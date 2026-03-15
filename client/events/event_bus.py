@@ -9,11 +9,12 @@ import weakref
 from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Optional
-import logging
 
+from client.core import logging
+from client.core.logging import setup_logging
 
-logger = logging.getLogger(__name__)
-
+setup_logging()
+logger = logging.get_logger(__name__)
 
 EventHandler = Callable[[Any], Optional[Awaitable[None]]]
 
@@ -26,15 +27,15 @@ class EventBus:
     Supports both sync and async handlers. All operations are thread-safe
     and can be used with asyncio.
     """
-    
+
     _listeners: dict[str, list[weakref.ref]] = field(default_factory=lambda: defaultdict(list))
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     _sync_lock: object = field(default_factory=lambda: __import__("threading").Lock())
-    
+
     def __post_init__(self) -> None:
         """Initialize the event bus."""
         self._listeners = defaultdict(list)
-    
+
     async def subscribe(self, event_type: str, handler: EventHandler) -> None:
         """
         Subscribe to an event type.
@@ -46,7 +47,7 @@ class EventBus:
         async with self._lock:
             self._listeners[event_type].append(weakref.ref(handler))
             logger.debug(f"Subscribed handler to event: {event_type}")
-    
+
     def subscribe_sync(self, event_type: str, handler: EventHandler) -> None:
         """
         Subscribe to an event type (synchronous version).
@@ -58,7 +59,7 @@ class EventBus:
         with self._sync_lock:
             self._listeners[event_type].append(weakref.ref(handler))
             logger.debug(f"Subscribed handler to event (sync): {event_type}")
-    
+
     async def unsubscribe(self, event_type: str, handler: EventHandler) -> None:
         """
         Unsubscribe a handler from an event type.
@@ -69,7 +70,7 @@ class EventBus:
         """
         async with self._lock:
             self._remove_handler(event_type, handler)
-    
+
     def unsubscribe_sync(self, event_type: str, handler: EventHandler) -> None:
         """
         Unsubscribe a handler from an event type (synchronous version).
@@ -80,13 +81,13 @@ class EventBus:
         """
         with self._sync_lock:
             self._remove_handler(event_type, handler)
-    
+
     def _remove_handler(self, event_type: str, handler: EventHandler) -> None:
         """Remove a handler from the listeners."""
         refs = self._listeners.get(event_type, [])
         self._listeners[event_type] = [ref for ref in refs if ref() is not handler]
         logger.debug(f"Unsubscribed handler from event: {event_type}")
-    
+
     async def emit(self, event_type: str, data: Any = None) -> None:
         """
         Emit an event to all subscribed handlers.
@@ -101,13 +102,13 @@ class EventBus:
         """
         async with self._lock:
             refs = list(self._listeners.get(event_type, []))
-        
+
         tasks = []
         for ref in refs:
             handler = ref()
             if handler is None:
                 continue
-            
+
             try:
                 result = handler(data)
                 if asyncio.iscoroutine(result):
@@ -116,12 +117,12 @@ class EventBus:
                     tasks.append(asyncio.create_task(handler(data)))
             except Exception as e:
                 logger.error(f"Error in event handler for {event_type}: {e}")
-        
+
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
-        
+
         logger.debug(f"Emitted event: {event_type} to {len(tasks)} handlers")
-    
+
     def emit_sync(self, event_type: str, data: Any = None) -> None:
         """
         Emit an event synchronously.
@@ -132,12 +133,12 @@ class EventBus:
         """
         with self._sync_lock:
             refs = list(self._listeners.get(event_type, []))
-        
+
         for ref in refs:
             handler = ref()
             if handler is None:
                 continue
-            
+
             try:
                 result = handler(data)
                 if asyncio.iscoroutine(result):
@@ -145,7 +146,7 @@ class EventBus:
                     asyncio.get_event_loop_run_forever()
             except Exception as e:
                 logger.error(f"Error in event handler for {event_type}: {e}")
-    
+
     async def clear(self, event_type: Optional[str] = None) -> None:
         """
         Clear all handlers for an event type, or all handlers if no type specified.
@@ -158,7 +159,7 @@ class EventBus:
                 self._listeners[event_type].clear()
             else:
                 self._listeners.clear()
-    
+
     def clear_sync(self, event_type: Optional[str] = None) -> None:
         """Clear all handlers synchronously."""
         with self._sync_lock:
@@ -166,7 +167,7 @@ class EventBus:
                 self._listeners[event_type].clear()
             else:
                 self._listeners.clear()
-    
+
     def listener_count(self, event_type: str) -> int:
         """Get the number of listeners for an event type."""
         with self._sync_lock:

@@ -4,17 +4,19 @@ AI Service Module
 Service for AI chat with streaming support.
 """
 import asyncio
-import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, AsyncIterator, Callable, Optional
 
+from client.core import logging
+from client.core.logging import setup_logging
 from client.models.message import ChatMessage
 from client.network.http_client import get_http_client
 
 
-logger = logging.getLogger(__name__)
+setup_logging()
+logger = logging.get_logger(__name__)
 
 
 class AIProviderType(Enum):

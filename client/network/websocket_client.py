@@ -5,7 +5,6 @@ Async WebSocket client with auto-reconnect, heartbeat, and state management.
 """
 import asyncio
 import json
-import logging
 import uuid
 from dataclasses import dataclass, field
 from enum import Enum
@@ -15,11 +14,12 @@ import websockets
 from websockets.legacy.client import WebSocketClientProtocol
 from websockets.exceptions import ConnectionClosed, WebSocketException
 
+from client.core import logging
 from client.core.config import get_config
+from client.core.logging import setup_logging
 
-
-logger = logging.getLogger(__name__)
-
+setup_logging()
+logger = logging.get_logger(__name__)
 
 class ConnectionState(Enum):
     """WebSocket connection states."""

@@ -4,19 +4,21 @@ Message Manager Module
 Manager for message handling, ACK processing, and caching.
 """
 import asyncio
-import logging
 import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
+from client.core import logging
+from client.core.logging import setup_logging
 from client.events.event_bus import get_event_bus
 from client.managers.connection_manager import get_connection_manager
 from client.models.message import ChatMessage, MessageStatus, MessageType
 from client.storage.database import get_database
 
 
-logger = logging.getLogger(__name__)
+setup_logging()
+logger = logging.get_logger(__name__)
 
 
 # Event types

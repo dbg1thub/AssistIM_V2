@@ -1,9 +1,12 @@
-import logging
 
 from PySide6.QtWidgets import QMainWindow, QPushButton, QVBoxLayout, QWidget
 from PySide6.QtCore import Signal
 
-logger = logging.getLogger(__name__)
+from client.core import logging
+from client.core.logging import setup_logging
+
+setup_logging()
+logger = logging.get_logger(__name__)
 
 
 class MainWindow(QMainWindow):

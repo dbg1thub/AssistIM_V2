@@ -5,11 +5,12 @@ Application entry point
 
 import sys
 import asyncio
-import logging
 
 from PySide6.QtWidgets import QApplication
 from qasync import QEventLoop
 
+from client.core import logging
+from client.core.logging import setup_logging
 from client.storage.database import get_database
 from client.network.http_client import get_http_client
 from client.network.websocket_client import get_websocket_client
@@ -20,8 +21,8 @@ from client.managers.session_manager import get_session_manager
 
 from client.ui.controllers.chat_controller import get_chat_controller
 
-
-logger = logging.getLogger(__name__)
+setup_logging()
+logger = logging.get_logger(__name__)
 
 
 class Application:
@@ -220,12 +221,6 @@ class Application:
 # =========================================================
 
 def main():
-
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    )
-
     logger.info("Starting AssistIM...")
 
     qt_app = QApplication(sys.argv)

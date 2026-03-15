@@ -3,16 +3,17 @@ Chat Service Module
 
 Service for chat operations via HTTP API.
 """
-import logging
 from typing import Optional
 
+from client.core import logging
+from client.core.logging import setup_logging
 from client.models.message import ChatMessage, MessageStatus, MessageType
 from client.network.http_client import get_http_client
 from client.storage.database import get_database
 
 
-logger = logging.getLogger(__name__)
-
+setup_logging()
+logger = logging.get_logger(__name__)
 
 class ChatService:
     """

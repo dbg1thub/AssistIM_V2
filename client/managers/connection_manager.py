@@ -4,10 +4,11 @@ Connection Manager Module
 Manager for WebSocket connection lifecycle and state management.
 """
 import asyncio
-import logging
 from enum import Enum
 from typing import Any, Callable, Optional
 
+from client.core import logging
+from client.core.logging import setup_logging
 from client.network.websocket_client import (
     ConnectionState,
     WebSocketClient,
@@ -15,7 +16,8 @@ from client.network.websocket_client import (
 )
 
 
-logger = logging.getLogger(__name__)
+setup_logging()
+logger = logging.get_logger(__name__)
 
 
 class ConnectionManager:

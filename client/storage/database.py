@@ -5,17 +5,18 @@ SQLite database using aiosqlite for async operations.
 """
 import aiosqlite
 import json
-import logging
 import os
 from pathlib import Path
 from typing import Any, Optional
 
+from client.core import logging
 from client.core.config import get_config
+from client.core.logging import setup_logging
 from client.models.message import ChatMessage, Session
 
 
-logger = logging.getLogger(__name__)
-
+setup_logging()
+logger = logging.get_logger(__name__)
 
 class Database:
     """
