@@ -5,6 +5,7 @@ Controller for chat UI interactions.
 Receives UI input and coordinates with MessageManager.
 """
 import asyncio
+import os
 from typing import Any, Callable, Optional
 
 from client.core import logging
@@ -12,7 +13,8 @@ from client.core.logging import setup_logging
 from client.events.event_bus import get_event_bus
 from client.managers.message_manager import MessageEvent, get_message_manager
 from client.managers.session_manager import SessionEvent, get_session_manager
-from client.models.message import ChatMessage, MessageType
+from client.models.message import ChatMessage, MessageType, infer_message_type_from_path
+from client.network.http_client import get_http_client
 
 setup_logging()
 logger = logging.get_logger(__name__)
@@ -79,6 +81,7 @@ class ChatController:
             self,
             content: str,
             message_type: MessageType = MessageType.TEXT,
+            extra: Optional[dict] = None,
     ) -> Optional[ChatMessage]:
         """
         Send a message in current session.
@@ -104,6 +107,7 @@ class ChatController:
             session_id=session_id,
             content=content.strip(),
             message_type=message_type,
+            extra=extra,
         )
 
         await self._session_manager.add_message_to_session(
@@ -115,11 +119,92 @@ class ChatController:
 
         return message
 
+    async def send_file(
+            self,
+            file_path: str,
+    ) -> Optional[ChatMessage]:
+        """
+        Send an image, video, or file message in current session.
+
+        Args:
+            file_path: Path to the file to send
+
+        Returns:
+            The sent message, or None if upload failed or no current session
+        """
+        session_id = self._session_manager.current_session_id
+
+        if not session_id:
+            logger.warning("No current session selected")
+            return None
+
+        if not file_path or not os.path.exists(file_path):
+            logger.warning(f"File not found: {file_path}")
+            return None
+
+        file_name = os.path.basename(file_path)
+        file_size = os.path.getsize(file_path)
+        message_type = infer_message_type_from_path(file_path)
+
+        placeholder = await self._msg_manager.create_local_message(
+            session_id=session_id,
+            content=file_path,
+            message_type=message_type,
+            extra={
+                "name": file_name,
+                "size": file_size,
+                "local_path": file_path,
+                "uploading": True,
+            },
+        )
+
+        await self._session_manager.add_message_to_session(
+            session_id=session_id,
+            message=placeholder,
+        )
+
+        # Upload file via HTTP
+        http_client = get_http_client()
+        upload_result = await http_client.upload_file(file_path)
+
+        if not upload_result:
+            logger.error(f"Failed to upload file: {file_path}")
+            await self._msg_manager.mark_message_failed(placeholder, "Upload failed")
+            return placeholder
+
+        # Get file info from upload result
+        file_url = upload_result.get("url", "")
+
+        if not file_url:
+            logger.error(f"Upload result missing URL: {upload_result}")
+            await self._msg_manager.mark_message_failed(placeholder, "Upload result missing URL")
+            return placeholder
+
+        message = await self._msg_manager.send_message(
+            session_id=session_id,
+            content=file_url,
+            message_type=message_type,
+            existing_message=placeholder,
+            extra={
+                "name": file_name,
+                "size": file_size,
+                "url": file_url,
+                "local_path": file_path,
+                "file_type": upload_result.get("file_type", ""),
+                "uploading": False,
+            },
+        )
+
+        logger.info(f"File message sent: {message.message_id}, file: {file_name}")
+
+        return message
+
     async def send_message_to(
             self,
             session_id: str,
             content: str,
             message_type: MessageType = MessageType.TEXT,
+            extra: Optional[dict] = None,
     ) -> Optional[ChatMessage]:
         """
         Send a message to a specific session.
@@ -140,6 +225,7 @@ class ChatController:
             session_id=session_id,
             content=content.strip(),
             message_type=message_type,
+            extra=extra,
         )
 
         await self._session_manager.add_message_to_session(
@@ -172,6 +258,18 @@ class ChatController:
     async def retry_message(self, message_id: str) -> bool:
         """Retry sending a failed message."""
         return await self._msg_manager.retry_message(message_id)
+
+    async def recall_message(self, message_id: str) -> tuple[bool, str]:
+        """Recall a previously sent message."""
+        return await self._msg_manager.recall_message(message_id)
+
+    async def edit_message(self, message_id: str, new_content: str) -> bool:
+        """Edit a previously sent message."""
+        return await self._msg_manager.edit_message(message_id, new_content)
+
+    async def delete_message(self, message_id: str) -> bool:
+        """Delete a previously sent message."""
+        return await self._msg_manager.delete_message(message_id)
 
     async def load_messages(
             self,

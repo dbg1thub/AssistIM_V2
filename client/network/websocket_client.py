@@ -15,7 +15,7 @@ from websockets.legacy.client import WebSocketClientProtocol
 from websockets.exceptions import ConnectionClosed, WebSocketException
 
 from client.core import logging
-from client.core.config import get_config
+from client.core.config_backend import get_config
 from client.core.logging import setup_logging
 
 setup_logging()

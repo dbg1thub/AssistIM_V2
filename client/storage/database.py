@@ -1,4 +1,4 @@
-"""
+﻿"""
 Database Module
 
 SQLite database using aiosqlite for async operations.
@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from client.core import logging
-from client.core.config import get_config
+from client.core.config_backend import get_config
 from client.core.logging import setup_logging
 from client.models.message import ChatMessage, Session
 
@@ -88,6 +88,11 @@ class Database:
                 is_ai INTEGER NOT NULL DEFAULT 0,
                 extra TEXT NOT NULL DEFAULT '{}',
                 FOREIGN KEY (session_id) REFERENCES sessions(session_id)
+            );
+            
+            CREATE TABLE IF NOT EXISTS app_state (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
             );
             
             CREATE INDEX IF NOT EXISTS idx_messages_session 
@@ -324,7 +329,7 @@ class Database:
     async def delete_message(self, message_id: str) -> None:
         """
         Delete a message.
-        
+
         Args:
             message_id: Message ID
         """
@@ -334,7 +339,41 @@ class Database:
         )
         await self._db.commit()
         logger.debug(f"Message deleted: {message_id}")
-    
+
+    async def update_message_status(self, message_id: str, status) -> None:
+        """
+        Update message status.
+
+        Args:
+            message_id: Message ID
+            status: New message status
+        """
+        from client.models.message import MessageStatus
+
+        status_value = status.value if isinstance(status, MessageStatus) else status
+
+        await self._db.execute(
+            "UPDATE messages SET status = ? WHERE message_id = ?",
+            (status_value, message_id),
+        )
+        await self._db.commit()
+        logger.debug(f"Message status updated: {message_id} -> {status_value}")
+
+    async def update_message_content(self, message_id: str, content: str) -> None:
+        """
+        Update message content.
+
+        Args:
+            message_id: Message ID
+            content: New message content
+        """
+        await self._db.execute(
+            "UPDATE messages SET content = ? WHERE message_id = ?",
+            (content, message_id),
+        )
+        await self._db.commit()
+        logger.debug(f"Message content updated: {message_id}")
+
     async def delete_session_messages(self, session_id: str) -> None:
         """
         Delete all messages in a session.
@@ -374,11 +413,85 @@ class Database:
             return None
         
         return self._row_to_message(row)
+
+    async def get_message_count(self, session_id: str) -> int:
+        """
+        Get total message count for a session.
+        
+        Args:
+            session_id: Session ID
+        
+        Returns:
+            Number of messages
+        """
+        cursor = await self._db.execute(
+            "SELECT COUNT(*) as count FROM messages WHERE session_id = ?",
+            (session_id,),
+        )
+        row = await cursor.fetchone()
+        return row["count"] if row else 0
+
+    async def get_session_last_timestamp(self, session_id: str) -> Optional[float]:
+        """
+        Get the latest message timestamp for a session.
+        
+        Args:
+            session_id: Session ID
+        
+        Returns:
+            Timestamp of latest message, or None
+        """
+        cursor = await self._db.execute(
+            """
+            SELECT MAX(timestamp) as last_timestamp 
+            FROM messages 
+            WHERE session_id = ?
+            """,
+            (session_id,),
+        )
+        row = await cursor.fetchone()
+        return row["last_timestamp"] if row and row["last_timestamp"] else None
+
+    async def save_messages_batch(self, messages: list[ChatMessage]) -> None:
+        """
+        Save multiple messages in batch.
+        
+        Args:
+            messages: List of messages to save
+        """
+        if not messages:
+            return
+        
+        for message in messages:
+            await self._db.execute(
+                """
+                INSERT OR REPLACE INTO messages
+                (message_id, session_id, sender_id, content, message_type,
+                 status, timestamp, updated_at, is_self, is_ai, extra)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    message.message_id,
+                    message.session_id,
+                    message.sender_id,
+                    message.content,
+                    message.message_type.value,
+                    message.status.value,
+                    message.timestamp.timestamp() if message.timestamp else None,
+                    message.updated_at.timestamp() if message.updated_at else None,
+                    1 if message.is_self else 0,
+                    1 if message.is_ai else 0,
+                    json.dumps(message.extra),
+                ),
+            )
+        
+        await self._db.commit()
+        logger.debug(f"Batch saved {len(messages)} messages")
     
     def _row_to_message(self, row: aiosqlite.Row) -> ChatMessage:
         """Convert database row to ChatMessage."""
         import datetime
-        from models.message import MessageStatus, MessageType
+        from client.models.message import MessageStatus, MessageType
         
         timestamp = row["timestamp"]
         if timestamp:
@@ -403,7 +516,51 @@ class Database:
         )
     
     # ============== Utility ==============
-    
+
+    async def get_app_state(self, key: str) -> Optional[str]:
+        """
+        Get app state value.
+
+        Args:
+            key: State key
+
+        Returns:
+            State value or None
+        """
+        cursor = await self._db.execute(
+            "SELECT value FROM app_state WHERE key = ?",
+            (key,),
+        )
+        row = await cursor.fetchone()
+        return row["value"] if row else None
+
+    async def set_app_state(self, key: str, value: str) -> None:
+        """
+        Set app state value.
+
+        Args:
+            key: State key
+            value: State value
+        """
+        await self._db.execute(
+            "INSERT OR REPLACE INTO app_state (key, value) VALUES (?, ?)",
+            (key, value),
+        )
+        await self._db.commit()
+
+    async def delete_app_state(self, key: str) -> None:
+        """
+        Delete app state value.
+
+        Args:
+            key: State key
+        """
+        await self._db.execute(
+            "DELETE FROM app_state WHERE key = ?",
+            (key,),
+        )
+        await self._db.commit()
+
     async def close(self) -> None:
         """Close database connection."""
         if self._db:
@@ -427,3 +584,4 @@ def get_database() -> Database:
     if _database is None:
         _database = Database()
     return _database
+

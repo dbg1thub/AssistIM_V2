@@ -3,21 +3,39 @@ Data Models Module
 
 Core data models using dataclasses.
 """
+import os
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from typing import Any, Optional
 
 
+def _coerce_datetime(value: Any) -> Optional[datetime]:
+    """Normalize timestamps from float/int/ISO string into datetime."""
+    if value is None or isinstance(value, datetime):
+        return value
+    if isinstance(value, (int, float)):
+        return datetime.fromtimestamp(value)
+    if isinstance(value, str):
+        try:
+            return datetime.fromisoformat(value)
+        except ValueError:
+            return None
+    return None
+
+
 class MessageStatus(Enum):
     """Message sending status."""
-    
+
     PENDING = "pending"
     SENDING = "sending"
     SENT = "sent"
+    RECEIVED = "received"
     DELIVERED = "delivered"
     READ = "read"
     FAILED = "failed"
+    RECALLED = "recalled"
+    EDITED = "edited"
 
 
 class MessageType(Enum):
@@ -26,8 +44,64 @@ class MessageType(Enum):
     TEXT = "text"
     IMAGE = "image"
     FILE = "file"
+    VIDEO = "video"
     VOICE = "voice"
     SYSTEM = "system"
+
+
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp"}
+VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v"}
+
+
+def infer_message_type_from_path(path: str) -> MessageType:
+    """Infer a message type from a file path or URL."""
+    extension = os.path.splitext((path or "").split("?", 1)[0])[1].lower()
+    if extension in IMAGE_EXTENSIONS:
+        return MessageType.IMAGE
+    if extension in VIDEO_EXTENSIONS:
+        return MessageType.VIDEO
+    return MessageType.FILE
+
+
+def format_message_preview(content: str, message_type: MessageType | str | None = None) -> str:
+    """Format a short session preview for a message."""
+    normalized_type = message_type
+    if isinstance(normalized_type, str):
+        try:
+            normalized_type = MessageType(normalized_type)
+        except ValueError:
+            normalized_type = None
+
+    if normalized_type == MessageType.IMAGE:
+        return "[图片]"
+    if normalized_type == MessageType.VIDEO:
+        return "[视频]"
+    if normalized_type == MessageType.FILE:
+        return "[文件]"
+
+    text = (content or "").strip()
+    if not text:
+        return ""
+
+    inferred_type = infer_message_type_from_path(text) if text.startswith(("/", "http://", "https://")) or os.path.splitext(text)[1] else None
+    if inferred_type == MessageType.IMAGE:
+        return "[图片]"
+    if inferred_type == MessageType.VIDEO:
+        return "[视频]"
+    if inferred_type == MessageType.FILE and (text.startswith("/uploads/") or text.startswith("http://") or text.startswith("https://")):
+        return "[文件]"
+
+    if text.count("|") >= 2:
+        tail = text.split("|")[-1]
+        inferred_tail_type = infer_message_type_from_path(tail)
+        if inferred_tail_type == MessageType.IMAGE:
+            return "[图片]"
+        if inferred_tail_type == MessageType.VIDEO:
+            return "[视频]"
+        if inferred_tail_type == MessageType.FILE:
+            return "[文件]"
+
+    return text
 
 
 class UserStatus(Enum):
@@ -137,6 +211,8 @@ class ChatMessage:
     
     def __post_init__(self) -> None:
         """Set default timestamps."""
+        self.timestamp = _coerce_datetime(self.timestamp)
+        self.updated_at = _coerce_datetime(self.updated_at)
         if self.timestamp is None:
             self.timestamp = datetime.now()
         if self.updated_at is None:
@@ -183,14 +259,16 @@ class ChatMessage:
         """Create from dictionary."""
         msg_type = MessageType(data.get("message_type", "text"))
         status = MessageStatus(data.get("status", "pending"))
+        extra_keys = {
+            "message_id", "session_id", "sender_id", "content", "message_type",
+            "status", "timestamp", "updated_at", "is_self", "is_ai",
+        }
         
         timestamp = data.get("timestamp")
-        if isinstance(timestamp, str):
-            timestamp = datetime.fromisoformat(timestamp)
+        timestamp = _coerce_datetime(timestamp)
         
         updated_at = data.get("updated_at")
-        if isinstance(updated_at, str):
-            updated_at = datetime.fromisoformat(updated_at)
+        updated_at = _coerce_datetime(updated_at)
         
         return cls(
             message_id=data["message_id"],
@@ -203,6 +281,7 @@ class ChatMessage:
             updated_at=updated_at,
             is_self=data.get("is_self", False),
             is_ai=data.get("is_ai", False),
+            extra={key: value for key, value in data.items() if key not in extra_keys},
         )
 
 
@@ -241,6 +320,9 @@ class Session:
     
     def __post_init__(self) -> None:
         """Set default timestamps."""
+        self.last_message_time = _coerce_datetime(self.last_message_time)
+        self.created_at = _coerce_datetime(self.created_at)
+        self.updated_at = _coerce_datetime(self.updated_at)
         now = datetime.now()
         if self.created_at is None:
             self.created_at = now
@@ -251,6 +333,7 @@ class Session:
     
     def update_last_message(self, content: str, timestamp: Optional[datetime] = None) -> None:
         """Update last message."""
+        timestamp = _coerce_datetime(timestamp)
         self.last_message = content
         self.last_message_time = timestamp or datetime.now()
         self.updated_at = self.last_message_time
@@ -284,16 +367,13 @@ class Session:
     def from_dict(cls, data: dict[str, Any]) -> "Session":
         """Create from dictionary."""
         last_message_time = data.get("last_message_time")
-        if isinstance(last_message_time, str):
-            last_message_time = datetime.fromisoformat(last_message_time)
+        last_message_time = _coerce_datetime(last_message_time)
         
         created_at = data.get("created_at")
-        if isinstance(created_at, str):
-            created_at = datetime.fromisoformat(created_at)
+        created_at = _coerce_datetime(created_at)
         
         updated_at = data.get("updated_at")
-        if isinstance(updated_at, str):
-            updated_at = datetime.fromisoformat(updated_at)
+        updated_at = _coerce_datetime(updated_at)
         
         return cls(
             session_id=data["session_id"],

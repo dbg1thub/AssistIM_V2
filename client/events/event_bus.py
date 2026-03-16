@@ -5,6 +5,7 @@ Thread-safe event bus for communication between UI and business logic.
 Supports both synchronous and asynchronous event handlers.
 """
 import asyncio
+import inspect
 import weakref
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -28,13 +29,38 @@ class EventBus:
     and can be used with asyncio.
     """
 
-    _listeners: dict[str, list[weakref.ref]] = field(default_factory=lambda: defaultdict(list))
+    _listeners: dict[str, list[weakref.ReferenceType]] = field(default_factory=lambda: defaultdict(list))
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     _sync_lock: object = field(default_factory=lambda: __import__("threading").Lock())
 
     def __post_init__(self) -> None:
         """Initialize the event bus."""
         self._listeners = defaultdict(list)
+
+    @staticmethod
+    def _create_handler_ref(handler: EventHandler) -> weakref.ReferenceType:
+        """Create a weak reference that works for both functions and bound methods."""
+        if inspect.ismethod(handler) and getattr(handler, "__self__", None) is not None:
+            return weakref.WeakMethod(handler)
+        return weakref.ref(handler)
+
+    def _get_live_handlers(self, event_type: str) -> list[EventHandler]:
+        """Return live handlers and prune dead weak references."""
+        refs = self._listeners.get(event_type, [])
+        live_handlers: list[EventHandler] = []
+        alive_refs: list[weakref.ReferenceType] = []
+
+        for ref in refs:
+            handler = ref()
+            if handler is None:
+                continue
+            live_handlers.append(handler)
+            alive_refs.append(ref)
+
+        if len(alive_refs) != len(refs):
+            self._listeners[event_type] = alive_refs
+
+        return live_handlers
 
     async def subscribe(self, event_type: str, handler: EventHandler) -> None:
         """
@@ -45,7 +71,7 @@ class EventBus:
             handler: Callback function to handle the event
         """
         async with self._lock:
-            self._listeners[event_type].append(weakref.ref(handler))
+            self._listeners[event_type].append(self._create_handler_ref(handler))
             logger.debug(f"Subscribed handler to event: {event_type}")
 
     def subscribe_sync(self, event_type: str, handler: EventHandler) -> None:
@@ -57,7 +83,7 @@ class EventBus:
             handler: Callback function to handle the event
         """
         with self._sync_lock:
-            self._listeners[event_type].append(weakref.ref(handler))
+            self._listeners[event_type].append(self._create_handler_ref(handler))
             logger.debug(f"Subscribed handler to event (sync): {event_type}")
 
     async def unsubscribe(self, event_type: str, handler: EventHandler) -> None:
@@ -101,14 +127,10 @@ class EventBus:
             data: Optional data to pass to handlers
         """
         async with self._lock:
-            refs = list(self._listeners.get(event_type, []))
+            handlers = list(self._get_live_handlers(event_type))
 
         tasks = []
-        for ref in refs:
-            handler = ref()
-            if handler is None:
-                continue
-
+        for handler in handlers:
             try:
                 result = handler(data)
                 if asyncio.iscoroutine(result):
@@ -132,18 +154,14 @@ class EventBus:
             data: Optional data to pass to handlers
         """
         with self._sync_lock:
-            refs = list(self._listeners.get(event_type, []))
+            handlers = list(self._get_live_handlers(event_type))
 
-        for ref in refs:
-            handler = ref()
-            if handler is None:
-                continue
-
+        for handler in handlers:
             try:
                 result = handler(data)
                 if asyncio.iscoroutine(result):
                     logger.warning(f"Async handler called sync for event: {event_type}")
-                    asyncio.get_event_loop_run_forever()
+                    result.close()
             except Exception as e:
                 logger.error(f"Error in event handler for {event_type}: {e}")
 
@@ -171,8 +189,7 @@ class EventBus:
     def listener_count(self, event_type: str) -> int:
         """Get the number of listeners for an event type."""
         with self._sync_lock:
-            refs = self._listeners.get(event_type, [])
-            return sum(1 for ref in refs if ref() is not None)
+            return len(self._get_live_handlers(event_type))
 
 
 _event_bus: Optional[EventBus] = None

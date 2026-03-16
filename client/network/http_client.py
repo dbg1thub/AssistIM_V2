@@ -1,16 +1,16 @@
-"""
+﻿"""
 HTTP Client Module
 
 Async HTTP client using aiohttp with unified request handling,
 automatic token management, and error handling.
 """
 import asyncio
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import aiohttp
 
 from client.core import logging
-from client.core.config import get_config
+from client.core.config_backend import get_config
 from client.core.exceptions import APIError, AuthExpiredError, NetworkError, ServerError
 from client.core.logging import setup_logging
 
@@ -21,7 +21,7 @@ logger = logging.get_logger(__name__)
 class HTTPClient:
     """
     Async HTTP client with token management and automatic error handling.
-    
+
     All API requests should go through this client to ensure consistent
     error handling and token management.
     """
@@ -33,7 +33,7 @@ class HTTPClient:
     ):
         """
         Initialize HTTP client.
-        
+
         Args:
             base_url: Base URL for API requests. Defaults to config server.api_base_url
             timeout: Request timeout in seconds
@@ -46,11 +46,22 @@ class HTTPClient:
         self._refresh_token: Optional[str] = None
         self._token_lock = asyncio.Lock()
         self._refreshing = False
+        self._token_listeners: list[Callable[[Optional[str], Optional[str]], None]] = []
 
     @property
     def is_connected(self) -> bool:
         """Check if client session is active."""
         return self._session is not None and not self._session.closed
+
+    @property
+    def access_token(self) -> Optional[str]:
+        """Return current access token."""
+        return self._access_token
+
+    @property
+    def refresh_token(self) -> Optional[str]:
+        """Return current refresh token."""
+        return self._refresh_token
 
     async def _ensure_session(self) -> aiohttp.ClientSession:
         """Ensure aiohttp session exists."""
@@ -58,23 +69,43 @@ class HTTPClient:
             self._session = aiohttp.ClientSession(timeout=self._timeout)
         return self._session
 
-    def set_tokens(self, access_token: str, refresh_token: Optional[str] = None) -> None:
+    def set_tokens(self, access_token: Optional[str], refresh_token: Optional[str] = None) -> None:
         """
         Set authentication tokens.
-        
+
         Args:
             access_token: JWT access token
             refresh_token: Optional refresh token
         """
         self._access_token = access_token
         self._refresh_token = refresh_token
+        self._notify_token_listeners()
         logger.debug("Tokens updated")
 
     def clear_tokens(self) -> None:
         """Clear authentication tokens."""
         self._access_token = None
         self._refresh_token = None
+        self._notify_token_listeners()
         logger.debug("Tokens cleared")
+
+    def add_token_listener(self, listener: Callable[[Optional[str], Optional[str]], None]) -> None:
+        """Add a listener that will be called when auth tokens change."""
+        if listener not in self._token_listeners:
+            self._token_listeners.append(listener)
+
+    def remove_token_listener(self, listener: Callable[[Optional[str], Optional[str]], None]) -> None:
+        """Remove a token change listener."""
+        if listener in self._token_listeners:
+            self._token_listeners.remove(listener)
+
+    def _notify_token_listeners(self) -> None:
+        """Notify all token change listeners."""
+        for listener in list(self._token_listeners):
+            try:
+                listener(self._access_token, self._refresh_token)
+            except Exception:
+                logger.exception("Token listener error")
 
     def _get_headers(self) -> dict[str, str]:
         """Build request headers."""
@@ -97,7 +128,7 @@ class HTTPClient:
     ) -> Any:
         """
         Make an HTTP request with unified error handling.
-        
+
         Args:
             method: HTTP method (GET, POST, PUT, DELETE, etc.)
             path: API path (will be appended to base_url)
@@ -105,10 +136,10 @@ class HTTPClient:
             json: JSON body
             headers: Additional headers
             retry_on_401: Whether to retry on 401 after token refresh
-        
+
         Returns:
             Response data (the 'data' field from API response)
-        
+
         Raises:
             NetworkError: For network-related errors
             AuthExpiredError: For 401 errors when token refresh fails
@@ -132,7 +163,7 @@ class HTTPClient:
                     json=json,
                     headers=request_headers,
             ) as response:
-                return await self._handle_response(response, retry_on_401, method, url, params, json, request_headers)
+                return await self._handle_response(response, retry_on_401, method, path, params, json, headers)
 
         except aiohttp.ClientError as e:
             logger.error(f"Network error: {e}")
@@ -146,10 +177,10 @@ class HTTPClient:
             response: aiohttp.ClientResponse,
             retry_on_401: bool,
             method: str,
-            url: str,
+            path: str,
             params: Optional[dict[str, Any]],
             json: Optional[dict[str, Any]],
-            headers: dict[str, str],
+            headers: Optional[dict[str, str]],
     ) -> Any:
         """Handle HTTP response and errors."""
         status = response.status
@@ -175,7 +206,12 @@ class HTTPClient:
                 success = await self._refresh_access_token()
                 if success:
                     return await self._request(
-                        method, url, params, json, headers, retry_on_401=False
+                        method,
+                        path,
+                        params=params,
+                        json=json,
+                        headers=headers,
+                        retry_on_401=False,
                     )
 
             raise AuthExpiredError(data.get("message", "Authentication failed"))
@@ -193,7 +229,7 @@ class HTTPClient:
     async def _refresh_access_token(self) -> bool:
         """
         Refresh access token using refresh token.
-        
+
         Returns:
             True if refresh successful, False otherwise
         """
@@ -219,9 +255,13 @@ class HTTPClient:
                 ) as response:
                     if response.status == 200:
                         data = await response.json()
-                        self._access_token = data.get("data", {}).get("access_token")
+                        auth_data = data.get("data", {}) if isinstance(data, dict) else {}
+                        self.set_tokens(
+                            auth_data.get("access_token"),
+                            auth_data.get("refresh_token", self._refresh_token),
+                        )
                         logger.info("Token refreshed successfully")
-                        return True
+                        return bool(self._access_token)
                     else:
                         logger.warning("Token refresh failed")
                         self.clear_tokens()
@@ -275,6 +315,79 @@ class HTTPClient:
         if self._session and not self._session.closed:
             await self._session.close()
             logger.debug("HTTP client session closed")
+
+    async def upload_file(
+            self,
+            file_path: str,
+            upload_path: str = "/upload",
+    ) -> Optional[dict]:
+        """
+        Upload a file to the server.
+
+        Args:
+            file_path: Path to the file to upload
+            upload_path: API path for upload endpoint
+
+        Returns:
+            Response data with file URL, or None on failure
+        """
+        import os
+        from aiohttp import FormData
+
+        url = f"{self._base_url}{upload_path}"
+
+        try:
+            session = await self._ensure_session()
+
+            form = FormData()
+            form.add_field(
+                "file",
+                open(file_path, "rb"),
+                filename=os.path.basename(file_path),
+                content_type=self._get_content_type(file_path),
+            )
+
+            headers = {}
+            if self._access_token:
+                headers["Authorization"] = f"Bearer {self._access_token}"
+
+            logger.info(f"Uploading file: {file_path}")
+
+            async with session.post(
+                    url,
+                    data=form,
+                    headers=headers,
+            ) as response:
+                if response.status == 200 or response.status == 201:
+                    data = await response.json()
+                    if isinstance(data, dict) and "data" in data:
+                        return data["data"]
+                    return data
+                else:
+                    text = await response.text()
+                    logger.error(f"Upload failed: {response.status} - {text}")
+                    return None
+
+        except Exception as e:
+            logger.error(f"Upload error: {e}")
+            return None
+
+    def _get_content_type(self, file_path: str) -> str:
+        """Get content type based on file extension."""
+        import os
+        ext = os.path.splitext(file_path)[1].lower()
+        content_types = {
+            ".png": "image/png",
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+            ".gif": "image/gif",
+            ".bmp": "image/bmp",
+            ".webp": "image/webp",
+            ".pdf": "application/pdf",
+            ".doc": "application/msword",
+            ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        }
+        return content_types.get(ext, "application/octet-stream")
 
 
 _http_client: Optional[HTTPClient] = None
