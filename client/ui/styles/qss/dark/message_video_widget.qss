@@ -1,0 +1,12 @@
+QWidget#videoBubble {
+    background: {{CARD_BG}};
+    border: 1px solid {{BORDER_COLOR}};
+    border-radius: {{RADIUS_CARD}};
+}
+
+QLabel#videoDurationLabel {
+    background-color: rgba(0, 0, 0, 0.6);
+    color: white;
+    padding: 2px 6px;
+    border-radius: 4px;
+}

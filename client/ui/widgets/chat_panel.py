@@ -6,8 +6,8 @@ import os
 from typing import Callable, Optional
 
 from PySide6.QtCore import QEvent, Qt, Signal, QUrl
-from PySide6.QtGui import QDesktopServices
-from PySide6.QtWidgets import QAbstractItemView, QFrame, QListView, QSplitter, QStackedWidget, QVBoxLayout, QWidget
+from PySide6.QtGui import QDesktopServices, QGuiApplication, QKeySequence
+from PySide6.QtWidgets import QAbstractItemView, QFrame, QListView, QStackedWidget, QVBoxLayout, QWidget
 
 from qfluentwidgets import BodyLabel, CaptionLabel, FluentIcon, IconWidget
 
@@ -15,7 +15,9 @@ from client.core.config_backend import get_config
 from client.delegates.message_delegate import MessageDelegate
 from client.models.message import ChatMessage, MessageType, Session
 from client.models.message_model import MessageModel
+from client.ui.styles import StyleSheet
 from client.ui.widgets.chat_header import ChatHeader
+from client.ui.widgets.fluent_splitter import FluentSplitter
 from client.ui.widgets.message_input import MessageInput
 
 
@@ -39,6 +41,8 @@ class WelcomeWidget(QWidget):
         self.subtitle_label.setWordWrap(True)
         self.subtitle_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.subtitle_label.setMaximumWidth(380)
+        self.title_label.setObjectName("chatWelcomeTitle")
+        self.subtitle_label.setObjectName("chatWelcomeSubtitle")
 
         layout.addWidget(self.icon, 0, Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self.title_label, 0, Qt.AlignmentFlag.AlignCenter)
@@ -77,6 +81,7 @@ class ChatPanel(QWidget):
 
         self.welcome_widget = WelcomeWidget(self)
         self.chat_page = QWidget(self)
+        self.chat_page.setObjectName("chatPage")
         self.chat_layout = QVBoxLayout(self.chat_page)
         self.chat_layout.setContentsMargins(0, 0, 0, 0)
         self.chat_layout.setSpacing(0)
@@ -88,17 +93,18 @@ class ChatPanel(QWidget):
         self.message_list.setFrameShape(QFrame.Shape.NoFrame)
         self.message_list.setContextMenuPolicy(Qt.ContextMenuPolicy.NoContextMenu)
         self.message_list.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.message_list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.message_list.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         self.message_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.message_list.setSpacing(0)
         self.message_list.setMouseTracking(True)
         self.message_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.message_list.installEventFilter(self)
         self.message_list.viewport().installEventFilter(self)
 
         self._setup_message_model()
 
         self.message_input = MessageInput(self.chat_page)
-        self.message_input.setMinimumHeight(180)
         self.message_input.send_clicked.connect(self._on_send_message)
         self.message_input.image_selected.connect(self._on_image_selected)
         self.message_input.file_selected.connect(self._on_file_selected)
@@ -107,7 +113,7 @@ class ChatPanel(QWidget):
         self.message_input.video_call_requested.connect(self.video_call_requested.emit)
         self.message_input.typing_signal.connect(self._on_typing)
 
-        self.content_splitter = QSplitter(Qt.Orientation.Vertical, self.chat_page)
+        self.content_splitter = FluentSplitter(Qt.Orientation.Vertical, self.chat_page)
         self.content_splitter.setObjectName("chatContentSplitter")
         self.content_splitter.setChildrenCollapsible(False)
         self.content_splitter.setHandleWidth(1)
@@ -126,31 +132,7 @@ class ChatPanel(QWidget):
         self.main_layout.addWidget(self.stack)
 
         self.show_welcome()
-
-        self.setStyleSheet(
-            """
-            QWidget#ChatPanel {
-                background: rgba(248, 250, 252, 0.95);
-            }
-            QListView#messageListView {
-                background: qlineargradient(
-                    x1: 0, y1: 0, x2: 1, y2: 1,
-                    stop: 0 rgba(248, 249, 251, 1),
-                    stop: 1 rgba(241, 245, 249, 1)
-                );
-            }
-            QSplitter#chatContentSplitter::handle {
-                background: rgba(15, 23, 42, 0.08);
-            }
-            QWidget#chatWelcomeWidget {
-                background: qlineargradient(
-                    x1: 0, y1: 0, x2: 1, y2: 1,
-                    stop: 0 rgba(249, 250, 252, 1),
-                    stop: 1 rgba(239, 244, 251, 1)
-                );
-            }
-            """
-        )
+        StyleSheet.CHAT_PANEL.apply(self)
 
     def _setup_message_model(self) -> None:
         """Set up the model/delegate pair used by the message list."""
@@ -284,15 +266,73 @@ class ChatPanel(QWidget):
 
     def eventFilter(self, watched, event) -> bool:
         """Only open attachments when the click lands inside the rendered content area."""
-        if watched is self.message_list.viewport() and event.type() == QEvent.Type.MouseButtonRelease:
-            if event.button() == Qt.MouseButton.LeftButton:
+        if watched is self.message_list.viewport():
+            if event.type() == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
+                position = event.position().toPoint() if hasattr(event, "position") else event.pos()
+                index = self.message_list.indexAt(position)
+                if index.isValid() and self._message_delegate and self._message_delegate.begin_text_selection(
+                    self.message_list, index, position
+                ):
+                    self.message_list.viewport().setCursor(Qt.CursorShape.IBeamCursor)
+                    return True
+
+                if self._message_delegate:
+                    self._message_delegate.clear_text_selection(self.message_list)
+                    self.message_list.viewport().unsetCursor()
+
+            if event.type() == QEvent.Type.MouseMove:
+                position = event.position().toPoint() if hasattr(event, "position") else event.pos()
+                if self._message_delegate and self._message_delegate.is_selection_active():
+                    if self._message_delegate.update_text_selection(self.message_list, position):
+                        self.message_list.viewport().setCursor(Qt.CursorShape.IBeamCursor)
+                        return True
+
+                index = self.message_list.indexAt(position)
+                if index.isValid() and self._message_delegate and self._message_delegate.is_text_hit(
+                    self.message_list, index, position
+                ):
+                    self.message_list.viewport().setCursor(Qt.CursorShape.IBeamCursor)
+                else:
+                    self.message_list.viewport().unsetCursor()
+
+            if event.type() == QEvent.Type.MouseButtonRelease and event.button() == Qt.MouseButton.LeftButton:
+                if self._message_delegate and self._message_delegate.is_selection_active():
+                    self._message_delegate.end_text_selection(self.message_list)
+                    return True
+
                 position = event.position().toPoint() if hasattr(event, "position") else event.pos()
                 index = self.message_list.indexAt(position)
                 if index.isValid() and self._is_attachment_click(index, position):
                     self.handle_message_click(index)
                     return True
 
+        if watched is self.message_list and event.type() == QEvent.Type.KeyPress:
+            if event.matches(QKeySequence.StandardKey.Copy):
+                message = self.current_message()
+                if message and message.message_type == MessageType.TEXT and message.content:
+                    selected_text = (
+                        self._message_delegate.selected_text(message.content, message.message_id)
+                        if self._message_delegate
+                        else ""
+                    )
+                    QGuiApplication.clipboard().setText(selected_text or message.content)
+                    return True
+
         return super().eventFilter(watched, event)
+
+    def current_message(self) -> Optional[ChatMessage]:
+        """Return the currently selected message, if any."""
+        index = self.message_list.currentIndex()
+        if not index.isValid():
+            return None
+        return index.data(Qt.ItemDataRole.UserRole)
+
+    def get_selected_text(self, message: Optional[ChatMessage] = None) -> str:
+        """Return the currently selected substring from a text bubble, if any."""
+        message = message or self.current_message()
+        if not message or message.message_type != MessageType.TEXT or not self._message_delegate:
+            return ""
+        return self._message_delegate.selected_text(message.content, message.message_id)
 
     def _is_attachment_click(self, index, position) -> bool:
         """Return whether the click should trigger attachment preview/opening."""

@@ -1,0 +1,45 @@
+QWidget#DiscoveryInterface,
+QWidget#MomentCard,
+QWidget#MomentCommentSection {
+    background: transparent;
+}
+
+CardWidget#DiscoveryHeroCard,
+CardWidget#MomentCard {
+    background: {{CARD_BG}};
+    border: 1px solid {{BORDER_COLOR}};
+    border-radius: {{RADIUS_CARD}};
+}
+
+QFrame#MomentCardDivider {
+    background: {{BORDER_COLOR}};
+    min-height: 1px;
+    max-height: 1px;
+    border: none;
+}
+
+QFrame#MomentCommentSurface {
+    background: {{SURFACE_BG}};
+    border: 1px solid {{BORDER_COLOR}};
+    border-radius: {{RADIUS_CARD}};
+}
+
+QLabel#momentCommentTimeLabel,
+QLabel#momentStatsLabel,
+QLabel#discoverySummaryLabel {
+    color: {{TEXT_SECONDARY}};
+    font: 12px "Segoe UI", "Microsoft YaHei", "PingFang SC";
+}
+
+QLabel#momentMediaTile {
+    background: {{TILE_BG}};
+    border: 1px solid {{TILE_BORDER}};
+    border-radius: {{RADIUS_CARD}};
+    color: {{TILE_TEXT}};
+    font: 12px "Segoe UI", "Microsoft YaHei", "PingFang SC";
+}
+
+QAbstractScrollArea {
+    background: transparent;
+    border: none;
+}

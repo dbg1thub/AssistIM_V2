@@ -33,6 +33,7 @@ from qfluentwidgets import (
 from client.core import logging
 from client.core.exceptions import APIError, NetworkError
 from client.core.logging import setup_logging
+from client.ui.styles import StyleSheet
 from client.ui.controllers.auth_controller import get_auth_controller
 
 
@@ -157,27 +158,7 @@ class AuthInterface(QWidget):
         root_layout.addWidget(self.brand_card, 0)
         root_layout.addWidget(self.form_card, 1)
 
-        self.setStyleSheet(
-            f"""
-            QWidget#AuthInterface {{
-                background-color: transparent;
-            }}
-            CardWidget#brandCard {{
-                border-radius: {self.CARD_RADIUS}px;
-                background: qlineargradient(
-                    x1: 0, y1: 0, x2: 1, y2: 1,
-                    stop: 0 rgba(240, 246, 255, 0.98),
-                    stop: 1 rgba(225, 236, 252, 0.92)
-                );
-            }}
-            CardWidget#formCard {{
-                border-radius: {self.CARD_RADIUS}px;
-            }}
-            QStackedWidget {{
-                background: transparent;
-            }}
-            """
-        )
+        StyleSheet.AUTH_INTERFACE.apply(self)
 
     def _build_login_page(self) -> QWidget:
         page = QWidget(self.form_pages)

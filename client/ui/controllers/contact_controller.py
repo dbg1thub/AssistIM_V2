@@ -104,10 +104,11 @@ class FriendRequestRecord:
     def status_label(self) -> str:
         """Return a localized status label."""
         return {
-            "pending": "待处理",
-            "accepted": "已通过",
-            "rejected": "已拒绝",
-        }.get(self.status, self.status or "未知")
+            "pending": "???",
+            "accepted": "???",
+            "rejected": "???",
+            "expired": "???",
+        }.get(self.status, self.status or "??")
 
     def can_review(self, current_user_id: str) -> bool:
         """Return whether the current user can accept or reject this request."""

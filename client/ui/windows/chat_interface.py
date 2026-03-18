@@ -8,10 +8,10 @@ import os
 from typing import Optional
 
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QPixmap
-from PySide6.QtWidgets import QDialog, QHBoxLayout, QLabel, QMenu, QScrollArea, QSplitter, QVBoxLayout, QWidget
+from PySide6.QtGui import QGuiApplication, QPixmap
+from PySide6.QtWidgets import QDialog, QHBoxLayout, QLabel, QScrollArea, QVBoxLayout, QWidget
 
-from qfluentwidgets import InfoBar, PrimaryPushButton, PushButton, SubtitleLabel, TextEdit
+from qfluentwidgets import Action, InfoBar, PrimaryPushButton, PushButton, RoundMenu, SubtitleLabel, TextEdit
 
 from client.events.event_bus import get_event_bus
 from client.managers.message_manager import MessageEvent
@@ -20,7 +20,9 @@ from client.models.message import MessageStatus, MessageType, Session, format_me
 from client.network.http_client import get_http_client
 from client.ui.controllers.auth_controller import get_auth_controller
 from client.ui.controllers.chat_controller import get_chat_controller
+from client.ui.styles import StyleSheet
 from client.ui.widgets.chat_panel import ChatPanel
+from client.ui.widgets.fluent_splitter import FluentSplitter
 from client.ui.widgets.screenshot_overlay import ScreenshotOverlay
 from client.ui.widgets.session_panel import SessionPanel
 
@@ -136,7 +138,7 @@ class ChatInterface(QWidget):
         """Set up the two-column chat layout."""
         self.setObjectName("ChatInterface")
 
-        self.splitter = QSplitter(Qt.Orientation.Horizontal, self)
+        self.splitter = FluentSplitter(Qt.Orientation.Horizontal, self)
         self.splitter.setObjectName("chatSplitter")
 
         self.session_panel = SessionPanel(self)
@@ -157,14 +159,7 @@ class ChatInterface(QWidget):
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(0)
         main_layout.addWidget(self.splitter)
-
-        self.setStyleSheet(
-            """
-            QSplitter#chatSplitter::handle {
-                background: rgba(15, 23, 42, 0.08);
-            }
-            """
-        )
+        StyleSheet.CHAT_INTERFACE.apply(self)
 
     def _connect_signals(self) -> None:
         """Connect panel-level signals."""
@@ -420,29 +415,40 @@ class ChatInterface(QWidget):
         if not message:
             return
 
-        menu = QMenu(self)
+        menu = RoundMenu(parent=self)
+        copy_action = None
         open_action = None
         edit_action = None
         recall_action = None
         delete_action = None
         retry_action = None
 
+        if message.message_type == MessageType.TEXT and message.content:
+            copy_action = Action("复制", self)
+            menu.addAction(copy_action)
+
         if message.message_type == MessageType.IMAGE:
-            open_action = menu.addAction("查看图片")
+            open_action = Action("查看图片", self)
+            menu.addAction(open_action)
         elif message.message_type in {MessageType.FILE, MessageType.VIDEO}:
-            open_action = menu.addAction("打开")
+            open_action = Action("打开", self)
+            menu.addAction(open_action)
 
         if message.is_self and message.message_type == MessageType.TEXT and message.status != MessageStatus.RECALLED:
-            edit_action = menu.addAction("编辑")
+            edit_action = Action("编辑", self)
+            menu.addAction(edit_action)
 
         if message.is_self and message.status not in {MessageStatus.RECALLED, MessageStatus.FAILED}:
-            recall_action = menu.addAction("撤回")
+            recall_action = Action("撤回", self)
+            menu.addAction(recall_action)
 
         if message.is_self:
-            delete_action = menu.addAction("删除")
+            delete_action = Action("删除", self)
+            menu.addAction(delete_action)
 
         if message.is_self and message.status == MessageStatus.FAILED:
-            retry_action = menu.addAction("重发")
+            retry_action = Action("重发", self)
+            menu.addAction(retry_action)
 
         action = menu.exec(self.chat_panel.get_message_list().viewport().mapToGlobal(position))
         if action is None:
@@ -450,6 +456,11 @@ class ChatInterface(QWidget):
 
         if action == open_action:
             self._open_message(message)
+            return
+
+        if action == copy_action:
+            selected_text = self.chat_panel.get_selected_text(message)
+            QGuiApplication.clipboard().setText(selected_text or (message.content or ""))
             return
 
         if action == edit_action:

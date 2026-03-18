@@ -1,0 +1,22 @@
+QWidget#ChatInterface,
+QWidget#ChatInterface QSplitter {
+    background: transparent;
+}
+
+QSplitter#chatSplitter::handle:horizontal {
+    background: transparent;
+    border: none;
+    margin: 0;
+}
+
+QSplitter#chatSplitter::handle:horizontal:hover {
+    background: transparent;
+    border: none;
+    margin: 0;
+}
+
+QSplitter#chatSplitter::handle:horizontal:pressed {
+    background: transparent;
+    border: none;
+    margin: 0;
+}

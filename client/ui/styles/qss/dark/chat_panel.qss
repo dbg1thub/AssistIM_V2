@@ -1,0 +1,38 @@
+QWidget#ChatPanel,
+QWidget#chatWelcomeWidget,
+QWidget#chatPage {
+    background: transparent;
+}
+
+QListView#messageListView {
+    background: transparent;
+    border: none;
+}
+
+QSplitter#chatContentSplitter::handle:vertical {
+    background: transparent;
+    border: none;
+    margin: 0;
+}
+
+QSplitter#chatContentSplitter::handle:vertical:hover {
+    background: transparent;
+    border: none;
+    margin: 0;
+}
+
+QSplitter#chatContentSplitter::handle:vertical:pressed {
+    background: transparent;
+    border: none;
+    margin: 0;
+}
+
+QLabel#chatWelcomeTitle {
+    color: white;
+    font: 28px "Segoe UI Semibold", "Microsoft YaHei", "PingFang SC";
+}
+
+QLabel#chatWelcomeSubtitle {
+    color: {{TEXT_SECONDARY}};
+    font: 14px "Segoe UI", "Microsoft YaHei", "PingFang SC";
+}

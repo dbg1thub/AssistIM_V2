@@ -1,0 +1,62 @@
+QWidget#ContactInterface,
+QWidget#ContactDetailPanel,
+QStackedWidget,
+QWidget#contactMomentsScrollWidget {
+    background: transparent;
+}
+
+CardWidget#ContactSidebarCard,
+CardWidget#ContactProfileCard,
+CardWidget#ContactMomentsPanel,
+CardWidget#ContactMomentItem,
+CardWidget#RequestListItem,
+CardWidget#UserSearchItem,
+CardWidget#GroupMemberItem {
+    background: {{CARD_BG}};
+    border: 1px solid {{BORDER_COLOR}};
+    border-radius: {{RADIUS_CARD}};
+}
+
+QFrame#DetailDivider {
+    background: {{BORDER_COLOR}};
+    min-height: 1px;
+    max-height: 1px;
+    border: none;
+}
+
+QLabel#elidedCaptionLabel,
+QLabel#contactMetaLabel,
+QLabel#contactSectionCaption,
+QLabel#contactMomentMetaLabel,
+QLabel#contactSummaryLabel {
+    color: {{TEXT_SECONDARY}};
+    font: 12px "Segoe UI", "Microsoft YaHei", "PingFang SC";
+}
+
+QWidget#contactMomentCommentBox {
+    background: {{SURFACE_BG}};
+    border: 1px solid {{BORDER_COLOR}};
+    border-radius: {{RADIUS_PILL}};
+}
+
+QLabel#contactMomentCommentLabel {
+    color: {{TEXT_TERTIARY}};
+    font: 12px "Segoe UI", "Microsoft YaHei", "PingFang SC";
+}
+
+QPushButton#requestStatusButton {
+    border-radius: {{RADIUS_PILL}};
+}
+
+QAbstractScrollArea {
+    background: transparent;
+    border: none;
+}
+
+QSplitter#contactSplitter::handle:horizontal {
+    background: {{HANDLE_COLOR}};
+}
+
+QSplitter#contactSplitter::handle:horizontal:hover {
+    background: {{HANDLE_HOVER}};
+}

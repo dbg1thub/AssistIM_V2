@@ -15,8 +15,11 @@ class MomentRepository:
     def __init__(self, db: Session) -> None:
         self.db = db
 
-    def list_moments(self) -> list[Moment]:
-        stmt = select(Moment).order_by(desc(Moment.created_at))
+    def list_moments(self, user_id: str | None = None) -> list[Moment]:
+        stmt = select(Moment)
+        if user_id:
+            stmt = stmt.where(Moment.user_id == user_id)
+        stmt = stmt.order_by(desc(Moment.created_at))
         return list(self.db.execute(stmt).scalars().all())
 
     def get_comments_map(self, moment_ids: list[str]) -> dict[str, list[MomentComment]]:

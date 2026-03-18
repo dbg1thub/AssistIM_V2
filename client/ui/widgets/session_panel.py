@@ -14,6 +14,7 @@ from client.events.event_bus import get_event_bus
 from client.managers.session_manager import SessionEvent, get_session_manager
 from client.models.message import Session
 from client.models.session_model import SessionModel
+from client.ui.styles import StyleSheet
 
 
 class SessionFilterProxyModel(QSortFilterProxyModel):
@@ -91,18 +92,7 @@ class SessionPanel(QWidget):
 
         self.main_layout.addWidget(self.search_box)
         self.main_layout.addWidget(self.session_list, 1)
-
-        self.setStyleSheet(
-            """
-            QWidget#SessionPanel {
-                background: rgba(255, 255, 255, 0.86);
-                border-right: 1px solid rgba(0, 0, 0, 0.05);
-            }
-            QListView#sessionListView {
-                background: transparent;
-            }
-            """
-        )
+        StyleSheet.SESSION_PANEL.apply(self)
 
     def _setup_session_model(self) -> None:
         """Initialize session model, proxy, and delegate."""

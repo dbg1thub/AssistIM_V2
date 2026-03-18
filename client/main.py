@@ -17,9 +17,11 @@ if __package__ in {None, ""}:
 from PySide6.QtCore import QLockFile
 from PySide6.QtWidgets import QApplication, QMessageBox
 from qasync import QEventLoop
+from qfluentwidgets import setTheme, setThemeColor
 
 from client.core import logging
 from client.core.config_backend import get_config
+from client.core.config import cfg
 from client.core.logging import setup_logging
 from client.storage.database import get_database
 from client.network.http_client import get_http_client
@@ -387,6 +389,8 @@ def main() -> int:
 
     qt_app = QApplication([sys.argv[0], *qt_unknown_args])
     qt_app.setApplicationName("AssistIM")
+    setTheme(cfg.get(cfg.themeMode), lazy=True)
+    setThemeColor(cfg.get(cfg.themeColor))
     app_font = qt_app.font()
     if app_font.pointSize() <= 0:
         app_font.setPointSize(10)
@@ -401,7 +405,7 @@ def main() -> int:
         QMessageBox.information(
             None,
             "AssistIM",
-            "AssistIM 已经在运行。若要本地双开测试，请使用不同的 --profile 参数。",
+            "AssistIM \u5df2\u7ecf\u5728\u8fd0\u884c\u3002\u5982\u9700\u672c\u5730\u591a\u5f00\u6d4b\u8bd5\uff0c\u8bf7\u4f7f\u7528\u4e0d\u540c\u7684 --profile \u53c2\u6570\u3002",
         )
         return 1
 

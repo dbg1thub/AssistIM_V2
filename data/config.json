@@ -1,30 +1,10 @@
 {
-    "AI": {
-        "AIApiKey": "",
-        "AIBaseUrl": "https://api.openai.com/v1",
-        "AIMaxTokens": 2048,
-        "AIModel": "GPT-3.5",
-        "AIProvider": "OpenAI",
-        "AITemperature": 0.7,
-        "EnableAIAutoReply": false
-    },
-    "Update": {
-        "CheckUpdateAtStartUp": true
-    },
     "MainWindow": {
         "DpiScale": "Auto",
         "Language": "Auto"
     },
-    "Notification": {
-        "EnableDesktopNotification": true,
-        "EnableMessageNotification": true,
-        "EnableMessageSound": true
-    },
-    "Chat": {
-        "EnableQuickReply": true,
-        "EnableReadReceipt": true,
-        "EnableTypingIndicator": true,
-        "MessageRecallTime": 5
+    "App": {
+        "ExitConfirmEnabled": false
     },
     "QFluentWidgets": {
         "FontFamilies": [
@@ -36,13 +16,8 @@
     "Window": {
         "MicaEnabled": true
     },
-    "Server": {
-        "ServerHost": "localhost",
-        "ServerPort": 8000,
-        "WsPort": 8000
-    },
     "Theme": {
         "ThemeColor": "#ff07c160",
-        "ThemeMode": "Light"
+        "ThemeMode": "Dark"
     }
 }

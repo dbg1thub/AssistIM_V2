@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
@@ -17,8 +17,12 @@ router = APIRouter()
 
 
 @router.get("")
-def list_moments(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
-    return success_response(MomentService(db).list_moments(current_user))
+def list_moments(
+    user_id: str | None = Query(default=None),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    return success_response(MomentService(db).list_moments(current_user, user_id=user_id))
 
 
 @router.post("")

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 from sqlalchemy.orm import Session
 
 from app.core.errors import AppError, ErrorCode
@@ -11,6 +13,8 @@ from app.repositories.user_repo import UserRepository
 
 
 class FriendService:
+    REQUEST_EXPIRE_AFTER = timedelta(days=7)
+
     def __init__(self, db: Session) -> None:
         self.friends = FriendRepository(db)
         self.users = UserRepository(db)
@@ -25,7 +29,8 @@ class FriendService:
         return self.serialize_request(request)
 
     def list_requests(self, current_user: User) -> list[dict]:
-        return [self.serialize_request(item) for item in self.friends.list_requests_for_user(current_user.id)]
+        requests = self.friends.list_requests_for_user(current_user.id)
+        return [self.serialize_request(self._expire_if_needed(item)) for item in requests]
 
     def accept_request(self, current_user: User, request_id: str) -> dict:
         request = self.friends.get_request(request_id)
@@ -33,6 +38,9 @@ class FriendService:
             raise AppError(ErrorCode.RESOURCE_NOT_FOUND, "friend request not found", 404)
         if request.receiver_id != current_user.id:
             raise AppError(ErrorCode.FORBIDDEN, "cannot accept this request", 403)
+        request = self._expire_if_needed(request)
+        if request.status != "pending":
+            raise AppError(ErrorCode.INVALID_REQUEST, f"friend request {request.status}", 409)
         self.friends.update_request_status(request, "accepted")
         self.friends.create_friendship_pair(request.sender_id, request.receiver_id)
         return {"status": "accepted"}
@@ -43,6 +51,9 @@ class FriendService:
             raise AppError(ErrorCode.RESOURCE_NOT_FOUND, "friend request not found", 404)
         if request.receiver_id != current_user.id:
             raise AppError(ErrorCode.FORBIDDEN, "cannot reject this request", 403)
+        request = self._expire_if_needed(request)
+        if request.status != "pending":
+            raise AppError(ErrorCode.INVALID_REQUEST, f"friend request {request.status}", 409)
         self.friends.update_request_status(request, "rejected")
         return {"status": "rejected"}
 
@@ -66,6 +77,18 @@ class FriendService:
 
     def check_relationship(self, current_user: User, user_id: str) -> dict:
         return {"is_friend": self.friends.is_friend(current_user.id, user_id)}
+
+    def _expire_if_needed(self, request):
+        if request.status != "pending" or request.created_at is None:
+            return request
+
+        created_at = request.created_at
+        if created_at.tzinfo is None:
+            created_at = created_at.replace(tzinfo=timezone.utc)
+
+        if datetime.now(timezone.utc) - created_at >= self.REQUEST_EXPIRE_AFTER:
+            return self.friends.update_request_status(request, "expired")
+        return request
 
     @staticmethod
     def serialize_request(request) -> dict:

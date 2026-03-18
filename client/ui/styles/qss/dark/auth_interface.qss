@@ -1,0 +1,16 @@
+QWidget#AuthInterface,
+QStackedWidget {
+    background-color: transparent;
+}
+
+CardWidget#brandCard {
+    background: {{CARD_BG}};
+    border: 1px solid {{BORDER_COLOR}};
+    border-radius: {{RADIUS_CARD}};
+}
+
+CardWidget#formCard {
+    background: {{CARD_BG_STRONG}};
+    border: 1px solid {{BORDER_COLOR}};
+    border-radius: {{RADIUS_CARD}};
+}

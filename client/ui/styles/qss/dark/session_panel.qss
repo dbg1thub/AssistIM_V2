@@ -1,0 +1,9 @@
+QWidget#SessionPanel {
+    background: transparent;
+    border: none;
+}
+
+QListView#sessionListView,
+SearchLineEdit {
+    background: transparent;
+}

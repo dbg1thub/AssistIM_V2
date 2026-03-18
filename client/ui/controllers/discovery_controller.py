@@ -70,9 +70,10 @@ class DiscoveryController:
         self._like_state_cache: dict[str, bool] = {}
         self._like_count_cache: dict[str, int] = {}
 
-    async def load_moments(self) -> list[MomentRecord]:
+    async def load_moments(self, user_id: Optional[str] = None) -> list[MomentRecord]:
         """Load moments and enrich authors from the user API when needed."""
-        payload = await self._http.get("/moments")
+        params = {"user_id": user_id} if user_id else None
+        payload = await self._http.get("/moments", params=params)
         items = list(payload or [])
 
         author_ids = {

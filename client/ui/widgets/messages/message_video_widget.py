@@ -10,6 +10,8 @@ from PySide6.QtGui import QPixmap, QIcon
 
 from qfluentwidgets import AvatarWidget, StateLabel, IconWidget, BodyLabel
 
+from client.ui.styles import StyleSheet
+
 
 class MessageVideoWidget(QWidget):
     """
@@ -110,13 +112,12 @@ class MessageVideoWidget(QWidget):
         self.play_button.clicked.connect(self._on_play_clicked)
 
         self.duration_label = BodyLabel(self._get_duration(), self.thumbnail_container)
+        self.duration_label.setObjectName("videoDurationLabel")
         self.duration_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignBottom)
-        self.duration_label.setStyleSheet(
-            "background-color: rgba(0,0,0,0.6); color: white; padding: 2px 6px; border-radius: 4px;"
-        )
         self.duration_label.move(self.MAX_WIDTH - 70, self.MAX_HEIGHT - 30)
 
         layout.addWidget(self.thumbnail_container)
+        StyleSheet.MESSAGE_VIDEO_WIDGET.apply(self)
 
         return bubble
 

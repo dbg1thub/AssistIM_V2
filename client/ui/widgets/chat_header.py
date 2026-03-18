@@ -10,6 +10,8 @@ from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
 
 from qfluentwidgets import BodyLabel, CaptionLabel, FluentIcon, IconWidget, TransparentToolButton
 
+from client.ui.styles import StyleSheet
+
 
 class ChatHeader(QWidget):
     """Top bar showing current chat identity, status, and actions."""
@@ -39,6 +41,8 @@ class ChatHeader(QWidget):
         self.title_label = BodyLabel("选择一个会话", self.info_widget)
         self.status_label = CaptionLabel("从左侧选择一个聊天开始对话", self.info_widget)
 
+        self.title_label.setObjectName("chatHeaderTitle")
+        self.status_label.setObjectName("chatHeaderStatus")
         self.info_layout.addWidget(self.title_label)
         self.info_layout.addWidget(self.status_label)
 
@@ -59,14 +63,7 @@ class ChatHeader(QWidget):
         self.detail_button.clicked.connect(self.more_clicked.emit)
         self.ai_button.clicked.connect(self.ai_summary_clicked.emit)
 
-        self.setStyleSheet(
-            """
-            QWidget#chatHeader {
-                background: rgba(255, 255, 255, 0.92);
-                border-bottom: 1px solid rgba(0, 0, 0, 0.06);
-            }
-            """
-        )
+        StyleSheet.CHAT_HEADER.apply(self)
 
     def _apply_safe_button_font(self, *buttons: TransparentToolButton) -> None:
         """Ensure tooltip rendering gets a valid point-size font."""

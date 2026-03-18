@@ -13,8 +13,8 @@ class MomentService:
     def __init__(self, db: Session) -> None:
         self.moments = MomentRepository(db)
 
-    def list_moments(self, current_user: User | None = None) -> list[dict]:
-        moments = self.moments.list_moments()
+    def list_moments(self, current_user: User | None = None, user_id: str | None = None) -> list[dict]:
+        moments = self.moments.list_moments(user_id=user_id)
         moment_ids = [item.id for item in moments]
         comments_map = self.moments.get_comments_map(moment_ids)
         like_user_ids_map = self.moments.get_like_user_ids_map(moment_ids)

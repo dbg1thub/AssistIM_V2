@@ -46,6 +46,7 @@ from client.ui.controllers.discovery_controller import (
     MomentRecord,
     get_discovery_controller,
 )
+from client.ui.styles import StyleSheet
 from client.ui.widgets.image_viewer import ImageViewer
 
 
@@ -208,18 +209,8 @@ class MomentMediaGrid(QWidget):
         for index, image_path in enumerate(self._images):
             row, col, row_span, col_span, width, height = sizes[index]
             label = ClickableImageLabel(image_path, self)
+            label.setObjectName("momentMediaTile")
             label.setFixedSize(width, height)
-            label.setStyleSheet(
-                """
-                QLabel {
-                    background: rgba(226, 232, 240, 0.9);
-                    border: 1px solid rgba(148, 163, 184, 0.18);
-                    border-radius: 14px;
-                    color: #48617B;
-                    font-size: 12px;
-                }
-                """
-            )
             self._load_image(label, image_path, width, height)
             label.clicked.connect(self.image_requested.emit)
             self._layout.addWidget(label, row, col, row_span, col_span)
@@ -265,7 +256,7 @@ class MomentCommentItem(QWidget):
         )
 
         time_label = CaptionLabel(format_relative_time(comment.created_at), self)
-        time_label.setStyleSheet("color: rgba(71, 85, 105, 0.78);")
+        time_label.setObjectName("momentCommentTimeLabel")
 
         layout.addWidget(text_label)
         layout.addWidget(time_label)
@@ -342,15 +333,7 @@ class AnimatedCommentSection(QWidget):
         surface_layout.addWidget(self.editor_widget)
         layout.addWidget(self.surface)
 
-        self.setStyleSheet(
-            """
-            QFrame#MomentCommentSurface {
-                background: rgba(241, 245, 249, 0.92);
-                border: 1px solid rgba(148, 163, 184, 0.18);
-                border-radius: 16px;
-            }
-            """
-        )
+        self.setObjectName("MomentCommentSection")
 
     def set_comments(self, comments: list[MomentCommentRecord]) -> None:
         """Replace the comment list and rebuild the section."""
@@ -546,6 +529,7 @@ class MomentCard(CardWidget):
         layout.addLayout(header_row)
 
         self.content_label = BodyLabel("", self)
+        self.content_label.setObjectName("momentContentLabel")
         self.content_label.setWordWrap(True)
         layout.addWidget(self.content_label)
 
@@ -559,6 +543,7 @@ class MomentCard(CardWidget):
         layout.addWidget(self.media_grid)
 
         self.stats_label = CaptionLabel("", self)
+        self.stats_label.setObjectName("momentStatsLabel")
         layout.addWidget(self.stats_label)
 
         divider = QFrame(self)
@@ -739,6 +724,7 @@ class DiscoveryInterface(QWidget):
         top_row.addWidget(self.publish_button, 0)
 
         self.summary_label = BodyLabel("正在加载动态…", self.hero_card)
+        self.summary_label.setObjectName("discoverySummaryLabel")
         self.summary_label.setWordWrap(True)
 
         hero_layout.addLayout(top_row)
@@ -755,33 +741,7 @@ class DiscoveryInterface(QWidget):
         self.scroll_area.setWidget(self.scroll_widget)
         main_layout.addWidget(self.scroll_area)
 
-        self.setStyleSheet(
-            """
-            QWidget#DiscoveryInterface {
-                background: qlineargradient(
-                    x1: 0, y1: 0, x2: 1, y2: 1,
-                    stop: 0 rgba(247, 249, 252, 1),
-                    stop: 1 rgba(236, 243, 250, 1)
-                );
-            }
-            CardWidget#DiscoveryHeroCard,
-            CardWidget#MomentCard {
-                background: rgba(255, 255, 255, 0.95);
-                border: 1px solid rgba(15, 23, 42, 0.06);
-                border-radius: 22px;
-            }
-            QFrame#MomentCardDivider {
-                background: rgba(148, 163, 184, 0.18);
-                min-height: 1px;
-                max-height: 1px;
-                border: none;
-            }
-            QAbstractScrollArea {
-                background: transparent;
-                border: none;
-            }
-            """
-        )
+        StyleSheet.DISCOVERY_INTERFACE.apply(self)
 
     def _connect_signals(self) -> None:
         self.refresh_button.clicked.connect(self.reload_data)

@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 from PySide6.QtCore import QModelIndex, QRect, QSize, Qt
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import QStyle, QStyledItemDelegate, QStyleOptionViewItem
+from qfluentwidgets import isDarkTheme, themeColor
 
 from client.models.message import format_message_preview
 
@@ -80,8 +81,13 @@ class SessionDelegate(QStyledItemDelegate):
         name_y = card_rect.y() + 14
         preview_y = name_y + 24
 
+        secondary_text = QColor(216, 216, 216) if isDarkTheme() else QColor(95, 95, 95)
+        primary_text = QColor(255, 255, 255) if isDarkTheme() else QColor(0, 0, 0)
+        preview_color = primary_text if session.unread_count > 0 else secondary_text
+        time_color = QColor(196, 196, 196) if isDarkTheme() else QColor(122, 122, 122)
+
         painter.setFont(name_font)
-        painter.setPen(QColor("#202020"))
+        painter.setPen(primary_text)
         painter.drawText(
             QRect(content_left, name_y, name_available, 20),
             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
@@ -94,7 +100,7 @@ class SessionDelegate(QStyledItemDelegate):
             self._draw_unread_badge(painter, badge_rect, unread_text)
 
         painter.setFont(preview_font)
-        painter.setPen(QColor("#7A7A7A") if session.unread_count == 0 else QColor("#303030"))
+        painter.setPen(preview_color)
         painter.drawText(
             QRect(content_left, preview_y, preview_available, 18),
             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
@@ -102,7 +108,7 @@ class SessionDelegate(QStyledItemDelegate):
         )
 
         painter.setFont(time_font)
-        painter.setPen(QColor("#9A9A9A"))
+        painter.setPen(time_color)
         painter.drawText(
             QRect(content_right - time_width, preview_y, time_width, 18),
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
@@ -113,16 +119,23 @@ class SessionDelegate(QStyledItemDelegate):
 
     def _draw_background(self, painter: QPainter, rect: QRect, option: QStyleOptionViewItem) -> None:
         """Draw rounded background for hover/selected state."""
+        dark = isDarkTheme()
         if option.state & QStyle.StateFlag.State_Selected:
-            color = QColor("#E8F1FF")
+            color = QColor(255, 255, 255, 28) if dark else QColor(0, 0, 0, 14)
+            border = QColor(255, 255, 255, 0)
         elif option.state & QStyle.StateFlag.State_MouseOver:
-            color = QColor("#F5F8FC")
+            color = QColor(255, 255, 255, 18) if dark else QColor(0, 0, 0, 8)
+            border = QColor(255, 255, 255, 0)
         else:
             color = QColor(255, 255, 255, 0)
+            border = QColor(255, 255, 255, 0)
 
         path = QPainterPath()
-        path.addRoundedRect(rect, 14, 14)
+        path.addRoundedRect(rect, 10, 10)
         painter.fillPath(path, color)
+        if border.alpha() > 0:
+            painter.setPen(QPen(border, 1))
+            painter.drawPath(path)
 
     def _draw_avatar(self, painter: QPainter, rect: QRect, session) -> None:
         """Draw session avatar or a generated initial avatar."""
@@ -145,9 +158,9 @@ class SessionDelegate(QStyledItemDelegate):
                 )
                 painter.drawPixmap(rect, scaled)
             else:
-                painter.fillPath(path, QColor("#D7DEE8"))
+                painter.fillPath(path, QColor("#626B76") if isDarkTheme() else QColor("#D7DEE8"))
         else:
-            painter.fillPath(path, QColor("#D7DEE8"))
+            painter.fillPath(path, QColor("#626B76") if isDarkTheme() else QColor("#D7DEE8"))
 
         painter.setClipping(False)
 
@@ -166,7 +179,8 @@ class SessionDelegate(QStyledItemDelegate):
         """Draw unread badge next to the session title."""
         path = QPainterPath()
         path.addRoundedRect(rect, 8, 8)
-        painter.fillPath(path, QColor("#FF5A5F"))
+        accent = QColor(themeColor())
+        painter.fillPath(path, accent)
 
         font = QFont()
         font.setPixelSize(10)

@@ -38,6 +38,8 @@ from client.ui.controllers.contact_controller import (
     get_contact_controller,
 )
 
+from client.ui.controllers.discovery_controller import MomentRecord, get_discovery_controller
+from client.ui.styles import StyleSheet
 
 setup_logging()
 logger = logging.get_logger(__name__)
@@ -129,7 +131,7 @@ class ElidedCaptionLabel(QLabel):
         font = QFont(self.font())
         font.setPixelSize(12)
         self.setFont(font)
-        self.setStyleSheet("color: rgba(71, 85, 105, 0.85);")
+        self.setObjectName("elidedCaptionLabel")
         self.setText(text)
 
     def setText(self, text: str) -> None:
@@ -188,6 +190,7 @@ class ContactListItem(QWidget):
         self.subtitle_label = ElidedCaptionLabel(subtitle, self)
         self.subtitle_label.setVisible(bool(subtitle))
         self.meta_label = CaptionLabel(meta, self)
+        self.meta_label.setObjectName("contactMetaLabel")
         self.meta_label.setVisible(bool(meta))
         bottom_row.addWidget(self.subtitle_label, 1)
         bottom_row.addWidget(self.meta_label, 0)
@@ -233,18 +236,27 @@ class RequestListItem(CardWidget):
     reject_clicked = Signal(str)
     selected = Signal(str)
 
+    STATUS_TEXT = {
+        "pending": "待处理",
+        "accepted": "已通过",
+        "rejected": "已拒绝",
+        "expired": "已过期",
+    }
+
     def __init__(self, request: FriendRequestRecord, current_user_id: str, parent=None):
         super().__init__(parent)
         self.request = request
         self.current_user_id = current_user_id
         self._selected = False
         self._hovered = False
+        self.setObjectName("RequestListItem")
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setMinimumWidth(0)
+        self.setFixedHeight(72)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setContentsMargins(14, 12, 14, 12)
         layout.setSpacing(12)
 
         avatar = ContactAvatar(42, self)
@@ -254,28 +266,20 @@ class RequestListItem(CardWidget):
         text_layout.setContentsMargins(0, 0, 0, 0)
         text_layout.setSpacing(4)
 
-        title_row = QHBoxLayout()
-        title_row.setContentsMargins(0, 0, 0, 0)
-        title_row.setSpacing(8)
-
         self.title_label = ElidedBodyLabel(request.counterpart_name(current_user_id), self)
-        title_row.addWidget(self.title_label, 1)
-        title_row.addWidget(CaptionLabel(request.direction_label(current_user_id), self), 0)
-        title_row.addWidget(CaptionLabel(request.status_label(), self), 0)
-
-        text_layout.addLayout(title_row)
+        text_layout.addWidget(self.title_label)
 
         if request.is_outgoing(current_user_id):
-            message = request.message or "你发送了一条好友申请。"
+            message = request.message or "你发出了一条好友申请。"
         else:
             message = request.message or "对方向你发送了一条好友申请。"
-        message_label = CaptionLabel(message, self)
-        message_label.setWordWrap(True)
-        text_layout.addWidget(message_label)
+        self.message_label = ElidedCaptionLabel(message, self)
+        text_layout.addWidget(self.message_label)
 
         action_layout = QVBoxLayout()
         action_layout.setContentsMargins(0, 0, 0, 0)
         action_layout.setSpacing(8)
+        action_layout.addStretch(1)
         if request.can_review(current_user_id):
             accept_button = PrimaryPushButton("通过", self)
             reject_button = PushButton("拒绝", self)
@@ -283,18 +287,22 @@ class RequestListItem(CardWidget):
             reject_button.setFixedWidth(76)
             accept_button.clicked.connect(lambda: self.accept_clicked.emit(self.request.id))
             reject_button.clicked.connect(lambda: self.reject_clicked.emit(self.request.id))
-            action_layout.addWidget(accept_button)
-            action_layout.addWidget(reject_button)
+            action_layout.addWidget(accept_button, 0, Qt.AlignmentFlag.AlignHCenter)
+            action_layout.addWidget(reject_button, 0, Qt.AlignmentFlag.AlignHCenter)
         else:
-            status_button = PushButton(request.status_label(), self)
+            status_button = PushButton(self._status_text(), self)
+            status_button.setObjectName("requestStatusButton")
             status_button.setFixedWidth(88)
             status_button.setEnabled(False)
-            action_layout.addWidget(status_button)
-            action_layout.addStretch(1)
+            action_layout.addWidget(status_button, 0, Qt.AlignmentFlag.AlignHCenter)
+        action_layout.addStretch(1)
 
         layout.addWidget(avatar, 0)
         layout.addLayout(text_layout, 1)
         layout.addLayout(action_layout, 0)
+
+    def _status_text(self) -> str:
+        return self.STATUS_TEXT.get(self.request.status, self.request.status_label() or "已处理")
 
     def set_selected(self, selected: bool) -> None:
         self._selected = selected
@@ -316,15 +324,16 @@ class RequestListItem(CardWidget):
         super().mousePressEvent(event)
 
     def paintEvent(self, event) -> None:
-        super().paintEvent(event)
-        if not self._selected and not self._hovered:
-            return
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        rect = self.rect().adjusted(2, 2, -2, -2)
+        rect = self.rect().adjusted(4, 2, -4, -2)
         path = QPainterPath()
-        path.addRoundedRect(rect, 16, 16)
-        painter.fillPath(path, QColor(94, 146, 255, 22 if self._selected else 10))
+        path.addRoundedRect(rect, 14, 14)
+        if self._selected:
+            painter.fillPath(path, QColor("#E7F0FF"))
+        elif self._hovered:
+            painter.fillPath(path, QColor("#F5F8FC"))
+        super().paintEvent(event)
 
 
 class DetailRow(QWidget):
@@ -344,7 +353,102 @@ class DetailRow(QWidget):
         layout.addWidget(divider)
 
 
-class ContactDetailPanel(CardWidget):
+class ContactMomentItem(CardWidget):
+    def __init__(self, moment: MomentRecord, parent=None):
+        super().__init__(parent)
+        self.setObjectName("ContactMomentItem")
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 14, 16, 14)
+        layout.setSpacing(10)
+
+        header = QHBoxLayout()
+        header.setContentsMargins(0, 0, 0, 0)
+        header.setSpacing(10)
+        avatar = ContactAvatar(36, self)
+        avatar.set_avatar(moment.avatar, moment.display_name)
+        header_text = QVBoxLayout()
+        header_text.setContentsMargins(0, 0, 0, 0)
+        header_text.setSpacing(2)
+        header_text.addWidget(BodyLabel(moment.display_name, self))
+        header_text.addWidget(CaptionLabel(moment.created_at or "刚刚", self))
+        header.addWidget(avatar, 0)
+        header.addLayout(header_text, 1)
+        layout.addLayout(header)
+
+        content_label = BodyLabel(moment.content or "", self)
+        content_label.setWordWrap(True)
+        layout.addWidget(content_label)
+
+        meta = CaptionLabel(f"{moment.like_count} 赞 · {moment.comment_count} 评论", self)
+        meta.setObjectName("contactMomentMetaLabel")
+        layout.addWidget(meta)
+
+        comments = list(moment.comments or [])[:2]
+        if comments:
+            comment_box = QWidget(self)
+            comment_box.setObjectName("contactMomentCommentBox")
+            comment_layout = QVBoxLayout(comment_box)
+            comment_layout.setContentsMargins(12, 10, 12, 10)
+            comment_layout.setSpacing(6)
+            for comment in comments:
+                label = CaptionLabel(f"{comment.display_name}: {comment.content}", comment_box)
+                label.setObjectName("contactMomentCommentLabel")
+                label.setWordWrap(True)
+                comment_layout.addWidget(label)
+            layout.addWidget(comment_box)
+
+
+class ContactMomentsPanel(CardWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("ContactMomentsPanel")
+        self._moments: list[MomentRecord] = []
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(14)
+
+        self.title_label = SubtitleLabel("朋友圈", self)
+        self.subtitle_label = CaptionLabel("浏览该联系人的最近动态", self)
+        self.subtitle_label.setObjectName("contactSectionCaption")
+        layout.addWidget(self.title_label)
+        layout.addWidget(self.subtitle_label)
+
+        self.scroll_area = ScrollArea(self)
+        self.scroll_area.setWidgetResizable(True)
+        self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+        self.container = QWidget(self.scroll_area)
+        self.container.setObjectName("contactMomentsScrollWidget")
+        self.container_layout = QVBoxLayout(self.container)
+        self.container_layout.setContentsMargins(0, 0, 0, 0)
+        self.container_layout.setSpacing(10)
+        self.container_layout.addStretch(1)
+        self.scroll_area.setWidget(self.container)
+        layout.addWidget(self.scroll_area, 1)
+
+        self.show_placeholder()
+
+    def show_placeholder(self) -> None:
+        self.set_moments([])
+
+    def set_moments(self, moments: list[MomentRecord]) -> None:
+        self._moments = list(moments)
+        while self.container_layout.count():
+            item = self.container_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        if not self._moments:
+            self.container_layout.addWidget(BodyLabel("这个联系人还没有动态。", self.container))
+            self.container_layout.addStretch(1)
+            return
+        for moment in self._moments:
+            self.container_layout.addWidget(ContactMomentItem(moment, self.container))
+        self.container_layout.addStretch(1)
+
+
+class ContactDetailPanel(QWidget):
     message_requested = Signal(object)
 
     def __init__(self, parent=None):
@@ -353,7 +457,16 @@ class ContactDetailPanel(CardWidget):
         self.setObjectName("ContactDetailPanel")
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
-        layout = QVBoxLayout(self)
+        root_layout = QHBoxLayout(self)
+        root_layout.setContentsMargins(0, 0, 0, 0)
+        root_layout.setSpacing(12)
+
+        self.profile_card = CardWidget(self)
+        self.profile_card.setObjectName("ContactProfileCard")
+        self.profile_card.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
+        self.profile_card.setMinimumWidth(340)
+        self.profile_card.setMaximumWidth(420)
+        layout = QVBoxLayout(self.profile_card)
         layout.setContentsMargins(28, 28, 28, 28)
         layout.setSpacing(20)
 
@@ -361,16 +474,16 @@ class ContactDetailPanel(CardWidget):
         header.setContentsMargins(0, 0, 0, 0)
         header.setSpacing(10)
         header.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.avatar = ContactAvatar(84, self)
-        self.title_label = TitleLabel("联系人详情", self)
-        self.subtitle_label = CaptionLabel("从左侧选择一个联系人、群组或申请查看详情。", self)
+        self.avatar = ContactAvatar(84, self.profile_card)
+        self.title_label = TitleLabel("联系人详情", self.profile_card)
+        self.subtitle_label = CaptionLabel("从左侧选择一个联系人、群组或申请查看详情。", self.profile_card)
         self.subtitle_label.setWordWrap(True)
         self.subtitle_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         header.addWidget(self.avatar, 0, Qt.AlignmentFlag.AlignCenter)
         header.addWidget(self.title_label, 0, Qt.AlignmentFlag.AlignCenter)
         header.addWidget(self.subtitle_label, 0, Qt.AlignmentFlag.AlignCenter)
 
-        self.info_container = QWidget(self)
+        self.info_container = QWidget(self.profile_card)
         self.info_layout = QVBoxLayout(self.info_container)
         self.info_layout.setContentsMargins(0, 0, 0, 0)
         self.info_layout.setSpacing(0)
@@ -378,9 +491,9 @@ class ContactDetailPanel(CardWidget):
         action_row = QHBoxLayout()
         action_row.setContentsMargins(0, 8, 0, 0)
         action_row.setSpacing(12)
-        self.message_button = PrimaryPushButton("发消息", self)
-        self.voice_button = PushButton("语音通话", self)
-        self.video_button = PushButton("视频通话", self)
+        self.message_button = PrimaryPushButton("发消息", self.profile_card)
+        self.voice_button = PushButton("语音通话", self.profile_card)
+        self.video_button = PushButton("视频通话", self.profile_card)
         action_row.addWidget(self.message_button)
         action_row.addWidget(self.voice_button)
         action_row.addWidget(self.video_button)
@@ -393,6 +506,11 @@ class ContactDetailPanel(CardWidget):
         layout.addLayout(header)
         layout.addWidget(self.info_container, 1)
         layout.addLayout(action_row)
+
+        self.moments_panel = ContactMomentsPanel(self)
+        self.moments_panel.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        root_layout.addWidget(self.profile_card, 0)
+        root_layout.addWidget(self.moments_panel, 1)
         self.show_placeholder()
 
     def show_placeholder(self) -> None:
@@ -404,8 +522,9 @@ class ContactDetailPanel(CardWidget):
         self.message_button.setEnabled(False)
         self.voice_button.setEnabled(False)
         self.video_button.setEnabled(False)
+        self.moments_panel.show_placeholder()
 
-    def set_contact(self, contact: ContactRecord) -> None:
+    def set_contact(self, contact: ContactRecord, moments: Optional[list[MomentRecord]] = None) -> None:
         self._entity = {"type": "friend", "data": contact}
         self.avatar.set_avatar(contact.avatar, contact.display_name)
         self.title_label.setText(contact.display_name)
@@ -420,8 +539,9 @@ class ContactDetailPanel(CardWidget):
         self.message_button.setEnabled(True)
         self.voice_button.setEnabled(True)
         self.video_button.setEnabled(True)
+        self.moments_panel.set_moments(moments or [])
 
-    def set_group(self, group: GroupRecord) -> None:
+    def set_group(self, group: GroupRecord, moments: Optional[list[MomentRecord]] = None) -> None:
         self._entity = {"type": "group", "data": group}
         self.avatar.set_avatar(fallback=group.name)
         self.title_label.setText(group.name)
@@ -435,24 +555,25 @@ class ContactDetailPanel(CardWidget):
         self.message_button.setEnabled(True)
         self.voice_button.setEnabled(False)
         self.video_button.setEnabled(False)
+        self.moments_panel.set_moments(moments or [])
 
-    def set_request(self, request: FriendRequestRecord, current_user_id: str = "") -> None:
+    def set_request(self, request: FriendRequestRecord, current_user_id: str = "", moments: Optional[list[MomentRecord]] = None) -> None:
         self._entity = None
         counterpart_name = request.counterpart_name(current_user_id)
         self.avatar.set_avatar(fallback=counterpart_name)
         self.title_label.setText("收到的好友申请" if request.is_incoming(current_user_id) else "发出的好友申请")
-        self.subtitle_label.setText(f"{request.direction_label(current_user_id)} · {counterpart_name}")
+        self.subtitle_label.setText(counterpart_name)
         self._set_rows([
             ("发送者 ID", request.sender_id or "-"),
             ("接收者 ID", request.receiver_id or "-"),
-            ("方向", request.direction_label(current_user_id)),
-            ("状态", request.status_label()),
+            ("申请状态", request.status_label()),
             ("申请信息", request.message or "对方没有填写验证信息。"),
             ("时间", request.created_at or "-"),
         ])
         self.message_button.setEnabled(False)
         self.voice_button.setEnabled(False)
         self.video_button.setEnabled(False)
+        self.moments_panel.set_moments(moments or [])
 
     def _set_rows(self, rows: list[tuple[str, str]]) -> None:
         while self.info_layout.count():
@@ -477,6 +598,7 @@ class UserSearchItem(CardWidget):
 
     def __init__(self, user: UserSearchRecord, disabled_reason: str = "", parent=None):
         super().__init__(parent)
+        self.setObjectName("UserSearchItem")
         self.user = user
         self.disabled_reason = disabled_reason
 
@@ -516,6 +638,7 @@ class GroupMemberItem(CardWidget):
 
     def __init__(self, contact: ContactRecord, parent=None):
         super().__init__(parent)
+        self.setObjectName("GroupMemberItem")
         self.contact = contact
         self._selected = False
         self._hovered = False
@@ -623,6 +746,7 @@ class AddFriendDialog(QDialog):
         layout.addWidget(self.message_edit)
 
         self.summary_label = CaptionLabel("输入关键词后搜索用户。", self)
+        self.summary_label.setObjectName("contactSummaryLabel")
         layout.addWidget(self.summary_label)
 
         self.result_area = ScrollArea(self)
@@ -749,6 +873,7 @@ class CreateGroupDialog(QDialog):
         layout.addWidget(self.search_edit)
 
         self.summary_label = CaptionLabel("请选择至少 1 位好友。", self)
+        self.summary_label.setObjectName("contactSummaryLabel")
         layout.addWidget(self.summary_label)
 
         self.member_area = ScrollArea(self)
@@ -863,15 +988,18 @@ class ContactInterface(QWidget):
         super().__init__(parent)
         self.setObjectName("ContactInterface")
         self._controller = get_contact_controller()
+        self._discovery_controller = get_discovery_controller()
         self._contacts: list[ContactRecord] = []
         self._groups: list[GroupRecord] = []
         self._requests: list[FriendRequestRecord] = []
+        self._moments: list[MomentRecord] = []
         self._friend_items: dict[str, ContactListItem] = {}
         self._group_items: dict[str, ContactListItem] = {}
         self._request_items: dict[str, RequestListItem] = {}
         self._current_page = "friends"
         self._selected_key: tuple[str, str] | None = None
         self._load_task: Optional[asyncio.Task] = None
+        self._moment_load_task: Optional[asyncio.Task] = None
         self._dialog_refs: set[QDialog] = set()
         self._current_user_id = ""
         self._setup_ui()
@@ -898,6 +1026,7 @@ class ContactInterface(QWidget):
         title_stack.setSpacing(2)
         title_stack.addWidget(TitleLabel("联系人", sidebar))
         self.summary_label = CaptionLabel("正在加载联系人数据...", sidebar)
+        self.summary_label.setObjectName("contactSummaryLabel")
         title_stack.addWidget(self.summary_label)
         self.refresh_button = TransparentToolButton(FluentIcon.SYNC, sidebar)
         self.add_button = TransparentToolButton(FluentIcon.ADD, sidebar)
@@ -948,37 +1077,7 @@ class ContactInterface(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(splitter)
 
-        self.setStyleSheet(
-            """
-            QWidget#ContactInterface {
-                background: qlineargradient(
-                    x1: 0, y1: 0, x2: 1, y2: 1,
-                    stop: 0 rgba(247, 249, 252, 1),
-                    stop: 1 rgba(239, 244, 250, 1)
-                );
-            }
-            CardWidget#ContactSidebarCard,
-            CardWidget#ContactDetailPanel,
-            CardWidget#RequestListItem {
-                background: rgba(255, 255, 255, 0.94);
-                border: 1px solid rgba(15, 23, 42, 0.06);
-                border-radius: 18px;
-            }
-            QFrame#DetailDivider {
-                background: rgba(15, 23, 42, 0.06);
-                min-height: 1px;
-                max-height: 1px;
-                border: none;
-            }
-            QAbstractScrollArea {
-                background: transparent;
-                border: none;
-            }
-            QSplitter#contactSplitter::handle {
-                background: rgba(15, 23, 42, 0.08);
-            }
-            """
-        )
+        StyleSheet.CONTACT_INTERFACE.apply(self)
         self.segmented.setCurrentItem("friends")
         self._switch_page("friends")
 
@@ -1022,6 +1121,7 @@ class ContactInterface(QWidget):
                 self._controller.load_groups(),
                 self._controller.load_requests(),
             )
+            self._moments = []
         except asyncio.CancelledError:
             raise
         except (APIError, NetworkError) as exc:
@@ -1048,6 +1148,35 @@ class ContactInterface(QWidget):
         else:
             self._build_requests_page()
         self._restore_selection(full_reload=False)
+
+    def _cancel_moment_load(self) -> None:
+        if self._moment_load_task and not self._moment_load_task.done():
+            self._moment_load_task.cancel()
+
+    def _load_detail_moments(self, user_id: str, kind: str, selection_id: str, payload: object) -> None:
+        self._cancel_moment_load()
+        if not user_id:
+            return
+        self._moment_load_task = asyncio.create_task(
+            self._load_detail_moments_async(user_id, kind, selection_id, payload)
+        )
+
+    async def _load_detail_moments_async(self, user_id: str, kind: str, selection_id: str, payload: object) -> None:
+        try:
+            moments = await self._discovery_controller.load_moments(user_id=user_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.debug("Contact detail moments load failed for %s", user_id, exc_info=True)
+            moments = []
+
+        if self._selected_key != (kind, selection_id):
+            return
+
+        if kind == "friend":
+            self.detail_panel.set_contact(payload, moments)
+        elif kind == "request":
+            self.detail_panel.set_request(payload, self._current_user_id, moments)
 
     def _build_friends_page(self) -> None:
         self._clear_layout(self.friends_layout)
@@ -1156,6 +1285,7 @@ class ContactInterface(QWidget):
                     {"friend": self._select_friend, "group": self._select_group, "request": self._select_request}[category](first_id)
                     return
         self._selected_key = None
+        self._cancel_moment_load()
         self._clear_selection()
         self.detail_panel.show_placeholder()
 
@@ -1166,16 +1296,18 @@ class ContactInterface(QWidget):
         self._selected_key = ("friend", contact_id)
         self._clear_selection()
         self._friend_items[contact_id].set_selected(True)
-        self.detail_panel.set_contact(selected)
+        self.detail_panel.set_contact(selected, [])
+        self._load_detail_moments(contact_id, "friend", contact_id, selected)
 
     def _select_group(self, group_id: str) -> None:
         selected = next((item for item in self._groups if item.id == group_id), None)
         if not selected:
             return
         self._selected_key = ("group", group_id)
+        self._cancel_moment_load()
         self._clear_selection()
         self._group_items[group_id].set_selected(True)
-        self.detail_panel.set_group(selected)
+        self.detail_panel.set_group(selected, [])
 
     def _select_request(self, request_id: str) -> None:
         selected = next((item for item in self._requests if item.id == request_id), None)
@@ -1184,7 +1316,9 @@ class ContactInterface(QWidget):
         self._selected_key = ("request", request_id)
         self._clear_selection()
         self._request_items[request_id].set_selected(True)
-        self.detail_panel.set_request(selected, self._current_user_id)
+        counterpart_id = selected.counterpart_id(self._current_user_id)
+        self.detail_panel.set_request(selected, self._current_user_id, [])
+        self._load_detail_moments(counterpart_id, "request", request_id, selected)
 
     def _accept_request(self, request_id: str) -> None:
         request = next((item for item in self._requests if item.id == request_id), None)

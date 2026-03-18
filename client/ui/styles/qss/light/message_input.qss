@@ -1,0 +1,73 @@
+QWidget#messageInput,
+QWidget#messageComposer,
+QWidget#messageToolbar {
+    background: transparent;
+    border: none;
+    border-radius: 0;
+}
+
+QWidget#messageInputCard {
+    background: transparent;
+    border: none;
+    border-radius: 0;
+}
+
+TextEdit#chatMessageEdit,
+QWidget#chatMessageViewport,
+TextEdit#chatMessageEdit QTextEdit,
+TextEdit#chatMessageEdit QFrame,
+TextEdit#chatMessageEdit QWidget {
+    background: transparent;
+    border: none;
+    border-radius: 0;
+    padding: 4px 2px;
+}
+
+TextEdit#chatMessageEdit:hover,
+TextEdit#chatMessageEdit:focus,
+QWidget#chatMessageViewport:hover,
+QWidget#chatMessageViewport:focus {
+    background: transparent;
+    border: none;
+    border-radius: 0;
+}
+
+PushButton#composerSendButton {
+    background: transparent;
+    border: none;
+    color: black;
+    border-radius: 0;
+    padding-left: 18px;
+    padding-right: 18px;
+}
+
+PushButton#composerSendButton:hover {
+    background: rgba(0, 0, 0, 0.05);
+}
+
+PushButton#composerSendButton:pressed {
+    background: rgba(0, 0, 0, 0.08);
+}
+
+QWidget#emojiPickerFlyout,
+QWidget#emojiPageStack,
+QWidget#emojiScrollContent,
+ScrollArea#emojiScrollArea {
+    background: transparent;
+    border: none;
+}
+
+QWidget#emojiPickerFlyout {
+    min-width: 420px;
+    min-height: 320px;
+}
+
+QLabel#emojiTile {
+    background: transparent;
+    border: none;
+    border-radius: 10px;
+}
+
+QLabel#emojiTile:hover {
+    background: rgba(0, 0, 0, 0.06);
+}
