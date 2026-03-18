@@ -25,6 +25,7 @@ from qfluentwidgets import (
     BodyLabel,
     CaptionLabel,
     CardWidget,
+    ElevatedCardWidget,
     FluentIcon,
     IconWidget,
     InfoBar,
@@ -481,7 +482,7 @@ class CreateMomentDialog(QDialog):
         self.accept()
 
 
-class MomentCard(CardWidget):
+class MomentCard(ElevatedCardWidget):
     """Single moment card in the timeline."""
 
     like_requested = Signal(str, bool, int)

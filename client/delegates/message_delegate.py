@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from PySide6.QtCore import QModelIndex, QPoint, QPointF, QRect, QRectF, QSize, Qt, QUrl
 from PySide6.QtGui import (
@@ -700,7 +700,24 @@ class MessageDelegate(QStyledItemDelegate):
         moment = self._normalize_datetime(value)
         if moment is None:
             return ""
-        return moment.strftime("%m-%d %H:%M")
+        now = datetime.now()
+        today = now.date()
+        moment_date = moment.date()
+
+        if moment_date == today:
+            return moment.strftime("%H:%M")
+        if moment_date == today - timedelta(days=1):
+            return moment.strftime("昨天 %H:%M")
+
+        day_delta = (today - moment_date).days
+        if 1 < day_delta <= 7:
+            weekdays = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
+            return f"{weekdays[moment.weekday()]} {moment.strftime('%H:%M')}"
+
+        if moment.year == now.year:
+            return f"{moment.month}月{moment.day}日 {moment.strftime('%H:%M')}"
+
+        return f"{moment.year}年{moment.month}月{moment.day}日 {moment.strftime('%H:%M')}"
 
     def _normalize_datetime(self, value) -> datetime | None:
         """Normalize timestamp values from the message model."""

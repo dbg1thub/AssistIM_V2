@@ -95,9 +95,6 @@ class LegacyEmojiPickerFlyout(FlyoutViewBase):
         self.view_layout.setContentsMargins(12, 12, 12, 12)
         self.view_layout.setSpacing(10)
 
-        title = BodyLabel("Emoji", self)
-        self.view_layout.addWidget(title)
-
         grid_widget = QWidget(self)
         grid_layout = QGridLayout(grid_widget)
         grid_layout.setContentsMargins(0, 0, 0, 0)
@@ -248,9 +245,6 @@ class ModernEmojiPickerFlyout(FlyoutViewBase):
         self.view_layout = QVBoxLayout(self)
         self.view_layout.setContentsMargins(12, 12, 12, 12)
         self.view_layout.setSpacing(8)
-
-        title = BodyLabel("Emoji", self)
-        self.view_layout.addWidget(title)
 
         self.group_tabs = SegmentedWidget(self)
         self.group_tabs.setObjectName("emojiGroupTabs")

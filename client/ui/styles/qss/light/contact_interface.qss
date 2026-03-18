@@ -1,17 +1,44 @@
 QWidget#ContactInterface,
 QWidget#ContactDetailPanel,
+QWidget#ContactSidebarCard,
+QWidget#ContactMomentsSection,
 QStackedWidget,
-QWidget#contactMomentsScrollWidget {
+QWidget#contactListScrollArea,
+QWidget#contactListScrollWidget,
+QWidget#contactMomentsScrollWidget,
+QWidget#contactDetailScrollWidget,
+QWidget#contactMomentFlowWidget,
+QWidget#MomentCard,
+QWidget#MomentCommentSection {
     background: transparent;
+    border: none;
+    border-radius: 0;
 }
 
-CardWidget#ContactSidebarCard,
-CardWidget#ContactProfileCard,
-CardWidget#ContactMomentsPanel,
 CardWidget#ContactMomentItem,
+QWidget#MomentCard,
 CardWidget#RequestListItem,
 CardWidget#UserSearchItem,
 CardWidget#GroupMemberItem {
+    background: {{CARD_BG}};
+    border: 1px solid {{BORDER_COLOR}};
+    border-radius: {{RADIUS_CARD}};
+}
+
+QFrame#MomentCardDivider {
+    background: {{BORDER_COLOR}};
+    min-height: 1px;
+    max-height: 1px;
+    border: none;
+}
+
+QFrame#MomentCommentSurface {
+    background: {{SURFACE_BG}};
+    border: 1px solid {{BORDER_COLOR}};
+    border-radius: {{RADIUS_CARD}};
+}
+
+QWidget#ContactDetailHeader {
     background: {{CARD_BG}};
     border: 1px solid {{BORDER_COLOR}};
     border-radius: {{RADIUS_CARD}};
@@ -28,7 +55,9 @@ QLabel#elidedCaptionLabel,
 QLabel#contactMetaLabel,
 QLabel#contactSectionCaption,
 QLabel#contactMomentMetaLabel,
-QLabel#contactSummaryLabel {
+QLabel#contactSummaryLabel,
+QLabel#momentCommentTimeLabel,
+QLabel#momentStatsLabel {
     color: {{TEXT_SECONDARY}};
     font: 12px "Segoe UI", "Microsoft YaHei", "PingFang SC";
 }
@@ -41,6 +70,14 @@ QWidget#contactMomentCommentBox {
 
 QLabel#contactMomentCommentLabel {
     color: {{TEXT_TERTIARY}};
+    font: 12px "Segoe UI", "Microsoft YaHei", "PingFang SC";
+}
+
+QLabel#momentMediaTile {
+    background: {{TILE_BG}};
+    border: 1px solid {{TILE_BORDER}};
+    border-radius: {{RADIUS_CARD}};
+    color: {{TILE_TEXT}};
     font: 12px "Segoe UI", "Microsoft YaHei", "PingFang SC";
 }
 

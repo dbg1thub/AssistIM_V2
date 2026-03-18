@@ -5,7 +5,7 @@ QWidget#MomentCommentSection {
 }
 
 CardWidget#DiscoveryHeroCard,
-CardWidget#MomentCard {
+QWidget#MomentCard {
     background: {{CARD_BG}};
     border: 1px solid {{BORDER_COLOR}};
     border-radius: {{RADIUS_CARD}};

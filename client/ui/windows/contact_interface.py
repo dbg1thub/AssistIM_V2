@@ -12,6 +12,8 @@ from qfluentwidgets import (
     BodyLabel,
     CaptionLabel,
     CardWidget,
+    ElevatedCardWidget,
+    FlowLayout,
     FluentIcon,
     IconWidget,
     InfoBar,
@@ -39,6 +41,7 @@ from client.ui.controllers.contact_controller import (
 )
 
 from client.ui.controllers.discovery_controller import MomentRecord, get_discovery_controller
+from client.ui.windows.discovery_interface import MomentCard
 from client.ui.styles import StyleSheet
 
 setup_logging()
@@ -357,6 +360,9 @@ class ContactMomentItem(CardWidget):
     def __init__(self, moment: MomentRecord, parent=None):
         super().__init__(parent)
         self.setObjectName("ContactMomentItem")
+        self.setMinimumWidth(320)
+        self.setMaximumWidth(380)
+        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(16, 14, 16, 14)
         layout.setSpacing(10)
@@ -584,6 +590,273 @@ class ContactDetailPanel(QWidget):
         for label, value in rows:
             self.info_layout.addWidget(DetailRow(label, value, self.info_container))
         self.info_layout.addStretch(1)
+
+    def _emit_message_request(self) -> None:
+        if self._entity:
+            self.message_requested.emit(self._entity)
+
+    def _show_unavailable(self) -> None:
+        InfoBar.info("提示", "语音和视频入口先保留 UI，后续再接业务逻辑。", parent=self.window(), duration=1800)
+
+
+class ContactMomentsFlowPanel(QWidget):
+    like_requested = Signal(str, bool, int)
+    comment_requested = Signal(str, str)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("ContactMomentsSection")
+        self._cards: dict[str, MomentCard] = {}
+        self._featured_widget: Optional[QWidget] = None
+        self._moments: list[MomentRecord] = []
+        self._empty_text = "暂无朋友圈内容"
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        self.section_title = SubtitleLabel("朋友圈", self)
+        self.section_caption = CaptionLabel("滚动浏览最近动态", self)
+        self.section_caption.setObjectName("contactSectionCaption")
+        self.section_title.hide()
+        self.section_caption.hide()
+
+        self.scroll_area = ScrollArea(self)
+        self.scroll_area.setWidgetResizable(True)
+        self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+
+        self.scroll_widget = QWidget(self.scroll_area)
+        self.scroll_widget.setObjectName("contactDetailScrollWidget")
+        self.scroll_layout = QVBoxLayout(self.scroll_widget)
+        self.scroll_layout.setContentsMargins(12, 8, 12, 16)
+        self.scroll_layout.setSpacing(18)
+
+        self.placeholder_label = BodyLabel("暂无朋友圈内容", self.scroll_widget)
+        self.placeholder_label.setObjectName("contactMomentsPlaceholder")
+        self.placeholder_label.setWordWrap(True)
+
+        self.flow_host = QWidget(self.scroll_widget)
+        self.flow_host.setObjectName("contactMomentFlowWidget")
+        self.flow_layout = FlowLayout(self.flow_host, needAni=True)
+        self.flow_layout.setContentsMargins(0, 2, 0, 2)
+        self.flow_layout.setHorizontalSpacing(18)
+        self.flow_layout.setVerticalSpacing(18)
+
+        self.scroll_layout.addWidget(self.placeholder_label)
+        self.scroll_layout.addWidget(self.flow_host)
+        self.scroll_layout.addStretch(1)
+        self.scroll_area.setWidget(self.scroll_widget)
+
+        layout.addWidget(self.section_title)
+        layout.addWidget(self.section_caption)
+        layout.addWidget(self.scroll_area, 1)
+
+        self.set_section("朋友圈", "滚动浏览最近动态")
+        self.show_placeholder()
+
+    def set_section(self, title: str, subtitle: str) -> None:
+        self.section_title.setText(title)
+        self.section_caption.setText(subtitle)
+
+    def show_placeholder(self, text: str = "暂无朋友圈内容") -> None:
+        self._moments = []
+        self._empty_text = text
+        self._rebuild_flow()
+
+    def set_moments(self, moments: list[MomentRecord], empty_text: str = "暂无朋友圈内容") -> None:
+        self._moments = list(moments)
+        self._empty_text = empty_text
+        self._rebuild_flow()
+
+    def set_featured_widget(self, widget: QWidget | None) -> None:
+        self._featured_widget = widget
+        if widget is not None and widget.parent() is not self.flow_host:
+            widget.setParent(self.flow_host)
+        self._rebuild_flow()
+
+    def _rebuild_flow(self) -> None:
+        self.flow_layout.removeAllWidgets()
+        self._cards.clear()
+
+        if self._featured_widget is not None:
+            if self._featured_widget.parent() is not self.flow_host:
+                self._featured_widget.setParent(self.flow_host)
+            self._featured_widget.show()
+            self.flow_layout.addWidget(self._featured_widget)
+
+        if not self._moments:
+            self.placeholder_label.setText(self._empty_text)
+            self.placeholder_label.show()
+            self.flow_host.setVisible(self._featured_widget is not None)
+            return
+
+        self.placeholder_label.hide()
+        self.flow_host.show()
+        for moment in self._moments:
+            card = MomentCard(moment, self.flow_host)
+            card.setMinimumWidth(320)
+            card.setMaximumWidth(380)
+            card.like_requested.connect(self.like_requested.emit)
+            card.comment_requested.connect(self.comment_requested.emit)
+            self.flow_layout.addWidget(card)
+            self._cards[moment.id] = card
+
+    def set_like_state(self, moment_id: str, liked: bool, like_count: int) -> None:
+        card = self._cards.get(moment_id)
+        if card is not None:
+            card.set_like_state(liked, like_count)
+
+    def append_comment(self, moment_id: str, comment) -> None:
+        card = self._cards.get(moment_id)
+        if card is not None:
+            card.append_comment(comment)
+
+
+class GalleryContactDetailPanel(QWidget):
+    message_requested = Signal(object)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._entity: Optional[dict[str, object]] = None
+        self.setObjectName("ContactDetailPanel")
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+
+        root_layout = QVBoxLayout(self)
+        root_layout.setContentsMargins(0, 0, 0, 0)
+        root_layout.setSpacing(0)
+
+        self.header = ElevatedCardWidget(self)
+        self.header.setObjectName("ContactDetailHeader")
+        self.header.setMinimumWidth(420)
+        self.header.setMaximumWidth(460)
+        self.header.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
+        header_layout = QVBoxLayout(self.header)
+        header_layout.setContentsMargins(30, 28, 30, 24)
+        header_layout.setSpacing(16)
+
+        self.avatar = ContactAvatar(72, self.header)
+
+        self.title_label = TitleLabel("联系人详情", self.header)
+        self.subtitle_label = CaptionLabel("", self.header)
+        self.subtitle_label.setObjectName("contactMetaLabel")
+        self.meta_primary_label = CaptionLabel("", self.header)
+        self.meta_primary_label.setObjectName("contactMetaLabel")
+        self.meta_primary_label.setWordWrap(True)
+        self.meta_secondary_label = CaptionLabel("", self.header)
+        self.meta_secondary_label.setObjectName("contactMetaLabel")
+        self.meta_secondary_label.hide()
+
+        action_row = QHBoxLayout()
+        action_row.setContentsMargins(0, 0, 0, 0)
+        action_row.setSpacing(10)
+        self.message_button = PrimaryPushButton("发消息", self.header)
+        self.voice_button = PushButton("语音通话", self.header)
+        self.video_button = PushButton("视频通话", self.header)
+        for button in (self.message_button, self.voice_button, self.video_button):
+            button.setFixedWidth(112)
+            button.setMinimumHeight(36)
+        action_row.addWidget(self.message_button)
+        action_row.addWidget(self.voice_button)
+        action_row.addWidget(self.video_button)
+        action_row.addStretch(1)
+
+        header_layout.addWidget(self.avatar, 0, Qt.AlignmentFlag.AlignLeft)
+        header_layout.addWidget(self.title_label, 0, Qt.AlignmentFlag.AlignLeft)
+        header_layout.addWidget(self.subtitle_label, 0, Qt.AlignmentFlag.AlignLeft)
+        header_layout.addWidget(self.meta_primary_label, 0, Qt.AlignmentFlag.AlignLeft)
+        header_layout.addLayout(action_row, 0)
+        header_layout.addStretch(1)
+
+        self.message_button.clicked.connect(self._emit_message_request)
+        self.voice_button.clicked.connect(self._show_unavailable)
+        self.video_button.clicked.connect(self._show_unavailable)
+
+        self.moments_panel = ContactMomentsFlowPanel(self)
+        self.moments_panel.set_featured_widget(self.header)
+
+        root_layout.addWidget(self.moments_panel, 1)
+        self.show_placeholder()
+
+    def show_placeholder(self) -> None:
+        self._entity = None
+        self.avatar.set_avatar(fallback="CT")
+        self.title_label.setText("联系人详情")
+        self.subtitle_label.clear()
+        self.meta_primary_label.clear()
+        self.message_button.setEnabled(False)
+        self.voice_button.setEnabled(False)
+        self.video_button.setEnabled(False)
+        self.moments_panel.show_placeholder("当前还没有可展示的内容。")
+
+    def set_contact(self, contact: ContactRecord, moments: Optional[list[MomentRecord]] = None) -> None:
+        self._entity = {"type": "friend", "data": contact}
+        self.avatar.set_avatar(contact.avatar, contact.display_name)
+        self.title_label.setText(contact.display_name)
+        self.subtitle_label.setText(f"AssistIM 号 {contact.assistim_id or contact.username or '-'}")
+        self.meta_primary_label.setText(
+            " │ ".join(
+                filter(
+                    None,
+                    [
+                        f"昵称：{contact.nickname}" if contact.nickname else "",
+                        f"备注：{contact.remark}" if contact.remark else "",
+                        f"地区：{contact.region}" if contact.region else "",
+                        f"签名：{contact.signature}" if contact.signature else "",
+                    ],
+                )
+            )
+            or "已建立好友关系"
+        )
+        self.message_button.setEnabled(True)
+        self.voice_button.setEnabled(True)
+        self.video_button.setEnabled(True)
+        self.moments_panel.set_moments(moments or [], "这个联系人还没有朋友圈内容。")
+
+    def set_group(self, group: GroupRecord, moments: Optional[list[MomentRecord]] = None) -> None:
+        self._entity = {"type": "group", "data": group}
+        self.avatar.set_avatar(fallback=group.name)
+        self.title_label.setText(group.name)
+        self.subtitle_label.setText(f"群组 ID {group.id or '-'}")
+        self.meta_primary_label.setText(
+            " │ ".join(
+                filter(
+                    None,
+                    [
+                        f"成员 {group.member_count} 人",
+                        f"会话 ID：{group.session_id}" if group.session_id else "",
+                        f"创建时间：{group.created_at}" if group.created_at else "",
+                    ],
+                )
+            )
+        )
+        self.message_button.setEnabled(True)
+        self.voice_button.setEnabled(False)
+        self.video_button.setEnabled(False)
+        self.moments_panel.set_moments(moments or [], "当前没有可展示的群组动态。")
+
+    def set_request(self, request: FriendRequestRecord, current_user_id: str = "", moments: Optional[list[MomentRecord]] = None) -> None:
+        self._entity = None
+        counterpart_name = request.counterpart_name(current_user_id)
+        self.avatar.set_avatar(fallback=counterpart_name)
+        self.title_label.setText("收到的好友申请" if request.is_incoming(current_user_id) else "发出的好友申请")
+        self.subtitle_label.setText(f"AssistIM 号 {counterpart_name}")
+        self.meta_primary_label.setText(
+            " │ ".join(
+                filter(
+                    None,
+                    [
+                        f"状态：{request.status_label()}",
+                        f"时间：{request.created_at}" if request.created_at else "",
+                        request.message or "",
+                    ],
+                )
+            )
+        )
+        self.message_button.setEnabled(False)
+        self.voice_button.setEnabled(False)
+        self.video_button.setEnabled(False)
+        self.moments_panel.set_moments(moments or [], "这个联系人还没有朋友圈内容。")
 
     def _emit_message_request(self) -> None:
         if self._entity:
@@ -1012,7 +1285,7 @@ class ContactInterface(QWidget):
         splitter.setHandleWidth(1)
         splitter.setChildrenCollapsible(False)
 
-        sidebar = CardWidget(self)
+        sidebar = QWidget(self)
         sidebar.setObjectName("ContactSidebarCard")
         sidebar_layout = QVBoxLayout(sidebar)
         sidebar_layout.setContentsMargins(20, 20, 20, 20)
@@ -1065,7 +1338,7 @@ class ContactInterface(QWidget):
         left_layout.setContentsMargins(0, 0, 0, 0)
         left_layout.addWidget(sidebar)
 
-        self.detail_panel = ContactDetailPanel(self)
+        self.detail_panel = GalleryContactDetailPanel(self)
 
         splitter.addWidget(left)
         splitter.addWidget(self.detail_panel)
@@ -1086,13 +1359,17 @@ class ContactInterface(QWidget):
         self.add_button.clicked.connect(self._show_add_placeholder)
         self.search_box.textChanged.connect(self._rebuild_current_page)
         self.detail_panel.message_requested.connect(self.message_requested.emit)
+        self.detail_panel.moments_panel.like_requested.connect(self._request_detail_like_toggle)
+        self.detail_panel.moments_panel.comment_requested.connect(self._request_detail_comment_create)
 
     def _create_scroll_page(self) -> tuple[ScrollArea, QWidget, QVBoxLayout]:
         area = ScrollArea(self)
+        area.setObjectName("contactListScrollArea")
         area.setWidgetResizable(True)
         area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         area.setFrameShape(QFrame.Shape.NoFrame)
         container = QWidget(area)
+        container.setObjectName("contactListScrollWidget")
         layout = QVBoxLayout(container)
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(8)
@@ -1262,8 +1539,18 @@ class ContactInterface(QWidget):
             "groups": self._group_items,
             "requests": self._request_items,
         }
+        current_category = {"friends": "friend", "groups": "group", "requests": "request"}[self._current_page]
         if self._selected_key:
             category, item_id = self._selected_key
+            if not full_reload:
+                if category != current_category:
+                    return
+                current_visible = current_map[self._current_page]
+                if item_id in current_visible:
+                    {"friend": self._select_friend, "group": self._select_group, "request": self._select_request}[category](
+                        item_id
+                    )
+                return
             if category == "friend" and item_id in self._friend_items:
                 self._select_friend(item_id)
                 return
@@ -1273,6 +1560,8 @@ class ContactInterface(QWidget):
             if category == "request" and item_id in self._request_items:
                 self._select_request(item_id)
                 return
+        if not full_reload:
+            return
         visible = current_map[self._current_page]
         if visible:
             first_id = next(iter(visible))
@@ -1390,6 +1679,32 @@ class ContactInterface(QWidget):
         self.page_stack.setCurrentIndex(1)
         self.reload_data()
         self.message_requested.emit({"type": "group", "data": group})
+
+    def _request_detail_like_toggle(self, moment_id: str, liked: bool, like_count: int) -> None:
+        asyncio.create_task(self._request_detail_like_toggle_async(moment_id, liked, like_count))
+
+    async def _request_detail_like_toggle_async(self, moment_id: str, liked: bool, like_count: int) -> None:
+        previous_liked = not liked
+        previous_count = like_count - 1 if liked else like_count + 1
+        try:
+            await self._discovery_controller.set_liked(moment_id, liked, like_count)
+        except Exception as exc:
+            self.detail_panel.moments_panel.set_like_state(moment_id, previous_liked, previous_count)
+            InfoBar.error("朋友圈", str(exc), parent=self.window(), duration=2200)
+            return
+
+    def _request_detail_comment_create(self, moment_id: str, content: str) -> None:
+        asyncio.create_task(self._request_detail_comment_create_async(moment_id, content))
+
+    async def _request_detail_comment_create_async(self, moment_id: str, content: str) -> None:
+        try:
+            comment = await self._discovery_controller.add_comment(moment_id, content)
+        except Exception as exc:
+            InfoBar.error("发表评论", str(exc), parent=self.window(), duration=2200)
+            return
+
+        self.detail_panel.moments_panel.append_comment(moment_id, comment)
+        InfoBar.success("发表评论", "评论已发送", parent=self.window(), duration=1400)
 
     def _add_empty_state(self, layout: QVBoxLayout, icon: FluentIcon, text: str) -> None:
         holder = QWidget(self)
