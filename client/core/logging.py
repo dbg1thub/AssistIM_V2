@@ -7,8 +7,9 @@ import logging
 import os
 import sys
 from dataclasses import dataclass, field
-from logging.handlers import RotatingFileHandler
+from logging.handlers import QueueHandler, QueueListener, RotatingFileHandler
 from pathlib import Path
+from queue import Queue
 from typing import Optional
 
 
@@ -59,6 +60,9 @@ class LogConfig:
 _loggers: dict[str, logging.Logger] = {}
 _config: Optional[LogConfig] = None
 _config_signature: Optional[tuple] = None
+_queue_listener: Optional[QueueListener] = None
+_queue: Optional[Queue] = None
+_active_handlers: list[logging.Handler] = []
 
 
 def _setup_console_handler(level: int) -> logging.StreamHandler:
@@ -109,7 +113,7 @@ def setup_logging(config: Optional[LogConfig] = None) -> None:
     Args:
         config: Optional logging configuration. Uses default if not provided.
     """
-    global _config, _config_signature
+    global _config, _config_signature, _queue_listener, _queue, _active_handlers
     
     _config = config or LogConfig()
     signature = (
@@ -136,15 +140,37 @@ def setup_logging(config: Optional[LogConfig] = None) -> None:
             except Exception:
                 pass
 
+    if _queue_listener is not None:
+        _queue_listener.stop()
+        _queue_listener = None
+
+    for handler in _active_handlers:
+        try:
+            handler.close()
+        except Exception:
+            pass
+    _active_handlers = []
+
+    target_handlers: list[logging.Handler] = []
+
     if _config.enable_console:
         console_handler = _setup_console_handler(level)
-        console_handler._assistim_handler = True
-        root_logger.addHandler(console_handler)
+        target_handlers.append(console_handler)
 
     file_handler = _setup_file_handler(_config)
     if file_handler:
-        file_handler._assistim_handler = True
-        root_logger.addHandler(file_handler)
+        target_handlers.append(file_handler)
+
+    if target_handlers:
+        _queue = Queue(-1)
+        queue_handler = QueueHandler(_queue)
+        queue_handler.setLevel(logging.DEBUG)
+        queue_handler._assistim_handler = True
+        root_logger.addHandler(queue_handler)
+
+        _queue_listener = QueueListener(_queue, *target_handlers, respect_handler_level=True)
+        _queue_listener.start()
+        _active_handlers = target_handlers
     
     logging.getLogger("asyncio").setLevel(logging.WARNING)
     logging.getLogger("websockets").setLevel(logging.WARNING)

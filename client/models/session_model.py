@@ -80,10 +80,16 @@ class SessionModel(QAbstractListModel):
 
     def add_session(self, session: Session) -> None:
         """Add a session to the list."""
-        self.beginInsertRows(QModelIndex(), len(self._sessions), len(self._sessions))
-        self._sessions.append(session)
+        insert_at = self._find_insert_index(session)
+        self.beginInsertRows(QModelIndex(), insert_at, insert_at)
+        self._sessions.insert(insert_at, session)
         self.endInsertRows()
-        self.sort_sessions()
+
+    def set_sessions(self, sessions: list[Session]) -> None:
+        """Replace all sessions in one model reset."""
+        self.beginResetModel()
+        self._sessions = sorted(sessions, key=self._session_sort_key, reverse=True)
+        self.endResetModel()
 
     def insert_session(self, index: int, session: Session) -> None:
         """Insert a session at specific index."""
@@ -105,13 +111,15 @@ class SessionModel(QAbstractListModel):
         """Update session fields."""
         for i, session in enumerate(self._sessions):
             if session.session_id == session_id:
+                old_sort_key = self._session_sort_key(session)
                 for key, value in kwargs.items():
                     if hasattr(session, key):
                         setattr(session, key, value)
 
                 index = self.index(i)
                 self.dataChanged.emit(index, index)
-                self.sort_sessions()
+                if self._session_sort_key(session) != old_sort_key:
+                    self.sort_sessions()
                 break
 
     def get_session(self, index: int) -> Optional[Session]:
@@ -150,6 +158,14 @@ class SessionModel(QAbstractListModel):
         is_pinned = getattr(session, 'is_pinned', False)
         last_time = session.last_message_time or session.created_at or datetime.min
         return (is_pinned, last_time)
+
+    def _find_insert_index(self, session: Session) -> int:
+        """Return the descending sort position for a new session."""
+        new_key = self._session_sort_key(session)
+        for i, existing in enumerate(self._sessions):
+            if new_key > self._session_sort_key(existing):
+                return i
+        return len(self._sessions)
 
     def set_pinned(self, session_id: str, pinned: bool) -> None:
         """Set session pinned status."""

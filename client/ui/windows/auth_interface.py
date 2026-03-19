@@ -27,7 +27,7 @@ from qfluentwidgets import (
     PrimaryPushButton,
     SegmentedWidget,
     SubtitleLabel,
-    TitleLabel,
+    TitleLabel, FluentWidget,
 )
 
 from client.core import logging
@@ -41,7 +41,7 @@ setup_logging()
 logger = logging.get_logger(__name__)
 
 
-class AuthInterface(QWidget):
+class AuthInterface(FluentWidget):
     """Authentication window styled with Win11 Fluent spacing and controls."""
 
     authenticated = Signal(dict)
@@ -66,7 +66,6 @@ class AuthInterface(QWidget):
 
     def _setup_ui(self) -> None:
         self.setObjectName("AuthInterface")
-        self.setWindowTitle("AssistIM")
         self.resize(980, 640)
         self.setMinimumSize(920, 580)
 

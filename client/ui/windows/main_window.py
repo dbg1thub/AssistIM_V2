@@ -58,6 +58,7 @@ class MainWindow(FluentWindow):
     """Main application window."""
 
     closed = Signal()
+    NAVIGATION_MENU_THRESHOLD = 1400
 
     def __init__(self):
         super().__init__()
@@ -85,6 +86,7 @@ class MainWindow(FluentWindow):
         self.settingsInterface.micaChanged.connect(self._on_mica_changed)
 
         self.navigationInterface.setAcrylicEnabled(cfg.get(cfg.micaEnabled))
+        self.navigationInterface.setMinimumExpandWidth(self.NAVIGATION_MENU_THRESHOLD)
         self.initNavigation()
         self._init_system_tray()
 
@@ -98,10 +100,7 @@ class MainWindow(FluentWindow):
             w, h = screen_geometry.width(), screen_geometry.height()
             self.move(w // 2 - self.width() // 2, h // 2 - self.height() // 2)
 
-        self.chat_interface.load_sessions()
-
-        self.show()
-        QApplication.processEvents()
+        QTimer.singleShot(0, self.chat_interface.load_sessions)
 
     def initNavigation(self):
         """Initialize left navigation."""

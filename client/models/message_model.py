@@ -79,6 +79,27 @@ class MessageModel(QAbstractListModel):
         self._messages.append(message)
         self.endInsertRows()
 
+    def add_messages(self, messages: list[ChatMessage]) -> None:
+        """Append multiple messages in one insert operation."""
+        if not messages:
+            return
+
+        start = len(self._messages)
+        end = start + len(messages) - 1
+        self.beginInsertRows(QModelIndex(), start, end)
+        self._messages.extend(messages)
+        self.endInsertRows()
+
+    def prepend_messages(self, messages: list[ChatMessage]) -> None:
+        """Insert multiple older messages at the beginning of the model."""
+        if not messages:
+            return
+
+        end = len(messages) - 1
+        self.beginInsertRows(QModelIndex(), 0, end)
+        self._messages = list(messages) + self._messages
+        self.endInsertRows()
+
     def refresh_message(self, message_id: str) -> None:
         """Emit a full data refresh for an existing message row."""
         for i, msg in enumerate(self._messages):
@@ -118,6 +139,12 @@ class MessageModel(QAbstractListModel):
         """Clear all messages."""
         self.beginResetModel()
         self._messages.clear()
+        self.endResetModel()
+
+    def set_messages(self, messages: list[ChatMessage]) -> None:
+        """Replace all messages in one model reset."""
+        self.beginResetModel()
+        self._messages = list(messages)
         self.endResetModel()
 
     def update_message_status(self, message_id: str, status) -> None:

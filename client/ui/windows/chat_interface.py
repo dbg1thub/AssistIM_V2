@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+from collections import OrderedDict
 from typing import Optional
 
 from PySide6.QtCore import Qt, QTimer
@@ -118,6 +119,8 @@ class ChatInterface(QWidget):
     """Main chat interface with session list on the left and chat view on the right."""
 
     SESSION_PANEL_WIDTH = 300
+    MESSAGE_PAGE_SIZE = 50
+    HISTORY_PAGE_CACHE_LIMIT = 12
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -129,6 +132,11 @@ class ChatInterface(QWidget):
         self._event_bus = get_event_bus()
         self._screenshot_overlays: set[ScreenshotOverlay] = set()
         self._screenshot_dialogs: set[ScreenshotPreviewDialog] = set()
+        self._oldest_loaded_timestamp: Optional[float] = None
+        self._has_more_history = True
+        self._history_load_task: Optional[asyncio.Task] = None
+        self._history_page_cache: dict[str, OrderedDict[tuple[Optional[float], int], list]] = {}
+        self._session_view_state: dict[str, dict] = {}
 
         self._setup_ui()
         self._connect_signals()
@@ -145,6 +153,7 @@ class ChatInterface(QWidget):
         self.chat_panel = ChatPanel(self)
 
         self.chat_panel.set_send_message_callback(self._on_send_message)
+        self.chat_panel.set_send_segments_callback(self._on_send_segments)
         self.chat_panel.set_send_typing_callback(self._on_send_typing)
 
         self.splitter.addWidget(self.session_panel)
@@ -168,6 +177,7 @@ class ChatInterface(QWidget):
         self.chat_panel.screenshot_requested.connect(self._on_screenshot_requested)
         self.chat_panel.voice_call_requested.connect(self._on_voice_call_requested)
         self.chat_panel.video_call_requested.connect(self._on_video_call_requested)
+        self.chat_panel.older_messages_requested.connect(self._on_older_messages_requested)
         self.chat_panel.get_message_list().customContextMenuRequested.connect(self._on_message_context_menu)
 
     def _subscribe_to_events(self) -> None:
@@ -185,6 +195,7 @@ class ChatInterface(QWidget):
         self._event_bus.subscribe_sync(MessageEvent.EDITED, self._on_edited_event)
         self._event_bus.subscribe_sync(MessageEvent.RECALLED, self._on_recalled_event)
         self._event_bus.subscribe_sync(MessageEvent.DELETED, self._on_deleted_event)
+        self._event_bus.subscribe_sync(MessageEvent.SYNC_COMPLETED, self._on_sync_completed)
 
     def _on_session_event(self, data: dict) -> None:
         """React to session lifecycle updates."""
@@ -209,12 +220,16 @@ class ChatInterface(QWidget):
     def _on_message_sent(self, data: dict) -> None:
         """Append sent message to the current conversation."""
         message = data.get("message")
+        if message:
+            self._invalidate_history_cache(message.session_id)
         if message and message.session_id == self._current_session_id:
             self.chat_panel.add_message(message)
 
     def _on_message_received(self, data: dict) -> None:
         """Append received message to the current conversation."""
         message = data.get("message")
+        if message:
+            self._invalidate_history_cache(message.session_id)
         if message and message.session_id == self._current_session_id:
             self.chat_panel.add_message(message)
 
@@ -230,6 +245,8 @@ class ChatInterface(QWidget):
     def _on_message_failed(self, data: dict) -> None:
         """Update failed message state."""
         message = data.get("message")
+        if message:
+            self._invalidate_history_cache(message.session_id)
         if message and message.session_id == self._current_session_id:
             self.chat_panel.add_message(message)
             self.chat_panel.update_message_status(message.message_id, MessageStatus.FAILED)
@@ -250,6 +267,7 @@ class ChatInterface(QWidget):
     def _on_edited_event(self, data: dict) -> None:
         """Update edited message content."""
         session_id = data.get("session_id", "")
+        self._invalidate_history_cache(session_id)
         if session_id != self._current_session_id:
             return
         self.chat_panel.update_message_content(data.get("message_id", ""), data.get("content", ""))
@@ -259,6 +277,7 @@ class ChatInterface(QWidget):
     def _on_recalled_event(self, data: dict) -> None:
         """Replace recalled message content."""
         session_id = data.get("session_id", "")
+        self._invalidate_history_cache(session_id)
         if session_id != self._current_session_id:
             asyncio.create_task(self._refresh_session_preview(session_id))
             return
@@ -270,9 +289,29 @@ class ChatInterface(QWidget):
     def _on_deleted_event(self, data: dict) -> None:
         """Remove a deleted message and refresh session preview."""
         session_id = data.get("session_id", "")
+        self._invalidate_history_cache(session_id)
         if session_id == self._current_session_id:
             self.chat_panel.remove_message(data.get("message_id", ""))
         asyncio.create_task(self._refresh_session_preview(session_id))
+
+    def _on_sync_completed(self, data: dict) -> None:
+        """Append synced history messages for the currently open session only."""
+        messages = data.get("messages") or []
+        for message in messages:
+            session_id = getattr(message, "session_id", None)
+            if session_id:
+                self._invalidate_history_cache(session_id)
+
+        if not self._current_session_id:
+            return
+
+        current_session_messages = [
+            message
+            for message in messages
+            if getattr(message, "session_id", None) == self._current_session_id
+        ]
+        if current_session_messages:
+            self.chat_panel.add_messages(current_session_messages)
 
     def load_sessions(self) -> None:
         """Load current sessions into the left panel."""
@@ -283,6 +322,8 @@ class ChatInterface(QWidget):
         if session_id == self._current_session_id:
             return
 
+        self._remember_current_session_view_state()
+
         self._current_session_id = session_id
         session = self._get_session(session_id)
         if session:
@@ -292,17 +333,28 @@ class ChatInterface(QWidget):
             return
 
         self.chat_panel.clear_messages()
+        self.chat_panel.set_has_more_history(True)
+        self.chat_panel.set_history_loading(False)
+        self._oldest_loaded_timestamp = None
+        self._has_more_history = True
 
         if self._load_task and not self._load_task.done():
             self._load_task.cancel()
+        if self._history_load_task and not self._history_load_task.done():
+            self._history_load_task.cancel()
 
-        self._load_task = asyncio.create_task(self._load_session_messages(session_id))
+        cached_state = self._session_view_state.get(session_id)
+        if cached_state:
+            self._restore_session_view_state(session_id, cached_state)
+            self._load_task = asyncio.create_task(self._select_session_only(session_id))
+        else:
+            self._load_task = asyncio.create_task(self._load_session_messages(session_id))
 
     async def _load_session_messages(self, session_id: str) -> None:
         """Load local messages for the selected session."""
         try:
             await self._chat_controller.select_session(session_id)
-            messages = await self._chat_controller.load_messages(session_id)
+            messages = await self._load_history_page(session_id, before_timestamp=None)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -312,11 +364,133 @@ class ChatInterface(QWidget):
         if session_id != self._current_session_id:
             return
 
-        self.chat_panel.clear_messages()
-        for message in messages:
-            self.chat_panel.add_message(message)
+        self.chat_panel.set_messages(messages)
+        self._oldest_loaded_timestamp = self._extract_oldest_timestamp(messages)
+        self._has_more_history = len(messages) >= self.MESSAGE_PAGE_SIZE and self._oldest_loaded_timestamp is not None
+        self.chat_panel.set_has_more_history(self._has_more_history)
+        self.chat_panel.set_history_loading(False)
+        self._store_session_view_state(session_id)
 
-        self.chat_panel.get_message_list().scrollToBottom()
+    async def _select_session_only(self, session_id: str) -> None:
+        """Update session selection side effects without reloading the visible page from storage."""
+        try:
+            await self._chat_controller.select_session(session_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.error("Failed to select session %s: %s", session_id, exc)
+
+    def _on_older_messages_requested(self) -> None:
+        """Load the next older page when the list is scrolled to the top."""
+        if not self._current_session_id or not self._has_more_history:
+            self.chat_panel.set_history_loading(False)
+            return
+
+        if self._history_load_task and not self._history_load_task.done():
+            return
+
+        self._history_load_task = asyncio.create_task(self._load_older_messages(self._current_session_id))
+
+    async def _load_older_messages(self, session_id: str) -> None:
+        """Prepend one older history page while keeping the current viewport stable."""
+        before_timestamp = self._oldest_loaded_timestamp
+        if before_timestamp is None:
+            self.chat_panel.set_history_loading(False)
+            self._has_more_history = False
+            self.chat_panel.set_has_more_history(False)
+            return
+
+        try:
+            messages = await self._load_history_page(session_id, before_timestamp=before_timestamp)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.error("Failed to load older messages for %s: %s", session_id, exc)
+            self.chat_panel.set_history_loading(False)
+            return
+
+        if session_id != self._current_session_id:
+            self.chat_panel.set_history_loading(False)
+            return
+
+        if not messages:
+            self._has_more_history = False
+            self.chat_panel.set_has_more_history(False)
+            self.chat_panel.set_history_loading(False)
+            return
+
+        self.chat_panel.prepend_messages(messages)
+        self._oldest_loaded_timestamp = self._extract_oldest_timestamp(messages)
+        self._has_more_history = len(messages) >= self.MESSAGE_PAGE_SIZE and self._oldest_loaded_timestamp is not None
+        self.chat_panel.set_has_more_history(self._has_more_history)
+        self._store_session_view_state(session_id)
+
+    @staticmethod
+    def _extract_oldest_timestamp(messages) -> Optional[float]:
+        """Return the timestamp of the oldest message in a loaded batch."""
+        if not messages:
+            return None
+
+        oldest = messages[0].timestamp
+        if hasattr(oldest, "timestamp"):
+            return float(oldest.timestamp())
+        try:
+            return float(oldest)
+        except (TypeError, ValueError):
+            return None
+
+    async def _load_history_page(self, session_id: str, before_timestamp: Optional[float]) -> list:
+        """Load one history page, reusing cached local pages when available."""
+        cache = self._history_page_cache.setdefault(session_id, OrderedDict())
+        cache_key = (before_timestamp, self.MESSAGE_PAGE_SIZE)
+        cached_page = cache.get(cache_key)
+        if cached_page is not None:
+            cache.move_to_end(cache_key)
+            return list(cached_page)
+
+        messages = await self._chat_controller.load_messages(
+            session_id,
+            limit=self.MESSAGE_PAGE_SIZE,
+            before_timestamp=before_timestamp,
+        )
+        cache[cache_key] = list(messages)
+        while len(cache) > self.HISTORY_PAGE_CACHE_LIMIT:
+            cache.popitem(last=False)
+        return messages
+
+    def _invalidate_history_cache(self, session_id: Optional[str] = None) -> None:
+        """Drop cached local history pages when a session receives updates."""
+        if session_id:
+            self._history_page_cache.pop(session_id, None)
+        else:
+            self._history_page_cache.clear()
+
+    def _remember_current_session_view_state(self) -> None:
+        """Persist the current visible message slice and scroll gap for the active session."""
+        if not self._current_session_id:
+            return
+        self._store_session_view_state(self._current_session_id)
+
+    def _store_session_view_state(self, session_id: str) -> None:
+        """Store the current chat panel state for a session."""
+        if session_id != self._current_session_id:
+            return
+        self._session_view_state[session_id] = {
+            "messages": self.chat_panel.get_visible_messages(),
+            "scroll_gap": self.chat_panel.get_message_scroll_gap(),
+            "oldest_loaded_timestamp": self._oldest_loaded_timestamp,
+            "has_more_history": self._has_more_history,
+        }
+
+    def _restore_session_view_state(self, session_id: str, state: dict) -> None:
+        """Restore a previously cached visible state for the selected session."""
+        messages = list(state.get("messages") or [])
+        self.chat_panel.set_messages(messages, scroll_to_bottom=False)
+        self._oldest_loaded_timestamp = state.get("oldest_loaded_timestamp")
+        self._has_more_history = bool(state.get("has_more_history", True))
+        self.chat_panel.set_has_more_history(self._has_more_history)
+        self.chat_panel.set_history_loading(False)
+        self.chat_panel.restore_message_scroll_gap(int(state.get("scroll_gap", 0)))
 
     def _on_send_message(self, content: str, message_type: MessageType) -> None:
         """Dispatch outgoing messages through ChatController."""
@@ -327,6 +501,28 @@ class ChatInterface(QWidget):
             asyncio.create_task(self._send_image_message(content))
         else:
             asyncio.create_task(self._send_text_message(content, message_type))
+
+    def _on_send_segments(self, segments: list[dict]) -> None:
+        """Dispatch mixed text/media segments in document order."""
+        if not self._current_session_id or not segments:
+            return
+        asyncio.create_task(self._send_segments_async(segments))
+
+    async def _send_segments_async(self, segments: list[dict]) -> None:
+        """Send composed editor segments sequentially so mixed content keeps order."""
+        for segment in segments:
+            segment_type = segment.get("type")
+            try:
+                if segment_type == MessageType.TEXT and segment.get("content"):
+                    await self._chat_controller.send_message_to(
+                        session_id=self._current_session_id,
+                        content=segment["content"],
+                        message_type=MessageType.TEXT,
+                    )
+                elif segment_type in {MessageType.IMAGE, MessageType.VIDEO, MessageType.FILE} and segment.get("file_path"):
+                    await self._chat_controller.send_file(segment["file_path"])
+            except Exception as exc:
+                logger.error("Send composed segment error: %s", exc)
 
     async def _send_text_message(self, content: str, message_type: MessageType) -> None:
         """Send a text message through the controller."""
@@ -487,7 +683,12 @@ class ChatInterface(QWidget):
             viewer.exec()
             return
 
-        if message.message_type in {MessageType.FILE, MessageType.VIDEO}:
+        if message.message_type == MessageType.VIDEO:
+            if not self.chat_panel.open_video_message(message):
+                InfoBar.warning("消息", "无法播放这个视频", parent=self.window(), duration=1800)
+            return
+
+        if message.message_type == MessageType.FILE:
             if not self.chat_panel.open_message_attachment(message):
                 InfoBar.warning("消息", "无法打开这个附件", parent=self.window(), duration=1800)
 

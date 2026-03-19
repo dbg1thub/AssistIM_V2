@@ -2,10 +2,28 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+import os
 import time
 
-from PySide6.QtCore import QEvent, QTimer, Qt, Signal
-from PySide6.QtGui import QColor, QFont, QKeyEvent, QPainter, QPalette
+from PySide6.QtCore import QEvent, QPoint, QPointF, QRectF, QTimer, Qt, QUrl, Signal
+from PySide6.QtGui import (
+    QColor,
+    QDragEnterEvent,
+    QDropEvent,
+    QFont,
+    QKeyEvent,
+    QPainter,
+    QPainterPath,
+    QPalette,
+    QPixmap,
+    QPolygon,
+    QTextCharFormat,
+    QTextCursor,
+    QTextDocument,
+    QTextFormat,
+    QTextImageFormat,
+)
 from PySide6.QtWidgets import (
     QFrame,
     QFileDialog,
@@ -19,7 +37,6 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-
 from qfluentwidgets import (
     BodyLabel,
     Flyout,
@@ -34,14 +51,78 @@ from qfluentwidgets import (
     TransparentToolButton,
 )
 
+from client.models.message import MessageType, infer_message_type_from_path
+from client.ui.common.attachment_card import attachment_card_size, draw_attachment_card
 from client.ui.styles import StyleSheet
+
+ATTACHMENT_ID_PROP = int(QTextFormat.Property.UserProperty) + 1
+ATTACHMENT_PATH_PROP = int(QTextFormat.Property.UserProperty) + 2
+ATTACHMENT_TYPE_PROP = int(QTextFormat.Property.UserProperty) + 3
+ATTACHMENT_WIDTH_PROP = int(QTextFormat.Property.UserProperty) + 4
+ATTACHMENT_HEIGHT_PROP = int(QTextFormat.Property.UserProperty) + 5
+ATTACHMENT_NAME_PROP = int(QTextFormat.Property.UserProperty) + 6
+
+
+@dataclass
+class InlineAttachment:
+    """Attachment metadata stored outside the QTextDocument but referenced by inline object id."""
+
+    attachment_id: str
+    file_path: str
+    message_type: MessageType
+    display_name: str
+    preview: QPixmap
+    rendered_preview: QPixmap | None = None
+
+
+class InlineAttachmentWidget(QWidget):
+    """Attachment preview rendered as a real widget over the text editor viewport."""
+
+    activated = Signal(str, str)
+
+    def __init__(self, attachment: InlineAttachment, parent=None):
+        super().__init__(parent)
+        self._attachment = attachment
+        self._preview = attachment.rendered_preview or QPixmap()
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+
+    def set_attachment(self, attachment: InlineAttachment) -> None:
+        """Refresh the preview widget with new attachment state."""
+        self._attachment = attachment
+        self._preview = attachment.rendered_preview or QPixmap()
+        self.update()
+
+    def mouseReleaseEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.activated.emit(self._attachment.file_path, self._attachment.message_type.value)
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+        if not self._preview.isNull():
+            painter.drawPixmap(self.rect(), self._preview)
+        painter.end()
 
 
 class ChatTextEdit(TextEdit):
     """Text editor that sends on Enter and inserts a newline on Shift+Enter."""
 
     send_requested = Signal()
+    attachment_activated = Signal(str, str)
 
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAcceptDrops(True)
+        self._attachments: dict[str, InlineAttachment] = {}
+        self._attachment_widgets: dict[str, InlineAttachmentWidget] = {}
+        self._attachment_sync_pending = False
+        self.document().contentsChanged.connect(self._schedule_attachment_widget_sync)
+        self.verticalScrollBar().valueChanged.connect(self._schedule_attachment_widget_sync)
+        self.horizontalScrollBar().valueChanged.connect(self._schedule_attachment_widget_sync)
     def keyPressEvent(self, event: QKeyEvent) -> None:
         """Emit send on Enter without modifiers."""
         if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter) and not (
@@ -51,7 +132,468 @@ class ChatTextEdit(TextEdit):
             self.send_requested.emit()
             return
 
+        if event.key() in (Qt.Key.Key_Backspace, Qt.Key.Key_Delete) and not event.modifiers():
+            if self._handle_attachment_delete(event.key()):
+                event.accept()
+                return
+
         super().keyPressEvent(event)
+
+    def dragEnterEvent(self, event: QDragEnterEvent) -> None:
+        """Accept local file drags so they can be inserted as inline attachments."""
+        if self._extract_local_files(event.mimeData()):
+            event.acceptProposedAction()
+            return
+
+        super().dragEnterEvent(event)
+
+    def dragMoveEvent(self, event) -> None:
+        """Keep accepting local file drags while hovering over the editor."""
+        if self._extract_local_files(event.mimeData()):
+            event.acceptProposedAction()
+            return
+
+        super().dragMoveEvent(event)
+
+    def dropEvent(self, event: QDropEvent) -> None:
+        """Insert local file drops as inline attachments instead of raw paths."""
+        file_paths = self._extract_local_files(event.mimeData())
+        if file_paths:
+            event.acceptProposedAction()
+            cursor = self.cursorForPosition(event.position().toPoint()) if hasattr(event, "position") else self.textCursor()
+            self.setTextCursor(cursor)
+            for file_path in file_paths:
+                self.insert_local_attachment(file_path)
+            return
+
+        super().dropEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:
+        """Let embedded attachment widgets handle their own click events."""
+        super().mouseReleaseEvent(event)
+
+    def resizeEvent(self, event) -> None:
+        """Keep embedded attachment widgets aligned while the editor resizes."""
+        super().resizeEvent(event)
+        self._schedule_attachment_widget_sync()
+
+    def scrollContentsBy(self, dx: int, dy: int) -> None:
+        """Keep embedded attachment widgets aligned while the editor scrolls."""
+        super().scrollContentsBy(dx, dy)
+        self._schedule_attachment_widget_sync()
+
+    def insert_local_attachment(self, file_path: str) -> None:
+        """Insert a local file as an inline attachment token at the current cursor position."""
+        normalized = os.path.normpath(file_path)
+        if not normalized:
+            return
+
+        attachment = self._build_attachment(normalized)
+        if attachment is None:
+            return
+
+        self._attachments[attachment.attachment_id] = attachment
+        attachment.rendered_preview = self._build_inline_preview(attachment)
+        resource_name = f"attachment://{attachment.attachment_id}"
+        width, height = self._attachment_size(attachment.message_type)
+        placeholder = QPixmap(width, height)
+        placeholder.fill(Qt.GlobalColor.transparent)
+        self.document().addResource(QTextDocument.ResourceType.ImageResource, QUrl(resource_name), placeholder)
+
+        cursor = self.textCursor()
+        image_format = QTextImageFormat()
+        image_format.setName(resource_name)
+        image_format.setProperty(ATTACHMENT_NAME_PROP, attachment.display_name)
+        image_format.setProperty(ATTACHMENT_ID_PROP, attachment.attachment_id)
+        image_format.setProperty(ATTACHMENT_PATH_PROP, attachment.file_path)
+        image_format.setProperty(ATTACHMENT_TYPE_PROP, attachment.message_type.value)
+        image_format.setAnchor(True)
+        image_format.setAnchorHref(resource_name)
+
+        image_format.setWidth(width)
+        image_format.setHeight(height)
+        image_format.setProperty(ATTACHMENT_WIDTH_PROP, width)
+        image_format.setProperty(ATTACHMENT_HEIGHT_PROP, height)
+
+        cursor.insertImage(image_format)
+        self.setTextCursor(cursor)
+        self._schedule_attachment_widget_sync()
+
+    def take_composed_segments(self) -> list[dict]:
+        """Extract text and inline attachments in document order, then clear the editor."""
+        segments: list[dict] = []
+        text_buffer: list[str] = []
+        document = self.document()
+        block = document.begin()
+
+        while block.isValid():
+            iterator = block.begin()
+            while not iterator.atEnd():
+                fragment = iterator.fragment()
+                if fragment.isValid():
+                    char_format = fragment.charFormat()
+                    if self._is_attachment_format(char_format):
+                        self._flush_text_buffer(text_buffer, segments)
+                        attachment = self._attachment_from_char_format(char_format)
+                        if attachment:
+                            segments.append(
+                                {
+                                    "type": attachment.message_type,
+                                    "file_path": attachment.file_path,
+                                }
+                            )
+                    else:
+                        text_buffer.append(fragment.text())
+                iterator += 1
+
+            if block.next().isValid():
+                text_buffer.append("\n")
+            block = block.next()
+
+        self._flush_text_buffer(text_buffer, segments)
+        self.clear_composer()
+        return segments
+
+    def clear_composer(self) -> None:
+        """Clear both text and inline attachment state."""
+        self.clear()
+        self._attachments.clear()
+        self._clear_attachment_widgets()
+
+    def _handle_attachment_delete(self, key: int) -> bool:
+        """Delete a neighboring inline attachment token with Backspace/Delete."""
+        cursor = self.textCursor()
+        if cursor.hasSelection():
+            super().keyPressEvent(QKeyEvent(QEvent.Type.KeyPress, key, Qt.KeyboardModifier.NoModifier))
+            return True
+
+        probe_pos = cursor.position() - 1 if key == Qt.Key.Key_Backspace else cursor.position()
+        attachment = self._attachment_at_document_position(probe_pos)
+        if attachment is None:
+            return False
+
+        removal_cursor = self.textCursor()
+        if key == Qt.Key.Key_Backspace:
+            removal_cursor.setPosition(max(0, probe_pos))
+            removal_cursor.movePosition(QTextCursor.MoveOperation.Right, QTextCursor.MoveMode.KeepAnchor, 1)
+        else:
+            removal_cursor.setPosition(max(0, probe_pos))
+            removal_cursor.movePosition(QTextCursor.MoveOperation.Right, QTextCursor.MoveMode.KeepAnchor, 1)
+        removal_cursor.removeSelectedText()
+        self._attachments.pop(attachment.attachment_id, None)
+        widget = self._attachment_widgets.pop(attachment.attachment_id, None)
+        if widget is not None:
+            widget.deleteLater()
+        self._schedule_attachment_widget_sync()
+        return True
+
+    @staticmethod
+    def _extract_local_files(mime_data) -> list[str]:
+        """Return local file paths from a mime payload, ignoring plain text URLs."""
+        if not mime_data or not mime_data.hasUrls():
+            return []
+
+        file_paths: list[str] = []
+        for url in mime_data.urls():
+            if not url.isLocalFile():
+                continue
+            path = url.toLocalFile().strip()
+            if path:
+                file_paths.append(path)
+        return file_paths
+
+    def _attachment_at_document_position(self, position: int) -> InlineAttachment | None:
+        """Resolve inline attachment metadata by document character position."""
+        if position < 0:
+            return None
+        cursor = QTextCursor(self.document())
+        cursor.setPosition(position)
+        char_format = cursor.charFormat()
+        return self._attachment_from_char_format(char_format)
+
+    def _schedule_attachment_widget_sync(self) -> None:
+        """Defer attachment widget positioning until Qt finishes the current layout pass."""
+        if self._attachment_sync_pending:
+            return
+        self._attachment_sync_pending = True
+        QTimer.singleShot(0, self._sync_attachment_widgets)
+
+    def _sync_attachment_widgets(self) -> None:
+        """Create, place, and remove embedded attachment widgets to match the document."""
+        self._attachment_sync_pending = False
+        document_attachment_ids: set[str] = set()
+
+        for document_position, attachment in self._iter_attachment_positions():
+            attachment_id = attachment.attachment_id
+            if attachment_id in document_attachment_ids:
+                continue
+            document_attachment_ids.add(attachment_id)
+
+            rect = self._attachment_rect_in_viewport(document_position, attachment)
+            widget = self._attachment_widgets.get(attachment_id)
+            if rect is None:
+                if widget is not None:
+                    widget.hide()
+                continue
+
+            if widget is None:
+                widget = InlineAttachmentWidget(attachment, self.viewport())
+                widget.activated.connect(self.attachment_activated.emit)
+                self._attachment_widgets[attachment_id] = widget
+            else:
+                widget.set_attachment(attachment)
+
+            widget.setGeometry(
+                round(rect.x()),
+                round(rect.y()),
+                max(1, round(rect.width())),
+                max(1, round(rect.height())),
+            )
+            widget.show()
+            widget.raise_()
+
+        for attachment_id, widget in list(self._attachment_widgets.items()):
+            if attachment_id not in document_attachment_ids:
+                widget.deleteLater()
+                self._attachment_widgets.pop(attachment_id, None)
+
+    def _clear_attachment_widgets(self) -> None:
+        """Destroy all embedded attachment widgets immediately."""
+        for widget in self._attachment_widgets.values():
+            widget.deleteLater()
+        self._attachment_widgets.clear()
+
+    def _build_attachment(self, file_path: str) -> InlineAttachment | None:
+        """Build attachment metadata and preview from a local file path."""
+        if not os.path.exists(file_path):
+            return None
+
+        message_type = infer_message_type_from_path(file_path)
+        return InlineAttachment(
+            attachment_id=f"att-{time.time_ns()}",
+            file_path=file_path,
+            message_type=message_type,
+            display_name=os.path.basename(file_path) or "Attachment",
+            preview=QPixmap(),
+        )
+
+    @staticmethod
+    def _attachment_size(message_type: MessageType) -> tuple[int, int]:
+        """Return inline attachment object size."""
+        return attachment_card_size()
+
+    def _attachment_rect_in_viewport(self, position: int, attachment: InlineAttachment) -> QRectF | None:
+        """Return the exact inline attachment rect in viewport coordinates."""
+        document = self.document()
+        if position < 0 or position >= max(0, document.characterCount() - 1):
+            return None
+
+        current_cursor = QTextCursor(document)
+        current_cursor.setPosition(position)
+        current_rect = self.cursorRect(current_cursor)
+        if current_rect.isNull():
+            return None
+
+        next_position = min(position + 1, max(0, document.characterCount() - 1))
+        next_cursor = QTextCursor(document)
+        next_cursor.setPosition(next_position)
+        next_rect = self.cursorRect(next_cursor)
+
+        stored_width = float(
+            current_cursor.charFormat().property(ATTACHMENT_WIDTH_PROP)
+            or self._attachment_size(attachment.message_type)[0]
+        )
+        stored_height = float(
+            current_cursor.charFormat().property(ATTACHMENT_HEIGHT_PROP)
+            or self._attachment_size(attachment.message_type)[1]
+        )
+
+        same_line = abs(next_rect.center().y() - current_rect.center().y()) < max(2.0, current_rect.height() / 2)
+        if same_line:
+            left = float(min(current_rect.x(), next_rect.x()))
+        else:
+            left = float(current_rect.x())
+        width = stored_width
+
+        top = current_rect.center().y() - stored_height / 2
+        return QRectF(left, top, width, stored_height)
+
+    def _build_inline_preview(self, attachment: InlineAttachment) -> QPixmap:
+        """Render a visible inline preview pixmap for the attachment."""
+        width, height = self._attachment_size(attachment.message_type)
+        pixmap = QPixmap(width, height)
+        pixmap.fill(Qt.GlobalColor.transparent)
+
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        draw_attachment_card(
+            painter,
+            QRectF(0, 0, width, height),
+            message_type=attachment.message_type,
+            display_name=attachment.display_name,
+            file_path=attachment.file_path,
+            dark=self._is_dark(),
+        )
+
+        painter.end()
+        return pixmap
+
+    @staticmethod
+    def _cover_source_rect(source_size, target_size) -> QRectF:
+        source_width = max(1, source_size.width())
+        source_height = max(1, source_size.height())
+        target_width = max(1, target_size.width())
+        target_height = max(1, target_size.height())
+        source_ratio = source_width / source_height
+        target_ratio = target_width / target_height
+
+        if source_ratio > target_ratio:
+            crop_width = max(1, int(round(source_height * target_ratio)))
+            crop_x = max(0, (source_width - crop_width) // 2)
+            return QRectF(crop_x, 0, crop_width, source_height)
+
+        crop_height = max(1, int(round(source_width / target_ratio)))
+        crop_y = max(0, (source_height - crop_height) // 2)
+        return QRectF(0, crop_y, source_width, crop_height)
+
+    @staticmethod
+    def _draw_video_play(painter: QPainter, rect: QRectF) -> None:
+        circle_size = 24
+        circle_rect = QRectF(
+            rect.center().x() - circle_size / 2,
+            rect.center().y() - circle_size / 2,
+            circle_size,
+            circle_size,
+        )
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(0, 0, 0, 110))
+        painter.drawEllipse(circle_rect)
+        triangle = QPolygon(
+            [
+                QPoint(int(circle_rect.center().x() - 3), int(circle_rect.center().y() - 5)),
+                QPoint(int(circle_rect.center().x() - 3), int(circle_rect.center().y() + 5)),
+                QPoint(int(circle_rect.center().x() + 5), int(circle_rect.center().y())),
+            ]
+        )
+        painter.setBrush(QColor(255, 255, 255))
+        painter.drawPolygon(triangle)
+        painter.restore()
+
+    @staticmethod
+    def _rounded_rect_path(rect: QRectF, radius: float):
+        path = QPainterPath()
+        path.addRoundedRect(rect, radius, radius)
+        return path
+
+    @staticmethod
+    def _is_dark() -> bool:
+        palette = QPalette()
+        return palette.color(QPalette.ColorRole.Window).lightness() < 128
+
+    @staticmethod
+    def _is_attachment_format(char_format: QTextCharFormat) -> bool:
+        """Return whether a char format represents one of our inline attachments."""
+        return bool(char_format.property(ATTACHMENT_ID_PROP))
+
+    def _attachment_from_char_format(self, char_format: QTextCharFormat) -> InlineAttachment | None:
+        """Rebuild attachment metadata directly from the QTextDocument format properties."""
+        if not self._is_attachment_format(char_format):
+            return None
+
+        attachment_id = str(char_format.property(ATTACHMENT_ID_PROP) or "")
+        file_path = str(char_format.property(ATTACHMENT_PATH_PROP) or "")
+        message_type_value = str(char_format.property(ATTACHMENT_TYPE_PROP) or "")
+        display_name = str(char_format.property(ATTACHMENT_NAME_PROP) or "") or os.path.basename(file_path)
+        if not attachment_id or not file_path or not message_type_value:
+            return None
+
+        try:
+            message_type = MessageType(message_type_value)
+        except ValueError:
+            return None
+
+        cached = self._attachments.get(attachment_id)
+        if cached is not None:
+            if cached.rendered_preview is None or cached.rendered_preview.isNull():
+                cached.rendered_preview = self._build_inline_preview(cached)
+            return cached
+
+        rebuilt = self._build_attachment(file_path)
+        if rebuilt is not None:
+            rebuilt.attachment_id = attachment_id
+            rebuilt.message_type = message_type
+            rebuilt.display_name = display_name
+            rebuilt.rendered_preview = self._build_inline_preview(rebuilt)
+            self._attachments[attachment_id] = rebuilt
+            return rebuilt
+
+        fallback = InlineAttachment(
+            attachment_id=attachment_id,
+            file_path=file_path,
+            message_type=message_type,
+            display_name=display_name,
+            preview=QPixmap(),
+            rendered_preview=QPixmap(*self._attachment_size(message_type)),
+        )
+        fallback.rendered_preview.fill(Qt.GlobalColor.transparent)
+        self._attachments[attachment_id] = fallback
+        return fallback
+
+    def _attachment_from_href(self, href: str) -> InlineAttachment | None:
+        """Resolve an attachment directly from its inline anchor href."""
+        if not href or not href.startswith("attachment://"):
+            return None
+
+        attachment_id = href.split("attachment://", 1)[1]
+        if not attachment_id:
+            return None
+
+        cached = self._attachments.get(attachment_id)
+        if cached is not None:
+            return cached
+
+        block = self.document().begin()
+        while block.isValid():
+            iterator = block.begin()
+            while not iterator.atEnd():
+                fragment = iterator.fragment()
+                if fragment.isValid():
+                    attachment = self._attachment_from_char_format(fragment.charFormat())
+                    if attachment and attachment.attachment_id == attachment_id:
+                        return attachment
+                iterator += 1
+            block = block.next()
+
+        return None
+
+    def _iter_attachment_positions(self):
+        """Yield every inline attachment together with its current document position."""
+        block = self.document().begin()
+        while block.isValid():
+            iterator = block.begin()
+            while not iterator.atEnd():
+                fragment = iterator.fragment()
+                if fragment.isValid():
+                    attachment = self._attachment_from_char_format(fragment.charFormat())
+                    if attachment is not None:
+                        fragment_position = fragment.position()
+                        for offset, _ in enumerate(fragment.text()):
+                            yield fragment_position + offset, attachment
+                iterator += 1
+            block = block.next()
+
+    @staticmethod
+    def _flush_text_buffer(text_buffer: list[str], segments: list[dict]) -> None:
+        """Flush a buffered text chunk into the composed segment list."""
+        if not text_buffer:
+            return
+
+        text = "".join(text_buffer)
+        text_buffer.clear()
+        if text.strip():
+            segments.append({"type": MessageType.TEXT, "content": text})
 
 
 class LegacyEmojiPickerFlyout(FlyoutViewBase):
@@ -311,9 +853,8 @@ class ModernEmojiPickerFlyout(FlyoutViewBase):
 class MessageInput(QWidget):
     """Integrated message input surface."""
 
-    send_clicked = Signal(str)
-    image_selected = Signal(str)
-    file_selected = Signal(str)
+    segments_submitted = Signal(object)
+    attachment_open_requested = Signal(str, str)
     screenshot_requested = Signal()
     voice_call_requested = Signal()
     video_call_requested = Signal()
@@ -424,6 +965,7 @@ class MessageInput(QWidget):
         self.send_button.setFixedSize(84, 34)
 
         self.toolbar_widget.setLayout(self.toolbar_layout)
+
         self.composer_layout.addWidget(self.toolbar_widget, 0)
         self.composer_layout.addWidget(self.text_input, 1)
         self.card_layout.addWidget(self.composer_widget, 1)
@@ -481,6 +1023,7 @@ class MessageInput(QWidget):
         self.ai_button.clicked.connect(self._on_placeholder_action)
         self.text_input.textChanged.connect(self._on_text_changed)
         self.text_input.send_requested.connect(self._on_send_clicked)
+        self.text_input.attachment_activated.connect(self._on_attachment_activated)
 
     def resizeEvent(self, event) -> None:
         """Keep the floating footer aligned with the text input."""
@@ -521,13 +1064,11 @@ class MessageInput(QWidget):
             self.typing_signal.emit()
 
     def _on_send_clicked(self) -> None:
-        """Send text content if the editor is not empty."""
-        text = self.text_input.toPlainText().strip()
-        if not text:
+        """Extract composed segments and hand them to the chat panel."""
+        segments = self.text_input.take_composed_segments()
+        if not segments:
             return
-
-        self.send_clicked.emit(text)
-        self.text_input.clear()
+        self.segments_submitted.emit(segments)
 
     def _on_emoji_clicked(self) -> None:
         """Show emoji picker flyout."""
@@ -553,16 +1094,22 @@ class MessageInput(QWidget):
         self.text_input.setFocus()
 
     def _on_image_clicked(self) -> None:
-        """Open image picker dialog."""
+        """Insert selected image into the editor as an inline attachment."""
         file_path, _ = QFileDialog.getOpenFileName(self, "Select image", "", self.IMAGE_FILTER)
         if file_path:
-            self.image_selected.emit(file_path)
+            self.text_input.insert_local_attachment(file_path)
+            self.text_input.setFocus()
 
     def _on_file_clicked(self) -> None:
-        """Open file picker dialog."""
+        """Insert selected file into the editor as an inline attachment."""
         file_path, _ = QFileDialog.getOpenFileName(self, "Select file", "", self.FILE_FILTER)
         if file_path:
-            self.file_selected.emit(file_path)
+            self.text_input.insert_local_attachment(file_path)
+            self.text_input.setFocus()
+
+    def _on_attachment_activated(self, file_path: str, message_type: str) -> None:
+        """Forward inline attachment open requests to the chat panel."""
+        self.attachment_open_requested.emit(file_path, message_type)
 
     def _on_placeholder_action(self) -> None:
         """Show temporary placeholder hint for unsupported toolbar actions."""
@@ -591,7 +1138,7 @@ class MessageInput(QWidget):
             self.text_input.setPlaceholderText("Enter to send, Shift+Enter for new line")
         else:
             self.text_input.setPlaceholderText("Select a session to start chatting")
-            self.text_input.clear()
+            self.text_input.clear_composer()
 
     def focus_editor(self) -> None:
         """Focus the text editor."""

@@ -5,6 +5,7 @@ Controller for chat UI interactions.
 Receives UI input and coordinates with MessageManager.
 """
 import asyncio
+import subprocess
 import os
 from typing import Any, Callable, Optional
 
@@ -145,6 +146,7 @@ class ChatController:
         file_name = os.path.basename(file_path)
         file_size = os.path.getsize(file_path)
         message_type = infer_message_type_from_path(file_path)
+        duration = self._probe_video_duration(file_path) if message_type == MessageType.VIDEO else None
 
         placeholder = await self._msg_manager.create_local_message(
             session_id=session_id,
@@ -155,6 +157,7 @@ class ChatController:
                 "size": file_size,
                 "local_path": file_path,
                 "uploading": True,
+                **({"duration": duration} if duration is not None else {}),
             },
         )
 
@@ -192,12 +195,42 @@ class ChatController:
                 "local_path": file_path,
                 "file_type": upload_result.get("file_type", ""),
                 "uploading": False,
+                **({"duration": duration} if duration is not None else {}),
             },
         )
 
         logger.info(f"File message sent: {message.message_id}, file: {file_name}")
 
         return message
+
+    def _probe_video_duration(self, file_path: str) -> Optional[int]:
+        """Probe local video duration in seconds using ffprobe when available."""
+        try:
+            result = subprocess.run(
+                [
+                    "ffprobe",
+                    "-v",
+                    "error",
+                    "-show_entries",
+                    "format=duration",
+                    "-of",
+                    "default=noprint_wrappers=1:nokey=1",
+                    file_path,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+
+        if result.returncode != 0:
+            return None
+
+        try:
+            return max(0, int(float((result.stdout or "").strip())))
+        except (TypeError, ValueError):
+            return None
 
     async def send_message_to(
             self,

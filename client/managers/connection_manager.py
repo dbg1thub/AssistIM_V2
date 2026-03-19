@@ -5,6 +5,7 @@ Manager for WebSocket connection lifecycle and state management.
 """
 import asyncio
 import inspect
+import time
 from datetime import datetime
 from typing import Any, Callable, Optional
 
@@ -43,6 +44,7 @@ class ConnectionManager:
         self._message_listeners: list[Callable[[dict], Any]] = []
         self._last_sync_timestamp: float = 0.0
         self._db = None
+        self._connect_started_at: float = 0.0
 
     @property
     def state(self) -> ConnectionState:
@@ -155,9 +157,16 @@ class ConnectionManager:
 
             if self._db.is_connected:
                 value = await self._db.get_app_state(self.LAST_SYNC_TIMESTAMP)
-                if value:
-                    self._last_sync_timestamp = float(value)
-                    logger.info(f"Loaded last sync timestamp: {self._last_sync_timestamp}")
+                persisted_timestamp = float(value) if value else 0.0
+                db_latest_timestamp = await self._db.get_latest_message_timestamp() or 0.0
+                self._last_sync_timestamp = max(persisted_timestamp, db_latest_timestamp)
+                if self._last_sync_timestamp:
+                    logger.info(
+                        "Loaded last sync timestamp: %s (persisted=%s, db_latest=%s)",
+                        self._last_sync_timestamp,
+                        persisted_timestamp,
+                        db_latest_timestamp,
+                    )
         except Exception as e:
             logger.warning(f"Failed to load sync timestamp: {e}")
 
@@ -190,17 +199,32 @@ class ConnectionManager:
 
     def _on_connect(self) -> None:
         """Handle connection established."""
+        self._connect_started_at = time.perf_counter()
         old_state = self._state
         self._notify_state_change(old_state, ConnectionState.CONNECTED)
 
         logger.info("Connection established")
-        self._create_task(self._post_connect_handshake())
+        self._schedule_post_connect_handshake()
 
-    async def _post_connect_handshake(self) -> None:
-        """Authenticate websocket and then request missed messages."""
-        await self._authenticate_websocket()
-        await asyncio.sleep(0.2)
-        await self._send_sync_request()
+    def _schedule_post_connect_handshake(self) -> None:
+        """Schedule auth/sync without awaiting worker sends on the UI loop."""
+        started = time.perf_counter()
+        logger.info("Post-connect handshake started (+%.1fms)", (time.perf_counter() - started) * 1000)
+
+        auth_started = time.perf_counter()
+        auth_sent = self._authenticate_websocket_nowait()
+        logger.info(
+            "WebSocket auth %s in %.1fms",
+            "message sent" if auth_sent else "skipped",
+            (time.perf_counter() - auth_started) * 1000,
+        )
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+
+        loop.call_later(0.2, self._send_sync_request_nowait)
 
     async def _authenticate_websocket(self) -> bool:
         """Send auth payload over websocket if access token exists."""
@@ -227,6 +251,31 @@ class ConnectionManager:
             logger.warning("Failed to send websocket auth message")
         return success
 
+    def _authenticate_websocket_nowait(self) -> bool:
+        """Send auth payload over websocket without awaiting on the main loop."""
+        http_client = get_http_client()
+        access_token = http_client.access_token
+
+        if not access_token:
+            logger.info("Skipping websocket auth: no access token present")
+            return False
+
+        auth_message = {
+            "type": "auth",
+            "seq": 0,
+            "msg_id": "",
+            "timestamp": 0,
+            "data": {
+                "token": access_token,
+            },
+        }
+        success = bool(self._ws_client and self._ws_client.send_nowait(auth_message))
+        if success:
+            logger.info("WebSocket auth message sent")
+        else:
+            logger.warning("Failed to send websocket auth message")
+        return success
+
     async def _send_sync_request(self) -> None:
         """Send sync request to fetch messages since last timestamp."""
         import time
@@ -247,6 +296,28 @@ class ConnectionManager:
         else:
             logger.warning("Failed to send sync request")
 
+    def _send_sync_request_nowait(self) -> None:
+        """Send sync request without awaiting worker send completion on the main loop."""
+        import time
+
+        sync_started = time.perf_counter()
+        sync_message = {
+            "type": "sync_messages",
+            "seq": 0,
+            "msg_id": f"sync_{int(time.time() * 1000)}",
+            "timestamp": int(time.time()),
+            "data": {
+                "last_timestamp": self._last_sync_timestamp,
+            },
+        }
+
+        success = bool(self._ws_client and self._ws_client.send_nowait(sync_message))
+        if success:
+            logger.info(f"Sync request sent, last_timestamp: {self._last_sync_timestamp}")
+        else:
+            logger.warning("Failed to send sync request")
+        logger.info("Sync request dispatch finished in %.1fms", (time.perf_counter() - sync_started) * 1000)
+
     def _on_disconnect(self) -> None:
         """Handle disconnection."""
         old_state = self._state
@@ -259,6 +330,7 @@ class ConnectionManager:
     def _on_message(self, message: dict) -> None:
         """Handle incoming message."""
         msg_type = message.get("type")
+        message_started = time.perf_counter()
         if msg_type == "history_messages":
             data = message.get("data", {})
             messages = data.get("messages", [])
@@ -271,8 +343,19 @@ class ConnectionManager:
                     self._last_sync_timestamp = latest_timestamp
                     logger.info(f"Updated sync timestamp to {latest_timestamp}")
                     self._create_task(self._save_sync_timestamp())
+            if self._connect_started_at:
+                logger.info(
+                    "History payload received %.1fms after connect (%d messages)",
+                    (time.perf_counter() - self._connect_started_at) * 1000,
+                    len(messages),
+                )
 
         self._notify_message(message)
+        if msg_type == "history_messages":
+            logger.info(
+                "History message dispatch scheduling took %.1fms",
+                (time.perf_counter() - message_started) * 1000,
+            )
 
     def _on_error(self, error: str) -> None:
         """Handle connection error."""

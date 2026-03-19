@@ -17,8 +17,8 @@ class SessionDelegate(QStyledItemDelegate):
 
     AVATAR_SIZE = 44
     ITEM_HEIGHT = 76
-    H_MARGIN = 8
-    V_MARGIN = 4
+    H_MARGIN = 0
+    V_MARGIN = 0
 
     def sizeHint(self, option: QStyleOptionViewItem, index: QModelIndex) -> QSize:
         """Return fixed session row height."""
@@ -50,7 +50,6 @@ class SessionDelegate(QStyledItemDelegate):
 
         name_font = QFont()
         name_font.setPixelSize(15)
-        name_font.setBold(True)
         name_fm = QFontMetrics(name_font)
 
         preview_font = QFont()
@@ -58,7 +57,7 @@ class SessionDelegate(QStyledItemDelegate):
         preview_fm = QFontMetrics(preview_font)
 
         time_font = QFont()
-        time_font.setPixelSize(12)
+        time_font.setPixelSize(11)
         time_fm = QFontMetrics(time_font)
 
         time_text = self._format_time(session.last_message_time or session.updated_at)
@@ -67,11 +66,11 @@ class SessionDelegate(QStyledItemDelegate):
         unread_text = self._format_unread(session.unread_count)
         unread_width = 0
         if unread_text:
-            unread_width = max(18, preview_fm.horizontalAdvance(unread_text) + 10)
+            unread_width = max(16, preview_fm.horizontalAdvance(unread_text) + 12)
 
         name_available = max(80, content_width - time_width - unread_width - 18)
         name_text = name_fm.elidedText(session.name or "未命名会话", Qt.TextElideMode.ElideRight, name_available)
-        preview_available = max(80, content_width - time_width - 8)
+        preview_available = max(80, content_width)
         preview_text = preview_fm.elidedText(
             self._format_preview_text(session),
             Qt.TextElideMode.ElideRight,
@@ -110,7 +109,7 @@ class SessionDelegate(QStyledItemDelegate):
         painter.setFont(time_font)
         painter.setPen(time_color)
         painter.drawText(
-            QRect(content_right - time_width, preview_y, time_width, 18),
+            QRect(content_right - time_width, name_y, time_width, 18),
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
             time_text,
         )
@@ -121,21 +120,19 @@ class SessionDelegate(QStyledItemDelegate):
         """Draw rounded background for hover/selected state."""
         dark = isDarkTheme()
         if option.state & QStyle.StateFlag.State_Selected:
-            color = QColor(255, 255, 255, 28) if dark else QColor(0, 0, 0, 14)
+            color = QColor(255, 255, 255, 38) if dark else QColor(0, 0, 0, 18)
             border = QColor(255, 255, 255, 0)
         elif option.state & QStyle.StateFlag.State_MouseOver:
-            color = QColor(255, 255, 255, 18) if dark else QColor(0, 0, 0, 8)
+            color = QColor(255, 255, 255, 24) if dark else QColor(0, 0, 0, 10)
             border = QColor(255, 255, 255, 0)
         else:
             color = QColor(255, 255, 255, 0)
             border = QColor(255, 255, 255, 0)
 
-        path = QPainterPath()
-        path.addRoundedRect(rect, 10, 10)
-        painter.fillPath(path, color)
+        painter.fillRect(rect, color)
         if border.alpha() > 0:
             painter.setPen(QPen(border, 1))
-            painter.drawPath(path)
+            painter.drawRect(rect.adjusted(0, 0, -1, -1))
 
     def _draw_avatar(self, painter: QPainter, rect: QRect, session) -> None:
         """Draw session avatar or a generated initial avatar."""
@@ -143,7 +140,7 @@ class SessionDelegate(QStyledItemDelegate):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
         path = QPainterPath()
-        path.addEllipse(rect)
+        path.addRoundedRect(rect, 8, 8)
         painter.setClipPath(path)
 
         if getattr(session, "avatar", None):
@@ -176,14 +173,15 @@ class SessionDelegate(QStyledItemDelegate):
         painter.restore()
 
     def _draw_unread_badge(self, painter: QPainter, rect: QRect, text: str) -> None:
-        """Draw unread badge next to the session title."""
+        """Draw unread badge using a Fluent InfoBadge-like pill."""
         path = QPainterPath()
-        path.addRoundedRect(rect, 8, 8)
+        radius = rect.height() / 2
+        path.addRoundedRect(rect, radius, radius)
         accent = QColor(themeColor())
         painter.fillPath(path, accent)
 
         font = QFont()
-        font.setPixelSize(10)
+        font.setPixelSize(11)
         font.setBold(True)
         painter.setFont(font)
         painter.setPen(Qt.GlobalColor.white)
@@ -213,11 +211,11 @@ class SessionDelegate(QStyledItemDelegate):
         if moment.date() == now.date():
             return moment.strftime("%H:%M")
         if moment.date() == (now.date() - timedelta(days=1)):
-            return "昨天"
+            return f"昨天 {moment.strftime('%H:%M')}"
         if (now - moment).days < 7:
-            weekdays = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
+            weekdays = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
             return weekdays[moment.weekday()]
-        return moment.strftime("%m-%d")
+        return moment.strftime("%Y/%m/%d")
 
     def _normalize_datetime(self, value) -> datetime | None:
         """Normalize datetime values from model or storage."""

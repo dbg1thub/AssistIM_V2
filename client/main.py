@@ -258,10 +258,14 @@ class Application:
         logger.info("Starting background services...")
 
         conn_manager = get_connection_manager()
-
-        self.create_task(conn_manager.connect())
+        self.create_task(self._connect_when_ui_idle(conn_manager))
 
         logger.info("Background services started")
+
+    async def _connect_when_ui_idle(self, conn_manager) -> None:
+        """Defer the first websocket connect until the initial UI paint settles."""
+        await asyncio.sleep(0.6)
+        await conn_manager.connect()
 
     # =========================================================
     # Shutdown

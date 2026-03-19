@@ -2,13 +2,11 @@
 
 from __future__ import annotations
 
-import os
-
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QFont, QPixmap
+from PySide6.QtCore import Signal
+from PySide6.QtGui import QFont
 from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
 
-from qfluentwidgets import BodyLabel, CaptionLabel, FluentIcon, IconWidget, TransparentToolButton
+from qfluentwidgets import BodyLabel, CaptionLabel, FluentIcon, TransparentToolButton
 
 from client.ui.styles import StyleSheet
 
@@ -29,9 +27,6 @@ class ChatHeader(QWidget):
         self.main_layout = QHBoxLayout(self)
         self.main_layout.setContentsMargins(20, 12, 20, 12)
         self.main_layout.setSpacing(12)
-
-        self.avatar_widget = IconWidget(FluentIcon.PEOPLE, self)
-        self.avatar_widget.setFixedSize(40, 40)
 
         self.info_widget = QWidget(self)
         self.info_layout = QVBoxLayout(self.info_widget)
@@ -55,7 +50,6 @@ class ChatHeader(QWidget):
         self.ai_button.setToolTip("AI 总结")
         self._apply_safe_button_font(self.detail_button, self.ai_button)
 
-        self.main_layout.addWidget(self.avatar_widget, 0)
         self.main_layout.addWidget(self.info_widget, 1)
         self.main_layout.addWidget(self.detail_button, 0)
         self.main_layout.addWidget(self.ai_button, 0)
@@ -87,23 +81,6 @@ class ChatHeader(QWidget):
         """Set header content for the current session."""
         self.title_label.setText(title or "未命名会话")
         self.status_label.setText(status)
-        self._set_avatar(avatar, is_ai=is_ai)
-
-    def _set_avatar(self, avatar: str | None, is_ai: bool = False) -> None:
-        """Update avatar icon or image."""
-        if avatar and os.path.exists(avatar):
-            pixmap = QPixmap(avatar)
-            if not pixmap.isNull():
-                self.avatar_widget.setIcon(
-                    pixmap.scaled(
-                        self.avatar_widget.size(),
-                        Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-                        Qt.TransformationMode.SmoothTransformation,
-                    )
-                )
-                return
-
-        self.avatar_widget.setIcon(FluentIcon.ROBOT if is_ai else FluentIcon.PEOPLE)
 
     def set_title(self, title: str) -> None:
         """Set chat title only."""

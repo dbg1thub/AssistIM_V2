@@ -137,6 +137,44 @@ class Database:
         )
         await self._db.commit()
         logger.debug(f"Session saved: {session.session_id}")
+
+    async def save_sessions_batch(self, sessions: list[Session]) -> None:
+        """
+        Save multiple sessions in a single transaction.
+
+        Args:
+            sessions: Sessions to save
+        """
+        if not sessions:
+            return
+
+        for session in sessions:
+            await self._db.execute(
+                """
+                INSERT OR REPLACE INTO sessions
+                (session_id, name, session_type, participant_ids, last_message,
+                 last_message_time, unread_count, avatar, is_ai_session, extra,
+                 created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    session.session_id,
+                    session.name,
+                    session.session_type,
+                    json.dumps(session.participant_ids),
+                    session.last_message,
+                    session.last_message_time.timestamp() if session.last_message_time else None,
+                    session.unread_count,
+                    session.avatar,
+                    1 if session.is_ai_session else 0,
+                    json.dumps(session.extra),
+                    session.created_at.timestamp() if session.created_at else None,
+                    session.updated_at.timestamp() if session.updated_at else None,
+                ),
+            )
+
+        await self._db.commit()
+        logger.debug(f"Batch saved {len(sessions)} sessions")
     
     async def get_session(self, session_id: str) -> Optional[Session]:
         """
@@ -282,6 +320,28 @@ class Database:
             return None
         
         return self._row_to_message(row)
+
+    async def get_existing_message_ids(self, message_ids: list[str]) -> set[str]:
+        """
+        Return the subset of provided message ids that already exist.
+
+        Args:
+            message_ids: Candidate ids
+
+        Returns:
+            Existing ids
+        """
+        ids = [message_id for message_id in message_ids if message_id]
+        if not ids:
+            return set()
+
+        placeholders = ", ".join("?" for _ in ids)
+        cursor = await self._db.execute(
+            f"SELECT message_id FROM messages WHERE message_id IN ({placeholders})",
+            ids,
+        )
+        rows = await cursor.fetchall()
+        return {row["message_id"] for row in rows}
     
     async def get_messages(
         self,
@@ -448,6 +508,22 @@ class Database:
             WHERE session_id = ?
             """,
             (session_id,),
+        )
+        row = await cursor.fetchone()
+        return row["last_timestamp"] if row and row["last_timestamp"] else None
+
+    async def get_latest_message_timestamp(self) -> Optional[float]:
+        """
+        Get the latest message timestamp across all sessions.
+
+        Returns:
+            Timestamp of latest message, or None
+        """
+        cursor = await self._db.execute(
+            """
+            SELECT MAX(timestamp) as last_timestamp
+            FROM messages
+            """
         )
         row = await cursor.fetchone()
         return row["last_timestamp"] if row and row["last_timestamp"] else None

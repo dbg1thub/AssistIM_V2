@@ -92,6 +92,10 @@ class SessionManager:
             MessageEvent.RECEIVED,
             self._on_message_received,
         )
+        await self._event_bus.subscribe(
+            MessageEvent.SYNC_COMPLETED,
+            self._on_history_synced,
+        )
 
         self._running = True
         self._initialized = True
@@ -320,6 +324,52 @@ class SessionManager:
 
         if self._current_session_id != message.session_id:
             await self.increment_unread(message.session_id)
+
+    async def _on_history_synced(self, data: dict) -> None:
+        """Apply a synced message batch without re-emitting per-message updates."""
+        messages: list[ChatMessage] = data.get("messages") or []
+        if not messages:
+            return
+
+        for message in messages:
+            await self._ensure_session_exists(message)
+
+        db = get_database()
+        changed_sessions: dict[str, Session] = {}
+        unread_changes: dict[str, int] = {}
+
+        async with self._lock:
+            for message in messages:
+                session = self._sessions.get(message.session_id)
+                if not session:
+                    continue
+
+                session.update_last_message(
+                    content=format_message_preview(message.content, message.message_type),
+                    timestamp=message.timestamp,
+                )
+                session.extra["last_message_type"] = message.message_type.value
+
+                if self._current_session_id != message.session_id:
+                    session.increment_unread()
+                    unread_changes[session.session_id] = session.unread_count
+
+                changed_sessions[session.session_id] = session
+
+        if changed_sessions and db.is_connected:
+            await db.save_sessions_batch(list(changed_sessions.values()))
+
+        if unread_changes:
+            for session_id, unread_count in unread_changes.items():
+                await self._event_bus.emit(SessionEvent.UNREAD_CHANGED, {
+                    "session_id": session_id,
+                    "unread_count": unread_count,
+                })
+
+        if changed_sessions:
+            await self._event_bus.emit(SessionEvent.UPDATED, {
+                "sessions": self.sessions,
+            })
 
     async def load_sessions(self, sessions: list[Session]) -> None:
         """Load sessions from storage."""

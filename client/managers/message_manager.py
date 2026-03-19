@@ -364,46 +364,52 @@ class MessageManager:
 
     async def _process_history_messages(self, data: dict) -> None:
         """Process history messages from sync response."""
+        started = time.perf_counter()
+        await asyncio.sleep(0)
         msg_data = data.get("data", {})
         messages_data = msg_data.get("messages", [])
 
         if not messages_data:
+            logger.info("History message processing finished in %.1fms (0 messages)", (time.perf_counter() - started) * 1000)
             await self._event_bus.emit(MessageEvent.SYNC_COMPLETED, {
                 "count": 0,
             })
             return
 
-        saved_messages = []
+        candidate_ids = [msg_item.get("msg_id") for msg_item in messages_data if msg_item.get("msg_id")]
+        query_started = time.perf_counter()
+        existing_ids = await self._db.get_existing_message_ids(candidate_ids)
+        logger.info(
+            "History existing-id query finished in %.1fms (%d candidates)",
+            (time.perf_counter() - query_started) * 1000,
+            len(candidate_ids),
+        )
+
+        saved_messages: list[ChatMessage] = []
         skipped_count = 0
 
         for msg_item in messages_data:
             msg_id = msg_item.get("msg_id")
-
-            # Skip if message already exists (avoid duplicates)
-            existing = await self._db.get_message(msg_id)
-            if existing:
+            if msg_id and msg_id in existing_ids:
                 skipped_count += 1
                 continue
 
-            message = ChatMessage(
-                message_id=msg_id or str(uuid.uuid4()),
-                session_id=msg_item.get("session_id", ""),
-                sender_id=msg_item.get("sender_id", ""),
-                content=msg_item.get("content", ""),
-                message_type=MessageType(msg_item.get("message_type", "text")),
-                status=MessageStatus.RECEIVED,
-                timestamp=msg_item.get("timestamp", time.time()),
-                is_self=msg_item.get("sender_id") == self._user_id,
-                extra=msg_item.get("extra", {}),
+            saved_messages.append(
+                ChatMessage(
+                    message_id=msg_id or str(uuid.uuid4()),
+                    session_id=msg_item.get("session_id", ""),
+                    sender_id=msg_item.get("sender_id", ""),
+                    content=msg_item.get("content", ""),
+                    message_type=MessageType(msg_item.get("message_type", "text")),
+                    status=MessageStatus.RECEIVED,
+                    timestamp=msg_item.get("timestamp", time.time()),
+                    is_self=msg_item.get("sender_id") == self._user_id,
+                    extra=msg_item.get("extra", {}),
+                )
             )
 
-            await self._db.save_message(message)
-            saved_messages.append(message)
-
-            # Also emit RECEIVED event for each message (for session updates)
-            await self._event_bus.emit(MessageEvent.RECEIVED, {
-                "message": message,
-            })
+        if saved_messages:
+            await self._db.save_messages_batch(saved_messages)
 
         await self._event_bus.emit(MessageEvent.SYNC_COMPLETED, {
             "count": len(saved_messages),
@@ -412,6 +418,7 @@ class MessageManager:
         })
 
         logger.info(f"History messages synced: {len(saved_messages)} new, {skipped_count} skipped")
+        logger.info("History message processing finished in %.1fms", (time.perf_counter() - started) * 1000)
     
     async def _process_typing(self, data: dict) -> None:
         """Process typing indicator."""

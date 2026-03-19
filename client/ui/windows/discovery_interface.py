@@ -672,9 +672,16 @@ class DiscoveryInterface(QWidget):
         self._cards: dict[str, MomentCard] = {}
         self._load_task: Optional[asyncio.Task] = None
         self._dialog_refs: set[QDialog] = set()
+        self._initial_load_done = False
 
         self._setup_ui()
         self._connect_signals()
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        if self._initial_load_done:
+            return
+        self._initial_load_done = True
         QTimer.singleShot(0, self.reload_data)
 
     def _setup_ui(self) -> None:

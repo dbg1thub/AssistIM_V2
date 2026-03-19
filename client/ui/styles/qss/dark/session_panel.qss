@@ -3,6 +3,7 @@ QWidget#SessionPanel {
     border: none;
 }
 
+QWidget#sessionSearchBar,
 QListView#sessionListView,
 SearchLineEdit {
     background: transparent;
