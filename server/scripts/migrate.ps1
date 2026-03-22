@@ -1,4 +1,4 @@
-﻿param(
+param(
     [string]$EnvFile = 'server/.env',
     [string]$DatabaseUrl = ''
 )
@@ -28,7 +28,22 @@ $python = Resolve-PythonPath -ServerRoot $serverRoot
 
 Push-Location $serverRoot
 try {
-    & $python -m alembic upgrade head
+    $hasAlembic = $false
+    try {
+        & $python -c "import alembic" *> $null
+        $hasAlembic = $LASTEXITCODE -eq 0
+    }
+    catch {
+        $hasAlembic = $false
+    }
+
+    if ($hasAlembic) {
+        & $python -m alembic upgrade head
+    }
+    else {
+        Write-Warning 'Alembic is not installed in the active Python environment. Falling back to schema compatibility upgrade.'
+        & $python -m app.schema_upgrade
+    }
 }
 finally {
     Pop-Location

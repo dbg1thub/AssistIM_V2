@@ -1,4 +1,4 @@
-﻿"""User service."""
+"""User service."""
 
 from __future__ import annotations
 
@@ -10,6 +10,8 @@ from app.repositories.user_repo import UserRepository
 
 
 class UserService:
+    _NULLABLE_FIELDS = {"avatar", "email", "phone", "birthday", "region", "signature", "gender"}
+
     def __init__(self, db: Session) -> None:
         self.users = UserRepository(db)
 
@@ -32,7 +34,13 @@ class UserService:
         }
 
     def update_me(self, current_user: User, **fields: object) -> dict:
-        user = self.users.update(current_user, **fields)
+        normalized_fields: dict[str, object] = {}
+        for key, value in fields.items():
+            if key in self._NULLABLE_FIELDS and isinstance(value, str) and not value.strip():
+                normalized_fields[key] = None
+            else:
+                normalized_fields[key] = value
+        user = self.users.update(current_user, **normalized_fields)
         return self.serialize_user(user)
 
     @staticmethod
@@ -42,6 +50,12 @@ class UserService:
             "username": user.username,
             "nickname": user.nickname,
             "avatar": user.avatar,
+            "email": user.email,
+            "phone": user.phone,
+            "birthday": user.birthday.isoformat() if user.birthday else None,
+            "region": user.region,
+            "signature": user.signature,
+            "gender": user.gender,
             "status": user.status,
             "created_at": user.created_at.isoformat() if user.created_at else None,
             "updated_at": user.updated_at.isoformat() if user.updated_at else None,

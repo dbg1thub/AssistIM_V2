@@ -46,8 +46,7 @@ def update_me(
     return success_response(
         UserService(db).update_me(
             current_user,
-            nickname=payload.nickname,
-            avatar=payload.avatar,
-            status=payload.status,
+            **payload.model_dump(exclude_unset=True),
         )
     )
+

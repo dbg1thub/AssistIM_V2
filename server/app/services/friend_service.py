@@ -1,4 +1,4 @@
-﻿"""Friend service."""
+"""Friend service."""
 
 from __future__ import annotations
 
@@ -68,6 +68,13 @@ class FriendService:
                         "username": friend.username,
                         "nickname": friend.nickname,
                         "avatar": friend.avatar,
+                        "email": friend.email,
+                        "phone": friend.phone,
+                        "birthday": friend.birthday.isoformat() if friend.birthday else None,
+                        "region": friend.region,
+                        "signature": friend.signature,
+                        "gender": friend.gender,
+                        "status": friend.status,
                     }
                 )
         return items

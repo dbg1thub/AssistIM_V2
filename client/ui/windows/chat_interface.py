@@ -6,6 +6,7 @@ import asyncio
 import logging
 import os
 from collections import OrderedDict
+from datetime import datetime
 from typing import Optional
 
 from PySide6.QtCore import Qt, QTimer
@@ -14,12 +15,11 @@ from PySide6.QtWidgets import QDialog, QHBoxLayout, QLabel, QScrollArea, QVBoxLa
 
 from qfluentwidgets import Action, InfoBar, PrimaryPushButton, PushButton, RoundMenu, SubtitleLabel, TextEdit
 
+from client.core.i18n import tr
 from client.events.event_bus import get_event_bus
 from client.managers.message_manager import MessageEvent
-from client.managers.session_manager import SessionEvent, get_session_manager
-from client.models.message import MessageStatus, MessageType, Session, format_message_preview
-from client.network.http_client import get_http_client
-from client.ui.controllers.auth_controller import get_auth_controller
+from client.managers.session_manager import SessionEvent
+from client.models.message import MessageStatus, MessageType, format_message_preview
 from client.ui.controllers.chat_controller import get_chat_controller
 from client.ui.styles import StyleSheet
 from client.ui.widgets.chat_panel import ChatPanel
@@ -37,7 +37,7 @@ class ScreenshotPreviewDialog(QDialog):
     def __init__(self, file_path: str, parent=None):
         super().__init__(parent)
         self.file_path = file_path
-        self.setWindowTitle("Preview Screenshot")
+        self.setWindowTitle(tr("chat.screenshot.preview_title", "Preview Screenshot"))
         self.resize(760, 560)
         self.setModal(True)
 
@@ -51,13 +51,13 @@ class ScreenshotPreviewDialog(QDialog):
 
         self.image_label = QLabel(self)
         self.image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.image_label.setText("Unable to load screenshot")
+        self.image_label.setText(tr("chat.screenshot.unavailable", "Unable to load screenshot"))
         self.scroll_area.setWidget(self.image_label)
 
         button_row = QHBoxLayout()
         button_row.addStretch(1)
-        self.cancel_button = PushButton("Cancel", self)
-        self.confirm_button = PrimaryPushButton("Send", self)
+        self.cancel_button = PushButton(tr("common.cancel", "Cancel"), self)
+        self.confirm_button = PrimaryPushButton(tr("common.send", "Send"), self)
         self.cancel_button.clicked.connect(self.reject)
         self.confirm_button.clicked.connect(self.accept)
         button_row.addWidget(self.cancel_button)
@@ -76,7 +76,7 @@ class EditMessageDialog(QDialog):
 
     def __init__(self, content: str, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("编辑消息")
+        self.setWindowTitle(tr("chat.edit.title", "Edit Message"))
         self.setModal(True)
         self.resize(420, 240)
 
@@ -84,7 +84,7 @@ class EditMessageDialog(QDialog):
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(12)
 
-        title = SubtitleLabel("编辑消息", self)
+        title = SubtitleLabel(tr("chat.edit.title", "Edit Message"), self)
         self.editor = TextEdit(self)
         self.editor.setPlainText(content)
         self.editor.setAcceptRichText(False)
@@ -92,8 +92,8 @@ class EditMessageDialog(QDialog):
         button_row = QHBoxLayout()
         button_row.addStretch(1)
 
-        self.cancel_button = PushButton("取消", self)
-        self.confirm_button = PrimaryPushButton("保存", self)
+        self.cancel_button = PushButton(tr("common.cancel", "Cancel"), self)
+        self.confirm_button = PrimaryPushButton(tr("common.save", "Save"), self)
 
         self.cancel_button.clicked.connect(self.reject)
         self.confirm_button.clicked.connect(self._on_confirm)
@@ -128,8 +128,8 @@ class ChatInterface(QWidget):
         self._chat_controller = get_chat_controller()
         self._current_session_id: Optional[str] = None
         self._load_task: Optional[asyncio.Task] = None
-        self._session_manager = get_session_manager()
         self._event_bus = get_event_bus()
+        self._event_subscriptions: list[tuple[str, object]] = []
         self._screenshot_overlays: set[ScreenshotOverlay] = set()
         self._screenshot_dialogs: set[ScreenshotPreviewDialog] = set()
         self._oldest_loaded_timestamp: Optional[float] = None
@@ -138,11 +138,14 @@ class ChatInterface(QWidget):
         self._history_page_cache: dict[str, OrderedDict[tuple[Optional[float], int], list]] = {}
         self._session_view_state: dict[str, dict] = {}
         self._last_read_receipts: dict[str, str] = {}
+        self._pending_read_receipts: set[tuple[str, str]] = set()
         self._composer_drafts: dict[str, list[dict]] = {}
+        self._ui_tasks: set[asyncio.Task] = set()
 
         self._setup_ui()
         self._connect_signals()
         self._subscribe_to_events()
+        self.destroyed.connect(self._on_destroyed)
 
     def _setup_ui(self) -> None:
         """Set up the two-column chat layout."""
@@ -156,7 +159,6 @@ class ChatInterface(QWidget):
         self.session_panel.setMinimumWidth(0)
         self.chat_panel.setMinimumWidth(0)
 
-        self.chat_panel.set_send_message_callback(self._on_send_message)
         self.chat_panel.set_send_segments_callback(self._on_send_segments)
         self.chat_panel.set_send_typing_callback(self._on_send_typing)
 
@@ -193,21 +195,88 @@ class ChatInterface(QWidget):
 
     def _subscribe_to_events(self) -> None:
         """Subscribe to session and message events for real-time UI updates."""
-        self._event_bus.subscribe_sync(SessionEvent.CREATED, self._on_session_event)
-        self._event_bus.subscribe_sync(SessionEvent.UPDATED, self._on_session_event)
-        self._event_bus.subscribe_sync(SessionEvent.DELETED, self._on_session_event)
+        self._subscribe_sync(SessionEvent.CREATED, self._on_session_event)
+        self._subscribe_sync(SessionEvent.UPDATED, self._on_session_event)
+        self._subscribe_sync(SessionEvent.DELETED, self._on_session_event)
 
-        self._event_bus.subscribe_sync(MessageEvent.SENT, self._on_message_sent)
-        self._event_bus.subscribe_sync(MessageEvent.RECEIVED, self._on_message_received)
-        self._event_bus.subscribe_sync(MessageEvent.ACK, self._on_message_ack)
-        self._event_bus.subscribe_sync(MessageEvent.DELIVERED, self._on_delivered_event)
-        self._event_bus.subscribe_sync(MessageEvent.FAILED, self._on_message_failed)
-        self._event_bus.subscribe_sync(MessageEvent.TYPING, self._on_typing_event)
-        self._event_bus.subscribe_sync(MessageEvent.READ, self._on_read_event)
-        self._event_bus.subscribe_sync(MessageEvent.EDITED, self._on_edited_event)
-        self._event_bus.subscribe_sync(MessageEvent.RECALLED, self._on_recalled_event)
-        self._event_bus.subscribe_sync(MessageEvent.DELETED, self._on_deleted_event)
-        self._event_bus.subscribe_sync(MessageEvent.SYNC_COMPLETED, self._on_sync_completed)
+        self._subscribe_sync(MessageEvent.SENT, self._on_message_sent)
+        self._subscribe_sync(MessageEvent.RECEIVED, self._on_message_received)
+        self._subscribe_sync(MessageEvent.ACK, self._on_message_ack)
+        self._subscribe_sync(MessageEvent.DELIVERED, self._on_delivered_event)
+        self._subscribe_sync(MessageEvent.FAILED, self._on_message_failed)
+        self._subscribe_sync(MessageEvent.TYPING, self._on_typing_event)
+        self._subscribe_sync(MessageEvent.READ, self._on_read_event)
+        self._subscribe_sync(MessageEvent.EDITED, self._on_edited_event)
+        self._subscribe_sync(MessageEvent.RECALLED, self._on_recalled_event)
+        self._subscribe_sync(MessageEvent.DELETED, self._on_deleted_event)
+        self._subscribe_sync(MessageEvent.SYNC_COMPLETED, self._on_sync_completed)
+
+    def _subscribe_sync(self, event_type: str, handler) -> None:
+        """Subscribe and retain the exact handler object for later unsubscribe."""
+        self._event_subscriptions.append((event_type, handler))
+        self._event_bus.subscribe_sync(event_type, handler)
+
+    def _unsubscribe_from_events(self) -> None:
+        """Remove all event-bus subscriptions owned by this widget."""
+        while self._event_subscriptions:
+            event_type, handler = self._event_subscriptions.pop()
+            self._event_bus.unsubscribe_sync(event_type, handler)
+
+    def _on_destroyed(self, *_args) -> None:
+        """Cancel outstanding UI tasks and remove event listeners on widget teardown."""
+        self._unsubscribe_from_events()
+        self._cancel_pending_task(self._load_task)
+        self._load_task = None
+        self._cancel_pending_task(self._history_load_task)
+        self._history_load_task = None
+        self._cancel_all_ui_tasks()
+
+    def _cancel_pending_task(self, task: Optional[asyncio.Task]) -> None:
+        """Cancel one tracked task if it is still running."""
+        if task is not None and not task.done():
+            task.cancel()
+
+    def _cancel_all_ui_tasks(self) -> None:
+        """Cancel all background tasks launched from this widget."""
+        for task in list(self._ui_tasks):
+            if not task.done():
+                task.cancel()
+
+    def _create_ui_task(self, coro, context: str, *, on_done=None) -> asyncio.Task:
+        """Create a tracked UI task that logs failures and is canceled on teardown."""
+        task = asyncio.create_task(coro)
+        self._ui_tasks.add(task)
+        task.add_done_callback(lambda finished, name=context, callback=on_done: self._finalize_ui_task(finished, name, callback))
+        return task
+
+    def _finalize_ui_task(self, task: asyncio.Task, context: str, on_done=None) -> None:
+        """Drop tracked tasks, run completion hooks, and report failures."""
+        self._ui_tasks.discard(task)
+        if on_done is not None:
+            on_done(task)
+        self._log_ui_task_result(task, context)
+
+    def _set_load_task(self, coro, context: str) -> None:
+        """Replace the active session-load task with a newly tracked one."""
+        self._cancel_pending_task(self._load_task)
+        task = self._create_ui_task(coro, context, on_done=self._clear_load_task)
+        self._load_task = task
+
+    def _clear_load_task(self, task: asyncio.Task) -> None:
+        """Clear the active load task reference when it finishes."""
+        if self._load_task is task:
+            self._load_task = None
+
+    def _set_history_load_task(self, coro, context: str) -> None:
+        """Replace the active history-pagination task with a tracked one."""
+        self._cancel_pending_task(self._history_load_task)
+        task = self._create_ui_task(coro, context, on_done=self._clear_history_load_task)
+        self._history_load_task = task
+
+    def _clear_history_load_task(self, task: asyncio.Task) -> None:
+        """Clear the active history-pagination task reference when it finishes."""
+        if self._history_load_task is task:
+            self._history_load_task = None
 
     def _on_session_event(self, data: dict) -> None:
         """React to session lifecycle updates."""
@@ -233,23 +302,26 @@ class ChatInterface(QWidget):
         """Append sent message to the current conversation."""
         message = data.get("message")
         if message:
-            self._invalidate_history_cache(message.session_id)
+            self._invalidate_session_caches(message.session_id)
         if message and message.session_id == self._current_session_id:
-            self.chat_panel.add_message(message)
+            self.chat_panel.add_message(message, scroll_to_bottom=True)
 
     def _on_message_received(self, data: dict) -> None:
         """Append received message to the current conversation."""
         message = data.get("message")
         if message:
-            self._invalidate_history_cache(message.session_id)
+            self._invalidate_session_caches(message.session_id)
         if message and message.session_id == self._current_session_id:
-            self.chat_panel.add_message(message)
+            should_scroll = self.chat_panel.is_near_bottom()
+            self.chat_panel.add_message(message, scroll_to_bottom=should_scroll)
             self._schedule_read_receipt()
 
     def _on_message_ack(self, data: dict) -> None:
         """Update message status after server acknowledgment."""
         message = data.get("message")
         message_id = data.get("message_id")
+        if message:
+            self._invalidate_session_caches(message.session_id)
         if message and message.session_id == self._current_session_id:
             self.chat_panel.update_message_status(message.message_id, message.status)
         elif message_id:
@@ -263,9 +335,8 @@ class ChatInterface(QWidget):
         if not session_id or not message_id:
             return
 
-        self._invalidate_history_cache(session_id)
+        self._invalidate_session_caches(session_id)
         if session_id != self._current_session_id:
-            self._session_view_state.pop(session_id, None)
             return
 
         self.chat_panel.update_message_status(message_id, MessageStatus.DELIVERED)
@@ -274,9 +345,9 @@ class ChatInterface(QWidget):
         """Update failed message state."""
         message = data.get("message")
         if message:
-            self._invalidate_history_cache(message.session_id)
+            self._invalidate_session_caches(message.session_id)
         if message and message.session_id == self._current_session_id:
-            self.chat_panel.add_message(message)
+            self.chat_panel.add_message(message, scroll_to_bottom=True)
             self.chat_panel.update_message_status(message.message_id, MessageStatus.FAILED)
 
     def _on_typing_event(self, data: dict) -> None:
@@ -293,9 +364,8 @@ class ChatInterface(QWidget):
         if not session_id or not message_id:
             return
 
-        self._invalidate_history_cache(session_id)
+        self._invalidate_session_caches(session_id)
         if session_id != self._current_session_id:
-            self._session_view_state.pop(session_id, None)
             return
 
         self.chat_panel.mark_read_through(session_id, message_id, MessageStatus.READ)
@@ -303,34 +373,37 @@ class ChatInterface(QWidget):
     def _on_edited_event(self, data: dict) -> None:
         """Update edited message content."""
         session_id = data.get("session_id", "")
-        self._invalidate_history_cache(session_id)
+        self._invalidate_session_caches(session_id)
         if session_id != self._current_session_id:
             return
         self.chat_panel.update_message_content(data.get("message_id", ""), data.get("content", ""))
         self.chat_panel.update_message_status(data.get("message_id", ""), MessageStatus.EDITED)
-        asyncio.create_task(self._refresh_session_preview(session_id))
+        self._schedule_ui_task(self._refresh_session_preview(session_id), f"refresh preview {session_id}")
 
     def _on_recalled_event(self, data: dict) -> None:
         """Replace recalled message content."""
         session_id = data.get("session_id", "")
-        self._invalidate_history_cache(session_id)
-        notice = data.get("content") or getattr(data.get("message"), "content", "撤回了一条消息")
+        self._invalidate_session_caches(session_id)
+        notice = data.get("content") or getattr(
+            data.get("message"),
+            "content",
+            tr("message.recalled_notice", "A message was recalled"),
+        )
         if session_id != self._current_session_id:
-            self._session_view_state.pop(session_id, None)
-            asyncio.create_task(self._refresh_session_preview(session_id))
+            self._schedule_ui_task(self._refresh_session_preview(session_id), f"refresh preview {session_id}")
             return
         message_id = data.get("message_id", "")
         self.chat_panel.update_message_content(message_id, notice)
         self.chat_panel.update_message_status(message_id, MessageStatus.RECALLED)
-        asyncio.create_task(self._refresh_session_preview(session_id))
+        self._schedule_ui_task(self._refresh_session_preview(session_id), f"refresh preview {session_id}")
 
     def _on_deleted_event(self, data: dict) -> None:
         """Remove a deleted message and refresh session preview."""
         session_id = data.get("session_id", "")
-        self._invalidate_history_cache(session_id)
+        self._invalidate_session_caches(session_id)
         if session_id == self._current_session_id:
             self.chat_panel.remove_message(data.get("message_id", ""))
-        asyncio.create_task(self._refresh_session_preview(session_id))
+        self._schedule_ui_task(self._refresh_session_preview(session_id), f"refresh preview {session_id}")
 
     def _on_sync_completed(self, data: dict) -> None:
         """Append synced history messages for the currently open session only."""
@@ -338,7 +411,7 @@ class ChatInterface(QWidget):
         for message in messages:
             session_id = getattr(message, "session_id", None)
             if session_id:
-                self._invalidate_history_cache(session_id)
+                self._invalidate_session_caches(session_id)
 
         if not self._current_session_id:
             return
@@ -349,12 +422,13 @@ class ChatInterface(QWidget):
             if getattr(message, "session_id", None) == self._current_session_id
         ]
         if current_session_messages:
-            self.chat_panel.add_messages(current_session_messages)
+            should_scroll = self.chat_panel.is_near_bottom()
+            self.chat_panel.add_messages(current_session_messages, scroll_to_bottom=should_scroll)
             self._schedule_read_receipt()
 
     def load_sessions(self) -> None:
         """Load current sessions into the left panel."""
-        self.session_panel.load_sessions_from_manager()
+        self.session_panel.load_sessions(self._chat_controller.get_sessions())
 
     def _on_session_selected(self, session_id: str) -> None:
         """Handle user selecting a conversation."""
@@ -381,23 +455,24 @@ class ChatInterface(QWidget):
         self._oldest_loaded_timestamp = None
         self._has_more_history = True
 
-        if self._load_task and not self._load_task.done():
-            self._load_task.cancel()
-        if self._history_load_task and not self._history_load_task.done():
-            self._history_load_task.cancel()
+        self._cancel_pending_task(self._load_task)
+        self._cancel_pending_task(self._history_load_task)
 
         cached_state = self._session_view_state.get(session_id)
         if cached_state:
             self._restore_session_view_state(session_id, cached_state)
-            self._load_task = asyncio.create_task(self._select_session_only(session_id))
+            self._set_load_task(self._select_session_only(session_id), f"select session {session_id}")
         else:
-            self._load_task = asyncio.create_task(self._load_session_messages(session_id))
+            self._set_load_task(self._load_session_messages(session_id), f"load session {session_id}")
 
     async def _load_session_messages(self, session_id: str) -> None:
         """Load local messages for the selected session."""
         try:
             await self._chat_controller.select_session(session_id)
-            messages = await self._load_history_page(session_id, before_timestamp=None)
+            messages = await self._load_history_page(
+                session_id,
+                before_timestamp=None,
+            )
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -407,6 +482,7 @@ class ChatInterface(QWidget):
         if session_id != self._current_session_id:
             return
 
+        messages = self._merge_loaded_messages_with_visible(messages)
         self.chat_panel.set_messages(messages)
         self._oldest_loaded_timestamp = self._extract_oldest_timestamp(messages)
         self._has_more_history = len(messages) >= self.MESSAGE_PAGE_SIZE and self._oldest_loaded_timestamp is not None
@@ -414,6 +490,55 @@ class ChatInterface(QWidget):
         self.chat_panel.set_history_loading(False)
         self._store_session_view_state(session_id)
         self._schedule_read_receipt()
+
+    def _merge_loaded_messages_with_visible(self, loaded_messages: list) -> list:
+        """Preserve live-arrived/status-updated messages while an async page load completes."""
+        visible_messages = list(self.chat_panel.get_visible_messages())
+        if not visible_messages:
+            return list(loaded_messages)
+
+        merged_by_id: dict[str, object] = {}
+        ordered_messages = list(loaded_messages) + visible_messages
+        for message in ordered_messages:
+            message_id = getattr(message, "message_id", "")
+            if not message_id:
+                continue
+
+            current = merged_by_id.get(message_id)
+            if current is None:
+                merged_by_id[message_id] = message
+                continue
+
+            current_updated = getattr(current, "updated_at", None) or getattr(current, "timestamp", None)
+            candidate_updated = getattr(message, "updated_at", None) or getattr(message, "timestamp", None)
+            if self._message_sort_key(candidate_updated, getattr(message, "message_id", "")) >= self._message_sort_key(
+                current_updated,
+                getattr(current, "message_id", ""),
+            ):
+                merged_by_id[message_id] = message
+
+        return sorted(
+            merged_by_id.values(),
+            key=lambda item: self._message_sort_key(
+                getattr(item, "timestamp", None),
+                getattr(item, "message_id", ""),
+            ),
+        )
+
+    @staticmethod
+    def _message_sort_key(timestamp, message_id: str) -> tuple[float, str]:
+        """Normalize message ordering for merged visible/history pages."""
+        if isinstance(timestamp, datetime):
+            return (timestamp.timestamp(), message_id)
+        if hasattr(timestamp, "timestamp"):
+            try:
+                return (float(timestamp.timestamp()), message_id)
+            except (TypeError, ValueError):
+                return (0.0, message_id)
+        try:
+            return (float(timestamp), message_id)
+        except (TypeError, ValueError):
+            return (0.0, message_id)
 
     async def _select_session_only(self, session_id: str) -> None:
         """Update session selection side effects without reloading the visible page from storage."""
@@ -433,7 +558,10 @@ class ChatInterface(QWidget):
         if self._history_load_task and not self._history_load_task.done():
             return
 
-        self._history_load_task = asyncio.create_task(self._load_older_messages(self._current_session_id))
+        self._set_history_load_task(
+            self._load_older_messages(self._current_session_id),
+            f"load older messages {self._current_session_id}",
+        )
 
     async def _load_older_messages(self, session_id: str) -> None:
         """Prepend one older history page while keeping the current viewport stable."""
@@ -483,7 +611,11 @@ class ChatInterface(QWidget):
         except (TypeError, ValueError):
             return None
 
-    async def _load_history_page(self, session_id: str, before_timestamp: Optional[float]) -> list:
+    async def _load_history_page(
+        self,
+        session_id: str,
+        before_timestamp: Optional[float],
+    ) -> list:
         """Load one history page, reusing cached local pages when available."""
         cache = self._history_page_cache.setdefault(session_id, OrderedDict())
         cache_key = (before_timestamp, self.MESSAGE_PAGE_SIZE)
@@ -508,6 +640,14 @@ class ChatInterface(QWidget):
             self._history_page_cache.pop(session_id, None)
         else:
             self._history_page_cache.clear()
+
+    def _invalidate_session_caches(self, session_id: Optional[str] = None) -> None:
+        """Drop cached history and visible-state snapshots for mutated sessions."""
+        self._invalidate_history_cache(session_id)
+        if session_id:
+            self._session_view_state.pop(session_id, None)
+        else:
+            self._session_view_state.clear()
 
     def _remember_current_session_view_state(self) -> None:
         """Persist the current visible message slice and scroll gap for the active session."""
@@ -600,17 +740,6 @@ class ChatInterface(QWidget):
         self.chat_panel.restore_message_scroll_gap(int(state.get("scroll_gap", 0)))
         self._schedule_read_receipt()
 
-    def _on_send_message(self, content: str, message_type: MessageType) -> None:
-        """Dispatch outgoing messages through ChatController."""
-        session_id = self._current_session_id
-        if not session_id:
-            return
-
-        if message_type == MessageType.IMAGE:
-            asyncio.create_task(self._send_image_message(session_id, content))
-        else:
-            asyncio.create_task(self._send_text_message(session_id, content, message_type))
-
     def _on_send_segments(self, segments: list[dict]) -> None:
         """Dispatch mixed text/media segments in document order."""
         session_id = self._current_session_id
@@ -618,7 +747,7 @@ class ChatInterface(QWidget):
             return
         self._store_session_draft_segments(session_id, [])
         self._set_session_draft_preview(session_id, [])
-        asyncio.create_task(self._send_segments_async(session_id, segments))
+        self._schedule_ui_task(self._send_segments_async(session_id, segments), f"send segments {session_id}")
 
     async def _send_segments_async(self, session_id: str, segments: list[dict]) -> None:
         """Send composed editor segments sequentially so mixed content keeps order."""
@@ -636,17 +765,6 @@ class ChatInterface(QWidget):
             except Exception as exc:
                 logger.error("Send composed segment error: %s", exc)
 
-    async def _send_text_message(self, session_id: str, content: str, message_type: MessageType) -> None:
-        """Send a text message through the controller."""
-        try:
-            await self._chat_controller.send_message_to(
-                session_id=session_id,
-                content=content,
-                message_type=message_type,
-            )
-        except Exception as exc:
-            logger.error("Send text message error: %s", exc)
-
     async def _send_image_message(self, session_id: str, file_path: str) -> None:
         """Send an image using the optimistic media upload flow."""
         try:
@@ -659,19 +777,24 @@ class ChatInterface(QWidget):
     def _on_send_typing(self) -> None:
         """Send typing indicator in background."""
         if self._current_session_id:
-            asyncio.create_task(self._chat_controller.send_typing())
+            self._schedule_ui_task(self._chat_controller.send_typing(), f"typing {self._current_session_id}")
 
     def _on_file_upload_requested(self, file_path: str) -> None:
         """Send file message in background."""
         session_id = self._current_session_id
         if not session_id:
             return
-        asyncio.create_task(self._send_file_message(session_id, file_path))
+        self._schedule_ui_task(self._send_file_message(session_id, file_path), f"send file {session_id}")
 
     def _on_screenshot_requested(self) -> None:
         """Open the screenshot overlay and send the result as an image."""
         if not self._current_session_id:
-            InfoBar.warning("Chat", "Select a conversation before sending a screenshot.", parent=self.window(), duration=2000)
+            InfoBar.warning(
+                tr("common.chat", "Chat"),
+                tr("chat.screenshot.select_conversation", "Select a conversation before sending a screenshot."),
+                parent=self.window(),
+                duration=2000,
+            )
             return
 
         overlay = ScreenshotOverlay(self.window())
@@ -687,7 +810,12 @@ class ChatInterface(QWidget):
             if not overlay.isVisible():
                 self._screenshot_overlays.discard(overlay)
         if not os.path.exists(file_path):
-            InfoBar.error("Screenshot", "Unable to open the captured screenshot.", parent=self.window(), duration=2000)
+            InfoBar.error(
+                tr("chat.screenshot.preview_title", "Preview Screenshot"),
+                tr("chat.screenshot.capture_failed", "Unable to open the captured screenshot."),
+                parent=self.window(),
+                duration=2000,
+            )
             return
 
         dialog = ScreenshotPreviewDialog(file_path, self.window())
@@ -695,7 +823,10 @@ class ChatInterface(QWidget):
         try:
             if dialog.exec() == QDialog.DialogCode.Accepted:
                 if self._current_session_id:
-                    asyncio.create_task(self._send_image_message(self._current_session_id, file_path))
+                    self._schedule_ui_task(
+                        self._send_image_message(self._current_session_id, file_path),
+                        f"send screenshot {self._current_session_id}",
+                    )
             else:
                 try:
                     os.remove(file_path)
@@ -706,11 +837,21 @@ class ChatInterface(QWidget):
 
     def _on_voice_call_requested(self) -> None:
         """Show placeholder feedback for voice calls."""
-        InfoBar.info("Voice Call", "Voice calling is not connected yet.", parent=self.window(), duration=1800)
+        InfoBar.info(
+            tr("chat.voice_call.title", "Voice Call"),
+            tr("chat.voice_call.unavailable", "Voice calling is not connected yet."),
+            parent=self.window(),
+            duration=1800,
+        )
 
     def _on_video_call_requested(self) -> None:
         """Show placeholder feedback for video calls."""
-        InfoBar.info("Video Call", "Video calling is not connected yet.", parent=self.window(), duration=1800)
+        InfoBar.info(
+            tr("chat.video_call.title", "Video Call"),
+            tr("chat.video_call.unavailable", "Video calling is not connected yet."),
+            parent=self.window(),
+            duration=1800,
+        )
 
     async def _send_file_message(self, session_id: str, file_path: str) -> None:
         """Upload and send a file via ChatController."""
@@ -734,29 +875,29 @@ class ChatInterface(QWidget):
         retry_action = None
 
         if message.message_type == MessageType.TEXT and message.content:
-            copy_action = Action("复制", self)
+            copy_action = Action(tr("chat.context.copy", "Copy"), self)
             menu.addAction(copy_action)
 
         if message.message_type == MessageType.IMAGE:
-            open_action = Action("查看图片", self)
+            open_action = Action(tr("chat.context.open_image", "View Image"), self)
             menu.addAction(open_action)
         elif message.message_type in {MessageType.FILE, MessageType.VIDEO}:
-            open_action = Action("打开", self)
+            open_action = Action(tr("chat.context.open_attachment", "Open"), self)
             menu.addAction(open_action)
 
         if message.is_self and message.message_type == MessageType.TEXT and message.status != MessageStatus.RECALLED:
-            edit_action = Action("编辑", self)
+            edit_action = Action(tr("chat.context.edit", "Edit"), self)
             menu.addAction(edit_action)
 
         if message.is_self and message.status not in {MessageStatus.RECALLED, MessageStatus.FAILED}:
-            recall_action = Action("撤回", self)
+            recall_action = Action(tr("chat.context.recall", "Recall"), self)
             menu.addAction(recall_action)
 
-        delete_action = Action("删除", self)
+        delete_action = Action(tr("common.delete", "Delete"), self)
         menu.addAction(delete_action)
 
         if message.is_self and message.status == MessageStatus.FAILED:
-            retry_action = Action("重发", self)
+            retry_action = Action(tr("chat.context.retry", "Retry"), self)
             menu.addAction(retry_action)
 
         if copy_action:
@@ -804,12 +945,22 @@ class ChatInterface(QWidget):
 
         if message.message_type == MessageType.VIDEO:
             if not self.chat_panel.open_video_message(message):
-                InfoBar.warning("消息", "无法播放这个视频", parent=self.window(), duration=1800)
+                InfoBar.warning(
+                    tr("chat.message.title", "Message"),
+                    tr("chat.attachment.video_open_failed", "Unable to play this video."),
+                    parent=self.window(),
+                    duration=1800,
+                )
             return
 
         if message.message_type == MessageType.FILE:
             if not self.chat_panel.open_message_attachment(message):
-                InfoBar.warning("消息", "无法打开这个附件", parent=self.window(), duration=1800)
+                InfoBar.warning(
+                    tr("chat.message.title", "Message"),
+                    tr("chat.attachment.file_open_failed", "Unable to open this attachment."),
+                    parent=self.window(),
+                    duration=1800,
+                )
 
     def _prompt_edit_message(self, message) -> None:
         """Open the edit dialog for a text message."""
@@ -819,47 +970,70 @@ class ChatInterface(QWidget):
 
         new_content = dialog.get_content()
         if not new_content:
-            InfoBar.warning("编辑消息", "内容不能为空", parent=self.window(), duration=1800)
+            InfoBar.warning(
+                tr("chat.edit.title", "Edit Message"),
+                tr("chat.edit.empty", "Content cannot be empty."),
+                parent=self.window(),
+                duration=1800,
+            )
             return
         if new_content == message.content:
             return
 
-        asyncio.create_task(self._edit_message(message.message_id, new_content))
+        self._schedule_ui_task(self._edit_message(message.message_id, new_content), f"edit {message.message_id}")
 
     async def _retry_message(self, message_id: str) -> None:
         """Retry a failed message."""
         success = await self._chat_controller.retry_message(message_id)
         if not success:
-            InfoBar.error("消息", "重发失败", parent=self.window(), duration=1800)
+            InfoBar.error(
+                tr("chat.message.title", "Message"),
+                tr("chat.retry_failed", "Retry failed."),
+                parent=self.window(),
+                duration=1800,
+            )
 
     async def _recall_message(self, message_id: str) -> None:
         """Recall a message and surface errors in the UI."""
         success, reason = await self._chat_controller.recall_message(message_id)
         if not success:
-            InfoBar.error("Message", reason or "Recall failed", parent=self.window(), duration=2400)
+            InfoBar.error(
+                tr("chat.message.title", "Message"),
+                reason or tr("chat.recall_failed", "Recall failed."),
+                parent=self.window(),
+                duration=2400,
+            )
 
     async def _edit_message(self, message_id: str, new_content: str) -> None:
         """Edit a message and surface errors in the UI."""
         success = await self._chat_controller.edit_message(message_id, new_content)
         if not success:
-            InfoBar.error("编辑消息", "编辑失败", parent=self.window(), duration=1800)
+            InfoBar.error(
+                tr("chat.edit.title", "Edit Message"),
+                tr("chat.edit_failed", "Edit failed."),
+                parent=self.window(),
+                duration=1800,
+            )
 
     async def _delete_message(self, message) -> None:
         """Delete a message locally and refresh session preview state."""
         success = await self._chat_controller.delete_message(message.message_id)
         if not success:
-            InfoBar.error("消息", "删除失败", parent=self.window(), duration=1800)
+            InfoBar.error(
+                tr("chat.message.title", "Message"),
+                tr("chat.delete_failed", "Delete failed."),
+                parent=self.window(),
+                duration=1800,
+            )
             return
 
-        self._invalidate_history_cache(message.session_id)
-        self._session_view_state.pop(message.session_id, None)
+        self._invalidate_session_caches(message.session_id)
         self.chat_panel.remove_message(message.message_id)
         await self._refresh_session_preview(message.session_id)
 
     def _schedule_ui_task(self, coro, context: str) -> None:
         """Schedule a UI-triggered coroutine and log any exception."""
-        task = asyncio.create_task(coro)
-        task.add_done_callback(lambda finished, name=context: self._log_ui_task_result(finished, name))
+        self._create_ui_task(coro, context)
 
     @staticmethod
     def _log_ui_task_result(task: asyncio.Task, context: str) -> None:
@@ -873,23 +1047,41 @@ class ChatInterface(QWidget):
 
     def _schedule_read_receipt(self) -> None:
         """Defer read-receipt sending until after the current UI update completes."""
-        QTimer.singleShot(0, lambda: asyncio.create_task(self._send_latest_read_receipt()))
-
-    async def _send_latest_read_receipt(self) -> None:
-        """Send a cumulative read receipt for the latest visible incoming message."""
-        if not self._current_session_id:
+        session_id = self._current_session_id
+        if not session_id:
             return
 
         latest_incoming = self._latest_readable_message()
         if latest_incoming is None:
             return
 
-        if self._last_read_receipts.get(self._current_session_id) == latest_incoming.message_id:
+        pending_key = (session_id, latest_incoming.message_id)
+        if self._last_read_receipts.get(session_id) == latest_incoming.message_id:
+            return
+        if pending_key in self._pending_read_receipts:
             return
 
-        success = await self._chat_controller.send_read_receipt(latest_incoming.message_id)
-        if success:
-            self._last_read_receipts[self._current_session_id] = latest_incoming.message_id
+        self._pending_read_receipts.add(pending_key)
+        QTimer.singleShot(
+            0,
+            lambda sid=session_id, mid=latest_incoming.message_id: self._schedule_ui_task(
+                self._send_read_receipt_for(sid, mid),
+                f"read receipt {sid}:{mid}",
+            ),
+        )
+
+    async def _send_read_receipt_for(self, session_id: str, message_id: str) -> None:
+        """Send a cumulative read receipt for a specific session/message pair."""
+        pending_key = (session_id, message_id)
+        try:
+            if self._last_read_receipts.get(session_id) == message_id:
+                return
+
+            success = await self._chat_controller.send_read_receipt(message_id, session_id=session_id)
+            if success:
+                self._last_read_receipts[session_id] = message_id
+        finally:
+            self._pending_read_receipts.discard(pending_key)
 
     def _latest_readable_message(self):
         """Return the latest visible non-self message that can advance read state."""
@@ -903,41 +1095,11 @@ class ChatInterface(QWidget):
 
     async def _refresh_session_preview(self, session_id: str) -> None:
         """Refresh session preview content from the latest local message."""
-        from client.storage.database import get_database
-
-        session = self._get_session(session_id)
-        if not session:
-            return
-
-        db = get_database()
-        if not db.is_connected:
-            return
-
-        last_message = await db.get_last_message(session_id)
-        if last_message and last_message.status == MessageStatus.RECALLED:
-            preview = last_message.content or "撤回了一条消息"
-        else:
-            preview = format_message_preview(last_message.content, last_message.message_type) if last_message else ""
-        preview_time = last_message.timestamp if last_message else session.updated_at
-        extra = dict(session.extra)
-        if last_message:
-            extra["last_message_type"] = last_message.message_type.value
-        else:
-            extra.pop("last_message_type", None)
-
-        await self._session_manager.update_session(
-            session_id,
-            last_message=preview,
-            last_message_time=preview_time,
-            extra=extra,
-        )
+        await self._chat_controller.refresh_session_preview(session_id)
 
     def _get_session(self, session_id: str):
         """Find session object by ID."""
-        for session in self._session_manager.sessions:
-            if session.session_id == session_id:
-                return session
-        return None
+        return self._chat_controller.get_session(session_id)
 
     def get_session_panel(self) -> SessionPanel:
         """Return session panel widget."""
@@ -962,122 +1124,27 @@ class ChatInterface(QWidget):
         if self.focus_session(session_id):
             return True
 
-        session = await self._fetch_remote_session(session_id)
+        session = await self._chat_controller.ensure_session_loaded(
+            session_id,
+            fallback_name="Session",
+        )
         if not session:
             return False
 
-        await self._remember_session(session)
         return self.focus_session(session.session_id)
 
     async def open_direct_session(self, user_id: str, display_name: str = "", avatar: str = "") -> bool:
         """Open an existing direct session or create one for the given contact."""
-        session = self._find_direct_session(user_id)
+        session = self._chat_controller.find_direct_session(user_id)
         if session:
             return self.focus_session(session.session_id)
 
-        try:
-            payload = await get_http_client().post(
-                "/sessions",
-                json={
-                    "type": "private",
-                    "user_id": user_id,
-                    "name": display_name or "Private Chat",
-                },
-            )
-        except Exception as exc:
-            logger.error("Create direct session error: %s", exc)
-            return False
-
-        session = self._build_session_from_payload(payload, fallback_name=display_name or "Private Chat", avatar=avatar)
+        session = await self._chat_controller.ensure_direct_session(
+            user_id,
+            display_name=display_name,
+            avatar=avatar,
+        )
         if not session:
             return False
 
-        await self._remember_session(session)
         return self.focus_session(session.session_id)
-
-    def _find_direct_session(self, user_id: str) -> Optional[Session]:
-        """Find a cached direct session by participant ID."""
-        for session in self._session_manager.sessions:
-            if session.is_ai_session or session.session_type == "group":
-                continue
-            if user_id in session.participant_ids:
-                return session
-        return None
-
-    async def _fetch_remote_session(self, session_id: str) -> Optional[Session]:
-        """Fetch a session payload from the backend and normalize it."""
-        try:
-            payload = await get_http_client().get(f"/sessions/{session_id}")
-        except Exception as exc:
-            logger.error("Fetch session %s error: %s", session_id, exc)
-            return None
-        return self._build_session_from_payload(payload, fallback_name="Session")
-
-    def _build_session_from_payload(
-        self,
-        payload: Optional[dict],
-        fallback_name: str,
-        avatar: str = "",
-    ) -> Optional[Session]:
-        """Normalize backend payload into a Session model."""
-        if not payload:
-            return None
-
-        data = dict(payload)
-        data.setdefault("session_id", data.get("id", ""))
-        data.setdefault("name", fallback_name)
-        session_type = str(data.get("session_type") or data.get("type") or "direct")
-        if session_type == "private":
-            session_type = "direct"
-        data["session_type"] = session_type
-
-        if session_type != "group" and not data.get("is_ai_session"):
-            current_user = (get_auth_controller().current_user or {})
-            current_user_id = str(current_user.get("id", "") or "")
-            counterpart_name = self._resolve_counterpart_name(
-                data.get("members") or [],
-                current_user_id,
-            )
-            if counterpart_name:
-                data["name"] = counterpart_name
-
-        if avatar and not data.get("avatar"):
-            data["avatar"] = avatar
-
-        try:
-            session = Session.from_dict(data)
-        except Exception as exc:
-            logger.error("Normalize session payload error: %s", exc)
-            return None
-
-        session.extra["members"] = data.get("members") or []
-        return session
-
-    @staticmethod
-    def _resolve_counterpart_name(members: list[dict], current_user_id: str) -> str:
-        """Resolve the other member's display name for direct sessions."""
-        for member in members:
-            member_id = str(member.get("id", "") or "")
-            if current_user_id and member_id == current_user_id:
-                continue
-            return (
-                str(member.get("nickname", "") or "")
-                or str(member.get("username", "") or "")
-                or member_id
-            )
-        return ""
-
-    async def _remember_session(self, session: Session) -> None:
-        """Insert a fetched session into the manager and local database."""
-        existing = self._get_session(session.session_id)
-        if not existing:
-            await self._session_manager.add_session(session)
-
-        try:
-            from client.storage.database import get_database
-
-            db = get_database()
-            if db.is_connected:
-                await db.save_session(session)
-        except Exception as exc:
-            logger.warning("Persist session %s failed: %s", session.session_id, exc)

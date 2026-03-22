@@ -4,12 +4,11 @@ Message Controller Module
 Controller for message list interactions.
 """
 
-from typing import Any, Callable, Optional
+from typing import Optional
 
 from client.core import logging
 from client.core.logging import setup_logging
-from client.events.event_bus import get_event_bus
-from client.managers.message_manager import MessageEvent, get_message_manager
+from client.managers.message_manager import get_message_manager
 from client.models.message import ChatMessage, MessageType
 
 setup_logging()
@@ -27,28 +26,15 @@ class MessageController:
     """
 
     def __init__(self):
-        self._event_bus = get_event_bus()
         self._msg_manager = get_message_manager()
-        self._handlers: dict[str, Callable] = {}
+        self._initialized = False
 
     async def initialize(self) -> None:
         """Initialize message controller."""
-        await self._event_bus.subscribe(
-            MessageEvent.SENT,
-            self._on_message_sent,
-        )
-        await self._event_bus.subscribe(
-            MessageEvent.RECEIVED,
-            self._on_message_received,
-        )
-        await self._event_bus.subscribe(
-            MessageEvent.ACK,
-            self._on_message_ack,
-        )
-        await self._event_bus.subscribe(
-            MessageEvent.FAILED,
-            self._on_message_failed,
-        )
+        if self._initialized:
+            return
+
+        self._initialized = True
         logger.info("Message controller initialized")
 
     async def send_message(
@@ -83,52 +69,17 @@ class MessageController:
         """Retry sending a failed message."""
         return await self._msg_manager.retry_message(message_id)
 
-    def _on_message_sent(self, data: dict) -> None:
-        """Handle message sent event."""
-        handler = self._handlers.get("message_sent")
-        if handler:
-            try:
-                handler(data)
-            except Exception as e:
-                logger.error(f"Handler error: {e}")
-
-    def _on_message_received(self, data: dict) -> None:
-        """Handle message received event."""
-        handler = self._handlers.get("message_received")
-        if handler:
-            try:
-                handler(data)
-            except Exception as e:
-                logger.error(f"Handler error: {e}")
-
-    def _on_message_ack(self, data: dict) -> None:
-        """Handle message ACK event."""
-        handler = self._handlers.get("message_ack")
-        if handler:
-            try:
-                handler(data)
-            except Exception as e:
-                logger.error(f"Handler error: {e}")
-
-    def _on_message_failed(self, data: dict) -> None:
-        """Handle message failed event."""
-        handler = self._handlers.get("message_failed")
-        if handler:
-            try:
-                handler(data)
-            except Exception as e:
-                logger.error(f"Handler error: {e}")
-
-    def set_handler(self, event: str, handler: Callable) -> None:
-        """Set event handler."""
-        self._handlers[event] = handler
-
-    def remove_handler(self, event: str) -> None:
-        """Remove event handler."""
-        self._handlers.pop(event, None)
+    async def close(self) -> None:
+        """Close the lightweight message controller state."""
+        self._initialized = False
 
 
 _message_controller: Optional[MessageController] = None
+
+
+def peek_message_controller() -> Optional[MessageController]:
+    """Return the existing message controller singleton if it was created."""
+    return _message_controller
 
 
 def get_message_controller() -> MessageController:

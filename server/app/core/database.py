@@ -8,6 +8,8 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from app.core.config import get_settings
+from app.core.logging import logger
+from app.core.schema_compat import describe_schema_compatibility, ensure_schema_compatibility
 
 
 class Base(DeclarativeBase):
@@ -41,7 +43,10 @@ def get_db() -> Generator[Session, None, None]:
 
 
 def init_db() -> None:
-    """Create database tables."""
+    """Create database tables and apply lightweight compatibility upgrades."""
     from app.models import file, group, message, moment, session, user  # noqa: F401
 
     Base.metadata.create_all(bind=engine)
+    applied = ensure_schema_compatibility(engine)
+    if applied:
+        logger.warning(describe_schema_compatibility(applied))

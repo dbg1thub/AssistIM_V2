@@ -1,11 +1,11 @@
-﻿"""Seed demo data for local development and testing."""
+"""Seed demo data for local development and testing."""
 
 from __future__ import annotations
 
 import argparse
 import json
 import uuid
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from sqlalchemy import create_engine, select
@@ -44,6 +44,12 @@ def ensure_user(
     nickname: str,
     created_at: datetime,
     avatar: str | None = None,
+    email: str | None = None,
+    phone: str | None = None,
+    birthday: date | None = None,
+    region: str | None = None,
+    signature: str | None = None,
+    gender: str | None = None,
     status: str = "online",
 ) -> User:
     user = db.execute(select(User).where(User.username == username)).scalar_one_or_none()
@@ -53,6 +59,12 @@ def ensure_user(
     user.password_hash = hash_password(DEMO_PASSWORD)
     user.nickname = nickname
     user.avatar = avatar
+    user.email = email
+    user.phone = phone
+    user.birthday = birthday
+    user.region = region
+    user.signature = signature
+    user.gender = gender
     user.status = status
     user.created_at = created_at
     user.updated_at = created_at
@@ -219,10 +231,59 @@ def seed_demo_data(
             reset_database(db)
 
         base_time = datetime(2026, 1, 1, 9, 0, 0)
-        alice = ensure_user(db, seed_name="user:demo_alice", username="demo_alice", nickname="Demo Alice", created_at=base_time)
-        bob = ensure_user(db, seed_name="user:demo_bob", username="demo_bob", nickname="Demo Bob", created_at=base_time + timedelta(minutes=1))
-        carla = ensure_user(db, seed_name="user:demo_carla", username="demo_carla", nickname="Demo Carla", created_at=base_time + timedelta(minutes=2))
-        derek = ensure_user(db, seed_name="user:demo_derek", username="demo_derek", nickname="Demo Derek", created_at=base_time + timedelta(minutes=3), status="offline")
+        alice = ensure_user(
+            db,
+            seed_name="user:demo_alice",
+            username="demo_alice",
+            nickname="Demo Alice",
+            created_at=base_time,
+            email="alice@example.com",
+            phone="010-1000-0001",
+            birthday=date(1994, 5, 12),
+            region="Seoul",
+            signature="Shipping the desktop client one milestone at a time.",
+            gender="female",
+        )
+        bob = ensure_user(
+            db,
+            seed_name="user:demo_bob",
+            username="demo_bob",
+            nickname="Demo Bob",
+            created_at=base_time + timedelta(minutes=1),
+            email="bob@example.com",
+            phone="010-1000-0002",
+            birthday=date(1992, 8, 4),
+            region="Busan",
+            signature="Backend APIs, migrations, and coffee.",
+            gender="male",
+        )
+        carla = ensure_user(
+            db,
+            seed_name="user:demo_carla",
+            username="demo_carla",
+            nickname="Demo Carla",
+            created_at=base_time + timedelta(minutes=2),
+            email="carla@example.com",
+            phone="010-1000-0003",
+            birthday=date(1996, 2, 21),
+            region="Incheon",
+            signature="Designing polished product details.",
+            gender="female",
+        )
+        derek = ensure_user(
+            db,
+            seed_name="user:demo_derek",
+            username="demo_derek",
+            nickname="Demo Derek",
+            created_at=base_time + timedelta(minutes=3),
+            email="derek@example.com",
+            phone="010-1000-0004",
+            birthday=date(1990, 11, 30),
+            region="Daegu",
+            signature="Offline for now, but still in the roster.",
+            gender="male",
+            status="offline",
+        )
 
         ensure_entity_by_id(
             db,
@@ -491,3 +552,6 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+

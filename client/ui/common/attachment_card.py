@@ -7,6 +7,7 @@ import os
 from PySide6.QtCore import QRectF, Qt
 from PySide6.QtGui import QColor, QFont, QPainter
 
+from client.core.i18n import tr
 from client.models.message import MessageType
 
 
@@ -52,7 +53,7 @@ def format_attachment_file_size(file_path: str, fallback_size=None) -> str:
 def attachment_icon_text(message_type: MessageType) -> str:
     """Return the single-letter attachment type marker."""
     if message_type == MessageType.IMAGE:
-        return "I"
+        return "P"
     if message_type == MessageType.VIDEO:
         return "V"
     return "F"
@@ -101,7 +102,11 @@ def draw_attachment_card(
     painter.setFont(title_font)
     painter.setPen(fg)
     metrics = painter.fontMetrics()
-    title = metrics.elidedText(display_name or "Attachment", Qt.TextElideMode.ElideRight, int(title_rect.width()))
+    title = metrics.elidedText(
+        display_name or tr("attachment.default_name", "Attachment"),
+        Qt.TextElideMode.ElideRight,
+        int(title_rect.width()),
+    )
     painter.drawText(title_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, title)
 
     size_font = QFont(painter.font())
@@ -112,5 +117,5 @@ def draw_attachment_card(
     painter.drawText(
         size_rect,
         Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
-        format_attachment_file_size(file_path, fallback_size) or "Unknown size",
+        format_attachment_file_size(file_path, fallback_size) or tr("attachment.unknown_size", "Unknown size"),
     )

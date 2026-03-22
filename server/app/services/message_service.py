@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from app.core.errors import AppError, ErrorCode
 from app.models.user import User
+from app.repositories.group_repo import GroupRepository
 from app.repositories.message_repo import MessageRepository
 from app.repositories.session_repo import SessionRepository
 
@@ -18,6 +19,7 @@ class MessageService:
     def __init__(self, db: Session) -> None:
         self.messages = MessageRepository(db)
         self.sessions = SessionRepository(db)
+        self.groups = GroupRepository(db)
 
     def list_messages(
         self,
@@ -60,10 +62,9 @@ class MessageService:
     ) -> dict:
         existing_session = self.sessions.get_by_id(session_id)
         if existing_session is None:
-            created = self.sessions.create_with_id(session_id, "Auto Session", "private")
-            self.sessions.add_member(created.id, sender_id)
-        else:
-            self._ensure_membership(sender_id, session_id)
+            raise AppError(ErrorCode.RESOURCE_NOT_FOUND, "session not found", 404)
+
+        self._ensure_membership(sender_id, session_id)
         message = self.messages.create(
             session_id=session_id,
             sender_id=sender_id,
@@ -144,25 +145,36 @@ class MessageService:
         ]
 
     def get_session_member_ids(self, session_id: str, user_id: str | None = None) -> list[str]:
-        member_ids = self.sessions.list_member_ids(session_id)
+        member_ids = self._resolve_session_member_ids(session_id)
         if user_id is not None and user_id not in member_ids:
             raise AppError(ErrorCode.FORBIDDEN, "not a session member", 403)
         return member_ids
 
     def _ensure_membership(self, user_id: str, session_id: str) -> None:
-        member_ids = self.sessions.list_member_ids(session_id)
+        member_ids = self._resolve_session_member_ids(session_id)
         if user_id not in member_ids:
             raise AppError(ErrorCode.FORBIDDEN, "not a session member", 403)
 
-    @staticmethod
-    def serialize_message(message, current_user_id: str) -> dict:
+    def _resolve_session_member_ids(self, session_id: str) -> list[str]:
+        group = self.groups.get_by_session_id(session_id)
+        if group is not None:
+            for member in self.groups.list_members(group.id):
+                self.sessions.add_member(session_id, member.user_id)
+        return self.sessions.list_member_ids(session_id)
+
+    def _serialize_message_content(self, message, current_user_id: str) -> str:
+        if message.status == "recalled":
+            return ""
+        return message.content
+
+    def serialize_message(self, message, current_user_id: str) -> dict:
         return {
             "id": message.id,
             "message_id": message.id,
             "msg_id": message.id,
             "session_id": message.session_id,
             "sender_id": message.sender_id,
-            "content": message.content,
+            "content": self._serialize_message_content(message, current_user_id),
             "type": message.type,
             "message_type": message.type,
             "status": message.status,

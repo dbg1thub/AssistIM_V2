@@ -175,6 +175,14 @@ class Database:
 
         await self._db.commit()
         logger.debug(f"Batch saved {len(sessions)} sessions")
+
+    async def replace_sessions(self, sessions: list[Session]) -> None:
+        """Replace the cached session list with the provided snapshot."""
+        await self._db.execute("DELETE FROM sessions")
+        await self._db.commit()
+        if sessions:
+            await self.save_sessions_batch(sessions)
+        logger.debug(f"Replaced session cache with {len(sessions)} sessions")
     
     async def get_session(self, session_id: str) -> Optional[Session]:
         """
@@ -477,6 +485,17 @@ class Database:
         )
         await self._db.commit()
         logger.debug(f"Messages deleted for session: {session_id}")
+
+    async def clear_chat_state(self) -> None:
+        """Remove all locally cached sessions, messages, and sync markers."""
+        await self._db.execute("DELETE FROM messages")
+        await self._db.execute("DELETE FROM sessions")
+        await self._db.execute(
+            "DELETE FROM app_state WHERE key IN (?, ?)",
+            ("last_sync_timestamp", "chat.hidden_sessions"),
+        )
+        await self._db.commit()
+        logger.info("Local chat state cleared")
     
     async def get_last_message(self, session_id: str) -> Optional[ChatMessage]:
         """
@@ -684,10 +703,17 @@ class Database:
 _database: Optional[Database] = None
 
 
+def peek_database() -> Optional[Database]:
+    """Return the existing database singleton if it was created."""
+    return _database
+
+
 def get_database() -> Database:
     """Get the global database instance."""
     global _database
     if _database is None:
         _database = Database()
     return _database
+
+
 

@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from PySide6.QtCore import QModelIndex, QRect, QSize, Qt
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import QStyle, QStyledItemDelegate, QStyleOptionViewItem
 from qfluentwidgets import isDarkTheme
 
+from client.core.datetime_utils import coerce_local_datetime
+from client.core.i18n import format_session_timestamp, tr
 from client.models.message import format_message_preview
 from client.ui.common.emoji_utils import (
     centered_text_baseline,
@@ -89,7 +91,11 @@ class SessionDelegate(QStyledItemDelegate):
             unread_width = max(16, preview_fm.horizontalAdvance(unread_text) + 12)
 
         name_available = max(0, content_width - time_width - unread_width - 18)
-        name_text = name_fm.elidedText(session.name or "未命名会话", Qt.TextElideMode.ElideRight, name_available)
+        name_text = name_fm.elidedText(
+            session.name or tr("session.unnamed", "Untitled Session"),
+            Qt.TextElideMode.ElideRight,
+            name_available,
+        )
         preview_available = max(0, content_width)
 
         name_y = card_rect.y() + 14
@@ -115,7 +121,7 @@ class SessionDelegate(QStyledItemDelegate):
 
         painter.setFont(preview_font)
         if draft_preview:
-            prefix_text = "[草稿]"
+            prefix_text = tr("session.draft_prefix", "[Draft]")
             prefix_color = QColor("#FF6B6B") if isDarkTheme() else QColor("#D93025")
             prefix_font = self._ui_font(13)
             prefix_fm = QFontMetrics(prefix_font)
@@ -385,37 +391,14 @@ class SessionDelegate(QStyledItemDelegate):
 
     def _format_preview_text(self, session) -> str:
         """Format preview text for media and file messages."""
-        preview = session.last_message or "开始新的对话"
+        preview = session.last_message or tr("session.start_new", "Start a new conversation")
         message_type = session.extra.get("last_message_type") if getattr(session, "extra", None) else None
         return format_message_preview(preview, message_type)
 
     def _format_time(self, timestamp) -> str:
         """Format timestamp using the previous UI's Chinese-friendly style."""
-        moment = self._normalize_datetime(timestamp)
-        if moment is None:
-            return ""
-
-        now = datetime.now()
-        if moment.date() == now.date():
-            return moment.strftime("%H:%M")
-        if moment.date() == (now.date() - timedelta(days=1)):
-            return f"昨天 {moment.strftime('%H:%M')}"
-        if (now - moment).days < 7:
-            weekdays = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
-            return weekdays[moment.weekday()]
-        return moment.strftime("%Y/%m/%d")
+        return format_session_timestamp(timestamp)
 
     def _normalize_datetime(self, value) -> datetime | None:
         """Normalize datetime values from model or storage."""
-        if value is None:
-            return None
-        if isinstance(value, datetime):
-            return value
-        if isinstance(value, (int, float)):
-            return datetime.fromtimestamp(value)
-        if isinstance(value, str):
-            try:
-                return datetime.fromisoformat(value)
-            except ValueError:
-                return None
-        return None
+        return coerce_local_datetime(value)

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from sqlalchemy import ForeignKey, Index, Text, UniqueConstraint, Uuid
+from datetime import date
+
+from sqlalchemy import Date, ForeignKey, Index, String, Text, UniqueConstraint, Uuid
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base, IdMixin, TimestampMixin
@@ -12,12 +14,20 @@ class User(IdMixin, TimestampMixin, Base):
     __tablename__ = "users"
     __table_args__ = (
         Index("idx_users_username", "username"),
+        Index("idx_users_email", "email"),
+        Index("idx_users_phone", "phone"),
     )
 
     username: Mapped[str] = mapped_column(unique=True, nullable=False)
     password_hash: Mapped[str] = mapped_column(nullable=False)
     nickname: Mapped[str] = mapped_column(nullable=False)
     avatar: Mapped[str | None] = mapped_column(nullable=True)
+    email: Mapped[str | None] = mapped_column(String(length=255), nullable=True)
+    phone: Mapped[str | None] = mapped_column(String(length=32), nullable=True)
+    birthday: Mapped[date | None] = mapped_column(Date(), nullable=True)
+    region: Mapped[str | None] = mapped_column(String(length=128), nullable=True)
+    signature: Mapped[str | None] = mapped_column(Text, nullable=True)
+    gender: Mapped[str | None] = mapped_column(String(length=32), nullable=True)
     status: Mapped[str] = mapped_column(default="offline")
 
 
@@ -43,3 +53,4 @@ class Friendship(IdMixin, TimestampMixin, Base):
 
     user_id: Mapped[str] = mapped_column(Uuid(as_uuid=False), ForeignKey("users.id"), nullable=False)
     friend_id: Mapped[str] = mapped_column(Uuid(as_uuid=False), ForeignKey("users.id"), nullable=False)
+

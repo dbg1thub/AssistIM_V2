@@ -31,8 +31,9 @@ from qfluentwidgets import (
 
 from client.core import logging
 from client.core.exceptions import APIError, NetworkError
+from client.core.i18n import format_relative_time, tr
+from client.core.profile_fields import format_profile_birthday, localize_profile_gender, localize_profile_status
 from client.core.logging import setup_logging
-from client.ui.controllers.auth_controller import get_auth_controller
 from client.ui.controllers.contact_controller import (
     ContactRecord,
     FriendRequestRecord,
@@ -47,6 +48,33 @@ from client.ui.styles import StyleSheet
 
 setup_logging()
 logger = logging.get_logger(__name__)
+
+
+def _request_status_text(status: str) -> str:
+    """Return the localized status text for a friend request."""
+    mapping = {
+        "pending": tr("contact.request.status.pending", "Pending"),
+        "accepted": tr("contact.request.status.accepted", "Accepted"),
+        "rejected": tr("contact.request.status.rejected", "Rejected"),
+        "expired": tr("contact.request.status.expired", "Expired"),
+    }
+    return mapping.get(status, status or tr("contact.request.status.processed", "Processed"))
+
+
+def _request_title_text(request: FriendRequestRecord, current_user_id: str) -> str:
+    """Return the localized title for a friend request block."""
+    return (
+        tr("contact.request.title.received", "Received Friend Request")
+        if request.is_incoming(current_user_id)
+        else tr("contact.request.title.sent", "Sent Friend Request")
+    )
+
+
+def _request_message_text(request: FriendRequestRecord, current_user_id: str) -> str:
+    """Return the fallback message shown in request rows."""
+    if request.is_outgoing(current_user_id):
+        return request.message or tr("contact.request.default_outgoing", "You sent a friend request.")
+    return request.message or tr("contact.request.default_incoming", "The other user sent you a friend request.")
 
 
 class ContactAvatar(QWidget):
@@ -286,13 +314,6 @@ class RequestListItem(QWidget):
     reject_clicked = Signal(str)
     selected = Signal(str)
 
-    STATUS_TEXT = {
-        "pending": "待处理",
-        "accepted": "已通过",
-        "rejected": "已拒绝",
-        "expired": "已过期",
-    }
-
     def __init__(self, request: FriendRequestRecord, current_user_id: str, parent=None):
         super().__init__(parent)
         self.request = request
@@ -322,13 +343,9 @@ class RequestListItem(QWidget):
         title_font.setBold(False)
         self.title_label.setFont(title_font)
 
-        if request.is_outgoing(current_user_id):
-            message = request.message or "你发出了一条好友申请。"
-        else:
-            message = request.message or "对方向你发送了一条好友申请。"
-        self.message_label = ElidedCaptionLabel(message, self)
+        self.message_label = ElidedCaptionLabel(_request_message_text(request, current_user_id), self)
 
-        self.meta_label = CaptionLabel(request.status_label(), self)
+        self.meta_label = CaptionLabel(self._status_text(), self)
         self.meta_label.setObjectName("contactMetaLabel")
         top_row = QHBoxLayout()
         top_row.setContentsMargins(0, 0, 0, 0)
@@ -344,8 +361,8 @@ class RequestListItem(QWidget):
         action_layout.setSpacing(8)
         action_layout.addStretch(1)
         if request.can_review(current_user_id):
-            accept_button = PrimaryPushButton("通过", self)
-            reject_button = PushButton("拒绝", self)
+            accept_button = PrimaryPushButton(tr("common.accept", "Accept"), self)
+            reject_button = PushButton(tr("common.reject", "Reject"), self)
             accept_button.setFixedWidth(76)
             reject_button.setFixedWidth(76)
             accept_button.clicked.connect(lambda: self.accept_clicked.emit(self.request.id))
@@ -365,7 +382,7 @@ class RequestListItem(QWidget):
         layout.addLayout(action_layout, 0)
 
     def _status_text(self) -> str:
-        return self.STATUS_TEXT.get(self.request.status, self.request.status_label() or "已处理")
+        return _request_status_text(self.request.status)
 
     def set_selected(self, selected: bool) -> None:
         self._selected = selected
@@ -432,7 +449,7 @@ class ContactMomentItem(CardWidget):
         header_text.setContentsMargins(0, 0, 0, 0)
         header_text.setSpacing(2)
         header_text.addWidget(BodyLabel(moment.display_name, self))
-        header_text.addWidget(CaptionLabel(moment.created_at or "刚刚", self))
+        header_text.addWidget(CaptionLabel(format_relative_time(moment.created_at), self))
         header.addWidget(avatar, 0)
         header.addLayout(header_text, 1)
         layout.addLayout(header)
@@ -441,7 +458,15 @@ class ContactMomentItem(CardWidget):
         content_label.setWordWrap(True)
         layout.addWidget(content_label)
 
-        meta = CaptionLabel(f"{moment.like_count} 赞 · {moment.comment_count} 评论", self)
+        meta = CaptionLabel(
+            tr(
+                "contact.moment.meta",
+                "{likes} likes · {comments} comments",
+                likes=moment.like_count,
+                comments=moment.comment_count,
+            ),
+            self,
+        )
         meta.setObjectName("contactMomentMetaLabel")
         layout.addWidget(meta)
 
@@ -470,8 +495,11 @@ class ContactMomentsPanel(CardWidget):
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(14)
 
-        self.title_label = SubtitleLabel("朋友圈", self)
-        self.subtitle_label = CaptionLabel("浏览该联系人的最近动态", self)
+        self.title_label = SubtitleLabel(tr("contact.moments.title", "Moments"), self)
+        self.subtitle_label = CaptionLabel(
+            tr("contact.moments.subtitle", "Browse this contact's latest updates"),
+            self,
+        )
         self.subtitle_label.setObjectName("contactSectionCaption")
         layout.addWidget(self.title_label)
         layout.addWidget(self.subtitle_label)
@@ -502,7 +530,9 @@ class ContactMomentsPanel(CardWidget):
             if widget is not None:
                 widget.deleteLater()
         if not self._moments:
-            self.container_layout.addWidget(BodyLabel("这个联系人还没有动态。", self.container))
+            self.container_layout.addWidget(
+                BodyLabel(tr("contact.moments.contact_empty", "This contact has no moments yet."), self.container)
+            )
             self.container_layout.addStretch(1)
             return
         for moment in self._moments:
@@ -537,8 +567,11 @@ class ContactDetailPanel(QWidget):
         header.setSpacing(10)
         header.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.avatar = ContactAvatar(84, self.profile_card)
-        self.title_label = TitleLabel("联系人详情", self.profile_card)
-        self.subtitle_label = CaptionLabel("从左侧选择一个联系人、群组或申请查看详情。", self.profile_card)
+        self.title_label = TitleLabel(tr("contact.detail.title", "Contact Details"), self.profile_card)
+        self.subtitle_label = CaptionLabel(
+            tr("contact.detail.placeholder_short", "Select a contact, group, or request from the left to view details."),
+            self.profile_card,
+        )
         self.subtitle_label.setWordWrap(True)
         self.subtitle_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         header.addWidget(self.avatar, 0, Qt.AlignmentFlag.AlignCenter)
@@ -553,9 +586,9 @@ class ContactDetailPanel(QWidget):
         action_row = QHBoxLayout()
         action_row.setContentsMargins(0, 8, 0, 0)
         action_row.setSpacing(12)
-        self.message_button = PrimaryPushButton("发消息", self.profile_card)
-        self.voice_button = PushButton("语音通话", self.profile_card)
-        self.video_button = PushButton("视频通话", self.profile_card)
+        self.message_button = PrimaryPushButton(tr("contact.detail.action.message", "Message"), self.profile_card)
+        self.voice_button = PushButton(tr("contact.detail.action.voice_call", "Voice Call"), self.profile_card)
+        self.video_button = PushButton(tr("contact.detail.action.video_call", "Video Call"), self.profile_card)
         action_row.addWidget(self.message_button)
         action_row.addWidget(self.voice_button)
         action_row.addWidget(self.video_button)
@@ -578,8 +611,13 @@ class ContactDetailPanel(QWidget):
     def show_placeholder(self) -> None:
         self._entity = None
         self.avatar.set_avatar(fallback="CT")
-        self.title_label.setText("联系人详情")
-        self.subtitle_label.setText("从左侧选择一个联系人、群组或好友申请查看详情。")
+        self.title_label.setText(tr("contact.detail.title", "Contact Details"))
+        self.subtitle_label.setText(
+            tr(
+                "contact.detail.placeholder",
+                "Select a contact, group, or friend request from the left to view details.",
+            )
+        )
         self._set_rows([])
         self.message_button.setEnabled(False)
         self.voice_button.setEnabled(False)
@@ -590,13 +628,21 @@ class ContactDetailPanel(QWidget):
         self._entity = {"type": "friend", "data": contact}
         self.avatar.set_avatar(contact.avatar, contact.display_name)
         self.title_label.setText(contact.display_name)
-        self.subtitle_label.setText(contact.username or contact.assistim_id or "好友")
+        self.subtitle_label.setText(contact.username or contact.assistim_id or tr("contact.detail.friend_fallback", "Friend"))
+        birthday_text = format_profile_birthday(contact.birthday)
+        gender_text = localize_profile_gender(contact.gender)
+        status_text = localize_profile_status(contact.status)
         self._set_rows([
-            ("AssistIM 号", contact.assistim_id or contact.username or "-"),
-            ("昵称", contact.nickname or "-"),
-            ("备注", contact.remark or "-"),
-            ("地区", contact.region or "-"),
-            ("个性签名", contact.signature or "-"),
+            (tr("contact.detail.label.assistim_id", "AssistIM ID"), contact.assistim_id or contact.username or "-"),
+            (tr("contact.detail.label.nickname", "Nickname"), contact.nickname or "-"),
+            (tr("contact.detail.label.remark", "Remark"), contact.remark or "-"),
+            (tr("contact.detail.label.region", "Region"), contact.region or "-"),
+            (tr("contact.detail.label.signature", "Signature"), contact.signature or "-"),
+            (tr("contact.detail.label.email", "Email"), contact.email or "-"),
+            (tr("contact.detail.label.phone", "Phone"), contact.phone or "-"),
+            (tr("contact.detail.label.birthday", "Birthday"), birthday_text or "-"),
+            (tr("contact.detail.label.gender", "Gender"), gender_text or "-"),
+            (tr("contact.detail.label.status", "Status"), status_text or "-"),
         ])
         self.message_button.setEnabled(True)
         self.voice_button.setEnabled(True)
@@ -607,12 +653,12 @@ class ContactDetailPanel(QWidget):
         self._entity = {"type": "group", "data": group}
         self.avatar.set_avatar(fallback=group.name)
         self.title_label.setText(group.name)
-        self.subtitle_label.setText("群组")
+        self.subtitle_label.setText(tr("contact.detail.group", "Group"))
         self._set_rows([
-            ("群组 ID", group.id or "-"),
-            ("会话 ID", group.session_id or "-"),
-            ("成员数量", str(group.member_count)),
-            ("创建时间", group.created_at or "-"),
+            (tr("contact.detail.label.group_id", "Group ID"), group.id or "-"),
+            (tr("contact.detail.label.session_id", "Session ID"), group.session_id or "-"),
+            (tr("contact.detail.label.member_count", "Members"), str(group.member_count)),
+            (tr("contact.detail.label.created_at", "Created At"), group.created_at or "-"),
         ])
         self.message_button.setEnabled(True)
         self.voice_button.setEnabled(False)
@@ -623,14 +669,17 @@ class ContactDetailPanel(QWidget):
         self._entity = None
         counterpart_name = request.counterpart_name(current_user_id)
         self.avatar.set_avatar(fallback=counterpart_name)
-        self.title_label.setText("收到的好友申请" if request.is_incoming(current_user_id) else "发出的好友申请")
+        self.title_label.setText(_request_title_text(request, current_user_id))
         self.subtitle_label.setText(counterpart_name)
         self._set_rows([
-            ("发送者 ID", request.sender_id or "-"),
-            ("接收者 ID", request.receiver_id or "-"),
-            ("申请状态", request.status_label()),
-            ("申请信息", request.message or "对方没有填写验证信息。"),
-            ("时间", request.created_at or "-"),
+            (tr("contact.detail.label.sender_id", "Sender ID"), request.sender_id or "-"),
+            (tr("contact.detail.label.receiver_id", "Receiver ID"), request.receiver_id or "-"),
+            (tr("contact.detail.label.request_status", "Request Status"), _request_status_text(request.status)),
+            (
+                tr("contact.detail.label.request_message", "Request Message"),
+                request.message or tr("contact.request.no_message", "No verification message was provided."),
+            ),
+            (tr("contact.detail.label.time", "Time"), request.created_at or "-"),
         ])
         self.message_button.setEnabled(False)
         self.voice_button.setEnabled(False)
@@ -652,7 +701,12 @@ class ContactDetailPanel(QWidget):
             self.message_requested.emit(self._entity)
 
     def _show_unavailable(self) -> None:
-        InfoBar.info("提示", "语音和视频入口先保留 UI，后续再接业务逻辑。", parent=self.window(), duration=1800)
+        InfoBar.info(
+            tr("contact.detail.unavailable_title", "Notice"),
+            tr("contact.detail.unavailable_content", "Voice and video entries are UI placeholders for now."),
+            parent=self.window(),
+            duration=1800,
+        )
 
 
 class ContactMomentsFlowPanel(QWidget):
@@ -665,14 +719,17 @@ class ContactMomentsFlowPanel(QWidget):
         self._cards: dict[str, MomentCard] = {}
         self._featured_widget: Optional[QWidget] = None
         self._moments: list[MomentRecord] = []
-        self._empty_text = "暂无朋友圈内容"
+        self._empty_text = tr("contact.moments.empty", "No moments available")
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        self.section_title = SubtitleLabel("朋友圈", self)
-        self.section_caption = CaptionLabel("滚动浏览最近动态", self)
+        self.section_title = SubtitleLabel(tr("contact.moments.title", "Moments"), self)
+        self.section_caption = CaptionLabel(
+            tr("contact.moments.flow_subtitle", "Scroll through the latest updates"),
+            self,
+        )
         self.section_caption.setObjectName("contactSectionCaption")
         self.section_title.hide()
         self.section_caption.hide()
@@ -688,7 +745,7 @@ class ContactMomentsFlowPanel(QWidget):
         self.scroll_layout.setContentsMargins(12, 8, 12, 16)
         self.scroll_layout.setSpacing(18)
 
-        self.placeholder_label = BodyLabel("暂无朋友圈内容", self.scroll_widget)
+        self.placeholder_label = BodyLabel(tr("contact.moments.empty", "No moments available"), self.scroll_widget)
         self.placeholder_label.setObjectName("contactMomentsPlaceholder")
         self.placeholder_label.setWordWrap(True)
 
@@ -708,21 +765,24 @@ class ContactMomentsFlowPanel(QWidget):
         layout.addWidget(self.section_caption)
         layout.addWidget(self.scroll_area, 1)
 
-        self.set_section("朋友圈", "滚动浏览最近动态")
+        self.set_section(
+            tr("contact.moments.title", "Moments"),
+            tr("contact.moments.flow_subtitle", "Scroll through the latest updates"),
+        )
         self.show_placeholder()
 
     def set_section(self, title: str, subtitle: str) -> None:
         self.section_title.setText(title)
         self.section_caption.setText(subtitle)
 
-    def show_placeholder(self, text: str = "暂无朋友圈内容") -> None:
+    def show_placeholder(self, text: str | None = None) -> None:
         self._moments = []
-        self._empty_text = text
+        self._empty_text = text or tr("contact.moments.empty", "No moments available")
         self._rebuild_flow()
 
-    def set_moments(self, moments: list[MomentRecord], empty_text: str = "暂无朋友圈内容") -> None:
+    def set_moments(self, moments: list[MomentRecord], empty_text: str | None = None) -> None:
         self._moments = list(moments)
-        self._empty_text = empty_text
+        self._empty_text = empty_text or tr("contact.moments.empty", "No moments available")
         self._rebuild_flow()
 
     def set_featured_widget(self, widget: QWidget | None) -> None:
@@ -803,7 +863,7 @@ class GalleryContactDetailPanel(QWidget):
 
         self.avatar = ContactAvatar(72, self.header)
 
-        self.title_label = TitleLabel("联系人详情", self.header)
+        self.title_label = TitleLabel(tr("contact.detail.title", "Contact Details"), self.header)
         self.subtitle_label = CaptionLabel("", self.header)
         self.subtitle_label.setObjectName("contactMetaLabel")
         self.meta_primary_label = CaptionLabel("", self.header)
@@ -816,9 +876,9 @@ class GalleryContactDetailPanel(QWidget):
         action_row = QHBoxLayout()
         action_row.setContentsMargins(0, 0, 0, 0)
         action_row.setSpacing(10)
-        self.message_button = PrimaryPushButton("发消息", self.header)
-        self.voice_button = PushButton("语音通话", self.header)
-        self.video_button = PushButton("视频通话", self.header)
+        self.message_button = PrimaryPushButton(tr("contact.detail.action.message", "Message"), self.header)
+        self.voice_button = PushButton(tr("contact.detail.action.voice_call", "Voice Call"), self.header)
+        self.video_button = PushButton(tr("contact.detail.action.video_call", "Video Call"), self.header)
         for button in (self.message_button, self.voice_button, self.video_button):
             button.setFixedWidth(112)
             button.setMinimumHeight(36)
@@ -847,51 +907,61 @@ class GalleryContactDetailPanel(QWidget):
     def show_placeholder(self) -> None:
         self._entity = None
         self.avatar.set_avatar(fallback="CT")
-        self.title_label.setText("联系人详情")
+        self.title_label.setText(tr("contact.detail.title", "Contact Details"))
         self.subtitle_label.clear()
         self.meta_primary_label.clear()
         self.message_button.setEnabled(False)
         self.voice_button.setEnabled(False)
         self.video_button.setEnabled(False)
-        self.moments_panel.show_placeholder("当前还没有可展示的内容。")
+        self.moments_panel.show_placeholder(tr("contact.moments.detail_empty", "There is nothing to display right now."))
 
     def set_contact(self, contact: ContactRecord, moments: Optional[list[MomentRecord]] = None) -> None:
         self._entity = {"type": "friend", "data": contact}
         self.avatar.set_avatar(contact.avatar, contact.display_name)
         self.title_label.setText(contact.display_name)
-        self.subtitle_label.setText(f"AssistIM 号 {contact.assistim_id or contact.username or '-'}")
+        self.subtitle_label.setText(
+            f"{tr('contact.detail.label.assistim_id', 'AssistIM ID')} {contact.assistim_id or contact.username or '-'}"
+        )
         self.meta_primary_label.setText(
             " │ ".join(
                 filter(
                     None,
                     [
-                        f"昵称：{contact.nickname}" if contact.nickname else "",
-                        f"备注：{contact.remark}" if contact.remark else "",
-                        f"地区：{contact.region}" if contact.region else "",
-                        f"签名：{contact.signature}" if contact.signature else "",
+                        f"{tr('contact.detail.label.nickname', 'Nickname')}：{contact.nickname}" if contact.nickname else "",
+                        f"{tr('contact.detail.label.remark', 'Remark')}：{contact.remark}" if contact.remark else "",
+                        f"{tr('contact.detail.label.region', 'Region')}：{contact.region}" if contact.region else "",
+                        f"{tr('contact.detail.label.signature', 'Signature')}：{contact.signature}" if contact.signature else "",
+                        f"{tr('contact.detail.label.email', 'Email')}：{contact.email}" if contact.email else "",
+                        f"{tr('contact.detail.label.phone', 'Phone')}：{contact.phone}" if contact.phone else "",
+                        f"{tr('contact.detail.label.birthday', 'Birthday')}：{format_profile_birthday(contact.birthday)}" if format_profile_birthday(contact.birthday) else "",
+                        f"{tr('contact.detail.label.gender', 'Gender')}：{localize_profile_gender(contact.gender)}" if localize_profile_gender(contact.gender) else "",
+                        f"{tr('contact.detail.label.status', 'Status')}：{localize_profile_status(contact.status)}" if localize_profile_status(contact.status) else "",
                     ],
                 )
             )
-            or "已建立好友关系"
+            or tr("contact.relationship.established", "Friend relationship established")
         )
         self.message_button.setEnabled(True)
         self.voice_button.setEnabled(True)
         self.video_button.setEnabled(True)
-        self.moments_panel.set_moments(moments or [], "这个联系人还没有朋友圈内容。")
+        self.moments_panel.set_moments(
+            moments or [],
+            tr("contact.moments.contact_empty", "This contact has no moments yet."),
+        )
 
     def set_group(self, group: GroupRecord, moments: Optional[list[MomentRecord]] = None) -> None:
         self._entity = {"type": "group", "data": group}
         self.avatar.set_avatar(fallback=group.name)
         self.title_label.setText(group.name)
-        self.subtitle_label.setText(f"群组 ID {group.id or '-'}")
+        self.subtitle_label.setText(f"{tr('contact.detail.label.group_id', 'Group ID')} {group.id or '-'}")
         self.meta_primary_label.setText(
             " │ ".join(
                 filter(
                     None,
                     [
-                        f"成员 {group.member_count} 人",
-                        f"会话 ID：{group.session_id}" if group.session_id else "",
-                        f"创建时间：{group.created_at}" if group.created_at else "",
+                        tr("contact.group.member_summary", "{count} members", count=group.member_count),
+                        f"{tr('contact.detail.label.session_id', 'Session ID')}：{group.session_id}" if group.session_id else "",
+                        f"{tr('contact.detail.label.created_at', 'Created At')}：{group.created_at}" if group.created_at else "",
                     ],
                 )
             )
@@ -899,21 +969,24 @@ class GalleryContactDetailPanel(QWidget):
         self.message_button.setEnabled(True)
         self.voice_button.setEnabled(False)
         self.video_button.setEnabled(False)
-        self.moments_panel.set_moments(moments or [], "当前没有可展示的群组动态。")
+        self.moments_panel.set_moments(
+            moments or [],
+            tr("contact.moments.group_empty", "There are no group moments to display yet."),
+        )
 
     def set_request(self, request: FriendRequestRecord, current_user_id: str = "", moments: Optional[list[MomentRecord]] = None) -> None:
         self._entity = None
         counterpart_name = request.counterpart_name(current_user_id)
         self.avatar.set_avatar(fallback=counterpart_name)
-        self.title_label.setText("收到的好友申请" if request.is_incoming(current_user_id) else "发出的好友申请")
-        self.subtitle_label.setText(f"AssistIM 号 {counterpart_name}")
+        self.title_label.setText(_request_title_text(request, current_user_id))
+        self.subtitle_label.setText(f"{tr('contact.detail.label.assistim_id', 'AssistIM ID')} {counterpart_name}")
         self.meta_primary_label.setText(
             " │ ".join(
                 filter(
                     None,
                     [
-                        f"状态：{request.status_label()}",
-                        f"时间：{request.created_at}" if request.created_at else "",
+                        f"{tr('contact.detail.label.request_status', 'Request Status')}：{_request_status_text(request.status)}",
+                        f"{tr('contact.detail.label.time', 'Time')}：{request.created_at}" if request.created_at else "",
                         request.message or "",
                     ],
                 )
@@ -922,14 +995,22 @@ class GalleryContactDetailPanel(QWidget):
         self.message_button.setEnabled(False)
         self.voice_button.setEnabled(False)
         self.video_button.setEnabled(False)
-        self.moments_panel.set_moments(moments or [], "这个联系人还没有朋友圈内容。")
+        self.moments_panel.set_moments(
+            moments or [],
+            tr("contact.moments.contact_empty", "This contact has no moments yet."),
+        )
 
     def _emit_message_request(self) -> None:
         if self._entity:
             self.message_requested.emit(self._entity)
 
     def _show_unavailable(self) -> None:
-        InfoBar.info("提示", "语音和视频入口先保留 UI，后续再接业务逻辑。", parent=self.window(), duration=1800)
+        InfoBar.info(
+            tr("contact.detail.unavailable_title", "Notice"),
+            tr("contact.detail.unavailable_content", "Voice and video entries are UI placeholders for now."),
+            parent=self.window(),
+            duration=1800,
+        )
 
 
 class UserSearchItem(CardWidget):
@@ -960,7 +1041,7 @@ class UserSearchItem(CardWidget):
         subtitle_label.setWordWrap(True)
         text_layout.addWidget(subtitle_label)
 
-        self.add_button = PrimaryPushButton("添加好友", self)
+        self.add_button = PrimaryPushButton(tr("contact.user_search.add", "Add Friend"), self)
         self.add_button.setFixedWidth(88)
         self.add_button.setDisabled(bool(disabled_reason))
         if disabled_reason:
@@ -999,7 +1080,7 @@ class GroupMemberItem(CardWidget):
         subtitle.setWordWrap(True)
         text_layout.addWidget(subtitle)
 
-        self.state_label = CaptionLabel("未选择", self)
+        self.state_label = CaptionLabel(tr("contact.group_member.unselected", "Not Selected"), self)
 
         layout.addWidget(self.avatar, 0)
         layout.addLayout(text_layout, 1)
@@ -1007,7 +1088,11 @@ class GroupMemberItem(CardWidget):
 
     def set_selected(self, selected: bool) -> None:
         self._selected = selected
-        self.state_label.setText("已选择" if selected else "未选择")
+        self.state_label.setText(
+            tr("contact.group_member.selected", "Selected")
+            if selected
+            else tr("contact.group_member.unselected", "Not Selected")
+        )
         self.update()
 
     def enterEvent(self, event) -> None:
@@ -1041,29 +1126,36 @@ class GroupMemberItem(CardWidget):
 class AddFriendDialog(QDialog):
     friend_request_sent = Signal()
 
-    def __init__(self, controller, existing_ids: set[str], parent=None):
+    def __init__(self, controller, existing_ids: set[str], current_user_id: str = "", parent=None):
         super().__init__(parent)
         self._controller = controller
-        auth = get_auth_controller()
-        current_user = auth.current_user or {}
-        self._current_user_id = str(current_user.get("id", "") or "")
+        self._current_user_id = str(current_user_id or "")
         self._existing_ids = set(existing_ids)
         self._search_task: Optional[asyncio.Task] = None
         self._action_task: Optional[asyncio.Task] = None
+        self._ui_tasks: set[asyncio.Task] = set()
 
-        self.setWindowTitle("新增好友")
+        self.setWindowTitle(tr("contact.add_friend.window_title", "Add Friend"))
         self.setModal(True)
         self.resize(560, 680)
 
         self._setup_ui()
+        self.finished.connect(self._on_finished)
+        self.destroyed.connect(self._on_destroyed)
 
     def _setup_ui(self) -> None:
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 24, 24, 24)
         layout.setSpacing(16)
 
-        layout.addWidget(TitleLabel("新增好友", self))
-        subtitle = CaptionLabel("按用户名或昵称搜索用户，然后发送好友申请。", self)
+        layout.addWidget(TitleLabel(tr("contact.add_friend.title", "Add Friend"), self))
+        subtitle = CaptionLabel(
+            tr(
+                "contact.add_friend.subtitle",
+                "Search users by username or nickname, then send a friend request.",
+            ),
+            self,
+        )
         subtitle.setWordWrap(True)
         layout.addWidget(subtitle)
 
@@ -1071,20 +1163,25 @@ class AddFriendDialog(QDialog):
         search_row.setContentsMargins(0, 0, 0, 0)
         search_row.setSpacing(10)
         self.search_edit = SearchLineEdit(self)
-        self.search_edit.setPlaceholderText("搜索用户名或昵称")
+        self.search_edit.setPlaceholderText(tr("contact.add_friend.search_placeholder", "Search username or nickname"))
         self.search_edit.setMinimumHeight(38)
-        self.search_button = PrimaryPushButton("搜索", self)
+        self.search_button = PrimaryPushButton(tr("contact.add_friend.search_button", "Search"), self)
         self.search_button.setFixedWidth(88)
         search_row.addWidget(self.search_edit, 1)
         search_row.addWidget(self.search_button, 0)
         layout.addLayout(search_row)
 
         self.message_edit = LineEdit(self)
-        self.message_edit.setPlaceholderText("验证消息（可选）")
+        self.message_edit.setPlaceholderText(
+            tr("contact.add_friend.message_placeholder", "Verification message (optional)")
+        )
         self.message_edit.setMinimumHeight(38)
         layout.addWidget(self.message_edit)
 
-        self.summary_label = CaptionLabel("输入关键词后搜索用户。", self)
+        self.summary_label = CaptionLabel(
+            tr("contact.add_friend.summary_idle", "Enter a keyword to search for users."),
+            self,
+        )
         self.summary_label.setObjectName("contactSummaryLabel")
         layout.addWidget(self.summary_label)
 
@@ -1103,7 +1200,7 @@ class AddFriendDialog(QDialog):
         footer = QHBoxLayout()
         footer.setContentsMargins(0, 0, 0, 0)
         footer.addStretch(1)
-        self.close_button = PushButton("关闭", self)
+        self.close_button = PushButton(tr("common.close", "Close"), self)
         footer.addWidget(self.close_button, 0)
         layout.addLayout(footer)
 
@@ -1114,35 +1211,41 @@ class AddFriendDialog(QDialog):
     def _trigger_search(self) -> None:
         keyword = self.search_edit.text().strip()
         if not keyword:
-            self.summary_label.setText("请输入搜索关键词。")
+            self.summary_label.setText(tr("contact.add_friend.summary_empty_keyword", "Please enter a search keyword."))
             return
 
         if self._search_task and not self._search_task.done():
             self._search_task.cancel()
-        self._search_task = asyncio.create_task(self._search_async(keyword))
+        self._set_search_task(self._search_async(keyword))
 
     async def _search_async(self, keyword: str) -> None:
-        self.summary_label.setText("正在搜索用户...")
+        self.summary_label.setText(tr("contact.add_friend.summary_searching", "Searching users..."))
         try:
             users = await self._controller.search_users(keyword)
+        except asyncio.CancelledError:
+            raise
         except Exception as exc:
-            self.summary_label.setText("搜索失败")
-            InfoBar.error("新增好友", str(exc), parent=self, duration=2200)
+            self.summary_label.setText(tr("contact.add_friend.summary_failed", "Search failed."))
+            InfoBar.error(tr("contact.add_friend.title", "Add Friend"), str(exc), parent=self, duration=2200)
             return
 
         filtered = [user for user in users if user.id and user.id != self._current_user_id]
-        self.summary_label.setText(f"共找到 {len(filtered)} 位用户")
+        self.summary_label.setText(
+            tr("contact.add_friend.summary_count", "{count} users found", count=len(filtered))
+        )
         self._render_search_results(filtered)
 
     def _render_search_results(self, users: list[UserSearchRecord]) -> None:
         self._clear_layout(self.result_layout)
         if not users:
-            self.result_layout.addWidget(BodyLabel("没有找到匹配用户。", self.result_container))
+            self.result_layout.addWidget(
+                BodyLabel(tr("contact.add_friend.empty_results", "No matching users were found."), self.result_container)
+            )
             self.result_layout.addStretch(1)
             return
 
         for user in users:
-            reason = "已是好友" if user.id in self._existing_ids else ""
+            reason = tr("contact.user_search.already_friend", "Already Friends") if user.id in self._existing_ids else ""
             item = UserSearchItem(user, reason, self.result_container)
             if not reason:
                 item.add_clicked.connect(self._send_friend_request)
@@ -1152,18 +1255,88 @@ class AddFriendDialog(QDialog):
     def _send_friend_request(self, user_id: str) -> None:
         if self._action_task and not self._action_task.done():
             return
-        self._action_task = asyncio.create_task(self._send_friend_request_async(user_id))
+        self._set_action_task(self._send_friend_request_async(user_id))
 
     async def _send_friend_request_async(self, user_id: str) -> None:
         try:
             await self._controller.send_friend_request(user_id, self.message_edit.text().strip())
+        except asyncio.CancelledError:
+            raise
         except Exception as exc:
-            InfoBar.error("新增好友", str(exc), parent=self, duration=2200)
+            InfoBar.error(tr("contact.add_friend.title", "Add Friend"), str(exc), parent=self, duration=2200)
             return
 
-        InfoBar.success("新增好友", "好友申请已发送", parent=self, duration=1800)
+        InfoBar.success(
+            tr("contact.add_friend.title", "Add Friend"),
+            tr("contact.add_friend.request_sent", "Friend request sent."),
+            parent=self,
+            duration=1800,
+        )
         self.friend_request_sent.emit()
         self.close()
+
+    def _on_finished(self, _result: int) -> None:
+        """Stop outstanding work after the dialog closes."""
+        self._cancel_pending_task(self._search_task)
+        self._search_task = None
+        self._cancel_pending_task(self._action_task)
+        self._action_task = None
+        self._cancel_all_ui_tasks()
+
+    def _on_destroyed(self, *_args) -> None:
+        """Mirror close cleanup when the dialog is destroyed by its parent."""
+        self._on_finished(0)
+
+    def _cancel_pending_task(self, task: Optional[asyncio.Task]) -> None:
+        """Cancel a tracked task if it is still running."""
+        if task is not None and not task.done():
+            task.cancel()
+
+    def _cancel_all_ui_tasks(self) -> None:
+        """Cancel every task launched from this dialog."""
+        for task in list(self._ui_tasks):
+            if not task.done():
+                task.cancel()
+
+    def _create_ui_task(self, coro, context: str, *, on_done=None) -> asyncio.Task:
+        """Track dialog-owned coroutines so they can be canceled on close."""
+        task = asyncio.create_task(coro)
+        self._ui_tasks.add(task)
+        task.add_done_callback(lambda finished, name=context, callback=on_done: self._finalize_ui_task(finished, name, callback))
+        return task
+
+    def _finalize_ui_task(self, task: asyncio.Task, context: str, on_done=None) -> None:
+        """Drop bookkeeping and log background failures."""
+        self._ui_tasks.discard(task)
+        if on_done is not None:
+            on_done(task)
+
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            logger.exception("AddFriendDialog task failed: %s", context)
+
+    def _set_search_task(self, coro) -> None:
+        """Keep only the latest user search request alive."""
+        self._cancel_pending_task(self._search_task)
+        self._search_task = self._create_ui_task(coro, "search users", on_done=self._clear_search_task)
+
+    def _clear_search_task(self, task: asyncio.Task) -> None:
+        """Clear the tracked search task when it finishes."""
+        if self._search_task is task:
+            self._search_task = None
+
+    def _set_action_task(self, coro) -> None:
+        """Track the current friend-request action."""
+        self._cancel_pending_task(self._action_task)
+        self._action_task = self._create_ui_task(coro, "send friend request", on_done=self._clear_action_task)
+
+    def _clear_action_task(self, task: asyncio.Task) -> None:
+        """Clear the tracked action task when it finishes."""
+        if self._action_task is task:
+            self._action_task = None
 
     def _clear_layout(self, layout: QVBoxLayout) -> None:
         while layout.count():
@@ -1183,35 +1356,47 @@ class CreateGroupDialog(QDialog):
         self._selected_ids: set[str] = set()
         self._member_items: dict[str, GroupMemberItem] = {}
         self._create_task: Optional[asyncio.Task] = None
+        self._ui_tasks: set[asyncio.Task] = set()
 
-        self.setWindowTitle("新建群组")
+        self.setWindowTitle(tr("contact.create_group.window_title", "Create Group"))
         self.setModal(True)
         self.resize(580, 720)
 
         self._setup_ui()
         self._rebuild_member_list()
+        self.finished.connect(self._on_finished)
+        self.destroyed.connect(self._on_destroyed)
 
     def _setup_ui(self) -> None:
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 24, 24, 24)
         layout.setSpacing(16)
 
-        layout.addWidget(TitleLabel("新建群组", self))
-        subtitle = CaptionLabel("从当前好友中选择成员，创建一个新的群组会话。", self)
+        layout.addWidget(TitleLabel(tr("contact.create_group.title", "Create Group"), self))
+        subtitle = CaptionLabel(
+            tr(
+                "contact.create_group.subtitle",
+                "Select members from your current friends to create a new group session.",
+            ),
+            self,
+        )
         subtitle.setWordWrap(True)
         layout.addWidget(subtitle)
 
         self.name_edit = LineEdit(self)
-        self.name_edit.setPlaceholderText("输入群组名称")
+        self.name_edit.setPlaceholderText(tr("contact.create_group.name_placeholder", "Enter group name"))
         self.name_edit.setMinimumHeight(38)
         layout.addWidget(self.name_edit)
 
         self.search_edit = SearchLineEdit(self)
-        self.search_edit.setPlaceholderText("筛选好友")
+        self.search_edit.setPlaceholderText(tr("contact.create_group.search_placeholder", "Filter friends"))
         self.search_edit.setMinimumHeight(38)
         layout.addWidget(self.search_edit)
 
-        self.summary_label = CaptionLabel("请选择至少 1 位好友。", self)
+        self.summary_label = CaptionLabel(
+            tr("contact.create_group.summary_minimum", "Select at least one friend."),
+            self,
+        )
         self.summary_label.setObjectName("contactSummaryLabel")
         layout.addWidget(self.summary_label)
 
@@ -1231,8 +1416,8 @@ class CreateGroupDialog(QDialog):
         footer.setContentsMargins(0, 0, 0, 0)
         footer.setSpacing(10)
         footer.addStretch(1)
-        self.cancel_button = PushButton("取消", self)
-        self.create_button = PrimaryPushButton("创建群组", self)
+        self.cancel_button = PushButton(tr("common.cancel", "Cancel"), self)
+        self.create_button = PrimaryPushButton(tr("contact.create_group.create", "Create Group"), self)
         footer.addWidget(self.cancel_button, 0)
         footer.addWidget(self.create_button, 0)
         layout.addLayout(footer)
@@ -1256,7 +1441,9 @@ class CreateGroupDialog(QDialog):
         ]
 
         if not filtered:
-            self.member_layout.addWidget(BodyLabel("没有匹配的好友。", self.member_container))
+            self.member_layout.addWidget(
+                BodyLabel(tr("contact.create_group.empty_results", "No matching friends."), self.member_container)
+            )
             self.member_layout.addStretch(1)
             self._update_summary()
             return
@@ -1279,7 +1466,9 @@ class CreateGroupDialog(QDialog):
         self._update_summary()
 
     def _update_summary(self) -> None:
-        self.summary_label.setText(f"已选择 {len(self._selected_ids)} 位好友")
+        self.summary_label.setText(
+            tr("contact.create_group.summary_selected", "{count} friends selected", count=len(self._selected_ids))
+        )
 
     def _create_group(self) -> None:
         if self._create_task and not self._create_task.done():
@@ -1287,30 +1476,98 @@ class CreateGroupDialog(QDialog):
 
         name = self.name_edit.text().strip()
         if not name:
-            InfoBar.warning("新建群组", "请输入群组名称", parent=self, duration=1800)
+            InfoBar.warning(
+                tr("contact.create_group.title", "Create Group"),
+                tr("contact.create_group.validation_name", "Please enter a group name."),
+                parent=self,
+                duration=1800,
+            )
             self.name_edit.setFocus()
             return
 
         if not self._selected_ids:
-            InfoBar.warning("新建群组", "请至少选择 1 位好友", parent=self, duration=1800)
+            InfoBar.warning(
+                tr("contact.create_group.title", "Create Group"),
+                tr("contact.create_group.validation_members", "Please select at least one friend."),
+                parent=self,
+                duration=1800,
+            )
             return
 
-        self._create_task = asyncio.create_task(self._create_group_async(name))
+        self._set_create_task(self._create_group_async(name))
 
     async def _create_group_async(self, name: str) -> None:
         self.create_button.setEnabled(False)
-        self.create_button.setText("创建中...")
+        self.create_button.setText(tr("contact.create_group.creating", "Creating..."))
         try:
             group = await self._controller.create_group(name, list(self._selected_ids))
+        except asyncio.CancelledError:
+            raise
         except Exception as exc:
-            InfoBar.error("新建群组", str(exc), parent=self, duration=2200)
+            InfoBar.error(tr("contact.create_group.title", "Create Group"), str(exc), parent=self, duration=2200)
         else:
-            InfoBar.success("新建群组", "群组创建成功", parent=self, duration=1800)
+            InfoBar.success(
+                tr("contact.create_group.title", "Create Group"),
+                tr("contact.create_group.success", "Group created."),
+                parent=self,
+                duration=1800,
+            )
             self.group_created.emit(group)
             self.close()
         finally:
             self.create_button.setEnabled(True)
-            self.create_button.setText("创建群组")
+            self.create_button.setText(tr("contact.create_group.create", "Create Group"))
+
+    def _on_finished(self, _result: int) -> None:
+        """Stop background creation work after the dialog closes."""
+        self._cancel_pending_task(self._create_task)
+        self._create_task = None
+        self._cancel_all_ui_tasks()
+
+    def _on_destroyed(self, *_args) -> None:
+        """Mirror close cleanup when the dialog is destroyed externally."""
+        self._on_finished(0)
+
+    def _cancel_pending_task(self, task: Optional[asyncio.Task]) -> None:
+        """Cancel a tracked task if it is still running."""
+        if task is not None and not task.done():
+            task.cancel()
+
+    def _cancel_all_ui_tasks(self) -> None:
+        """Cancel every task launched from this dialog."""
+        for task in list(self._ui_tasks):
+            if not task.done():
+                task.cancel()
+
+    def _create_ui_task(self, coro, context: str, *, on_done=None) -> asyncio.Task:
+        """Track dialog-owned tasks for reliable cleanup."""
+        task = asyncio.create_task(coro)
+        self._ui_tasks.add(task)
+        task.add_done_callback(lambda finished, name=context, callback=on_done: self._finalize_ui_task(finished, name, callback))
+        return task
+
+    def _finalize_ui_task(self, task: asyncio.Task, context: str, on_done=None) -> None:
+        """Drop bookkeeping and log task failures."""
+        self._ui_tasks.discard(task)
+        if on_done is not None:
+            on_done(task)
+
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            logger.exception("CreateGroupDialog task failed: %s", context)
+
+    def _set_create_task(self, coro) -> None:
+        """Track the active create-group request."""
+        self._cancel_pending_task(self._create_task)
+        self._create_task = self._create_ui_task(coro, "create group", on_done=self._clear_create_task)
+
+    def _clear_create_task(self, task: asyncio.Task) -> None:
+        """Clear the tracked create task when it finishes."""
+        if self._create_task is task:
+            self._create_task = None
 
     def _clear_layout(self, layout: QVBoxLayout) -> None:
         while layout.count():
@@ -1339,12 +1596,15 @@ class ContactInterface(QWidget):
         self._selected_key: tuple[str, str] | None = None
         self._load_task: Optional[asyncio.Task] = None
         self._moment_load_task: Optional[asyncio.Task] = None
+        self._keyed_ui_tasks: dict[tuple[str, str], asyncio.Task] = {}
+        self._ui_tasks: set[asyncio.Task] = set()
         self._dialog_refs: set[QDialog] = set()
         self._current_user_id = ""
         self._initial_load_done = False
         self._friend_section_headers: dict[str, QWidget] = {}
         self._setup_ui()
         self._connect_signals()
+        self.destroyed.connect(self._on_destroyed)
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
@@ -1365,7 +1625,7 @@ class ContactInterface(QWidget):
         sidebar_layout.setContentsMargins(0, 0, 0, 0)
         sidebar_layout.setSpacing(0)
 
-        self.summary_label = CaptionLabel("正在加载联系人数据...", sidebar)
+        self.summary_label = CaptionLabel(tr("contact.sidebar.loading", "Loading contacts..."), sidebar)
         self.summary_label.setObjectName("contactSummaryLabel")
         self.summary_label.hide()
 
@@ -1374,18 +1634,18 @@ class ContactInterface(QWidget):
         search_row.setContentsMargins(12, 12, 12, 12)
         search_row.setSpacing(12)
         self.search_box = SearchLineEdit(self.search_bar)
-        self.search_box.setPlaceholderText("搜索联系人、群组或申请")
+        self.search_box.setPlaceholderText(tr("contact.sidebar.search_placeholder", "Search contacts, groups, or requests"))
         self.search_box.setFixedHeight(36)
         self.add_button = TransparentToolButton(FluentIcon.ADD, self.search_bar)
-        self.add_button.setToolTip("新增")
+        self.add_button.setToolTip(tr("contact.sidebar.add_tooltip", "Add"))
         self.add_button.setFixedSize(36, 36)
         search_row.addWidget(self.search_box, 1)
         search_row.addWidget(self.add_button, 0, Qt.AlignmentFlag.AlignVCenter)
 
         self.segmented = SegmentedWidget(sidebar)
-        self.segmented.addItem("friends", "好友", lambda: self._switch_page("friends"))
-        self.segmented.addItem("groups", "群组", lambda: self._switch_page("groups"))
-        self.segmented.addItem("requests", "新朋友", lambda: self._switch_page("requests"))
+        self.segmented.addItem("friends", tr("contact.sidebar.tab.friends", "Friends"), lambda: self._switch_page("friends"))
+        self.segmented.addItem("groups", tr("contact.sidebar.tab.groups", "Groups"), lambda: self._switch_page("groups"))
+        self.segmented.addItem("requests", tr("contact.sidebar.tab.requests", "New Friends"), lambda: self._switch_page("requests"))
         self.segmented.setMinimumHeight(36)
 
         self.page_stack = QStackedWidget(sidebar)
@@ -1475,15 +1735,11 @@ class ContactInterface(QWidget):
         self._rebuild_current_page()
 
     def reload_data(self) -> None:
-        auth = get_auth_controller()
-        current_user = auth.current_user or {}
-        self._current_user_id = str(current_user.get("id", "") or "")
-        if self._load_task and not self._load_task.done():
-            self._load_task.cancel()
-        self._load_task = asyncio.create_task(self._reload_data_async())
+        self._current_user_id = self._controller.get_current_user_id()
+        self._set_load_task(self._reload_data_async())
 
     async def _reload_data_async(self) -> None:
-        self.summary_label.setText("正在同步联系人数据...")
+        self.summary_label.setText(tr("contact.sidebar.syncing", "Syncing contact data..."))
         try:
             self._contacts, self._groups, self._requests = await asyncio.gather(
                 self._controller.load_contacts(),
@@ -1494,16 +1750,29 @@ class ContactInterface(QWidget):
         except asyncio.CancelledError:
             raise
         except (APIError, NetworkError) as exc:
-            self.summary_label.setText("联系人加载失败")
-            InfoBar.error("联系人", str(exc), parent=self.window(), duration=2400)
+            self.summary_label.setText(tr("contact.sidebar.load_failed", "Failed to load contacts."))
+            InfoBar.error(tr("common.contacts", "Contacts"), str(exc), parent=self.window(), duration=2400)
             return
         except Exception:
             logger.exception("Unexpected contact load error")
-            self.summary_label.setText("联系人加载失败")
-            InfoBar.error("联系人", "加载联系人时发生未知错误", parent=self.window(), duration=2400)
+            self.summary_label.setText(tr("contact.sidebar.load_failed", "Failed to load contacts."))
+            InfoBar.error(
+                tr("common.contacts", "Contacts"),
+                tr("contact.sidebar.load_unknown_error", "Unexpected error while loading contacts."),
+                parent=self.window(),
+                duration=2400,
+            )
             return
 
-        self.summary_label.setText(f"{len(self._contacts)} 位好友 · {len(self._groups)} 个群组 · {len(self._requests)} 条申请")
+        self.summary_label.setText(
+            tr(
+                "contact.sidebar.summary",
+                "{friends} friends · {groups} groups · {requests} requests",
+                friends=len(self._contacts),
+                groups=len(self._groups),
+                requests=len(self._requests),
+            )
+        )
         self._build_friends_page()
         self._build_groups_page()
         self._build_requests_page()
@@ -1519,16 +1788,14 @@ class ContactInterface(QWidget):
         self._restore_selection(full_reload=False)
 
     def _cancel_moment_load(self) -> None:
-        if self._moment_load_task and not self._moment_load_task.done():
-            self._moment_load_task.cancel()
+        self._cancel_pending_task(self._moment_load_task)
+        self._moment_load_task = None
 
     def _load_detail_moments(self, user_id: str, kind: str, selection_id: str, payload: object) -> None:
         self._cancel_moment_load()
         if not user_id:
             return
-        self._moment_load_task = asyncio.create_task(
-            self._load_detail_moments_async(user_id, kind, selection_id, payload)
-        )
+        self._set_moment_load_task(self._load_detail_moments_async(user_id, kind, selection_id, payload))
 
     async def _load_detail_moments_async(self, user_id: str, kind: str, selection_id: str, payload: object) -> None:
         try:
@@ -1558,7 +1825,11 @@ class ContactInterface(QWidget):
         ]
         grouped = self._controller.group_contacts(filtered)
         if not filtered:
-            self._add_empty_state(self.friends_layout, FluentIcon.PEOPLE, "没有找到匹配的好友")
+            self._add_empty_state(
+                self.friends_layout,
+                FluentIcon.PEOPLE,
+                tr("contact.sidebar.empty_friends", "No matching friends found"),
+            )
             self.alpha_nav.set_letters(set())
             self.alpha_nav.hide()
             return
@@ -1587,10 +1858,19 @@ class ContactInterface(QWidget):
         search = self.search_box.text().strip().lower()
         filtered = [item for item in self._groups if not search or search in item.name.lower() or search in item.id.lower()]
         if not filtered:
-            self._add_empty_state(self.groups_layout, FluentIcon.PEOPLE, "当前没有群组")
+            self._add_empty_state(
+                self.groups_layout,
+                FluentIcon.PEOPLE,
+                tr("contact.sidebar.empty_groups", "No groups yet"),
+            )
             return
         for group in filtered:
-            item = ContactListItem(group.id, group.name, f"成员 {group.member_count}", "群组")
+            item = ContactListItem(
+                group.id,
+                group.name,
+                tr("contact.group.member_summary", "{count} members", count=group.member_count),
+                tr("contact.group.badge", "Group"),
+            )
             item.clicked.connect(self._select_group)
             self.groups_layout.addWidget(item)
             self._group_items[group.id] = item
@@ -1610,7 +1890,11 @@ class ContactInterface(QWidget):
             or search in item.message.lower()
         ]
         if not filtered:
-            self._add_empty_state(self.requests_layout, FluentIcon.ADD, "没有新的好友申请")
+            self._add_empty_state(
+                self.requests_layout,
+                FluentIcon.ADD,
+                tr("contact.sidebar.empty_requests", "No new friend requests"),
+            )
             return
 
         incoming = [item for item in filtered if item.is_incoming(self._current_user_id)]
@@ -1730,54 +2014,88 @@ class ContactInterface(QWidget):
         request = next((item for item in self._requests if item.id == request_id), None)
         if not request or not request.can_review(self._current_user_id):
             return
-        asyncio.create_task(self._accept_request_async(request_id))
+        self._schedule_keyed_ui_task(
+            ("accept_request", request_id),
+            self._accept_request_async(request_id),
+            f"accept request {request_id}",
+        )
 
     async def _accept_request_async(self, request_id: str) -> None:
         try:
             await self._controller.accept_request(request_id)
         except Exception as exc:
-            InfoBar.error("新朋友", str(exc), parent=self.window(), duration=2200)
+            InfoBar.error(tr("contact.request.tab_title", "New Friends"), str(exc), parent=self.window(), duration=2200)
             return
-        InfoBar.success("新朋友", "好友申请已通过", parent=self.window(), duration=1800)
+        InfoBar.success(
+            tr("contact.request.tab_title", "New Friends"),
+            tr("contact.request.accepted", "Friend request accepted."),
+            parent=self.window(),
+            duration=1800,
+        )
         self.reload_data()
 
     def _reject_request(self, request_id: str) -> None:
         request = next((item for item in self._requests if item.id == request_id), None)
         if not request or not request.can_review(self._current_user_id):
             return
-        asyncio.create_task(self._reject_request_async(request_id))
+        self._schedule_keyed_ui_task(
+            ("reject_request", request_id),
+            self._reject_request_async(request_id),
+            f"reject request {request_id}",
+        )
 
     async def _reject_request_async(self, request_id: str) -> None:
         try:
             await self._controller.reject_request(request_id)
         except Exception as exc:
-            InfoBar.error("新朋友", str(exc), parent=self.window(), duration=2200)
+            InfoBar.error(tr("contact.request.tab_title", "New Friends"), str(exc), parent=self.window(), duration=2200)
             return
-        InfoBar.success("新朋友", "好友申请已拒绝", parent=self.window(), duration=1800)
+        InfoBar.success(
+            tr("contact.request.tab_title", "New Friends"),
+            tr("contact.request.rejected", "Friend request rejected."),
+            parent=self.window(),
+            duration=1800,
+        )
         self.reload_data()
 
     def _show_add_placeholder(self) -> None:
         if self._current_page == "friends":
-            dialog = AddFriendDialog(self._controller, {item.id for item in self._contacts}, self.window())
+            dialog = AddFriendDialog(
+                self._controller,
+                {item.id for item in self._contacts},
+                self._current_user_id,
+                self.window(),
+            )
             dialog.friend_request_sent.connect(self._on_friend_request_sent)
             self._show_dialog(dialog)
             return
 
         if self._current_page == "groups":
             if not self._contacts:
-                InfoBar.info("新建群组", "当前没有可选的好友", parent=self.window(), duration=2000)
+                InfoBar.info(
+                    tr("contact.create_group.title", "Create Group"),
+                    tr("contact.sidebar.no_contacts_for_group", "There are no friends available to add."),
+                    parent=self.window(),
+                    duration=2000,
+                )
                 return
             dialog = CreateGroupDialog(self._controller, self._contacts, self.window())
             dialog.group_created.connect(self._on_group_created)
             self._show_dialog(dialog)
             return
 
-        InfoBar.info("提示", "申请列表已经可以在当前页面直接查看。", parent=self.window(), duration=1800)
+        InfoBar.info(
+            tr("contact.detail.unavailable_title", "Notice"),
+            tr("contact.sidebar.requests_inline_hint", "The request list is already available on this page."),
+            parent=self.window(),
+            duration=1800,
+        )
 
     def _show_dialog(self, dialog: QDialog) -> None:
         """Keep a dialog alive while it is visible."""
         self._dialog_refs.add(dialog)
         dialog.finished.connect(lambda _result=0, dlg=dialog: self._dialog_refs.discard(dlg))
+        dialog.finished.connect(dialog.deleteLater)
         dialog.show()
         dialog.raise_()
         dialog.activateWindow()
@@ -1798,7 +2116,11 @@ class ContactInterface(QWidget):
         self.message_requested.emit({"type": "group", "data": group})
 
     def _request_detail_like_toggle(self, moment_id: str, liked: bool, like_count: int) -> None:
-        asyncio.create_task(self._request_detail_like_toggle_async(moment_id, liked, like_count))
+        self._schedule_keyed_ui_task(
+            ("moment_like", moment_id),
+            self._request_detail_like_toggle_async(moment_id, liked, like_count),
+            f"toggle moment like {moment_id}",
+        )
 
     async def _request_detail_like_toggle_async(self, moment_id: str, liked: bool, like_count: int) -> None:
         previous_liked = not liked
@@ -1807,21 +2129,30 @@ class ContactInterface(QWidget):
             await self._discovery_controller.set_liked(moment_id, liked, like_count)
         except Exception as exc:
             self.detail_panel.moments_panel.set_like_state(moment_id, previous_liked, previous_count)
-            InfoBar.error("朋友圈", str(exc), parent=self.window(), duration=2200)
+            InfoBar.error(tr("discovery.feed.title", "Moments"), str(exc), parent=self.window(), duration=2200)
             return
 
     def _request_detail_comment_create(self, moment_id: str, content: str) -> None:
-        asyncio.create_task(self._request_detail_comment_create_async(moment_id, content))
+        self._schedule_keyed_ui_task(
+            ("moment_comment", moment_id),
+            self._request_detail_comment_create_async(moment_id, content),
+            f"create moment comment {moment_id}",
+        )
 
     async def _request_detail_comment_create_async(self, moment_id: str, content: str) -> None:
         try:
             comment = await self._discovery_controller.add_comment(moment_id, content)
         except Exception as exc:
-            InfoBar.error("发表评论", str(exc), parent=self.window(), duration=2200)
+            InfoBar.error(tr("discovery.comment.title", "Post Comment"), str(exc), parent=self.window(), duration=2200)
             return
 
         self.detail_panel.moments_panel.append_comment(moment_id, comment)
-        InfoBar.success("发表评论", "评论已发送", parent=self.window(), duration=1400)
+        InfoBar.success(
+            tr("discovery.comment.title", "Post Comment"),
+            tr("discovery.comment.success", "Comment sent."),
+            parent=self.window(),
+            duration=1400,
+        )
 
     def _add_empty_state(self, layout: QVBoxLayout, icon: FluentIcon, text: str) -> None:
         holder = QWidget(self)
@@ -1851,3 +2182,85 @@ class ContactInterface(QWidget):
             widget = item.widget()
             if widget:
                 widget.deleteLater()
+
+    def _on_destroyed(self, *_args) -> None:
+        """Cancel outstanding async work when the contact page is torn down."""
+        self._cancel_pending_task(self._load_task)
+        self._load_task = None
+        self._cancel_pending_task(self._moment_load_task)
+        self._moment_load_task = None
+        for task in list(self._keyed_ui_tasks.values()):
+            if not task.done():
+                task.cancel()
+        self._keyed_ui_tasks.clear()
+        self._cancel_all_ui_tasks()
+
+    def _cancel_pending_task(self, task: Optional[asyncio.Task]) -> None:
+        """Cancel one tracked task if it is still running."""
+        if task is not None and not task.done():
+            task.cancel()
+
+    def _cancel_all_ui_tasks(self) -> None:
+        """Cancel all background tasks launched from this page."""
+        for task in list(self._ui_tasks):
+            if not task.done():
+                task.cancel()
+
+    def _create_ui_task(self, coro, context: str, *, on_done=None) -> asyncio.Task:
+        """Track page-owned coroutines so they can be canceled reliably."""
+        task = asyncio.create_task(coro)
+        self._ui_tasks.add(task)
+        task.add_done_callback(lambda finished, name=context, callback=on_done: self._finalize_ui_task(finished, name, callback))
+        return task
+
+    def _finalize_ui_task(self, task: asyncio.Task, context: str, on_done=None) -> None:
+        """Drop finished tasks from bookkeeping and report failures."""
+        self._ui_tasks.discard(task)
+        if on_done is not None:
+            on_done(task)
+
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            logger.exception("ContactInterface task failed: %s", context)
+
+    def _set_load_task(self, coro) -> None:
+        """Replace the active contact-reload task with the newest request."""
+        self._cancel_pending_task(self._load_task)
+        self._load_task = self._create_ui_task(coro, "reload contact data", on_done=self._clear_load_task)
+
+    def _clear_load_task(self, task: asyncio.Task) -> None:
+        """Clear the active reload task reference when it finishes."""
+        if self._load_task is task:
+            self._load_task = None
+
+    def _set_moment_load_task(self, coro) -> None:
+        """Replace the active detail-moments load task."""
+        self._cancel_pending_task(self._moment_load_task)
+        self._moment_load_task = self._create_ui_task(coro, "load contact moments", on_done=self._clear_moment_load_task)
+
+    def _clear_moment_load_task(self, task: asyncio.Task) -> None:
+        """Clear the tracked moments task when it finishes."""
+        if self._moment_load_task is task:
+            self._moment_load_task = None
+
+    def _schedule_keyed_ui_task(self, key: tuple[str, str], coro, context: str) -> None:
+        """Prevent duplicate actions for the same target while one is still running."""
+        existing = self._keyed_ui_tasks.get(key)
+        if existing is not None and not existing.done():
+            return
+        self._keyed_ui_tasks[key] = self._create_ui_task(
+            coro,
+            context,
+            on_done=lambda task, task_key=key: self._clear_keyed_ui_task(task_key, task),
+        )
+
+    def _clear_keyed_ui_task(self, key: tuple[str, str], task: asyncio.Task) -> None:
+        """Clear a keyed action slot once its task finishes."""
+        if self._keyed_ui_tasks.get(key) is task:
+            self._keyed_ui_tasks.pop(key, None)
+
+
+

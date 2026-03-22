@@ -6,8 +6,10 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from client.core import logging
+from client.core.i18n import tr
 from client.core.logging import setup_logging
 from client.network.http_client import get_http_client
+from client.ui.controllers.auth_controller import get_auth_controller
 
 
 setup_logging()
@@ -34,13 +36,18 @@ class ContactRecord:
     assistim_id: str = ""
     region: str = ""
     signature: str = ""
+    email: str = ""
+    phone: str = ""
+    birthday: str = ""
+    gender: str = ""
+    status: str = ""
     category: str = "friend"
     extra: dict = field(default_factory=dict)
 
     @property
     def display_name(self) -> str:
         """Return the best visible name for UI rendering."""
-        return self.remark or self.nickname or self.name or self.username or "Unnamed Contact"
+        return self.remark or self.nickname or self.name or self.username or tr("contact.record.unnamed", "Unnamed Contact")
 
 
 @dataclass
@@ -71,7 +78,7 @@ class FriendRequestRecord:
     @property
     def display_name(self) -> str:
         """Return the best visible name for the sender."""
-        return self.sender_name or self.sender_id or "New Friend"
+        return self.sender_name or self.sender_id or tr("contact.request.new_friend", "New Friend")
 
     def is_incoming(self, current_user_id: str) -> bool:
         """Return whether the request was received by the current user."""
@@ -90,25 +97,25 @@ class FriendRequestRecord:
     def counterpart_name(self, current_user_id: str) -> str:
         """Return the best display name for the other party."""
         if self.is_outgoing(current_user_id):
-            return self.receiver_id or "Target User"
+            return self.receiver_id or tr("contact.request.target_user", "Target User")
         return self.display_name
 
     def direction_label(self, current_user_id: str) -> str:
         """Return a UI label describing request direction."""
         if self.is_outgoing(current_user_id):
-            return "发出"
+            return tr("contact.request.direction.sent", "Sent")
         if self.is_incoming(current_user_id):
-            return "收到"
-        return "申请"
+            return tr("contact.request.direction.received", "Received")
+        return tr("contact.request.direction.requested", "Request")
 
     def status_label(self) -> str:
         """Return a localized status label."""
         return {
-            "pending": "???",
-            "accepted": "???",
-            "rejected": "???",
-            "expired": "???",
-        }.get(self.status, self.status or "??")
+            "pending": tr("contact.request.status.pending", "Pending"),
+            "accepted": tr("contact.request.status.accepted", "Accepted"),
+            "rejected": tr("contact.request.status.rejected", "Rejected"),
+            "expired": tr("contact.request.status.expired", "Expired"),
+        }.get(self.status, self.status or tr("contact.request.status.processed", "Processed"))
 
     def can_review(self, current_user_id: str) -> bool:
         """Return whether the current user can accept or reject this request."""
@@ -128,7 +135,7 @@ class UserSearchRecord:
     @property
     def display_name(self) -> str:
         """Return the best visible name."""
-        return self.nickname or self.username or "Unknown User"
+        return self.nickname or self.username or tr("contact.user.unknown", "Unknown User")
 
 
 class ContactController:
@@ -136,6 +143,12 @@ class ContactController:
 
     def __init__(self) -> None:
         self._http = get_http_client()
+        self._auth = get_auth_controller()
+
+    def get_current_user_id(self) -> str:
+        """Return the authenticated user id for UI flows that need directionality."""
+        current_user = self._auth.current_user or {}
+        return str(current_user.get("id", "") or "")
 
     async def load_contacts(self) -> list[ContactRecord]:
         """Load and normalize the friend list."""
@@ -156,6 +169,11 @@ class ContactController:
                     assistim_id=username,
                     region=str(item.get("region", "") or ""),
                     signature=str(item.get("signature", "") or ""),
+                    email=str(item.get("email", "") or ""),
+                    phone=str(item.get("phone", "") or ""),
+                    birthday=str(item.get("birthday", "") or ""),
+                    gender=str(item.get("gender", "") or ""),
+                    status=str(item.get("status", "") or ""),
                     category="friend",
                     extra=dict(item or {}),
                 )

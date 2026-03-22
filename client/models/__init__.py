@@ -1,8 +1,14 @@
 # Models module - data models
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 from client.models.message import ChatMessage, Session, AISession, MessageType
-from client.models.message_model import MessageModel
-from client.models.session_model import SessionModel
+
+if TYPE_CHECKING:
+    from client.models.message_model import MessageModel
+    from client.models.session_model import SessionModel
 
 __all__ = [
     "ChatMessage",
@@ -12,3 +18,16 @@ __all__ = [
     "MessageModel",
     "SessionModel",
 ]
+
+
+def __getattr__(name: str):
+    """Lazily import Qt-backed models so non-UI modules avoid PySide6 imports."""
+    if name == "MessageModel":
+        from client.models.message_model import MessageModel
+
+        return MessageModel
+    if name == "SessionModel":
+        from client.models.session_model import SessionModel
+
+        return SessionModel
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

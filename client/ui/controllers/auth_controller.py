@@ -12,6 +12,7 @@ from client.core import logging
 from client.core.exceptions import APIError, AuthExpiredError, NetworkError
 from client.core.logging import setup_logging
 from client.core.secure_storage import SecureStorage, SecureStorageError
+from client.managers.connection_manager import peek_connection_manager
 from client.managers.message_manager import get_message_manager
 from client.network.http_client import get_http_client
 from client.storage.database import get_database
@@ -37,6 +38,9 @@ class AuthController:
         self._message_manager = get_message_manager()
         self._chat_controller = get_chat_controller()
         self._current_user: dict[str, Any] | None = None
+        self._token_state_task: Optional[asyncio.Task] = None
+        self._suppress_token_listener_sync_depth = 0
+        self._closed = False
         self._http.add_token_listener(self._on_tokens_changed)
 
     @property
@@ -65,7 +69,8 @@ class AuthController:
             await self.clear_session()
             return None
 
-        self._http.set_tokens(access_token, refresh_token)
+        self._cancel_pending_task(self._token_state_task)
+        self._set_http_tokens(access_token, refresh_token)
 
         try:
             user = await self._http.get("/auth/me")
@@ -96,7 +101,7 @@ class AuthController:
                 "password": password,
             },
         )
-        return await self._apply_auth_payload(payload)
+        return await self._apply_auth_payload(payload, reset_local_chat_state=True)
 
     async def register(self, username: str, nickname: str, password: str) -> dict[str, Any]:
         payload = await self._http.post(
@@ -107,14 +112,65 @@ class AuthController:
                 "nickname": nickname,
             },
         )
-        return await self._apply_auth_payload(payload)
+        return await self._apply_auth_payload(payload, reset_local_chat_state=True)
+
+    async def logout(self) -> None:
+        """Best-effort backend logout followed by local session cleanup."""
+        try:
+            await self._http.delete("/auth/session")
+        except (AuthExpiredError, APIError, NetworkError) as exc:
+            logger.info("Logout request did not complete cleanly: %s", exc)
+        except Exception:
+            logger.exception("Unexpected logout error")
+        finally:
+            await self.clear_session()
+
+    async def update_profile(
+        self,
+        *,
+        nickname: str | None = None,
+        avatar: str | None = None,
+        email: str | None = None,
+        phone: str | None = None,
+        birthday: str | None = None,
+        region: str | None = None,
+        signature: str | None = None,
+        gender: str | None = None,
+        status: str | None = None,
+    ) -> dict[str, Any]:
+        """Update the current user's profile and persist the refreshed auth context."""
+        payload = {
+            key: value
+            for key, value in {
+                "nickname": nickname,
+                "avatar": avatar,
+                "email": email,
+                "phone": phone,
+                "birthday": birthday,
+                "region": region,
+                "signature": signature,
+                "gender": gender,
+                "status": status,
+            }.items()
+            if value is not None
+        }
+
+        if not payload:
+            return dict(self._current_user or {})
+
+        user = await self._http.put("/users/me", json=payload)
+        self._apply_runtime_context(user)
+        await self._persist_user_profile(user)
+        return user
 
     async def clear_session(self) -> None:
-        self._http.clear_tokens()
+        self._cancel_pending_task(self._token_state_task)
+        self._clear_http_tokens()
         self._current_user = None
         self._message_manager.set_user_id("")
         self._chat_controller.set_user_id("")
 
+        await self._reset_local_chat_state()
         await self._clear_persisted_auth_state()
 
     async def _clear_persisted_auth_state(self) -> None:
@@ -127,7 +183,21 @@ class AuthController:
         ):
             await self._db.delete_app_state(key)
 
-    async def _apply_auth_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+    async def _reset_local_chat_state(self) -> None:
+        """Clear cached chat/session state and reset the sync cursor."""
+        if self._db.is_connected:
+            await self._db.clear_chat_state()
+
+        conn_manager = peek_connection_manager()
+        if conn_manager is not None:
+            await conn_manager.reset_sync_state()
+
+    async def _apply_auth_payload(
+        self,
+        payload: dict[str, Any],
+        *,
+        reset_local_chat_state: bool = False,
+    ) -> dict[str, Any]:
         access_token = payload.get("access_token", "")
         refresh_token = payload.get("refresh_token", "")
         user = payload.get("user", {})
@@ -135,7 +205,10 @@ class AuthController:
         if not access_token or not refresh_token or not user.get("id"):
             raise APIError("Invalid authentication payload")
 
-        self._http.set_tokens(access_token, refresh_token)
+        self._cancel_pending_task(self._token_state_task)
+        if reset_local_chat_state:
+            await self._reset_local_chat_state()
+        self._set_http_tokens(access_token, refresh_token)
         await self._persist_auth_state(access_token, refresh_token, user)
         self._apply_runtime_context(user)
         return user
@@ -146,6 +219,10 @@ class AuthController:
 
         await self._db.set_app_state(self.ACCESS_TOKEN_KEY, access_cipher)
         await self._db.set_app_state(self.REFRESH_TOKEN_KEY, refresh_cipher)
+        await self._persist_user_profile(user)
+
+    async def _persist_user_profile(self, user: dict[str, Any]) -> None:
+        """Persist the current user payload without touching token state."""
         await self._db.set_app_state(self.USER_ID_KEY, user.get("id", ""))
         await self._db.set_app_state(self.USER_PROFILE_KEY, json.dumps(user, ensure_ascii=False))
 
@@ -158,23 +235,79 @@ class AuthController:
 
     def _on_tokens_changed(self, access_token: Optional[str], refresh_token: Optional[str]) -> None:
         """Persist token updates so refresh rotations survive app restarts."""
+        if self._closed or self._suppress_token_listener_sync_depth > 0:
+            return
+
         try:
-            loop = asyncio.get_running_loop()
+            asyncio.get_running_loop()
         except RuntimeError:
             return
 
         if access_token and refresh_token and self._current_user:
-            loop.create_task(
+            self._set_token_state_task(
                 self._persist_auth_state(
                     access_token,
                     refresh_token,
                     self._current_user,
-                )
+                ),
+                "persist rotated tokens",
             )
             return
 
         if not access_token:
-            loop.create_task(self._clear_persisted_auth_state())
+            self._set_token_state_task(self._clear_persisted_auth_state(), "clear persisted auth state")
+
+    def _set_http_tokens(self, access_token: str, refresh_token: str) -> None:
+        """Update HTTP tokens without re-triggering redundant listener persistence."""
+        self._suppress_token_listener_sync_depth += 1
+        try:
+            self._http.set_tokens(access_token, refresh_token)
+        finally:
+            self._suppress_token_listener_sync_depth = max(0, self._suppress_token_listener_sync_depth - 1)
+
+    def _clear_http_tokens(self) -> None:
+        """Clear HTTP tokens without scheduling duplicate persisted-state cleanup."""
+        self._suppress_token_listener_sync_depth += 1
+        try:
+            self._http.clear_tokens()
+        finally:
+            self._suppress_token_listener_sync_depth = max(0, self._suppress_token_listener_sync_depth - 1)
+
+    def _cancel_pending_task(self, task: Optional[asyncio.Task]) -> None:
+        """Cancel one tracked background task if it is still running."""
+        if task is not None and not task.done():
+            task.cancel()
+
+    def _set_token_state_task(self, coro, context: str) -> None:
+        """Keep only the latest persisted-token sync task alive."""
+        self._cancel_pending_task(self._token_state_task)
+        task = asyncio.create_task(coro)
+        self._token_state_task = task
+        task.add_done_callback(lambda finished, name=context: self._finalize_token_state_task(finished, name))
+
+    def _finalize_token_state_task(self, task: asyncio.Task, context: str) -> None:
+        """Clear task bookkeeping and report background sync failures."""
+        if self._token_state_task is task:
+            self._token_state_task = None
+
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            logger.exception("Auth controller background task failed: %s", context)
+
+    async def close(self) -> None:
+        """Detach token listeners and stop background persistence work."""
+        self._closed = True
+        self._http.remove_token_listener(self._on_tokens_changed)
+
+        task = self._token_state_task
+        self._cancel_pending_task(task)
+        self._token_state_task = None
+
+        if task is not None:
+            await asyncio.gather(task, return_exceptions=True)
 
     def _is_token_expired(self, token: str) -> bool:
         """Check JWT exp locally so obviously expired sessions are cleared before restore."""
@@ -209,9 +342,18 @@ class AuthController:
 _auth_controller: Optional[AuthController] = None
 
 
+def peek_auth_controller() -> Optional[AuthController]:
+    """Return the existing auth controller singleton if it was created."""
+    return _auth_controller
+
+
 def get_auth_controller() -> AuthController:
     """Get the global auth controller instance."""
     global _auth_controller
     if _auth_controller is None:
         _auth_controller = AuthController()
     return _auth_controller
+
+
+
+

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from datetime import datetime
 from typing import Optional
@@ -14,12 +15,17 @@ from PySide6.QtWidgets import QAbstractItemView, QFrame, QHBoxLayout, QListView,
 from qfluentwidgets import Action, FluentIcon, RoundMenu, ScrollBarHandleDisplayMode, SearchLineEdit, ToolButton
 from qfluentwidgets.components.widgets.scroll_bar import SmoothScrollDelegate
 
+from client.core.i18n import tr
 from client.delegates.session_delegate import SessionDelegate
 from client.events.event_bus import get_event_bus
-from client.managers.session_manager import SessionEvent, get_session_manager
-from client.models.message import Session
+from client.managers.session_manager import SessionEvent
+from client.models.message import Session, format_message_preview
 from client.models.session_model import SessionModel
+from client.ui.controllers.session_controller import get_session_controller
 from client.ui.styles import StyleSheet
+
+
+logger = logging.getLogger(__name__)
 
 
 class SessionFilterProxyModel(QSortFilterProxyModel):
@@ -65,12 +71,15 @@ class SessionPanel(QWidget):
         self._proxy_model: Optional[SessionFilterProxyModel] = None
         self._session_delegate: Optional[SessionDelegate] = None
         self._scroll_delegate: Optional[SmoothScrollDelegate] = None
-        self._session_manager = get_session_manager()
+        self._session_controller = get_session_controller()
         self._event_bus = get_event_bus()
         self._sessions_snapshot: tuple | None = None
+        self._event_subscriptions: list[tuple[str, object]] = []
+        self._ui_tasks: set[asyncio.Task] = set()
 
         self._setup_ui()
         self._subscribe_to_events()
+        self.destroyed.connect(self._on_destroyed)
 
     def _setup_ui(self) -> None:
         """Create search box and list view."""
@@ -88,7 +97,7 @@ class SessionPanel(QWidget):
         self.search_bar_layout.setSpacing(12)
 
         self.search_box = SearchLineEdit(self.search_bar)
-        self.search_box.setPlaceholderText("搜索")
+        self.search_box.setPlaceholderText(tr("session.search.placeholder", "Search"))
         self.search_box.setFixedHeight(36)
         self.search_box.setMinimumWidth(0)
         self.search_box.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
@@ -96,7 +105,7 @@ class SessionPanel(QWidget):
 
         self.add_button = ToolButton(FluentIcon.ADD, self.search_bar)
         self.add_button.setObjectName("sessionAddButton")
-        self.add_button.setToolTip("新建会话")
+        self.add_button.setToolTip(tr("session.add.tooltip", "New Conversation"))
         self.add_button.setFixedSize(36, 36)
         self.add_button.clicked.connect(self.add_requested.emit)
 
@@ -178,9 +187,9 @@ class SessionPanel(QWidget):
         self.session_list.updateGeometries()
         self.session_list.viewport().update()
 
-    def load_sessions_from_manager(self) -> None:
-        """Load sessions from SessionManager into the model."""
-        sessions = self._session_manager.sessions
+    def load_sessions(self, sessions: Optional[list[Session]] = None) -> None:
+        """Load sessions into the model, defaulting to the current controller cache."""
+        sessions = list(sessions) if sessions is not None else self._session_controller.get_sessions()
         snapshot = self._session_snapshot(sessions)
         if snapshot == self._sessions_snapshot:
             return
@@ -189,11 +198,33 @@ class SessionPanel(QWidget):
 
     def _subscribe_to_events(self) -> None:
         """Subscribe to session events."""
-        self._event_bus.subscribe_sync(SessionEvent.CREATED, self._on_session_created)
-        self._event_bus.subscribe_sync(SessionEvent.UPDATED, self._on_session_updated)
-        self._event_bus.subscribe_sync(SessionEvent.DELETED, self._on_session_deleted)
-        self._event_bus.subscribe_sync(SessionEvent.MESSAGE_ADDED, self._on_message_added)
-        self._event_bus.subscribe_sync(SessionEvent.UNREAD_CHANGED, self._on_unread_changed)
+        self._subscribe_sync(SessionEvent.CREATED, self._on_session_created)
+        self._subscribe_sync(SessionEvent.UPDATED, self._on_session_updated)
+        self._subscribe_sync(SessionEvent.DELETED, self._on_session_deleted)
+        self._subscribe_sync(SessionEvent.MESSAGE_ADDED, self._on_message_added)
+        self._subscribe_sync(SessionEvent.UNREAD_CHANGED, self._on_unread_changed)
+
+    def _subscribe_sync(self, event_type: str, handler) -> None:
+        """Subscribe and retain the handler for explicit unsubscribe on teardown."""
+        self._event_subscriptions.append((event_type, handler))
+        self._event_bus.subscribe_sync(event_type, handler)
+
+    def _unsubscribe_from_events(self) -> None:
+        """Remove all event-bus subscriptions owned by this panel."""
+        while self._event_subscriptions:
+            event_type, handler = self._event_subscriptions.pop()
+            self._event_bus.unsubscribe_sync(event_type, handler)
+
+    def _on_destroyed(self, *_args) -> None:
+        """Detach event listeners and cancel outstanding async actions."""
+        self._unsubscribe_from_events()
+        self._cancel_all_ui_tasks()
+
+    def _cancel_all_ui_tasks(self) -> None:
+        """Cancel all background actions launched from this panel."""
+        for task in list(self._ui_tasks):
+            if not task.done():
+                task.cancel()
 
     def _on_session_created(self, data: dict) -> None:
         """Handle newly created sessions."""
@@ -225,7 +256,10 @@ class SessionPanel(QWidget):
         if session_id and message:
             self._session_model.update_session(
                 session_id,
-                last_message=getattr(message, "content", ""),
+                last_message=format_message_preview(
+                    getattr(message, "content", ""),
+                    getattr(message, "message_type", None),
+                ),
                 last_message_time=getattr(message, "timestamp", None),
             )
 
@@ -296,9 +330,17 @@ class SessionPanel(QWidget):
         pinned = bool(getattr(session, "is_pinned", False) or session.extra.get("is_pinned"))
         menu = RoundMenu(parent=self)
         menu.setMinimumWidth(148)
-        pin_action = Action("取消置顶" if pinned else "置顶", self)
-        unread_action = Action("标为已读" if session.unread_count > 0 else "标为未读", self)
-        delete_action = Action("删除", self)
+        pin_action = Action(
+            tr("session.context.unpin", "Unpin") if pinned else tr("session.context.pin", "Pin"),
+            self,
+        )
+        unread_action = Action(
+            tr("session.context.mark_read", "Mark as Read")
+            if session.unread_count > 0
+            else tr("session.context.mark_unread", "Mark as Unread"),
+            self,
+        )
+        delete_action = Action(tr("common.delete", "Delete"), self)
 
         menu.addAction(pin_action)
         menu.addAction(unread_action)
@@ -317,7 +359,7 @@ class SessionPanel(QWidget):
         )
         unread_action.triggered.connect(
             lambda _checked=False, sid=session.session_id, unread=(session.unread_count == 0): self._schedule_ui_task(
-                self._session_manager.mark_session_unread(sid, unread),
+                self._session_controller.mark_session_unread(sid, unread),
                 f"toggle unread {sid}",
             )
         )
@@ -330,7 +372,7 @@ class SessionPanel(QWidget):
     def _trigger_session_delete(self, session_id: str) -> None:
         """Delete a session locally first, then persist the removal."""
         self._remove_session_safe(session_id)
-        self._schedule_ui_task(self._session_manager.remove_session(session_id), f"delete session {session_id}")
+        self._schedule_ui_task(self._session_controller.remove_session(session_id), f"delete session {session_id}")
 
     def _toggle_session_pin_local(self, session_id: str, pinned: bool) -> None:
         """Apply pin state immediately in the list, then persist asynchronously."""
@@ -341,7 +383,7 @@ class SessionPanel(QWidget):
         self._sessions_snapshot = None
         if selected_session_id:
             self.select_session(selected_session_id, emit_signal=False)
-        self._schedule_ui_task(self._session_manager.set_pinned(session_id, pinned), f"toggle pin {session_id}")
+        self._schedule_ui_task(self._session_controller.set_pinned(session_id, pinned), f"toggle pin {session_id}")
 
     def _current_selected_session_id(self) -> str | None:
         """Return the session id currently selected in the list, if any."""
@@ -354,7 +396,13 @@ class SessionPanel(QWidget):
     def _schedule_ui_task(self, coro, context: str) -> None:
         """Schedule a session-menu coroutine and log failures."""
         task = asyncio.create_task(coro)
-        task.add_done_callback(lambda finished, name=context: self._log_ui_task_result(finished, name))
+        self._ui_tasks.add(task)
+        task.add_done_callback(lambda finished, name=context: self._finalize_ui_task(finished, name))
+
+    def _finalize_ui_task(self, task: asyncio.Task, context: str) -> None:
+        """Drop completed tasks from tracking and report failures."""
+        self._ui_tasks.discard(task)
+        self._log_ui_task_result(task, context)
 
     @staticmethod
     def _log_ui_task_result(task: asyncio.Task, context: str) -> None:
@@ -364,9 +412,7 @@ class SessionPanel(QWidget):
         except asyncio.CancelledError:
             return
         except Exception:
-            import logging
-
-            logging.getLogger(__name__).exception("Session menu task failed: %s", context)
+            logger.exception("Session menu task failed: %s", context)
 
     def get_search_box(self) -> SearchLineEdit:
         """Return search box widget."""

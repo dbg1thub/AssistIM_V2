@@ -44,16 +44,35 @@ class EventBus:
             return weakref.WeakMethod(handler)
         return weakref.ref(handler)
 
+    @staticmethod
+    def _handler_identity(handler: EventHandler) -> tuple[Any, ...]:
+        """Build a stable identity for functions and bound methods."""
+        if inspect.ismethod(handler) and getattr(handler, "__self__", None) is not None:
+            return ("bound", id(handler.__self__), getattr(handler, "__func__", None))
+        return ("callable", handler)
+
+    def _handler_matches(self, ref: weakref.ReferenceType, handler: EventHandler) -> bool:
+        """Return whether one stored weakref points at the same logical handler."""
+        existing = ref()
+        if existing is None:
+            return False
+        return self._handler_identity(existing) == self._handler_identity(handler)
+
     def _get_live_handlers(self, event_type: str) -> list[EventHandler]:
         """Return live handlers and prune dead weak references."""
         refs = self._listeners.get(event_type, [])
         live_handlers: list[EventHandler] = []
         alive_refs: list[weakref.ReferenceType] = []
+        seen_handlers: set[tuple[Any, ...]] = set()
 
         for ref in refs:
             handler = ref()
             if handler is None:
                 continue
+            handler_identity = self._handler_identity(handler)
+            if handler_identity in seen_handlers:
+                continue
+            seen_handlers.add(handler_identity)
             live_handlers.append(handler)
             alive_refs.append(ref)
 
@@ -71,6 +90,9 @@ class EventBus:
             handler: Callback function to handle the event
         """
         async with self._lock:
+            if any(self._handler_matches(ref, handler) for ref in self._listeners[event_type]):
+                logger.debug(f"Handler already subscribed to event: {event_type}")
+                return
             self._listeners[event_type].append(self._create_handler_ref(handler))
             logger.debug(f"Subscribed handler to event: {event_type}")
 
@@ -83,6 +105,9 @@ class EventBus:
             handler: Callback function to handle the event
         """
         with self._sync_lock:
+            if any(self._handler_matches(ref, handler) for ref in self._listeners[event_type]):
+                logger.debug(f"Handler already subscribed to event (sync): {event_type}")
+                return
             self._listeners[event_type].append(self._create_handler_ref(handler))
             logger.debug(f"Subscribed handler to event (sync): {event_type}")
 
@@ -111,7 +136,11 @@ class EventBus:
     def _remove_handler(self, event_type: str, handler: EventHandler) -> None:
         """Remove a handler from the listeners."""
         refs = self._listeners.get(event_type, [])
-        self._listeners[event_type] = [ref for ref in refs if ref() is not handler]
+        self._listeners[event_type] = [
+            ref
+            for ref in refs
+            if ref() is not None and not self._handler_matches(ref, handler)
+        ]
         logger.debug(f"Unsubscribed handler from event: {event_type}")
 
     async def emit(self, event_type: str, data: Any = None) -> None:

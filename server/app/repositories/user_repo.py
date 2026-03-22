@@ -1,4 +1,4 @@
-﻿"""User repository."""
+"""User repository."""
 
 from __future__ import annotations
 
@@ -26,7 +26,12 @@ class UserRepository:
     def search_users(self, keyword: str, page: int = 1, size: int = 20) -> tuple[int, list[User]]:
         pattern = f"%{keyword}%"
         base_stmt = select(User).where(
-            or_(User.username.ilike(pattern), User.nickname.ilike(pattern))
+            or_(
+                User.username.ilike(pattern),
+                User.nickname.ilike(pattern),
+                User.email.ilike(pattern),
+                User.phone.ilike(pattern),
+            )
         )
         total = self.db.execute(select(func.count()).select_from(base_stmt.subquery())).scalar_one()
         stmt = base_stmt.order_by(User.created_at.desc()).offset((page - 1) * size).limit(size)
@@ -46,7 +51,7 @@ class UserRepository:
 
     def update(self, user: User, **fields: object) -> User:
         for key, value in fields.items():
-            if value is not None and hasattr(user, key):
+            if hasattr(user, key):
                 setattr(user, key, value)
         self.db.add(user)
         self.db.commit()

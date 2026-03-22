@@ -1,4 +1,4 @@
-"""
+﻿"""
 Data Models Module
 
 Core data models using dataclasses.
@@ -9,19 +9,21 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Optional
 
+from client.core.datetime_utils import coerce_local_datetime
+
 
 def _coerce_datetime(value: Any) -> Optional[datetime]:
     """Normalize timestamps from float/int/ISO string into datetime."""
-    if value is None or isinstance(value, datetime):
-        return value
-    if isinstance(value, (int, float)):
-        return datetime.fromtimestamp(value)
-    if isinstance(value, str):
-        try:
-            return datetime.fromisoformat(value)
-        except ValueError:
-            return None
-    return None
+    return coerce_local_datetime(value)
+
+
+def _preview_token(key: str, default: str) -> str:
+    """Resolve localized preview labels without hard-wiring model imports to UI startup."""
+    try:
+        from client.core.i18n import tr
+    except Exception:
+        return default
+    return tr(key, default)
 
 
 class MessageStatus(Enum):
@@ -73,11 +75,11 @@ def format_message_preview(content: str, message_type: MessageType | str | None 
             normalized_type = None
 
     if normalized_type == MessageType.IMAGE:
-        return "[图片]"
+        return _preview_token("preview.image", "[Image]")
     if normalized_type == MessageType.VIDEO:
-        return "[视频]"
+        return _preview_token("preview.video", "[Video]")
     if normalized_type == MessageType.FILE:
-        return "[文件]"
+        return _preview_token("preview.file", "[File]")
 
     text = (content or "").strip()
     if not text:
@@ -85,24 +87,43 @@ def format_message_preview(content: str, message_type: MessageType | str | None 
 
     inferred_type = infer_message_type_from_path(text) if text.startswith(("/", "http://", "https://")) or os.path.splitext(text)[1] else None
     if inferred_type == MessageType.IMAGE:
-        return "[图片]"
+        return _preview_token("preview.image", "[Image]")
     if inferred_type == MessageType.VIDEO:
-        return "[视频]"
+        return _preview_token("preview.video", "[Video]")
     if inferred_type == MessageType.FILE and (text.startswith("/uploads/") or text.startswith("http://") or text.startswith("https://")):
-        return "[文件]"
+        return _preview_token("preview.file", "[File]")
 
     if text.count("|") >= 2:
         tail = text.split("|")[-1]
         inferred_tail_type = infer_message_type_from_path(tail)
         if inferred_tail_type == MessageType.IMAGE:
-            return "[图片]"
+            return _preview_token("preview.image", "[Image]")
         if inferred_tail_type == MessageType.VIDEO:
-            return "[视频]"
+            return _preview_token("preview.video", "[Video]")
         if inferred_tail_type == MessageType.FILE:
-            return "[文件]"
+            return _preview_token("preview.file", "[File]")
 
     return text
 
+
+def resolve_recall_notice(message: "ChatMessage") -> str:
+    """Return the safe recall notice that should be shown to the user."""
+    extra = getattr(message, "extra", {}) or {}
+    explicit_notice = str(extra.get("recall_notice", "") or "").strip()
+    if explicit_notice:
+        return explicit_notice
+
+    fallback_notice = _preview_token(
+        "message.recalled.self" if getattr(message, "is_self", False) else "message.recalled.other",
+        "You recalled a message" if getattr(message, "is_self", False) else "The other side recalled a message",
+    )
+
+    message_type = getattr(message, "message_type", None)
+    if message_type == MessageType.SYSTEM:
+        text = (getattr(message, "content", "") or "").strip()
+        return text or fallback_notice
+
+    return fallback_notice
 
 class UserStatus(Enum):
     """User online status."""
@@ -458,3 +479,4 @@ class AISession:
             max_tokens=data.get("max_tokens", 2048),
             context_messages=data.get("context_messages", 10),
         )
+

@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from collections import OrderedDict
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 import time
 
 from PySide6.QtCore import QModelIndex, QPoint, QRect, QRectF, QSize, Qt, QTimer, QUrl
@@ -23,6 +23,8 @@ from PySide6.QtWidgets import QStyledItemDelegate, QStyleOptionViewItem
 from qfluentwidgets import FluentIcon, Theme, isDarkTheme, themeColor
 
 from client.core.config_backend import get_config
+from client.core.datetime_utils import coerce_local_datetime
+from client.core.i18n import format_chat_timestamp, tr
 from client.core.video_thumbnail_cache import (
     get_thumbnail as get_video_thumbnail,
     get_video_thumbnail_cache,
@@ -454,7 +456,11 @@ class MessageDelegate(QStyledItemDelegate):
         font.setPixelSize(12)
         painter.setFont(font)
         painter.setPen(QColor(196, 196, 196, 220) if isDarkTheme() else QColor("#8A8A8A"))
-        painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, message.content or "撤回了一条消息")
+        painter.drawText(
+            rect,
+            Qt.AlignmentFlag.AlignCenter,
+            message.content or tr("message.recalled_notice", "A message was recalled"),
+        )
 
     def _display_kind(self, index: QModelIndex, message: ChatMessage) -> str:
         """Return the visible row kind for the current index."""
@@ -1390,42 +1396,11 @@ class MessageDelegate(QStyledItemDelegate):
 
     def _format_time(self, value) -> str:
         """Format message time for the center time block."""
-        moment = self._normalize_datetime(value)
-        if moment is None:
-            return ""
-        now = datetime.now()
-        today = now.date()
-        moment_date = moment.date()
-
-        if moment_date == today:
-            return moment.strftime("%H:%M")
-        if moment_date == today - timedelta(days=1):
-            return moment.strftime("昨天 %H:%M")
-
-        day_delta = (today - moment_date).days
-        if 1 < day_delta <= 7:
-            weekdays = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
-            return f"{weekdays[moment.weekday()]} {moment.strftime('%H:%M')}"
-
-        if moment.year == now.year:
-            return f"{moment.month}月{moment.day}日 {moment.strftime('%H:%M')}"
-
-        return f"{moment.year}年{moment.month}月{moment.day}日 {moment.strftime('%H:%M')}"
+        return format_chat_timestamp(value)
 
     def _normalize_datetime(self, value) -> datetime | None:
         """Normalize timestamp values from the message model."""
-        if value is None:
-            return None
-        if isinstance(value, datetime):
-            return value
-        if isinstance(value, (int, float)):
-            return datetime.fromtimestamp(value)
-        if isinstance(value, str):
-            try:
-                return datetime.fromisoformat(value)
-            except ValueError:
-                return None
-        return None
+        return coerce_local_datetime(value)
 
     def _load_pixmap(self, message: ChatMessage) -> QPixmap:
         """Load image from local path, cache, or remote URL."""

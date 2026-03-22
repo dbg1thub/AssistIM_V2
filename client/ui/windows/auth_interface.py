@@ -27,11 +27,13 @@ from qfluentwidgets import (
     PrimaryPushButton,
     SegmentedWidget,
     SubtitleLabel,
-    TitleLabel, FluentWidget,
+    TitleLabel,
+    FluentWidget,
 )
 
 from client.core import logging
 from client.core.exceptions import APIError, NetworkError
+from client.core.i18n import tr
 from client.core.logging import setup_logging
 from client.ui.styles import StyleSheet
 from client.ui.controllers.auth_controller import get_auth_controller
@@ -57,15 +59,18 @@ class AuthInterface(FluentWidget):
         super().__init__(parent)
         self._auth_controller = get_auth_controller()
         self._submit_task: Optional[asyncio.Task] = None
+        self._ui_tasks: set[asyncio.Task] = set()
         self._busy_mode: Optional[str] = None
         self._centered_once = False
 
         self._setup_ui()
         self._connect_signals()
         self._switch_to(self.login_page)
+        self.destroyed.connect(self._on_destroyed)
 
     def _setup_ui(self) -> None:
         self.setObjectName("AuthInterface")
+        self.setWindowTitle(tr("common.app_name", "AssistIM"))
         self.resize(980, 640)
         self.setMinimumSize(920, 580)
 
@@ -89,17 +94,32 @@ class AuthInterface(FluentWidget):
         self.brand_icon = IconWidget(FluentIcon.CHAT, self.brand_card)
         self.brand_icon.setFixedSize(52, 52)
 
-        brand_title = TitleLabel("AssistIM", self.brand_card)
-        brand_subtitle = SubtitleLabel("Desktop messaging with AI assistance", self.brand_card)
+        brand_title = TitleLabel(tr("common.app_name", "AssistIM"), self.brand_card)
+        brand_subtitle = SubtitleLabel(
+            tr("auth.brand.subtitle", "Desktop messaging with AI assistance"),
+            self.brand_card,
+        )
         brand_copy = BodyLabel(
-            "Sign in to sync conversations, reconnect WebSocket messaging, and continue the same account across devices.",
+            tr(
+                "auth.brand.copy",
+                "Sign in to sync conversations, reconnect WebSocket messaging, and continue the same account across devices.",
+            ),
             self.brand_card,
         )
         brand_copy.setWordWrap(True)
 
-        brand_feature_1 = CaptionLabel("Encrypted local token storage via Windows DPAPI", self.brand_card)
-        brand_feature_2 = CaptionLabel("Fast login, register, and session restore flow", self.brand_card)
-        brand_feature_3 = CaptionLabel("Fluent layout tuned to Win11 spacing rhythm", self.brand_card)
+        brand_feature_1 = CaptionLabel(
+            tr("auth.brand.feature.token_storage", "Encrypted local token storage via Windows DPAPI"),
+            self.brand_card,
+        )
+        brand_feature_2 = CaptionLabel(
+            tr("auth.brand.feature.fast_login", "Fast login, register, and session restore flow"),
+            self.brand_card,
+        )
+        brand_feature_3 = CaptionLabel(
+            tr("auth.brand.feature.fluent_layout", "Fluent layout tuned to Win11 spacing rhythm"),
+            self.brand_card,
+        )
 
         for label in (brand_feature_1, brand_feature_2, brand_feature_3):
             label.setWordWrap(True)
@@ -123,9 +143,9 @@ class AuthInterface(FluentWidget):
         form_layout.setContentsMargins(40, 36, 40, 36)
         form_layout.setSpacing(self.SECTION_GAP)
 
-        self.form_title = TitleLabel("Account access", self.form_card)
+        self.form_title = TitleLabel(tr("auth.form.access_title", "Account Access"), self.form_card)
         self.form_subtitle = CaptionLabel(
-            "Use your AssistIM backend account to enter the desktop client.",
+            tr("auth.form.access_subtitle", "Use your AssistIM backend account to enter the desktop client."),
             self.form_card,
         )
         self.form_subtitle.setWordWrap(True)
@@ -140,12 +160,12 @@ class AuthInterface(FluentWidget):
 
         self.page_switcher.addItem(
             routeKey=self.login_page.objectName(),
-            text="Sign in",
+            text=tr("auth.switch.sign_in", "Sign In"),
             onClick=lambda: self._switch_to(self.login_page),
         )
         self.page_switcher.addItem(
             routeKey=self.register_page.objectName(),
-            text="Create account",
+            text=tr("auth.switch.create_account", "Create Account"),
             onClick=lambda: self._switch_to(self.register_page),
         )
 
@@ -167,24 +187,27 @@ class AuthInterface(FluentWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(self.FIELD_GAP)
 
-        intro = SubtitleLabel("Welcome back", page)
+        intro = SubtitleLabel(tr("auth.login.welcome_back", "Welcome Back"), page)
         copy = CaptionLabel(
-            "Enter your username and password to restore synced chat access.",
+            tr("auth.login.copy", "Enter your username and password to restore synced chat access."),
             page,
         )
         copy.setWordWrap(True)
 
         self.login_username_edit = LineEdit(page)
-        self._configure_text_field(self.login_username_edit, "Username")
+        self._configure_text_field(self.login_username_edit, tr("auth.field.username", "Username"))
 
         self.login_password_edit = PasswordLineEdit(page)
-        self._configure_text_field(self.login_password_edit, "Password")
+        self._configure_text_field(self.login_password_edit, tr("auth.field.password", "Password"))
 
-        self.login_button = PrimaryPushButton("Sign in", page)
+        self.login_button = PrimaryPushButton(tr("auth.button.sign_in", "Sign In"), page)
         self.login_button.setMinimumHeight(40)
 
         self.login_hint = CaptionLabel(
-            "Your access and refresh tokens are saved locally with Windows DPAPI encryption.",
+            tr(
+                "auth.login.hint",
+                "Your access and refresh tokens are saved locally with Windows DPAPI encryption.",
+            ),
             page,
         )
         self.login_hint.setWordWrap(True)
@@ -208,30 +231,39 @@ class AuthInterface(FluentWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(self.FIELD_GAP)
 
-        intro = SubtitleLabel("Create a new account", page)
+        intro = SubtitleLabel(tr("auth.register.title", "Create a New Account"), page)
         copy = CaptionLabel(
-            "Registration will create the account and return an authenticated session immediately.",
+            tr(
+                "auth.register.copy",
+                "Registration will create the account and return an authenticated session immediately.",
+            ),
             page,
         )
         copy.setWordWrap(True)
 
         self.register_username_edit = LineEdit(page)
-        self._configure_text_field(self.register_username_edit, "Username")
+        self._configure_text_field(self.register_username_edit, tr("auth.field.username", "Username"))
 
         self.register_nickname_edit = LineEdit(page)
-        self._configure_text_field(self.register_nickname_edit, "Nickname")
+        self._configure_text_field(self.register_nickname_edit, tr("auth.field.nickname", "Nickname"))
 
         self.register_password_edit = PasswordLineEdit(page)
-        self._configure_text_field(self.register_password_edit, "Password")
+        self._configure_text_field(self.register_password_edit, tr("auth.field.password", "Password"))
 
         self.register_confirm_edit = PasswordLineEdit(page)
-        self._configure_text_field(self.register_confirm_edit, "Confirm password")
+        self._configure_text_field(
+            self.register_confirm_edit,
+            tr("auth.field.confirm_password", "Confirm Password"),
+        )
 
-        self.register_button = PrimaryPushButton("Create account", page)
+        self.register_button = PrimaryPushButton(tr("auth.button.create_account", "Create Account"), page)
         self.register_button.setMinimumHeight(40)
 
         self.register_hint = CaptionLabel(
-            "Keep the password strong. The backend will return fresh access and refresh tokens after registration.",
+            tr(
+                "auth.register.hint",
+                "Keep the password strong. The backend will return fresh access and refresh tokens after registration.",
+            ),
             page,
         )
         self.register_hint.setWordWrap(True)
@@ -274,12 +306,19 @@ class AuthInterface(FluentWidget):
         self._clear_validation_state()
 
         if page is self.login_page:
-            self.form_title.setText("Account access")
-            self.form_subtitle.setText("Use your AssistIM backend account to enter the desktop client.")
+            self.form_title.setText(tr("auth.form.access_title", "Account Access"))
+            self.form_subtitle.setText(
+                tr("auth.form.access_subtitle", "Use your AssistIM backend account to enter the desktop client.")
+            )
             self.login_username_edit.setFocus()
         else:
-            self.form_title.setText("Create your account")
-            self.form_subtitle.setText("Register a new desktop account and continue without a second login step.")
+            self.form_title.setText(tr("auth.form.create_title", "Create Your Account"))
+            self.form_subtitle.setText(
+                tr(
+                    "auth.form.create_subtitle",
+                    "Register a new desktop account and continue without a second sign-in step.",
+                )
+            )
             self.register_username_edit.setFocus()
 
     def _sync_switcher(self, index: int) -> None:
@@ -304,8 +343,16 @@ class AuthInterface(FluentWidget):
         ):
             widget.setDisabled(is_busy)
 
-        self.login_button.setText("Signing in..." if mode == "login" else "Sign in")
-        self.register_button.setText("Creating account..." if mode == "register" else "Create account")
+        self.login_button.setText(
+            tr("auth.button.sign_in_busy", "Signing In...")
+            if mode == "login"
+            else tr("auth.button.sign_in", "Sign In")
+        )
+        self.register_button.setText(
+            tr("auth.button.create_account_busy", "Creating Account...")
+            if mode == "register"
+            else tr("auth.button.create_account", "Create Account")
+        )
 
     def _clear_validation_state(self) -> None:
         for widget in (
@@ -334,14 +381,14 @@ class AuthInterface(FluentWidget):
         password = self.login_password_edit.text()
 
         if not username:
-            self._mark_invalid(self.login_username_edit, "Username is required")
+            self._mark_invalid(self.login_username_edit, tr("auth.validation.username_required", "Username is required."))
             return
 
         if not password:
-            self._mark_invalid(self.login_password_edit, "Password is required")
+            self._mark_invalid(self.login_password_edit, tr("auth.validation.password_required", "Password is required."))
             return
 
-        self._submit_task = asyncio.create_task(self._perform_login(username, password))
+        self._set_submit_task(self._perform_login(username, password))
 
     def _submit_register(self) -> None:
         if self._busy_mode:
@@ -354,35 +401,52 @@ class AuthInterface(FluentWidget):
         confirm = self.register_confirm_edit.text()
 
         if len(username) < 3:
-            self._mark_invalid(self.register_username_edit, "Username must be at least 3 characters")
+            self._mark_invalid(
+                self.register_username_edit,
+                tr("auth.validation.username_min_length", "Username must be at least 3 characters."),
+            )
             return
 
         if not nickname:
-            self._mark_invalid(self.register_nickname_edit, "Nickname is required")
+            self._mark_invalid(self.register_nickname_edit, tr("auth.validation.nickname_required", "Nickname is required."))
             return
 
         if len(password) < 6:
-            self._mark_invalid(self.register_password_edit, "Password must be at least 6 characters")
+            self._mark_invalid(
+                self.register_password_edit,
+                tr("auth.validation.password_min_length", "Password must be at least 6 characters."),
+            )
             return
 
         if password != confirm:
-            self._mark_invalid(self.register_confirm_edit, "Passwords do not match")
+            self._mark_invalid(
+                self.register_confirm_edit,
+                tr("auth.validation.password_mismatch", "Passwords do not match."),
+            )
             return
 
-        self._submit_task = asyncio.create_task(self._perform_register(username, nickname, password))
+        self._set_submit_task(self._perform_register(username, nickname, password))
 
     async def _perform_login(self, username: str, password: str) -> None:
         self._set_busy("login")
         try:
             user = await self._auth_controller.login(username, password)
+        except asyncio.CancelledError:
+            raise
         except (APIError, NetworkError) as exc:
             logger.warning("Login failed: %s", exc)
             self._show_error(str(exc))
         except Exception:
             logger.exception("Unexpected login error")
-            self._show_error("Unexpected error while signing in")
+            self._show_error(tr("auth.error.unexpected_sign_in", "Unexpected error while signing in."))
         else:
-            self._show_success(f"Welcome back, {user.get('nickname') or user.get('username', '')}")
+            self._show_success(
+                tr(
+                    "auth.success.welcome_back",
+                    "Welcome back, {name}",
+                    name=user.get("nickname") or user.get("username", ""),
+                )
+            )
             self.authenticated.emit(user)
             self.close()
         finally:
@@ -392,24 +456,32 @@ class AuthInterface(FluentWidget):
         self._set_busy("register")
         try:
             user = await self._auth_controller.register(username, nickname, password)
+        except asyncio.CancelledError:
+            raise
         except (APIError, NetworkError) as exc:
             logger.warning("Registration failed: %s", exc)
             self._show_error(str(exc))
         except Exception:
             logger.exception("Unexpected registration error")
-            self._show_error("Unexpected error while creating account")
+            self._show_error(tr("auth.error.unexpected_register", "Unexpected error while creating account."))
         else:
-            self._show_success(f"Account created for {user.get('nickname') or user.get('username', '')}")
+            self._show_success(
+                tr(
+                    "auth.success.account_created",
+                    "Account created for {name}",
+                    name=user.get("nickname") or user.get("username", ""),
+                )
+            )
             self.authenticated.emit(user)
             self.close()
         finally:
             self._set_busy(None)
 
     def _show_error(self, message: str) -> None:
-        InfoBar.error("Authentication", message, parent=self.form_card)
+        InfoBar.error(tr("auth.feedback.title", "Authentication"), message, parent=self.form_card)
 
     def _show_success(self, message: str) -> None:
-        InfoBar.success("Authentication", message, parent=self.form_card)
+        InfoBar.success(tr("auth.feedback.title", "Authentication"), message, parent=self.form_card)
 
     def showEvent(self, event: QShowEvent) -> None:
         super().showEvent(event)
@@ -428,7 +500,49 @@ class AuthInterface(FluentWidget):
         )
 
     def closeEvent(self, event: QCloseEvent) -> None:
-        if self._submit_task and not self._submit_task.done():
-            self._submit_task.cancel()
+        self._cancel_pending_task(self._submit_task)
         self.closed.emit()
         super().closeEvent(event)
+
+    def _on_destroyed(self, *_args) -> None:
+        """Cancel outstanding submit work when the widget is torn down."""
+        self._cancel_pending_task(self._submit_task)
+        self._submit_task = None
+        for task in list(self._ui_tasks):
+            if not task.done():
+                task.cancel()
+
+    def _cancel_pending_task(self, task: Optional[asyncio.Task]) -> None:
+        """Cancel a tracked task if it is still running."""
+        if task is not None and not task.done():
+            task.cancel()
+
+    def _create_ui_task(self, coro, context: str, *, on_done=None) -> asyncio.Task:
+        """Track auth coroutines for consistent cleanup and error logging."""
+        task = asyncio.create_task(coro)
+        self._ui_tasks.add(task)
+        task.add_done_callback(lambda finished, name=context, callback=on_done: self._finalize_ui_task(finished, name, callback))
+        return task
+
+    def _finalize_ui_task(self, task: asyncio.Task, context: str, on_done=None) -> None:
+        """Drop bookkeeping and report task failures."""
+        self._ui_tasks.discard(task)
+        if on_done is not None:
+            on_done(task)
+
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            logger.exception("AuthInterface task failed: %s", context)
+
+    def _set_submit_task(self, coro) -> None:
+        """Keep only the latest auth submit task alive."""
+        self._cancel_pending_task(self._submit_task)
+        self._submit_task = self._create_ui_task(coro, "auth submit", on_done=self._clear_submit_task)
+
+    def _clear_submit_task(self, task: asyncio.Task) -> None:
+        """Clear the tracked submit task when it finishes."""
+        if self._submit_task is task:
+            self._submit_task = None

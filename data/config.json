@@ -1,7 +1,7 @@
 {
     "MainWindow": {
         "DpiScale": "Auto",
-        "Language": "Auto"
+        "Language": "zh_CN"
     },
     "App": {
         "ExitConfirmEnabled": false
@@ -18,6 +18,6 @@
     },
     "Theme": {
         "ThemeColor": "#ff07c160",
-        "ThemeMode": "Dark"
+        "ThemeMode": "Light"
     }
 }

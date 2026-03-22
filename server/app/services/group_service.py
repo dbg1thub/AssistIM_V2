@@ -16,7 +16,10 @@ class GroupService:
         self.sessions = SessionRepository(db)
 
     def list_groups(self, current_user: User) -> list[dict]:
-        return [self.serialize_group(item, include_members=False) for item in self.groups.list_user_groups(current_user.id)]
+        groups = self.groups.list_user_groups(current_user.id)
+        for group in groups:
+            self._ensure_group_session_members(group.id, group.session_id)
+        return [self.serialize_group(item, include_members=False) for item in groups]
 
     def create_group(self, current_user: User, name: str, member_ids: list[str]) -> dict:
         unique_member_ids = [member_id for member_id in dict.fromkeys(member_ids or []) if member_id != current_user.id]
@@ -37,6 +40,7 @@ class GroupService:
             raise AppError(ErrorCode.RESOURCE_NOT_FOUND, "group not found", 404)
         if self.groups.get_member(group_id, current_user.id) is None:
             raise AppError(ErrorCode.FORBIDDEN, "not a group member", 403)
+        self._ensure_group_session_members(group.id, group.session_id)
         return self.serialize_group(group, include_members=True)
 
     def add_member(self, current_user: User, group_id: str, user_id: str, role: str = "member") -> dict:
@@ -88,6 +92,7 @@ class GroupService:
         self.groups.update_member_role(group_id, current_user.id, "member")
         self.groups.update_member_role(group_id, new_owner_id, "owner")
         group = self.groups.transfer_owner(group, new_owner_id)
+        self._ensure_group_session_members(group.id, group.session_id)
         return self.serialize_group(group, include_members=True)
 
     def serialize_group(self, group, include_members: bool = True) -> dict:
@@ -105,3 +110,7 @@ class GroupService:
                 for item in self.groups.list_members(group.id)
             ]
         return data
+
+    def _ensure_group_session_members(self, group_id: str, session_id: str) -> None:
+        for member in self.groups.list_members(group_id):
+            self.sessions.add_member(session_id, member.user_id)

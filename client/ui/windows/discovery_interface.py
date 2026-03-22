@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import html
-from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -41,6 +40,7 @@ from qfluentwidgets import (
 
 from client.core import logging
 from client.core.exceptions import APIError, NetworkError
+from client.core.i18n import format_relative_time, tr
 from client.core.logging import setup_logging
 from client.ui.controllers.discovery_controller import (
     MomentCommentRecord,
@@ -78,36 +78,6 @@ def _clear_layout(layout: QVBoxLayout | QHBoxLayout | QGridLayout) -> None:
             widget.deleteLater()
         elif child_layout is not None:
             _clear_layout(child_layout)
-
-
-def _parse_datetime(value: str) -> Optional[datetime]:
-    """Parse common backend datetime formats."""
-    if not value:
-        return None
-    try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00")).replace(tzinfo=None)
-    except ValueError:
-        return None
-
-
-def format_relative_time(value: str) -> str:
-    """Format an ISO timestamp into a friendly Chinese label."""
-    dt = _parse_datetime(value)
-    if not dt:
-        return value or "刚刚"
-
-    now = datetime.now()
-    delta = now - dt
-    seconds = int(max(delta.total_seconds(), 0))
-    if seconds < 60:
-        return "刚刚"
-    if seconds < 3600:
-        return f"{seconds // 60} 分钟前"
-    if seconds < 86400:
-        return f"{seconds // 3600} 小时前"
-    if seconds < 86400 * 7:
-        return f"{seconds // 86400} 天前"
-    return dt.strftime("%m-%d %H:%M")
 
 
 class DiscoveryAvatar(QWidget):
@@ -220,12 +190,12 @@ class MomentMediaGrid(QWidget):
         """Try to render a local image file, otherwise keep the placeholder."""
         path = Path(image_path)
         if not path.exists():
-            label.setText("图片")
+            label.setText(tr("discovery.image.placeholder", "Image"))
             return
 
         pixmap = QPixmap(str(path))
         if pixmap.isNull():
-            label.setText("图片")
+            label.setText(tr("discovery.image.placeholder", "Image"))
             return
 
         scaled = pixmap.scaled(
@@ -307,7 +277,7 @@ class AnimatedCommentSection(QWidget):
         self.extra_opacity.setOpacity(0.0)
         self.extra_widget.setGraphicsEffect(self.extra_opacity)
 
-        self.toggle_button = PushButton("查看更多评论", self.surface)
+        self.toggle_button = PushButton(tr("discovery.comments.more", "View more comments"), self.surface)
         self.toggle_button.setFixedHeight(30)
         self.toggle_button.clicked.connect(self._toggle_expanded)
 
@@ -318,8 +288,8 @@ class AnimatedCommentSection(QWidget):
         editor_layout.setSpacing(8)
 
         self.comment_edit = LineEdit(self.editor_widget)
-        self.comment_edit.setPlaceholderText("写下你的评论")
-        self.send_button = PrimaryPushButton("发送", self.editor_widget)
+        self.comment_edit.setPlaceholderText(tr("discovery.comments.placeholder", "Write a comment"))
+        self.send_button = PrimaryPushButton(tr("common.send", "Send"), self.editor_widget)
         self.send_button.setFixedWidth(70)
 
         editor_layout.addWidget(self.comment_edit, 1)
@@ -419,7 +389,11 @@ class AnimatedCommentSection(QWidget):
         if not hidden_count:
             self.toggle_button.setText("")
             return
-        self.toggle_button.setText("收起评论" if self._expanded else f"查看更多评论 ({hidden_count})")
+        self.toggle_button.setText(
+            tr("discovery.comments.collapse", "Collapse comments")
+            if self._expanded
+            else tr("discovery.comments.more_count", "View more comments ({count})", count=hidden_count)
+        )
 
     def _sync_visibility(self) -> None:
         self.setVisible(bool(self._comments) or self._editor_visible)
@@ -439,7 +413,7 @@ class CreateMomentDialog(QDialog):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("发布动态")
+        self.setWindowTitle(tr("discovery.dialog.window_title", "Publish Moment"))
         self.setModal(True)
         self.resize(560, 360)
         self._setup_ui()
@@ -449,14 +423,22 @@ class CreateMomentDialog(QDialog):
         layout.setContentsMargins(24, 24, 24, 20)
         layout.setSpacing(14)
 
-        layout.addWidget(TitleLabel("发布一条动态", self))
-        hint = CaptionLabel("当前版本先支持文字动态，图片入口后续再接。", self)
+        layout.addWidget(TitleLabel(tr("discovery.dialog.title", "Post a moment"), self))
+        hint = CaptionLabel(
+            tr(
+                "discovery.dialog.hint",
+                "Text-only moments are supported for now. Image posting will be added soon.",
+            ),
+            self,
+        )
         hint.setWordWrap(True)
         layout.addWidget(hint)
 
         self.editor = TextEdit(self)
         self.editor.setAcceptRichText(False)
-        self.editor.setPlaceholderText("分享今天的新鲜事、想法或状态")
+        self.editor.setPlaceholderText(
+            tr("discovery.dialog.placeholder", "Share what's new today, a thought, or a status")
+        )
         self.editor.setMinimumHeight(200)
         layout.addWidget(self.editor, 1)
 
@@ -465,8 +447,8 @@ class CreateMomentDialog(QDialog):
         footer.setSpacing(10)
         footer.addStretch(1)
 
-        cancel_button = PushButton("取消", self)
-        publish_button = PrimaryPushButton("发布", self)
+        cancel_button = PushButton(tr("common.cancel", "Cancel"), self)
+        publish_button = PrimaryPushButton(tr("common.publish", "Publish"), self)
         cancel_button.clicked.connect(self.reject)
         publish_button.clicked.connect(self._submit)
         footer.addWidget(cancel_button)
@@ -476,7 +458,12 @@ class CreateMomentDialog(QDialog):
     def _submit(self) -> None:
         text = self.editor.toPlainText().strip()
         if not text:
-            InfoBar.warning("发布动态", "请输入动态内容", parent=self, duration=1800)
+            InfoBar.warning(
+                tr("discovery.publish.title", "Publish Moment"),
+                tr("discovery.dialog.empty_warning", "Please enter something to post."),
+                parent=self,
+                duration=1800,
+            )
             return
         self.submitted.emit(text)
         self.accept()
@@ -520,7 +507,7 @@ class MomentCard(ElevatedCardWidget):
         info_layout.addWidget(self.time_label)
 
         self.more_button = TransparentToolButton(FluentIcon.INFO, self)
-        self.more_button.setToolTip("更多")
+        self.more_button.setToolTip(tr("discovery.card.more_tooltip", "More"))
         self.more_button.clicked.connect(self._show_more_placeholder)
         _apply_safe_button_font(self.more_button)
 
@@ -534,7 +521,7 @@ class MomentCard(ElevatedCardWidget):
         self.content_label.setWordWrap(True)
         layout.addWidget(self.content_label)
 
-        self.expand_button = PushButton("全文", self)
+        self.expand_button = PushButton(tr("discovery.card.expand", "Read More"), self)
         self.expand_button.setFixedHeight(30)
         self.expand_button.clicked.connect(self._toggle_content)
         layout.addWidget(self.expand_button, 0, Qt.AlignmentFlag.AlignLeft)
@@ -589,27 +576,42 @@ class MomentCard(ElevatedCardWidget):
         self._refresh_actions()
 
     def _refresh_content(self) -> None:
-        text = self.moment.content.strip() or "这条动态还没有正文。"
+        text = self.moment.content.strip() or tr("discovery.card.no_content", "This moment has no body text yet.")
         is_long = len(text) > self.CONTENT_PREVIEW_LENGTH
         if is_long and not self._content_expanded:
             self.content_label.setText(text[: self.CONTENT_PREVIEW_LENGTH].rstrip() + "…")
         else:
             self.content_label.setText(text)
         self.expand_button.setVisible(is_long)
-        self.expand_button.setText("收起" if self._content_expanded else "全文")
+        self.expand_button.setText(
+            tr("discovery.card.collapse", "Collapse")
+            if self._content_expanded
+            else tr("discovery.card.expand", "Read More")
+        )
 
     def _refresh_actions(self) -> None:
-        like_prefix = "已赞" if self.moment.is_liked else "点赞"
+        like_prefix = (
+            tr("discovery.card.liked", "Liked")
+            if self.moment.is_liked
+            else tr("discovery.card.like", "Like")
+        )
         self.like_button.setText(f"{like_prefix} {self.moment.like_count}" if self.moment.like_count else like_prefix)
-        comment_prefix = "评论"
+        comment_prefix = tr("discovery.card.comment", "Comment")
         self.comment_button.setText(
             f"{comment_prefix} {self.moment.comment_count}" if self.moment.comment_count else comment_prefix
         )
 
         if self.moment.like_count or self.moment.comment_count:
-            self.stats_label.setText(f"{self.moment.like_count} 次点赞 · {self.moment.comment_count} 条评论")
+            self.stats_label.setText(
+                tr(
+                    "discovery.card.stats_summary",
+                    "{likes} likes · {comments} comments",
+                    likes=self.moment.like_count,
+                    comments=self.moment.comment_count,
+                )
+            )
         else:
-            self.stats_label.setText("还没有互动，抢个沙发吧。")
+            self.stats_label.setText(tr("discovery.card.stats_empty", "No interactions yet. Be the first."))
 
     def set_like_state(self, liked: bool, like_count: int) -> None:
         """Update like state from optimistic UI or rollback."""
@@ -641,16 +643,31 @@ class MomentCard(ElevatedCardWidget):
         self.comment_requested.emit(self.moment.id, content)
 
     def _show_more_placeholder(self) -> None:
-        InfoBar.info("朋友圈", "更多操作入口先保留 UI，后续再补。", parent=self.window(), duration=1800)
+        InfoBar.info(
+            tr("discovery.feed.title", "Moments"),
+            tr("discovery.card.more_placeholder", "More actions are still a placeholder for now."),
+            parent=self.window(),
+            duration=1800,
+        )
 
     def _open_image(self, image_path: str) -> None:
         if image_path.startswith("http://") or image_path.startswith("https://"):
-            InfoBar.info("图片预览", "远程图片预览稍后补上。", parent=self.window(), duration=1800)
+            InfoBar.info(
+                tr("common.image", "Image"),
+                tr("discovery.image.remote_pending", "Remote image preview is coming soon."),
+                parent=self.window(),
+                duration=1800,
+            )
             return
 
         path = Path(image_path)
         if not path.exists():
-            InfoBar.warning("图片预览", "找不到图片文件。", parent=self.window(), duration=1800)
+            InfoBar.warning(
+                tr("common.image", "Image"),
+                tr("discovery.image.not_found", "Image file not found."),
+                parent=self.window(),
+                duration=1800,
+            )
             return
 
         viewer = ImageViewer(str(path), self.window())
@@ -671,11 +688,15 @@ class DiscoveryInterface(QWidget):
         self._moments: list[MomentRecord] = []
         self._cards: dict[str, MomentCard] = {}
         self._load_task: Optional[asyncio.Task] = None
+        self._publish_task: Optional[asyncio.Task] = None
+        self._keyed_ui_tasks: dict[tuple[str, str], asyncio.Task] = {}
+        self._ui_tasks: set[asyncio.Task] = set()
         self._dialog_refs: set[QDialog] = set()
         self._initial_load_done = False
 
         self._setup_ui()
         self._connect_signals()
+        self.destroyed.connect(self._on_destroyed)
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
@@ -719,19 +740,27 @@ class DiscoveryInterface(QWidget):
         title_stack = QVBoxLayout()
         title_stack.setContentsMargins(0, 0, 0, 0)
         title_stack.setSpacing(6)
-        title_stack.addWidget(TitleLabel("朋友圈", self.hero_card))
-        title_stack.addWidget(CaptionLabel("分享动态、浏览近况，并在评论里继续互动。", self.hero_card))
+        title_stack.addWidget(TitleLabel(tr("discovery.feed.title", "Moments"), self.hero_card))
+        title_stack.addWidget(
+            CaptionLabel(
+                tr(
+                    "discovery.feed.subtitle",
+                    "Share updates, browse what's new, and keep the conversation going in comments.",
+                ),
+                self.hero_card,
+            )
+        )
 
         self.refresh_button = TransparentToolButton(FluentIcon.SYNC, self.hero_card)
-        self.refresh_button.setToolTip("刷新动态")
+        self.refresh_button.setToolTip(tr("discovery.feed.refresh_tooltip", "Refresh feed"))
         _apply_safe_button_font(self.refresh_button)
-        self.publish_button = PrimaryPushButton("发布动态", self.hero_card)
+        self.publish_button = PrimaryPushButton(tr("discovery.feed.publish_button", "Publish Moment"), self.hero_card)
 
         top_row.addLayout(title_stack, 1)
         top_row.addWidget(self.refresh_button, 0)
         top_row.addWidget(self.publish_button, 0)
 
-        self.summary_label = BodyLabel("正在加载动态…", self.hero_card)
+        self.summary_label = BodyLabel(tr("discovery.feed.loading", "Loading moments..."), self.hero_card)
         self.summary_label.setObjectName("discoverySummaryLabel")
         self.summary_label.setWordWrap(True)
 
@@ -757,31 +786,40 @@ class DiscoveryInterface(QWidget):
 
     def reload_data(self) -> None:
         """Refresh the feed from the backend."""
-        if self._load_task and not self._load_task.done():
-            self._load_task.cancel()
-        self._load_task = asyncio.create_task(self._reload_data_async())
+        self._set_load_task(self._reload_data_async())
 
     async def _reload_data_async(self) -> None:
         self.refresh_button.setEnabled(False)
-        self.summary_label.setText("正在同步朋友圈动态…")
+        self.summary_label.setText(tr("discovery.feed.syncing", "Syncing the moments feed..."))
         try:
             moments = await self._controller.load_moments()
         except asyncio.CancelledError:
             raise
         except (APIError, NetworkError) as exc:
-            self.summary_label.setText("动态加载失败")
-            InfoBar.error("朋友圈", str(exc), parent=self.window(), duration=2400)
+            self.summary_label.setText(tr("discovery.feed.load_failed", "Failed to load moments."))
+            InfoBar.error(tr("discovery.feed.title", "Moments"), str(exc), parent=self.window(), duration=2400)
             return
         except Exception:
             logger.exception("Unexpected discovery load error")
-            self.summary_label.setText("动态加载失败")
-            InfoBar.error("朋友圈", "加载动态时发生未知错误", parent=self.window(), duration=2400)
+            self.summary_label.setText(tr("discovery.feed.load_failed", "Failed to load moments."))
+            InfoBar.error(
+                tr("discovery.feed.title", "Moments"),
+                tr("discovery.feed.load_unknown_error", "Unexpected error while loading moments."),
+                parent=self.window(),
+                duration=2400,
+            )
             return
         finally:
             self.refresh_button.setEnabled(True)
 
         self._moments = moments
-        self.summary_label.setText(f"共 {len(self._moments)} 条动态，点击评论可直接展开输入。")
+        self.summary_label.setText(
+            tr(
+                "discovery.feed.summary",
+                "{count} moments total. Click comment to expand the inline editor.",
+                count=len(self._moments),
+            )
+        )
         self._rebuild_feed()
 
     def _rebuild_feed(self) -> None:
@@ -813,8 +851,14 @@ class DiscoveryInterface(QWidget):
         icon.setFixedSize(48, 48)
         layout.addWidget(icon, 0, Qt.AlignmentFlag.AlignCenter)
 
-        title = SubtitleLabel("还没有任何动态", card)
-        caption = CaptionLabel("发布第一条内容，或者刷新后查看最新朋友圈。", card)
+        title = SubtitleLabel(tr("discovery.feed.empty_title", "No moments yet"), card)
+        caption = CaptionLabel(
+            tr(
+                "discovery.feed.empty_caption",
+                "Publish the first update, or refresh to check the latest moments.",
+            ),
+            card,
+        )
         caption.setWordWrap(True)
 
         layout.addWidget(title, 0, Qt.AlignmentFlag.AlignCenter)
@@ -826,35 +870,60 @@ class DiscoveryInterface(QWidget):
         dialog.submitted.connect(self._create_moment)
         self._dialog_refs.add(dialog)
         dialog.finished.connect(lambda _result=0, dlg=dialog: self._dialog_refs.discard(dlg))
+        dialog.finished.connect(dialog.deleteLater)
         dialog.show()
         dialog.raise_()
         dialog.activateWindow()
 
     def _create_moment(self, content: str) -> None:
-        asyncio.create_task(self._create_moment_async(content))
+        if self._publish_task is not None and not self._publish_task.done():
+            return
+        self._set_publish_task(self._create_moment_async(content))
 
     async def _create_moment_async(self, content: str) -> None:
         self.publish_button.setEnabled(False)
         try:
             moment = await self._controller.create_moment(content)
+        except asyncio.CancelledError:
+            raise
         except (APIError, NetworkError) as exc:
-            InfoBar.error("发布动态", str(exc), parent=self.window(), duration=2400)
+            InfoBar.error(tr("discovery.publish.title", "Publish Moment"), str(exc), parent=self.window(), duration=2400)
             return
         except Exception:
             logger.exception("Unexpected moment publish error")
-            InfoBar.error("发布动态", "发布失败，请稍后重试", parent=self.window(), duration=2400)
+            InfoBar.error(
+                tr("discovery.publish.title", "Publish Moment"),
+                tr("discovery.publish.failed", "Publish failed. Please try again later."),
+                parent=self.window(),
+                duration=2400,
+            )
             return
         finally:
             self.publish_button.setEnabled(True)
 
         self._moments.insert(0, moment)
-        self.summary_label.setText(f"共 {len(self._moments)} 条动态，点击评论可直接展开输入。")
+        self.summary_label.setText(
+            tr(
+                "discovery.feed.summary",
+                "{count} moments total. Click comment to expand the inline editor.",
+                count=len(self._moments),
+            )
+        )
         self._rebuild_feed()
         self.scroll_area.verticalScrollBar().setValue(0)
-        InfoBar.success("发布动态", "动态已发布", parent=self.window(), duration=1800)
+        InfoBar.success(
+            tr("discovery.publish.title", "Publish Moment"),
+            tr("discovery.publish.success", "Moment published."),
+            parent=self.window(),
+            duration=1800,
+        )
 
     def _request_like_toggle(self, moment_id: str, liked: bool, like_count: int) -> None:
-        asyncio.create_task(self._request_like_toggle_async(moment_id, liked, like_count))
+        self._schedule_keyed_ui_task(
+            ("moment_like", moment_id),
+            self._request_like_toggle_async(moment_id, liked, like_count),
+            f"toggle moment like {moment_id}",
+        )
 
     async def _request_like_toggle_async(self, moment_id: str, liked: bool, like_count: int) -> None:
         card = self._cards.get(moment_id)
@@ -862,10 +931,12 @@ class DiscoveryInterface(QWidget):
         previous_count = like_count - 1 if liked else like_count + 1
         try:
             await self._controller.set_liked(moment_id, liked, like_count)
+        except asyncio.CancelledError:
+            raise
         except Exception as exc:
             if card is not None:
                 card.set_like_state(previous_liked, previous_count)
-            InfoBar.error("朋友圈", str(exc), parent=self.window(), duration=2200)
+            InfoBar.error(tr("discovery.feed.title", "Moments"), str(exc), parent=self.window(), duration=2200)
             return
 
         moment = next((item for item in self._moments if item.id == moment_id), None)
@@ -874,17 +945,107 @@ class DiscoveryInterface(QWidget):
             moment.like_count = like_count
 
     def _request_comment_create(self, moment_id: str, content: str) -> None:
-        asyncio.create_task(self._request_comment_create_async(moment_id, content))
+        self._schedule_keyed_ui_task(
+            ("moment_comment", moment_id),
+            self._request_comment_create_async(moment_id, content),
+            f"create moment comment {moment_id}",
+        )
 
     async def _request_comment_create_async(self, moment_id: str, content: str) -> None:
         try:
             comment = await self._controller.add_comment(moment_id, content)
+        except asyncio.CancelledError:
+            raise
         except Exception as exc:
-            InfoBar.error("发表评论", str(exc), parent=self.window(), duration=2200)
+            InfoBar.error(tr("discovery.comment.title", "Post Comment"), str(exc), parent=self.window(), duration=2200)
             return
 
         card = self._cards.get(moment_id)
         if card is not None:
             card.append_comment(comment)
 
-        InfoBar.success("发表评论", "评论已发送", parent=self.window(), duration=1400)
+        InfoBar.success(
+            tr("discovery.comment.title", "Post Comment"),
+            tr("discovery.comment.success", "Comment sent."),
+            parent=self.window(),
+            duration=1400,
+        )
+
+    def _on_destroyed(self, *_args) -> None:
+        """Cancel outstanding async work when the page is torn down."""
+        self._cancel_pending_task(self._load_task)
+        self._load_task = None
+        self._cancel_pending_task(self._publish_task)
+        self._publish_task = None
+        for task in list(self._keyed_ui_tasks.values()):
+            if not task.done():
+                task.cancel()
+        self._keyed_ui_tasks.clear()
+        self._cancel_all_ui_tasks()
+
+    def _cancel_pending_task(self, task: Optional[asyncio.Task]) -> None:
+        """Cancel one tracked task if it is still running."""
+        if task is not None and not task.done():
+            task.cancel()
+
+    def _cancel_all_ui_tasks(self) -> None:
+        """Cancel all background tasks launched from this page."""
+        for task in list(self._ui_tasks):
+            if not task.done():
+                task.cancel()
+
+    def _create_ui_task(self, coro, context: str, *, on_done=None) -> asyncio.Task:
+        """Track page-owned coroutines for consistent cleanup."""
+        task = asyncio.create_task(coro)
+        self._ui_tasks.add(task)
+        task.add_done_callback(lambda finished, name=context, callback=on_done: self._finalize_ui_task(finished, name, callback))
+        return task
+
+    def _finalize_ui_task(self, task: asyncio.Task, context: str, on_done=None) -> None:
+        """Drop task bookkeeping and log failures."""
+        self._ui_tasks.discard(task)
+        if on_done is not None:
+            on_done(task)
+
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            logger.exception("DiscoveryInterface task failed: %s", context)
+
+    def _set_load_task(self, coro) -> None:
+        """Replace the active feed reload with the newest request."""
+        self._cancel_pending_task(self._load_task)
+        self._load_task = self._create_ui_task(coro, "reload moments", on_done=self._clear_load_task)
+
+    def _clear_load_task(self, task: asyncio.Task) -> None:
+        """Clear the tracked reload task when it finishes."""
+        if self._load_task is task:
+            self._load_task = None
+
+    def _set_publish_task(self, coro) -> None:
+        """Track the current publish request."""
+        self._cancel_pending_task(self._publish_task)
+        self._publish_task = self._create_ui_task(coro, "publish moment", on_done=self._clear_publish_task)
+
+    def _clear_publish_task(self, task: asyncio.Task) -> None:
+        """Clear the tracked publish task when it finishes."""
+        if self._publish_task is task:
+            self._publish_task = None
+
+    def _schedule_keyed_ui_task(self, key: tuple[str, str], coro, context: str) -> None:
+        """Prevent duplicate actions for the same moment while one is pending."""
+        existing = self._keyed_ui_tasks.get(key)
+        if existing is not None and not existing.done():
+            return
+        self._keyed_ui_tasks[key] = self._create_ui_task(
+            coro,
+            context,
+            on_done=lambda task, task_key=key: self._clear_keyed_ui_task(task_key, task),
+        )
+
+    def _clear_keyed_ui_task(self, key: tuple[str, str], task: asyncio.Task) -> None:
+        """Release a keyed action slot once its task finishes."""
+        if self._keyed_ui_tasks.get(key) is task:
+            self._keyed_ui_tasks.pop(key, None)

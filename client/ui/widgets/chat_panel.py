@@ -13,6 +13,7 @@ from qfluentwidgets import BodyLabel, CaptionLabel, FluentIcon, IconWidget, Scro
 from qfluentwidgets.components.widgets.scroll_bar import SmoothScrollDelegate
 
 from client.core.config_backend import get_config
+from client.core.i18n import tr
 from client.delegates.message_delegate import MessageDelegate
 from client.models.message import ChatMessage, MessageType, Session
 from client.models.message_model import MessageModel
@@ -21,6 +22,19 @@ from client.ui.widgets.chat_header import ChatHeader
 from client.ui.widgets.fluent_splitter import FluentSplitter
 from client.ui.widgets.message_input import MessageInput
 from qfluentwidgets.multimedia import VideoWidget
+
+
+def _session_status_text(session: Session | None) -> str:
+    """Return the localized status label for the active session."""
+    if session is None:
+        return ""
+    if session.is_ai_session:
+        return tr("chat.status.ai", "AI Session")
+    return (
+        tr("chat.status.group", "Group Chat")
+        if session.session_type == "group"
+        else tr("chat.status.direct", "Direct Chat")
+    )
 
 
 class WelcomeWidget(QWidget):
@@ -38,8 +52,14 @@ class WelcomeWidget(QWidget):
         self.icon = IconWidget(FluentIcon.CHAT, self)
         self.icon.setFixedSize(88, 88)
 
-        self.title_label = BodyLabel("欢迎使用 AssistIM", self)
-        self.subtitle_label = CaptionLabel("从左侧选择一个会话，继续消息同步、文件传输和 AI 辅助聊天。", self)
+        self.title_label = BodyLabel(tr("chat.welcome.title", "Welcome to AssistIM"), self)
+        self.subtitle_label = CaptionLabel(
+            tr(
+                "chat.welcome.subtitle",
+                "Choose a conversation on the left to continue message sync, file transfer, and AI-assisted chat.",
+            ),
+            self,
+        )
         self.subtitle_label.setWordWrap(True)
         self.subtitle_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.subtitle_label.setMaximumWidth(380)
@@ -54,7 +74,6 @@ class WelcomeWidget(QWidget):
 class ChatPanel(QWidget):
     """Chat panel composed of welcome page and active conversation page."""
 
-    message_sent = Signal(str)
     file_upload_requested = Signal(str)
     screenshot_requested = Signal()
     voice_call_requested = Signal()
@@ -68,7 +87,6 @@ class ChatPanel(QWidget):
         self._message_model: Optional[MessageModel] = None
         self._message_delegate: Optional[MessageDelegate] = None
         self._scroll_delegate: Optional[SmoothScrollDelegate] = None
-        self._send_message_callback: Optional[Callable] = None
         self._send_segments_callback: Optional[Callable] = None
         self._send_typing_callback: Optional[Callable] = None
         self._current_session: Optional[Session] = None
@@ -119,7 +137,10 @@ class ChatPanel(QWidget):
         self.message_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.message_list.installEventFilter(self)
         self.message_list.viewport().installEventFilter(self)
-        self._history_indicator = CaptionLabel("加载更多消息...", self.message_list.viewport())
+        self._history_indicator = CaptionLabel(
+            tr("chat.history.loading", "Loading more messages..."),
+            self.message_list.viewport(),
+        )
         self._history_indicator.setObjectName("historyLoadingLabel")
         self._history_indicator.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         self._history_indicator.hide()
@@ -208,10 +229,9 @@ class ChatPanel(QWidget):
     def set_session(self, session: Session) -> None:
         """Update header and switch to active chat page."""
         self._current_session = session
-        status = "AI 会话" if session.is_ai_session else f"{'群聊' if session.session_type == 'group' else '私聊'}"
         self.chat_header.set_session_info(
             title=session.name,
-            status=status,
+            status=_session_status_text(session),
             avatar=session.avatar,
             is_ai=session.is_ai_session,
         )
@@ -240,9 +260,6 @@ class ChatPanel(QWidget):
         """Forward composed text/media segments in document order."""
         if self._send_segments_callback:
             self._send_segments_callback(segments)
-        for segment in segments:
-            if segment.get("type") == MessageType.TEXT and segment.get("content"):
-                self.message_sent.emit(segment["content"])
 
     def _on_attachment_open_requested(self, file_path: str, message_type_value: str) -> None:
         """Open a local inline attachment from the editor."""
@@ -256,10 +273,6 @@ class ChatPanel(QWidget):
         """Emit typing signal through external callback."""
         if self._send_typing_callback:
             self._send_typing_callback()
-
-    def set_send_message_callback(self, callback: Callable[[str, MessageType], None]) -> None:
-        """Set message send callback."""
-        self._send_message_callback = callback
 
     def set_send_segments_callback(self, callback: Callable[[list[dict]], None]) -> None:
         """Set composed segments send callback."""
@@ -307,7 +320,7 @@ class ChatPanel(QWidget):
         """Clear the current composer draft."""
         self.message_input.clear_draft()
 
-    def add_message(self, message: ChatMessage) -> None:
+    def add_message(self, message: ChatMessage, *, scroll_to_bottom: bool = True) -> None:
         """Append a message or refresh an existing one in-place."""
         if not self._message_model:
             return
@@ -329,8 +342,9 @@ class ChatPanel(QWidget):
             return
 
         self._message_model.add_message(message)
-        self.message_list.scrollToBottom()
-        self._remember_message_scroll_gap()
+        if scroll_to_bottom:
+            self.message_list.scrollToBottom()
+            self._remember_message_scroll_gap()
 
     def add_messages(self, messages: list[ChatMessage], *, scroll_to_bottom: bool = True) -> None:
         """Append multiple messages in one batch update."""
@@ -624,6 +638,13 @@ class ChatPanel(QWidget):
         """Return the current distance between viewport and bottom of the message list."""
         return max(0, self._message_scroll_gap)
 
+    def is_near_bottom(self, threshold: int = 48) -> bool:
+        """Return whether the message list is already close enough to the bottom."""
+        bar = self.message_list.verticalScrollBar()
+        if bar.maximum() <= 0:
+            return True
+        return max(0, bar.maximum() - bar.value()) <= max(0, threshold)
+
     def restore_message_scroll_gap(self, scroll_gap: int) -> None:
         """Restore a previously remembered bottom gap for this conversation."""
         self._message_scroll_gap = max(0, scroll_gap)
@@ -684,7 +705,7 @@ class ChatPanel(QWidget):
         viewer.setWindowTitle(
             (message.extra or {}).get("name")
             or os.path.basename((source or "").split("?", 1)[0])
-            or "视频播放"
+            or tr("chat.video.player_title", "Video Playback")
         )
         viewer.resize(960, 540)
         viewer.setVideo(url)
@@ -748,14 +769,11 @@ class ChatPanel(QWidget):
 
     def show_typing_indicator(self) -> None:
         """Display typing status in header."""
-        self.chat_header.set_status("对方正在输入...")
+        self.chat_header.set_status(tr("chat.status.typing", "The other side is typing..."))
 
     def hide_typing_indicator(self) -> None:
         """Clear typing status and restore session type label."""
         if self._current_session:
-            status = "AI 会话" if self._current_session.is_ai_session else (
-                "群聊" if self._current_session.session_type == "group" else "私聊"
-            )
-            self.chat_header.set_status(status)
+            self.chat_header.set_status(_session_status_text(self._current_session))
         else:
             self.chat_header.set_status("")

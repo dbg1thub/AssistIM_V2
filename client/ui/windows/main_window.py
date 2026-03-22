@@ -23,10 +23,12 @@ from qfluentwidgets import (
 
 from client.core import logging
 from client.core.config import cfg
+from client.core.i18n import tr
 from client.core.logging import setup_logging
 from client.ui.windows.chat_interface import ChatInterface
 from client.ui.windows.contact_interface import ContactInterface
 from client.ui.windows.discovery_interface import DiscoveryInterface
+from client.ui.windows.profile_interface import ProfileInterface
 from client.ui.windows.settings_interface import SettingsInterface
 
 
@@ -39,18 +41,24 @@ class ExitConfirmDialog(MessageBoxBase):
 
     def __init__(self, parent=None):
         super().__init__(parent=parent)
-        self.title_label = SubtitleLabel("\u9000\u51fa AssistIM", self.widget)
-        self.content_label = BodyLabel("\u786e\u5b9a\u8981\u9000\u51fa AssistIM \u5417\uff1f", self.widget)
+        self.title_label = SubtitleLabel(tr("main_window.exit_dialog.title", "Exit AssistIM"), self.widget)
+        self.content_label = BodyLabel(
+            tr("main_window.exit_dialog.content", "Are you sure you want to exit AssistIM?"),
+            self.widget,
+        )
         self.content_label.setWordWrap(True)
-        self.remember_check_box = CheckBox("\u4e0b\u6b21\u4e0d\u518d\u663e\u793a", self.widget)
+        self.remember_check_box = CheckBox(
+            tr("main_window.exit_dialog.remember", "Don't show this again"),
+            self.widget,
+        )
 
         self.viewLayout.addWidget(self.title_label)
         self.viewLayout.addWidget(self.content_label)
         self.viewLayout.addWidget(self.remember_check_box)
         self.viewLayout.addStretch(1)
 
-        self.yesButton.setText("\u9000\u51fa")
-        self.cancelButton.setText("\u53d6\u6d88")
+        self.yesButton.setText(tr("main_window.exit_dialog.confirm", "Exit"))
+        self.cancelButton.setText(tr("main_window.exit_dialog.cancel", "Cancel"))
         self.widget.setMinimumWidth(360)
 
 
@@ -58,18 +66,21 @@ class MainWindow(FluentWindow):
     """Main application window."""
 
     closed = Signal()
+    logoutRequested = Signal()
     NAVIGATION_MENU_THRESHOLD = 1400
 
     def __init__(self):
         super().__init__()
         self.resize(1200, 900)
-        self.setWindowTitle("AssistIM")
+        self.setWindowTitle(tr("common.app_name", "AssistIM"))
         self.setWindowIcon(FluentIcon.CHAT.icon())
 
         self._allow_exit = False
         self._tray_message_shown = False
         self._tray_icon: QSystemTrayIcon | None = None
         self._tray_menu: RoundMenu | None = None
+        self._ui_tasks: set[asyncio.Task] = set()
+        self._contact_open_task: asyncio.Task | None = None
 
         self.setMicaEffectEnabled(cfg.get(cfg.micaEnabled))
 
@@ -81,14 +92,17 @@ class MainWindow(FluentWindow):
         self.chat_interface = ChatInterface(self)
         self.contact_interface = ContactInterface(self)
         self.discovery_interface = DiscoveryInterface(self)
+        self.profile_interface = ProfileInterface(self)
         self.settingsInterface = SettingsInterface(self)
         self.contact_interface.message_requested.connect(self._on_contact_message_requested)
+        self.profile_interface.logoutRequested.connect(self.logoutRequested.emit)
         self.settingsInterface.micaChanged.connect(self._on_mica_changed)
 
         self.navigationInterface.setAcrylicEnabled(cfg.get(cfg.micaEnabled))
         self.navigationInterface.setMinimumExpandWidth(self.NAVIGATION_MENU_THRESHOLD)
         self.initNavigation()
         self._init_system_tray()
+        self.destroyed.connect(self._on_destroyed)
 
         if sys.platform == "win32":
             self._last_system_theme = self._detect_system_theme()
@@ -104,13 +118,19 @@ class MainWindow(FluentWindow):
 
     def initNavigation(self):
         """Initialize left navigation."""
-        self.addSubInterface(self.chat_interface, FluentIcon.CHAT, "Chat")
-        self.addSubInterface(self.contact_interface, FluentIcon.PEOPLE, "Contacts")
-        self.addSubInterface(self.discovery_interface, FluentIcon.GLOBE, "Moments")
+        self.addSubInterface(self.chat_interface, FluentIcon.CHAT, tr("common.chat", "Chat"))
+        self.addSubInterface(self.contact_interface, FluentIcon.PEOPLE, tr("common.contacts", "Contacts"))
+        self.addSubInterface(self.discovery_interface, FluentIcon.GLOBE, tr("common.moments", "Moments"))
+        self.addSubInterface(
+            self.profile_interface,
+            FluentIcon.INFO,
+            tr("common.profile", "Profile"),
+            NavigationItemPosition.BOTTOM,
+        )
         self.addSubInterface(
             self.settingsInterface,
             FluentIcon.SETTING,
-            "Settings",
+            tr("common.settings", "Settings"),
             NavigationItemPosition.BOTTOM,
         )
         self.navigationInterface.panel.setReturnButtonVisible(False)
@@ -122,12 +142,12 @@ class MainWindow(FluentWindow):
 
         self._tray_icon = QSystemTrayIcon(self)
         self._tray_icon.setIcon(self.windowIcon())
-        self._tray_icon.setToolTip("AssistIM")
+        self._tray_icon.setToolTip(tr("common.app_name", "AssistIM"))
         self._tray_icon.activated.connect(self._on_tray_activated)
 
         self._tray_menu = RoundMenu(parent=self)
-        show_action = Action(FluentIcon.HOME, "\u663e\u793a\u4e3b\u754c\u9762", self)
-        exit_action = Action(FluentIcon.CLOSE, "\u9000\u51fa", self)
+        show_action = Action(FluentIcon.HOME, tr("common.show_main_window", "Show Main Window"), self)
+        exit_action = Action(FluentIcon.CLOSE, tr("common.exit", "Exit"), self)
         show_action.triggered.connect(self.show_from_tray)
         exit_action.triggered.connect(self.request_exit)
         self._tray_menu.addAction(show_action)
@@ -208,8 +228,11 @@ class MainWindow(FluentWindow):
             if not self._tray_message_shown:
                 self._tray_message_shown = True
                 self._tray_icon.showMessage(
-                    "AssistIM",
-                    "\u5e94\u7528\u4ecd\u5728\u540e\u53f0\u8fd0\u884c\uff0c\u53ef\u901a\u8fc7\u7cfb\u7edf\u6258\u76d8\u6062\u590d\u6216\u9000\u51fa\u3002",
+                    tr("common.app_name", "AssistIM"),
+                    tr(
+                        "main_window.tray.background_message",
+                        "AssistIM is still running in the background. Restore or quit it from the system tray.",
+                    ),
                     QSystemTrayIcon.MessageIcon.Information,
                     2500,
                 )
@@ -221,7 +244,50 @@ class MainWindow(FluentWindow):
 
     def _on_contact_message_requested(self, payload: object) -> None:
         """Open the selected contact or group in the chat interface."""
-        asyncio.create_task(self._open_contact_target(payload))
+        self._set_contact_open_task(self._open_contact_target(payload))
+
+    def _on_destroyed(self, *_args) -> None:
+        """Cancel outstanding UI tasks when the window is torn down."""
+        self._cancel_pending_task(self._contact_open_task)
+        self._contact_open_task = None
+        for task in list(self._ui_tasks):
+            if not task.done():
+                task.cancel()
+
+    def _cancel_pending_task(self, task: asyncio.Task | None) -> None:
+        """Cancel a tracked task if it is still running."""
+        if task is not None and not task.done():
+            task.cancel()
+
+    def _create_ui_task(self, coro, context: str, *, on_done=None) -> asyncio.Task:
+        """Create a tracked UI task that logs failures and clears bookkeeping."""
+        task = asyncio.create_task(coro)
+        self._ui_tasks.add(task)
+        task.add_done_callback(lambda finished, name=context, callback=on_done: self._finalize_ui_task(finished, name, callback))
+        return task
+
+    def _finalize_ui_task(self, task: asyncio.Task, context: str, on_done=None) -> None:
+        """Remove completed tasks from tracking and report failures."""
+        self._ui_tasks.discard(task)
+        if on_done is not None:
+            on_done(task)
+
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            logger.exception("MainWindow UI task failed: %s", context)
+
+    def _set_contact_open_task(self, coro) -> None:
+        """Keep only the latest contact-jump task alive."""
+        self._cancel_pending_task(self._contact_open_task)
+        self._contact_open_task = self._create_ui_task(coro, "open contact target", on_done=self._clear_contact_open_task)
+
+    def _clear_contact_open_task(self, task: asyncio.Task) -> None:
+        """Clear the tracked contact-open task when it finishes."""
+        if self._contact_open_task is task:
+            self._contact_open_task = None
 
     async def _open_contact_target(self, payload: object) -> None:
         """Route contact actions into the chat page."""
@@ -231,7 +297,12 @@ class MainWindow(FluentWindow):
             self.stackedWidget.setCurrentWidget(self.chat_interface)
 
         if not isinstance(payload, dict):
-            InfoBar.warning("Chat", "Unable to resolve contact jump data.", parent=self, duration=2000)
+            InfoBar.warning(
+                tr("main_window.contact_jump.invalid_title", "Chat"),
+                tr("main_window.contact_jump.invalid_message", "Unable to resolve contact jump data."),
+                parent=self,
+                duration=2000,
+            )
             return
 
         target_type = payload.get("type", "")
@@ -252,4 +323,9 @@ class MainWindow(FluentWindow):
                 )
 
         if not opened:
-            InfoBar.warning("Chat", "Unable to open this conversation right now.", parent=self, duration=2200)
+            InfoBar.warning(
+                tr("main_window.contact_jump.unavailable_title", "Chat"),
+                tr("main_window.contact_jump.unavailable_message", "Unable to open this conversation right now."),
+                parent=self,
+                duration=2200,
+            )

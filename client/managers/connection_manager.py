@@ -6,9 +6,12 @@ Manager for WebSocket connection lifecycle and state management.
 import asyncio
 import inspect
 import time
+from concurrent.futures import Future
 from datetime import datetime
 from typing import Any, Callable, Optional
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
+from client.core.datetime_utils import to_epoch_seconds
 from client.core import logging
 from client.core.logging import setup_logging
 from client.network.http_client import get_http_client
@@ -38,6 +41,7 @@ class ConnectionManager:
 
     def __init__(self):
         self._ws_client: Optional[WebSocketClient] = None
+        self._base_ws_url: str = ""
         self._tasks: set[asyncio.Task] = set()
         self._state = ConnectionState.DISCONNECTED
         self._state_listeners: list[Callable[[ConnectionState, ConnectionState], None]] = []
@@ -45,6 +49,8 @@ class ConnectionManager:
         self._last_sync_timestamp: float = 0.0
         self._db = None
         self._connect_started_at: float = 0.0
+        self._initialized = False
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
 
     @property
     def state(self) -> ConnectionState:
@@ -70,12 +76,23 @@ class ConnectionManager:
         """Set last sync timestamp."""
         self._last_sync_timestamp = timestamp
 
+    async def reload_sync_timestamp(self) -> None:
+        """Reload the sync cursor from persisted local state."""
+        await self._load_sync_timestamp()
+
+    async def reset_sync_state(self) -> None:
+        """Reset in-memory and persisted sync cursors for a fresh account context."""
+        self._last_sync_timestamp = 0.0
+        if self._db and self._db.is_connected:
+            await self._db.delete_app_state(self.LAST_SYNC_TIMESTAMP)
+
     def add_state_listener(
         self,
         listener: Callable[[ConnectionState, ConnectionState], None],
     ) -> None:
         """Add connection state change listener."""
-        self._state_listeners.append(listener)
+        if listener not in self._state_listeners:
+            self._state_listeners.append(listener)
 
     def remove_state_listener(
         self,
@@ -87,7 +104,8 @@ class ConnectionManager:
 
     def add_message_listener(self, listener: Callable[[dict], Any]) -> None:
         """Add message listener."""
-        self._message_listeners.append(listener)
+        if listener not in self._message_listeners:
+            self._message_listeners.append(listener)
 
     def remove_message_listener(self, listener: Callable[[dict], Any]) -> None:
         """Remove message listener."""
@@ -102,7 +120,7 @@ class ConnectionManager:
         """Notify all listeners of state change."""
         self._state = new_state
 
-        for listener in self._state_listeners:
+        for listener in list(self._state_listeners):
             try:
                 listener(old_state, new_state)
             except Exception as e:
@@ -110,11 +128,11 @@ class ConnectionManager:
 
     def _notify_message(self, message: dict) -> None:
         """Notify all listeners of new message."""
-        for listener in self._message_listeners:
+        for listener in list(self._message_listeners):
             try:
                 result = listener(message)
                 if inspect.isawaitable(result):
-                    self._create_task(result)
+                    self._schedule_message_coroutine(result)
             except Exception as e:
                 logger.error(f"Message listener error: {e}")
 
@@ -122,21 +140,21 @@ class ConnectionManager:
         """Normalize backend timestamps to epoch seconds."""
         if value is None or value == "":
             return 0.0
-        if isinstance(value, (int, float)):
-            return float(value)
-        if isinstance(value, str):
-            try:
-                return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
-            except ValueError:
-                try:
-                    return float(value)
-                except ValueError:
-                    return 0.0
-        return 0.0
+        return to_epoch_seconds(value)
 
     async def initialize(self) -> None:
         """Initialize connection manager."""
+        if self._initialized and self._ws_client is not None:
+            return
+
+        try:
+            self._loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self._loop = None
+
         self._ws_client = get_websocket_client()
+        self._base_ws_url = self._base_ws_url or str(self._ws_client.url or "")
+        self._apply_authenticated_ws_url()
 
         self._ws_client.set_callbacks(
             on_connect=self._on_connect,
@@ -146,8 +164,29 @@ class ConnectionManager:
         )
 
         await self._load_sync_timestamp()
+        self._initialized = True
 
         logger.info("Connection manager initialized")
+
+    def _apply_authenticated_ws_url(self) -> None:
+        """Attach the current access token to the websocket URL for early server binding."""
+        if self._ws_client is None:
+            return
+
+        base_url = self._base_ws_url or str(self._ws_client.url or "")
+        if not base_url:
+            return
+
+        parts = urlsplit(base_url)
+        query_items = [(key, value) for key, value in parse_qsl(parts.query, keep_blank_values=True) if key != "token"]
+
+        access_token = get_http_client().access_token
+        if access_token:
+            query_items.append(("token", access_token))
+
+        self._ws_client.url = urlunsplit(
+            (parts.scheme, parts.netloc, parts.path, urlencode(query_items), parts.fragment)
+        )
 
     async def _load_sync_timestamp(self) -> None:
         """Load last sync timestamp from database."""
@@ -196,6 +235,34 @@ class ConnectionManager:
                 logger.exception("Connection manager background task crashed")
 
         task.add_done_callback(_cleanup)
+
+    def _schedule_message_coroutine(self, coro) -> None:
+        """Schedule websocket message processing back onto the main asyncio loop."""
+        loop = self._loop
+        if loop is None or not loop.is_running():
+            self._create_task(coro)
+            return
+
+        try:
+            current_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            current_loop = None
+
+        if current_loop is loop:
+            self._create_task(coro)
+            return
+
+        future = asyncio.run_coroutine_threadsafe(coro, loop)
+
+        def _cleanup(done_future: Future) -> None:
+            try:
+                done_future.result()
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                logger.exception("Connection manager message task crashed")
+
+        future.add_done_callback(_cleanup)
 
     def _on_connect(self) -> None:
         """Handle connection established."""
@@ -342,7 +409,7 @@ class ConnectionManager:
                 if latest_timestamp > self._last_sync_timestamp:
                     self._last_sync_timestamp = latest_timestamp
                     logger.info(f"Updated sync timestamp to {latest_timestamp}")
-                    self._create_task(self._save_sync_timestamp())
+                    self._schedule_message_coroutine(self._save_sync_timestamp())
             if self._connect_started_at:
                 logger.info(
                     "History payload received %.1fms after connect (%d messages)",
@@ -370,6 +437,13 @@ class ConnectionManager:
         """
         if not self._ws_client:
             await self.initialize()
+
+        try:
+            self._loop = asyncio.get_running_loop()
+        except RuntimeError:
+            pass
+
+        self._apply_authenticated_ws_url()
 
         old_state = self._state
         self._notify_state_change(old_state, ConnectionState.CONNECTING)
@@ -545,17 +619,30 @@ class ConnectionManager:
 
         if self._tasks:
             await asyncio.gather(*list(self._tasks), return_exceptions=True)
+            self._tasks.clear()
 
         if self._ws_client:
             await self._ws_client.close()
+            self._ws_client.set_callbacks()
+            self._ws_client = None
 
         self._state_listeners.clear()
         self._message_listeners.clear()
+        self._state = ConnectionState.DISCONNECTED
+        self._connect_started_at = 0.0
+        self._db = None
+        self._last_sync_timestamp = 0.0
+        self._initialized = False
 
         logger.info("Connection manager closed")
 
 
 _connection_manager: Optional[ConnectionManager] = None
+
+
+def peek_connection_manager() -> Optional[ConnectionManager]:
+    """Return the existing connection manager singleton if it was created."""
+    return _connection_manager
 
 
 def get_connection_manager() -> ConnectionManager:
@@ -564,3 +651,4 @@ def get_connection_manager() -> ConnectionManager:
     if _connection_manager is None:
         _connection_manager = ConnectionManager()
     return _connection_manager
+

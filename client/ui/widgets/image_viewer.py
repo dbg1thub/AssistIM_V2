@@ -12,6 +12,7 @@ from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequ
 from PySide6.QtWidgets import QDialog, QVBoxLayout, QScrollArea, QLabel, QPushButton, QHBoxLayout
 
 from client.core.config_backend import get_config
+from client.core.i18n import tr
 
 
 class ImageViewer(QDialog):
@@ -33,7 +34,7 @@ class ImageViewer(QDialog):
 
     def _setup_ui(self) -> None:
         """Setup UI components."""
-        self.setWindowTitle("Image Viewer")
+        self.setWindowTitle(tr("image_viewer.title", "Image Viewer"))
         self.setMinimumSize(600, 400)
         self.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.WindowCloseButtonHint)
 
@@ -57,7 +58,7 @@ class ImageViewer(QDialog):
         button_layout = QHBoxLayout()
         button_layout.addStretch()
 
-        self.close_button = QPushButton("Close", self)
+        self.close_button = QPushButton(tr("common.close", "Close"), self)
         self.close_button.clicked.connect(self.close)
         button_layout.addWidget(self.close_button)
 
@@ -73,10 +74,10 @@ class ImageViewer(QDialog):
             if source.startswith(("http://", "https://")):
                 reply = self._network_manager.get(QNetworkRequest(QUrl(source)))
                 reply.setProperty("image_source", source)
-                self.image_label.setText("Loading image...")
+                self.image_label.setText(tr("image_viewer.loading", "Loading image..."))
                 return
 
-            self.image_label.setText("Failed to load image")
+            self.image_label.setText(tr("image_viewer.load_failed", "Failed to load image"))
             return
 
         self.image_label.setPixmap(pixmap)
@@ -99,12 +100,12 @@ class ImageViewer(QDialog):
         """Handle async remote image loading."""
         try:
             if reply.error() != QNetworkReply.NetworkError.NoError:
-                self.image_label.setText("Failed to load image")
+                self.image_label.setText(tr("image_viewer.load_failed", "Failed to load image"))
                 return
 
             pixmap = QPixmap()
             if not pixmap.loadFromData(bytes(reply.readAll())):
-                self.image_label.setText("Failed to load image")
+                self.image_label.setText(tr("image_viewer.load_failed", "Failed to load image"))
                 return
 
             self.image_label.setPixmap(pixmap)

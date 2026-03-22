@@ -7,6 +7,7 @@ import asyncio
 import json
 import threading
 import uuid
+from collections import deque
 from concurrent.futures import Future
 from dataclasses import dataclass, field
 from enum import Enum
@@ -34,7 +35,7 @@ class ConnectionState(Enum):
 
 # Try to import PySide6 signals, fall back to callback if not available
 try:
-    from PySide6.QtCore import Signal, QObject
+    from PySide6.QtCore import QCoreApplication, QTimer, Signal, QObject, Slot
     
     class WebSocketSignals(QObject):
         """PySide6 signals for WebSocket events."""
@@ -44,6 +45,32 @@ try:
         message_received = Signal(dict)
         state_changed = Signal(str)
         error_occurred = Signal(str)
+        dispatch_requested = Signal()
+
+        def __init__(self) -> None:
+            super().__init__()
+            self._pending_callbacks: deque[Callable[[], None]] = deque()
+            self._callback_lock = threading.Lock()
+            self._dispatch_timer = QTimer(self)
+            self._dispatch_timer.setInterval(10)
+            self._dispatch_timer.timeout.connect(self._drain_callbacks)
+            self._dispatch_timer.start()
+
+        def queue_callback(self, callback: Callable[[], None]) -> None:
+            with self._callback_lock:
+                self._pending_callbacks.append(callback)
+
+        @Slot()
+        def _drain_callbacks(self) -> None:
+            while True:
+                with self._callback_lock:
+                    if not self._pending_callbacks:
+                        return
+                    callback = self._pending_callbacks.popleft()
+                try:
+                    callback()
+                except Exception:
+                    logger.exception("Qt queued websocket callback failed")
         
     _SIGNALS_AVAILABLE = True
 except ImportError:
@@ -116,37 +143,75 @@ class WebSocketClient:
     
     def _set_state(self, new_state: ConnectionState) -> None:
         """Set connection state and notify."""
+        old_state = self._state
+        if old_state == new_state:
+            return
+
+        # Keep the transport state in sync immediately on the worker thread so
+        # receive/heartbeat loops started right after connect() see CONNECTED
+        # instead of the previous asynchronously-dispatched value.
+        self._state = new_state
+
         def _emit_state() -> None:
-            if self._state == new_state:
-                return
-
-            old_state = self._state
-            self._state = new_state
-
             logger.info(f"WebSocket state: {old_state.value} -> {new_state.value}")
 
             if self.signals:
-                self.signals.state_changed.emit(new_state.value)
+                try:
+                    self.signals.state_changed.emit(new_state.value)
+                except Exception:
+                    logger.exception("WebSocket state_changed signal handler failed")
 
             if new_state == ConnectionState.CONNECTED:
-                if self.signals:
-                    self.signals.connected.emit()
                 if self._on_connect:
-                    self._on_connect()
+                    try:
+                        self._on_connect()
+                    except Exception:
+                        logger.exception("WebSocket on_connect callback failed")
+                if self.signals:
+                    try:
+                        self.signals.connected.emit()
+                    except Exception:
+                        logger.exception("WebSocket connected signal handler failed")
 
             elif new_state == ConnectionState.DISCONNECTED and old_state != ConnectionState.DISCONNECTED:
-                if self.signals:
-                    self.signals.disconnected.emit()
                 if self._on_disconnect:
-                    self._on_disconnect()
+                    try:
+                        self._on_disconnect()
+                    except Exception:
+                        logger.exception("WebSocket on_disconnect callback failed")
+                if self.signals:
+                    try:
+                        self.signals.disconnected.emit()
+                    except Exception:
+                        logger.exception("WebSocket disconnected signal handler failed")
 
         self._dispatch_to_main(_emit_state)
 
     def _dispatch_to_main(self, callback: Callable[[], None]) -> None:
         """Run a callback on the main/UI asyncio loop."""
+        if self.signals and QCoreApplication.instance() is not None:
+            try:
+                self.signals.queue_callback(callback)
+                return
+            except Exception:
+                logger.exception("Qt main-thread callback dispatch failed")
+
         loop = self._main_loop
         if loop and loop.is_running():
-            loop.call_soon_threadsafe(callback)
+            async def _invoke_callback() -> None:
+                callback()
+
+            future = asyncio.run_coroutine_threadsafe(_invoke_callback(), loop)
+
+            def _report_callback_result(done_future: Future) -> None:
+                try:
+                    done_future.result()
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    logger.exception("Main-loop websocket callback failed")
+
+            future.add_done_callback(_report_callback_result)
             return
         callback()
 
@@ -228,57 +293,61 @@ class WebSocketClient:
         """Main connection loop with exponential backoff."""
         attempt = 0
         delay = self.initial_reconnect_delay
-        
-        while not self._intentional_disconnect:
-            try:
-                logger.info(f"WebSocket connecting (attempt {attempt + 1})")
-                
-                self._ws = await asyncio.wait_for(
-                    websockets.connect(
-                        self.url,
-                        ping_interval=None,
-                    ),
-                    timeout=self.heartbeat_timeout,
-                )
-                
-                logger.info("WebSocket connected")
-                self._set_state(ConnectionState.CONNECTED)
-                
-                self._receive_task = asyncio.create_task(self._receive_loop())
-                self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
-                
-                return
-            
-            except asyncio.CancelledError:
-                # Task was cancelled, exit the loop immediately
-                logger.info("Connect loop cancelled, exiting")
-                raise
-            
-            except asyncio.TimeoutError:
-                logger.warning(f"WebSocket connection timeout")
-            except WebSocketException as e:
-                logger.warning(f"WebSocket connection error: {e}")
-            except Exception as e:
-                logger.error(f"WebSocket unexpected error: {e}")
-                if self._on_error:
-                    self._on_error(str(e))
-                if self.signals:
-                    self.signals.error_occurred.emit(str(e))
-            
-            if self._intentional_disconnect:
-                break
-            
-            attempt += 1
-            if attempt >= self.max_reconnect_attempts:
-                logger.error("Max reconnect attempts reached")
-                self._set_state(ConnectionState.DISCONNECTED)
-                return
-            
-            logger.info(f"Reconnecting in {delay:.1f}s")
-            self._set_state(ConnectionState.RECONNECTING)
-            
-            await asyncio.sleep(delay)
-            delay = min(delay * self.reconnect_backoff_factor, self.max_reconnect_delay)
+        try:
+            while not self._intentional_disconnect:
+                try:
+                    logger.info(f"WebSocket connecting (attempt {attempt + 1})")
+
+                    self._ws = await asyncio.wait_for(
+                        websockets.connect(
+                            self.url,
+                            ping_interval=None,
+                        ),
+                        timeout=self.heartbeat_timeout,
+                    )
+
+                    logger.info("WebSocket connected")
+                    self._set_state(ConnectionState.CONNECTED)
+
+                    self._receive_task = asyncio.create_task(self._receive_loop())
+                    self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
+
+                    return
+
+                except asyncio.CancelledError:
+                    # Task was cancelled, exit the loop immediately
+                    logger.info("Connect loop cancelled, exiting")
+                    raise
+
+                except asyncio.TimeoutError:
+                    logger.warning(f"WebSocket connection timeout")
+                except WebSocketException as e:
+                    logger.warning(f"WebSocket connection error: {e}")
+                except Exception as e:
+                    logger.error(f"WebSocket unexpected error: {e}")
+                    if self._on_error:
+                        self._on_error(str(e))
+                    if self.signals:
+                        self.signals.error_occurred.emit(str(e))
+
+                if self._intentional_disconnect:
+                    break
+
+                attempt += 1
+                if attempt >= self.max_reconnect_attempts:
+                    logger.error("Max reconnect attempts reached")
+                    self._set_state(ConnectionState.DISCONNECTED)
+                    return
+
+                logger.info(f"Reconnecting in {delay:.1f}s")
+                self._set_state(ConnectionState.RECONNECTING)
+
+                await asyncio.sleep(delay)
+                delay = min(delay * self.reconnect_backoff_factor, self.max_reconnect_delay)
+        finally:
+            current_task = asyncio.current_task()
+            if self._connect_task is current_task:
+                self._connect_task = None
     
     async def _receive_loop(self) -> None:
         """Receive messages from WebSocket."""
@@ -292,14 +361,23 @@ class WebSocketClient:
                 try:
                     data = await asyncio.to_thread(json.loads, message)
                     logger.debug(f"Received message: {data.get('type')}")
-
-                    def _dispatch_message() -> None:
-                        if self.signals:
-                            self.signals.message_received.emit(data)
-                        if self._on_message:
+                    if self._on_message:
+                        try:
+                            # Deliver transport payloads immediately from the
+                            # worker loop so business message handling does not
+                            # depend on Qt callback marshalling.
                             self._on_message(data)
+                        except Exception:
+                            logger.exception("WebSocket on_message callback failed")
 
-                    self._dispatch_to_main(_dispatch_message)
+                    if self.signals:
+                        def _emit_signal() -> None:
+                            try:
+                                self.signals.message_received.emit(data)
+                            except Exception:
+                                logger.exception("WebSocket message_received signal handler failed")
+
+                        self._dispatch_to_main(_emit_signal)
                 
                 except json.JSONDecodeError:
                     logger.warning(f"Invalid JSON: {message[:100]}")
@@ -368,14 +446,18 @@ class WebSocketClient:
             except RuntimeError:
                 return
 
+            if self._connect_task is not None and not self._connect_task.done():
+                return
+
             self._connect_task = loop.create_task(self._connect_loop())
-    
+
     async def _cleanup(self) -> None:
         """Cleanup tasks and connection."""
-        tasks = [self._receive_task, self._heartbeat_task]
-        
+        current_task = asyncio.current_task()
+        tasks = [self._receive_task, self._heartbeat_task, self._connect_task]
+
         for task in tasks:
-            if task and not task.done():
+            if task and task is not current_task and not task.done():
                 task.cancel()
                 try:
                     await task
@@ -391,6 +473,8 @@ class WebSocketClient:
         
         self._receive_task = None
         self._heartbeat_task = None
+        if self._connect_task is not current_task:
+            self._connect_task = None
     
     async def send(self, message: dict[str, Any], timeout: float = 10.0) -> bool:
         """
@@ -499,12 +583,26 @@ class WebSocketClient:
             await asyncio.to_thread(self._thread.join, 2.0)
             self._thread = None
 
+        self._connect_task = None
+        self._receive_task = None
+        self._heartbeat_task = None
+        self._reconnect_task = None
+        self._main_loop = None
+        self._on_connect = None
+        self._on_disconnect = None
+        self._on_message = None
+        self._on_error = None
         self._set_state(ConnectionState.DISCONNECTED)
 
         logger.info("WebSocket client closed")
 
 
 _websocket_client: Optional[WebSocketClient] = None
+
+
+def peek_websocket_client() -> Optional[WebSocketClient]:
+    """Return the existing WebSocket client singleton if it was created."""
+    return _websocket_client
 
 
 def get_websocket_client(**kwargs) -> WebSocketClient:

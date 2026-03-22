@@ -15,6 +15,7 @@ from app.core.security import (
 )
 from app.models.user import User
 from app.repositories.user_repo import UserRepository
+from app.services.user_service import UserService
 
 
 class AuthService:
@@ -82,11 +83,5 @@ class AuthService:
             "token_type": "Bearer",
             "expires_in": self.settings.access_token_expire_minutes * 60,
             "refresh_expires_in": self.settings.refresh_token_expire_days * 24 * 60 * 60,
-            "user": {
-                "id": user.id,
-                "username": user.username,
-                "nickname": user.nickname,
-                "avatar": user.avatar,
-                "status": user.status,
-            },
+            "user": UserService.serialize_user(user),
         }

@@ -8,6 +8,7 @@ from PySide6.QtWidgets import QHBoxLayout, QSizePolicy, QVBoxLayout, QWidget
 
 from qfluentwidgets import BodyLabel, CaptionLabel, FluentIcon, TransparentToolButton
 
+from client.core.i18n import tr
 from client.ui.styles import StyleSheet
 
 
@@ -36,8 +37,11 @@ class ChatHeader(QWidget):
         self.info_layout.setContentsMargins(0, 0, 0, 0)
         self.info_layout.setSpacing(2)
 
-        self.title_label = BodyLabel("选择一个会话", self.info_widget)
-        self.status_label = CaptionLabel("从左侧选择一个聊天开始对话", self.info_widget)
+        self.title_label = BodyLabel(tr("chat_header.placeholder_title", "Select a Conversation"), self.info_widget)
+        self.status_label = CaptionLabel(
+            tr("chat_header.placeholder_status", "Choose a chat from the left to get started"),
+            self.info_widget,
+        )
         self.title_label.setMinimumWidth(0)
         self.status_label.setMinimumWidth(0)
         self.title_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
@@ -50,11 +54,11 @@ class ChatHeader(QWidget):
 
         self.detail_button = TransparentToolButton(FluentIcon.INFO, self)
         self.detail_button.setFixedSize(36, 36)
-        self.detail_button.setToolTip("聊天详情")
+        self.detail_button.setToolTip(tr("chat_header.detail_tooltip", "Chat Details"))
 
         self.ai_button = TransparentToolButton(FluentIcon.ROBOT, self)
         self.ai_button.setFixedSize(36, 36)
-        self.ai_button.setToolTip("AI 总结")
+        self.ai_button.setToolTip(tr("chat_header.ai_tooltip", "AI Summary"))
         self._apply_safe_button_font(self.detail_button, self.ai_button)
 
         self.main_layout.addWidget(self.info_widget, 1)
@@ -86,7 +90,7 @@ class ChatHeader(QWidget):
         is_ai: bool = False,
     ) -> None:
         """Set header content for the current session."""
-        self.title_label.setText(title or "未命名会话")
+        self.title_label.setText(title or tr("session.unnamed", "Untitled Session"))
         self.status_label.setText(status)
 
     def set_title(self, title: str) -> None:

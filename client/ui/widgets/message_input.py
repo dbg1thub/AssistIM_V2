@@ -52,6 +52,7 @@ from qfluentwidgets import (
     qconfig,
 )
 
+from client.core.i18n import tr
 from client.models.message import MessageType, infer_message_type_from_path
 from client.ui.common.attachment_card import attachment_card_size, draw_attachment_card
 from client.ui.common.emoji_utils import (
@@ -1293,6 +1294,7 @@ class MessageInput(QWidget):
         self._session_active = False
         self._emoji_flyout = None
         self._draft_emit_pending = False
+        self._programmatic_edit_depth = 0
         self._setup_ui()
         self._connect_signals()
         qconfig.themeChanged.connect(lambda *_args: self._apply_editor_transparency())
@@ -1331,31 +1333,31 @@ class MessageInput(QWidget):
 
         self.emoji_button = TransparentToolButton(FluentIcon.EMOJI_TAB_SYMBOLS, self.composer_widget)
         self.emoji_button.setFixedSize(28, 28)
-        self.emoji_button.setToolTip("Emoji")
+        self.emoji_button.setToolTip(tr("composer.toolbar.emoji", "Emoji"))
 
         self.image_button = TransparentToolButton(FluentIcon.PHOTO, self.composer_widget)
         self.image_button.setFixedSize(28, 28)
-        self.image_button.setToolTip("Send image")
+        self.image_button.setToolTip(tr("composer.toolbar.image", "Send Image"))
 
         self.file_button = TransparentToolButton(FluentIcon.FOLDER, self.composer_widget)
         self.file_button.setFixedSize(28, 28)
-        self.file_button.setToolTip("Send file")
+        self.file_button.setToolTip(tr("composer.toolbar.file", "Send File"))
 
         self.cut_button = TransparentToolButton(FluentIcon.CUT, self.composer_widget)
         self.cut_button.setFixedSize(28, 28)
-        self.cut_button.setToolTip("Screenshot")
+        self.cut_button.setToolTip(tr("composer.toolbar.screenshot", "Screenshot"))
 
         self.voice_button = TransparentToolButton(FluentIcon.PHONE, self.composer_widget)
         self.voice_button.setFixedSize(28, 28)
-        self.voice_button.setToolTip("Voice call")
+        self.voice_button.setToolTip(tr("composer.toolbar.voice_call", "Voice Call"))
 
         self.video_button = TransparentToolButton(FluentIcon.VIDEO, self.composer_widget)
         self.video_button.setFixedSize(28, 28)
-        self.video_button.setToolTip("Video call")
+        self.video_button.setToolTip(tr("composer.toolbar.video_call", "Video Call"))
 
         self.ai_button = TransparentToolButton(FluentIcon.ROBOT, self.composer_widget)
         self.ai_button.setFixedSize(28, 28)
-        self.ai_button.setToolTip("AI assistant")
+        self.ai_button.setToolTip(tr("composer.toolbar.ai", "AI Assistant"))
 
         self._apply_safe_button_font(
             self.emoji_button,
@@ -1379,13 +1381,13 @@ class MessageInput(QWidget):
         self.text_input = ChatTextEdit(self.composer_widget)
         self.text_input.setObjectName("chatMessageEdit")
         self.text_input.viewport().setObjectName("chatMessageViewport")
-        self.text_input.setPlaceholderText("Select a session to start chatting")
+        self.text_input.setPlaceholderText(tr("composer.placeholder.inactive", "Select a session to start chatting"))
         self.text_input.setAcceptRichText(False)
         self.text_input.setMinimumHeight(128)
         self.text_input.setViewportMargins(0, 0, 24, 52)
         self._apply_editor_transparency()
 
-        self.send_button = PushButton("Send", self.composer_widget)
+        self.send_button = PushButton(tr("composer.button.send", "Send"), self.composer_widget)
         self.send_button.setObjectName("composerSendButton")
         self.send_button.setFixedSize(84, 34)
 
@@ -1544,8 +1546,18 @@ class MessageInput(QWidget):
         has_draft = self.text_input.has_meaningful_content()
         self.send_button.setEnabled(self._session_active and has_draft)
 
+    def _run_programmatic_edit(self, callback) -> None:
+        """Suppress typing side effects while mutating the composer programmatically."""
+        self._programmatic_edit_depth += 1
+        try:
+            callback()
+        finally:
+            self._programmatic_edit_depth = max(0, self._programmatic_edit_depth - 1)
+
     def _on_text_changed(self) -> None:
         """Emit throttled typing events."""
+        if self._programmatic_edit_depth:
+            return
         current_time = time.time()
         if current_time - self._last_typing_time >= self.TYPING_THROTTLE:
             self._last_typing_time = current_time
@@ -1553,6 +1565,8 @@ class MessageInput(QWidget):
 
     def _schedule_draft_changed_emit(self) -> None:
         """Coalesce draft updates so session preview refreshes once per event loop turn."""
+        if self._programmatic_edit_depth:
+            return
         if self._draft_emit_pending:
             return
         self._draft_emit_pending = True
@@ -1594,14 +1608,24 @@ class MessageInput(QWidget):
 
     def _on_image_clicked(self) -> None:
         """Insert a selected image into the composer flow."""
-        file_path, _ = QFileDialog.getOpenFileName(self, "Select image", "", self.IMAGE_FILTER)
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            tr("composer.dialog.select_image", "Select Image"),
+            "",
+            self.IMAGE_FILTER,
+        )
         if file_path:
             self.text_input.insert_local_attachment(file_path, blockify=False)
             self.text_input.setFocus()
 
     def _on_file_clicked(self) -> None:
         """Insert a selected file into the composer flow."""
-        file_path, _ = QFileDialog.getOpenFileName(self, "Select file", "", self.FILE_FILTER)
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            tr("composer.dialog.select_file", "Select File"),
+            "",
+            self.FILE_FILTER,
+        )
         if file_path:
             self.text_input.insert_local_attachment(file_path, blockify=False)
             self.text_input.setFocus()
@@ -1619,8 +1643,8 @@ class MessageInput(QWidget):
     def _on_placeholder_action(self) -> None:
         """Show temporary placeholder hint for unsupported toolbar actions."""
         InfoBar.info(
-            "Notice",
-            "This toolbar action is not connected yet.",
+            tr("composer.action.title", "Notice"),
+            tr("composer.action.unavailable", "This toolbar action is not connected yet."),
             parent=self.window(),
             duration=1800,
         )
@@ -1639,9 +1663,9 @@ class MessageInput(QWidget):
         self.text_input.setEnabled(active)
 
         if active:
-            self.text_input.setPlaceholderText("Enter to send, Shift+Enter for new line")
+            self.text_input.setPlaceholderText(tr("composer.placeholder.active", "Enter to send, Shift+Enter for new line"))
         else:
-            self.text_input.setPlaceholderText("Select a session to start chatting")
+            self.text_input.setPlaceholderText(tr("composer.placeholder.inactive", "Select a session to start chatting"))
             self.clear_draft()
 
         self._apply_editor_transparency()
@@ -1658,13 +1682,13 @@ class MessageInput(QWidget):
 
     def restore_draft_segments(self, segments: list[dict]) -> None:
         """Restore a previously captured draft into the composer."""
-        self.text_input.restore_composed_segments(segments or [])
+        self._run_programmatic_edit(lambda: self.text_input.restore_composed_segments(segments or []))
         self._update_send_button_state()
         self._schedule_draft_changed_emit()
 
     def clear_draft(self) -> None:
         """Clear the current composer draft explicitly."""
-        self.text_input.clear_composer()
+        self._run_programmatic_edit(self.text_input.clear_composer)
         self._update_send_button_state()
 
     def get_text_input(self) -> QTextEdit:

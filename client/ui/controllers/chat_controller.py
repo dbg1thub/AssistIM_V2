@@ -4,17 +4,15 @@ Chat Controller Module
 Controller for chat UI interactions.
 Receives UI input and coordinates with MessageManager.
 """
-import asyncio
 import subprocess
 import os
-from typing import Any, Callable, Optional
+from typing import Any, Optional
 
 from client.core import logging
 from client.core.logging import setup_logging
-from client.events.event_bus import get_event_bus
-from client.managers.message_manager import MessageEvent, get_message_manager
-from client.managers.session_manager import SessionEvent, get_session_manager
-from client.models.message import ChatMessage, MessageType, infer_message_type_from_path
+from client.managers.message_manager import get_message_manager
+from client.managers.session_manager import get_session_manager
+from client.models.message import ChatMessage, MessageType, Session, infer_message_type_from_path
 from client.network.http_client import get_http_client
 
 setup_logging()
@@ -33,12 +31,8 @@ class ChatController:
     """
 
     def __init__(self):
-        self._event_bus = get_event_bus()
         self._msg_manager = get_message_manager()
         self._session_manager = get_session_manager()
-
-        self._tasks: set[asyncio.Task] = set()
-        self._handlers: dict[str, Callable] = {}
         self._initialized = False
 
     async def initialize(self) -> None:
@@ -48,27 +42,6 @@ class ChatController:
 
         await self._msg_manager.initialize()
         await self._session_manager.initialize()
-
-        await self._event_bus.subscribe(
-            MessageEvent.SENT,
-            self._on_message_sent,
-        )
-        await self._event_bus.subscribe(
-            MessageEvent.RECEIVED,
-            self._on_message_received,
-        )
-        await self._event_bus.subscribe(
-            MessageEvent.ACK,
-            self._on_message_ack,
-        )
-        await self._event_bus.subscribe(
-            MessageEvent.FAILED,
-            self._on_message_failed,
-        )
-        await self._event_bus.subscribe(
-            MessageEvent.TYPING,
-            self._on_typing,
-        )
 
         self._initialized = True
 
@@ -280,9 +253,9 @@ class ChatController:
 
         await self._msg_manager.send_typing(session_id)
 
-    async def send_read_receipt(self, message_id: str) -> bool:
+    async def send_read_receipt(self, message_id: str, session_id: Optional[str] = None) -> bool:
         """Send read receipt for a message."""
-        session_id = self._session_manager.current_session_id
+        session_id = session_id or self._session_manager.current_session_id
 
         if not session_id:
             return False
@@ -351,80 +324,67 @@ class ChatController:
         """Get all sessions."""
         return self._session_manager.sessions
 
+    def get_session(self, session_id: str) -> Optional[Session]:
+        """Get one cached session by id."""
+        for session in self._session_manager.sessions:
+            if session.session_id == session_id:
+                return session
+        return None
+
+    def find_direct_session(self, user_id: str) -> Optional[Session]:
+        """Find an existing direct session for one user."""
+        return self._session_manager.find_direct_session(user_id)
+
+    async def ensure_session_loaded(
+        self,
+        session_id: str,
+        *,
+        fallback_name: str = "Session",
+        avatar: str = "",
+    ) -> Optional[Session]:
+        """Ensure a remote session exists locally for the UI to open."""
+        return await self._session_manager.ensure_remote_session(
+            session_id,
+            fallback_name=fallback_name,
+            avatar=avatar,
+        )
+
+    async def ensure_direct_session(
+        self,
+        user_id: str,
+        *,
+        display_name: str = "",
+        avatar: str = "",
+    ) -> Optional[Session]:
+        """Ensure a direct session exists for the given contact."""
+        return await self._session_manager.ensure_direct_session(
+            user_id,
+            display_name=display_name,
+            avatar=avatar,
+        )
+
+    async def refresh_session_preview(self, session_id: str) -> None:
+        """Refresh the cached session preview from local storage."""
+        await self._session_manager.refresh_session_preview(session_id)
+
     def get_total_unread(self) -> int:
         """Get total unread count."""
         return self._session_manager.get_total_unread_count()
 
-    def _on_message_sent(self, data: dict) -> None:
-        """Handle message sent event."""
-        handler = self._handlers.get("message_sent")
-        if handler:
-            try:
-                handler(data)
-            except Exception as e:
-                logger.error(f"Handler error: {e}")
-
-    def _on_message_received(self, data: dict) -> None:
-        """Handle message received event."""
-        handler = self._handlers.get("message_received")
-        if handler:
-            try:
-                handler(data)
-            except Exception as e:
-                logger.error(f"Handler error: {e}")
-
-    def _on_message_ack(self, data: dict) -> None:
-        """Handle message ACK event."""
-        handler = self._handlers.get("message_ack")
-        if handler:
-            try:
-                handler(data)
-            except Exception as e:
-                logger.error(f"Handler error: {e}")
-
-    def _on_message_failed(self, data: dict) -> None:
-        """Handle message failed event."""
-        handler = self._handlers.get("message_failed")
-        if handler:
-            try:
-                handler(data)
-            except Exception as e:
-                logger.error(f"Handler error: {e}")
-
-    def _on_typing(self, data: dict) -> None:
-        """Handle typing event."""
-        handler = self._handlers.get("typing")
-        if handler:
-            try:
-                handler(data)
-            except Exception as e:
-                logger.error(f"Handler error: {e}")
-
-    def set_handler(self, event: str, handler: Callable) -> None:
-        """Set event handler."""
-        self._handlers[event] = handler
-
-    def remove_handler(self, event: str) -> None:
-        """Remove event handler."""
-        self._handlers.pop(event, None)
-
     async def close(self) -> None:
         """Close chat controller."""
         logger.info("Closing chat controller")
-
-        for task in self._tasks:
-            if not task.done():
-                task.cancel()
-
-        if self._tasks:
-            await asyncio.gather(*self._tasks, return_exceptions=True)
-
-        self._handlers.clear()
+        self._initialized = False
 
         logger.info("Chat controller closed")
 
 
 _chat_controller: Optional[ChatController] = None
+
+
+def peek_chat_controller() -> Optional[ChatController]:
+    """Return the existing chat controller singleton if it was created."""
+    return _chat_controller
 
 
 def get_chat_controller() -> ChatController:

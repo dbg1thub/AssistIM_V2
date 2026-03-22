@@ -1,4 +1,4 @@
-"""
+﻿"""
 Message Model Module
 
 QAbstractListModel for chat message list.
@@ -8,7 +8,8 @@ from datetime import datetime
 
 from PySide6.QtCore import QAbstractListModel, Qt, QModelIndex
 
-from client.models.message import ChatMessage, MessageStatus, MessageType
+from client.core.datetime_utils import coerce_local_datetime
+from client.models.message import ChatMessage, MessageStatus, MessageType, resolve_recall_notice
 
 
 class MessageModel(QAbstractListModel):
@@ -289,21 +290,25 @@ class MessageModel(QAbstractListModel):
 
     def _build_recall_notice_item(self, message: ChatMessage) -> ChatMessage:
         """Build a synthetic standalone recall-notice row."""
+        extra = dict(message.extra or {})
+        extra.update(
+            {
+                self.DISPLAY_KIND_KEY: self.DISPLAY_RECALL_NOTICE,
+                self.SOURCE_MESSAGE_ID_KEY: message.message_id,
+            }
+        )
         return ChatMessage(
             message_id=f"__recall__::{message.message_id}",
             session_id=message.session_id,
             sender_id=message.sender_id,
-            content=message.content,
+            content=resolve_recall_notice(message),
             message_type=MessageType.SYSTEM,
             status=MessageStatus.RECALLED,
             timestamp=message.timestamp,
             updated_at=message.updated_at,
             is_self=message.is_self,
             is_ai=message.is_ai,
-            extra={
-                self.DISPLAY_KIND_KEY: self.DISPLAY_RECALL_NOTICE,
-                self.SOURCE_MESSAGE_ID_KEY: message.message_id,
-            },
+            extra=extra,
         )
 
     def _display_kind(self, item: ChatMessage) -> str:
@@ -317,16 +322,7 @@ class MessageModel(QAbstractListModel):
     @staticmethod
     def _normalize_timestamp(value):
         """Normalize timestamps for time-break comparisons."""
-        if isinstance(value, datetime):
-            return value
-        if isinstance(value, (int, float)):
-            return datetime.fromtimestamp(value)
-        if isinstance(value, str):
-            try:
-                return datetime.fromisoformat(value)
-            except ValueError:
-                return None
-        return None
+        return coerce_local_datetime(value)
 
     def _is_time_break(self, current: ChatMessage, next_message: ChatMessage) -> bool:
         """Return whether adjacent messages belong to different visible time groups."""
@@ -337,3 +333,4 @@ class MessageModel(QAbstractListModel):
         if current_time.date() != next_time.date():
             return True
         return abs((next_time - current_time).total_seconds()) >= 5 * 60
+

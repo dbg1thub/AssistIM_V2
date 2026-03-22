@@ -9,6 +9,8 @@ from PySide6.QtCore import Qt
 
 from qfluentwidgets import AvatarWidget, BodyLabel, CaptionLabel, Badge
 
+from client.core.i18n import tr
+
 
 class SessionItem(QWidget):
     """
@@ -45,7 +47,7 @@ class SessionItem(QWidget):
         self.top_layout.setSpacing(8)
 
         self.name_label = BodyLabel(self)
-        self.name_label.setText("User Name")
+        self.name_label.setText(tr("session.unnamed", "Untitled Session"))
 
         self.time_label = CaptionLabel(self)
         self.time_label.setText("")

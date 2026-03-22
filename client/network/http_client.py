@@ -315,6 +315,8 @@ class HTTPClient:
         if self._session and not self._session.closed:
             await self._session.close()
             logger.debug("HTTP client session closed")
+        self._session = None
+        self._refreshing = False
 
     async def upload_file(
             self,
@@ -339,31 +341,32 @@ class HTTPClient:
         try:
             session = await self._ensure_session()
 
-            form = FormData()
-            form.add_field(
-                "file",
-                open(file_path, "rb"),
-                filename=os.path.basename(file_path),
-                content_type=self._get_content_type(file_path),
-            )
+            with open(file_path, "rb") as file_obj:
+                form = FormData()
+                form.add_field(
+                    "file",
+                    file_obj,
+                    filename=os.path.basename(file_path),
+                    content_type=self._get_content_type(file_path),
+                )
 
-            headers = {}
-            if self._access_token:
-                headers["Authorization"] = f"Bearer {self._access_token}"
+                headers = {}
+                if self._access_token:
+                    headers["Authorization"] = f"Bearer {self._access_token}"
 
-            logger.info(f"Uploading file: {file_path}")
+                logger.info(f"Uploading file: {file_path}")
 
-            async with session.post(
-                    url,
-                    data=form,
-                    headers=headers,
-            ) as response:
-                if response.status == 200 or response.status == 201:
-                    data = await response.json()
-                    if isinstance(data, dict) and "data" in data:
-                        return data["data"]
-                    return data
-                else:
+                async with session.post(
+                        url,
+                        data=form,
+                        headers=headers,
+                ) as response:
+                    if response.status == 200 or response.status == 201:
+                        data = await response.json()
+                        if isinstance(data, dict) and "data" in data:
+                            return data["data"]
+                        return data
+
                     text = await response.text()
                     logger.error(f"Upload failed: {response.status} - {text}")
                     return None
@@ -391,6 +394,11 @@ class HTTPClient:
 
 
 _http_client: Optional[HTTPClient] = None
+
+
+def peek_http_client() -> Optional[HTTPClient]:
+    """Return the existing HTTP client singleton if it was created."""
+    return _http_client
 
 
 def get_http_client() -> HTTPClient:

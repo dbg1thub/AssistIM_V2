@@ -85,6 +85,28 @@ class SessionRepository:
         )
         return list(self.db.execute(stmt).scalars().all())
 
+    def find_private_session_by_members(self, user_ids: list[str]) -> ChatSession | None:
+        normalized_ids = list(dict.fromkeys(user_ids))
+        if len(normalized_ids) < 2:
+            return None
+
+        seed_user_id = normalized_ids[0]
+        stmt = (
+            select(ChatSession)
+            .join(SessionMember, SessionMember.session_id == ChatSession.id)
+            .where(ChatSession.type == "private", SessionMember.user_id == seed_user_id)
+            .order_by(ChatSession.updated_at.desc())
+        )
+        candidates = list(self.db.execute(stmt).scalars().all())
+        expected_members = set(normalized_ids)
+
+        for session in candidates:
+            member_ids = set(self.list_member_ids(session.id))
+            if member_ids == expected_members:
+                return session
+
+        return None
+
     def touch(self, session_id: str) -> ChatSession | None:
         session = self.get_by_id(session_id)
         if session is None:
@@ -105,3 +127,4 @@ class SessionRepository:
         if session is not None:
             self.db.delete(session)
         self.db.commit()
+

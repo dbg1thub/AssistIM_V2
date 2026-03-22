@@ -9,6 +9,8 @@ from PySide6.QtCore import Signal, Qt
 
 from qfluentwidgets import AvatarWidget, BodyLabel, CaptionLabel, IconWidget, PrimaryPushButton
 
+from client.core.i18n import format_file_size, tr
+
 
 class MessageFileWidget(QWidget):
     """
@@ -98,7 +100,7 @@ class MessageFileWidget(QWidget):
         self.file_size = CaptionLabel(self._get_file_size(), bubble)
         layout.addWidget(self.file_size, 0, Qt.AlignmentFlag.AlignLeft)
 
-        self.download_btn = PrimaryPushButton("Download", bubble)
+        self.download_btn = PrimaryPushButton(tr("common.download", "Download"), bubble)
         self.download_btn.setFixedSize(80, 28)
         self.download_btn.clicked.connect(self._on_download_clicked)
         layout.addWidget(self.download_btn, 0, Qt.AlignmentFlag.AlignRight)
@@ -111,7 +113,7 @@ class MessageFileWidget(QWidget):
             return self._message.extra.get("name", "")
         if self._message and self._message.content:
             return self._message.content.split('/')[-1]
-        return "Unknown File"
+        return tr("attachment.unknown_file", "Unknown File")
 
     def _get_file_url(self) -> str:
         """Extract file URL from message content."""
@@ -130,14 +132,7 @@ class MessageFileWidget(QWidget):
 
     def _format_size(self, size: int) -> str:
         """Format file size to human readable format."""
-        if size < 1024:
-            return f"{size} B"
-        elif size < 1024 * 1024:
-            return f"{size / 1024:.1f} KB"
-        elif size < 1024 * 1024 * 1024:
-            return f"{size / (1024 * 1024):.1f} MB"
-        else:
-            return f"{size / (1024 * 1024 * 1024):.1f} GB"
+        return format_file_size(size)
 
     def _on_download_clicked(self) -> None:
         """Handle download button click."""

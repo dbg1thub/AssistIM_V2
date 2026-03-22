@@ -4,12 +4,11 @@ Session Controller Module
 Controller for session list interactions.
 """
 
-from typing import Any, Callable, Optional
+from typing import Any, Optional
 
 from client.core import logging
 from client.core.logging import setup_logging
-from client.events.event_bus import get_event_bus
-from client.managers.session_manager import SessionEvent, get_session_manager
+from client.managers.session_manager import get_session_manager
 
 setup_logging()
 logger = logging.get_logger(__name__)
@@ -26,20 +25,15 @@ class SessionController:
     """
 
     def __init__(self):
-        self._event_bus = get_event_bus()
         self._session_manager = get_session_manager()
-        self._handlers: dict[str, Callable] = {}
+        self._initialized = False
 
     async def initialize(self) -> None:
         """Initialize session controller."""
-        await self._event_bus.subscribe(
-            SessionEvent.UPDATED,
-            self._on_session_updated,
-        )
-        await self._event_bus.subscribe(
-            SessionEvent.MESSAGE_ADDED,
-            self._on_message_added,
-        )
+        if self._initialized:
+            return
+
+        self._initialized = True
         logger.info("Session controller initialized")
 
     async def select_session(self, session_id: str) -> None:
@@ -61,36 +55,38 @@ class SessionController:
 
     def get_sessions(self) -> list[Any]:
         """Get all sessions."""
-        return list(self._session_manager.sessions.values())
+        return list(self._session_manager.sessions)
 
-    def _on_session_updated(self, data: dict) -> None:
-        """Handle session updated event."""
-        handler = self._handlers.get("session_updated")
-        if handler:
-            try:
-                handler(data)
-            except Exception as e:
-                logger.error(f"Handler error: {e}")
+    def get_session(self, session_id: str) -> Optional[Any]:
+        """Get one session by id from the current cached list."""
+        for session in self._session_manager.sessions:
+            if getattr(session, "session_id", None) == session_id:
+                return session
+        return None
 
-    def _on_message_added(self, data: dict) -> None:
-        """Handle message added event."""
-        handler = self._handlers.get("message_added")
-        if handler:
-            try:
-                handler(data)
-            except Exception as e:
-                logger.error(f"Handler error: {e}")
+    async def remove_session(self, session_id: str) -> None:
+        """Remove a session."""
+        await self._session_manager.remove_session(session_id)
 
-    def set_handler(self, event: str, handler: Callable) -> None:
-        """Set event handler."""
-        self._handlers[event] = handler
+    async def set_pinned(self, session_id: str, pinned: bool) -> None:
+        """Persist pinned state for a session."""
+        await self._session_manager.set_pinned(session_id, pinned)
 
-    def remove_handler(self, event: str) -> None:
-        """Remove event handler."""
-        self._handlers.pop(event, None)
+    async def mark_session_unread(self, session_id: str, unread: bool) -> None:
+        """Toggle unread state for a session."""
+        await self._session_manager.mark_session_unread(session_id, unread)
+
+    async def close(self) -> None:
+        """Close the lightweight session controller state."""
+        self._initialized = False
 
 
 _session_controller: Optional[SessionController] = None
+
+
+def peek_session_controller() -> Optional[SessionController]:
+    """Return the existing session controller singleton if it was created."""
+    return _session_controller
 
 
 def get_session_controller() -> SessionController:
