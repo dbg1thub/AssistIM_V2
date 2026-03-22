@@ -5,6 +5,7 @@ Manager for chat sessions, unread counts, and current session.
 """
 import asyncio
 import json
+import time
 from datetime import datetime
 from typing import Any, Callable, Optional
 
@@ -404,6 +405,10 @@ class SessionManager:
             session = self._sessions.pop(session_id, None)
 
         if session:
+            db = get_database()
+            if db.is_connected:
+                await db.delete_session(session_id)
+
             if self._current_session_id == session_id:
                 self._current_session_id = None
 
@@ -412,6 +417,54 @@ class SessionManager:
             })
 
             logger.info(f"Session removed: {session_id}")
+
+    async def set_pinned(self, session_id: str, pinned: bool) -> None:
+        """Persist pinned state for a session and refresh the list."""
+        async with self._lock:
+            session = self._sessions.get(session_id)
+            if not session:
+                return
+
+            db = get_database()
+            affected_sessions: list[Session] = []
+            desired_pinned_at = time.time() if pinned else None
+            current_pinned_at = session.extra.get("pinned_at")
+            if getattr(session, "is_pinned", False) != pinned or current_pinned_at != desired_pinned_at:
+                setattr(session, "is_pinned", pinned)
+                session.extra["is_pinned"] = pinned
+                session.extra["pinned_at"] = desired_pinned_at
+                affected_sessions.append(session)
+
+            if db.is_connected:
+                for changed in affected_sessions:
+                    await db.save_session(changed)
+
+        for changed in affected_sessions:
+            await self._event_bus.emit(SessionEvent.UPDATED, {
+                "session": changed,
+            })
+
+    async def mark_session_unread(self, session_id: str, unread: bool) -> None:
+        """Manually mark a session read or unread."""
+        async with self._lock:
+            session = self._sessions.get(session_id)
+            if not session:
+                return
+
+            new_count = max(1, session.unread_count) if unread else 0
+            if session.unread_count == new_count:
+                return
+
+            session.unread_count = new_count
+
+            db = get_database()
+            if db.is_connected:
+                await db.update_session_unread(session_id, new_count)
+
+        await self._event_bus.emit(SessionEvent.UNREAD_CHANGED, {
+            "session_id": session_id,
+            "unread_count": new_count,
+        })
 
     async def get_session(self, session_id: str) -> Optional[Session]:
         """Get a session by ID."""

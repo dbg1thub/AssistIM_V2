@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from PySide6.QtCore import Signal
 from PySide6.QtGui import QFont
-from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QHBoxLayout, QSizePolicy, QVBoxLayout, QWidget
 
 from qfluentwidgets import BodyLabel, CaptionLabel, FluentIcon, TransparentToolButton
 
@@ -23,18 +23,25 @@ class ChatHeader(QWidget):
 
     def _setup_ui(self) -> None:
         self.setObjectName("chatHeader")
+        self.setMinimumWidth(0)
 
         self.main_layout = QHBoxLayout(self)
         self.main_layout.setContentsMargins(20, 12, 20, 12)
         self.main_layout.setSpacing(12)
 
         self.info_widget = QWidget(self)
+        self.info_widget.setMinimumWidth(0)
+        self.info_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self.info_layout = QVBoxLayout(self.info_widget)
         self.info_layout.setContentsMargins(0, 0, 0, 0)
         self.info_layout.setSpacing(2)
 
         self.title_label = BodyLabel("选择一个会话", self.info_widget)
         self.status_label = CaptionLabel("从左侧选择一个聊天开始对话", self.info_widget)
+        self.title_label.setMinimumWidth(0)
+        self.status_label.setMinimumWidth(0)
+        self.title_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.status_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
 
         self.title_label.setObjectName("chatHeaderTitle")
         self.status_label.setObjectName("chatHeaderStatus")

@@ -330,6 +330,7 @@ class Session:
             self.updated_at = now
         if self.last_message_time is None:
             self.last_message_time = self.created_at
+        setattr(self, "is_pinned", bool(self.extra.get("is_pinned", getattr(self, "is_pinned", False))))
     
     def update_last_message(self, content: str, timestamp: Optional[datetime] = None) -> None:
         """Update last message."""

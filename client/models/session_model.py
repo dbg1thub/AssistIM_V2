@@ -4,6 +4,7 @@ Session Model Module
 QAbstractListModel for chat session list.
 """
 
+import time
 from datetime import datetime
 from typing import Optional
 
@@ -154,10 +155,14 @@ class SessionModel(QAbstractListModel):
         self.layoutChanged.emit()
 
     def _session_sort_key(self, session: Session) -> tuple:
-        """Sort key for session: (is_pinned, last_message_time)"""
+        """Sort key for session: pinned first, newest pin first, then latest message time."""
         is_pinned = getattr(session, 'is_pinned', False)
+        try:
+            pinned_at = float(session.extra.get("pinned_at") or 0.0) if hasattr(session, "extra") else 0.0
+        except (TypeError, ValueError):
+            pinned_at = 0.0
         last_time = session.last_message_time or session.created_at or datetime.min
-        return (is_pinned, last_time)
+        return (is_pinned, pinned_at, last_time)
 
     def _find_insert_index(self, session: Session) -> int:
         """Return the descending sort position for a new session."""
@@ -167,16 +172,32 @@ class SessionModel(QAbstractListModel):
                 return i
         return len(self._sessions)
 
-    def set_pinned(self, session_id: str, pinned: bool) -> None:
+    def set_pinned(self, session_id: str, pinned: bool, *, pinned_at: float | None = None) -> None:
         """Set session pinned status."""
+        changed_rows: list[int] = []
         for i, session in enumerate(self._sessions):
-            if session.session_id == session_id:
-                if hasattr(session, 'is_pinned'):
-                    session.is_pinned = pinned
-                    index = self.index(i)
-                    self.dataChanged.emit(index, index, [self.IsPinnedRole])
-                    self.sort_sessions()
-                break
+            if session.session_id != session_id:
+                continue
+            target_state = pinned
+            desired_pinned_at = (
+                pinned_at if (target_state and pinned_at is not None)
+                else (time.time() if target_state else None)
+            )
+            current_pinned_at = session.extra.get("pinned_at") if hasattr(session, "extra") else None
+            if getattr(session, "is_pinned", False) == target_state and current_pinned_at == desired_pinned_at:
+                continue
+            if hasattr(session, "is_pinned"):
+                session.is_pinned = target_state
+                if hasattr(session, "extra"):
+                    session.extra["is_pinned"] = target_state
+                    session.extra["pinned_at"] = desired_pinned_at
+                changed_rows.append(i)
+
+        for row in changed_rows:
+            index = self.index(row)
+            self.dataChanged.emit(index, index, [self.IsPinnedRole])
+        if changed_rows:
+            self.sort_sessions()
 
     def move_to_top(self, session_id: str) -> None:
         """Move session to top (temporary pin)."""

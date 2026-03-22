@@ -33,6 +33,7 @@ class MessageEvent:
     FAILED = "message_failed"
     TYPING = "message_typing"
     READ = "message_read"
+    DELIVERED = "message_delivered"
     SYNC_COMPLETED = "message_sync_completed"
     RECALLED = "message_recalled"
     EDITED = "message_edited"
@@ -297,6 +298,9 @@ class MessageManager:
         elif msg_type == "read":
             await self._process_read(data)
 
+        elif msg_type == "message_delivered":
+            await self._process_delivered(data)
+
         elif msg_type == "message_recall":
             await self._process_recall(data)
 
@@ -436,12 +440,37 @@ class MessageManager:
         message_id = data.get("data", {}).get("message_id", "")
         user_id = data.get("data", {}).get("user_id", "")
 
-        await self._db.update_message_status(message_id, MessageStatus.READ)
+        await self._db.mark_messages_read_through(session_id, message_id)
 
         await self._event_bus.emit(MessageEvent.READ, {
             "session_id": session_id,
             "message_id": message_id,
             "user_id": user_id,
+        })
+
+    async def _process_delivered(self, data: dict) -> None:
+        """Process delivery receipt for a sent message."""
+        delivered_data = data.get("data", {})
+        message_id = delivered_data.get("msg_id") or data.get("msg_id", "")
+        session_id = delivered_data.get("session_id", "")
+        user_ids = delivered_data.get("user_ids", [])
+
+        if not message_id:
+            return
+
+        message = await self._db.get_message(message_id)
+        if message is None:
+            return
+
+        if message.status not in {MessageStatus.READ, MessageStatus.RECALLED, MessageStatus.FAILED}:
+            message.status = MessageStatus.DELIVERED
+            await self._db.save_message(message)
+
+        await self._event_bus.emit(MessageEvent.DELIVERED, {
+            "message_id": message_id,
+            "session_id": session_id or message.session_id,
+            "user_ids": user_ids,
+            "message": message,
         })
 
     async def _process_recall(self, data: dict) -> None:
@@ -451,17 +480,21 @@ class MessageManager:
         session_id = recall_data.get("session_id", "")
         user_id = recall_data.get("user_id", "")
 
-        # Update message status in database
-        await self._db.update_message_status(message_id, MessageStatus.RECALLED)
-
-        # Get the original message
         message = await self._db.get_message(message_id)
+        if message is None:
+            logger.warning(f"Message not found for recall event: {message_id}")
+            return
 
-        # Emit recall event
+        message.status = MessageStatus.RECALLED
+        message.content = await self._build_recall_notice(message, user_id)
+        message.updated_at = datetime.now()
+        await self._db.save_message(message)
+
         await self._event_bus.emit(MessageEvent.RECALLED, {
             "message_id": message_id,
-            "session_id": session_id,
+            "session_id": session_id or message.session_id,
             "user_id": user_id,
+            "content": message.content,
             "message": message,
         })
 
@@ -637,10 +670,47 @@ class MessageManager:
     async def send_typing(self, session_id: str) -> bool:
         """Send typing indicator."""
         return await self._conn_manager.send_typing(session_id)
-    
+
     async def send_read_receipt(self, session_id: str, message_id: str) -> bool:
         """Send read receipt."""
         return await self._conn_manager.send_read_ack(session_id, message_id)
+
+    async def _build_recall_notice(self, message: ChatMessage, actor_user_id: str | None = None) -> str:
+        """Build a viewer-specific recall notice for a message."""
+        actor_id = str(actor_user_id or message.sender_id or "")
+        if message.is_self or (actor_id and actor_id == self._user_id):
+            return "你撤回了一条消息"
+
+        try:
+            from client.managers.session_manager import get_session_manager
+            session = await get_session_manager().get_session(message.session_id)
+        except Exception:
+            session = None
+
+        if session is not None:
+            if session.session_type == "direct" and session.name:
+                return f"{session.name}撤回了一条消息"
+
+            for member in session.extra.get("members") or []:
+                member_id = str(member.get("id", "") or "")
+                if actor_id and member_id != actor_id:
+                    continue
+                member_name = (
+                    str(member.get("nickname", "") or "")
+                    or str(member.get("username", "") or "")
+                    or member_id
+                )
+                if member_name:
+                    return f"{member_name}撤回了一条消息"
+
+        sender_name = (
+            str(message.extra.get("sender_nickname", "") or "")
+            or str(message.extra.get("sender_name", "") or "")
+        )
+        if sender_name:
+            return f"{sender_name}撤回了一条消息"
+
+        return "对方撤回了一条消息"
 
     async def recall_message(self, message_id: str) -> tuple[bool, str]:
         """
@@ -673,16 +743,17 @@ class MessageManager:
             return False, str(exc) or "recall failed"
 
         message.status = MessageStatus.RECALLED
-        message.content = "[消息已撤回]"
+        message.content = await self._build_recall_notice(message, self._user_id)
+        message.updated_at = datetime.now()
         await self._db.save_message(message)
 
         await self._event_bus.emit(MessageEvent.RECALLED, {
             "message_id": message_id,
             "session_id": message.session_id,
             "user_id": self._user_id,
+            "content": message.content,
             "message": message,
         })
-
         logger.info(f"Message recall sent: {message_id}")
         return True, ""
 
@@ -760,25 +831,15 @@ class MessageManager:
         return success
 
     async def delete_message(self, message_id: str) -> bool:
-        """Delete a sent message via HTTP API and local cache."""
+        """Delete a message locally without affecting other participants."""
         message = await self._db.get_message(message_id)
 
         if not message:
             logger.warning(f"Message not found for delete: {message_id}")
-            return False, "message not found"
-
-        if not message.is_self:
-            logger.warning(f"Cannot delete other user's message: {message_id}")
-            return False, "cannot recall other user's message"
-
-        try:
-            await get_http_client().delete(f"/messages/{message_id}")
-        except Exception as exc:
-            logger.error(f"Failed to delete message: {message_id}, error: {exc}")
-            return False, "message already recalled"
+            return False
 
         await self._db.delete_message(message_id)
-        logger.info(f"Message deleted: {message_id}")
+        logger.info(f"Message deleted locally: {message_id}")
         return True
 
     async def _ack_check_loop(self) -> None:

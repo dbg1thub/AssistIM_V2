@@ -2,21 +2,40 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from PySide6.QtCore import QModelIndex, QRect, QSize, Qt
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import QStyle, QStyledItemDelegate, QStyleOptionViewItem
-from qfluentwidgets import isDarkTheme, themeColor
+from qfluentwidgets import isDarkTheme
 
 from client.models.message import format_message_preview
+from client.ui.common.emoji_utils import (
+    centered_text_baseline,
+    centered_emoji_top,
+    PREVIEW_EMOJI_PIXEL_SIZE,
+    PREVIEW_ONLY_EMOJI_PIXEL_SIZE,
+    is_emoji_text,
+    iter_text_and_emoji_clusters,
+    load_emoji_pixmap,
+)
+
+
+@dataclass
+class _PreviewRun:
+    """Preview text run used for mixed text/emoji rendering."""
+
+    kind: str
+    text: str
+    width: int
 
 
 class SessionDelegate(QStyledItemDelegate):
     """Render chat sessions with avatar, preview, time, and unread badge."""
 
     AVATAR_SIZE = 44
-    ITEM_HEIGHT = 76
+    ITEM_HEIGHT = 80
     H_MARGIN = 0
     V_MARGIN = 0
 
@@ -32,6 +51,7 @@ class SessionDelegate(QStyledItemDelegate):
 
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setClipRect(option.rect)
 
         card_rect = option.rect.adjusted(self.H_MARGIN, self.V_MARGIN, -self.H_MARGIN, -self.V_MARGIN)
         self._draw_background(painter, card_rect, option)
@@ -46,36 +66,31 @@ class SessionDelegate(QStyledItemDelegate):
 
         content_left = avatar_rect.right() + 12
         content_right = card_rect.right() - 12
-        content_width = max(120, content_right - content_left)
+        content_width = max(0, content_right - content_left)
 
-        name_font = QFont()
-        name_font.setPixelSize(15)
+        name_font = self._ui_font(16)
         name_fm = QFontMetrics(name_font)
 
-        preview_font = QFont()
-        preview_font.setPixelSize(12)
+        draft_preview = (getattr(session, "draft_preview", None) or "").strip()
+        preview_text = self._format_preview_text(session)
+        preview_font = self._preview_font(draft_preview or preview_text)
         preview_fm = QFontMetrics(preview_font)
 
-        time_font = QFont()
-        time_font.setPixelSize(11)
+        time_font = self._ui_font(10)
         time_fm = QFontMetrics(time_font)
 
         time_text = self._format_time(session.last_message_time or session.updated_at)
-        time_width = max(42, time_fm.horizontalAdvance(time_text) + 4)
+        time_width = max(0, min(max(0, content_width // 2), time_fm.horizontalAdvance(time_text) + 4))
+        time_text = time_fm.elidedText(time_text, Qt.TextElideMode.ElideRight, time_width)
 
         unread_text = self._format_unread(session.unread_count)
         unread_width = 0
         if unread_text:
             unread_width = max(16, preview_fm.horizontalAdvance(unread_text) + 12)
 
-        name_available = max(80, content_width - time_width - unread_width - 18)
+        name_available = max(0, content_width - time_width - unread_width - 18)
         name_text = name_fm.elidedText(session.name or "未命名会话", Qt.TextElideMode.ElideRight, name_available)
-        preview_available = max(80, content_width)
-        preview_text = preview_fm.elidedText(
-            self._format_preview_text(session),
-            Qt.TextElideMode.ElideRight,
-            preview_available,
-        )
+        preview_available = max(0, content_width)
 
         name_y = card_rect.y() + 14
         preview_y = name_y + 24
@@ -88,23 +103,49 @@ class SessionDelegate(QStyledItemDelegate):
         painter.setFont(name_font)
         painter.setPen(primary_text)
         painter.drawText(
-            QRect(content_left, name_y, name_available, 20),
-            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-            name_text,
-        )
+                QRect(content_left, name_y, name_available, 22),
+                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                name_text,
+            )
 
         badge_anchor_x = content_left + name_fm.horizontalAdvance(name_text) + 8
-        if unread_text:
+        if unread_text and unread_width > 0 and badge_anchor_x + unread_width <= content_right:
             badge_rect = QRect(badge_anchor_x, name_y + 2, unread_width, 16)
             self._draw_unread_badge(painter, badge_rect, unread_text)
 
         painter.setFont(preview_font)
-        painter.setPen(preview_color)
-        painter.drawText(
-            QRect(content_left, preview_y, preview_available, 18),
-            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-            preview_text,
-        )
+        if draft_preview:
+            prefix_text = "[草稿]"
+            prefix_color = QColor("#FF6B6B") if isDarkTheme() else QColor("#D93025")
+            prefix_font = self._ui_font(13)
+            prefix_fm = QFontMetrics(prefix_font)
+            prefix_width = prefix_fm.horizontalAdvance(prefix_text) + 6
+            body_available = max(32, preview_available - prefix_width)
+
+            painter.setFont(prefix_font)
+            painter.setPen(prefix_color)
+            painter.drawText(
+                QRect(content_left, preview_y, prefix_fm.horizontalAdvance(prefix_text) + 10, 24),
+                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                prefix_text,
+            )
+
+            painter.setFont(preview_font)
+            painter.setPen(preview_color)
+            self._draw_preview_runs(
+                painter,
+                QRect(content_left + prefix_width, preview_y - 1, body_available + 12, 28),
+                draft_preview,
+                preview_color,
+            )
+        else:
+            painter.setPen(preview_color)
+            self._draw_preview_runs(
+                painter,
+                QRect(content_left, preview_y - 1, preview_available + 12, 28),
+                preview_text,
+                preview_color,
+            )
 
         painter.setFont(time_font)
         painter.setPen(time_color)
@@ -177,7 +218,7 @@ class SessionDelegate(QStyledItemDelegate):
         path = QPainterPath()
         radius = rect.height() / 2
         path.addRoundedRect(rect, radius, radius)
-        accent = QColor(themeColor())
+        accent = QColor("#FF5A5F") if isDarkTheme() else QColor("#E53935")
         painter.fillPath(path, accent)
 
         font = QFont()
@@ -186,6 +227,153 @@ class SessionDelegate(QStyledItemDelegate):
         painter.setFont(font)
         painter.setPen(Qt.GlobalColor.white)
         painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, text)
+
+    @staticmethod
+    def _ui_font(pixel_size: int, *, bold: bool = False) -> QFont:
+        """Return a UI font with emoji-capable fallbacks."""
+        font = QFont()
+        font.setPixelSize(pixel_size)
+        font.setBold(bold)
+        try:
+            font.setFamilies(
+                [
+                    "Segoe UI",
+                    "Microsoft YaHei UI",
+                    "Segoe UI Emoji",
+                    "Apple Color Emoji",
+                    "Noto Color Emoji",
+                ]
+            )
+        except AttributeError:
+            font.setFamily("Segoe UI")
+        return font
+
+    def _preview_font(self, text: str) -> QFont:
+        """Return the preview font, enlarging emoji-only previews without changing normal text."""
+        if is_emoji_text(text):
+            return self._ui_font(22)
+        return self._ui_font(13)
+
+    def _preview_emoji_font(self) -> QFont:
+        """Return the larger font used for emoji glyphs inside preview text."""
+        font = QFont()
+        font.setPixelSize(18)
+        try:
+            font.setFamilies(
+                [
+                    "Segoe UI Emoji",
+                    "Apple Color Emoji",
+                    "Noto Color Emoji",
+                    "Segoe UI",
+                    "Microsoft YaHei UI",
+                ]
+            )
+        except AttributeError:
+            font.setFamily("Segoe UI Emoji")
+        return font
+
+    def _draw_preview_runs(self, painter: QPainter, rect: QRect, text: str, color: QColor) -> None:
+        """Draw preview text with larger emoji glyphs while keeping ordinary text small."""
+        text = text or ""
+        if not text:
+            return
+
+        base_font = self._ui_font(13)
+        base_metrics = QFontMetrics(base_font)
+        emoji_side = PREVIEW_ONLY_EMOJI_PIXEL_SIZE if is_emoji_text(text) else PREVIEW_EMOJI_PIXEL_SIZE
+        display_runs = self._preview_runs_for_width(text, max(0, rect.width()), base_metrics, emoji_side)
+
+        baseline = centered_text_baseline(rect, base_metrics, vertical_nudge=-1)
+        x = rect.x()
+
+        painter.save()
+        painter.setPen(color)
+        for run in display_runs:
+            if run.kind == "emoji":
+                pixmap = load_emoji_pixmap(run.text, emoji_side, emoji_side)
+                if not pixmap.isNull():
+                    top = centered_emoji_top(rect.y(), rect.height(), emoji_side)
+                    painter.drawPixmap(x, top, pixmap)
+                else:
+                    painter.setFont(self._preview_emoji_font())
+                    painter.drawText(x, baseline, run.text)
+                x += run.width
+                continue
+
+            painter.setFont(base_font)
+            painter.drawText(x, baseline, run.text)
+            x += run.width
+        painter.restore()
+
+    def _preview_runs_for_width(
+        self,
+        text: str,
+        available_width: int,
+        base_metrics: QFontMetrics,
+        emoji_side: int,
+    ) -> list[_PreviewRun]:
+        """Build a single-line preview run list with emoji-aware elision."""
+        ellipsis = "..."
+        ellipsis_width = base_metrics.horizontalAdvance(ellipsis)
+        remaining = max(0, available_width)
+        runs: list[_PreviewRun] = []
+        text_buffer: list[str] = []
+        text_buffer_width = 0
+
+        def flush_text_buffer() -> None:
+            nonlocal text_buffer, text_buffer_width
+            if not text_buffer:
+                return
+            runs.append(_PreviewRun("text", "".join(text_buffer), text_buffer_width))
+            text_buffer = []
+            text_buffer_width = 0
+
+        for run_text, is_emoji_run in iter_text_and_emoji_clusters(text):
+            run_width = emoji_side if is_emoji_run else base_metrics.horizontalAdvance(run_text)
+            reserve = ellipsis_width if run_width > remaining and runs else 0
+            if run_width + reserve <= remaining:
+                if is_emoji_run:
+                    flush_text_buffer()
+                    runs.append(_PreviewRun("emoji", run_text, run_width))
+                else:
+                    text_buffer.append(run_text)
+                    text_buffer_width += run_width
+                remaining -= run_width
+                continue
+
+            if is_emoji_run:
+                flush_text_buffer()
+                if remaining >= ellipsis_width:
+                    runs.append(_PreviewRun("text", ellipsis, ellipsis_width))
+                break
+
+            clipped = ""
+            clipped_width = 0
+            for char in run_text:
+                char_width = base_metrics.horizontalAdvance(char)
+                if clipped_width + char_width + ellipsis_width > remaining:
+                    break
+                clipped += char
+                clipped_width += char_width
+
+            if clipped:
+                text_buffer.append(clipped)
+                text_buffer_width += clipped_width
+                flush_text_buffer()
+            else:
+                flush_text_buffer()
+
+            if remaining >= ellipsis_width:
+                runs.append(_PreviewRun("text", ellipsis, ellipsis_width))
+            break
+        else:
+            flush_text_buffer()
+
+        if not runs:
+            elided = base_metrics.elidedText(text, Qt.TextElideMode.ElideRight, available_width)
+            return [_PreviewRun("text", elided, base_metrics.horizontalAdvance(elided))] if elided else []
+
+        return runs
 
     def _format_unread(self, count: int) -> str:
         """Format unread count display."""

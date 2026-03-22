@@ -100,6 +100,7 @@ async def _handle_chat_socket(websocket: WebSocket) -> None:
                         )
                         continue
 
+                recipient_ids = [member_id for member_id in member_ids if member_id != user_id]
                 await connection_manager.send_json(
                     connection_id,
                     _compat_message("message_ack", {"msg_id": msg_id, "success": True}, msg_id=msg_id, event="ack"),
@@ -117,7 +118,25 @@ async def _handle_chat_socket(websocket: WebSocket) -> None:
                     event="message",
                 )
                 payload["data"]["id"] = saved["id"]
-                await connection_manager.send_json_to_users(member_ids, payload, exclude_connection_id=connection_id)
+                delivered_user_ids = await connection_manager.send_json_to_users(
+                    recipient_ids,
+                    payload,
+                    exclude_connection_id=connection_id,
+                )
+                if delivered_user_ids:
+                    await connection_manager.send_json_to_users(
+                        [user_id],
+                        _compat_message(
+                            "message_delivered",
+                            {
+                                "session_id": session_id,
+                                "msg_id": saved["msg_id"],
+                                "user_ids": sorted(delivered_user_ids),
+                            },
+                            msg_id=saved["msg_id"],
+                            event="delivered",
+                        ),
+                    )
                 continue
 
             if msg_type == "typing":

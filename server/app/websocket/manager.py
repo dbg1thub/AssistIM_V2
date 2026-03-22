@@ -66,26 +66,34 @@ class ConnectionManager:
         became_offline = bool(user_id) and not self.has_user_connections(user_id)
         return user_id, became_offline
 
-    async def send_json(self, connection_id: str, payload: dict) -> None:
+    async def send_json(self, connection_id: str, payload: dict) -> bool:
         websocket = self._connections.get(connection_id)
         if websocket is None:
-            return
+            return False
         try:
             await websocket.send_json(payload)
+            return True
         except (RuntimeError, WebSocketDisconnect):
             self.disconnect_by_connection_id(connection_id)
+            return False
 
     async def send_json_to_users(
         self,
         user_ids: list[str],
         payload: dict,
         exclude_connection_id: str | None = None,
-    ) -> None:
+    ) -> set[str]:
+        delivered_user_ids: set[str] = set()
         for user_id in user_ids:
+            delivered = False
             for connection_id in list(self._connections_by_user.get(user_id, set())):
                 if exclude_connection_id is not None and connection_id == exclude_connection_id:
                     continue
-                await self.send_json(connection_id, payload)
+                if await self.send_json(connection_id, payload):
+                    delivered = True
+            if delivered:
+                delivered_user_ids.add(user_id)
+        return delivered_user_ids
 
     async def broadcast_json(self, payload: dict, exclude_connection_id: str | None = None) -> None:
         for connection_id in list(self._connections):

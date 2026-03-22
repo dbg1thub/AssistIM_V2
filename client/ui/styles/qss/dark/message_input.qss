@@ -12,19 +12,49 @@ QWidget#messageInputCard {
     border-radius: 0;
 }
 
-TextEdit#chatMessageEdit,
-QWidget#chatMessageViewport,
-TextEdit#chatMessageEdit QTextEdit,
-TextEdit#chatMessageEdit QFrame,
-TextEdit#chatMessageEdit QWidget {
+QWidget#pendingAttachmentArea,
+QWidget#pendingAttachmentItem {
     background: transparent;
     border: none;
     border-radius: 0;
-    padding: 4px 2px;
 }
 
-TextEdit#chatMessageEdit:hover,
-TextEdit#chatMessageEdit:focus,
+QLabel#pendingAttachmentPreviewBlock {
+    background: rgba(255, 255, 255, 0.10);
+    color: rgba(255, 255, 255, 0.92);
+    border: none;
+    border-radius: 12px;
+    padding: 0;
+}
+
+QLabel#pendingAttachmentNameLabel {
+    background: transparent;
+    color: rgba(255, 255, 255, 0.92);
+    border: none;
+}
+
+TransparentToolButton#pendingAttachmentRemoveButton {
+    background: rgba(255, 255, 255, 0.06);
+    border: none;
+    border-radius: 9px;
+}
+
+TransparentToolButton#pendingAttachmentRemoveButton:hover {
+    background: rgba(255, 255, 255, 0.10);
+}
+
+QTextEdit#chatMessageEdit,
+QWidget#chatMessageViewport,
+QTextEdit#chatMessageEdit QFrame,
+QTextEdit#chatMessageEdit QWidget {
+    background: transparent;
+    border: none;
+    border-radius: 0;
+    padding: 6px 4px;
+}
+
+QTextEdit#chatMessageEdit:hover,
+QTextEdit#chatMessageEdit:focus,
 QWidget#chatMessageViewport:hover,
 QWidget#chatMessageViewport:focus {
     background: transparent;
@@ -39,6 +69,11 @@ PushButton#composerSendButton {
     border-radius: 0;
     padding-left: 18px;
     padding-right: 18px;
+}
+
+PushButton#composerSendButton:disabled {
+    color: rgba(255, 255, 255, 0.34);
+    background: transparent;
 }
 
 PushButton#composerSendButton:hover {

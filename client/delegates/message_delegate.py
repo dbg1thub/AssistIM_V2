@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import os
 from collections import OrderedDict
+from dataclasses import dataclass
 from datetime import datetime, timedelta
+import time
 
-from PySide6.QtCore import QModelIndex, QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer, QUrl
+from PySide6.QtCore import QModelIndex, QPoint, QRect, QRectF, QSize, Qt, QTimer, QUrl
 from PySide6.QtGui import (
-    QAbstractTextDocumentLayout,
     QColor,
     QFont,
     QFontMetrics,
@@ -16,10 +17,6 @@ from PySide6.QtGui import (
     QPainterPath,
     QPixmap,
     QImageReader,
-    QTextCharFormat,
-    QTextCursor,
-    QTextDocument,
-    QTextOption,
 )
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 from PySide6.QtWidgets import QStyledItemDelegate, QStyleOptionViewItem
@@ -31,7 +28,57 @@ from client.core.video_thumbnail_cache import (
     get_video_thumbnail_cache,
 )
 from client.models.message import ChatMessage, MessageStatus, MessageType
+from client.models.message_model import MessageModel
 from client.ui.common.attachment_card import attachment_card_size, draw_attachment_card
+from client.ui.common.emoji_utils import (
+    BUBBLE_EMOJI_PIXEL_SIZE,
+    MIXED_EMOJI_TEXT_GAP,
+    centered_emoji_top,
+    is_emoji_char,
+    is_emoji_text,
+    iter_text_and_emoji_clusters,
+    load_emoji_pixmap,
+)
+
+
+@dataclass
+class _TextRunLayout:
+    """A laid-out text or emoji run inside a message bubble."""
+
+    kind: str
+    text: str
+    start: int
+    end: int
+    width: int
+    height: int
+    ascent: int
+    descent: int
+    char_advances: tuple[int, ...] = ()
+    char_offsets: tuple[int, ...] = ()
+    x: int = 0
+    y: int = 0
+
+
+@dataclass
+class _TextLineLayout:
+    """A single wrapped line inside a custom text layout."""
+
+    runs: list[_TextRunLayout]
+    width: int
+    height: int
+    baseline: int
+    x: int = 0
+    y: int = 0
+
+
+@dataclass
+class _RunTextLayout:
+    """Layout result for a text bubble rendered without QTextDocument."""
+
+    lines: list[_TextLineLayout]
+    width: int
+    height: int
+    pure_emoji: bool
 
 
 class MessageDelegate(QStyledItemDelegate):
@@ -53,15 +100,19 @@ class MessageDelegate(QStyledItemDelegate):
     TAIL_SPACE = 8
     TIME_SPACING = 9
     STATUS_BADGE_SIZE = 16
+    RECALL_NOTICE_HEIGHT = TIME_BLOCK_HEIGHT
+    TIME_BREAK_SECONDS = 5 * 60
     TEXT_MEASURE_CACHE_LIMIT = 512
     TEXT_LAYOUT_CACHE_LIMIT = 256
     MEDIA_SIZE_CACHE_LIMIT = 512
     IMAGE_RECT_CACHE_LIMIT = 512
+    EMOJI_TEXT_GAP = MIXED_EMOJI_TEXT_GAP
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._image_cache: dict[str, QPixmap] = {}
         self._loading_sources: set[str] = set()
+        self._failed_image_sources: dict[str, float] = {}
         self._network_manager = QNetworkAccessManager(self)
         self._network_manager.finished.connect(self._on_image_reply_finished)
         self._selection_message_id: str | None = None
@@ -73,7 +124,7 @@ class MessageDelegate(QStyledItemDelegate):
         self._video_thumbnail_cache.signals.thumbnail_ready.connect(self._on_video_thumbnail_ready)
         self._refresh_scheduled = False
         self._text_measure_cache: OrderedDict[str, QSize] = OrderedDict()
-        self._text_layout_cache: OrderedDict[tuple[int, str], tuple[int, QTextDocument]] = OrderedDict()
+        self._text_layout_cache: OrderedDict[tuple[int, str], _RunTextLayout] = OrderedDict()
         self._media_size_cache: OrderedDict[tuple, QSize] = OrderedDict()
         self._image_rect_cache: OrderedDict[tuple, QRect] = OrderedDict()
 
@@ -83,12 +134,14 @@ class MessageDelegate(QStyledItemDelegate):
         if not message:
             return QSize(option.rect.width(), 0)
 
-        content_size = self._bubble_size(message)
+        display_kind = self._display_kind(index, message)
+        if display_kind == MessageModel.DISPLAY_TIME_SEPARATOR:
+            return QSize(option.rect.width(), self.TIME_BLOCK_HEIGHT + self.TIME_SPACING * 2)
+        if display_kind == MessageModel.DISPLAY_RECALL_NOTICE:
+            return QSize(option.rect.width(), self.TIME_BLOCK_HEIGHT + self.TIME_SPACING * 2)
+
+        content_size = self._bubble_size(message, option.rect.width())
         total_height = max(content_size.height(), self.AVATAR_SIZE) + 18
-
-        if self._should_show_time(index, message):
-            total_height += self.TIME_BLOCK_HEIGHT + self.TIME_SPACING * 2
-
         return QSize(option.rect.width(), total_height)
 
     def paint(self, painter: QPainter, option: QStyleOptionViewItem, index: QModelIndex) -> None:
@@ -99,6 +152,33 @@ class MessageDelegate(QStyledItemDelegate):
 
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setClipRect(option.rect)
+
+        display_kind = self._display_kind(index, message)
+
+        if display_kind == MessageModel.DISPLAY_TIME_SEPARATOR:
+            time_rect = QRect(
+                option.rect.x(),
+                option.rect.y() + self.TIME_SPACING,
+                option.rect.width(),
+                self.TIME_BLOCK_HEIGHT,
+            )
+            self._draw_time_block(painter, time_rect, self._format_time(message.timestamp))
+            self._draw_row_divider(painter, option.rect)
+            painter.restore()
+            return
+
+        if display_kind == MessageModel.DISPLAY_RECALL_NOTICE:
+            notice_rect = QRect(
+                option.rect.x(),
+                option.rect.y() + self.TIME_SPACING,
+                option.rect.width(),
+                self.RECALL_NOTICE_HEIGHT,
+            )
+            self._draw_recall_notice(painter, notice_rect, message)
+            self._draw_row_divider(painter, option.rect)
+            painter.restore()
+            return
 
         avatar_rect, bubble_rect, _ = self._layout_rects(option.rect, message)
 
@@ -109,23 +189,17 @@ class MessageDelegate(QStyledItemDelegate):
             badge_rect = self._status_badge_rect(bubble_rect, option.rect)
             self._draw_status_badge(painter, badge_rect, message)
 
-        footer_top = max(bubble_rect.bottom(), avatar_rect.bottom()) + self.TIME_SPACING
-
-        if self._should_show_time(index, message):
-            time_rect = QRect(
-                option.rect.x(),
-                footer_top,
-                option.rect.width(),
-                self.TIME_BLOCK_HEIGHT,
-            )
-            self._draw_time_block(painter, time_rect, self._format_time(message.timestamp))
-
+        self._draw_row_divider(painter, option.rect)
         painter.restore()
 
     def is_attachment_hit(self, view, index: QModelIndex, position) -> bool:
         """Return whether a click position is inside the rendered attachment content."""
         message: ChatMessage = index.data(Qt.ItemDataRole.UserRole)
-        if not message or message.message_type not in {MessageType.IMAGE, MessageType.FILE, MessageType.VIDEO}:
+        if (
+            not message
+            or self._display_kind(index, message) != MessageModel.DISPLAY_MESSAGE
+            or message.message_type not in {MessageType.IMAGE, MessageType.FILE, MessageType.VIDEO}
+        ):
             return False
 
         row_rect = view.visualRect(index)
@@ -139,7 +213,11 @@ class MessageDelegate(QStyledItemDelegate):
     def is_text_hit(self, view, index: QModelIndex, position: QPoint) -> bool:
         """Return whether a viewport position lands on text content."""
         message: ChatMessage = index.data(Qt.ItemDataRole.UserRole)
-        if not message or message.message_type != MessageType.TEXT:
+        if (
+            not message
+            or self._display_kind(index, message) != MessageModel.DISPLAY_MESSAGE
+            or message.message_type != MessageType.TEXT
+        ):
             return False
 
         row_rect = view.visualRect(index)
@@ -147,13 +225,17 @@ class MessageDelegate(QStyledItemDelegate):
             return False
 
         _, _, content_rect = self._layout_rects(row_rect, message)
-        text_rect, document = self._text_layout(content_rect, message.content or "")
-        return self._text_position_for_point(document, text_rect, position, clamp=False) >= 0
+        text_rect, layout = self._text_layout(content_rect, message.content or "")
+        return self._text_position_for_point(layout, text_rect, position, clamp=False) >= 0
 
     def begin_text_selection(self, view, index: QModelIndex, position: QPoint) -> bool:
         """Begin selecting text from a message bubble."""
         message: ChatMessage = index.data(Qt.ItemDataRole.UserRole)
-        if not message or message.message_type != MessageType.TEXT:
+        if (
+            not message
+            or self._display_kind(index, message) != MessageModel.DISPLAY_MESSAGE
+            or message.message_type != MessageType.TEXT
+        ):
             return False
 
         row_rect = view.visualRect(index)
@@ -161,10 +243,11 @@ class MessageDelegate(QStyledItemDelegate):
             return False
 
         _, _, content_rect = self._layout_rects(row_rect, message)
-        text_rect, document = self._text_layout(content_rect, message.content or "")
-        cursor_pos = self._text_position_for_point(document, text_rect, position, clamp=False)
+        text_rect, layout = self._text_layout(content_rect, message.content or "")
+        cursor_pos = self._text_position_for_point(layout, text_rect, position, clamp=False)
         if cursor_pos < 0:
             return False
+        cursor_pos = self._normalize_selection_index(message.content or "", cursor_pos, prefer_end=None)
 
         self._selection_message_id = message.message_id
         self._selection_anchor = cursor_pos
@@ -184,7 +267,12 @@ class MessageDelegate(QStyledItemDelegate):
             return False
 
         message: ChatMessage = index.data(Qt.ItemDataRole.UserRole)
-        if not message or message.message_id != self._selection_message_id or message.message_type != MessageType.TEXT:
+        if (
+            not message
+            or self._display_kind(index, message) != MessageModel.DISPLAY_MESSAGE
+            or message.message_id != self._selection_message_id
+            or message.message_type != MessageType.TEXT
+        ):
             return False
 
         row_rect = view.visualRect(index)
@@ -192,10 +280,11 @@ class MessageDelegate(QStyledItemDelegate):
             return False
 
         _, _, content_rect = self._layout_rects(row_rect, message)
-        text_rect, document = self._text_layout(content_rect, message.content or "")
-        cursor_pos = self._text_position_for_point(document, text_rect, position, clamp=True)
+        text_rect, layout = self._text_layout(content_rect, message.content or "")
+        cursor_pos = self._text_position_for_point(layout, text_rect, position, clamp=True)
         if cursor_pos < 0:
             return False
+        cursor_pos = self._normalize_selection_index(message.content or "", cursor_pos, prefer_end=None)
 
         self._selection_position = cursor_pos
         view.viewport().update()
@@ -231,12 +320,49 @@ class MessageDelegate(QStyledItemDelegate):
         if not self.has_selected_text(message_id):
             return ""
 
-        start = min(self._selection_anchor, self._selection_position)
-        end = max(self._selection_anchor, self._selection_position)
+        start, end = self._selection_index_bounds(content or "", self._selection_anchor, self._selection_position)
         return (content or "")[start:end]
 
-    def _bubble_size(self, message: ChatMessage) -> QSize:
+    @staticmethod
+    def _emoji_cluster_python_ranges(content: str) -> list[tuple[int, int]]:
+        """Return Python string index ranges occupied by emoji clusters."""
+        ranges: list[tuple[int, int]] = []
+        position = 0
+        for chunk, is_emoji_chunk in iter_text_and_emoji_clusters(content or ""):
+            length = len(chunk)
+            if is_emoji_chunk and length > 0:
+                ranges.append((position, position + length))
+            position += length
+        return ranges
+
+    @classmethod
+    def _normalize_selection_index(cls, content: str, position: int, *, prefer_end: bool | None) -> int:
+        """Snap a Python string index away from the middle of an emoji cluster."""
+        if not content:
+            return 0
+
+        value = max(0, min(position, len(content)))
+        for start, end in cls._emoji_cluster_python_ranges(content):
+            if start < value < end:
+                if prefer_end is None:
+                    midpoint = start + (end - start) / 2
+                    return end if value >= midpoint else start
+                return end if prefer_end else start
+        return value
+
+    @classmethod
+    def _selection_index_bounds(cls, content: str, anchor: int, position: int) -> tuple[int, int]:
+        """Return Python selection bounds that never split an emoji cluster."""
+        start = min(anchor, position)
+        end = max(anchor, position)
+        return (
+            cls._normalize_selection_index(content, start, prefer_end=False),
+            cls._normalize_selection_index(content, end, prefer_end=True),
+        )
+
+    def _bubble_size(self, message: ChatMessage, row_width: int | None = None) -> QSize:
         """Compute bubble or media size for the current message type."""
+        max_bubble_width = self._max_bubble_width_for_row(row_width or 0)
         if message.message_type == MessageType.IMAGE:
             pixmap = self._load_pixmap(message)
             cache_key = (
@@ -246,16 +372,20 @@ class MessageDelegate(QStyledItemDelegate):
                 message.extra.get("local_path", ""),
                 pixmap.width(),
                 pixmap.height(),
+                max_bubble_width,
             )
             cached_size = self._cache_get(self._media_size_cache, cache_key)
             if cached_size is not None:
                 return cached_size
 
             if not pixmap.isNull():
-                scaled = self._contained_size(pixmap.size(), QSize(self.MAX_IMAGE_WIDTH, self.MAX_IMAGE_HEIGHT))
-                size = QSize(max(120, scaled.width()), max(96, scaled.height()))
+                scaled = self._contained_size(
+                    pixmap.size(),
+                    QSize(min(self.MAX_IMAGE_WIDTH, max_bubble_width), self.MAX_IMAGE_HEIGHT),
+                )
+                size = QSize(max(72, scaled.width()), max(72, scaled.height()))
             else:
-                size = QSize(160, 116)
+                size = QSize(max(72, min(max_bubble_width, 160)), 116)
 
             self._cache_put(self._media_size_cache, cache_key, size, self.MEDIA_SIZE_CACHE_LIMIT)
             return size
@@ -266,11 +396,12 @@ class MessageDelegate(QStyledItemDelegate):
                 message.message_id,
                 message.extra.get("name", ""),
                 message.extra.get("size"),
+                max_bubble_width,
             )
             cached_size = self._cache_get(self._media_size_cache, cache_key)
             if cached_size is not None:
                 return cached_size
-            size = QSize(self.FILE_WIDTH, self.FILE_HEIGHT)
+            size = QSize(max(88, min(self.FILE_WIDTH, max_bubble_width)), self.FILE_HEIGHT)
             self._cache_put(self._media_size_cache, cache_key, size, self.MEDIA_SIZE_CACHE_LIMIT)
             return size
 
@@ -280,18 +411,28 @@ class MessageDelegate(QStyledItemDelegate):
                 message.message_id,
                 message.extra.get("local_path", ""),
                 message.extra.get("thumbnail_path", ""),
+                max_bubble_width,
             )
             cached_size = self._cache_get(self._media_size_cache, cache_key)
             if cached_size is not None:
                 return cached_size
-            size = QSize(self.VIDEO_WIDTH, self.VIDEO_HEIGHT)
+            video_width = max(88, min(self.VIDEO_WIDTH, max_bubble_width))
+            video_height = max(60, round(video_width * self.VIDEO_HEIGHT / self.VIDEO_WIDTH))
+            size = QSize(video_width, video_height)
             self._cache_put(self._media_size_cache, cache_key, size, self.MEDIA_SIZE_CACHE_LIMIT)
             return size
 
-        text_size = self._measure_text_content(message.content or "")
+        text_content_width = max(
+            24,
+            min(
+                self.MAX_TEXT_WIDTH,
+                max_bubble_width - self.BUBBLE_PADDING_H * 2 - self.TAIL_SPACE,
+            ),
+        )
+        text_size = self._measure_text_content(message.content or "", text_content_width)
         bubble_width = min(
-            self.MAX_TEXT_WIDTH + self.BUBBLE_PADDING_H * 2 + self.TAIL_SPACE,
-            max(52, text_size.width() + self.BUBBLE_PADDING_H * 2 + self.TAIL_SPACE),
+            text_content_width + self.BUBBLE_PADDING_H * 2 + self.TAIL_SPACE,
+            max(36, text_size.width() + self.BUBBLE_PADDING_H * 2 + self.TAIL_SPACE),
         )
         bubble_height = max(40, text_size.height() + self.BUBBLE_PADDING_V * 2)
         return QSize(bubble_width, bubble_height)
@@ -306,6 +447,25 @@ class MessageDelegate(QStyledItemDelegate):
         painter.setFont(font)
         painter.setPen(QColor(210, 210, 210, 230) if isDarkTheme() else QColor("#8A8A8A"))
         painter.drawText(rect, Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter, time_text)
+
+    def _draw_recall_notice(self, painter: QPainter, rect: QRect, message: ChatMessage) -> None:
+        """Draw a centered system-style recall notice."""
+        font = QFont()
+        font.setPixelSize(12)
+        painter.setFont(font)
+        painter.setPen(QColor(196, 196, 196, 220) if isDarkTheme() else QColor("#8A8A8A"))
+        painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, message.content or "撤回了一条消息")
+
+    def _display_kind(self, index: QModelIndex, message: ChatMessage) -> str:
+        """Return the visible row kind for the current index."""
+        explicit_kind = index.data(MessageModel.DisplayKindRole)
+        if explicit_kind:
+            return str(explicit_kind)
+        return str((message.extra or {}).get(MessageModel.DISPLAY_KIND_KEY, MessageModel.DISPLAY_MESSAGE))
+
+    def _draw_row_divider(self, painter: QPainter, rect: QRect) -> None:
+        """Draw a subtle divider line to help inspect row positioning."""
+        return
 
     def _draw_avatar(self, painter: QPainter, rect: QRect, message: ChatMessage) -> None:
         """Draw avatar with initial text when no image is available."""
@@ -358,7 +518,7 @@ class MessageDelegate(QStyledItemDelegate):
         content_rect = self._content_rect(rect, message)
 
         if message.message_type == MessageType.TEXT:
-            self._draw_text_content(painter, content_rect, message)
+            self._draw_text_content(painter, content_rect, message, bubble_color)
         elif message.message_type == MessageType.IMAGE:
             self._draw_image_content(painter, content_rect, message)
         elif message.message_type == MessageType.FILE:
@@ -368,27 +528,68 @@ class MessageDelegate(QStyledItemDelegate):
         else:
             self._draw_text_content(painter, content_rect, message)
 
-    def _draw_text_content(self, painter: QPainter, rect: QRect, message: ChatMessage) -> None:
+    def _draw_text_content(self, painter: QPainter, rect: QRect, message: ChatMessage, background_fill: QColor) -> None:
         """Draw wrapped text content."""
-        text_rect, document = self._text_layout(rect, message.content or "")
-        context = QAbstractTextDocumentLayout.PaintContext()
+        del background_fill
+        content = message.content or ""
+        text_rect, layout = self._text_layout(rect, content)
+        selection_range = (
+            self._selection_index_bounds(content, self._selection_anchor, self._selection_position)
+            if self.has_selected_text(message.message_id)
+            else None
+        )
 
-        if self.has_selected_text(message.message_id):
-            selection = QAbstractTextDocumentLayout.Selection()
-            cursor = QTextCursor(document)
-            cursor.setPosition(min(self._selection_anchor, self._selection_position))
-            cursor.setPosition(max(self._selection_anchor, self._selection_position), QTextCursor.MoveMode.KeepAnchor)
-            selection.cursor = cursor
-
-            char_format = QTextCharFormat()
-            char_format.setBackground(QColor(86, 157, 229, 120) if isDarkTheme() else QColor(140, 196, 255, 140))
-            char_format.setForeground(QColor(255, 255, 255) if isDarkTheme() else QColor("#101010"))
-            selection.format = char_format
-            context.selections = [selection]
+        text_font = self._text_font()
+        text_metrics = QFontMetrics(text_font)
+        text_color = self._text_color(message)
+        selected_text_color = QColor(255, 255, 255) if isDarkTheme() else QColor("#101010")
+        highlight_color = QColor(86, 157, 229, 120) if isDarkTheme() else QColor(140, 196, 255, 140)
+        emoji_target = BUBBLE_EMOJI_PIXEL_SIZE
 
         painter.save()
-        painter.translate(text_rect.topLeft())
-        document.documentLayout().draw(painter, context)
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setFont(text_font)
+
+        for line in layout.lines:
+            line_top = text_rect.y() + line.y
+            baseline_y = line_top + line.baseline
+
+            for run in line.runs:
+                run_left = text_rect.x() + line.x + run.x
+                run_rect = QRect(run_left, line_top + run.y, run.width, run.height)
+                is_selected = bool(
+                    selection_range and self._ranges_overlap(selection_range[0], selection_range[1], run.start, run.end)
+                )
+
+                if run.kind == "emoji":
+                    if is_selected:
+                        highlight_path = QPainterPath()
+                        highlight_path.addRoundedRect(QRectF(run_rect.adjusted(0, 0, 0, -1)), 4, 4)
+                        painter.fillPath(highlight_path, highlight_color)
+
+                    pixmap = load_emoji_pixmap(run.text, emoji_target, emoji_target)
+                    if pixmap.isNull():
+                        painter.setFont(text_font)
+                        painter.setPen(selected_text_color if is_selected else text_color)
+                        painter.drawText(QPoint(run_left, baseline_y), run.text)
+                        continue
+                    draw_x = run_rect.x() + max(0, (run_rect.width() - pixmap.width()) // 2)
+                    draw_y = centered_emoji_top(run_rect.y(), run_rect.height(), pixmap.height(), vertical_nudge=1)
+                    painter.drawPixmap(draw_x, draw_y, pixmap)
+                    continue
+
+                self._draw_text_run(
+                    painter,
+                    run,
+                    run_rect,
+                    baseline_y,
+                    selection_range,
+                    text_color,
+                    selected_text_color,
+                    highlight_color,
+                )
+
         painter.restore()
 
     def _draw_image_content(self, painter: QPainter, rect: QRect, message: ChatMessage) -> None:
@@ -488,18 +689,17 @@ class MessageDelegate(QStyledItemDelegate):
         info_color = QColor(157, 157, 157) if dark else QColor(138, 138, 138)
         success_color = QColor(108, 203, 95) if dark else QColor(15, 123, 15)
         error_color = QColor(255, 153, 164) if dark else QColor(196, 43, 28)
-        accent_color = QColor(themeColor())
 
         if self._is_uploading(message):
             return info_color, FluentIcon.SYNC
         if message.status in (MessageStatus.PENDING, MessageStatus.SENDING):
-            return info_color, FluentIcon.SEND
+            return info_color, FluentIcon.SEND_FILL
         if message.status == MessageStatus.SENT:
-            return info_color, FluentIcon.ACCEPT_MEDIUM
+            return success_color, FluentIcon.SEND_FILL
         if message.status == MessageStatus.DELIVERED:
-            return success_color, FluentIcon.COMPLETED
+            return info_color, FluentIcon.COMPLETED
         if message.status == MessageStatus.READ:
-            return accent_color, FluentIcon.COMPLETED
+            return success_color, FluentIcon.COMPLETED
         if message.status == MessageStatus.FAILED:
             return error_color, FluentIcon.CANCEL_MEDIUM
         return None
@@ -522,22 +722,6 @@ class MessageDelegate(QStyledItemDelegate):
         painter.setPen(Qt.GlobalColor.white)
         painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, state_text)
 
-    def _attachment_description(self, message: ChatMessage, default: str) -> str:
-        """Return card secondary text based on upload state."""
-        if self._is_uploading(message):
-            return "Uploading..."
-        if message.status == MessageStatus.FAILED:
-            return "Upload failed, right click to retry"
-        return default
-
-    def _attachment_desc_color(self, message: ChatMessage) -> QColor:
-        """Return attachment description color."""
-        if message.status == MessageStatus.FAILED:
-            return QColor("#D84A4A")
-        if self._is_uploading(message):
-            return QColor(themeColor())
-        return QColor(196, 196, 196) if isDarkTheme() else QColor("#7A7A7A")
-
     def _media_state_text(self, message: ChatMessage) -> str:
         """Return image/video overlay text."""
         if self._is_uploading(message):
@@ -548,7 +732,7 @@ class MessageDelegate(QStyledItemDelegate):
 
     def _layout_rects(self, row_rect: QRect, message: ChatMessage) -> tuple[QRect, QRect, QRect]:
         """Compute avatar, bubble, and content rectangles for a row."""
-        bubble_size = self._bubble_size(message)
+        bubble_size = self._bubble_size(message, row_rect.width())
         row_top = row_rect.y() + 8
         body_height = max(bubble_size.height(), self.AVATAR_SIZE)
         standalone_attachment = message.message_type in {MessageType.IMAGE, MessageType.VIDEO, MessageType.FILE}
@@ -762,10 +946,11 @@ class MessageDelegate(QStyledItemDelegate):
             return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
         return f"{minutes:02d}:{seconds:02d}"
 
-    def _measure_text_content(self, content: str) -> QSize:
+    def _measure_text_content(self, content: str, max_width: int) -> QSize:
         """Measure wrapped text using wrap-anywhere to avoid clipping digits/URLs."""
         text = content or ""
-        cached_size = self._cache_get(self._text_measure_cache, text)
+        cache_key = (text, max_width)
+        cached_size = self._cache_get(self._text_measure_cache, cache_key)
         if cached_size is not None:
             return cached_size
 
@@ -773,62 +958,271 @@ class MessageDelegate(QStyledItemDelegate):
         fm = QFontMetrics(font)
         if not text:
             size = QSize(18, fm.height())
-            self._cache_put(self._text_measure_cache, text, size, self.TEXT_MEASURE_CACHE_LIMIT)
+            self._cache_put(self._text_measure_cache, cache_key, size, self.TEXT_MEASURE_CACHE_LIMIT)
             return size
 
-        text_rect = fm.boundingRect(
-            QRect(0, 0, self.MAX_TEXT_WIDTH, 4000),
-            self._text_measure_flags(),
-            text,
+        layout = self._run_text_layout(text, max_width)
+        size = QSize(
+            max(18, layout.width + 2),
+            max(fm.height(), layout.height),
         )
-        size = QSize(max(18, text_rect.width()), max(fm.height(), text_rect.height()))
-        self._cache_put(self._text_measure_cache, text, size, self.TEXT_MEASURE_CACHE_LIMIT)
+        self._cache_put(self._text_measure_cache, cache_key, size, self.TEXT_MEASURE_CACHE_LIMIT)
         return size
 
     @staticmethod
-    def _text_measure_flags() -> Qt.TextFlag | Qt.AlignmentFlag:
-        """Flags used when measuring text bubbles."""
-        return Qt.TextFlag.TextWrapAnywhere | Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop
-
-    @staticmethod
-    def _text_draw_flags() -> Qt.TextFlag | Qt.AlignmentFlag:
-        """Flags used when drawing text bubbles."""
-        return Qt.TextFlag.TextWrapAnywhere | Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop
-
-    @staticmethod
     def _text_font() -> QFont:
-        """Return the font used for text messages."""
+        """Return the base font used for text messages."""
         font = QFont()
-        font.setPixelSize(14)
+        font.setPixelSize(17)
+        try:
+            font.setFamilies(
+                [
+                    "Segoe UI",
+                    "Microsoft YaHei UI",
+                    "Segoe UI Emoji",
+                    "Apple Color Emoji",
+                    "Noto Color Emoji",
+                ]
+            )
+        except AttributeError:
+            font.setFamily("Segoe UI")
         return font
 
-    def _text_layout(self, rect: QRect, content: str) -> tuple[QRect, QTextDocument]:
-        """Create the document and draw rect for a text bubble."""
-        width = max(1, rect.width())
-        cache_key = (width, content or "")
+    @staticmethod
+    def _ranges_overlap(start_a: int, end_a: int, start_b: int, end_b: int) -> bool:
+        """Return whether two half-open ranges overlap."""
+        return start_a < end_b and start_b < end_a
+
+    def _draw_text_run(
+        self,
+        painter: QPainter,
+        run: _TextRunLayout,
+        run_rect: QRect,
+        baseline_y: int,
+        selection_range: tuple[int, int] | None,
+        text_color: QColor,
+        selected_text_color: QColor,
+        highlight_color: QColor,
+    ) -> None:
+        """Draw a text run, splitting around any active selection."""
+        painter.setFont(self._text_font())
+
+        for segment_start, segment_end, is_selected in self._text_run_segments(run, selection_range):
+            if segment_start >= segment_end:
+                continue
+            segment_x = run_rect.x() + self._text_run_offset(run, segment_start)
+            segment_width = self._text_run_offset(run, segment_end) - self._text_run_offset(run, segment_start)
+            segment_rect = QRect(segment_x, run_rect.y(), max(1, segment_width), run_rect.height())
+            if is_selected:
+                painter.fillRect(segment_rect.adjusted(0, 0, 0, -1), highlight_color)
+
+            text_slice = run.text[segment_start - run.start : segment_end - run.start]
+            painter.setPen(selected_text_color if is_selected else text_color)
+            painter.drawText(QPoint(segment_x, baseline_y), text_slice)
+
+    @staticmethod
+    def _text_run_segments(
+        run: _TextRunLayout,
+        selection_range: tuple[int, int] | None,
+    ) -> list[tuple[int, int, bool]]:
+        """Split a text run into selected and unselected drawing segments."""
+        if not selection_range:
+            return [(run.start, run.end, False)]
+
+        selection_start = max(selection_range[0], run.start)
+        selection_end = min(selection_range[1], run.end)
+        if selection_start >= selection_end:
+            return [(run.start, run.end, False)]
+
+        segments: list[tuple[int, int, bool]] = []
+        if run.start < selection_start:
+            segments.append((run.start, selection_start, False))
+        segments.append((selection_start, selection_end, True))
+        if selection_end < run.end:
+            segments.append((selection_end, run.end, False))
+        return segments
+
+    @staticmethod
+    def _text_run_offset(run: _TextRunLayout, position: int) -> int:
+        """Return the pixel offset from the run start to a character index."""
+        offset = max(0, min(position - run.start, len(run.char_offsets) - 1))
+        if not run.char_offsets:
+            return 0
+        return run.char_offsets[offset]
+
+    @staticmethod
+    def _build_text_run(
+        text: str,
+        advances: list[int],
+        start: int,
+        x: int,
+        text_metrics: QFontMetrics,
+    ) -> _TextRunLayout:
+        """Create one continuous text run with cached prefix offsets."""
+        width = sum(advances)
+        offsets = [0]
+        current = 0
+        for advance in advances:
+            current += advance
+            offsets.append(current)
+        return _TextRunLayout(
+            "text",
+            text,
+            start,
+            start + len(text),
+            width,
+            text_metrics.height(),
+            text_metrics.ascent(),
+            text_metrics.descent(),
+            tuple(advances),
+            tuple(offsets),
+            x=x,
+        )
+
+    def _run_text_layout(self, content: str, width: int) -> _RunTextLayout:
+        """Build a custom run-based layout for bubble text."""
+        cache_key = (max(1, width), content or "")
         cached_layout = self._cache_get(self._text_layout_cache, cache_key)
         if cached_layout is not None:
-            text_height, document = cached_layout
-            return QRect(rect.x(), rect.y(), width, text_height), document
+            return cached_layout
 
-        document = QTextDocument()
-        document.setDocumentMargin(0)
-        document.setDefaultFont(self._text_font())
+        text_font = self._text_font()
+        text_metrics = QFontMetrics(text_font)
+        emoji_target = BUBBLE_EMOJI_PIXEL_SIZE
+        max_width = max(1, width)
 
-        option = QTextOption()
-        option.setWrapMode(QTextOption.WrapMode.WrapAnywhere)
-        document.setDefaultTextOption(option)
-        document.setPlainText(content or "")
-        document.setTextWidth(width)
+        def new_line() -> _TextLineLayout:
+            return _TextLineLayout([], 0, text_metrics.height(), text_metrics.ascent())
 
-        text_height = max(1, int(round(document.size().height())))
-        self._cache_put(
-            self._text_layout_cache,
-            cache_key,
-            (text_height, document),
-            self.TEXT_LAYOUT_CACHE_LIMIT,
-        )
-        return QRect(rect.x(), rect.y(), width, text_height), document
+        def append_line(target: list[_TextLineLayout], line: _TextLineLayout) -> None:
+            target.append(line)
+
+        text_buffer: list[str] = []
+        text_advances: list[int] = []
+        text_buffer_start: int | None = None
+        text_buffer_width = 0
+
+        def flush_text_buffer() -> None:
+            nonlocal text_buffer, text_advances, text_buffer_start, text_buffer_width, current_line
+            if not text_buffer or text_buffer_start is None:
+                text_buffer = []
+                text_advances = []
+                text_buffer_start = None
+                text_buffer_width = 0
+                return
+
+            token = self._build_text_run(
+                "".join(text_buffer),
+                text_advances,
+                text_buffer_start,
+                current_line.width,
+                text_metrics,
+            )
+            current_line.runs.append(token)
+            current_line.width += token.width
+            text_buffer = []
+            text_advances = []
+            text_buffer_start = None
+            text_buffer_width = 0
+
+        runs: list[_TextLineLayout] = []
+        current_line = new_line()
+        pure_emoji = bool(content) and is_emoji_text(content)
+        position = 0
+
+        for chunk, is_emoji_chunk in iter_text_and_emoji_clusters(content or ""):
+            if is_emoji_chunk:
+                flush_text_buffer()
+                pixmap = load_emoji_pixmap(chunk, emoji_target, emoji_target)
+                emoji_width = pixmap.width() if not pixmap.isNull() else max(emoji_target, text_metrics.height())
+                emoji_height = pixmap.height() if not pixmap.isNull() else max(emoji_target, text_metrics.height())
+                run_height = max(text_metrics.height(), emoji_height)
+                run_ascent = text_metrics.ascent() + max(0, (run_height - text_metrics.height()) // 2)
+                gap_before = self.EMOJI_TEXT_GAP if current_line.runs and current_line.runs[-1].kind == "text" else 0
+                token = _TextRunLayout(
+                    "emoji",
+                    chunk,
+                    position,
+                    position + len(chunk),
+                    emoji_width,
+                    run_height,
+                    run_ascent,
+                    max(0, run_height - run_ascent),
+                    (),
+                    (),
+                )
+                if current_line.runs and current_line.width + gap_before + token.width > max_width:
+                    append_line(runs, current_line)
+                    current_line = new_line()
+                    gap_before = 0
+                current_line.width += gap_before
+                token.x = current_line.width
+                current_line.runs.append(token)
+                current_line.width += token.width
+                current_line.baseline = max(current_line.baseline, token.ascent)
+                current_line.height = max(current_line.height, token.ascent + token.descent)
+                position += len(chunk)
+                continue
+
+            for char in chunk:
+                start = position
+                end = position + 1
+                position = end
+
+                if char == "\n":
+                    flush_text_buffer()
+                    append_line(runs, current_line)
+                    current_line = new_line()
+                    continue
+
+                token_width = max(1, text_metrics.horizontalAdvance(char))
+                gap_before = self.EMOJI_TEXT_GAP if not text_buffer and current_line.runs and current_line.runs[-1].kind == "emoji" else 0
+                if (current_line.runs or text_buffer) and current_line.width + gap_before + text_buffer_width + token_width > max_width:
+                    flush_text_buffer()
+                    append_line(runs, current_line)
+                    current_line = new_line()
+                    gap_before = 0
+
+                if text_buffer_start is None:
+                    current_line.width += gap_before
+                    text_buffer_start = start
+                text_buffer.append(char)
+                text_advances.append(token_width)
+                text_buffer_width += token_width
+
+        flush_text_buffer()
+        append_line(runs, current_line)
+
+        if not runs:
+            runs = [new_line()]
+
+        total_height = 0
+        max_line_width = 0
+        for line in runs:
+            line.y = total_height
+            max_line_width = max(max_line_width, line.width)
+            line.x = max(0, (max_width - line.width) // 2) if pure_emoji else 0
+            for run in line.runs:
+                run.y = max(0, line.baseline - run.ascent)
+            total_height += line.height
+
+        layout = _RunTextLayout(runs, max_line_width, max(total_height, text_metrics.height()), pure_emoji)
+        self._cache_put(self._text_layout_cache, cache_key, layout, self.TEXT_LAYOUT_CACHE_LIMIT)
+        return layout
+
+    def _text_layout(self, rect: QRect, content: str) -> tuple[QRect, _RunTextLayout]:
+        """Return the draw rect and custom layout for a text bubble."""
+        layout = self._run_text_layout(content or "", rect.width())
+        text_y = rect.y() + max(0, (rect.height() - layout.height) // 2)
+        return QRect(rect.x(), text_y, max(1, rect.width()), layout.height), layout
+
+    def _max_bubble_width_for_row(self, row_width: int) -> int:
+        """Return the maximum width a bubble/media card can occupy in the current row."""
+        if row_width <= 0:
+            return self.MAX_TEXT_WIDTH + self.BUBBLE_PADDING_H * 2 + self.TAIL_SPACE
+
+        reserved = self.LEFT_MARGIN + self.RIGHT_MARGIN + self.AVATAR_SIZE + self.BUBBLE_GAP + 28
+        return max(56, row_width - reserved)
 
     @staticmethod
     def _cache_get(cache, key):
@@ -850,7 +1244,7 @@ class MessageDelegate(QStyledItemDelegate):
 
     def _text_position_for_point(
         self,
-        document: QTextDocument,
+        layout: _RunTextLayout,
         text_rect: QRect,
         position: QPoint,
         *,
@@ -863,9 +1257,64 @@ class MessageDelegate(QStyledItemDelegate):
         if not clamp and (local_x < 0 or local_y < 0 or local_x > text_rect.width() or local_y > text_rect.height()):
             return -1
 
-        local_x = max(0, min(local_x, text_rect.width()))
-        local_y = max(0, min(local_y, text_rect.height()))
-        return document.documentLayout().hitTest(QPointF(local_x, local_y), Qt.HitTestAccuracy.FuzzyHit)
+        local_x = max(0, local_x)
+        local_y = max(0, local_y)
+
+        if not layout.lines:
+            return 0
+
+        for line_index, line in enumerate(layout.lines):
+            line_top = line.y
+            line_bottom = line.y + line.height
+            line_left = line.x
+            line_right = line.x + line.width
+
+            if not clamp:
+                if local_y < line_top or local_y > line_bottom:
+                    continue
+                if local_x < line_left or local_x > line_right:
+                    return -1
+
+            if local_y < line_bottom or line_index == len(layout.lines) - 1:
+                if not line.runs:
+                    if line_index == 0:
+                        return 0
+                    previous_line = layout.lines[line_index - 1]
+                    return previous_line.runs[-1].end if previous_line.runs else 0
+                if local_x <= line.x:
+                    return line.runs[0].start
+                for run in line.runs:
+                    run_left = line.x + run.x
+                    if local_x <= run_left:
+                        return run.start
+                    right = run_left + run.width
+                    if local_x <= right:
+                        if run.kind == "text" and run.char_advances:
+                            local_run_x = max(0, local_x - run_left)
+                            for offset, advance in enumerate(run.char_advances):
+                                current_x = run.char_offsets[offset]
+                                midpoint = current_x + advance / 2
+                                if local_run_x <= midpoint:
+                                    return run.start + offset
+                            return run.end
+                        midpoint = run_left + run.width / 2
+                        return run.end if local_x >= midpoint else run.start
+                return line.runs[-1].end
+
+        if not clamp:
+            return -1
+
+        last_line = layout.lines[-1]
+        if not last_line.runs:
+            return 0
+        return last_line.runs[-1].end
+
+    @staticmethod
+    def _text_color(message: ChatMessage) -> QColor:
+        """Return the foreground text color for a message bubble."""
+        if isDarkTheme():
+            return QColor(246, 248, 250, 235) if message.is_self else QColor(236, 239, 243, 230)
+        return QColor("#1A1A1A")
 
     @staticmethod
     def _is_uploading(message: ChatMessage) -> bool:
@@ -910,23 +1359,34 @@ class MessageDelegate(QStyledItemDelegate):
 
         return path
 
-    def _should_show_time(self, index: QModelIndex, message: ChatMessage) -> bool:
-        """Show time if this is the first message or minute changed."""
-        if index.row() == 0:
-            return True
+    def _should_show_time_after(self, index: QModelIndex, message: ChatMessage) -> bool:
+        """Show the current message time after this row when the next row starts a new time segment."""
+        explicit_value = index.data(MessageModel.ShowTimeAfterRole)
+        if explicit_value is not None:
+            return bool(explicit_value)
 
-        previous_index = index.model().index(index.row() - 1, 0)
-        previous_message = previous_index.data(Qt.ItemDataRole.UserRole)
-        if not previous_message:
-            return True
+        model = index.model()
+        if model is None or index.row() >= model.rowCount() - 1:
+            return False
+
+        next_index = model.index(index.row() + 1, 0)
+        next_message = next_index.data(Qt.ItemDataRole.UserRole)
+        if not next_message:
+            return False
 
         current_time = self._normalize_datetime(message.timestamp)
-        previous_time = self._normalize_datetime(previous_message.timestamp)
+        next_time = self._normalize_datetime(next_message.timestamp)
 
-        if current_time is None or previous_time is None:
+        if current_time is None or next_time is None:
+            return False
+
+        return self._is_time_break(current_time, next_time)
+
+    def _is_time_break(self, current_time: datetime, next_time: datetime) -> bool:
+        """Return whether two adjacent messages belong to different visible time groups."""
+        if current_time.date() != next_time.date():
             return True
-
-        return current_time.strftime("%Y-%m-%d %H:%M") != previous_time.strftime("%Y-%m-%d %H:%M")
+        return abs((next_time - current_time).total_seconds()) >= self.TIME_BREAK_SECONDS
 
     def _format_time(self, value) -> str:
         """Format message time for the center time block."""
@@ -1053,6 +1513,9 @@ class MessageDelegate(QStyledItemDelegate):
         """Start downloading a remote image if needed."""
         if not source or source in self._loading_sources:
             return
+        failed_at = self._failed_image_sources.get(source)
+        if failed_at is not None and (time.monotonic() - failed_at) < 30.0:
+            return
 
         self._loading_sources.add(source)
         reply = self._network_manager.get(QNetworkRequest(QUrl(source)))
@@ -1065,10 +1528,14 @@ class MessageDelegate(QStyledItemDelegate):
 
         try:
             if reply.error() != QNetworkReply.NetworkError.NoError:
+                if source:
+                    self._failed_image_sources[source] = time.monotonic()
                 return
 
             pixmap = QPixmap()
             if not pixmap.loadFromData(bytes(reply.readAll())):
+                if source:
+                    self._failed_image_sources[source] = time.monotonic()
                 return
 
             if pixmap.width() > self.MAX_IMAGE_WIDTH * 2 or pixmap.height() > self.MAX_IMAGE_HEIGHT * 2:
@@ -1083,6 +1550,7 @@ class MessageDelegate(QStyledItemDelegate):
                 )
 
             self._image_cache[source] = pixmap
+            self._failed_image_sources.pop(source, None)
             self._schedule_refresh_message_view()
         finally:
             reply.deleteLater()

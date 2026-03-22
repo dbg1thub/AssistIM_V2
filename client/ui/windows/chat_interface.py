@@ -137,6 +137,8 @@ class ChatInterface(QWidget):
         self._history_load_task: Optional[asyncio.Task] = None
         self._history_page_cache: dict[str, OrderedDict[tuple[Optional[float], int], list]] = {}
         self._session_view_state: dict[str, dict] = {}
+        self._last_read_receipts: dict[str, str] = {}
+        self._composer_drafts: dict[str, list[dict]] = {}
 
         self._setup_ui()
         self._connect_signals()
@@ -151,6 +153,8 @@ class ChatInterface(QWidget):
 
         self.session_panel = SessionPanel(self)
         self.chat_panel = ChatPanel(self)
+        self.session_panel.setMinimumWidth(0)
+        self.chat_panel.setMinimumWidth(0)
 
         self.chat_panel.set_send_message_callback(self._on_send_message)
         self.chat_panel.set_send_segments_callback(self._on_send_segments)
@@ -163,6 +167,7 @@ class ChatInterface(QWidget):
         self.splitter.setStretchFactor(0, 0)
         self.splitter.setStretchFactor(1, 1)
         self.splitter.setHandleWidth(1)
+        self.splitter.splitterMoved.connect(self._on_splitter_moved)
 
         main_layout = QHBoxLayout(self)
         main_layout.setContentsMargins(0, 0, 0, 0)
@@ -173,12 +178,18 @@ class ChatInterface(QWidget):
     def _connect_signals(self) -> None:
         """Connect panel-level signals."""
         self.session_panel.session_selected.connect(self._on_session_selected)
+        self.chat_panel.composer_draft_changed.connect(self._on_composer_draft_changed)
         self.chat_panel.file_upload_requested.connect(self._on_file_upload_requested)
         self.chat_panel.screenshot_requested.connect(self._on_screenshot_requested)
         self.chat_panel.voice_call_requested.connect(self._on_voice_call_requested)
         self.chat_panel.video_call_requested.connect(self._on_video_call_requested)
         self.chat_panel.older_messages_requested.connect(self._on_older_messages_requested)
         self.chat_panel.get_message_list().customContextMenuRequested.connect(self._on_message_context_menu)
+
+    def _on_splitter_moved(self, _pos: int, _index: int) -> None:
+        """Force both panes to re-layout item widths while the splitter is dragged."""
+        QTimer.singleShot(0, self.session_panel._relayout_session_list)
+        QTimer.singleShot(0, self.chat_panel._relayout_message_list)
 
     def _subscribe_to_events(self) -> None:
         """Subscribe to session and message events for real-time UI updates."""
@@ -189,6 +200,7 @@ class ChatInterface(QWidget):
         self._event_bus.subscribe_sync(MessageEvent.SENT, self._on_message_sent)
         self._event_bus.subscribe_sync(MessageEvent.RECEIVED, self._on_message_received)
         self._event_bus.subscribe_sync(MessageEvent.ACK, self._on_message_ack)
+        self._event_bus.subscribe_sync(MessageEvent.DELIVERED, self._on_delivered_event)
         self._event_bus.subscribe_sync(MessageEvent.FAILED, self._on_message_failed)
         self._event_bus.subscribe_sync(MessageEvent.TYPING, self._on_typing_event)
         self._event_bus.subscribe_sync(MessageEvent.READ, self._on_read_event)
@@ -232,6 +244,7 @@ class ChatInterface(QWidget):
             self._invalidate_history_cache(message.session_id)
         if message and message.session_id == self._current_session_id:
             self.chat_panel.add_message(message)
+            self._schedule_read_receipt()
 
     def _on_message_ack(self, data: dict) -> None:
         """Update message status after server acknowledgment."""
@@ -241,6 +254,21 @@ class ChatInterface(QWidget):
             self.chat_panel.update_message_status(message.message_id, message.status)
         elif message_id:
             self.chat_panel.update_message_status(message_id, MessageStatus.SENT)
+
+    def _on_delivered_event(self, data: dict) -> None:
+        """Update delivered state for the active conversation."""
+        message = data.get("message")
+        message_id = data.get("message_id") or (message.message_id if message else "")
+        session_id = data.get("session_id") or (message.session_id if message else "")
+        if not session_id or not message_id:
+            return
+
+        self._invalidate_history_cache(session_id)
+        if session_id != self._current_session_id:
+            self._session_view_state.pop(session_id, None)
+            return
+
+        self.chat_panel.update_message_status(message_id, MessageStatus.DELIVERED)
 
     def _on_message_failed(self, data: dict) -> None:
         """Update failed message state."""
@@ -261,8 +289,16 @@ class ChatInterface(QWidget):
     def _on_read_event(self, data: dict) -> None:
         """Update read state in the message list."""
         message_id = data.get("message_id", "")
-        if message_id:
-            self.chat_panel.update_message_status(message_id, MessageStatus.READ)
+        session_id = data.get("session_id", "")
+        if not session_id or not message_id:
+            return
+
+        self._invalidate_history_cache(session_id)
+        if session_id != self._current_session_id:
+            self._session_view_state.pop(session_id, None)
+            return
+
+        self.chat_panel.mark_read_through(session_id, message_id, MessageStatus.READ)
 
     def _on_edited_event(self, data: dict) -> None:
         """Update edited message content."""
@@ -278,11 +314,13 @@ class ChatInterface(QWidget):
         """Replace recalled message content."""
         session_id = data.get("session_id", "")
         self._invalidate_history_cache(session_id)
+        notice = data.get("content") or getattr(data.get("message"), "content", "撤回了一条消息")
         if session_id != self._current_session_id:
+            self._session_view_state.pop(session_id, None)
             asyncio.create_task(self._refresh_session_preview(session_id))
             return
         message_id = data.get("message_id", "")
-        self.chat_panel.update_message_content(message_id, "[消息已撤回]")
+        self.chat_panel.update_message_content(message_id, notice)
         self.chat_panel.update_message_status(message_id, MessageStatus.RECALLED)
         asyncio.create_task(self._refresh_session_preview(session_id))
 
@@ -312,6 +350,7 @@ class ChatInterface(QWidget):
         ]
         if current_session_messages:
             self.chat_panel.add_messages(current_session_messages)
+            self._schedule_read_receipt()
 
     def load_sessions(self) -> None:
         """Load current sessions into the left panel."""
@@ -323,11 +362,15 @@ class ChatInterface(QWidget):
             return
 
         self._remember_current_session_view_state()
+        self._remember_current_composer_draft()
 
         self._current_session_id = session_id
         session = self._get_session(session_id)
         if session:
             self.chat_panel.set_session(session)
+            self._set_session_draft_preview(session_id, [])
+            self.chat_panel.clear_composer_draft()
+            self.chat_panel.restore_composer_draft(self._composer_drafts.get(session_id, []))
         else:
             self.chat_panel.show_welcome()
             return
@@ -370,6 +413,7 @@ class ChatInterface(QWidget):
         self.chat_panel.set_has_more_history(self._has_more_history)
         self.chat_panel.set_history_loading(False)
         self._store_session_view_state(session_id)
+        self._schedule_read_receipt()
 
     async def _select_session_only(self, session_id: str) -> None:
         """Update session selection side effects without reloading the visible page from storage."""
@@ -471,6 +515,69 @@ class ChatInterface(QWidget):
             return
         self._store_session_view_state(self._current_session_id)
 
+    def _remember_current_composer_draft(self) -> None:
+        """Persist the current unsent text/attachment draft for the active session."""
+        if not self._current_session_id:
+            return
+
+        segments = self.chat_panel.capture_composer_draft()
+        self._store_session_draft_segments(self._current_session_id, segments)
+        self._set_session_draft_preview(self._current_session_id, segments)
+
+    def _on_composer_draft_changed(self, segments: list[dict]) -> None:
+        """Keep the current session draft isolated and mirrored into the session list."""
+        if not self._current_session_id:
+            return
+        self._store_session_draft_segments(self._current_session_id, segments)
+        self._set_session_draft_preview(self._current_session_id, [])
+
+    def _store_session_draft_segments(self, session_id: str, segments: list[dict]) -> None:
+        """Store in-memory draft segments for one session."""
+        if not session_id:
+            return
+
+        normalized_segments = list(segments or [])
+        if normalized_segments:
+            self._composer_drafts[session_id] = normalized_segments
+        else:
+            self._composer_drafts.pop(session_id, None)
+
+    def _set_session_draft_preview(self, session_id: str, segments: list[dict]) -> None:
+        """Update the left-list draft preview for one session."""
+        if not session_id:
+            return
+
+        session = self._get_session(session_id)
+        if not session:
+            return
+
+        draft_preview = self._draft_preview_from_segments(segments or [])
+        setattr(session, "draft_preview", draft_preview or None)
+        self.session_panel.update_session(session_id, draft_preview=getattr(session, "draft_preview", None))
+
+    def _draft_preview_from_segments(self, segments: list[dict]) -> str:
+        """Build a short WeChat-style draft preview from composed editor segments."""
+        parts: list[str] = []
+
+        for segment in segments or []:
+            segment_type = segment.get("type")
+            if isinstance(segment_type, str):
+                try:
+                    segment_type = MessageType(segment_type)
+                except ValueError:
+                    segment_type = None
+
+            if segment_type == MessageType.TEXT:
+                text = " ".join(str(segment.get("content", "") or "").split())
+                if text:
+                    parts.append(text)
+                continue
+
+            if segment_type in {MessageType.IMAGE, MessageType.VIDEO, MessageType.FILE}:
+                parts.append(format_message_preview("", segment_type))
+
+        return " ".join(part for part in parts if part).strip()
+
     def _store_session_view_state(self, session_id: str) -> None:
         """Store the current chat panel state for a session."""
         if session_id != self._current_session_id:
@@ -491,54 +598,59 @@ class ChatInterface(QWidget):
         self.chat_panel.set_has_more_history(self._has_more_history)
         self.chat_panel.set_history_loading(False)
         self.chat_panel.restore_message_scroll_gap(int(state.get("scroll_gap", 0)))
+        self._schedule_read_receipt()
 
     def _on_send_message(self, content: str, message_type: MessageType) -> None:
         """Dispatch outgoing messages through ChatController."""
-        if not self._current_session_id:
+        session_id = self._current_session_id
+        if not session_id:
             return
 
         if message_type == MessageType.IMAGE:
-            asyncio.create_task(self._send_image_message(content))
+            asyncio.create_task(self._send_image_message(session_id, content))
         else:
-            asyncio.create_task(self._send_text_message(content, message_type))
+            asyncio.create_task(self._send_text_message(session_id, content, message_type))
 
     def _on_send_segments(self, segments: list[dict]) -> None:
         """Dispatch mixed text/media segments in document order."""
-        if not self._current_session_id or not segments:
+        session_id = self._current_session_id
+        if not session_id or not segments:
             return
-        asyncio.create_task(self._send_segments_async(segments))
+        self._store_session_draft_segments(session_id, [])
+        self._set_session_draft_preview(session_id, [])
+        asyncio.create_task(self._send_segments_async(session_id, segments))
 
-    async def _send_segments_async(self, segments: list[dict]) -> None:
+    async def _send_segments_async(self, session_id: str, segments: list[dict]) -> None:
         """Send composed editor segments sequentially so mixed content keeps order."""
         for segment in segments:
             segment_type = segment.get("type")
             try:
                 if segment_type == MessageType.TEXT and segment.get("content"):
                     await self._chat_controller.send_message_to(
-                        session_id=self._current_session_id,
+                        session_id=session_id,
                         content=segment["content"],
                         message_type=MessageType.TEXT,
                     )
                 elif segment_type in {MessageType.IMAGE, MessageType.VIDEO, MessageType.FILE} and segment.get("file_path"):
-                    await self._chat_controller.send_file(segment["file_path"])
+                    await self._chat_controller.send_file(segment["file_path"], session_id=session_id)
             except Exception as exc:
                 logger.error("Send composed segment error: %s", exc)
 
-    async def _send_text_message(self, content: str, message_type: MessageType) -> None:
+    async def _send_text_message(self, session_id: str, content: str, message_type: MessageType) -> None:
         """Send a text message through the controller."""
         try:
             await self._chat_controller.send_message_to(
-                session_id=self._current_session_id,
+                session_id=session_id,
                 content=content,
                 message_type=message_type,
             )
         except Exception as exc:
             logger.error("Send text message error: %s", exc)
 
-    async def _send_image_message(self, file_path: str) -> None:
+    async def _send_image_message(self, session_id: str, file_path: str) -> None:
         """Send an image using the optimistic media upload flow."""
         try:
-            message = await self._chat_controller.send_file(file_path)
+            message = await self._chat_controller.send_file(file_path, session_id=session_id)
             if message:
                 self.chat_panel.get_message_list().viewport().update()
         except Exception as exc:
@@ -551,9 +663,10 @@ class ChatInterface(QWidget):
 
     def _on_file_upload_requested(self, file_path: str) -> None:
         """Send file message in background."""
-        if not self._current_session_id:
+        session_id = self._current_session_id
+        if not session_id:
             return
-        asyncio.create_task(self._send_file_message(file_path))
+        asyncio.create_task(self._send_file_message(session_id, file_path))
 
     def _on_screenshot_requested(self) -> None:
         """Open the screenshot overlay and send the result as an image."""
@@ -581,7 +694,8 @@ class ChatInterface(QWidget):
         self._screenshot_dialogs.add(dialog)
         try:
             if dialog.exec() == QDialog.DialogCode.Accepted:
-                asyncio.create_task(self._send_image_message(file_path))
+                if self._current_session_id:
+                    asyncio.create_task(self._send_image_message(self._current_session_id, file_path))
             else:
                 try:
                     os.remove(file_path)
@@ -598,10 +712,10 @@ class ChatInterface(QWidget):
         """Show placeholder feedback for video calls."""
         InfoBar.info("Video Call", "Video calling is not connected yet.", parent=self.window(), duration=1800)
 
-    async def _send_file_message(self, file_path: str) -> None:
+    async def _send_file_message(self, session_id: str, file_path: str) -> None:
         """Upload and send a file via ChatController."""
         try:
-            await self._chat_controller.send_file(file_path)
+            await self._chat_controller.send_file(file_path, session_id=session_id)
         except Exception as exc:
             logger.error("Send file message error: %s", exc)
 
@@ -638,41 +752,46 @@ class ChatInterface(QWidget):
             recall_action = Action("撤回", self)
             menu.addAction(recall_action)
 
-        if message.is_self:
-            delete_action = Action("删除", self)
-            menu.addAction(delete_action)
+        delete_action = Action("删除", self)
+        menu.addAction(delete_action)
 
         if message.is_self and message.status == MessageStatus.FAILED:
             retry_action = Action("重发", self)
             menu.addAction(retry_action)
 
-        action = menu.exec(self.chat_panel.get_message_list().viewport().mapToGlobal(position))
-        if action is None:
-            return
+        if copy_action:
+            copy_action.triggered.connect(
+                lambda _checked=False, msg=message: QGuiApplication.clipboard().setText(
+                    self.chat_panel.get_selected_text(msg) or (msg.content or "")
+                )
+            )
+        if open_action:
+            open_action.triggered.connect(lambda _checked=False, msg=message: self._open_message(msg))
+        if edit_action:
+            edit_action.triggered.connect(lambda _checked=False, msg=message: self._prompt_edit_message(msg))
+        if recall_action:
+            recall_action.triggered.connect(
+                lambda _checked=False, message_id=message.message_id: self._schedule_ui_task(
+                    self._recall_message(message_id),
+                    f"recall {message_id}",
+                )
+            )
+        if delete_action:
+            delete_action.triggered.connect(
+                lambda _checked=False, msg=message: self._schedule_ui_task(
+                    self._delete_message(msg),
+                    f"delete {msg.message_id}",
+                )
+            )
+        if retry_action:
+            retry_action.triggered.connect(
+                lambda _checked=False, message_id=message.message_id: self._schedule_ui_task(
+                    self._retry_message(message_id),
+                    f"retry {message_id}",
+                )
+            )
 
-        if action == open_action:
-            self._open_message(message)
-            return
-
-        if action == copy_action:
-            selected_text = self.chat_panel.get_selected_text(message)
-            QGuiApplication.clipboard().setText(selected_text or (message.content or ""))
-            return
-
-        if action == edit_action:
-            self._prompt_edit_message(message)
-            return
-
-        if action == recall_action:
-            asyncio.create_task(self._recall_message(message.message_id))
-            return
-
-        if action == delete_action:
-            asyncio.create_task(self._delete_message(message))
-            return
-
-        if action == retry_action:
-            asyncio.create_task(self._retry_message(message.message_id))
+        menu.exec(self.chat_panel.get_message_list().viewport().mapToGlobal(position))
 
     def _open_message(self, message) -> None:
         """Open an image, file, or video attachment."""
@@ -726,14 +845,61 @@ class ChatInterface(QWidget):
             InfoBar.error("编辑消息", "编辑失败", parent=self.window(), duration=1800)
 
     async def _delete_message(self, message) -> None:
-        """Delete a message and refresh session preview state."""
+        """Delete a message locally and refresh session preview state."""
         success = await self._chat_controller.delete_message(message.message_id)
         if not success:
             InfoBar.error("消息", "删除失败", parent=self.window(), duration=1800)
             return
 
+        self._invalidate_history_cache(message.session_id)
+        self._session_view_state.pop(message.session_id, None)
         self.chat_panel.remove_message(message.message_id)
         await self._refresh_session_preview(message.session_id)
+
+    def _schedule_ui_task(self, coro, context: str) -> None:
+        """Schedule a UI-triggered coroutine and log any exception."""
+        task = asyncio.create_task(coro)
+        task.add_done_callback(lambda finished, name=context: self._log_ui_task_result(finished, name))
+
+    @staticmethod
+    def _log_ui_task_result(task: asyncio.Task, context: str) -> None:
+        """Log background task failures from UI actions."""
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            logger.exception("UI action task failed: %s", context)
+
+    def _schedule_read_receipt(self) -> None:
+        """Defer read-receipt sending until after the current UI update completes."""
+        QTimer.singleShot(0, lambda: asyncio.create_task(self._send_latest_read_receipt()))
+
+    async def _send_latest_read_receipt(self) -> None:
+        """Send a cumulative read receipt for the latest visible incoming message."""
+        if not self._current_session_id:
+            return
+
+        latest_incoming = self._latest_readable_message()
+        if latest_incoming is None:
+            return
+
+        if self._last_read_receipts.get(self._current_session_id) == latest_incoming.message_id:
+            return
+
+        success = await self._chat_controller.send_read_receipt(latest_incoming.message_id)
+        if success:
+            self._last_read_receipts[self._current_session_id] = latest_incoming.message_id
+
+    def _latest_readable_message(self):
+        """Return the latest visible non-self message that can advance read state."""
+        for message in reversed(self.chat_panel.get_visible_messages()):
+            if message.is_self:
+                continue
+            if message.message_type == MessageType.SYSTEM:
+                continue
+            return message
+        return None
 
     async def _refresh_session_preview(self, session_id: str) -> None:
         """Refresh session preview content from the latest local message."""
@@ -748,7 +914,10 @@ class ChatInterface(QWidget):
             return
 
         last_message = await db.get_last_message(session_id)
-        preview = format_message_preview(last_message.content, last_message.message_type) if last_message else ""
+        if last_message and last_message.status == MessageStatus.RECALLED:
+            preview = last_message.content or "撤回了一条消息"
+        else:
+            preview = format_message_preview(last_message.content, last_message.message_type) if last_message else ""
         preview_time = last_message.timestamp if last_message else session.updated_at
         extra = dict(session.extra)
         if last_message:

@@ -60,6 +60,7 @@ class ChatPanel(QWidget):
     voice_call_requested = Signal()
     video_call_requested = Signal()
     older_messages_requested = Signal()
+    composer_draft_changed = Signal(object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -76,12 +77,15 @@ class ChatPanel(QWidget):
         self._video_windows: list[VideoWidget] = []
         self._history_request_pending = False
         self._has_more_history = True
+        self.message_input: Optional[MessageInput] = None
+        self.content_splitter: Optional[FluentSplitter] = None
 
         self._setup_ui()
 
     def _setup_ui(self) -> None:
         """Create stacked welcome page and active chat page."""
         self.setObjectName("ChatPanel")
+        self.setMinimumWidth(0)
 
         self.main_layout = QVBoxLayout(self)
         self.main_layout.setContentsMargins(0, 0, 0, 0)
@@ -100,6 +104,7 @@ class ChatPanel(QWidget):
 
         self.message_list = QListView(self.chat_page)
         self.message_list.setObjectName("messageListView")
+        self.message_list.setMinimumWidth(0)
         self.message_list.setFrameShape(QFrame.Shape.NoFrame)
         self.message_list.setContextMenuPolicy(Qt.ContextMenuPolicy.NoContextMenu)
         self.message_list.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -107,6 +112,7 @@ class ChatPanel(QWidget):
         self.message_list.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         self.message_list.setLayoutMode(QListView.LayoutMode.Batched)
         self.message_list.setBatchSize(24)
+        self.message_list.setResizeMode(QListView.ResizeMode.Adjust)
         self.message_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.message_list.setSpacing(0)
         self.message_list.setMouseTracking(True)
@@ -121,24 +127,30 @@ class ChatPanel(QWidget):
         self._setup_message_model()
 
         self.message_input = MessageInput(self.chat_page)
+        self.message_input.setMinimumWidth(0)
+        self.message_input.setMinimumHeight(0)
+        self.message_input.setMaximumHeight(340)
         self.message_input.segments_submitted.connect(self._on_segments_submitted)
         self.message_input.attachment_open_requested.connect(self._on_attachment_open_requested)
         self.message_input.screenshot_requested.connect(self.screenshot_requested.emit)
         self.message_input.voice_call_requested.connect(self.voice_call_requested.emit)
         self.message_input.video_call_requested.connect(self.video_call_requested.emit)
         self.message_input.typing_signal.connect(self._on_typing)
+        self.message_input.draft_changed.connect(self.composer_draft_changed.emit)
 
         self.content_splitter = FluentSplitter(Qt.Orientation.Vertical, self.chat_page)
         self.content_splitter.setObjectName("chatContentSplitter")
         self.content_splitter.setChildrenCollapsible(False)
         self.content_splitter.setHandleWidth(1)
-        self.message_list.setMinimumHeight(180)
+        self.message_list.setMinimumHeight(0)
         self.content_splitter.addWidget(self.message_list)
         self.content_splitter.addWidget(self.message_input)
         self.content_splitter.setStretchFactor(0, 1)
         self.content_splitter.setStretchFactor(1, 0)
         self.content_splitter.setSizes([560, 220])
         self.content_splitter.splitterMoved.connect(self._schedule_restore_message_viewport)
+        self.content_splitter.installEventFilter(self)
+        self.message_input.installEventFilter(self)
 
         self.chat_layout.addWidget(self.chat_header, 0)
         self.chat_layout.addWidget(self.content_splitter, 1)
@@ -150,6 +162,17 @@ class ChatPanel(QWidget):
         self.show_welcome()
         StyleSheet.CHAT_PANEL.apply(self)
         self._position_history_indicator()
+
+    def resizeEvent(self, event) -> None:
+        """Keep message/input layout responsive while the chat panel is being resized."""
+        self._remember_message_scroll_gap()
+        super().resizeEvent(event)
+        self.chat_layout.activate()
+        self._position_history_indicator()
+        self._relayout_message_list()
+        self._restore_message_viewport()
+        self._schedule_restore_message_viewport()
+        QTimer.singleShot(0, self._relayout_message_list)
 
     def _setup_message_model(self) -> None:
         """Set up the model/delegate pair used by the message list."""
@@ -272,6 +295,18 @@ class ChatPanel(QWidget):
         """Return message delegate."""
         return self._message_delegate
 
+    def capture_composer_draft(self) -> list[dict]:
+        """Return the current message composer draft without clearing it."""
+        return self.message_input.capture_draft_segments()
+
+    def restore_composer_draft(self, segments: list[dict]) -> None:
+        """Restore a previously captured composer draft."""
+        self.message_input.restore_draft_segments(segments)
+
+    def clear_composer_draft(self) -> None:
+        """Clear the current composer draft."""
+        self.message_input.clear_draft()
+
     def add_message(self, message: ChatMessage) -> None:
         """Append a message or refresh an existing one in-place."""
         if not self._message_model:
@@ -367,6 +402,11 @@ class ChatPanel(QWidget):
         if self._message_model:
             self._message_model.update_message_status(message_id, status)
 
+    def mark_read_through(self, session_id: str, message_id: str, status) -> None:
+        """Mark all self messages up to the target message as read in the visible model."""
+        if self._message_model:
+            self._message_model.mark_read_through(session_id, message_id, status)
+
     def update_message_content(self, message_id: str, content: str) -> None:
         """Update message content in model."""
         if self._message_model:
@@ -382,10 +422,16 @@ class ChatPanel(QWidget):
         index = self.message_list.indexAt(position)
         if not index.isValid():
             return None
-        return index.data(Qt.ItemDataRole.UserRole)
+        message = index.data(Qt.ItemDataRole.UserRole)
+        if not message or message.message_type == MessageType.SYSTEM:
+            return None
+        return message
 
     def eventFilter(self, watched, event) -> bool:
         """Only open attachments when the click lands inside the rendered content area."""
+        content_splitter = getattr(self, "content_splitter", None)
+        message_input = getattr(self, "message_input", None)
+
         if self._scroll_delegate and watched in {
             self.message_list,
             self.message_list.viewport(),
@@ -398,6 +444,7 @@ class ChatPanel(QWidget):
 
         if watched is self.message_list.viewport():
             if event.type() == QEvent.Type.Resize:
+                self._relayout_message_list()
                 self._position_history_indicator()
                 self._schedule_restore_message_viewport()
             if event.type() == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
@@ -439,6 +486,18 @@ class ChatPanel(QWidget):
                     self.handle_message_click(index)
                     return True
 
+        tracked_resize_widgets = {widget for widget in (content_splitter, message_input) if widget is not None}
+        if watched in tracked_resize_widgets and event.type() in {
+            QEvent.Type.Resize,
+            QEvent.Type.LayoutRequest,
+            QEvent.Type.Show,
+        }:
+            self._remember_message_scroll_gap()
+            self._relayout_message_list()
+            self._restore_message_viewport()
+            self._schedule_restore_message_viewport()
+            QTimer.singleShot(0, self._relayout_message_list)
+
         if watched is self.message_list and event.type() == QEvent.Type.KeyPress:
             if event.matches(QKeySequence.StandardKey.Copy):
                 message = self.current_message()
@@ -463,6 +522,12 @@ class ChatPanel(QWidget):
         )
         self._scroll_delegate.vScrollBar.setForceHidden(not hovered)
 
+    def _relayout_message_list(self) -> None:
+        """Force message rows to recompute widths after viewport changes."""
+        self.message_list.doItemsLayout()
+        self.message_list.updateGeometries()
+        self.message_list.viewport().update()
+
     def _remember_message_scroll_gap(self) -> None:
         """Remember the current distance between viewport and bottom of the chat list."""
         if self._restoring_message_view:
@@ -482,7 +547,13 @@ class ChatPanel(QWidget):
 
     def _schedule_restore_message_viewport(self, *_args) -> None:
         """Restore chat viewport position after splitter moves or list resizes."""
+        self._restore_message_viewport()
         QTimer.singleShot(0, self._restore_message_viewport)
+        QTimer.singleShot(16, self._restore_message_viewport)
+
+    def _run_restore_message_viewport(self) -> None:
+        """Kept for compatibility with older queued restore hooks."""
+        self._restore_message_viewport()
 
     def _restore_message_viewport(self) -> None:
         """Keep the same bottom gap visible after viewport size changes."""
@@ -537,7 +608,10 @@ class ChatPanel(QWidget):
         index = self.message_list.currentIndex()
         if not index.isValid():
             return None
-        return index.data(Qt.ItemDataRole.UserRole)
+        message = index.data(Qt.ItemDataRole.UserRole)
+        if not message or message.message_type == MessageType.SYSTEM:
+            return None
+        return message
 
     def get_selected_text(self, message: Optional[ChatMessage] = None) -> str:
         """Return the currently selected substring from a text bubble, if any."""

@@ -419,6 +419,36 @@ class Database:
         await self._db.commit()
         logger.debug(f"Message status updated: {message_id} -> {status_value}")
 
+    async def mark_messages_read_through(self, session_id: str, message_id: str) -> None:
+        """
+        Mark self messages in a session as read through the target message timestamp.
+
+        Args:
+            session_id: Session ID
+            message_id: Last read message ID
+        """
+        cursor = await self._db.execute(
+            "SELECT timestamp FROM messages WHERE message_id = ? AND session_id = ?",
+            (message_id, session_id),
+        )
+        row = await cursor.fetchone()
+        if row is None or row["timestamp"] is None:
+            return
+
+        await self._db.execute(
+            """
+            UPDATE messages
+            SET status = ?
+            WHERE session_id = ?
+              AND is_self = 1
+              AND timestamp <= ?
+              AND status NOT IN (?, ?)
+            """,
+            ("read", session_id, row["timestamp"], "failed", "recalled"),
+        )
+        await self._db.commit()
+        logger.debug(f"Messages marked read through: session={session_id}, message={message_id}")
+
     async def update_message_content(self, message_id: str, content: str) -> None:
         """
         Update message content.

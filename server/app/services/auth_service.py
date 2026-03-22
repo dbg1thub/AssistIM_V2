@@ -1,9 +1,10 @@
-﻿"""Authentication service."""
+"""Authentication service."""
 
 from __future__ import annotations
 
 from sqlalchemy.orm import Session
 
+from app.core.config import get_settings
 from app.core.errors import AppError, ErrorCode
 from app.core.security import (
     create_access_token,
@@ -18,6 +19,7 @@ from app.repositories.user_repo import UserRepository
 
 class AuthService:
     def __init__(self, db: Session) -> None:
+        self.settings = get_settings()
         self.users = UserRepository(db)
 
     def register(self, username: str, password: str, nickname: str) -> dict:
@@ -67,7 +69,8 @@ class AuthService:
         return {
             "access_token": create_access_token(user.id, user.username),
             "token_type": "Bearer",
-            "expires_in": 60 * 60,
+            "expires_in": self.settings.access_token_expire_minutes * 60,
+            "refresh_expires_in": self.settings.refresh_token_expire_days * 24 * 60 * 60,
         }
 
     def _build_auth_payload(self, user: User) -> dict:
@@ -77,7 +80,8 @@ class AuthService:
             "access_token": access_token,
             "refresh_token": refresh_token,
             "token_type": "Bearer",
-            "expires_in": 60 * 60,
+            "expires_in": self.settings.access_token_expire_minutes * 60,
+            "refresh_expires_in": self.settings.refresh_token_expire_days * 24 * 60 * 60,
             "user": {
                 "id": user.id,
                 "username": user.username,

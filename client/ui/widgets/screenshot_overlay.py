@@ -3,13 +3,24 @@
 from __future__ import annotations
 
 import ctypes
+import math
 from ctypes import wintypes
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import QPoint, QRect, QRectF, Qt, Signal
-from PySide6.QtGui import QColor, QGuiApplication, QKeyEvent, QMouseEvent, QPainter, QPen, QPixmap
+from PySide6.QtGui import QColor, QGuiApplication, QImage, QKeyEvent, QMouseEvent, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QWidget
+
+
+@dataclass
+class WindowTarget:
+    """Native window hit-test result with both logical and physical bounds."""
+
+    hwnd: int
+    logical_rect: QRect
+    physical_rect: QRect
 
 
 class ScreenshotOverlay(QWidget):
@@ -25,8 +36,7 @@ class ScreenshotOverlay(QWidget):
         super().__init__(parent)
 
         self._virtual_geometry = self._compute_virtual_geometry()
-        self._background = self._grab_virtual_desktop()
-        self._hover_rect_global: QRect | None = None
+        self._hover_target: WindowTarget | None = None
         self._selection_rect_global: QRect | None = None
         self._selection_start_global: QPoint | None = None
         self._free_selecting = False
@@ -66,9 +76,9 @@ class ScreenshotOverlay(QWidget):
                 self._free_selecting = True
                 self._selection_rect_global = QRect(self._selection_start_global, global_pos).normalized()
             else:
-                self._hover_rect_global = self._window_rect_at(global_pos)
+                self._hover_target = self._window_target_at(global_pos)
         else:
-            self._hover_rect_global = self._window_rect_at(global_pos)
+            self._hover_target = self._window_target_at(global_pos)
 
         self.update()
         super().mouseMoveEvent(event)
@@ -84,9 +94,9 @@ class ScreenshotOverlay(QWidget):
 
         global_pos = event.globalPosition().toPoint()
         self._selection_start_global = global_pos
-        self._hover_rect_global = self._window_rect_at(global_pos)
+        self._hover_target = self._window_target_at(global_pos)
 
-        if self._hover_rect_global is None:
+        if self._hover_target is None:
             self._free_selecting = True
             self._selection_rect_global = QRect(global_pos, global_pos)
         else:
@@ -102,13 +112,15 @@ class ScreenshotOverlay(QWidget):
             return super().mouseReleaseEvent(event)
 
         target_rect: QRect | None = None
+        target_window: WindowTarget | None = None
         if self._free_selecting:
             target_rect = self._selection_rect_global
         else:
-            target_rect = self._window_rect_at(event.globalPosition().toPoint()) or self._hover_rect_global
+            target_window = self._window_target_at(event.globalPosition().toPoint()) or self._hover_target
+            target_rect = target_window.logical_rect if target_window else None
 
         if target_rect is not None and target_rect.width() >= self.MIN_SELECTION_SIZE and target_rect.height() >= self.MIN_SELECTION_SIZE:
-            self._finish_capture(target_rect)
+            self._finish_capture(target_rect, target_window)
             return
 
         self._cancel()
@@ -118,10 +130,11 @@ class ScreenshotOverlay(QWidget):
         """Draw the dimmed desktop and the current selection highlight."""
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.drawPixmap(self.rect(), self._background)
         painter.fillRect(self.rect(), QColor(0, 0, 0, 110))
 
-        highlight_global = self._selection_rect_global if self._free_selecting else self._hover_rect_global
+        highlight_global = self._selection_rect_global if self._free_selecting else (
+            self._hover_target.logical_rect if self._hover_target else None
+        )
         if highlight_global is None or highlight_global.isNull():
             return
 
@@ -129,19 +142,28 @@ class ScreenshotOverlay(QWidget):
         if highlight.isNull():
             return
 
-        painter.drawPixmap(highlight, self._background.copy(highlight))
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Clear)
+        painter.fillRect(highlight, Qt.GlobalColor.transparent)
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
         painter.fillRect(highlight, QColor(255, 255, 255, 18))
         painter.setPen(QPen(QColor("#4C8DFF"), 2))
         painter.drawRect(highlight)
 
-    def _finish_capture(self, rect_global: QRect) -> None:
+    def _finish_capture(self, rect_global: QRect, target_window: WindowTarget | None = None) -> None:
         """Save the selected area to a temporary PNG file and emit it."""
-        pixmap = self._capture_rect(rect_global)
+        self.hide()
+        app = QGuiApplication.instance()
+        if app is not None:
+            app.processEvents()
+
+        if target_window is not None:
+            pixmap = self._capture_window(target_window)
+        else:
+            pixmap = self._capture_rect(rect_global)
         output_dir = Path(__file__).resolve().parents[2] / "data" / "screenshots"
         output_dir.mkdir(parents=True, exist_ok=True)
         file_path = output_dir / f"screenshot_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.png"
         pixmap.save(str(file_path), "PNG")
-        self.hide()
         self.captured.emit(str(file_path))
         self.deleteLater()
 
@@ -164,41 +186,164 @@ class ScreenshotOverlay(QWidget):
             geometry = geometry.united(screen.geometry())
         return geometry
 
-    def _grab_virtual_desktop(self) -> QPixmap:
-        """Capture all screens into a single pixmap."""
-        pixmap = QPixmap(self._virtual_geometry.size())
-        pixmap.fill(Qt.GlobalColor.transparent)
-
-        painter = QPainter(pixmap)
-        for screen in QGuiApplication.screens():
-            logical_geometry = screen.geometry()
-            target_rect = QRect(logical_geometry.topLeft() - self._virtual_geometry.topLeft(), logical_geometry.size())
-            grab = screen.grabWindow(0, 0, 0, logical_geometry.width(), logical_geometry.height())
-            painter.drawPixmap(QRectF(target_rect), grab, QRectF(grab.rect()))
-        painter.end()
-        return pixmap
-
     def _capture_rect(self, rect_global: QRect) -> QPixmap:
-        """Capture the selected rect using per-screen grabs to avoid blur."""
-        target = QPixmap(rect_global.size())
-        target.fill(Qt.GlobalColor.transparent)
+        """Capture the selected rect using native pixel crops to keep screenshots sharp."""
+        parts: list[tuple[QImage, QPoint]] = []
+        target_width = 0
+        target_height = 0
 
-        painter = QPainter(target)
         for screen in QGuiApplication.screens():
             logical_geometry = screen.geometry()
             intersection = rect_global.intersected(logical_geometry)
             if intersection.isEmpty():
                 continue
 
-            screen_local = intersection.translated(-logical_geometry.topLeft())
-            grab = screen.grabWindow(0, screen_local.x(), screen_local.y(), screen_local.width(), screen_local.height())
-            draw_rect = QRect(intersection.topLeft() - rect_global.topLeft(), intersection.size())
-            painter.drawPixmap(QRectF(draw_rect), grab, QRectF(grab.rect()))
-        painter.end()
-        return target
+            grab = screen.grabWindow(0)
+            if grab.isNull():
+                continue
 
-    def _window_rect_at(self, global_pos: QPoint) -> QRect | None:
-        """Return the hovered top-level window rect on Windows."""
+            image = grab.toImage()
+            scale_x = image.width() / max(1, logical_geometry.width())
+            scale_y = image.height() / max(1, logical_geometry.height())
+
+            source_rect = QRect(
+                max(0, round((intersection.left() - logical_geometry.left()) * scale_x)),
+                max(0, round((intersection.top() - logical_geometry.top()) * scale_y)),
+                max(1, round(intersection.width() * scale_x)),
+                max(1, round(intersection.height() * scale_y)),
+            ).intersected(image.rect())
+            if source_rect.isEmpty():
+                continue
+
+            draw_point = QPoint(
+                max(0, round((intersection.left() - rect_global.left()) * scale_x)),
+                max(0, round((intersection.top() - rect_global.top()) * scale_y)),
+            )
+            cropped = image.copy(source_rect)
+            parts.append((cropped, draw_point))
+            target_width = max(target_width, draw_point.x() + cropped.width())
+            target_height = max(target_height, draw_point.y() + cropped.height())
+
+        if not parts or target_width <= 0 or target_height <= 0:
+            return QPixmap()
+
+        target = QImage(target_width, target_height, QImage.Format.Format_ARGB32_Premultiplied)
+        target.fill(Qt.GlobalColor.transparent)
+
+        painter = QPainter(target)
+        for image, draw_point in parts:
+            painter.drawImage(draw_point, image)
+        painter.end()
+        return QPixmap.fromImage(target)
+
+    def _capture_window(self, target_window: WindowTarget) -> QPixmap:
+        """Capture a native window directly so snapped-window screenshots stay precise."""
+        native = self._capture_window_native(target_window)
+        if native is not None and not native.isNull():
+            return native
+
+        screen = QGuiApplication.screenAt(target_window.logical_rect.center())
+        if screen is None:
+            return self._capture_rect(target_window.logical_rect)
+
+        grab = screen.grabWindow(target_window.hwnd)
+        if not grab.isNull():
+            return grab
+
+        return self._capture_rect(target_window.logical_rect)
+
+    def _capture_window_native(self, target_window: WindowTarget) -> QPixmap | None:
+        """Capture a window with PrintWindow so occluded windows don't include front content."""
+        if not hasattr(ctypes, "windll"):
+            return None
+
+        width = target_window.physical_rect.width()
+        height = target_window.physical_rect.height()
+        if width <= 0 or height <= 0:
+            return None
+
+        user32 = ctypes.windll.user32
+        gdi32 = ctypes.windll.gdi32
+
+        class BITMAPINFOHEADER(ctypes.Structure):
+            _fields_ = [
+                ("biSize", wintypes.DWORD),
+                ("biWidth", ctypes.c_long),
+                ("biHeight", ctypes.c_long),
+                ("biPlanes", wintypes.WORD),
+                ("biBitCount", wintypes.WORD),
+                ("biCompression", wintypes.DWORD),
+                ("biSizeImage", wintypes.DWORD),
+                ("biXPelsPerMeter", ctypes.c_long),
+                ("biYPelsPerMeter", ctypes.c_long),
+                ("biClrUsed", wintypes.DWORD),
+                ("biClrImportant", wintypes.DWORD),
+            ]
+
+        class BITMAPINFO(ctypes.Structure):
+            _fields_ = [
+                ("bmiHeader", BITMAPINFOHEADER),
+                ("bmiColors", wintypes.DWORD * 3),
+            ]
+
+        BI_RGB = 0
+        DIB_RGB_COLORS = 0
+        PW_RENDERFULLCONTENT = 0x00000002
+
+        screen_dc = user32.GetDC(0)
+        if not screen_dc:
+            return None
+
+        memory_dc = gdi32.CreateCompatibleDC(screen_dc)
+        bitmap = gdi32.CreateCompatibleBitmap(screen_dc, width, height)
+        if not memory_dc or not bitmap:
+            if bitmap:
+                gdi32.DeleteObject(bitmap)
+            if memory_dc:
+                gdi32.DeleteDC(memory_dc)
+            user32.ReleaseDC(0, screen_dc)
+            return None
+
+        old_bitmap = gdi32.SelectObject(memory_dc, bitmap)
+        try:
+            success = user32.PrintWindow(target_window.hwnd, memory_dc, PW_RENDERFULLCONTENT)
+            if not success:
+                success = user32.PrintWindow(target_window.hwnd, memory_dc, 0)
+            if not success:
+                return None
+
+            bitmap_info = BITMAPINFO()
+            bitmap_info.bmiHeader.biSize = ctypes.sizeof(BITMAPINFOHEADER)
+            bitmap_info.bmiHeader.biWidth = width
+            bitmap_info.bmiHeader.biHeight = -height
+            bitmap_info.bmiHeader.biPlanes = 1
+            bitmap_info.bmiHeader.biBitCount = 32
+            bitmap_info.bmiHeader.biCompression = BI_RGB
+
+            buffer = ctypes.create_string_buffer(width * height * 4)
+            copied = gdi32.GetDIBits(
+                memory_dc,
+                bitmap,
+                0,
+                height,
+                buffer,
+                ctypes.byref(bitmap_info),
+                DIB_RGB_COLORS,
+            )
+            if copied != height:
+                return None
+
+            image = QImage(buffer.raw, width, height, width * 4, QImage.Format.Format_ARGB32)
+            return QPixmap.fromImage(image.copy())
+        finally:
+            if old_bitmap:
+                gdi32.SelectObject(memory_dc, old_bitmap)
+            gdi32.DeleteObject(bitmap)
+            gdi32.DeleteDC(memory_dc)
+            user32.ReleaseDC(0, screen_dc)
+
+    def _window_target_at(self, global_pos: QPoint) -> WindowTarget | None:
+        """Return the hovered top-level window with logical and physical bounds."""
         if not hasattr(ctypes, "WINFUNCTYPE"):
             return None
 
@@ -253,7 +398,11 @@ class ScreenshotOverlay(QWidget):
         screen = QGuiApplication.screenAt(global_pos)
         if screen is None:
             return None
-        return self._physical_rect_to_logical(hwnd, rect, screen)
+        logical_rect = self._physical_rect_to_logical(hwnd, rect, screen)
+        if logical_rect is None:
+            return None
+        physical_rect = QRect(rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top)
+        return WindowTarget(hwnd=hwnd, logical_rect=logical_rect, physical_rect=physical_rect)
 
     def _physical_rect_to_logical(self, hwnd, rect, screen) -> QRect | None:
         """Convert a native window rect to Qt logical coordinates."""
@@ -288,8 +437,10 @@ class ScreenshotOverlay(QWidget):
         scale_x = physical_width / max(1, logical_geometry.width())
         scale_y = physical_height / max(1, logical_geometry.height())
 
-        left = logical_geometry.left() + round((rect.left - monitor_rect.left) / scale_x)
-        top = logical_geometry.top() + round((rect.top - monitor_rect.top) / scale_y)
-        width = max(1, round((rect.right - rect.left) / scale_x))
-        height = max(1, round((rect.bottom - rect.top) / scale_y))
+        left = logical_geometry.left() + math.floor((rect.left - monitor_rect.left) / scale_x)
+        top = logical_geometry.top() + math.floor((rect.top - monitor_rect.top) / scale_y)
+        right = logical_geometry.left() + math.ceil((rect.right - monitor_rect.left) / scale_x)
+        bottom = logical_geometry.top() + math.ceil((rect.bottom - monitor_rect.top) / scale_y)
+        width = max(1, right - left)
+        height = max(1, bottom - top)
         return QRect(left, top, width, height)

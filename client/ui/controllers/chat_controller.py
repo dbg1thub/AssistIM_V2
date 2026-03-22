@@ -123,6 +123,7 @@ class ChatController:
     async def send_file(
             self,
             file_path: str,
+            session_id: Optional[str] = None,
     ) -> Optional[ChatMessage]:
         """
         Send an image, video, or file message in current session.
@@ -133,7 +134,7 @@ class ChatController:
         Returns:
             The sent message, or None if upload failed or no current session
         """
-        session_id = self._session_manager.current_session_id
+        session_id = session_id or self._session_manager.current_session_id
 
         if not session_id:
             logger.warning("No current session selected")
@@ -279,14 +280,14 @@ class ChatController:
 
         await self._msg_manager.send_typing(session_id)
 
-    async def send_read_receipt(self, message_id: str) -> None:
+    async def send_read_receipt(self, message_id: str) -> bool:
         """Send read receipt for a message."""
         session_id = self._session_manager.current_session_id
 
         if not session_id:
-            return
+            return False
 
-        await self._msg_manager.send_read_receipt(session_id, message_id)
+        return await self._msg_manager.send_read_receipt(session_id, message_id)
 
     async def retry_message(self, message_id: str) -> bool:
         """Retry sending a failed message."""

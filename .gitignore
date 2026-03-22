@@ -59,3 +59,10 @@ demo
 
 # cursor 规则
 .cursorrules
+
+# 临时文件
+tmp
+
+# 上传文件
+data/uploads
+data/video_thumbnail

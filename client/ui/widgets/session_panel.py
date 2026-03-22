@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
+import time
 from datetime import datetime
 from typing import Optional
 
 from PySide6.QtCore import QEvent, QItemSelectionModel, QSortFilterProxyModel, Qt, QTimer, Signal
-from PySide6.QtWidgets import QAbstractItemView, QFrame, QHBoxLayout, QListView, QVBoxLayout, QWidget
+from PySide6.QtGui import QColor
+from PySide6.QtWidgets import QAbstractItemView, QFrame, QHBoxLayout, QListView, QSizePolicy, QVBoxLayout, QWidget
 
-from qfluentwidgets import FluentIcon, ScrollBarHandleDisplayMode, SearchLineEdit, ToolButton
+from qfluentwidgets import Action, FluentIcon, RoundMenu, ScrollBarHandleDisplayMode, SearchLineEdit, ToolButton
 from qfluentwidgets.components.widgets.scroll_bar import SmoothScrollDelegate
 
 from client.delegates.session_delegate import SessionDelegate
@@ -43,7 +46,8 @@ class SessionFilterProxyModel(QSortFilterProxyModel):
 
         name = (session.name or "").lower()
         preview = (session.last_message or "").lower()
-        return self._filter_text in name or self._filter_text in preview
+        draft_preview = (getattr(session, "draft_preview", "") or "").lower()
+        return self._filter_text in name or self._filter_text in preview or self._filter_text in draft_preview
 
 
 class SessionPanel(QWidget):
@@ -70,7 +74,7 @@ class SessionPanel(QWidget):
 
     def _setup_ui(self) -> None:
         """Create search box and list view."""
-        self.setMinimumWidth(220)
+        self.setMinimumWidth(0)
         self.setMaximumWidth(520)
 
         self.main_layout = QVBoxLayout(self)
@@ -86,6 +90,8 @@ class SessionPanel(QWidget):
         self.search_box = SearchLineEdit(self.search_bar)
         self.search_box.setPlaceholderText("搜索")
         self.search_box.setFixedHeight(36)
+        self.search_box.setMinimumWidth(0)
+        self.search_box.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.search_box.textChanged.connect(self._on_search_text_changed)
 
         self.add_button = ToolButton(FluentIcon.ADD, self.search_bar)
@@ -105,10 +111,12 @@ class SessionPanel(QWidget):
         self.session_list.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         self.session_list.setLayoutMode(QListView.LayoutMode.Batched)
         self.session_list.setBatchSize(24)
+        self.session_list.setResizeMode(QListView.ResizeMode.Adjust)
         self.session_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.session_list.setContentsMargins(0, 0, 0, 0)
         self.session_list.setSpacing(0)
         self.session_list.setMouseTracking(True)
+        self.session_list.setMinimumWidth(0)
 
         self._setup_session_model()
         self.session_list.clicked.connect(self._on_session_clicked)
@@ -145,6 +153,12 @@ class SessionPanel(QWidget):
                 self._scroll_delegate.vScrollBar.setForceHidden(False)
             elif event.type() == QEvent.Type.Leave:
                 QTimer.singleShot(0, self._sync_scrollbar_visibility)
+            elif event.type() == QEvent.Type.Resize:
+                QTimer.singleShot(0, self._relayout_session_list)
+            elif watched is self.session_list.viewport() and event.type() == QEvent.Type.MouseButtonPress:
+                if event.button() == Qt.MouseButton.RightButton:
+                    self._show_session_context_menu(event.pos())
+                    return True
 
         return super().eventFilter(watched, event)
 
@@ -157,6 +171,12 @@ class SessionPanel(QWidget):
             or self._scroll_delegate.vScrollBar.underMouse()
         )
         self._scroll_delegate.vScrollBar.setForceHidden(not hovered)
+
+    def _relayout_session_list(self) -> None:
+        """Force item geometry to follow the latest viewport width during splitter drags."""
+        self.session_list.doItemsLayout()
+        self.session_list.updateGeometries()
+        self.session_list.viewport().update()
 
     def load_sessions_from_manager(self) -> None:
         """Load sessions from SessionManager into the model."""
@@ -231,6 +251,9 @@ class SessionPanel(QWidget):
             last_message=session.last_message,
             last_message_time=session.last_message_time,
             unread_count=session.unread_count,
+            extra=session.extra,
+            draft_preview=getattr(session, "draft_preview", None),
+            is_pinned=getattr(session, "is_pinned", session.extra.get("is_pinned", False)),
         )
 
     def _remove_session_safe(self, session_id: str) -> None:
@@ -259,6 +282,91 @@ class SessionPanel(QWidget):
         session = index.data(Qt.ItemDataRole.UserRole)
         if session:
             self.session_selected.emit(session.session_id)
+
+    def _show_session_context_menu(self, position) -> None:
+        """Show a session-level context menu without changing selection."""
+        index = self.session_list.indexAt(position)
+        if not index.isValid():
+            return
+
+        session = index.data(Qt.ItemDataRole.UserRole)
+        if not session:
+            return
+
+        pinned = bool(getattr(session, "is_pinned", False) or session.extra.get("is_pinned"))
+        menu = RoundMenu(parent=self)
+        menu.setMinimumWidth(148)
+        pin_action = Action("取消置顶" if pinned else "置顶", self)
+        unread_action = Action("标为已读" if session.unread_count > 0 else "标为未读", self)
+        delete_action = Action("删除", self)
+
+        menu.addAction(pin_action)
+        menu.addAction(unread_action)
+        menu.addSeparator()
+        menu.addAction(delete_action)
+
+        delete_item = delete_action.property("item")
+        if delete_item is not None:
+            delete_item.setForeground(QColor("#d13438"))
+
+        pin_action.triggered.connect(
+            lambda _checked=False, sid=session.session_id, target=not pinned: self._toggle_session_pin_local(
+                sid,
+                target,
+            )
+        )
+        unread_action.triggered.connect(
+            lambda _checked=False, sid=session.session_id, unread=(session.unread_count == 0): self._schedule_ui_task(
+                self._session_manager.mark_session_unread(sid, unread),
+                f"toggle unread {sid}",
+            )
+        )
+        delete_action.triggered.connect(
+            lambda _checked=False, sid=session.session_id: self._trigger_session_delete(sid)
+        )
+
+        menu.exec(self.session_list.viewport().mapToGlobal(position))
+
+    def _trigger_session_delete(self, session_id: str) -> None:
+        """Delete a session locally first, then persist the removal."""
+        self._remove_session_safe(session_id)
+        self._schedule_ui_task(self._session_manager.remove_session(session_id), f"delete session {session_id}")
+
+    def _toggle_session_pin_local(self, session_id: str, pinned: bool) -> None:
+        """Apply pin state immediately in the list, then persist asynchronously."""
+        selected_session_id = self._current_selected_session_id()
+        if self._session_model:
+            pinned_at = time.time() if pinned else None
+            self._session_model.set_pinned(session_id, pinned, pinned_at=pinned_at)
+        self._sessions_snapshot = None
+        if selected_session_id:
+            self.select_session(selected_session_id, emit_signal=False)
+        self._schedule_ui_task(self._session_manager.set_pinned(session_id, pinned), f"toggle pin {session_id}")
+
+    def _current_selected_session_id(self) -> str | None:
+        """Return the session id currently selected in the list, if any."""
+        current_index = self.session_list.currentIndex()
+        if not current_index.isValid():
+            return None
+        session = current_index.data(Qt.ItemDataRole.UserRole)
+        return getattr(session, "session_id", None) if session else None
+
+    def _schedule_ui_task(self, coro, context: str) -> None:
+        """Schedule a session-menu coroutine and log failures."""
+        task = asyncio.create_task(coro)
+        task.add_done_callback(lambda finished, name=context: self._log_ui_task_result(finished, name))
+
+    @staticmethod
+    def _log_ui_task_result(task: asyncio.Task, context: str) -> None:
+        """Log background task failures from session-menu actions."""
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            import logging
+
+            logging.getLogger(__name__).exception("Session menu task failed: %s", context)
 
     def get_search_box(self) -> SearchLineEdit:
         """Return search box widget."""
@@ -306,6 +414,8 @@ class SessionPanel(QWidget):
                 normalize_timestamp(session.last_message_time),
                 session.unread_count,
                 getattr(session, "is_pinned", False),
+                session.extra.get("pinned_at"),
+                getattr(session, "draft_preview", None),
             )
             for session in sessions
         )

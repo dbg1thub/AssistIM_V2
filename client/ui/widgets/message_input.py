@@ -6,18 +6,18 @@ from dataclasses import dataclass
 import os
 import time
 
-from PySide6.QtCore import QEvent, QPoint, QPointF, QRectF, QTimer, Qt, QUrl, Signal
+from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QRectF, QSize, QTimer, Qt, QUrl, Signal
 from PySide6.QtGui import (
     QColor,
     QDragEnterEvent,
     QDropEvent,
     QFont,
+    QFontMetrics,
     QKeyEvent,
     QPainter,
     QPainterPath,
     QPalette,
     QPixmap,
-    QPolygon,
     QTextCharFormat,
     QTextCursor,
     QTextDocument,
@@ -34,11 +34,11 @@ from PySide6.QtWidgets import (
     QStackedWidget,
     QStyle,
     QStyleOption,
+    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
 from qfluentwidgets import (
-    BodyLabel,
     Flyout,
     FlyoutAnimationType,
     FlyoutViewBase,
@@ -47,12 +47,21 @@ from qfluentwidgets import (
     PushButton,
     ScrollArea,
     SegmentedWidget,
-    TextEdit,
     TransparentToolButton,
+    isDarkTheme,
+    qconfig,
 )
 
 from client.models.message import MessageType, infer_message_type_from_path
 from client.ui.common.attachment_card import attachment_card_size, draw_attachment_card
+from client.ui.common.emoji_utils import (
+    COMPOSER_EMOJI_PIXEL_SIZE,
+    centered_emoji_top,
+    is_emoji_char,
+    iter_text_and_emoji_clusters,
+    load_emoji_pixmap,
+)
+from client.core.video_thumbnail_cache import get_thumbnail as get_video_thumbnail, get_video_thumbnail_cache
 from client.ui.styles import StyleSheet
 
 ATTACHMENT_ID_PROP = int(QTextFormat.Property.UserProperty) + 1
@@ -61,6 +70,8 @@ ATTACHMENT_TYPE_PROP = int(QTextFormat.Property.UserProperty) + 3
 ATTACHMENT_WIDTH_PROP = int(QTextFormat.Property.UserProperty) + 4
 ATTACHMENT_HEIGHT_PROP = int(QTextFormat.Property.UserProperty) + 5
 ATTACHMENT_NAME_PROP = int(QTextFormat.Property.UserProperty) + 6
+EMOJI_ID_PROP = int(QTextFormat.Property.UserProperty) + 7
+EMOJI_VALUE_PROP = int(QTextFormat.Property.UserProperty) + 8
 
 
 @dataclass
@@ -71,26 +82,36 @@ class InlineAttachment:
     file_path: str
     message_type: MessageType
     display_name: str
-    preview: QPixmap
-    rendered_preview: QPixmap | None = None
+
+
+@dataclass
+class InlineEmoji:
+    """Emoji metadata represented as an inline object inside the composer."""
+
+    emoji_id: str
+    value: str
 
 
 class InlineAttachmentWidget(QWidget):
     """Attachment preview rendered as a real widget over the text editor viewport."""
 
     activated = Signal(str, str)
+    IMAGE_SIZE = QSize(132, 132)
+    VIDEO_SIZE = QSize(176, 100)
+    FILE_SIZE = QSize(*attachment_card_size())
+    CARD_RADIUS = 12
 
     def __init__(self, attachment: InlineAttachment, parent=None):
         super().__init__(parent)
         self._attachment = attachment
-        self._preview = attachment.rendered_preview or QPixmap()
+        self._video_thumbnail_cache = get_video_thumbnail_cache()
+        self._video_thumbnail_cache.signals.thumbnail_ready.connect(self._on_video_thumbnail_ready)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
 
     def set_attachment(self, attachment: InlineAttachment) -> None:
         """Refresh the preview widget with new attachment state."""
         self._attachment = attachment
-        self._preview = attachment.rendered_preview or QPixmap()
         self.update()
 
     def mouseReleaseEvent(self, event) -> None:
@@ -102,27 +123,221 @@ class InlineAttachmentWidget(QWidget):
 
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        if self._attachment.message_type == MessageType.FILE:
+            draw_attachment_card(
+                painter,
+                QRectF(self.rect()),
+                message_type=self._attachment.message_type,
+                display_name=self._attachment.display_name,
+                file_path=self._attachment.file_path,
+                dark=isDarkTheme(),
+            )
+        elif self._attachment.message_type == MessageType.IMAGE:
+            self._draw_image_card(painter)
+        else:
+            self._draw_video_card(painter)
+        painter.end()
+
+    def _draw_image_card(self, painter: QPainter) -> None:
+        rect = QRectF(self.rect())
+        path = QPainterPath()
+        path.addRoundedRect(rect.adjusted(0.5, 0.5, -0.5, -0.5), self.CARD_RADIUS, self.CARD_RADIUS)
+        pixmap = QPixmap(self._attachment.file_path)
+        if pixmap.isNull():
+            painter.fillPath(path, QColor(255, 255, 255, 20) if isDarkTheme() else QColor(0, 0, 0, 10))
+            painter.setPen(QColor(220, 220, 220) if isDarkTheme() else QColor("#666666"))
+            painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "Image")
+            return
+        source_rect = self._cover_source_rect(pixmap.size(), self.size())
+        painter.save()
+        painter.setClipPath(path)
+        painter.drawPixmap(self.rect(), pixmap, source_rect)
+        painter.restore()
+
+    def _draw_video_card(self, painter: QPainter) -> None:
+        rect = QRectF(self.rect())
+        path = QPainterPath()
+        path.addRoundedRect(rect.adjusted(0.5, 0.5, -0.5, -0.5), self.CARD_RADIUS, self.CARD_RADIUS)
+        thumbnail = get_video_thumbnail(self._attachment.file_path)
+        if thumbnail is None:
+            self._video_thumbnail_cache.request_thumbnail(self._attachment.file_path)
+            painter.fillPath(path, QColor(255, 255, 255, 18) if isDarkTheme() else QColor(0, 0, 0, 10))
+            painter.setPen(QColor(220, 220, 220) if isDarkTheme() else QColor("#666666"))
+            painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "Video")
+        else:
+            source_rect = self._cover_source_rect(thumbnail.size(), self.size())
+            painter.save()
+            painter.setClipPath(path)
+            painter.drawPixmap(self.rect(), thumbnail, source_rect)
+            painter.restore()
+        painter.fillRect(self.rect(), QColor(0, 0, 0, 24))
+        self._draw_play_button(painter)
+
+    def _on_video_thumbnail_ready(self, source: str) -> None:
+        if os.path.normcase(source) == os.path.normcase(self._attachment.file_path):
+            self.update()
+
+    @staticmethod
+    def _cover_source_rect(source_size: QSize, target_size: QSize) -> QRect:
+        source_width = max(1, source_size.width())
+        source_height = max(1, source_size.height())
+        target_width = max(1, target_size.width())
+        target_height = max(1, target_size.height())
+        source_ratio = source_width / source_height
+        target_ratio = target_width / target_height
+        if source_ratio > target_ratio:
+            crop_height = source_height
+            crop_width = round(crop_height * target_ratio)
+            crop_x = max(0, (source_width - crop_width) // 2)
+            return QRect(crop_x, 0, crop_width, crop_height)
+        crop_width = source_width
+        crop_height = round(crop_width / target_ratio)
+        crop_y = max(0, (source_height - crop_height) // 2)
+        return QRect(0, crop_y, crop_width, crop_height)
+
+    def _draw_play_button(self, painter: QPainter) -> None:
+        circle_size = 32
+        circle_rect = QRect(
+            self.rect().center().x() - circle_size // 2,
+            self.rect().center().y() - circle_size // 2,
+            circle_size,
+            circle_size,
+        )
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(0, 0, 0, 110))
+        painter.drawEllipse(circle_rect)
+
+        triangle = QPainterPath()
+        triangle.moveTo(circle_rect.center().x() - 4, circle_rect.center().y() - 7)
+        triangle.lineTo(circle_rect.center().x() - 4, circle_rect.center().y() + 7)
+        triangle.lineTo(circle_rect.center().x() + 7, circle_rect.center().y())
+        triangle.closeSubpath()
+        painter.fillPath(triangle, QColor(255, 255, 255))
+
+
+class InlineEmojiWidget(QWidget):
+    """Emoji preview rendered as a real widget over the text editor viewport."""
+
+    def __init__(self, emoji: InlineEmoji, parent=None):
+        super().__init__(parent)
+        self._emoji = emoji
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+
+    def set_emoji(self, emoji: InlineEmoji) -> None:
+        """Refresh the widget with the latest emoji metadata."""
+        self._emoji = emoji
+        self.update()
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
-        if not self._preview.isNull():
-            painter.drawPixmap(self.rect(), self._preview)
+        target_size = min(COMPOSER_EMOJI_PIXEL_SIZE, max(12, self.width() - 1), max(12, self.height() - 2))
+        pixmap = load_emoji_pixmap(self._emoji.value, target_size, target_size)
+        if not pixmap.isNull():
+            x = round((self.width() - pixmap.width()) / 2)
+            y = round((self.height() - pixmap.height()) / 2)
+            painter.drawPixmap(x, y, pixmap)
+        else:
+            painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+            font = ChatTextEdit._build_emoji_font()
+            painter.setFont(font)
+            painter.setPen(self.palette().color(QPalette.ColorRole.Text))
+            painter.drawText(self.rect().adjusted(0, -1, -2, 1), Qt.AlignmentFlag.AlignCenter, self._emoji.value)
         painter.end()
 
 
-class ChatTextEdit(TextEdit):
+class ChatTextEdit(QTextEdit):
     """Text editor that sends on Enter and inserts a newline on Shift+Enter."""
 
     send_requested = Signal()
     attachment_activated = Signal(str, str)
+    files_dropped = Signal(object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setAcceptDrops(True)
+        self._editor_font = self._build_editor_font()
+        self.setFont(self._editor_font)
+        self.document().setDefaultFont(self._editor_font)
+        self.document().setDocumentMargin(5)
         self._attachments: dict[str, InlineAttachment] = {}
         self._attachment_widgets: dict[str, InlineAttachmentWidget] = {}
+        self._emoji_objects: dict[str, InlineEmoji] = {}
+        self._emoji_widgets: dict[str, InlineEmojiWidget] = {}
         self._attachment_sync_pending = False
+        self._inline_emoji_sync_pending = False
+        self._applying_inline_emoji_sync = False
         self.document().contentsChanged.connect(self._schedule_attachment_widget_sync)
         self.verticalScrollBar().valueChanged.connect(self._schedule_attachment_widget_sync)
         self.horizontalScrollBar().valueChanged.connect(self._schedule_attachment_widget_sync)
+        self.textChanged.connect(self._schedule_inline_emoji_sync)
+
+    def _reset_cursor_to_plain_text(self, cursor: QTextCursor | None = None) -> QTextCursor:
+        """Reset a cursor format so following text won't inherit inline object properties."""
+        cursor = QTextCursor(cursor or self.textCursor())
+        plain_format = QTextCharFormat()
+        plain_format.setFont(self._editor_font)
+        plain_format.setForeground(self.palette().color(QPalette.ColorRole.Text))
+        cursor.setCharFormat(plain_format)
+        self.setTextCursor(cursor)
+        return cursor
+
+    @staticmethod
+    def _build_editor_font() -> QFont:
+        """Return the editor font with emoji-capable fallbacks."""
+        font = QFont()
+        font.setPixelSize(16)
+        try:
+            font.setFamilies(
+                [
+                    "Segoe UI",
+                    "Microsoft YaHei UI",
+                    "Segoe UI Emoji",
+                    "Apple Color Emoji",
+                    "Noto Color Emoji",
+                ]
+            )
+        except AttributeError:
+            font.setFamily("Segoe UI")
+        return font
+
+    @staticmethod
+    def _build_emoji_font() -> QFont:
+        """Return a larger emoji font while keeping ordinary text at the normal size."""
+        font = QFont()
+        font.setPixelSize(COMPOSER_EMOJI_PIXEL_SIZE)
+        try:
+            font.setFamilies(
+                [
+                    "Segoe UI Emoji",
+                    "Apple Color Emoji",
+                    "Noto Color Emoji",
+                    "Segoe UI",
+                    "Microsoft YaHei UI",
+                ]
+            )
+        except AttributeError:
+            font.setFamily("Segoe UI Emoji")
+        font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 0.5)
+        return font
+
+    @staticmethod
+    def _emoji_size() -> tuple[int, int]:
+        """Return the fixed inline object size used for composer emoji."""
+        # Keep the composer emoji box tight so adjacent emoji don't look spaced
+        # out, while still leaving a little vertical room for stable alignment.
+        return COMPOSER_EMOJI_PIXEL_SIZE + 1, COMPOSER_EMOJI_PIXEL_SIZE + 3
+
+    @staticmethod
+    def _attachment_vertical_alignment():
+        """Return the safest bottom-style inline alignment supported by the runtime."""
+        return getattr(
+            QTextCharFormat.VerticalAlignment,
+            "AlignBaseline",
+            QTextCharFormat.VerticalAlignment.AlignMiddle,
+        )
     def keyPressEvent(self, event: QKeyEvent) -> None:
         """Emit send on Enter without modifiers."""
         if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter) and not (
@@ -156,14 +371,11 @@ class ChatTextEdit(TextEdit):
         super().dragMoveEvent(event)
 
     def dropEvent(self, event: QDropEvent) -> None:
-        """Insert local file drops as inline attachments instead of raw paths."""
+        """Forward local file drops to the outer composer so attachments stay in the editor flow."""
         file_paths = self._extract_local_files(event.mimeData())
         if file_paths:
             event.acceptProposedAction()
-            cursor = self.cursorForPosition(event.position().toPoint()) if hasattr(event, "position") else self.textCursor()
-            self.setTextCursor(cursor)
-            for file_path in file_paths:
-                self.insert_local_attachment(file_path)
+            self.files_dropped.emit(file_paths)
             return
 
         super().dropEvent(event)
@@ -182,8 +394,8 @@ class ChatTextEdit(TextEdit):
         super().scrollContentsBy(dx, dy)
         self._schedule_attachment_widget_sync()
 
-    def insert_local_attachment(self, file_path: str) -> None:
-        """Insert a local file as an inline attachment token at the current cursor position."""
+    def insert_local_attachment(self, file_path: str, *, blockify: bool = False) -> None:
+        """Insert a local file as an attachment object that participates in editor flow."""
         normalized = os.path.normpath(file_path)
         if not normalized:
             return
@@ -193,10 +405,9 @@ class ChatTextEdit(TextEdit):
             return
 
         self._attachments[attachment.attachment_id] = attachment
-        attachment.rendered_preview = self._build_inline_preview(attachment)
         resource_name = f"attachment://{attachment.attachment_id}"
-        width, height = self._attachment_size(attachment.message_type)
-        placeholder = QPixmap(width, height)
+        card_width, height = self._attachment_size(attachment.message_type)
+        placeholder = QPixmap(card_width, height)
         placeholder.fill(Qt.GlobalColor.transparent)
         self.document().addResource(QTextDocument.ResourceType.ImageResource, QUrl(resource_name), placeholder)
 
@@ -209,18 +420,84 @@ class ChatTextEdit(TextEdit):
         image_format.setProperty(ATTACHMENT_TYPE_PROP, attachment.message_type.value)
         image_format.setAnchor(True)
         image_format.setAnchorHref(resource_name)
+        image_format.setVerticalAlignment(self._attachment_vertical_alignment())
 
-        image_format.setWidth(width)
+        image_format.setWidth(card_width)
         image_format.setHeight(height)
-        image_format.setProperty(ATTACHMENT_WIDTH_PROP, width)
+        image_format.setProperty(ATTACHMENT_WIDTH_PROP, card_width)
         image_format.setProperty(ATTACHMENT_HEIGHT_PROP, height)
 
         cursor.insertImage(image_format)
-        self.setTextCursor(cursor)
+        self._reset_cursor_to_plain_text(cursor)
+        self._schedule_attachment_widget_sync()
+
+    def insert_inline_emoji(self, emoji: str) -> None:
+        """Insert an emoji as a true inline object instead of a plain text glyph."""
+        if not emoji:
+            return
+
+        inline_emoji = InlineEmoji(
+            emoji_id=f"emoji-{time.time_ns()}",
+            value=emoji,
+        )
+        self._emoji_objects[inline_emoji.emoji_id] = inline_emoji
+        resource_name = f"emoji://{inline_emoji.emoji_id}"
+        width, height = self._emoji_size()
+        placeholder = QPixmap(width, height)
+        placeholder.fill(Qt.GlobalColor.transparent)
+        self.document().addResource(QTextDocument.ResourceType.ImageResource, QUrl(resource_name), placeholder)
+
+        cursor = self.textCursor()
+        image_format = QTextImageFormat()
+        image_format.setName(resource_name)
+        image_format.setProperty(EMOJI_ID_PROP, inline_emoji.emoji_id)
+        image_format.setProperty(EMOJI_VALUE_PROP, inline_emoji.value)
+        image_format.setAnchor(True)
+        image_format.setAnchorHref(resource_name)
+        image_format.setVerticalAlignment(self._attachment_vertical_alignment())
+        image_format.setWidth(width)
+        image_format.setHeight(height)
+        cursor.insertImage(image_format)
+        self._reset_cursor_to_plain_text(cursor)
         self._schedule_attachment_widget_sync()
 
     def take_composed_segments(self) -> list[dict]:
         """Extract text and inline attachments in document order, then clear the editor."""
+        return self._extract_composed_segments(clear_after=True)
+
+    def collect_composed_segments(self) -> list[dict]:
+        """Collect text and inline attachments in document order without clearing the editor."""
+        return self._extract_composed_segments(clear_after=False)
+
+    def restore_composed_segments(self, segments: list[dict]) -> None:
+        """Restore a previously captured mixed text and attachment draft."""
+        self.clear_composer()
+        if not segments:
+            return
+
+        cursor = self.textCursor()
+        self.setTextCursor(cursor)
+
+        for segment in segments:
+            segment_type = segment.get("type")
+            if isinstance(segment_type, str):
+                try:
+                    segment_type = MessageType(segment_type)
+                except ValueError:
+                    continue
+
+            if segment_type == MessageType.TEXT:
+                content = str(segment.get("content", "") or "")
+                if content:
+                    self._insert_mixed_text_segment(content)
+                continue
+
+            file_path = str(segment.get("file_path", "") or "")
+            if file_path:
+                self.insert_local_attachment(file_path, blockify=False)
+
+    def _extract_composed_segments(self, *, clear_after: bool) -> list[dict]:
+        """Extract text and inline attachments in document order."""
         segments: list[dict] = []
         text_buffer: list[str] = []
         document = self.document()
@@ -242,6 +519,10 @@ class ChatTextEdit(TextEdit):
                                     "file_path": attachment.file_path,
                                 }
                             )
+                    elif self._is_inline_emoji_format(char_format):
+                        inline_emoji = self._emoji_from_char_format(char_format)
+                        if inline_emoji:
+                            text_buffer.append(inline_emoji.value)
                     else:
                         text_buffer.append(fragment.text())
                 iterator += 1
@@ -251,25 +532,76 @@ class ChatTextEdit(TextEdit):
             block = block.next()
 
         self._flush_text_buffer(text_buffer, segments)
-        self.clear_composer()
+        segments = self._normalize_attachment_boundary_newlines(segments)
+        if clear_after:
+            self.clear_composer()
         return segments
+
+    def has_meaningful_content(self) -> bool:
+        """Return whether the composer currently contains sendable content."""
+        plain_text = self.toPlainText().replace("\uFFFC", "").strip()
+        return bool(plain_text) or bool(self._attachments) or bool(self._emoji_objects)
+
+    @staticmethod
+    def _qt_text_length(text: str) -> int:
+        """Return the UTF-16 code-unit length Qt uses for cursor positions."""
+        length = 0
+        for char in text or "":
+            length += 2 if ord(char) > 0xFFFF else 1
+        return length
+
+    def _schedule_inline_emoji_sync(self) -> None:
+        """Normalize raw emoji text into inline emoji objects after the current edit completes."""
+        if self._applying_inline_emoji_sync or self._inline_emoji_sync_pending:
+            return
+        self._inline_emoji_sync_pending = True
+        QTimer.singleShot(0, self._sync_inline_emoji_objects)
+
+    def _sync_inline_emoji_objects(self) -> None:
+        """Replace raw emoji glyphs in the document with inline emoji objects."""
+        self._inline_emoji_sync_pending = False
+        if self._applying_inline_emoji_sync:
+            return
+
+        self._applying_inline_emoji_sync = True
+        saved_cursor = QTextCursor(self.textCursor())
+
+        try:
+            while True:
+                replacement = self._find_plain_text_fragment_with_emoji()
+                if replacement is None:
+                    break
+
+                start, text = replacement
+                cursor = QTextCursor(self.document())
+                cursor.setPosition(start)
+                cursor.setPosition(start + self._qt_text_length(text), QTextCursor.MoveMode.KeepAnchor)
+                cursor.removeSelectedText()
+                self._insert_mixed_text_segment(text, cursor=cursor)
+        finally:
+            self.setTextCursor(saved_cursor)
+            self._reset_cursor_to_plain_text()
+            self._applying_inline_emoji_sync = False
 
     def clear_composer(self) -> None:
         """Clear both text and inline attachment state."""
         self.clear()
         self._attachments.clear()
+        self._emoji_objects.clear()
         self._clear_attachment_widgets()
+        self._reset_cursor_to_plain_text()
 
     def _handle_attachment_delete(self, key: int) -> bool:
         """Delete a neighboring inline attachment token with Backspace/Delete."""
         cursor = self.textCursor()
         if cursor.hasSelection():
             super().keyPressEvent(QKeyEvent(QEvent.Type.KeyPress, key, Qt.KeyboardModifier.NoModifier))
+            self._schedule_attachment_widget_sync()
             return True
 
         probe_pos = cursor.position() - 1 if key == Qt.Key.Key_Backspace else cursor.position()
-        attachment = self._attachment_at_document_position(probe_pos)
-        if attachment is None:
+        inline_kind = self._inline_object_kind_at_document_position(probe_pos)
+        if inline_kind is None:
             return False
 
         removal_cursor = self.textCursor()
@@ -280,10 +612,18 @@ class ChatTextEdit(TextEdit):
             removal_cursor.setPosition(max(0, probe_pos))
             removal_cursor.movePosition(QTextCursor.MoveOperation.Right, QTextCursor.MoveMode.KeepAnchor, 1)
         removal_cursor.removeSelectedText()
-        self._attachments.pop(attachment.attachment_id, None)
-        widget = self._attachment_widgets.pop(attachment.attachment_id, None)
-        if widget is not None:
-            widget.deleteLater()
+        if inline_kind[0] == "attachment":
+            attachment = inline_kind[1]
+            self._attachments.pop(attachment.attachment_id, None)
+            widget = self._attachment_widgets.pop(attachment.attachment_id, None)
+            if widget is not None:
+                widget.deleteLater()
+        else:
+            inline_emoji = inline_kind[1]
+            self._emoji_objects.pop(inline_emoji.emoji_id, None)
+            widget = self._emoji_widgets.pop(inline_emoji.emoji_id, None)
+            if widget is not None:
+                widget.deleteLater()
         self._schedule_attachment_widget_sync()
         return True
 
@@ -311,6 +651,21 @@ class ChatTextEdit(TextEdit):
         char_format = cursor.charFormat()
         return self._attachment_from_char_format(char_format)
 
+    def _inline_object_kind_at_document_position(self, position: int):
+        """Return the inline object at a document position, attachment or emoji."""
+        if position < 0:
+            return None
+        cursor = QTextCursor(self.document())
+        cursor.setPosition(position)
+        char_format = cursor.charFormat()
+        attachment = self._attachment_from_char_format(char_format)
+        if attachment is not None:
+            return "attachment", attachment
+        inline_emoji = self._emoji_from_char_format(char_format)
+        if inline_emoji is not None:
+            return "emoji", inline_emoji
+        return None
+
     def _schedule_attachment_widget_sync(self) -> None:
         """Defer attachment widget positioning until Qt finishes the current layout pass."""
         if self._attachment_sync_pending:
@@ -322,6 +677,7 @@ class ChatTextEdit(TextEdit):
         """Create, place, and remove embedded attachment widgets to match the document."""
         self._attachment_sync_pending = False
         document_attachment_ids: set[str] = set()
+        document_emoji_ids: set[str] = set()
 
         for document_position, attachment in self._iter_attachment_positions():
             attachment_id = attachment.attachment_id
@@ -357,11 +713,63 @@ class ChatTextEdit(TextEdit):
                 widget.deleteLater()
                 self._attachment_widgets.pop(attachment_id, None)
 
+        for document_position, inline_emoji in self._iter_inline_emoji_positions():
+            emoji_id = inline_emoji.emoji_id
+            if emoji_id in document_emoji_ids:
+                continue
+            document_emoji_ids.add(emoji_id)
+
+            rect = self._emoji_rect_in_viewport(document_position, inline_emoji)
+            widget = self._emoji_widgets.get(emoji_id)
+            if rect is None:
+                if widget is not None:
+                    widget.hide()
+                continue
+
+            if widget is None:
+                widget = InlineEmojiWidget(inline_emoji, self.viewport())
+                self._emoji_widgets[emoji_id] = widget
+            else:
+                widget.set_emoji(inline_emoji)
+
+            widget.setGeometry(
+                round(rect.x()),
+                round(rect.y()),
+                max(1, round(rect.width())),
+                max(1, round(rect.height())),
+            )
+            widget.show()
+            widget.raise_()
+
+        for emoji_id, widget in list(self._emoji_widgets.items()):
+            if emoji_id not in document_emoji_ids:
+                widget.deleteLater()
+                self._emoji_widgets.pop(emoji_id, None)
+
+        self._prune_orphan_inline_objects(document_attachment_ids, document_emoji_ids)
+
     def _clear_attachment_widgets(self) -> None:
         """Destroy all embedded attachment widgets immediately."""
         for widget in self._attachment_widgets.values():
             widget.deleteLater()
         self._attachment_widgets.clear()
+        for widget in self._emoji_widgets.values():
+            widget.deleteLater()
+        self._emoji_widgets.clear()
+
+    def _prune_orphan_inline_objects(
+        self,
+        document_attachment_ids: set[str],
+        document_emoji_ids: set[str],
+    ) -> None:
+        """Drop metadata for inline objects that no longer exist in the document."""
+        for attachment_id in list(self._attachments.keys()):
+            if attachment_id not in document_attachment_ids:
+                self._attachments.pop(attachment_id, None)
+
+        for emoji_id in list(self._emoji_objects.keys()):
+            if emoji_id not in document_emoji_ids:
+                self._emoji_objects.pop(emoji_id, None)
 
     def _build_attachment(self, file_path: str) -> InlineAttachment | None:
         """Build attachment metadata and preview from a local file path."""
@@ -374,13 +782,23 @@ class ChatTextEdit(TextEdit):
             file_path=file_path,
             message_type=message_type,
             display_name=os.path.basename(file_path) or "Attachment",
-            preview=QPixmap(),
         )
 
     @staticmethod
     def _attachment_size(message_type: MessageType) -> tuple[int, int]:
         """Return inline attachment object size."""
+        if message_type == MessageType.IMAGE:
+            return InlineAttachmentWidget.IMAGE_SIZE.width(), InlineAttachmentWidget.IMAGE_SIZE.height()
+        if message_type == MessageType.VIDEO:
+            return InlineAttachmentWidget.VIDEO_SIZE.width(), InlineAttachmentWidget.VIDEO_SIZE.height()
         return attachment_card_size()
+
+    def _document_char_at(self, position: int) -> str:
+        """Return the character at the given document position, or an empty string."""
+        document = self.document()
+        if position < 0 or position >= max(0, document.characterCount() - 1):
+            return ""
+        return document.characterAt(position)
 
     def _attachment_rect_in_viewport(self, position: int, attachment: InlineAttachment) -> QRectF | None:
         """Return the exact inline attachment rect in viewport coordinates."""
@@ -408,94 +826,33 @@ class ChatTextEdit(TextEdit):
             or self._attachment_size(attachment.message_type)[1]
         )
 
-        same_line = abs(next_rect.center().y() - current_rect.center().y()) < max(2.0, current_rect.height() / 2)
-        if same_line:
-            left = float(min(current_rect.x(), next_rect.x()))
-        else:
-            left = float(current_rect.x())
+        left = float(current_rect.x())
         width = stored_width
 
-        top = current_rect.center().y() - stored_height / 2
+        line_top = float(min(current_rect.top(), next_rect.top()))
+        line_bottom = float(max(current_rect.bottom(), next_rect.bottom()))
+        metrics = QFontMetrics(self._editor_font)
+        visual_bottom = line_bottom - max(0, metrics.descent() - 1)
+        top = round(visual_bottom - stored_height)
         return QRectF(left, top, width, stored_height)
-
-    def _build_inline_preview(self, attachment: InlineAttachment) -> QPixmap:
-        """Render a visible inline preview pixmap for the attachment."""
-        width, height = self._attachment_size(attachment.message_type)
-        pixmap = QPixmap(width, height)
-        pixmap.fill(Qt.GlobalColor.transparent)
-
-        painter = QPainter(pixmap)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        draw_attachment_card(
-            painter,
-            QRectF(0, 0, width, height),
-            message_type=attachment.message_type,
-            display_name=attachment.display_name,
-            file_path=attachment.file_path,
-            dark=self._is_dark(),
-        )
-
-        painter.end()
-        return pixmap
-
-    @staticmethod
-    def _cover_source_rect(source_size, target_size) -> QRectF:
-        source_width = max(1, source_size.width())
-        source_height = max(1, source_size.height())
-        target_width = max(1, target_size.width())
-        target_height = max(1, target_size.height())
-        source_ratio = source_width / source_height
-        target_ratio = target_width / target_height
-
-        if source_ratio > target_ratio:
-            crop_width = max(1, int(round(source_height * target_ratio)))
-            crop_x = max(0, (source_width - crop_width) // 2)
-            return QRectF(crop_x, 0, crop_width, source_height)
-
-        crop_height = max(1, int(round(source_width / target_ratio)))
-        crop_y = max(0, (source_height - crop_height) // 2)
-        return QRectF(0, crop_y, source_width, crop_height)
-
-    @staticmethod
-    def _draw_video_play(painter: QPainter, rect: QRectF) -> None:
-        circle_size = 24
-        circle_rect = QRectF(
-            rect.center().x() - circle_size / 2,
-            rect.center().y() - circle_size / 2,
-            circle_size,
-            circle_size,
-        )
-        painter.save()
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor(0, 0, 0, 110))
-        painter.drawEllipse(circle_rect)
-        triangle = QPolygon(
-            [
-                QPoint(int(circle_rect.center().x() - 3), int(circle_rect.center().y() - 5)),
-                QPoint(int(circle_rect.center().x() - 3), int(circle_rect.center().y() + 5)),
-                QPoint(int(circle_rect.center().x() + 5), int(circle_rect.center().y())),
-            ]
-        )
-        painter.setBrush(QColor(255, 255, 255))
-        painter.drawPolygon(triangle)
-        painter.restore()
-
-    @staticmethod
-    def _rounded_rect_path(rect: QRectF, radius: float):
-        path = QPainterPath()
-        path.addRoundedRect(rect, radius, radius)
-        return path
 
     @staticmethod
     def _is_dark() -> bool:
-        palette = QPalette()
-        return palette.color(QPalette.ColorRole.Window).lightness() < 128
+        return isDarkTheme()
 
     @staticmethod
     def _is_attachment_format(char_format: QTextCharFormat) -> bool:
         """Return whether a char format represents one of our inline attachments."""
-        return bool(char_format.property(ATTACHMENT_ID_PROP))
+        attachment_id = char_format.property(ATTACHMENT_ID_PROP)
+        name = str(char_format.property(QTextFormat.Property.ImageName) or "")
+        return bool(attachment_id and name.startswith("attachment://"))
+
+    @staticmethod
+    def _is_inline_emoji_format(char_format: QTextCharFormat) -> bool:
+        """Return whether a char format represents one of our inline emoji objects."""
+        emoji_id = char_format.property(EMOJI_ID_PROP)
+        name = str(char_format.property(QTextFormat.Property.ImageName) or "")
+        return bool(emoji_id and name.startswith("emoji://"))
 
     def _attachment_from_char_format(self, char_format: QTextCharFormat) -> InlineAttachment | None:
         """Rebuild attachment metadata directly from the QTextDocument format properties."""
@@ -516,8 +873,6 @@ class ChatTextEdit(TextEdit):
 
         cached = self._attachments.get(attachment_id)
         if cached is not None:
-            if cached.rendered_preview is None or cached.rendered_preview.isNull():
-                cached.rendered_preview = self._build_inline_preview(cached)
             return cached
 
         rebuilt = self._build_attachment(file_path)
@@ -525,7 +880,6 @@ class ChatTextEdit(TextEdit):
             rebuilt.attachment_id = attachment_id
             rebuilt.message_type = message_type
             rebuilt.display_name = display_name
-            rebuilt.rendered_preview = self._build_inline_preview(rebuilt)
             self._attachments[attachment_id] = rebuilt
             return rebuilt
 
@@ -534,10 +888,7 @@ class ChatTextEdit(TextEdit):
             file_path=file_path,
             message_type=message_type,
             display_name=display_name,
-            preview=QPixmap(),
-            rendered_preview=QPixmap(*self._attachment_size(message_type)),
         )
-        fallback.rendered_preview.fill(Qt.GlobalColor.transparent)
         self._attachments[attachment_id] = fallback
         return fallback
 
@@ -563,6 +914,103 @@ class ChatTextEdit(TextEdit):
                     attachment = self._attachment_from_char_format(fragment.charFormat())
                     if attachment and attachment.attachment_id == attachment_id:
                         return attachment
+                iterator += 1
+            block = block.next()
+
+        return None
+
+    def _emoji_from_char_format(self, char_format: QTextCharFormat) -> InlineEmoji | None:
+        """Rebuild inline emoji metadata directly from the QTextDocument format properties."""
+        if not self._is_inline_emoji_format(char_format):
+            return None
+
+        emoji_id = str(char_format.property(EMOJI_ID_PROP) or "")
+        value = str(char_format.property(EMOJI_VALUE_PROP) or "")
+        if not emoji_id or not value:
+            return None
+
+        cached = self._emoji_objects.get(emoji_id)
+        if cached is not None:
+            return cached
+
+        inline_emoji = InlineEmoji(emoji_id=emoji_id, value=value)
+        self._emoji_objects[emoji_id] = inline_emoji
+        return inline_emoji
+
+    def _iter_inline_emoji_positions(self):
+        """Yield every inline emoji together with its current document position."""
+        block = self.document().begin()
+        while block.isValid():
+            iterator = block.begin()
+            while not iterator.atEnd():
+                fragment = iterator.fragment()
+                if fragment.isValid():
+                    inline_emoji = self._emoji_from_char_format(fragment.charFormat())
+                    if inline_emoji is not None:
+                        fragment_position = fragment.position()
+                        for offset, _ in enumerate(fragment.text()):
+                            yield fragment_position + offset, inline_emoji
+                iterator += 1
+            block = block.next()
+
+    def _emoji_rect_in_viewport(self, position: int, inline_emoji: InlineEmoji) -> QRectF | None:
+        """Return the exact inline emoji rect in viewport coordinates."""
+        del inline_emoji
+        document = self.document()
+        if position < 0 or position >= max(0, document.characterCount() - 1):
+            return None
+
+        current_cursor = QTextCursor(document)
+        current_cursor.setPosition(position)
+        current_rect = self.cursorRect(current_cursor)
+        if current_rect.isNull():
+            return None
+
+        next_position = min(position + 1, max(0, document.characterCount() - 1))
+        next_cursor = QTextCursor(document)
+        next_cursor.setPosition(next_position)
+        next_rect = self.cursorRect(next_cursor)
+
+        width, height = self._emoji_size()
+        same_line = abs(next_rect.center().y() - current_rect.center().y()) < max(2.0, current_rect.height() / 2)
+        left = float(min(current_rect.x(), next_rect.x()) if same_line else current_rect.x())
+        line_bottom = float(max(current_rect.bottom(), next_rect.bottom()))
+        metrics = QFontMetrics(self._editor_font)
+        text_top = line_bottom - metrics.height() + 1.0
+        top = centered_emoji_top(text_top, metrics.height(), height, vertical_nudge=-2)
+        return QRectF(left, float(top), width, height)
+
+    def _insert_mixed_text_segment(self, text: str, cursor: QTextCursor | None = None) -> None:
+        """Insert text while converting emoji clusters into inline emoji objects."""
+        if not text:
+            return
+
+        active_cursor = QTextCursor(cursor or self.textCursor())
+        for chunk, is_emoji_chunk in iter_text_and_emoji_clusters(text):
+            if is_emoji_chunk:
+                self.setTextCursor(active_cursor)
+                self.insert_inline_emoji(chunk)
+                active_cursor = self.textCursor()
+            else:
+                active_cursor.insertText(chunk)
+                self.setTextCursor(active_cursor)
+
+    def _find_plain_text_fragment_with_emoji(self) -> tuple[int, str] | None:
+        """Return the first normal text fragment that still contains raw emoji glyphs."""
+        block = self.document().begin()
+        while block.isValid():
+            iterator = block.begin()
+            while not iterator.atEnd():
+                fragment = iterator.fragment()
+                if fragment.isValid():
+                    char_format = fragment.charFormat()
+                    if self._is_attachment_format(char_format) or self._is_inline_emoji_format(char_format):
+                        iterator += 1
+                        continue
+
+                    text = fragment.text()
+                    if any(is_emoji_char(char) for char in text):
+                        return fragment.position(), text
                 iterator += 1
             block = block.next()
 
@@ -595,68 +1043,36 @@ class ChatTextEdit(TextEdit):
         if text.strip():
             segments.append({"type": MessageType.TEXT, "content": text})
 
+    @staticmethod
+    def _normalize_attachment_boundary_newlines(segments: list[dict]) -> list[dict]:
+        """Trim structural newlines around attachment segments so send/restore stay stable."""
+        normalized = [dict(segment) for segment in segments]
+        attachment_types = {MessageType.IMAGE, MessageType.VIDEO, MessageType.FILE}
 
-class LegacyEmojiPickerFlyout(FlyoutViewBase):
-    """Compact emoji picker used by the message input toolbar."""
+        for index, segment in enumerate(normalized):
+            if segment.get("type") not in attachment_types:
+                continue
 
-    emoji_selected = Signal(str)
+            if index > 0 and normalized[index - 1].get("type") == MessageType.TEXT:
+                previous_content = str(normalized[index - 1].get("content", "") or "")
+                normalized[index - 1]["content"] = previous_content.rstrip("\n")
 
-    EMOJIS = [
-        "😀",
-        "😁",
-        "😂",
-        "🤣",
-        "😊",
-        "😍",
-        "😘",
-        "😎",
-        "🤔",
-        "😴",
-        "😭",
-        "😡",
-        "👍",
-        "👀",
-        "🎉",
-        "❤️",
-        "🔥",
-        "✨",
-        "🙏",
-        "💡",
-        "📷",
-        "🎵",
-        "🌙",
-        "🌟",
-    ]
+            if index + 1 < len(normalized) and normalized[index + 1].get("type") == MessageType.TEXT:
+                next_content = str(normalized[index + 1].get("content", "") or "")
+                normalized[index + 1]["content"] = next_content.lstrip("\n")
 
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._setup_ui()
-
-    def _setup_ui(self) -> None:
-        self.view_layout = QVBoxLayout(self)
-        self.view_layout.setContentsMargins(12, 12, 12, 12)
-        self.view_layout.setSpacing(10)
-
-        grid_widget = QWidget(self)
-        grid_layout = QGridLayout(grid_widget)
-        grid_layout.setContentsMargins(0, 0, 0, 0)
-        grid_layout.setHorizontalSpacing(6)
-        grid_layout.setVerticalSpacing(6)
-
-        for index, emoji in enumerate(self.EMOJIS):
-            button = PushButton(emoji, grid_widget)
-            button.setFixedSize(44, 36)
-            button.clicked.connect(lambda _checked=False, value=emoji: self.emoji_selected.emit(value))
-            grid_layout.addWidget(button, index // 8, index % 8)
-
-        self.view_layout.addWidget(grid_widget)
+        return [
+            segment
+            for segment in normalized
+            if segment.get("type") != MessageType.TEXT or str(segment.get("content", "") or "").strip()
+        ]
 
 
 class EmojiTile(QLabel):
     """Lightweight clickable emoji tile."""
 
     clicked = Signal(str)
-    _VERTICAL_NUDGE = -1
+    _VERTICAL_NUDGE = 0
 
     def __init__(self, emoji: str, parent=None):
         super().__init__("", parent)
@@ -664,11 +1080,11 @@ class EmojiTile(QLabel):
         self.setObjectName("emojiTile")
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setFixedSize(48, 52)
+        self.setFixedSize(56, 60)
         self.setToolTip(emoji)
 
         font = QFont(self.font())
-        font.setPointSize(19)
+        font.setPixelSize(22)
         try:
             font.setFamilies(["Segoe UI Emoji", "Apple Color Emoji", "Noto Color Emoji"])
         except AttributeError:
@@ -689,13 +1105,19 @@ class EmojiTile(QLabel):
 
         painter = QPainter(self)
         self.style().drawPrimitive(QStyle.PrimitiveElement.PE_Widget, option, painter, self)
-        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
-        painter.setFont(self.font())
-
-        metrics = painter.fontMetrics()
-        x = round((self.width() - metrics.horizontalAdvance(self._emoji)) / 2)
-        y = round((self.height() + metrics.ascent() - metrics.descent()) / 2) + self._VERTICAL_NUDGE
-        painter.drawText(x, y, self._emoji)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+        pixmap = load_emoji_pixmap(self._emoji, self.width() - 10, self.height() - 12)
+        if not pixmap.isNull():
+            x = round((self.width() - pixmap.width()) / 2)
+            y = round((self.height() - pixmap.height()) / 2)
+            painter.drawPixmap(x, y, pixmap)
+        else:
+            painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+            painter.setFont(self.font())
+            metrics = painter.fontMetrics()
+            x = round((self.width() - metrics.horizontalAdvance(self._emoji)) / 2)
+            y = round((self.height() + metrics.ascent() - metrics.descent()) / 2) + self._VERTICAL_NUDGE
+            painter.drawText(x, y, self._emoji)
         painter.end()
 
 
@@ -854,6 +1276,7 @@ class MessageInput(QWidget):
     """Integrated message input surface."""
 
     segments_submitted = Signal(object)
+    draft_changed = Signal(object)
     attachment_open_requested = Signal(str, str)
     screenshot_requested = Signal()
     voice_call_requested = Signal()
@@ -869,15 +1292,17 @@ class MessageInput(QWidget):
         self._last_typing_time = 0.0
         self._session_active = False
         self._emoji_flyout = None
+        self._draft_emit_pending = False
         self._setup_ui()
         self._connect_signals()
+        qconfig.themeChanged.connect(lambda *_args: self._apply_editor_transparency())
         self.set_session_active(False)
         QTimer.singleShot(0, self._update_overlay_positions)
 
     def _setup_ui(self) -> None:
         self.setObjectName("messageInput")
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        self.setMinimumHeight(180)
+        self.setMinimumHeight(0)
 
         self.main_layout = QVBoxLayout(self)
         self.main_layout.setContentsMargins(0, 0, 0, 0)
@@ -957,7 +1382,7 @@ class MessageInput(QWidget):
         self.text_input.setPlaceholderText("Select a session to start chatting")
         self.text_input.setAcceptRichText(False)
         self.text_input.setMinimumHeight(128)
-        self.text_input.setViewportMargins(0, 0, 92, 8)
+        self.text_input.setViewportMargins(0, 0, 24, 52)
         self._apply_editor_transparency()
 
         self.send_button = PushButton("Send", self.composer_widget)
@@ -989,28 +1414,72 @@ class MessageInput(QWidget):
         for button in buttons:
             button.setFont(font)
 
+    def _is_dark(self) -> bool:
+        """Return whether the current widget palette is using a dark window color."""
+        return isDarkTheme()
+
     def _apply_editor_transparency(self) -> None:
         """Force the text editor and its viewport to render with a transparent background."""
+        text_color = QColor("#FFFFFF") if self._is_dark() else QColor("#000000")
+        placeholder_color = QColor(255, 255, 255, 138) if self._is_dark() else QColor(20, 20, 20, 118)
+        selection_color = QColor(255, 255, 255) if self._is_dark() else QColor("#000000")
+        selection_background = QColor(255, 255, 255, 48) if self._is_dark() else QColor(0, 0, 0, 32)
+        transparent_base = QColor(0, 0, 0, 10) if self._is_dark() else QColor(255, 255, 255, 18)
+
         self.text_input.setFrameShape(QFrame.Shape.NoFrame)
-        self.text_input.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-        self.text_input.viewport().setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.text_input.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
+        self.text_input.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.text_input.viewport().setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
+        self.text_input.viewport().setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.text_input.viewport().setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, False)
+        self.text_input.setAutoFillBackground(False)
         self.text_input.viewport().setAutoFillBackground(False)
+        self.text_input.setCursorWidth(3)
+        self.text_input.setFont(self.text_input._editor_font)
+        self.text_input.document().setDefaultFont(self.text_input._editor_font)
         self.text_input.setStyleSheet(
-            "QTextEdit { border: none !important; background-color: transparent !important; border-radius: 0; }"
-            "QTextEdit:hover { background-color: transparent !important; border: none !important; }"
-            "QTextEdit:focus { background-color: transparent !important; border: none !important; }"
+            f"QTextEdit#chatMessageEdit {{"
+            " border: none !important;"
+            " background-color: transparent !important;"
+            " border-radius: 0;"
+            f" color: {text_color.name()};"
+            f" selection-background-color: {selection_background.name(QColor.NameFormat.HexArgb)};"
+            f" selection-color: {selection_color.name()};"
+            "}"
+            "QTextEdit#chatMessageEdit:hover { background-color: transparent !important; border: none !important; }"
+            "QTextEdit#chatMessageEdit:focus { background-color: transparent !important; border: none !important; }"
+            "QWidget#chatMessageViewport { background-color: transparent !important; border: none !important; }"
         )
         self.text_input.viewport().setStyleSheet("border: none !important; background-color: transparent !important;")
 
         palette = self.text_input.palette()
-        palette.setColor(QPalette.ColorRole.Base, QColor(0, 0, 0, 0))
-        palette.setColor(QPalette.ColorRole.Window, QColor(0, 0, 0, 0))
+        palette.setColor(QPalette.ColorRole.Base, transparent_base)
+        palette.setColor(QPalette.ColorRole.Window, transparent_base)
+        palette.setColor(QPalette.ColorRole.Text, text_color)
+        palette.setColor(QPalette.ColorRole.WindowText, text_color)
+        palette.setColor(QPalette.ColorRole.PlaceholderText, placeholder_color)
+        palette.setColor(QPalette.ColorRole.HighlightedText, selection_color)
+        palette.setColor(QPalette.ColorRole.Highlight, selection_background)
         self.text_input.setPalette(palette)
+        self.text_input.setTextColor(text_color)
 
         viewport_palette = self.text_input.viewport().palette()
-        viewport_palette.setColor(QPalette.ColorRole.Base, QColor(0, 0, 0, 0))
-        viewport_palette.setColor(QPalette.ColorRole.Window, QColor(0, 0, 0, 0))
+        viewport_palette.setColor(QPalette.ColorRole.Base, transparent_base)
+        viewport_palette.setColor(QPalette.ColorRole.Window, transparent_base)
+        viewport_palette.setColor(QPalette.ColorRole.Text, text_color)
+        viewport_palette.setColor(QPalette.ColorRole.WindowText, text_color)
+        viewport_palette.setColor(QPalette.ColorRole.PlaceholderText, placeholder_color)
+        viewport_palette.setColor(QPalette.ColorRole.HighlightedText, selection_color)
+        viewport_palette.setColor(QPalette.ColorRole.Highlight, selection_background)
         self.text_input.viewport().setPalette(viewport_palette)
+
+        current_format = self.text_input.currentCharFormat()
+        current_format.setFont(self.text_input._editor_font)
+        current_format.setForeground(text_color)
+        self.text_input.setCurrentCharFormat(current_format)
+        self.text_input.document().setDocumentMargin(5)
+        self.text_input.viewport().update()
+        self.text_input.update()
 
     def _connect_signals(self) -> None:
         self.send_button.clicked.connect(self._on_send_clicked)
@@ -1022,8 +1491,11 @@ class MessageInput(QWidget):
         self.video_button.clicked.connect(self.video_call_requested.emit)
         self.ai_button.clicked.connect(self._on_placeholder_action)
         self.text_input.textChanged.connect(self._on_text_changed)
+        self.text_input.textChanged.connect(self._update_send_button_state)
+        self.text_input.textChanged.connect(self._schedule_draft_changed_emit)
         self.text_input.send_requested.connect(self._on_send_clicked)
         self.text_input.attachment_activated.connect(self._on_attachment_activated)
+        self.text_input.files_dropped.connect(self._on_files_dropped)
 
     def resizeEvent(self, event) -> None:
         """Keep the floating footer aligned with the text input."""
@@ -1038,23 +1510,39 @@ class MessageInput(QWidget):
 
     def eventFilter(self, watched, event) -> bool:
         """Refresh floating controls after internal layout resizes."""
-        if watched in {self.composer_widget, self.text_input} and event.type() in {QEvent.Type.Resize, QEvent.Type.Show}:
+        if watched in {self.composer_widget, self.text_input} and event.type() in {
+            QEvent.Type.Resize,
+            QEvent.Type.Show,
+            QEvent.Type.LayoutRequest,
+        }:
             QTimer.singleShot(0, self._update_overlay_positions)
         return super().eventFilter(watched, event)
 
     def _update_overlay_positions(self) -> None:
         """Place the send button inside the text input area."""
+        if self.composer_layout is not None:
+            self.composer_layout.activate()
+        self.card_layout.activate()
+        self.main_layout.activate()
         text_rect = self.text_input.geometry()
         if not text_rect.isValid():
             return
 
-        button_margin_right = 10
-        button_margin_bottom = 8
-        send_x = text_rect.right() - self.send_button.width() - button_margin_right
-        send_y = text_rect.bottom() - self.send_button.height() - button_margin_bottom
+        button_margin_right = 14
+        button_margin_bottom = 14
+        send_x = text_rect.x() + text_rect.width() - self.send_button.width() - button_margin_right
+        send_y = text_rect.y() + text_rect.height() - self.send_button.height() - button_margin_bottom
+        composer_rect = self.composer_widget.rect()
+        send_x = max(composer_rect.left(), min(send_x, composer_rect.right() - self.send_button.width()))
+        send_y = max(composer_rect.top(), min(send_y, composer_rect.bottom() - self.send_button.height()))
         self.send_button.move(send_x, send_y)
 
         self.send_button.raise_()
+
+    def _update_send_button_state(self) -> None:
+        """Enable the send button only when the active session has draft content."""
+        has_draft = self.text_input.has_meaningful_content()
+        self.send_button.setEnabled(self._session_active and has_draft)
 
     def _on_text_changed(self) -> None:
         """Emit throttled typing events."""
@@ -1062,6 +1550,19 @@ class MessageInput(QWidget):
         if current_time - self._last_typing_time >= self.TYPING_THROTTLE:
             self._last_typing_time = current_time
             self.typing_signal.emit()
+
+    def _schedule_draft_changed_emit(self) -> None:
+        """Coalesce draft updates so session preview refreshes once per event loop turn."""
+        if self._draft_emit_pending:
+            return
+        self._draft_emit_pending = True
+        QTimer.singleShot(0, self._emit_draft_changed)
+
+    def _emit_draft_changed(self) -> None:
+        """Publish the current draft segments for the active session."""
+        self._draft_emit_pending = False
+        self._update_send_button_state()
+        self.draft_changed.emit(self.capture_draft_segments())
 
     def _on_send_clicked(self) -> None:
         """Extract composed segments and hand them to the chat panel."""
@@ -1088,28 +1589,32 @@ class MessageInput(QWidget):
 
     def _insert_emoji(self, emoji: str) -> None:
         """Insert emoji at current cursor position."""
-        cursor = self.text_input.textCursor()
-        cursor.insertText(emoji)
-        self.text_input.setTextCursor(cursor)
+        self.text_input.insert_inline_emoji(emoji)
         self.text_input.setFocus()
 
     def _on_image_clicked(self) -> None:
-        """Insert selected image into the editor as an inline attachment."""
+        """Insert a selected image into the composer flow."""
         file_path, _ = QFileDialog.getOpenFileName(self, "Select image", "", self.IMAGE_FILTER)
         if file_path:
-            self.text_input.insert_local_attachment(file_path)
+            self.text_input.insert_local_attachment(file_path, blockify=False)
             self.text_input.setFocus()
 
     def _on_file_clicked(self) -> None:
-        """Insert selected file into the editor as an inline attachment."""
+        """Insert a selected file into the composer flow."""
         file_path, _ = QFileDialog.getOpenFileName(self, "Select file", "", self.FILE_FILTER)
         if file_path:
-            self.text_input.insert_local_attachment(file_path)
+            self.text_input.insert_local_attachment(file_path, blockify=False)
             self.text_input.setFocus()
 
     def _on_attachment_activated(self, file_path: str, message_type: str) -> None:
-        """Forward inline attachment open requests to the chat panel."""
+        """Forward attachment open requests to the chat panel."""
         self.attachment_open_requested.emit(file_path, message_type)
+
+    def _on_files_dropped(self, file_paths: list[str]) -> None:
+        """Insert dragged local files into the composer flow."""
+        for file_path in file_paths or []:
+            self.text_input.insert_local_attachment(file_path, blockify=False)
+        self.text_input.setFocus()
 
     def _on_placeholder_action(self) -> None:
         """Show temporary placeholder hint for unsupported toolbar actions."""
@@ -1132,20 +1637,37 @@ class MessageInput(QWidget):
         self.video_button.setEnabled(active)
         self.ai_button.setEnabled(active)
         self.text_input.setEnabled(active)
-        self.send_button.setEnabled(active)
 
         if active:
             self.text_input.setPlaceholderText("Enter to send, Shift+Enter for new line")
         else:
             self.text_input.setPlaceholderText("Select a session to start chatting")
-            self.text_input.clear_composer()
+            self.clear_draft()
+
+        self._apply_editor_transparency()
+        self._update_send_button_state()
 
     def focus_editor(self) -> None:
         """Focus the text editor."""
         if self._session_active:
             self.text_input.setFocus()
 
-    def get_text_input(self) -> TextEdit:
+    def capture_draft_segments(self) -> list[dict]:
+        """Return the current mixed text/attachment draft without clearing it."""
+        return self.text_input.collect_composed_segments()
+
+    def restore_draft_segments(self, segments: list[dict]) -> None:
+        """Restore a previously captured draft into the composer."""
+        self.text_input.restore_composed_segments(segments or [])
+        self._update_send_button_state()
+        self._schedule_draft_changed_emit()
+
+    def clear_draft(self) -> None:
+        """Clear the current composer draft explicitly."""
+        self.text_input.clear_composer()
+        self._update_send_button_state()
+
+    def get_text_input(self) -> QTextEdit:
         """Get text input widget."""
         return self.text_input
 
