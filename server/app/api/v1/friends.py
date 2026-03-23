@@ -1,14 +1,14 @@
-﻿"""Friend routes."""
+"""Friend routes."""
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Response, status
+from fastapi import APIRouter, Depends, Request, Response, status
 from sqlalchemy.orm import Session
 
-from app.core.config import get_settings
 from app.core.database import get_db
 from app.core.rate_limit import rate_limiter
 from app.dependencies.auth_dependency import get_current_user
+from app.dependencies.settings_dependency import get_request_settings
 from app.models.user import User
 from app.schemas.friend import FriendRequestCreate
 from app.services.friend_service import FriendService
@@ -16,7 +16,11 @@ from app.utils.response import success_response
 
 
 router = APIRouter()
-settings = get_settings()
+
+
+def _friend_request_limit(request: Request) -> int:
+    """Return the current friend-request rate limit for this app snapshot."""
+    return get_request_settings(request).rate_limit_friend_request
 
 
 @router.get("")
@@ -29,7 +33,7 @@ def check_friendship(user_id: str, current_user: User = Depends(get_current_user
     return success_response(FriendService(db).check_relationship(current_user, user_id))
 
 
-@router.post("/requests", dependencies=[Depends(rate_limiter.dependency("friend-request", settings.rate_limit_friend_request))])
+@router.post("/requests", dependencies=[Depends(rate_limiter.dynamic_dependency("friend-request", _friend_request_limit))])
 def send_request(
     payload: FriendRequestCreate,
     current_user: User = Depends(get_current_user),

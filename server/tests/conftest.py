@@ -1,4 +1,4 @@
-﻿"""Pytest fixtures for backend integration tests."""
+"""Pytest fixtures for backend integration tests."""
 
 from __future__ import annotations
 
@@ -27,26 +27,27 @@ os.environ["DATABASE_URL"] = f"sqlite:///{TEST_DB_PATH.as_posix()}"
 os.environ["UPLOAD_DIR"] = TEST_UPLOAD_DIR.as_posix()
 os.environ["API_V1_PREFIX"] = "/api/v1"
 os.environ["API_COMPAT_PREFIX"] = "/api"
+os.environ["ENABLE_LEGACY_CHAT_HTTP"] = "true"
+os.environ["ENABLE_LEGACY_CHAT_WS"] = "true"
 os.environ["CORS_ORIGINS"] = "*"
 
 if str(SERVER_ROOT) not in sys.path:
     sys.path.insert(0, str(SERVER_ROOT))
 
-from app.core.database import Base, engine
+from app.core.config import reload_settings
+from app.core.database import Base, get_engine
 from app.core.rate_limit import rate_limiter
-from app.main import app
+from app.main import create_app
 from app.websocket.manager import connection_manager
 
 
 @pytest.fixture(autouse=True)
 def reset_test_state() -> None:
+    engine = get_engine()
     Base.metadata.drop_all(bind=engine)
     Base.metadata.create_all(bind=engine)
-    rate_limiter._buckets.clear()
-    connection_manager._connections.clear()
-    connection_manager._user_by_connection.clear()
-    connection_manager._connection_by_socket.clear()
-    connection_manager._connections_by_user.clear()
+    rate_limiter.reset()
+    connection_manager.reset()
 
     if TEST_UPLOAD_DIR.exists():
         shutil.rmtree(TEST_UPLOAD_DIR)
@@ -55,6 +56,7 @@ def reset_test_state() -> None:
 
 @pytest.fixture
 def client() -> TestClient:
+    app = create_app(reload_settings())
     with TestClient(app) as test_client:
         yield test_client
 
@@ -84,3 +86,6 @@ def auth_header() -> Callable[[str], dict[str, str]]:
         return {"Authorization": f"Bearer {access_token}"}
 
     return build
+
+
+

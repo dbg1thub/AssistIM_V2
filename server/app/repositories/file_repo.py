@@ -12,12 +12,27 @@ class FileRepository:
     def __init__(self, db: Session) -> None:
         self.db = db
 
-    def create(self, user_id: str, file_url: str, file_type: str | None, file_name: str) -> StoredFile:
+    def create(
+        self,
+        *,
+        user_id: str,
+        storage_provider: str,
+        storage_key: str,
+        file_url: str,
+        file_type: str | None,
+        file_name: str,
+        size_bytes: int,
+        checksum_sha256: str,
+    ) -> StoredFile:
         stored = StoredFile(
             user_id=user_id,
+            storage_provider=storage_provider,
+            storage_key=storage_key,
             file_url=file_url,
             file_type=file_type,
             file_name=file_name,
+            size_bytes=size_bytes,
+            checksum_sha256=checksum_sha256,
         )
         self.db.add(stored)
         self.db.commit()

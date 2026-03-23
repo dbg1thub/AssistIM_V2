@@ -1,329 +1,90 @@
-# 项目背景（Project Context）
+# 项目背景与范围
 
-本项目是一个 **AI增强即时通讯桌面客户端**。
+## 1. 项目定位
 
-客户端允许用户：
+AssistIM 是一个 AI 增强即时通讯桌面应用，核心目标是把“即时通讯”和“AI 助手能力”放在同一个桌面客户端里，并保持清晰的分层、稳定的实时链路和可维护的 UI 体系。
 
-* 与其他用户聊天
-* 与 AI 助手聊天
-* 实时接收消息
-* 查看聊天历史
-* 使用 AI 进行流式对话
+系统由三部分组成：
 
-客户端采用 **桌面 GUI + WebSocket 实时通信 + HTTPS API** 的架构。
+- Desktop Client
+- Backend API + WebSocket Gateway
+- External AI Providers / File Storage
 
----
+## 2. 核心能力
 
-# 技术栈
+当前项目面向以下核心业务能力：
 
-客户端技术栈：
+- 私聊与群聊
+- 消息发送、接收、ACK、重试、断线补偿
+- 已读回执与未读统计
+- 好友、群组、朋友圈、文件上传
+- AI 会话与流式输出
+- 本地缓存与离线浏览基础能力
 
-Python
-PySide6（桌面 GUI）
-asyncio（异步 IO）
-aiohttp（HTTP 客户端）
-WebSocket（实时通信）
-SQLite（本地存储）
+## 3. 设计目标
 
-服务器技术栈：
+项目设计目标统一遵循以下原则：
 
-FastAPI
-WebSocket
-REST API
+- 成熟：优先选择行业里经过验证的常见做法
+- 常见：尽量不要为了“看起来灵活”而引入冷门机制
+- 可扩展：核心协议、领域模型、状态模型可以支撑后续功能演进
+- 低耦合：界面、业务、网络、存储、协议边界清晰
+- 可观测：关键链路必须可测试、可追踪、可定位问题
 
----
+## 4. 系统边界
 
-# 客户端架构
+### 4.1 客户端负责
 
-客户端采用严格分层架构：
+- 界面展示与交互
+- 本地状态与本地缓存
+- WebSocket 长连接与实时消息处理
+- 调用后端 HTTP API
+- 调用 AI 服务适配层
 
-UI
-↓
-Controller
-↓
-Manager
-↓
-Service
-↓
-Network
-↓
-Protocol
+### 4.2 服务端负责
 
-每一层职责如下：
+- 用户认证与权限控制
+- 会话、消息、好友、群组、文件、朋友圈业务
+- WebSocket 实时网关与消息广播
+- 幂等处理、读指针推进、历史记录查询
 
-UI
-负责界面显示与用户输入。
+### 4.3 外部依赖负责
 
-Controller
-连接 UI 与业务逻辑。
+- 大模型推理
+- 对象存储或本地文件存储
+- 可选的 Redis / PubSub / Presence Cache 扩展能力
 
-Manager
-负责客户端核心业务逻辑和状态管理。
+## 5. 当前交付基线
 
-Service
-封装 HTTP API 或 AI 服务调用。
+当前工程需要先保证单机可运行、可调试、可测试。在这个前提下，文档明确保留后续演进路径：
 
-Network
-负责网络通信（HTTP / WebSocket）。
+- 服务端可以从单实例扩展到多实例
+- 文件存储可以从本地目录迁移到对象存储
+- Presence / Fanout 可以从进程内结构迁移到 Redis / PubSub
+- 离线消息补偿可以从“消息补偿”继续演进到“事件流补偿”
 
-Protocol
-定义 WebSocket 消息结构。
+## 6. 非目标
 
----
+以下内容不作为当前文档集的设计目标：
 
-# 核心模块
+- 为了“未来可能用到”而过早拆成微服务
+- 在 UI 层直接拼接网络逻辑或数据库逻辑
+- 用多个来源重复维护同一份业务真相
+- 用演示型临时方案长期替代正式一致性模型
 
-客户端主要模块：
+## 7. 目录说明
 
-UI 模块
+- [architecture.md](./architecture.md)：客户端总体架构与协议边界
+- [backend_architecture.md](./backend_architecture.md)：服务端架构与领域模型
+- [ui_guidelines.md](./ui_guidelines.md)：QFluentWidgets 设计系统与 UI 约束
+- [design_decisions.md](./design_decisions.md)：关键 ADR
+- [pitfalls.md](./pitfalls.md)：常见反模式
 
-ui/
+## 8. 文档使用原则
 
-负责：
+后续重构时，如果代码与文档不一致：
 
-* 主窗口
-* 聊天窗口
-* 消息显示
-* 用户输入
-
----
-
-Controller 模块
-
-controllers/
-
-负责：
-
-* 接收 UI 输入
-* 调用 Manager
-
----
-
-Manager 模块
-
-managers/
-
-负责客户端核心逻辑：
-
-ConnectionManager
-
-管理 WebSocket 连接与重连。
-
-MessageManager
-
-负责：
-
-发送消息
-接收消息
-处理 ACK
-触发 UI 更新事件。
-
-SessionManager
-
-负责：
-
-聊天会话
-当前会话状态
-未读消息
-
----
-
-Service 模块
-
-services/
-
-ChatService
-
-封装聊天相关 HTTP API。
-
-AIService
-
-封装 AI 对话接口。
-
-支持 **流式 AI 输出**。
-
----
-
-Network 模块
-
-network/
-
-HTTPClient
-
-封装 aiohttp。
-
-WebSocketClient
-
-负责：
-
-建立 WebSocket 连接
-发送消息
-接收消息
-自动重连
-心跳检测
-
----
-
-Events 模块
-
-events/
-
-EventBus
-
-用于解耦 UI 与业务逻辑。
-
-Manager 通过 EventBus 向 UI 发送事件。
-
-例如：
-
-MessageReceivedEvent
-MessageSentEvent
-ConnectionStateEvent
-AIStreamChunkEvent
-
----
-
-Models 模块
-
-models/
-
-定义客户端数据模型：
-
-ChatMessage
-User
-Session
-
-全部使用 dataclass。
-
----
-
-Protocol 模块
-
-protocol/
-
-定义 WebSocket 消息结构。
-
-标准格式：
-
-{
-"type": "message_type",
-"seq": 123,
-"msg_id": "uuid",
-"timestamp": 123456,
-"data": {}
-}
-
----
-
-Storage 模块
-
-storage/
-
-使用 SQLite 保存：
-
-聊天记录
-会话列表
-未发送消息
-
----
-
-Core 模块
-
-core/
-
-提供基础设施：
-
-config
-logging
-
----
-
-# 消息发送流程
-
-用户发送消息时流程：
-
-UI
-↓
-ChatController
-↓
-MessageManager
-↓
-WebSocketClient
-↓
-Server
-
-Server 返回 ACK。
-
-MessageManager 更新消息状态。
-
-UI 通过 EventBus 更新。
-
----
-
-# 消息接收流程
-
-服务器发送消息：
-
-Server
-↓
-WebSocketClient
-↓
-MessageManager
-↓
-EventBus
-↓
-UI
-
-UI 更新聊天窗口。
-
----
-
-# AI 对话流程
-
-用户发送 AI 消息：
-
-UI
-↓
-ChatController
-↓
-MessageManager
-↓
-AIService
-↓
-AI Provider
-
-AI 通过 **streaming 返回 token**。
-
-AIService 触发：
-
-AIStreamChunkEvent
-
-UI 实时更新聊天内容。
-
----
-
-# 设计原则
-
-客户端遵循以下原则：
-
-1 分层架构
-2 UI 与业务逻辑解耦
-3 使用 EventBus 进行事件通信
-4 网络层不包含业务逻辑
-5 所有网络 IO 使用 async
-
----
-
-# AI 代码生成要求
-
-当 AI 生成代码时必须：
-
-遵守 architecture.md
-遵守 ai_rules.md
-遵守 code_style.md
-
-并保持：
-
-模块职责清晰
-避免跨层依赖
-代码结构可维护
+- 先判断是历史实现问题还是文档设计问题
+- 设计不对就改设计
+- 文档不对就改文档
+- 历史实现偏离正式设计时，后续代码按文档收敛

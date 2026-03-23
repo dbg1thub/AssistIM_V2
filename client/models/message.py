@@ -1,4 +1,4 @@
-﻿"""
+"""
 Data Models Module
 
 Core data models using dataclasses.
@@ -63,6 +63,93 @@ def infer_message_type_from_path(path: str) -> MessageType:
     if extension in VIDEO_EXTENSIONS:
         return MessageType.VIDEO
     return MessageType.FILE
+
+
+def _coerce_size_bytes(raw_value: Any, fallback_size: int = 0) -> int:
+    try:
+        return max(0, int(raw_value or fallback_size or 0))
+    except (TypeError, ValueError):
+        return max(0, int(fallback_size or 0))
+
+
+
+def build_remote_attachment_extra(
+    upload_payload: dict[str, Any],
+    *,
+    fallback_name: str,
+    fallback_size: int = 0,
+    duration: int | None = None,
+) -> dict[str, Any]:
+    """Build one shareable attachment payload that is safe to send to the server."""
+    normalized = dict(upload_payload or {})
+    file_url = str(normalized.get("url") or normalized.get("file_url") or "")
+    original_name = str(
+        normalized.get("original_name")
+        or normalized.get("file_name")
+        or normalized.get("name")
+        or fallback_name
+        or "upload.bin"
+    )
+    mime_type = str(normalized.get("mime_type") or normalized.get("file_type") or "")
+    storage_provider = str(normalized.get("storage_provider") or "")
+    storage_key = str(normalized.get("storage_key") or "")
+    checksum_sha256 = str(normalized.get("checksum_sha256") or "")
+    size_bytes = _coerce_size_bytes(normalized.get("size_bytes"), fallback_size)
+
+    media = dict(normalized.get("media") or {})
+    media.setdefault("url", file_url)
+    media.setdefault("original_name", original_name)
+    media.setdefault("mime_type", mime_type)
+    media.setdefault("storage_provider", storage_provider)
+    media.setdefault("storage_key", storage_key)
+    media.setdefault("size_bytes", size_bytes)
+    media.setdefault("checksum_sha256", checksum_sha256)
+
+    extra = {
+        "url": file_url,
+        "name": original_name,
+        "file_type": mime_type,
+        "size": size_bytes,
+        "media": media,
+    }
+    if duration is not None:
+        extra["duration"] = duration
+    return extra
+
+
+
+def build_attachment_extra(
+    upload_payload: dict[str, Any],
+    *,
+    local_path: str,
+    fallback_name: str,
+    fallback_size: int = 0,
+    uploading: bool = False,
+    duration: int | None = None,
+) -> dict[str, Any]:
+    """Build one normalized local attachment payload for chat messages."""
+    extra = build_remote_attachment_extra(
+        upload_payload,
+        fallback_name=fallback_name or os.path.basename(local_path),
+        fallback_size=fallback_size,
+        duration=duration,
+    )
+    extra["local_path"] = local_path
+    extra["uploading"] = uploading
+    return extra
+
+
+
+def sanitize_outbound_message_extra(extra: dict[str, Any] | None) -> dict[str, Any]:
+    """Remove local-only attachment state before sending a payload to the server."""
+    normalized = dict(extra or {})
+    normalized.pop("local_path", None)
+    normalized.pop("uploading", None)
+
+    media = dict(normalized.get("media") or {})
+    if media:
+        normalized["media"] = media
+    return normalized
 
 
 def format_message_preview(content: str, message_type: MessageType | str | None = None) -> str:
@@ -479,4 +566,6 @@ class AISession:
             max_tokens=data.get("max_tokens", 2048),
             context_messages=data.get("context_messages", 10),
         )
+
+
 

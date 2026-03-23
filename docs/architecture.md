@@ -1,539 +1,308 @@
-# AI增强即时通讯桌面客户端架构说明
+# 客户端总体架构说明
 
-## 1 项目简介
+## 1. 适用范围
 
-本项目是一个 AI增强即时通讯桌面客户端。
+本文档描述客户端的目标架构、模块边界、协议约束、消息一致性模型、缓存策略与 UI 性能原则。
 
-系统支持以下核心功能：
+如果某段代码与本文档冲突，优先检查 [design_decisions.md](./design_decisions.md)；若 ADR 没有特殊说明，则按本文档收敛代码。
 
-- 实时聊天
-- 朋友圈
-- 好友系统
-- 聊天会话管理
-- AI助手对话
-- AI流式输出
-- 聊天记录存储
-- 断线消息同步
+## 2. 总体设计目标
 
-客户端采用 **分层架构 + 事件驱动设计**，实现高可维护性和低耦合。
+客户端架构的核心目标有五个：
 
----
+- 明确边界：UI、业务、网络、存储、协议职责分开
+- 可恢复：连接波动、ACK 超时、断线重连后状态可恢复
+- 可演进：可以继续扩展更多事件类型、横向扩展、更多 AI provider
+- 可测试：关键流程可以做单测、集成测试与回归测试
+- 可维护：避免同一条规则散落在 UI、Manager、Service 多处重复实现
 
-# 2 技术栈
+## 3. 分层模型
 
-## 客户端
+客户端采用如下层次关系：
 
-- PySide6
-- PySide6-Fluent
-- qasync
-- asyncio
-- aiohttp
-- websockets
+```text
+UI -> Controller -> Manager -> Service -> Network
+                         \-> Storage
+Manager -> EventBus -> UI
+```
 
-## 服务端
+### 3.1 UI Layer
 
-- FastAPI
-- WebSocket
-- REST API
+职责：
 
----
-
-# 3 客户端架构分层
-
-客户端遵循五层架构设计：
-
-UI Layer  
-↓  
-Manager Layer  
-↓  
-Service Layer  
-↓  
-Network Layer  
-↓  
-Protocol Layer  
-
-各层职责如下。
-
----
-
-## UI Layer
-
-UI层负责：
-
-- 界面展示
+- 组件渲染
 - 用户交互
-- 监听事件并更新界面
+- 视图状态展示
+- 订阅 EventBus / Signal 并刷新界面
 
-UI层 **不直接访问 Network 或 Service**。
+禁止：
 
----
+- 直接请求 HTTP API
+- 直接操作 WebSocket
+- 直接读写数据库
+- 直接维护业务真相
 
-## Manager Layer
+### 3.2 Controller Layer
 
-Manager层负责：
+职责：
 
-- 客户端状态管理
-- 业务流程控制
+- 承接 UI 输入
+- 做轻量参数整理和交互编排
+- 调用对应 Manager
 
-主要模块：
+Controller 不是业务层，不承担状态管理，不做网络访问。
 
-SessionManager  
-MessageManager  
-ConnectionManager  
+正式要求：
 
----
+- Controller 发起远程操作时，只调用对应 Service
+- Controller 可以做轻量 payload 归一化与界面交互编排
+- Controller 不直接依赖 `HTTPClient` 发请求
 
-## Service Layer
+### 3.3 Manager Layer
 
-Service层负责：
+职责：
 
-- 调用服务器 API
-- AI请求
-- 封装业务逻辑接口
-
----
-
-## Network Layer
-
-Network层负责：
-
-- HTTPS请求
-- WebSocket连接
-- 网络通信
-
----
-
-## Protocol Layer
-
-Protocol层负责：
-
-- WebSocket消息结构
-- 消息编码与解析
-
----
-
-# 4 客户端目录结构
-
-```
-client/
-
-core/
-    日志
-    配置
-    事件总线
-
-network/
-    HTTP客户端
-    WebSocket客户端
-
-protocol/
-    WebSocket消息协议
-
-services/
-    后端API调用
-    AI服务
-
-providers/
-    AI模型提供者
-
-managers/
-    客户端状态管理
-
-sync/
-    消息同步模块
-
-storage/
-    本地数据库
-
-models/
-    数据结构定义
-
-ui/
-    PySide6界面
-```
-
----
-
-# 5 WebSocket通信流程
-
-客户端启动流程：
-
-客户端启动  
-→ 建立WebSocket连接  
-→ 发送认证消息  
-→ 进入消息收发循环  
-
----
-
-## 消息发送流程
-
-UI  
-→ MessageManager  
-→ WebSocketClient  
-→ Server  
-
----
-
-## 消息接收流程
-
-Server  
-→ WebSocketClient  
-→ MessageManager  
-→ EventBus  
-→ UI  
-
----
-
-# 6 AI消息流程
-
-AI消息支持 **流式输出**。
-
-完整流程：
-
-用户发送消息  
-→ ChatService  
-→ AIService  
-→ Server  
-→ AI流式返回  
-
-服务器发送事件：
-
-ai_stream_start  
-ai_stream_chunk  
-ai_stream_end  
-
-客户端按 chunk 实时更新 UI。
-
----
-
-# 7 消息同步机制
-
-当客户端断线重连时：
-
-客户端发送：
-
-```
-last_received_seq
-```
-
-服务器返回：
-
-```
-missing_messages
-```
-
-客户端补充缺失消息。
-
----
-
-# 8 客户端状态管理
-
-客户端状态由 Manager层统一维护。
-
-主要模块：
-
-SessionManager  
-MessageManager  
-ConnectionManager  
+- 管理客户端核心状态
+- 编排消息、会话、连接、已读、缓存等业务流程
+- 协调 Service、Storage、ConnectionManager
+- 向 EventBus 发出状态变化通知
 
 规则：
 
-- UI 不直接修改状态
-- UI 通过 Manager 调用业务逻辑
-- UI 通过 EventBus 更新界面
+- 除 `ConnectionManager` 外，Manager 不应直接依赖底层 `WebSocketClient`
+- 其他 Manager 与实时链路交互时，应通过 `ConnectionManager` 暴露的接口完成
+- Manager 可以依赖 Storage，因为本地缓存属于客户端状态的一部分
+- Manager 访问远程 HTTP 能力时，应通过对应 Service，而不是直接拿 `HTTPClient`
+- `ConnectionManager` 读取 access token 时，也通过 `AuthService` 等认证边界完成，而不是直接拿 `HTTPClient`
 
----
+### 3.4 Service Layer
 
-# 9 事件系统
+职责：
 
-系统使用 EventBus 实现事件驱动架构。
+- 封装后端 HTTP API
+- 封装 AI Provider 调用
+- 提供稳定的远程能力接口
 
-常见事件：
+规则：
 
-message_received  
-message_sent  
-session_updated  
-ai_stream_chunk  
-connection_state_changed  
+- Service 不依赖 UI
+- Service 不直接更新 UI
+- Service 不持有界面状态
+- Service 只关心远程请求，不负责本地会话状态真相
+- `FileService` 返回规范媒体描述；消息附件发给服务端前必须剥离本地临时字段
+- 典型例子包括 `AuthService`、`UserService`、`ChatService`、`FileService`、`SessionService`、`ContactService`、`DiscoveryService`
 
-UI只监听事件。
+### 3.5 Network Layer
 
----
+职责：
 
-## EventBus 示例实现
+- HTTP 传输
+- WebSocket 传输
+- Token 附带、错误转换、连接生命周期等底层通信细节
 
-```
-from collections import defaultdict
+规则：
 
-class EventBus:
+- Network 层不包含业务判断
+- Network 层不直接更新 UI
+- Network 层不决定“某条消息是否应该重发、是否已读、是否属于当前会话”
 
-    def __init__(self):
-        self.listeners = defaultdict(list)
+### 3.6 Storage Layer
 
-    def subscribe(self, event, callback):
-        self.listeners[event].append(callback)
+职责：
 
-    def emit(self, event, data=None):
-        for cb in self.listeners[event]:
-            cb(data)
+- SQLite 本地缓存
+- App state 持久化
+- 离线数据恢复所需的最小本地状态
 
-event_bus = EventBus()
-```
+Storage 由 Manager 驱动，不直接暴露给 UI。
 
----
+规则：
 
-# 10 本地存储
+- Manager 可以依赖 Storage，但应调用公开的 storage API
+- Manager 不直接写 SQL，不依赖 storage 私有 helper
+- 与 SQLite 方言相关的查询语义和结果解码统一留在 storage 层
 
-客户端使用 SQLite 存储数据。
+## 4. 横切机制
 
-存储内容：
+### 4.1 EventBus
 
-- 聊天记录
-- 会话信息
-- 未发送消息
+EventBus 是通知通道，不是命令总线。
 
-存储模块：
+推荐方向：
 
-```
-storage/
-```
-
----
-
-# 11 UI实现示例
-
-下面给出一个简化聊天界面示例。
-
-## ChatView
-
-```
-from PySide6.QtWidgets import QWidget, QVBoxLayout
-from core.event_bus import event_bus
-
-class ChatView(QWidget):
-
-    def __init__(self, controller):
-        super().__init__()
-
-        self.controller = controller
-        self.layout = QVBoxLayout(self)
-
-        event_bus.subscribe("message_received", self.on_message_received)
-
-    def send_message(self, text):
-        self.controller.send_message(text)
-
-    def on_message_received(self, message):
-        print("收到消息:", message)
+```text
+Manager -> EventBus -> UI
 ```
 
----
+禁止方向：
 
-## ChatController
-
-```
-from managers.message_manager import message_manager
-
-class ChatController:
-
-    def send_message(self, text):
-        message_manager.send_message(content=text)
+```text
+UI -> EventBus -> Manager
+Network -> EventBus -> UI（绕过 Manager）
 ```
 
----
+### 4.2 Typed Models
 
-## MessageManager
+客户端内部业务对象应使用 dataclass / typed model 表达，而不是在多个层之间直接传裸 dict。
 
-```
-class MessageManager:
+- Network 可以收发 dict
+- Service / Manager / UI 之间应尽快收敛为 typed model
 
-    async def send_message(self, content):
+## 5. HTTP 与 WebSocket 的职责划分
 
-        msg = {
-            "type": "chat_message",
-            "content": content
-        }
+### 5.1 HTTP 负责
 
-        await ws_client.send(msg)
-```
+- 登录、注册、鉴权刷新
+- 会话列表与历史记录拉取
+- 文件上传
+- 好友、群组、朋友圈等非实时业务
+- 关键状态的最终持久化补写
 
----
+### 5.2 WebSocket 负责
 
-# 12 UI开发完整流程示例
+- 实时聊天消息
+- ACK / delivered / read 事件
+- typing、presence 等实时通知
+- 断线重连后的补偿同步
 
-完整调用链：
+设计原则：
 
-```
-用户输入
-↓
-ChatView
-↓
-ChatController
-↓
-MessageManager
-↓
-WebSocketClient
-↓
-Server
-↓
-EventBus
-↓
-UI更新
-```
+- HTTP 负责“最终查询和最终持久化”
+- WebSocket 负责“低延迟实时通知”
+- 同一业务不能在 UI 层同时直接拼接两套链路判断
 
----
+## 6. WebSocket 消息协议
 
-## 示例目录结构
+统一外层结构：
 
-```
-ui/
-    chat/
-        chat_view.py
-        chat_controller.py
-
-managers/
-    message_manager.py
-
-network/
-    websocket_client.py
-
-core/
-    event_bus.py
+```json
+{
+  "type": "message_type",
+  "seq": 0,
+  "msg_id": "uuid-or-empty",
+  "timestamp": 0,
+  "data": {}
+}
 ```
 
----
+协议解释：
 
-## ChatView 示例
+- `type`：消息类型
+- `msg_id`：客户端命令幂等键；对会改变状态的客户端命令必须存在
+- `timestamp`：发送时间或兼容字段，不作为断线补偿主依据
+- `seq`：服务端回传的顺序字段；对状态事件表示 `event_seq`，对普通消息不能替代 `session_seq`
+- `data`：业务负载
 
-```
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QTextEdit, QLineEdit
-from core.event_bus import event_bus
+重要规则：
 
-class ChatView(QWidget):
+- 会话消息顺序使用 `data.session_seq`，不使用外层 `seq`
+- 状态变更事件顺序使用独立 `event_seq`，在外层 `seq` 与 `data.event_seq` 中回传
+- 断线补偿同时使用 `session_cursors` 与 `event_cursors`，不使用时间戳
+- 不能用 `session_seq` 补偿 `read`、`message_edit`、`message_recall`、`message_delete` 等非消息事件
 
-    def __init__(self, controller):
-        super().__init__()
+## 7. 消息一致性模型
 
-        self.controller = controller
+### 7.1 `msg_id` 负责幂等
 
-        self.layout = QVBoxLayout(self)
+`msg_id` 是客户端命令 ID，用于：
 
-        self.chat_area = QTextEdit()
-        self.chat_area.setReadOnly(True)
+- ACK 匹配
+- 自动重发
+- 服务端幂等去重
+- 日志追踪
 
-        self.input_box = QLineEdit()
-        self.input_box.returnPressed.connect(self._on_send)
+同一个逻辑消息在重发时必须复用同一个 `msg_id`。
 
-        self.layout.addWidget(self.chat_area)
-        self.layout.addWidget(self.input_box)
+### 7.2 `session_seq` 负责会话内顺序
 
-        event_bus.subscribe("message_received", self._on_message_received)
+服务端为每个会话分配单调递增的 `session_seq`。
 
-    def _on_send(self):
+用途：
 
-        text = self.input_box.text()
+- 会话内消息排序
+- 已读游标推进
+- 断线补偿高水位同步
 
-        if not text:
-            return
+### 7.3 已读模型使用游标，不写全局 `read` 状态
 
-        self.controller.send_message(text)
+正式设计：
 
-        self.input_box.clear()
+- `message.status` 只表示消息生命周期，例如 `sent`、`failed`、`edited`、`recalled`
+- 已读状态由会话成员自己的 `last_read_seq` 表达
+- 群聊展示为 `read_count / read_target_count`
+- 私聊可显示“对方已读”
 
-    def _on_message_received(self, message):
+### 7.4 断线补偿使用双游标
 
-        self.chat_area.append(
-            f"{message.sender_id}: {message.content}"
-        )
-```
+客户端维护：
 
----
-
-# 13 AI流式UI更新示例
-
-服务器发送：
-
-```
-ai_stream_start
-ai_stream_chunk
-ai_stream_end
-```
-
-客户端监听：
-
-```
-event_bus.subscribe("ai_stream_chunk", self.on_ai_chunk)
+```json
+{
+  "session_cursors": {
+    "session_id": 12
+  },
+  "event_cursors": {
+    "session_id": 5
+  }
+}
 ```
 
-UI更新：
+重连后：
 
-```
-def on_ai_chunk(self, data):
+- 客户端发送 `session_cursors` 与 `event_cursors`
+- 服务端返回 `history_messages`：各会话中 `session_seq > cursor` 的遗漏消息
+- 服务端返回 `history_events`：各会话中 `event_seq > cursor` 的遗漏事件
+- 客户端分别推进消息高水位与事件高水位，并按事件类型回放本地状态
 
-    text = data["content"]
+当前纳入 `event_seq` 的事件包括：
 
-    self.ai_message.append(text)
-```
+- `read`
+- `message_edit`
+- `message_recall`
+- `message_delete`
 
----
+## 8. 本地缓存策略
 
-# 14 系统整体数据流
+客户端使用 SQLite 做本地缓存，主要保存：
 
-```
-用户输入
-↓
-UI
-↓
-Manager
-↓
-Network
-↓
-Server
-↓
-EventBus
-↓
-UI更新
-```
+- 会话列表
+- 消息列表
+- 本地 app_state
+- 断线补偿高水位（消息游标 + 事件游标）
 
----
+规则：
 
-# 15 UI开发规则（重要）
+- 本地缓存是客户端状态恢复基础，不是业务权限判断依据
+- 消息游标与事件游标都应持久化，不能仅靠内存
+- 高水位不能只从“当前还存在的消息列表”临时推导，尤其不能试图从消息列表反推事件游标
 
-UI层必须遵守以下规则：
+## 9. UI 列表与性能原则
 
-1. UI只负责界面展示  
-2. UI不直接访问Network  
-3. UI不直接访问Service  
-4. UI通过Manager调用业务逻辑  
-5. UI通过EventBus接收事件  
+消息列表、会话列表、联系人列表必须遵守以下原则：
 
-推荐模式：
+- 优先增量更新 `insert / remove / dataChanged`
+- 非必要不使用 `beginResetModel()` / `modelReset()`
+- 长列表不能依赖全量重建刷新
+- AI 流式输出要做节流或批量刷新，不能每个 token 触发一次重绘
+- Tooltip、Flyout、菜单、卡片样式应通过统一设计系统实现，见 [ui_guidelines.md](./ui_guidelines.md)
 
-```
-UI → Controller → Manager → Network
-```
+## 10. AI 会话架构
 
-禁止模式：
+AI 能力通过 Service / Provider 体系接入，目标是：
 
-```
-UI → WebSocket
-UI → API
-```
+- Provider 可替换
+- 流式输出统一接口
+- UI 不直接持有 provider 客户端
+- AI 会话与普通 IM 会话共享尽可能一致的数据结构与视图层能力
 
----
+## 11. 设计演进保留位
 
-# 16 总结
+为了保持可扩展性，当前架构预留以下演进方向：
 
-本客户端采用：
+- 扩展更多 session event：例如 system / membership / pin / moderation events
+- Presence / fanout 外置：当前通过 `RealtimeHub` 暴露，后续可从进程内实现扩展到 Redis / PubSub
+- Rate limit state 外置：当前通过 `RateLimitStore` 暴露，后续可从进程内计数扩展到共享存储
+- 文件存储切换：从本地目录扩展到对象存储
+- 更细粒度的 UI 设计系统：在不破坏 CardWidget / Acrylic / Tooltip 统一规范的前提下演进
 
-- 分层架构
-- 事件驱动
-- WebSocket实时通信
-- AI流式输出
 
-核心设计目标：
-
-- 模块解耦
-- 易维护
-- 易扩展
-- 支持AI能力集成

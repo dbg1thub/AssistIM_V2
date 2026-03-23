@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import uuid
 from datetime import date, datetime, timedelta
@@ -359,6 +360,7 @@ def seed_demo_data(
                 seed_uuid("message:alice-bob:1"),
                 session_id=private_session.id,
                 sender_id=alice.id,
+                session_seq=1,
                 type="text",
                 content="Morning. I pushed the desktop chat fixes.",
                 status="read",
@@ -371,6 +373,7 @@ def seed_demo_data(
                 seed_uuid("message:alice-bob:2"),
                 session_id=private_session.id,
                 sender_id=bob.id,
+                session_seq=2,
                 type="text",
                 content="Received. I'll verify the sync flow next.",
                 status="read",
@@ -383,6 +386,7 @@ def seed_demo_data(
                 seed_uuid("message:alice-bob:3"),
                 session_id=private_session.id,
                 sender_id=alice.id,
+                session_seq=3,
                 type="text",
                 content="Please also check the PostgreSQL migration path.",
                 status="sent",
@@ -397,6 +401,7 @@ def seed_demo_data(
                 seed_uuid("message:team:1"),
                 session_id=group_session.id,
                 sender_id=carla.id,
+                session_seq=1,
                 type="text",
                 content="Demo seed data is ready for QA.",
                 status="read",
@@ -409,6 +414,7 @@ def seed_demo_data(
                 seed_uuid("message:team:2"),
                 session_id=group_session.id,
                 sender_id=alice.id,
+                session_seq=2,
                 type="text",
                 content="Let's validate auth, chat, and group permissions.",
                 status="sent",
@@ -509,9 +515,13 @@ def seed_demo_data(
             StoredFile,
             seed_uuid("file:alice:demo-note"),
             user_id=alice.id,
+            storage_provider="local",
+            storage_key=SEED_FILE_NAME,
             file_url=f"/uploads/{SEED_FILE_NAME}",
             file_type="text/plain",
             file_name=SEED_FILE_NAME,
+            size_bytes=seed_file_path.stat().st_size,
+            checksum_sha256=hashlib.sha256(seed_file_path.read_bytes()).hexdigest(),
             created_at=base_time + timedelta(minutes=22),
             updated_at=base_time + timedelta(minutes=22),
         )
@@ -552,6 +562,9 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+
 
 
 

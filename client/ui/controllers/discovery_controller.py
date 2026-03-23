@@ -8,7 +8,8 @@ from typing import Any, Optional
 
 from client.core import logging
 from client.core.logging import setup_logging
-from client.network.http_client import get_http_client
+from client.services.discovery_service import get_discovery_service
+from client.services.user_service import get_user_service
 from client.ui.controllers.auth_controller import get_auth_controller
 
 
@@ -63,7 +64,8 @@ class DiscoveryController:
     """Provide discovery timeline data to the UI."""
 
     def __init__(self) -> None:
-        self._http = get_http_client()
+        self._discovery_service = get_discovery_service()
+        self._user_service = get_user_service()
         self._auth = get_auth_controller()
         self._user_cache: dict[str, dict[str, Any]] = {}
         self._comment_cache: dict[str, list[MomentCommentRecord]] = {}
@@ -72,8 +74,7 @@ class DiscoveryController:
 
     async def load_moments(self, user_id: Optional[str] = None) -> list[MomentRecord]:
         """Load moments and enrich authors from the user API when needed."""
-        params = {"user_id": user_id} if user_id else None
-        payload = await self._http.get("/moments", params=params)
+        payload = await self._discovery_service.fetch_moments(user_id=user_id)
         items = list(payload or [])
 
         author_ids = {
@@ -93,15 +94,15 @@ class DiscoveryController:
 
     async def create_moment(self, content: str) -> MomentRecord:
         """Create a new moment."""
-        payload = await self._http.post("/moments", json={"content": content})
+        payload = await self._discovery_service.create_moment(content)
         return self._normalize_moment(payload or {})
 
     async def set_liked(self, moment_id: str, liked: bool, like_count: Optional[int] = None) -> bool:
         """Update like state for a moment."""
         if liked:
-            await self._http.post(f"/moments/{moment_id}/likes", json={})
+            await self._discovery_service.like_moment(moment_id)
         else:
-            await self._http.delete(f"/moments/{moment_id}/likes")
+            await self._discovery_service.unlike_moment(moment_id)
         self._like_state_cache[moment_id] = liked
         if like_count is not None:
             self._like_count_cache[moment_id] = max(0, like_count)
@@ -109,10 +110,7 @@ class DiscoveryController:
 
     async def add_comment(self, moment_id: str, content: str) -> MomentCommentRecord:
         """Add a new comment to a moment."""
-        payload = await self._http.post(
-            f"/moments/{moment_id}/comments",
-            json={"content": content},
-        )
+        payload = await self._discovery_service.add_comment(moment_id, content)
         comment = self._normalize_comment(payload or {}, moment_id=moment_id)
         self._comment_cache.setdefault(moment_id, []).append(comment)
         self._like_count_cache.setdefault(moment_id, self._like_count_cache.get(moment_id, 0))
@@ -124,7 +122,7 @@ class DiscoveryController:
             return
 
         try:
-            payload = await self._http.get(f"/users/{user_id}")
+            payload = await self._user_service.fetch_user(user_id)
         except Exception:
             logger.debug("Discovery user enrichment failed for %s", user_id, exc_info=True)
             self._user_cache[user_id] = {}

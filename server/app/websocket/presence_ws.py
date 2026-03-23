@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import time
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect, status
 
 from app.core.security import decode_access_token
+from app.dependencies.settings_dependency import get_websocket_settings
 from app.websocket.manager import connection_manager
 
 
@@ -30,19 +31,17 @@ def event_payload(event: str, data: dict, msg_type: str | None = None, msg_id: s
     return payload
 
 
-def bind_websocket_user(websocket: WebSocket, connection_id: str) -> str:
+def bind_websocket_user(websocket: WebSocket, connection_id: str) -> str | None:
     token = websocket.query_params.get("token")
-    guest_id = f"guest-{connection_id[:8]}"
-    if token:
-        try:
-            payload = decode_access_token(token)
-            user_id = payload["sub"]
-            connection_manager.bind_user(connection_id, user_id)
-            return user_id
-        except Exception:
-            pass
-    connection_manager.bind_user(connection_id, guest_id)
-    return guest_id
+    if not token:
+        return None
+    try:
+        payload = decode_access_token(token, settings=get_websocket_settings(websocket))
+    except Exception:
+        return None
+    user_id = payload["sub"]
+    connection_manager.bind_user(connection_id, user_id)
+    return user_id
 
 
 async def _broadcast_offline_if_needed(user_id: str | None, became_offline: bool) -> None:
@@ -54,6 +53,11 @@ async def _broadcast_offline_if_needed(user_id: str | None, became_offline: bool
 async def presence_endpoint(websocket: WebSocket) -> None:
     connection_id = await connection_manager.connect(websocket)
     user_id = bind_websocket_user(websocket, connection_id)
+    if user_id is None:
+        connection_manager.disconnect_by_connection_id(connection_id)
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
+
     await connection_manager.broadcast_json(event_payload("online", {"user_id": user_id}, msg_type="online"))
 
     try:

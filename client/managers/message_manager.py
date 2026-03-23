@@ -1,4 +1,4 @@
-﻿"""
+"""
 Message Manager Module
 
 Manager for message handling, ACK processing, and caching.
@@ -6,17 +6,19 @@ Manager for message handling, ACK processing, and caching.
 import asyncio
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Callable, Optional
+from typing import Any, Awaitable, Callable, Optional
 
 from client.core import logging
+from client.core.exceptions import AppError
 from client.core.i18n import tr
 from client.core.logging import setup_logging
 from client.events.event_bus import get_event_bus
 from client.managers.connection_manager import get_connection_manager
-from client.models.message import ChatMessage, MessageStatus, MessageType
-from client.network.http_client import get_http_client
+from client.models.message import ChatMessage, MessageStatus, MessageType, build_attachment_extra, sanitize_outbound_message_extra
+from client.services.chat_service import get_chat_service
+from client.services.file_service import get_file_service
 from client.storage.database import get_database
 
 
@@ -43,47 +45,51 @@ class MessageEvent:
 
 @dataclass
 class PendingMessage:
-    """Pending message waiting for ACK."""
-
-    message: ChatMessage
-    created_at: float
-    retry_count: int = 0
-    max_retries: int = 3
-    ack_timeout: float = 10.0
-
-
-@dataclass
-class QueuedMessage:
-    """Message in send queue."""
+    """Pending outbound message tracked across transport attempts and ACKs."""
 
     message: ChatMessage
     session_id: str
     content: str
     message_type: str
-    extra: dict
-    retry_count: int = 0
-    max_retries: int = 3
+    extra: dict[str, Any]
+    created_at: float
+    attempt_count: int = 0
+    max_attempts: int = 3
+    ack_timeout: float = 10.0
+    last_attempt_at: float = 0.0
+    awaiting_ack: bool = False
+
+
+@dataclass
+class QueuedMessage:
+    """One transport attempt queued for websocket delivery."""
+
+    message_id: str
+    session_id: str
+    content: str
+    message_type: str
+    extra: dict[str, Any]
 
 
 class MessageSendQueue:
     """
-    Async message send queue with retry mechanism.
+    Async message send queue.
 
     Responsibilities:
-        - Queue messages for sending
-        - Process queue in background
-        - Retry failed messages (max 3 times)
-        - Update message status on success/failure
+        - Queue outbound websocket sends
+        - Preserve message ordering
+        - Report each transport attempt result back to MessageManager
     """
 
-    MAX_RETRY = 3
-    RETRY_DELAY = 2.0  # seconds
-    QUEUE_TIMEOUT = 30.0  # seconds
+    QUEUE_TIMEOUT = 30.0
 
-    def __init__(self, conn_manager, event_bus, db):
+    def __init__(
+        self,
+        conn_manager,
+        on_send_result: Callable[[QueuedMessage, bool], Awaitable[None]],
+    ):
         self._conn_manager = conn_manager
-        self._event_bus = event_bus
-        self._db = db
+        self._on_send_result = on_send_result
 
         self._queue: asyncio.Queue[QueuedMessage] = asyncio.Queue()
         self._running = False
@@ -114,44 +120,32 @@ class MessageSendQueue:
 
     async def enqueue(
         self,
-        message: ChatMessage,
+        message_id: str,
         session_id: str,
         content: str,
         message_type: str,
-        extra: dict,
+        extra: dict[str, Any],
     ) -> None:
-        """Add a message to the send queue."""
+        """Add one outbound transport attempt to the queue."""
         queued = QueuedMessage(
-            message=message,
+            message_id=message_id,
             session_id=session_id,
             content=content,
             message_type=message_type,
-            extra=extra,
-            retry_count=0,
-            max_retries=self.MAX_RETRY,
+            extra=sanitize_outbound_message_extra(extra),
         )
 
-        await asyncio.wait_for(
-            self._queue.put(queued),
-            timeout=self.QUEUE_TIMEOUT
-        )
-
-        logger.debug(f"Message enqueued: {message.message_id}")
+        await asyncio.wait_for(self._queue.put(queued), timeout=self.QUEUE_TIMEOUT)
+        logger.debug("Message queued for websocket send: %s", message_id)
 
     async def _worker(self) -> None:
-        """Background worker that processes the queue."""
+        """Background worker that processes queued transport attempts."""
         logger.debug("Message send queue worker started")
 
         while self._running:
             try:
-                # Wait for message with timeout
-                queued = await asyncio.wait_for(
-                    self._queue.get(),
-                    timeout=1.0
-                )
-
+                queued = await asyncio.wait_for(self._queue.get(), timeout=1.0)
                 await self._send_message(queued)
-
             except asyncio.TimeoutError:
                 continue
             except asyncio.CancelledError:
@@ -162,56 +156,20 @@ class MessageSendQueue:
         logger.debug("Message send queue worker stopped")
 
     async def _send_message(self, queued: QueuedMessage) -> None:
-        """Send a single message with retry logic."""
-        message = queued.message
-
+        """Execute one websocket send attempt and report the result."""
+        success = False
         try:
             success = await self._conn_manager.send_chat_message(
                 session_id=queued.session_id,
                 content=queued.content,
-                msg_id=message.message_id,
+                msg_id=queued.message_id,
                 message_type=queued.message_type,
                 extra=queued.extra,
             )
-
-            if success:
-                # Add to pending for ACK tracking
-                logger.debug(f"Message sent, waiting for ACK: {message.message_id}")
-            else:
-                # Send failed, handle retry
-                await self._handle_send_failure(queued)
-
         except Exception as e:
-            logger.error(f"Send message error: {e}")
-            await self._handle_send_failure(queued)
+            logger.error(f"Send message error for {queued.message_id}: {e}")
 
-    async def _handle_send_failure(self, queued: QueuedMessage) -> None:
-        """Handle send failure with retry."""
-        message = queued.message
-        queued.retry_count += 1
-
-        if queued.retry_count < queued.max_retries:
-            # Retry after delay
-            logger.warning(
-                f"Message send failed (retry {queued.retry_count}/{queued.max_retries}): "
-                f"{message.message_id}"
-            )
-
-            await asyncio.sleep(self.RETRY_DELAY)
-            await self._queue.put(queued)
-
-        else:
-            # Max retries exceeded, mark as failed
-            logger.error(f"Message send failed after {queued.max_retries} retries: {message.message_id}")
-
-            message.status = MessageStatus.FAILED
-            await self._db.save_message(message)
-
-            await self._event_bus.emit(MessageEvent.FAILED, {
-                "message_id": message.message_id,
-                "message": message,
-                "reason": "Max retries exceeded",
-            })
+        await self._on_send_result(queued, success)
 
 
 class MessageManager:
@@ -230,6 +188,8 @@ class MessageManager:
         self._event_bus = get_event_bus()
         self._conn_manager = get_connection_manager()
         self._db = get_database()
+        self._chat_service = get_chat_service()
+        self._file_service = get_file_service()
 
         # Send queue
         self._send_queue: Optional[MessageSendQueue] = None
@@ -247,7 +207,8 @@ class MessageManager:
 
         self._user_id: str = ""
         self._ack_timeout = 10.0
-        self._max_retries = 3
+        self._max_attempts = 3
+        self._transport_retry_delay = 2.0
 
     async def initialize(self) -> None:
         """Initialize message manager."""
@@ -258,8 +219,7 @@ class MessageManager:
         # Initialize send queue
         self._send_queue = MessageSendQueue(
             self._conn_manager,
-            self._event_bus,
-            self._db
+            self._handle_send_attempt_result,
         )
         await self._send_queue.start()
 
@@ -282,6 +242,138 @@ class MessageManager:
     def set_user_id(self, user_id: str) -> None:
         """Set current user ID."""
         self._user_id = user_id
+
+    def _build_pending_message(
+        self,
+        message: ChatMessage,
+        session_id: str,
+        content: str,
+        message_type: str,
+        extra: dict[str, Any],
+    ) -> PendingMessage:
+        """Build one authoritative outbound state entry for retries and ACK tracking."""
+        return PendingMessage(
+            message=message,
+            session_id=session_id,
+            content=content,
+            message_type=message_type,
+            extra=sanitize_outbound_message_extra(extra),
+            created_at=time.time(),
+            max_attempts=self._max_attempts,
+            ack_timeout=self._ack_timeout,
+        )
+
+    async def _enqueue_pending_message(self, pending: PendingMessage) -> None:
+        """Queue the next websocket transport attempt for one pending message."""
+        if self._send_queue is None:
+            raise RuntimeError("message send queue is not initialized")
+
+        await self._send_queue.enqueue(
+            message_id=pending.message.message_id,
+            session_id=pending.session_id,
+            content=pending.content,
+            message_type=pending.message_type,
+            extra=pending.extra,
+        )
+
+    async def _handle_send_attempt_result(self, queued: QueuedMessage, success: bool) -> None:
+        """Update pending state after one websocket transport attempt."""
+        if success:
+            async with self._pending_lock:
+                pending = self._pending_messages.get(queued.message_id)
+                if pending is None:
+                    logger.debug("Transport success ignored for unknown message: %s", queued.message_id)
+                    return
+                pending.attempt_count += 1
+                pending.awaiting_ack = True
+                pending.last_attempt_at = time.time()
+
+            logger.debug("Message sent, waiting for ACK: %s", queued.message_id)
+            return
+
+        await self._handle_transport_failure(queued.message_id)
+
+    async def _handle_transport_failure(self, message_id: str) -> None:
+        """Retry or fail one outbound message after transport send failure."""
+        retry_pending: Optional[PendingMessage] = None
+        failed_pending: Optional[PendingMessage] = None
+
+        async with self._pending_lock:
+            pending = self._pending_messages.get(message_id)
+            if pending is None:
+                logger.debug("Transport failure ignored for unknown message: %s", message_id)
+                return
+
+            pending.attempt_count += 1
+            pending.awaiting_ack = False
+            pending.last_attempt_at = 0.0
+
+            if pending.attempt_count < pending.max_attempts:
+                retry_pending = pending
+            else:
+                failed_pending = self._pending_messages.pop(message_id)
+
+        if retry_pending is not None:
+            logger.warning(
+                "Message transport failed (attempt %s/%s), retrying: %s",
+                retry_pending.attempt_count,
+                retry_pending.max_attempts,
+                message_id,
+            )
+            await asyncio.sleep(self._transport_retry_delay)
+            async with self._pending_lock:
+                current_pending = self._pending_messages.get(message_id)
+                if current_pending is not retry_pending:
+                    return
+            await self._enqueue_pending_message(retry_pending)
+            return
+
+        if failed_pending is not None:
+            logger.error("Message send failed after %s attempts: %s", failed_pending.max_attempts, message_id)
+            await self._finalize_pending_failure(failed_pending, "Transport send failed")
+
+    async def _finalize_pending_failure(self, pending: PendingMessage, reason: str) -> None:
+        """Persist one terminal outbound failure and notify the UI."""
+        pending.message.status = MessageStatus.FAILED
+        pending.message.updated_at = datetime.now()
+        await self._db.save_message(pending.message)
+        await self._event_bus.emit(MessageEvent.FAILED, {
+            "message_id": pending.message.message_id,
+            "message": pending.message,
+            "reason": reason,
+        })
+
+    def _merge_ack_message(
+        self,
+        msg_id: str,
+        ack_payload: Any,
+        fallback_message: Optional[ChatMessage],
+    ) -> Optional[ChatMessage]:
+        """Merge canonical ACK payload from the server with local-only message metadata."""
+        if not isinstance(ack_payload, dict) or not ack_payload:
+            return fallback_message
+
+        normalized = dict(ack_payload)
+        if fallback_message is not None:
+            normalized.setdefault("session_id", fallback_message.session_id)
+            normalized.setdefault("sender_id", fallback_message.sender_id or self._user_id)
+            normalized.setdefault("message_type", fallback_message.message_type.value)
+            normalized.setdefault("content", fallback_message.content)
+            normalized.setdefault("status", fallback_message.status.value)
+            normalized.setdefault("is_self", True)
+            merged_extra = dict(fallback_message.extra or {})
+            merged_extra.update(dict(normalized.get("extra") or {}))
+            normalized["extra"] = merged_extra
+        else:
+            normalized.setdefault("sender_id", self._user_id)
+            normalized.setdefault("is_self", True)
+
+        normalized.setdefault("message_id", msg_id)
+        normalized.setdefault("msg_id", msg_id)
+        return self._normalize_loaded_message(
+            normalized,
+            default_session_id=str(normalized.get("session_id", "") or ""),
+        )
     
     async def _handle_ws_message(self, data: dict) -> None:
         """Handle incoming WebSocket message."""
@@ -295,6 +387,9 @@ class MessageManager:
 
         elif msg_type == "history_messages":
             await self._process_history_messages(data)
+
+        elif msg_type == "history_events":
+            await self._process_history_events(data)
 
         elif msg_type == "typing":
             await self._process_typing(data)
@@ -319,36 +414,49 @@ class MessageManager:
     
     async def _process_ack(self, data: dict) -> None:
         """Process message acknowledgment."""
-        msg_id = data.get("data", {}).get("msg_id", "")
-        success = data.get("data", {}).get("success", False)
-        
+        ack_data = data.get("data", {}) if isinstance(data.get("data"), dict) else {}
+        msg_id = ack_data.get("msg_id") or data.get("msg_id", "")
+        success = bool(ack_data.get("success", False))
+        ack_message_payload = ack_data.get("message")
+
         async with self._pending_lock:
             pending = self._pending_messages.pop(msg_id, None)
-        
-        if pending:
-            if success:
-                persisted_message = await self._db.get_message(msg_id)
-                message = persisted_message or pending.message
-                if message.status in {MessageStatus.PENDING, MessageStatus.SENDING, MessageStatus.SENT}:
-                    message.status = MessageStatus.SENT
-                    await self._db.save_message(message)
-                logger.info(f"Message ACK received: {msg_id}")
-                
-                await self._event_bus.emit(MessageEvent.ACK, {
-                    "message_id": msg_id,
-                    "message": message,
-                })
-            else:
-                pending.message.status = MessageStatus.FAILED
-                logger.warning(f"Message rejected: {msg_id}")
-                
-                await self._event_bus.emit(MessageEvent.FAILED, {
-                    "message_id": msg_id,
-                    "message": pending.message,
-                    "reason": data.get("data", {}).get("reason", "Unknown"),
-                })
-            
-                await self._db.save_message(pending.message)
+
+        fallback_message = pending.message if pending is not None else await self._db.get_message(msg_id)
+
+        if success:
+            message = self._merge_ack_message(msg_id, ack_message_payload, fallback_message)
+            if message is None:
+                logger.warning("ACK received for unknown message: %s", msg_id)
+                return
+
+            if message.status in {MessageStatus.PENDING, MessageStatus.SENDING, MessageStatus.FAILED}:
+                message.status = MessageStatus.SENT
+                message.updated_at = datetime.now()
+
+            await self._db.save_message(message)
+            logger.info(f"Message ACK received: {msg_id}")
+
+            await self._event_bus.emit(MessageEvent.ACK, {
+                "message_id": msg_id,
+                "message": message,
+            })
+            return
+
+        if fallback_message is None:
+            logger.warning("Message rejection received for unknown message: %s", msg_id)
+            return
+
+        fallback_message.status = MessageStatus.FAILED
+        fallback_message.updated_at = datetime.now()
+        logger.warning(f"Message rejected: {msg_id}")
+
+        await self._event_bus.emit(MessageEvent.FAILED, {
+            "message_id": msg_id,
+            "message": fallback_message,
+            "reason": ack_data.get("reason", "Unknown"),
+        })
+        await self._db.save_message(fallback_message)
     
     async def _process_incoming_message(self, data: dict) -> None:
         """Process incoming chat message."""
@@ -443,6 +551,44 @@ class MessageManager:
             return tr("message.recalled.self", "You recalled a message")
         return tr("message.recalled.other", "The other side recalled a message")
 
+    @staticmethod
+    def _coerce_read_int(value: Any) -> int:
+        """Coerce read-receipt counters into safe non-negative integers."""
+        try:
+            return max(0, int(value or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    @staticmethod
+    def _normalize_read_user_ids(value: Any) -> list[str]:
+        """Normalize reader id payloads into a stable unique list."""
+        if not isinstance(value, (list, tuple, set)):
+            return []
+
+        normalized: list[str] = []
+        for item in value:
+            user_id = str(item or "").strip()
+            if user_id and user_id not in normalized:
+                normalized.append(user_id)
+        return normalized
+
+    def _apply_read_metadata(self, sender_id: str, status: MessageStatus, extra: dict[str, Any]) -> tuple[MessageStatus, dict[str, Any]]:
+        """Normalize read-receipt metadata and derive the UI-facing status for self messages."""
+        read_by_user_ids = self._normalize_read_user_ids(extra.get("read_by_user_ids"))
+        read_count = max(self._coerce_read_int(extra.get("read_count")), len(read_by_user_ids))
+        read_target_count = self._coerce_read_int(extra.get("read_target_count"))
+
+        extra["session_seq"] = self._coerce_read_int(extra.get("session_seq"))
+        extra["read_by_user_ids"] = read_by_user_ids
+        extra["read_count"] = read_count
+        extra["read_target_count"] = read_target_count
+        extra["is_read_by_me"] = bool(extra.get("is_read_by_me", sender_id == self._user_id))
+
+        if sender_id == self._user_id and read_count > 0 and status in {MessageStatus.SENT, MessageStatus.DELIVERED, MessageStatus.READ}:
+            status = MessageStatus.READ if read_target_count <= 1 else MessageStatus.DELIVERED
+
+        return status, extra
+
     def _normalize_loaded_message(
         self,
         payload: dict[str, Any],
@@ -466,6 +612,12 @@ class MessageManager:
             status = MessageStatus.SENT if sender_id == self._user_id else MessageStatus.RECEIVED
 
         extra = dict(data.get("extra") or {})
+        for key in ("session_seq", "read_count", "read_target_count", "read_by_user_ids", "is_read_by_me"):
+            if key in data and key not in extra:
+                extra[key] = data[key]
+
+        status, extra = self._apply_read_metadata(sender_id, status, extra)
+
         content = str(data.get("content", "") or "")
         if status == MessageStatus.RECALLED:
             extra.setdefault("recall_notice", self._default_recall_notice_for_sender(sender_id))
@@ -536,6 +688,18 @@ class MessageManager:
         logger.info(f"History messages synced: {len(saved_messages)} new, {skipped_count} skipped")
         logger.info("History message processing finished in %.1fms", (time.perf_counter() - started) * 1000)
     
+    async def _process_history_events(self, data: dict) -> None:
+        """Replay a batch of offline mutation events in order."""
+        msg_data = data.get("data", {}) if isinstance(data.get("data"), dict) else {}
+        events = msg_data.get("events", [])
+        if not isinstance(events, list):
+            return
+
+        for event_payload in events:
+            if not isinstance(event_payload, dict):
+                continue
+            await self._handle_ws_message(event_payload)
+
     async def _process_typing(self, data: dict) -> None:
         """Process typing indicator."""
         session_id = data.get("data", {}).get("session_id", "")
@@ -547,17 +711,21 @@ class MessageManager:
         })
     
     async def _process_read(self, data: dict) -> None:
-        """Process read receipt."""
-        session_id = data.get("data", {}).get("session_id", "")
-        message_id = data.get("data", {}).get("message_id", "")
-        user_id = data.get("data", {}).get("user_id", "")
+        """Process cumulative read-receipt cursor updates."""
+        read_data = data.get("data", {})
+        session_id = read_data.get("session_id", "")
+        message_id = read_data.get("last_read_message_id") or read_data.get("message_id", "")
+        user_id = read_data.get("user_id", "")
+        last_read_seq = self._coerce_read_int(read_data.get("last_read_seq"))
 
-        await self._db.mark_messages_read_through(session_id, message_id)
+        changed_message_ids = await self._db.apply_read_receipt(session_id, user_id, message_id, last_read_seq)
 
         await self._event_bus.emit(MessageEvent.READ, {
             "session_id": session_id,
             "message_id": message_id,
             "user_id": user_id,
+            "last_read_seq": last_read_seq,
+            "changed_message_ids": changed_message_ids,
         })
 
     async def _process_delivered(self, data: dict) -> None:
@@ -721,23 +889,23 @@ class MessageManager:
                 "message": message,
             })
 
-        # Add to send queue
-        await self._send_queue.enqueue(
-            message=message,
-            session_id=session_id,
-            content=content,
-            message_type=message_type.value,
-            extra=message.extra,
+        pending = self._build_pending_message(
+            message,
+            session_id,
+            content,
+            message_type.value,
+            message.extra,
         )
-
-        # Add to pending for ACK tracking
         async with self._pending_lock:
-            self._pending_messages[msg_id] = PendingMessage(
-                message=message,
-                created_at=time.time(),
-                max_retries=self._max_retries,
-                ack_timeout=self._ack_timeout,
-            )
+            self._pending_messages[msg_id] = pending
+
+        try:
+            await self._enqueue_pending_message(pending)
+        except Exception as exc:
+            async with self._pending_lock:
+                self._pending_messages.pop(msg_id, None)
+            logger.error("Failed to enqueue outbound message %s: %s", msg_id, exc)
+            await self._finalize_pending_failure(pending, "Transport queue failure")
 
         logger.info(f"Message enqueued: {msg_id}")
 
@@ -792,13 +960,7 @@ class MessageManager:
         """Send read receipt."""
         http_success = False
         try:
-            await get_http_client().post(
-                "/messages/read/batch",
-                json={
-                    "session_id": session_id,
-                    "last_read_id": message_id,
-                },
-            )
+            await self._chat_service.persist_read_receipt(session_id, message_id)
             http_success = True
         except Exception as exc:
             logger.warning("Failed to persist read receipt for %s/%s: %s", session_id, message_id, exc)
@@ -838,7 +1000,7 @@ class MessageManager:
             return False, tr("message.error.already_recalled", "This message has already been recalled")
 
         try:
-            await get_http_client().post(f"/messages/{message_id}/recall")
+            await self._chat_service.recall_message(message_id)
         except Exception as exc:
             logger.error(f"Failed to send recall request: {message_id}, error: {exc}")
             return False, str(exc) or tr("chat.recall_failed", "Recall failed.")
@@ -913,7 +1075,7 @@ class MessageManager:
 
         success = False
         try:
-            await get_http_client().put(f"/messages/{message_id}", json={"content": new_content})
+            await self._chat_service.edit_message(message_id, new_content)
             success = True
         except Exception as exc:
             logger.error(f"Failed to send edit request: {message_id}, error: {exc}")
@@ -967,32 +1129,40 @@ class MessageManager:
                 logger.error(f"ACK check error: {e}")
     
     async def _check_pending_messages(self) -> None:
-        """Check and retry pending messages."""
+        """Check pending ACKs and resend timed-out messages using the same msg_id."""
         now = time.time()
-        
+        to_retry: list[PendingMessage] = []
+        to_fail: list[PendingMessage] = []
+
         async with self._pending_lock:
-            to_retry = []
-            to_remove = []
-            
-            for msg_id, pending in self._pending_messages.items():
-                if now - pending.created_at > pending.ack_timeout:
-                    if pending.retry_count < pending.max_retries:
-                        to_retry.append(pending)
-                    else:
-                        to_remove.append(msg_id)
-            
-            for msg_id in to_remove:
-                pending = self._pending_messages.pop(msg_id)
-                pending.message.status = MessageStatus.FAILED
-                await self._db.save_message(pending.message)
-                
-                await self._event_bus.emit(MessageEvent.FAILED, {
-                    "message_id": msg_id,
-                    "message": pending.message,
-                    "reason": "Timeout",
-                })
-                
-                logger.warning(f"Message timeout: {msg_id}")
+            for msg_id, pending in list(self._pending_messages.items()):
+                if not pending.awaiting_ack or pending.last_attempt_at <= 0:
+                    continue
+                if now - pending.last_attempt_at <= pending.ack_timeout:
+                    continue
+
+                pending.awaiting_ack = False
+                pending.last_attempt_at = 0.0
+
+                if pending.attempt_count < pending.max_attempts:
+                    to_retry.append(pending)
+                else:
+                    removed = self._pending_messages.pop(msg_id, None)
+                    if removed is not None:
+                        to_fail.append(removed)
+
+        for pending in to_retry:
+            logger.warning(
+                "Message ACK timeout, retrying attempt %s/%s: %s",
+                pending.attempt_count + 1,
+                pending.max_attempts,
+                pending.message.message_id,
+            )
+            await self._enqueue_pending_message(pending)
+
+        for pending in to_fail:
+            logger.warning(f"Message ACK timeout exhausted retries: {pending.message.message_id}")
+            await self._finalize_pending_failure(pending, "ACK timeout")
     
     async def retry_message(self, msg_id: str) -> bool:
         """
@@ -1015,41 +1185,56 @@ class MessageManager:
             return False
 
         if self._needs_media_upload(message):
-            upload_result = await get_http_client().upload_file(message.extra.get("local_path", ""))
-            file_url = upload_result.get("url", "") if upload_result else ""
-            if not file_url:
-                logger.warning(f"Media retry upload failed: {msg_id}")
+            try:
+                upload_result = await self._file_service.upload_chat_attachment(message.extra.get("local_path", ""))
+            except AppError as exc:
+                logger.warning("Media retry upload failed: %s (%s)", msg_id, exc)
                 return False
 
+            file_url = str(upload_result["url"])
             message.content = file_url
-            message.extra.update({
-                "url": file_url,
-                "name": message.extra.get("name") or message.extra.get("local_path", "").rsplit("\\", 1)[-1].rsplit("/", 1)[-1],
-                "file_type": upload_result.get("file_type", ""),
-                "uploading": False,
-            })
+            duration_value = message.extra.get("duration")
+            try:
+                normalized_duration = int(duration_value) if duration_value is not None else None
+            except (TypeError, ValueError):
+                normalized_duration = None
+            message.extra.update(
+                build_attachment_extra(
+                    upload_result,
+                    local_path=str(message.extra.get("local_path", "") or ""),
+                    fallback_name=str(
+                        message.extra.get("name")
+                        or message.extra.get("local_path", "").rsplit("\\", 1)[-1].rsplit("/", 1)[-1]
+                        or "upload.bin"
+                    ),
+                    fallback_size=int(message.extra.get("size") or 0),
+                    uploading=False,
+                    duration=normalized_duration,
+                )
+            )
 
         message.status = MessageStatus.SENDING
         message.updated_at = datetime.now()
         await self._db.save_message(message)
 
-        # Re-enqueue via send queue
-        await self._send_queue.enqueue(
-            message=message,
-            session_id=message.session_id,
-            content=message.content,
-            message_type=message.message_type.value,
-            extra=message.extra,
+        pending = self._build_pending_message(
+            message,
+            message.session_id,
+            message.content,
+            message.message_type.value,
+            message.extra,
         )
-
-        # Add to pending for ACK tracking
         async with self._pending_lock:
-            self._pending_messages[msg_id] = PendingMessage(
-                message=message,
-                created_at=time.time(),
-                max_retries=self._max_retries,
-                ack_timeout=self._ack_timeout,
-            )
+            self._pending_messages[msg_id] = pending
+
+        try:
+            await self._enqueue_pending_message(pending)
+        except Exception as exc:
+            async with self._pending_lock:
+                self._pending_messages.pop(msg_id, None)
+            logger.error("Failed to enqueue retry message %s: %s", msg_id, exc)
+            await self._finalize_pending_failure(pending, "Transport queue failure")
+            return False
 
         await self._event_bus.emit(MessageEvent.SENT, {
             "message": message,
@@ -1069,7 +1254,8 @@ class MessageManager:
         if not local_path:
             return False
 
-        remote_url = str(message.extra.get("url", "") or "")
+        media = dict(message.extra.get("media") or {})
+        remote_url = str(media.get("url") or message.extra.get("url", "") or "")
         if remote_url:
             return False
 
@@ -1083,14 +1269,14 @@ class MessageManager:
         before_timestamp: Optional[float] = None,
     ) -> list[ChatMessage]:
         """Fetch one message page from the backend and persist it locally."""
-        params: dict[str, Any] = {"limit": limit}
-        if before_timestamp is not None:
-            params["before"] = str(before_timestamp)
-
-        payload = await get_http_client().get(f"/sessions/{session_id}/messages", params=params)
+        payload = await self._chat_service.fetch_messages(
+            session_id,
+            limit=limit,
+            before_timestamp=before_timestamp,
+        )
         remote_messages: list[ChatMessage] = []
 
-        for item in payload or []:
+        for item in payload:
             remote_messages.append(
                 self._normalize_loaded_message(
                     item,
@@ -1179,6 +1365,12 @@ def get_message_manager() -> MessageManager:
     if _message_manager is None:
         _message_manager = MessageManager()
     return _message_manager
+
+
+
+
+
+
 
 
 

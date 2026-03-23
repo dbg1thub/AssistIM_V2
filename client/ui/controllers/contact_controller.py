@@ -8,7 +8,8 @@ from typing import Optional
 from client.core import logging
 from client.core.i18n import tr
 from client.core.logging import setup_logging
-from client.network.http_client import get_http_client
+from client.services.contact_service import get_contact_service
+from client.services.user_service import get_user_service
 from client.ui.controllers.auth_controller import get_auth_controller
 
 
@@ -142,7 +143,8 @@ class ContactController:
     """Provide contact, group, and friend-request data to the UI."""
 
     def __init__(self) -> None:
-        self._http = get_http_client()
+        self._contact_service = get_contact_service()
+        self._user_service = get_user_service()
         self._auth = get_auth_controller()
 
     def get_current_user_id(self) -> str:
@@ -152,7 +154,7 @@ class ContactController:
 
     async def load_contacts(self) -> list[ContactRecord]:
         """Load and normalize the friend list."""
-        payload = await self._http.get("/friends")
+        payload = await self._contact_service.fetch_friends()
         contacts: list[ContactRecord] = []
 
         for item in payload or []:
@@ -184,7 +186,7 @@ class ContactController:
 
     async def load_groups(self) -> list[GroupRecord]:
         """Load and normalize the group list."""
-        payload = await self._http.get("/groups")
+        payload = await self._contact_service.fetch_groups()
         groups = [
             GroupRecord(
                 id=str(item.get("id", "") or ""),
@@ -202,7 +204,7 @@ class ContactController:
 
     async def load_requests(self) -> list[FriendRequestRecord]:
         """Load pending friend requests."""
-        payload = await self._http.get("/friends/requests")
+        payload = await self._contact_service.fetch_friend_requests()
         requests: list[FriendRequestRecord] = []
 
         for item in payload or []:
@@ -229,14 +231,7 @@ class ContactController:
 
     async def search_users(self, keyword: str, limit: int = 20) -> list[UserSearchRecord]:
         """Search users for the add-friend flow."""
-        payload = await self._http.get(
-            "/users/search",
-            params={
-                "keyword": keyword,
-                "page": 1,
-                "size": limit,
-            },
-        )
+        payload = await self._user_service.search_users(keyword, page=1, size=limit)
         items = payload.get("items", []) if isinstance(payload, dict) else []
         return [
             UserSearchRecord(
@@ -251,23 +246,11 @@ class ContactController:
 
     async def send_friend_request(self, user_id: str, message: str = "") -> dict:
         """Create a new friend request."""
-        return await self._http.post(
-            "/friends/requests",
-            json={
-                "receiver_id": user_id,
-                "message": message,
-            },
-        )
+        return await self._contact_service.send_friend_request(user_id, message)
 
     async def create_group(self, name: str, member_ids: list[str]) -> GroupRecord:
         """Create a new group from selected members."""
-        payload = await self._http.post(
-            "/groups",
-            json={
-                "name": name,
-                "member_ids": member_ids,
-            },
-        )
+        payload = await self._contact_service.create_group(name, member_ids)
         data = dict(payload or {})
         return GroupRecord(
             id=str(data.get("id", "") or ""),
@@ -281,15 +264,15 @@ class ContactController:
 
     async def accept_request(self, request_id: str) -> dict:
         """Accept a pending friend request."""
-        return await self._http.post(f"/friends/requests/{request_id}/accept", json={})
+        return await self._contact_service.accept_friend_request(request_id)
 
     async def reject_request(self, request_id: str) -> dict:
         """Reject a pending friend request."""
-        return await self._http.post(f"/friends/requests/{request_id}/reject", json={})
+        return await self._contact_service.reject_friend_request(request_id)
 
     async def remove_friend(self, friend_id: str) -> None:
         """Remove an existing friend."""
-        await self._http.delete(f"/friends/{friend_id}")
+        await self._contact_service.remove_friend(friend_id)
 
     def group_contacts(self, contacts: list[ContactRecord]) -> dict[str, list[ContactRecord]]:
         """Group contacts by sort letter."""

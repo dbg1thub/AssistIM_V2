@@ -1,4 +1,4 @@
-﻿"""Group API tests."""
+"""Group API tests."""
 
 from __future__ import annotations
 
@@ -54,3 +54,22 @@ def test_group_permissions_and_transfer_flow(client: TestClient, user_factory, a
         headers=auth_header(owner["access_token"]),
     )
     assert delete_as_old_owner_response.status_code == 403
+
+
+def test_group_owner_cannot_remove_self_without_transfer(client: TestClient, user_factory, auth_header) -> None:
+    owner = user_factory("owner", "Owner")
+    member = user_factory("member", "Member")
+
+    create_group_response = client.post(
+        "/api/v1/groups",
+        json={"name": "Core Team", "member_ids": [member["user"]["id"]]},
+        headers=auth_header(owner["access_token"]),
+    )
+    assert create_group_response.status_code == 201
+    group_id = create_group_response.json()["data"]["id"]
+
+    remove_owner_response = client.delete(
+        f"/api/v1/groups/{group_id}/members/{owner['user']['id']}",
+        headers=auth_header(owner["access_token"]),
+    )
+    assert remove_owner_response.status_code == 403

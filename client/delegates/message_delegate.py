@@ -188,7 +188,7 @@ class MessageDelegate(QStyledItemDelegate):
         self._draw_bubble(painter, bubble_rect, message, avatar_rect)
 
         if message.is_self:
-            badge_rect = self._status_badge_rect(bubble_rect, option.rect)
+            badge_rect = self._status_badge_rect(bubble_rect, option.rect, message)
             self._draw_status_badge(painter, badge_rect, message)
 
         self._draw_row_divider(painter, option.rect)
@@ -660,26 +660,42 @@ class MessageDelegate(QStyledItemDelegate):
         self._draw_video_duration(painter, cover_rect, message)
         self._draw_media_state_overlay(painter, cover_rect, message)
 
-    def _status_badge_rect(self, bubble_rect: QRect, row_rect: QRect) -> QRect:
+    def _status_badge_rect(self, bubble_rect: QRect, row_rect: QRect, message: ChatMessage) -> QRect:
         """Return the rect for the self-message status badge."""
         size = self.STATUS_BADGE_SIZE
-        x = max(row_rect.x() + self.LEFT_MARGIN, bubble_rect.x() - self.BUBBLE_GAP - size)
+        width = size
+        count_text = self._group_read_count_text(message)
+        if count_text:
+            width = max(size, QFontMetrics(self._status_count_font()).horizontalAdvance(count_text) + 12)
+        x = max(row_rect.x() + self.LEFT_MARGIN, bubble_rect.x() - self.BUBBLE_GAP - width)
         y = bubble_rect.y() + max(0, bubble_rect.height() - size - 6)
-        return QRect(x, y, size, size)
+        return QRect(x, y, width, size)
 
     def _draw_status_badge(self, painter: QPainter, rect: QRect, message: ChatMessage) -> None:
-        """Draw a Fluent IconInfoBadge-like status badge on the left of self bubbles."""
+        """Draw a status icon or group read-count pill on the left of self bubbles."""
         badge = self._status_badge_style(message)
         if badge is None:
             return
 
         color, icon = badge
+        count_text = self._group_read_count_text(message)
+
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(color)
-        painter.drawEllipse(rect)
 
+        if count_text:
+            badge_path = QPainterPath()
+            badge_path.addRoundedRect(QRectF(rect), rect.height() / 2, rect.height() / 2)
+            painter.fillPath(badge_path, color)
+            painter.setPen(Qt.GlobalColor.white)
+            painter.setFont(self._status_count_font())
+            painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, count_text)
+            painter.restore()
+            return
+
+        painter.drawEllipse(rect)
         icon_rect = QRectF(
             rect.x() + (rect.width() - 8) / 2,
             rect.y() + (rect.height() - 8) / 2,
@@ -688,6 +704,29 @@ class MessageDelegate(QStyledItemDelegate):
         )
         icon.render(painter, icon_rect, Theme.DARK if not isDarkTheme() else Theme.LIGHT)
         painter.restore()
+
+    def _status_count_font(self) -> QFont:
+        """Return the compact font used for group read-count pills."""
+        font = QFont()
+        font.setPixelSize(10)
+        font.setBold(True)
+        return font
+
+    def _group_read_count_text(self, message: ChatMessage) -> str:
+        """Return the group read-progress label for one self message."""
+        if not message.is_self:
+            return ""
+
+        extra = message.extra or {}
+        try:
+            read_count = max(0, int(extra.get("read_count", 0) or 0))
+            read_target_count = max(0, int(extra.get("read_target_count", 0) or 0))
+        except (TypeError, ValueError):
+            return ""
+
+        if read_target_count <= 1 or read_count <= 0:
+            return ""
+        return f"{read_count}/{read_target_count}"
 
     def _status_badge_style(self, message: ChatMessage) -> tuple[QColor, FluentIcon] | None:
         """Return badge background and icon for message status."""

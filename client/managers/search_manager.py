@@ -3,8 +3,6 @@ Search Manager Module
 
 Message search functionality with database queries.
 """
-import asyncio
-import re
 from dataclasses import dataclass
 from typing import Optional
 
@@ -40,8 +38,6 @@ class SearchManager:
     def __init__(self):
         self._db = get_database()
         self._current_results: list[SearchResult] = []
-        self._search_task: Optional[asyncio.Task] = None
-        self._running = False
 
     async def search(
         self,
@@ -87,42 +83,9 @@ class SearchManager:
         session_id: Optional[str],
         limit: int,
     ) -> list[ChatMessage]:
-        """Search messages in database."""
+        """Search messages through the formal storage API."""
         try:
-            if session_id:
-                # Search within specific session
-                cursor = await self._db.execute(
-                    """
-                    SELECT * FROM messages
-                    WHERE session_id = ? AND content LIKE ?
-                    ORDER BY timestamp DESC
-                    LIMIT ?
-                    """,
-                    (session_id, f"%{keyword}%", limit),
-                )
-            else:
-                # Search all sessions
-                cursor = await self._db.execute(
-                    """
-                    SELECT * FROM messages
-                    WHERE content LIKE ?
-                    ORDER BY timestamp DESC
-                    LIMIT ?
-                    """,
-                    (f"%{keyword}%", limit),
-                )
-
-            rows = await cursor.fetchall()
-
-            # Convert rows to messages
-            messages = []
-            for row in rows:
-                message = self._db._row_to_message(row)
-                if message:
-                    messages.append(message)
-
-            return messages
-
+            return await self._db.search_messages(keyword, session_id=session_id, limit=limit)
         except Exception as e:
             logger.error(f"Search error: {e}")
             return []

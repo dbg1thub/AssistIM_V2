@@ -416,10 +416,11 @@ class ChatPanel(QWidget):
         if self._message_model:
             self._message_model.update_message_status(message_id, status)
 
-    def mark_read_through(self, session_id: str, message_id: str, status) -> None:
-        """Mark all self messages up to the target message as read in the visible model."""
+    def apply_read_receipt(self, session_id: str, reader_id: str, last_read_seq: int) -> None:
+        """Apply one cumulative read receipt in the visible model."""
         if self._message_model:
-            self._message_model.mark_read_through(session_id, message_id, status)
+            self._message_model.apply_read_receipt(session_id, reader_id, last_read_seq)
+
 
     def update_message_content(self, message_id: str, content: str) -> None:
         """Update message content in model."""

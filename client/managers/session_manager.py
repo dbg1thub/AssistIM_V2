@@ -15,7 +15,7 @@ from client.core.logging import setup_logging
 from client.events.event_bus import get_event_bus
 from client.managers.message_manager import MessageEvent, get_message_manager
 from client.models.message import ChatMessage, MessageStatus, Session, format_message_preview, resolve_recall_notice
-from client.network.http_client import get_http_client
+from client.services.session_service import get_session_service
 from client.storage.database import get_database
 
 setup_logging()
@@ -50,6 +50,7 @@ class SessionManager:
     def __init__(self):
         self._event_bus = get_event_bus()
         self._msg_manager = get_message_manager()
+        self._session_service = get_session_service()
 
         self._sessions: dict[str, Session] = {}
         self._current_session_id: Optional[str] = None
@@ -95,6 +96,9 @@ class SessionManager:
 
         await self._subscribe(MessageEvent.RECEIVED, self._on_message_received)
         await self._subscribe(MessageEvent.SYNC_COMPLETED, self._on_history_synced)
+        await self._subscribe(MessageEvent.EDITED, self._on_message_mutated)
+        await self._subscribe(MessageEvent.RECALLED, self._on_message_mutated)
+        await self._subscribe(MessageEvent.DELETED, self._on_message_mutated)
 
         self._running = True
         self._initialized = True
@@ -290,7 +294,7 @@ class SessionManager:
     async def _fetch_remote_session(self, session_id: str, message: ChatMessage) -> Optional[Session]:
         """Fetch and normalize a session from the backend."""
         try:
-            payload = await get_http_client().get(f"/sessions/{session_id}")
+            payload = await self._session_service.fetch_session(session_id)
         except Exception as exc:
             logger.warning("Fetch session %s failed: %s", session_id, exc)
             return None
@@ -514,6 +518,13 @@ class SessionManager:
                 "sessions": self.sessions,
             })
 
+    async def _on_message_mutated(self, data: dict) -> None:
+        """Refresh session preview after edit/recall/delete events."""
+        session_id = str(data.get("session_id", "") or "")
+        if not session_id:
+            return
+        await self.refresh_session_preview(session_id)
+
     def _is_session_visible(self, session: Session, current_user: dict[str, Any]) -> bool:
         """Return whether a session has a valid visible counterpart for the current user."""
         if session.is_ai_session or session.session_type == "group":
@@ -589,7 +600,7 @@ class SessionManager:
     async def refresh_remote_sessions(self) -> list[Session]:
         """Fetch the current user's session snapshot from the backend and replace local cache."""
         try:
-            payload = await get_http_client().get("/sessions")
+            payload = await self._session_service.fetch_sessions()
         except Exception as exc:
             logger.warning("Refresh remote sessions failed: %s", exc)
             return self.sessions
@@ -615,7 +626,7 @@ class SessionManager:
     async def _fetch_remote_unread_counts(self) -> dict[str, int]:
         """Fetch authoritative unread counts from the backend."""
         try:
-            payload = await get_http_client().get("/sessions/unread")
+            payload = await self._session_service.fetch_unread_counts()
         except Exception as exc:
             logger.warning("Refresh remote unread counts failed: %s", exc)
             return {}
@@ -742,7 +753,7 @@ class SessionManager:
             return existing
 
         try:
-            payload = await get_http_client().get(f"/sessions/{session_id}")
+            payload = await self._session_service.fetch_session(session_id)
         except Exception as exc:
             logger.warning("Fetch session %s failed: %s", session_id, exc)
             return None
@@ -770,13 +781,9 @@ class SessionManager:
             return existing
 
         try:
-            payload = await get_http_client().post(
-                "/sessions",
-                json={
-                    "type": "private",
-                    "user_id": user_id,
-                    "name": display_name or tr("session.private_chat", "Private Chat"),
-                },
+            payload = await self._session_service.create_direct_session(
+                user_id,
+                display_name=display_name or tr("session.private_chat", "Private Chat"),
             )
         except Exception as exc:
             logger.warning("Create direct session for %s failed: %s", user_id, exc)

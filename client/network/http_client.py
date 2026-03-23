@@ -45,7 +45,7 @@ class HTTPClient:
         self._access_token: Optional[str] = None
         self._refresh_token: Optional[str] = None
         self._token_lock = asyncio.Lock()
-        self._refreshing = False
+        self._refresh_task: Optional[asyncio.Task[bool]] = None
         self._token_listeners: list[Callable[[Optional[str], Optional[str]], None]] = []
 
     @property
@@ -107,14 +107,41 @@ class HTTPClient:
             except Exception:
                 logger.exception("Token listener error")
 
-    def _get_headers(self) -> dict[str, str]:
+    @staticmethod
+    def _is_absolute_url(path: str) -> bool:
+        """Return whether one request target is already a full URL."""
+        return path.startswith("http://") or path.startswith("https://")
+
+    def _resolve_url(self, path: str) -> str:
+        """Resolve one relative API path or return one absolute URL unchanged."""
+        if self._is_absolute_url(path):
+            return path
+
+        normalized_base = self._base_url.rstrip("/")
+        normalized_path = path if path.startswith("/") else f"/{path}"
+        return f"{normalized_base}{normalized_path}"
+
+    def _should_use_app_auth(self, path: str, use_auth: Optional[bool]) -> bool:
+        """Decide whether one request should inherit the app auth state."""
+        if use_auth is not None:
+            return use_auth
+        return not self._is_absolute_url(path)
+
+    def _build_headers(
+            self,
+            *,
+            include_auth: bool,
+            extra_headers: Optional[dict[str, str]] = None,
+    ) -> dict[str, str]:
         """Build request headers."""
         headers = {
             "Content-Type": "application/json",
             "Accept": "application/json",
         }
-        if self._access_token:
+        if include_auth and self._access_token:
             headers["Authorization"] = f"Bearer {self._access_token}"
+        if extra_headers:
+            headers.update(extra_headers)
         return headers
 
     async def _request(
@@ -125,17 +152,19 @@ class HTTPClient:
             json: Optional[dict[str, Any]] = None,
             headers: Optional[dict[str, str]] = None,
             retry_on_401: bool = True,
+            use_auth: Optional[bool] = None,
     ) -> Any:
         """
         Make an HTTP request with unified error handling.
 
         Args:
             method: HTTP method (GET, POST, PUT, DELETE, etc.)
-            path: API path (will be appended to base_url)
+            path: Relative API path or absolute URL
             params: Query parameters
             json: JSON body
             headers: Additional headers
             retry_on_401: Whether to retry on 401 after token refresh
+            use_auth: Whether to apply app auth/refresh; defaults to True for relative paths only
 
         Returns:
             Response data (the 'data' field from API response)
@@ -146,10 +175,12 @@ class HTTPClient:
             ServerError: For 5xx server errors
             APIError: For other API errors
         """
-        url = f"{self._base_url}{path}"
-        request_headers = self._get_headers()
-        if headers:
-            request_headers.update(headers)
+        url = self._resolve_url(path)
+        apply_auth = self._should_use_app_auth(path, use_auth)
+        request_headers = self._build_headers(
+            include_auth=apply_auth,
+            extra_headers=headers,
+        )
 
         session = await self._ensure_session()
 
@@ -163,7 +194,16 @@ class HTTPClient:
                     json=json,
                     headers=request_headers,
             ) as response:
-                return await self._handle_response(response, retry_on_401, method, path, params, json, headers)
+                return await self._handle_response(
+                    response,
+                    retry_on_401,
+                    method,
+                    path,
+                    params,
+                    json,
+                    headers,
+                    use_auth=apply_auth,
+                )
 
         except aiohttp.ClientError as e:
             logger.error(f"Network error: {e}")
@@ -181,6 +221,7 @@ class HTTPClient:
             params: Optional[dict[str, Any]],
             json: Optional[dict[str, Any]],
             headers: Optional[dict[str, str]],
+            use_auth: bool,
     ) -> Any:
         """Handle HTTP response and errors."""
         status = response.status
@@ -202,7 +243,7 @@ class HTTPClient:
             return data
 
         if status == 401:
-            if retry_on_401 and self._refresh_token:
+            if use_auth and retry_on_401 and self._refresh_token:
                 success = await self._refresh_access_token()
                 if success:
                     return await self._request(
@@ -212,9 +253,17 @@ class HTTPClient:
                         json=json,
                         headers=headers,
                         retry_on_401=False,
+                        use_auth=use_auth,
                     )
 
-            raise AuthExpiredError(data.get("message", "Authentication failed"))
+            if use_auth:
+                raise AuthExpiredError(data.get("message", "Authentication failed"))
+
+            raise APIError(
+                data.get("message", "Unauthorized"),
+                code=data.get("code"),
+                status_code=status,
+            )
 
         if status >= 500:
             raise ServerError(
@@ -226,54 +275,141 @@ class HTTPClient:
         message = data.get("message", "Unknown error")
         raise APIError(message, code=code, status_code=status)
 
+    @staticmethod
+    def _error_message_from_payload(payload: Any, response_text: str, *, fallback: str) -> str:
+        """Return one normalized API error message."""
+        if isinstance(payload, dict):
+            return str(payload.get("message", fallback) or fallback)
+        if response_text:
+            return response_text
+        return fallback
+
+    @staticmethod
+    def _error_code_from_payload(payload: Any) -> int | None:
+        """Return one normalized API error code."""
+        if not isinstance(payload, dict):
+            return None
+        code = payload.get("code")
+        try:
+            return int(code) if code is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    async def _handle_upload_response(
+            self,
+            response: aiohttp.ClientResponse,
+            *,
+            file_path: str,
+            upload_path: str,
+            use_auth: bool,
+            retry_on_401: bool,
+    ) -> dict[str, Any]:
+        """Handle multipart upload responses using the standard client error model."""
+        status = response.status
+        payload: Any = None
+        response_text = ""
+
+        try:
+            payload = await response.json()
+        except Exception:
+            response_text = await response.text()
+
+        if status == 200 or status == 201:
+            if isinstance(payload, dict) and "data" in payload:
+                payload = payload["data"]
+            if isinstance(payload, dict):
+                return payload
+            raise ServerError("Upload response must be a JSON object", status_code=status)
+
+        if status == 401:
+            if use_auth and retry_on_401 and self._refresh_token:
+                success = await self._refresh_access_token()
+                if success:
+                    return await self.upload_file(
+                        file_path,
+                        upload_path=upload_path,
+                        use_auth=use_auth,
+                    )
+
+            message = self._error_message_from_payload(payload, response_text, fallback="Authentication failed")
+            if use_auth:
+                raise AuthExpiredError(message)
+            raise APIError(
+                message,
+                code=self._error_code_from_payload(payload),
+                status_code=status,
+            )
+
+        if status >= 500:
+            raise ServerError(
+                self._error_message_from_payload(payload, response_text, fallback="Server error"),
+                status_code=status,
+            )
+
+        raise APIError(
+            self._error_message_from_payload(payload, response_text, fallback=f"Upload failed ({status})"),
+            code=self._error_code_from_payload(payload),
+            status_code=status,
+        )
+
     async def _refresh_access_token(self) -> bool:
         """
-        Refresh access token using refresh token.
+        Refresh access token using one single-flight task.
 
         Returns:
             True if refresh successful, False otherwise
         """
         async with self._token_lock:
-            if self._refreshing:
-                return False
-
             if not self._refresh_token:
                 return False
 
-            self._refreshing = True
+            refresh_task = self._refresh_task
+            if refresh_task is None or refresh_task.done():
+                refresh_task = asyncio.create_task(self._perform_token_refresh())
+                self._refresh_task = refresh_task
 
-            try:
-                logger.info("Refreshing access token")
+        try:
+            return await refresh_task
+        finally:
+            async with self._token_lock:
+                if self._refresh_task is refresh_task and refresh_task.done():
+                    self._refresh_task = None
 
-                session = await self._ensure_session()
-                url = f"{self._base_url}/auth/refresh"
+    async def _perform_token_refresh(self) -> bool:
+        """Execute one refresh HTTP call and update in-memory tokens."""
+        refresh_token = self._refresh_token
+        if not refresh_token:
+            return False
 
-                async with session.post(
-                        url,
-                        json={"refresh_token": self._refresh_token},
-                        headers={"Content-Type": "application/json"},
-                ) as response:
-                    if response.status == 200:
-                        data = await response.json()
-                        auth_data = data.get("data", {}) if isinstance(data, dict) else {}
-                        self.set_tokens(
-                            auth_data.get("access_token"),
-                            auth_data.get("refresh_token", self._refresh_token),
-                        )
-                        logger.info("Token refreshed successfully")
-                        return bool(self._access_token)
-                    else:
-                        logger.warning("Token refresh failed")
-                        self.clear_tokens()
-                        return False
+        try:
+            logger.info("Refreshing access token")
 
-            except Exception as e:
-                logger.error(f"Token refresh error: {e}")
+            session = await self._ensure_session()
+            url = self._resolve_url("/auth/refresh")
+
+            async with session.post(
+                    url,
+                    json={"refresh_token": refresh_token},
+                    headers={"Content-Type": "application/json"},
+            ) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    auth_data = data.get("data", {}) if isinstance(data, dict) else {}
+                    self.set_tokens(
+                        auth_data.get("access_token"),
+                        auth_data.get("refresh_token", refresh_token),
+                    )
+                    logger.info("Token refreshed successfully")
+                    return bool(self._access_token)
+
+                logger.warning("Token refresh failed")
                 self.clear_tokens()
                 return False
 
-            finally:
-                self._refreshing = False
+        except Exception as e:
+            logger.error(f"Token refresh error: {e}")
+            self.clear_tokens()
+            return False
 
     async def get(
             self,
@@ -312,31 +448,34 @@ class HTTPClient:
 
     async def close(self) -> None:
         """Close the HTTP session."""
+        refresh_task = self._refresh_task
+        self._refresh_task = None
+        if refresh_task and not refresh_task.done():
+            refresh_task.cancel()
+            try:
+                await refresh_task
+            except asyncio.CancelledError:
+                pass
         if self._session and not self._session.closed:
             await self._session.close()
             logger.debug("HTTP client session closed")
         self._session = None
-        self._refreshing = False
 
     async def upload_file(
             self,
             file_path: str,
             upload_path: str = "/upload",
-    ) -> Optional[dict]:
-        """
-        Upload a file to the server.
-
-        Args:
-            file_path: Path to the file to upload
-            upload_path: API path for upload endpoint
-
-        Returns:
-            Response data with file URL, or None on failure
-        """
+            use_auth: Optional[bool] = None,
+    ) -> dict[str, Any]:
+        """Upload one file using the same structured error model as normal HTTP requests."""
         import os
         from aiohttp import FormData
 
-        url = f"{self._base_url}{upload_path}"
+        if not file_path:
+            raise APIError("file path required")
+
+        url = self._resolve_url(upload_path)
+        apply_auth = self._should_use_app_auth(upload_path, use_auth)
 
         try:
             session = await self._ensure_session()
@@ -350,8 +489,8 @@ class HTTPClient:
                     content_type=self._get_content_type(file_path),
                 )
 
-                headers = {}
-                if self._access_token:
+                headers = {"Accept": "application/json"}
+                if apply_auth and self._access_token:
                     headers["Authorization"] = f"Bearer {self._access_token}"
 
                 logger.info(f"Uploading file: {file_path}")
@@ -361,19 +500,28 @@ class HTTPClient:
                         data=form,
                         headers=headers,
                 ) as response:
-                    if response.status == 200 or response.status == 201:
-                        data = await response.json()
-                        if isinstance(data, dict) and "data" in data:
-                            return data["data"]
-                        return data
+                    return await self._handle_upload_response(
+                        response,
+                        file_path=file_path,
+                        upload_path=upload_path,
+                        use_auth=apply_auth,
+                        retry_on_401=True,
+                    )
 
-                    text = await response.text()
-                    logger.error(f"Upload failed: {response.status} - {text}")
-                    return None
-
-        except Exception as e:
-            logger.error(f"Upload error: {e}")
-            return None
+        except FileNotFoundError as e:
+            logger.error(f"Upload file not found: {file_path}")
+            raise APIError(f"file not found: {file_path}") from e
+        except OSError as e:
+            logger.error(f"Upload file error: {e}")
+            raise APIError(f"file upload failed: {e}") from e
+        except (APIError, AuthExpiredError, NetworkError, ServerError):
+            raise
+        except aiohttp.ClientError as e:
+            logger.error(f"Upload network error: {e}")
+            raise NetworkError(f"Upload failed: {e}") from e
+        except asyncio.TimeoutError as e:
+            logger.error(f"Upload timeout: {url}")
+            raise NetworkError(f"Upload timeout: {e}") from e
 
     def _get_content_type(self, file_path: str) -> str:
         """Get content type based on file extension."""

@@ -1,395 +1,371 @@
-# 常见陷阱与反模式（Pitfalls）
+# 常见陷阱与反模式
 
-本文档记录项目中需要避免的常见错误模式。
+本文档记录项目中需要主动规避的错误设计。它不是重复架构文档，而是把容易再次犯错的地方直接点出来，方便 code review 与后续重构时对照检查。
 
-Cursor 在生成或修改代码时必须避免这些问题。
+## 1. UI 直接调用网络或数据库
 
----
+错误模式：
 
-# 1 WebSocket 无限重连
+- Widget 里直接发 HTTP 请求
+- Widget 里直接发 WebSocket
+- Widget 里直接读写 SQLite
 
-问题：
+为什么错：
 
-当 WebSocket 连接断开时，如果没有区分 **主动断开** 与 **异常断开**，客户端可能进入无限重连循环。
-
-错误示例：
-
-WebSocket关闭
-→ 抛出异常
-→ reconnect
-→ 再次关闭
-→ 无限循环
-
-正确设计：
-
-客户端必须维护标志：
-
-self._intentional_disconnect
-
-重连逻辑：
-
-如果 intentional_disconnect 为 true
-→ 不执行重连
-
-必须实现 **指数退避重连策略**。
-
----
-
-# 2 asyncio Task 泄漏
-
-问题：
-
-如果使用 fire-and-forget 方式创建任务：
-
-asyncio.create_task()
-
-但没有保存引用。
-
-任务可能：
-
-* 无法取消
-* 无法监控异常
-* 在程序退出时产生警告
-
-错误示例：
-
-create_task(...)
-不保存引用。
-
-正确做法：
-
-所有任务必须保存引用：
-
-self._tasks.add(task)
-
-并在关闭时：
-
-cancel
-await
-
----
-
-# 3 UI线程阻塞
-
-问题：
-
-在 PySide6 + qasync 项目中，如果在 async 函数中执行 **阻塞操作**，会导致 UI 卡死。
-
-常见原因：
-
-AI推理
-文件IO
-数据库操作
-
-错误示例：
-
-await model.generate()
-
-如果 generate 是同步函数。
-
-正确做法：
-
-使用：
-
-loop.run_in_executor(...)
-
-或使用真正的 async API。
-
----
-
-# 4 WebSocket 消息静默丢失
-
-问题：
-
-如果发送消息使用 fire-and-forget：
-
-asyncio.create_task(ws.send())
-
-当连接断开时：
-
-消息可能直接丢失。
-
-UI 不会收到任何错误。
-
-正确做法：
-
-发送失败必须通知 UI。
-
-例如：
-
-message_send_failed(msg_id)
-
----
-
-# 5 心跳机制误判断线
-
-错误设计：
-
-sleep(interval)
-send_ping()
-sleep(timeout)
-
-这种顺序 sleep 容易造成误判。
-
-如果网络延迟较高：
-
-客户端可能错误判断连接断开。
+- UI 与业务状态耦合
+- 难测
+- 页面一多就到处复制逻辑
 
 正确方式：
 
-使用：
+- UI -> Controller -> Manager
+- Manager 协调 Service / ConnectionManager / Storage
 
-asyncio.wait_for()
+## 2. 在多个地方维护同一份业务真相
 
-等待 pong。
+错误模式：
 
----
+- 同时依赖多套成员关系判断聊天权限
+- UI 自己维护未读、排序、会话状态真相
+- 本地缓存和服务端权限混在一起判断
 
-# 6 aiohttp ClientSession 未关闭
+为什么错：
 
-问题：
-
-如果 aiohttp.ClientSession 没有正确关闭：
-
-程序退出时会出现：
-
-Unclosed client session
-
-正确设计：
-
-在应用关闭时：
-
-await session.close()
-
-关闭时机：
-
-QApplication.aboutToQuit
-
----
-
-# 7 消息重复发送
-
-问题：
-
-如果消息没有唯一 ID：
-
-在重连重发时可能产生重复消息。
-
-正确设计：
-
-每条消息必须包含：
-
-msg_id
-
-推荐：
-
-UUID。
-
-服务器根据 msg_id 去重。
-
----
-
-# 8 UI 更新过于频繁（AI streaming）
-
-问题：
-
-AI streaming 如果每个 token 更新 UI：
-
-界面会严重卡顿。
-
-错误示例：
-
-token
-→ update UI
-
-正确做法：
-
-使用缓冲：
-
-每 30ms 批量刷新 UI。
-
----
-
-# 9 聊天会话状态分散
-
-问题：
-
-如果 UI 自己维护：
-
-聊天列表
-未读数
-会话排序
-
-会导致状态不同步。
-
-正确设计：
-
-所有会话状态由：
-
-SessionManager
-
-统一管理。
-
-UI 只读取状态。
-
----
-
-# 10 Token 过期导致连接异常
-
-问题：
-
-如果 WebSocket 连接使用过期 token：
-
-服务器会直接关闭连接。
-
-客户端可能不断 reconnect。
-
-正确设计：
-
-连接前检查 token 是否有效。
-
-HTTP 请求 401 时：
-
-refresh token
-retry request
-
----
-
-# 11 相对路径存储问题
-
-问题：
-
-使用：
-
-Path("data/file")
-
-如果用户从不同目录启动程序：
-
-会生成多个 data 文件夹。
-
-正确做法：
-
-使用：
-
-appdirs.user_data_dir()
-
----
-
-# 12 直接抛出 Exception
-
-问题：
-
-如果代码直接：
-
-raise Exception
-
-UI 无法区分错误类型。
-
-正确设计：
-
-使用统一异常体系：
-
-APIError
-NetworkError
-AuthExpiredError
-ServerError
-
----
-
-# 13 WebSocket 状态管理混乱
-
-问题：
-
-如果 WebSocket 没有明确状态：
-
-可能出现：
-
-重复连接
-重复关闭
-任务重复启动
-
-正确设计：
-
-WebSocketClient 必须维护状态机：
-
-DISCONNECTED
-CONNECTING
-CONNECTED
-RECONNECTING
-
----
-
-# 14 未处理 asyncio CancelledError
-
-问题：
-
-在取消任务时，如果代码捕获所有异常：
-
-except Exception
-
-可能会吞掉 CancelledError。
-
-导致任务无法正确退出。
-
-正确设计：
-
-必须显式处理：
-
-CancelledError
-
-并重新抛出。
-
----
-
-# 15 程序关闭时仍有后台任务
-
-问题：
-
-如果程序关闭时还有未完成任务：
-
-可能出现：
-
-Task was destroyed but it is pending
-
-正确做法：
-
-关闭流程必须：
-
-disconnect websocket
-cancel tasks
-await tasks
-close session
-
-# 16 UI线程更新问题
-
-问题：
-
-如果在非 UI 线程更新 Qt UI，
-程序可能崩溃。
-
-错误示例：
-
-worker thread
-→ update widget
+- 写路径复杂
+- 读路径需要“修复”数据
+- 状态长期漂移
 
 正确方式：
 
-UI 更新必须在 Qt 主线程执行。
+- 会话权限与已读真相统一落到 `session_members`
+- 客户端状态统一由 Manager 管理
+- 本地缓存只做恢复与展示，不做最终权限真相
+- 历史成员漂移通过启动期兼容迁移回填，不在 `list/get/send` 等业务请求里隐式补数据
 
-推荐：
+## 3. 把群聊已读写成消息全局 `read`
 
-通过 EventBus 或 Signal 通知 UI。
+错误模式：
 
-# 17 WebSocket消息乱序
+- 只要有一个群成员读了消息，就把消息状态写成 `read`
 
-问题：
+为什么错：
 
-网络延迟可能导致消息顺序错乱。
+- 群聊里“有人读了”不等于“所有人读了”
+- 失去按成员统计与展示能力
 
-解决方案：
+正确方式：
 
-使用 seq 字段排序。
+- 已读使用成员读指针 `last_read_seq`
+- 私聊显示对方已读
+- 群聊显示读人数或读者列表
 
-客户端必须维护：
+## 4. 用时间戳做正式断线补偿
 
-last_received_seq
+错误模式：
+
+- 用 `last_timestamp` 拉缺失消息
+- 认为“created_at 更大就是新消息”
+
+为什么错：
+
+- 时间精度、时钟漂移、写入重排都会破坏正确性
+- 不适合作为 IM 正式补偿依据
+
+正确方式：
+
+- 新消息补偿使用 `session_cursors`
+- 状态事件补偿使用 `event_cursors`
+- 会话顺序使用 `session_seq`
+
+## 5. 拿 `session_seq` 补偿非消息事件
+
+错误模式：
+
+- 试图通过 `session_seq` 推断 edit / recall / delete / read 是否遗漏
+- 把所有状态变更混到消息补偿里
+
+为什么错：
+
+- 新消息与状态变更不是同一类数据
+- 客户端很难处理“没有新消息，但旧消息状态变了”的场景
+
+正确方式：
+
+- 新消息补偿使用 `session_cursors`
+- 状态事件补偿使用 `event_cursors`
+- `read`、`message_edit`、`message_recall`、`message_delete` 进入独立事件流
+
+## 6. 用 `max(session_seq) + 1` 分配消息序号
+
+错误模式：
+
+- 读取当前最大值再加一
+
+为什么错：
+
+- 并发下会冲突
+- 事务回滚和重试复杂
+
+正确方式：
+
+- 使用会话级高水位原子递增
+- 把 `last_message_seq` 作为正式分配器
+
+## 7. 把好友请求当成“每点一次就新建一条记录”
+
+错误模式：
+
+- 允许用户给自己发好友请求
+- 同方向重复点击反复创建多条 `pending` 请求
+- A 给 B 发过请求后，B 再给 A 发一条新的 `pending` 请求
+
+为什么错：
+
+- 会把简单的好友关系变成脏数据堆积
+- UI 很难判断哪一条才是当前有效请求
+- 互相想加好友时反而需要两边重复处理
+
+正确方式：
+
+- 自加直接拒绝
+- 同方向重复发送按幂等处理，返回现有 `pending` 请求
+- 发现反向 `pending` 时直接接受已有请求并建立好友关系
+
+## 8. WebSocket Gateway 直接广播业务变更
+
+错误模式：
+
+- WS 入口只做“是不是会话成员”的校验
+- 然后直接广播 edit / recall / delete / read
+
+为什么错：
+
+- HTTP 与 WS 规则容易分叉
+- 权限校验、时间窗校验、消息归属校验会漏掉
+
+正确方式：
+
+- WS 与 HTTP 共用同一套 Service 规则
+- Gateway 只做协议适配和错误转换
+
+## 9. ACK 机制只有一半
+
+错误模式：
+
+- 客户端等待 ACK，但超时后不真正重发
+- 重发时换了新的 `msg_id`
+- 服务端没有做幂等去重
+
+为什么错：
+
+- 表面上有 ACK，实际上没有可靠性闭环
+
+正确方式：
+
+- 同一逻辑消息复用同一 `msg_id`
+- ACK 超时自动重发
+- 服务端幂等处理并返回权威结果
+
+## 10. 把 EventBus 当成命令总线
+
+错误模式：
+
+- UI 通过 EventBus 反向驱动业务命令
+- 任意层都往 EventBus 塞命令型消息
+
+为什么错：
+
+- 调用路径不清晰
+- 难定位真正入口
+- 更容易变成隐式耦合
+
+正确方式：
+
+- 命令走 Controller / Manager
+- EventBus 只传播状态变化与通知
+
+## 11. 长列表使用全量 reset
+
+错误模式：
+
+- 消息列表一变化就 `beginResetModel()`
+- 会话列表一变化就全量重建
+
+为什么错：
+
+- 大列表性能差
+- 滚动位置和选择态容易抖动
+
+正确方式：
+
+- 优先增量更新模型
+- 只有全量快照替换时才考虑 reset
+
+## 12. AI streaming 每个 token 都重绘 UI
+
+错误模式：
+
+- 每收到一个 token 就刷新一次整个界面
+
+为什么错：
+
+- 重绘过于频繁
+- 长文本输出时体验会迅速变差
+
+正确方式：
+
+- 做节流或批量刷新
+- 把 token 合并成短周期批次更新
+
+## 13. 自定义一堆“伪 Fluent”基础控件
+
+错误模式：
+
+- 有现成 QFluentWidgets 组件，却重新写按钮、卡片、菜单、tooltip
+- 页面各自发明一套容器和样式规则
+
+为什么错：
+
+- 风格漂移
+- 重复维护
+- 设计系统无法统一
+
+正确方式：
+
+- 优先复用 QFluentWidgets
+- 容器统一 `CardWidget`
+- Tooltip 默认 Acrylic + Filter
+- 样式参考 Gallery 与共享 token
+
+## 14. 大量内联 `setStyleSheet`
+
+错误模式：
+
+- Python 代码里拼大量样式字符串
+- 相似页面复制粘贴一份颜色和圆角
+
+为什么错：
+
+- 样式难以统一
+- 主题切换成本高
+- 维护成本高
+
+正确方式：
+
+- 用共享 QSS 文件 + style registry
+- 通过 objectName 和 token 管理差异
+
+## 15. 未追踪的后台任务
+
+错误模式：
+
+- `asyncio.create_task()` 后不保存引用
+- 程序退出时任务还在跑
+
+为什么错：
+
+- 无法取消
+- 异常容易丢失
+- 关闭时出现 pending task 警告
+
+正确方式：
+
+- 保存任务引用
+- 关闭时 cancel + await
+- 明确区分长期任务与短期任务
+
+## 16. 吞掉 `CancelledError`
+
+错误模式：
+
+- `except Exception` 把取消异常一起吞了
+
+为什么错：
+
+- 任务无法正常退出
+- 关闭流程和重连流程容易混乱
+
+正确方式：
+
+- 显式处理 `CancelledError`
+- 需要时重新抛出
+
+## 17. 在服务端继续使用 naive UTC 时间或遗留生命周期钩子
+
+错误模式：
+
+- 在服务端继续写 `datetime.utcnow()`
+- 拿 naive datetime 和 aware datetime 混着比较
+- 继续依赖 FastAPI `@app.on_event("startup")`
+
+为什么错：
+
+- 会持续制造时区歧义和运行时 warning
+- SQLite / PostgreSQL / Python datetime 边界更容易出现隐性 bug
+- 生命周期入口分散，不利于后续扩展启动与清理逻辑
+
+正确方式：
+
+- 统一通过 UTC helper 生成和归一化时间
+- 时间比较前先归一化到 aware UTC
+- 应用初始化使用 FastAPI lifespan
+
+## 18. 文档长期滞后于设计与实现
+
+错误模式：
+
+- 协议改了但文档没改
+- UI 规则变了但没有统一文档
+- 架构错误被写进文档继续传播
+
+为什么错：
+
+- 后续重构没有统一目标
+- AI / 新同事 / code review 都会被错误文档误导
+
+正确方式：
+
+- 改架构就改文档
+- 改协议就改文档和测试
+- 发现设计不对，优先修正文档里的错误设计
+
+## 19. 在 HTTP / WebSocket 请求链路里直接回退到全局 `get_settings()`
+
+错误模式：
+
+- Request dependency 自己调用 `get_settings()`
+- WebSocket 认证直接用全局 secret 解 token
+- 动态限流在闭包里固化或偷读全局配置
+
+为什么错：
+
+- `create_app(settings)` 传入的自定义配置不会真正传到底层依赖
+- 测试 app、灰度 app、兼容开关会和全局缓存重新耦合
+- HTTP 和 WebSocket 可能读到不同配置快照，行为变得不可预测
+
+正确方式：
+
+- HTTP 通过 `request.app.state.settings` 读取当前配置
+- WebSocket 通过 `websocket.app.state.settings` 读取当前配置
+- token 解码、文件服务、动态限流优先接收显式 settings snapshot
+
+## 20. 把本地附件状态或裸 URL 直接当成正式媒体模型
+
+错误模式：
+
+- 上传接口只返回一个 `file_url`
+- 消息里直接塞 `local_path` 给服务端
+- 文件列表、聊天消息、历史同步各自返回不同附件字段
+
+为什么错：
+
+- 历史回放和断线补偿拿不到稳定附件元数据
+- 本地重试状态和服务端持久化状态耦在一起
+- 后续切换对象存储时需要同时改协议、UI、消息模型
+
+正确方式：
+
+- 上传通过统一媒体描述返回 `storage_provider`、`storage_key`、`url`、`mime_type`、`original_name`、`size_bytes`、`checksum_sha256`
+- 服务端消息只持久化可共享、可回放的远端附件元数据
+- `local_path`、`uploading` 等临时状态只保留在客户端，并在真正发消息前剥离
+

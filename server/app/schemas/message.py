@@ -1,6 +1,8 @@
-﻿"""Message schemas."""
+"""Message schemas."""
 
 from __future__ import annotations
+
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -11,6 +13,7 @@ class MessageCreate(BaseModel):
     session_id: str | None = None
     content: str = ""
     type: str = Field(default="text", pattern="^(text|image|file|video|voice|system)$")
+    extra: dict[str, Any] = Field(default_factory=dict)
 
 
 class MessageUpdate(BaseModel):
@@ -24,3 +27,4 @@ class MessageOut(ORMModel):
     type: str
     content: str
     status: str
+    extra: dict[str, Any] = Field(default_factory=dict)

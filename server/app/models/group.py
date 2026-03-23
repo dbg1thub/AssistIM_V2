@@ -8,6 +8,7 @@ from sqlalchemy import ForeignKey, Index, UniqueConstraint, Uuid
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base, IdMixin, TimestampMixin
+from app.utils.time import utcnow
 
 
 class Group(IdMixin, TimestampMixin, Base):
@@ -31,4 +32,4 @@ class GroupMember(Base):
     group_id: Mapped[str] = mapped_column(Uuid(as_uuid=False), ForeignKey("groups.id"), primary_key=True)
     user_id: Mapped[str] = mapped_column(Uuid(as_uuid=False), ForeignKey("users.id"), primary_key=True)
     role: Mapped[str] = mapped_column(default="member")
-    joined_at: Mapped[datetime] = mapped_column(default=datetime.utcnow)
+    joined_at: Mapped[datetime] = mapped_column(default=utcnow)

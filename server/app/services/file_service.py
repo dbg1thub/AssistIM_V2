@@ -2,37 +2,32 @@
 
 from __future__ import annotations
 
-import os
-import shutil
-import uuid
-
 from fastapi import UploadFile
 from sqlalchemy.orm import Session
 
-from app.core.config import get_settings
+from app.core.config import Settings, get_settings
+from app.media.storage import build_media_storage
 from app.models.user import User
 from app.repositories.file_repo import FileRepository
 
 
 class FileService:
-    def __init__(self, db: Session) -> None:
+    def __init__(self, db: Session, settings: Settings | None = None) -> None:
         self.files = FileRepository(db)
-        self.settings = get_settings()
+        self.settings = settings or get_settings()
+        self.storage = build_media_storage(self.settings)
 
     def save_upload(self, current_user: User, file: UploadFile) -> dict:
-        os.makedirs(self.settings.upload_dir, exist_ok=True)
-        extension = os.path.splitext(file.filename or "")[1]
-        stored_name = f"{uuid.uuid4()}{extension}"
-        absolute_path = os.path.join(self.settings.upload_dir, stored_name)
-
-        with open(absolute_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
-
+        stored_media = self.storage.store_upload(file)
         record = self.files.create(
             user_id=current_user.id,
-            file_url=f"/uploads/{stored_name}",
-            file_type=file.content_type,
-            file_name=file.filename or stored_name,
+            storage_provider=stored_media.storage_provider,
+            storage_key=stored_media.storage_key,
+            file_url=stored_media.public_url,
+            file_type=stored_media.content_type,
+            file_name=stored_media.original_name,
+            size_bytes=stored_media.size_bytes,
+            checksum_sha256=stored_media.checksum_sha256,
         )
         return self.serialize_file(record)
 
@@ -41,13 +36,29 @@ class FileService:
 
     @staticmethod
     def serialize_file(item) -> dict:
+        media = {
+            "url": item.file_url,
+            "storage_provider": item.storage_provider,
+            "storage_key": item.storage_key,
+            "mime_type": item.file_type,
+            "size_bytes": int(item.size_bytes or 0),
+            "checksum_sha256": item.checksum_sha256,
+            "original_name": item.file_name,
+        }
         return {
             "id": item.id,
             "user_id": item.user_id,
+            "storage_provider": item.storage_provider,
+            "storage_key": item.storage_key,
             "file_url": item.file_url,
             "url": item.file_url,
+            "mime_type": item.file_type,
             "file_type": item.file_type,
+            "original_name": item.file_name,
             "file_name": item.file_name,
             "name": item.file_name,
+            "size_bytes": int(item.size_bytes or 0),
+            "checksum_sha256": item.checksum_sha256,
+            "media": media,
             "created_at": item.created_at.isoformat() if item.created_at else None,
         }

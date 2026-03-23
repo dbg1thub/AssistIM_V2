@@ -1,4 +1,4 @@
-﻿"""Friend repository."""
+"""Friend repository."""
 
 from __future__ import annotations
 
@@ -21,6 +21,19 @@ class FriendRepository:
 
     def get_request(self, request_id: str) -> FriendRequest | None:
         return self.db.get(FriendRequest, request_id)
+
+    def list_requests_between(self, user_id: str, other_user_id: str) -> list[FriendRequest]:
+        stmt = (
+            select(FriendRequest)
+            .where(
+                or_(
+                    and_(FriendRequest.sender_id == user_id, FriendRequest.receiver_id == other_user_id),
+                    and_(FriendRequest.sender_id == other_user_id, FriendRequest.receiver_id == user_id),
+                )
+            )
+            .order_by(FriendRequest.created_at.desc())
+        )
+        return list(self.db.execute(stmt).scalars().all())
 
     def list_requests_for_user(self, user_id: str) -> list[FriendRequest]:
         stmt = select(FriendRequest).where(

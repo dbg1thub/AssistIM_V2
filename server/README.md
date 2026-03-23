@@ -1,4 +1,4 @@
-﻿# AssistIM Backend
+# AssistIM Backend
 
 ## What is included
 
@@ -16,9 +16,9 @@ This backend implements the sections 1-127 from `backend_architecture.md`:
 - Compatibility routes for the current desktop client:
   - `POST /api/auth/refresh`
   - `POST /api/upload`
-  - `WS /ws`
-  - legacy chat aliases under `/api/chat/*` and `/api/api/chat/*`
-
+  - `WS /ws` (canonical chat websocket)
+  - legacy chat websocket alias under `/ws/chat`
+  - legacy chat aliases under `/api/chat/*`
 ## Recommended local setup on Windows
 
 1. Copy `server/.env.postgres.example` to `server/.env` and replace `YOUR_PASSWORD`.
@@ -132,6 +132,8 @@ Copy `server/.env.postgres.example` to `server/.env` or pass `-DatabaseUrl` to t
 - Native UUID columns are used through SQLAlchemy `Uuid`, which maps to PostgreSQL UUID natively.
 - Uploaded files are stored under `data/uploads` and exposed at `/uploads/...`.
 - For compatibility with the current desktop client, WebSocket payloads include both `type` and `event` style fields where useful.
+- `/ws` is the canonical chat websocket endpoint; `/ws/chat` is kept as one explicit legacy alias.
 - Message history pagination currently uses `before_id` by resolving the referenced message timestamp, because IDs are UUIDs rather than auto-increment integers.
 - WebSocket incremental sync now filters messages by session membership instead of returning all recent messages globally.
+- Legacy HTTP POST /api/chat/sync now mirrors the cursor-based replay model and returns both messages and events.
 - Your PostgreSQL service was detected as `postgresql-x64-18`, and `server/scripts/init-postgres.ps1` can resolve `psql.exe` from that service path automatically.

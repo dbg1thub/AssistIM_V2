@@ -49,7 +49,6 @@ from client.core.profile_fields import (
     profile_status_options,
     qdate_from_profile_birthday,
 )
-from client.network.http_client import get_http_client
 from client.ui.controllers.auth_controller import get_auth_controller
 
 
@@ -579,15 +578,8 @@ class ProfileInterface(ScrollArea):
     async def _save_profile_async(self, payload: dict[str, str | None]) -> None:
         self._set_busy(True)
         avatar_file_path = str(payload.get("avatar_file_path", "") or "").strip()
-        avatar_url = None
 
         try:
-            if avatar_file_path:
-                upload_result = await get_http_client().upload_file(avatar_file_path, upload_path="/files/upload")
-                avatar_url = str((upload_result or {}).get("url", "") or "")
-                if not avatar_url:
-                    raise RuntimeError(tr("profile.edit.avatar.upload_failed", "Avatar upload failed."))
-
             user = await self._auth_controller.update_profile(
                 nickname=str(payload.get("nickname", "") or "").strip(),
                 signature=str(payload.get("signature", "") or "").strip(),
@@ -597,7 +589,7 @@ class ProfileInterface(ScrollArea):
                 birthday=payload.get("birthday"),
                 gender=str(payload.get("gender", "") or "").strip(),
                 status=str(payload.get("status", "") or "").strip(),
-                avatar=avatar_url if avatar_url is not None else None,
+                avatar_file_path=avatar_file_path or None,
             )
         except asyncio.CancelledError:
             raise

@@ -31,7 +31,6 @@ class SessionModel(QAbstractListModel):
         SessionModel.IsPinnedRole: Whether session is pinned
     """
 
-    # Custom Qt roles
     SessionRole = Qt.ItemDataRole.UserRole + 1
     LastMessageRole = Qt.ItemDataRole.UserRole + 2
     UnreadCountRole = Qt.ItemDataRole.UserRole + 3
@@ -60,21 +59,21 @@ class SessionModel(QAbstractListModel):
 
         if role == Qt.ItemDataRole.DisplayRole:
             return session.name
-        elif role == Qt.ItemDataRole.UserRole:
+        if role == Qt.ItemDataRole.UserRole:
             return session
-        elif role == self.SessionRole:
+        if role == self.SessionRole:
             return session.to_dict()
-        elif role == self.LastMessageRole:
+        if role == self.LastMessageRole:
             return session.last_message
-        elif role == self.UnreadCountRole:
+        if role == self.UnreadCountRole:
             return session.unread_count
-        elif role == self.TimestampRole:
+        if role == self.TimestampRole:
             return session.last_message_time
-        elif role == self.IsPinnedRole:
+        if role == self.IsPinnedRole:
             return getattr(session, 'is_pinned', False)
-        elif role == self.AvatarRole:
+        if role == self.AvatarRole:
             return session.avatar
-        elif role == Qt.ItemDataRole.TextAlignmentRole:
+        if role == Qt.ItemDataRole.TextAlignmentRole:
             return Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
 
         return None
@@ -87,17 +86,33 @@ class SessionModel(QAbstractListModel):
         self.endInsertRows()
 
     def set_sessions(self, sessions: list[Session]) -> None:
-        """Replace all sessions in one model reset."""
+        """Replace all sessions, using insert/remove when transitioning from or to empty."""
+        sorted_sessions = sorted(sessions, key=self._session_sort_key, reverse=True)
+
+        if not self._sessions and not sorted_sessions:
+            return
+        if not self._sessions:
+            self.beginInsertRows(QModelIndex(), 0, len(sorted_sessions) - 1)
+            self._sessions = sorted_sessions
+            self.endInsertRows()
+            return
+        if not sorted_sessions:
+            self.beginRemoveRows(QModelIndex(), 0, len(self._sessions) - 1)
+            self._sessions = []
+            self.endRemoveRows()
+            return
+
         self.beginResetModel()
-        self._sessions = sorted(sessions, key=self._session_sort_key, reverse=True)
+        self._sessions = sorted_sessions
         self.endResetModel()
 
     def insert_session(self, index: int, session: Session) -> None:
-        """Insert a session at specific index."""
-        self.beginInsertRows(QModelIndex(), index, index)
-        self._sessions.insert(index, session)
+        """Insert a session at specific index, then move it to the sorted position."""
+        target_index = max(0, min(index, len(self._sessions)))
+        self.beginInsertRows(QModelIndex(), target_index, target_index)
+        self._sessions.insert(target_index, session)
         self.endInsertRows()
-        self.sort_sessions()
+        self._move_session_if_needed(target_index, self._session_roles())
 
     def remove_session(self, session_id: str) -> None:
         """Remove a session by ID."""
@@ -109,19 +124,17 @@ class SessionModel(QAbstractListModel):
                 break
 
     def update_session(self, session_id: str, **kwargs) -> None:
-        """Update session fields."""
+        """Update one session and move it if the sort key changed."""
         for i, session in enumerate(self._sessions):
-            if session.session_id == session_id:
-                old_sort_key = self._session_sort_key(session)
-                for key, value in kwargs.items():
-                    if hasattr(session, key):
-                        setattr(session, key, value)
+            if session.session_id != session_id:
+                continue
 
-                index = self.index(i)
-                self.dataChanged.emit(index, index)
-                if self._session_sort_key(session) != old_sort_key:
-                    self.sort_sessions()
-                break
+            for key, value in kwargs.items():
+                if hasattr(session, key):
+                    setattr(session, key, value)
+
+            self._move_session_if_needed(i, self._roles_for_update(kwargs))
+            break
 
     def get_session(self, index: int) -> Optional[Session]:
         """Get session at index."""
@@ -142,16 +155,18 @@ class SessionModel(QAbstractListModel):
 
     def clear(self) -> None:
         """Clear all sessions."""
-        self.beginResetModel()
+        if not self._sessions:
+            return
+        self.beginRemoveRows(QModelIndex(), 0, len(self._sessions) - 1)
         self._sessions.clear()
-        self.endResetModel()
+        self.endRemoveRows()
 
     def sort_sessions(self) -> None:
         """Sort sessions by pinned first, then by latest message time."""
+        if len(self._sessions) < 2:
+            return
         self.layoutAboutToBeChanged.emit()
-
         self._sessions.sort(key=self._session_sort_key, reverse=True)
-
         self.layoutChanged.emit()
 
     def _session_sort_key(self, session: Session) -> tuple:
@@ -172,32 +187,90 @@ class SessionModel(QAbstractListModel):
                 return i
         return len(self._sessions)
 
+    def _target_index_for_row(self, row: int) -> int:
+        """Return the sorted index of one session after temporarily removing it."""
+        session = self._sessions[row]
+        remaining = self._sessions[:row] + self._sessions[row + 1 :]
+        new_key = self._session_sort_key(session)
+        for i, existing in enumerate(remaining):
+            if new_key > self._session_sort_key(existing):
+                return i
+        return len(remaining)
+
+    def _move_session_if_needed(self, row: int, roles: list[int]) -> None:
+        """Move one session to its sorted position, otherwise emit dataChanged in place."""
+        if row < 0 or row >= len(self._sessions):
+            return
+
+        target_row = self._target_index_for_row(row)
+        if target_row == row:
+            index = self.index(row)
+            self.dataChanged.emit(index, index, roles)
+            return
+
+        destination_child = target_row if target_row < row else target_row + 1
+        self.beginMoveRows(QModelIndex(), row, row, QModelIndex(), destination_child)
+        session = self._sessions.pop(row)
+        self._sessions.insert(target_row, session)
+        self.endMoveRows()
+
+        index = self.index(target_row)
+        self.dataChanged.emit(index, index, roles)
+
+    def _session_roles(self) -> list[int]:
+        """Return the complete role list for one session row update."""
+        return [
+            Qt.ItemDataRole.DisplayRole,
+            Qt.ItemDataRole.UserRole,
+            self.SessionRole,
+            self.LastMessageRole,
+            self.UnreadCountRole,
+            self.TimestampRole,
+            self.IsPinnedRole,
+            self.AvatarRole,
+        ]
+
+    def _roles_for_update(self, kwargs: dict) -> list[int]:
+        """Return the minimal role list affected by one update payload."""
+        roles = {Qt.ItemDataRole.UserRole, self.SessionRole}
+        for key in kwargs:
+            if key == 'name':
+                roles.add(Qt.ItemDataRole.DisplayRole)
+            elif key == 'last_message':
+                roles.add(self.LastMessageRole)
+            elif key == 'unread_count':
+                roles.add(self.UnreadCountRole)
+            elif key == 'last_message_time':
+                roles.add(self.TimestampRole)
+            elif key == 'avatar':
+                roles.add(self.AvatarRole)
+            elif key in {'is_pinned', 'extra'}:
+                roles.add(self.IsPinnedRole)
+                roles.add(Qt.ItemDataRole.DisplayRole)
+            else:
+                return self._session_roles()
+        return list(roles) if roles else self._session_roles()
+
     def set_pinned(self, session_id: str, pinned: bool, *, pinned_at: float | None = None) -> None:
-        """Set session pinned status."""
-        changed_rows: list[int] = []
+        """Set session pinned status without forcing a full layout refresh."""
         for i, session in enumerate(self._sessions):
             if session.session_id != session_id:
                 continue
+
             target_state = pinned
-            desired_pinned_at = (
-                pinned_at if (target_state and pinned_at is not None)
-                else (time.time() if target_state else None)
-            )
+            desired_pinned_at = pinned_at if (target_state and pinned_at is not None) else (time.time() if target_state else None)
             current_pinned_at = session.extra.get("pinned_at") if hasattr(session, "extra") else None
             if getattr(session, "is_pinned", False) == target_state and current_pinned_at == desired_pinned_at:
-                continue
+                return
+
             if hasattr(session, "is_pinned"):
                 session.is_pinned = target_state
-                if hasattr(session, "extra"):
-                    session.extra["is_pinned"] = target_state
-                    session.extra["pinned_at"] = desired_pinned_at
-                changed_rows.append(i)
+            if hasattr(session, "extra"):
+                session.extra["is_pinned"] = target_state
+                session.extra["pinned_at"] = desired_pinned_at
 
-        for row in changed_rows:
-            index = self.index(row)
-            self.dataChanged.emit(index, index, [self.IsPinnedRole])
-        if changed_rows:
-            self.sort_sessions()
+            self._move_session_if_needed(i, [Qt.ItemDataRole.UserRole, self.SessionRole, self.IsPinnedRole])
+            return
 
     def move_to_top(self, session_id: str) -> None:
         """Move session to top (temporary pin)."""

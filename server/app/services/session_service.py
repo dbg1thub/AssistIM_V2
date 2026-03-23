@@ -1,6 +1,9 @@
-﻿"""Session service."""
+"""Session service."""
 
 from __future__ import annotations
+
+from collections.abc import Callable
+from typing import TypeVar
 
 from sqlalchemy.orm import Session
 
@@ -12,16 +15,18 @@ from app.repositories.session_repo import SessionRepository
 from app.repositories.user_repo import UserRepository
 
 
+T = TypeVar("T")
+
+
 class SessionService:
     def __init__(self, db: Session) -> None:
+        self.db = db
         self.sessions = SessionRepository(db)
         self.messages = MessageRepository(db)
         self.users = UserRepository(db)
         self.groups = GroupRepository(db)
 
     def list_sessions(self, current_user: User) -> list[dict]:
-        self._repair_group_sessions_for_user(current_user.id)
-
         payload: list[dict] = []
         seen_private_keys: set[tuple[str, ...]] = set()
         for item in self.sessions.list_user_sessions(current_user.id):
@@ -49,16 +54,25 @@ class SessionService:
         if existing is not None:
             return self.serialize_session(existing, viewer_user_id=current_user.id, include_members=True, participant_ids=members)
 
-        session = self.sessions.create(name or "Private Chat", "private")
-        for member_id in members:
-            self.sessions.add_member(session.id, member_id)
+        def action() -> object:
+            session = self.sessions.create(name or "Private Chat", "private", commit=False)
+            for member_id in members:
+                self.sessions.add_member(session.id, member_id, commit=False)
+            return session
+
+        session = self._run_transaction(action)
         return self.serialize_session(session, viewer_user_id=current_user.id, include_members=True, participant_ids=members)
 
     def create_group(self, current_user: User, name: str, participant_ids: list[str]) -> dict:
         members = self._normalize_group_members(current_user, participant_ids)
-        session = self.sessions.create(name, "group")
-        for member_id in members:
-            self.sessions.add_member(session.id, member_id)
+
+        def action() -> object:
+            session = self.sessions.create(name, "group", commit=False)
+            for member_id in members:
+                self.sessions.add_member(session.id, member_id, commit=False)
+            return session
+
+        session = self._run_transaction(action)
         return self.serialize_session(session, viewer_user_id=current_user.id, include_members=True, participant_ids=members)
 
     def create_generic(self, current_user: User, payload: dict) -> dict:
@@ -78,7 +92,6 @@ class SessionService:
         if session is None:
             raise AppError(ErrorCode.RESOURCE_NOT_FOUND, "session not found", 404)
 
-        self._repair_group_session_if_needed(session_id, current_user.id)
         member_ids = self.sessions.list_member_ids(session_id)
         if current_user.id not in member_ids:
             raise AppError(ErrorCode.FORBIDDEN, "not a session member", 403)
@@ -105,7 +118,6 @@ class SessionService:
         if session is None:
             raise AppError(ErrorCode.RESOURCE_NOT_FOUND, "session not found", 404)
 
-        self._repair_group_session_if_needed(session_id, current_user_id)
         member_ids = self.sessions.list_member_ids(session_id)
         if current_user_id not in member_ids:
             raise AppError(ErrorCode.FORBIDDEN, "not a session member", 403)
@@ -203,24 +215,17 @@ class SessionService:
         if self.users.get_by_id(user_id) is None:
             raise AppError(ErrorCode.RESOURCE_NOT_FOUND, "user not found", 404)
 
-    def _repair_group_sessions_for_user(self, user_id: str) -> None:
-        for group in self.groups.list_user_groups(user_id):
-            self._ensure_group_session_members(group.id, group.session_id)
-
-    def _repair_group_session_if_needed(self, session_id: str, user_id: str) -> None:
-        group = self.groups.get_by_session_id(session_id)
-        if group is None:
-            return
-        if self.groups.get_member(group.id, user_id) is None:
-            return
-        self._ensure_group_session_members(group.id, group.session_id)
-
-    def _ensure_group_session_members(self, group_id: str, session_id: str) -> None:
-        for member in self.groups.list_members(group_id):
-            self.sessions.add_member(session_id, member.user_id)
-
     @staticmethod
     def _is_visible_private_session(session, member_ids: list[str]) -> bool:
         if session.type != "private" or session.is_ai_session:
             return True
         return len(set(member_ids)) >= 2
+
+    def _run_transaction(self, action: Callable[[], T]) -> T:
+        try:
+            result = action()
+            self.db.commit()
+            return result
+        except Exception:
+            self.db.rollback()
+            raise

@@ -1,4 +1,4 @@
-﻿"""Authentication controller for login, registration, and session restore."""
+"""Authentication controller for login, registration, and session restore."""
 
 from __future__ import annotations
 
@@ -14,7 +14,9 @@ from client.core.logging import setup_logging
 from client.core.secure_storage import SecureStorage, SecureStorageError
 from client.managers.connection_manager import peek_connection_manager
 from client.managers.message_manager import get_message_manager
-from client.network.http_client import get_http_client
+from client.services.auth_service import get_auth_service
+from client.services.file_service import get_file_service
+from client.services.user_service import get_user_service
 from client.storage.database import get_database
 from client.ui.controllers.chat_controller import get_chat_controller
 
@@ -33,7 +35,9 @@ class AuthController:
     TOKEN_EXP_SKEW_SECONDS = 30
 
     def __init__(self) -> None:
-        self._http = get_http_client()
+        self._auth_service = get_auth_service()
+        self._user_service = get_user_service()
+        self._file_service = get_file_service()
         self._db = get_database()
         self._message_manager = get_message_manager()
         self._chat_controller = get_chat_controller()
@@ -41,7 +45,7 @@ class AuthController:
         self._token_state_task: Optional[asyncio.Task] = None
         self._suppress_token_listener_sync_depth = 0
         self._closed = False
-        self._http.add_token_listener(self._on_tokens_changed)
+        self._auth_service.add_token_listener(self._on_tokens_changed)
 
     @property
     def current_user(self) -> dict[str, Any] | None:
@@ -73,7 +77,7 @@ class AuthController:
         self._set_http_tokens(access_token, refresh_token)
 
         try:
-            user = await self._http.get("/auth/me")
+            user = await self._auth_service.fetch_current_user()
         except (AuthExpiredError, APIError) as exc:
             logger.info("Stored auth session is no longer valid: %s", exc)
             await self.clear_session()
@@ -89,35 +93,26 @@ class AuthController:
                     return None
             return None
 
-        await self._persist_auth_state(self._http.access_token or access_token, self._http.refresh_token or refresh_token, user)
+        await self._persist_auth_state(
+            self._auth_service.access_token or access_token,
+            self._auth_service.refresh_token or refresh_token,
+            user,
+        )
         self._apply_runtime_context(user)
         return user
 
     async def login(self, username: str, password: str) -> dict[str, Any]:
-        payload = await self._http.post(
-            "/auth/login",
-            json={
-                "username": username,
-                "password": password,
-            },
-        )
+        payload = await self._auth_service.login(username, password)
         return await self._apply_auth_payload(payload, reset_local_chat_state=True)
 
     async def register(self, username: str, nickname: str, password: str) -> dict[str, Any]:
-        payload = await self._http.post(
-            "/auth/register",
-            json={
-                "username": username,
-                "password": password,
-                "nickname": nickname,
-            },
-        )
+        payload = await self._auth_service.register(username, nickname, password)
         return await self._apply_auth_payload(payload, reset_local_chat_state=True)
 
     async def logout(self) -> None:
         """Best-effort backend logout followed by local session cleanup."""
         try:
-            await self._http.delete("/auth/session")
+            await self._auth_service.logout()
         except (AuthExpiredError, APIError, NetworkError) as exc:
             logger.info("Logout request did not complete cleanly: %s", exc)
         except Exception:
@@ -130,6 +125,7 @@ class AuthController:
         *,
         nickname: str | None = None,
         avatar: str | None = None,
+        avatar_file_path: str | None = None,
         email: str | None = None,
         phone: str | None = None,
         birthday: str | None = None,
@@ -139,11 +135,16 @@ class AuthController:
         status: str | None = None,
     ) -> dict[str, Any]:
         """Update the current user's profile and persist the refreshed auth context."""
+        resolved_avatar = avatar
+        if avatar_file_path:
+            upload_result = await self._file_service.upload_avatar(avatar_file_path)
+            resolved_avatar = str(upload_result["url"])
+
         payload = {
             key: value
             for key, value in {
                 "nickname": nickname,
-                "avatar": avatar,
+                "avatar": resolved_avatar,
                 "email": email,
                 "phone": phone,
                 "birthday": birthday,
@@ -158,7 +159,7 @@ class AuthController:
         if not payload:
             return dict(self._current_user or {})
 
-        user = await self._http.put("/users/me", json=payload)
+        user = await self._user_service.update_me(payload)
         self._apply_runtime_context(user)
         await self._persist_user_profile(user)
         return user
@@ -261,7 +262,7 @@ class AuthController:
         """Update HTTP tokens without re-triggering redundant listener persistence."""
         self._suppress_token_listener_sync_depth += 1
         try:
-            self._http.set_tokens(access_token, refresh_token)
+            self._auth_service.set_tokens(access_token, refresh_token)
         finally:
             self._suppress_token_listener_sync_depth = max(0, self._suppress_token_listener_sync_depth - 1)
 
@@ -269,7 +270,7 @@ class AuthController:
         """Clear HTTP tokens without scheduling duplicate persisted-state cleanup."""
         self._suppress_token_listener_sync_depth += 1
         try:
-            self._http.clear_tokens()
+            self._auth_service.clear_tokens()
         finally:
             self._suppress_token_listener_sync_depth = max(0, self._suppress_token_listener_sync_depth - 1)
 
@@ -300,7 +301,7 @@ class AuthController:
     async def close(self) -> None:
         """Detach token listeners and stop background persistence work."""
         self._closed = True
-        self._http.remove_token_listener(self._on_tokens_changed)
+        self._auth_service.remove_token_listener(self._on_tokens_changed)
 
         task = self._token_state_task
         self._cancel_pending_task(task)

@@ -358,17 +358,19 @@ class ChatInterface(QWidget):
             QTimer.singleShot(5000, self.chat_panel.hide_typing_indicator)
 
     def _on_read_event(self, data: dict) -> None:
-        """Update read state in the message list."""
-        message_id = data.get("message_id", "")
+        """Update read-receipt metadata in the message list."""
         session_id = data.get("session_id", "")
-        if not session_id or not message_id:
+        reader_id = data.get("user_id", "")
+        last_read_seq = int(data.get("last_read_seq", 0) or 0)
+        if not session_id or not reader_id or last_read_seq <= 0:
             return
 
         self._invalidate_session_caches(session_id)
         if session_id != self._current_session_id:
             return
 
-        self.chat_panel.mark_read_through(session_id, message_id, MessageStatus.READ)
+        self.chat_panel.apply_read_receipt(session_id, reader_id, last_read_seq)
+
 
     def _on_edited_event(self, data: dict) -> None:
         """Update edited message content."""

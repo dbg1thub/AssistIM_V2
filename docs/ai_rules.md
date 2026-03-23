@@ -1,359 +1,93 @@
-# AI 代码生成规则（AI Rules）
+# AI 代码生成规则
 
-本文件用于约束 AI（Cursor / Copilot / ChatGPT）生成代码时遵守项目架构。
+本文件用于约束 Cursor / Copilot / ChatGPT 等 AI 在 AssistIM 项目中生成或修改代码时的行为。
 
-AI 在生成或修改代码时必须遵守以下规则。
+## 1. 文档优先级
 
-违反这些规则的代码 **必须被拒绝**。
+AI 修改代码前，必须遵守以下优先级：
 
----
+1. [design_decisions.md](./design_decisions.md)
+2. [architecture.md](./architecture.md)
+3. [backend_architecture.md](./backend_architecture.md)
+4. [ui_guidelines.md](./ui_guidelines.md)
+5. [code_style.md](./code_style.md)
+6. [templates.md](./templates.md)
+7. [pitfalls.md](./pitfalls.md)
 
-# 1 架构分层规则（最重要）
+如果多个文档冲突，按上述顺序处理，不允许 AI 自行臆断覆盖高优先级文档。
 
-系统采用严格分层架构：
+## 2. 分层硬约束
 
-UI  
-↓  
-Controller  
-↓  
-Manager  
-↓  
-Service  
-↓  
-Network  
-↓  
-Protocol  
+AI 生成代码时必须保持以下边界：
 
-AI 生成代码时 **必须遵守依赖方向**。
+- UI 不直接访问 HTTP / WebSocket / SQLite
+- Controller 不直接访问 Network / Database
+- Manager 不直接访问 `HTTPClient`，远程 HTTP 能力先收敛到 Service
+- `ConnectionManager` 读取认证状态时也走 `AuthService`，不要直接取 `HTTPClient.access_token`
+- Service 不直接更新 UI
+- Gateway / Router 不直接写业务策略
+- Repository 不承担策略层职责
 
-允许依赖：
+## 3. 实时链路硬约束
 
-UI → Controller  
-Controller → Manager  
-Manager → Service  
-Service → Network  
+AI 不得生成以下错误设计：
 
-禁止依赖：
+- 用时间戳代替正式断线补偿游标
+- 把群聊消息写成全局 `read`
+- 用新的 `msg_id` 重发同一逻辑消息
+- 在 WebSocket 入口绕过 Service 直接广播状态变更
+- 用 `max(session_seq) + 1` 分配会话消息序号
 
-UI → Network  
-UI → Protocol  
-UI → Service  
+## 4. 网络边界硬约束
 
-Controller → Network  
+AI 不得把外部 provider / 第三方 HTTP 请求混入应用内部鉴权链路。
 
-Manager → UI  
+必须遵守：
 
-Network → Manager  
+- 内部后端 API 使用相对路径，通过统一 `HTTPClient` 继承应用鉴权
+- 外部 AI / Ollama / 第三方服务使用绝对 URL，默认不继承应用 access token，也不触发应用 refresh
+- 并发 401 场景下只能存在一条 refresh in-flight，其他请求等待同一 refresh 结果
+- Network / Service 层失败使用结构化异常传播，不使用 `None` / 空 dict 猜测失败语义
 
----
+## 5. UI 设计系统硬约束
 
-# 2 UI 层规则
+AI 在新增 UI 时必须优先遵守：
 
-UI 只负责：
+- 有现成 QFluentWidgets 组件时先复用
+- 容器类业务 widget 默认使用 `CardWidget`
+- Tooltip 默认使用 Acrylic 方案，并通过 Filter 机制设置
+- 页面样式复用共享 QSS / token，不到处内联 setStyleSheet
 
-- 界面显示
-- 用户输入
-- 监听事件
+## 6. 数据模型硬约束
 
-UI **禁止做以下事情**：
-
-❌ 调用 HTTP API  
-❌ 调用 WebSocket  
-❌ 操作数据库  
-❌ 管理业务状态  
-
-UI 只能：
-
-```
-UI → Controller
-```
-
-UI 更新必须来自：
-
-- EventBus
-- Qt Signal
-
----
-
-# 3 Controller 层规则
-
-Controller 负责：
-
-- 接收 UI 输入
-- 调用 Manager
-- 进行简单参数处理
-
-Controller **不负责业务逻辑**。
-
-禁止：
-
-❌ 调用 Network  
-❌ 调用 HTTP  
-❌ 调用数据库  
-
-Controller 只允许：
-
-```
-Controller → Manager
-```
-
----
-
-# 4 Manager 层规则
-
-Manager 是客户端业务核心层。
-
-职责：
-
-- 管理客户端状态
-- 业务流程控制
-- 调用 Service 或 Network
-
-Manager 可以：
-
-```
-Manager → Service
-Manager → Network
-```
-
-Manager 不允许：
-
-❌ 依赖 UI  
-❌ 更新 UI  
-
-UI 更新必须通过：
-
-EventBus
-
----
-
-# 5 Service 层规则
-
-Service 负责：
-
-- HTTP API
-- AI 请求
-- 后端业务接口
-
-Service 不允许：
-
-❌ 依赖 UI  
-❌ 依赖 Manager  
-
-Service 只允许：
-
-```
-Service → Network
-```
-
----
-
-# 6 Network 层规则
-
-Network 层负责：
-
-- HTTP Client
-- WebSocket Client
-
-Network 层：
-
-❌ 不允许包含业务逻辑  
-❌ 不允许更新 UI  
-
-Network 只负责：
-
-- 网络通信
-- 数据发送
-- 数据接收
-
----
-
-# 7 EventBus 使用规则
-
-UI 与业务逻辑之间 **必须通过 EventBus 解耦**。
-
-允许：
-
-```
-Manager → EventBus → UI
-Service → EventBus → UI
-```
-
-禁止：
-
-```
-Manager → UI
-Service → UI
-Network → UI
-```
-
----
-
-# 8 数据模型规则
-
-AI 生成的数据结构 **必须使用 dataclass 或 pydantic**。
-
-禁止：
-
-```
-dict 作为业务对象
-```
-
-正确示例：
-
-```
-@dataclass
-class ChatMessage:
-
-    id: str
-    sender_id: str
-    content: str
-    timestamp: int
-```
-
----
-
-# 9 WebSocket 消息规则
-
-所有 WebSocket 消息必须遵循统一结构：
-
-```
-{
-  "type": "message_type",
-  "seq": 123,
-  "msg_id": "uuid",
-  "timestamp": 123456,
-  "data": {}
-}
-```
-
-禁止：
-
-- 随意定义 WebSocket 数据结构
-- 直接发送字符串
-
----
-
-# 10 asyncio 规则
-
-所有网络 IO 必须使用 async。
-
-禁止：
-
-```
-requests.get()
-time.sleep()
-```
-
-必须：
-
-```
-aiohttp
-asyncio
-await
-```
-
-创建任务必须使用：
-
-```
-asyncio.create_task()
-```
-
----
-
-# 11 UI 性能规则
-
-AI streaming 更新 UI 时：
-
-禁止：
-
-每个 token 更新 UI。
-
-必须：
-
-使用缓冲刷新 UI。
+AI 不应在内部业务层大量传裸 dict 充当正式业务对象。
 
 推荐：
 
-```
-30ms 批量刷新
-```
+- 消息附件 extra 只持有 shareable 远端媒体元数据；`local_path`、`uploading` 等本地状态不能发到服务端
+- dataclass
+- pydantic schema
+- 明确的 typed payload model
 
----
+## 7. 测试与文档硬约束
 
-# 12 日志规则
+AI 生成涉及以下内容的改动时，必须同步补测试并更新文档：
 
-AI 生成代码时必须包含日志。
+- 协议字段
+- ACK / 重试逻辑
+- 断线补偿逻辑
+- 已读模型
+- 权限和安全逻辑
+- UI 设计系统公共规范
 
-网络行为必须记录：
+## 8. 拒绝生成的典型模式
 
-- WebSocket连接
-- WebSocket断开
-- 消息发送
-- 消息接收
+- UI 里直接 `await http_client.post(...)`
+- Controller 里直接 `await http_client.get(...)` / `post(...)`
+- Manager 里直接 `await db.execute(...)` 或调用 `db._row_to_message(...)`
+- Widget 里直接读写数据库
+- Service 里发 Qt Signal 更新界面
+- Repository 里实现“如果你是发送者就允许撤回”之类的业务规则
+- 为现成 QFluentWidgets 组件重新写一套基础按钮、卡片、tooltip
+- 让 OpenAI / Ollama / 第三方 HTTP 请求误带应用 Bearer token，或在外部 401 上触发应用 refresh
 
-示例：
-
-```
-logger.info("WebSocket connected")
-logger.info("Message sent", extra={"msg_id": msg_id})
-```
-
----
-
-# 13 异常规则
-
-禁止：
-
-```
-raise Exception()
-```
-
-必须使用项目异常体系：
-
-```
-APIError
-NetworkError
-AuthExpiredError
-ServerError
-```
-
----
-
-# 14 任务管理规则
-
-所有 asyncio task 必须：
-
-- 保存引用
-- 支持取消
-- 程序退出时清理
-
-禁止：
-
-fire-and-forget 任务。
-
----
-
-# 15 AI 代码生成原则
-
-AI 生成代码必须满足：
-
-- 遵守架构分层
-- 避免跨层依赖
-- 使用类型注解
-- 避免全局状态
-- 避免重复逻辑
-
----
-
-# 16 当规则冲突时
-
-优先级：
-
-1 architecture.md  
-2 design_decisions.md  
-3 ai_rules.md  
-4 code_style.md  
-5 templates.md  
-
-AI 必须遵守高优先级规则。

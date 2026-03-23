@@ -1124,7 +1124,7 @@ class GroupMemberItem(CardWidget):
 
 
 class AddFriendDialog(QDialog):
-    friend_request_sent = Signal()
+    friend_request_sent = Signal(str)
 
     def __init__(self, controller, existing_ids: set[str], current_user_id: str = "", parent=None):
         super().__init__(parent)
@@ -1259,20 +1259,26 @@ class AddFriendDialog(QDialog):
 
     async def _send_friend_request_async(self, user_id: str) -> None:
         try:
-            await self._controller.send_friend_request(user_id, self.message_edit.text().strip())
+            payload = await self._controller.send_friend_request(user_id, self.message_edit.text().strip())
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             InfoBar.error(tr("contact.add_friend.title", "Add Friend"), str(exc), parent=self, duration=2200)
             return
 
+        status = str((payload or {}).get("status", "pending") or "pending")
+        success_message = (
+            tr("contact.request.accepted", "Friend request accepted.")
+            if status == "accepted"
+            else tr("contact.add_friend.request_sent", "Friend request sent.")
+        )
         InfoBar.success(
             tr("contact.add_friend.title", "Add Friend"),
-            tr("contact.add_friend.request_sent", "Friend request sent."),
+            success_message,
             parent=self,
             duration=1800,
         )
-        self.friend_request_sent.emit()
+        self.friend_request_sent.emit(status)
         self.close()
 
     def _on_finished(self, _result: int) -> None:
@@ -2100,11 +2106,16 @@ class ContactInterface(QWidget):
         dialog.raise_()
         dialog.activateWindow()
 
-    def _on_friend_request_sent(self) -> None:
-        """Refresh data after a new friend request is sent."""
-        self._current_page = "requests"
-        self.segmented.setCurrentItem("requests")
-        self.page_stack.setCurrentIndex(2)
+    def _on_friend_request_sent(self, status: str = "pending") -> None:
+        """Refresh data after a friend action is completed from the add dialog."""
+        if status == "accepted":
+            self._current_page = "friends"
+            self.segmented.setCurrentItem("friends")
+            self.page_stack.setCurrentIndex(0)
+        else:
+            self._current_page = "requests"
+            self.segmented.setCurrentItem("requests")
+            self.page_stack.setCurrentIndex(2)
         self.reload_data()
 
     def _on_group_created(self, group: object) -> None:

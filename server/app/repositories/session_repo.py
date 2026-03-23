@@ -1,4 +1,4 @@
-﻿"""Session repository."""
+"""Session repository."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.models.message import Message, MessageRead
 from app.models.session import ChatSession, SessionMember
+from app.utils.time import utcnow
 
 
 class SessionRepository:
@@ -18,12 +19,20 @@ class SessionRepository:
     def get_by_id(self, session_id: str) -> ChatSession | None:
         return self.db.get(ChatSession, session_id)
 
+    def get_member(self, session_id: str, user_id: str) -> SessionMember | None:
+        return self.db.get(SessionMember, {"session_id": session_id, "user_id": user_id})
+
+    def has_member(self, session_id: str, user_id: str) -> bool:
+        return self.get_member(session_id, user_id) is not None
+
     def create(
         self,
         name: str,
         session_type: str,
         avatar: str | None = None,
         is_ai_session: bool = False,
+        *,
+        commit: bool = True,
     ) -> ChatSession:
         session = ChatSession(
             name=name,
@@ -32,8 +41,10 @@ class SessionRepository:
             is_ai_session=is_ai_session,
         )
         self.db.add(session)
-        self.db.commit()
-        self.db.refresh(session)
+        self.db.flush()
+        if commit:
+            self.db.commit()
+            self.db.refresh(session)
         return session
 
     def create_with_id(
@@ -43,6 +54,8 @@ class SessionRepository:
         session_type: str,
         avatar: str | None = None,
         is_ai_session: bool = False,
+        *,
+        commit: bool = True,
     ) -> ChatSession:
         session = ChatSession(
             id=session_id,
@@ -52,28 +65,61 @@ class SessionRepository:
             is_ai_session=is_ai_session,
         )
         self.db.add(session)
-        self.db.commit()
-        self.db.refresh(session)
+        self.db.flush()
+        if commit:
+            self.db.commit()
+            self.db.refresh(session)
         return session
 
-    def add_member(self, session_id: str, user_id: str) -> None:
-        existing = self.db.get(SessionMember, {"session_id": session_id, "user_id": user_id})
-        if existing is None:
-            self.db.add(SessionMember(session_id=session_id, user_id=user_id))
-            self.db.commit()
+    def add_member(
+        self,
+        session_id: str,
+        user_id: str,
+        *,
+        joined_at: datetime | None = None,
+        commit: bool = True,
+    ) -> SessionMember:
+        member = self.get_member(session_id, user_id)
+        if member is None:
+            member = SessionMember(session_id=session_id, user_id=user_id)
+            if joined_at is not None:
+                member.joined_at = joined_at
+            self.db.add(member)
+        elif joined_at is not None and member.joined_at is None:
+            member.joined_at = joined_at
+            self.db.add(member)
 
-    def remove_member(self, session_id: str, user_id: str) -> None:
-        existing = self.db.get(SessionMember, {"session_id": session_id, "user_id": user_id})
-        if existing is not None:
-            self.db.delete(existing)
+        self.db.flush()
+        if commit:
             self.db.commit()
+            self.db.refresh(member)
+        return member
+
+    def remove_member(self, session_id: str, user_id: str, *, commit: bool = True) -> bool:
+        member = self.get_member(session_id, user_id)
+        if member is None:
+            return False
+
+        self.db.delete(member)
+        self.db.flush()
+        if commit:
+            self.db.commit()
+        return True
 
     def list_members(self, session_id: str) -> list[SessionMember]:
-        stmt = select(SessionMember).where(SessionMember.session_id == session_id)
+        stmt = (
+            select(SessionMember)
+            .where(SessionMember.session_id == session_id)
+            .order_by(SessionMember.joined_at.asc(), SessionMember.user_id.asc())
+        )
         return list(self.db.execute(stmt).scalars().all())
 
     def list_member_ids(self, session_id: str) -> list[str]:
-        stmt = select(SessionMember.user_id).where(SessionMember.session_id == session_id)
+        stmt = (
+            select(SessionMember.user_id)
+            .where(SessionMember.session_id == session_id)
+            .order_by(SessionMember.joined_at.asc(), SessionMember.user_id.asc())
+        )
         return list(self.db.execute(stmt).scalars().all())
 
     def list_user_sessions(self, user_id: str) -> list[ChatSession]:
@@ -111,13 +157,13 @@ class SessionRepository:
         session = self.get_by_id(session_id)
         if session is None:
             return None
-        session.updated_at = datetime.utcnow()
+        session.updated_at = utcnow()
         self.db.add(session)
         self.db.commit()
         self.db.refresh(session)
         return session
 
-    def delete_session(self, session_id: str) -> None:
+    def delete_session(self, session_id: str, *, commit: bool = True) -> None:
         message_ids = list(self.db.execute(select(Message.id).where(Message.session_id == session_id)).scalars().all())
         if message_ids:
             self.db.execute(delete(MessageRead).where(MessageRead.message_id.in_(message_ids)))
@@ -126,5 +172,6 @@ class SessionRepository:
         session = self.get_by_id(session_id)
         if session is not None:
             self.db.delete(session)
-        self.db.commit()
-
+        self.db.flush()
+        if commit:
+            self.db.commit()

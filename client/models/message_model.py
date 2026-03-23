@@ -1,4 +1,4 @@
-﻿"""
+"""
 Message Model Module
 
 QAbstractListModel for chat message list.
@@ -6,7 +6,7 @@ QAbstractListModel for chat message list.
 
 from datetime import datetime
 
-from PySide6.QtCore import QAbstractListModel, Qt, QModelIndex
+from PySide6.QtCore import QAbstractListModel, QModelIndex, Qt
 
 from client.core.datetime_utils import coerce_local_datetime
 from client.models.message import ChatMessage, MessageStatus, MessageType, resolve_recall_notice
@@ -93,30 +93,49 @@ class MessageModel(QAbstractListModel):
     def add_message(self, message: ChatMessage) -> None:
         """Add a message to the list."""
         self._messages.append(message)
-        self._reset_with_rebuilt_display_items()
+        self._append_display_items([message])
 
     def add_messages(self, messages: list[ChatMessage]) -> None:
         """Append multiple messages."""
         if not messages:
             return
         self._messages.extend(messages)
-        self._reset_with_rebuilt_display_items()
+        self._append_display_items(messages)
 
     def prepend_messages(self, messages: list[ChatMessage]) -> None:
         """Insert multiple older messages at the beginning of the model."""
         if not messages:
             return
         self._messages = list(messages) + self._messages
-        self._reset_with_rebuilt_display_items()
+        self._prepend_display_items(messages)
 
     def refresh_message(self, message_id: str) -> None:
-        """Emit a full refresh for a changed message."""
-        self._reset_with_rebuilt_display_items()
+        """Refresh one changed message without resetting the whole model when possible."""
+        message = self.get_message_by_id(message_id)
+        if message is None:
+            return
+
+        row = self._find_display_row_for_message(message_id)
+        if row < 0:
+            self._apply_display_rebuild(changed_message_ids=[message_id])
+            return
+
+        desired_kind = self.DISPLAY_RECALL_NOTICE if message.status == MessageStatus.RECALLED else self.DISPLAY_MESSAGE
+        current_item = self._display_items[row]
+        current_kind = self._display_kind(current_item)
+
+        if current_kind == desired_kind:
+            if desired_kind == self.DISPLAY_RECALL_NOTICE:
+                self._display_items[row] = self._build_recall_notice_item(message)
+            self._emit_display_row_changed(message_id, self._display_roles())
+            return
+
+        self._apply_display_rebuild(changed_message_ids=[message_id])
 
     def insert_message(self, index: int, message: ChatMessage) -> None:
         """Insert a message at specific index."""
         self._messages.insert(index, message)
-        self._reset_with_rebuilt_display_items()
+        self._apply_display_rebuild()
 
     def get_message(self, index: int) -> ChatMessage | None:
         """Get the real message at an actual-message index."""
@@ -141,16 +160,41 @@ class MessageModel(QAbstractListModel):
 
     def clear(self) -> None:
         """Clear all messages."""
-        self.beginResetModel()
+        if not self._display_items:
+            self._messages.clear()
+            return
+
+        self.beginRemoveRows(QModelIndex(), 0, len(self._display_items) - 1)
         self._messages.clear()
         self._display_items.clear()
-        self.endResetModel()
+        self.endRemoveRows()
 
     def set_messages(self, messages: list[ChatMessage]) -> None:
-        """Replace all messages in one model reset."""
+        """Replace all messages, using incremental updates for empty/non-empty edges."""
+        new_messages = list(messages)
+        new_display_items = self._build_display_items(new_messages)
+
+        if not self._display_items and not new_display_items:
+            self._messages = new_messages
+            return
+
+        if not self._display_items:
+            self._messages = new_messages
+            self.beginInsertRows(QModelIndex(), 0, len(new_display_items) - 1)
+            self._display_items = new_display_items
+            self.endInsertRows()
+            return
+
+        if not new_display_items:
+            self.beginRemoveRows(QModelIndex(), 0, len(self._display_items) - 1)
+            self._messages = new_messages
+            self._display_items = []
+            self.endRemoveRows()
+            return
+
         self.beginResetModel()
-        self._messages = list(messages)
-        self._rebuild_display_items()
+        self._messages = new_messages
+        self._display_items = new_display_items
         self.endResetModel()
 
     def update_message_status(self, message_id: str, status) -> None:
@@ -163,41 +207,47 @@ class MessageModel(QAbstractListModel):
         message.status = status
 
         if previous_status == MessageStatus.RECALLED or status == MessageStatus.RECALLED:
-            self._reset_with_rebuilt_display_items()
+            self.refresh_message(message_id)
             return
 
-        self._emit_display_row_changed(
-            message_id,
-            [
-                self.StatusRole,
-                Qt.ItemDataRole.UserRole,
-                Qt.ItemDataRole.SizeHintRole,
-                Qt.ItemDataRole.DisplayRole,
-                self.MessageRole,
-            ],
-        )
+        self._emit_display_row_changed(message_id, self._display_roles())
 
-    def mark_read_through(self, session_id: str, message_id: str, status) -> None:
-        """Mark all self messages up to the target message as read within a session."""
-        target_timestamp = None
-        for message in self._messages:
-            if message.session_id == session_id and message.message_id == message_id:
-                target_timestamp = message.timestamp
-                break
-
-        if target_timestamp is None:
+    def apply_read_receipt(self, session_id: str, reader_id: str, last_read_seq: int) -> None:
+        """Apply one cumulative read receipt to visible self messages in a session."""
+        if not session_id or not reader_id or last_read_seq <= 0:
             return
 
         changed_ids: list[str] = []
         for message in self._messages:
-            if message.session_id != session_id or not message.is_self or message.timestamp is None:
+            if message.session_id != session_id or not message.is_self:
                 continue
-            if message.timestamp <= target_timestamp and message.status != status:
-                message.status = status
-                changed_ids.append(message.message_id)
+
+            message_seq = self._coerce_extra_int(message, "session_seq")
+            if message_seq <= 0 or message_seq > last_read_seq:
+                continue
+
+            read_by_user_ids = self._normalized_reader_ids(message)
+            if reader_id in read_by_user_ids:
+                continue
+
+            read_by_user_ids.append(reader_id)
+            read_by_user_ids.sort()
+
+            read_target_count = self._coerce_extra_int(message, "read_target_count")
+            message.extra["read_by_user_ids"] = read_by_user_ids
+            message.extra["read_count"] = len(read_by_user_ids)
+            message.extra["read_target_count"] = read_target_count
+
+            if read_target_count <= 1 and message.status not in {MessageStatus.FAILED, MessageStatus.RECALLED}:
+                message.status = MessageStatus.READ
+            elif message.status in {MessageStatus.SENT, MessageStatus.DELIVERED, MessageStatus.READ}:
+                message.status = MessageStatus.DELIVERED
+
+            message.updated_at = datetime.now()
+            changed_ids.append(message.message_id)
 
         for changed_id in changed_ids:
-            self._emit_display_row_changed(changed_id, [self.StatusRole, Qt.ItemDataRole.UserRole])
+            self._emit_display_row_changed(changed_id, self._display_roles())
 
     def update_message_content(self, message_id: str, content: str) -> None:
         """Update message content and refresh the corresponding display row."""
@@ -206,55 +256,175 @@ class MessageModel(QAbstractListModel):
             return
 
         message.content = content
-        self._emit_display_row_changed(
-            message_id,
-            [
-                Qt.ItemDataRole.DisplayRole,
-                Qt.ItemDataRole.UserRole,
-                Qt.ItemDataRole.SizeHintRole,
-                self.MessageRole,
-            ],
-        )
+        self._emit_display_row_changed(message_id, self._display_roles())
 
     def remove_message(self, message_id: str) -> None:
         """Remove a real message by ID."""
         for i, message in enumerate(self._messages):
             if message.message_id == message_id:
                 self._messages.pop(i)
-                self._reset_with_rebuilt_display_items()
+                self._apply_display_rebuild()
                 break
 
-    def _reset_with_rebuilt_display_items(self) -> None:
-        """Rebuild visible rows in one safe model reset."""
-        self.beginResetModel()
-        self._rebuild_display_items()
-        self.endResetModel()
+    def _append_display_items(self, messages: list[ChatMessage]) -> None:
+        """Append one contiguous display fragment for newly appended real messages."""
+        if not messages:
+            return
 
-    def _rebuild_display_items(self) -> None:
-        """Recompute visible rows from the real message list."""
-        display_items: list[ChatMessage] = []
-        message_count = len(self._messages)
+        previous_message = None
+        existing_message_count = len(self._messages) - len(messages)
+        if existing_message_count > 0:
+            previous_message = self._messages[existing_message_count - 1]
 
-        for index, message in enumerate(self._messages):
-            if message.status == MessageStatus.RECALLED:
-                display_items.append(self._build_recall_notice_item(message))
+        fragment = self._build_append_fragment(previous_message, messages)
+        if not fragment:
+            return
+
+        insert_at = len(self._display_items)
+        self.beginInsertRows(QModelIndex(), insert_at, insert_at + len(fragment) - 1)
+        self._display_items.extend(fragment)
+        self.endInsertRows()
+
+    def _prepend_display_items(self, messages: list[ChatMessage]) -> None:
+        """Prepend one contiguous display fragment for older history messages."""
+        if not messages:
+            return
+
+        next_message = self._messages[len(messages)] if len(self._messages) > len(messages) else None
+        fragment = self._build_prepend_fragment(messages, next_message)
+        if not fragment:
+            return
+
+        self.beginInsertRows(QModelIndex(), 0, len(fragment) - 1)
+        self._display_items = fragment + self._display_items
+        self.endInsertRows()
+
+    def _apply_display_rebuild(self, *, changed_message_ids: list[str] | None = None) -> None:
+        """Recompute visible rows and apply the smallest safe model change."""
+        self._apply_display_items(self._build_display_items(), changed_message_ids=changed_message_ids)
+
+    def _apply_display_items(self, new_items: list[ChatMessage], *, changed_message_ids: list[str] | None = None) -> None:
+        """Apply one rebuilt display snapshot with insert/remove/update instead of reset when possible."""
+        old_items = list(self._display_items)
+
+        if not old_items and not new_items:
+            return
+        if not old_items:
+            self.beginInsertRows(QModelIndex(), 0, len(new_items) - 1)
+            self._display_items = list(new_items)
+            self.endInsertRows()
+            return
+        if not new_items:
+            self.beginRemoveRows(QModelIndex(), 0, len(old_items) - 1)
+            self._display_items = []
+            self.endRemoveRows()
+            return
+
+        prefix = 0
+        max_prefix = min(len(old_items), len(new_items))
+        while prefix < max_prefix and self._display_signature(old_items[prefix]) == self._display_signature(new_items[prefix]):
+            prefix += 1
+
+        suffix = 0
+        max_suffix = min(len(old_items), len(new_items)) - prefix
+        while suffix < max_suffix and self._display_signature(old_items[-1 - suffix]) == self._display_signature(new_items[-1 - suffix]):
+            suffix += 1
+
+        old_mid_count = len(old_items) - prefix - suffix
+        new_mid_count = len(new_items) - prefix - suffix
+
+        if old_mid_count == 0 and new_mid_count == 0:
+            self._display_items = list(new_items)
+            self._emit_rows_for_message_ids(changed_message_ids)
+            return
+
+        if old_mid_count == new_mid_count:
+            self._display_items = list(new_items)
+            if new_mid_count > 0:
+                top = self.index(prefix, 0)
+                bottom = self.index(prefix + new_mid_count - 1, 0)
+                self.dataChanged.emit(top, bottom, self._display_roles())
             else:
-                display_items.append(message)
+                self._emit_rows_for_message_ids(changed_message_ids)
+            return
+
+        if old_mid_count > 0:
+            remove_start = prefix
+            remove_end = prefix + old_mid_count - 1
+            self.beginRemoveRows(QModelIndex(), remove_start, remove_end)
+            self._display_items = old_items[:prefix] + old_items[len(old_items) - suffix :]
+            self.endRemoveRows()
+
+        if new_mid_count > 0:
+            insert_start = prefix
+            insert_end = prefix + new_mid_count - 1
+            current_items = list(self._display_items)
+            self.beginInsertRows(QModelIndex(), insert_start, insert_end)
+            self._display_items = current_items[:insert_start] + new_items[prefix : prefix + new_mid_count] + current_items[insert_start:]
+            self.endInsertRows()
+
+        self._display_items = list(new_items)
+
+    def _build_display_items(self, messages: list[ChatMessage] | None = None) -> list[ChatMessage]:
+        """Recompute visible rows from the real message list."""
+        items = self._messages if messages is None else messages
+        display_items: list[ChatMessage] = []
+        message_count = len(items)
+
+        for index, message in enumerate(items):
+            display_items.append(self._build_display_message_item(message))
 
             if index >= message_count - 1:
                 continue
 
-            next_message = self._messages[index + 1]
+            next_message = items[index + 1]
             if self._is_time_break(message, next_message):
                 display_items.append(self._build_time_separator_item(message))
 
-        self._display_items = display_items
+        return display_items
+
+    def _build_append_fragment(self, previous_message: ChatMessage | None, messages: list[ChatMessage]) -> list[ChatMessage]:
+        """Build the display fragment for messages appended to the tail."""
+        fragment: list[ChatMessage] = []
+        if previous_message is not None and messages and self._is_time_break(previous_message, messages[0]):
+            fragment.append(self._build_time_separator_item(previous_message))
+
+        for index, message in enumerate(messages):
+            fragment.append(self._build_display_message_item(message))
+            if index >= len(messages) - 1:
+                continue
+            next_message = messages[index + 1]
+            if self._is_time_break(message, next_message):
+                fragment.append(self._build_time_separator_item(message))
+
+        return fragment
+
+    def _build_prepend_fragment(self, messages: list[ChatMessage], next_message: ChatMessage | None) -> list[ChatMessage]:
+        """Build the display fragment for older history inserted at the head."""
+        fragment: list[ChatMessage] = []
+        for index, message in enumerate(messages):
+            fragment.append(self._build_display_message_item(message))
+            candidate_next = messages[index + 1] if index < len(messages) - 1 else next_message
+            if candidate_next is not None and self._is_time_break(message, candidate_next):
+                fragment.append(self._build_time_separator_item(message))
+        return fragment
+
+    def _emit_rows_for_message_ids(self, message_ids: list[str] | None) -> None:
+        """Emit dataChanged for a set of real messages when structure is unchanged."""
+        if not message_ids:
+            return
+        seen: set[str] = set()
+        for message_id in message_ids:
+            if message_id in seen:
+                continue
+            seen.add(message_id)
+            self._emit_display_row_changed(message_id, self._display_roles())
 
     def _emit_display_row_changed(self, message_id: str, roles: list[int]) -> None:
         """Emit dataChanged for the display row representing one real message."""
         row = self._find_display_row_for_message(message_id)
         if row < 0:
-            self._reset_with_rebuilt_display_items()
+            self._apply_display_rebuild(changed_message_ids=[message_id])
             return
 
         index = self.index(row, 0)
@@ -268,6 +438,12 @@ class MessageModel(QAbstractListModel):
             if self._source_message_id(item) == message_id:
                 return row
         return -1
+
+    def _build_display_message_item(self, message: ChatMessage) -> ChatMessage:
+        """Return the visible row item for one real message."""
+        if message.status == MessageStatus.RECALLED:
+            return self._build_recall_notice_item(message)
+        return message
 
     def _build_time_separator_item(self, message: ChatMessage) -> ChatMessage:
         """Build a synthetic standalone time-separator row."""
@@ -319,10 +495,48 @@ class MessageModel(QAbstractListModel):
         """Return the real message id represented by a visible row."""
         return str((item.extra or {}).get(self.SOURCE_MESSAGE_ID_KEY, item.message_id))
 
+    def _display_signature(self, item: ChatMessage) -> tuple[str, str]:
+        """Return a stable signature for one visible row."""
+        return (self._display_kind(item), self._source_message_id(item))
+
+    def _display_roles(self) -> list[int]:
+        """Return the Qt roles affected by visible-row updates."""
+        return [
+            Qt.ItemDataRole.DisplayRole,
+            Qt.ItemDataRole.UserRole,
+            Qt.ItemDataRole.SizeHintRole,
+            self.MessageRole,
+            self.IsSelfRole,
+            self.MessageTypeRole,
+            self.StatusRole,
+            self.TimestampRole,
+            self.SenderIdRole,
+            self.DisplayKindRole,
+            self.SourceMessageIdRole,
+        ]
+
     @staticmethod
     def _normalize_timestamp(value):
         """Normalize timestamps for time-break comparisons."""
         return coerce_local_datetime(value)
+
+    @staticmethod
+    def _coerce_extra_int(message: ChatMessage, key: str) -> int:
+        """Read one integer from message extra metadata safely."""
+        try:
+            return max(0, int((message.extra or {}).get(key, 0) or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    @staticmethod
+    def _normalized_reader_ids(message: ChatMessage) -> list[str]:
+        """Return a stable unique reader-id list from message extra metadata."""
+        normalized: list[str] = []
+        for reader_id in (message.extra or {}).get("read_by_user_ids", []) or []:
+            value = str(reader_id or "").strip()
+            if value and value not in normalized:
+                normalized.append(value)
+        return normalized
 
     def _is_time_break(self, current: ChatMessage, next_message: ChatMessage) -> bool:
         """Return whether adjacent messages belong to different visible time groups."""
@@ -333,4 +547,3 @@ class MessageModel(QAbstractListModel):
         if current_time.date() != next_time.date():
             return True
         return abs((next_time - current_time).total_seconds()) >= 5 * 60
-

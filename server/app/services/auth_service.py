@@ -1,10 +1,10 @@
-"""Authentication service."""
+﻿"""Authentication service."""
 
 from __future__ import annotations
 
 from sqlalchemy.orm import Session
 
-from app.core.config import get_settings
+from app.core.config import Settings, get_settings
 from app.core.errors import AppError, ErrorCode
 from app.core.security import (
     create_access_token,
@@ -19,8 +19,8 @@ from app.services.user_service import UserService
 
 
 class AuthService:
-    def __init__(self, db: Session) -> None:
-        self.settings = get_settings()
+    def __init__(self, db: Session, settings: Settings | None = None) -> None:
+        self.settings = settings or get_settings()
         self.users = UserRepository(db)
 
     def register(self, username: str, password: str, nickname: str) -> dict:
@@ -56,27 +56,27 @@ class AuthService:
         return self._build_auth_payload(user)
 
     def refresh(self, refresh_token: str) -> dict:
-        payload = decode_refresh_token(refresh_token)
+        payload = decode_refresh_token(refresh_token, settings=self.settings)
         user = self.users.get_by_id(payload["sub"])
         if user is None:
             raise AppError(ErrorCode.USER_NOT_FOUND, "user not found", 404)
         return self._build_auth_payload(user)
 
     def refresh_access_token(self, refresh_token: str) -> dict:
-        payload = decode_refresh_token(refresh_token)
+        payload = decode_refresh_token(refresh_token, settings=self.settings)
         user = self.users.get_by_id(payload["sub"])
         if user is None:
             raise AppError(ErrorCode.USER_NOT_FOUND, "user not found", 404)
         return {
-            "access_token": create_access_token(user.id, user.username),
+            "access_token": create_access_token(user.id, user.username, settings=self.settings),
             "token_type": "Bearer",
             "expires_in": self.settings.access_token_expire_minutes * 60,
             "refresh_expires_in": self.settings.refresh_token_expire_days * 24 * 60 * 60,
         }
 
     def _build_auth_payload(self, user: User) -> dict:
-        access_token = create_access_token(user.id, user.username)
-        refresh_token = create_refresh_token(user.id, user.username)
+        access_token = create_access_token(user.id, user.username, settings=self.settings)
+        refresh_token = create_refresh_token(user.id, user.username, settings=self.settings)
         return {
             "access_token": access_token,
             "refresh_token": refresh_token,

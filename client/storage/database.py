@@ -1,4 +1,4 @@
-﻿"""
+"""
 Database Module
 
 SQLite database using aiosqlite for async operations.
@@ -393,6 +393,53 @@ class Database:
         messages = [self._row_to_message(row) for row in rows]
         messages.reverse()
         return messages
+
+    @staticmethod
+    def _escape_like_pattern(keyword: str) -> str:
+        """Escape one keyword for literal SQLite LIKE matching."""
+        escaped = str(keyword or "")
+        escaped = escaped.replace("\\", "\\\\")
+        escaped = escaped.replace("%", "\\%")
+        escaped = escaped.replace("_", "\\_")
+        return f"%{escaped}%"
+
+    async def search_messages(
+        self,
+        keyword: str,
+        session_id: Optional[str] = None,
+        limit: int = 100,
+    ) -> list[ChatMessage]:
+        """Search cached messages by one literal keyword."""
+        normalized_keyword = str(keyword or "").strip()
+        if not normalized_keyword:
+            return []
+
+        normalized_limit = max(1, int(limit or 0))
+        like_pattern = self._escape_like_pattern(normalized_keyword)
+
+        if session_id:
+            cursor = await self._db.execute(
+                """
+                SELECT * FROM messages
+                WHERE session_id = ? AND content LIKE ? ESCAPE '\\'
+                ORDER BY timestamp DESC
+                LIMIT ?
+                """,
+                (session_id, like_pattern, normalized_limit),
+            )
+        else:
+            cursor = await self._db.execute(
+                """
+                SELECT * FROM messages
+                WHERE content LIKE ? ESCAPE '\\'
+                ORDER BY timestamp DESC
+                LIMIT ?
+                """,
+                (like_pattern, normalized_limit),
+            )
+
+        rows = await cursor.fetchall()
+        return [self._row_to_message(row) for row in rows]
     
     async def delete_message(self, message_id: str) -> None:
         """
@@ -427,35 +474,78 @@ class Database:
         await self._db.commit()
         logger.debug(f"Message status updated: {message_id} -> {status_value}")
 
-    async def mark_messages_read_through(self, session_id: str, message_id: str) -> None:
-        """
-        Mark self messages in a session as read through the target message timestamp.
+    async def apply_read_receipt(
+        self,
+        session_id: str,
+        reader_id: str,
+        message_id: str,
+        last_read_seq: int,
+    ) -> list[str]:
+        """Apply one cumulative read receipt to locally cached self messages."""
+        import datetime
 
-        Args:
-            session_id: Session ID
-            message_id: Last read message ID
-        """
+        from client.models.message import MessageStatus
+
+        if not session_id or not reader_id or last_read_seq <= 0:
+            return []
+
         cursor = await self._db.execute(
-            "SELECT timestamp FROM messages WHERE message_id = ? AND session_id = ?",
-            (message_id, session_id),
-        )
-        row = await cursor.fetchone()
-        if row is None or row["timestamp"] is None:
-            return
-
-        await self._db.execute(
             """
-            UPDATE messages
-            SET status = ?
-            WHERE session_id = ?
-              AND is_self = 1
-              AND timestamp <= ?
-              AND status NOT IN (?, ?)
+            SELECT * FROM messages
+            WHERE session_id = ? AND is_self = 1
+            ORDER BY timestamp ASC
             """,
-            ("read", session_id, row["timestamp"], "failed", "recalled"),
+            (session_id,),
         )
-        await self._db.commit()
-        logger.debug(f"Messages marked read through: session={session_id}, message={message_id}")
+        rows = await cursor.fetchall()
+        changed_message_ids: list[str] = []
+
+        for row in rows:
+            message = self._row_to_message(row)
+            try:
+                message_seq = max(0, int((message.extra or {}).get("session_seq", 0) or 0))
+            except (TypeError, ValueError):
+                message_seq = 0
+
+            if message_seq <= 0 or message_seq > last_read_seq:
+                continue
+
+            read_by_user_ids = list(message.extra.get("read_by_user_ids") or [])
+            normalized_reader_ids: list[str] = []
+            for existing_reader_id in read_by_user_ids:
+                normalized_reader = str(existing_reader_id or "").strip()
+                if normalized_reader and normalized_reader not in normalized_reader_ids:
+                    normalized_reader_ids.append(normalized_reader)
+
+            if reader_id in normalized_reader_ids:
+                continue
+
+            normalized_reader_ids.append(reader_id)
+            normalized_reader_ids.sort()
+
+            try:
+                read_target_count = max(0, int(message.extra.get("read_target_count", 0) or 0))
+            except (TypeError, ValueError):
+                read_target_count = 0
+
+            message.extra["read_by_user_ids"] = normalized_reader_ids
+            message.extra["read_count"] = len(normalized_reader_ids)
+            message.extra["read_target_count"] = read_target_count
+
+            if read_target_count <= 1 and message.status not in {MessageStatus.FAILED, MessageStatus.RECALLED}:
+                message.status = MessageStatus.READ
+            elif message.status in {MessageStatus.SENT, MessageStatus.DELIVERED, MessageStatus.READ}:
+                message.status = MessageStatus.DELIVERED
+
+            message.updated_at = datetime.datetime.now()
+            await self.save_message(message)
+            changed_message_ids.append(message.message_id)
+
+        logger.debug(
+            f"Applied read receipt: session={session_id}, reader={reader_id}, message={message_id}, seq={last_read_seq}, changed={len(changed_message_ids)}"
+        )
+        return changed_message_ids
+
 
     async def update_message_content(self, message_id: str, content: str) -> None:
         """
@@ -491,8 +581,8 @@ class Database:
         await self._db.execute("DELETE FROM messages")
         await self._db.execute("DELETE FROM sessions")
         await self._db.execute(
-            "DELETE FROM app_state WHERE key IN (?, ?)",
-            ("last_sync_timestamp", "chat.hidden_sessions"),
+            "DELETE FROM app_state WHERE key IN (?, ?, ?, ?)",
+            ("last_sync_session_cursors", "last_sync_event_cursors", "last_sync_timestamp", "chat.hidden_sessions"),
         )
         await self._db.commit()
         logger.info("Local chat state cleared")
@@ -576,6 +666,38 @@ class Database:
         )
         row = await cursor.fetchone()
         return row["last_timestamp"] if row and row["last_timestamp"] else None
+
+    async def get_session_sync_cursors(self) -> dict[str, int]:
+        """Return the highest cached session_seq per session for reconnect sync."""
+        cursor = await self._db.execute(
+            "SELECT session_id, extra FROM messages"
+        )
+        rows = await cursor.fetchall()
+
+        session_cursors: dict[str, int] = {}
+        for row in rows:
+            session_id = str(row["session_id"] or "").strip()
+            if not session_id:
+                continue
+
+            try:
+                extra = json.loads(row["extra"] or "{}")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                extra = {}
+
+            try:
+                session_seq = max(0, int((extra or {}).get("session_seq", 0) or 0))
+            except (TypeError, ValueError):
+                session_seq = 0
+
+            if session_seq <= 0:
+                continue
+
+            current_seq = session_cursors.get(session_id, 0)
+            if session_seq > current_seq:
+                session_cursors[session_id] = session_seq
+
+        return session_cursors
 
     async def save_messages_batch(self, messages: list[ChatMessage]) -> None:
         """

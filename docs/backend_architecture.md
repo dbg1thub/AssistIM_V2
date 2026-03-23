@@ -1,2451 +1,315 @@
-# AssistIM Backend Architecture
+# 服务端架构说明
 
-Version: 1.0
-Architecture Style: RESTful + WebSocket
-Backend Framework: FastAPI
+## 1. 适用范围
 
----
+本文档描述服务端的目标架构、部署基线、领域模型、一致性规则、实时链路、存储与演进方式。
 
-# 1. Project Overview
+本文档强调两件事：
 
-AssistIM 是一个 **AI增强即时通讯系统**。
+- 先定义成熟、常见、可扩展、低耦合的目标设计
+- 再让代码逐步向目标设计收敛，而不是把历史实现直接等同于最终架构
 
-系统包含：
+## 2. 部署基线与演进路径
 
-* Desktop Client
-* Backend API
-* WebSocket Real-time Server
-* File Storage
-* AI Assistant
+### 2.1 当前可运行基线
 
-核心功能：
+当前项目优先保证单机可运行，因此可以接受以下基线：
 
-* 用户系统
-* 好友系统
-* 聊天系统
-* 群聊系统
-* 朋友圈系统
-* 文件系统
-* AI聊天
-* 实时消息
+- 单个 FastAPI 应用进程
+- 单个 SQL 数据库
+- 本地文件上传目录
+- 进程内 `RealtimeHub` 默认实现（连接注册表 / presence / fanout）
+- 进程内 `RateLimitStore` 默认实现
+- 测试环境可使用 SQLite，生产目标优先 PostgreSQL
 
----
+### 2.2 目标演进路径
 
-# 2. Technology Stack
+后续扩展时，服务端应沿着以下方向演进，而不破坏上层接口：
 
-Backend Framework
+- Presence / Fanout 通过 `RealtimeHub` 从进程内实现外置到 Redis / PubSub
+- 文件存储从本地目录切换到对象存储
+- 后台任务从进程内执行演进到 worker / queue
+- 历史兼容脚本逐步收敛为标准 migration 流程
 
-FastAPI
+原则：
 
-ASGI Server
+- 先通过边界抽象保证可替换性
+- 不为了“可能扩容”过早拆分微服务
+- 不把横向扩展需求写死到业务层判断里
 
-Uvicorn
+## 3. 分层结构
 
-ORM
+服务端采用如下分层：
 
-SQLAlchemy 2.0
-
-Database
-
-PostgreSQL
-
-Cache
-
-Redis
-
-Schema Validation
-
-Pydantic
-
-Authentication
-
-JWT
-
-Password Hashing
-
-bcrypt
-
-Migration
-
-Alembic
-
----
-
-# 3. Backend Architecture Pattern
-
-系统使用 **四层架构**
-
-API Layer
-Service Layer
-Repository Layer
-Database Layer
-
-结构如下
-
-```
-Client
- ↓
-API Router
- ↓
-Service
- ↓
-Repository
- ↓
-Database
-```
-
----
-
-# 4. Backend Directory Structure
-
-```
-server
-
-app
- ├── main.py
- ├── core
- ├── api
- ├── models
- ├── schemas
- ├── services
- ├── repositories
- ├── websocket
- ├── dependencies
- └── utils
-
-alembic
-tests
-docs
-```
-
----
-
-# 5. Detailed Directory Structure
-
-```
-app
-
-core
-api
-models
-schemas
-services
-repositories
-websocket
-dependencies
-utils
-```
-
----
-
-# 6. Core Directory
-
-```
-app/core
-```
-
-Files
-
-```
-config.py
-database.py
-security.py
-logging.py
-```
-
-Responsibilities
-
-Configuration management
-Database initialization
-Security configuration
-Logging setup
-
----
-
-# 7. API Layer
-
-```
-app/api/v1
-```
-
-Structure
-
-```
-auth.py
-users.py
-friends.py
-sessions.py
-messages.py
-groups.py
-moments.py
-files.py
-```
-
-Responsibilities
-
-HTTP request handling
-Request validation
-Response formatting
-
----
-
-# 8. Models Layer
-
-```
-app/models
-```
-
-SQLAlchemy models。
-
-Example
-
-```
-user.py
-message.py
-group.py
-friend.py
-session.py
-moment.py
-```
-
----
-
-# 9. Schemas Layer
-
-```
-app/schemas
-```
-
-Pydantic models。
-
-Example
-
-```
-user_schema.py
-auth_schema.py
-message_schema.py
-```
-
----
-
-# 10. Services Layer
-
-```
-app/services
-```
-
-Business logic layer。
-
-Example
-
-```
-auth_service.py
-message_service.py
-friend_service.py
-group_service.py
-moment_service.py
-```
-
-Responsibilities
-
-Authentication logic
-Chat logic
-Friend management
-
----
-
-# 11. Repository Layer
-
-```
-app/repositories
-```
-
-Database operations。
-
-Example
-
-```
-user_repo.py
-message_repo.py
-friend_repo.py
-```
-
-Responsibilities
-
-CRUD operations
-Query abstraction
-
----
-
-# 12. WebSocket Layer
-
-```
-app/websocket
-```
-
-Files
-
-```
-manager.py
-chat_ws.py
-presence_ws.py
-```
-
-Responsibilities
-
-Real-time message delivery
-User presence
-Typing indicator
-
----
-
-# 13. Dependencies
-
-```
-app/dependencies
-```
-
-Example
-
-```
-auth_dependency.py
-```
-
-Responsibilities
-
-JWT validation
-User authentication
-
----
-
-# 14. Utils
-
-```
-app/utils
-```
-
-Utilities
-
-```
-jwt.py
-password.py
-response.py
-time.py
-```
-
----
-
-# 15. Configuration System
-
-Environment configuration stored in `.env`.
-
-Example
-
-```
-DATABASE_URL
-SECRET_KEY
-ACCESS_TOKEN_EXPIRE
-REDIS_URL
-```
-
----
-
-# 16. Example main.py
-
-```python
-from fastapi import FastAPI
-from app.api.v1.router import api_router
-
-app = FastAPI(
-    title="AssistIM API",
-    version="1.0"
-)
-
-app.include_router(api_router, prefix="/api/v1")
-```
-
----
-
-# 17. API Router
-
-```
-app/api/v1/router.py
-```
-
-Example
-
-```python
-from fastapi import APIRouter
-
-from .auth import router as auth_router
-from .users import router as users_router
-
-api_router = APIRouter()
-
-api_router.include_router(auth_router, prefix="/auth")
-api_router.include_router(users_router, prefix="/users")
-```
-
----
-
-# 18. RESTful API Rules
-
-Rules
-
-1 Resource based URL
-2 Use HTTP methods
-3 Stateless design
-
-Example
-
-```
-GET /users
-POST /users
-GET /users/{id}
-DELETE /users/{id}
-```
-
----
-
-# 19. API Response Format
-
-Success
-
-```
-{
- "code":0,
- "message":"success",
- "data":{}
-}
-```
-
-Error
-
-```
-{
- "code":4001,
- "message":"invalid request"
-}
-```
-
----
-
-# 20. Authentication System
-
-Authentication uses **JWT**.
-
-Flow
-
-```
-Login
- ↓
-Generate Token
- ↓
-Client stores token
- ↓
-Client sends Authorization header
-```
-
-Header
-
-```
-Authorization: Bearer <token>
-```
-
----
-
-# 21. Password Hashing
-
-Passwords stored as bcrypt hashes.
-
-Process
-
-```
-password → bcrypt → hash
-```
-
----
-
-# 22. Token Structure
-
-Example JWT payload
-
-```
-{
- "sub":1,
- "username":"user1",
- "exp":1760000000
-}
-```
-
----
-
-# 23. Rate Limiting
-
-System should implement request rate limiting.
-
-Example
-
-```
-login: 5 requests/min
-register: 3 requests/min
-```
-
----
-
-# 24. Logging System
-
-Use structured logging.
-
-Log types
-
-```
-access log
-error log
-security log
-```
-
----
-
-# 25. Error Codes
-
-Example
-
-```
-1001 invalid credentials
-1002 user exists
-1003 user not found
-1004 unauthorized
-```
-
----
-
-# 26. Future Modules
-
-Planned modules
-
-User system
-Friend system
-Chat system
-Group chat
-Moments
-File storage
-AI assistant
-
-Next chapters will define them in detail.
-
-# 27. Database Architecture
-
-Database: PostgreSQL
-
-Design principles
-
-1 Normalized structure
-2 Clear relations
-3 Indexed queries
-4 Optimized for chat workloads
-
----
-
-# 28. Database Tables Overview
-
-Main tables
-
-users
-friend_requests
-friends
-sessions
-messages
-groups
-group_members
-moments
-moment_likes
-moment_comments
-files
-
----
-
-# 29. Users Table
-
-Table name
-
-users
-
-Fields
-
-id
-username
-password_hash
-nickname
-avatar
-status
-created_at
-
-Schema
-
-```sql
-CREATE TABLE users (
-    id BIGSERIAL PRIMARY KEY,
-    username VARCHAR(32) UNIQUE NOT NULL,
-    password_hash VARCHAR(255) NOT NULL,
-    nickname VARCHAR(64) NOT NULL,
-    avatar TEXT,
-    status VARCHAR(16) DEFAULT 'offline',
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-```
-
-Indexes
-
-```sql
-CREATE INDEX idx_users_username ON users(username);
-```
-
----
-
-# 30. Friend Requests Table
-
-Table
-
-friend_requests
-
-Fields
-
-id
-sender_id
-receiver_id
-status
-created_at
-
-Schema
-
-```sql
-CREATE TABLE friend_requests (
-    id BIGSERIAL PRIMARY KEY,
-    sender_id BIGINT NOT NULL,
-    receiver_id BIGINT NOT NULL,
-    status VARCHAR(16) DEFAULT 'pending',
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-```
-
-Status
-
-pending
-accepted
-rejected
-
----
-
-# 31. Friends Table
-
-Table
-
-friends
-
-Fields
-
-id
-user_id
-friend_id
-created_at
-
-Schema
-
-```sql
-CREATE TABLE friends (
-    id BIGSERIAL PRIMARY KEY,
-    user_id BIGINT NOT NULL,
-    friend_id BIGINT NOT NULL,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-```
-
-Indexes
-
-```sql
-CREATE INDEX idx_friends_user_id ON friends(user_id);
-```
-
----
-
-# 32. Sessions Table
-
-Session represents a chat conversation.
-
-Table
-
-sessions
-
-Fields
-
-id
-type
-created_at
-
-Types
-
-private
-group
-
-Schema
-
-```sql
-CREATE TABLE sessions (
-    id BIGSERIAL PRIMARY KEY,
-    type VARCHAR(16) NOT NULL,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-```
-
----
-
-# 33. Session Members Table
-
-Table
-
-session_members
-
-Fields
-
-session_id
-user_id
-joined_at
-
-Schema
-
-```sql
-CREATE TABLE session_members (
-    session_id BIGINT NOT NULL,
-    user_id BIGINT NOT NULL,
-    joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY(session_id,user_id)
-);
-```
-
----
-
-# 34. Messages Table
-
-Table
-
-messages
-
-Fields
-
-id
-session_id
-sender_id
-type
-content
-created_at
-
-Message types
-
-text
-image
-file
-system
-
-Schema
-
-```sql
-CREATE TABLE messages (
-    id BIGSERIAL PRIMARY KEY,
-    session_id BIGINT NOT NULL,
-    sender_id BIGINT NOT NULL,
-    type VARCHAR(16) NOT NULL,
-    content TEXT,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-```
-
-Indexes
-
-```sql
-CREATE INDEX idx_messages_session_id ON messages(session_id);
-```
-
----
-
-# 35. Message Read Status
-
-Table
-
-message_reads
-
-Fields
-
-message_id
-user_id
-read_at
-
-Schema
-
-```sql
-CREATE TABLE message_reads (
-    message_id BIGINT NOT NULL,
-    user_id BIGINT NOT NULL,
-    read_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY(message_id,user_id)
-);
-```
-
----
-
-# 36. Groups Table
-
-Table
-
-groups
-
-Fields
-
-id
-name
-owner_id
-created_at
-
-Schema
-
-```sql
-CREATE TABLE groups (
-    id BIGSERIAL PRIMARY KEY,
-    name VARCHAR(128) NOT NULL,
-    owner_id BIGINT NOT NULL,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-```
-
----
-
-# 37. Group Members
-
-Table
-
-group_members
-
-Fields
-
-group_id
-user_id
-role
-
-Roles
-
-owner
-admin
-member
-
-Schema
-
-```sql
-CREATE TABLE group_members (
-    group_id BIGINT NOT NULL,
-    user_id BIGINT NOT NULL,
-    role VARCHAR(16) DEFAULT 'member',
-    joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY(group_id,user_id)
-);
-```
-
----
-
-# 38. Moments Table
-
-朋友圈动态
-
-Table
-
-moments
-
-Fields
-
-id
-user_id
-content
-created_at
-
-Schema
-
-```sql
-CREATE TABLE moments (
-    id BIGSERIAL PRIMARY KEY,
-    user_id BIGINT NOT NULL,
-    content TEXT,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-```
-
----
-
-# 39. Moment Likes
-
-Table
-
-moment_likes
-
-Fields
-
-moment_id
-user_id
-created_at
-
-Schema
-
-```sql
-CREATE TABLE moment_likes (
-    moment_id BIGINT NOT NULL,
-    user_id BIGINT NOT NULL,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY(moment_id,user_id)
-);
-```
-
----
-
-# 40. Moment Comments
-
-Table
-
-moment_comments
-
-Fields
-
-id
-moment_id
-user_id
-content
-created_at
-
-Schema
-
-```sql
-CREATE TABLE moment_comments (
-    id BIGSERIAL PRIMARY KEY,
-    moment_id BIGINT NOT NULL,
-    user_id BIGINT NOT NULL,
-    content TEXT,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-```
-
----
-
-# 41. Files Table
-
-Table
-
-files
-
-Fields
-
-id
-user_id
-file_url
-file_type
-created_at
-
-Schema
-
-```sql
-CREATE TABLE files (
-    id BIGSERIAL PRIMARY KEY,
-    user_id BIGINT NOT NULL,
-    file_url TEXT NOT NULL,
-    file_type VARCHAR(32),
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-```
-
----
-
-# 42. Database Relations
-
-Relations
-
-users → friends
-users → messages
-sessions → messages
-groups → group_members
-
-Example
-
-User
-
-↓
-
-Sessions
-
-↓
-
-Messages
-
----
-
-# 43. Message Flow
-
-Message send process
-
-Client sends message
-
-↓
-
-API receives request
-
-↓
-
-Message stored in database
-
-↓
-
-WebSocket broadcast
-
----
-
-# 44. Index Strategy
-
-Indexes required
-
-users.username
-messages.session_id
-friends.user_id
-group_members.group_id
-
----
-
-# 45. Scaling Considerations
-
-Future scaling
-
-Partition messages table
-Use Redis cache
-Use message queue
-
----
-
-# 46. Database Migration
-
-Migration tool
-
-Alembic
-
-Example
-
-```bash
-alembic revision --autogenerate
-alembic upgrade head
-```
-
----
-
-# 47. Future Database Extensions
-
-Possible additions
-
-message_reactions
-message_attachments
-user_settings
-notification_queue
-
-# 48. RESTful API Design
-
-All APIs follow RESTful principles.
-
-Rules
-
-1 Resource-based URLs
-2 Use HTTP verbs
-3 Stateless requests
-4 JSON responses
-
-Base URL
-
-/api/v1
-
----
-
-# 49. Authentication APIs
-
-Authentication endpoints.
-
-Endpoints
-
-POST /auth/login
-POST /auth/users
-POST /auth/token
-DELETE /auth/session
-GET /auth/me
-
----
-
-# 50. User Registration
-
-Endpoint
-
-POST /auth/users
-
-Request
-
-```json id="req01"
-{
- "username": "string",
- "password": "string",
- "nickname": "string"
-}
-```
-
-Response
-
-```json id="res01"
-{
- "id":1,
- "username":"user1",
- "nickname":"User One",
- "created_at":"2026-03-16T12:00:00Z"
-}
-```
-
-HTTP Status
-
-201 Created
-
----
-
-# 51. User Login
-
-Endpoint
-
-POST /auth/login
-
-Request
-
-```json id="req02"
-{
- "username":"string",
- "password":"string"
-}
-```
-
-Response
-
-```json id="res02"
-{
- "access_token":"jwt_token",
- "refresh_token":"refresh_token",
- "token_type":"Bearer",
- "expires_in":7200
-}
-```
-
-HTTP Status
-
-200 OK
-
----
-
-# 52. Refresh Token
-
-Endpoint
-
-POST /auth/token
-
-Request
-
-```json id="req03"
-{
- "refresh_token":"string"
-}
-```
-
-Response
-
-```json id="res03"
-{
- "access_token":"new_token",
- "token_type":"Bearer",
- "expires_in":7200
-}
-```
-
----
-
-# 53. Logout
-
-Endpoint
-
-DELETE /auth/session
-
-Headers
-
-Authorization: Bearer token
-
-Response
-
-204 No Content
-
----
-
-# 54. Current User
-
-Endpoint
-
-GET /auth/me
-
-Response
-
-```json id="res04"
-{
- "id":1,
- "username":"user1",
- "nickname":"User One",
- "avatar":"url",
- "created_at":"2026-03-16T12:00:00Z"
-}
-```
-
----
-
-# 55. Users API
-
-User resources.
-
-Endpoints
-
-GET /users/{id}
-GET /users/search
-
----
-
-# 56. Get User Profile
-
-Endpoint
-
-GET /users/{id}
-
-Response
-
-```json id="res05"
-{
- "id":1,
- "username":"user1",
- "nickname":"User One",
- "avatar":"url"
-}
-```
-
----
-
-# 57. Search Users
-
-Endpoint
-
-GET /users/search
-
-Query Parameters
-
-keyword
-
-Example
-
-/users/search?keyword=test
-
-Response
-
-```json id="res06"
-[
- {
-  "id":2,
-  "username":"testuser",
-  "nickname":"Test"
- }
-]
-```
-
----
-
-# 58. Friend System Overview
-
-Friend system includes
-
-friend requests
-friend list
-accept/reject requests
-
-Tables used
-
-friend_requests
-friends
-
----
-
-# 59. Send Friend Request
-
-Endpoint
-
-POST /friends/requests
-
-Request
-
-```json id="req04"
-{
- "user_id":2,
- "message":"hello"
-}
-```
-
-Response
-
-```json id="res07"
-{
- "id":10,
- "status":"pending"
-}
-```
-
----
-
-# 60. List Friend Requests
-
-Endpoint
-
-GET /friends/requests
-
-Response
-
-```json id="res08"
-[
- {
-  "id":10,
-  "sender_id":2,
-  "status":"pending"
- }
-]
-```
-
----
-
-# 61. Accept Friend Request
-
-Endpoint
-
-POST /friends/requests/{id}/accept
-
-Response
-
-```json id="res09"
-{
- "status":"accepted"
-}
-```
-
----
-
-# 62. Reject Friend Request
-
-Endpoint
-
-POST /friends/requests/{id}/reject
-
-Response
-
-```json id="res10"
-{
- "status":"rejected"
-}
-```
-
----
-
-# 63. Friend List
-
-Endpoint
-
-GET /friends
-
-Response
-
-```json id="res11"
-[
- {
-  "id":2,
-  "username":"friend1",
-  "nickname":"Friend One",
-  "avatar":"url"
- }
-]
-```
-
----
-
-# 64. Delete Friend
-
-Endpoint
-
-DELETE /friends/{id}
-
-Response
-
-204 No Content
-
----
-
-# 65. Friend Relationship Check
-
-Endpoint
-
-GET /friends/check/{user_id}
-
-Response
-
-```json id="res12"
-{
- "is_friend":true
-}
-```
-
----
-
-# 66. Pagination Rules
-
-List endpoints support pagination.
-
-Parameters
-
-page
-size
-
-Example
-
-/users/search?page=1&size=20
-
-Response
-
-```json id="res13"
-{
- "total":100,
- "page":1,
- "size":20,
- "items":[]
-}
-```
-
----
-
-# 67. Error Handling
-
-Standard error response
-
-```json id="err01"
-{
- "code":4001,
- "message":"invalid request"
-}
-```
-
-Common errors
-
-400 Bad Request
-401 Unauthorized
-403 Forbidden
-404 Not Found
-500 Server Error
-
----
-
-# 68. API Versioning
-
-All APIs include version prefix.
-
-Example
-
-/api/v1/users
-
-Future
-
-/api/v2
-
----
-
-# 69. Authentication Middleware
-
-All protected endpoints require token.
-
-Header
-
-Authorization: Bearer token
-
-Validation process
-
-Verify JWT
-Extract user_id
-Load user
-
----
-
-# 70. Rate Limiting
-
-Endpoints should apply limits.
-
-Examples
-
-login → 5/min
-register → 3/min
-friend request → 10/min
-
----
-
-# 71. Logging
-
-Log API requests.
-
-Example fields
-
-timestamp
-user_id
-endpoint
-status_code
-
-# 72. Chat System Overview
-
-The chat system is the core of AssistIM.
-
-Main components
-
-sessions
-session_members
-messages
-message_reads
-
-Features
-
-private chat
-group chat
-message history
-read receipts
-message recall
-
----
-
-# 73. Session Resource
-
-Session represents a conversation.
-
-Types
-
-private
-group
-
-Endpoints
-
-GET /sessions
-POST /sessions
-GET /sessions/{id}
-DELETE /sessions/{id}
-
----
-
-# 74. Create Private Session
-
-Endpoint
-
-POST /sessions
-
-Request
-
-```json id="req10"
-{
- "type":"private",
- "user_id":2
-}
-```
-
-Response
-
-```json id="res20"
-{
- "id":100,
- "type":"private",
- "created_at":"2026-03-16T12:00:00Z"
-}
-```
-
----
-
-# 75. List Sessions
-
-Endpoint
-
-GET /sessions
-
-Response
-
-```json id="res21"
-[
- {
-  "id":100,
-  "type":"private",
-  "last_message":"hello",
-  "updated_at":"2026-03-16T12:10:00Z"
- }
-]
-```
-
----
-
-# 76. Get Session
-
-Endpoint
-
-GET /sessions/{id}
-
-Response
-
-```json id="res22"
-{
- "id":100,
- "type":"private",
- "members":[
-  {
-   "id":1,
-   "nickname":"User1"
-  },
-  {
-   "id":2,
-   "nickname":"User2"
-  }
- ]
-}
-```
-
----
-
-# 77. Delete Session
-
-Endpoint
-
-DELETE /sessions/{id}
-
-Response
-
-204 No Content
-
----
-
-# 78. Message Resource
-
-Message represents a chat message.
-
-Fields
-
-id
-session_id
-sender_id
-type
-content
-created_at
-
-Types
-
-text
-image
-file
-system
-
----
-
-# 79. Send Message
-
-Endpoint
-
-POST /messages
-
-Request
-
-```json id="req11"
-{
- "session_id":100,
- "type":"text",
- "content":"hello"
-}
-```
-
-Response
-
-```json id="res23"
-{
- "id":500,
- "session_id":100,
- "sender_id":1,
- "type":"text",
- "content":"hello",
- "created_at":"2026-03-16T12:00:00Z"
-}
-```
-
----
-
-# 80. Message History
-
-Endpoint
-
-GET /messages/history
-
-Query Parameters
-
-session_id
-before_id
-limit
-
-Example
-
-/messages/history?session_id=100&limit=20
-
-Response
-
-```json id="res24"
-[
- {
-  "id":500,
-  "content":"hello",
-  "sender_id":1
- }
-]
-```
-
----
-
-# 81. Load Older Messages
-
-Pagination uses message id.
-
-Example
-
-/messages/history?session_id=100&before_id=500
-
-Response returns older messages.
-
----
-
-# 82. Message Read Receipt
-
-Endpoint
-
-POST /messages/read
-
-Request
-
-```json id="req12"
-{
- "message_id":500
-}
-```
-
-Response
-
-```json id="res25"
-{
- "status":"read"
-}
-```
-
----
-
-# 83. Batch Read
-
-Endpoint
-
-POST /messages/read/batch
-
-Request
-
-```json id="req13"
-{
- "session_id":100,
- "last_read_id":500
-}
-```
-
-Response
-
-```json id="res26"
-{
- "success":true
-}
-```
-
----
-
-# 84. Message Recall
-
-Endpoint
-
-POST /messages/{id}/recall
-
-Rules
-
-Only sender can recall message.
-
-Time limit example
-
-2 minutes.
-
-Response
-
-```json id="res27"
-{
- "status":"recalled"
-}
-```
-
----
-
-# 85. Message Delete
-
-Endpoint
-
-DELETE /messages/{id}
-
-Response
-
-204 No Content
-
----
-
-# 86. Message Types
-
-Supported types
-
-text
-image
-file
-system
-
-Example
-
-```json id="msg01"
-{
- "type":"text",
- "content":"hello"
-}
-```
-
----
-
-# 87. Image Message
-
-Example
-
-```json id="msg02"
-{
- "type":"image",
- "content":"https://cdn.server/image.jpg"
-}
-```
-
----
-
-# 88. File Message
-
-Example
-
-```json id="msg03"
-{
- "type":"file",
- "content":"https://cdn.server/file.pdf"
-}
-```
-
----
-
-# 89. Typing Indicator
-
-Endpoint
-
-POST /sessions/{id}/typing
-
-Request
-
-```json id="req14"
-{
- "typing":true
-}
-```
-
-Used for real-time typing notifications.
-
----
-
-# 90. Unread Messages
-
-Endpoint
-
-GET /messages/unread
-
-Response
-
-```json id="res28"
-{
- "total":15
-}
+```text
+HTTP Router / WebSocket Gateway
+            -> Service
+            -> Repository
+            -> Database
 ```
 
----
+### 3.1 Router / Gateway 层
 
-# 91. Session Unread Count
+职责：
 
-Endpoint
+- HTTP 请求校验
+- WebSocket 鉴权、收包、发包
+- 错误转换
+- 协议适配
 
-GET /sessions/unread
+禁止：
 
-Response
+- 在 Router / Gateway 内实现业务规则
+- 在 WebSocket handler 中直接绕过 Service 修改数据库
+- 在多个入口分别复制权限判断逻辑
 
-```json id="res29"
-[
- {
-  "session_id":100,
-  "unread":3
- }
-]
-```
-
----
-
-# 92. Message Ordering
-
-Messages ordered by
-
-id ASC
-
-Example
-
-1
-2
-3
-4
-
----
-
-# 93. Message ID Strategy
-
-Use auto increment id.
-
-Advantages
-
-ordered
-easy pagination
-fast query
-
----
-
-# 94. Message Storage
-
-Messages stored in database.
-
-Flow
-
-Client → API → DB → WebSocket broadcast
-
----
-
-# 95. Performance Optimization
-
-For large systems
-
-partition messages table
-
-Example
-
-messages_2026
-messages_2027
-
----
-
-# 96. Message Cache
-
-Redis cache for
-
-recent messages
-session metadata
-
----
-
-# 97. Message Queue
-
-Future scaling
-
-Kafka
-RabbitMQ
-
----
-
-# 98. Security Rules
-
-Check session membership before sending message.
-
-Verify
-
-user_id ∈ session_members
-
-# 99. Group Chat System Overview
-
-Group chat allows multiple users to communicate in one session.
-
-Main components
-
-groups
-group_members
-messages
-
-Roles
-
-owner
-admin
-member
-
-Features
-
-create group
-invite members
-remove members
-group messaging
-
----
-
-# 100. Group Resource
-
-Group represents a chat group.
-
-Endpoints
-
-POST /groups
-GET /groups
-GET /groups/{id}
-DELETE /groups/{id}
-
----
-
-# 101. Create Group
-
-Endpoint
-
-POST /groups
-
-Request
-
-```json id="req20"
-{
- "name":"Study Group",
- "members":[2,3,4]
-}
-```
-
-Response
-
-```json id="res40"
-{
- "id":200,
- "name":"Study Group",
- "owner_id":1
-}
-```
-
-HTTP Status
-
-201 Created
-
----
-
-# 102. List Groups
-
-Endpoint
-
-GET /groups
+### 3.2 Service 层
 
-Response
+职责：
 
-```json id="res41"
-[
- {
-  "id":200,
-  "name":"Study Group",
-  "member_count":5
- }
-]
-```
-
----
-
-# 103. Get Group
-
-Endpoint
-
-GET /groups/{id}
-
-Response
-
-```json id="res42"
-{
- "id":200,
- "name":"Study Group",
- "owner_id":1,
- "members":[
-  {
-   "user_id":1,
-   "role":"owner"
-  },
-  {
-   "user_id":2,
-   "role":"member"
-  }
- ]
-}
-```
-
----
-
-# 104. Delete Group
-
-Endpoint
-
-DELETE /groups/{id}
-
-Rules
-
-Only owner can delete group.
-
-Response
-
-204 No Content
-
----
-
-# 105. Add Group Member
-
-Endpoint
-
-POST /groups/{id}/members
-
-Request
-
-```json id="req21"
-{
- "user_id":5
-}
-```
-
-Response
-
-```json id="res43"
-{
- "status":"added"
-}
-```
-
----
-
-# 106. Remove Group Member
-
-Endpoint
-
-DELETE /groups/{id}/members/{user_id}
-
-Response
-
-204 No Content
-
----
-
-# 107. Group Member Role
-
-Roles
-
-owner
-admin
-member
-
-Permissions
+- 业务规则
+- 权限校验
+- 跨聚合协调
+- 一致性约束
+- 序列化为 API / WS 输出模型
 
-owner → full control
-admin → manage members
-member → send messages
+Service 是真正的业务边界，HTTP 与 WebSocket 都必须复用同一套 Service 规则。
 
----
+### 3.3 Repository 层
 
-# 108. Leave Group
+职责：
 
-Endpoint
+- 数据读写封装
+- 持久化查询
+- 最小必要的数据库事务辅助
 
-POST /groups/{id}/leave
+规则：
 
-Response
+- Repository 不做业务策略裁决
+- Repository 不应成为“第二套 Service”
+- 跨领域一致性由 Service 协调，不由多个 Repository 各自猜测
 
-```json id="res44"
-{
- "status":"left"
-}
-```
-
----
-
-# 109. Transfer Ownership
-
-Endpoint
-
-POST /groups/{id}/transfer
-
-Request
-
-```json id="req22"
-{
- "new_owner_id":3
-}
-```
-
----
-
-# 110. WebSocket Overview
-
-WebSocket used for real-time communication.
-
-Main channels
-
-/ws/chat
-/ws/presence
-
----
-
-# 111. Chat WebSocket
-
-Connection URL
+## 4. 核心领域模型
 
-/ws/chat
+### 4.1 ChatSession
 
-Authentication
+会话是聊天的核心聚合根，负责承载：
 
-Token required.
+- 会话基本信息
+- 会话类型（私聊 / 群聊 / AI 等）
+- 会话消息高水位 `last_message_seq`
+- 会话事件高水位 `last_event_seq`
 
-Example
+### 4.2 SessionMember
 
-ws://server/ws/chat?token=JWT
+`session_members` 是会话成员关系的正式真相来源。
 
----
+它负责表达：
 
-# 112. WebSocket Message Format
+- 谁属于该会话
+- 成员何时加入
+- 成员自己的已读游标 `last_read_seq`
+- 成员自己的 `last_read_message_id / last_read_at`
 
-Client → Server
+设计要求：
 
-```json id="ws01"
-{
- "type":"message",
- "session_id":100,
- "content":"hello"
-}
-```
-
-Server → Client
-
-```json id="ws02"
-{
- "event":"message",
- "data":{
-  "id":500,
-  "session_id":100,
-  "content":"hello"
- }
-}
-```
-
----
-
-# 113. WebSocket Events
-
-Events supported
-
-message
-typing
-read
-online
-offline
-
----
+- 权限判断以 `session_members` 为准
+- 群组域模型不能绕开 `session_members` 单独作为聊天权限真相
+- 运行时不应依赖“读路径修复成员关系”来维持正常业务
+- 历史漂移由启动期兼容迁移一次性回填，不在业务请求中隐式修复
 
-# 114. Typing Event
+### 4.3 Group / Friend / Moment / File
 
-Example
+这些模型分别承载各自业务域，但都不应破坏聊天主链路的一致性边界。
 
-```json id="ws03"
-{
- "type":"typing",
- "session_id":100
-}
-```
-
-Server broadcasts typing event.
-
----
-
-# 115. Read Receipt Event
+示例：
 
-Example
+- Group 表达群组业务元数据
+- Friend / FriendRequest 表达好友关系与申请历史
+- File 表达上传文件元数据
+- Moment 表达朋友圈内容
 
-```json id="ws04"
-{
- "type":"read",
- "message_id":500
-}
-```
-
----
+好友请求规则：
 
-# 116. Presence System
+- 同一对用户同一时刻最多只有一个有效 `pending` 请求
+- 同方向重复发送按幂等处理，返回现有请求
+- 发现反向 `pending` 请求时，直接接受已有请求并建立好友关系
+- 已经是好友时不再创建新请求
 
-Presence tracks online users.
+## 5. 消息一致性规则
 
-Events
+### 5.1 `msg_id` 是命令幂等键
 
-online
-offline
+所有会改变消息状态的客户端命令，都必须带唯一 `msg_id`。
 
-Example
+用途：
 
-```json id="ws05"
-{
- "event":"online",
- "user_id":2
-}
-```
+- ACK 匹配
+- 客户端自动重发
+- 服务端幂等去重
+- 日志追踪
 
----
+规则：
 
-# 117. Connection Manager
+- 同一逻辑消息重发时复用相同 `msg_id`
+- 服务端必须拒绝“同一 `msg_id` 对应不同逻辑消息”的冲突写入
 
-WebSocket manager maintains active connections.
+### 5.2 `session_seq` 是会话内消息顺序号
 
-Responsibilities
+服务端必须为每个会话分配单调递增的 `session_seq`。
 
-store connections
-broadcast messages
-handle disconnects
+规则：
 
----
+- 不能再用 `max(session_seq) + 1` 这种并发不安全写法
+- 正式设计应使用会话级高水位原子递增
+- `session_seq` 只表示会话内消息顺序，不表示全局事件顺序
 
-# 118. Broadcast Message
+### 5.3 已读模型使用成员游标
 
-Flow
+正式设计：
 
-message received
-save to database
-broadcast to session members
+- 已读是“成员读到哪一条”的游标模型
+- 群聊不能把一条消息写成全局 `read`
+- `message.status` 不表达群聊已读
+- `read_count`、`read_target_count` 基于成员游标计算
 
----
+### 5.4 断线补偿使用 `session_cursors + event_cursors`
 
-# 119. User Online State
+服务端补偿同步规则：
 
-User status stored in
+- 输入：客户端的 `session_cursors` 与 `event_cursors`
+- 输出：`history_messages` 中返回 `session_seq > cursor` 的遗漏消息
+- 输出：`history_events` 中返回 `event_seq > cursor` 的遗漏事件
+- 不以时间戳作为正式补偿依据
 
-Redis
+规则：
 
-States
+- `session_seq` 只补偿新消息
+- `event_seq` 补偿 `read`、`message_edit`、`message_recall`、`message_delete` 等状态变更
+- 事件流与消息流分离，避免把不同语义强行塞进同一个序列
 
-online
-offline
+### 5.5 SessionEvent 是独立事件流
 
----
+当前事件流承载：
 
-# 120. Heartbeat Mechanism
+- `read`
+- `message_edit`
+- `message_recall`
+- `message_delete`
 
-Client sends ping every 30 seconds.
+设计要求：
 
-Example
+- 事件按会话维度单调递增 `event_seq`
+- 事件可独立于消息回放
+- 删除消息后仍允许回放关联事件，因此事件记录不能依赖消息实体继续存在
 
-```json id="ws06"
-{
- "type":"ping"
-}
-```
+## 6. WebSocket 实时链路
 
-Server responds
+### 6.1 连接阶段
 
-```json id="ws07"
-{
- "type":"pong"
-}
-```
+- 连接建立
+- 通过 token 认证
+- 绑定用户与连接
+- 进入消息收发循环
 
----
+### 6.2 发送阶段
 
-# 121. Reconnect Strategy
+- 客户端发送带 `msg_id` 的命令
+- 服务端执行业务校验与落库
+- 返回 `message_ack`
+- 对其他会话成员做广播
 
-Client should reconnect automatically.
+### 6.3 状态变更阶段
 
-Steps
+消息撤回、编辑、删除、已读等行为必须遵守：
 
-disconnect
-retry connection
-restore sessions
+- 先走 Service 规则
+- 再广播结果
+- 不允许在 Gateway 内仅做“会话成员校验后直接广播”
 
----
+## 7. Presence 与广播设计
 
-# 122. Message Delivery Guarantee
+当前基线可以使用进程内连接管理器，但架构上应保证它是可替换的。
 
-Strategy
+正式设计原则：
 
-save to DB first
-then broadcast
+- Presence 状态缓存与 WS 连接管理解耦
+- 广播接口抽象为可替换的 fanout 通道
+- 不让业务 Service 直接依赖某种具体广播存储实现
 
-Ensures no message loss.
+## 8. 数据库与迁移策略
 
----
+### 8.1 生产目标
 
-# 123. Scaling WebSocket
+- PostgreSQL 是生产数据库优先选择
+- SQLAlchemy 是 ORM 边界
+- Alembic 是正式 migration 机制
 
-For large scale deployment
+### 8.2 测试与兼容
 
-Use Redis pub/sub
+- SQLite 可作为测试与轻量本地运行基线
+- `schema_compat.py` 只用于历史漂移与测试启动兼容，不应替代正式 migration 策略
 
-Flow
+## 9. 文件与媒体设计
 
-Server A receives message
-Publish to Redis
-Server B broadcasts
+### 9.1 存储边界
 
----
+- 服务端上传能力通过 `MediaStorage` 抽象承载，默认实现为 `LocalMediaStorage`
+- `MediaStorage` 负责真正的落盘或对象存储写入，并返回统一 `StoredMediaObject`
+- `StoredMediaObject` 至少包含：`storage_provider`、`storage_key`、`public_url`、`original_name`、`content_type`、`size_bytes`、`checksum_sha256`
+- `media_public_base_url` 负责把存储 key 映射为正式公开 URL；本地磁盘与未来对象存储都遵循同一接口
 
-# 124. Security
+### 9.2 服务端持久化模型
 
-WebSocket security checks
+- `files` 表保存存储真相，包括 `storage_provider`、`storage_key`、`file_url`、`file_type`、`size_bytes`、`checksum_sha256`
+- 上传接口和文件列表接口统一返回规范媒体元数据，而不是只返回一个 `file_url` 字符串
+- 消息附件通过 `messages.extra` 持久化远端附件元数据，确保历史消息、断线补偿和兼容 sync 都能回放同一份附件信息
+- 服务端不持久化 `local_path`、`uploading` 之类客户端临时状态
 
-validate token
-verify session membership
+### 9.3 客户端职责边界
 
----
+- `FileService` 负责把上传响应归一化成稳定媒体描述，不把后端字段差异泄漏给 Controller / Manager
+- `build_attachment_extra()` 用于构建本地附件状态，可带 `local_path`、`uploading` 等仅客户端可见字段
+- `sanitize_outbound_message_extra()` 在真正发消息前移除本地临时字段，只把 shareable metadata 发给服务端
+- 重试时如果远端 URL 尚不存在，客户端先重传媒体，再复用同一 `msg_id` 发送消息
 
-# 125. Rate Limits
+### 9.4 可扩展性要求
 
-Prevent spam.
+- 不允许把“当前是本地磁盘存储”写死到消息协议和业务层判断里
+- 新增对象存储实现时，应优先新增 `MediaStorage` 子类，而不是修改 Controller / Manager / Router 逻辑
+- 上传返回字段和消息附件字段必须保持兼容，避免文件列表、聊天消息、历史回放各自发明不同格式
 
-Limits
+## 10. 可观测性与测试
 
-messages per second
-typing events per second
+关键链路必须可验证：
 
----
+- WS 认证
+- `msg_id` 幂等
+- ACK / 重发
+- `session_seq` 分配
+- 已读游标推进
+- 断线补偿（消息游标 + 事件游标）
+- 编辑 / 撤回 / 删除权限
 
-# 126. Logging
+日志至少应能关联：
 
-Log WebSocket events
+- `user_id`
+- `session_id`
+- `message_id` / `msg_id`
+- endpoint / ws event
 
-connect
-disconnect
-message send
 
----
+## 11. 兼容入口策略
 
-# 127. Future Improvements
+- 正式 API 入口保持 /api/v1/* 与 /api/* 两层。
+- 历史 chat HTTP 兼容入口只保留单一显式前缀 /api/chat/*。
+- 不通过重复 router 挂载制造 /api/api/chat/* 这类二次别名。
+- POST /api/chat/sync 优先复用 session_cursors + event_cursors，返回 {messages, events}；仅对极旧调用方保留 session_id 快照 fallback。
+- /ws 是正式聊天 WebSocket 入口；历史 /ws/chat 只作为显式兼容 alias 保留，并可通过配置单独关闭。
+## 12. 配置加载策略
 
-Possible additions
+- 服务端配置通过 `Settings` 运行时快照读取，不在 dataclass 类定义时冻结环境变量。
+- 应用入口通过 `create_app(settings)` 组装，兼容开关和部署参数由 app factory 显式决定。
+- 数据库 engine 通过 `configure_database(settings)` 在 runtime 绑定；`SessionLocal` 作为稳定工厂保留，但不在模块导入时提前冻结具体连接。
+- 需要读取当前限流阈值等运行时配置的依赖，应通过动态 dependency 获取，不在路由装饰期固化具体数值。
 
-message reactions
-threaded replies
-voice messages

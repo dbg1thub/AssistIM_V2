@@ -1,20 +1,19 @@
-﻿"""
+"""
 Connection Manager Module
 
 Manager for WebSocket connection lifecycle and state management.
 """
 import asyncio
 import inspect
+import json
 import time
 from concurrent.futures import Future
-from datetime import datetime
 from typing import Any, Callable, Optional
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-from client.core.datetime_utils import to_epoch_seconds
 from client.core import logging
 from client.core.logging import setup_logging
-from client.network.http_client import get_http_client
+from client.services.auth_service import get_auth_service
 from client.network.websocket_client import (
     ConnectionState,
     WebSocketClient,
@@ -37,7 +36,9 @@ class ConnectionManager:
         - Emit connection events
     """
 
-    LAST_SYNC_TIMESTAMP = "last_sync_timestamp"
+    LAST_SYNC_SESSION_CURSORS = "last_sync_session_cursors"
+    LAST_SYNC_EVENT_CURSORS = "last_sync_event_cursors"
+    LEGACY_LAST_SYNC_TIMESTAMP = "last_sync_timestamp"
 
     def __init__(self):
         self._ws_client: Optional[WebSocketClient] = None
@@ -46,11 +47,13 @@ class ConnectionManager:
         self._state = ConnectionState.DISCONNECTED
         self._state_listeners: list[Callable[[ConnectionState, ConnectionState], None]] = []
         self._message_listeners: list[Callable[[dict], Any]] = []
-        self._last_sync_timestamp: float = 0.0
+        self._session_sync_cursors: dict[str, int] = {}
+        self._event_sync_cursors: dict[str, int] = {}
         self._db = None
         self._connect_started_at: float = 0.0
         self._initialized = False
         self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._auth_service = get_auth_service()
 
     @property
     def state(self) -> ConnectionState:
@@ -68,23 +71,27 @@ class ConnectionManager:
         return self._ws_client
 
     @property
-    def last_sync_timestamp(self) -> float:
-        """Get last sync timestamp."""
-        return self._last_sync_timestamp
+    def session_sync_cursors(self) -> dict[str, int]:
+        """Return a snapshot of reconnect message cursors keyed by session id."""
+        return dict(self._session_sync_cursors)
 
-    def set_last_sync_timestamp(self, timestamp: float) -> None:
-        """Set last sync timestamp."""
-        self._last_sync_timestamp = timestamp
+    @property
+    def event_sync_cursors(self) -> dict[str, int]:
+        """Return a snapshot of reconnect event cursors keyed by session id."""
+        return dict(self._event_sync_cursors)
 
     async def reload_sync_timestamp(self) -> None:
-        """Reload the sync cursor from persisted local state."""
-        await self._load_sync_timestamp()
+        """Reload the sync cursors from persisted local state."""
+        await self._load_sync_state()
 
     async def reset_sync_state(self) -> None:
         """Reset in-memory and persisted sync cursors for a fresh account context."""
-        self._last_sync_timestamp = 0.0
+        self._session_sync_cursors = {}
+        self._event_sync_cursors = {}
         if self._db and self._db.is_connected:
-            await self._db.delete_app_state(self.LAST_SYNC_TIMESTAMP)
+            await self._db.delete_app_state(self.LAST_SYNC_SESSION_CURSORS)
+            await self._db.delete_app_state(self.LAST_SYNC_EVENT_CURSORS)
+            await self._db.delete_app_state(self.LEGACY_LAST_SYNC_TIMESTAMP)
 
     def add_state_listener(
         self,
@@ -136,11 +143,110 @@ class ConnectionManager:
             except Exception as e:
                 logger.error(f"Message listener error: {e}")
 
-    def _coerce_message_timestamp(self, value: Any) -> float:
-        """Normalize backend timestamps to epoch seconds."""
-        if value is None or value == "":
-            return 0.0
-        return to_epoch_seconds(value)
+    @staticmethod
+    def _normalize_session_cursors(raw_cursors: Any) -> dict[str, int]:
+        """Normalize persisted or remote cursor payloads into safe integers."""
+        if not isinstance(raw_cursors, dict):
+            return {}
+
+        normalized: dict[str, int] = {}
+        for session_id, raw_value in raw_cursors.items():
+            normalized_session_id = str(session_id or "").strip()
+            if not normalized_session_id:
+                continue
+            try:
+                session_seq = max(0, int(raw_value or 0))
+            except (TypeError, ValueError):
+                continue
+            normalized[normalized_session_id] = session_seq
+        return normalized
+
+    @classmethod
+    def _merge_session_cursors(cls, *cursor_maps: dict[str, int]) -> dict[str, int]:
+        """Merge cursor maps by taking the maximum session seq for each session."""
+        merged: dict[str, int] = {}
+        for cursor_map in cursor_maps:
+            for session_id, session_seq in cls._normalize_session_cursors(cursor_map).items():
+                current_seq = merged.get(session_id, 0)
+                if session_seq > current_seq:
+                    merged[session_id] = session_seq
+        return merged
+
+    def _advance_session_cursor(self, session_id: Any, session_seq: Any) -> bool:
+        """Advance one session cursor if the incoming seq is newer."""
+        normalized_session_id = str(session_id or "").strip()
+        if not normalized_session_id:
+            return False
+
+        try:
+            normalized_seq = max(0, int(session_seq or 0))
+        except (TypeError, ValueError):
+            return False
+
+        if normalized_seq <= 0:
+            return False
+
+        current_seq = self._session_sync_cursors.get(normalized_session_id, 0)
+        if normalized_seq <= current_seq:
+            return False
+
+        self._session_sync_cursors[normalized_session_id] = normalized_seq
+        return True
+
+    def _advance_event_cursor(self, session_id: Any, event_seq: Any) -> bool:
+        """Advance one event cursor if the incoming seq is newer."""
+        normalized_session_id = str(session_id or "").strip()
+        if not normalized_session_id:
+            return False
+
+        try:
+            normalized_seq = max(0, int(event_seq or 0))
+        except (TypeError, ValueError):
+            return False
+
+        if normalized_seq <= 0:
+            return False
+
+        current_seq = self._event_sync_cursors.get(normalized_session_id, 0)
+        if normalized_seq <= current_seq:
+            return False
+
+        self._event_sync_cursors[normalized_session_id] = normalized_seq
+        return True
+
+    def _advance_cursor_from_message_payload(self, payload: Any) -> bool:
+        """Advance one message cursor from a single message-like payload."""
+        if not isinstance(payload, dict):
+            return False
+        return self._advance_session_cursor(payload.get("session_id"), payload.get("session_seq"))
+
+    def _advance_event_cursor_from_event_payload(self, payload: Any) -> bool:
+        """Advance one event cursor from a single event-like payload."""
+        if not isinstance(payload, dict):
+            return False
+        return self._advance_event_cursor(payload.get("session_id"), payload.get("event_seq"))
+
+    def _advance_cursors_from_history_payload(self, messages: Any) -> bool:
+        """Advance cursors from a batch of history messages."""
+        if not isinstance(messages, list):
+            return False
+
+        advanced = False
+        for payload in messages:
+            if self._advance_cursor_from_message_payload(payload):
+                advanced = True
+        return advanced
+
+    def _advance_event_cursors_from_history_payload(self, events: Any) -> bool:
+        """Advance event cursors from a batch of history events."""
+        if not isinstance(events, list):
+            return False
+
+        advanced = False
+        for envelope in events:
+            if isinstance(envelope, dict) and self._advance_event_cursor_from_event_payload(envelope.get("data", {})):
+                advanced = True
+        return advanced
 
     async def initialize(self) -> None:
         """Initialize connection manager."""
@@ -163,7 +269,7 @@ class ConnectionManager:
             on_error=self._on_error,
         )
 
-        await self._load_sync_timestamp()
+        await self._load_sync_state()
         self._initialized = True
 
         logger.info("Connection manager initialized")
@@ -180,7 +286,7 @@ class ConnectionManager:
         parts = urlsplit(base_url)
         query_items = [(key, value) for key, value in parse_qsl(parts.query, keep_blank_values=True) if key != "token"]
 
-        access_token = get_http_client().access_token
+        access_token = self._auth_service.access_token
         if access_token:
             query_items.append(("token", access_token))
 
@@ -188,38 +294,74 @@ class ConnectionManager:
             (parts.scheme, parts.netloc, parts.path, urlencode(query_items), parts.fragment)
         )
 
-    async def _load_sync_timestamp(self) -> None:
-        """Load last sync timestamp from database."""
+    async def _load_sync_state(self) -> None:
+        """Load message and event reconnect cursors from database state or local cache."""
         try:
             from client.storage.database import get_database
+
             self._db = get_database()
+            if not self._db.is_connected:
+                return
 
-            if self._db.is_connected:
-                value = await self._db.get_app_state(self.LAST_SYNC_TIMESTAMP)
-                persisted_timestamp = float(value) if value else 0.0
-                db_latest_timestamp = await self._db.get_latest_message_timestamp() or 0.0
-                self._last_sync_timestamp = max(persisted_timestamp, db_latest_timestamp)
-                if self._last_sync_timestamp:
-                    logger.info(
-                        "Loaded last sync timestamp: %s (persisted=%s, db_latest=%s)",
-                        self._last_sync_timestamp,
-                        persisted_timestamp,
-                        db_latest_timestamp,
-                    )
+            persisted_session_cursors: dict[str, int] = {}
+            persisted_session_value = await self._db.get_app_state(self.LAST_SYNC_SESSION_CURSORS)
+            if persisted_session_value:
+                try:
+                    persisted_session_cursors = self._normalize_session_cursors(json.loads(persisted_session_value))
+                except json.JSONDecodeError as exc:
+                    logger.warning("Failed to decode message sync cursors: %s", exc)
+
+            persisted_event_cursors: dict[str, int] = {}
+            persisted_event_value = await self._db.get_app_state(self.LAST_SYNC_EVENT_CURSORS)
+            if persisted_event_value:
+                try:
+                    persisted_event_cursors = self._normalize_session_cursors(json.loads(persisted_event_value))
+                except json.JSONDecodeError as exc:
+                    logger.warning("Failed to decode event sync cursors: %s", exc)
+
+            db_cursors: dict[str, int] = {}
+            if not persisted_session_cursors:
+                db_cursors = await self._db.get_session_sync_cursors()
+
+            self._session_sync_cursors = self._merge_session_cursors(persisted_session_cursors, db_cursors)
+            self._event_sync_cursors = self._merge_session_cursors(persisted_event_cursors)
+            if self._session_sync_cursors or self._event_sync_cursors:
+                logger.info(
+                    "Loaded reconnect cursors for %d message sessions and %d event sessions",
+                    len(self._session_sync_cursors),
+                    len(self._event_sync_cursors),
+                )
         except Exception as e:
-            logger.warning(f"Failed to load sync timestamp: {e}")
+            logger.warning(f"Failed to load sync state: {e}")
 
-    async def _save_sync_timestamp(self) -> None:
-        """Save last sync timestamp to database."""
+    async def _save_sync_state(self) -> None:
+        """Persist message and event reconnect cursors to local app state."""
         try:
             if self._db and self._db.is_connected:
-                await self._db.set_app_state(
-                    self.LAST_SYNC_TIMESTAMP,
-                    str(self._last_sync_timestamp)
+                if self._session_sync_cursors:
+                    await self._db.set_app_state(
+                        self.LAST_SYNC_SESSION_CURSORS,
+                        json.dumps(self._session_sync_cursors, sort_keys=True),
+                    )
+                else:
+                    await self._db.delete_app_state(self.LAST_SYNC_SESSION_CURSORS)
+
+                if self._event_sync_cursors:
+                    await self._db.set_app_state(
+                        self.LAST_SYNC_EVENT_CURSORS,
+                        json.dumps(self._event_sync_cursors, sort_keys=True),
+                    )
+                else:
+                    await self._db.delete_app_state(self.LAST_SYNC_EVENT_CURSORS)
+
+                await self._db.delete_app_state(self.LEGACY_LAST_SYNC_TIMESTAMP)
+                logger.debug(
+                    "Saved reconnect cursors for %d message sessions and %d event sessions",
+                    len(self._session_sync_cursors),
+                    len(self._event_sync_cursors),
                 )
-                logger.debug(f"Saved sync timestamp: {self._last_sync_timestamp}")
         except Exception as e:
-            logger.warning(f"Failed to save sync timestamp: {e}")
+            logger.warning(f"Failed to save sync state: {e}")
 
     def _create_task(self, coro) -> None:
         task = asyncio.create_task(coro)
@@ -295,8 +437,7 @@ class ConnectionManager:
 
     async def _authenticate_websocket(self) -> bool:
         """Send auth payload over websocket if access token exists."""
-        http_client = get_http_client()
-        access_token = http_client.access_token
+        access_token = self._auth_service.access_token
 
         if not access_token:
             logger.info("Skipping websocket auth: no access token present")
@@ -320,8 +461,7 @@ class ConnectionManager:
 
     def _authenticate_websocket_nowait(self) -> bool:
         """Send auth payload over websocket without awaiting on the main loop."""
-        http_client = get_http_client()
-        access_token = http_client.access_token
+        access_token = self._auth_service.access_token
 
         if not access_token:
             logger.info("Skipping websocket auth: no access token present")
@@ -344,29 +484,26 @@ class ConnectionManager:
         return success
 
     async def _send_sync_request(self) -> None:
-        """Send sync request to fetch messages since last timestamp."""
-        import time
-
+        """Send sync request using per-session reconnect cursors."""
         sync_message = {
             "type": "sync_messages",
             "seq": 0,
             "msg_id": f"sync_{int(time.time() * 1000)}",
             "timestamp": int(time.time()),
             "data": {
-                "last_timestamp": self._last_sync_timestamp,
+                "session_cursors": self.session_sync_cursors,
+                "event_cursors": self.event_sync_cursors,
             },
         }
 
         success = await self.send(sync_message)
         if success:
-            logger.info(f"Sync request sent, last_timestamp: {self._last_sync_timestamp}")
+            logger.info("Sync request sent for %d sessions", len(self._session_sync_cursors))
         else:
             logger.warning("Failed to send sync request")
 
     def _send_sync_request_nowait(self) -> None:
         """Send sync request without awaiting worker send completion on the main loop."""
-        import time
-
         sync_started = time.perf_counter()
         sync_message = {
             "type": "sync_messages",
@@ -374,13 +511,14 @@ class ConnectionManager:
             "msg_id": f"sync_{int(time.time() * 1000)}",
             "timestamp": int(time.time()),
             "data": {
-                "last_timestamp": self._last_sync_timestamp,
+                "session_cursors": self.session_sync_cursors,
+                "event_cursors": self.event_sync_cursors,
             },
         }
 
         success = bool(self._ws_client and self._ws_client.send_nowait(sync_message))
         if success:
-            logger.info(f"Sync request sent, last_timestamp: {self._last_sync_timestamp}")
+            logger.info("Sync request sent for %d sessions", len(self._session_sync_cursors))
         else:
             logger.warning("Failed to send sync request")
         logger.info("Sync request dispatch finished in %.1fms", (time.perf_counter() - sync_started) * 1000)
@@ -398,30 +536,40 @@ class ConnectionManager:
         """Handle incoming message."""
         msg_type = message.get("type")
         message_started = time.perf_counter()
+        sync_state_changed = False
+
         if msg_type == "history_messages":
             data = message.get("data", {})
             messages = data.get("messages", [])
-            if messages:
-                latest_timestamp = max(
-                    (self._coerce_message_timestamp(m.get("timestamp", 0)) for m in messages),
-                    default=0
-                )
-                if latest_timestamp > self._last_sync_timestamp:
-                    self._last_sync_timestamp = latest_timestamp
-                    logger.info(f"Updated sync timestamp to {latest_timestamp}")
-                    self._schedule_message_coroutine(self._save_sync_timestamp())
+            sync_state_changed = self._advance_cursors_from_history_payload(messages)
             if self._connect_started_at:
                 logger.info(
                     "History payload received %.1fms after connect (%d messages)",
                     (time.perf_counter() - self._connect_started_at) * 1000,
                     len(messages),
                 )
+        elif msg_type == "history_events":
+            data = message.get("data", {})
+            events = data.get("events", [])
+            sync_state_changed = self._advance_event_cursors_from_history_payload(events)
+        elif msg_type == "chat_message":
+            sync_state_changed = self._advance_cursor_from_message_payload(message.get("data", {}))
+        elif msg_type == "message_ack":
+            sync_state_changed = self._advance_cursor_from_message_payload(
+                (message.get("data") or {}).get("message", {})
+            )
+        elif msg_type in {"message_edit", "message_recall", "message_delete", "read"}:
+            sync_state_changed = self._advance_event_cursor_from_event_payload(message.get("data", {}))
+
+        if sync_state_changed:
+            self._schedule_message_coroutine(self._save_sync_state())
 
         self._notify_message(message)
-        if msg_type == "history_messages":
+        if msg_type in {"history_messages", "history_events"}:
             logger.info(
-                "History message dispatch scheduling took %.1fms",
+                "History dispatch scheduling took %.1fms for %s",
                 (time.perf_counter() - message_started) * 1000,
+                msg_type,
             )
 
     def _on_error(self, error: str) -> None:
@@ -520,8 +668,6 @@ class ConnectionManager:
         Returns:
             True if sent successfully
         """
-        import time
-
         message_data = {
             "session_id": session_id,
             "content": content,
@@ -543,8 +689,6 @@ class ConnectionManager:
 
     async def send_typing(self, session_id: str) -> bool:
         """Send typing indicator."""
-        import time
-
         message = {
             "type": "typing",
             "seq": 0,
@@ -559,8 +703,6 @@ class ConnectionManager:
 
     async def send_read_ack(self, session_id: str, message_id: str) -> bool:
         """Send read acknowledgment."""
-        import time
-
         message = {
             "type": "read_ack",
             "seq": 0,
@@ -576,8 +718,6 @@ class ConnectionManager:
 
     async def send_recall(self, session_id: str, message_id: str) -> bool:
         """Send message recall request."""
-        import time
-
         message = {
             "type": "message_recall",
             "seq": 0,
@@ -593,8 +733,6 @@ class ConnectionManager:
 
     async def send_edit(self, session_id: str, message_id: str, new_content: str) -> bool:
         """Send message edit request."""
-        import time
-
         message = {
             "type": "message_edit",
             "seq": 0,
@@ -631,7 +769,7 @@ class ConnectionManager:
         self._state = ConnectionState.DISCONNECTED
         self._connect_started_at = 0.0
         self._db = None
-        self._last_sync_timestamp = 0.0
+        self._session_sync_cursors = {}
         self._initialized = False
 
         logger.info("Connection manager closed")
@@ -651,4 +789,3 @@ def get_connection_manager() -> ConnectionManager:
     if _connection_manager is None:
         _connection_manager = ConnectionManager()
     return _connection_manager
-
