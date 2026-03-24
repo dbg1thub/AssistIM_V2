@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import pytest
 import sys
 import types
@@ -232,6 +233,7 @@ if 'qfluentwidgets' not in sys.modules:
     sys.modules['qfluentwidgets'] = qfluentwidgets
 
 from client.core.exceptions import APIError, ServerError
+from client.managers import message_manager as message_manager_module
 from client.managers import session_manager as session_manager_module
 from client.managers import search_manager as search_manager_module
 from client.models.message import ChatMessage, MessageStatus, MessageType
@@ -567,6 +569,31 @@ class FakeSessionStateDatabase:
     is_connected = False
 
 
+class FakeSessionProfileDatabase:
+    def __init__(self) -> None:
+        self.is_connected = True
+        self.replaced_sessions = []
+        self.app_state = {
+            'auth.user_profile': json.dumps(
+                {
+                    'id': 'user-1',
+                    'username': 'alice',
+                    'nickname': 'Alice',
+                    'avatar': '/uploads/alice.svg',
+                    'gender': 'female',
+                },
+                ensure_ascii=False,
+            ),
+            'auth.user_id': 'user-1',
+        }
+
+    async def get_app_state(self, key: str):
+        return self.app_state.get(key)
+
+    async def replace_sessions(self, sessions):
+        self.replaced_sessions = list(sessions)
+
+
 class FakeSessionService:
     def __init__(self) -> None:
         self.fetch_session_calls: list[str] = []
@@ -607,6 +634,63 @@ class FakeSessionService:
         return dict(self.direct_session_payload)
 
 
+class FakeMessageStoreDatabase:
+    def __init__(self, messages: list[ChatMessage], session_payload: dict | None = None) -> None:
+        self.is_connected = True
+        self.messages = list(messages)
+        self.session_payload = dict(session_payload or {})
+        self.saved_batches: list[list[ChatMessage]] = []
+        self.app_state = {
+            'auth.user_profile': json.dumps(
+                {
+                    'id': 'user-1',
+                    'username': 'alice',
+                    'nickname': 'Alice',
+                    'avatar': '/uploads/alice.svg',
+                    'gender': 'female',
+                },
+                ensure_ascii=False,
+            ),
+            'auth.user_id': 'user-1',
+        }
+
+    async def get_messages(self, session_id: str, limit: int = 50, before_timestamp=None) -> list[ChatMessage]:
+        return [message for message in self.messages if message.session_id == session_id][:limit]
+
+    async def save_messages_batch(self, messages: list[ChatMessage]) -> None:
+        self.saved_batches.append([message for message in messages])
+
+    async def get_app_state(self, key: str):
+        return self.app_state.get(key)
+
+    async def get_session(self, session_id: str):
+        if not self.session_payload or self.session_payload.get('session_id') != session_id:
+            return None
+
+        from client.models.message import Session
+
+        session = Session.from_dict(self.session_payload)
+        session.extra = dict(self.session_payload.get('extra') or {})
+        return session
+
+
+class FakeConnectionManager:
+    def add_message_listener(self, _listener) -> None:
+        return None
+
+    def remove_message_listener(self, _listener) -> None:
+        return None
+
+
+class FakeChatService:
+    async def fetch_messages(self, session_id: str, limit: int, before_timestamp=None) -> list[dict]:
+        return []
+
+
+class FakeNoopFileService:
+    pass
+
+
 def test_chat_controller_send_file_uses_file_service(monkeypatch) -> None:
     fake_message_manager = FakeMessageManager()
     fake_session_manager = FakeSessionManager()
@@ -634,6 +718,67 @@ def test_chat_controller_send_file_uses_file_service(monkeypatch) -> None:
 
     asyncio.run(scenario())
 
+
+def test_message_manager_get_messages_hydrates_sender_profiles(monkeypatch) -> None:
+    stored_messages = [
+        ChatMessage(
+            message_id='m-self',
+            session_id='session-1',
+            sender_id='user-1',
+            content='hello',
+            message_type=MessageType.TEXT,
+            status=MessageStatus.SENT,
+            is_self=True,
+            extra={},
+        ),
+        ChatMessage(
+            message_id='m-other',
+            session_id='session-1',
+            sender_id='user-2',
+            content='hi',
+            message_type=MessageType.TEXT,
+            status=MessageStatus.RECEIVED,
+            is_self=False,
+            extra={},
+        ),
+    ]
+    fake_db = FakeMessageStoreDatabase(
+        stored_messages,
+        session_payload={
+            'session_id': 'session-1',
+            'name': 'Bob',
+            'session_type': 'direct',
+            'participant_ids': ['user-1', 'user-2'],
+            'avatar': '/uploads/bob.svg',
+            'extra': {
+                'members': [
+                    {'id': 'user-1', 'username': 'alice', 'nickname': 'Alice', 'avatar': '/uploads/alice.svg', 'gender': 'female'},
+                    {'id': 'user-2', 'username': 'bob', 'nickname': 'Bob', 'avatar': '/uploads/bob.svg', 'gender': 'male'},
+                ]
+            },
+        },
+    )
+
+    monkeypatch.setattr(message_manager_module, 'get_event_bus', lambda: FakeEventBus())
+    monkeypatch.setattr(message_manager_module, 'get_connection_manager', lambda: FakeConnectionManager())
+    monkeypatch.setattr(message_manager_module, 'get_database', lambda: fake_db)
+    monkeypatch.setattr(message_manager_module, 'get_chat_service', lambda: FakeChatService())
+    monkeypatch.setattr(message_manager_module, 'get_file_service', lambda: FakeNoopFileService())
+
+    async def scenario() -> None:
+        manager = message_manager_module.MessageManager()
+        manager.set_user_id('user-1')
+        messages = await manager.get_messages('session-1', limit=2)
+
+        assert messages[0].extra['sender_avatar'] == '/uploads/alice.svg'
+        assert messages[0].extra['sender_gender'] == 'female'
+        assert messages[0].extra['sender_username'] == 'alice'
+        assert messages[1].extra['sender_avatar'] == '/uploads/bob.svg'
+        assert messages[1].extra['sender_gender'] == 'male'
+        assert messages[1].extra['sender_username'] == 'bob'
+        assert len(fake_db.saved_batches) == 1
+
+    asyncio.run(scenario())
 
 
 def test_auth_controller_update_profile_uploads_avatar_via_file_service(monkeypatch) -> None:
@@ -698,6 +843,46 @@ def test_auth_controller_login_uses_auth_service(monkeypatch) -> None:
         assert fake_auth_service.access_token == 'access-token'
         assert fake_auth_service.refresh_token == 'refresh-token'
         assert user['id'] == 'user-1'
+        assert fake_message_manager.user_ids[-1] == 'user-1'
+        assert fake_chat_controller.user_ids[-1] == 'user-1'
+        assert fake_db.app_state[controller.USER_ID_KEY] == 'user-1'
+
+    asyncio.run(scenario())
+
+
+def test_auth_controller_register_assigns_random_default_avatar(monkeypatch) -> None:
+    fake_auth_service = FakeAuthService()
+    fake_user_service = FakeUserService()
+    fake_db = FakeDatabase()
+    fake_message_manager = FakeMessageManager()
+    fake_chat_controller = FakeChatControllerContext()
+    fake_file_service = FakeFileService({'url': 'https://cdn.example/files/default-avatar.svg'})
+
+    monkeypatch.setattr(auth_controller_module, 'get_auth_service', lambda: fake_auth_service)
+    monkeypatch.setattr(auth_controller_module, 'get_user_service', lambda: fake_user_service)
+    monkeypatch.setattr(auth_controller_module, 'get_database', lambda: fake_db)
+    monkeypatch.setattr(auth_controller_module, 'get_message_manager', lambda: fake_message_manager)
+    monkeypatch.setattr(auth_controller_module, 'get_chat_controller', lambda: fake_chat_controller)
+    monkeypatch.setattr(auth_controller_module, 'get_file_service', lambda: fake_file_service)
+    monkeypatch.setattr(auth_controller_module, 'peek_connection_manager', lambda: None)
+    monkeypatch.setattr(
+        auth_controller_module,
+        'random_default_avatar_path',
+        lambda gender='': 'D:/tmp/avatar-default.svg',
+    )
+
+    async def scenario() -> None:
+        controller = auth_controller_module.AuthController()
+        user = await controller.register('alice', 'Alice', 'secret')
+
+        assert fake_auth_service.register_calls == [('alice', 'Alice', 'secret')]
+        assert fake_file_service.avatar_uploads == ['D:/tmp/avatar-default.svg']
+        assert fake_user_service.update_calls == [
+            {
+                'avatar': 'https://cdn.example/files/default-avatar.svg',
+            }
+        ]
+        assert user['avatar'] == 'https://cdn.example/files/default-avatar.svg'
         assert fake_message_manager.user_ids[-1] == 'user-1'
         assert fake_chat_controller.user_ids[-1] == 'user-1'
         assert fake_db.app_state[controller.USER_ID_KEY] == 'user-1'
@@ -1000,6 +1185,54 @@ def test_session_manager_refresh_remote_sessions_uses_session_service(monkeypatc
         assert len(sessions) == 1
         assert sessions[0].session_id == 'session-1'
         assert sessions[0].unread_count == 4
+
+    asyncio.run(scenario())
+
+
+def test_session_manager_refresh_remote_sessions_prefers_counterpart_profile(monkeypatch) -> None:
+    fake_session_service = FakeSessionService()
+    fake_db = FakeSessionProfileDatabase()
+    fake_session_service.session_payload = {
+        'id': 'session-1',
+        'name': 'Private Chat',
+        'session_type': 'direct',
+        'participant_ids': ['user-1', 'user-2'],
+        'members': [
+            {
+                'id': 'user-1',
+                'username': 'alice',
+                'nickname': 'Alice',
+                'avatar': '/uploads/alice.svg',
+                'gender': 'female',
+            },
+            {
+                'id': 'user-2',
+                'username': 'bob',
+                'nickname': 'Bobby',
+                'avatar': '/uploads/bob.svg',
+                'gender': 'male',
+            },
+        ],
+    }
+
+    monkeypatch.setattr(session_manager_module, 'get_session_service', lambda: fake_session_service)
+    monkeypatch.setattr(session_manager_module, 'get_event_bus', lambda: FakeEventBus())
+    monkeypatch.setattr(session_manager_module, 'get_message_manager', lambda: FakeMessageManager())
+    monkeypatch.setattr(session_manager_module, 'get_database', lambda: fake_db)
+
+    async def scenario() -> None:
+        manager = session_manager_module.SessionManager()
+        sessions = await manager.refresh_remote_sessions()
+
+        assert len(sessions) == 1
+        session = sessions[0]
+        assert session.name == 'Bobby'
+        assert session.avatar == '/uploads/bob.svg'
+        assert session.extra['gender'] == 'male'
+        assert session.extra['counterpart_id'] == 'user-2'
+        assert session.extra['counterpart_username'] == 'bob'
+        assert session.extra['avatar_seed'] == session_manager_module.avatar_seed('user-2', 'bob', 'Bobby')
+        assert len(fake_db.replaced_sessions) == 1
 
     asyncio.run(scenario())
 

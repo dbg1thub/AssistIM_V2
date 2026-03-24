@@ -10,6 +10,8 @@ from PySide6.QtGui import QPixmap
 
 from qfluentwidgets import AvatarWidget, StateLabel, IconWidget
 
+from client.core.avatar_utils import choose_avatar_image
+
 
 class MessageImageWidget(QWidget):
     """
@@ -115,9 +117,9 @@ class MessageImageWidget(QWidget):
                 )
                 self.image_label.setPixmap(scaled)
 
-    def set_avatar(self, avatar_path: str) -> None:
+    def set_avatar(self, avatar_path: str, *, gender: str = "", seed: str = "") -> None:
         """Set avatar image."""
-        self.avatar.setImage(avatar_path)
+        self.avatar.setImage(choose_avatar_image(avatar_path, gender=gender, seed=seed))
 
     def get_message(self):
         """Get message data."""

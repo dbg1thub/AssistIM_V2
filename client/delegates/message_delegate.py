@@ -22,9 +22,11 @@ from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequ
 from PySide6.QtWidgets import QStyledItemDelegate, QStyleOptionViewItem
 from qfluentwidgets import FluentIcon, Theme, isDarkTheme, themeColor
 
+from client.core.avatar_utils import avatar_seed, choose_avatar_image
 from client.core.config_backend import get_config
 from client.core.datetime_utils import coerce_local_datetime
 from client.core.i18n import format_chat_timestamp, tr
+from client.ui.controllers.auth_controller import peek_auth_controller
 from client.core.video_thumbnail_cache import (
     get_thumbnail as get_video_thumbnail,
     get_video_thumbnail_cache,
@@ -477,6 +479,43 @@ class MessageDelegate(QStyledItemDelegate):
         """Draw avatar with initial text when no image is available."""
         path = QPainterPath()
         path.addRoundedRect(QRectF(rect), 8, 8)
+
+        extra = message.extra or {}
+        sender_avatar = str(extra.get("sender_avatar", "") or "")
+        sender_gender = str(extra.get("sender_gender", "") or "")
+        sender_name = (
+            str(extra.get("sender_nickname", "") or "")
+            or str(extra.get("sender_name", "") or "")
+            or str(extra.get("sender_username", "") or "")
+        )
+
+        if message.is_self and (not sender_avatar or not sender_gender):
+            auth_controller = peek_auth_controller()
+            current_user = dict(auth_controller.current_user or {}) if auth_controller is not None else {}
+            sender_avatar = sender_avatar or str(current_user.get("avatar", "") or "")
+            sender_gender = sender_gender or str(current_user.get("gender", "") or "")
+            sender_name = sender_name or str(current_user.get("nickname", "") or "") or str(current_user.get("username", "") or "")
+
+        avatar_path = choose_avatar_image(
+            sender_avatar,
+            gender=sender_gender,
+            seed=avatar_seed(message.sender_id, sender_name),
+        )
+
+        if avatar_path:
+            painter.save()
+            painter.setClipPath(path)
+            pixmap = QPixmap(avatar_path)
+            if not pixmap.isNull():
+                scaled = pixmap.scaled(
+                    rect.size(),
+                    Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+                painter.drawPixmap(rect, scaled)
+                painter.restore()
+                return
+            painter.restore()
 
         painter.save()
         painter.setClipPath(path)

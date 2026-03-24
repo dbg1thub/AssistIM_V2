@@ -131,6 +131,7 @@ class UserSearchRecord:
     username: str = ""
     nickname: str = ""
     avatar: str = ""
+    gender: str = ""
     status: str = ""
 
     @property
@@ -239,6 +240,7 @@ class ContactController:
                 username=str(item.get("username", "") or ""),
                 nickname=str(item.get("nickname", "") or ""),
                 avatar=str(item.get("avatar", "") or ""),
+                gender=str(item.get("gender", "") or ""),
                 status=str(item.get("status", "") or ""),
             )
             for item in items

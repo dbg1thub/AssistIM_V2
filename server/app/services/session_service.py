@@ -165,6 +165,8 @@ class SessionService:
                             "id": user.id,
                             "nickname": user.nickname,
                             "username": user.username,
+                            "avatar": user.avatar,
+                            "gender": user.gender,
                             "joined_at": member.joined_at.isoformat() if member.joined_at else None,
                         }
                     )

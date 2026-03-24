@@ -55,13 +55,7 @@ AI 在新增 UI 时必须优先遵守：
 
 - 有现成 QFluentWidgets 组件时先复用
 - 容器类业务 widget 默认使用 `CardWidget`
-- `ElevatedCardWidget` 只在明确需要更高层级强调时使用
-- 窗口和页面基底优先使用 Mica 语义；Acrylic 只用于 Flyout、Context Menu、Tooltip、ComboBox Dropdown、轻量浮层 InfoBar 等瞬时性浮层
-- Tooltip 默认使用 Acrylic 方案，并通过 Filter 机制设置，且默认从顶部弹出
-- 所有可交互控件都必须设置合适的鼠标手势与 hover / pressed / focus / disabled 反馈
-- 需要用户知晓的信息、警告、错误统一优先通过 `InfoBar`
-- 字体优先使用 `Segoe UI Variable`，图标优先使用 FluentIcon / Segoe Fluent Icons
-- 可见文案、tab 名称、tooltip 文案必须国际化
+- Tooltip 默认使用 Acrylic 方案，并通过 Filter 机制设置
 - 页面样式复用共享 QSS / token，不到处内联 setStyleSheet
 
 ## 6. 数据模型硬约束

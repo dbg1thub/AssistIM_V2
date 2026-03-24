@@ -25,11 +25,13 @@ from client.core import logging
 from client.core.config import cfg
 from client.core.i18n import tr
 from client.core.logging import setup_logging
+from client.core.avatar_utils import avatar_seed, choose_avatar_image
 from client.ui.windows.chat_interface import ChatInterface
 from client.ui.windows.contact_interface import ContactInterface
 from client.ui.windows.discovery_interface import DiscoveryInterface
-from client.ui.windows.profile_interface import ProfileInterface
 from client.ui.windows.settings_interface import SettingsInterface
+from client.ui.widgets.navigation_user_card import RegularWeightNavigationUserCard
+from client.ui.widgets.user_profile_flyout import UserProfileCoordinator
 
 
 setup_logging()
@@ -81,6 +83,7 @@ class MainWindow(FluentWindow):
         self._tray_menu: RoundMenu | None = None
         self._ui_tasks: set[asyncio.Task] = set()
         self._contact_open_task: asyncio.Task | None = None
+        self.user_card = None
 
         self.setMicaEffectEnabled(cfg.get(cfg.micaEnabled))
 
@@ -92,10 +95,11 @@ class MainWindow(FluentWindow):
         self.chat_interface = ChatInterface(self)
         self.contact_interface = ContactInterface(self)
         self.discovery_interface = DiscoveryInterface(self)
-        self.profile_interface = ProfileInterface(self)
+        self.user_profile = UserProfileCoordinator(self)
         self.settingsInterface = SettingsInterface(self)
         self.contact_interface.message_requested.connect(self._on_contact_message_requested)
-        self.profile_interface.logoutRequested.connect(self.logoutRequested.emit)
+        self.user_profile.logoutRequested.connect(self.logoutRequested.emit)
+        self.user_profile.profileChanged.connect(self._on_profile_changed)
         self.settingsInterface.micaChanged.connect(self._on_mica_changed)
 
         self.navigationInterface.setAcrylicEnabled(cfg.get(cfg.micaEnabled))
@@ -118,15 +122,10 @@ class MainWindow(FluentWindow):
 
     def initNavigation(self):
         """Initialize left navigation."""
+        self._init_user_card()
         self.addSubInterface(self.chat_interface, FluentIcon.CHAT, tr("common.chat", "Chat"))
         self.addSubInterface(self.contact_interface, FluentIcon.PEOPLE, tr("common.contacts", "Contacts"))
         self.addSubInterface(self.discovery_interface, FluentIcon.GLOBE, tr("common.moments", "Moments"))
-        self.addSubInterface(
-            self.profile_interface,
-            FluentIcon.INFO,
-            tr("common.profile", "Profile"),
-            NavigationItemPosition.BOTTOM,
-        )
         self.addSubInterface(
             self.settingsInterface,
             FluentIcon.SETTING,
@@ -134,6 +133,62 @@ class MainWindow(FluentWindow):
             NavigationItemPosition.BOTTOM,
         )
         self.navigationInterface.panel.setReturnButtonVisible(False)
+        self._sync_user_card(self.user_profile.current_user_snapshot())
+
+    def _init_user_card(self) -> None:
+        """Insert the current-account user card into the navigation area."""
+        self.user_card = RegularWeightNavigationUserCard(self.navigationInterface)
+        placeholder_avatar = choose_avatar_image(
+            "",
+            seed=avatar_seed("main-user-card"),
+        )
+        if placeholder_avatar:
+            self.user_card.setAvatar(placeholder_avatar)
+
+        self.user_card.setTitle(tr("profile.placeholder.name", "Not Signed In"))
+        self.user_card.setSubtitle(tr("main_window.user_card.empty_subtitle", "AssistIM ID unavailable"))
+        self.navigationInterface.addWidget(
+            "main.userCard",
+            self.user_card,
+            self._toggle_profile_card,
+            NavigationItemPosition.TOP,
+        )
+
+    def _toggle_profile_card(self) -> None:
+        """Toggle the quick profile flyout anchored to the sidebar user card."""
+        if self.user_card is None:
+            return
+        self.user_profile.show_user_flyout(self.user_card, self)
+
+    def _on_profile_changed(self, payload: object) -> None:
+        """Keep the sidebar user card in sync with the current profile."""
+        user = dict(payload or {})
+        self._sync_user_card(user)
+
+    def _sync_user_card(self, user: dict | None) -> None:
+        """Refresh the sidebar user-card title/subtitle from one user payload."""
+        if self.user_card is None:
+            return
+
+        user = dict(user or {})
+        title = (
+            str(user.get("nickname", "") or "")
+            or str(user.get("username", "") or "")
+            or tr("profile.placeholder.name", "Not Signed In")
+        )
+        subtitle = (
+            str(user.get("username", "") or "")
+            or tr("main_window.user_card.empty_subtitle", "AssistIM ID unavailable")
+        )
+        self.user_card.setTitle(title)
+        self.user_card.setSubtitle(subtitle)
+        avatar_path = choose_avatar_image(
+            user.get("avatar", ""),
+            gender=user.get("gender", ""),
+            seed=avatar_seed(user.get("id"), user.get("username"), title),
+        )
+        if avatar_path:
+            self.user_card.setAvatar(avatar_path)
 
     def _init_system_tray(self) -> None:
         if not QSystemTrayIcon.isSystemTrayAvailable():
@@ -211,6 +266,7 @@ class MainWindow(FluentWindow):
         self.close()
 
     def closeEvent(self, event: QCloseEvent):
+        self.user_profile.close_flyout()
         if self._allow_exit:
             logger.info("MainWindow closeEvent, exiting application")
             if self._theme_poll_timer.isActive():
@@ -248,6 +304,7 @@ class MainWindow(FluentWindow):
 
     def _on_destroyed(self, *_args) -> None:
         """Cancel outstanding UI tasks when the window is torn down."""
+        self.user_profile.close()
         self._cancel_pending_task(self._contact_open_task)
         self._contact_open_task = None
         for task in list(self._ui_tasks):

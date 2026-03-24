@@ -135,7 +135,6 @@ Service 是真正的业务边界，HTTP 与 WebSocket 都必须复用同一套 S
 - 同方向重复发送按幂等处理，返回现有请求
 - 发现反向 `pending` 请求时，直接接受已有请求并建立好友关系
 - 已经是好友时不再创建新请求
-- 好友请求创建、接受、拒绝、好友删除后，通过轻量 contact_refresh 实时事件通知相关在线用户刷新联系人数据
 
 ## 5. 消息一致性规则
 
@@ -313,5 +312,4 @@ Service 是真正的业务边界，HTTP 与 WebSocket 都必须复用同一套 S
 - 应用入口通过 `create_app(settings)` 组装，兼容开关和部署参数由 app factory 显式决定。
 - 数据库 engine 通过 `configure_database(settings)` 在 runtime 绑定；`SessionLocal` 作为稳定工厂保留，但不在模块导入时提前冻结具体连接。
 - 需要读取当前限流阈值等运行时配置的依赖，应通过动态 dependency 获取，不在路由装饰期固化具体数值。
-
 

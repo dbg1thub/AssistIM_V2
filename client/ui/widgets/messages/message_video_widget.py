@@ -10,6 +10,7 @@ from PySide6.QtGui import QPixmap, QIcon
 
 from qfluentwidgets import AvatarWidget, StateLabel, IconWidget, BodyLabel
 
+from client.core.avatar_utils import choose_avatar_image
 from client.ui.styles import StyleSheet
 
 
@@ -150,9 +151,9 @@ class MessageVideoWidget(QWidget):
         if hasattr(self, 'duration_label'):
             self.duration_label.setText(self._get_duration())
 
-    def set_avatar(self, avatar_path: str) -> None:
+    def set_avatar(self, avatar_path: str, *, gender: str = "", seed: str = "") -> None:
         """Set avatar image."""
-        self.avatar.setImage(avatar_path)
+        self.avatar.setImage(choose_avatar_image(avatar_path, gender=gender, seed=seed))
 
     def get_message(self):
         """Get message data."""

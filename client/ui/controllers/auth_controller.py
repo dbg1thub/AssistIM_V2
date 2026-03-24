@@ -9,6 +9,7 @@ import time
 from typing import Any, Optional
 
 from client.core import logging
+from client.core.avatar_utils import random_default_avatar_path
 from client.core.exceptions import APIError, AuthExpiredError, NetworkError
 from client.core.logging import setup_logging
 from client.core.secure_storage import SecureStorage, SecureStorageError
@@ -107,7 +108,8 @@ class AuthController:
 
     async def register(self, username: str, nickname: str, password: str) -> dict[str, Any]:
         payload = await self._auth_service.register(username, nickname, password)
-        return await self._apply_auth_payload(payload, reset_local_chat_state=True)
+        user = await self._apply_auth_payload(payload, reset_local_chat_state=True)
+        return await self._persist_registration_default_avatar(user)
 
     async def logout(self) -> None:
         """Best-effort backend logout followed by local session cleanup."""
@@ -163,6 +165,27 @@ class AuthController:
         self._apply_runtime_context(user)
         await self._persist_user_profile(user)
         return user
+
+    async def _persist_registration_default_avatar(self, user: dict[str, Any]) -> dict[str, Any]:
+        """Assign and persist one random default avatar after registration when needed."""
+        profile = dict(user or {})
+        if not profile or str(profile.get("avatar", "") or "").strip():
+            return profile
+
+        avatar_file_path = random_default_avatar_path(gender=profile.get("gender", ""))
+        if not avatar_file_path:
+            return profile
+
+        try:
+            return await self.update_profile(avatar_file_path=avatar_file_path)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception(
+                "Failed to persist default avatar after registration for user %s",
+                profile.get("id", ""),
+            )
+            return dict(self._current_user or profile)
 
     async def clear_session(self) -> None:
         self._cancel_pending_task(self._token_state_task)

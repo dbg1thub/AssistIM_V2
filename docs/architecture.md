@@ -162,7 +162,7 @@ Network -> EventBus -> UI（绕过 Manager）
 
 - 实时聊天消息
 - ACK / delivered / read 事件
-- typing、presence、`contact_refresh` 等实时通知
+- typing、presence 等实时通知
 - 断线重连后的补偿同步
 
 设计原则：
@@ -304,6 +304,5 @@ AI 能力通过 Service / Provider 体系接入，目标是：
 - Rate limit state 外置：当前通过 `RateLimitStore` 暴露，后续可从进程内计数扩展到共享存储
 - 文件存储切换：从本地目录扩展到对象存储
 - 更细粒度的 UI 设计系统：在不破坏 CardWidget / Acrylic / Tooltip 统一规范的前提下演进
-
 
 

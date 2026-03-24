@@ -39,6 +39,7 @@ from qfluentwidgets import (
 )
 
 from client.core import logging
+from client.core.avatar_utils import avatar_seed, choose_avatar_image
 from client.core.exceptions import APIError, NetworkError
 from client.core.i18n import format_relative_time, tr
 from client.core.logging import setup_logging
@@ -90,12 +91,17 @@ class DiscoveryAvatar(QWidget):
         self._fallback = "?"
         self.setFixedSize(size, size)
 
-    def set_avatar(self, avatar_path: str = "", fallback: str = "?") -> None:
+    def set_avatar(self, avatar_path: str = "", fallback: str = "?", *, gender: str = "", seed: str = "") -> None:
         """Update avatar image or fallback initials."""
         self._fallback = (fallback or "?").strip()[:2].upper() or "?"
         self._pixmap = None
-        if avatar_path:
-            pixmap = QPixmap(avatar_path)
+        resolved = choose_avatar_image(
+            avatar_path,
+            gender=gender,
+            seed=seed or avatar_seed(fallback, avatar_path, gender),
+        )
+        if resolved:
+            pixmap = QPixmap(resolved)
             if not pixmap.isNull():
                 self._pixmap = pixmap
         self.update()
@@ -558,7 +564,12 @@ class MomentCard(ElevatedCardWidget):
         layout.addWidget(self.comment_section)
 
     def _apply_moment(self) -> None:
-        self.avatar.set_avatar(self.moment.avatar, self.moment.display_name)
+        self.avatar.set_avatar(
+            self.moment.avatar,
+            self.moment.display_name,
+            gender=self.moment.gender,
+            seed=avatar_seed(self.moment.user_id, self.moment.username, self.moment.display_name),
+        )
         self.name_label.setText(self.moment.display_name)
         self.time_label.setText(format_relative_time(self.moment.created_at))
         self._refresh_content()

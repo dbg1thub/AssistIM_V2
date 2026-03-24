@@ -9,6 +9,7 @@ from PySide6.QtCore import Signal, Qt
 
 from qfluentwidgets import AvatarWidget, BodyLabel, CaptionLabel, IconWidget, PrimaryPushButton
 
+from client.core.avatar_utils import choose_avatar_image
 from client.core.i18n import format_file_size, tr
 
 
@@ -140,6 +141,10 @@ class MessageFileWidget(QWidget):
         if file_url:
             self.download_clicked.emit(file_url)
 
+    def set_avatar(self, avatar_path: str, *, gender: str = "", seed: str = "") -> None:
+        """Set avatar image."""
+        self.avatar.setImage(choose_avatar_image(avatar_path, gender=gender, seed=seed))
+
     def set_message(self, message) -> None:
         """Set message data."""
         self._message = message
@@ -147,10 +152,6 @@ class MessageFileWidget(QWidget):
             self.file_name.setText(self._get_file_name())
         if hasattr(self, 'file_size'):
             self.file_size.setText(self._get_file_size())
-
-    def set_avatar(self, avatar_path: str) -> None:
-        """Set avatar image."""
-        self.avatar.setImage(avatar_path)
 
     def get_message(self):
         """Get message data."""

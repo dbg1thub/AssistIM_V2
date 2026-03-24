@@ -4,6 +4,7 @@ Message Manager Module
 Manager for message handling, ACK processing, and caching.
 """
 import asyncio
+import json
 import time
 import uuid
 from dataclasses import dataclass
@@ -434,6 +435,8 @@ class MessageManager:
                 logger.warning("ACK received for unknown message: %s", msg_id)
                 return
 
+            await self._hydrate_message_sender_profile(message)
+
             if message.status in {MessageStatus.PENDING, MessageStatus.SENDING, MessageStatus.FAILED}:
                 message.status = MessageStatus.SENT
                 message.updated_at = datetime.now()
@@ -477,6 +480,7 @@ class MessageManager:
             payload,
             default_session_id=str(msg_data.get("session_id", "") or ""),
         )
+        await self._hydrate_message_sender_profile(message)
         if not message.is_self and message.status in {MessageStatus.PENDING, MessageStatus.SENDING, MessageStatus.SENT}:
             message.status = MessageStatus.RECEIVED
         if not await self._reserve_incoming_message(message.message_id):
@@ -593,6 +597,128 @@ class MessageManager:
 
         return status, extra
 
+    async def _get_current_user_context(self) -> dict[str, Any]:
+        """Load the current authenticated user profile from persisted auth state."""
+        if not self._db.is_connected:
+            return {}
+
+        try:
+            stored_user = await self._db.get_app_state("auth.user_profile")
+            if stored_user:
+                parsed = json.loads(stored_user)
+                if isinstance(parsed, dict):
+                    return parsed
+        except Exception as exc:
+            logger.debug("Failed to load current user profile for message hydration: %s", exc)
+
+        try:
+            user_id = str(await self._db.get_app_state("auth.user_id") or "")
+        except Exception:
+            user_id = ""
+        return {"id": user_id} if user_id else {}
+
+    async def _get_session_member_context(
+        self,
+        session_id: str,
+        sender_id: str,
+        *,
+        current_user_id: str = "",
+    ) -> dict[str, Any]:
+        """Resolve one sender profile from the cached session member list when possible."""
+        if not self._db.is_connected or not session_id or not sender_id:
+            return {}
+
+        try:
+            session = await self._db.get_session(session_id)
+        except Exception as exc:
+            logger.debug("Failed to load session %s for sender hydration: %s", session_id, exc)
+            return {}
+
+        if session is None:
+            return {}
+
+        for member in session.extra.get("members") or []:
+            if str(member.get("id", "") or "") == sender_id:
+                return dict(member)
+
+        if session.session_type != "group" and sender_id != current_user_id:
+            return {
+                "id": sender_id,
+                "nickname": session.name,
+                "avatar": session.avatar,
+            }
+
+        return {}
+
+    async def _hydrate_message_sender_profile(self, message: ChatMessage) -> bool:
+        """Align one message sender snapshot with the latest local profile/session identity."""
+        if not message.sender_id:
+            return False
+
+        extra = dict(message.extra or {})
+        current_user = await self._get_current_user_context()
+        current_user_id = str(current_user.get("id", "") or "")
+
+        profile: dict[str, Any] = {}
+        if message.is_self or (current_user_id and message.sender_id == current_user_id):
+            profile = dict(current_user or {})
+        else:
+            profile = await self._get_session_member_context(
+                message.session_id,
+                message.sender_id,
+                current_user_id=current_user_id,
+            )
+            if not profile and current_user_id and message.sender_id == current_user_id:
+                profile = dict(current_user or {})
+
+        if not profile:
+            return False
+
+        changed = False
+        mapping = {
+            "sender_avatar": profile.get("avatar", ""),
+            "sender_gender": profile.get("gender", ""),
+            "sender_username": profile.get("username", ""),
+            "sender_nickname": profile.get("nickname", ""),
+        }
+        for key, raw_value in mapping.items():
+            value = str(raw_value or "").strip()
+            if not value:
+                continue
+            if str(extra.get(key, "") or "").strip() != value:
+                extra[key] = value
+                changed = True
+
+        sender_name = (
+            str(profile.get("nickname", "") or "").strip()
+            or str(profile.get("username", "") or "").strip()
+            or str(profile.get("name", "") or "").strip()
+        )
+        if sender_name and str(extra.get("sender_name", "") or "").strip() != sender_name:
+            extra["sender_name"] = sender_name
+            changed = True
+
+        if changed:
+            message.extra = extra
+        return changed
+
+    async def _hydrate_messages_sender_profiles(
+        self,
+        messages: list[ChatMessage],
+        *,
+        persist: bool = False,
+    ) -> list[ChatMessage]:
+        """Align a message batch with the latest local sender identity snapshots."""
+        changed_messages: list[ChatMessage] = []
+        for message in messages:
+            if await self._hydrate_message_sender_profile(message):
+                changed_messages.append(message)
+
+        if persist and changed_messages:
+            await self._db.save_messages_batch(changed_messages)
+
+        return messages
+
     def _normalize_loaded_message(
         self,
         payload: dict[str, Any],
@@ -679,6 +805,8 @@ class MessageManager:
                     default_session_id=str(msg_item.get("session_id", "") or ""),
                 )
             )
+
+        await self._hydrate_messages_sender_profiles(saved_messages)
 
         if saved_messages:
             await self._db.save_messages_batch(saved_messages)
@@ -881,6 +1009,7 @@ class MessageManager:
                 is_self=True,
                 extra=extra or {},
             )
+            await self._hydrate_message_sender_profile(message)
 
             await self._db.save_message(message)
 
@@ -899,6 +1028,7 @@ class MessageManager:
             if extra:
                 merged_extra.update(extra)
             message.extra = merged_extra
+            await self._hydrate_message_sender_profile(message)
             msg_id = message.message_id
             await self._db.save_message(message)
             await self._event_bus.emit(MessageEvent.SENT, {
@@ -950,6 +1080,7 @@ class MessageManager:
             is_self=True,
             extra=extra or {},
         )
+        await self._hydrate_message_sender_profile(message)
 
         await self._db.save_message(message)
         await self._event_bus.emit(MessageEvent.SENT, {
@@ -1300,6 +1431,8 @@ class MessageManager:
                 )
             )
 
+        await self._hydrate_messages_sender_profiles(remote_messages)
+
         if remote_messages:
             await self._db.save_messages_batch(remote_messages)
 
@@ -1317,6 +1450,7 @@ class MessageManager:
             limit=limit,
             before_timestamp=before_timestamp,
         )
+        await self._hydrate_messages_sender_profiles(messages, persist=True)
 
         should_fetch_remote = before_timestamp is not None or len(messages) < limit
         if should_fetch_remote:

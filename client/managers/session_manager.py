@@ -10,6 +10,7 @@ from datetime import datetime
 from typing import Any, Callable, Optional
 
 from client.core import logging
+from client.core.avatar_utils import avatar_seed
 from client.core.i18n import tr
 from client.core.logging import setup_logging
 from client.events.event_bus import get_event_bus
@@ -397,6 +398,15 @@ class SessionManager:
             updated_at=message.timestamp,
         )
         session.extra["last_message_type"] = message.message_type.value
+        session.extra["members"] = list(message.extra.get("members") or [])
+        session.extra["counterpart_id"] = str(message.sender_id or "")
+        session.extra["counterpart_username"] = str(message.extra.get("sender_username", "") or "")
+        session.extra["gender"] = str(message.extra.get("sender_gender", "") or "")
+        session.extra["avatar_seed"] = avatar_seed(
+            message.sender_id,
+            message.extra.get("sender_username", ""),
+            message.extra.get("sender_nickname", "") or message.extra.get("sender_name", ""),
+        )
         return session
 
     async def _get_current_user_id(self) -> str:
@@ -418,30 +428,88 @@ class SessionManager:
             return {}
 
     def _normalize_session_display(self, session: Session, current_user: dict[str, Any]) -> None:
-        """Normalize direct-session display names to the counterpart."""
+        """Normalize direct-session display fields to the counterpart profile."""
         if session.is_ai_session or session.session_type == "group":
             return
+
+        counterpart = self._resolve_counterpart_profile(
+            session.extra.get("members") or [],
+            session.participant_ids,
+            current_user,
+        )
+        counterpart_name = str(counterpart.get("display_name", "") or "")
+        counterpart_id = str(counterpart.get("id", "") or "")
+        counterpart_username = str(counterpart.get("username", "") or "")
+        counterpart_avatar = str(counterpart.get("avatar", "") or "")
+        counterpart_gender = str(counterpart.get("gender", "") or "")
+
+        if counterpart_name:
+            session.extra["server_name"] = session.name
+            session.name = counterpart_name
 
         current_user_id = str(current_user.get("id", "") or "")
         current_username = str(current_user.get("username", "") or "")
         current_nickname = str(current_user.get("nickname", "") or "")
-
-        counterpart_name = self._resolve_counterpart_name(
-            session.extra.get("members") or [],
-            current_user_id,
-        )
-        if counterpart_name:
-            session.extra["server_name"] = session.name
-            session.name = counterpart_name
-            return
-
         private_chat_label = tr("session.private_chat", "Private Chat")
         self_names = {value for value in {current_user_id, current_username, current_nickname, private_chat_label} if value}
-        if not session.name or session.name in self_names:
-            counterpart_id = self._resolve_counterpart_id(session.participant_ids, current_user_id)
-            if counterpart_id:
-                session.extra["server_name"] = session.name
-                session.name = counterpart_id
+        if (not session.name or session.name in self_names) and counterpart_id:
+            session.extra["server_name"] = session.name
+            session.name = counterpart_id
+
+        if counterpart_avatar:
+            session.avatar = counterpart_avatar
+        if counterpart_gender:
+            session.extra["gender"] = counterpart_gender
+        if counterpart_id:
+            session.extra["counterpart_id"] = counterpart_id
+        if counterpart_username:
+            session.extra["counterpart_username"] = counterpart_username
+
+        session.extra["avatar_seed"] = avatar_seed(
+            counterpart_id or session.session_id,
+            counterpart_username or session.name,
+            counterpart_name or session.name,
+        )
+
+    def _resolve_counterpart_profile(
+        self,
+        members: list[dict[str, Any]],
+        participant_ids: list[str],
+        current_user: dict[str, Any],
+    ) -> dict[str, str]:
+        """Resolve one normalized counterpart profile for a direct chat."""
+        current_user_id = str(current_user.get("id", "") or "")
+        current_username = str(current_user.get("username", "") or "")
+
+        for member in members:
+            member_id = str(member.get("id", "") or "")
+            member_username = str(member.get("username", "") or "")
+            if current_user_id and member_id == current_user_id:
+                continue
+            if current_username and member_username == current_username:
+                continue
+            return {
+                "id": member_id,
+                "username": member_username,
+                "nickname": str(member.get("nickname", "") or ""),
+                "avatar": str(member.get("avatar", "") or ""),
+                "gender": str(member.get("gender", "") or ""),
+                "display_name": (
+                    str(member.get("nickname", "") or "")
+                    or member_username
+                    or member_id
+                ),
+            }
+
+        counterpart_id = self._resolve_counterpart_id(participant_ids, current_user_id)
+        return {
+            "id": counterpart_id,
+            "username": "",
+            "nickname": "",
+            "avatar": "",
+            "gender": "",
+            "display_name": counterpart_id,
+        }
 
     @staticmethod
     def _resolve_counterpart_name(members: list[dict[str, Any]], current_user_id: str) -> str:

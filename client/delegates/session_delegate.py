@@ -10,6 +10,7 @@ from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPainterPath, Q
 from PySide6.QtWidgets import QStyle, QStyledItemDelegate, QStyleOptionViewItem
 from qfluentwidgets import isDarkTheme
 
+from client.core.avatar_utils import avatar_seed, choose_avatar_image
 from client.core.datetime_utils import coerce_local_datetime
 from client.core.i18n import format_session_timestamp, tr
 from client.models.message import format_message_preview
@@ -190,10 +191,24 @@ class SessionDelegate(QStyledItemDelegate):
         path.addRoundedRect(rect, 8, 8)
         painter.setClipPath(path)
 
-        if getattr(session, "avatar", None):
+        avatar_path = choose_avatar_image(
+            getattr(session, "avatar", None),
+            gender=getattr(session, "extra", {}).get("gender", ""),
+            seed=(
+                getattr(session, "extra", {}).get("avatar_seed", "")
+                or avatar_seed(
+                    getattr(session, "extra", {}).get("counterpart_id", ""),
+                    getattr(session, "extra", {}).get("counterpart_username", ""),
+                    getattr(session, "session_id", ""),
+                    getattr(session, "name", ""),
+                )
+            ),
+        )
+
+        if avatar_path:
             from PySide6.QtGui import QPixmap
 
-            pixmap = QPixmap(session.avatar)
+            pixmap = QPixmap(avatar_path)
             if not pixmap.isNull():
                 scaled = pixmap.scaled(
                     rect.size(),
@@ -208,7 +223,7 @@ class SessionDelegate(QStyledItemDelegate):
 
         painter.setClipping(False)
 
-        if not getattr(session, "avatar", None):
+        if not avatar_path:
             initial = (session.name or "?")[:1].upper()
             font = QFont()
             font.setPixelSize(18)

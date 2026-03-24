@@ -9,6 +9,8 @@ from PySide6.QtCore import Qt, Signal
 
 from qfluentwidgets import AvatarWidget, BodyLabel, CaptionLabel
 
+from client.core.avatar_utils import choose_avatar_image
+
 
 class MessageTextWidget(QWidget):
     """
@@ -92,9 +94,9 @@ class MessageTextWidget(QWidget):
         if hasattr(self, 'content_label'):
             self.content_label.setText(message.content)
 
-    def set_avatar(self, avatar_path: str) -> None:
+    def set_avatar(self, avatar_path: str, *, gender: str = "", seed: str = "") -> None:
         """Set avatar image."""
-        self.avatar.setImage(avatar_path)
+        self.avatar.setImage(choose_avatar_image(avatar_path, gender=gender, seed=seed))
 
     def get_message(self):
         """Get message data."""

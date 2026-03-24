@@ -1,1 +1,0 @@
-AssistIM demo seed file. Safe to delete and regenerate.

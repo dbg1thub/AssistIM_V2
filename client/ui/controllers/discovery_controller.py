@@ -29,6 +29,7 @@ class MomentCommentRecord:
     username: str = ""
     nickname: str = ""
     avatar: str = ""
+    gender: str = ""
 
     @property
     def display_name(self) -> str:
@@ -47,6 +48,7 @@ class MomentRecord:
     username: str = ""
     nickname: str = ""
     avatar: str = ""
+    gender: str = ""
     images: list[str] = field(default_factory=list)
     comments: list[MomentCommentRecord] = field(default_factory=list)
     like_count: int = 0
@@ -143,6 +145,7 @@ class DiscoveryController:
                 "username": current_user.get("username", cached_user.get("username", "")),
                 "nickname": current_user.get("nickname", cached_user.get("nickname", "")),
                 "avatar": current_user.get("avatar", cached_user.get("avatar", "")),
+                "gender": current_user.get("gender", cached_user.get("gender", "")),
             }
 
         moment_id = str(data.get("id", "") or "")
@@ -177,6 +180,7 @@ class DiscoveryController:
             username=str(data.get("username", "") or author.get("username", "") or cached_user.get("username", "") or ""),
             nickname=str(data.get("nickname", "") or author.get("nickname", "") or cached_user.get("nickname", "") or ""),
             avatar=str(data.get("avatar", "") or author.get("avatar", "") or cached_user.get("avatar", "") or ""),
+            gender=str(data.get("gender", "") or author.get("gender", "") or cached_user.get("gender", "") or ""),
             images=images,
             comments=normalized_comments,
             like_count=like_count,
@@ -198,6 +202,7 @@ class DiscoveryController:
                 "username": current_user.get("username", cached_user.get("username", "")),
                 "nickname": current_user.get("nickname", cached_user.get("nickname", "")),
                 "avatar": current_user.get("avatar", cached_user.get("avatar", "")),
+                "gender": current_user.get("gender", cached_user.get("gender", "")),
             }
 
         return MomentCommentRecord(
@@ -209,6 +214,7 @@ class DiscoveryController:
             username=str(data.get("username", "") or cached_user.get("username", "") or ""),
             nickname=str(data.get("nickname", "") or cached_user.get("nickname", "") or ""),
             avatar=str(data.get("avatar", "") or cached_user.get("avatar", "") or ""),
+            gender=str(data.get("gender", "") or cached_user.get("gender", "") or ""),
         )
 
 

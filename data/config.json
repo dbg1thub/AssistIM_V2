@@ -4,7 +4,7 @@
         "Language": "zh_CN"
     },
     "App": {
-        "ExitConfirmEnabled": true
+        "ExitConfirmEnabled": false
     },
     "QFluentWidgets": {
         "FontFamilies": [
@@ -18,6 +18,6 @@
     },
     "Theme": {
         "ThemeColor": "#ff07c160",
-        "ThemeMode": "Dark"
+        "ThemeMode": "Light"
     }
 }

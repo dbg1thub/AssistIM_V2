@@ -9,6 +9,7 @@ from PySide6.QtCore import QEvent, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPixmap
 from PySide6.QtWidgets import QLabel, QDialog, QFrame, QHBoxLayout, QSizePolicy, QSplitter, QStackedWidget, QVBoxLayout, QWidget
 from qfluentwidgets import (
+    AvatarWidget,
     BodyLabel,
     CaptionLabel,
     CardWidget,
@@ -30,6 +31,7 @@ from qfluentwidgets import (
 )
 
 from client.core import logging
+from client.core.avatar_utils import avatar_seed, choose_avatar_image
 from client.core.exceptions import APIError, NetworkError
 from client.core.i18n import format_relative_time, tr
 from client.core.profile_fields import format_profile_birthday, localize_profile_gender, localize_profile_status
@@ -81,46 +83,20 @@ def _request_message_text(request: FriendRequestRecord, current_user_id: str) ->
     return request.message or tr("contact.request.default_incoming", "The other user sent you a friend request.")
 
 
-class ContactAvatar(QWidget):
+class ContactAvatar(AvatarWidget):
     def __init__(self, size: int = 48, parent=None):
         super().__init__(parent)
         self._size = size
-        self._pixmap: Optional[QPixmap] = None
-        self._fallback = "?"
         self.setFixedSize(size, size)
+        self.setRadius(max(8, size // 6))
 
-    def set_avatar(self, avatar_path: str = "", fallback: str = "?") -> None:
-        self._fallback = (fallback or "?").strip()[:2].upper() or "?"
-        self._pixmap = None
-        if avatar_path:
-            pixmap = QPixmap(avatar_path)
-            if not pixmap.isNull():
-                self._pixmap = pixmap
-        self.update()
-
-    def paintEvent(self, event) -> None:
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        rect = self.rect()
-        clip = QPainterPath()
-        clip.addRoundedRect(rect, 8, 8)
-        painter.setClipPath(clip)
-        if self._pixmap:
-            scaled = self._pixmap.scaled(
-                rect.size(),
-                Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-                Qt.TransformationMode.SmoothTransformation,
-            )
-            painter.drawPixmap(rect, scaled)
-            return
-        painter.fillPath(clip, QColor("#D9E4F5"))
-        painter.setClipping(False)
-        font = QFont()
-        font.setPixelSize(max(12, self._size // 3))
-        font.setBold(True)
-        painter.setFont(font)
-        painter.setPen(QColor("#37506B"))
-        painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, self._fallback)
+    def set_avatar(self, avatar_path: str = "", fallback: str = "?", *, gender: str = "", seed: str = "") -> None:
+        resolved = choose_avatar_image(
+            avatar_path,
+            gender=gender,
+            seed=seed or avatar_seed(fallback, avatar_path, gender),
+        )
+        self.setImage(resolved)
 
 
 class ElidedBodyLabel(QLabel):
@@ -258,7 +234,7 @@ class ContactListItem(QWidget):
         layout.setSpacing(12)
 
         self.avatar = ContactAvatar(44, self)
-        self.avatar.set_avatar(avatar, title)
+        self.avatar.set_avatar(avatar, title, seed=avatar_seed(self.item_id, title))
 
         text_layout = QVBoxLayout()
         text_layout.setContentsMargins(0, 0, 0, 0)
@@ -448,7 +424,12 @@ class ContactMomentItem(CardWidget):
         header.setContentsMargins(0, 0, 0, 0)
         header.setSpacing(10)
         avatar = ContactAvatar(36, self)
-        avatar.set_avatar(moment.avatar, moment.display_name)
+        avatar.set_avatar(
+            moment.avatar,
+            moment.display_name,
+            gender=getattr(moment, "gender", ""),
+            seed=avatar_seed(moment.user_id, moment.display_name),
+        )
         header_text = QVBoxLayout()
         header_text.setContentsMargins(0, 0, 0, 0)
         header_text.setSpacing(2)
@@ -630,7 +611,12 @@ class ContactDetailPanel(QWidget):
 
     def set_contact(self, contact: ContactRecord, moments: Optional[list[MomentRecord]] = None) -> None:
         self._entity = {"type": "friend", "data": contact}
-        self.avatar.set_avatar(contact.avatar, contact.display_name)
+        self.avatar.set_avatar(
+            contact.avatar,
+            contact.display_name,
+            gender=contact.gender,
+            seed=avatar_seed(contact.id, contact.username, contact.display_name),
+        )
         self.title_label.setText(contact.display_name)
         self.subtitle_label.setText(contact.username or contact.assistim_id or tr("contact.detail.friend_fallback", "Friend"))
         birthday_text = format_profile_birthday(contact.birthday)
@@ -843,6 +829,61 @@ class ContactMomentsFlowPanel(QWidget):
             card.append_comment(comment)
 
 
+class ContactWelcomeWidget(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("ContactWelcomeWidget")
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 24, 24, 24)
+        layout.setSpacing(0)
+        layout.addStretch(1)
+
+        card = ElevatedCardWidget(self)
+        card.setObjectName("ContactWelcomeCard")
+        card.setMinimumWidth(420)
+        card.setMaximumWidth(540)
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(36, 36, 36, 36)
+        card_layout.setSpacing(14)
+
+        icon = IconWidget(FluentIcon.PEOPLE, card)
+        icon.setFixedSize(52, 52)
+
+        title_label = BodyLabel(tr("contact.welcome.title", "Welcome to Contacts"), card)
+        title_font = QFont(title_label.font())
+        title_font.setPixelSize(24)
+        title_font.setBold(False)
+        title_label.setFont(title_font)
+
+        subtitle_label = CaptionLabel(
+            tr(
+                "contact.welcome.subtitle",
+                "Select a friend, group, or request from the left to view the profile and recent activity.",
+            ),
+            card,
+        )
+        subtitle_label.setWordWrap(True)
+
+        hint_label = CaptionLabel(
+            tr(
+                "contact.welcome.hint",
+                "You can also search above, add friends, or create groups from the sidebar.",
+            ),
+            card,
+        )
+        hint_label.setObjectName("contactSectionCaption")
+        hint_label.setWordWrap(True)
+
+        card_layout.addWidget(icon, 0, Qt.AlignmentFlag.AlignLeft)
+        card_layout.addWidget(title_label, 0, Qt.AlignmentFlag.AlignLeft)
+        card_layout.addWidget(subtitle_label, 0, Qt.AlignmentFlag.AlignLeft)
+        card_layout.addWidget(hint_label, 0, Qt.AlignmentFlag.AlignLeft)
+
+        layout.addWidget(card, 0, Qt.AlignmentFlag.AlignHCenter)
+        layout.addStretch(1)
+
+
 class GalleryContactDetailPanel(QWidget):
     message_requested = Signal(object)
 
@@ -921,7 +962,12 @@ class GalleryContactDetailPanel(QWidget):
 
     def set_contact(self, contact: ContactRecord, moments: Optional[list[MomentRecord]] = None) -> None:
         self._entity = {"type": "friend", "data": contact}
-        self.avatar.set_avatar(contact.avatar, contact.display_name)
+        self.avatar.set_avatar(
+            contact.avatar,
+            contact.display_name,
+            gender=contact.gender,
+            seed=avatar_seed(contact.id, contact.username, contact.display_name),
+        )
         self.title_label.setText(contact.display_name)
         self.subtitle_label.setText(
             f"{tr('contact.detail.label.assistim_id', 'AssistIM ID')} {contact.assistim_id or contact.username or '-'}"
@@ -1031,7 +1077,12 @@ class UserSearchItem(CardWidget):
         layout.setSpacing(12)
 
         avatar = ContactAvatar(42, self)
-        avatar.set_avatar(user.avatar, user.display_name)
+        avatar.set_avatar(
+            user.avatar,
+            user.display_name,
+            gender=user.gender,
+            seed=avatar_seed(user.id, user.username, user.display_name),
+        )
 
         text_layout = QVBoxLayout()
         text_layout.setContentsMargins(0, 0, 0, 0)
@@ -1073,7 +1124,12 @@ class GroupMemberItem(CardWidget):
         layout.setSpacing(12)
 
         self.avatar = ContactAvatar(42, self)
-        self.avatar.set_avatar(contact.avatar, contact.display_name)
+        self.avatar.set_avatar(
+            contact.avatar,
+            contact.display_name,
+            gender=contact.gender,
+            seed=avatar_seed(contact.id, contact.username, contact.display_name),
+        )
 
         text_layout = QVBoxLayout()
         text_layout.setContentsMargins(0, 0, 0, 0)
@@ -1694,10 +1750,15 @@ class ContactInterface(QWidget):
         left_layout.setContentsMargins(0, 0, 0, 0)
         left_layout.addWidget(sidebar)
 
-        self.detail_panel = GalleryContactDetailPanel(self)
+        self.detail_stack = QStackedWidget(self)
+        self.detail_stack.setObjectName("contactDetailStack")
+        self.welcome_panel = ContactWelcomeWidget(self.detail_stack)
+        self.detail_panel = GalleryContactDetailPanel(self.detail_stack)
+        self.detail_stack.addWidget(self.welcome_panel)
+        self.detail_stack.addWidget(self.detail_panel)
 
         splitter.addWidget(left)
-        splitter.addWidget(self.detail_panel)
+        splitter.addWidget(self.detail_stack)
         splitter.setSizes([320, 880])
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
@@ -1708,6 +1769,7 @@ class ContactInterface(QWidget):
 
         StyleSheet.CONTACT_INTERFACE.apply(self)
         self.segmented.setCurrentItem("friends")
+        self._show_welcome_panel()
         self._switch_page("friends")
         self._position_alpha_nav()
 
@@ -1733,6 +1795,12 @@ class ContactInterface(QWidget):
         layout.addStretch(1)
         area.setWidget(container)
         return area, container, layout
+
+    def _show_welcome_panel(self) -> None:
+        self.detail_stack.setCurrentWidget(self.welcome_panel)
+
+    def _show_detail_panel(self) -> None:
+        self.detail_stack.setCurrentWidget(self.detail_panel)
 
     def eventFilter(self, watched, event) -> bool:
         friends_viewport = self.friends_area.viewport() if hasattr(self, "friends_area") else None
@@ -1956,11 +2024,17 @@ class ContactInterface(QWidget):
             category, item_id = self._selected_key
             if not full_reload:
                 if category != current_category:
+                    self._clear_selection()
+                    self._show_welcome_panel()
                     return
                 current_visible = current_map[self._current_page]
                 if item_id in current_visible:
                     self._clear_selection()
                     current_visible[item_id].set_selected(True)
+                    self._show_detail_panel()
+                else:
+                    self._clear_selection()
+                    self._show_welcome_panel()
                 return
             if category == "friend" and item_id in self._friend_items:
                 self._select_friend(item_id, force=True)
@@ -1971,23 +2045,10 @@ class ContactInterface(QWidget):
             if category == "request" and item_id in self._request_items:
                 self._select_request(item_id, force=True)
                 return
-        if not full_reload:
-            return
-        visible = current_map[self._current_page]
-        if visible:
-            first_id = next(iter(visible))
-            {"friends": self._select_friend, "groups": self._select_group, "requests": self._select_request}[self._current_page](first_id, True)
-            return
-        if full_reload:
-            for category, mapping in (("friend", self._friend_items), ("group", self._group_items), ("request", self._request_items)):
-                if mapping:
-                    first_id = next(iter(mapping))
-                    {"friend": self._select_friend, "group": self._select_group, "request": self._select_request}[category](first_id, True)
-                    return
-        self._selected_key = None
         self._cancel_moment_load()
         self._clear_selection()
         self.detail_panel.show_placeholder()
+        self._show_welcome_panel()
 
     def _select_friend(self, contact_id: str, force: bool = False) -> None:
         selected = next((item for item in self._contacts if item.id == contact_id), None)
@@ -1999,6 +2060,7 @@ class ContactInterface(QWidget):
         self._clear_selection()
         self._friend_items[contact_id].set_selected(True)
         self.detail_panel.set_contact(selected, [])
+        self._show_detail_panel()
         self._load_detail_moments(contact_id, "friend", contact_id, selected)
 
     def _select_group(self, group_id: str, force: bool = False) -> None:
@@ -2012,6 +2074,7 @@ class ContactInterface(QWidget):
         self._clear_selection()
         self._group_items[group_id].set_selected(True)
         self.detail_panel.set_group(selected, [])
+        self._show_detail_panel()
 
     def _select_request(self, request_id: str, force: bool = False) -> None:
         selected = next((item for item in self._requests if item.id == request_id), None)
@@ -2024,6 +2087,7 @@ class ContactInterface(QWidget):
         self._request_items[request_id].set_selected(True)
         counterpart_id = selected.counterpart_id(self._current_user_id)
         self.detail_panel.set_request(selected, self._current_user_id, [])
+        self._show_detail_panel()
         self._load_detail_moments(counterpart_id, "request", request_id, selected)
 
     def _accept_request(self, request_id: str) -> None:
