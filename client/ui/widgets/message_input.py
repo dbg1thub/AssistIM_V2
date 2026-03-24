@@ -6,7 +6,7 @@ from dataclasses import dataclass
 import os
 import time
 
-from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QRectF, QSize, QTimer, Qt, QUrl, Signal
+from PySide6.QtCore import QByteArray, QEvent, QMimeData, QPoint, QPointF, QRect, QRectF, QSize, QTimer, Qt, QUrl, Signal
 from PySide6.QtGui import (
     QColor,
     QDragEnterEvent,
@@ -49,12 +49,14 @@ from qfluentwidgets import (
     SegmentedWidget,
     TransparentToolButton,
     isDarkTheme,
-    qconfig,
+    qconfig, ToolTipPosition,
 )
+from qfluentwidgets.components.material import AcrylicToolTipFilter, AcrylicFlyoutViewBase, AcrylicFlyout
 
 from client.core.i18n import tr
 from client.models.message import MessageType, infer_message_type_from_path
 from client.ui.common.attachment_card import attachment_card_size, draw_attachment_card
+from client.ui.common.emoji_names import emoji_display_name
 from client.ui.common.emoji_utils import (
     COMPOSER_EMOJI_PIXEL_SIZE,
     centered_emoji_top,
@@ -64,6 +66,14 @@ from client.ui.common.emoji_utils import (
 )
 from client.core.video_thumbnail_cache import get_thumbnail as get_video_thumbnail, get_video_thumbnail_cache
 from client.ui.styles import StyleSheet
+from client.ui.widgets.composer_clipboard import (
+    COMPOSER_SEGMENTS_MIME,
+    clipboard_file_paths,
+    clipboard_plain_text,
+    deserialize_clipboard_segments,
+    serialize_clipboard_segments,
+)
+from client.ui.widgets.composer_layout import centered_inline_object_top, inline_object_line_metrics
 
 ATTACHMENT_ID_PROP = int(QTextFormat.Property.UserProperty) + 1
 ATTACHMENT_PATH_PROP = int(QTextFormat.Property.UserProperty) + 2
@@ -73,6 +83,7 @@ ATTACHMENT_HEIGHT_PROP = int(QTextFormat.Property.UserProperty) + 5
 ATTACHMENT_NAME_PROP = int(QTextFormat.Property.UserProperty) + 6
 EMOJI_ID_PROP = int(QTextFormat.Property.UserProperty) + 7
 EMOJI_VALUE_PROP = int(QTextFormat.Property.UserProperty) + 8
+ATTACHMENT_RENDER_HEIGHT_PROP = int(QTextFormat.Property.UserProperty) + 9
 
 
 @dataclass
@@ -255,6 +266,7 @@ class ChatTextEdit(QTextEdit):
     send_requested = Signal()
     attachment_activated = Signal(str, str)
     files_dropped = Signal(object)
+    _ATTACHMENT_VERTICAL_PADDING = 10
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -381,6 +393,50 @@ class ChatTextEdit(QTextEdit):
 
         super().dropEvent(event)
 
+    def canInsertFromMimeData(self, source: QMimeData) -> bool:
+        """Accept composer clipboard payloads in addition to normal Qt text and file data."""
+        if source is not None and source.hasFormat(COMPOSER_SEGMENTS_MIME):
+            return True
+        if self._extract_local_files(source):
+            return True
+        return super().canInsertFromMimeData(source)
+
+    def createMimeDataFromSelection(self) -> QMimeData:
+        """Serialize mixed composer selections so attachments and emoji survive copy/paste."""
+        mime_data = super().createMimeDataFromSelection()
+        selection_cursor = self.textCursor()
+        if not selection_cursor.hasSelection():
+            return mime_data
+
+        segments = self._collect_selected_segments(selection_cursor)
+        if not segments:
+            return mime_data
+
+        mime_data.setData(COMPOSER_SEGMENTS_MIME, QByteArray(serialize_clipboard_segments(segments)))
+        plain_text = clipboard_plain_text(segments)
+        if plain_text:
+            mime_data.setText(plain_text)
+
+        file_urls = [QUrl.fromLocalFile(file_path) for file_path in clipboard_file_paths(segments)]
+        if file_urls:
+            mime_data.setUrls(file_urls)
+        return mime_data
+
+    def insertFromMimeData(self, source: QMimeData) -> None:
+        """Restore mixed composer selections before falling back to Qt's default paste behavior."""
+        segments = self._segments_from_mime(source)
+        if segments:
+            self._replace_selection_with_segments(segments)
+            return
+
+        file_paths = self._extract_local_files(source)
+        if file_paths:
+            for file_path in file_paths:
+                self.insert_local_attachment(file_path, blockify=False)
+            return
+
+        super().insertFromMimeData(source)
+
     def mouseReleaseEvent(self, event) -> None:
         """Let embedded attachment widgets handle their own click events."""
         super().mouseReleaseEvent(event)
@@ -407,8 +463,9 @@ class ChatTextEdit(QTextEdit):
 
         self._attachments[attachment.attachment_id] = attachment
         resource_name = f"attachment://{attachment.attachment_id}"
-        card_width, height = self._attachment_size(attachment.message_type)
-        placeholder = QPixmap(card_width, height)
+        card_width, render_height = self._attachment_size(attachment.message_type)
+        placeholder_height = self._attachment_placeholder_height(render_height)
+        placeholder = QPixmap(card_width, placeholder_height)
         placeholder.fill(Qt.GlobalColor.transparent)
         self.document().addResource(QTextDocument.ResourceType.ImageResource, QUrl(resource_name), placeholder)
 
@@ -424,9 +481,10 @@ class ChatTextEdit(QTextEdit):
         image_format.setVerticalAlignment(self._attachment_vertical_alignment())
 
         image_format.setWidth(card_width)
-        image_format.setHeight(height)
+        image_format.setHeight(placeholder_height)
         image_format.setProperty(ATTACHMENT_WIDTH_PROP, card_width)
-        image_format.setProperty(ATTACHMENT_HEIGHT_PROP, height)
+        image_format.setProperty(ATTACHMENT_HEIGHT_PROP, placeholder_height)
+        image_format.setProperty(ATTACHMENT_RENDER_HEIGHT_PROP, render_height)
 
         cursor.insertImage(image_format)
         self._reset_cursor_to_plain_text(cursor)
@@ -472,30 +530,7 @@ class ChatTextEdit(QTextEdit):
 
     def restore_composed_segments(self, segments: list[dict]) -> None:
         """Restore a previously captured mixed text and attachment draft."""
-        self.clear_composer()
-        if not segments:
-            return
-
-        cursor = self.textCursor()
-        self.setTextCursor(cursor)
-
-        for segment in segments:
-            segment_type = segment.get("type")
-            if isinstance(segment_type, str):
-                try:
-                    segment_type = MessageType(segment_type)
-                except ValueError:
-                    continue
-
-            if segment_type == MessageType.TEXT:
-                content = str(segment.get("content", "") or "")
-                if content:
-                    self._insert_mixed_text_segment(content)
-                continue
-
-            file_path = str(segment.get("file_path", "") or "")
-            if file_path:
-                self.insert_local_attachment(file_path, blockify=False)
+        self._insert_composed_segments(segments or [], clear_first=True)
 
     def _extract_composed_segments(self, *, clear_after: bool) -> list[dict]:
         """Extract text and inline attachments in document order."""
@@ -537,6 +572,147 @@ class ChatTextEdit(QTextEdit):
         if clear_after:
             self.clear_composer()
         return segments
+
+    def _collect_selected_segments(self, selection_cursor: QTextCursor) -> list[dict]:
+        """Extract mixed segments from the current selection without normalizing whitespace."""
+        if selection_cursor is None or not selection_cursor.hasSelection():
+            return []
+        return self._extract_selected_segments(selection_cursor.selectionStart(), selection_cursor.selectionEnd())
+
+    def _extract_selected_segments(self, selection_start: int, selection_end: int) -> list[dict]:
+        """Extract a lossless segment list for clipboard copy from a document range."""
+        if selection_end <= selection_start:
+            return []
+
+        segments: list[dict] = []
+        text_buffer: list[str] = []
+        document = self.document()
+        block = document.findBlock(selection_start)
+        if not block.isValid():
+            block = document.begin()
+
+        while block.isValid():
+            if block.position() >= selection_end:
+                break
+
+            iterator = block.begin()
+            while not iterator.atEnd():
+                fragment = iterator.fragment()
+                if fragment.isValid():
+                    fragment_start = fragment.position()
+                    fragment_end = fragment_start + fragment.length()
+                    overlap_start = max(selection_start, fragment_start)
+                    overlap_end = min(selection_end, fragment_end)
+                    if overlap_start < overlap_end:
+                        char_format = fragment.charFormat()
+                        if self._is_attachment_format(char_format):
+                            self._flush_selection_text_buffer(text_buffer, segments)
+                            attachment = self._attachment_from_char_format(char_format)
+                            if attachment:
+                                segments.append(
+                                    {
+                                        "type": attachment.message_type,
+                                        "file_path": attachment.file_path,
+                                        "display_name": attachment.display_name,
+                                    }
+                                )
+                        elif self._is_inline_emoji_format(char_format):
+                            inline_emoji = self._emoji_from_char_format(char_format)
+                            if inline_emoji:
+                                text_buffer.append(inline_emoji.value)
+                        else:
+                            fragment_text = fragment.text()
+                            selected_text = self._slice_text_by_qt_positions(
+                                fragment_text,
+                                overlap_start - fragment_start,
+                                overlap_end - fragment_start,
+                            )
+                            if selected_text:
+                                text_buffer.append(selected_text)
+                iterator += 1
+
+            next_block = block.next()
+            block_separator_position = block.position() + max(0, block.length() - 1)
+            if next_block.isValid() and selection_start <= block_separator_position < selection_end:
+                text_buffer.append("\n")
+
+            if not next_block.isValid() or next_block.position() >= selection_end:
+                break
+            block = next_block
+
+        self._flush_selection_text_buffer(text_buffer, segments)
+        return segments
+
+    def _segments_from_mime(self, mime_data: QMimeData | None) -> list[dict]:
+        """Decode the app-private composer clipboard payload, if present."""
+        if mime_data is None or not mime_data.hasFormat(COMPOSER_SEGMENTS_MIME):
+            return []
+        return deserialize_clipboard_segments(bytes(mime_data.data(COMPOSER_SEGMENTS_MIME)))
+
+    def _replace_selection_with_segments(self, segments: list[dict]) -> None:
+        """Replace the current selection with a previously copied mixed segment payload."""
+        if not segments:
+            return
+
+        cursor = QTextCursor(self.textCursor())
+        cursor.beginEditBlock()
+        if cursor.hasSelection():
+            cursor.removeSelectedText()
+        self.setTextCursor(cursor)
+        self._insert_composed_segments(segments, clear_first=False)
+        cursor = QTextCursor(self.textCursor())
+        cursor.endEditBlock()
+        self.setTextCursor(cursor)
+        self._schedule_attachment_widget_sync()
+
+    def _insert_composed_segments(self, segments: list[dict], *, clear_first: bool) -> None:
+        """Insert a mixed text/attachment segment list into the composer."""
+        if clear_first:
+            self.clear_composer()
+        if not segments:
+            return
+
+        cursor = self.textCursor()
+        self.setTextCursor(cursor)
+
+        for segment in segments:
+            segment_type = segment.get("type")
+            if isinstance(segment_type, str):
+                try:
+                    segment_type = MessageType(segment_type)
+                except ValueError:
+                    continue
+
+            if segment_type == MessageType.TEXT:
+                content = str(segment.get("content", "") or "")
+                if content:
+                    self._insert_mixed_text_segment(content)
+                continue
+
+            file_path = str(segment.get("file_path", "") or "")
+            if file_path:
+                self.insert_local_attachment(file_path, blockify=False)
+
+    @staticmethod
+    def _slice_text_by_qt_positions(text: str, start: int, end: int) -> str:
+        """Slice a Python string using Qt UTF-16 cursor offsets."""
+        if not text or end <= start:
+            return ""
+
+        cursor_units = 0
+        sliced_chars: list[str] = []
+        for char in text:
+            char_units = 2 if ord(char) > 0xFFFF else 1
+            next_cursor_units = cursor_units + char_units
+            if next_cursor_units <= start:
+                cursor_units = next_cursor_units
+                continue
+            if cursor_units >= end:
+                break
+            if start < next_cursor_units and end > cursor_units:
+                sliced_chars.append(char)
+            cursor_units = next_cursor_units
+        return "".join(sliced_chars)
 
     def has_meaningful_content(self) -> bool:
         """Return whether the composer currently contains sendable content."""
@@ -787,12 +963,17 @@ class ChatTextEdit(QTextEdit):
 
     @staticmethod
     def _attachment_size(message_type: MessageType) -> tuple[int, int]:
-        """Return inline attachment object size."""
+        """Return the rendered attachment card size."""
         if message_type == MessageType.IMAGE:
             return InlineAttachmentWidget.IMAGE_SIZE.width(), InlineAttachmentWidget.IMAGE_SIZE.height()
         if message_type == MessageType.VIDEO:
             return InlineAttachmentWidget.VIDEO_SIZE.width(), InlineAttachmentWidget.VIDEO_SIZE.height()
         return attachment_card_size()
+
+    @classmethod
+    def _attachment_placeholder_height(cls, render_height: int | float) -> int:
+        """Return the line-box height used for attachment rows."""
+        return int(max(1, round(float(render_height) + cls._ATTACHMENT_VERTICAL_PADDING * 2)))
 
     def _document_char_at(self, position: int) -> str:
         """Return the character at the given document position, or an empty string."""
@@ -818,24 +999,35 @@ class ChatTextEdit(QTextEdit):
         next_cursor.setPosition(next_position)
         next_rect = self.cursorRect(next_cursor)
 
-        stored_width = float(
-            current_cursor.charFormat().property(ATTACHMENT_WIDTH_PROP)
-            or self._attachment_size(attachment.message_type)[0]
-        )
-        stored_height = float(
+        render_width, fallback_render_height = self._attachment_size(attachment.message_type)
+        stored_width = float(current_cursor.charFormat().property(ATTACHMENT_WIDTH_PROP) or render_width)
+        stored_placeholder_height = float(
             current_cursor.charFormat().property(ATTACHMENT_HEIGHT_PROP)
-            or self._attachment_size(attachment.message_type)[1]
+            or self._attachment_placeholder_height(fallback_render_height)
+        )
+        stored_render_height = float(
+            current_cursor.charFormat().property(ATTACHMENT_RENDER_HEIGHT_PROP) or fallback_render_height
         )
 
         left = float(current_rect.x())
         width = stored_width
 
-        line_top = float(min(current_rect.top(), next_rect.top()))
-        line_bottom = float(max(current_rect.bottom(), next_rect.bottom()))
-        metrics = QFontMetrics(self._editor_font)
-        visual_bottom = line_bottom - max(0, metrics.descent() - 1)
-        top = round(visual_bottom - stored_height)
-        return QRectF(left, top, width, stored_height)
+        line_top, line_bottom = inline_object_line_metrics(
+            float(current_rect.top()),
+            float(current_rect.bottom()),
+            float(next_rect.top()),
+            float(next_rect.bottom()),
+            float(current_rect.height()),
+        )
+        top = round(
+            centered_inline_object_top(
+                line_top,
+                line_bottom,
+                stored_render_height,
+                minimum_line_height=stored_placeholder_height,
+            )
+        )
+        return QRectF(left, top, width, stored_render_height)
 
     @staticmethod
     def _is_dark() -> bool:
@@ -973,9 +1165,15 @@ class ChatTextEdit(QTextEdit):
         next_rect = self.cursorRect(next_cursor)
 
         width, height = self._emoji_size()
-        same_line = abs(next_rect.center().y() - current_rect.center().y()) < max(2.0, current_rect.height() / 2)
+        line_top, line_bottom = inline_object_line_metrics(
+            float(current_rect.top()),
+            float(current_rect.bottom()),
+            float(next_rect.top()),
+            float(next_rect.bottom()),
+            float(current_rect.height()),
+        )
+        same_line = line_bottom != float(current_rect.bottom()) or line_top != float(current_rect.top())
         left = float(min(current_rect.x(), next_rect.x()) if same_line else current_rect.x())
-        line_bottom = float(max(current_rect.bottom(), next_rect.bottom()))
         metrics = QFontMetrics(self._editor_font)
         text_top = line_bottom - metrics.height() + 1.0
         top = centered_emoji_top(text_top, metrics.height(), height, vertical_nudge=-2)
@@ -1045,6 +1243,17 @@ class ChatTextEdit(QTextEdit):
             segments.append({"type": MessageType.TEXT, "content": text})
 
     @staticmethod
+    def _flush_selection_text_buffer(text_buffer: list[str], segments: list[dict]) -> None:
+        """Flush clipboard-selected text without trimming whitespace-only segments."""
+        if not text_buffer:
+            return
+
+        text = "".join(text_buffer)
+        text_buffer.clear()
+        if text:
+            segments.append({"type": MessageType.TEXT, "content": text})
+
+    @staticmethod
     def _normalize_attachment_boundary_newlines(segments: list[dict]) -> list[dict]:
         """Trim structural newlines around attachment segments so send/restore stay stable."""
         normalized = [dict(segment) for segment in segments]
@@ -1068,7 +1277,6 @@ class ChatTextEdit(QTextEdit):
             if segment.get("type") != MessageType.TEXT or str(segment.get("content", "") or "").strip()
         ]
 
-
 class EmojiTile(QLabel):
     """Lightweight clickable emoji tile."""
 
@@ -1081,8 +1289,9 @@ class EmojiTile(QLabel):
         self.setObjectName("emojiTile")
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setFixedSize(56, 60)
-        self.setToolTip(emoji)
+        self.setFixedSize(56, 56)
+        self.setToolTip(emoji_display_name(emoji))
+        self.installEventFilter(AcrylicToolTipFilter(self, 250, ToolTipPosition.TOP))
 
         font = QFont(self.font())
         font.setPixelSize(22)
@@ -1122,7 +1331,7 @@ class EmojiTile(QLabel):
         painter.end()
 
 
-class ModernEmojiPickerFlyout(FlyoutViewBase):
+class ModernEmojiPickerFlyout(AcrylicFlyoutViewBase):
     """Grouped emoji picker that keeps the popup fast by building pages lazily."""
 
     emoji_selected = Signal(str)
@@ -1130,6 +1339,7 @@ class ModernEmojiPickerFlyout(FlyoutViewBase):
     EMOJI_GROUPS = [
         (
             "smileys",
+            "composer.emoji.group.smileys",
             "Smileys",
             [
                 "\U0001F600", "\U0001F603", "\U0001F604", "\U0001F601", "\U0001F606", "\U0001F605", "\U0001F602", "\U0001F923",
@@ -1141,6 +1351,7 @@ class ModernEmojiPickerFlyout(FlyoutViewBase):
         ),
         (
             "hands",
+            "composer.emoji.group.hands",
             "Hands",
             [
                 "\U0001F44B", "\U0001F91A", "\U0001F590\ufe0f", "\u270B", "\U0001F596", "\U0001FAF1", "\U0001FAF2", "\U0001FAF3",
@@ -1152,6 +1363,7 @@ class ModernEmojiPickerFlyout(FlyoutViewBase):
         ),
         (
             "people",
+            "composer.emoji.group.people",
             "People",
             [
                 "\U0001F64B", "\U0001F64E", "\U0001F645", "\U0001F646", "\U0001F481", "\U0001F647", "\U0001F926", "\U0001F937",
@@ -1164,6 +1376,7 @@ class ModernEmojiPickerFlyout(FlyoutViewBase):
         ),
         (
             "animals",
+            "composer.emoji.group.animals",
             "Animals",
             [
                 "\U0001F436", "\U0001F431", "\U0001F42D", "\U0001F439", "\U0001F430", "\U0001F98A", "\U0001F43B", "\U0001F43C",
@@ -1175,6 +1388,7 @@ class ModernEmojiPickerFlyout(FlyoutViewBase):
         ),
         (
             "food",
+            "composer.emoji.group.food",
             "Food",
             [
                 "\U0001F34E", "\U0001F34A", "\U0001F349", "\U0001F347", "\U0001F353", "\U0001FAD0", "\U0001F965", "\U0001F951",
@@ -1186,6 +1400,7 @@ class ModernEmojiPickerFlyout(FlyoutViewBase):
         ),
         (
             "symbols",
+            "composer.emoji.group.symbols",
             "Symbols",
             [
                 "\u2764\ufe0f", "\U0001F9E1", "\U0001F49B", "\U0001F49A", "\U0001F499", "\U0001F49C", "\U0001F90E", "\U0001F5A4",
@@ -1199,7 +1414,7 @@ class ModernEmojiPickerFlyout(FlyoutViewBase):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._group_emoji_map = {route_key: emojis for route_key, _label, emojis in self.EMOJI_GROUPS}
+        self._group_emoji_map = {route_key: emojis for route_key, _label_key, _label, emojis in self.EMOJI_GROUPS}
         self._containers: dict[str, QWidget] = {}
         self._container_layouts: dict[str, QVBoxLayout] = {}
         self._built_pages: set[str] = set()
@@ -1207,27 +1422,40 @@ class ModernEmojiPickerFlyout(FlyoutViewBase):
 
     def _setup_ui(self) -> None:
         self.setObjectName("emojiPickerFlyout")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setAutoFillBackground(False)
         self.view_layout = QVBoxLayout(self)
         self.view_layout.setContentsMargins(12, 12, 12, 12)
         self.view_layout.setSpacing(8)
 
         self.group_tabs = SegmentedWidget(self)
         self.group_tabs.setObjectName("emojiGroupTabs")
+        self.group_tabs.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.group_tabs.setAutoFillBackground(False)
         self.view_layout.addWidget(self.group_tabs)
 
         self.page_stack = QStackedWidget(self)
         self.page_stack.setObjectName("emojiPageStack")
+        self.page_stack.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.page_stack.setAutoFillBackground(False)
         self.view_layout.addWidget(self.page_stack, 1)
 
-        for route_key, label, _emojis in self.EMOJI_GROUPS:
+        for route_key, label_key, default_label, _emojis in self.EMOJI_GROUPS:
             container = QWidget(self.page_stack)
+            container.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+            container.setAutoFillBackground(False)
             container_layout = QVBoxLayout(container)
             container_layout.setContentsMargins(0, 0, 0, 0)
             container_layout.setSpacing(0)
             self._containers[route_key] = container
             self._container_layouts[route_key] = container_layout
             self.page_stack.addWidget(container)
-            self.group_tabs.addItem(route_key, label, lambda _checked=False, key=route_key: self._switch_group(key))
+            self.group_tabs.addItem(
+                route_key,
+                tr(label_key, default_label),
+                lambda _checked=False, key=route_key: self._switch_group(key),
+            )
 
         first_group = self.EMOJI_GROUPS[0][0]
         self._switch_group(first_group)
@@ -1253,9 +1481,18 @@ class ModernEmojiPickerFlyout(FlyoutViewBase):
         scroll_area.setObjectName("emojiScrollArea")
         scroll_area.setWidgetResizable(True)
         scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+        scroll_area.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        scroll_area.setAutoFillBackground(False)
+        if scroll_area.viewport() is not None:
+            scroll_area.viewport().setObjectName("emojiScrollViewport")
+            scroll_area.viewport().setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+            scroll_area.viewport().setAutoFillBackground(False)
 
         content = QWidget(scroll_area)
         content.setObjectName("emojiScrollContent")
+        content.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        content.setAutoFillBackground(False)
         grid_layout = QGridLayout(content)
         grid_layout.setContentsMargins(4, 4, 4, 4)
         grid_layout.setHorizontalSpacing(4)
@@ -1368,6 +1605,15 @@ class MessageInput(QWidget):
             self.video_button,
             self.ai_button,
         )
+        self._install_acrylic_tooltips(
+            self.emoji_button,
+            self.image_button,
+            self.file_button,
+            self.cut_button,
+            self.voice_button,
+            self.video_button,
+            self.ai_button,
+        )
 
         self.toolbar_layout.addWidget(self.emoji_button)
         self.toolbar_layout.addWidget(self.image_button)
@@ -1415,6 +1661,13 @@ class MessageInput(QWidget):
 
         for button in buttons:
             button.setFont(font)
+
+    def _install_acrylic_tooltips(self, *widgets: QWidget) -> None:
+        """Install Fluent acrylic tooltips for toolbar controls."""
+        if AcrylicToolTipFilter is None or ToolTipPosition is None:
+            return
+        for widget in widgets:
+            widget.installEventFilter(AcrylicToolTipFilter(widget, 250, ToolTipPosition.TOP))
 
     def _is_dark(self) -> bool:
         """Return whether the current widget palette is using a dark window color."""
@@ -1592,7 +1845,7 @@ class MessageInput(QWidget):
 
         picker = ModernEmojiPickerFlyout(self)
         picker.emoji_selected.connect(self._insert_emoji)
-        self._emoji_flyout = Flyout.make(
+        self._emoji_flyout = AcrylicFlyout.make(
             picker,
             self.emoji_button,
             self,

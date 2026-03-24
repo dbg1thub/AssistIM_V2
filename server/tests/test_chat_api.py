@@ -137,6 +137,36 @@ def test_friend_request_private_session_and_message_flow(
 
 
 
+def test_friend_request_broadcasts_realtime_contact_refresh(
+    client: TestClient,
+    user_factory,
+    auth_header,
+) -> None:
+    alice = user_factory("alice_friend_realtime", "Alice Friend Realtime")
+    bob = user_factory("bob_friend_realtime", "Bob Friend Realtime")
+
+    def receive_until(ws, expected_type: str):
+        while True:
+            payload = ws.receive_json()
+            if payload.get("type") == expected_type:
+                return payload
+
+    with client.websocket_connect(f"/ws?token={bob['access_token']}") as bob_ws:
+        send_request_response = client.post(
+            "/api/v1/friends/requests",
+            json={"receiver_id": bob["user"]["id"], "message": "hello realtime"},
+            headers=auth_header(alice["access_token"]),
+        )
+        assert send_request_response.status_code == 200
+        request_payload = send_request_response.json()["data"]
+
+        refresh_payload = receive_until(bob_ws, "contact_refresh")
+        assert refresh_payload["data"]["reason"] == "friend_request_created"
+        assert refresh_payload["data"]["request_id"] == request_payload["id"]
+        assert refresh_payload["data"]["sender_id"] == alice["user"]["id"]
+        assert refresh_payload["data"]["receiver_id"] == bob["user"]["id"]
+
+
 def test_websocket_routes_expose_canonical_and_legacy_chat_paths(
     client: TestClient,
 ) -> None:

@@ -14,6 +14,7 @@ from client.core import logging
 from client.core.exceptions import AppError
 from client.core.i18n import tr
 from client.core.logging import setup_logging
+from client.events.contact_events import ContactEvent
 from client.events.event_bus import get_event_bus
 from client.managers.connection_manager import get_connection_manager
 from client.models.message import ChatMessage, MessageStatus, MessageType, build_attachment_extra, sanitize_outbound_message_extra
@@ -408,6 +409,9 @@ class MessageManager:
 
         elif msg_type == "message_delete":
             await self._process_delete(data)
+
+        elif msg_type == "contact_refresh":
+            await self._process_contact_refresh(data)
 
         else:
             logger.debug(f"Unknown message type: {msg_type}")
@@ -827,6 +831,18 @@ class MessageManager:
         })
 
         logger.info(f"Message deleted: {message_id}")
+
+    async def _process_contact_refresh(self, data: dict) -> None:
+        """Process realtime contact-domain mutations that require UI refresh."""
+        payload = data.get("data", {}) if isinstance(data.get("data"), dict) else {}
+        await self._event_bus.emit(
+            ContactEvent.SYNC_REQUIRED,
+            {
+                "reason": str(payload.get("reason", "") or "contact_refresh"),
+                "payload": dict(payload),
+                "message": dict(data or {}),
+            },
+        )
 
     async def send_message(
         self,
@@ -1365,6 +1381,7 @@ def get_message_manager() -> MessageManager:
     if _message_manager is None:
         _message_manager = MessageManager()
     return _message_manager
+
 
 
 

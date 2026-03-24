@@ -34,6 +34,10 @@ from client.core.exceptions import APIError, NetworkError
 from client.core.i18n import format_relative_time, tr
 from client.core.profile_fields import format_profile_birthday, localize_profile_gender, localize_profile_status
 from client.core.logging import setup_logging
+from client.events.contact_events import ContactEvent
+from client.events.event_bus import get_event_bus
+from client.events.contact_events import ContactEvent
+from client.events.event_bus import get_event_bus
 from client.ui.controllers.contact_controller import (
     ContactRecord,
     FriendRequestRecord,
@@ -899,8 +903,8 @@ class GalleryContactDetailPanel(QWidget):
         self.video_button.clicked.connect(self._show_unavailable)
 
         self.moments_panel = ContactMomentsFlowPanel(self)
-        self.moments_panel.set_featured_widget(self.header)
 
+        root_layout.addWidget(self.header, 0, Qt.AlignmentFlag.AlignTop)
         root_layout.addWidget(self.moments_panel, 1)
         self.show_placeholder()
 
@@ -1607,6 +1611,7 @@ class ContactInterface(QWidget):
         self._dialog_refs: set[QDialog] = set()
         self._current_user_id = ""
         self._initial_load_done = False
+        self._event_bus = get_event_bus()
         self._friend_section_headers: dict[str, QWidget] = {}
         self._setup_ui()
         self._connect_signals()
@@ -1710,6 +1715,7 @@ class ContactInterface(QWidget):
         self.add_button.clicked.connect(self._show_add_placeholder)
         self.search_box.textChanged.connect(self._rebuild_current_page)
         self.detail_panel.message_requested.connect(self.message_requested.emit)
+        self._event_bus.subscribe_sync(ContactEvent.SYNC_REQUIRED, self._on_contact_sync_required)
         self.detail_panel.moments_panel.like_requested.connect(self._request_detail_like_toggle)
         self.detail_panel.moments_panel.comment_requested.connect(self._request_detail_comment_create)
 
@@ -1743,6 +1749,10 @@ class ContactInterface(QWidget):
     def reload_data(self) -> None:
         self._current_user_id = self._controller.get_current_user_id()
         self._set_load_task(self._reload_data_async())
+
+    def _on_contact_sync_required(self, _payload: object) -> None:
+        """Refresh contact data when realtime friend-domain mutations arrive."""
+        self.reload_data()
 
     async def _reload_data_async(self) -> None:
         self.summary_label.setText(tr("contact.sidebar.syncing", "Syncing contact data..."))
@@ -2196,6 +2206,7 @@ class ContactInterface(QWidget):
 
     def _on_destroyed(self, *_args) -> None:
         """Cancel outstanding async work when the contact page is torn down."""
+        self._event_bus.unsubscribe_sync(ContactEvent.SYNC_REQUIRED, self._on_contact_sync_required)
         self._cancel_pending_task(self._load_task)
         self._load_task = None
         self._cancel_pending_task(self._moment_load_task)
@@ -2272,6 +2283,7 @@ class ContactInterface(QWidget):
         """Clear a keyed action slot once its task finishes."""
         if self._keyed_ui_tasks.get(key) is task:
             self._keyed_ui_tasks.pop(key, None)
+
 
 
 

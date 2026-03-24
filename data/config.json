@@ -4,7 +4,7 @@
         "Language": "zh_CN"
     },
     "App": {
-        "ExitConfirmEnabled": false
+        "ExitConfirmEnabled": true
     },
     "QFluentWidgets": {
         "FontFamilies": [

@@ -87,6 +87,8 @@ PushButton#composerSendButton:pressed {
 QWidget#emojiPickerFlyout,
 QWidget#emojiPageStack,
 QWidget#emojiScrollContent,
+QWidget#emojiScrollViewport,
+QWidget#emojiGroupTabs,
 ScrollArea#emojiScrollArea {
     background: transparent;
     border: none;
@@ -100,9 +102,9 @@ QWidget#emojiPickerFlyout {
 QLabel#emojiTile {
     background: transparent;
     border: none;
-    border-radius: 10px;
+    border-radius: 12px;
 }
 
 QLabel#emojiTile:hover {
-    background: rgba(255, 255, 255, 0.08);
+    background: rgba(255, 255, 255, 0.24);
 }

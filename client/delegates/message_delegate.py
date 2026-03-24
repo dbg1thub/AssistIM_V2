@@ -779,10 +779,9 @@ class MessageDelegate(QStyledItemDelegate):
         """Compute avatar, bubble, and content rectangles for a row."""
         bubble_size = self._bubble_size(message, row_rect.width())
         row_top = row_rect.y() + 8
-        body_height = max(bubble_size.height(), self.AVATAR_SIZE)
         standalone_attachment = message.message_type in {MessageType.IMAGE, MessageType.VIDEO, MessageType.FILE}
-        avatar_y = row_top if standalone_attachment else row_top + (body_height - self.AVATAR_SIZE) // 2
-        bubble_y = row_top if standalone_attachment else row_top + (body_height - bubble_size.height()) // 2
+        avatar_y = row_top
+        bubble_y = row_top
         bubble_gap = self.BUBBLE_GAP + (self.TAIL_SPACE if standalone_attachment else 0)
 
         if message.is_self:

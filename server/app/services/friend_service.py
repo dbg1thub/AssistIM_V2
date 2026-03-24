@@ -58,9 +58,9 @@ class FriendService:
         request = self._expire_if_needed(request)
         if request.status != "pending":
             raise AppError(ErrorCode.INVALID_REQUEST, f"friend request {request.status}", 409)
-        self.friends.update_request_status(request, "accepted")
+        request = self.friends.update_request_status(request, "accepted")
         self.friends.create_friendship_pair(request.sender_id, request.receiver_id)
-        return {"status": "accepted"}
+        return self.serialize_request(request)
 
     def reject_request(self, current_user: User, request_id: str) -> dict:
         request = self.friends.get_request(request_id)
@@ -71,8 +71,8 @@ class FriendService:
         request = self._expire_if_needed(request)
         if request.status != "pending":
             raise AppError(ErrorCode.INVALID_REQUEST, f"friend request {request.status}", 409)
-        self.friends.update_request_status(request, "rejected")
-        return {"status": "rejected"}
+        request = self.friends.update_request_status(request, "rejected")
+        return self.serialize_request(request)
 
     def list_friends(self, current_user: User) -> list[dict]:
         items = []
@@ -128,6 +128,7 @@ class FriendService:
     def serialize_request(request: FriendRequest) -> dict:
         return {
             "id": request.id,
+            "request_id": request.id,
             "sender_id": request.sender_id,
             "receiver_id": request.receiver_id,
             "status": request.status,

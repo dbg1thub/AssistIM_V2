@@ -228,6 +228,7 @@ if 'qfluentwidgets' not in sys.modules:
     qfluentwidgets.qconfig = types.SimpleNamespace(load=lambda path, cfg: None)
     sys.modules['qfluentwidgets'] = qfluentwidgets
 
+from client.events.contact_events import ContactEvent
 from client.managers import message_manager as message_manager_module
 from client.models.message import ChatMessage, MessageStatus
 
@@ -383,6 +384,61 @@ def test_message_manager_retries_on_ack_timeout_and_merges_canonical_ack(monkeyp
 
 
 
+
+
+def test_message_manager_bridges_contact_refresh_events(monkeypatch) -> None:
+    fake_event_bus = FakeEventBus()
+    fake_conn_manager = FakeConnectionManager([])
+    fake_db = FakeDatabase()
+
+    monkeypatch.setattr(message_manager_module, 'get_event_bus', lambda: fake_event_bus)
+    monkeypatch.setattr(message_manager_module, 'get_connection_manager', lambda: fake_conn_manager)
+    monkeypatch.setattr(message_manager_module, 'get_database', lambda: fake_db)
+
+    async def scenario() -> None:
+        manager = message_manager_module.MessageManager()
+        manager.set_user_id('alice')
+        await manager.initialize()
+        try:
+            await manager._handle_ws_message(
+                {
+                    'type': 'contact_refresh',
+                    'data': {
+                        'reason': 'friend_request_created',
+                        'request_id': 'req-1',
+                        'sender_id': 'bob',
+                        'receiver_id': 'alice',
+                    },
+                }
+            )
+
+            assert fake_event_bus.events == [
+                (
+                    ContactEvent.SYNC_REQUIRED,
+                    {
+                        'reason': 'friend_request_created',
+                        'payload': {
+                            'reason': 'friend_request_created',
+                            'request_id': 'req-1',
+                            'sender_id': 'bob',
+                            'receiver_id': 'alice',
+                        },
+                        'message': {
+                            'type': 'contact_refresh',
+                            'data': {
+                                'reason': 'friend_request_created',
+                                'request_id': 'req-1',
+                                'sender_id': 'bob',
+                                'receiver_id': 'alice',
+                            },
+                        },
+                    },
+                )
+            ]
+        finally:
+            await manager.close()
+
+    asyncio.run(scenario())
 
 
 def test_message_manager_replays_history_events(monkeypatch) -> None:
