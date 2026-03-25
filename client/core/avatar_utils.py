@@ -10,6 +10,7 @@ from pathlib import Path
 _WORKSPACE_ROOT = Path(__file__).resolve().parents[2]
 _AVATAR_RESOURCE_DIR = _WORKSPACE_ROOT / "client" / "resources" / "avatars"
 _DATA_ROOT = _WORKSPACE_ROOT / "data"
+_REMOTE_PREFIXES = ("http://", "https://")
 
 
 def normalize_gender(value: object) -> str:
@@ -26,6 +27,21 @@ def avatar_seed(*values: object) -> str:
     """Build one stable seed text for pseudo-random default avatar selection."""
     parts = [str(value or "").strip() for value in values if str(value or "").strip()]
     return "|".join(parts)
+
+
+def profile_avatar_seed(
+    *,
+    user_id: object = "",
+    username: object = "",
+    display_name: object = "",
+    fallback: object = "",
+) -> str:
+    """Build one stable avatar seed that prefers identity fields over mutable display names."""
+    stable_user_id = str(user_id or "").strip()
+    stable_username = str(username or "").strip()
+    if stable_user_id or stable_username:
+        return avatar_seed(stable_user_id, stable_username)
+    return avatar_seed(display_name, fallback)
 
 
 def _default_avatar_pool(gender: object = "") -> list[Path]:
@@ -88,6 +104,24 @@ def random_default_avatar_path(*, gender: object = "") -> str:
     return str(pool[secrets.randbelow(len(pool))].resolve())
 
 
+def resolve_avatar_source(
+    avatar: object = "",
+    *,
+    gender: object = "",
+    seed: object = "",
+) -> str:
+    """Return one canonical avatar source, preserving remote URLs when present."""
+    resolved = resolve_local_image_path(avatar)
+    if resolved:
+        return resolved
+
+    text = str(avatar or "").strip()
+    if text.startswith(_REMOTE_PREFIXES):
+        return text
+
+    return default_avatar_path(gender=gender, seed=seed)
+
+
 def choose_avatar_image(
     avatar: object = "",
     *,
@@ -95,7 +129,7 @@ def choose_avatar_image(
     seed: object = "",
 ) -> str:
     """Return one local avatar image path or a pseudo-random default fallback."""
-    resolved = resolve_local_image_path(avatar)
-    if resolved:
-        return resolved
-    return default_avatar_path(gender=gender, seed=seed)
+    source = resolve_avatar_source(avatar, gender=gender, seed=seed)
+    if source.startswith(_REMOTE_PREFIXES):
+        return default_avatar_path(gender=gender, seed=seed)
+    return source

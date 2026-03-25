@@ -88,12 +88,38 @@ if 'PySide6.QtCore' not in sys.modules:
         def instance():
             return None
 
+    class _DummyQUrl:
+        def __init__(self, value=''):
+            self.value = value
+
+        @staticmethod
+        def fromLocalFile(value):
+            return _DummyQUrl(value)
+
+    class _DummyQDate:
+        def __init__(self, year=2000, month=1, day=1):
+            self.year = year
+            self.month = month
+            self.day = day
+
+        @staticmethod
+        def currentDate():
+            return _DummyQDate(2026, 3, 25)
+
+        def toString(self, _fmt=None):
+            return f'{self.year:04d}-{self.month:02d}-{self.day:02d}'
+
+        def __eq__(self, other):
+            return isinstance(other, _DummyQDate) and (self.year, self.month, self.day) == (other.year, other.month, other.day)
+
     qtcore.QLocale = _DummyQLocale
+    qtcore.QDate = _DummyQDate
     qtcore.QObject = _DummyQObject
     qtcore.Signal = _DummySignal
     qtcore.Slot = _DummySlot
     qtcore.QTimer = _DummyQTimer
     qtcore.QCoreApplication = _DummyQCoreApplication
+    qtcore.QUrl = _DummyQUrl
     pyside = types.ModuleType('PySide6')
     pyside.QtCore = qtcore
     sys.modules['PySide6'] = pyside
@@ -221,21 +247,34 @@ if 'qfluentwidgets' not in sys.modules:
         DARK = 'dark'
         AUTO = 'auto'
 
+    class _DummyFluentIconBase:
+        def icon(self, *args, **kwargs):
+            return self
+
+        def path(self, theme=None):
+            return ''
+
     qfluentwidgets.BoolValidator = _DummyValidator
     qfluentwidgets.ColorConfigItem = _DummyColorConfigItem
     qfluentwidgets.ConfigItem = _DummyConfigItem
     qfluentwidgets.ConfigSerializer = _DummyConfigSerializer
+    qfluentwidgets.FluentIconBase = _DummyFluentIconBase
     qfluentwidgets.OptionsConfigItem = _DummyOptionsConfigItem
     qfluentwidgets.OptionsValidator = _DummyValidator
     qfluentwidgets.QConfig = _DummyQConfig
     qfluentwidgets.Theme = _DummyTheme
+    qfluentwidgets.getIconColor = lambda theme: 'black'
     qfluentwidgets.qconfig = types.SimpleNamespace(load=lambda path, cfg: None)
     sys.modules['qfluentwidgets'] = qfluentwidgets
 
 from client.core.exceptions import APIError, ServerError
+from client.core import app_icons as app_icons_module
+from client.core import avatar_utils as avatar_utils_module
 from client.managers import message_manager as message_manager_module
 from client.managers import session_manager as session_manager_module
 from client.managers import search_manager as search_manager_module
+from client.managers import sound_manager as sound_manager_module
+from client.core import profile_fields as profile_fields_module
 from client.models.message import ChatMessage, MessageStatus, MessageType
 from client.services import file_service as file_service_module
 from client.storage import database as database_module
@@ -330,7 +369,7 @@ class FakeFileService:
 
 class FakeAuthService:
     def __init__(self) -> None:
-        self.login_calls: list[tuple[str, str]] = []
+        self.login_calls: list[tuple[str, str, bool]] = []
         self.register_calls: list[tuple[str, str, str]] = []
         self.logout_calls = 0
         self.listeners = []
@@ -365,8 +404,8 @@ class FakeAuthService:
     async def fetch_current_user(self) -> dict:
         return dict(self.current_user_payload)
 
-    async def login(self, username: str, password: str) -> dict:
-        self.login_calls.append((username, password))
+    async def login(self, username: str, password: str, *, force: bool = False) -> dict:
+        self.login_calls.append((username, password, force))
         return dict(self.login_payload)
 
     async def register(self, username: str, nickname: str, password: str) -> dict:
@@ -839,7 +878,7 @@ def test_auth_controller_login_uses_auth_service(monkeypatch) -> None:
         controller = auth_controller_module.AuthController()
         user = await controller.login('alice', 'secret')
 
-        assert fake_auth_service.login_calls == [('alice', 'secret')]
+        assert fake_auth_service.login_calls == [('alice', 'secret', False)]
         assert fake_auth_service.access_token == 'access-token'
         assert fake_auth_service.refresh_token == 'refresh-token'
         assert user['id'] == 'user-1'
@@ -850,8 +889,15 @@ def test_auth_controller_login_uses_auth_service(monkeypatch) -> None:
     asyncio.run(scenario())
 
 
-def test_auth_controller_register_assigns_random_default_avatar(monkeypatch) -> None:
+def test_auth_controller_register_uses_backend_default_avatar_without_follow_up_upload(monkeypatch) -> None:
     fake_auth_service = FakeAuthService()
+    fake_auth_service.login_payload['user'] = {
+        'id': 'user-1',
+        'username': 'alice',
+        'nickname': 'Alice',
+        'avatar': '/uploads/default_avatars/avatar_default_female_01.svg',
+        'gender': None,
+    }
     fake_user_service = FakeUserService()
     fake_db = FakeDatabase()
     fake_message_manager = FakeMessageManager()
@@ -865,30 +911,21 @@ def test_auth_controller_register_assigns_random_default_avatar(monkeypatch) -> 
     monkeypatch.setattr(auth_controller_module, 'get_chat_controller', lambda: fake_chat_controller)
     monkeypatch.setattr(auth_controller_module, 'get_file_service', lambda: fake_file_service)
     monkeypatch.setattr(auth_controller_module, 'peek_connection_manager', lambda: None)
-    monkeypatch.setattr(
-        auth_controller_module,
-        'random_default_avatar_path',
-        lambda gender='': 'D:/tmp/avatar-default.svg',
-    )
 
     async def scenario() -> None:
         controller = auth_controller_module.AuthController()
         user = await controller.register('alice', 'Alice', 'secret')
 
         assert fake_auth_service.register_calls == [('alice', 'Alice', 'secret')]
-        assert fake_file_service.avatar_uploads == ['D:/tmp/avatar-default.svg']
-        assert fake_user_service.update_calls == [
-            {
-                'avatar': 'https://cdn.example/files/default-avatar.svg',
-            }
-        ]
-        assert user['avatar'] == 'https://cdn.example/files/default-avatar.svg'
+        assert fake_file_service.avatar_uploads == []
+        assert fake_user_service.update_calls == []
+        assert user['avatar'] == '/uploads/default_avatars/avatar_default_female_01.svg'
+        assert user['gender'] is None
         assert fake_message_manager.user_ids[-1] == 'user-1'
         assert fake_chat_controller.user_ids[-1] == 'user-1'
         assert fake_db.app_state[controller.USER_ID_KEY] == 'user-1'
 
     asyncio.run(scenario())
-
 
 def test_chat_controller_send_file_marks_failed_on_upload_error(monkeypatch) -> None:
     fake_message_manager = FakeMessageManager()
@@ -1231,7 +1268,11 @@ def test_session_manager_refresh_remote_sessions_prefers_counterpart_profile(mon
         assert session.extra['gender'] == 'male'
         assert session.extra['counterpart_id'] == 'user-2'
         assert session.extra['counterpart_username'] == 'bob'
-        assert session.extra['avatar_seed'] == session_manager_module.avatar_seed('user-2', 'bob', 'Bobby')
+        assert session.extra['avatar_seed'] == session_manager_module.profile_avatar_seed(
+            user_id='user-2',
+            username='bob',
+            display_name='Bobby',
+        )
         assert len(fake_db.replaced_sessions) == 1
 
     asyncio.run(scenario())
@@ -1256,4 +1297,160 @@ def test_session_manager_ensure_direct_session_uses_session_service(monkeypatch)
     asyncio.run(scenario())
 
 
+
+
+def test_normalize_profile_gender_preserves_supported_values() -> None:
+    assert profile_fields_module.normalize_profile_gender('female') == 'female'
+    assert profile_fields_module.normalize_profile_gender('male') == 'male'
+    assert profile_fields_module.normalize_profile_gender('non_binary') == 'non_binary'
+    assert profile_fields_module.normalize_profile_gender('OTHER') == 'other'
+    assert profile_fields_module.normalize_profile_gender('  ') == ''
+    assert profile_fields_module.normalize_profile_gender('woman') == ''
+
+
+def test_profile_avatar_seed_prefers_stable_identity_fields() -> None:
+    original = avatar_utils_module.profile_avatar_seed(
+        user_id='user-1',
+        username='alice',
+        display_name='Alice',
+    )
+    renamed = avatar_utils_module.profile_avatar_seed(
+        user_id='user-1',
+        username='alice',
+        display_name='Alice Cooper',
+    )
+
+    assert original == renamed
+
+
+def test_resolve_avatar_source_keeps_remote_url() -> None:
+    remote_avatar = 'https://cdn.example.com/avatar.png'
+
+    assert avatar_utils_module.resolve_avatar_source(
+        remote_avatar,
+        gender='female',
+        seed='user-1',
+    ) == remote_avatar
+
+
+def test_app_icon_paths_point_to_generated_svg_assets() -> None:
+    add_path = Path(app_icons_module.AppIcon.ADD.path())
+    people_path = Path(app_icons_module.AppIcon.PEOPLE.path())
+
+    assert add_path.suffix == '.svg'
+    assert people_path.suffix == '.svg'
+    assert add_path.is_file()
+    assert people_path.is_file()
+    assert 'client/resources/icons/iconfont_51777' in add_path.as_posix()
+    assert 'client/resources/icons/iconfont_51777' in people_path.as_posix()
+
+
+def test_app_icon_render_scale_is_applied_at_runtime() -> None:
+    original_scale = app_icons_module.get_icon_render_scale()
+
+    try:
+        app_icons_module.set_icon_render_scale(1.0)
+        raw_path = Path(app_icons_module.AppIcon.ADD.path())
+        assert 'client/resources/icons/iconfont_51777' in raw_path.as_posix()
+        assert raw_path.name == 'add.svg'
+
+        app_icons_module.set_icon_render_scale(1.28)
+        scaled_svg = app_icons_module._render_svg_markup('add', fill='#101010')
+        assert 'scale(1.28)' in scaled_svg
+        assert '#101010' in scaled_svg
+        assert 'currentColor' not in scaled_svg
+    finally:
+        app_icons_module.set_icon_render_scale(original_scale)
+
+
+def test_collection_icon_library_is_downloaded_and_addressable() -> None:
+    available_names = app_icons_module.available_collection_icon_names()
+    group_path = Path(app_icons_module.CollectionIcon('group').path())
+
+    assert len(available_names) >= 1504
+    assert 'group' in available_names
+    assert group_path.suffix == '.svg'
+    assert group_path.is_file()
+    assert 'client/resources/icons/iconfont_51777' in group_path.as_posix()
+
+
+def test_app_icon_default_theme_opacity_matches_fluent_medium_emphasis() -> None:
+    light_svg = app_icons_module._render_svg_markup('add', theme=app_icons_module.Theme.LIGHT)
+    dark_svg = app_icons_module._render_svg_markup('add', theme=app_icons_module.Theme.DARK)
+    explicit_fill_svg = app_icons_module._render_svg_markup('add', fill='#202020')
+
+    assert 'opacity="0.63"' in light_svg
+    assert 'opacity="0.786"' in dark_svg
+    assert 'opacity=' not in explicit_fill_svg
+
+
+def test_sound_manager_loads_manifest_and_plays_registered_sound(monkeypatch) -> None:
+    fake_event_bus = FakeEventBus()
+    created_effects = []
+
+    class DummySoundEffect:
+        def __init__(self, source_path: str, volume: float) -> None:
+            self.source_path = source_path
+            self.volume = volume
+            self.play_calls = 0
+            self.stop_calls = 0
+            self._playing = False
+
+        def setVolume(self, value: float) -> None:
+            self.volume = value
+
+        def isPlaying(self) -> bool:
+            return self._playing
+
+        def play(self) -> None:
+            self.play_calls += 1
+            self._playing = True
+
+        def stop(self) -> None:
+            self.stop_calls += 1
+            self._playing = False
+
+    def build_effect(path: Path, volume: float):
+        effect = DummySoundEffect(str(path), volume)
+        created_effects.append(effect)
+        return effect
+
+    monkeypatch.setattr(sound_manager_module, 'get_event_bus', lambda: fake_event_bus)
+    monkeypatch.setattr(sound_manager_module, '_create_sound_effect', build_effect)
+
+    async def scenario() -> None:
+        manager = sound_manager_module.SoundManager()
+        await manager.initialize()
+
+        assert sound_manager_module.AppSound.MESSAGE_INCOMING.value in manager.available_sounds()
+        assert manager.play(sound_manager_module.AppSound.MESSAGE_INCOMING) is True
+        assert len(created_effects) >= 1
+        assert any(effect.play_calls == 1 for effect in created_effects)
+        assert any(
+            'client\\resources\\audio\\notifications\\windows_notify_messaging_' in effect.source_path
+            for effect in created_effects
+        )
+
+        await manager.close()
+
+    asyncio.run(scenario())
+
+
+def test_sound_manager_handles_incoming_message_event(monkeypatch) -> None:
+    fake_event_bus = FakeEventBus()
+    played = []
+
+    monkeypatch.setattr(sound_manager_module, 'get_event_bus', lambda: fake_event_bus)
+
+    async def scenario() -> None:
+        manager = sound_manager_module.SoundManager()
+        monkeypatch.setattr(manager, 'play', lambda sound_id, force=False: played.append(sound_id) or True)
+        await manager.initialize()
+        await manager._on_message_received({'message': object()})
+
+        assert played == [sound_manager_module.AppSound.MESSAGE_INCOMING]
+
+        await manager.close()
+
+    asyncio.run(scenario())
 

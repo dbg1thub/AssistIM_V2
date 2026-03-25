@@ -25,7 +25,6 @@ from qfluentwidgets import (
     CaptionLabel,
     CardWidget,
     ElevatedCardWidget,
-    FluentIcon,
     IconWidget,
     InfoBar,
     LineEdit,
@@ -38,8 +37,10 @@ from qfluentwidgets import (
     TransparentToolButton,
 )
 
+from client.core.app_icons import AppIcon
 from client.core import logging
-from client.core.avatar_utils import avatar_seed, choose_avatar_image
+from client.core.avatar_rendering import get_avatar_image_store
+from client.core.avatar_utils import avatar_seed, profile_avatar_seed
 from client.core.exceptions import APIError, NetworkError
 from client.core.i18n import format_relative_time, tr
 from client.core.logging import setup_logging
@@ -89,22 +90,42 @@ class DiscoveryAvatar(QWidget):
         self._size = size
         self._pixmap: Optional[QPixmap] = None
         self._fallback = "?"
+        self._avatar_source = ""
+        self._avatar_gender = ""
+        self._avatar_seed = ""
+        self._avatar_store = get_avatar_image_store()
+        self._avatar_store.avatar_ready.connect(self._on_avatar_ready)
         self.setFixedSize(size, size)
 
     def set_avatar(self, avatar_path: str = "", fallback: str = "?", *, gender: str = "", seed: str = "") -> None:
         """Update avatar image or fallback initials."""
         self._fallback = (fallback or "?").strip()[:2].upper() or "?"
-        self._pixmap = None
-        resolved = choose_avatar_image(
+        self._avatar_gender = str(gender or "")
+        self._avatar_seed = str(seed or avatar_seed(fallback))
+        self._avatar_source, resolved = self._avatar_store.resolve_display_path(
             avatar_path,
-            gender=gender,
-            seed=seed or avatar_seed(fallback, avatar_path, gender),
+            gender=self._avatar_gender,
+            seed=self._avatar_seed,
         )
-        if resolved:
-            pixmap = QPixmap(resolved)
+        self._apply_avatar_path(resolved)
+
+    def _apply_avatar_path(self, avatar_path: str) -> None:
+        self._pixmap = None
+        if avatar_path:
+            pixmap = QPixmap(avatar_path)
             if not pixmap.isNull():
                 self._pixmap = pixmap
         self.update()
+
+    def _on_avatar_ready(self, source: str) -> None:
+        if source != self._avatar_source:
+            return
+        resolved = self._avatar_store.display_path_for_source(
+            source,
+            gender=self._avatar_gender,
+            seed=self._avatar_seed,
+        )
+        self._apply_avatar_path(resolved)
 
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
@@ -512,7 +533,7 @@ class MomentCard(ElevatedCardWidget):
         info_layout.addWidget(self.name_label)
         info_layout.addWidget(self.time_label)
 
-        self.more_button = TransparentToolButton(FluentIcon.INFO, self)
+        self.more_button = TransparentToolButton(AppIcon.INFO, self)
         self.more_button.setToolTip(tr("discovery.card.more_tooltip", "More"))
         self.more_button.clicked.connect(self._show_more_placeholder)
         _apply_safe_button_font(self.more_button)
@@ -568,7 +589,7 @@ class MomentCard(ElevatedCardWidget):
             self.moment.avatar,
             self.moment.display_name,
             gender=self.moment.gender,
-            seed=avatar_seed(self.moment.user_id, self.moment.username, self.moment.display_name),
+            seed=profile_avatar_seed(user_id=self.moment.user_id, username=self.moment.username, display_name=self.moment.display_name),
         )
         self.name_label.setText(self.moment.display_name)
         self.time_label.setText(format_relative_time(self.moment.created_at))
@@ -762,7 +783,7 @@ class DiscoveryInterface(QWidget):
             )
         )
 
-        self.refresh_button = TransparentToolButton(FluentIcon.SYNC, self.hero_card)
+        self.refresh_button = TransparentToolButton(AppIcon.SYNC, self.hero_card)
         self.refresh_button.setToolTip(tr("discovery.feed.refresh_tooltip", "Refresh feed"))
         _apply_safe_button_font(self.refresh_button)
         self.publish_button = PrimaryPushButton(tr("discovery.feed.publish_button", "Publish Moment"), self.hero_card)
@@ -858,7 +879,7 @@ class DiscoveryInterface(QWidget):
         layout.setContentsMargins(36, 36, 36, 36)
         layout.setSpacing(12)
 
-        icon = IconWidget(FluentIcon.GLOBE, card)
+        icon = IconWidget(AppIcon.GLOBE, card)
         icon.setFixedSize(48, 48)
         layout.addWidget(icon, 0, Qt.AlignmentFlag.AlignCenter)
 
@@ -1060,3 +1081,4 @@ class DiscoveryInterface(QWidget):
         """Release a keyed action slot once its task finishes."""
         if self._keyed_ui_tasks.get(key) is task:
             self._keyed_ui_tasks.pop(key, None)
+

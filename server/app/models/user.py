@@ -28,6 +28,7 @@ class User(IdMixin, TimestampMixin, Base):
     region: Mapped[str | None] = mapped_column(String(length=128), nullable=True)
     signature: Mapped[str | None] = mapped_column(Text, nullable=True)
     gender: Mapped[str | None] = mapped_column(String(length=32), nullable=True)
+    auth_session_version: Mapped[int] = mapped_column(default=0)
     status: Mapped[str] = mapped_column(default="offline")
 
 
@@ -53,4 +54,7 @@ class Friendship(IdMixin, TimestampMixin, Base):
 
     user_id: Mapped[str] = mapped_column(Uuid(as_uuid=False), ForeignKey("users.id"), nullable=False)
     friend_id: Mapped[str] = mapped_column(Uuid(as_uuid=False), ForeignKey("users.id"), nullable=False)
+
+
+
 

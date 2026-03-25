@@ -92,27 +92,52 @@ class MessageModel(QAbstractListModel):
 
     def add_message(self, message: ChatMessage) -> None:
         """Add a message to the list."""
+        if self._can_incrementally_append([message]):
+            self._messages.append(message)
+            self._append_display_items([message])
+            return
+
         self._messages.append(message)
-        self._append_display_items([message])
+        self._sort_messages()
+        self._apply_display_rebuild(changed_message_ids=[message.message_id])
 
     def add_messages(self, messages: list[ChatMessage]) -> None:
         """Append multiple messages."""
         if not messages:
             return
+
+        if self._can_incrementally_append(messages):
+            self._messages.extend(messages)
+            self._append_display_items(messages)
+            return
+
         self._messages.extend(messages)
-        self._append_display_items(messages)
+        self._sort_messages()
+        self._apply_display_rebuild(changed_message_ids=[message.message_id for message in messages])
 
     def prepend_messages(self, messages: list[ChatMessage]) -> None:
         """Insert multiple older messages at the beginning of the model."""
         if not messages:
             return
-        self._messages = list(messages) + self._messages
-        self._prepend_display_items(messages)
 
-    def refresh_message(self, message_id: str) -> None:
+        if self._can_incrementally_prepend(messages):
+            self._messages = list(messages) + self._messages
+            self._prepend_display_items(messages)
+            return
+
+        self._messages = list(messages) + self._messages
+        self._sort_messages()
+        self._apply_display_rebuild(changed_message_ids=[message.message_id for message in messages])
+
+    def refresh_message(self, message_id: str, *, allow_reorder: bool = False) -> None:
         """Refresh one changed message without resetting the whole model when possible."""
         message = self.get_message_by_id(message_id)
         if message is None:
+            return
+
+        if allow_reorder and self._should_reorder_message(message_id):
+            self._sort_messages()
+            self._apply_display_rebuild(changed_message_ids=[message_id])
             return
 
         row = self._find_display_row_for_message(message_id)
@@ -172,6 +197,7 @@ class MessageModel(QAbstractListModel):
     def set_messages(self, messages: list[ChatMessage]) -> None:
         """Replace all messages, using incremental updates for empty/non-empty edges."""
         new_messages = list(messages)
+        new_messages.sort(key=self._message_sort_key)
         new_display_items = self._build_display_items(new_messages)
 
         if not self._display_items and not new_display_items:
@@ -369,44 +395,40 @@ class MessageModel(QAbstractListModel):
         """Recompute visible rows from the real message list."""
         items = self._messages if messages is None else messages
         display_items: list[ChatMessage] = []
-        message_count = len(items)
 
         for index, message in enumerate(items):
-            display_items.append(self._build_display_message_item(message))
-
-            if index >= message_count - 1:
-                continue
-
-            next_message = items[index + 1]
-            if self._is_time_break(message, next_message):
+            previous_message = items[index - 1] if index > 0 else None
+            if previous_message is not None and self._is_time_break(previous_message, message):
                 display_items.append(self._build_time_separator_item(message))
+            display_items.append(self._build_display_message_item(message))
 
         return display_items
 
     def _build_append_fragment(self, previous_message: ChatMessage | None, messages: list[ChatMessage]) -> list[ChatMessage]:
         """Build the display fragment for messages appended to the tail."""
         fragment: list[ChatMessage] = []
-        if previous_message is not None and messages and self._is_time_break(previous_message, messages[0]):
-            fragment.append(self._build_time_separator_item(previous_message))
 
         for index, message in enumerate(messages):
-            fragment.append(self._build_display_message_item(message))
-            if index >= len(messages) - 1:
-                continue
-            next_message = messages[index + 1]
-            if self._is_time_break(message, next_message):
+            candidate_previous = previous_message if index == 0 else messages[index - 1]
+            if candidate_previous is not None and self._is_time_break(candidate_previous, message):
                 fragment.append(self._build_time_separator_item(message))
+            fragment.append(self._build_display_message_item(message))
 
         return fragment
 
     def _build_prepend_fragment(self, messages: list[ChatMessage], next_message: ChatMessage | None) -> list[ChatMessage]:
         """Build the display fragment for older history inserted at the head."""
         fragment: list[ChatMessage] = []
+
         for index, message in enumerate(messages):
-            fragment.append(self._build_display_message_item(message))
-            candidate_next = messages[index + 1] if index < len(messages) - 1 else next_message
-            if candidate_next is not None and self._is_time_break(message, candidate_next):
+            candidate_previous = messages[index - 1] if index > 0 else None
+            if candidate_previous is not None and self._is_time_break(candidate_previous, message):
                 fragment.append(self._build_time_separator_item(message))
+            fragment.append(self._build_display_message_item(message))
+
+        if messages and next_message is not None and self._is_time_break(messages[-1], next_message):
+            fragment.append(self._build_time_separator_item(next_message))
+
         return fragment
 
     def _emit_rows_for_message_ids(self, message_ids: list[str] | None) -> None:
@@ -514,6 +536,53 @@ class MessageModel(QAbstractListModel):
             self.DisplayKindRole,
             self.SourceMessageIdRole,
         ]
+
+    def _message_sort_key(self, message: ChatMessage) -> tuple[float, str]:
+        """Return a stable ordering key for real chat messages."""
+        normalized = self._normalize_timestamp(message.timestamp)
+        epoch_seconds = normalized.timestamp() if normalized is not None else 0.0
+        return (epoch_seconds, message.message_id)
+
+    def _sort_messages(self) -> None:
+        """Keep the real message list sorted by message timestamp."""
+        self._messages.sort(key=self._message_sort_key)
+
+    def _are_messages_non_decreasing(self, messages: list[ChatMessage]) -> bool:
+        """Return whether a message batch is already ordered by timestamp."""
+        return all(self._message_sort_key(messages[index - 1]) <= self._message_sort_key(messages[index]) for index in range(1, len(messages)))
+
+    def _can_incrementally_append(self, messages: list[ChatMessage]) -> bool:
+        """Return whether a batch can be appended without rebuilding the full list."""
+        if not messages:
+            return False
+        if not self._are_messages_non_decreasing(messages):
+            return False
+        if not self._messages:
+            return True
+        return self._message_sort_key(self._messages[-1]) <= self._message_sort_key(messages[0])
+
+    def _can_incrementally_prepend(self, messages: list[ChatMessage]) -> bool:
+        """Return whether a batch can be prepended without rebuilding the full list."""
+        if not messages:
+            return False
+        if not self._are_messages_non_decreasing(messages):
+            return False
+        if not self._messages:
+            return True
+        return self._message_sort_key(messages[-1]) <= self._message_sort_key(self._messages[0])
+
+    def _should_reorder_message(self, message_id: str) -> bool:
+        """Return whether one updated message now falls outside its neighbor ordering."""
+        for index, message in enumerate(self._messages):
+            if message.message_id != message_id:
+                continue
+            current_key = self._message_sort_key(message)
+            if index > 0 and current_key < self._message_sort_key(self._messages[index - 1]):
+                return True
+            if index < len(self._messages) - 1 and current_key > self._message_sort_key(self._messages[index + 1]):
+                return True
+            return False
+        return False
 
     @staticmethod
     def _normalize_timestamp(value):

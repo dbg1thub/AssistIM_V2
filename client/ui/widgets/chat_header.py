@@ -6,8 +6,9 @@ from PySide6.QtCore import Signal
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import QHBoxLayout, QSizePolicy, QVBoxLayout, QWidget
 
-from qfluentwidgets import BodyLabel, CaptionLabel, FluentIcon, TransparentToolButton
+from qfluentwidgets import BodyLabel, CaptionLabel, TransparentToolButton
 
+from client.core.app_icons import AppIcon
 from client.core.i18n import tr
 from client.ui.styles import StyleSheet
 
@@ -52,11 +53,11 @@ class ChatHeader(QWidget):
         self.info_layout.addWidget(self.title_label)
         self.info_layout.addWidget(self.status_label)
 
-        self.detail_button = TransparentToolButton(FluentIcon.INFO, self)
+        self.detail_button = TransparentToolButton(AppIcon.INFO, self)
         self.detail_button.setFixedSize(36, 36)
         self.detail_button.setToolTip(tr("chat_header.detail_tooltip", "Chat Details"))
 
-        self.ai_button = TransparentToolButton(FluentIcon.ROBOT, self)
+        self.ai_button = TransparentToolButton(AppIcon.ROBOT, self)
         self.ai_button.setFixedSize(36, 36)
         self.ai_button.setToolTip(tr("chat_header.ai_tooltip", "AI Summary"))
         self._apply_safe_button_font(self.detail_button, self.ai_button)

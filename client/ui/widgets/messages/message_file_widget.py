@@ -9,7 +9,7 @@ from PySide6.QtCore import Signal, Qt
 
 from qfluentwidgets import AvatarWidget, BodyLabel, CaptionLabel, IconWidget, PrimaryPushButton
 
-from client.core.avatar_utils import choose_avatar_image
+from client.core.avatar_rendering import apply_avatar_widget_image
 from client.core.i18n import format_file_size, tr
 
 
@@ -143,7 +143,7 @@ class MessageFileWidget(QWidget):
 
     def set_avatar(self, avatar_path: str, *, gender: str = "", seed: str = "") -> None:
         """Set avatar image."""
-        self.avatar.setImage(choose_avatar_image(avatar_path, gender=gender, seed=seed))
+        apply_avatar_widget_image(self.avatar, avatar_path, gender=gender, seed=seed)
 
     def set_message(self, message) -> None:
         """Set message data."""
@@ -160,3 +160,4 @@ class MessageFileWidget(QWidget):
     def is_self_message(self) -> bool:
         """Check if message is from self."""
         return self._is_self
+

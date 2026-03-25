@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "sounds": {
+    "message_incoming": {
+      "category": "messages",
+      "volume": 1.0,
+      "polyphony": 2,
+      "cooldown_ms": 150,
+      "variants": {
+        "light": "notifications/windows_notify_messaging_light.wav",
+        "dark": "notifications/windows_notify_messaging_black.wav",
+        "default": "notifications/windows_notify_messaging_light.wav"
+      }
+    }
+  }
+}

@@ -14,6 +14,7 @@ class RegisterRequest(BaseModel):
 class LoginRequest(BaseModel):
     username: str
     password: str
+    force: bool = False
 
 
 class RefreshTokenRequest(BaseModel):

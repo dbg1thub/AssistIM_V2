@@ -9,9 +9,10 @@ from PySide6.QtCore import QEvent, Qt, QTimer, Signal, QUrl
 from PySide6.QtGui import QDesktopServices, QGuiApplication, QKeySequence
 from PySide6.QtWidgets import QAbstractItemView, QFrame, QListView, QStackedWidget, QVBoxLayout, QWidget
 
-from qfluentwidgets import BodyLabel, CaptionLabel, FluentIcon, IconWidget, ScrollBarHandleDisplayMode
+from qfluentwidgets import BodyLabel, CaptionLabel, IconWidget, ScrollBarHandleDisplayMode
 from qfluentwidgets.components.widgets.scroll_bar import SmoothScrollDelegate
 
+from client.core.app_icons import AppIcon
 from client.core.config_backend import get_config
 from client.core.i18n import tr
 from client.delegates.message_delegate import MessageDelegate
@@ -49,7 +50,7 @@ class WelcomeWidget(QWidget):
         layout.setSpacing(18)
         layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-        self.icon = IconWidget(FluentIcon.CHAT, self)
+        self.icon = IconWidget(AppIcon.CHAT, self)
         self.icon.setFixedSize(88, 88)
 
         self.title_label = BodyLabel(tr("chat.welcome.title", "Welcome to AssistIM"), self)
@@ -73,6 +74,8 @@ class WelcomeWidget(QWidget):
 
 class ChatPanel(QWidget):
     """Chat panel composed of welcome page and active conversation page."""
+
+    MESSAGE_LIST_BOTTOM_MARGIN = 8
 
     file_upload_requested = Signal(str)
     screenshot_requested = Signal()
@@ -132,6 +135,7 @@ class ChatPanel(QWidget):
         self.message_list.setResizeMode(QListView.ResizeMode.Adjust)
         self.message_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.message_list.setSpacing(0)
+        self.message_list.setViewportMargins(0, 0, 0, self.MESSAGE_LIST_BOTTOM_MARGIN)
         self.message_list.setMouseTracking(True)
         self.message_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.message_list.installEventFilter(self)
@@ -336,7 +340,7 @@ class ChatPanel(QWidget):
             existing.is_self = message.is_self
             existing.is_ai = message.is_ai
             existing.extra = dict(message.extra)
-            self._message_model.refresh_message(message.message_id)
+            self._message_model.refresh_message(message.message_id, allow_reorder=True)
             self.message_list.viewport().update()
             return
 
@@ -364,7 +368,7 @@ class ChatPanel(QWidget):
                 existing.is_self = message.is_self
                 existing.is_ai = message.is_ai
                 existing.extra = dict(message.extra)
-                self._message_model.refresh_message(message.message_id)
+                self._message_model.refresh_message(message.message_id, allow_reorder=True)
                 continue
             new_messages.append(message)
 

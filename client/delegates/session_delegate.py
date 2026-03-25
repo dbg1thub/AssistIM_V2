@@ -10,7 +10,8 @@ from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPainterPath, Q
 from PySide6.QtWidgets import QStyle, QStyledItemDelegate, QStyleOptionViewItem
 from qfluentwidgets import isDarkTheme
 
-from client.core.avatar_utils import avatar_seed, choose_avatar_image
+from client.core.avatar_rendering import get_avatar_image_store
+from client.core.avatar_utils import profile_avatar_seed
 from client.core.datetime_utils import coerce_local_datetime
 from client.core.i18n import format_session_timestamp, tr
 from client.models.message import format_message_preview
@@ -41,6 +42,11 @@ class SessionDelegate(QStyledItemDelegate):
     ITEM_HEIGHT = 80
     H_MARGIN = 0
     V_MARGIN = 0
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._avatar_store = get_avatar_image_store()
+        self._avatar_store.avatar_ready.connect(self._on_avatar_ready)
 
     def sizeHint(self, option: QStyleOptionViewItem, index: QModelIndex) -> QSize:
         """Return fixed session row height."""
@@ -191,18 +197,19 @@ class SessionDelegate(QStyledItemDelegate):
         path.addRoundedRect(rect, 8, 8)
         painter.setClipPath(path)
 
-        avatar_path = choose_avatar_image(
+        avatar_seed_value = (
+            getattr(session, "extra", {}).get("avatar_seed", "")
+            or profile_avatar_seed(
+                user_id=getattr(session, "extra", {}).get("counterpart_id", ""),
+                username=getattr(session, "extra", {}).get("counterpart_username", ""),
+                display_name=getattr(session, "name", ""),
+                fallback=getattr(session, "session_id", ""),
+            )
+        )
+        _avatar_source, avatar_path = self._avatar_store.resolve_display_path(
             getattr(session, "avatar", None),
             gender=getattr(session, "extra", {}).get("gender", ""),
-            seed=(
-                getattr(session, "extra", {}).get("avatar_seed", "")
-                or avatar_seed(
-                    getattr(session, "extra", {}).get("counterpart_id", ""),
-                    getattr(session, "extra", {}).get("counterpart_username", ""),
-                    getattr(session, "session_id", ""),
-                    getattr(session, "name", ""),
-                )
-            ),
+            seed=avatar_seed_value,
         )
 
         if avatar_path:
@@ -233,6 +240,17 @@ class SessionDelegate(QStyledItemDelegate):
             painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, initial)
 
         painter.restore()
+
+    def _on_avatar_ready(self, _source: str) -> None:
+        """Refresh the bound session view when a remote avatar finishes downloading."""
+        parent = self.parent()
+        if parent is None:
+            return
+        if hasattr(parent, "viewport"):
+            parent.viewport().update()
+            return
+        if hasattr(parent, "update"):
+            parent.update()
 
     def _draw_unread_badge(self, painter: QPainter, rect: QRect, text: str) -> None:
         """Draw unread badge using a Fluent InfoBadge-like pill."""
@@ -417,3 +435,4 @@ class SessionDelegate(QStyledItemDelegate):
     def _normalize_datetime(self, value) -> datetime | None:
         """Normalize datetime values from model or storage."""
         return coerce_local_datetime(value)
+

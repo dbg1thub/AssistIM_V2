@@ -10,7 +10,7 @@ from datetime import datetime
 from typing import Any, Callable, Optional
 
 from client.core import logging
-from client.core.avatar_utils import avatar_seed
+from client.core.avatar_utils import profile_avatar_seed
 from client.core.i18n import tr
 from client.core.logging import setup_logging
 from client.events.event_bus import get_event_bus
@@ -402,10 +402,10 @@ class SessionManager:
         session.extra["counterpart_id"] = str(message.sender_id or "")
         session.extra["counterpart_username"] = str(message.extra.get("sender_username", "") or "")
         session.extra["gender"] = str(message.extra.get("sender_gender", "") or "")
-        session.extra["avatar_seed"] = avatar_seed(
-            message.sender_id,
-            message.extra.get("sender_username", ""),
-            message.extra.get("sender_nickname", "") or message.extra.get("sender_name", ""),
+        session.extra["avatar_seed"] = profile_avatar_seed(
+            user_id=message.sender_id,
+            username=message.extra.get("sender_username", ""),
+            display_name=message.extra.get("sender_nickname", "") or message.extra.get("sender_name", ""),
         )
         return session
 
@@ -465,10 +465,10 @@ class SessionManager:
         if counterpart_username:
             session.extra["counterpart_username"] = counterpart_username
 
-        session.extra["avatar_seed"] = avatar_seed(
-            counterpart_id or session.session_id,
-            counterpart_username or session.name,
-            counterpart_name or session.name,
+        session.extra["avatar_seed"] = profile_avatar_seed(
+            user_id=counterpart_id or session.session_id,
+            username=counterpart_username,
+            display_name=counterpart_name or session.name,
         )
 
     def _resolve_counterpart_profile(
@@ -1080,5 +1080,6 @@ def get_session_manager() -> SessionManager:
     if _session_manager is None:
         _session_manager = SessionManager()
     return _session_manager
+
 
 

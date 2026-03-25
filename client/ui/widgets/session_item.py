@@ -9,7 +9,7 @@ from PySide6.QtCore import Qt
 
 from qfluentwidgets import AvatarWidget, BodyLabel, CaptionLabel, Badge
 
-from client.core.avatar_utils import choose_avatar_image
+from client.core.avatar_rendering import apply_avatar_widget_image
 from client.core.i18n import tr
 
 
@@ -96,4 +96,5 @@ class SessionItem(QWidget):
 
     def set_avatar(self, avatar_path: str, *, gender: str = "", seed: str = "") -> None:
         """Set avatar image path."""
-        self.avatar.setImage(choose_avatar_image(avatar_path, gender=gender, seed=seed))
+        apply_avatar_widget_image(self.avatar, avatar_path, gender=gender, seed=seed)
+

@@ -9,7 +9,6 @@ from qfluentwidgets import (
     ComboBoxSettingCard,
     CustomColorSettingCard,
     ExpandLayout,
-    FluentIcon,
     InfoBar,
     OptionsSettingCard,
     ScrollArea,
@@ -20,6 +19,7 @@ from qfluentwidgets import (
     setThemeColor,
 )
 
+from client.core.app_icons import AppIcon, CollectionIcon
 from client.core.config import cfg, is_win11
 from client.core.i18n import tr
 
@@ -38,10 +38,11 @@ class SettingsInterface(ScrollArea):
         self.expand_layout = ExpandLayout(self.scroll_widget)
 
         self.personal_group = SettingCardGroup(tr("settings.group.personalization", "Personalization"), self.scroll_widget)
+        self.notification_group = SettingCardGroup(tr("settings.group.notifications", "Notifications"), self.scroll_widget)
         self.app_group = SettingCardGroup(tr("settings.group.application", "Application"), self.scroll_widget)
 
         self.mica_card = SwitchSettingCard(
-            FluentIcon.TRANSPARENT,
+            AppIcon.TRANSPARENT,
             tr("settings.card.mica.title", "Mica Effect"),
             tr("settings.card.mica.content", "Enable the Windows 11 Mica background effect for the window surface."),
             configItem=cfg.micaEnabled,
@@ -49,7 +50,7 @@ class SettingsInterface(ScrollArea):
         )
         self.theme_card = OptionsSettingCard(
             cfg.themeMode,
-            FluentIcon.PALETTE,
+            AppIcon.PALETTE,
             tr("settings.card.theme.title", "Theme"),
             tr("settings.card.theme.content", "Switch between light, dark, or system theme."),
             texts=[
@@ -61,14 +62,14 @@ class SettingsInterface(ScrollArea):
         )
         self.theme_color_card = CustomColorSettingCard(
             cfg.themeColor,
-            FluentIcon.BRUSH,
+            AppIcon.BRUSH,
             tr("settings.card.theme_color.title", "Theme Color"),
             tr("settings.card.theme_color.content", "Change the application accent color."),
             parent=self.personal_group,
         )
         self.zoom_card = OptionsSettingCard(
             cfg.dpiScale,
-            FluentIcon.ZOOM,
+            AppIcon.ZOOM,
             tr("settings.card.zoom.title", "Display Scale"),
             tr("settings.card.zoom.content", "Adjust the scale used for UI and text rendering."),
             texts=["100%", "125%", "150%", "175%", "200%", tr("settings.card.zoom.option.auto", "Follow System")],
@@ -76,7 +77,7 @@ class SettingsInterface(ScrollArea):
         )
         self.language_card = ComboBoxSettingCard(
             cfg.language,
-            FluentIcon.LANGUAGE,
+            AppIcon.LANGUAGE,
             tr("settings.card.language.title", "Language"),
             tr("settings.card.language.content", "Choose the language used by the application interface."),
             texts=[
@@ -89,11 +90,25 @@ class SettingsInterface(ScrollArea):
         )
 
         self.exit_confirm_card = SwitchSettingCard(
-            FluentIcon.CLOSE,
+            AppIcon.CLOSE,
             tr("settings.card.exit_confirm.title", "Confirm Before Exit"),
             tr("settings.card.exit_confirm.content", "Show a confirmation dialog before quitting from the system tray."),
             configItem=cfg.exitConfirmEnabled,
             parent=self.app_group,
+        )
+        self.sound_enabled_card = SwitchSettingCard(
+            CollectionIcon("speaker_2"),
+            tr("settings.card.sound_enabled.title", "Enable Sound Effects"),
+            tr("settings.card.sound_enabled.content", "Allow the desktop client to play notification sounds and future UI sound effects."),
+            configItem=cfg.soundEnabled,
+            parent=self.notification_group,
+        )
+        self.message_sound_card = SwitchSettingCard(
+            CollectionIcon("alert"),
+            tr("settings.card.message_sound.title", "Incoming Message Sound"),
+            tr("settings.card.message_sound.content", "Play a prompt sound when a new real-time message arrives."),
+            configItem=cfg.messageSoundEnabled,
+            parent=self.notification_group,
         )
 
         self._init_widget()
@@ -125,11 +140,15 @@ class SettingsInterface(ScrollArea):
         self.personal_group.addSettingCard(self.zoom_card)
         self.personal_group.addSettingCard(self.language_card)
 
+        self.notification_group.addSettingCard(self.sound_enabled_card)
+        self.notification_group.addSettingCard(self.message_sound_card)
+
         self.app_group.addSettingCard(self.exit_confirm_card)
 
         self.expand_layout.setSpacing(28)
         self.expand_layout.setContentsMargins(36, 0, 36, 0)
         self.expand_layout.addWidget(self.personal_group)
+        self.expand_layout.addWidget(self.notification_group)
         self.expand_layout.addWidget(self.app_group)
 
     def _connect_signals(self) -> None:
@@ -137,10 +156,12 @@ class SettingsInterface(ScrollArea):
         cfg.themeColorChanged.connect(setThemeColor)
         cfg.appRestartSig.connect(self._show_restart_tooltip)
         self.mica_card.checkedChanged.connect(self.micaChanged.emit)
+        self.sound_enabled_card.checkedChanged.connect(self.message_sound_card.setEnabled)
 
     def _apply_initial_values(self) -> None:
         setTheme(cfg.get(cfg.themeMode), lazy=True)
         setThemeColor(cfg.get(cfg.themeColor))
+        self.message_sound_card.setEnabled(bool(cfg.get(cfg.soundEnabled)))
 
     def _on_theme_changed(self, theme: Theme) -> None:
         setTheme(theme, lazy=True)

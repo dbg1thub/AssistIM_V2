@@ -220,14 +220,23 @@ if 'qfluentwidgets' not in sys.modules:
         DARK = 'dark'
         AUTO = 'auto'
 
+    class _DummyFluentIconBase:
+        def icon(self, *args, **kwargs):
+            return self
+
+        def path(self, theme=None):
+            return ''
+
     qfluentwidgets.BoolValidator = _DummyValidator
     qfluentwidgets.ColorConfigItem = _DummyColorConfigItem
     qfluentwidgets.ConfigItem = _DummyConfigItem
     qfluentwidgets.ConfigSerializer = _DummyConfigSerializer
+    qfluentwidgets.FluentIconBase = _DummyFluentIconBase
     qfluentwidgets.OptionsConfigItem = _DummyOptionsConfigItem
     qfluentwidgets.OptionsValidator = _DummyValidator
     qfluentwidgets.QConfig = _DummyQConfig
     qfluentwidgets.Theme = _DummyTheme
+    qfluentwidgets.getIconColor = lambda theme: 'black'
     qfluentwidgets.qconfig = types.SimpleNamespace(load=lambda path, cfg: None)
     sys.modules['qfluentwidgets'] = qfluentwidgets
 

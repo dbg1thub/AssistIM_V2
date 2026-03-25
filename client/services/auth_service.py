@@ -47,13 +47,14 @@ class AuthService:
         payload = await self._http.get("/auth/me")
         return dict(payload or {})
 
-    async def login(self, username: str, password: str) -> dict[str, Any]:
+    async def login(self, username: str, password: str, *, force: bool = False) -> dict[str, Any]:
         """Authenticate one user and return the auth payload."""
         payload = await self._http.post(
             "/auth/login",
             json={
                 "username": username,
                 "password": password,
+                "force": force,
             },
         )
         return dict(payload or {})

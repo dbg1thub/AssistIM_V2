@@ -1,4 +1,4 @@
-"""Schema compatibility helpers for environments without Alembic upgrades applied."""
+﻿"""Schema compatibility helpers for environments without Alembic upgrades applied."""
 
 from __future__ import annotations
 
@@ -15,6 +15,7 @@ USER_PROFILE_COLUMN_DDL: dict[str, str] = {
     "region": "VARCHAR(128)",
     "signature": "TEXT",
     "gender": "VARCHAR(32)",
+    "auth_session_version": "INTEGER NOT NULL DEFAULT 0",
 }
 
 USER_PROFILE_INDEX_DDL: dict[str, str] = {
@@ -496,6 +497,7 @@ def describe_schema_compatibility(applied: Iterable[str]) -> str:
     if not items:
         return "Schema compatibility already up to date."
     return "Applied schema compatibility updates: " + ", ".join(items)
+
 
 
 

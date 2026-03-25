@@ -9,13 +9,11 @@ from PySide6.QtCore import QEvent, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPixmap
 from PySide6.QtWidgets import QLabel, QDialog, QFrame, QHBoxLayout, QSizePolicy, QSplitter, QStackedWidget, QVBoxLayout, QWidget
 from qfluentwidgets import (
-    AvatarWidget,
     BodyLabel,
     CaptionLabel,
     CardWidget,
     ElevatedCardWidget,
     FlowLayout,
-    FluentIcon,
     IconWidget,
     InfoBar,
     LineEdit,
@@ -30,14 +28,14 @@ from qfluentwidgets import (
     isDarkTheme,
 )
 
+from client.core.app_icons import AppIcon
 from client.core import logging
-from client.core.avatar_utils import avatar_seed, choose_avatar_image
+from client.core.avatar_rendering import get_avatar_image_store
+from client.core.avatar_utils import avatar_seed, profile_avatar_seed
 from client.core.exceptions import APIError, NetworkError
 from client.core.i18n import format_relative_time, tr
 from client.core.profile_fields import format_profile_birthday, localize_profile_gender, localize_profile_status
 from client.core.logging import setup_logging
-from client.events.contact_events import ContactEvent
-from client.events.event_bus import get_event_bus
 from client.events.contact_events import ContactEvent
 from client.events.event_bus import get_event_bus
 from client.ui.controllers.contact_controller import (
@@ -54,6 +52,15 @@ from client.ui.styles import StyleSheet
 
 setup_logging()
 logger = logging.get_logger(__name__)
+
+CONTACT_SIDEBAR_AVATAR_SIZE = 44
+CONTACT_SIDEBAR_ITEM_HEIGHT = 80
+CONTACT_SIDEBAR_ITEM_PADDING = 12
+CONTACT_SIDEBAR_CONTENT_GAP = 12
+CONTACT_SIDEBAR_TEXT_TOP_OFFSET = 2
+CONTACT_SIDEBAR_TEXT_SPACING = 4
+CONTACT_SIDEBAR_META_GAP = 8
+CONTACT_SIDEBAR_TITLE_FONT_SIZE = 16
 
 
 def _request_status_text(status: str) -> str:
@@ -83,20 +90,74 @@ def _request_message_text(request: FriendRequestRecord, current_user_id: str) ->
     return request.message or tr("contact.request.default_incoming", "The other user sent you a friend request.")
 
 
-class ContactAvatar(AvatarWidget):
+class ContactAvatar(QWidget):
     def __init__(self, size: int = 48, parent=None):
         super().__init__(parent)
         self._size = size
+        self._radius = max(8, size // 6)
+        self._pixmap: Optional[QPixmap] = None
+        self._fallback = "?"
+        self._avatar_source = ""
+        self._avatar_gender = ""
+        self._avatar_seed = ""
+        self._avatar_store = get_avatar_image_store()
+        self._avatar_store.avatar_ready.connect(self._on_avatar_ready)
         self.setFixedSize(size, size)
-        self.setRadius(max(8, size // 6))
 
     def set_avatar(self, avatar_path: str = "", fallback: str = "?", *, gender: str = "", seed: str = "") -> None:
-        resolved = choose_avatar_image(
+        self._fallback = (fallback or "?").strip()[:2].upper() or "?"
+        self._avatar_gender = str(gender or "")
+        self._avatar_seed = str(seed or avatar_seed(fallback, avatar_path, gender))
+        self._avatar_source, resolved = self._avatar_store.resolve_display_path(
             avatar_path,
-            gender=gender,
-            seed=seed or avatar_seed(fallback, avatar_path, gender),
+            gender=self._avatar_gender,
+            seed=self._avatar_seed,
         )
-        self.setImage(resolved)
+        self._apply_avatar_path(resolved)
+
+    def _apply_avatar_path(self, avatar_path: str) -> None:
+        self._pixmap = None
+        if avatar_path:
+            pixmap = QPixmap(avatar_path)
+            if not pixmap.isNull():
+                self._pixmap = pixmap
+        self.update()
+
+    def _on_avatar_ready(self, source: str) -> None:
+        if source != self._avatar_source:
+            return
+        resolved = self._avatar_store.display_path_for_source(
+            source,
+            gender=self._avatar_gender,
+            seed=self._avatar_seed,
+        )
+        self._apply_avatar_path(resolved)
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        rect = self.rect()
+        clip = QPainterPath()
+        clip.addRoundedRect(rect, self._radius, self._radius)
+        painter.setClipPath(clip)
+
+        if self._pixmap is not None:
+            scaled = self._pixmap.scaled(
+                rect.size(),
+                Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            painter.drawPixmap(rect, scaled)
+            return
+
+        painter.fillPath(clip, QColor("#626B76") if isDarkTheme() else QColor("#D7DEE8"))
+        painter.setClipping(False)
+        font = QFont()
+        font.setBold(True)
+        font.setPixelSize(max(12, self._size // 3))
+        painter.setFont(font)
+        painter.setPen(QColor("#FFFFFF") if isDarkTheme() else QColor("#27486B"))
+        painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, self._fallback)
 
 
 class ElidedBodyLabel(QLabel):
@@ -225,27 +286,32 @@ class ContactListItem(QWidget):
         self._selected = False
         self._hovered = False
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setFixedHeight(76)
+        self.setFixedHeight(CONTACT_SIDEBAR_ITEM_HEIGHT)
         self.setMinimumWidth(0)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(12, 12, 12, 12)
-        layout.setSpacing(12)
+        layout.setContentsMargins(
+            CONTACT_SIDEBAR_ITEM_PADDING,
+            CONTACT_SIDEBAR_ITEM_PADDING,
+            CONTACT_SIDEBAR_ITEM_PADDING,
+            CONTACT_SIDEBAR_ITEM_PADDING,
+        )
+        layout.setSpacing(CONTACT_SIDEBAR_CONTENT_GAP)
 
-        self.avatar = ContactAvatar(44, self)
-        self.avatar.set_avatar(avatar, title, seed=avatar_seed(self.item_id, title))
+        self.avatar = ContactAvatar(CONTACT_SIDEBAR_AVATAR_SIZE, self)
+        self.avatar.set_avatar(avatar, title, seed=profile_avatar_seed(user_id=self.item_id, display_name=title))
 
         text_layout = QVBoxLayout()
-        text_layout.setContentsMargins(0, 0, 0, 0)
-        text_layout.setSpacing(4)
+        text_layout.setContentsMargins(0, CONTACT_SIDEBAR_TEXT_TOP_OFFSET, 0, 0)
+        text_layout.setSpacing(CONTACT_SIDEBAR_TEXT_SPACING)
 
         top_row = QHBoxLayout()
         top_row.setContentsMargins(0, 0, 0, 0)
-        top_row.setSpacing(8)
+        top_row.setSpacing(CONTACT_SIDEBAR_META_GAP)
         self.title_label = ElidedBodyLabel(title, self)
         title_font = QFont(self.title_label.font())
-        title_font.setPixelSize(15)
+        title_font.setPixelSize(CONTACT_SIDEBAR_TITLE_FONT_SIZE)
         title_font.setBold(False)
         self.title_label.setFont(title_font)
         top_row.addWidget(self.title_label, 1)
@@ -258,7 +324,7 @@ class ContactListItem(QWidget):
         self.subtitle_label.setVisible(bool(subtitle))
         text_layout.addLayout(top_row)
         text_layout.addWidget(self.subtitle_label)
-        layout.addWidget(self.avatar, 0)
+        layout.addWidget(self.avatar, 0, Qt.AlignmentFlag.AlignVCenter)
         layout.addLayout(text_layout, 1)
 
     def set_selected(self, selected: bool) -> None:
@@ -303,23 +369,28 @@ class RequestListItem(QWidget):
         self.setObjectName("RequestListItem")
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setMinimumWidth(0)
-        self.setFixedHeight(76)
+        self.setFixedHeight(CONTACT_SIDEBAR_ITEM_HEIGHT)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(12, 12, 12, 12)
-        layout.setSpacing(12)
+        layout.setContentsMargins(
+            CONTACT_SIDEBAR_ITEM_PADDING,
+            CONTACT_SIDEBAR_ITEM_PADDING,
+            CONTACT_SIDEBAR_ITEM_PADDING,
+            CONTACT_SIDEBAR_ITEM_PADDING,
+        )
+        layout.setSpacing(CONTACT_SIDEBAR_CONTENT_GAP)
 
-        self.avatar = ContactAvatar(44, self)
+        self.avatar = ContactAvatar(CONTACT_SIDEBAR_AVATAR_SIZE, self)
         self.avatar.set_avatar(fallback=request.counterpart_name(current_user_id))
 
         text_layout = QVBoxLayout()
-        text_layout.setContentsMargins(0, 0, 0, 0)
-        text_layout.setSpacing(4)
+        text_layout.setContentsMargins(0, CONTACT_SIDEBAR_TEXT_TOP_OFFSET, 0, 0)
+        text_layout.setSpacing(CONTACT_SIDEBAR_TEXT_SPACING)
 
         self.title_label = ElidedBodyLabel(request.counterpart_name(current_user_id), self)
         title_font = QFont(self.title_label.font())
-        title_font.setPixelSize(15)
+        title_font.setPixelSize(CONTACT_SIDEBAR_TITLE_FONT_SIZE)
         title_font.setBold(False)
         self.title_label.setFont(title_font)
 
@@ -329,7 +400,7 @@ class RequestListItem(QWidget):
         self.meta_label.setObjectName("contactMetaLabel")
         top_row = QHBoxLayout()
         top_row.setContentsMargins(0, 0, 0, 0)
-        top_row.setSpacing(8)
+        top_row.setSpacing(CONTACT_SIDEBAR_META_GAP)
         top_row.addWidget(self.title_label, 1)
         top_row.addWidget(self.meta_label, 0)
 
@@ -357,7 +428,7 @@ class RequestListItem(QWidget):
             action_layout.addWidget(status_button, 0, Qt.AlignmentFlag.AlignHCenter)
         action_layout.addStretch(1)
 
-        layout.addWidget(self.avatar, 0)
+        layout.addWidget(self.avatar, 0, Qt.AlignmentFlag.AlignVCenter)
         layout.addLayout(text_layout, 1)
         layout.addLayout(action_layout, 0)
 
@@ -428,7 +499,7 @@ class ContactMomentItem(CardWidget):
             moment.avatar,
             moment.display_name,
             gender=getattr(moment, "gender", ""),
-            seed=avatar_seed(moment.user_id, moment.display_name),
+            seed=profile_avatar_seed(user_id=moment.user_id, username=getattr(moment, "username", ""), display_name=moment.display_name),
         )
         header_text = QVBoxLayout()
         header_text.setContentsMargins(0, 0, 0, 0)
@@ -615,7 +686,7 @@ class ContactDetailPanel(QWidget):
             contact.avatar,
             contact.display_name,
             gender=contact.gender,
-            seed=avatar_seed(contact.id, contact.username, contact.display_name),
+            seed=profile_avatar_seed(user_id=contact.id, username=contact.username, display_name=contact.display_name),
         )
         self.title_label.setText(contact.display_name)
         self.subtitle_label.setText(contact.username or contact.assistim_id or tr("contact.detail.friend_fallback", "Friend"))
@@ -847,7 +918,7 @@ class ContactWelcomeWidget(QWidget):
         card_layout.setContentsMargins(36, 36, 36, 36)
         card_layout.setSpacing(14)
 
-        icon = IconWidget(FluentIcon.PEOPLE, card)
+        icon = IconWidget(AppIcon.PEOPLE, card)
         icon.setFixedSize(52, 52)
 
         title_label = BodyLabel(tr("contact.welcome.title", "Welcome to Contacts"), card)
@@ -906,7 +977,7 @@ class GalleryContactDetailPanel(QWidget):
         header_layout.setContentsMargins(30, 28, 30, 24)
         header_layout.setSpacing(16)
 
-        self.avatar = ContactAvatar(72, self.header)
+        self.avatar = ContactAvatar(88, self.header)
 
         self.title_label = TitleLabel(tr("contact.detail.title", "Contact Details"), self.header)
         self.subtitle_label = CaptionLabel("", self.header)
@@ -966,7 +1037,7 @@ class GalleryContactDetailPanel(QWidget):
             contact.avatar,
             contact.display_name,
             gender=contact.gender,
-            seed=avatar_seed(contact.id, contact.username, contact.display_name),
+            seed=profile_avatar_seed(user_id=contact.id, username=contact.username, display_name=contact.display_name),
         )
         self.title_label.setText(contact.display_name)
         self.subtitle_label.setText(
@@ -1081,7 +1152,7 @@ class UserSearchItem(CardWidget):
             user.avatar,
             user.display_name,
             gender=user.gender,
-            seed=avatar_seed(user.id, user.username, user.display_name),
+            seed=profile_avatar_seed(user_id=user.id, username=user.username, display_name=user.display_name),
         )
 
         text_layout = QVBoxLayout()
@@ -1128,7 +1199,7 @@ class GroupMemberItem(CardWidget):
             contact.avatar,
             contact.display_name,
             gender=contact.gender,
-            seed=avatar_seed(contact.id, contact.username, contact.display_name),
+            seed=profile_avatar_seed(user_id=contact.id, username=contact.username, display_name=contact.display_name),
         )
 
         text_layout = QVBoxLayout()
@@ -1703,7 +1774,7 @@ class ContactInterface(QWidget):
         self.search_box = SearchLineEdit(self.search_bar)
         self.search_box.setPlaceholderText(tr("contact.sidebar.search_placeholder", "Search contacts, groups, or requests"))
         self.search_box.setFixedHeight(36)
-        self.add_button = TransparentToolButton(FluentIcon.ADD, self.search_bar)
+        self.add_button = TransparentToolButton(AppIcon.ADD, self.search_bar)
         self.add_button.setToolTip(tr("contact.sidebar.add_tooltip", "Add"))
         self.add_button.setFixedSize(36, 36)
         search_row.addWidget(self.search_box, 1)
@@ -1911,7 +1982,7 @@ class ContactInterface(QWidget):
         if not filtered:
             self._add_empty_state(
                 self.friends_layout,
-                FluentIcon.PEOPLE,
+                AppIcon.PEOPLE,
                 tr("contact.sidebar.empty_friends", "No matching friends found"),
             )
             self.alpha_nav.set_letters(set())
@@ -1944,7 +2015,7 @@ class ContactInterface(QWidget):
         if not filtered:
             self._add_empty_state(
                 self.groups_layout,
-                FluentIcon.PEOPLE,
+                AppIcon.PEOPLE,
                 tr("contact.sidebar.empty_groups", "No groups yet"),
             )
             return
@@ -1976,7 +2047,7 @@ class ContactInterface(QWidget):
         if not filtered:
             self._add_empty_state(
                 self.requests_layout,
-                FluentIcon.ADD,
+                AppIcon.ADD,
                 tr("contact.sidebar.empty_requests", "No new friend requests"),
             )
             return
@@ -2239,7 +2310,7 @@ class ContactInterface(QWidget):
             duration=1400,
         )
 
-    def _add_empty_state(self, layout: QVBoxLayout, icon: FluentIcon, text: str) -> None:
+    def _add_empty_state(self, layout: QVBoxLayout, icon: AppIcon, text: str) -> None:
         holder = QWidget(self)
         holder_layout = QVBoxLayout(holder)
         holder_layout.setContentsMargins(0, 52, 0, 0)
@@ -2347,6 +2418,7 @@ class ContactInterface(QWidget):
         """Clear a keyed action slot once its task finishes."""
         if self._keyed_ui_tasks.get(key) is task:
             self._keyed_ui_tasks.pop(key, None)
+
 
 
 

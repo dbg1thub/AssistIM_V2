@@ -9,6 +9,7 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QCloseEvent, QShowEvent
 from PySide6.QtWidgets import (
     QApplication,
+    QDialog,
     QHBoxLayout,
     QSizePolicy,
     QStackedWidget,
@@ -19,10 +20,10 @@ from qfluentwidgets import (
     BodyLabel,
     CaptionLabel,
     CardWidget,
-    FluentIcon,
     IconWidget,
     InfoBar,
     LineEdit,
+    MessageBoxBase,
     PasswordLineEdit,
     PrimaryPushButton,
     SegmentedWidget,
@@ -31,16 +32,49 @@ from qfluentwidgets import (
     FluentWidget,
 )
 
+from client.core.app_icons import AppIcon
 from client.core import logging
 from client.core.exceptions import APIError, NetworkError
 from client.core.i18n import tr
 from client.core.logging import setup_logging
 from client.ui.styles import StyleSheet
 from client.ui.controllers.auth_controller import get_auth_controller
+from client.ui.widgets.acrylic_surface import attach_acrylic_backdrop, configure_acrylic_infobar
 
 
 setup_logging()
 logger = logging.get_logger(__name__)
+
+SESSION_CONFLICT_ERROR_CODE = 1009
+
+
+class SessionConflictDialog(MessageBoxBase):
+    """Confirm whether a new login should replace the current online session."""
+
+    def __init__(self, username: str, parent=None):
+        super().__init__(parent=parent)
+        title = SubtitleLabel(tr("auth.session_conflict.title", "Account Already Online"), self.widget)
+        content = BodyLabel(
+            tr(
+                "auth.session_conflict.content",
+                "{username} is currently signed in on another client. Continue here and sign out the other client?",
+                username=username or tr("auth.field.username", "this account"),
+            ),
+            self.widget,
+        )
+        content.setWordWrap(True)
+
+        self.viewLayout.addWidget(title)
+        self.viewLayout.addWidget(content)
+        self.viewLayout.addStretch(1)
+
+        self.yesButton.setText(tr("auth.session_conflict.confirm", "Continue Login"))
+        self.cancelButton.setText(tr("common.cancel", "Cancel"))
+        self.widget.setMinimumWidth(400)
+        self.widget.setStyleSheet("background: transparent; border: none;")
+        self.buttonGroup.setStyleSheet("background: transparent; border: none;")
+        attach_acrylic_backdrop(self.widget, radius=22)
+
 
 
 class AuthInterface(FluentWidget):
@@ -62,6 +96,7 @@ class AuthInterface(FluentWidget):
         self._ui_tasks: set[asyncio.Task] = set()
         self._busy_mode: Optional[str] = None
         self._centered_once = False
+        self._transient_dialogs: set[QDialog] = set()
 
         self._setup_ui()
         self._connect_signals()
@@ -91,7 +126,7 @@ class AuthInterface(FluentWidget):
         brand_layout.setContentsMargins(32, 32, 32, 32)
         brand_layout.setSpacing(16)
 
-        self.brand_icon = IconWidget(FluentIcon.CHAT, self.brand_card)
+        self.brand_icon = IconWidget(AppIcon.CHAT, self.brand_card)
         self.brand_icon.setFixedSize(52, 52)
 
         brand_title = TitleLabel(tr("common.app_name", "AssistIM"), self.brand_card)
@@ -427,15 +462,23 @@ class AuthInterface(FluentWidget):
 
         self._set_submit_task(self._perform_register(username, nickname, password))
 
-    async def _perform_login(self, username: str, password: str) -> None:
+    async def _perform_login(self, username: str, password: str, *, force: bool = False) -> None:
+        retry_force_login = False
         self._set_busy("login")
         try:
-            user = await self._auth_controller.login(username, password)
+            user = await self._auth_controller.login(username, password, force=force)
         except asyncio.CancelledError:
             raise
-        except (APIError, NetworkError) as exc:
+        except NetworkError as exc:
             logger.warning("Login failed: %s", exc)
             self._show_error(str(exc))
+        except APIError as exc:
+            if not force and self._is_session_conflict_error(exc):
+                logger.info("Login conflict detected for %s", username)
+                retry_force_login = await self._prompt_force_login(username)
+            else:
+                logger.warning("Login failed: %s", exc)
+                self._show_error(str(exc))
         except Exception:
             logger.exception("Unexpected login error")
             self._show_error(tr("auth.error.unexpected_sign_in", "Unexpected error while signing in."))
@@ -451,6 +494,31 @@ class AuthInterface(FluentWidget):
             self.close()
         finally:
             self._set_busy(None)
+
+        if retry_force_login:
+            self._set_submit_task(self._perform_login(username, password, force=True))
+
+    @staticmethod
+    def _is_session_conflict_error(exc: APIError) -> bool:
+        """Return whether an auth error asks the user to confirm replacing another session."""
+        return int(getattr(exc, "status_code", 0) or 0) == 409 and int(getattr(exc, "code", 0) or 0) == SESSION_CONFLICT_ERROR_CODE
+
+    async def _prompt_force_login(self, username: str) -> bool:
+        """Ask whether the current login should replace the already-online client."""
+        dialog = SessionConflictDialog(username, self)
+        dialog.setModal(True)
+        loop = asyncio.get_running_loop()
+        decision = loop.create_future()
+        self._transient_dialogs.add(dialog)
+
+        def _finish(result: int) -> None:
+            self._transient_dialogs.discard(dialog)
+            if not decision.done():
+                decision.set_result(result == int(QDialog.DialogCode.Accepted))
+
+        dialog.finished.connect(_finish)
+        dialog.open()
+        return bool(await decision)
 
     async def _perform_register(self, username: str, nickname: str, password: str) -> None:
         self._set_busy("register")
@@ -478,10 +546,10 @@ class AuthInterface(FluentWidget):
             self._set_busy(None)
 
     def _show_error(self, message: str) -> None:
-        InfoBar.error(tr("auth.feedback.title", "Authentication"), message, parent=self.form_card)
+        configure_acrylic_infobar(InfoBar.error(tr("auth.feedback.title", "Authentication"), message, parent=self.form_card))
 
     def _show_success(self, message: str) -> None:
-        InfoBar.success(tr("auth.feedback.title", "Authentication"), message, parent=self.form_card)
+        configure_acrylic_infobar(InfoBar.success(tr("auth.feedback.title", "Authentication"), message, parent=self.form_card))
 
     def showEvent(self, event: QShowEvent) -> None:
         super().showEvent(event)
@@ -508,6 +576,9 @@ class AuthInterface(FluentWidget):
         """Cancel outstanding submit work when the widget is torn down."""
         self._cancel_pending_task(self._submit_task)
         self._submit_task = None
+        for dialog in list(self._transient_dialogs):
+            dialog.close()
+        self._transient_dialogs.clear()
         for task in list(self._ui_tasks):
             if not task.done():
                 task.cancel()

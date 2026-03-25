@@ -13,6 +13,11 @@
             "PingFang SC"
         ]
     },
+    "Sound": {
+        "MessageEnabled": true,
+        "Enabled": true,
+        "Volume": 85
+    },
     "Window": {
         "MicaEnabled": true
     },

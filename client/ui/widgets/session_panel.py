@@ -12,9 +12,10 @@ from PySide6.QtCore import QEvent, QItemSelectionModel, QSortFilterProxyModel, Q
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import QAbstractItemView, QFrame, QHBoxLayout, QListView, QSizePolicy, QVBoxLayout, QWidget
 
-from qfluentwidgets import Action, FluentIcon, RoundMenu, ScrollBarHandleDisplayMode, SearchLineEdit, ToolButton
+from qfluentwidgets import Action, RoundMenu, ScrollBarHandleDisplayMode, SearchLineEdit, ToolButton
 from qfluentwidgets.components.widgets.scroll_bar import SmoothScrollDelegate
 
+from client.core.app_icons import AppIcon
 from client.core.i18n import tr
 from client.delegates.session_delegate import SessionDelegate
 from client.events.event_bus import get_event_bus
@@ -103,7 +104,7 @@ class SessionPanel(QWidget):
         self.search_box.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.search_box.textChanged.connect(self._on_search_text_changed)
 
-        self.add_button = ToolButton(FluentIcon.ADD, self.search_bar)
+        self.add_button = ToolButton(AppIcon.ADD, self.search_bar)
         self.add_button.setObjectName("sessionAddButton")
         self.add_button.setToolTip(tr("session.add.tooltip", "New Conversation"))
         self.add_button.setFixedSize(36, 36)

@@ -99,6 +99,23 @@ class Config(QConfig):
         True,
         BoolValidator(),
     )
+    soundEnabled = ConfigItem(
+        "Sound",
+        "Enabled",
+        True,
+        BoolValidator(),
+    )
+    messageSoundEnabled = ConfigItem(
+        "Sound",
+        "MessageEnabled",
+        True,
+        BoolValidator(),
+    )
+    soundVolume = ConfigItem(
+        "Sound",
+        "Volume",
+        85,
+    )
 
     @property
     def appVersion(self) -> str:

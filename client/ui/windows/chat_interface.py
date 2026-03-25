@@ -121,6 +121,7 @@ class ChatInterface(QWidget):
     SESSION_PANEL_WIDTH = 300
     MESSAGE_PAGE_SIZE = 50
     HISTORY_PAGE_CACHE_LIMIT = 12
+    TYPING_INDICATOR_HIDE_DELAY_MS = 1800
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -141,8 +142,11 @@ class ChatInterface(QWidget):
         self._pending_read_receipts: set[tuple[str, str]] = set()
         self._composer_drafts: dict[str, list[dict]] = {}
         self._ui_tasks: set[asyncio.Task] = set()
+        self._typing_indicator_timer = QTimer(self)
+        self._typing_indicator_timer.setSingleShot(True)
 
         self._setup_ui()
+        self._typing_indicator_timer.timeout.connect(self.chat_panel.hide_typing_indicator)
         self._connect_signals()
         self._subscribe_to_events()
         self.destroyed.connect(self._on_destroyed)
@@ -312,6 +316,8 @@ class ChatInterface(QWidget):
         if message:
             self._invalidate_session_caches(message.session_id)
         if message and message.session_id == self._current_session_id:
+            self._typing_indicator_timer.stop()
+            self.chat_panel.hide_typing_indicator()
             should_scroll = self.chat_panel.is_near_bottom()
             self.chat_panel.add_message(message, scroll_to_bottom=should_scroll)
             self._schedule_read_receipt()
@@ -323,7 +329,9 @@ class ChatInterface(QWidget):
         if message:
             self._invalidate_session_caches(message.session_id)
         if message and message.session_id == self._current_session_id:
-            self.chat_panel.update_message_status(message.message_id, message.status)
+            # Replace the optimistic local message with the canonical ACK payload so
+            # later read receipts can see server-assigned metadata like session_seq.
+            self.chat_panel.add_message(message, scroll_to_bottom=False)
         elif message_id:
             self.chat_panel.update_message_status(message_id, MessageStatus.SENT)
 
@@ -355,7 +363,7 @@ class ChatInterface(QWidget):
         session_id = data.get("session_id", "")
         if session_id == self._current_session_id:
             self.chat_panel.show_typing_indicator()
-            QTimer.singleShot(5000, self.chat_panel.hide_typing_indicator)
+            self._typing_indicator_timer.start(self.TYPING_INDICATOR_HIDE_DELAY_MS)
 
     def _on_read_event(self, data: dict) -> None:
         """Update read-receipt metadata in the message list."""

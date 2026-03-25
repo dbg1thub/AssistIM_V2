@@ -10,7 +10,7 @@ from PySide6.QtGui import QPixmap, QIcon
 
 from qfluentwidgets import AvatarWidget, StateLabel, IconWidget, BodyLabel
 
-from client.core.avatar_utils import choose_avatar_image
+from client.core.avatar_rendering import apply_avatar_widget_image
 from client.ui.styles import StyleSheet
 
 
@@ -153,7 +153,7 @@ class MessageVideoWidget(QWidget):
 
     def set_avatar(self, avatar_path: str, *, gender: str = "", seed: str = "") -> None:
         """Set avatar image."""
-        self.avatar.setImage(choose_avatar_image(avatar_path, gender=gender, seed=seed))
+        apply_avatar_widget_image(self.avatar, avatar_path, gender=gender, seed=seed)
 
     def get_message(self):
         """Get message data."""
@@ -162,3 +162,4 @@ class MessageVideoWidget(QWidget):
     def is_self_message(self) -> bool:
         """Check if message is from self."""
         return self._is_self
+

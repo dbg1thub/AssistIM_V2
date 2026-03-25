@@ -42,7 +42,6 @@ from qfluentwidgets import (
     Flyout,
     FlyoutAnimationType,
     FlyoutViewBase,
-    FluentIcon,
     InfoBar,
     PushButton,
     ScrollArea,
@@ -53,6 +52,7 @@ from qfluentwidgets import (
 )
 from qfluentwidgets.components.material import AcrylicToolTipFilter, AcrylicFlyoutViewBase, AcrylicFlyout
 
+from client.core.app_icons import AppIcon
 from client.core.i18n import tr
 from client.models.message import MessageType, infer_message_type_from_path
 from client.ui.common.attachment_card import attachment_card_size, draw_attachment_card
@@ -1523,7 +1523,7 @@ class MessageInput(QWidget):
 
     IMAGE_FILTER = "Images (*.png *.jpg *.jpeg *.gif *.bmp *.webp)"
     FILE_FILTER = "All Files (*.*)"
-    TYPING_THROTTLE = 3.0
+    TYPING_THROTTLE = 1.0
     def __init__(self, parent=None):
         super().__init__(parent)
 
@@ -1568,31 +1568,31 @@ class MessageInput(QWidget):
         self.toolbar_layout.setContentsMargins(4, 4, 4, 4)
         self.toolbar_layout.setSpacing(4)
 
-        self.emoji_button = TransparentToolButton(FluentIcon.EMOJI_TAB_SYMBOLS, self.composer_widget)
+        self.emoji_button = TransparentToolButton(AppIcon.EMOJI_TAB_SYMBOLS, self.composer_widget)
         self.emoji_button.setFixedSize(28, 28)
         self.emoji_button.setToolTip(tr("composer.toolbar.emoji", "Emoji"))
 
-        self.image_button = TransparentToolButton(FluentIcon.PHOTO, self.composer_widget)
+        self.image_button = TransparentToolButton(AppIcon.PHOTO, self.composer_widget)
         self.image_button.setFixedSize(28, 28)
         self.image_button.setToolTip(tr("composer.toolbar.image", "Send Image"))
 
-        self.file_button = TransparentToolButton(FluentIcon.FOLDER, self.composer_widget)
+        self.file_button = TransparentToolButton(AppIcon.FOLDER, self.composer_widget)
         self.file_button.setFixedSize(28, 28)
         self.file_button.setToolTip(tr("composer.toolbar.file", "Send File"))
 
-        self.cut_button = TransparentToolButton(FluentIcon.CUT, self.composer_widget)
+        self.cut_button = TransparentToolButton(AppIcon.CUT, self.composer_widget)
         self.cut_button.setFixedSize(28, 28)
         self.cut_button.setToolTip(tr("composer.toolbar.screenshot", "Screenshot"))
 
-        self.voice_button = TransparentToolButton(FluentIcon.PHONE, self.composer_widget)
+        self.voice_button = TransparentToolButton(AppIcon.PHONE, self.composer_widget)
         self.voice_button.setFixedSize(28, 28)
         self.voice_button.setToolTip(tr("composer.toolbar.voice_call", "Voice Call"))
 
-        self.video_button = TransparentToolButton(FluentIcon.VIDEO, self.composer_widget)
+        self.video_button = TransparentToolButton(AppIcon.VIDEO, self.composer_widget)
         self.video_button.setFixedSize(28, 28)
         self.video_button.setToolTip(tr("composer.toolbar.video_call", "Video Call"))
 
-        self.ai_button = TransparentToolButton(FluentIcon.ROBOT, self.composer_widget)
+        self.ai_button = TransparentToolButton(AppIcon.ROBOT, self.composer_widget)
         self.ai_button.setFixedSize(28, 28)
         self.ai_button.setToolTip(tr("composer.toolbar.ai", "AI Assistant"))
 
@@ -1811,7 +1811,7 @@ class MessageInput(QWidget):
         """Emit throttled typing events."""
         if self._programmatic_edit_depth:
             return
-        current_time = time.time()
+        current_time = time.monotonic()
         if current_time - self._last_typing_time >= self.TYPING_THROTTLE:
             self._last_typing_time = current_time
             self.typing_signal.emit()

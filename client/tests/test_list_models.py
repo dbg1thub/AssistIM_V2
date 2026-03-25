@@ -255,6 +255,40 @@ def test_message_model_refresh_recalled_message_without_full_reset() -> None:
 
 
 
+
+
+def test_message_model_time_separator_uses_newer_message_timestamp() -> None:
+    model = MessageModel()
+
+    model.add_messages([_message('m-1', 0), _message('m-2', 10)])
+
+    separator_timestamp = model.data(model.index(1, 0), model.TimestampRole)
+
+    assert separator_timestamp == BASE_TIME + timedelta(minutes=10)
+
+
+def test_message_model_add_message_reorders_out_of_order_insert() -> None:
+    model = MessageModel()
+    model.add_messages([_message('m-2', 10)])
+
+    model.add_message(_message('m-1', 0))
+
+    assert [message.message_id for message in model.get_messages()] == ['m-1', 'm-2']
+    assert model.data(model.index(1, 0), model.DisplayKindRole) == model.DISPLAY_TIME_SEPARATOR
+
+
+def test_message_model_refresh_message_reorders_when_timestamp_changes() -> None:
+    model = MessageModel()
+    first = _message('m-1', 0)
+    second = _message('m-2', 10)
+    model.add_messages([first, second])
+
+    first.timestamp = BASE_TIME + timedelta(minutes=15)
+    model.refresh_message('m-1', allow_reorder=True)
+
+    assert [message.message_id for message in model.get_messages()] == ['m-2', 'm-1']
+
+
 def test_session_model_initial_load_uses_insert_and_update_moves_row() -> None:
     model = SessionModel()
     newer = _session('s-new', 5)

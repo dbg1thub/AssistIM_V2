@@ -1,4 +1,4 @@
-"""Presence websocket helpers and endpoint."""
+﻿"""Presence websocket helpers and endpoint."""
 
 from __future__ import annotations
 
@@ -6,8 +6,10 @@ import time
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, status
 
-from app.core.security import decode_access_token
+from app.core.database import SessionLocal
+from app.core.security import decode_access_token, token_session_version
 from app.dependencies.settings_dependency import get_websocket_settings
+from app.repositories.user_repo import UserRepository
 from app.websocket.manager import connection_manager
 
 
@@ -40,6 +42,12 @@ def bind_websocket_user(websocket: WebSocket, connection_id: str) -> str | None:
     except Exception:
         return None
     user_id = payload["sub"]
+    with SessionLocal() as db:
+        user = UserRepository(db).get_by_id(user_id)
+        if user is None:
+            return None
+        if token_session_version(payload) != int(getattr(user, "auth_session_version", 0) or 0):
+            return None
     connection_manager.bind_user(connection_id, user_id)
     return user_id
 

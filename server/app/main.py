@@ -18,6 +18,7 @@ from app.core.database import configure_database, init_db
 from app.core.errors import AppError, ErrorCode
 from app.core.logging import configure_logging, logger
 from app.core.security import decode_access_token
+from app.media.default_avatars import sync_default_avatar_assets
 from app.media.storage import get_local_media_mount_path
 from app.utils.response import error_response, success_response
 from app.websocket.chat_ws import legacy_chat_websocket_router, websocket_router
@@ -32,6 +33,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     current_settings = settings or get_settings()
     configure_database(current_settings)
     os.makedirs(current_settings.upload_dir, exist_ok=True)
+    sync_default_avatar_assets(current_settings)
 
     @asynccontextmanager
     async def app_lifespan(_: FastAPI):

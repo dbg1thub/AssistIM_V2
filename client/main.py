@@ -1,4 +1,4 @@
-﻿"""
+"""
 AssistIM Desktop Client
 Application entry point
 """
@@ -31,6 +31,7 @@ from client.network.websocket_client import get_websocket_client, peek_websocket
 from client.managers.connection_manager import get_connection_manager, peek_connection_manager
 from client.managers.message_manager import get_message_manager, peek_message_manager
 from client.managers.session_manager import get_session_manager, peek_session_manager
+from client.managers.sound_manager import get_sound_manager, peek_sound_manager
 
 from client.ui.controllers.auth_controller import get_auth_controller, peek_auth_controller
 from client.ui.controllers.chat_controller import get_chat_controller, peek_chat_controller
@@ -102,6 +103,7 @@ class Application:
         self._quit_event = asyncio.Event()
         self._tasks: set[asyncio.Task] = set()
         self._logout_task: asyncio.Task | None = None
+        self._forced_logout_in_progress = False
 
         self.main_window = None
         self.auth_window = None
@@ -162,6 +164,7 @@ class Application:
         logger.info("Initializing connection manager...")
         conn_manager = get_connection_manager()
         await conn_manager.initialize()
+        conn_manager.add_message_listener(self._handle_transport_message)
 
         logger.info("Initializing message manager...")
         msg_manager = get_message_manager()
@@ -174,6 +177,10 @@ class Application:
         logger.info("Initializing chat controller...")
         chat_controller = get_chat_controller()
         await chat_controller.initialize()
+
+        logger.info("Initializing sound manager...")
+        sound_manager = get_sound_manager()
+        await sound_manager.initialize()
 
         logger.info("Application initialized")
 
@@ -275,6 +282,45 @@ class Application:
         if self._logout_task is task:
             self._logout_task = None
 
+
+    async def _handle_transport_message(self, message: dict) -> None:
+        """Handle raw websocket control messages that should bypass the normal message manager."""
+        if not isinstance(message, dict) or message.get("type") != "force_logout":
+            return
+
+        reason = str((message.get("data") or {}).get("reason", "") or "")
+        if reason != "session_replaced":
+            return
+        if self._forced_logout_in_progress:
+            return
+
+        self._forced_logout_in_progress = True
+        logger.warning("Session replaced by another client login")
+
+        try:
+            auth_controller = get_auth_controller()
+            await auth_controller.clear_session()
+        except Exception:
+            logger.exception("Failed to clear auth state after forced logout")
+
+        try:
+            conn_manager = peek_connection_manager()
+            if conn_manager is not None:
+                await conn_manager.close()
+        except Exception:
+            logger.exception("Failed to close connection manager after forced logout")
+
+        if self.main_window is not None:
+            self.main_window.show_session_replaced_warning()
+            return
+
+        if self.auth_window is not None:
+            self.auth_window.close()
+            self.auth_window.deleteLater()
+            self.auth_window = None
+
+        self._quit_event.set()
+
     # =========================================================
     # Background services
     # =========================================================
@@ -374,6 +420,13 @@ class Application:
                 await session_manager.close()
         except Exception:
             logger.exception("Session manager close during logout failed")
+
+        try:
+            sound_manager = peek_sound_manager()
+            if sound_manager is not None:
+                await sound_manager.close()
+        except Exception:
+            logger.exception("Sound manager close during logout failed")
 
         try:
             db = peek_database()
@@ -479,6 +532,13 @@ class Application:
                 await session_manager.close()
         except Exception:
             logger.exception("Session manager close failed")
+
+        try:
+            sound_manager = peek_sound_manager()
+            if sound_manager is not None:
+                await sound_manager.close()
+        except Exception:
+            logger.exception("Sound manager close failed")
 
         # Close HTTP client
         try:

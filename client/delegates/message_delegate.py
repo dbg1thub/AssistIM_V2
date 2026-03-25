@@ -20,9 +20,11 @@ from PySide6.QtGui import (
 )
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 from PySide6.QtWidgets import QStyledItemDelegate, QStyleOptionViewItem
-from qfluentwidgets import FluentIcon, Theme, isDarkTheme, themeColor
+from qfluentwidgets import Theme, isDarkTheme, themeColor
 
-from client.core.avatar_utils import avatar_seed, choose_avatar_image
+from client.core.app_icons import AppIcon
+from client.core.avatar_rendering import get_avatar_image_store
+from client.core.avatar_utils import profile_avatar_seed
 from client.core.config_backend import get_config
 from client.core.datetime_utils import coerce_local_datetime
 from client.core.i18n import format_chat_timestamp, tr
@@ -114,6 +116,8 @@ class MessageDelegate(QStyledItemDelegate):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._avatar_store = get_avatar_image_store()
+        self._avatar_store.avatar_ready.connect(self._on_avatar_ready)
         self._image_cache: dict[str, QPixmap] = {}
         self._loading_sources: set[str] = set()
         self._failed_image_sources: dict[str, float] = {}
@@ -495,11 +499,18 @@ class MessageDelegate(QStyledItemDelegate):
             sender_avatar = sender_avatar or str(current_user.get("avatar", "") or "")
             sender_gender = sender_gender or str(current_user.get("gender", "") or "")
             sender_name = sender_name or str(current_user.get("nickname", "") or "") or str(current_user.get("username", "") or "")
-
-        avatar_path = choose_avatar_image(
+            sender_username = str(extra.get("sender_username", "") or current_user.get("username", "") or "")
+        else:
+            sender_username = str(extra.get("sender_username", "") or "")
+        avatar_seed_value = profile_avatar_seed(
+            user_id=message.sender_id,
+            username=sender_username,
+            display_name=sender_name,
+        )
+        _avatar_source, avatar_path = self._avatar_store.resolve_display_path(
             sender_avatar,
             gender=sender_gender,
-            seed=avatar_seed(message.sender_id, sender_name),
+            seed=avatar_seed_value,
         )
 
         if avatar_path:
@@ -767,7 +778,7 @@ class MessageDelegate(QStyledItemDelegate):
             return ""
         return f"{read_count}/{read_target_count}"
 
-    def _status_badge_style(self, message: ChatMessage) -> tuple[QColor, FluentIcon] | None:
+    def _status_badge_style(self, message: ChatMessage) -> tuple[QColor, AppIcon] | None:
         """Return badge background and icon for message status."""
         dark = isDarkTheme()
         info_color = QColor(157, 157, 157) if dark else QColor(138, 138, 138)
@@ -775,17 +786,17 @@ class MessageDelegate(QStyledItemDelegate):
         error_color = QColor(255, 153, 164) if dark else QColor(196, 43, 28)
 
         if self._is_uploading(message):
-            return info_color, FluentIcon.SYNC
+            return info_color, AppIcon.SYNC
         if message.status in (MessageStatus.PENDING, MessageStatus.SENDING):
-            return info_color, FluentIcon.SEND_FILL
+            return info_color, AppIcon.SEND_FILL
         if message.status == MessageStatus.SENT:
-            return success_color, FluentIcon.SEND_FILL
+            return success_color, AppIcon.SEND_FILL
         if message.status == MessageStatus.DELIVERED:
-            return info_color, FluentIcon.COMPLETED
+            return info_color, AppIcon.COMPLETED
         if message.status == MessageStatus.READ:
-            return success_color, FluentIcon.COMPLETED
+            return success_color, AppIcon.COMPLETED
         if message.status == MessageStatus.FAILED:
-            return error_color, FluentIcon.CANCEL_MEDIUM
+            return error_color, AppIcon.CANCEL_MEDIUM
         return None
 
     def _draw_media_state_overlay(self, painter: QPainter, rect: QRect, message: ChatMessage) -> None:
@@ -1612,6 +1623,10 @@ class MessageDelegate(QStyledItemDelegate):
         if source:
             self._schedule_refresh_message_view()
 
+    def _on_avatar_ready(self, _source: str) -> None:
+        """Refresh the view after a remote avatar finishes downloading."""
+        self._schedule_refresh_message_view()
+
     def _schedule_refresh_message_view(self) -> None:
         """Coalesce async media refreshes into a single view update."""
         if self._refresh_scheduled:
@@ -1629,3 +1644,4 @@ class MessageDelegate(QStyledItemDelegate):
         message_list = parent.get_message_list()
         message_list.doItemsLayout()
         message_list.viewport().update()
+

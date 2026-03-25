@@ -19,6 +19,12 @@ def normalize_profile_choice(value: Any) -> str:
     return str(value or "").strip().lower()
 
 
+def normalize_profile_gender(value: Any) -> str:
+    """Normalize one profile gender value without collapsing supported enum variants."""
+    normalized = normalize_profile_choice(value)
+    return normalized if normalized in PROFILE_GENDER_VALUES else ""
+
+
 def profile_gender_options(*, include_blank: bool = True) -> list[tuple[str, str]]:
     """Return the localized gender options used by the profile UI."""
     items: list[tuple[str, str]] = []

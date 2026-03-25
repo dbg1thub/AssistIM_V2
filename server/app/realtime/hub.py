@@ -1,4 +1,4 @@
-"""Realtime hub abstraction and in-memory implementation."""
+﻿"""Realtime hub abstraction and in-memory implementation."""
 
 from __future__ import annotations
 
@@ -56,6 +56,18 @@ class RealtimeHub(ABC):
     @abstractmethod
     async def broadcast_json(self, payload: dict, exclude_connection_id: str | None = None) -> None:
         """Broadcast one payload to all active connections."""
+
+    @abstractmethod
+    async def disconnect_user_connections(
+        self,
+        user_id: str,
+        *,
+        exclude_connection_id: str | None = None,
+        close_code: int = 4001,
+        reason: str = "",
+        payload: dict | None = None,
+    ) -> bool:
+        """Close every active connection for one user and report whether they became offline."""
 
     @abstractmethod
     def reset(self) -> None:
@@ -154,6 +166,38 @@ class InMemoryRealtimeHub(RealtimeHub):
             if exclude_connection_id is not None and connection_id == exclude_connection_id:
                 continue
             await self.send_json(connection_id, payload)
+
+    async def disconnect_user_connections(
+        self,
+        user_id: str,
+        *,
+        exclude_connection_id: str | None = None,
+        close_code: int = 4001,
+        reason: str = "",
+        payload: dict | None = None,
+    ) -> bool:
+        connection_ids = list(self._connections_by_user.get(user_id, set()))
+        disconnected_any = False
+        for connection_id in connection_ids:
+            if exclude_connection_id is not None and connection_id == exclude_connection_id:
+                continue
+
+            websocket = self._connections.get(connection_id)
+            if websocket is not None:
+                if payload:
+                    try:
+                        await websocket.send_json(payload)
+                    except (RuntimeError, WebSocketDisconnect):
+                        pass
+                try:
+                    await websocket.close(code=close_code, reason=reason)
+                except (RuntimeError, WebSocketDisconnect):
+                    pass
+
+            self.disconnect_by_connection_id(connection_id)
+            disconnected_any = True
+
+        return disconnected_any and not self.has_user_connections(user_id)
 
     def reset(self) -> None:
         self._connections.clear()

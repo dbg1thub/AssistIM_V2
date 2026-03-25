@@ -19,7 +19,13 @@ def _resolve_settings(settings: Settings | None = None) -> Settings:
     return settings or get_settings()
 
 
-def create_access_token(user_id: str, username: str, *, settings: Settings | None = None) -> str:
+def create_access_token(
+    user_id: str,
+    username: str,
+    *,
+    session_version: int = 0,
+    settings: Settings | None = None,
+) -> str:
     """Create an access token."""
     current_settings = _resolve_settings(settings)
     return encode_token(
@@ -27,6 +33,7 @@ def create_access_token(user_id: str, username: str, *, settings: Settings | Non
             "sub": user_id,
             "username": username,
             "type": ACCESS_TOKEN_TYPE,
+            "session_version": int(session_version or 0),
         },
         secret_key=current_settings.secret_key,
         expires_delta=timedelta(minutes=current_settings.access_token_expire_minutes),
@@ -34,7 +41,13 @@ def create_access_token(user_id: str, username: str, *, settings: Settings | Non
 
 
 
-def create_refresh_token(user_id: str, username: str, *, settings: Settings | None = None) -> str:
+def create_refresh_token(
+    user_id: str,
+    username: str,
+    *,
+    session_version: int = 0,
+    settings: Settings | None = None,
+) -> str:
     """Create a refresh token."""
     current_settings = _resolve_settings(settings)
     return encode_token(
@@ -42,6 +55,7 @@ def create_refresh_token(user_id: str, username: str, *, settings: Settings | No
             "sub": user_id,
             "username": username,
             "type": REFRESH_TOKEN_TYPE,
+            "session_version": int(session_version or 0),
         },
         secret_key=current_settings.secret_key,
         expires_delta=timedelta(days=current_settings.refresh_token_expire_days),
@@ -76,11 +90,21 @@ def decode_refresh_token(token: str, *, settings: Settings | None = None) -> dic
     return payload
 
 
+
+def token_session_version(payload: dict) -> int:
+    """Return the auth session version embedded in a JWT payload."""
+    try:
+        return max(0, int(payload.get("session_version", 0) or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
 __all__ = [
     "create_access_token",
     "create_refresh_token",
     "decode_access_token",
     "decode_refresh_token",
     "hash_password",
+    "token_session_version",
     "verify_password",
 ]

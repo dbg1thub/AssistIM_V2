@@ -34,11 +34,13 @@ from qfluentwidgets import (
 from qfluentwidgets.components.material import AcrylicFlyout, AcrylicFlyoutViewBase
 
 from client.core import logging
-from client.core.avatar_utils import avatar_seed, choose_avatar_image, normalize_gender
+from client.core.avatar_rendering import apply_avatar_widget_image
+from client.core.avatar_utils import profile_avatar_seed
 from client.core.i18n import tr
 from client.core.logging import setup_logging
 from client.core.profile_fields import (
     normalize_profile_choice,
+    normalize_profile_gender,
     profile_gender_options,
     profile_status_options,
     qdate_from_profile_birthday,
@@ -83,10 +85,7 @@ def _set_avatar_widget(
     seed: str = "",
 ) -> None:
     """Apply one avatar image or initials fallback to a Fluent AvatarWidget."""
-    resolved = choose_avatar_image(avatar_path, gender=gender, seed=seed)
-    if resolved:
-        widget.setText("")
-        widget.setImage(resolved)
+    if apply_avatar_widget_image(widget, avatar_path, gender=gender, seed=seed):
         return
 
     widget.setImage(None)
@@ -135,7 +134,7 @@ class ProfileEditDialog(QDialog):
         )
         subtitle.setWordWrap(True)
 
-        seed = avatar_seed(self._user.get("id"), self._user.get("username"), self._user.get("nickname"))
+        seed = profile_avatar_seed(user_id=self._user.get("id"), username=self._user.get("username"), display_name=self._user.get("nickname"))
         self.avatar_preview = AvatarWidget(self)
         self.avatar_preview.setRadius(40)
         _set_avatar_widget(
@@ -285,7 +284,7 @@ class ProfileEditDialog(QDialog):
             return
 
         self._avatar_file_path = file_path
-        seed = avatar_seed(self._user.get("id"), self._user.get("username"), self.nickname_edit.text().strip())
+        seed = profile_avatar_seed(user_id=self._user.get("id"), username=self._user.get("username"), display_name=self.nickname_edit.text().strip())
         _set_avatar_widget(
             self.avatar_preview,
             file_path,
@@ -394,7 +393,7 @@ class ProfileCard(QWidget):
             self._user.get("avatar", ""),
             fallback=display_name,
             gender=self._user.get("gender", ""),
-            seed=avatar_seed(self._user.get("id"), self._user.get("username"), display_name),
+            seed=profile_avatar_seed(user_id=self._user.get("id"), username=self._user.get("username"), display_name=display_name),
         )
 
         self.name_label.setText(display_name)
@@ -517,7 +516,7 @@ class UserProfileCoordinator(QWidget):
                 email=str(payload.get("email", "") or "").strip(),
                 phone=str(payload.get("phone", "") or "").strip(),
                 birthday=payload.get("birthday"),
-                gender=normalize_gender(payload.get("gender")),
+                gender=normalize_profile_gender(payload.get("gender")),
                 status=str(payload.get("status", "") or "").strip(),
                 avatar_file_path=avatar_file_path or None,
             )
@@ -591,3 +590,6 @@ class UserProfileCoordinator(QWidget):
             if not task.done():
                 task.cancel()
         super().closeEvent(event)
+
+
+

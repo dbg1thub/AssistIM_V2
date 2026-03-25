@@ -1,4 +1,4 @@
-"""User repository."""
+﻿"""User repository."""
 
 from __future__ import annotations
 
@@ -37,11 +37,12 @@ class UserRepository:
         stmt = base_stmt.order_by(User.created_at.desc()).offset((page - 1) * size).limit(size)
         return total, list(self.db.execute(stmt).scalars().all())
 
-    def create(self, username: str, password_hash: str, nickname: str) -> User:
+    def create(self, username: str, password_hash: str, nickname: str, *, avatar: str | None = None) -> User:
         user = User(
             username=username,
             password_hash=password_hash,
             nickname=nickname,
+            avatar=avatar,
             status="online",
         )
         self.db.add(user)
@@ -57,3 +58,7 @@ class UserRepository:
         self.db.commit()
         self.db.refresh(user)
         return user
+
+    def advance_auth_session_version(self, user: User) -> User:
+        current_version = int(getattr(user, "auth_session_version", 0) or 0)
+        return self.update(user, auth_session_version=current_version + 1)

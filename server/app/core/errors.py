@@ -1,4 +1,4 @@
-﻿"""Application error types and codes."""
+"""Application error types and codes."""
 
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ class ErrorCode:
     RESOURCE_NOT_FOUND = 1006
     RATE_LIMITED = 1007
     FORBIDDEN = 1008
+    SESSION_CONFLICT = 1009
     INTERNAL_ERROR = 1500
 
 

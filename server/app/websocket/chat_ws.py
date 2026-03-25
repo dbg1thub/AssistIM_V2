@@ -1,4 +1,4 @@
-"""Chat websocket endpoints."""
+﻿"""Chat websocket endpoints."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from app.core.database import SessionLocal
 from app.core.errors import AppError, ErrorCode
-from app.core.security import decode_access_token
+from app.core.security import decode_access_token, token_session_version
 from app.dependencies.settings_dependency import get_websocket_settings
 from app.repositories.user_repo import UserRepository
 from app.services.message_service import MessageService
@@ -81,6 +81,12 @@ def _authenticate_connection(
     user_id = payload.get("sub")
     if not user_id:
         raise AppError(ErrorCode.UNAUTHORIZED, "invalid access token", 401)
+    with SessionLocal() as db:
+        user = UserRepository(db).get_by_id(user_id)
+        if user is None:
+            raise AppError(ErrorCode.UNAUTHORIZED, "user not found for websocket connection", 401)
+        if token_session_version(payload) != int(getattr(user, "auth_session_version", 0) or 0):
+            raise AppError(ErrorCode.UNAUTHORIZED, "session expired", 401)
     if current_user_id is not None and current_user_id != user_id:
         raise AppError(ErrorCode.FORBIDDEN, "connection already authenticated as another user", 403)
 
@@ -405,5 +411,6 @@ async def websocket_chat(websocket: WebSocket) -> None:
 @legacy_chat_websocket_router.websocket("/ws/chat")
 async def websocket_chat_legacy(websocket: WebSocket) -> None:
     await _handle_chat_socket(websocket)
+
 
 

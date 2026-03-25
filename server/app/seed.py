@@ -13,6 +13,7 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.config import get_settings
+from app.media.default_avatars import default_avatar_url_for_seed
 from app.core.database import Base
 from app.models.file import StoredFile
 from app.models.group import Group, GroupMember
@@ -57,9 +58,11 @@ def ensure_user(
     if user is None:
         user = User(id=seed_uuid(seed_name), username=username)
 
+    resolved_avatar = avatar if avatar is not None else default_avatar_url_for_seed(get_settings(), seed=seed_name, gender=gender)
+
     user.password_hash = hash_password(DEMO_PASSWORD)
     user.nickname = nickname
-    user.avatar = avatar
+    user.avatar = resolved_avatar
     user.email = email
     user.phone = phone
     user.birthday = birthday
@@ -562,6 +565,8 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
 
 
 
