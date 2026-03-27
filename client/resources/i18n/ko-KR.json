@@ -333,6 +333,7 @@
   "main_window.exit_dialog.remember": "다음부터 표시하지 않기",
   "main_window.exit_dialog.confirm": "종료",
   "main_window.exit_dialog.cancel": "취소",
+  "main_window.tray.ignore": "나중에 처리",
   "main_window.tray.background_message": "앱이 백그라운드에서 계속 실행 중입니다. 시스템 트레이에서 복원하거나 종료할 수 있습니다.",
   "main_window.contact_jump.invalid_title": "채팅",
   "main_window.contact_jump.invalid_message": "연락처 이동 데이터를 해석할 수 없습니다.",

@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from typing import Optional
 
-from PySide6.QtCore import QEvent, Qt, QTimer, Signal
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPixmap
 from PySide6.QtWidgets import QLabel, QDialog, QFrame, QHBoxLayout, QSizePolicy, QSplitter, QStackedWidget, QVBoxLayout, QWidget
 from qfluentwidgets import (
@@ -23,8 +23,8 @@ from qfluentwidgets import (
     SearchLineEdit,
     SegmentedWidget,
     SubtitleLabel,
+    ToolButton,
     TitleLabel,
-    TransparentToolButton,
     isDarkTheme,
 )
 
@@ -49,6 +49,7 @@ from client.ui.controllers.contact_controller import (
 from client.ui.controllers.discovery_controller import MomentRecord, get_discovery_controller
 from client.ui.windows.discovery_interface import MomentCard
 from client.ui.styles import StyleSheet
+from client.ui.widgets.fluent_divider import FluentDivider
 
 setup_logging()
 logger = logging.get_logger(__name__)
@@ -61,6 +62,8 @@ CONTACT_SIDEBAR_TEXT_TOP_OFFSET = 2
 CONTACT_SIDEBAR_TEXT_SPACING = 4
 CONTACT_SIDEBAR_META_GAP = 8
 CONTACT_SIDEBAR_TITLE_FONT_SIZE = 16
+CONTACT_SECTION_INSET = 32
+CONTACT_SECTION_LABEL_GAP = 8
 
 
 def _request_status_text(status: str) -> str:
@@ -223,68 +226,60 @@ class ElidedCaptionLabel(QLabel):
         self.setToolTip(self._full_text if display != self._full_text else "")
 
 
-class AlphaNavLabel(QLabel):
-    clicked = Signal(str)
+class ContactSectionHeader(QWidget):
+    """WeChat-like alphabetical divider shown inside the friends list."""
 
     def __init__(self, letter: str, parent=None):
-        super().__init__(letter, parent)
-        self.letter = letter
-        self._enabled = False
-        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setFixedSize(18, 18)
-        font = QFont(self.font())
-        font.setPixelSize(11)
-        self.setFont(font)
-        self._refresh_style()
-
-    def set_enabled(self, enabled: bool) -> None:
-        self._enabled = enabled
-        self.setVisible(enabled)
-        self._refresh_style()
-
-    def mousePressEvent(self, event) -> None:
-        if self._enabled and event.button() == Qt.MouseButton.LeftButton:
-            self.clicked.emit(self.letter)
-        super().mousePressEvent(event)
-
-    def _refresh_style(self) -> None:
-        color = "#A9B1BA" if self._enabled else "transparent"
-        self.setStyleSheet(f"color: {color}; background: transparent;")
-
-
-class AlphaNavWidget(QWidget):
-    letter_selected = Signal(str)
-
-    def __init__(self, parent=None):
         super().__init__(parent)
-        self._labels: dict[str, AlphaNavLabel] = {}
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 4, 0, 4)
-        layout.setSpacing(2)
-        layout.addStretch(1)
-        for letter in [chr(code) for code in range(ord("A"), ord("Z") + 1)] + ["#"]:
-            label = AlphaNavLabel(letter, self)
-            label.clicked.connect(self.letter_selected.emit)
-            label.hide()
-            layout.addWidget(label, 0, Qt.AlignmentFlag.AlignHCenter)
-            self._labels[letter] = label
-        layout.addStretch(1)
+        self.letter = (letter or "#").upper()
+        self.setObjectName("contactSectionHeader")
+        self.setFixedHeight(40)
 
-    def set_letters(self, letters: set[str]) -> None:
-        normalized = {letter.upper() for letter in letters}
-        for letter, label in self._labels.items():
-            label.set_enabled(letter in normalized)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 8, 0, 4)
+        layout.setSpacing(CONTACT_SECTION_LABEL_GAP)
+
+        self.label = CaptionLabel(self.letter, self)
+        self.label.setObjectName("contactSectionIndexLabel")
+        self.label.setTextColor(QColor(122, 122, 122), QColor(196, 196, 196))
+
+        label_row = QHBoxLayout()
+        label_row.setContentsMargins(CONTACT_SECTION_INSET, 0, 0, 0)
+        label_row.setSpacing(0)
+        label_row.addWidget(self.label, 0, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        label_row.addStretch(1)
+
+        divider = FluentDivider(
+            self,
+            variant=FluentDivider.FULL,
+            left_inset=CONTACT_SECTION_INSET,
+            right_inset=0,
+        )
+
+        layout.addLayout(label_row)
+        layout.addWidget(divider, 0, Qt.AlignmentFlag.AlignVCenter)
 
 
 class ContactListItem(QWidget):
     clicked = Signal(str)
 
-    def __init__(self, item_id: str, title: str, subtitle: str = "", meta: str = "", avatar: str = "", badge: str = "", parent=None):
+    def __init__(
+        self,
+        item_id: str,
+        title: str,
+        subtitle: str = "",
+        meta: str = "",
+        avatar: str = "",
+        badge: str = "",
+        parent=None,
+        *,
+        left_padding: int | None = None,
+    ):
         super().__init__(parent)
         self.item_id = item_id
         self._selected = False
         self._hovered = False
+        self._left_padding = int(left_padding if left_padding is not None else CONTACT_SIDEBAR_ITEM_PADDING)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setFixedHeight(CONTACT_SIDEBAR_ITEM_HEIGHT)
         self.setMinimumWidth(0)
@@ -292,7 +287,7 @@ class ContactListItem(QWidget):
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(
-            CONTACT_SIDEBAR_ITEM_PADDING,
+            self._left_padding,
             CONTACT_SIDEBAR_ITEM_PADDING,
             CONTACT_SIDEBAR_ITEM_PADDING,
             CONTACT_SIDEBAR_ITEM_PADDING,
@@ -306,23 +301,15 @@ class ContactListItem(QWidget):
         text_layout.setContentsMargins(0, CONTACT_SIDEBAR_TEXT_TOP_OFFSET, 0, 0)
         text_layout.setSpacing(CONTACT_SIDEBAR_TEXT_SPACING)
 
-        top_row = QHBoxLayout()
-        top_row.setContentsMargins(0, 0, 0, 0)
-        top_row.setSpacing(CONTACT_SIDEBAR_META_GAP)
         self.title_label = ElidedBodyLabel(title, self)
         title_font = QFont(self.title_label.font())
         title_font.setPixelSize(CONTACT_SIDEBAR_TITLE_FONT_SIZE)
         title_font.setBold(False)
         self.title_label.setFont(title_font)
-        top_row.addWidget(self.title_label, 1)
-        self.meta_label = CaptionLabel(meta or badge, self)
-        self.meta_label.setObjectName("contactMetaLabel")
-        self.meta_label.setVisible(bool(meta or badge))
-        top_row.addWidget(self.meta_label, 0)
 
         self.subtitle_label = ElidedCaptionLabel(subtitle, self)
         self.subtitle_label.setVisible(bool(subtitle))
-        text_layout.addLayout(top_row)
+        text_layout.addWidget(self.title_label)
         text_layout.addWidget(self.subtitle_label)
         layout.addWidget(self.avatar, 0, Qt.AlignmentFlag.AlignVCenter)
         layout.addLayout(text_layout, 1)
@@ -395,16 +382,7 @@ class RequestListItem(QWidget):
         self.title_label.setFont(title_font)
 
         self.message_label = ElidedCaptionLabel(_request_message_text(request, current_user_id), self)
-
-        self.meta_label = CaptionLabel(self._status_text(), self)
-        self.meta_label.setObjectName("contactMetaLabel")
-        top_row = QHBoxLayout()
-        top_row.setContentsMargins(0, 0, 0, 0)
-        top_row.setSpacing(CONTACT_SIDEBAR_META_GAP)
-        top_row.addWidget(self.title_label, 1)
-        top_row.addWidget(self.meta_label, 0)
-
-        text_layout.addLayout(top_row)
+        text_layout.addWidget(self.title_label)
         text_layout.addWidget(self.message_label)
 
         action_layout = QVBoxLayout()
@@ -1768,13 +1746,15 @@ class ContactInterface(QWidget):
         self.summary_label.hide()
 
         self.search_bar = QWidget(sidebar)
+        self.search_bar.setObjectName("sessionSearchBar")
         search_row = QHBoxLayout(self.search_bar)
         search_row.setContentsMargins(12, 12, 12, 12)
         search_row.setSpacing(12)
         self.search_box = SearchLineEdit(self.search_bar)
-        self.search_box.setPlaceholderText(tr("contact.sidebar.search_placeholder", "Search contacts, groups, or requests"))
+        self.search_box.setPlaceholderText(tr("session.search.placeholder", "Search"))
         self.search_box.setFixedHeight(36)
-        self.add_button = TransparentToolButton(AppIcon.ADD, self.search_bar)
+        self.add_button = ToolButton(AppIcon.ADD, self.search_bar)
+        self.add_button.setObjectName("sessionAddButton")
         self.add_button.setToolTip(tr("contact.sidebar.add_tooltip", "Add"))
         self.add_button.setFixedSize(36, 36)
         search_row.addWidget(self.search_box, 1)
@@ -1787,17 +1767,7 @@ class ContactInterface(QWidget):
         self.segmented.setMinimumHeight(36)
 
         self.page_stack = QStackedWidget(sidebar)
-        self.friends_page = QWidget(sidebar)
-        friends_page_layout = QHBoxLayout(self.friends_page)
-        friends_page_layout.setContentsMargins(0, 0, 0, 0)
-        friends_page_layout.setSpacing(0)
-        self.friends_area, self.friends_container, self.friends_layout = self._create_scroll_page()
-        self.alpha_nav = AlphaNavWidget(self.friends_page)
-        self.alpha_nav.letter_selected.connect(self._scroll_to_friend_letter)
-        self.alpha_nav.hide()
-        friends_page_layout.addWidget(self.friends_area, 1)
-        self.friends_page.installEventFilter(self)
-        self.friends_area.viewport().installEventFilter(self)
+        self.friends_page, self.friends_container, self.friends_layout = self._create_scroll_page()
         self.groups_page, self.groups_container, self.groups_layout = self._create_scroll_page()
         self.requests_page, self.requests_container, self.requests_layout = self._create_scroll_page()
         self.page_stack.addWidget(self.friends_page)
@@ -1842,7 +1812,6 @@ class ContactInterface(QWidget):
         self.segmented.setCurrentItem("friends")
         self._show_welcome_panel()
         self._switch_page("friends")
-        self._position_alpha_nav()
 
     def _connect_signals(self) -> None:
         self.add_button.clicked.connect(self._show_add_placeholder)
@@ -1872,13 +1841,6 @@ class ContactInterface(QWidget):
 
     def _show_detail_panel(self) -> None:
         self.detail_stack.setCurrentWidget(self.detail_panel)
-
-    def eventFilter(self, watched, event) -> bool:
-        friends_viewport = self.friends_area.viewport() if hasattr(self, "friends_area") else None
-        if watched in {getattr(self, "friends_page", None), friends_viewport}:
-            if event.type() in {QEvent.Type.Resize, QEvent.Type.Show}:
-                QTimer.singleShot(0, self._position_alpha_nav)
-        return super().eventFilter(watched, event)
 
     def _switch_page(self, key: str) -> None:
         self._current_page = key
@@ -1942,6 +1904,26 @@ class ContactInterface(QWidget):
             self._build_requests_page()
         self._restore_selection(full_reload=False)
 
+    @staticmethod
+    def _friend_assistim_line(contact: ContactRecord) -> str:
+        return str(contact.assistim_id or contact.username or "").strip() or "-"
+
+    @staticmethod
+    def _match_friend_search(contact: ContactRecord, search: str) -> bool:
+        if not search:
+            return True
+
+        keyword = search.lower()
+        haystacks = (
+            contact.display_name,
+            contact.username,
+            contact.nickname,
+            contact.remark,
+            contact.assistim_id,
+            contact.signature,
+        )
+        return any(keyword in str(value or "").lower() for value in haystacks)
+
     def _cancel_moment_load(self) -> None:
         self._cancel_pending_task(self._moment_load_task)
         self._moment_load_task = None
@@ -1974,10 +1956,7 @@ class ContactInterface(QWidget):
         self._friend_items.clear()
         self._friend_section_headers.clear()
         search = self.search_box.text().strip().lower()
-        filtered = [
-            item for item in self._contacts
-            if not search or search in item.display_name.lower() or search in item.username.lower() or search in item.signature.lower()
-        ]
+        filtered = [item for item in self._contacts if self._match_friend_search(item, search)]
         grouped = self._controller.group_contacts(filtered)
         if not filtered:
             self._add_empty_state(
@@ -1985,27 +1964,24 @@ class ContactInterface(QWidget):
                 AppIcon.PEOPLE,
                 tr("contact.sidebar.empty_friends", "No matching friends found"),
             )
-            self.alpha_nav.set_letters(set())
-            self.alpha_nav.hide()
             return
         for letter, contacts in grouped.items():
+            header = ContactSectionHeader(letter, self.friends_container)
+            self.friends_layout.addWidget(header)
+            self._friend_section_headers[letter] = header
             for contact in contacts:
                 item = ContactListItem(
                     contact.id,
                     contact.display_name,
-                    contact.signature or contact.username,
-                    contact.username,
+                    self._friend_assistim_line(contact),
+                    "",
                     contact.avatar,
+                    left_padding=CONTACT_SECTION_INSET,
                 )
                 item.clicked.connect(self._select_friend)
-                if letter not in self._friend_section_headers:
-                    self._friend_section_headers[letter] = item
                 self.friends_layout.addWidget(item)
                 self._friend_items[contact.id] = item
         self.friends_layout.addStretch(1)
-        self.alpha_nav.set_letters(set(grouped.keys()))
-        self.alpha_nav.setVisible(bool(grouped))
-        self._position_alpha_nav()
 
     def _build_groups_page(self) -> None:
         self._clear_layout(self.groups_layout)
@@ -2065,24 +2041,6 @@ class ContactInterface(QWidget):
             self.requests_layout.addWidget(item)
             self._request_items[request.id] = item
         self.requests_layout.addStretch(1)
-
-    def _scroll_to_friend_letter(self, letter: str) -> None:
-        """Scroll the friends list to the requested alphabetical section."""
-        target = self._friend_section_headers.get(letter)
-        if not target:
-            return
-        bar = self.friends_area.verticalScrollBar()
-        bar.setValue(max(0, target.y() - 8))
-
-    def _position_alpha_nav(self) -> None:
-        """Float the A-Z navigation above the friends list instead of occupying layout width."""
-        if not hasattr(self, "alpha_nav"):
-            return
-        self.alpha_nav.adjustSize()
-        x = max(0, self.friends_page.width() - self.alpha_nav.width() - 6)
-        y = max(8, (self.friends_page.height() - self.alpha_nav.height()) // 2)
-        self.alpha_nav.move(x, y)
-        self.alpha_nav.raise_()
 
     def _restore_selection(self, full_reload: bool) -> None:
         current_map = {

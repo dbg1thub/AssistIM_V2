@@ -241,7 +241,7 @@ class ChatPanel(QWidget):
         self._history_indicator.hide()
         if self._chat_info_overlay:
             self._chat_info_overlay.set_session(None)
-            self._chat_info_overlay.close_drawer()
+            self._chat_info_overlay.close_drawer(immediate=True)
 
     def show_chat(self) -> None:
         """Show active chat page and enable input."""
@@ -254,6 +254,9 @@ class ChatPanel(QWidget):
 
     def set_session(self, session: Session) -> None:
         """Update header and switch to active chat page."""
+        previous_session_id = getattr(self._current_session, "session_id", None)
+        if self._chat_info_overlay and previous_session_id and previous_session_id != session.session_id:
+            self._chat_info_overlay.close_drawer(immediate=True)
         self._current_session = session
         self.chat_header.set_session_info(
             title=session.name,
@@ -848,10 +851,10 @@ class ChatPanel(QWidget):
         self._chat_info_overlay.set_session(self._current_session)
         self._chat_info_overlay.toggle()
 
-    def close_chat_info_drawer(self) -> None:
+    def close_chat_info_drawer(self, *, immediate: bool = False) -> None:
         """Hide the floating chat info drawer if it is visible."""
         if self._chat_info_overlay:
-            self._chat_info_overlay.close_drawer()
+            self._chat_info_overlay.close_drawer(immediate=immediate)
 
     def _layout_chat_info_overlay(self) -> None:
         """Keep the floating chat info drawer aligned to the full right-side chat pane."""

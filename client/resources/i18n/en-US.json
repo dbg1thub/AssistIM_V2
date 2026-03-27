@@ -333,6 +333,7 @@
   "main_window.exit_dialog.remember": "Don't show this again",
   "main_window.exit_dialog.confirm": "Exit",
   "main_window.exit_dialog.cancel": "Cancel",
+  "main_window.tray.ignore": "Ignore for now",
   "main_window.tray.background_message": "AssistIM is still running in the background. Restore or quit it from the system tray.",
   "main_window.contact_jump.invalid_title": "Chat",
   "main_window.contact_jump.invalid_message": "Unable to resolve contact jump data.",

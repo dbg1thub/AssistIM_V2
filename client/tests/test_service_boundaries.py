@@ -1033,6 +1033,51 @@ def test_contact_controller_load_contacts_and_search_users_use_services(monkeypa
     asyncio.run(scenario())
 
 
+def test_contact_controller_load_requests_resolves_counterpart_names(monkeypatch) -> None:
+    fake_contact_service = FakeContactService()
+    fake_user_service = FakeUserService()
+    fake_auth_context = FakeAuthContext()
+    outgoing_target_id = '11111111-2222-3333-4444-555555555555'
+    incoming_sender_id = '66666666-7777-8888-9999-000000000000'
+    fake_contact_service.requests_payload = [
+        {
+            'id': 'req-1',
+            'sender_id': 'user-1',
+            'receiver_id': outgoing_target_id,
+            'message': 'hello',
+            'status': 'accepted',
+            'created_at': '2026-03-27T10:00:00Z',
+        },
+        {
+            'id': 'req-2',
+            'sender_id': incoming_sender_id,
+            'receiver_id': 'user-1',
+            'message': 'hi',
+            'status': 'pending',
+            'created_at': '2026-03-26T09:00:00Z',
+        },
+    ]
+    fake_user_service.user_payloads = {
+        outgoing_target_id: {'id': outgoing_target_id, 'username': 'test2', 'nickname': 'Test 2'},
+        incoming_sender_id: {'id': incoming_sender_id, 'username': 'test3', 'nickname': 'Test 3'},
+    }
+
+    monkeypatch.setattr(contact_controller_module, 'get_contact_service', lambda: fake_contact_service)
+    monkeypatch.setattr(contact_controller_module, 'get_user_service', lambda: fake_user_service)
+    monkeypatch.setattr(contact_controller_module, 'get_auth_controller', lambda: fake_auth_context)
+
+    async def scenario() -> None:
+        controller = contact_controller_module.ContactController()
+        requests = await controller.load_requests()
+
+        assert set(fake_user_service.fetch_user_calls) == {outgoing_target_id, incoming_sender_id}
+        assert [item.id for item in requests] == ['req-1', 'req-2']
+        assert requests[0].counterpart_name('user-1') == 'Test 2'
+        assert requests[1].counterpart_name('user-1') == 'Test 3'
+
+    asyncio.run(scenario())
+
+
 def test_contact_controller_mutations_use_contact_service(monkeypatch) -> None:
     fake_contact_service = FakeContactService()
     fake_user_service = FakeUserService()

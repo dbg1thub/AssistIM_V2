@@ -2,6 +2,8 @@ QWidget#ContactInterface,
 QWidget#ContactDetailPanel,
 QWidget#ContactSidebarCard,
 QWidget#ContactMomentsSection,
+QWidget#contactSectionHeader,
+QWidget#sessionSearchBar,
 QStackedWidget,
 QWidget#contactListScrollArea,
 QWidget#contactListScrollWidget,
@@ -54,11 +56,17 @@ QFrame#DetailDivider {
 QLabel#elidedCaptionLabel,
 QLabel#contactMetaLabel,
 QLabel#contactSectionCaption,
+QLabel#contactSectionIndexLabel,
 QLabel#contactMomentMetaLabel,
 QLabel#contactSummaryLabel,
 QLabel#momentCommentTimeLabel,
 QLabel#momentStatsLabel {
     color: {{TEXT_SECONDARY}};
+    font: 12px "Segoe UI", "Microsoft YaHei", "PingFang SC";
+}
+
+QLabel#contactSectionIndexLabel {
+    color: rgb(196, 196, 196);
     font: 12px "Segoe UI", "Microsoft YaHei", "PingFang SC";
 }
 

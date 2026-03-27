@@ -333,6 +333,7 @@
   "main_window.exit_dialog.remember": "下次不再显示",
   "main_window.exit_dialog.confirm": "退出",
   "main_window.exit_dialog.cancel": "取消",
+  "main_window.tray.ignore": "暂不处理",
   "main_window.tray.background_message": "应用仍在后台运行，可通过系统托盘恢复或退出。",
   "main_window.contact_jump.invalid_title": "聊天",
   "main_window.contact_jump.invalid_message": "无法解析联系人跳转数据。",

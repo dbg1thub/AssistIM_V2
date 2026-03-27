@@ -12,12 +12,24 @@ class FluentDivider(QWidget):
     """A subtle 1px divider with full-width and inset variants."""
 
     FULL = "full"
+    LEFT_FULL = "left_full"
+    RIGHT_FULL = "right_full"
     INSET = "inset"
 
-    def __init__(self, parent=None, *, variant: str = FULL, inset: int = 14):
+    def __init__(
+        self,
+        parent=None,
+        *,
+        variant: str = FULL,
+        inset: int = 14,
+        left_inset: int | None = None,
+        right_inset: int | None = None,
+    ):
         super().__init__(parent)
         self._variant = self.FULL
         self._inset = max(0, int(inset))
+        self._left_inset_override = max(0, int(left_inset)) if left_inset is not None else None
+        self._right_inset_override = max(0, int(right_inset)) if right_inset is not None else None
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.setFixedHeight(1)
@@ -28,7 +40,7 @@ class FluentDivider(QWidget):
 
     def setVariant(self, variant: str) -> None:
         normalized = str(variant or self.FULL).strip().lower()
-        if normalized not in {self.FULL, self.INSET}:
+        if normalized not in {self.FULL, self.LEFT_FULL, self.RIGHT_FULL, self.INSET}:
             normalized = self.FULL
         self._variant = normalized
         self.update()
@@ -40,6 +52,33 @@ class FluentDivider(QWidget):
         self._inset = max(0, int(inset))
         self.update()
 
+    def leftInset(self) -> int:
+        return self._resolve_insets()[0]
+
+    def rightInset(self) -> int:
+        return self._resolve_insets()[1]
+
+    def setLeftInset(self, inset: int | None) -> None:
+        self._left_inset_override = max(0, int(inset)) if inset is not None else None
+        self.update()
+
+    def setRightInset(self, inset: int | None) -> None:
+        self._right_inset_override = max(0, int(inset)) if inset is not None else None
+        self.update()
+
+    def setInsets(self, left: int | None = None, right: int | None = None) -> None:
+        self.setLeftInset(left)
+        self.setRightInset(right)
+
+    def _resolve_insets(self) -> tuple[int, int]:
+        left_inset = self._inset if self._variant in {self.RIGHT_FULL, self.INSET} else 0
+        right_inset = self._inset if self._variant in {self.LEFT_FULL, self.INSET} else 0
+        if self._left_inset_override is not None:
+            left_inset = self._left_inset_override
+        if self._right_inset_override is not None:
+            right_inset = self._right_inset_override
+        return left_inset, right_inset
+
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
@@ -49,8 +88,9 @@ class FluentDivider(QWidget):
         else:
             color = QColor(15, 23, 42, 28)
 
-        left = float(self._inset if self._variant == self.INSET else 0)
-        right = float(max(left, self.width() - (self._inset if self._variant == self.INSET else 0)))
+        left_inset, right_inset = self._resolve_insets()
+        left = float(left_inset)
+        right = float(max(left, self.width() - right_inset))
         y = self.height() / 2
 
         pen = QPen(color)

@@ -14,6 +14,7 @@ from PySide6.QtGui import QColor, QGuiApplication, QPixmap
 from PySide6.QtWidgets import QDialog, QHBoxLayout, QLabel, QScrollArea, QVBoxLayout, QWidget
 
 from qfluentwidgets import Action, BodyLabel, InfoBar, MessageBoxBase, PrimaryPushButton, PushButton, RoundMenu, SubtitleLabel, TextEdit
+from qfluentwidgets.components.widgets.menu import MenuAnimationType
 
 from client.core.i18n import tr
 from client.core.message_actions import should_offer_delete, should_offer_recall
@@ -967,6 +968,10 @@ class ChatInterface(QWidget):
             f"pin session {session_id}",
         )
 
+    def close_transient_panels(self) -> None:
+        """Close floating transient UI owned by the chat page."""
+        self.chat_panel.close_chat_info_drawer(immediate=True)
+
     async def _send_file_message(self, session_id: str, file_path: str) -> None:
         """Upload and send a file via ChatController."""
         try:
@@ -1097,7 +1102,11 @@ class ChatInterface(QWidget):
 
         menu.closedSignal.connect(_on_menu_hidden)
         self._message_context_menu = menu
-        menu.popup(self.chat_panel.get_message_list().viewport().mapToGlobal(position))
+        menu.exec(
+            self.chat_panel.get_message_list().viewport().mapToGlobal(position),
+            ani=True,
+            aniType=MenuAnimationType.DROP_DOWN,
+        )
 
     def _open_message(self, message) -> None:
         """Open an image, file, or video attachment."""
@@ -1292,8 +1301,12 @@ class ChatInterface(QWidget):
             return False
         return self.session_panel.select_session(session_id, emit_signal=True)
 
-    async def open_group_session(self, session_id: str) -> bool:
-        """Open a group session, fetching it from the backend if needed."""
+    def get_session(self, session_id: str):
+        """Return one cached session for external UI integrations."""
+        return self._get_session(session_id)
+
+    async def open_session(self, session_id: str) -> bool:
+        """Open any existing session by id, fetching it when needed."""
         if self.focus_session(session_id):
             return True
 
@@ -1305,6 +1318,10 @@ class ChatInterface(QWidget):
             return False
 
         return self.focus_session(session.session_id)
+
+    async def open_group_session(self, session_id: str) -> bool:
+        """Open a group session, fetching it from the backend if needed."""
+        return await self.open_session(session_id)
 
     async def open_direct_session(self, user_id: str, display_name: str = "", avatar: str = "") -> bool:
         """Open an existing direct session or create one for the given contact."""

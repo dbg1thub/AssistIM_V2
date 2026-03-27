@@ -441,6 +441,8 @@ class ChatInfoDrawerOverlay(QWidget):
         self.setObjectName("chatInfoOverlay")
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setEnabled(False)
         self.hide()
 
         self.drawer = AcrylicDrawerSurface(self)
@@ -497,6 +499,8 @@ class ChatInfoDrawerOverlay(QWidget):
             return
 
         self._open = True
+        self.setEnabled(True)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
         self.show()
         self.raise_()
         self.visibilityChanged.emit(True)
@@ -512,20 +516,30 @@ class ChatInfoDrawerOverlay(QWidget):
         self._animation.setEndValue(end_rect)
         self._animation.start()
 
-    def close_drawer(self) -> None:
+    def close_drawer(self, *, immediate: bool = False) -> None:
         if not self.isVisible():
             self._open = False
+            self.setEnabled(False)
+            self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
             return
 
         self._open = False
         self.visibilityChanged.emit(False)
         self._animation.stop()
+        if immediate:
+            self.drawer.setGeometry(self._closed_rect())
+            self.setEnabled(False)
+            self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+            self.hide()
+            return
         self._animation.setStartValue(self.drawer.geometry())
         self._animation.setEndValue(self._closed_rect())
         self._animation.start()
 
     def _on_animation_finished(self) -> None:
         if not self._open:
+            self.setEnabled(False)
+            self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
             self.hide()
 
     def _drawer_width(self) -> int:

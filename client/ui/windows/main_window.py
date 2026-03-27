@@ -1,9 +1,10 @@
 import asyncio
 import sys
+from collections import OrderedDict
 
 import darkdetect
-from PySide6.QtCore import QTimer, Signal
-from PySide6.QtGui import QCloseEvent
+from PySide6.QtCore import QPoint, QRect, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import QCloseEvent, QColor, QCursor, QIcon, QPainter
 from PySide6.QtWidgets import QApplication, QSystemTrayIcon
 from qfluentwidgets import (
     Action,
@@ -27,12 +28,17 @@ from client.core.i18n import tr
 from client.core.logging import setup_logging
 from client.core.avatar_rendering import get_avatar_image_store
 from client.core.avatar_utils import avatar_seed, profile_avatar_seed
+from client.events.event_bus import get_event_bus
+from client.managers.session_manager import SessionEvent
 from client.ui.windows.chat_interface import ChatInterface
 from client.ui.windows.contact_interface import ContactInterface
 from client.ui.windows.discovery_interface import DiscoveryInterface
 from client.ui.windows.settings_interface import SettingsInterface
 from client.ui.widgets.navigation_user_card import RegularWeightNavigationUserCard
+from client.ui.widgets.tray_message_flyout import TrayAlertEntry, TrayMessageFlyoutView
 from client.ui.widgets.user_profile_flyout import UserProfileCoordinator
+from qfluentwidgets.components.material import AcrylicFlyout
+from qfluentwidgets.components.widgets.flyout import FlyoutAnimationType
 
 
 setup_logging()
@@ -82,8 +88,27 @@ class MainWindow(FluentWindow):
         self._tray_message_shown = False
         self._tray_icon: QSystemTrayIcon | None = None
         self._tray_menu: AcrylicMenu | None = None
+        self._tray_alert_entries: OrderedDict[str, TrayAlertEntry] = OrderedDict()
+        self._tray_attention_enabled = False
+        self._tray_flash_on = False
+        self._tray_normal_icon: QIcon = self.windowIcon()
+        self._tray_attention_icon: QIcon = self._build_attention_tray_icon(self._tray_normal_icon)
+        self._tray_flyout = None
+        self._tray_flyout_view: TrayMessageFlyoutView | None = None
+        self._tray_flash_timer = QTimer(self)
+        self._tray_flash_timer.setInterval(480)
+        self._tray_flash_timer.timeout.connect(self._toggle_tray_flash)
+        self._tray_hover_timer = QTimer(self)
+        self._tray_hover_timer.setInterval(120)
+        self._tray_hover_timer.timeout.connect(self._poll_tray_hover)
+        self._tray_leave_timer = QTimer(self)
+        self._tray_leave_timer.setSingleShot(True)
+        self._tray_leave_timer.setInterval(240)
+        self._tray_leave_timer.timeout.connect(self._close_tray_alert_flyout)
         self._ui_tasks: set[asyncio.Task] = set()
         self._contact_open_task: asyncio.Task | None = None
+        self._event_bus = get_event_bus()
+        self._event_subscriptions: list[tuple[str, object]] = []
         self._force_logout_pending = False
         self._force_logout_info_bar = None
         self._force_logout_timer = QTimer(self)
@@ -113,6 +138,9 @@ class MainWindow(FluentWindow):
         self.navigationInterface.setAcrylicEnabled(cfg.get(cfg.micaEnabled))
         self.navigationInterface.setMinimumExpandWidth(self.NAVIGATION_MENU_THRESHOLD)
         self.initNavigation()
+        self._subscribe_to_events()
+        if hasattr(self, "stackedWidget"):
+            self.stackedWidget.currentChanged.connect(self._on_sub_interface_changed)
         self._init_system_tray()
         self.destroyed.connect(self._on_destroyed)
 
@@ -142,6 +170,20 @@ class MainWindow(FluentWindow):
         )
         self.navigationInterface.panel.setReturnButtonVisible(False)
         self._sync_user_card(self.user_profile.current_user_snapshot())
+
+    def _on_sub_interface_changed(self, index: int) -> None:
+        """Close chat-only transient layers when navigation leaves the chat page."""
+        if not hasattr(self, "stackedWidget"):
+            return
+        current_widget = self.stackedWidget.widget(index)
+        if current_widget is not self.chat_interface:
+            self.chat_interface.close_transient_panels()
+
+    def switchTo(self, interface):
+        """Close chat overlays before switching to another top-level page."""
+        if interface is not self.chat_interface:
+            self.chat_interface.close_transient_panels()
+        return super().switchTo(interface)
 
     def _init_user_card(self) -> None:
         """Insert the current-account user card into the navigation area."""
@@ -241,12 +283,14 @@ class MainWindow(FluentWindow):
         self._tray_menu.addAction(exit_action)
         self._tray_icon.setContextMenu(self._tray_menu)
         self._tray_icon.show()
+        self._apply_tray_icon()
 
     def _onThemeChangedFinished(self):
         """Refresh mica effect after theme changes."""
         super()._onThemeChangedFinished()
         if self.isMicaEffectEnabled():
             QTimer.singleShot(100, lambda: self.windowEffect.setMicaEffect(self.winId(), isDarkTheme()))
+        self._refresh_tray_icons()
 
     def _detect_system_theme(self) -> str:
         """Return current Windows theme label."""
@@ -275,6 +319,7 @@ class MainWindow(FluentWindow):
             QTimer.singleShot(100, lambda: self.windowEffect.setMicaEffect(self.winId(), isDarkTheme()))
 
     def show_from_tray(self) -> None:
+        self._dismiss_tray_attention(clear_entries=True)
         if self.isMinimized():
             self.showNormal()
         else:
@@ -285,6 +330,8 @@ class MainWindow(FluentWindow):
     def _on_tray_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
         if reason in {QSystemTrayIcon.ActivationReason.Trigger, QSystemTrayIcon.ActivationReason.DoubleClick}:
             self.show_from_tray()
+        elif reason == QSystemTrayIcon.ActivationReason.Context:
+            self._close_tray_alert_flyout()
 
     def show_session_replaced_warning(self) -> None:
         """Warn the user that this client was replaced by a newer login and close shortly after."""
@@ -368,12 +415,385 @@ class MainWindow(FluentWindow):
 
     def _on_destroyed(self, *_args) -> None:
         """Cancel outstanding UI tasks when the window is torn down."""
+        self._unsubscribe_from_events()
+        self._dismiss_tray_attention(clear_entries=True)
         self.user_profile.close()
         self._cancel_pending_task(self._contact_open_task)
         self._contact_open_task = None
         for task in list(self._ui_tasks):
             if not task.done():
                 task.cancel()
+
+    def _subscribe_to_events(self) -> None:
+        """Subscribe to session updates relevant to tray alerts."""
+        self._subscribe_sync(SessionEvent.MESSAGE_ADDED, self._on_tray_message_added)
+        self._subscribe_sync(SessionEvent.UNREAD_CHANGED, self._on_tray_unread_changed)
+        self._subscribe_sync(SessionEvent.UPDATED, self._on_tray_session_updated)
+        self._subscribe_sync(SessionEvent.DELETED, self._on_tray_session_deleted)
+
+    def _subscribe_sync(self, event_type: str, handler) -> None:
+        self._event_subscriptions.append((event_type, handler))
+        self._event_bus.subscribe_sync(event_type, handler)
+
+    def _unsubscribe_from_events(self) -> None:
+        while self._event_subscriptions:
+            event_type, handler = self._event_subscriptions.pop()
+            self._event_bus.unsubscribe_sync(event_type, handler)
+
+    def _on_tray_message_added(self, data: dict | None) -> None:
+        """Raise tray attention when a background message lands in any visible session."""
+        payload = dict(data or {})
+        message = payload.get("message")
+        session_id = str(payload.get("session_id", "") or getattr(message, "session_id", "") or "")
+        if not session_id or message is None or getattr(message, "is_self", False):
+            return
+
+        session = self.chat_interface.get_session(session_id)
+        if session is None or not self._can_trigger_tray_alert(session):
+            return
+
+        existing = self._tray_alert_entries.get(session_id)
+        session_unread = int(getattr(session, "unread_count", 0) or 0)
+        fallback_unread = int(existing.unread_count if existing is not None else 0) + 1
+        display_unread = session_unread if session_unread > 0 else max(1, fallback_unread)
+        self._upsert_tray_alert(session, unread_count=display_unread)
+        self._set_tray_attention_enabled(True)
+
+    def _on_tray_unread_changed(self, data: dict | None) -> None:
+        """Start or stop tray attention based on unread-count changes."""
+        payload = dict(data or {})
+        session_id = str(payload.get("session_id", "") or "")
+        unread_count = int(payload.get("unread_count", 0) or 0)
+        if not session_id:
+            return
+
+        session = self.chat_interface.get_session(session_id)
+        if unread_count <= 0 or session is None:
+            self._remove_tray_alert(session_id)
+            return
+
+        if session_id in self._tray_alert_entries:
+            self._upsert_tray_alert(session, unread_count=unread_count, keep_order=True)
+        elif self._can_trigger_tray_alert(session):
+            self._upsert_tray_alert(session, unread_count=unread_count)
+            self._set_tray_attention_enabled(True)
+
+    def _on_tray_session_updated(self, data: dict | None) -> None:
+        """Keep existing tray-alert rows in sync with session state."""
+        payload = dict(data or {})
+        sessions = payload.get("sessions")
+        session_objects = []
+        if isinstance(sessions, list):
+            session_objects.extend(sessions)
+        elif payload.get("session") is not None:
+            session_objects.append(payload.get("session"))
+
+        for session in session_objects:
+            session_id = getattr(session, "session_id", "")
+            if not session_id:
+                continue
+            if session_id in self._tray_alert_entries:
+                if not self._can_display_tray_alert(session):
+                    self._remove_tray_alert(session_id)
+                    continue
+                self._upsert_tray_alert(
+                    session,
+                    unread_count=max(
+                        int(getattr(session, "unread_count", 0) or 0),
+                        int(self._tray_alert_entries[session_id].unread_count or 0),
+                    ),
+                    keep_order=True,
+                )
+
+    def _on_tray_session_deleted(self, data: dict | None) -> None:
+        payload = dict(data or {})
+        session_id = str(payload.get("session_id", "") or "")
+        if session_id:
+            self._remove_tray_alert(session_id)
+
+    def _can_display_tray_alert(self, session) -> bool:
+        """Return whether one session can be shown inside tray-alert UI."""
+        if self._tray_icon is None or not self._tray_icon.isVisible():
+            return False
+        if session is None or getattr(session, "is_ai_session", False):
+            return False
+        if bool(getattr(session, "extra", {}).get("is_muted", False)):
+            return False
+        return True
+
+    def _can_trigger_tray_alert(self, session) -> bool:
+        """Return whether one session should start tray flashing right now."""
+        if not self._can_display_tray_alert(session):
+            return False
+
+        app = QApplication.instance()
+        is_foreground = bool(
+            app
+            and app.applicationState() == Qt.ApplicationState.ApplicationActive
+            and self.isVisible()
+            and not self.isMinimized()
+            and self.isActiveWindow()
+        )
+        return not is_foreground
+
+    def _build_tray_alert_entry(self, session, *, unread_count: int | None = None) -> TrayAlertEntry:
+        extra = dict(getattr(session, "extra", {}) or {})
+        return TrayAlertEntry(
+            session_id=str(getattr(session, "session_id", "") or ""),
+            name=str(getattr(session, "name", "") or tr("session.unnamed", "Untitled Session")),
+            avatar=str(getattr(session, "avatar", "") or ""),
+            unread_count=int(unread_count if unread_count is not None else (getattr(session, "unread_count", 0) or 0)),
+            counterpart_id=str(extra.get("counterpart_id", "") or ""),
+            counterpart_username=str(extra.get("counterpart_username", "") or ""),
+        )
+
+    def _upsert_tray_alert(self, session, *, unread_count: int | None = None, keep_order: bool = False) -> None:
+        entry = self._build_tray_alert_entry(session, unread_count=unread_count)
+        if not entry.session_id:
+            return
+        if keep_order and entry.session_id in self._tray_alert_entries:
+            self._tray_alert_entries[entry.session_id] = entry
+            self._refresh_tray_flyout_entries()
+            return
+        if entry.session_id in self._tray_alert_entries:
+            self._tray_alert_entries.pop(entry.session_id, None)
+        self._tray_alert_entries[entry.session_id] = entry
+        self._tray_alert_entries.move_to_end(entry.session_id, last=False)
+        self._refresh_tray_flyout_entries()
+
+    def _remove_tray_alert(self, session_id: str) -> None:
+        if not session_id:
+            return
+        if session_id in self._tray_alert_entries:
+            self._tray_alert_entries.pop(session_id, None)
+            self._refresh_tray_flyout_entries()
+        if not self._tray_alert_entries:
+            self._dismiss_tray_attention(clear_entries=False)
+
+    def _set_tray_attention_enabled(self, enabled: bool) -> None:
+        enabled = bool(enabled and self._tray_alert_entries and self._tray_icon and self._tray_icon.isVisible())
+        self._tray_attention_enabled = enabled
+        if not enabled:
+            self._tray_flash_timer.stop()
+            self._tray_hover_timer.stop()
+            self._tray_leave_timer.stop()
+            self._tray_flash_on = False
+            self._apply_tray_icon()
+            return
+
+        if not self._tray_hover_timer.isActive():
+            self._tray_hover_timer.start()
+        if not self._tray_flash_timer.isActive():
+            self._tray_flash_on = True
+            self._tray_flash_timer.start()
+        self._apply_tray_icon()
+
+    def _dismiss_tray_attention(self, *, clear_entries: bool) -> None:
+        self._tray_leave_timer.stop()
+        self._close_tray_alert_flyout()
+        if clear_entries:
+            self._tray_alert_entries.clear()
+        self._set_tray_attention_enabled(False)
+
+    def _toggle_tray_flash(self) -> None:
+        if not self._tray_attention_enabled:
+            self._tray_flash_timer.stop()
+            self._apply_tray_icon()
+            return
+
+        if self._tray_flyout is not None and self._tray_flyout.isVisible():
+            self._tray_flash_on = True
+        elif self._tray_menu is not None and self._tray_menu.isVisible():
+            self._tray_flash_on = True
+        else:
+            self._tray_flash_on = not self._tray_flash_on
+        self._apply_tray_icon()
+
+    def _apply_tray_icon(self) -> None:
+        if self._tray_icon is None:
+            return
+        if self._tray_attention_enabled and self._tray_flash_on:
+            self._tray_icon.setIcon(self._tray_attention_icon)
+        else:
+            self._tray_icon.setIcon(self._tray_normal_icon)
+
+    def _refresh_tray_icons(self) -> None:
+        self._tray_normal_icon = self.windowIcon()
+        self._tray_attention_icon = self._build_attention_tray_icon(self._tray_normal_icon)
+        self._apply_tray_icon()
+
+    @staticmethod
+    def _build_attention_tray_icon(base_icon: QIcon) -> QIcon:
+        """Overlay a small red dot onto the normal tray icon."""
+        icon = QIcon()
+        for size in (16, 20, 24, 32):
+            pixmap = base_icon.pixmap(size, size)
+            if pixmap.isNull():
+                continue
+
+            painter = QPainter(pixmap)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            badge_size = max(8, int(size * 0.58))
+            badge_rect = QRect(size - badge_size - 1, 0, badge_size, badge_size)
+            painter.setPen(QColor("#FFFFFF"))
+            painter.setBrush(QColor("#FFFFFF"))
+            painter.drawEllipse(badge_rect.adjusted(-1, -1, 1, 1))
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor("#FF4D4F"))
+            painter.drawEllipse(badge_rect)
+            painter.end()
+            icon.addPixmap(pixmap)
+
+        return icon if not icon.isNull() else base_icon
+
+    def _poll_tray_hover(self) -> None:
+        if not self._tray_attention_enabled or self._tray_icon is None or not self._tray_icon.isVisible():
+            return
+        if self._tray_menu is not None and self._tray_menu.isVisible():
+            self._close_tray_alert_flyout()
+            return
+
+        tray_rect = self._tray_icon.geometry()
+        if not tray_rect.isValid() or tray_rect.isNull():
+            return
+
+        cursor_pos = QCursor.pos()
+        hovered_tray = tray_rect.adjusted(-2, -2, 2, 2).contains(cursor_pos)
+        hovered_flyout = bool(
+            self._tray_flyout is not None
+            and self._tray_flyout.isVisible()
+            and self._tray_flyout.frameGeometry().adjusted(-4, -4, 4, 4).contains(cursor_pos)
+        )
+
+        if hovered_tray or hovered_flyout:
+            self._tray_leave_timer.stop()
+            if hovered_tray and (self._tray_flyout is None or not self._tray_flyout.isVisible()):
+                self._show_tray_alert_flyout(tray_rect)
+            return
+
+        if self._tray_flyout is not None and self._tray_flyout.isVisible() and not self._tray_leave_timer.isActive():
+            self._tray_leave_timer.start()
+
+    def _show_tray_alert_flyout(self, tray_rect: QRect | None = None) -> None:
+        if not self._tray_alert_entries:
+            return
+        if self._tray_menu is not None and self._tray_menu.isVisible():
+            return
+
+        tray_rect = tray_rect or (self._tray_icon.geometry() if self._tray_icon is not None else QRect())
+        if not tray_rect.isValid() or tray_rect.isNull():
+            return
+
+        if self._tray_flyout is not None and self._tray_flyout.isVisible() and self._tray_flyout_view is not None:
+            self._tray_flyout_view.set_entries(list(self._tray_alert_entries.values()))
+            self._tray_flyout.adjustSize()
+            return
+
+        view = TrayMessageFlyoutView()
+        view.set_entries(list(self._tray_alert_entries.values()))
+        view.sessionActivated.connect(self._on_tray_alert_session_activated)
+        view.ignoreRequested.connect(self._on_tray_alert_ignore_requested)
+        view.hoverEntered.connect(self._tray_leave_timer.stop)
+        view.hoverLeft.connect(lambda: self._tray_leave_timer.start())
+
+        flyout = AcrylicFlyout(view, None)
+        flyout.closed.connect(self._clear_tray_flyout)
+        flyout.show()
+        flyout.adjustSize()
+
+        ani_type = self._tray_flyout_animation_type(tray_rect)
+        target_pos = self._tray_flyout_top_left(tray_rect, flyout.sizeHint(), ani_type)
+        self._tray_flyout = flyout
+        self._tray_flyout_view = view
+        flyout.exec(target_pos, aniType=ani_type)
+        self._tray_flash_on = True
+        self._apply_tray_icon()
+
+    def _refresh_tray_flyout_entries(self) -> None:
+        if self._tray_flyout_view is None:
+            return
+        entries = list(self._tray_alert_entries.values())
+        self._tray_flyout_view.set_entries(entries)
+        if self._tray_flyout is not None:
+            self._tray_flyout.adjustSize()
+            tray_rect = self._tray_icon.geometry() if self._tray_icon is not None else QRect()
+            if self._tray_flyout.isVisible() and tray_rect.isValid() and not tray_rect.isNull():
+                ani_type = self._tray_flyout_animation_type(tray_rect)
+                self._tray_flyout.move(self._tray_flyout_top_left(tray_rect, self._tray_flyout.sizeHint(), ani_type))
+        if not entries:
+            self._close_tray_alert_flyout()
+
+    def _tray_flyout_animation_type(self, tray_rect: QRect) -> FlyoutAnimationType:
+        screen = QApplication.screenAt(tray_rect.center()) or QApplication.primaryScreen()
+        if screen is None:
+            return FlyoutAnimationType.PULL_UP
+
+        geometry = screen.availableGeometry()
+        distances = {
+            FlyoutAnimationType.DROP_DOWN: abs(tray_rect.top() - geometry.top()),
+            FlyoutAnimationType.PULL_UP: abs(geometry.bottom() - tray_rect.bottom()),
+            FlyoutAnimationType.SLIDE_RIGHT: abs(tray_rect.left() - geometry.left()),
+            FlyoutAnimationType.SLIDE_LEFT: abs(geometry.right() - tray_rect.right()),
+        }
+        return min(distances, key=distances.get)
+
+    def _tray_flyout_top_left(self, tray_rect: QRect, size: QSize, ani_type: FlyoutAnimationType) -> QPoint:
+        screen = QApplication.screenAt(tray_rect.center()) or QApplication.primaryScreen()
+        if screen is None:
+            return tray_rect.topLeft()
+        geometry = screen.availableGeometry()
+        width = max(0, size.width())
+        height = max(0, size.height())
+
+        if ani_type == FlyoutAnimationType.DROP_DOWN:
+            point = QPoint(tray_rect.center().x() - width // 2, tray_rect.bottom() - 6)
+        elif ani_type == FlyoutAnimationType.SLIDE_LEFT:
+            point = QPoint(tray_rect.left() - width + 8, tray_rect.center().y() - height // 2)
+        elif ani_type == FlyoutAnimationType.SLIDE_RIGHT:
+            point = QPoint(tray_rect.right() - 8, tray_rect.center().y() - height // 2)
+        else:
+            point = QPoint(tray_rect.center().x() - width // 2, tray_rect.top() - height + 6)
+
+        x = min(max(geometry.left() + 8, point.x()), geometry.right() - width - 8)
+        y = min(max(geometry.top() + 8, point.y()), geometry.bottom() - height - 8)
+        return QPoint(x, y)
+
+    def _close_tray_alert_flyout(self) -> None:
+        self._tray_leave_timer.stop()
+        if self._tray_flyout is not None and self._tray_flyout.isVisible():
+            self._tray_flyout.close()
+        else:
+            self._clear_tray_flyout()
+
+    def _clear_tray_flyout(self) -> None:
+        self._tray_flyout = None
+        self._tray_flyout_view = None
+        if self._tray_attention_enabled:
+            self._tray_flash_on = False
+            self._apply_tray_icon()
+
+    def _on_tray_alert_ignore_requested(self) -> None:
+        self._dismiss_tray_attention(clear_entries=False)
+
+    def _on_tray_alert_session_activated(self, session_id: str) -> None:
+        self._dismiss_tray_attention(clear_entries=True)
+        self._create_ui_task(self._open_tray_session(session_id), f"open tray session {session_id}")
+
+    async def _open_tray_session(self, session_id: str) -> None:
+        self.show_from_tray()
+        if hasattr(self, "switchTo"):
+            self.switchTo(self.chat_interface)
+        else:
+            self.stackedWidget.setCurrentWidget(self.chat_interface)
+
+        opened = await self.chat_interface.open_session(session_id)
+        if not opened:
+            InfoBar.warning(
+                tr("main_window.contact_jump.unavailable_title", "Chat"),
+                tr("main_window.contact_jump.unavailable_message", "Unable to open this conversation right now."),
+                parent=self,
+                duration=2200,
+            )
 
     def _cancel_pending_task(self, task: asyncio.Task | None) -> None:
         """Cancel a tracked task if it is still running."""

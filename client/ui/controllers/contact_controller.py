@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -15,6 +16,24 @@ from client.ui.controllers.auth_controller import get_auth_controller
 
 setup_logging()
 logger = logging.get_logger(__name__)
+
+
+def _looks_like_generated_user_id(value: str) -> bool:
+    """Return whether a raw identifier looks like an internal UUID-style id."""
+    candidate = str(value or "").strip()
+    return len(candidate) >= 24 and candidate.count("-") >= 2
+
+
+def _preferred_request_name(name: str, user_id: str, *, fallback_key: str, fallback_default: str) -> str:
+    """Resolve a human-friendly request party name without exposing noisy generated ids."""
+    display = str(name or "").strip()
+    if display:
+        return display
+
+    candidate = str(user_id or "").strip()
+    if candidate and not _looks_like_generated_user_id(candidate):
+        return candidate
+    return tr(fallback_key, fallback_default)
 
 
 try:
@@ -75,11 +94,17 @@ class FriendRequestRecord:
     status: str = "pending"
     created_at: str = ""
     sender_name: str = ""
+    receiver_name: str = ""
 
     @property
     def display_name(self) -> str:
         """Return the best visible name for the sender."""
-        return self.sender_name or self.sender_id or tr("contact.request.new_friend", "New Friend")
+        return _preferred_request_name(
+            self.sender_name,
+            self.sender_id,
+            fallback_key="contact.request.new_friend",
+            fallback_default="New Friend",
+        )
 
     def is_incoming(self, current_user_id: str) -> bool:
         """Return whether the request was received by the current user."""
@@ -98,7 +123,12 @@ class FriendRequestRecord:
     def counterpart_name(self, current_user_id: str) -> str:
         """Return the best display name for the other party."""
         if self.is_outgoing(current_user_id):
-            return self.receiver_id or tr("contact.request.target_user", "Target User")
+            return _preferred_request_name(
+                self.receiver_name,
+                self.receiver_id,
+                fallback_key="contact.request.target_user",
+                fallback_default="Target User",
+            )
         return self.display_name
 
     def direction_label(self, current_user_id: str) -> str:
@@ -207,28 +237,83 @@ class ContactController:
         """Load pending friend requests."""
         payload = await self._contact_service.fetch_friend_requests()
         requests: list[FriendRequestRecord] = []
+        pending_records: list[dict[str, str]] = []
+        user_ids_to_resolve: set[str] = set()
+        current_user_id = self.get_current_user_id()
 
         for item in payload or []:
             from_user = item.get("from_user") or item.get("sender") or {}
+            to_user = item.get("to_user") or item.get("receiver") or {}
+            sender_id = str(item.get("sender_id", "") or "")
+            receiver_id = str(item.get("receiver_id", "") or "")
             sender_name = (
                 str(from_user.get("nickname", "") or "")
                 or str(from_user.get("username", "") or "")
                 or str(item.get("sender_name", "") or "")
             )
+            receiver_name = (
+                str(to_user.get("nickname", "") or "")
+                or str(to_user.get("username", "") or "")
+                or str(item.get("receiver_name", "") or "")
+            )
+            if sender_id and sender_id != current_user_id and not sender_name:
+                user_ids_to_resolve.add(sender_id)
+            if receiver_id and receiver_id != current_user_id and not receiver_name:
+                user_ids_to_resolve.add(receiver_id)
+
+            pending_records.append(
+                {
+                    "id": str(item.get("id", "") or ""),
+                    "sender_id": sender_id,
+                    "receiver_id": receiver_id,
+                    "message": str(item.get("message", "") or ""),
+                    "status": str(item.get("status", "pending") or "pending"),
+                    "created_at": str(item.get("created_at", "") or ""),
+                    "sender_name": sender_name,
+                    "receiver_name": receiver_name,
+                }
+            )
+
+        resolved_names = await self._load_request_user_names(user_ids_to_resolve)
+        for item in pending_records:
             requests.append(
                 FriendRequestRecord(
-                    id=str(item.get("id", "") or ""),
-                    sender_id=str(item.get("sender_id", "") or ""),
-                    receiver_id=str(item.get("receiver_id", "") or ""),
-                    message=str(item.get("message", "") or ""),
-                    status=str(item.get("status", "pending") or "pending"),
-                    created_at=str(item.get("created_at", "") or ""),
-                    sender_name=sender_name,
+                    id=item["id"],
+                    sender_id=item["sender_id"],
+                    receiver_id=item["receiver_id"],
+                    message=item["message"],
+                    status=item["status"],
+                    created_at=item["created_at"],
+                    sender_name=item["sender_name"] or resolved_names.get(item["sender_id"], ""),
+                    receiver_name=item["receiver_name"] or resolved_names.get(item["receiver_id"], ""),
                 )
             )
 
         requests.sort(key=lambda item: item.created_at, reverse=True)
         return requests
+
+    async def _load_request_user_names(self, user_ids: set[str]) -> dict[str, str]:
+        """Fetch missing user names for request rows in one concurrent pass."""
+        if not user_ids:
+            return {}
+
+        async def _fetch_name(user_id: str) -> tuple[str, str]:
+            try:
+                payload = await self._user_service.fetch_user(user_id)
+            except Exception:
+                logger.debug("Failed to resolve request user name for %s", user_id, exc_info=True)
+                return user_id, ""
+            return user_id, self._extract_user_display_name(payload)
+
+        results = await asyncio.gather(*(_fetch_name(user_id) for user_id in user_ids))
+        return {user_id: name for user_id, name in results if name}
+
+    @staticmethod
+    def _extract_user_display_name(payload: object) -> str:
+        """Extract a visible display name from a user payload."""
+        if not isinstance(payload, dict):
+            return ""
+        return str(payload.get("nickname", "") or "") or str(payload.get("username", "") or "")
 
     async def search_users(self, keyword: str, limit: int = 20) -> list[UserSearchRecord]:
         """Search users for the add-friend flow."""
