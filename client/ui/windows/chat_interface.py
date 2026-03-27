@@ -1,4 +1,4 @@
-"""Chat window container that keeps the new architecture but migrates old UI styling."""
+﻿"""Chat window container that keeps the new architecture but migrates old UI styling."""
 
 from __future__ import annotations
 
@@ -10,17 +10,19 @@ from datetime import datetime
 from typing import Optional
 
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QGuiApplication, QPixmap
+from PySide6.QtGui import QColor, QGuiApplication, QPixmap
 from PySide6.QtWidgets import QDialog, QHBoxLayout, QLabel, QScrollArea, QVBoxLayout, QWidget
 
-from qfluentwidgets import Action, InfoBar, PrimaryPushButton, PushButton, RoundMenu, SubtitleLabel, TextEdit
+from qfluentwidgets import Action, BodyLabel, InfoBar, MessageBoxBase, PrimaryPushButton, PushButton, RoundMenu, SubtitleLabel, TextEdit
 
 from client.core.i18n import tr
+from client.core.message_actions import should_offer_delete, should_offer_recall
 from client.events.event_bus import get_event_bus
 from client.managers.message_manager import MessageEvent
 from client.managers.session_manager import SessionEvent
 from client.models.message import MessageStatus, MessageType, format_message_preview
 from client.ui.controllers.chat_controller import get_chat_controller
+from client.ui.controllers.session_controller import get_session_controller
 from client.ui.styles import StyleSheet
 from client.ui.widgets.chat_panel import ChatPanel
 from client.ui.widgets.fluent_splitter import FluentSplitter
@@ -115,6 +117,28 @@ class EditMessageDialog(QDialog):
         return self.editor.toPlainText().strip()
 
 
+class DeleteMessageConfirmDialog(MessageBoxBase):
+    """Ask for confirmation before deleting one local chat message."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent=parent)
+        title = SubtitleLabel(tr("chat.delete.confirm_title", "Delete Message"), self.widget)
+        content = BodyLabel(
+            tr(
+                "chat.delete.confirm_content",
+                "Delete this message from the current device? This action won't affect the other participant.",
+            ),
+            self.widget,
+        )
+        content.setWordWrap(True)
+        self.viewLayout.addWidget(title)
+        self.viewLayout.addWidget(content)
+        self.viewLayout.addStretch(1)
+        self.yesButton.setText(tr("chat.delete.confirm_action", "Delete"))
+        self.cancelButton.setText(tr("common.cancel", "Cancel"))
+        self.widget.setMinimumWidth(360)
+
+
 class ChatInterface(QWidget):
     """Main chat interface with session list on the left and chat view on the right."""
 
@@ -127,6 +151,7 @@ class ChatInterface(QWidget):
         super().__init__(parent)
 
         self._chat_controller = get_chat_controller()
+        self._session_controller = get_session_controller()
         self._current_session_id: Optional[str] = None
         self._load_task: Optional[asyncio.Task] = None
         self._event_bus = get_event_bus()
@@ -142,6 +167,7 @@ class ChatInterface(QWidget):
         self._pending_read_receipts: set[tuple[str, str]] = set()
         self._composer_drafts: dict[str, list[dict]] = {}
         self._ui_tasks: set[asyncio.Task] = set()
+        self._message_context_menu: RoundMenu | None = None
         self._typing_indicator_timer = QTimer(self)
         self._typing_indicator_timer.setSingleShot(True)
 
@@ -190,6 +216,12 @@ class ChatInterface(QWidget):
         self.chat_panel.voice_call_requested.connect(self._on_voice_call_requested)
         self.chat_panel.video_call_requested.connect(self._on_video_call_requested)
         self.chat_panel.older_messages_requested.connect(self._on_older_messages_requested)
+        self.chat_panel.chat_history_requested.connect(self._on_chat_history_requested)
+        self.chat_panel.chat_info_search_requested.connect(self._on_chat_info_search_requested)
+        self.chat_panel.chat_info_add_requested.connect(self._on_chat_info_add_requested)
+        self.chat_panel.chat_info_clear_requested.connect(self._on_chat_info_clear_requested)
+        self.chat_panel.chat_info_mute_toggled.connect(self._on_chat_info_mute_toggled)
+        self.chat_panel.chat_info_pin_toggled.connect(self._on_chat_info_pin_toggled)
         self.chat_panel.get_message_list().customContextMenuRequested.connect(self._on_message_context_menu)
 
     def _on_splitter_moved(self, _pos: int, _index: int) -> None:
@@ -863,6 +895,78 @@ class ChatInterface(QWidget):
             duration=1800,
         )
 
+    def _on_chat_history_requested(self) -> None:
+        """Show placeholder feedback for the reserved chat-history entry point."""
+        InfoBar.info(
+            tr("chat.info.history.title", "Chat History"),
+            tr("chat.info.history.unavailable", "The chat history entry is reserved and will be connected next."),
+            parent=self.window(),
+            duration=1800,
+        )
+
+    def _on_chat_info_search_requested(self) -> None:
+        """Show placeholder feedback for chat-content search."""
+        InfoBar.info(
+            tr("chat.info.search.title", "Find Chat Content"),
+            tr("chat.info.search.unavailable", "The in-chat search feature will be connected next."),
+            parent=self.window(),
+            duration=1800,
+        )
+
+    def _on_chat_info_add_requested(self) -> None:
+        """Show placeholder feedback for the future add-member action."""
+        InfoBar.info(
+            tr("chat.info.add.title", "Add"),
+            tr("chat.info.add.unavailable", "This entry is reserved for future group-chat expansion."),
+            parent=self.window(),
+            duration=1800,
+        )
+
+    def _on_chat_info_clear_requested(self) -> None:
+        """Show placeholder feedback for clear-history until durable sync semantics are defined."""
+        InfoBar.info(
+            tr("chat.info.clear.title", "Clear Chat History"),
+            tr(
+                "chat.info.clear.unavailable",
+                "The clear-history entry is reserved. Durable sync-safe clearing will be connected next.",
+            ),
+            parent=self.window(),
+            duration=2200,
+        )
+
+    def _on_chat_info_mute_toggled(self, muted: bool) -> None:
+        """Persist local do-not-disturb state for the current session."""
+        session_id = self._current_session_id
+        if not session_id:
+            return
+
+        session = self._get_session(session_id)
+        if session is not None:
+            session.extra["is_muted"] = bool(muted)
+            self._event_bus.emit_sync(SessionEvent.UPDATED, {"session": session})
+
+        self._schedule_ui_task(
+            self._session_controller.set_muted(session_id, muted),
+            f"mute session {session_id}",
+        )
+
+    def _on_chat_info_pin_toggled(self, pinned: bool) -> None:
+        """Persist pin state for the current session."""
+        session_id = self._current_session_id
+        if not session_id:
+            return
+
+        session = self._get_session(session_id)
+        if session is not None:
+            setattr(session, "is_pinned", bool(pinned))
+            session.extra["is_pinned"] = bool(pinned)
+            self._event_bus.emit_sync(SessionEvent.UPDATED, {"session": session})
+
+        self._schedule_ui_task(
+            self._session_controller.set_pinned(session_id, pinned),
+            f"pin session {session_id}",
+        )
+
     async def _send_file_message(self, session_id: str, file_path: str) -> None:
         """Upload and send a file via ChatController."""
         try:
@@ -872,43 +976,77 @@ class ChatInterface(QWidget):
 
     def _on_message_context_menu(self, position) -> None:
         """Show message actions for the clicked bubble."""
-        message = self.chat_panel.get_message_at(position)
+        message = self.chat_panel.get_message_at(position, bubble_only=True)
         if not message:
             return
+
+        if self._message_context_menu is not None:
+            self._message_context_menu.close()
+            self._message_context_menu.deleteLater()
+            self._message_context_menu = None
 
         menu = RoundMenu(parent=self)
         copy_action = None
         open_action = None
+        translate_action = None
+        quote_action = None
+        multiselect_action = None
         edit_action = None
         recall_action = None
         delete_action = None
         retry_action = None
 
+        basic_actions: list[Action] = []
+        placeholder_actions: list[Action] = []
+        message_actions: list[Action] = []
+        retry_actions: list[Action] = []
+
         if message.message_type == MessageType.TEXT and message.content:
             copy_action = Action(tr("chat.context.copy", "Copy"), self)
-            menu.addAction(copy_action)
+            basic_actions.append(copy_action)
 
         if message.message_type == MessageType.IMAGE:
             open_action = Action(tr("chat.context.open_image", "View Image"), self)
-            menu.addAction(open_action)
+            basic_actions.append(open_action)
         elif message.message_type in {MessageType.FILE, MessageType.VIDEO}:
             open_action = Action(tr("chat.context.open_attachment", "Open"), self)
-            menu.addAction(open_action)
+            basic_actions.append(open_action)
+
+        if message.message_type == MessageType.TEXT:
+            translate_action = Action(tr("chat.context.translate", "Translate"), self)
+            translate_action.setEnabled(False)
+            placeholder_actions.append(translate_action)
+
+        quote_action = Action(tr("chat.context.quote", "Quote"), self)
+        quote_action.setEnabled(False)
+        placeholder_actions.append(quote_action)
+
+        multiselect_action = Action(tr("chat.context.multi_select", "Multi-select"), self)
+        multiselect_action.setEnabled(False)
+        placeholder_actions.append(multiselect_action)
 
         if message.is_self and message.message_type == MessageType.TEXT and message.status != MessageStatus.RECALLED:
             edit_action = Action(tr("chat.context.edit", "Edit"), self)
-            menu.addAction(edit_action)
+            message_actions.append(edit_action)
 
-        if message.is_self and message.status not in {MessageStatus.RECALLED, MessageStatus.FAILED}:
+        if should_offer_recall(message):
             recall_action = Action(tr("chat.context.recall", "Recall"), self)
-            menu.addAction(recall_action)
-
-        delete_action = Action(tr("common.delete", "Delete"), self)
-        menu.addAction(delete_action)
+            message_actions.append(recall_action)
+        elif should_offer_delete(message):
+            delete_action = Action(tr("common.delete", "Delete"), self)
+            message_actions.append(delete_action)
 
         if message.is_self and message.status == MessageStatus.FAILED:
             retry_action = Action(tr("chat.context.retry", "Retry"), self)
-            menu.addAction(retry_action)
+            retry_actions.append(retry_action)
+
+        for actions in (basic_actions, placeholder_actions, message_actions, retry_actions):
+            if not actions:
+                continue
+            if menu.actions():
+                menu.addSeparator()
+            for action in actions:
+                menu.addAction(action)
 
         if copy_action:
             copy_action.triggered.connect(
@@ -917,9 +1055,13 @@ class ChatInterface(QWidget):
                 )
             )
         if open_action:
-            open_action.triggered.connect(lambda _checked=False, msg=message: self._open_message(msg))
+            open_action.triggered.connect(
+                lambda _checked=False, msg=message: QTimer.singleShot(0, lambda: self._open_message(msg))
+            )
         if edit_action:
-            edit_action.triggered.connect(lambda _checked=False, msg=message: self._prompt_edit_message(msg))
+            edit_action.triggered.connect(
+                lambda _checked=False, msg=message: QTimer.singleShot(0, lambda: self._prompt_edit_message(msg))
+            )
         if recall_action:
             recall_action.triggered.connect(
                 lambda _checked=False, message_id=message.message_id: self._schedule_ui_task(
@@ -929,10 +1071,7 @@ class ChatInterface(QWidget):
             )
         if delete_action:
             delete_action.triggered.connect(
-                lambda _checked=False, msg=message: self._schedule_ui_task(
-                    self._delete_message(msg),
-                    f"delete {msg.message_id}",
-                )
+                lambda _checked=False, msg=message: QTimer.singleShot(0, lambda: self._confirm_delete_message(msg))
             )
         if retry_action:
             retry_action.triggered.connect(
@@ -942,7 +1081,23 @@ class ChatInterface(QWidget):
                 )
             )
 
-        menu.exec(self.chat_panel.get_message_list().viewport().mapToGlobal(position))
+        if delete_action:
+            delete_item = delete_action.property("item")
+            if delete_item is not None:
+                delete_item.setForeground(QColor("#d13438"))
+
+        if message.message_type == MessageType.TEXT:
+            self.chat_panel.set_context_menu_message(message.message_id)
+
+        def _on_menu_hidden() -> None:
+            if self._message_context_menu is menu:
+                self._message_context_menu = None
+            self.chat_panel.clear_context_menu_message()
+            menu.deleteLater()
+
+        menu.closedSignal.connect(_on_menu_hidden)
+        self._message_context_menu = menu
+        menu.popup(self.chat_panel.get_message_list().viewport().mapToGlobal(position))
 
     def _open_message(self, message) -> None:
         """Open an image, file, or video attachment."""
@@ -1024,6 +1179,14 @@ class ChatInterface(QWidget):
                 parent=self.window(),
                 duration=1800,
             )
+
+    def _confirm_delete_message(self, message) -> None:
+        """Ask for confirmation before scheduling one local message delete."""
+        dialog = DeleteMessageConfirmDialog(self.window())
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        self._schedule_ui_task(self._delete_message(message), f"delete {message.message_id}")
 
     async def _delete_message(self, message) -> None:
         """Delete a message locally and refresh session preview state."""
@@ -1158,3 +1321,4 @@ class ChatInterface(QWidget):
             return False
 
         return self.focus_session(session.session_id)
+

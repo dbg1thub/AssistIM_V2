@@ -13,12 +13,12 @@ from qfluentwidgets import (
     InfoBar,
     MessageBoxBase,
     NavigationItemPosition,
-    RoundMenu,
     SubtitleLabel,
     Theme,
     isDarkTheme,
     setTheme,
 )
+from qfluentwidgets.components.material import AcrylicMenu, AcrylicSystemTrayMenu
 
 from client.core.app_icons import AppIcon
 from client.core import logging
@@ -33,7 +33,6 @@ from client.ui.windows.discovery_interface import DiscoveryInterface
 from client.ui.windows.settings_interface import SettingsInterface
 from client.ui.widgets.navigation_user_card import RegularWeightNavigationUserCard
 from client.ui.widgets.user_profile_flyout import UserProfileCoordinator
-from client.ui.widgets.acrylic_surface import configure_acrylic_infobar
 
 
 setup_logging()
@@ -82,7 +81,7 @@ class MainWindow(FluentWindow):
         self._allow_exit = False
         self._tray_message_shown = False
         self._tray_icon: QSystemTrayIcon | None = None
-        self._tray_menu: RoundMenu | None = None
+        self._tray_menu: AcrylicMenu | None = None
         self._ui_tasks: set[asyncio.Task] = set()
         self._contact_open_task: asyncio.Task | None = None
         self._force_logout_pending = False
@@ -233,7 +232,7 @@ class MainWindow(FluentWindow):
         self._tray_icon.setToolTip(tr("common.app_name", "AssistIM"))
         self._tray_icon.activated.connect(self._on_tray_activated)
 
-        self._tray_menu = RoundMenu(parent=self)
+        self._tray_menu = AcrylicSystemTrayMenu(parent=self)
         show_action = Action(AppIcon.HOME, tr("common.show_main_window", "Show Main Window"), self)
         exit_action = Action(AppIcon.CLOSE, tr("common.exit", "Exit"), self)
         show_action.triggered.connect(self.show_from_tray)
@@ -295,16 +294,14 @@ class MainWindow(FluentWindow):
         self._force_logout_pending = True
         self.show_from_tray()
         self.user_profile.close_flyout()
-        self._force_logout_info_bar = configure_acrylic_infobar(
-            InfoBar.warning(
-                tr("main_window.session_replaced.title", "Signed Out"),
-                tr(
-                    "main_window.session_replaced.message",
-                    "This account signed in on another client. This window will close in a moment.",
-                ),
-                parent=self,
-                duration=3000,
-            )
+        self._force_logout_info_bar = InfoBar.warning(
+            tr("main_window.session_replaced.title", "Signed Out"),
+            tr(
+                "main_window.session_replaced.message",
+                "This account signed in on another client. This window will close in a moment.",
+            ),
+            parent=self,
+            duration=3000,
         )
         if hasattr(self._force_logout_info_bar, "closedSignal"):
             self._force_logout_info_bar.closedSignal.connect(self._request_forced_exit)

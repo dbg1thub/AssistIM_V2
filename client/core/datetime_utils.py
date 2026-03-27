@@ -9,8 +9,8 @@ from typing import Any
 def coerce_local_datetime(value: Any) -> datetime | None:
     """Normalize timestamp-like values into a naive local datetime.
 
-    Server ISO strings are currently emitted as UTC without an explicit offset,
-    so naive ISO values are interpreted as UTC and converted to local time.
+    Offset-aware ISO strings are converted into the local wall clock time.
+    Naive ISO strings are treated as already-local wall clock times.
     """
     if value is None:
         return None
@@ -32,7 +32,7 @@ def coerce_local_datetime(value: Any) -> datetime | None:
             except ValueError:
                 return None
         if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=timezone.utc)
+            return parsed
         return parsed.astimezone().replace(tzinfo=None)
     return None
 

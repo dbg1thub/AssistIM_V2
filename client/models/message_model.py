@@ -30,6 +30,7 @@ class MessageModel(QAbstractListModel):
     ShowTimeAfterRole = Qt.ItemDataRole.UserRole + 7
     DisplayKindRole = Qt.ItemDataRole.UserRole + 8
     SourceMessageIdRole = Qt.ItemDataRole.UserRole + 9
+    TimeExpandedRole = Qt.ItemDataRole.UserRole + 10
 
     DISPLAY_MESSAGE = "message"
     DISPLAY_TIME_SEPARATOR = "time_separator"
@@ -42,6 +43,7 @@ class MessageModel(QAbstractListModel):
         super().__init__(parent)
         self._messages: list[ChatMessage] = []
         self._display_items: list[ChatMessage] = []
+        self._expanded_time_separator_ids: set[str] = set()
 
     def rowCount(self, parent=QModelIndex()) -> int:
         """Return number of visible rows."""
@@ -81,6 +83,8 @@ class MessageModel(QAbstractListModel):
             return display_kind
         if role == self.SourceMessageIdRole:
             return self._source_message_id(item)
+        if role == self.TimeExpandedRole:
+            return display_kind == self.DISPLAY_TIME_SEPARATOR and self.is_time_separator_expanded(self._source_message_id(item))
         if role == Qt.ItemDataRole.TextAlignmentRole:
             if display_kind != self.DISPLAY_MESSAGE:
                 return Qt.AlignmentFlag.AlignCenter
@@ -118,11 +122,6 @@ class MessageModel(QAbstractListModel):
     def prepend_messages(self, messages: list[ChatMessage]) -> None:
         """Insert multiple older messages at the beginning of the model."""
         if not messages:
-            return
-
-        if self._can_incrementally_prepend(messages):
-            self._messages = list(messages) + self._messages
-            self._prepend_display_items(messages)
             return
 
         self._messages = list(messages) + self._messages
@@ -185,6 +184,7 @@ class MessageModel(QAbstractListModel):
 
     def clear(self) -> None:
         """Clear all messages."""
+        self._expanded_time_separator_ids.clear()
         if not self._display_items:
             self._messages.clear()
             return
@@ -198,6 +198,7 @@ class MessageModel(QAbstractListModel):
         """Replace all messages, using incremental updates for empty/non-empty edges."""
         new_messages = list(messages)
         new_messages.sort(key=self._message_sort_key)
+        self._prune_expanded_time_separator_ids(new_messages)
         new_display_items = self._build_display_items(new_messages)
 
         if not self._display_items and not new_display_items:
@@ -327,6 +328,7 @@ class MessageModel(QAbstractListModel):
 
     def _apply_display_rebuild(self, *, changed_message_ids: list[str] | None = None) -> None:
         """Recompute visible rows and apply the smallest safe model change."""
+        self._prune_expanded_time_separator_ids(self._messages)
         self._apply_display_items(self._build_display_items(), changed_message_ids=changed_message_ids)
 
     def _apply_display_items(self, new_items: list[ChatMessage], *, changed_message_ids: list[str] | None = None) -> None:
@@ -398,7 +400,7 @@ class MessageModel(QAbstractListModel):
 
         for index, message in enumerate(items):
             previous_message = items[index - 1] if index > 0 else None
-            if previous_message is not None and self._is_time_break(previous_message, message):
+            if previous_message is None or self._is_time_break(previous_message, message):
                 display_items.append(self._build_time_separator_item(message))
             display_items.append(self._build_display_message_item(message))
 
@@ -410,7 +412,7 @@ class MessageModel(QAbstractListModel):
 
         for index, message in enumerate(messages):
             candidate_previous = previous_message if index == 0 else messages[index - 1]
-            if candidate_previous is not None and self._is_time_break(candidate_previous, message):
+            if candidate_previous is None or self._is_time_break(candidate_previous, message):
                 fragment.append(self._build_time_separator_item(message))
             fragment.append(self._build_display_message_item(message))
 
@@ -422,7 +424,7 @@ class MessageModel(QAbstractListModel):
 
         for index, message in enumerate(messages):
             candidate_previous = messages[index - 1] if index > 0 else None
-            if candidate_previous is not None and self._is_time_break(candidate_previous, message):
+            if candidate_previous is None or self._is_time_break(candidate_previous, message):
                 fragment.append(self._build_time_separator_item(message))
             fragment.append(self._build_display_message_item(message))
 
@@ -460,6 +462,34 @@ class MessageModel(QAbstractListModel):
             if self._source_message_id(item) == message_id:
                 return row
         return -1
+
+    def _find_display_row_for_time_separator(self, source_message_id: str) -> int:
+        """Return the display row for one standalone time separator."""
+        for row, item in enumerate(self._display_items):
+            if self._display_kind(item) != self.DISPLAY_TIME_SEPARATOR:
+                continue
+            if self._source_message_id(item) == source_message_id:
+                return row
+        return -1
+
+    def is_time_separator_expanded(self, source_message_id: str) -> bool:
+        """Return whether one time separator currently uses the expanded format."""
+        return bool(source_message_id) and source_message_id in self._expanded_time_separator_ids
+
+    def toggle_time_separator_expanded(self, source_message_id: str) -> bool:
+        """Toggle the display format for one time separator row."""
+        row = self._find_display_row_for_time_separator(source_message_id)
+        if row < 0:
+            return False
+
+        if source_message_id in self._expanded_time_separator_ids:
+            self._expanded_time_separator_ids.remove(source_message_id)
+        else:
+            self._expanded_time_separator_ids.add(source_message_id)
+
+        index = self.index(row, 0)
+        self.dataChanged.emit(index, index, self._display_roles())
+        return True
 
     def _build_display_message_item(self, message: ChatMessage) -> ChatMessage:
         """Return the visible row item for one real message."""
@@ -535,6 +565,7 @@ class MessageModel(QAbstractListModel):
             self.SenderIdRole,
             self.DisplayKindRole,
             self.SourceMessageIdRole,
+            self.TimeExpandedRole,
         ]
 
     def _message_sort_key(self, message: ChatMessage) -> tuple[float, str]:
@@ -546,6 +577,11 @@ class MessageModel(QAbstractListModel):
     def _sort_messages(self) -> None:
         """Keep the real message list sorted by message timestamp."""
         self._messages.sort(key=self._message_sort_key)
+
+    def _prune_expanded_time_separator_ids(self, messages: list[ChatMessage]) -> None:
+        """Drop expanded-state entries for messages that are no longer loaded."""
+        loaded_ids = {message.message_id for message in messages}
+        self._expanded_time_separator_ids.intersection_update(loaded_ids)
 
     def _are_messages_non_decreasing(self, messages: list[ChatMessage]) -> bool:
         """Return whether a message batch is already ordered by timestamp."""

@@ -1,4 +1,4 @@
-"""Time helpers."""
+﻿"""Time helpers."""
 
 from __future__ import annotations
 
@@ -15,3 +15,15 @@ def ensure_utc(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value.replace(tzinfo=UTC)
     return value.astimezone(UTC)
+
+
+def isoformat_utc(value: datetime | None) -> str | None:
+    """Serialize one datetime while preserving naive wall-clock values."""
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.isoformat()
+    return ensure_utc(value).isoformat()
+
+
+

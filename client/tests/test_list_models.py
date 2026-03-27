@@ -211,16 +211,17 @@ def test_message_model_add_messages_uses_incremental_insert() -> None:
     model.add_messages([_message('m-1', 0), _message('m-2', 10)])
 
     assert ('reset_begin',) not in model._qt_ops
-    assert ('insert', 0, 2) in model._qt_ops
-    assert model.rowCount() == 3
-    assert model.data(model.index(1, 0), model.DisplayKindRole) == model.DISPLAY_TIME_SEPARATOR
+    assert ('insert', 0, 3) in model._qt_ops
+    assert model.rowCount() == 4
+    assert model.data(model.index(0, 0), model.DisplayKindRole) == model.DISPLAY_TIME_SEPARATOR
+    assert model.data(model.index(2, 0), model.DisplayKindRole) == model.DISPLAY_TIME_SEPARATOR
 
     model._qt_ops.clear()
     model.add_message(_message('m-3', 11))
 
     assert ('reset_begin',) not in model._qt_ops
-    assert ('insert', 3, 3) in model._qt_ops
-    assert model.rowCount() == 4
+    assert ('insert', 4, 4) in model._qt_ops
+    assert model.rowCount() == 5
 
 
 
@@ -233,8 +234,9 @@ def test_message_model_prepend_messages_uses_incremental_insert() -> None:
 
     assert ('reset_begin',) not in model._qt_ops
     assert ('insert', 0, 1) in model._qt_ops
-    assert model.rowCount() == 4
-    assert model.data(model.index(1, 0), model.DisplayKindRole) == model.DISPLAY_TIME_SEPARATOR
+    assert model.rowCount() == 5
+    assert model.data(model.index(0, 0), model.DisplayKindRole) == model.DISPLAY_TIME_SEPARATOR
+    assert model.data(model.index(2, 0), model.DisplayKindRole) == model.DISPLAY_TIME_SEPARATOR
 
 
 
@@ -250,7 +252,8 @@ def test_message_model_refresh_recalled_message_without_full_reset() -> None:
     model.refresh_message('m-1')
 
     assert ('reset_begin',) not in model._qt_ops
-    assert model.data(model.index(0, 0), model.DisplayKindRole) == model.DISPLAY_RECALL_NOTICE
+    assert model.data(model.index(0, 0), model.DisplayKindRole) == model.DISPLAY_TIME_SEPARATOR
+    assert model.data(model.index(1, 0), model.DisplayKindRole) == model.DISPLAY_RECALL_NOTICE
     assert model.dataChanged.events
 
 
@@ -262,7 +265,7 @@ def test_message_model_time_separator_uses_newer_message_timestamp() -> None:
 
     model.add_messages([_message('m-1', 0), _message('m-2', 10)])
 
-    separator_timestamp = model.data(model.index(1, 0), model.TimestampRole)
+    separator_timestamp = model.data(model.index(2, 0), model.TimestampRole)
 
     assert separator_timestamp == BASE_TIME + timedelta(minutes=10)
 
@@ -274,7 +277,8 @@ def test_message_model_add_message_reorders_out_of_order_insert() -> None:
     model.add_message(_message('m-1', 0))
 
     assert [message.message_id for message in model.get_messages()] == ['m-1', 'm-2']
-    assert model.data(model.index(1, 0), model.DisplayKindRole) == model.DISPLAY_TIME_SEPARATOR
+    assert model.data(model.index(0, 0), model.DisplayKindRole) == model.DISPLAY_TIME_SEPARATOR
+    assert model.data(model.index(2, 0), model.DisplayKindRole) == model.DISPLAY_TIME_SEPARATOR
 
 
 def test_message_model_refresh_message_reorders_when_timestamp_changes() -> None:
@@ -287,6 +291,26 @@ def test_message_model_refresh_message_reorders_when_timestamp_changes() -> None
     model.refresh_message('m-1', allow_reorder=True)
 
     assert [message.message_id for message in model.get_messages()] == ['m-2', 'm-1']
+
+
+def test_message_model_toggle_time_separator_expanded_updates_role() -> None:
+    model = MessageModel()
+    model.add_messages([_message('m-1', 0)])
+
+    assert model.data(model.index(0, 0), model.TimeExpandedRole) is False
+
+    assert model.toggle_time_separator_expanded('m-1') is True
+    assert model.data(model.index(0, 0), model.TimeExpandedRole) is True
+
+
+def test_message_model_prepend_same_group_keeps_single_leading_separator() -> None:
+    model = MessageModel()
+    model.add_messages([_message('m-2', 10), _message('m-3', 11)])
+
+    model.prepend_messages([_message('m-1', 9)])
+
+    display_kinds = [model.data(model.index(row, 0), model.DisplayKindRole) for row in range(model.rowCount())]
+    assert display_kinds == [model.DISPLAY_TIME_SEPARATOR, model.DISPLAY_MESSAGE, model.DISPLAY_MESSAGE, model.DISPLAY_MESSAGE]
 
 
 def test_session_model_initial_load_uses_insert_and_update_moves_row() -> None:

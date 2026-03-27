@@ -39,7 +39,6 @@ from client.core.i18n import tr
 from client.core.logging import setup_logging
 from client.ui.styles import StyleSheet
 from client.ui.controllers.auth_controller import get_auth_controller
-from client.ui.widgets.acrylic_surface import attach_acrylic_backdrop, configure_acrylic_infobar
 
 
 setup_logging()
@@ -71,9 +70,7 @@ class SessionConflictDialog(MessageBoxBase):
         self.yesButton.setText(tr("auth.session_conflict.confirm", "Continue Login"))
         self.cancelButton.setText(tr("common.cancel", "Cancel"))
         self.widget.setMinimumWidth(400)
-        self.widget.setStyleSheet("background: transparent; border: none;")
-        self.buttonGroup.setStyleSheet("background: transparent; border: none;")
-        attach_acrylic_backdrop(self.widget, radius=22)
+
 
 
 
@@ -546,10 +543,10 @@ class AuthInterface(FluentWidget):
             self._set_busy(None)
 
     def _show_error(self, message: str) -> None:
-        configure_acrylic_infobar(InfoBar.error(tr("auth.feedback.title", "Authentication"), message, parent=self.form_card))
+        InfoBar.error(tr("auth.feedback.title", "Authentication"), message, parent=self.form_card)
 
     def _show_success(self, message: str) -> None:
-        configure_acrylic_infobar(InfoBar.success(tr("auth.feedback.title", "Authentication"), message, parent=self.form_card))
+        InfoBar.success(tr("auth.feedback.title", "Authentication"), message, parent=self.form_card)
 
     def showEvent(self, event: QShowEvent) -> None:
         super().showEvent(event)

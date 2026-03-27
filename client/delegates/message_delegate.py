@@ -5,7 +5,6 @@ from __future__ import annotations
 import os
 from collections import OrderedDict
 from dataclasses import dataclass
-from datetime import datetime
 import time
 
 from PySide6.QtCore import QModelIndex, QPoint, QRect, QRectF, QSize, Qt, QTimer, QUrl
@@ -26,8 +25,7 @@ from client.core.app_icons import AppIcon
 from client.core.avatar_rendering import get_avatar_image_store
 from client.core.avatar_utils import profile_avatar_seed
 from client.core.config_backend import get_config
-from client.core.datetime_utils import coerce_local_datetime
-from client.core.i18n import format_chat_timestamp, tr
+from client.core.i18n import format_chat_timestamp, format_chat_timestamp_expanded, tr
 from client.ui.controllers.auth_controller import peek_auth_controller
 from client.core.video_thumbnail_cache import (
     get_thumbnail as get_video_thumbnail,
@@ -107,7 +105,6 @@ class MessageDelegate(QStyledItemDelegate):
     TIME_SPACING = 9
     STATUS_BADGE_SIZE = 16
     RECALL_NOTICE_HEIGHT = TIME_BLOCK_HEIGHT
-    TIME_BREAK_SECONDS = 5 * 60
     TEXT_MEASURE_CACHE_LIMIT = 512
     TEXT_LAYOUT_CACHE_LIMIT = 256
     MEDIA_SIZE_CACHE_LIMIT = 512
@@ -131,6 +128,8 @@ class MessageDelegate(QStyledItemDelegate):
         self._video_thumbnail_cache = get_video_thumbnail_cache()
         self._video_thumbnail_cache.signals.thumbnail_ready.connect(self._on_video_thumbnail_ready)
         self._refresh_scheduled = False
+        self._context_menu_message_id: str | None = None
+        self._hovered_time_separator_id: str | None = None
         self._text_measure_cache: OrderedDict[str, QSize] = OrderedDict()
         self._text_layout_cache: OrderedDict[tuple[int, str], _RunTextLayout] = OrderedDict()
         self._media_size_cache: OrderedDict[tuple, QSize] = OrderedDict()
@@ -171,7 +170,16 @@ class MessageDelegate(QStyledItemDelegate):
                 option.rect.width(),
                 self.TIME_BLOCK_HEIGHT,
             )
-            self._draw_time_block(painter, time_rect, self._format_time(message.timestamp))
+            source_message_id = str(index.data(MessageModel.SourceMessageIdRole) or "")
+            is_expanded = bool(index.data(MessageModel.TimeExpandedRole))
+            is_hovered = bool(source_message_id) and source_message_id == self._hovered_time_separator_id
+            self._draw_time_block(
+                painter,
+                time_rect,
+                self._format_time(message.timestamp, expanded=is_expanded),
+                hovered=is_hovered,
+                expanded=is_expanded,
+            )
             self._draw_row_divider(painter, option.rect)
             painter.restore()
             return
@@ -217,6 +225,22 @@ class MessageDelegate(QStyledItemDelegate):
         _, _, content_rect = self._layout_rects(row_rect, message)
         hit_rect = self._attachment_hit_rect(content_rect, message)
         return hit_rect.contains(position)
+
+    def is_bubble_hit(self, view, index: QModelIndex, position: QPoint) -> bool:
+        """Return whether a viewport position lands on the rendered message bubble/card."""
+        message: ChatMessage = index.data(Qt.ItemDataRole.UserRole)
+        if (
+            not message
+            or self._display_kind(index, message) != MessageModel.DISPLAY_MESSAGE
+        ):
+            return False
+
+        row_rect = view.visualRect(index)
+        if not row_rect.isValid():
+            return False
+
+        _, bubble_rect, _ = self._layout_rects(row_rect, message)
+        return bubble_rect.contains(position)
 
     def is_text_hit(self, view, index: QModelIndex, position: QPoint) -> bool:
         """Return whether a viewport position lands on text content."""
@@ -445,16 +469,125 @@ class MessageDelegate(QStyledItemDelegate):
         bubble_height = max(40, text_size.height() + self.BUBBLE_PADDING_V * 2)
         return QSize(bubble_width, bubble_height)
 
-    def _draw_time_block(self, painter: QPainter, rect: QRect, time_text: str) -> None:
-        """Draw centered timestamp text without a visible background."""
+    def _time_block_font(self) -> QFont:
+        """Return the font used by standalone time separators."""
+        font = QFont()
+        font.setPixelSize(11)
+        return font
+
+    def _time_block_pill_rect(self, rect: QRect, time_text: str) -> tuple[QRect, str]:
+        """Return the clickable pill rect and the final elided text for a time separator."""
+        font = self._time_block_font()
+        metrics = QFontMetrics(font)
+        available_width = max(44, rect.width() - 16)
+        display_text = metrics.elidedText(time_text, Qt.TextElideMode.ElideRight, max(20, available_width - 18))
+        text_width = metrics.horizontalAdvance(display_text)
+        pill_width = min(available_width, max(56, text_width + 18))
+        pill_height = 22
+        pill_x = rect.x() + max(0, (rect.width() - pill_width) // 2)
+        pill_y = rect.y() + max(0, (rect.height() - pill_height) // 2)
+        return QRect(pill_x, pill_y, pill_width, pill_height), display_text
+
+    def _draw_time_block(
+        self,
+        painter: QPainter,
+        rect: QRect,
+        time_text: str,
+        *,
+        hovered: bool = False,
+        expanded: bool = False,
+    ) -> None:
+        """Draw a centered standalone timestamp with hover and expanded states."""
         if not time_text:
             return
 
-        font = QFont()
-        font.setPixelSize(11)
+        font = self._time_block_font()
+        pill_rect, display_text = self._time_block_pill_rect(rect, time_text)
         painter.setFont(font)
-        painter.setPen(QColor(210, 210, 210, 230) if isDarkTheme() else QColor("#8A8A8A"))
-        painter.drawText(rect, Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter, time_text)
+
+        if hovered:
+            background = (
+                QColor(255, 255, 255, 32)
+                if isDarkTheme()
+                else QColor(0, 0, 0, 12)
+            )
+            border = (
+                QColor(255, 255, 255, 18)
+                if isDarkTheme()
+                else QColor(0, 0, 0, 8)
+            )
+            path = QPainterPath()
+            path.addRoundedRect(QRectF(pill_rect), pill_rect.height() / 2, pill_rect.height() / 2)
+            painter.fillPath(path, background)
+            painter.setPen(border)
+            painter.drawPath(path)
+
+        text_color = (
+            QColor(224, 224, 224, 236) if hovered else QColor(210, 210, 210, 230)
+        ) if isDarkTheme() else (QColor("#5F5F5F") if hovered else QColor("#8A8A8A"))
+        painter.setPen(text_color)
+        painter.drawText(pill_rect, Qt.AlignmentFlag.AlignCenter, display_text)
+
+    def is_time_separator_hit(self, view, index: QModelIndex, position: QPoint) -> bool:
+        """Return whether a viewport position lands on a standalone time separator."""
+        return bool(self._time_separator_source_at(view, index, position))
+
+    def update_time_separator_hover(self, view, index: QModelIndex, position: QPoint) -> bool:
+        """Refresh the hovered time separator row and request a repaint if needed."""
+        hovered_id = self._time_separator_source_at(view, index, position)
+        if hovered_id == self._hovered_time_separator_id:
+            return bool(hovered_id)
+        self._hovered_time_separator_id = hovered_id
+        view.viewport().update()
+        return bool(hovered_id)
+
+    def clear_time_separator_hover(self, view=None) -> None:
+        """Clear any hovered time separator row."""
+        if self._hovered_time_separator_id is None:
+            return
+        self._hovered_time_separator_id = None
+        if view is not None:
+            view.viewport().update()
+
+    def set_context_menu_message(self, view, message_id: str | None) -> None:
+        """Persist one temporary bubble highlight while a context menu is open."""
+        normalized = str(message_id or "").strip() or None
+        if normalized == self._context_menu_message_id:
+            return
+        self._context_menu_message_id = normalized
+        if view is not None:
+            view.viewport().repaint()
+
+    def toggle_time_separator_expanded_at(self, view, index: QModelIndex, position: QPoint) -> bool:
+        """Toggle the display format of a clicked time separator row."""
+        source_message_id = self._time_separator_source_at(view, index, position)
+        if not source_message_id:
+            return False
+        model = index.model()
+        if model is None or not hasattr(model, "toggle_time_separator_expanded"):
+            return False
+        return bool(model.toggle_time_separator_expanded(source_message_id))
+
+    def _time_separator_source_at(self, view, index: QModelIndex, position: QPoint) -> str | None:
+        """Return the source message id for the clicked/hovered time separator."""
+        if not index.isValid():
+            return None
+
+        message: ChatMessage = index.data(Qt.ItemDataRole.UserRole)
+        if not message or self._display_kind(index, message) != MessageModel.DISPLAY_TIME_SEPARATOR:
+            return None
+
+        row_rect = view.visualRect(index)
+        if not row_rect.isValid():
+            return None
+
+        source_message_id = str(index.data(MessageModel.SourceMessageIdRole) or "")
+        is_expanded = bool(index.data(MessageModel.TimeExpandedRole))
+        time_rect = QRect(row_rect.x(), row_rect.y() + self.TIME_SPACING, row_rect.width(), self.TIME_BLOCK_HEIGHT)
+        pill_rect, _display_text = self._time_block_pill_rect(time_rect, self._format_time(message.timestamp, expanded=is_expanded))
+        if not pill_rect.contains(position):
+            return None
+        return source_message_id or None
 
     def _draw_recall_notice(self, painter: QPainter, rect: QRect, message: ChatMessage) -> None:
         """Draw a centered system-style recall notice."""
@@ -560,13 +693,12 @@ class MessageDelegate(QStyledItemDelegate):
             return
 
         path = self._bubble_path(rect, message.is_self, avatar_rect.center().y())
-        dark = isDarkTheme()
-        accent = QColor(themeColor())
-        if message.is_self:
-            bubble_color = QColor(accent)
-            bubble_color.setAlpha(58 if dark else 22)
-        else:
-            bubble_color = QColor(255, 255, 255, 22) if dark else QColor(255, 255, 255, 214)
+        bubble_color = self._bubble_fill_color(
+            message,
+            context_menu_active=(
+                message.message_type == MessageType.TEXT and message.message_id == self._context_menu_message_id
+            ),
+        )
 
         painter.fillPath(path, bubble_color)
         painter.setPen(Qt.PenStyle.NoPen)
@@ -1415,6 +1547,21 @@ class MessageDelegate(QStyledItemDelegate):
         """Return whether the message is still in HTTP upload stage."""
         return bool(getattr(message, "extra", {}) and message.extra.get("uploading"))
 
+    @staticmethod
+    def _bubble_fill_color(message: ChatMessage, *, context_menu_active: bool = False) -> QColor:
+        """Return one stable bubble fill, including the right-click pressed state."""
+        dark = isDarkTheme()
+        if message.is_self:
+            bubble_color = QColor(themeColor())
+            if context_menu_active:
+                bubble_color.setAlpha(100 if dark else 64)
+            else:
+                bubble_color.setAlpha(58 if dark else 22)
+            return bubble_color
+        if dark:
+            return QColor(255, 255, 255, 54 if context_menu_active else 22)
+        return QColor("#EBEBEB") if context_menu_active else QColor(255, 255, 255, 214)
+
     def _bubble_path(self, rect: QRect, is_self: bool, avatar_center_y: int) -> QPainterPath:
         """Create a rounded bubble with a small tail aligned to the avatar center."""
         radius = 10
@@ -1453,42 +1600,11 @@ class MessageDelegate(QStyledItemDelegate):
 
         return path
 
-    def _should_show_time_after(self, index: QModelIndex, message: ChatMessage) -> bool:
-        """Show the current message time after this row when the next row starts a new time segment."""
-        explicit_value = index.data(MessageModel.ShowTimeAfterRole)
-        if explicit_value is not None:
-            return bool(explicit_value)
-
-        model = index.model()
-        if model is None or index.row() >= model.rowCount() - 1:
-            return False
-
-        next_index = model.index(index.row() + 1, 0)
-        next_message = next_index.data(Qt.ItemDataRole.UserRole)
-        if not next_message:
-            return False
-
-        current_time = self._normalize_datetime(message.timestamp)
-        next_time = self._normalize_datetime(next_message.timestamp)
-
-        if current_time is None or next_time is None:
-            return False
-
-        return self._is_time_break(current_time, next_time)
-
-    def _is_time_break(self, current_time: datetime, next_time: datetime) -> bool:
-        """Return whether two adjacent messages belong to different visible time groups."""
-        if current_time.date() != next_time.date():
-            return True
-        return abs((next_time - current_time).total_seconds()) >= self.TIME_BREAK_SECONDS
-
-    def _format_time(self, value) -> str:
-        """Format message time for the center time block."""
+    def _format_time(self, value, *, expanded: bool = False) -> str:
+        """Format message time for the standalone center time block."""
+        if expanded:
+            return format_chat_timestamp_expanded(value)
         return format_chat_timestamp(value)
-
-    def _normalize_datetime(self, value) -> datetime | None:
-        """Normalize timestamp values from the message model."""
-        return coerce_local_datetime(value)
 
     def _load_pixmap(self, message: ChatMessage) -> QPixmap:
         """Load image from local path, cache, or remote URL."""

@@ -10,6 +10,7 @@ from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPainterPath, Q
 from PySide6.QtWidgets import QStyle, QStyledItemDelegate, QStyleOptionViewItem
 from qfluentwidgets import isDarkTheme
 
+from client.core.app_icons import CollectionIcon
 from client.core.avatar_rendering import get_avatar_image_store
 from client.core.avatar_utils import profile_avatar_seed
 from client.core.datetime_utils import coerce_local_datetime
@@ -47,6 +48,7 @@ class SessionDelegate(QStyledItemDelegate):
         super().__init__(parent)
         self._avatar_store = get_avatar_image_store()
         self._avatar_store.avatar_ready.connect(self._on_avatar_ready)
+        self._mute_icon = CollectionIcon("alert_off")
 
     def sizeHint(self, option: QStyleOptionViewItem, index: QModelIndex) -> QSize:
         """Return fixed session row height."""
@@ -88,9 +90,12 @@ class SessionDelegate(QStyledItemDelegate):
         time_font = self._ui_font(10)
         time_fm = QFontMetrics(time_font)
 
-        time_text = self._format_time(session.last_message_time or session.updated_at)
+        time_text = self._format_time(session.last_message_time or session.created_at)
         time_width = max(0, min(max(0, content_width // 2), time_fm.horizontalAdvance(time_text) + 4))
         time_text = time_fm.elidedText(time_text, Qt.TextElideMode.ElideRight, time_width)
+        muted = bool(getattr(session, "extra", {}).get("is_muted", False))
+        mute_icon_size = 10
+        mute_slot_width = mute_icon_size + 2 if muted else 0
 
         unread_text = self._format_unread(session.unread_count)
         unread_width = 0
@@ -103,7 +108,7 @@ class SessionDelegate(QStyledItemDelegate):
             Qt.TextElideMode.ElideRight,
             name_available,
         )
-        preview_available = max(0, content_width)
+        preview_available = max(0, content_width - mute_slot_width)
 
         name_y = card_rect.y() + 14
         preview_y = name_y + 24
@@ -167,6 +172,15 @@ class SessionDelegate(QStyledItemDelegate):
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
             time_text,
         )
+
+        if muted:
+            icon_rect = QRect(
+                content_right - mute_icon_size,
+                preview_y + 6,
+                mute_icon_size,
+                mute_icon_size,
+            )
+            self._mute_icon.render(painter, icon_rect, fill=time_color)
 
         painter.restore()
 

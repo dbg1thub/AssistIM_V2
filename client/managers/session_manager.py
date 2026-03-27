@@ -85,7 +85,7 @@ class SessionManager:
         session_list = list(self._sessions.values())
 
         def sort_key(s: Session) -> datetime:
-            return s.last_message_time or s.updated_at or datetime.min
+            return s.last_message_time or s.created_at or datetime.min
 
         return sorted(session_list, key=sort_key, reverse=True)
 
@@ -773,6 +773,34 @@ class SessionManager:
                 "session": changed,
             })
 
+    async def set_muted(self, session_id: str, muted: bool) -> None:
+        """Persist one local do-not-disturb flag for a session."""
+        async with self._lock:
+            session = self._sessions.get(session_id)
+            if not session:
+                return
+
+            current_muted = bool(session.extra.get("is_muted", False))
+            if current_muted == muted:
+                return
+
+            session.extra["is_muted"] = bool(muted)
+
+            db = get_database()
+            if db.is_connected:
+                await db.save_session(session)
+
+        await self._event_bus.emit(SessionEvent.UPDATED, {
+            "session": session,
+        })
+
+    def is_session_muted(self, session_id: str) -> bool:
+        """Return whether one session has local do-not-disturb enabled."""
+        session = self._sessions.get(session_id)
+        if session is None:
+            return False
+        return bool(session.extra.get("is_muted", False))
+
     async def mark_session_unread(self, session_id: str, unread: bool) -> None:
         """Manually mark a session read or unread."""
         async with self._lock:
@@ -882,7 +910,7 @@ class SessionManager:
             preview = resolve_recall_notice(last_message)
         else:
             preview = format_message_preview(last_message.content, last_message.message_type) if last_message else ""
-        preview_time = last_message.timestamp if last_message else session.updated_at
+        preview_time = last_message.timestamp if last_message else (session.last_message_time or session.created_at)
         extra = dict(session.extra)
         if last_message:
             extra["last_message_type"] = last_message.message_type.value

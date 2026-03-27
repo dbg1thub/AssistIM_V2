@@ -10,9 +10,9 @@ from typing import Optional
 
 from PySide6.QtCore import QEvent, QItemSelectionModel, QSortFilterProxyModel, Qt, QTimer, Signal
 from PySide6.QtGui import QColor
-from PySide6.QtWidgets import QAbstractItemView, QFrame, QHBoxLayout, QListView, QSizePolicy, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QAbstractItemView, QDialog, QFrame, QHBoxLayout, QListView, QSizePolicy, QVBoxLayout, QWidget
 
-from qfluentwidgets import Action, RoundMenu, ScrollBarHandleDisplayMode, SearchLineEdit, ToolButton
+from qfluentwidgets import Action, BodyLabel, MessageBoxBase, RoundMenu, ScrollBarHandleDisplayMode, SearchLineEdit, SubtitleLabel, ToolButton
 from qfluentwidgets.components.widgets.scroll_bar import SmoothScrollDelegate
 
 from client.core.app_icons import AppIcon
@@ -27,6 +27,30 @@ from client.ui.styles import StyleSheet
 
 
 logger = logging.getLogger(__name__)
+
+
+class DeleteSessionConfirmDialog(MessageBoxBase):
+    """Ask for confirmation before removing one conversation locally."""
+
+    def __init__(self, session_name: str, parent=None):
+        super().__init__(parent=parent)
+        display_name = (session_name or "").strip() or tr("session.unnamed", "Unnamed Session")
+        title = SubtitleLabel(tr("session.delete.confirm_title", "Delete Conversation"), self.widget)
+        content = BodyLabel(
+            tr(
+                "session.delete.confirm_content",
+                "Remove {name} from this device and clear its local chat history?",
+                name=display_name,
+            ),
+            self.widget,
+        )
+        content.setWordWrap(True)
+        self.viewLayout.addWidget(title)
+        self.viewLayout.addWidget(content)
+        self.viewLayout.addStretch(1)
+        self.yesButton.setText(tr("session.delete.confirm_action", "Delete"))
+        self.cancelButton.setText(tr("common.cancel", "Cancel"))
+        self.widget.setMinimumWidth(380)
 
 
 class SessionFilterProxyModel(QSortFilterProxyModel):
@@ -329,6 +353,7 @@ class SessionPanel(QWidget):
             return
 
         pinned = bool(getattr(session, "is_pinned", False) or session.extra.get("is_pinned"))
+        muted = bool(session.extra.get("is_muted", False))
         menu = RoundMenu(parent=self)
         menu.setMinimumWidth(148)
         pin_action = Action(
@@ -341,10 +366,15 @@ class SessionPanel(QWidget):
             else tr("session.context.mark_unread", "Mark as Unread"),
             self,
         )
+        mute_action = Action(
+            tr("session.context.unmute", "Turn Off Mute") if muted else tr("session.context.mute", "Mute Notifications"),
+            self,
+        )
         delete_action = Action(tr("common.delete", "Delete"), self)
 
         menu.addAction(pin_action)
         menu.addAction(unread_action)
+        menu.addAction(mute_action)
         menu.addSeparator()
         menu.addAction(delete_action)
 
@@ -364,6 +394,12 @@ class SessionPanel(QWidget):
                 f"toggle unread {sid}",
             )
         )
+        mute_action.triggered.connect(
+            lambda _checked=False, sid=session.session_id, target=not muted: self._toggle_session_mute_local(
+                sid,
+                target,
+            )
+        )
         delete_action.triggered.connect(
             lambda _checked=False, sid=session.session_id: self._trigger_session_delete(sid)
         )
@@ -372,6 +408,12 @@ class SessionPanel(QWidget):
 
     def _trigger_session_delete(self, session_id: str) -> None:
         """Delete a session locally first, then persist the removal."""
+        session = self._session_model.get_session_by_id(session_id) if self._session_model else None
+        session_name = getattr(session, "name", "") if session else ""
+        dialog = DeleteSessionConfirmDialog(session_name, self.window())
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
         self._remove_session_safe(session_id)
         self._schedule_ui_task(self._session_controller.remove_session(session_id), f"delete session {session_id}")
 
@@ -381,10 +423,31 @@ class SessionPanel(QWidget):
         if self._session_model:
             pinned_at = time.time() if pinned else None
             self._session_model.set_pinned(session_id, pinned, pinned_at=pinned_at)
+            session = self._session_model.get_session_by_id(session_id)
+            if session is not None:
+                self._event_bus.emit_sync(SessionEvent.UPDATED, {"session": session})
         self._sessions_snapshot = None
         if selected_session_id:
             self.select_session(selected_session_id, emit_signal=False)
         self._schedule_ui_task(self._session_controller.set_pinned(session_id, pinned), f"toggle pin {session_id}")
+
+    def _toggle_session_mute_local(self, session_id: str, muted: bool) -> None:
+        """Apply mute state immediately in the list, then persist asynchronously."""
+        if not self._session_model:
+            return
+
+        session = self._session_model.get_session_by_id(session_id)
+        if session is None:
+            return
+
+        extra = dict(session.extra or {})
+        extra["is_muted"] = bool(muted)
+        self._sessions_snapshot = None
+        self._session_model.update_session(session_id, extra=extra)
+        updated = self._session_model.get_session_by_id(session_id)
+        if updated is not None:
+            self._event_bus.emit_sync(SessionEvent.UPDATED, {"session": updated})
+        self._schedule_ui_task(self._session_controller.set_muted(session_id, muted), f"toggle mute {session_id}")
 
     def _current_selected_session_id(self) -> str | None:
         """Return the session id currently selected in the list, if any."""
@@ -462,6 +525,7 @@ class SessionPanel(QWidget):
                 session.unread_count,
                 getattr(session, "is_pinned", False),
                 session.extra.get("pinned_at"),
+                bool(session.extra.get("is_muted", False)),
                 getattr(session, "draft_preview", None),
             )
             for session in sessions

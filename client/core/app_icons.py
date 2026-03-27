@@ -22,9 +22,9 @@ _collection_names_cache: list[str] | None = None
 _svg_template_cache: dict[str, str] = {}
 _svg_markup_cache: dict[tuple[str, str, str, str], str] = {}
 
-_THEME_ICON_OPACITY = {
-    Theme.LIGHT: 0.63,
-    Theme.DARK: 0.786,
+_THEME_ICON_COLOR = {
+    Theme.LIGHT: "#797979",
+    Theme.DARK: "#929292",
 }
 
 
@@ -124,12 +124,7 @@ def _mode_opacity(mode: Any) -> float:
 
 def _resolve_icon_opacity(theme=Theme.AUTO, mode: Any = None, **attributes) -> float:
     explicit_opacity = attributes.get("opacity")
-    if explicit_opacity is not None:
-        base_opacity = _coerce_opacity(explicit_opacity, 1.0)
-    elif attributes.get("fill"):
-        base_opacity = 1.0
-    else:
-        base_opacity = _THEME_ICON_OPACITY.get(_resolve_theme_mode(theme), 1.0)
+    base_opacity = _coerce_opacity(explicit_opacity, 1.0) if explicit_opacity is not None else 1.0
     return _coerce_opacity(base_opacity * _mode_opacity(mode), 1.0)
 
 
@@ -170,7 +165,8 @@ def _resolve_fill_color(theme=Theme.AUTO, **attributes) -> str:
     if fill:
         return _normalize_color(fill)
 
-    return _normalize_color(getIconColor(theme))
+    resolved_theme = _resolve_theme_mode(theme)
+    return _THEME_ICON_COLOR.get(resolved_theme, _normalize_color(getIconColor(theme)))
 
 
 def _render_svg_markup(icon_name: str, theme=Theme.AUTO, mode: Any = None, **attributes) -> str:

@@ -1,4 +1,4 @@
-"""Session service."""
+﻿"""Session service."""
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ from app.repositories.group_repo import GroupRepository
 from app.repositories.message_repo import MessageRepository
 from app.repositories.session_repo import SessionRepository
 from app.repositories.user_repo import UserRepository
+from app.utils.time import isoformat_utc
 
 
 T = TypeVar("T")
@@ -147,13 +148,13 @@ class SessionService:
             "last_message_status": last_message.status if last_message else None,
             "last_message_sender_id": last_message.sender_id if last_message else None,
             "last_message_time": (
-                last_message.created_at.isoformat() if last_message and last_message.created_at else None
+                isoformat_utc(last_message.created_at) if last_message else None
             ),
-            "updated_at": session.updated_at.isoformat() if session.updated_at else None,
+            "updated_at": isoformat_utc(session.updated_at),
             "unread_count": 0,
             "avatar": session.avatar,
             "is_ai_session": session.is_ai_session,
-            "created_at": session.created_at.isoformat() if session.created_at else None,
+            "created_at": isoformat_utc(session.created_at),
         }
         if include_members:
             members = []
@@ -167,7 +168,7 @@ class SessionService:
                             "username": user.username,
                             "avatar": user.avatar,
                             "gender": user.gender,
-                            "joined_at": member.joined_at.isoformat() if member.joined_at else None,
+                            "joined_at": isoformat_utc(member.joined_at),
                         }
                     )
             data["members"] = members

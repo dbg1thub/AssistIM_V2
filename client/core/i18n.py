@@ -128,14 +128,18 @@ def weekday_name(weekday_index: int, *, short: bool = False) -> str:
     return ""
 
 
+def _localized_time_text(moment: datetime) -> str:
+    """Return the locale-aware clock text for one datetime."""
+    return current_locale().toString(moment.time(), "HH:mm")
+
+
 def format_chat_timestamp(value: Any) -> str:
-    """Format message timestamps for the chat list."""
+    """Format message timestamps for compact chat time separators."""
     moment = _normalize_datetime(value)
     if moment is None:
         return ""
 
-    locale = current_locale()
-    time_text = locale.toString(moment.time(), "HH:mm")
+    time_text = _localized_time_text(moment)
     now = datetime.now()
     today = now.date()
     moment_date = moment.date()
@@ -146,7 +150,7 @@ def format_chat_timestamp(value: Any) -> str:
         return tr("time.yesterday_with_time", time=time_text)
 
     day_delta = (today - moment_date).days
-    if 1 < day_delta <= 7:
+    if 1 < day_delta < 7:
         return tr(
             "time.weekday_with_time",
             weekday=weekday_name(moment.weekday(), short=False),
@@ -170,14 +174,42 @@ def format_chat_timestamp(value: Any) -> str:
     )
 
 
-def format_session_timestamp(value: Any) -> str:
-    """Format timestamps for session-list preview rows."""
+def format_chat_timestamp_expanded(value: Any) -> str:
+    """Format message timestamps for the expanded chat time separator state."""
     moment = _normalize_datetime(value)
     if moment is None:
         return ""
 
-    locale = current_locale()
-    time_text = locale.toString(moment.time(), "HH:mm")
+    time_text = _localized_time_text(moment)
+    weekday = weekday_name(moment.weekday(), short=False)
+    now = datetime.now()
+
+    if moment.year == now.year:
+        return tr(
+            "time.same_year_with_weekday_and_time",
+            month=moment.month,
+            day=moment.day,
+            weekday=weekday,
+            time=time_text,
+        )
+
+    return tr(
+        "time.full_year_with_weekday_and_time",
+        year=moment.year,
+        month=moment.month,
+        day=moment.day,
+        weekday=weekday,
+        time=time_text,
+    )
+
+
+def format_session_timestamp(value: Any) -> str:
+    """Format timestamps for session-list preview rows with a WeChat-like hierarchy."""
+    moment = _normalize_datetime(value)
+    if moment is None:
+        return ""
+
+    time_text = _localized_time_text(moment)
     now = datetime.now()
     today = now.date()
     moment_date = moment.date()
@@ -186,11 +218,20 @@ def format_session_timestamp(value: Any) -> str:
         return time_text
     if moment_date == today.fromordinal(today.toordinal() - 1):
         return tr("time.yesterday_with_time", time=time_text)
-    if (today - moment_date).days < 7:
+
+    day_delta = (today - moment_date).days
+    if 1 < day_delta < 7:
         return weekday_name(moment.weekday(), short=True)
 
+    if moment.year == now.year:
+        return tr(
+            "time.same_year_date",
+            month=moment.month,
+            day=moment.day,
+        )
+
     return tr(
-        "time.short_date",
+        "time.full_year_date",
         year=moment.year,
         month=moment.month,
         day=moment.day,

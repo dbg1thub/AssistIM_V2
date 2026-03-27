@@ -72,6 +72,14 @@ class SessionController:
         """Persist pinned state for a session."""
         await self._session_manager.set_pinned(session_id, pinned)
 
+    async def set_muted(self, session_id: str, muted: bool) -> None:
+        """Persist local do-not-disturb state for a session."""
+        await self._session_manager.set_muted(session_id, muted)
+
+    def is_session_muted(self, session_id: str) -> bool:
+        """Return whether local do-not-disturb is enabled for a session."""
+        return self._session_manager.is_session_muted(session_id)
+
     async def mark_session_unread(self, session_id: str, unread: bool) -> None:
         """Toggle unread state for a session."""
         await self._session_manager.mark_session_unread(session_id, unread)

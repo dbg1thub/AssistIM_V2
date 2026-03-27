@@ -1,4 +1,4 @@
-"""Message service."""
+﻿"""Message service."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from app.models.session import SessionEvent
 from app.models.user import User
 from app.repositories.message_repo import MessageIdConflictError, MessageRepository
 from app.repositories.session_repo import SessionRepository
-from app.utils.time import ensure_utc, utcnow
+from app.utils.time import ensure_utc, isoformat_utc, utcnow
 
 
 class MessageService:
@@ -157,7 +157,7 @@ class MessageService:
             "message_id": message.id,
             "user_id": current_user.id,
             "status": "recalled",
-            "updated_at": message.updated_at.isoformat() if message.updated_at else None,
+            "updated_at": isoformat_utc(message.updated_at),
             "session_seq": int(message.session_seq or 0),
         }
         payload = self._record_session_event(
@@ -349,9 +349,9 @@ class MessageService:
             "type": message.type,
             "message_type": message.type,
             "status": message.status,
-            "created_at": message.created_at.isoformat() if message.created_at else None,
-            "timestamp": message.created_at.isoformat() if message.created_at else None,
-            "updated_at": message.updated_at.isoformat() if message.updated_at else None,
+            "created_at": isoformat_utc(message.created_at),
+            "timestamp": isoformat_utc(message.created_at),
+            "updated_at": isoformat_utc(message.updated_at),
             "is_self": message.sender_id == current_user_id,
             "is_ai": False,
             "session_seq": read_metadata["session_seq"],
@@ -423,3 +423,4 @@ class MessageService:
         if event_type == "read":
             return str(data.get("last_read_message_id") or data.get("message_id") or "")
         return str(data.get("msg_id") or data.get("message_id") or "")
+

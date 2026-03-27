@@ -8,7 +8,7 @@ from PySide6.QtWidgets import QHBoxLayout, QSizePolicy, QVBoxLayout, QWidget
 
 from qfluentwidgets import BodyLabel, CaptionLabel, TransparentToolButton
 
-from client.core.app_icons import AppIcon
+from client.core.app_icons import AppIcon, CollectionIcon
 from client.core.i18n import tr
 from client.ui.styles import StyleSheet
 
@@ -16,6 +16,8 @@ from client.ui.styles import StyleSheet
 class ChatHeader(QWidget):
     """Top bar showing current chat identity, status, and actions."""
 
+    history_clicked = Signal()
+    info_clicked = Signal()
     more_clicked = Signal()
     ai_summary_clicked = Signal()
 
@@ -53,21 +55,23 @@ class ChatHeader(QWidget):
         self.info_layout.addWidget(self.title_label)
         self.info_layout.addWidget(self.status_label)
 
-        self.detail_button = TransparentToolButton(AppIcon.INFO, self)
-        self.detail_button.setFixedSize(36, 36)
-        self.detail_button.setToolTip(tr("chat_header.detail_tooltip", "Chat Details"))
+        self.history_button = TransparentToolButton(CollectionIcon("history"), self)
+        self.history_button.setFixedSize(36, 36)
+        self.history_button.setToolTip(tr("chat_header.history_tooltip", "Chat History"))
 
-        self.ai_button = TransparentToolButton(AppIcon.ROBOT, self)
-        self.ai_button.setFixedSize(36, 36)
-        self.ai_button.setToolTip(tr("chat_header.ai_tooltip", "AI Summary"))
-        self._apply_safe_button_font(self.detail_button, self.ai_button)
+        self.info_button = TransparentToolButton(AppIcon.INFO, self)
+        self.info_button.setFixedSize(36, 36)
+        self.info_button.setToolTip(tr("chat_header.info_tooltip", "Chat Info"))
+        self._apply_safe_button_font(self.history_button, self.info_button)
 
         self.main_layout.addWidget(self.info_widget, 1)
-        self.main_layout.addWidget(self.detail_button, 0)
-        self.main_layout.addWidget(self.ai_button, 0)
+        self.main_layout.addWidget(self.history_button, 0)
+        self.main_layout.addWidget(self.info_button, 0)
 
-        self.detail_button.clicked.connect(self.more_clicked.emit)
-        self.ai_button.clicked.connect(self.ai_summary_clicked.emit)
+        self.history_button.clicked.connect(self.history_clicked.emit)
+        self.info_button.clicked.connect(self.info_clicked.emit)
+        self.info_button.clicked.connect(self.more_clicked.emit)
+        self.set_actions_enabled(False)
 
         StyleSheet.CHAT_HEADER.apply(self)
 
@@ -93,6 +97,7 @@ class ChatHeader(QWidget):
         """Set header content for the current session."""
         self.title_label.setText(title or tr("session.unnamed", "Untitled Session"))
         self.status_label.setText(status)
+        self.set_actions_enabled(True)
 
     def set_title(self, title: str) -> None:
         """Set chat title only."""
@@ -101,6 +106,11 @@ class ChatHeader(QWidget):
     def set_status(self, status: str) -> None:
         """Set status label."""
         self.status_label.setText(status)
+
+    def set_actions_enabled(self, enabled: bool) -> None:
+        """Enable or disable the header action buttons together."""
+        self.history_button.setEnabled(enabled)
+        self.info_button.setEnabled(enabled)
 
     def get_title_label(self) -> BodyLabel:
         """Get title label widget."""
@@ -112,4 +122,8 @@ class ChatHeader(QWidget):
 
     def get_more_button(self) -> TransparentToolButton:
         """Get detail button widget."""
-        return self.detail_button
+        return self.info_button
+
+    def get_history_button(self) -> TransparentToolButton:
+        """Get history button widget."""
+        return self.history_button

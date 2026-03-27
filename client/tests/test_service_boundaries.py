@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import datetime, timedelta
 import pytest
 import sys
 import types
@@ -270,12 +271,14 @@ if 'qfluentwidgets' not in sys.modules:
 from client.core.exceptions import APIError, ServerError
 from client.core import app_icons as app_icons_module
 from client.core import avatar_utils as avatar_utils_module
+from client.core import i18n as i18n_module
+from client.core import message_actions as message_actions_module
 from client.managers import message_manager as message_manager_module
 from client.managers import session_manager as session_manager_module
 from client.managers import search_manager as search_manager_module
 from client.managers import sound_manager as sound_manager_module
 from client.core import profile_fields as profile_fields_module
-from client.models.message import ChatMessage, MessageStatus, MessageType
+from client.models.message import ChatMessage, MessageStatus, MessageType, Session
 from client.services import file_service as file_service_module
 from client.storage import database as database_module
 from client.ui.controllers import auth_controller as auth_controller_module
@@ -1299,6 +1302,48 @@ def test_session_manager_ensure_direct_session_uses_session_service(monkeypatch)
 
 
 
+def test_session_manager_refresh_session_preview_preserves_last_message_time_without_local_message(monkeypatch) -> None:
+    fake_session_service = FakeSessionService()
+    fake_event_bus = FakeEventBus()
+    saved_sessions = []
+
+    class PreviewDatabase:
+        is_connected = True
+
+        async def get_last_message(self, session_id: str):
+            return None
+
+        async def save_session(self, session):
+            saved_sessions.append(session)
+
+    fake_db = PreviewDatabase()
+
+    monkeypatch.setattr(session_manager_module, 'get_session_service', lambda: fake_session_service)
+    monkeypatch.setattr(session_manager_module, 'get_event_bus', lambda: fake_event_bus)
+    monkeypatch.setattr(session_manager_module, 'get_message_manager', lambda: FakeMessageManager())
+    monkeypatch.setattr(session_manager_module, 'get_database', lambda: fake_db)
+
+    async def scenario() -> None:
+        manager = session_manager_module.SessionManager()
+        preserved_time = datetime(2026, 3, 20, 8, 30, 0)
+        session = Session(
+            session_id='session-1',
+            name='Core Team',
+            last_message='hello',
+            last_message_time=preserved_time,
+            created_at=datetime(2026, 3, 18, 9, 0, 0),
+            updated_at=datetime(2026, 3, 26, 23, 59, 0),
+            extra={},
+        )
+        manager._sessions[session.session_id] = session
+
+        await manager.refresh_session_preview(session.session_id)
+
+        assert session.last_message_time == preserved_time
+        assert saved_sessions[-1].last_message_time == preserved_time
+
+    asyncio.run(scenario())
+
 def test_normalize_profile_gender_preserves_supported_values() -> None:
     assert profile_fields_module.normalize_profile_gender('female') == 'female'
     assert profile_fields_module.normalize_profile_gender('male') == 'male'
@@ -1374,14 +1419,82 @@ def test_collection_icon_library_is_downloaded_and_addressable() -> None:
     assert 'client/resources/icons/iconfont_51777' in group_path.as_posix()
 
 
-def test_app_icon_default_theme_opacity_matches_fluent_medium_emphasis() -> None:
+def test_app_icon_default_theme_colors_match_fluent_icon_palette() -> None:
     light_svg = app_icons_module._render_svg_markup('add', theme=app_icons_module.Theme.LIGHT)
     dark_svg = app_icons_module._render_svg_markup('add', theme=app_icons_module.Theme.DARK)
     explicit_fill_svg = app_icons_module._render_svg_markup('add', fill='#202020')
 
-    assert 'opacity="0.63"' in light_svg
-    assert 'opacity="0.786"' in dark_svg
+    assert '#797979' in light_svg
+    assert '#929292' in dark_svg
+    assert '#202020' in explicit_fill_svg
+    assert 'opacity=' not in light_svg
+    assert 'opacity=' not in dark_svg
     assert 'opacity=' not in explicit_fill_svg
+
+
+def test_message_actions_offer_recall_before_two_minute_limit() -> None:
+    now = datetime(2026, 3, 27, 14, 0, 0)
+    message = ChatMessage(
+        message_id='msg-1',
+        session_id='session-1',
+        sender_id='user-1',
+        content='hello',
+        status=MessageStatus.SENT,
+        timestamp=now - timedelta(seconds=119),
+        is_self=True,
+    )
+
+    assert message_actions_module.should_offer_recall(message, now=now) is True
+    assert message_actions_module.should_offer_delete(message, now=now) is False
+
+
+def test_message_actions_switch_self_message_to_delete_after_recall_window() -> None:
+    now = datetime(2026, 3, 27, 14, 0, 0)
+    message = ChatMessage(
+        message_id='msg-2',
+        session_id='session-1',
+        sender_id='user-1',
+        content='hello',
+        status=MessageStatus.DELIVERED,
+        timestamp=now - timedelta(seconds=121),
+        is_self=True,
+    )
+
+    assert message_actions_module.should_offer_recall(message, now=now) is False
+    assert message_actions_module.should_offer_delete(message, now=now) is True
+
+
+def test_format_session_timestamp_uses_yesterday_with_time(monkeypatch) -> None:
+    class FrozenDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 3, 27, 14, 0, 0)
+
+    monkeypatch.setattr(i18n_module, 'datetime', FrozenDateTime)
+    monkeypatch.setattr(i18n_module, '_localized_time_text', lambda moment: f'{moment.hour:02d}:{moment.minute:02d}')
+    i18n_module.initialize_i18n()
+
+    assert i18n_module.format_session_timestamp(datetime(2026, 3, 26, 9, 30, 0)) == 'Yesterday 09:30'
+
+
+def test_format_session_timestamp_uses_full_year_date_for_older_year(monkeypatch) -> None:
+    class FrozenDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 3, 27, 14, 0, 0)
+
+    monkeypatch.setattr(i18n_module, 'datetime', FrozenDateTime)
+    i18n_module.initialize_i18n()
+
+    assert i18n_module.format_session_timestamp(datetime(2025, 12, 31, 9, 30, 0)) == '2025/12/31'
+
+
+def test_coerce_local_datetime_keeps_naive_iso_wall_clock_time() -> None:
+    from client.core.datetime_utils import coerce_local_datetime
+
+    parsed = coerce_local_datetime('2026-03-27T18:04:00')
+
+    assert parsed == datetime(2026, 3, 27, 18, 4, 0)
 
 
 def test_sound_manager_loads_manifest_and_plays_registered_sound(monkeypatch) -> None:

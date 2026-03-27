@@ -20,6 +20,7 @@ from client.models.message import ChatMessage, MessageType, Session
 from client.models.message_model import MessageModel
 from client.ui.styles import StyleSheet
 from client.ui.widgets.chat_header import ChatHeader
+from client.ui.widgets.chat_info_drawer import ChatInfoDrawerOverlay
 from client.ui.widgets.fluent_splitter import FluentSplitter
 from client.ui.widgets.message_input import MessageInput
 from qfluentwidgets.multimedia import VideoWidget
@@ -83,6 +84,12 @@ class ChatPanel(QWidget):
     video_call_requested = Signal()
     older_messages_requested = Signal()
     composer_draft_changed = Signal(object)
+    chat_history_requested = Signal()
+    chat_info_search_requested = Signal()
+    chat_info_add_requested = Signal()
+    chat_info_clear_requested = Signal()
+    chat_info_mute_toggled = Signal(bool)
+    chat_info_pin_toggled = Signal(bool)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -100,6 +107,7 @@ class ChatPanel(QWidget):
         self._has_more_history = True
         self.message_input: Optional[MessageInput] = None
         self.content_splitter: Optional[FluentSplitter] = None
+        self._chat_info_overlay: Optional[ChatInfoDrawerOverlay] = None
 
         self._setup_ui()
 
@@ -179,6 +187,15 @@ class ChatPanel(QWidget):
         self.chat_layout.addWidget(self.chat_header, 0)
         self.chat_layout.addWidget(self.content_splitter, 1)
 
+        self._chat_info_overlay = ChatInfoDrawerOverlay(self.chat_page)
+        self._chat_info_overlay.searchRequested.connect(self.chat_info_search_requested.emit)
+        self._chat_info_overlay.addRequested.connect(self.chat_info_add_requested.emit)
+        self._chat_info_overlay.clearRequested.connect(self.chat_info_clear_requested.emit)
+        self._chat_info_overlay.muteToggled.connect(self.chat_info_mute_toggled.emit)
+        self._chat_info_overlay.pinToggled.connect(self.chat_info_pin_toggled.emit)
+        self.chat_header.history_clicked.connect(self.chat_history_requested.emit)
+        self.chat_header.info_clicked.connect(self.toggle_chat_info_drawer)
+
         self.stack.addWidget(self.welcome_widget)
         self.stack.addWidget(self.chat_page)
         self.main_layout.addWidget(self.stack)
@@ -186,6 +203,7 @@ class ChatPanel(QWidget):
         self.show_welcome()
         StyleSheet.CHAT_PANEL.apply(self)
         self._position_history_indicator()
+        self._layout_chat_info_overlay()
 
     def resizeEvent(self, event) -> None:
         """Keep message/input layout responsive while the chat panel is being resized."""
@@ -193,6 +211,7 @@ class ChatPanel(QWidget):
         super().resizeEvent(event)
         self.chat_layout.activate()
         self._position_history_indicator()
+        self._layout_chat_info_overlay()
         self._relayout_message_list()
         self._restore_message_viewport()
         self._schedule_restore_message_viewport()
@@ -218,7 +237,11 @@ class ChatPanel(QWidget):
         self._current_session = None
         self.stack.setCurrentWidget(self.welcome_widget)
         self.message_input.set_session_active(False)
+        self.chat_header.set_actions_enabled(False)
         self._history_indicator.hide()
+        if self._chat_info_overlay:
+            self._chat_info_overlay.set_session(None)
+            self._chat_info_overlay.close_drawer()
 
     def show_chat(self) -> None:
         """Show active chat page and enable input."""
@@ -238,6 +261,8 @@ class ChatPanel(QWidget):
             avatar=session.avatar,
             is_ai=session.is_ai_session,
         )
+        if self._chat_info_overlay:
+            self._chat_info_overlay.set_session(session)
         self.show_chat()
 
     def clear_messages(self) -> None:
@@ -435,7 +460,7 @@ class ChatPanel(QWidget):
         if self._message_model:
             self._message_model.remove_message(message_id)
 
-    def get_message_at(self, position) -> Optional[ChatMessage]:
+    def get_message_at(self, position, *, bubble_only: bool = False) -> Optional[ChatMessage]:
         """Return the message under a viewport position."""
         index = self.message_list.indexAt(position)
         if not index.isValid():
@@ -443,7 +468,19 @@ class ChatPanel(QWidget):
         message = index.data(Qt.ItemDataRole.UserRole)
         if not message or message.message_type == MessageType.SYSTEM:
             return None
+        if bubble_only and self._message_delegate:
+            if not self._message_delegate.is_bubble_hit(self.message_list, index, position):
+                return None
         return message
+
+    def set_context_menu_message(self, message_id: str | None) -> None:
+        """Highlight one text bubble while its context menu is visible."""
+        if self._message_delegate:
+            self._message_delegate.set_context_menu_message(self.message_list, message_id)
+
+    def clear_context_menu_message(self) -> None:
+        """Clear any transient context-menu bubble highlight."""
+        self.set_context_menu_message(None)
 
     def eventFilter(self, watched, event) -> bool:
         """Only open attachments when the click lands inside the rendered content area."""
@@ -465,9 +502,17 @@ class ChatPanel(QWidget):
                 self._relayout_message_list()
                 self._position_history_indicator()
                 self._schedule_restore_message_viewport()
+            if event.type() == QEvent.Type.Leave:
+                if self._message_delegate:
+                    self._message_delegate.clear_time_separator_hover(self.message_list)
+                self.message_list.viewport().unsetCursor()
             if event.type() == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
                 position = event.position().toPoint() if hasattr(event, "position") else event.pos()
                 index = self.message_list.indexAt(position)
+                if index.isValid() and self._message_delegate and self._message_delegate.is_time_separator_hit(
+                    self.message_list, index, position
+                ):
+                    return True
                 if index.isValid() and self._message_delegate and self._message_delegate.begin_text_selection(
                     self.message_list, index, position
                 ):
@@ -486,6 +531,14 @@ class ChatPanel(QWidget):
                         return True
 
                 index = self.message_list.indexAt(position)
+                if index.isValid() and self._message_delegate and self._message_delegate.update_time_separator_hover(
+                    self.message_list, index, position
+                ):
+                    self.message_list.viewport().setCursor(Qt.CursorShape.PointingHandCursor)
+                    return True
+                if self._message_delegate:
+                    self._message_delegate.clear_time_separator_hover(self.message_list)
+
                 if index.isValid() and self._message_delegate and self._message_delegate.is_text_hit(
                     self.message_list, index, position
                 ):
@@ -500,6 +553,10 @@ class ChatPanel(QWidget):
 
                 position = event.position().toPoint() if hasattr(event, "position") else event.pos()
                 index = self.message_list.indexAt(position)
+                if index.isValid() and self._message_delegate and self._message_delegate.toggle_time_separator_expanded_at(
+                    self.message_list, index, position
+                ):
+                    return True
                 if index.isValid() and self._is_attachment_click(index, position):
                     self.handle_message_click(index)
                     return True
@@ -511,6 +568,7 @@ class ChatPanel(QWidget):
             QEvent.Type.Show,
         }:
             self._remember_message_scroll_gap()
+            self._layout_chat_info_overlay()
             self._relayout_message_list()
             self._restore_message_viewport()
             self._schedule_restore_message_viewport()
@@ -781,3 +839,22 @@ class ChatPanel(QWidget):
             self.chat_header.set_status(_session_status_text(self._current_session))
         else:
             self.chat_header.set_status("")
+
+    def toggle_chat_info_drawer(self) -> None:
+        """Toggle the floating chat info drawer for the current session."""
+        if not self._current_session or not self._chat_info_overlay:
+            return
+        self._layout_chat_info_overlay()
+        self._chat_info_overlay.set_session(self._current_session)
+        self._chat_info_overlay.toggle()
+
+    def close_chat_info_drawer(self) -> None:
+        """Hide the floating chat info drawer if it is visible."""
+        if self._chat_info_overlay:
+            self._chat_info_overlay.close_drawer()
+
+    def _layout_chat_info_overlay(self) -> None:
+        """Keep the floating chat info drawer aligned to the full right-side chat pane."""
+        if not self._chat_info_overlay or not self.chat_page:
+            return
+        self._chat_info_overlay.set_content_geometry(self.chat_page.rect())

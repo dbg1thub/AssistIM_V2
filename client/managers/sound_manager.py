@@ -16,6 +16,7 @@ from client.core.config import cfg
 from client.core.logging import setup_logging
 from client.events.event_bus import get_event_bus
 from client.managers.message_manager import MessageEvent
+from client.managers.session_manager import peek_session_manager
 
 
 setup_logging()
@@ -141,7 +142,12 @@ class SoundManager:
         self._pending_loaded_callbacks.clear()
         self._initialized = False
 
-    async def _on_message_received(self, _payload: dict) -> None:
+    async def _on_message_received(self, payload: dict) -> None:
+        message = payload.get("message")
+        session_id = str(getattr(message, "session_id", "") or payload.get("session_id", "") or "")
+        session_manager = peek_session_manager()
+        if session_manager is not None and session_id and session_manager.is_session_muted(session_id):
+            return
         self.play(AppSound.MESSAGE_INCOMING)
 
     def _load_manifest(self) -> None:

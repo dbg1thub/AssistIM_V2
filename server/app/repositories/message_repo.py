@@ -1,4 +1,4 @@
-"""Message repository."""
+﻿"""Message repository."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 
 from app.models.message import Message, MessageRead
 from app.models.session import ChatSession, SessionEvent, SessionMember
-from app.utils.time import utcnow
+from app.utils.time import isoformat_utc, utcnow
 
 
 class MessageIdConflictError(ValueError):
@@ -276,7 +276,7 @@ class MessageRepository:
             "last_read_message_id": member.last_read_message_id or message.id,
             "last_read_seq": int(member.last_read_seq or target_seq),
             "user_id": user_id,
-            "read_at": member.last_read_at.isoformat() if member.last_read_at else None,
+            "read_at": isoformat_utc(member.last_read_at),
             "advanced": advanced,
         }
 
@@ -346,3 +346,4 @@ class MessageRepository:
         except (TypeError, ValueError, json.JSONDecodeError):
             return {}
         return payload if isinstance(payload, dict) else {}
+

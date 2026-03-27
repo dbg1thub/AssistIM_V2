@@ -1,4 +1,4 @@
-"""
+﻿"""
 Message Manager Module
 
 Manager for message handling, ACK processing, and caching.
@@ -1452,7 +1452,7 @@ class MessageManager:
         )
         await self._hydrate_messages_sender_profiles(messages, persist=True)
 
-        should_fetch_remote = before_timestamp is not None or len(messages) < limit
+        should_fetch_remote = before_timestamp is None or len(messages) < limit
         if should_fetch_remote:
             try:
                 remote_messages = await self._fetch_remote_messages(
@@ -1515,6 +1515,7 @@ def get_message_manager() -> MessageManager:
     if _message_manager is None:
         _message_manager = MessageManager()
     return _message_manager
+
 
 
 
