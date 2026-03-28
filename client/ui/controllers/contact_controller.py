@@ -253,6 +253,7 @@ class ContactController:
                 "nickname": item.nickname,
                 "remark": item.remark,
                 "assistim_id": item.assistim_id,
+                "region": item.region,
                 "avatar": item.avatar,
                 "signature": item.signature,
                 "category": item.category,
@@ -279,7 +280,8 @@ class ContactController:
                 "owner_id": item.owner_id,
                 "session_id": item.session_id,
                 "member_count": item.member_count,
-                "extra": dict(item.extra),
+                "member_search_text": self._group_member_search_text(item.extra),
+                "extra": self._group_search_extra(item.extra),
             }
             for item in groups
         ]
@@ -287,6 +289,40 @@ class ContactController:
             await self._db.replace_groups_cache(payload)
         except Exception:
             logger.debug("Failed to persist groups cache", exc_info=True)
+
+    @staticmethod
+    def _group_member_search_text(extra: dict) -> str:
+        """Build one flattened member-search index for future group-member search."""
+        previews = ContactController._group_member_previews(extra)
+        return " ".join(previews)
+
+    @staticmethod
+    def _group_search_extra(extra: dict) -> dict:
+        """Persist only lightweight member-preview data needed by local search UI."""
+        payload = dict(extra or {})
+        payload["member_previews"] = ContactController._group_member_previews(extra)
+        return payload
+
+    @staticmethod
+    def _group_member_previews(extra: dict) -> list[str]:
+        """Extract the first-level member display previews from one raw group payload."""
+        previews: list[str] = []
+        for item in list((extra or {}).get("members") or []):
+            if not isinstance(item, dict):
+                continue
+            name = str(
+                item.get("display_name", "")
+                or item.get("nickname", "")
+                or item.get("remark", "")
+                or item.get("username", "")
+                or item.get("user_id", "")
+                or ""
+            ).strip()
+            region = str(item.get("region", "") or "").strip()
+            if not name:
+                continue
+            previews.append(f"{name}（地区：{region}）" if region else name)
+        return previews
 
     async def load_requests(self) -> list[FriendRequestRecord]:
         """Load pending friend requests."""

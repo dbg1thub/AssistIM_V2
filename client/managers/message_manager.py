@@ -84,6 +84,7 @@ class MessageSendQueue:
     """
 
     QUEUE_TIMEOUT = 30.0
+    STOP_TIMEOUT = 1.5
 
     def __init__(
         self,
@@ -113,7 +114,9 @@ class MessageSendQueue:
         if self._worker_task:
             self._worker_task.cancel()
             try:
-                await self._worker_task
+                await asyncio.wait_for(self._worker_task, timeout=self.STOP_TIMEOUT)
+            except asyncio.TimeoutError:
+                logger.warning("Timed out waiting for message send queue worker to stop")
             except asyncio.CancelledError:
                 pass
             self._worker_task = None
@@ -211,6 +214,7 @@ class MessageManager:
         self._ack_timeout = 10.0
         self._max_attempts = 3
         self._transport_retry_delay = 2.0
+        self._close_timeout = 1.5
 
     async def initialize(self) -> None:
         """Initialize message manager."""
@@ -1518,6 +1522,21 @@ class MessageManager:
 
         return messages
 
+    async def get_cached_messages(
+        self,
+        session_id: str,
+        limit: int = 50,
+        before_timestamp: Optional[float] = None,
+    ) -> list[ChatMessage]:
+        """Get one local-only message page without triggering remote backfill."""
+        messages = await self._db.get_messages(
+            session_id,
+            limit=limit,
+            before_timestamp=before_timestamp,
+        )
+        await self._hydrate_messages_sender_profiles(messages, persist=True)
+        return messages
+
     async def close(self) -> None:
         """Close message manager."""
         logger.info("Closing message manager")
@@ -1531,7 +1550,9 @@ class MessageManager:
         if self._ack_check_task:
             self._ack_check_task.cancel()
             try:
-                await self._ack_check_task
+                await asyncio.wait_for(self._ack_check_task, timeout=self._close_timeout)
+            except asyncio.TimeoutError:
+                logger.warning("Timed out waiting for ACK check loop to stop")
             except asyncio.CancelledError:
                 pass
             self._ack_check_task = None

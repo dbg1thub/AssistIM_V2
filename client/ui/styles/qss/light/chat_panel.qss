@@ -28,7 +28,7 @@ QSplitter#chatContentSplitter::handle:vertical:pressed {
 }
 
 QLabel#chatWelcomeTitle {
-    color: black;
+    color: {{TEXT_PRIMARY}};
     font: 28px "Segoe UI Semibold", "Microsoft YaHei", "PingFang SC";
 }
 
@@ -38,11 +38,27 @@ QLabel#chatWelcomeSubtitle {
 }
 
 QWidget#chatInfoOverlay,
-QWidget#chatInfoDrawer,
 QWidget#chatInfoDrawerContent,
 QWidget#chatInfoParticipantTile,
 QWidget#chatInfoAddTile {
     background: transparent;
+}
+
+QFrame#chatInfoDrawer {
+    background: transparent;
+    border: none;
+}
+
+QFrame#chatInfoDrawerBorder {
+    background: transparent;
+    border-top: 1px solid rgb(229, 229, 229);
+    border-left: 1px solid rgb(229, 229, 229);
+    border-bottom: 1px solid rgb(229, 229, 229);
+    border-right: none;
+    border-top-left-radius: 7px;
+    border-bottom-left-radius: 7px;
+    border-top-right-radius: 0;
+    border-bottom-right-radius: 0;
 }
 
 QFrame#chatInfoParticipantCard,
@@ -59,12 +75,12 @@ QFrame#chatInfoAddGlyph {
 QLabel#chatInfoParticipantName,
 QLabel#chatInfoAddName,
 QLabel#chatInfoActionTitle {
-    color: black;
+    color: {{TEXT_PRIMARY}};
     font: 13px "Segoe UI", "Microsoft YaHei", "PingFang SC";
 }
 
 QLabel#chatInfoPlaceholderTitle {
-    color: black;
+    color: {{TEXT_PRIMARY}};
     font: 15px "Segoe UI Semibold", "Microsoft YaHei", "PingFang SC";
 }
 

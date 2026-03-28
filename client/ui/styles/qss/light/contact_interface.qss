@@ -10,21 +10,10 @@ QWidget#contactListScrollWidget,
 QWidget#contactMomentsScrollWidget,
 QWidget#contactDetailScrollWidget,
 QWidget#contactMomentFlowWidget,
-QWidget#MomentCard,
 QWidget#MomentCommentSection {
     background: transparent;
     border: none;
     border-radius: 0;
-}
-
-CardWidget#ContactMomentItem,
-QWidget#MomentCard,
-CardWidget#RequestListItem,
-CardWidget#UserSearchItem,
-CardWidget#GroupMemberItem {
-    background: {{CARD_BG}};
-    border: 1px solid {{BORDER_COLOR}};
-    border-radius: {{RADIUS_CARD}};
 }
 
 QFrame#MomentCardDivider {
@@ -40,17 +29,28 @@ QFrame#MomentCommentSurface {
     border-radius: {{RADIUS_CARD}};
 }
 
-QWidget#ContactDetailHeader {
-    background: {{CARD_BG}};
-    border: 1px solid {{BORDER_COLOR}};
-    border-radius: {{RADIUS_CARD}};
-}
-
 QFrame#DetailDivider {
     background: {{BORDER_COLOR}};
     min-height: 1px;
     max-height: 1px;
     border: none;
+}
+
+QLabel#elidedCaptionLabel,
+QLabel#elidedBodyLabel,
+QLabel#contactMetaLabel,
+QLabel#contactSectionCaption,
+QLabel#contactSectionIndexLabel,
+QLabel#contactMomentMetaLabel,
+QLabel#contactSummaryLabel,
+QLabel#momentCommentTimeLabel,
+QLabel#momentStatsLabel {
+    background: transparent;
+}
+
+QLabel#elidedBodyLabel {
+    color: {{TEXT_PRIMARY}};
+    font: 15px "Segoe UI", "Microsoft YaHei", "PingFang SC";
 }
 
 QLabel#elidedCaptionLabel,
@@ -74,6 +74,16 @@ QWidget#contactMomentCommentBox {
     background: {{SURFACE_BG}};
     border: 1px solid {{BORDER_COLOR}};
     border-radius: {{RADIUS_PILL}};
+}
+
+QWidget#ContactWelcomeCard,
+QWidget#ContactDetailHeader,
+QWidget#UserSearchItem,
+QWidget#GroupMemberItem,
+QWidget#ContactMomentItem {
+    background: {{CARD_BG_STRONG}};
+    border: 1px solid {{BORDER_COLOR_STRONG}};
+    border-radius: {{RADIUS_CARD}};
 }
 
 QLabel#contactMomentCommentLabel {
@@ -104,4 +114,64 @@ QSplitter#contactSplitter::handle:horizontal {
 
 QSplitter#contactSplitter::handle:horizontal:hover {
     background: {{HANDLE_HOVER}};
+}
+
+QWidget#globalSearchPanel,
+QScrollArea#globalSearchScrollArea,
+QWidget#globalSearchScrollWidget,
+QWidget#globalSearchSectionHeader,
+QWidget#globalSearchSectionTitleRow {
+    background: transparent;
+    border: none;
+}
+
+QFrame#globalSearchAcrylicSurface {
+    background: transparent;
+    border: none;
+}
+
+QFrame#globalSearchAcrylicBorder {
+    background: transparent;
+    border: 1px solid rgb(229, 229, 229);
+    border-radius: 10px;
+}
+
+QLabel#globalSearchStateLabel,
+QLabel#globalSearchSectionTitle,
+QLabel#globalSearchResultSubtitle,
+QLabel#globalSearchResultMeta {
+    color: {{TEXT_SECONDARY}};
+    font: 12px "Segoe UI", "Microsoft YaHei", "PingFang SC";
+}
+
+QLabel#globalSearchResultTitle {
+    color: {{TEXT_PRIMARY}};
+    font: 15px "Segoe UI", "Microsoft YaHei", "PingFang SC";
+}
+
+QWidget#globalSearchResultCard {
+    background: transparent;
+    border: none;
+    border-radius: {{RADIUS_CARD}};
+}
+
+QFrame#globalSearchSectionDivider {
+    background: {{BORDER_COLOR}};
+    border: none;
+    min-height: 1px;
+    max-height: 1px;
+}
+
+QWidget#globalSearchSectionLinkRow {
+    background: transparent;
+    border: none;
+}
+
+QLabel#globalSearchSectionLinkLabel {
+    color: {{TEXT_SECONDARY}};
+    font: 14px "Segoe UI", "Microsoft YaHei", "PingFang SC";
+}
+
+QWidget#globalSearchSectionLinkRow:hover QLabel#globalSearchSectionLinkLabel {
+    color: {{TEXT_PRIMARY}};
 }

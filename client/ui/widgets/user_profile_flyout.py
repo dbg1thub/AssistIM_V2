@@ -7,7 +7,8 @@ import os
 import re
 from typing import Optional
 
-from PySide6.QtCore import QDate, Qt, Signal
+from PySide6.QtCore import QDate, QEvent, Qt, Signal
+from PySide6.QtGui import QColor, QPalette
 from PySide6.QtWidgets import (
     QComboBox,
     QDateEdit,
@@ -30,6 +31,7 @@ from qfluentwidgets import (
     PrimaryPushButton,
     PushButton,
     SubtitleLabel,
+    isDarkTheme,
 )
 from qfluentwidgets.components.material import AcrylicFlyout, AcrylicFlyoutViewBase
 
@@ -55,6 +57,18 @@ logger = logging.get_logger(__name__)
 _EMAIL_PATTERN = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 _PHONE_PATTERN = re.compile(r"^\+?[0-9][0-9()\-\.\s]{5,31}$")
 _EMPTY_BIRTHDAY = QDate(1900, 1, 1)
+
+
+def _apply_themed_dialog_surface(dialog: QDialog, object_name: str, *, radius: int = 14) -> None:
+    """Apply one stable theme-aware palette to profile dialogs."""
+    dialog.setObjectName(object_name)
+    dialog.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, False)
+    dialog.setAutoFillBackground(True)
+    background = QColor(39, 43, 48) if isDarkTheme() else QColor(255, 255, 255)
+    palette = dialog.palette()
+    palette.setColor(QPalette.ColorRole.Window, background)
+    palette.setColor(QPalette.ColorRole.Base, background)
+    dialog.setPalette(palette)
 
 
 def _avatar_initials(name: str) -> str:
@@ -122,6 +136,7 @@ class ProfileEditDialog(QDialog):
         self.setWindowTitle(tr("profile.edit.window_title", "Edit Profile"))
         self.setMinimumWidth(520)
         self.setModal(True)
+        _apply_themed_dialog_surface(self, "ProfileEditDialog")
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 24, 24, 24)
@@ -245,6 +260,15 @@ class ProfileEditDialog(QDialog):
         layout.addLayout(form)
         layout.addStretch(1)
         layout.addLayout(button_row)
+
+    def changeEvent(self, event) -> None:
+        super().changeEvent(event)
+        if event.type() in {
+            QEvent.Type.PaletteChange,
+            QEvent.Type.ApplicationPaletteChange,
+            QEvent.Type.StyleChange,
+        }:
+            _apply_themed_dialog_surface(self, "ProfileEditDialog")
 
     def profile_payload(self) -> dict[str, str | None]:
         """Return dialog values after acceptance."""
@@ -590,6 +614,3 @@ class UserProfileCoordinator(QWidget):
             if not task.done():
                 task.cancel()
         super().closeEvent(event)
-
-
-

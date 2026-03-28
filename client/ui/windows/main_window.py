@@ -77,10 +77,12 @@ class MainWindow(FluentWindow):
     closed = Signal()
     logoutRequested = Signal()
     NAVIGATION_MENU_THRESHOLD = 1400
+    DEFAULT_WIDTH = 1200
+    DEFAULT_HEIGHT = 900
 
     def __init__(self):
         super().__init__()
-        self.resize(1200, 900)
+        self.resize(self.DEFAULT_WIDTH, self.DEFAULT_HEIGHT)
         self.setWindowTitle(tr("common.app_name", "AssistIM"))
         self.setWindowIcon(AppIcon.CHAT.icon())
 
@@ -148,14 +150,18 @@ class MainWindow(FluentWindow):
             self._last_system_theme = self._detect_system_theme()
             self._theme_poll_timer.start()
 
+        self.restore_default_geometry()
+        QTimer.singleShot(0, self.chat_interface.load_sessions)
+        QTimer.singleShot(0, self._sync_chat_session_activity)
+
+    def restore_default_geometry(self) -> None:
+        """Restore the expected shell size and center it on the primary display."""
+        self.resize(self.DEFAULT_WIDTH, self.DEFAULT_HEIGHT)
         primary_screen = QApplication.primaryScreen()
         if primary_screen:
             screen_geometry = primary_screen.availableGeometry()
             w, h = screen_geometry.width(), screen_geometry.height()
             self.move(w // 2 - self.width() // 2, h // 2 - self.height() // 2)
-
-        QTimer.singleShot(0, self.chat_interface.load_sessions)
-        QTimer.singleShot(0, self._sync_chat_session_activity)
 
     def initNavigation(self):
         """Initialize left navigation."""
@@ -870,30 +876,42 @@ class MainWindow(FluentWindow):
         else:
             self.stackedWidget.setCurrentWidget(self.chat_interface)
 
-        if not isinstance(payload, dict):
-            InfoBar.warning(
-                tr("main_window.contact_jump.invalid_title", "Chat"),
-                tr("main_window.contact_jump.invalid_message", "Unable to resolve contact jump data."),
-                parent=self,
-                duration=2000,
-            )
-            return
+        def _target_value(target: object, key: str, default: object = "") -> object:
+            if isinstance(target, dict):
+                return target.get(key, default)
+            return getattr(target, key, default)
 
-        target_type = payload.get("type", "")
-        target = payload.get("data")
+        target_type = ""
+        target = payload
+        if isinstance(payload, dict) and "data" in payload:
+            target_type = str(payload.get("type", "") or "")
+            target = payload.get("data")
+
+        if not target_type:
+            inferred_session_id = str(_target_value(target, "session_id", "") or "")
+            inferred_member_count = _target_value(target, "member_count", None)
+            target_type = "group" if inferred_member_count is not None or inferred_session_id else "contact"
         opened = False
 
-        if target_type == "group":
-            session_id = getattr(target, "session_id", "")
+        if target_type == "message":
+            session_id = str(_target_value(target, "session_id", "") or "")
+            if session_id:
+                opened = await self.chat_interface.open_session(session_id)
+        elif target_type == "group":
+            session_id = str(_target_value(target, "session_id", "") or _target_value(target, "id", "") or "")
             if session_id:
                 opened = await self.chat_interface.open_group_session(session_id)
         else:
-            contact_id = getattr(target, "id", "")
+            contact_id = str(_target_value(target, "id", "") or _target_value(target, "user_id", "") or "")
             if contact_id:
                 opened = await self.chat_interface.open_direct_session(
                     contact_id,
-                    getattr(target, "display_name", "") or getattr(target, "name", ""),
-                    getattr(target, "avatar", ""),
+                    str(
+                        _target_value(target, "display_name", "")
+                        or _target_value(target, "name", "")
+                        or _target_value(target, "username", "")
+                    ),
+                    str(_target_value(target, "avatar", "") or ""),
                 )
 
         if not opened:

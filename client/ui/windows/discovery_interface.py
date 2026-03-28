@@ -7,8 +7,8 @@ import html
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import QEasingCurve, QParallelAnimationGroup, QPropertyAnimation, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPixmap
+from PySide6.QtCore import QEvent, QEasingCurve, QParallelAnimationGroup, QPropertyAnimation, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPalette, QPixmap
 from PySide6.QtWidgets import (
     QDialog,
     QFrame,
@@ -24,9 +24,9 @@ from qfluentwidgets import (
     BodyLabel,
     CaptionLabel,
     CardWidget,
-    ElevatedCardWidget,
     IconWidget,
     InfoBar,
+    isDarkTheme,
     LineEdit,
     PrimaryPushButton,
     PushButton,
@@ -68,6 +68,34 @@ def _apply_safe_button_font(*buttons: TransparentToolButton) -> None:
 
     for button in buttons:
         button.setFont(font)
+
+
+def _prepare_transparent_scroll_area(area: ScrollArea) -> None:
+    """Keep discovery scroll containers transparent in both themes."""
+    area.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, False)
+    area.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+    area.setAutoFillBackground(False)
+    area.setStyleSheet("QAbstractScrollArea{background: transparent; border: none;} QScrollArea{background: transparent; border: none;}")
+    viewport = area.viewport()
+    if viewport is not None:
+        viewport.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, False)
+        viewport.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        viewport.setAutoFillBackground(False)
+        viewport.setStyleSheet("background: transparent; border: none;")
+    if hasattr(area, "enableTransparentBackground"):
+        area.enableTransparentBackground()
+
+
+def _apply_themed_dialog_surface(dialog: QDialog, object_name: str, *, radius: int = 14) -> None:
+    """Apply one stable theme-aware palette to plain discovery dialogs."""
+    dialog.setObjectName(object_name)
+    dialog.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, False)
+    dialog.setAutoFillBackground(True)
+    background = QColor(39, 43, 48) if isDarkTheme() else QColor(255, 255, 255)
+    palette = dialog.palette()
+    palette.setColor(QPalette.ColorRole.Window, background)
+    palette.setColor(QPalette.ColorRole.Base, background)
+    dialog.setPalette(palette)
 
 
 def _clear_layout(layout: QVBoxLayout | QHBoxLayout | QGridLayout) -> None:
@@ -144,13 +172,18 @@ class DiscoveryAvatar(QWidget):
             painter.drawPixmap(rect, scaled)
             return
 
-        painter.fillPath(clip, QColor("#D8E8F8"))
+        if isDarkTheme():
+            painter.fillPath(clip, QColor(98, 107, 118))
+            text_color = QColor("#F8FAFC")
+        else:
+            painter.fillPath(clip, QColor("#D8E8F8"))
+            text_color = QColor("#27486B")
         painter.setClipping(False)
         font = QFont()
         font.setBold(True)
         font.setPixelSize(max(12, self._size // 3))
         painter.setFont(font)
-        painter.setPen(QColor("#27486B"))
+        painter.setPen(text_color)
         painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, self._fallback)
 
 
@@ -245,19 +278,39 @@ class MomentCommentItem(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(2)
 
-        text_label = QLabel(self)
-        text_label.setWordWrap(True)
-        text_label.setTextFormat(Qt.TextFormat.RichText)
-        text_label.setText(
-            f"<span style='color:#24425E;font-weight:600'>{html.escape(comment.display_name)}</span>"
-            f"<span style='color:#4A5565'>：{html.escape(comment.content)}</span>"
-        )
+        self.text_label = QLabel(self)
+        self.text_label.setWordWrap(True)
+        self.text_label.setTextFormat(Qt.TextFormat.RichText)
+        self._apply_comment_text()
 
         time_label = CaptionLabel(format_relative_time(comment.created_at), self)
         time_label.setObjectName("momentCommentTimeLabel")
 
-        layout.addWidget(text_label)
+        layout.addWidget(self.text_label)
         layout.addWidget(time_label)
+
+    def changeEvent(self, event) -> None:
+        super().changeEvent(event)
+        if event.type() in {
+            QEvent.Type.PaletteChange,
+            QEvent.Type.ApplicationPaletteChange,
+            QEvent.Type.StyleChange,
+        }:
+            self._apply_comment_text()
+
+    def _apply_comment_text(self) -> None:
+        """Refresh the rich text colors to match the current theme."""
+        if isDarkTheme():
+            author_color = "#E2E8F0"
+            body_color = "#CBD5E1"
+        else:
+            author_color = "#24425E"
+            body_color = "#4A5565"
+
+        self.text_label.setText(
+            f"<span style='color:{author_color};font-weight:600'>{html.escape(self.comment.display_name)}</span>"
+            f"<span style='color:{body_color}'>：{html.escape(self.comment.content)}</span>"
+        )
 
 
 class AnimatedCommentSection(QWidget):
@@ -443,6 +496,7 @@ class CreateMomentDialog(QDialog):
         self.setWindowTitle(tr("discovery.dialog.window_title", "Publish Moment"))
         self.setModal(True)
         self.resize(560, 360)
+        _apply_themed_dialog_surface(self, "CreateMomentDialog")
         self._setup_ui()
 
     def _setup_ui(self) -> None:
@@ -482,6 +536,15 @@ class CreateMomentDialog(QDialog):
         footer.addWidget(publish_button)
         layout.addLayout(footer)
 
+    def changeEvent(self, event) -> None:
+        super().changeEvent(event)
+        if event.type() in {
+            QEvent.Type.PaletteChange,
+            QEvent.Type.ApplicationPaletteChange,
+            QEvent.Type.StyleChange,
+        }:
+            _apply_themed_dialog_surface(self, "CreateMomentDialog")
+
     def _submit(self) -> None:
         text = self.editor.toPlainText().strip()
         if not text:
@@ -496,7 +559,7 @@ class CreateMomentDialog(QDialog):
         self.accept()
 
 
-class MomentCard(ElevatedCardWidget):
+class MomentCard(CardWidget):
     """Single moment card in the timeline."""
 
     like_requested = Signal(str, bool, int)
@@ -509,6 +572,7 @@ class MomentCard(ElevatedCardWidget):
         self.moment = moment
         self._content_expanded = False
         self._image_dialogs: set[QDialog] = set()
+        self.setBorderRadius(8)
         self._setup_ui()
         self._apply_moment()
 
@@ -716,6 +780,8 @@ class DiscoveryInterface(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("DiscoveryInterface")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, False)
+        self.setAutoFillBackground(False)
         self._controller = get_discovery_controller()
         self._moments: list[MomentRecord] = []
         self._cards: dict[str, MomentCard] = {}
@@ -746,14 +812,24 @@ class DiscoveryInterface(QWidget):
         self.scroll_area.setWidgetResizable(True)
         self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+        _prepare_transparent_scroll_area(self.scroll_area)
+        if self.scroll_area.viewport() is not None:
+            self.scroll_area.viewport().setObjectName("discoveryViewport")
 
         self.scroll_widget = QWidget(self.scroll_area)
+        self.scroll_widget.setObjectName("discoveryScrollWidget")
+        self.scroll_widget.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, False)
+        self.scroll_widget.setAutoFillBackground(False)
+        self.scroll_widget.setStyleSheet("background: transparent; border: none;")
         self.scroll_layout = QVBoxLayout(self.scroll_widget)
         self.scroll_layout.setContentsMargins(24, 24, 24, 32)
         self.scroll_layout.setSpacing(18)
         self.scroll_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
 
         self.column = QWidget(self.scroll_widget)
+        self.column.setObjectName("discoveryColumn")
+        self.column.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, False)
+        self.column.setAutoFillBackground(False)
         self.column.setMaximumWidth(880)
         self.column_layout = QVBoxLayout(self.column)
         self.column_layout.setContentsMargins(0, 0, 0, 0)
@@ -761,6 +837,7 @@ class DiscoveryInterface(QWidget):
 
         self.hero_card = CardWidget(self.column)
         self.hero_card.setObjectName("DiscoveryHeroCard")
+        self.hero_card.setBorderRadius(8)
         hero_layout = QVBoxLayout(self.hero_card)
         hero_layout.setContentsMargins(24, 24, 24, 24)
         hero_layout.setSpacing(18)
@@ -800,6 +877,9 @@ class DiscoveryInterface(QWidget):
         hero_layout.addWidget(self.summary_label)
 
         self.feed_container = QWidget(self.column)
+        self.feed_container.setObjectName("discoveryFeedContainer")
+        self.feed_container.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, False)
+        self.feed_container.setAutoFillBackground(False)
         self.feed_layout = QVBoxLayout(self.feed_container)
         self.feed_layout.setContentsMargins(0, 0, 0, 0)
         self.feed_layout.setSpacing(16)
@@ -875,6 +955,7 @@ class DiscoveryInterface(QWidget):
     def _create_empty_state(self) -> CardWidget:
         """Create an empty placeholder when the feed is blank."""
         card = CardWidget(self.feed_container)
+        card.setBorderRadius(8)
         layout = QVBoxLayout(card)
         layout.setContentsMargins(36, 36, 36, 36)
         layout.setSpacing(12)

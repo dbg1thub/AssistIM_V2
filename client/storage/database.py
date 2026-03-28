@@ -39,6 +39,7 @@ class Database:
         
         self._db_path = str(Path(db_path).expanduser().resolve())
         self._db: Optional[aiosqlite.Connection] = None
+        self._search_fts_tokenizer: Optional[str] = None
     
     @property
     def is_connected(self) -> bool:
@@ -56,6 +57,8 @@ class Database:
         self._db.row_factory = aiosqlite.Row
         
         await self._create_tables()
+        await self._ensure_local_search_cache_schema()
+        await self._ensure_search_fts_schema()
         await self._normalize_cached_session_types()
         logger.info(f"Database connected: {self._db_path}")
     
@@ -99,6 +102,7 @@ class Database:
                 nickname TEXT NOT NULL DEFAULT '',
                 remark TEXT NOT NULL DEFAULT '',
                 assistim_id TEXT NOT NULL DEFAULT '',
+                region TEXT NOT NULL DEFAULT '',
                 avatar TEXT NOT NULL DEFAULT '',
                 signature TEXT NOT NULL DEFAULT '',
                 category TEXT NOT NULL DEFAULT 'friend',
@@ -114,6 +118,7 @@ class Database:
                 owner_id TEXT NOT NULL DEFAULT '',
                 session_id TEXT NOT NULL DEFAULT '',
                 member_count INTEGER NOT NULL DEFAULT 0,
+                member_search_text TEXT NOT NULL DEFAULT '',
                 extra TEXT NOT NULL DEFAULT '{}',
                 updated_at INTEGER NOT NULL
             );
@@ -135,6 +140,212 @@ class Database:
                 ON groups_cache(updated_at DESC);
         """)
         await self._db.commit()
+
+    async def _ensure_local_search_cache_schema(self) -> None:
+        """Add newly introduced cache columns to existing local databases."""
+        await self._ensure_table_columns(
+            "contacts_cache",
+            {
+                "region": "TEXT NOT NULL DEFAULT ''",
+            },
+        )
+        await self._ensure_table_columns(
+            "groups_cache",
+            {
+                "member_search_text": "TEXT NOT NULL DEFAULT ''",
+            },
+        )
+
+    async def _ensure_table_columns(self, table_name: str, columns: dict[str, str]) -> None:
+        """Ensure one table exposes every required column for lightweight upgrades."""
+        cursor = await self._db.execute(f"PRAGMA table_info({table_name})")
+        rows = await cursor.fetchall()
+        existing_columns = {str(row["name"]) for row in rows}
+        missing_columns = {name: ddl for name, ddl in columns.items() if name not in existing_columns}
+        for column_name, ddl in missing_columns.items():
+            await self._db.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {ddl}")
+        if missing_columns:
+            await self._db.commit()
+
+    async def _ensure_search_fts_schema(self) -> None:
+        """Create and backfill SQLite FTS5 search indexes when available."""
+        detected_tokenizer = await self._detect_search_fts_tokenizer()
+        if detected_tokenizer:
+            self._search_fts_tokenizer = detected_tokenizer
+            await self._create_search_fts_schema(detected_tokenizer)
+            await self._rebuild_search_fts_if_needed()
+            return
+
+        for tokenizer in ("trigram", "unicode61 remove_diacritics 2"):
+            try:
+                await self._create_search_fts_schema(tokenizer)
+            except Exception as exc:
+                logger.debug("Search FTS tokenizer unavailable (%s): %s", tokenizer, exc)
+                await self._drop_search_fts_schema()
+                continue
+            self._search_fts_tokenizer = "trigram" if tokenizer == "trigram" else "unicode61"
+            await self._rebuild_search_fts_if_needed(force=True)
+            logger.info("Enabled local search FTS with tokenizer: %s", self._search_fts_tokenizer)
+            return
+
+        self._search_fts_tokenizer = None
+        logger.info("SQLite FTS5 search unavailable; falling back to LIKE queries")
+
+    async def _detect_search_fts_tokenizer(self) -> Optional[str]:
+        """Return the tokenizer used by the existing search FTS tables, if any."""
+        cursor = await self._db.execute(
+            """
+            SELECT sql
+            FROM sqlite_master
+            WHERE type = 'table' AND name = 'message_search_fts'
+            """
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+
+        sql = str(row["sql"] or "").lower()
+        if "trigram" in sql:
+            return "trigram"
+        if "unicode61" in sql:
+            return "unicode61 remove_diacritics 2"
+        return None
+
+    async def _create_search_fts_schema(self, tokenizer: str) -> None:
+        """Create search FTS tables and sync triggers for one tokenizer."""
+        token_clause = str(tokenizer or "").strip()
+        if not token_clause:
+            raise ValueError("FTS tokenizer is required")
+
+        await self._db.executescript(
+            f"""
+            CREATE VIRTUAL TABLE IF NOT EXISTS message_search_fts USING fts5(
+                content,
+                content='messages',
+                content_rowid='rowid',
+                tokenize='{token_clause}'
+            );
+
+            CREATE VIRTUAL TABLE IF NOT EXISTS contact_search_fts USING fts5(
+                display_name,
+                nickname,
+                remark,
+                assistim_id,
+                region,
+                content='contacts_cache',
+                content_rowid='rowid',
+                tokenize='{token_clause}'
+            );
+
+            CREATE VIRTUAL TABLE IF NOT EXISTS group_search_fts USING fts5(
+                name,
+                member_search_text,
+                content='groups_cache',
+                content_rowid='rowid',
+                tokenize='{token_clause}'
+            );
+
+            CREATE TRIGGER IF NOT EXISTS messages_search_ai AFTER INSERT ON messages BEGIN
+                INSERT INTO message_search_fts(rowid, content)
+                VALUES (new.rowid, new.content);
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS messages_search_ad AFTER DELETE ON messages BEGIN
+                INSERT INTO message_search_fts(message_search_fts, rowid, content)
+                VALUES ('delete', old.rowid, old.content);
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS messages_search_au AFTER UPDATE ON messages BEGIN
+                INSERT INTO message_search_fts(message_search_fts, rowid, content)
+                VALUES ('delete', old.rowid, old.content);
+                INSERT INTO message_search_fts(rowid, content)
+                VALUES (new.rowid, new.content);
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS contacts_search_ai AFTER INSERT ON contacts_cache BEGIN
+                INSERT INTO contact_search_fts(rowid, display_name, nickname, remark, assistim_id, region)
+                VALUES (new.rowid, new.display_name, new.nickname, new.remark, new.assistim_id, new.region);
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS contacts_search_ad AFTER DELETE ON contacts_cache BEGIN
+                INSERT INTO contact_search_fts(contact_search_fts, rowid, display_name, nickname, remark, assistim_id, region)
+                VALUES ('delete', old.rowid, old.display_name, old.nickname, old.remark, old.assistim_id, old.region);
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS contacts_search_au AFTER UPDATE ON contacts_cache BEGIN
+                INSERT INTO contact_search_fts(contact_search_fts, rowid, display_name, nickname, remark, assistim_id, region)
+                VALUES ('delete', old.rowid, old.display_name, old.nickname, old.remark, old.assistim_id, old.region);
+                INSERT INTO contact_search_fts(rowid, display_name, nickname, remark, assistim_id, region)
+                VALUES (new.rowid, new.display_name, new.nickname, new.remark, new.assistim_id, new.region);
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS groups_search_ai AFTER INSERT ON groups_cache BEGIN
+                INSERT INTO group_search_fts(rowid, name, member_search_text)
+                VALUES (new.rowid, new.name, new.member_search_text);
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS groups_search_ad AFTER DELETE ON groups_cache BEGIN
+                INSERT INTO group_search_fts(group_search_fts, rowid, name, member_search_text)
+                VALUES ('delete', old.rowid, old.name, old.member_search_text);
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS groups_search_au AFTER UPDATE ON groups_cache BEGIN
+                INSERT INTO group_search_fts(group_search_fts, rowid, name, member_search_text)
+                VALUES ('delete', old.rowid, old.name, old.member_search_text);
+                INSERT INTO group_search_fts(rowid, name, member_search_text)
+                VALUES (new.rowid, new.name, new.member_search_text);
+            END;
+            """
+        )
+        await self._db.commit()
+
+    async def _drop_search_fts_schema(self) -> None:
+        """Drop partially created search FTS tables after one failed attempt."""
+        await self._db.executescript(
+            """
+            DROP TRIGGER IF EXISTS messages_search_ai;
+            DROP TRIGGER IF EXISTS messages_search_ad;
+            DROP TRIGGER IF EXISTS messages_search_au;
+            DROP TRIGGER IF EXISTS contacts_search_ai;
+            DROP TRIGGER IF EXISTS contacts_search_ad;
+            DROP TRIGGER IF EXISTS contacts_search_au;
+            DROP TRIGGER IF EXISTS groups_search_ai;
+            DROP TRIGGER IF EXISTS groups_search_ad;
+            DROP TRIGGER IF EXISTS groups_search_au;
+            DROP TABLE IF EXISTS message_search_fts;
+            DROP TABLE IF EXISTS contact_search_fts;
+            DROP TABLE IF EXISTS group_search_fts;
+            """
+        )
+        await self._db.commit()
+
+    async def _rebuild_search_fts_if_needed(self, *, force: bool = False) -> None:
+        """Backfill FTS tables from current cache contents when needed."""
+        if not self._search_fts_tokenizer and not force:
+            return
+
+        rebuild_specs = (
+            ("messages", "message_search_fts"),
+            ("contacts_cache", "contact_search_fts"),
+            ("groups_cache", "group_search_fts"),
+        )
+        rebuilt = False
+        for base_table, fts_table in rebuild_specs:
+            base_count = await self._table_row_count(base_table)
+            fts_count = await self._table_row_count(fts_table)
+            if force or base_count != fts_count:
+                await self._db.execute(
+                    f"INSERT INTO {fts_table}({fts_table}) VALUES ('rebuild')"
+                )
+                rebuilt = True
+        if rebuilt:
+            await self._db.commit()
+
+    async def _table_row_count(self, table_name: str) -> int:
+        """Return the current row count for one SQLite table."""
+        cursor = await self._db.execute(f"SELECT COUNT(*) AS count FROM {table_name}")
+        row = await cursor.fetchone()
+        return int((row["count"] if row is not None else 0) or 0)
 
     async def _normalize_cached_session_types(self) -> None:
         """Upgrade legacy cached one-to-one sessions to the canonical direct type."""
@@ -246,6 +457,31 @@ class Database:
             return None
         
         return self._row_to_session(row)
+
+    async def get_session_search_metadata(self, session_ids: list[str]) -> dict[str, dict[str, str]]:
+        """Return lightweight session metadata for one batch of search hits."""
+        normalized_ids = [str(session_id or "").strip() for session_id in session_ids if str(session_id or "").strip()]
+        if not normalized_ids:
+            return {}
+
+        placeholders = ", ".join("?" for _ in normalized_ids)
+        cursor = await self._db.execute(
+            f"""
+            SELECT session_id, name, avatar, session_type
+            FROM sessions
+            WHERE session_id IN ({placeholders})
+            """,
+            tuple(normalized_ids),
+        )
+        rows = await cursor.fetchall()
+        return {
+            str(row["session_id"]): {
+                "session_name": str(row["name"] or ""),
+                "session_avatar": str(row["avatar"] or ""),
+                "session_type": str(row["session_type"] or ""),
+            }
+            for row in rows
+        }
     
     async def get_all_sessions(self) -> list[Session]:
         """
@@ -445,6 +681,21 @@ class Database:
         escaped = escaped.replace("_", "\\_")
         return f"%{escaped}%"
 
+    def _should_use_search_fts(self, keyword: str) -> bool:
+        """Return whether the current keyword should use the local FTS path."""
+        normalized_keyword = str(keyword or "").strip()
+        if not normalized_keyword or not self._search_fts_tokenizer:
+            return False
+        if self._search_fts_tokenizer == "trigram":
+            return len(normalized_keyword) >= 3
+        return len(normalized_keyword) >= 2
+
+    @staticmethod
+    def _build_fts_match_query(keyword: str) -> str:
+        """Quote one literal keyword for SQLite FTS MATCH."""
+        normalized_keyword = str(keyword or "").strip().replace('"', '""')
+        return f'"{normalized_keyword}"'
+
     async def search_messages(
         self,
         keyword: str,
@@ -457,6 +708,11 @@ class Database:
             return []
 
         normalized_limit = max(1, int(limit or 0))
+        if self._should_use_search_fts(normalized_keyword):
+            try:
+                return await self._search_messages_fts(normalized_keyword, session_id=session_id, limit=normalized_limit)
+            except Exception as exc:
+                logger.debug("Message FTS search failed, falling back to LIKE: %s", exc)
         like_pattern = self._escape_like_pattern(normalized_keyword)
 
         if session_id:
@@ -483,6 +739,113 @@ class Database:
         rows = await cursor.fetchall()
         return [self._row_to_message(row) for row in rows]
 
+    async def count_search_message_sessions(
+        self,
+        keyword: str,
+        session_id: Optional[str] = None,
+    ) -> int:
+        """Count unique sessions matching one message-search keyword."""
+        normalized_keyword = str(keyword or "").strip()
+        if not normalized_keyword:
+            return 0
+
+        if self._should_use_search_fts(normalized_keyword):
+            try:
+                return await self._count_search_message_sessions_fts(normalized_keyword, session_id=session_id)
+            except Exception as exc:
+                logger.debug("Message FTS count failed, falling back to LIKE: %s", exc)
+
+        like_pattern = self._escape_like_pattern(normalized_keyword)
+        if session_id:
+            cursor = await self._db.execute(
+                """
+                SELECT COUNT(DISTINCT session_id) AS count
+                FROM messages
+                WHERE session_id = ? AND content LIKE ? ESCAPE '\\'
+                """,
+                (session_id, like_pattern),
+            )
+        else:
+            cursor = await self._db.execute(
+                """
+                SELECT COUNT(DISTINCT session_id) AS count
+                FROM messages
+                WHERE content LIKE ? ESCAPE '\\'
+                """,
+                (like_pattern,),
+            )
+        row = await cursor.fetchone()
+        return int((row["count"] if row is not None else 0) or 0)
+
+    async def _search_messages_fts(
+        self,
+        keyword: str,
+        *,
+        session_id: Optional[str],
+        limit: int,
+    ) -> list[ChatMessage]:
+        """Search cached messages through the FTS5 index."""
+        match_query = self._build_fts_match_query(keyword)
+        if session_id:
+            cursor = await self._db.execute(
+                """
+                SELECT m.*
+                FROM message_search_fts f
+                JOIN messages m ON m.rowid = f.rowid
+                WHERE message_search_fts MATCH ?
+                  AND m.session_id = ?
+                ORDER BY bm25(message_search_fts), m.timestamp DESC
+                LIMIT ?
+                """,
+                (match_query, session_id, limit),
+            )
+        else:
+            cursor = await self._db.execute(
+                """
+                SELECT m.*
+                FROM message_search_fts f
+                JOIN messages m ON m.rowid = f.rowid
+                WHERE message_search_fts MATCH ?
+                ORDER BY bm25(message_search_fts), m.timestamp DESC
+                LIMIT ?
+                """,
+                (match_query, limit),
+            )
+        rows = await cursor.fetchall()
+        return [self._row_to_message(row) for row in rows]
+
+    async def _count_search_message_sessions_fts(
+        self,
+        keyword: str,
+        *,
+        session_id: Optional[str],
+    ) -> int:
+        """Count distinct message sessions through the FTS5 index."""
+        match_query = self._build_fts_match_query(keyword)
+        if session_id:
+            cursor = await self._db.execute(
+                """
+                SELECT COUNT(DISTINCT m.session_id) AS count
+                FROM message_search_fts f
+                JOIN messages m ON m.rowid = f.rowid
+                WHERE message_search_fts MATCH ?
+                  AND m.session_id = ?
+                """,
+                (match_query, session_id),
+            )
+        else:
+            cursor = await self._db.execute(
+                """
+                SELECT COUNT(DISTINCT m.session_id) AS count
+                FROM message_search_fts f
+                JOIN messages m ON m.rowid = f.rowid
+                WHERE message_search_fts MATCH ?
+                """,
+                (match_query,),
+            )
+        row = await cursor.fetchone()
+        return int((row["count"] if row is not None else 0) or 0)
+
     async def replace_contacts_cache(self, contacts: list[dict[str, Any]]) -> None:
         """Replace the cached contact directory snapshot."""
         await self._db.execute("DELETE FROM contacts_cache")
@@ -494,8 +857,8 @@ class Database:
                 """
                 INSERT OR REPLACE INTO contacts_cache
                 (contact_id, display_name, username, nickname, remark,
-                 assistim_id, avatar, signature, category, status, extra, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 assistim_id, region, avatar, signature, category, status, extra, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     str(contact.get("id", "") or ""),
@@ -504,6 +867,7 @@ class Database:
                     str(contact.get("nickname", "") or ""),
                     str(contact.get("remark", "") or ""),
                     str(contact.get("assistim_id", "") or ""),
+                    str(contact.get("region", "") or ""),
                     str(contact.get("avatar", "") or ""),
                     str(contact.get("signature", "") or ""),
                     str(contact.get("category", "friend") or "friend"),
@@ -523,11 +887,12 @@ class Database:
 
         for group in groups:
             extra = dict(group.get("extra") or {})
+            member_search_text = str(group.get("member_search_text", "") or "")
             await self._db.execute(
                 """
                 INSERT OR REPLACE INTO groups_cache
-                (group_id, name, avatar, owner_id, session_id, member_count, extra, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                (group_id, name, avatar, owner_id, session_id, member_count, member_search_text, extra, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     str(group.get("id", "") or ""),
@@ -536,6 +901,7 @@ class Database:
                     str(group.get("owner_id", "") or ""),
                     str(group.get("session_id", "") or ""),
                     max(0, int(group.get("member_count", 0) or 0)),
+                    member_search_text,
                     json.dumps(extra),
                     updated_at,
                 ),
@@ -555,16 +921,19 @@ class Database:
             return []
 
         normalized_limit = max(1, int(limit or 0))
+        if self._should_use_search_fts(normalized_keyword):
+            try:
+                return await self._search_contacts_fts(normalized_keyword, limit=normalized_limit)
+            except Exception as exc:
+                logger.debug("Contact FTS search failed, falling back to LIKE: %s", exc)
         like_pattern = self._escape_like_pattern(normalized_keyword)
         cursor = await self._db.execute(
             """
             SELECT * FROM contacts_cache
-            WHERE display_name LIKE ? ESCAPE '\\'
-               OR username LIKE ? ESCAPE '\\'
-               OR nickname LIKE ? ESCAPE '\\'
+            WHERE nickname LIKE ? ESCAPE '\\'
                OR remark LIKE ? ESCAPE '\\'
                OR assistim_id LIKE ? ESCAPE '\\'
-               OR signature LIKE ? ESCAPE '\\'
+               OR region LIKE ? ESCAPE '\\'
             ORDER BY updated_at DESC
             LIMIT ?
             """,
@@ -573,10 +942,65 @@ class Database:
                 like_pattern,
                 like_pattern,
                 like_pattern,
-                like_pattern,
-                like_pattern,
                 normalized_limit,
             ),
+        )
+        rows = await cursor.fetchall()
+        return [self._row_to_contact_cache(row) for row in rows]
+
+    async def count_search_contacts(self, keyword: str) -> int:
+        """Count contact search hits for one keyword."""
+        normalized_keyword = str(keyword or "").strip()
+        if not normalized_keyword:
+            return 0
+
+        if self._should_use_search_fts(normalized_keyword):
+            try:
+                cursor = await self._db.execute(
+                    """
+                    SELECT COUNT(*) AS count
+                    FROM contact_search_fts
+                    WHERE contact_search_fts MATCH ?
+                    """,
+                    (self._build_fts_match_query(normalized_keyword),),
+                )
+                row = await cursor.fetchone()
+                return int((row["count"] if row is not None else 0) or 0)
+            except Exception as exc:
+                logger.debug("Contact FTS count failed, falling back to LIKE: %s", exc)
+
+        like_pattern = self._escape_like_pattern(normalized_keyword)
+        cursor = await self._db.execute(
+            """
+            SELECT COUNT(*) AS count
+            FROM contacts_cache
+            WHERE nickname LIKE ? ESCAPE '\\'
+               OR remark LIKE ? ESCAPE '\\'
+               OR assistim_id LIKE ? ESCAPE '\\'
+               OR region LIKE ? ESCAPE '\\'
+            """,
+            (like_pattern, like_pattern, like_pattern, like_pattern),
+        )
+        row = await cursor.fetchone()
+        return int((row["count"] if row is not None else 0) or 0)
+
+    async def _search_contacts_fts(
+        self,
+        keyword: str,
+        *,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        """Search cached contacts through the FTS5 index."""
+        cursor = await self._db.execute(
+            """
+            SELECT c.*
+            FROM contact_search_fts f
+            JOIN contacts_cache c ON c.rowid = f.rowid
+            WHERE contact_search_fts MATCH ?
+            ORDER BY bm25(contact_search_fts), c.updated_at DESC
+            LIMIT ?
+            """,
+            (self._build_fts_match_query(keyword), limit),
         )
         rows = await cursor.fetchall()
         return [self._row_to_contact_cache(row) for row in rows]
@@ -592,22 +1016,80 @@ class Database:
             return []
 
         normalized_limit = max(1, int(limit or 0))
+        if self._should_use_search_fts(normalized_keyword):
+            try:
+                return await self._search_groups_fts(normalized_keyword, limit=normalized_limit)
+            except Exception as exc:
+                logger.debug("Group FTS search failed, falling back to LIKE: %s", exc)
         like_pattern = self._escape_like_pattern(normalized_keyword)
         cursor = await self._db.execute(
             """
             SELECT * FROM groups_cache
             WHERE name LIKE ? ESCAPE '\\'
-               OR group_id LIKE ? ESCAPE '\\'
-               OR session_id LIKE ? ESCAPE '\\'
+               OR member_search_text LIKE ? ESCAPE '\\'
             ORDER BY updated_at DESC
             LIMIT ?
             """,
             (
                 like_pattern,
                 like_pattern,
-                like_pattern,
                 normalized_limit,
             ),
+        )
+        rows = await cursor.fetchall()
+        return [self._row_to_group_cache(row) for row in rows]
+
+    async def count_search_groups(self, keyword: str) -> int:
+        """Count group search hits for one keyword."""
+        normalized_keyword = str(keyword or "").strip()
+        if not normalized_keyword:
+            return 0
+
+        if self._should_use_search_fts(normalized_keyword):
+            try:
+                cursor = await self._db.execute(
+                    """
+                    SELECT COUNT(*) AS count
+                    FROM group_search_fts
+                    WHERE group_search_fts MATCH ?
+                    """,
+                    (self._build_fts_match_query(normalized_keyword),),
+                )
+                row = await cursor.fetchone()
+                return int((row["count"] if row is not None else 0) or 0)
+            except Exception as exc:
+                logger.debug("Group FTS count failed, falling back to LIKE: %s", exc)
+
+        like_pattern = self._escape_like_pattern(normalized_keyword)
+        cursor = await self._db.execute(
+            """
+            SELECT COUNT(*) AS count
+            FROM groups_cache
+            WHERE name LIKE ? ESCAPE '\\'
+               OR member_search_text LIKE ? ESCAPE '\\'
+            """,
+            (like_pattern, like_pattern),
+        )
+        row = await cursor.fetchone()
+        return int((row["count"] if row is not None else 0) or 0)
+
+    async def _search_groups_fts(
+        self,
+        keyword: str,
+        *,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        """Search cached groups through the FTS5 index."""
+        cursor = await self._db.execute(
+            """
+            SELECT g.*
+            FROM group_search_fts f
+            JOIN groups_cache g ON g.rowid = f.rowid
+            WHERE group_search_fts MATCH ?
+            ORDER BY bm25(group_search_fts), g.updated_at DESC
+            LIMIT ?
+            """,
+            (self._build_fts_match_query(keyword), limit),
         )
         rows = await cursor.fetchall()
         return [self._row_to_group_cache(row) for row in rows]
@@ -622,6 +1104,7 @@ class Database:
             "nickname": row["nickname"],
             "remark": row["remark"],
             "assistim_id": row["assistim_id"],
+            "region": row["region"],
             "avatar": row["avatar"],
             "signature": row["signature"],
             "category": row["category"],
@@ -638,6 +1121,7 @@ class Database:
             "owner_id": row["owner_id"],
             "session_id": row["session_id"],
             "member_count": row["member_count"],
+            "member_search_text": row["member_search_text"],
             "extra": json.loads(row["extra"]),
         }
     

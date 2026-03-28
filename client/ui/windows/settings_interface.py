@@ -22,6 +22,7 @@ from qfluentwidgets import (
 from client.core.app_icons import AppIcon, CollectionIcon
 from client.core.config import cfg, is_win11
 from client.core.i18n import tr
+from client.ui.styles import StyleSheet
 
 
 class SettingsInterface(ScrollArea):
@@ -122,6 +123,20 @@ class SettingsInterface(ScrollArea):
         self._init_layout()
         self._connect_signals()
         self._apply_initial_values()
+        if self.viewport() is not None:
+            self.viewport().setObjectName("settingsViewport")
+            self.viewport().setAttribute(Qt.WidgetAttribute.WA_StyledBackground, False)
+            self.viewport().setAutoFillBackground(False)
+            self.viewport().setStyleSheet("background: transparent; border: none;")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, False)
+        self.setAutoFillBackground(False)
+        self.setStyleSheet("QAbstractScrollArea{background: transparent; border: none;} QScrollArea{background: transparent; border: none;}")
+        self.scroll_widget.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, False)
+        self.scroll_widget.setAutoFillBackground(False)
+        self.scroll_widget.setStyleSheet("background: transparent; border: none;")
+        if hasattr(self, "enableTransparentBackground"):
+            self.enableTransparentBackground()
+        StyleSheet.SETTINGS_INTERFACE.apply(self)
 
         if not is_win11():
             self.mica_card.setChecked(False)

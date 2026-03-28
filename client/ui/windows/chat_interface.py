@@ -1,4 +1,4 @@
-﻿"""Chat window container that keeps the new architecture but migrates old UI styling."""
+"""Chat window container that keeps the new architecture but migrates old UI styling."""
 
 from __future__ import annotations
 
@@ -9,11 +9,22 @@ from collections import OrderedDict
 from datetime import datetime
 from typing import Optional
 
-from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QColor, QGuiApplication, QPixmap
-from PySide6.QtWidgets import QDialog, QHBoxLayout, QLabel, QScrollArea, QVBoxLayout, QWidget
+from PySide6.QtCore import QEvent, Qt, QTimer
+from PySide6.QtGui import QColor, QGuiApplication, QPalette, QPixmap
+from PySide6.QtWidgets import QDialog, QFrame, QHBoxLayout, QLabel, QScrollArea, QVBoxLayout, QWidget
 
-from qfluentwidgets import Action, BodyLabel, InfoBar, MessageBoxBase, PrimaryPushButton, PushButton, RoundMenu, SubtitleLabel, TextEdit
+from qfluentwidgets import (
+    Action,
+    BodyLabel,
+    InfoBar,
+    MessageBoxBase,
+    PrimaryPushButton,
+    PushButton,
+    RoundMenu,
+    SubtitleLabel,
+    TextEdit,
+    isDarkTheme,
+)
 from qfluentwidgets.components.widgets.menu import MenuAnimationType
 
 from client.core.i18n import tr
@@ -37,6 +48,31 @@ from client.ui.widgets.session_panel import SessionPanel
 logger = logging.getLogger(__name__)
 
 
+def _apply_themed_dialog_surface(dialog: QDialog, object_name: str, *, radius: int = 14) -> None:
+    """Apply one stable theme-aware palette to plain chat dialogs."""
+    dialog.setObjectName(object_name)
+    dialog.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, False)
+    dialog.setAutoFillBackground(True)
+    background = QColor(39, 43, 48) if isDarkTheme() else QColor(255, 255, 255)
+    palette = dialog.palette()
+    palette.setColor(QPalette.ColorRole.Window, background)
+    palette.setColor(QPalette.ColorRole.Base, background)
+    dialog.setPalette(palette)
+
+
+def _prepare_transparent_scroll_area(area: QScrollArea) -> None:
+    """Keep plain Qt scroll areas transparent so dialog surfaces show through."""
+    area.setFrameShape(QFrame.Shape.NoFrame)
+    area.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, False)
+    area.setAutoFillBackground(False)
+    area.setStyleSheet("QScrollArea{background: transparent; border: none;} QAbstractScrollArea{background: transparent; border: none;}")
+    viewport = area.viewport()
+    if viewport is not None:
+        viewport.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, False)
+        viewport.setAutoFillBackground(False)
+        viewport.setStyleSheet("background: transparent; border: none;")
+
+
 class ScreenshotPreviewDialog(QDialog):
     """Preview a captured screenshot before sending it."""
 
@@ -46,6 +82,7 @@ class ScreenshotPreviewDialog(QDialog):
         self.setWindowTitle(tr("chat.screenshot.preview_title", "Preview Screenshot"))
         self.resize(760, 560)
         self.setModal(True)
+        _apply_themed_dialog_surface(self, "ScreenshotPreviewDialog")
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(16, 16, 16, 16)
@@ -54,6 +91,7 @@ class ScreenshotPreviewDialog(QDialog):
         self.scroll_area = QScrollArea(self)
         self.scroll_area.setWidgetResizable(True)
         self.scroll_area.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        _prepare_transparent_scroll_area(self.scroll_area)
 
         self.image_label = QLabel(self)
         self.image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -76,6 +114,15 @@ class ScreenshotPreviewDialog(QDialog):
         if not pixmap.isNull():
             self.image_label.setPixmap(pixmap)
 
+    def changeEvent(self, event) -> None:
+        super().changeEvent(event)
+        if event.type() in {
+            QEvent.Type.PaletteChange,
+            QEvent.Type.ApplicationPaletteChange,
+            QEvent.Type.StyleChange,
+        }:
+            _apply_themed_dialog_surface(self, "ScreenshotPreviewDialog")
+
 
 class EditMessageDialog(QDialog):
     """Dialog used to edit a text message."""
@@ -85,6 +132,7 @@ class EditMessageDialog(QDialog):
         self.setWindowTitle(tr("chat.edit.title", "Edit Message"))
         self.setModal(True)
         self.resize(420, 240)
+        _apply_themed_dialog_surface(self, "EditMessageDialog")
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 20, 20, 20)
@@ -110,6 +158,15 @@ class EditMessageDialog(QDialog):
         layout.addWidget(title)
         layout.addWidget(self.editor, 1)
         layout.addLayout(button_row)
+
+    def changeEvent(self, event) -> None:
+        super().changeEvent(event)
+        if event.type() in {
+            QEvent.Type.PaletteChange,
+            QEvent.Type.ApplicationPaletteChange,
+            QEvent.Type.StyleChange,
+        }:
+            _apply_themed_dialog_surface(self, "EditMessageDialog")
 
     def _on_confirm(self) -> None:
         """Validate content before closing."""
@@ -149,6 +206,8 @@ class ChatInterface(QWidget):
     SESSION_PANEL_WIDTH = 300
     MESSAGE_PAGE_SIZE = 50
     HISTORY_PAGE_CACHE_LIMIT = 12
+    INITIAL_HISTORY_WARM_CONCURRENCY = 2
+    INITIAL_HISTORY_WARM_SESSION_LIMIT = 6
     TYPING_INDICATOR_HIDE_DELAY_MS = 1800
 
     def __init__(self, parent=None):
@@ -171,6 +230,9 @@ class ChatInterface(QWidget):
         self._has_more_history = True
         self._history_load_task: Optional[asyncio.Task] = None
         self._history_page_cache: dict[str, OrderedDict[tuple[Optional[float], int], list]] = {}
+        self._history_page_warm_keys: set[tuple[str, Optional[float], int]] = set()
+        self._history_page_tasks: dict[tuple[str, Optional[float], int], asyncio.Task] = {}
+        self._startup_history_prefetch_task: Optional[asyncio.Task] = None
         self._session_view_state: dict[str, dict] = {}
         self._last_read_receipts: dict[str, str] = {}
         self._pending_read_receipts: set[tuple[str, str]] = set()
@@ -219,6 +281,7 @@ class ChatInterface(QWidget):
     def _connect_signals(self) -> None:
         """Connect panel-level signals."""
         self.session_panel.session_selected.connect(self._on_session_selected)
+        self.session_panel.search_result_requested.connect(self._on_sidebar_search_result_requested)
         self.chat_panel.composer_draft_changed.connect(self._on_composer_draft_changed)
         self.chat_panel.file_upload_requested.connect(self._on_file_upload_requested)
         self.chat_panel.screenshot_requested.connect(self._on_screenshot_requested)
@@ -237,6 +300,44 @@ class ChatInterface(QWidget):
         """Force both panes to re-layout item widths while the splitter is dragged."""
         QTimer.singleShot(0, self.session_panel._relayout_session_list)
         QTimer.singleShot(0, self.chat_panel._relayout_message_list)
+
+    def _on_sidebar_search_result_requested(self, payload: object) -> None:
+        """Open a conversation from one grouped sidebar search result."""
+        self._schedule_ui_task(self._open_sidebar_search_result(payload), "open sidebar search result")
+
+    async def _open_sidebar_search_result(self, payload: object) -> None:
+        """Route sidebar search hits into the appropriate chat open flow."""
+        if not isinstance(payload, dict):
+            return
+
+        target_type = str(payload.get("type", "") or "")
+        data = payload.get("data") or {}
+        opened = False
+
+        if target_type == "group":
+            session_id = str(data.get("session_id", "") or data.get("id", "") or "")
+            if session_id:
+                opened = await self.open_group_session(session_id)
+        elif target_type == "message":
+            session_id = str(data.get("session_id", "") or "")
+            if session_id:
+                opened = await self.open_session(session_id)
+        else:
+            user_id = str(data.get("id", "") or "")
+            if user_id:
+                opened = await self.open_direct_session(
+                    user_id,
+                    display_name=str(data.get("display_name", "") or data.get("name", "") or ""),
+                    avatar=str(data.get("avatar", "") or ""),
+                )
+
+        if not opened:
+            InfoBar.warning(
+                tr("main_window.contact_jump.unavailable_title", "Chat"),
+                tr("main_window.contact_jump.unavailable_message", "Unable to open this conversation right now."),
+                parent=self.window(),
+                duration=2200,
+            )
 
     def _subscribe_to_events(self) -> None:
         """Subscribe to session and message events for real-time UI updates."""
@@ -274,6 +375,11 @@ class ChatInterface(QWidget):
         self._load_task = None
         self._cancel_pending_task(self._history_load_task)
         self._history_load_task = None
+        self._cancel_pending_task(self._startup_history_prefetch_task)
+        self._startup_history_prefetch_task = None
+        for task in list(self._history_page_tasks.values()):
+            self._cancel_pending_task(task)
+        self._history_page_tasks.clear()
         for dialog in list(self._dialog_refs):
             dialog.close()
         self._dialog_refs.clear()
@@ -483,7 +589,33 @@ class ChatInterface(QWidget):
 
     def load_sessions(self) -> None:
         """Load current sessions into the left panel."""
-        self.session_panel.load_sessions(self._chat_controller.get_sessions())
+        sessions = list(self._chat_controller.get_sessions())
+        self.session_panel.load_sessions(sessions)
+        self._schedule_initial_history_prefetch(sessions)
+
+    def _schedule_initial_history_prefetch(self, sessions: list) -> None:
+        """Warm the first page for a small batch of recent sessions in the background."""
+        if self._startup_history_prefetch_task is not None and not self._startup_history_prefetch_task.done():
+            return
+
+        session_ids = [
+            str(getattr(session, "session_id", "") or "")
+            for session in sessions[: self.INITIAL_HISTORY_WARM_SESSION_LIMIT]
+            if str(getattr(session, "session_id", "") or "")
+        ]
+        if not session_ids:
+            return
+
+        self._startup_history_prefetch_task = self._create_ui_task(
+            self._warm_history_pages(session_ids),
+            "warm initial history pages",
+            on_done=self._clear_startup_history_prefetch_task,
+        )
+
+    def _clear_startup_history_prefetch_task(self, task: asyncio.Task) -> None:
+        """Drop the startup history warmup bookkeeping when the task finishes."""
+        if self._startup_history_prefetch_task is task:
+            self._startup_history_prefetch_task = None
 
     def _on_session_selected(self, session_id: str) -> None:
         """Handle user selecting a conversation."""
@@ -516,10 +648,13 @@ class ChatInterface(QWidget):
         self._cancel_pending_task(self._history_load_task)
 
         cached_state = self._session_view_state.get(session_id)
+        cached_page = self._peek_cached_history_page(session_id, before_timestamp=None)
         if cached_state:
             self._restore_session_view_state(session_id, cached_state)
             self._set_load_task(self._select_session_only(session_id), f"select session {session_id}")
         else:
+            if cached_page:
+                self._apply_primary_history_page(session_id, cached_page, schedule_read_receipt=False)
             self._set_load_task(self._load_session_messages(session_id), f"load session {session_id}")
 
     async def _load_session_messages(self, session_id: str) -> None:
@@ -527,6 +662,22 @@ class ChatInterface(QWidget):
         try:
             await self._chat_controller.select_session(session_id)
             self._activate_selected_session_if_visible(session_id)
+            local_messages = self._peek_cached_history_page(session_id, before_timestamp=None)
+            if local_messages is None:
+                local_messages = await self._chat_controller.load_cached_messages(
+                    session_id,
+                    limit=self.MESSAGE_PAGE_SIZE,
+                    before_timestamp=None,
+                )
+                if local_messages:
+                    self._cache_history_page(
+                        session_id,
+                        before_timestamp=None,
+                        messages=local_messages,
+                        warm=False,
+                    )
+            if session_id == self._current_session_id and local_messages:
+                self._apply_primary_history_page(session_id, local_messages, schedule_read_receipt=False)
             messages = await self._load_history_page(
                 session_id,
                 before_timestamp=None,
@@ -540,14 +691,28 @@ class ChatInterface(QWidget):
         if session_id != self._current_session_id:
             return
 
-        messages = self._merge_loaded_messages_with_visible(messages)
-        self.chat_panel.set_messages(messages)
-        self._oldest_loaded_timestamp = self._extract_oldest_timestamp(messages)
-        self._has_more_history = len(messages) >= self.MESSAGE_PAGE_SIZE and self._oldest_loaded_timestamp is not None
+        self._apply_primary_history_page(session_id, messages)
+
+    def _apply_primary_history_page(
+        self,
+        session_id: str,
+        messages: list,
+        *,
+        schedule_read_receipt: bool = True,
+    ) -> None:
+        """Render the primary history page while preserving any live in-memory messages."""
+        if session_id != self._current_session_id:
+            return
+
+        merged_messages = self._merge_loaded_messages_with_visible(messages)
+        self.chat_panel.set_messages(merged_messages)
+        self._oldest_loaded_timestamp = self._extract_oldest_timestamp(merged_messages)
+        self._has_more_history = len(merged_messages) >= self.MESSAGE_PAGE_SIZE and self._oldest_loaded_timestamp is not None
         self.chat_panel.set_has_more_history(self._has_more_history)
         self.chat_panel.set_history_loading(False)
         self._store_session_view_state(session_id)
-        self._schedule_read_receipt()
+        if schedule_read_receipt:
+            self._schedule_read_receipt()
 
     def _merge_loaded_messages_with_visible(self, loaded_messages: list) -> list:
         """Preserve live-arrived/status-updated messages while an async page load completes."""
@@ -679,26 +844,142 @@ class ChatInterface(QWidget):
         cache = self._history_page_cache.setdefault(session_id, OrderedDict())
         cache_key = (before_timestamp, self.MESSAGE_PAGE_SIZE)
         cached_page = cache.get(cache_key)
-        if cached_page is not None:
+        task_key = self._history_page_task_key(session_id, before_timestamp)
+        if cached_page is not None and (before_timestamp is not None or task_key in self._history_page_warm_keys):
             cache.move_to_end(cache_key)
             return list(cached_page)
 
+        task = self._history_page_tasks.get(task_key)
+        if task is None or task.done():
+            task = asyncio.create_task(self._fetch_and_cache_history_page(session_id, before_timestamp))
+            self._history_page_tasks[task_key] = task
+
+        try:
+            messages = await task
+        finally:
+            if self._history_page_tasks.get(task_key) is task and task.done():
+                self._history_page_tasks.pop(task_key, None)
+        return list(messages)
+
+    async def _fetch_and_cache_history_page(
+        self,
+        session_id: str,
+        before_timestamp: Optional[float],
+    ) -> list:
+        """Fetch one history page through the normal controller path and cache it as warm data."""
         messages = await self._chat_controller.load_messages(
             session_id,
             limit=self.MESSAGE_PAGE_SIZE,
             before_timestamp=before_timestamp,
         )
+        self._cache_history_page(
+            session_id,
+            before_timestamp=before_timestamp,
+            messages=messages,
+            warm=True,
+        )
+        return list(messages)
+
+    def _cache_history_page(
+        self,
+        session_id: str,
+        *,
+        before_timestamp: Optional[float],
+        messages: list,
+        warm: bool,
+    ) -> None:
+        """Store one history page and remember whether it already includes remote backfill."""
+        cache = self._history_page_cache.setdefault(session_id, OrderedDict())
+        cache_key = (before_timestamp, self.MESSAGE_PAGE_SIZE)
         cache[cache_key] = list(messages)
+        cache.move_to_end(cache_key)
+
+        task_key = self._history_page_task_key(session_id, before_timestamp)
+        if warm:
+            self._history_page_warm_keys.add(task_key)
+        else:
+            self._history_page_warm_keys.discard(task_key)
+
         while len(cache) > self.HISTORY_PAGE_CACHE_LIMIT:
-            cache.popitem(last=False)
-        return messages
+            dropped_key, _ = cache.popitem(last=False)
+            self._history_page_warm_keys.discard((session_id, dropped_key[0], dropped_key[1]))
+
+    def _peek_cached_history_page(
+        self,
+        session_id: str,
+        *,
+        before_timestamp: Optional[float],
+    ) -> Optional[list]:
+        """Return one cached history page without triggering any async work."""
+        cache = self._history_page_cache.get(session_id)
+        if not cache:
+            return None
+
+        cache_key = (before_timestamp, self.MESSAGE_PAGE_SIZE)
+        cached_page = cache.get(cache_key)
+        if cached_page is None:
+            return None
+        cache.move_to_end(cache_key)
+        return list(cached_page)
+
+    def _history_page_task_key(
+        self,
+        session_id: str,
+        before_timestamp: Optional[float],
+    ) -> tuple[str, Optional[float], int]:
+        """Build one stable identity for a cached history page."""
+        return (session_id, before_timestamp, self.MESSAGE_PAGE_SIZE)
+
+    async def _warm_history_pages(self, session_ids: list[str]) -> None:
+        """Warm the first history page for a batch of sessions with bounded concurrency."""
+        normalized_ids = [session_id for session_id in session_ids if session_id]
+        if not normalized_ids:
+            return
+
+        semaphore = asyncio.Semaphore(self.INITIAL_HISTORY_WARM_CONCURRENCY)
+
+        async def worker(session_id: str) -> None:
+            async with semaphore:
+                await self._prime_history_page(session_id)
+                await asyncio.sleep(0)
+
+        await asyncio.gather(*(worker(session_id) for session_id in normalized_ids))
+
+    async def _prime_history_page(self, session_id: str) -> None:
+        """Seed the in-memory first page from local storage, then backfill it remotely."""
+        if self._peek_cached_history_page(session_id, before_timestamp=None) is None:
+            local_messages = await self._chat_controller.load_cached_messages(
+                session_id,
+                limit=self.MESSAGE_PAGE_SIZE,
+                before_timestamp=None,
+            )
+            if local_messages:
+                self._cache_history_page(
+                    session_id,
+                    before_timestamp=None,
+                    messages=local_messages,
+                    warm=False,
+                )
+
+        await self._load_history_page(session_id, before_timestamp=None)
 
     def _invalidate_history_cache(self, session_id: Optional[str] = None) -> None:
         """Drop cached local history pages when a session receives updates."""
         if session_id:
             self._history_page_cache.pop(session_id, None)
+            self._history_page_warm_keys = {
+                key for key in self._history_page_warm_keys if key[0] != session_id
+            }
+            task_keys = [key for key in self._history_page_tasks if key[0] == session_id]
+            for key in task_keys:
+                task = self._history_page_tasks.pop(key, None)
+                self._cancel_pending_task(task)
         else:
             self._history_page_cache.clear()
+            self._history_page_warm_keys.clear()
+            for task in list(self._history_page_tasks.values()):
+                self._cancel_pending_task(task)
+            self._history_page_tasks.clear()
 
     def _invalidate_session_caches(self, session_id: Optional[str] = None) -> None:
         """Drop cached history and visible-state snapshots for mutated sessions."""
@@ -1536,4 +1817,6 @@ class ChatInterface(QWidget):
             return False
 
         return self.focus_session(session.session_id)
+
+
 

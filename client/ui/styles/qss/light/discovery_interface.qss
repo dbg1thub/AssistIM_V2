@@ -1,14 +1,21 @@
 QWidget#DiscoveryInterface,
-QWidget#MomentCard,
-QWidget#MomentCommentSection {
+QWidget#MomentCommentSection,
+QWidget#discoveryScrollWidget,
+QWidget#discoveryViewport,
+QWidget#discoveryColumn,
+QWidget#discoveryFeedContainer {
     background: transparent;
 }
 
-CardWidget#DiscoveryHeroCard,
+QWidget#DiscoveryHeroCard,
 QWidget#MomentCard {
-    background: {{CARD_BG}};
-    border: 1px solid {{BORDER_COLOR}};
+    background: {{CARD_BG_STRONG}};
+    border: 1px solid {{BORDER_COLOR_STRONG}};
     border-radius: {{RADIUS_CARD}};
+}
+
+BodyLabel#momentContentLabel {
+    color: {{TEXT_PRIMARY}};
 }
 
 QFrame#MomentCardDivider {

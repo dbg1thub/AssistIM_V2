@@ -11,6 +11,7 @@ from qfluentwidgets import isDarkTheme
 class FluentDivider(QWidget):
     """A subtle 1px divider with full-width and inset variants."""
 
+    DEFAULT_INSET = 14
     FULL = "full"
     LEFT_FULL = "left_full"
     RIGHT_FULL = "right_full"
@@ -20,13 +21,13 @@ class FluentDivider(QWidget):
         self,
         parent=None,
         *,
-        variant: str = FULL,
-        inset: int = 14,
+        variant: str = RIGHT_FULL,
+        inset: int = DEFAULT_INSET,
         left_inset: int | None = None,
         right_inset: int | None = None,
     ):
         super().__init__(parent)
-        self._variant = self.FULL
+        self._variant = self.RIGHT_FULL
         self._inset = max(0, int(inset))
         self._left_inset_override = max(0, int(left_inset)) if left_inset is not None else None
         self._right_inset_override = max(0, int(right_inset)) if right_inset is not None else None
@@ -39,9 +40,9 @@ class FluentDivider(QWidget):
         return self._variant
 
     def setVariant(self, variant: str) -> None:
-        normalized = str(variant or self.FULL).strip().lower()
+        normalized = str(variant or self.RIGHT_FULL).strip().lower()
         if normalized not in {self.FULL, self.LEFT_FULL, self.RIGHT_FULL, self.INSET}:
-            normalized = self.FULL
+            normalized = self.RIGHT_FULL
         self._variant = normalized
         self.update()
 

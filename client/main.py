@@ -14,7 +14,7 @@ if __package__ in {None, ""}:
     if str(workspace_root) not in sys.path:
         sys.path.insert(0, str(workspace_root))
 
-from PySide6.QtCore import QLockFile
+from PySide6.QtCore import QLockFile, QTimer
 from PySide6.QtWidgets import QApplication, QMessageBox
 from qasync import QEventLoop
 from qfluentwidgets import setTheme, setThemeColor
@@ -38,7 +38,6 @@ from client.ui.controllers.chat_controller import get_chat_controller, peek_chat
 from client.ui.controllers.message_controller import peek_message_controller
 from client.ui.controllers.session_controller import peek_session_controller
 from client.ui.windows.auth_interface import AuthInterface
-
 setup_logging()
 logger = logging.get_logger(__name__)
 
@@ -107,7 +106,6 @@ class Application:
 
         self.main_window = None
         self.auth_window = None
-
     # =========================================================
     # Task helper
     # =========================================================
@@ -138,6 +136,10 @@ class Application:
         self._tasks.add(task)
 
         return task
+
+    async def _yield_to_ui(self) -> None:
+        """Yield back to qasync without re-entering Qt's event pump manually."""
+        await asyncio.sleep(0)
 
     # =========================================================
     # Initialization
@@ -200,7 +202,6 @@ class Application:
         restored_user = await auth_controller.restore_session()
         if restored_user:
             logger.info("Restored persisted session for user %s", restored_user.get("id"))
-            await self._synchronize_authenticated_runtime()
             return True
 
         loop = asyncio.get_running_loop()
@@ -227,24 +228,41 @@ class Application:
         if self.auth_window:
             self.auth_window.deleteLater()
             self.auth_window = None
+            await self._yield_to_ui()
 
         if not authenticated:
             logger.info("Authentication window closed before sign-in")
             return False
 
-        await self._synchronize_authenticated_runtime()
         return True
 
     async def _synchronize_authenticated_runtime(self) -> None:
         """Reload per-user runtime state after authentication succeeds."""
         conn_manager = get_connection_manager()
         await conn_manager.reload_sync_timestamp()
+        await self._yield_to_ui()
 
         session_manager = get_session_manager()
-        await session_manager.close()
-        await session_manager.initialize()
         await session_manager.refresh_remote_sessions()
-    def show_main_window(self) -> None:
+        await self._yield_to_ui()
+
+    async def _warm_authenticated_runtime(self) -> None:
+        """Refresh authenticated runtime state after the main shell is already visible."""
+        try:
+            await self._synchronize_authenticated_runtime()
+            await self.start_background_services()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Authenticated runtime warmup failed")
+            return
+
+        if self.main_window is None:
+            return
+
+        self.main_window.chat_interface.load_sessions()
+
+    async def show_main_window(self) -> None:
         """
         Create and display the main application window.
         """
@@ -252,11 +270,19 @@ class Application:
         from client.ui.windows.main_window import MainWindow
 
         self.main_window = MainWindow()
-
         self.main_window.closed.connect(self._on_main_window_closed)
         self.main_window.logoutRequested.connect(self._on_logout_requested)
-
+        self.main_window.restore_default_geometry()
         self.main_window.show()
+        self.main_window.showNormal()
+        self.main_window.raise_()
+        self.main_window.activateWindow()
+        QTimer.singleShot(0, self.main_window.raise_)
+        QTimer.singleShot(0, self.main_window.activateWindow)
+        QTimer.singleShot(80, self.main_window.raise_)
+        QTimer.singleShot(80, self.main_window.activateWindow)
+        await self._yield_to_ui()
+        self.create_task(self._warm_authenticated_runtime())
 
         logger.info("Main window displayed")
 
@@ -335,14 +361,12 @@ class Application:
         logger.info("Starting background services...")
 
         conn_manager = get_connection_manager()
-        self.create_task(self._connect_when_ui_idle(conn_manager))
+        try:
+            await conn_manager.connect()
+        except Exception:
+            logger.exception("Initial websocket connect failed")
 
         logger.info("Background services started")
-
-    async def _connect_when_ui_idle(self, conn_manager) -> None:
-        """Defer the first websocket connect until the initial UI paint settles."""
-        await asyncio.sleep(0)
-        await conn_manager.connect()
 
     async def _perform_logout_flow(self) -> None:
         """Sign out the current user, reset authenticated runtime state, and reopen auth UI."""
@@ -362,8 +386,7 @@ class Application:
             return
 
         await self.initialize()
-        self.show_main_window()
-        await self.start_background_services()
+        await self.show_main_window()
 
     async def _teardown_authenticated_runtime(self) -> None:
         """Reset UI and runtime services that are tied to one authenticated user session."""
@@ -372,61 +395,39 @@ class Application:
             self.main_window.deleteLater()
             self.main_window = None
 
-        try:
-            chat_controller = peek_chat_controller()
-            if chat_controller is not None:
-                await chat_controller.close()
-        except Exception:
-            logger.exception("Chat controller close during logout failed")
-
-        try:
-            message_controller = peek_message_controller()
-            if message_controller is not None:
-                await message_controller.close()
-        except Exception:
-            logger.exception("Message controller close during logout failed")
-
-        try:
-            session_controller = peek_session_controller()
-            if session_controller is not None:
-                await session_controller.close()
-        except Exception:
-            logger.exception("Session controller close during logout failed")
-
-        try:
-            conn_manager = peek_connection_manager()
-            if conn_manager is not None:
-                await conn_manager.close()
-        except Exception:
-            logger.exception("Connection manager close during logout failed")
-
-        try:
-            ws = peek_websocket_client()
-            if ws is not None:
-                await ws.close()
-        except Exception:
-            logger.exception("WebSocket client close during logout failed")
-
-        try:
-            msg_manager = peek_message_manager()
-            if msg_manager is not None:
-                await msg_manager.close()
-        except Exception:
-            logger.exception("Message manager close during logout failed")
-
-        try:
-            session_manager = peek_session_manager()
-            if session_manager is not None:
-                await session_manager.close()
-        except Exception:
-            logger.exception("Session manager close during logout failed")
-
-        try:
-            sound_manager = peek_sound_manager()
-            if sound_manager is not None:
-                await sound_manager.close()
-        except Exception:
-            logger.exception("Sound manager close during logout failed")
+        await self._close_optional_component(
+            "Chat controller close during logout failed",
+            peek_chat_controller,
+        )
+        await self._close_optional_component(
+            "Message controller close during logout failed",
+            peek_message_controller,
+        )
+        await self._close_optional_component(
+            "Session controller close during logout failed",
+            peek_session_controller,
+        )
+        await self._close_optional_component(
+            "Message manager close during logout failed",
+            peek_message_manager,
+        )
+        await self._close_optional_component(
+            "Session manager close during logout failed",
+            peek_session_manager,
+        )
+        await self._close_optional_component(
+            "Connection manager close during logout failed",
+            peek_connection_manager,
+        )
+        await self._close_optional_component(
+            "WebSocket client close during logout failed",
+            peek_websocket_client,
+            skip_if=peek_connection_manager,
+        )
+        await self._close_optional_component(
+            "Sound manager close during logout failed",
+            peek_sound_manager,
+        )
 
         try:
             db = peek_database()
@@ -434,6 +435,27 @@ class Application:
                 await db.clear_chat_state()
         except Exception:
             logger.exception("Database chat-state cleanup during logout failed")
+
+    async def _close_optional_component(
+        self,
+        failure_message: str,
+        getter,
+        *,
+        timeout: float = 2.0,
+        skip_if=None,
+    ) -> None:
+        """Close one optional singleton component with a timeout guard."""
+        try:
+            component = getter()
+            if component is None:
+                return
+            if skip_if is not None and skip_if() is not None:
+                return
+            await asyncio.wait_for(component.close(), timeout=timeout)
+        except asyncio.TimeoutError:
+            logger.warning("%s (timed out after %.1fs)", failure_message, timeout)
+        except Exception:
+            logger.exception(failure_message)
 
     # =========================================================
     # Shutdown
@@ -474,71 +496,19 @@ class Application:
         if self._tasks:
             await asyncio.gather(*list(self._tasks), return_exceptions=True)
 
-        # Close controller
-        try:
-            chat_controller = peek_chat_controller()
-            if chat_controller is not None:
-                await chat_controller.close()
-        except Exception:
-            logger.exception("Chat controller close failed")
-
-        try:
-            message_controller = peek_message_controller()
-            if message_controller is not None:
-                await message_controller.close()
-        except Exception:
-            logger.exception("Message controller close failed")
-
-        try:
-            session_controller = peek_session_controller()
-            if session_controller is not None:
-                await session_controller.close()
-        except Exception:
-            logger.exception("Session controller close failed")
-
-        try:
-            auth_controller = peek_auth_controller()
-            if auth_controller is not None:
-                await auth_controller.close()
-        except Exception:
-            logger.exception("Auth controller close failed")
-
-        # Stop network activity before shutting down message/session managers.
-        try:
-            conn_manager = peek_connection_manager()
-            if conn_manager is not None:
-                await conn_manager.close()
-        except Exception:
-            logger.exception("Connection manager close failed")
-
-        try:
-            ws = peek_websocket_client()
-            if ws is not None:
-                await ws.close()
-        except Exception:
-            logger.exception("WebSocket client close failed")
-
-        # Close managers
-        try:
-            msg_manager = peek_message_manager()
-            if msg_manager is not None:
-                await msg_manager.close()
-        except Exception:
-            logger.exception("Message manager close failed")
-
-        try:
-            session_manager = peek_session_manager()
-            if session_manager is not None:
-                await session_manager.close()
-        except Exception:
-            logger.exception("Session manager close failed")
-
-        try:
-            sound_manager = peek_sound_manager()
-            if sound_manager is not None:
-                await sound_manager.close()
-        except Exception:
-            logger.exception("Sound manager close failed")
+        await self._close_optional_component("Chat controller close failed", peek_chat_controller)
+        await self._close_optional_component("Message controller close failed", peek_message_controller)
+        await self._close_optional_component("Session controller close failed", peek_session_controller)
+        await self._close_optional_component("Auth controller close failed", peek_auth_controller)
+        await self._close_optional_component("Message manager close failed", peek_message_manager)
+        await self._close_optional_component("Session manager close failed", peek_session_manager)
+        await self._close_optional_component("Connection manager close failed", peek_connection_manager)
+        await self._close_optional_component(
+            "WebSocket client close failed",
+            peek_websocket_client,
+            skip_if=peek_connection_manager,
+        )
+        await self._close_optional_component("Sound manager close failed", peek_sound_manager)
 
         # Close HTTP client
         try:
@@ -579,8 +549,7 @@ class Application:
             if not await self.authenticate():
                 return
 
-            self.show_main_window()
-            await self.start_background_services()
+            await self.show_main_window()
             await self._quit_event.wait()
         finally:
             await self.shutdown()
@@ -656,5 +625,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
-
-

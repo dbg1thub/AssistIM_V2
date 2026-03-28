@@ -65,7 +65,7 @@ QWidget#chatMessageViewport:focus {
 PushButton#composerSendButton {
     background: transparent;
     border: none;
-    color: white;
+    color: {{TEXT_PRIMARY}};
     border-radius: 0;
     padding-left: 18px;
     padding-right: 18px;

@@ -292,6 +292,7 @@ class FakeMessageManager:
         self.user_ids: list[str] = []
         self.failed: list[tuple[str, str]] = []
         self.sent_messages: list[ChatMessage] = []
+        self.cached_messages_calls: list[tuple[str, int, object]] = []
 
     def set_user_id(self, user_id: str) -> None:
         self.user_ids.append(user_id)
@@ -327,6 +328,20 @@ class FakeMessageManager:
 
     async def mark_message_failed(self, message: ChatMessage, reason: str = 'Send failed') -> None:
         self.failed.append((message.message_id, reason))
+
+    async def get_cached_messages(self, session_id: str, limit: int = 50, before_timestamp=None) -> list[ChatMessage]:
+        self.cached_messages_calls.append((session_id, limit, before_timestamp))
+        return [
+            ChatMessage(
+                message_id='cached-1',
+                session_id=session_id,
+                sender_id='alice',
+                content='cached hello',
+                message_type=MessageType.TEXT,
+                status=MessageStatus.SENT,
+                is_self=True,
+            )
+        ]
 
 
 class FakeSessionManager:
@@ -759,7 +774,11 @@ class FakeConnectionManager:
 
 
 class FakeChatService:
+    def __init__(self) -> None:
+        self.fetch_messages_calls: list[tuple[str, int, object]] = []
+
     async def fetch_messages(self, session_id: str, limit: int, before_timestamp=None) -> list[dict]:
+        self.fetch_messages_calls.append((session_id, limit, before_timestamp))
         return []
 
 
@@ -1103,6 +1122,60 @@ def test_contact_controller_load_contacts_and_search_users_use_services(monkeypa
     asyncio.run(scenario())
 
 
+def test_message_manager_get_cached_messages_skips_remote_backfill(monkeypatch) -> None:
+    stored_messages = [
+        ChatMessage(
+            message_id='m-self',
+            session_id='session-1',
+            sender_id='user-1',
+            content='hello',
+            message_type=MessageType.TEXT,
+            status=MessageStatus.SENT,
+            is_self=True,
+            extra={},
+        ),
+    ]
+    fake_db = FakeMessageStoreDatabase(stored_messages)
+    fake_chat_service = FakeChatService()
+
+    monkeypatch.setattr(message_manager_module, 'get_event_bus', lambda: FakeEventBus())
+    monkeypatch.setattr(message_manager_module, 'get_connection_manager', lambda: FakeConnectionManager())
+    monkeypatch.setattr(message_manager_module, 'get_database', lambda: fake_db)
+    monkeypatch.setattr(message_manager_module, 'get_chat_service', lambda: fake_chat_service)
+    monkeypatch.setattr(message_manager_module, 'get_file_service', lambda: FakeNoopFileService())
+
+    async def scenario() -> None:
+        manager = message_manager_module.MessageManager()
+        manager.set_user_id('user-1')
+        messages = await manager.get_cached_messages('session-1', limit=20)
+
+        assert len(messages) == 1
+        assert fake_chat_service.fetch_messages_calls == []
+        assert len(fake_db.saved_batches) == 1
+
+    asyncio.run(scenario())
+
+
+def test_chat_controller_load_cached_messages_uses_message_manager_boundary(monkeypatch) -> None:
+    fake_message_manager = FakeMessageManager()
+    fake_session_manager = FakeSessionManager()
+    fake_file_service = FakeFileService()
+
+    monkeypatch.setattr(chat_controller_module, 'get_message_manager', lambda: fake_message_manager)
+    monkeypatch.setattr(chat_controller_module, 'get_session_manager', lambda: fake_session_manager)
+    monkeypatch.setattr(chat_controller_module, 'get_file_service', lambda: fake_file_service)
+
+    async def scenario() -> None:
+        controller = chat_controller_module.ChatController()
+        messages = await controller.load_cached_messages('session-42', limit=12)
+
+        assert fake_message_manager.cached_messages_calls == [('session-42', 12, None)]
+        assert len(messages) == 1
+        assert messages[0].message_id == 'cached-1'
+
+    asyncio.run(scenario())
+
+
 def test_contact_controller_load_contacts_and_groups_persist_local_search_cache(monkeypatch) -> None:
     fake_contact_service = FakeContactService()
     fake_user_service = FakeUserService()
@@ -1110,12 +1183,20 @@ def test_contact_controller_load_contacts_and_groups_persist_local_search_cache(
     fake_db = FakeDatabase()
     fake_db.is_connected = True
     fake_contact_service.friends_payload = [
-        {'id': 'user-2', 'username': 'zoe', 'nickname': 'Zoe', 'remark': '', 'avatar': ''},
-        {'id': 'user-1', 'username': 'alice', 'nickname': 'Alice', 'remark': 'A Friend', 'avatar': ''},
+        {'id': 'user-2', 'username': 'zoe', 'nickname': 'Zoe', 'remark': '', 'avatar': '', 'region': 'Seoul'},
+        {'id': 'user-1', 'username': 'alice', 'nickname': 'Alice', 'remark': 'A Friend', 'avatar': '', 'region': 'Shenzhen'},
     ]
     fake_contact_service.groups_payload = [
         {'id': 'group-2', 'name': 'Zeta Squad', 'member_count': 8, 'session_id': 'session-group-2'},
-        {'id': 'group-1', 'name': 'Core Team', 'member_count': 3, 'session_id': 'session-group-1'},
+        {
+            'id': 'group-1',
+            'name': 'Core Team',
+            'member_count': 3,
+            'session_id': 'session-group-1',
+            'members': [
+                {'nickname': 'Alice', 'region': 'Shenzhen'},
+            ],
+        },
     ]
 
     monkeypatch.setattr(contact_controller_module, 'get_contact_service', lambda: fake_contact_service)
@@ -1134,7 +1215,10 @@ def test_contact_controller_load_contacts_and_groups_persist_local_search_cache(
         assert len(fake_db.replaced_groups) == 1
         assert [item['id'] for item in fake_db.replaced_contacts[0]] == ['user-1', 'user-2']
         assert [item['display_name'] for item in fake_db.replaced_contacts[0]] == ['A Friend', 'Zoe']
+        assert [item['region'] for item in fake_db.replaced_contacts[0]] == ['Shenzhen', 'Seoul']
         assert [item['id'] for item in fake_db.replaced_groups[0]] == ['group-1', 'group-2']
+        assert fake_db.replaced_groups[0][0]['member_search_text'] == 'Alice（地区：Shenzhen）'
+        assert fake_db.replaced_groups[0][0]['extra']['member_previews'] == ['Alice（地区：Shenzhen）']
 
     asyncio.run(scenario())
 
@@ -1335,16 +1419,27 @@ def test_search_manager_search_all_uses_storage_boundaries(monkeypatch) -> None:
                 status=MessageStatus.SENT,
                 is_self=True,
             )
+            ,
+            ChatMessage(
+                message_id='msg-2',
+                session_id='session-1',
+                sender_id='user-2',
+                content='Second core update for roadmap',
+                message_type=MessageType.TEXT,
+                status=MessageStatus.SENT,
+                is_self=False,
+            )
         ],
         contacts=[
             {
                 'id': 'user-2',
-                'display_name': 'Corey',
-                'username': 'corey',
-                'nickname': 'Corey',
+                'display_name': 'Alice',
+                'username': 'alice',
+                'nickname': 'Alice',
                 'remark': '',
-                'assistim_id': 'corey',
-                'signature': 'core collaborator',
+                'assistim_id': 'alice',
+                'region': 'Core City',
+                'signature': '',
             }
         ],
         groups=[
@@ -1352,6 +1447,8 @@ def test_search_manager_search_all_uses_storage_boundaries(monkeypatch) -> None:
                 'id': 'group-1',
                 'name': 'Core Team',
                 'session_id': 'session-group-1',
+                'member_search_text': 'Alice Shenzhen',
+                'extra': {'member_previews': ['Alice（地区：Shenzhen）']},
             }
         ],
     )
@@ -1375,9 +1472,38 @@ def test_search_manager_search_all_uses_storage_boundaries(monkeypatch) -> None:
         assert len(results.contacts) == 1
         assert len(results.groups) == 1
         assert results.messages[0].message.message_id == 'msg-1'
+        assert results.messages[0].match_count == 2
         assert results.contacts[0].contact['id'] == 'user-2'
         assert results.groups[0].group['id'] == 'group-1'
         assert manager.last_catalog_results == results
+
+    asyncio.run(scenario())
+
+
+def test_search_manager_group_member_match_uses_cached_member_previews(monkeypatch) -> None:
+    fake_db = FakeSearchDatabase(
+        [],
+        groups=[
+            {
+                'id': 'group-1',
+                'name': 'Weekend Club',
+                'session_id': 'session-group-1',
+                'member_search_text': 'Alice Shenzhen',
+                'extra': {'member_previews': ['Alice（地区：Shenzhen）']},
+            }
+        ],
+    )
+
+    monkeypatch.setattr(search_manager_module, 'get_database', lambda: fake_db)
+
+    async def scenario() -> None:
+        manager = search_manager_module.SearchManager()
+        results = await manager.search_groups('shenzhen', limit=5)
+
+        assert fake_db.search_group_calls == [('shenzhen', 5)]
+        assert len(results) == 1
+        assert results[0].matched_field == 'member'
+        assert 'Shenzhen' in results[0].matched_text
 
     asyncio.run(scenario())
 

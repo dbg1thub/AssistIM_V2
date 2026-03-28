@@ -5,14 +5,15 @@ from __future__ import annotations
 import asyncio
 from typing import Optional
 
-from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPixmap
+from PySide6.QtCore import QEvent, QPoint, QRect, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPalette, QPixmap
 from PySide6.QtWidgets import QLabel, QDialog, QFrame, QHBoxLayout, QSizePolicy, QSplitter, QStackedWidget, QVBoxLayout, QWidget
 from qfluentwidgets import (
     BodyLabel,
     CaptionLabel,
     CardWidget,
-    ElevatedCardWidget,
+    FluentWidget,
+    FluentStyleSheet,
     FlowLayout,
     IconWidget,
     InfoBar,
@@ -29,6 +30,7 @@ from qfluentwidgets import (
     MaskDialogBase,
     isDarkTheme,
 )
+from qframelesswindow.titlebar import CloseButton
 from shiboken6 import isValid as is_valid_qt_object
 
 from client.core.app_icons import AppIcon
@@ -42,6 +44,7 @@ from client.core.profile_fields import format_profile_birthday, localize_profile
 from client.core.logging import setup_logging
 from client.events.contact_events import ContactEvent
 from client.events.event_bus import get_event_bus
+from client.managers.search_manager import search_all
 from client.ui.controllers.auth_controller import get_auth_controller
 from client.ui.controllers.contact_controller import (
     ContactRecord,
@@ -54,6 +57,8 @@ from client.ui.controllers.contact_controller import (
 from client.ui.controllers.discovery_controller import MomentRecord, get_discovery_controller
 from client.ui.windows.discovery_interface import MomentCard
 from client.ui.styles import StyleSheet
+from client.ui.widgets.chat_info_drawer import AcrylicDrawerSurface
+from client.ui.widgets.global_search_panel import GlobalSearchPopupOverlay
 from client.ui.widgets.fluent_divider import FluentDivider
 from client.ui.widgets.fluent_splitter import FluentSplitter
 
@@ -70,6 +75,34 @@ CONTACT_SIDEBAR_META_GAP = 8
 CONTACT_SIDEBAR_TITLE_FONT_SIZE = 16
 CONTACT_SECTION_INSET = 32
 CONTACT_SECTION_LABEL_GAP = 8
+
+
+def _apply_themed_dialog_surface(dialog: QDialog, object_name: str, *, radius: int = 14) -> None:
+    """Apply one stable theme-aware palette to a plain QDialog."""
+    dialog.setObjectName(object_name)
+    dialog.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, False)
+    dialog.setAutoFillBackground(True)
+    background = QColor(39, 43, 48) if isDarkTheme() else QColor(255, 255, 255)
+    palette = dialog.palette()
+    palette.setColor(QPalette.ColorRole.Window, background)
+    palette.setColor(QPalette.ColorRole.Base, background)
+    dialog.setPalette(palette)
+
+
+def _prepare_transparent_scroll_area(area: ScrollArea | SingleDirectionScrollArea) -> None:
+    """Keep qfluent scroll areas transparent so parent surfaces show through."""
+    area.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, False)
+    area.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+    area.setAutoFillBackground(False)
+    area.setStyleSheet("QAbstractScrollArea{background: transparent; border: none;} QScrollArea{background: transparent; border: none;}")
+    viewport = area.viewport()
+    if viewport is not None:
+        viewport.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, False)
+        viewport.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        viewport.setAutoFillBackground(False)
+        viewport.setStyleSheet("background: transparent; border: none;")
+    if hasattr(area, "enableTransparentBackground"):
+        area.enableTransparentBackground()
 
 
 def _request_status_text(status: str) -> str:
@@ -181,6 +214,7 @@ class ElidedBodyLabel(QLabel):
         font = QFont(self.font())
         font.setPixelSize(15)
         self.setFont(font)
+        self.setObjectName("elidedBodyLabel")
         self.setText(text)
 
     def setText(self, text: str) -> None:
@@ -894,8 +928,9 @@ class ContactWelcomeWidget(QWidget):
         layout.setSpacing(0)
         layout.addStretch(1)
 
-        card = ElevatedCardWidget(self)
+        card = CardWidget(self)
         card.setObjectName("ContactWelcomeCard")
+        card.setBorderRadius(8)
         card.setMinimumWidth(420)
         card.setMaximumWidth(540)
         card_layout = QVBoxLayout(card)
@@ -952,8 +987,9 @@ class GalleryContactDetailPanel(QWidget):
         root_layout.setContentsMargins(0, 0, 0, 0)
         root_layout.setSpacing(0)
 
-        self.header = ElevatedCardWidget(self)
+        self.header = CardWidget(self)
         self.header.setObjectName("ContactDetailHeader")
+        self.header.setBorderRadius(8)
         self.header.setMinimumWidth(420)
         self.header.setMaximumWidth(460)
         self.header.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
@@ -1867,29 +1903,159 @@ class StartGroupChatDialog(MaskDialogBase):
                 widget.deleteLater()
 
 
-class AddFriendDialog(QDialog):
+class AcrylicToolWindow(QWidget):
+    """Frameless floating window with one shared acrylic surface and close button."""
+
+    closed = Signal()
+    DRAG_REGION_HEIGHT = 52
+    CLOSE_BUTTON_TOP = 0
+
+    def __init__(self, parent=None, *, radius: int = 10) -> None:
+        super().__init__(parent, Qt.WindowType.Window | Qt.WindowType.FramelessWindowHint)
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, False)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+
+        self._drag_active = False
+        self._drag_offset = QPoint()
+        self._backdrop_primed = False
+        self._backdrop_capture_in_progress = False
+        self._backdrop_refresh_delay_ms = 56
+        self._backdrop_capture_wait_ms = 24
+        self._backdrop_refresh_timer = QTimer(self)
+        self._backdrop_refresh_timer.setSingleShot(True)
+        self._backdrop_refresh_timer.timeout.connect(self._refresh_backdrop_after_move)
+
+        self.surface = AcrylicDrawerSurface(self, extend_right_edge=False, radius=radius)
+        self.surface.setObjectName("addFriendAcrylicSurface")
+        self.surface.set_border_object_name("addFriendAcrylicBorder")
+        self.surface.installEventFilter(self)
+
+        self.content_root = QWidget(self.surface)
+        self.content_root.setObjectName("addFriendContentRoot")
+        self.content_root.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, False)
+        self.content_root.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.content_root.setAutoFillBackground(False)
+
+        self.close_button = CloseButton(self.surface)
+        FluentStyleSheet.FLUENT_WINDOW.apply(self.close_button)
+        self.close_button.setObjectName("addFriendWindowCloseButton")
+        self.close_button.clicked.connect(self.close)
+
+    def show(self) -> None:
+        if not self._backdrop_primed:
+            self._prime_backdrop()
+            self._backdrop_primed = True
+        super().show()
+
+    def _prime_backdrop(self) -> None:
+        if self.width() <= 0 or self.height() <= 0:
+            return
+        global_rect = QRect(self.mapToGlobal(QPoint(0, 0)), self.size())
+        self.surface.capture_backdrop(global_rect)
+
+    def _schedule_backdrop_refresh(self) -> None:
+        if not self._backdrop_primed or not self.isVisible() or self._backdrop_capture_in_progress:
+            return
+        self._backdrop_refresh_timer.start(self._backdrop_refresh_delay_ms)
+
+    def _refresh_backdrop_after_move(self) -> None:
+        if not self.isVisible() or self.width() <= 0 or self.height() <= 0:
+            return
+        if self._drag_active:
+            self._schedule_backdrop_refresh()
+            return
+        self._backdrop_capture_in_progress = True
+        self.setWindowOpacity(0.0)
+        QTimer.singleShot(self._backdrop_capture_wait_ms, self._finish_backdrop_refresh)
+
+    def _finish_backdrop_refresh(self) -> None:
+        if not self._backdrop_capture_in_progress:
+            return
+        if not self.isVisible() or self.width() <= 0 or self.height() <= 0:
+            self.setWindowOpacity(1.0)
+            self._backdrop_capture_in_progress = False
+            return
+        global_rect = QRect(self.mapToGlobal(QPoint(0, 0)), self.size())
+        self.surface.capture_backdrop(global_rect)
+        self.surface.raise_()
+        self.close_button.raise_()
+        self.setWindowOpacity(1.0)
+        self._backdrop_capture_in_progress = False
+
+    def _position_close_button(self) -> None:
+        self.close_button.move(
+            max(0, self.surface.width() - self.close_button.width()),
+            self.CLOSE_BUTTON_TOP,
+        )
+        self.close_button.raise_()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self.surface.setGeometry(self.rect())
+        self.content_root.setGeometry(self.surface.rect())
+        self._position_close_button()
+
+    def moveEvent(self, event) -> None:
+        super().moveEvent(event)
+        self._schedule_backdrop_refresh()
+
+    def eventFilter(self, watched, event) -> bool:
+        if watched is self.surface:
+            if event.type() == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
+                self._backdrop_refresh_timer.stop()
+                point = event.position().toPoint()
+                if point.y() <= self.DRAG_REGION_HEIGHT and not self.close_button.geometry().contains(point):
+                    self._drag_active = True
+                    self._drag_offset = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+                    event.accept()
+                    return True
+            elif event.type() == QEvent.Type.MouseMove and self._drag_active:
+                self.move(event.globalPosition().toPoint() - self._drag_offset)
+                event.accept()
+                return True
+            elif event.type() == QEvent.Type.MouseButtonRelease and self._drag_active:
+                self._drag_active = False
+                self._schedule_backdrop_refresh()
+                event.accept()
+                return True
+        return super().eventFilter(watched, event)
+
+    def closeEvent(self, event) -> None:
+        self._backdrop_refresh_timer.stop()
+        self.setWindowOpacity(1.0)
+        self._backdrop_capture_in_progress = False
+        self.closed.emit()
+        super().closeEvent(event)
+
+
+class AddFriendDialog(FluentWidget):
     friend_request_sent = Signal(str)
 
     def __init__(self, controller, existing_ids: set[str], current_user_id: str = "", parent=None):
-        super().__init__(parent)
+        super().__init__(parent=parent)
         self._controller = controller
         self._current_user_id = str(current_user_id or "")
         self._existing_ids = set(existing_ids)
         self._search_task: Optional[asyncio.Task] = None
         self._action_task: Optional[asyncio.Task] = None
         self._ui_tasks: set[asyncio.Task] = set()
+        self._close_cleanup_done = False
 
-        self.setWindowTitle(tr("contact.add_friend.window_title", "Add Friend"))
-        self.setModal(True)
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        self.setWindowTitle("")
+        self.setObjectName("AddFriendDialog")
         self.resize(560, 680)
+        self.setFixedSize(560, 680)
+        if hasattr(self, "titleBar") and hasattr(self.titleBar, "titleLabel"):
+            self.titleBar.titleLabel.hide()
 
         self._setup_ui()
-        self.finished.connect(self._on_finished)
         self.destroyed.connect(self._on_destroyed)
 
     def _setup_ui(self) -> None:
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(24, 24, 24, 24)
+        layout.setContentsMargins(24, 56, 24, 24)
         layout.setSpacing(16)
 
         layout.addWidget(TitleLabel(tr("contact.add_friend.title", "Add Friend"), self))
@@ -1933,7 +2099,11 @@ class AddFriendDialog(QDialog):
         self.result_area.setWidgetResizable(True)
         self.result_area.setFrameShape(QFrame.Shape.NoFrame)
         self.result_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        _prepare_transparent_scroll_area(self.result_area)
         self.result_container = QWidget(self.result_area)
+        self.result_container.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, False)
+        self.result_container.setAutoFillBackground(False)
+        self.result_container.setStyleSheet("background: transparent; border: none;")
         self.result_layout = QVBoxLayout(self.result_container)
         self.result_layout.setContentsMargins(6, 6, 6, 6)
         self.result_layout.setSpacing(8)
@@ -1941,16 +2111,12 @@ class AddFriendDialog(QDialog):
         self.result_area.setWidget(self.result_container)
         layout.addWidget(self.result_area, 1)
 
-        footer = QHBoxLayout()
-        footer.setContentsMargins(0, 0, 0, 0)
-        footer.addStretch(1)
-        self.close_button = PushButton(tr("common.close", "Close"), self)
-        footer.addWidget(self.close_button, 0)
-        layout.addLayout(footer)
-
         self.search_button.clicked.connect(self._trigger_search)
         self.search_edit.returnPressed.connect(self._trigger_search)
-        self.close_button.clicked.connect(self.close)
+
+    def closeEvent(self, event) -> None:
+        self._run_close_cleanup()
+        super().closeEvent(event)
 
     def _trigger_search(self) -> None:
         keyword = self.search_edit.text().strip()
@@ -2035,6 +2201,13 @@ class AddFriendDialog(QDialog):
 
     def _on_destroyed(self, *_args) -> None:
         """Mirror close cleanup when the dialog is destroyed by its parent."""
+        self._run_close_cleanup()
+
+    def _run_close_cleanup(self) -> None:
+        """Run dialog cleanup only once across close and destroy paths."""
+        if self._close_cleanup_done:
+            return
+        self._close_cleanup_done = True
         self._on_finished(0)
 
     def _cancel_pending_task(self, task: Optional[asyncio.Task]) -> None:
@@ -2111,6 +2284,7 @@ class CreateGroupDialog(QDialog):
         self.setWindowTitle(tr("contact.create_group.window_title", "Create Group"))
         self.setModal(True)
         self.resize(580, 720)
+        _apply_themed_dialog_surface(self, "CreateGroupDialog")
 
         self._setup_ui()
         self._rebuild_member_list()
@@ -2154,7 +2328,11 @@ class CreateGroupDialog(QDialog):
         self.member_area.setWidgetResizable(True)
         self.member_area.setFrameShape(QFrame.Shape.NoFrame)
         self.member_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        _prepare_transparent_scroll_area(self.member_area)
         self.member_container = QWidget(self.member_area)
+        self.member_container.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, False)
+        self.member_container.setAutoFillBackground(False)
+        self.member_container.setStyleSheet("background: transparent; border: none;")
         self.member_layout = QVBoxLayout(self.member_container)
         self.member_layout.setContentsMargins(6, 6, 6, 6)
         self.member_layout.setSpacing(8)
@@ -2175,6 +2353,15 @@ class CreateGroupDialog(QDialog):
         self.search_edit.textChanged.connect(self._rebuild_member_list)
         self.cancel_button.clicked.connect(self.close)
         self.create_button.clicked.connect(self._create_group)
+
+    def changeEvent(self, event) -> None:
+        super().changeEvent(event)
+        if event.type() in {
+            QEvent.Type.PaletteChange,
+            QEvent.Type.ApplicationPaletteChange,
+            QEvent.Type.StyleChange,
+        }:
+            _apply_themed_dialog_surface(self, "CreateGroupDialog")
 
     def _rebuild_member_list(self) -> None:
         self._clear_layout(self.member_layout)
@@ -2346,9 +2533,17 @@ class ContactInterface(QWidget):
         self._selected_key: tuple[str, str] | None = None
         self._load_task: Optional[asyncio.Task] = None
         self._moment_load_task: Optional[asyncio.Task] = None
+        self._search_task: Optional[asyncio.Task] = None
+        self._search_flyout = None
+        self._search_flyout_view: Optional[GlobalSearchPopupOverlay] = None
+        self._pending_search_keyword = ''
+        self._search_timer = QTimer(self)
+        self._search_timer.setSingleShot(True)
+        self._search_timer.setInterval(120)
+        self._search_timer.timeout.connect(self._trigger_global_search)
         self._keyed_ui_tasks: dict[tuple[str, str], asyncio.Task] = {}
         self._ui_tasks: set[asyncio.Task] = set()
-        self._dialog_refs: set[QDialog] = set()
+        self._dialog_refs: set[QWidget] = set()
         self._current_user_id = ""
         self._initial_load_done = False
         self._destroyed = False
@@ -2363,7 +2558,8 @@ class ContactInterface(QWidget):
         if self._initial_load_done:
             return
         self._initial_load_done = True
-        QTimer.singleShot(0, self.reload_data)
+        logger.info("Contact interface first show; scheduling initial reload")
+        QTimer.singleShot(80, self.reload_data)
 
     def _setup_ui(self) -> None:
         splitter = QSplitter(Qt.Orientation.Horizontal, self)
@@ -2387,7 +2583,7 @@ class ContactInterface(QWidget):
         search_row.setContentsMargins(12, 12, 12, 12)
         search_row.setSpacing(12)
         self.search_box = SearchLineEdit(self.search_bar)
-        self.search_box.setPlaceholderText(tr("session.search.placeholder", "Search"))
+        self.search_box.setPlaceholderText(tr("session.search.placeholder", "搜索"))
         self.search_box.setFixedHeight(36)
         self.add_button = ToolButton(AppIcon.ADD, self.search_bar)
         self.add_button.setObjectName("sessionAddButton")
@@ -2451,7 +2647,7 @@ class ContactInterface(QWidget):
 
     def _connect_signals(self) -> None:
         self.add_button.clicked.connect(self._show_add_placeholder)
-        self.search_box.textChanged.connect(self._rebuild_current_page)
+        self.search_box.textChanged.connect(self._on_search_text_changed)
         self.detail_panel.message_requested.connect(self.message_requested.emit)
         self._event_bus.subscribe_sync(ContactEvent.SYNC_REQUIRED, self._on_contact_sync_required)
         self.detail_panel.moments_panel.like_requested.connect(self._request_detail_like_toggle)
@@ -2487,6 +2683,7 @@ class ContactInterface(QWidget):
         if self._destroyed or not is_valid_qt_object(self):
             return
         self._current_user_id = self._controller.get_current_user_id()
+        logger.info("Contact interface reload requested")
         self._set_load_task(self._reload_data_async())
 
     def _on_contact_sync_required(self, _payload: object) -> None:
@@ -2505,13 +2702,18 @@ class ContactInterface(QWidget):
     async def _reload_data_async(self) -> None:
         if not self._can_update_contact_ui():
             return
+        logger.info("Contact interface reload started")
         self.summary_label.setText(tr("contact.sidebar.syncing", "Syncing contact data..."))
         try:
-            self._contacts, self._groups, self._requests = await asyncio.gather(
-                self._controller.load_contacts(),
-                self._controller.load_groups(),
-                self._controller.load_requests(),
-            )
+            self._contacts = await self._controller.load_contacts()
+            if self._destroyed:
+                return
+            await asyncio.sleep(0)
+            self._groups = await self._controller.load_groups()
+            if self._destroyed:
+                return
+            await asyncio.sleep(0)
+            self._requests = await self._controller.load_requests()
             self._moments = []
         except asyncio.CancelledError:
             raise
@@ -2536,6 +2738,12 @@ class ContactInterface(QWidget):
 
         if not self._can_update_contact_ui():
             return
+        logger.info(
+            "Contact interface reload fetched %d friends, %d groups, %d requests",
+            len(self._contacts),
+            len(self._groups),
+            len(self._requests),
+        )
         self.summary_label.setText(
             tr(
                 "contact.sidebar.summary",
@@ -2545,10 +2753,16 @@ class ContactInterface(QWidget):
                 requests=len(self._requests),
             )
         )
+        logger.info("Contact interface rebuilding sidebar pages")
         self._build_friends_page()
         self._build_groups_page()
         self._build_requests_page()
+        logger.info("Contact interface restoring selection")
         self._restore_selection(full_reload=True)
+        keyword = self.search_box.text().strip()
+        if keyword:
+            self._search_timer.start()
+        logger.info("Contact interface reload finished")
 
     def _rebuild_current_page(self) -> None:
         if self._current_page == "friends":
@@ -2559,25 +2773,93 @@ class ContactInterface(QWidget):
             self._build_requests_page()
         self._restore_selection(full_reload=False)
 
+    def _on_search_text_changed(self, text: str) -> None:
+        """Open or update the anchored search flyout for the current keyword."""
+        keyword = str(text or "").strip()
+        self._pending_search_keyword = keyword
+
+        if not keyword:
+            self._search_timer.stop()
+            self._cancel_pending_task(self._search_task)
+            self._search_task = None
+            self._dismiss_search_flyout(clear_results=True)
+            return
+
+        self._search_timer.start()
+
+    def _trigger_global_search(self) -> None:
+        """Run the latest pending grouped sidebar search request."""
+        keyword = self._pending_search_keyword
+        if not keyword:
+            return
+        flyout_view = self._show_search_flyout()
+        if flyout_view is not None:
+            flyout_view.set_loading(keyword)
+        self._set_search_task(self._run_global_search(keyword))
+
+    async def _run_global_search(self, keyword: str) -> None:
+        """Populate grouped local-search results for the contact sidebar."""
+        results = await search_all(keyword, message_limit=30, contact_limit=30, group_limit=30)
+        if self._destroyed or self.search_box.text().strip() != keyword:
+            return
+        flyout_view = self._show_search_flyout()
+        if flyout_view is not None:
+            flyout_view.set_results(keyword, results)
+
+    def _clear_search_results_view(self) -> None:
+        """Clear search results without tearing down the anchored flyout."""
+        if self._search_flyout_view is not None:
+            self._search_flyout_view.clear_results()
+
+    def _on_search_result_activated(self, payload: object) -> None:
+        """Route one grouped-search result into the shared chat-opening flow."""
+        self.clear_search()
+        self.message_requested.emit(payload)
+
+    def clear_search(self) -> None:
+        """Clear the shared sidebar search box and anchored results flyout."""
+        self.search_box.clear()
+        self._dismiss_search_flyout(clear_results=True)
+
+    def _show_search_flyout(self) -> Optional[GlobalSearchPopupOverlay]:
+        """Create or reuse the anchored search overlay below the search box."""
+        if self._search_flyout_view is not None and self._search_flyout is not None:
+            self._search_flyout_view.set_content_width(self.search_box.width() + 72)
+            self._search_flyout_view.show_for(self.search_box)
+            return self._search_flyout_view
+
+        host = self.window() or self
+        view = GlobalSearchPopupOverlay(host)
+        view.set_content_width(self.search_box.width() + 72)
+        view.resultActivated.connect(self._on_search_result_activated)
+        view.closed.connect(self._on_search_flyout_closed)
+        view.show_for(self.search_box)
+        self._search_flyout = view
+        self._search_flyout_view = view
+        return view
+
+    def _dismiss_search_flyout(self, *, clear_results: bool) -> None:
+        """Close the anchored search overlay when the search is cleared or completed."""
+        if self._search_flyout_view is not None and clear_results:
+            self._search_flyout_view.clear_results()
+        if self._search_flyout is not None:
+            self._search_flyout.close_overlay()
+        else:
+            self._clear_search_flyout()
+
+    def _clear_search_flyout(self) -> None:
+        """Drop stale search-overlay references after the popup closes."""
+        self._search_flyout = None
+        self._search_flyout_view = None
+
+    def _on_search_flyout_closed(self) -> None:
+        """Reset search state when the overlay closes outside normal clear flow."""
+        self._clear_search_flyout()
+        self.search_box.clear()
+
     @staticmethod
     def _friend_assistim_line(contact: ContactRecord) -> str:
         return str(contact.assistim_id or contact.username or "").strip() or "-"
-
-    @staticmethod
-    def _match_friend_search(contact: ContactRecord, search: str) -> bool:
-        if not search:
-            return True
-
-        keyword = search.lower()
-        haystacks = (
-            contact.display_name,
-            contact.username,
-            contact.nickname,
-            contact.remark,
-            contact.assistim_id,
-            contact.signature,
-        )
-        return any(keyword in str(value or "").lower() for value in haystacks)
 
     def _cancel_moment_load(self) -> None:
         self._cancel_pending_task(self._moment_load_task)
@@ -2610,14 +2892,12 @@ class ContactInterface(QWidget):
         self._clear_layout(self.friends_layout)
         self._friend_items.clear()
         self._friend_section_headers.clear()
-        search = self.search_box.text().strip().lower()
-        filtered = [item for item in self._contacts if self._match_friend_search(item, search)]
-        grouped = self._controller.group_contacts(filtered)
-        if not filtered:
+        grouped = self._controller.group_contacts(self._contacts)
+        if not self._contacts:
             self._add_empty_state(
                 self.friends_layout,
                 AppIcon.PEOPLE,
-                tr("contact.sidebar.empty_friends", "No matching friends found"),
+                tr("contact.sidebar.empty_friends", "No friends yet"),
             )
             return
         for letter, contacts in grouped.items():
@@ -2641,16 +2921,14 @@ class ContactInterface(QWidget):
     def _build_groups_page(self) -> None:
         self._clear_layout(self.groups_layout)
         self._group_items.clear()
-        search = self.search_box.text().strip().lower()
-        filtered = [item for item in self._groups if not search or search in item.name.lower() or search in item.id.lower()]
-        if not filtered:
+        if not self._groups:
             self._add_empty_state(
                 self.groups_layout,
                 AppIcon.PEOPLE,
                 tr("contact.sidebar.empty_groups", "No groups yet"),
             )
             return
-        for group in filtered:
+        for group in self._groups:
             item = ContactListItem(
                 group.id,
                 group.name,
@@ -2666,17 +2944,7 @@ class ContactInterface(QWidget):
     def _build_requests_page(self) -> None:
         self._clear_layout(self.requests_layout)
         self._request_items.clear()
-        search = self.search_box.text().strip().lower()
-        filtered = [
-            item for item in self._requests
-            if not search
-            or search in item.counterpart_name(self._current_user_id).lower()
-            or search in item.counterpart_id(self._current_user_id).lower()
-            or search in item.sender_id.lower()
-            or search in item.receiver_id.lower()
-            or search in item.message.lower()
-        ]
-        if not filtered:
+        if not self._requests:
             self._add_empty_state(
                 self.requests_layout,
                 AppIcon.ADD,
@@ -2684,9 +2952,9 @@ class ContactInterface(QWidget):
             )
             return
 
-        incoming = [item for item in filtered if item.is_incoming(self._current_user_id)]
-        outgoing = [item for item in filtered if item.is_outgoing(self._current_user_id)]
-        unknown = [item for item in filtered if not item.is_incoming(self._current_user_id) and not item.is_outgoing(self._current_user_id)]
+        incoming = [item for item in self._requests if item.is_incoming(self._current_user_id)]
+        outgoing = [item for item in self._requests if item.is_outgoing(self._current_user_id)]
+        unknown = [item for item in self._requests if not item.is_incoming(self._current_user_id) and not item.is_outgoing(self._current_user_id)]
         ordered_requests = incoming + outgoing + unknown
         for request in ordered_requests:
             item = RequestListItem(request, self._current_user_id, self.requests_container)
@@ -2856,11 +3124,14 @@ class ContactInterface(QWidget):
             duration=1800,
         )
 
-    def _show_dialog(self, dialog: QDialog) -> None:
+    def _show_dialog(self, dialog: QWidget) -> None:
         """Keep a dialog alive while it is visible."""
         self._dialog_refs.add(dialog)
-        dialog.finished.connect(lambda _result=0, dlg=dialog: self._dialog_refs.discard(dlg))
-        dialog.finished.connect(dialog.deleteLater)
+        dialog.destroyed.connect(lambda *_args, dlg=dialog: self._dialog_refs.discard(dlg))
+        if hasattr(dialog, "finished"):
+            dialog.finished.connect(dialog.deleteLater)
+        elif hasattr(dialog, "closed"):
+            dialog.closed.connect(dialog.deleteLater)
         dialog.show()
         dialog.raise_()
         dialog.activateWindow()
@@ -2957,6 +3228,10 @@ class ContactInterface(QWidget):
         """Cancel outstanding async work when the contact page is torn down."""
         self._destroyed = True
         self._event_bus.unsubscribe_sync(ContactEvent.SYNC_REQUIRED, self._on_contact_sync_required)
+        self._search_timer.stop()
+        self._cancel_pending_task(self._search_task)
+        self._search_task = None
+        self._dismiss_search_flyout(clear_results=False)
         self._cancel_pending_task(self._load_task)
         self._load_task = None
         self._cancel_pending_task(self._moment_load_task)
@@ -3005,6 +3280,16 @@ class ContactInterface(QWidget):
         self._cancel_pending_task(self._load_task)
         self._load_task = self._create_ui_task(coro, "reload contact data", on_done=self._clear_load_task)
 
+    def _set_search_task(self, coro) -> None:
+        """Keep only the latest grouped-search refresh alive."""
+        self._cancel_pending_task(self._search_task)
+        self._search_task = self._create_ui_task(coro, "search contacts sidebar", on_done=self._clear_search_task)
+
+    def _clear_search_task(self, task: asyncio.Task) -> None:
+        """Clear the tracked grouped-search task when it finishes."""
+        if self._search_task is task:
+            self._search_task = None
+
     def _clear_load_task(self, task: asyncio.Task) -> None:
         """Clear the active reload task reference when it finishes."""
         if self._load_task is task:
@@ -3035,6 +3320,10 @@ class ContactInterface(QWidget):
         """Clear a keyed action slot once its task finishes."""
         if self._keyed_ui_tasks.get(key) is task:
             self._keyed_ui_tasks.pop(key, None)
+
+
+
+
 
 
 

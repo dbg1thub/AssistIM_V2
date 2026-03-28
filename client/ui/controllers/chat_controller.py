@@ -257,6 +257,19 @@ class ChatController:
             before_timestamp=before_timestamp,
         )
 
+    async def load_cached_messages(
+        self,
+        session_id: str,
+        limit: int = 50,
+        before_timestamp: Optional[float] = None,
+    ) -> list[ChatMessage]:
+        """Load one local-only message page for optimistic first paint."""
+        return await self._msg_manager.get_cached_messages(
+            session_id=session_id,
+            limit=limit,
+            before_timestamp=before_timestamp,
+        )
+
     async def load_more_messages(
         self,
         session_id: str,

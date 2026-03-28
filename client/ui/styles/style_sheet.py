@@ -9,6 +9,7 @@ from qfluentwidgets import StyleSheetBase, Theme, qconfig
 
 STYLE_TOKENS = {
     Theme.LIGHT: {
+        "{{TEXT_PRIMARY}}": "rgb(17, 24, 39)",
         "{{CARD_BG}}": "rgba(255, 255, 255, 0.84)",
         "{{CARD_BG_STRONG}}": "rgba(255, 255, 255, 0.88)",
         "{{PANEL_BG}}": "rgba(255, 255, 255, 0.72)",
@@ -26,6 +27,7 @@ STYLE_TOKENS = {
         "{{RADIUS_PILL}}": "8px",
     },
     Theme.DARK: {
+        "{{TEXT_PRIMARY}}": "rgb(241, 245, 249)",
         "{{CARD_BG}}": "rgba(39, 43, 48, 0.88)",
         "{{CARD_BG_STRONG}}": "rgba(32, 35, 39, 0.92)",
         "{{PANEL_BG}}": "rgba(39, 43, 48, 0.76)",
@@ -56,6 +58,7 @@ class StyleSheet(StyleSheetBase, Enum):
     SESSION_PANEL = "session_panel"
     CONTACT_INTERFACE = "contact_interface"
     DISCOVERY_INTERFACE = "discovery_interface"
+    SETTINGS_INTERFACE = "settings_interface"
     MESSAGE_VIDEO_WIDGET = "message_video_widget"
 
     def path(self, theme=Theme.AUTO):

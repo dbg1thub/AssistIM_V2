@@ -4,7 +4,7 @@ QWidget#chatHeader {
 }
 
 QLabel#chatHeaderTitle {
-    color: black;
+    color: {{TEXT_PRIMARY}};
     font: 16px "Segoe UI Semibold", "Microsoft YaHei", "PingFang SC";
 }
 

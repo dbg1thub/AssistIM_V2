@@ -6,13 +6,39 @@ Dialog for viewing full-size images.
 
 import os
 
-from PySide6.QtCore import Qt, QUrl
-from PySide6.QtGui import QPixmap
+from PySide6.QtCore import QEvent, Qt, QUrl
+from PySide6.QtGui import QColor, QPalette, QPixmap
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
-from PySide6.QtWidgets import QDialog, QVBoxLayout, QScrollArea, QLabel, QPushButton, QHBoxLayout
+from PySide6.QtWidgets import QDialog, QVBoxLayout, QScrollArea, QLabel, QPushButton, QHBoxLayout, QFrame
 
 from client.core.config_backend import get_config
 from client.core.i18n import tr
+from qfluentwidgets import isDarkTheme
+
+
+def _apply_themed_dialog_surface(dialog: QDialog, object_name: str, *, radius: int = 14) -> None:
+    """Apply one stable theme-aware palette to the image viewer dialog."""
+    dialog.setObjectName(object_name)
+    dialog.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, False)
+    dialog.setAutoFillBackground(True)
+    background = QColor(39, 43, 48) if isDarkTheme() else QColor(255, 255, 255)
+    palette = dialog.palette()
+    palette.setColor(QPalette.ColorRole.Window, background)
+    palette.setColor(QPalette.ColorRole.Base, background)
+    dialog.setPalette(palette)
+
+
+def _prepare_transparent_scroll_area(area: QScrollArea) -> None:
+    """Keep the viewer scroll area transparent in both themes."""
+    area.setFrameShape(QFrame.Shape.NoFrame)
+    area.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, False)
+    area.setAutoFillBackground(False)
+    area.setStyleSheet("QScrollArea{background: transparent; border: none;} QAbstractScrollArea{background: transparent; border: none;}")
+    viewport = area.viewport()
+    if viewport is not None:
+        viewport.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, False)
+        viewport.setAutoFillBackground(False)
+        viewport.setStyleSheet("background: transparent; border: none;")
 
 
 class ImageViewer(QDialog):
@@ -37,6 +63,7 @@ class ImageViewer(QDialog):
         self.setWindowTitle(tr("image_viewer.title", "Image Viewer"))
         self.setMinimumSize(600, 400)
         self.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.WindowCloseButtonHint)
+        _apply_themed_dialog_surface(self, "ImageViewerDialog")
 
         # Main layout
         main_layout = QVBoxLayout(self)
@@ -46,6 +73,7 @@ class ImageViewer(QDialog):
         self.scroll_area = QScrollArea(self)
         self.scroll_area.setWidgetResizable(True)
         self.scroll_area.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        _prepare_transparent_scroll_area(self.scroll_area)
 
         # Image label
         self.image_label = QLabel(self)
@@ -64,6 +92,16 @@ class ImageViewer(QDialog):
 
         main_layout.addWidget(self.scroll_area)
         main_layout.addLayout(button_layout)
+
+    def changeEvent(self, event) -> None:
+        """Keep the dialog surface aligned with the active theme."""
+        super().changeEvent(event)
+        if event.type() in {
+            QEvent.Type.PaletteChange,
+            QEvent.Type.ApplicationPaletteChange,
+            QEvent.Type.StyleChange,
+        }:
+            _apply_themed_dialog_surface(self, "ImageViewerDialog")
 
     def _load_image(self) -> None:
         """Load and display image."""

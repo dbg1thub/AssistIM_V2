@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from typing import Optional
 
-from PySide6.QtCore import QEasingCurve, QPoint, QPropertyAnimation, QRect, QSignalBlocker, Qt, Signal
+from PySide6.QtCore import QEasingCurve, QPoint, QPropertyAnimation, QRect, QRectF, QSignalBlocker, Qt, Signal
 from PySide6.QtGui import QColor, QMouseEvent, QPainter, QPainterPath, QPen
-from PySide6.QtWidgets import QHBoxLayout, QSizePolicy, QStackedWidget, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QFrame, QHBoxLayout, QSizePolicy, QStackedWidget, QVBoxLayout, QWidget
 
 from qfluentwidgets import (
     AvatarWidget,
@@ -361,22 +361,79 @@ class ChatInfoDrawerContent(QWidget):
         self.stack.setCurrentWidget(self.placeholder_content)
 
 
-class AcrylicDrawerSurface(QWidget):
-    """One acrylic-painted surface used by the floating chat info drawer."""
+class AcrylicDrawerSurface(QFrame):
+    """Reusable Fluent-style acrylic surface for drawer and popup panels."""
 
-    def __init__(self, parent=None) -> None:
+    def __init__(self, parent=None, *, extend_right_edge: bool = False, radius: int = 7) -> None:
         super().__init__(parent)
         self.setObjectName("chatInfoDrawer")
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self._extend_right_edge = bool(extend_right_edge)
+        self._radius = max(0, int(radius))
         self._acrylic_brush = AcrylicBrush(self, 30)
+        self._border_frame = QFrame(self)
+        self._border_frame.setObjectName("chatInfoDrawerBorder")
+        self._border_frame.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self._border_frame.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self._border_frame.show()
+        self._last_border_style = ""
+        self._update_border_style()
+
+    def set_border_object_name(self, object_name: str) -> None:
+        """Update the overlay frame used for the crisp Fluent border."""
+        self._border_frame.setObjectName(str(object_name or ""))
+        self._update_border_style(force=True)
+
+    def _update_border_style(self, *, force: bool = False) -> None:
+        border_rgb = "57, 57, 57" if isDarkTheme() else "229, 229, 229"
+        if self._extend_right_edge:
+            style = (
+                "QFrame {"
+                " background: transparent;"
+                f" border-top: 1px solid rgb({border_rgb});"
+                f" border-left: 1px solid rgb({border_rgb});"
+                f" border-bottom: 1px solid rgb({border_rgb});"
+                " border-right: none;"
+                f" border-top-left-radius: {self._radius}px;"
+                f" border-bottom-left-radius: {self._radius}px;"
+                " border-top-right-radius: 0px;"
+                " border-bottom-right-radius: 0px;"
+                "}"
+            )
+        else:
+            style = (
+                "QFrame {"
+                " background: transparent;"
+                f" border: 1px solid rgb({border_rgb});"
+                f" border-radius: {self._radius}px;"
+                "}"
+            )
+
+        if force or style != self._last_border_style:
+            self._border_frame.setStyleSheet(style)
+            self._last_border_style = style
 
     def _update_acrylic_color(self) -> None:
         if isDarkTheme():
-            self._acrylic_brush.tintColor = QColor(32, 32, 32, 204)
+            self._acrylic_brush.tintColor = QColor(32, 32, 32, 200)
             self._acrylic_brush.luminosityColor = QColor(0, 0, 0, 0)
         else:
-            self._acrylic_brush.tintColor = QColor(255, 255, 255, 188)
+            self._acrylic_brush.tintColor = QColor(255, 255, 255, 180)
             self._acrylic_brush.luminosityColor = QColor(255, 255, 255, 0)
+
+    def _fallback_fill_color(self) -> QColor:
+        return QColor(40, 40, 40, 232) if isDarkTheme() else QColor(248, 248, 248, 236)
+
+    def _shape_path(self) -> QPainterPath:
+        rect = QRectF(self.rect()).adjusted(1, 1, -1, -1)
+        path = QPainterPath()
+        path.setFillRule(Qt.FillRule.WindingFill)
+        path.addRoundedRect(rect, self._radius, self._radius)
+        if self._extend_right_edge:
+            extension = max(8.0, float(self._radius) + 1.0)
+            path.addRect(QRectF(rect.right() - extension + 1.0, rect.top(), extension, rect.height()))
+        return path.simplified()
 
     def capture_backdrop(self, global_rect: QRect | None = None) -> None:
         """Grab one acrylic backdrop snapshot, mirroring NavigationPanel behavior."""
@@ -394,11 +451,8 @@ class AcrylicDrawerSurface(QWidget):
         self.update()
 
     def paintEvent(self, event) -> None:
-        path = QPainterPath()
-        path.setFillRule(Qt.FillRule.WindingFill)
-        path.addRoundedRect(0, 1, self.width() - 1, self.height() - 1, 7, 7)
-        path.addRect(self.width() - 8, 1, 8, self.height() - 1)
-        shape_path = path.simplified()
+        shape_path = self._shape_path()
+        self._update_border_style()
 
         if self._acrylic_brush.isAvailable():
             self._acrylic_brush.setClipPath(shape_path)
@@ -408,18 +462,16 @@ class AcrylicDrawerSurface(QWidget):
             painter = QPainter(self)
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
             painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(QColor(36, 36, 36, 232) if isDarkTheme() else QColor(255, 255, 255, 236))
+            painter.setBrush(self._fallback_fill_color())
             painter.drawPath(shape_path)
 
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        if isDarkTheme():
-            pen = QPen(QColor(57, 57, 57), 1)
-        else:
-            pen = QPen(QColor(218, 218, 218), 1)
-        painter.setPen(pen)
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.drawPath(shape_path)
+        super().paintEvent(event)
+        self._border_frame.raise_()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._border_frame.setGeometry(self.rect())
+        self._border_frame.raise_()
 
 
 class ChatInfoDrawerOverlay(QWidget):
@@ -445,7 +497,7 @@ class ChatInfoDrawerOverlay(QWidget):
         self.setEnabled(False)
         self.hide()
 
-        self.drawer = AcrylicDrawerSurface(self)
+        self.drawer = AcrylicDrawerSurface(self, extend_right_edge=True)
         self.drawer.setObjectName("chatInfoDrawer")
 
         drawer_layout = QVBoxLayout(self.drawer)

@@ -7,6 +7,7 @@ import sqlite3
 import sys
 import time
 import types
+from datetime import datetime
 from pathlib import Path
 
 
@@ -59,6 +60,7 @@ if "aiosqlite" not in sys.modules:
     sys.modules["aiosqlite"] = aiosqlite
 
 from client.storage.database import Database
+from client.models.message import ChatMessage, MessageStatus, MessageType, Session
 
 
 def test_database_connect_normalizes_legacy_private_sessions() -> None:
@@ -159,6 +161,7 @@ def test_database_local_directory_cache_search_and_clear() -> None:
                             "nickname": "Alice",
                             "remark": "Core teammate",
                             "assistim_id": "alice",
+                            "region": "Shenzhen",
                             "signature": "Build core features",
                         },
                         {
@@ -168,6 +171,7 @@ def test_database_local_directory_cache_search_and_clear() -> None:
                             "nickname": "Bob",
                             "remark": "",
                             "assistim_id": "bob",
+                            "region": "Seoul",
                             "signature": "",
                         },
                     ]
@@ -179,6 +183,7 @@ def test_database_local_directory_cache_search_and_clear() -> None:
                             "name": "Core Team",
                             "session_id": "session-group-1",
                             "member_count": 3,
+                            "member_search_text": "Alice Shenzhen Carol Busan",
                         },
                         {
                             "id": "group-2",
@@ -191,12 +196,129 @@ def test_database_local_directory_cache_search_and_clear() -> None:
 
                 contacts = await database.search_contacts("core", limit=10)
                 groups = await database.search_groups("core", limit=10)
+                region_contacts = await database.search_contacts("shenzhen", limit=10)
+                member_groups = await database.search_groups("busan", limit=10)
                 assert [item["id"] for item in contacts] == ["user-1"]
                 assert [item["id"] for item in groups] == ["group-1"]
+                assert [item["id"] for item in region_contacts] == ["user-1"]
+                assert [item["id"] for item in member_groups] == ["group-1"]
 
                 await database.clear_chat_state()
                 assert await database.search_contacts("core", limit=10) == []
                 assert await database.search_groups("core", limit=10) == []
+            finally:
+                await database.close()
+
+        asyncio.run(scenario())
+    finally:
+        try:
+            db_path.unlink(missing_ok=True)
+        except PermissionError:
+            pass
+        shutil.rmtree(temp_root, ignore_errors=True)
+
+
+def test_database_message_search_tracks_updates_and_deletes() -> None:
+    temp_root = (Path.cwd() / "client/tests/.pytest_tmp").resolve()
+    temp_root.mkdir(parents=True, exist_ok=True)
+    db_path = temp_root / "database-message-search-sync.db"
+    try:
+        db_path.unlink(missing_ok=True)
+
+        async def scenario() -> None:
+            database = Database(str(db_path))
+            await database.connect()
+            try:
+                session = Session(
+                    session_id="session-1",
+                    name="Direct Chat",
+                    created_at=datetime.now(),
+                    updated_at=datetime.now(),
+                )
+                await database.save_session(session)
+
+                message = ChatMessage(
+                    message_id="message-1",
+                    session_id="session-1",
+                    sender_id="user-1",
+                    content="Launch roadmap alpha",
+                    message_type=MessageType.TEXT,
+                    status=MessageStatus.SENT,
+                    timestamp=datetime.now(),
+                    updated_at=datetime.now(),
+                )
+                await database.save_message(message)
+
+                launch_results = await database.search_messages("launch", session_id="session-1", limit=10)
+                assert [item.message_id for item in launch_results] == ["message-1"]
+
+                await database.update_message_content("message-1", "Beta roadmap only")
+                assert await database.search_messages("launch", session_id="session-1", limit=10) == []
+                beta_results = await database.search_messages("beta", session_id="session-1", limit=10)
+                assert [item.message_id for item in beta_results] == ["message-1"]
+
+                await database.delete_message("message-1")
+                assert await database.search_messages("beta", session_id="session-1", limit=10) == []
+            finally:
+                await database.close()
+
+        asyncio.run(scenario())
+    finally:
+        try:
+            db_path.unlink(missing_ok=True)
+        except PermissionError:
+            pass
+        shutil.rmtree(temp_root, ignore_errors=True)
+
+
+def test_database_connect_upgrades_local_search_cache_columns() -> None:
+    temp_root = (Path.cwd() / "client/tests/.pytest_tmp").resolve()
+    temp_root.mkdir(parents=True, exist_ok=True)
+    db_path = temp_root / "database-cache-schema-upgrade.db"
+    try:
+        db_path.unlink(missing_ok=True)
+        with sqlite3.connect(str(db_path)) as connection:
+            connection.executescript(
+                """
+                CREATE TABLE contacts_cache (
+                    contact_id TEXT PRIMARY KEY,
+                    display_name TEXT NOT NULL DEFAULT '',
+                    username TEXT NOT NULL DEFAULT '',
+                    nickname TEXT NOT NULL DEFAULT '',
+                    remark TEXT NOT NULL DEFAULT '',
+                    assistim_id TEXT NOT NULL DEFAULT '',
+                    avatar TEXT NOT NULL DEFAULT '',
+                    signature TEXT NOT NULL DEFAULT '',
+                    category TEXT NOT NULL DEFAULT 'friend',
+                    status TEXT NOT NULL DEFAULT '',
+                    extra TEXT NOT NULL DEFAULT '{}',
+                    updated_at INTEGER NOT NULL
+                );
+
+                CREATE TABLE groups_cache (
+                    group_id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL DEFAULT '',
+                    avatar TEXT NOT NULL DEFAULT '',
+                    owner_id TEXT NOT NULL DEFAULT '',
+                    session_id TEXT NOT NULL DEFAULT '',
+                    member_count INTEGER NOT NULL DEFAULT 0,
+                    extra TEXT NOT NULL DEFAULT '{}',
+                    updated_at INTEGER NOT NULL
+                );
+                """
+            )
+            connection.commit()
+
+        async def scenario() -> None:
+            database = Database(db_path=str(db_path))
+            await database.connect()
+            try:
+                cursor = await database._db.execute("PRAGMA table_info(contacts_cache)")
+                contact_columns = {row["name"] for row in await cursor.fetchall()}
+                cursor = await database._db.execute("PRAGMA table_info(groups_cache)")
+                group_columns = {row["name"] for row in await cursor.fetchall()}
+                assert "region" in contact_columns
+                assert "member_search_text" in group_columns
             finally:
                 await database.close()
 

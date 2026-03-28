@@ -8,3 +8,63 @@ QListView#sessionListView,
 SearchLineEdit {
     background: transparent;
 }
+
+QWidget#globalSearchPanel,
+QScrollArea#globalSearchScrollArea,
+QWidget#globalSearchScrollWidget,
+QWidget#globalSearchSectionHeader,
+QWidget#globalSearchSectionTitleRow {
+    background: transparent;
+    border: none;
+}
+
+QFrame#globalSearchAcrylicSurface {
+    background: transparent;
+    border: none;
+}
+
+QFrame#globalSearchAcrylicBorder {
+    background: transparent;
+    border: 1px solid rgb(57, 57, 57);
+    border-radius: 10px;
+}
+
+QLabel#globalSearchStateLabel,
+QLabel#globalSearchSectionTitle,
+QLabel#globalSearchResultSubtitle,
+QLabel#globalSearchResultMeta {
+    color: {{TEXT_SECONDARY}};
+    font: 12px "Segoe UI", "Microsoft YaHei", "PingFang SC";
+}
+
+QLabel#globalSearchResultTitle {
+    color: {{TEXT_PRIMARY}};
+    font: 15px "Segoe UI", "Microsoft YaHei", "PingFang SC";
+}
+
+QWidget#globalSearchResultCard {
+    background: transparent;
+    border: none;
+    border-radius: {{RADIUS_CARD}};
+}
+
+QFrame#globalSearchSectionDivider {
+    background: {{BORDER_COLOR}};
+    border: none;
+    min-height: 1px;
+    max-height: 1px;
+}
+
+QWidget#globalSearchSectionLinkRow {
+    background: transparent;
+    border: none;
+}
+
+QLabel#globalSearchSectionLinkLabel {
+    color: {{TEXT_SECONDARY}};
+    font: 14px "Segoe UI", "Microsoft YaHei", "PingFang SC";
+}
+
+QWidget#globalSearchSectionLinkRow:hover QLabel#globalSearchSectionLinkLabel {
+    color: {{TEXT_PRIMARY}};
+}

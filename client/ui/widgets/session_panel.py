@@ -19,11 +19,13 @@ from client.core.app_icons import AppIcon
 from client.core.i18n import tr
 from client.delegates.session_delegate import SessionDelegate
 from client.events.event_bus import get_event_bus
+from client.managers.search_manager import search_all
 from client.managers.session_manager import SessionEvent
 from client.models.message import Session, format_message_preview
 from client.models.session_model import SessionModel
 from client.ui.controllers.session_controller import get_session_controller
 from client.ui.styles import StyleSheet
+from client.ui.widgets.global_search_panel import GlobalSearchPopupOverlay
 
 
 logger = logging.getLogger(__name__)
@@ -86,6 +88,7 @@ class SessionPanel(QWidget):
 
     session_selected = Signal(str)
     add_requested = Signal()
+    search_result_requested = Signal(object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -101,6 +104,14 @@ class SessionPanel(QWidget):
         self._sessions_snapshot: tuple | None = None
         self._event_subscriptions: list[tuple[str, object]] = []
         self._ui_tasks: set[asyncio.Task] = set()
+        self._search_task: asyncio.Task | None = None
+        self._search_flyout = None
+        self._search_flyout_view: Optional[GlobalSearchPopupOverlay] = None
+        self._pending_search_keyword = ''
+        self._search_timer = QTimer(self)
+        self._search_timer.setSingleShot(True)
+        self._search_timer.setInterval(120)
+        self._search_timer.timeout.connect(self._trigger_global_search)
 
         self._setup_ui()
         self._subscribe_to_events()
@@ -122,7 +133,7 @@ class SessionPanel(QWidget):
         self.search_bar_layout.setSpacing(12)
 
         self.search_box = SearchLineEdit(self.search_bar)
-        self.search_box.setPlaceholderText(tr("session.search.placeholder", "Search"))
+        self.search_box.setPlaceholderText(tr("session.search.placeholder", "搜索"))
         self.search_box.setFixedHeight(36)
         self.search_box.setMinimumWidth(0)
         self.search_box.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
@@ -243,6 +254,10 @@ class SessionPanel(QWidget):
     def _on_destroyed(self, *_args) -> None:
         """Detach event listeners and cancel outstanding async actions."""
         self._unsubscribe_from_events()
+        self._search_timer.stop()
+        self._cancel_pending_task(self._search_task)
+        self._search_task = None
+        self._dismiss_search_flyout(clear_results=False)
         self._cancel_all_ui_tasks()
 
     def _cancel_all_ui_tasks(self) -> None:
@@ -329,9 +344,85 @@ class SessionPanel(QWidget):
         self._session_model.set_sessions(sessions)
 
     def _on_search_text_changed(self, text: str) -> None:
-        """Apply search filter."""
+        """Open or update the anchored search flyout for the current keyword."""
+        keyword = str(text or "").strip()
+        self._pending_search_keyword = keyword
         if self._proxy_model:
-            self._proxy_model.set_filter_text(text)
+            self._proxy_model.set_filter_text("")
+
+        if not keyword:
+            self._search_timer.stop()
+            self._cancel_pending_task(self._search_task)
+            self._search_task = None
+            self._dismiss_search_flyout(clear_results=True)
+            return
+
+        self._search_timer.start()
+
+    def _trigger_global_search(self) -> None:
+        """Run the latest pending local-search request."""
+        keyword = self._pending_search_keyword
+        if not keyword:
+            return
+        flyout_view = self._show_search_flyout()
+        if flyout_view is not None:
+            flyout_view.set_loading(keyword)
+        self._set_search_task(self._run_global_search(keyword))
+
+    async def _run_global_search(self, keyword: str) -> None:
+        """Populate grouped search results for the current keyword."""
+        results = await search_all(keyword, message_limit=30, contact_limit=30, group_limit=30)
+        if self.search_box.text().strip() != keyword:
+            return
+        flyout_view = self._show_search_flyout()
+        if flyout_view is not None:
+            flyout_view.set_results(keyword, results)
+
+    def _clear_search_results_view(self) -> None:
+        """Clear search results without tearing down the anchored flyout."""
+        if self._search_flyout_view is not None:
+            self._search_flyout_view.clear_results()
+
+    def _on_search_result_activated(self, payload: object) -> None:
+        """Forward one activated grouped-search result to the host chat window."""
+        self.clear_search()
+        self.search_result_requested.emit(payload)
+
+    def _show_search_flyout(self) -> Optional[GlobalSearchPopupOverlay]:
+        """Create or reuse the anchored search overlay below the search box."""
+        if self._search_flyout_view is not None and self._search_flyout is not None:
+            self._search_flyout_view.set_content_width(self.search_box.width() + 72)
+            self._search_flyout_view.show_for(self.search_box)
+            return self._search_flyout_view
+
+        host = self.window() or self
+        view = GlobalSearchPopupOverlay(host)
+        view.set_content_width(self.search_box.width() + 72)
+        view.resultActivated.connect(self._on_search_result_activated)
+        view.closed.connect(self._on_search_flyout_closed)
+        view.show_for(self.search_box)
+        self._search_flyout = view
+        self._search_flyout_view = view
+        return view
+
+    def _dismiss_search_flyout(self, *, clear_results: bool) -> None:
+        """Close the anchored search overlay when the search is cleared or completed."""
+        if self._search_flyout_view is not None and clear_results:
+            self._search_flyout_view.clear_results()
+        if self._search_flyout is not None:
+            self._search_flyout.close_overlay()
+        else:
+            self._clear_search_flyout()
+
+    def _clear_search_flyout(self) -> None:
+        """Drop stale search-overlay references after the popup closes."""
+        self._search_flyout = None
+        self._search_flyout_view = None
+
+    def _on_search_flyout_closed(self) -> None:
+        """Reset search state when the overlay closes outside normal clear flow."""
+        self._clear_search_flyout()
+        self.search_box.clear()
 
     def _on_session_clicked(self, index) -> None:
         """Emit selected session ID."""
@@ -457,6 +548,25 @@ class SessionPanel(QWidget):
         session = current_index.data(Qt.ItemDataRole.UserRole)
         return getattr(session, "session_id", None) if session else None
 
+    def _cancel_pending_task(self, task: asyncio.Task | None) -> None:
+        """Cancel one tracked task if it is still running."""
+        if task is not None and not task.done():
+            task.cancel()
+
+    def _set_search_task(self, coro) -> None:
+        """Keep only the latest grouped-search task alive."""
+        self._cancel_pending_task(self._search_task)
+        task = asyncio.create_task(coro)
+        self._search_task = task
+        self._ui_tasks.add(task)
+        task.add_done_callback(lambda finished: self._finalize_search_task(finished, "search sidebar"))
+
+    def _finalize_search_task(self, task: asyncio.Task, context: str) -> None:
+        """Drop the tracked grouped-search task and report failures."""
+        if self._search_task is task:
+            self._search_task = None
+        self._finalize_ui_task(task, context)
+
     def _schedule_ui_task(self, coro, context: str) -> None:
         """Schedule a session-menu coroutine and log failures."""
         task = asyncio.create_task(coro)
@@ -477,6 +587,11 @@ class SessionPanel(QWidget):
             return
         except Exception:
             logger.exception("Session menu task failed: %s", context)
+
+    def clear_search(self) -> None:
+        """Reset the shared sidebar search state."""
+        self.search_box.clear()
+        self._dismiss_search_flyout(clear_results=True)
 
     def get_search_box(self) -> SearchLineEdit:
         """Return search box widget."""
@@ -568,3 +683,13 @@ class SessionPanel(QWidget):
     def update_session(self, session_id: str, **kwargs) -> None:
         """Public helper to update a session."""
         self._session_model.update_session(session_id, **kwargs)
+
+
+
+
+
+
+
+
+
+
