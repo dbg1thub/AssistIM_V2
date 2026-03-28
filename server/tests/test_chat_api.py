@@ -1,4 +1,4 @@
-﻿"""Chat and friendship API tests."""
+"""Chat and friendship API tests."""
 
 from __future__ import annotations
 
@@ -24,7 +24,9 @@ def test_friend_request_private_session_and_message_flow(
         headers=auth_header(alice["access_token"]),
     )
     assert send_request_response.status_code == 200
-    request_id = send_request_response.json()["data"]["id"]
+    send_request_payload = send_request_response.json()["data"]
+    request_id = send_request_payload["request_id"]
+    assert "id" not in send_request_payload
 
     list_requests_response = client.get(
         "/api/v1/friends/requests",
@@ -32,7 +34,8 @@ def test_friend_request_private_session_and_message_flow(
     )
     assert list_requests_response.status_code == 200
     requests_payload = list_requests_response.json()["data"]
-    assert any(item["id"] == request_id for item in requests_payload)
+    assert any(item["request_id"] == request_id for item in requests_payload)
+    assert all("id" not in item for item in requests_payload)
 
     accept_response = client.post(
         f"/api/v1/friends/requests/{request_id}/accept",
@@ -79,34 +82,45 @@ def test_friend_request_private_session_and_message_flow(
     assert friend_payload[0]["status"] == "busy"
 
     create_session_response = client.post(
-        "/api/v1/sessions/private",
+        "/api/v1/sessions/direct",
         json={"participant_ids": [bob["user"]["id"]], "name": "Alice & Bob"},
         headers=auth_header(alice["access_token"]),
     )
     assert create_session_response.status_code == 200
     session_payload = create_session_response.json()["data"]
     session_id = session_payload["id"]
+    assert session_payload["session_type"] == "direct"
+    assert "type" not in session_payload
     assert bob["user"]["id"] in session_payload["participant_ids"]
 
     send_message_response = client.post(
-        "/api/v1/messages",
-        json={"session_id": session_id, "content": "hello bob", "type": "text"},
+        f"/api/v1/sessions/{session_id}/messages",
+        json={"content": "hello bob", "message_type": "text"},
         headers=auth_header(alice["access_token"]),
     )
     assert send_message_response.status_code == 200
     message_payload = send_message_response.json()["data"]
+    assert message_payload["message_id"]
+    assert message_payload["message_type"] == "text"
+    assert "id" not in message_payload
+    assert "msg_id" not in message_payload
+    assert "type" not in message_payload
     assert datetime.fromisoformat(message_payload["timestamp"])
     assert datetime.fromisoformat(message_payload["created_at"])
     assert datetime.fromisoformat(message_payload["updated_at"])
     assert message_payload["timestamp"] == message_payload["created_at"]
 
     history_response = client.get(
-        "/api/v1/messages/history",
-        params={"session_id": session_id},
+        f"/api/v1/sessions/{session_id}/messages",
         headers=auth_header(alice["access_token"]),
     )
     assert history_response.status_code == 200
     history_payload = history_response.json()["data"]
+    assert history_payload[0]["message_id"] == message_payload["message_id"]
+    assert history_payload[0]["message_type"] == "text"
+    assert "id" not in history_payload[0]
+    assert "msg_id" not in history_payload[0]
+    assert "type" not in history_payload[0]
     assert datetime.fromisoformat(history_payload[0]["timestamp"])
     assert history_payload[0]["timestamp"] == message_payload["timestamp"]
 
@@ -119,6 +133,32 @@ def test_friend_request_private_session_and_message_flow(
     assert datetime.fromisoformat(session_payload[0]["last_message_time"])
     assert session_payload[0]["last_message_time"] == message_payload["timestamp"]
 
+
+def test_send_message_requires_canonical_message_type_field(
+    client: TestClient,
+    user_factory,
+    auth_header,
+) -> None:
+    alice = user_factory("alice_http_message_type", "Alice Http Message Type")
+    bob = user_factory("bob_http_message_type", "Bob Http Message Type")
+
+    create_session_response = client.post(
+        "/api/v1/sessions/direct",
+        json={"participant_ids": [bob["user"]["id"]], "name": "Alice & Bob"},
+        headers=auth_header(alice["access_token"]),
+    )
+    assert create_session_response.status_code == 200
+    session_id = create_session_response.json()["data"]["id"]
+
+    response = client.post(
+        f"/api/v1/sessions/{session_id}/messages",
+        json={"content": "legacy http body", "type": "text"},
+        headers=auth_header(alice["access_token"]),
+    )
+
+    assert response.status_code == 422
+    assert "type" in response.json()["message"]
+
 def test_invalid_read_ack_does_not_disconnect_websocket(
     client: TestClient,
     user_factory,
@@ -128,7 +168,7 @@ def test_invalid_read_ack_does_not_disconnect_websocket(
     bob = user_factory("bob", "Bob")
 
     create_session_response = client.post(
-        "/api/v1/sessions/private",
+        "/api/v1/sessions/direct",
         json={"participant_ids": [bob["user"]["id"]], "name": "Alice & Bob"},
         headers=auth_header(alice["access_token"]),
     )
@@ -188,6 +228,57 @@ def test_invalid_read_ack_does_not_disconnect_websocket(
         assert second_received["data"]["content"] == "second"
 
 
+
+
+def test_websocket_read_ack_requires_message_id_field(client: TestClient, user_factory) -> None:
+    alice = user_factory("alice_read_ack_required", "Alice Read Ack Required")
+
+    def receive_until(ws, expected_type: str):
+        while True:
+            payload = ws.receive_json()
+            if payload.get("type") == expected_type:
+                return payload
+
+    with client.websocket_connect(f"/ws?token={alice['access_token']}") as websocket:
+        websocket.send_json(
+            {
+                "type": "read_ack",
+                "msg_id": "44555555-5555-4555-8555-555555555555",
+                "data": {
+                    "session_id": "session-1",
+                    "last_read_id": "message-1",
+                },
+            }
+        )
+        error_payload = receive_until(websocket, "error")
+        assert error_payload["data"]["message"] == "message_id is required"
+
+
+def test_websocket_rejects_legacy_message_alias(client: TestClient, user_factory) -> None:
+    alice = user_factory("alice", "Alice")
+
+    def receive_until(ws, expected_type: str):
+        while True:
+            payload = ws.receive_json()
+            if payload.get("type") == expected_type:
+                return payload
+
+    with client.websocket_connect(f"/ws?token={alice['access_token']}") as websocket:
+        websocket.send_json(
+            {
+                "type": "message",
+                "msg_id": "55666666-6666-4666-8666-666666666666",
+                "data": {
+                    "session_id": "legacy-session",
+                    "content": "legacy hello",
+                    "message_type": "text",
+                },
+            }
+        )
+        error_payload = receive_until(websocket, "error")
+        assert error_payload["data"]["message"] == "unsupported message type: message"
+
+
 def test_private_websocket_delivers_multiple_messages_with_token_query(
     client: TestClient,
     user_factory,
@@ -197,7 +288,7 @@ def test_private_websocket_delivers_multiple_messages_with_token_query(
     bob = user_factory("bob", "Bob")
 
     create_session_response = client.post(
-        "/api/v1/sessions/private",
+        "/api/v1/sessions/direct",
         json={"participant_ids": [bob["user"]["id"]], "name": "Alice & Bob"},
         headers=auth_header(alice["access_token"]),
     )
@@ -294,7 +385,7 @@ def test_chat_websocket_rejects_user_id_only_auth_and_keeps_socket_open(
             if payload.get("type") == expected_type:
                 return payload
 
-    with client.websocket_connect("/ws/chat") as websocket:
+    with client.websocket_connect("/ws") as websocket:
         websocket.send_json(
             {
                 "type": "auth",
@@ -317,7 +408,6 @@ def test_chat_websocket_rejects_user_id_only_auth_and_keeps_socket_open(
         assert auth_payload["data"]["success"] is True
         assert auth_payload["data"]["user_id"] == alice["user"]["id"]
 
-
 def test_websocket_message_mutations_require_message_owner(
     client: TestClient,
     user_factory,
@@ -327,7 +417,7 @@ def test_websocket_message_mutations_require_message_owner(
     bob = user_factory("bob", "Bob")
 
     create_session_response = client.post(
-        "/api/v1/sessions/private",
+        "/api/v1/sessions/direct",
         json={"participant_ids": [bob["user"]["id"]], "name": "Alice & Bob"},
         headers=auth_header(alice["access_token"]),
     )
@@ -335,12 +425,12 @@ def test_websocket_message_mutations_require_message_owner(
     session_id = create_session_response.json()["data"]["id"]
 
     send_message_response = client.post(
-        "/api/v1/messages",
-        json={"session_id": session_id, "content": "hello bob", "type": "text"},
+        f"/api/v1/sessions/{session_id}/messages",
+        json={"content": "hello bob", "message_type": "text"},
         headers=auth_header(alice["access_token"]),
     )
     assert send_message_response.status_code == 200
-    message_id = send_message_response.json()["data"]["id"]
+    message_id = send_message_response.json()["data"]["message_id"]
 
     def receive_until(ws, expected_type: str):
         while True:
@@ -353,7 +443,7 @@ def test_websocket_message_mutations_require_message_owner(
             {
                 "type": "message_recall",
                 "msg_id": "92000000-0000-4000-8000-000000000001",
-                "data": {"session_id": session_id, "msg_id": message_id},
+                "data": {"session_id": session_id, "message_id": message_id},
             }
         )
         recall_error = receive_until(websocket, "error")
@@ -365,7 +455,7 @@ def test_websocket_message_mutations_require_message_owner(
                 "msg_id": "92000000-0000-4000-8000-000000000002",
                 "data": {
                     "session_id": session_id,
-                    "msg_id": message_id,
+                    "message_id": message_id,
                     "content": "hacked by bob",
                 },
             }
@@ -377,21 +467,20 @@ def test_websocket_message_mutations_require_message_owner(
             {
                 "type": "message_delete",
                 "msg_id": "92000000-0000-4000-8000-000000000003",
-                "data": {"session_id": session_id, "msg_id": message_id},
+                "data": {"session_id": session_id, "message_id": message_id},
             }
         )
         delete_error = receive_until(websocket, "error")
         assert "cannot delete this message" in delete_error["data"]["message"]
 
     history_response = client.get(
-        "/api/v1/messages/history",
-        params={"session_id": session_id},
+        f"/api/v1/sessions/{session_id}/messages",
         headers=auth_header(bob["access_token"]),
     )
     assert history_response.status_code == 200
     history_payload = history_response.json()["data"]
     assert len(history_payload) == 1
-    assert history_payload[0]["id"] == message_id
+    assert history_payload[0]["message_id"] == message_id
     assert history_payload[0]["status"] == "sent"
     assert history_payload[0]["content"] == "hello bob"
 
@@ -411,7 +500,7 @@ def test_edit_message_rejects_messages_older_than_two_minutes(
     bob = user_factory("bob", "Bob")
 
     create_session_response = client.post(
-        "/api/v1/sessions/private",
+        "/api/v1/sessions/direct",
         json={"participant_ids": [bob["user"]["id"]], "name": "Alice & Bob"},
         headers=auth_header(alice["access_token"]),
     )
@@ -419,12 +508,12 @@ def test_edit_message_rejects_messages_older_than_two_minutes(
     session_id = create_session_response.json()["data"]["id"]
 
     send_message_response = client.post(
-        "/api/v1/messages",
-        json={"session_id": session_id, "content": "original content", "type": "text"},
+        f"/api/v1/sessions/{session_id}/messages",
+        json={"content": "original content", "message_type": "text"},
         headers=auth_header(alice["access_token"]),
     )
     assert send_message_response.status_code == 200
-    message_id = send_message_response.json()["data"]["id"]
+    message_id = send_message_response.json()["data"]["message_id"]
 
     with SessionLocal() as db:
         message = db.get(Message, message_id)
@@ -443,13 +532,12 @@ def test_edit_message_rejects_messages_older_than_two_minutes(
     assert edit_response.json()["message"] == "edit time limit exceeded"
 
     history_response = client.get(
-        "/api/v1/messages/history",
-        params={"session_id": session_id},
+        f"/api/v1/sessions/{session_id}/messages",
         headers=auth_header(alice["access_token"]),
     )
     assert history_response.status_code == 200
     history_payload = history_response.json()["data"]
-    assert history_payload[0]["id"] == message_id
+    assert history_payload[0]["message_id"] == message_id
     assert history_payload[0]["content"] == "original content"
     assert history_payload[0]["status"] == "sent"
 
@@ -471,16 +559,15 @@ def test_group_read_receipts_are_tracked_per_member(
     session_id = group_response.json()["data"]["session_id"]
 
     send_message_response = client.post(
-        "/api/v1/messages",
-        json={"session_id": session_id, "content": "group hello", "type": "text"},
+        f"/api/v1/sessions/{session_id}/messages",
+        json={"content": "group hello", "message_type": "text"},
         headers=auth_header(alice["access_token"]),
     )
     assert send_message_response.status_code == 200
-    message_id = send_message_response.json()["data"]["id"]
+    message_id = send_message_response.json()["data"]["message_id"]
 
     alice_history_before = client.get(
-        "/api/v1/messages/history",
-        params={"session_id": session_id},
+        f"/api/v1/sessions/{session_id}/messages",
         headers=auth_header(alice["access_token"]),
     )
     assert alice_history_before.status_code == 200
@@ -492,13 +579,14 @@ def test_group_read_receipts_are_tracked_per_member(
 
     bob_read_response = client.post(
         "/api/v1/messages/read/batch",
-        json={"session_id": session_id, "last_read_id": message_id},
+        json={"session_id": session_id, "message_id": message_id},
         headers=auth_header(bob["access_token"]),
     )
     assert bob_read_response.status_code == 200
     bob_read_payload = bob_read_response.json()["data"]
     assert bob_read_payload["success"] is True
-    assert bob_read_payload["last_read_message_id"] == message_id
+    assert bob_read_payload["message_id"] == message_id
+    assert "last_read_message_id" not in bob_read_payload
     assert bob_read_payload["last_read_seq"] == 1
     assert bob_read_payload["user_id"] == bob["user"]["id"]
 
@@ -517,26 +605,42 @@ def test_group_read_receipts_are_tracked_per_member(
     assert charlie_unread_response.json()["data"]["total"] == 1
 
     alice_history_after = client.get(
-        "/api/v1/messages/history",
-        params={"session_id": session_id},
+        f"/api/v1/sessions/{session_id}/messages",
         headers=auth_header(alice["access_token"]),
     )
     assert alice_history_after.status_code == 200
     after_payload = alice_history_after.json()["data"][0]
-    assert after_payload["id"] == message_id
+    assert after_payload["message_id"] == message_id
     assert after_payload["status"] == "sent"
     assert after_payload["read_count"] == 1
     assert after_payload["read_target_count"] == 2
     assert after_payload["read_by_user_ids"] == [bob["user"]["id"]]
 
     charlie_history = client.get(
-        "/api/v1/messages/history",
-        params={"session_id": session_id},
+        f"/api/v1/sessions/{session_id}/messages",
         headers=auth_header(charlie["access_token"]),
     )
     assert charlie_history.status_code == 200
     charlie_payload = charlie_history.json()["data"][0]
     assert charlie_payload["is_read_by_me"] is False
+
+
+
+def test_read_batch_requires_canonical_message_id_field(
+    client: TestClient,
+    user_factory,
+    auth_header,
+) -> None:
+    alice = user_factory("alice_read_batch_alias", "Alice Read Batch Alias")
+
+    response = client.post(
+        "/api/v1/messages/read/batch",
+        json={"session_id": "session-1", "last_read_id": "message-1"},
+        headers=auth_header(alice["access_token"]),
+    )
+
+    assert response.status_code == 422
+    assert "message_id" in response.json()["message"]
 
 
 def test_read_ack_websocket_broadcasts_read_cursor(
@@ -548,7 +652,7 @@ def test_read_ack_websocket_broadcasts_read_cursor(
     bob = user_factory("bob", "Bob")
 
     create_session_response = client.post(
-        "/api/v1/sessions/private",
+        "/api/v1/sessions/direct",
         json={"participant_ids": [bob["user"]["id"]], "name": "Alice & Bob"},
         headers=auth_header(alice["access_token"]),
     )
@@ -556,12 +660,12 @@ def test_read_ack_websocket_broadcasts_read_cursor(
     session_id = create_session_response.json()["data"]["id"]
 
     send_message_response = client.post(
-        "/api/v1/messages",
-        json={"session_id": session_id, "content": "hello bob", "type": "text"},
+        f"/api/v1/sessions/{session_id}/messages",
+        json={"content": "hello bob", "message_type": "text"},
         headers=auth_header(alice["access_token"]),
     )
     assert send_message_response.status_code == 200
-    message_id = send_message_response.json()["data"]["id"]
+    message_id = send_message_response.json()["data"]["message_id"]
 
     def receive_until(ws, expected_type: str):
         while True:
@@ -585,7 +689,8 @@ def test_read_ack_websocket_broadcasts_read_cursor(
 
         read_payload = receive_until(alice_ws, "read")
         assert read_payload["data"]["session_id"] == session_id
-        assert read_payload["data"]["last_read_message_id"] == message_id
+        assert read_payload["data"]["message_id"] == message_id
+        assert "last_read_message_id" not in read_payload["data"]
         assert read_payload["data"]["last_read_seq"] == 1
         assert read_payload["data"]["user_id"] == bob["user"]["id"]
 
@@ -598,7 +703,7 @@ def test_websocket_duplicate_message_id_is_idempotent_and_ack_returns_canonical_
     bob = user_factory("bob", "Bob")
 
     create_session_response = client.post(
-        "/api/v1/sessions/private",
+        "/api/v1/sessions/direct",
         json={"participant_ids": [bob["user"]["id"]], "name": "Alice & Bob"},
         headers=auth_header(alice["access_token"]),
     )
@@ -647,14 +752,13 @@ def test_websocket_duplicate_message_id_is_idempotent_and_ack_returns_canonical_
         receive_until(bob_ws, "pong", unexpected_type="chat_message")
 
     history_response = client.get(
-        "/api/v1/messages/history",
-        params={"session_id": session_id},
+        f"/api/v1/sessions/{session_id}/messages",
         headers=auth_header(alice["access_token"]),
     )
     assert history_response.status_code == 200
     history_payload = history_response.json()["data"]
     assert len(history_payload) == 1
-    assert history_payload[0]["id"] == payload["msg_id"]
+    assert history_payload[0]["message_id"] == payload["msg_id"]
     assert history_payload[0]["session_seq"] == 1
 
 
@@ -667,7 +771,7 @@ def test_websocket_rejects_conflicting_duplicate_message_id(
     bob = user_factory("bob", "Bob")
 
     create_session_response = client.post(
-        "/api/v1/sessions/private",
+        "/api/v1/sessions/direct",
         json={"participant_ids": [bob["user"]["id"]], "name": "Alice & Bob"},
         headers=auth_header(alice["access_token"]),
     )
@@ -712,14 +816,13 @@ def test_websocket_rejects_conflicting_duplicate_message_id(
         assert "already used" in error_payload["data"]["message"]
 
     history_response = client.get(
-        "/api/v1/messages/history",
-        params={"session_id": session_id},
+        f"/api/v1/sessions/{session_id}/messages",
         headers=auth_header(alice["access_token"]),
     )
     assert history_response.status_code == 200
     history_payload = history_response.json()["data"]
     assert len(history_payload) == 1
-    assert history_payload[0]["id"] == message_id
+    assert history_payload[0]["message_id"] == message_id
     assert history_payload[0]["content"] == "first body"
 
 
@@ -733,7 +836,7 @@ def test_websocket_sync_messages_uses_session_cursors(
     bob = user_factory("bob", "Bob")
 
     create_session_response = client.post(
-        "/api/v1/sessions/private",
+        "/api/v1/sessions/direct",
         json={"participant_ids": [bob["user"]["id"]], "name": "Alice & Bob"},
         headers=auth_header(alice["access_token"]),
     )
@@ -741,16 +844,16 @@ def test_websocket_sync_messages_uses_session_cursors(
     session_id = create_session_response.json()["data"]["id"]
 
     first_response = client.post(
-        "/api/v1/messages",
-        json={"session_id": session_id, "content": "first sync message", "type": "text"},
+        f"/api/v1/sessions/{session_id}/messages",
+        json={"content": "first sync message", "message_type": "text"},
         headers=auth_header(alice["access_token"]),
     )
     assert first_response.status_code == 200
     assert first_response.json()["data"]["session_seq"] == 1
 
     second_response = client.post(
-        "/api/v1/messages",
-        json={"session_id": session_id, "content": "second sync message", "type": "text"},
+        f"/api/v1/sessions/{session_id}/messages",
+        json={"content": "second sync message", "message_type": "text"},
         headers=auth_header(alice["access_token"]),
     )
     assert second_response.status_code == 200
@@ -792,7 +895,7 @@ def test_websocket_sync_messages_replays_offline_read_and_edit_events(
     bob = user_factory("bob", "Bob")
 
     create_session_response = client.post(
-        "/api/v1/sessions/private",
+        "/api/v1/sessions/direct",
         json={"participant_ids": [bob["user"]["id"]], "name": "Alice & Bob"},
         headers=auth_header(alice["access_token"]),
     )
@@ -800,17 +903,17 @@ def test_websocket_sync_messages_replays_offline_read_and_edit_events(
     session_id = create_session_response.json()["data"]["id"]
 
     send_message_response = client.post(
-        "/api/v1/messages",
-        json={"session_id": session_id, "content": "original sync payload", "type": "text"},
+        f"/api/v1/sessions/{session_id}/messages",
+        json={"content": "original sync payload", "message_type": "text"},
         headers=auth_header(alice["access_token"]),
     )
     assert send_message_response.status_code == 200
-    message_id = send_message_response.json()["data"]["id"]
+    message_id = send_message_response.json()["data"]["message_id"]
     assert send_message_response.json()["data"]["session_seq"] == 1
 
     read_response = client.post(
         "/api/v1/messages/read/batch",
-        json={"session_id": session_id, "last_read_id": message_id},
+        json={"session_id": session_id, "message_id": message_id},
         headers=auth_header(bob["access_token"]),
     )
     assert read_response.status_code == 200
@@ -852,6 +955,7 @@ def test_websocket_sync_messages_replays_offline_read_and_edit_events(
         assert events[0]["data"]["last_read_seq"] == 1
         assert events[0]["data"]["event_seq"] == 1
         assert events[1]["data"]["message_id"] == message_id
+        assert "msg_id" not in events[1]["data"]
         assert events[1]["data"]["content"] == "edited sync payload"
         assert events[1]["data"]["event_seq"] == 2
 
@@ -865,7 +969,7 @@ def test_websocket_sync_messages_replays_offline_recall_and_delete_events(
     bob = user_factory("bob", "Bob")
 
     create_session_response = client.post(
-        "/api/v1/sessions/private",
+        "/api/v1/sessions/direct",
         json={"participant_ids": [bob["user"]["id"]], "name": "Alice & Bob"},
         headers=auth_header(alice["access_token"]),
     )
@@ -873,21 +977,21 @@ def test_websocket_sync_messages_replays_offline_recall_and_delete_events(
     session_id = create_session_response.json()["data"]["id"]
 
     first_message = client.post(
-        "/api/v1/messages",
-        json={"session_id": session_id, "content": "first message", "type": "text"},
+        f"/api/v1/sessions/{session_id}/messages",
+        json={"content": "first message", "message_type": "text"},
         headers=auth_header(alice["access_token"]),
     )
     assert first_message.status_code == 200
-    first_message_id = first_message.json()["data"]["id"]
+    first_message_id = first_message.json()["data"]["message_id"]
     assert first_message.json()["data"]["session_seq"] == 1
 
     second_message = client.post(
-        "/api/v1/messages",
-        json={"session_id": session_id, "content": "second message", "type": "text"},
+        f"/api/v1/sessions/{session_id}/messages",
+        json={"content": "second message", "message_type": "text"},
         headers=auth_header(alice["access_token"]),
     )
     assert second_message.status_code == 200
-    second_message_id = second_message.json()["data"]["id"]
+    second_message_id = second_message.json()["data"]["message_id"]
     assert second_message.json()["data"]["session_seq"] == 2
 
     recall_response = client.post(
@@ -929,8 +1033,10 @@ def test_websocket_sync_messages_replays_offline_recall_and_delete_events(
         assert [item["type"] for item in events] == ["message_recall", "message_delete"]
         assert [item["seq"] for item in events] == [1, 2]
         assert events[0]["data"]["message_id"] == first_message_id
+        assert "msg_id" not in events[0]["data"]
         assert events[0]["data"]["event_seq"] == 1
         assert events[1]["data"]["message_id"] == second_message_id
+        assert "msg_id" not in events[1]["data"]
         assert events[1]["data"]["event_seq"] == 2
 
 
@@ -977,7 +1083,7 @@ def test_file_upload_returns_normalized_media_metadata_and_list_roundtrips(
     assert listed[0]["checksum_sha256"] == uploaded["checksum_sha256"]
 
 
-def test_attachment_message_extra_roundtrips_through_history_and_legacy_sync(
+def test_attachment_message_extra_roundtrips_through_history_and_sync_messages(
     client: TestClient,
     user_factory,
     auth_header,
@@ -986,7 +1092,7 @@ def test_attachment_message_extra_roundtrips_through_history_and_legacy_sync(
     bob = user_factory("bob_attachment_roundtrip", "Bob Attachment")
 
     create_session_response = client.post(
-        "/api/v1/sessions/private",
+        "/api/v1/sessions/direct",
         json={"participant_ids": [bob["user"]["id"]], "name": "Alice & Bob"},
         headers=auth_header(alice["access_token"]),
     )
@@ -1010,11 +1116,11 @@ def test_attachment_message_extra_roundtrips_through_history_and_legacy_sync(
     }
 
     create_message_response = client.post(
-        "/api/v1/messages",
+        f"/api/v1/sessions/{session_id}/messages",
         json={
             "session_id": session_id,
             "content": "/uploads/2026/03/24/demo-image.png",
-            "type": "image",
+            "message_type": "image",
             "extra": attachment_extra,
         },
         headers=auth_header(alice["access_token"]),
@@ -1026,8 +1132,7 @@ def test_attachment_message_extra_roundtrips_through_history_and_legacy_sync(
     assert created_payload["extra"]["media"]["storage_key"] == "2026/03/24/demo-image.png"
 
     history_response = client.get(
-        "/api/v1/messages/history",
-        params={"session_id": session_id},
+        f"/api/v1/sessions/{session_id}/messages",
         headers=auth_header(bob["access_token"]),
     )
     assert history_response.status_code == 200
@@ -1038,21 +1143,32 @@ def test_attachment_message_extra_roundtrips_through_history_and_legacy_sync(
     assert history_payload[0]["extra"]["media"]["mime_type"] == "image/png"
     assert history_payload[0]["extra"]["media"]["checksum_sha256"] == "abc123"
 
-    sync_response = client.post(
-        "/api/chat/sync",
-        json={
-            "session_cursors": {session_id: 0},
-            "event_cursors": {session_id: 0},
-        },
-        headers=auth_header(bob["access_token"]),
-    )
-    assert sync_response.status_code == 200
-    sync_payload = sync_response.json()["data"]
-    assert len(sync_payload["messages"]) == 1
-    assert sync_payload["messages"][0]["extra"]["media"]["storage_key"] == "2026/03/24/demo-image.png"
-    assert sync_payload["messages"][0]["extra"]["media"]["size_bytes"] == 2048
-    assert sync_payload["events"] == []
+    def receive_until(ws, expected_type: str):
+        while True:
+            payload = ws.receive_json()
+            if payload.get("type") == expected_type:
+                return payload
 
+    with client.websocket_connect(f"/ws?token={bob['access_token']}") as websocket:
+        websocket.send_json(
+            {
+                "type": "sync_messages",
+                "msg_id": "98000000-0000-4000-8000-000000000001",
+                "data": {
+                    "session_cursors": {session_id: 0},
+                    "event_cursors": {session_id: 0},
+                },
+            }
+        )
+
+        sync_messages_payload = receive_until(websocket, "history_messages")
+        assert len(sync_messages_payload["data"]["messages"]) == 1
+        synced_message = sync_messages_payload["data"]["messages"][0]
+        assert synced_message["extra"]["media"]["storage_key"] == "2026/03/24/demo-image.png"
+        assert synced_message["extra"]["media"]["size_bytes"] == 2048
+
+        sync_events_payload = receive_until(websocket, "history_events")
+        assert sync_events_payload["data"]["events"] == []
 
 def test_file_upload_rejects_empty_files(
     client: TestClient,
@@ -1068,6 +1184,116 @@ def test_file_upload_rejects_empty_files(
     )
     assert upload_response.status_code == 422
     assert upload_response.json()["message"] == "empty uploads are not allowed"
+def test_delete_private_session_removes_messages_reads_members_and_events(
+    client: TestClient,
+    user_factory,
+    auth_header,
+) -> None:
+    from sqlalchemy import select
+
+    from app.core.database import SessionLocal
+    from app.models.message import Message, MessageRead
+    from app.models.session import ChatSession, SessionEvent, SessionMember
+
+    alice = user_factory("alice_delete_session", "Alice Delete Session")
+    bob = user_factory("bob_delete_session", "Bob Delete Session")
+
+    create_session_response = client.post(
+        "/api/v1/sessions/direct",
+        json={"participant_ids": [bob["user"]["id"]], "name": "Delete Me"},
+        headers=auth_header(alice["access_token"]),
+    )
+    assert create_session_response.status_code == 200
+    session_id = create_session_response.json()["data"]["id"]
+
+    send_message_response = client.post(
+        f"/api/v1/sessions/{session_id}/messages",
+        json={"content": "cleanup target", "message_type": "text"},
+        headers=auth_header(alice["access_token"]),
+    )
+    assert send_message_response.status_code == 200
+    message_id = send_message_response.json()["data"]["message_id"]
+
+    read_response = client.post(
+        "/api/v1/messages/read/batch",
+        json={"session_id": session_id, "message_id": message_id},
+        headers=auth_header(bob["access_token"]),
+    )
+    assert read_response.status_code == 200
+    assert read_response.json()["data"]["event_seq"] == 1
+
+    delete_response = client.delete(
+        f"/api/v1/sessions/{session_id}",
+        headers=auth_header(alice["access_token"]),
+    )
+    assert delete_response.status_code == 204
+
+    with SessionLocal() as db:
+        assert db.get(ChatSession, session_id) is None
+        assert db.execute(select(Message.id).where(Message.session_id == session_id)).scalars().all() == []
+        assert db.execute(select(MessageRead.message_id).where(MessageRead.message_id == message_id)).scalars().all() == []
+        assert db.execute(select(SessionMember.user_id).where(SessionMember.session_id == session_id)).scalars().all() == []
+        assert db.execute(select(SessionEvent.id).where(SessionEvent.session_id == session_id)).scalars().all() == []
+
+
+def test_delete_group_removes_group_session_messages_and_events(
+    client: TestClient,
+    user_factory,
+    auth_header,
+) -> None:
+    from sqlalchemy import select
+
+    from app.core.database import SessionLocal
+    from app.models.group import Group, GroupMember
+    from app.models.message import Message, MessageRead
+    from app.models.session import ChatSession, SessionEvent, SessionMember
+
+    alice = user_factory("alice_delete_group", "Alice Delete Group")
+    bob = user_factory("bob_delete_group", "Bob Delete Group")
+
+    create_group_response = client.post(
+        "/api/v1/groups",
+        json={"name": "Delete Group", "member_ids": [bob["user"]["id"]]},
+        headers=auth_header(alice["access_token"]),
+    )
+    assert create_group_response.status_code == 201
+    group_payload = create_group_response.json()["data"]
+    group_id = group_payload["id"]
+    session_id = group_payload["session_id"]
+
+    send_message_response = client.post(
+        f"/api/v1/sessions/{session_id}/messages",
+        json={"content": "group cleanup target", "message_type": "text"},
+        headers=auth_header(alice["access_token"]),
+    )
+    assert send_message_response.status_code == 200
+    message_id = send_message_response.json()["data"]["message_id"]
+
+    read_response = client.post(
+        "/api/v1/messages/read/batch",
+        json={"session_id": session_id, "message_id": message_id},
+        headers=auth_header(bob["access_token"]),
+    )
+    assert read_response.status_code == 200
+    assert read_response.json()["data"]["event_seq"] == 1
+
+    delete_response = client.delete(
+        f"/api/v1/groups/{group_id}",
+        headers=auth_header(alice["access_token"]),
+    )
+    assert delete_response.status_code == 204
+
+    with SessionLocal() as db:
+        assert db.get(Group, group_id) is None
+        assert db.get(ChatSession, session_id) is None
+        assert db.execute(select(GroupMember.user_id).where(GroupMember.group_id == group_id)).scalars().all() == []
+        assert db.execute(select(SessionMember.user_id).where(SessionMember.session_id == session_id)).scalars().all() == []
+        assert db.execute(select(Message.id).where(Message.session_id == session_id)).scalars().all() == []
+        assert db.execute(select(MessageRead.message_id).where(MessageRead.message_id == message_id)).scalars().all() == []
+        assert db.execute(select(SessionEvent.id).where(SessionEvent.session_id == session_id)).scalars().all() == []
+
+
+
 
 
 

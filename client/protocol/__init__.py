@@ -1,1 +1,1 @@
-# Protocol module - WebSocket message protocol
+"""Client protocol helpers package."""

@@ -8,7 +8,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from app.models.message import Message, MessageRead
-from app.models.session import ChatSession, SessionMember
+from app.models.session import ChatSession, SessionEvent, SessionMember
 from app.utils.time import utcnow
 
 
@@ -165,10 +165,11 @@ class SessionRepository:
 
     def delete_session(self, session_id: str, *, commit: bool = True) -> None:
         message_ids = list(self.db.execute(select(Message.id).where(Message.session_id == session_id)).scalars().all())
+        self.db.execute(delete(SessionEvent).where(SessionEvent.session_id == session_id))
+        self.db.execute(delete(SessionMember).where(SessionMember.session_id == session_id))
         if message_ids:
             self.db.execute(delete(MessageRead).where(MessageRead.message_id.in_(message_ids)))
         self.db.execute(delete(Message).where(Message.session_id == session_id))
-        self.db.execute(delete(SessionMember).where(SessionMember.session_id == session_id))
         session = self.get_by_id(session_id)
         if session is not None:
             self.db.delete(session)

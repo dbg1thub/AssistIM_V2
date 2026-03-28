@@ -46,7 +46,7 @@ class ChatService:
             "/messages/read/batch",
             json={
                 "session_id": session_id,
-                "last_read_id": message_id,
+                "message_id": message_id,
             },
         )
 

@@ -3,7 +3,7 @@ import sys
 from collections import OrderedDict
 
 import darkdetect
-from PySide6.QtCore import QPoint, QRect, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QPoint, QRect, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QCloseEvent, QColor, QCursor, QIcon, QPainter
 from PySide6.QtWidgets import QApplication, QSystemTrayIcon
 from qfluentwidgets import (
@@ -155,6 +155,7 @@ class MainWindow(FluentWindow):
             self.move(w // 2 - self.width() // 2, h // 2 - self.height() // 2)
 
         QTimer.singleShot(0, self.chat_interface.load_sessions)
+        QTimer.singleShot(0, self._sync_chat_session_activity)
 
     def initNavigation(self):
         """Initialize left navigation."""
@@ -178,12 +179,42 @@ class MainWindow(FluentWindow):
         current_widget = self.stackedWidget.widget(index)
         if current_widget is not self.chat_interface:
             self.chat_interface.close_transient_panels()
+        self._sync_chat_session_activity()
 
     def switchTo(self, interface):
         """Close chat overlays before switching to another top-level page."""
         if interface is not self.chat_interface:
             self.chat_interface.close_transient_panels()
-        return super().switchTo(interface)
+        result = super().switchTo(interface)
+        QTimer.singleShot(0, self._sync_chat_session_activity)
+        return result
+
+    def changeEvent(self, event) -> None:
+        """Keep chat read-state visibility in sync with focus and window-state changes."""
+        super().changeEvent(event)
+        if event.type() in {
+            QEvent.Type.ActivationChange,
+            QEvent.Type.WindowStateChange,
+        }:
+            QTimer.singleShot(0, self._sync_chat_session_activity)
+
+    def _is_chat_session_active(self) -> bool:
+        """Return whether the chat page is truly foreground-visible to the user."""
+        if not hasattr(self, "stackedWidget") or not hasattr(self, "chat_interface"):
+            return False
+
+        return bool(
+            self.stackedWidget.currentWidget() is self.chat_interface
+            and self.isVisible()
+            and not self.isMinimized()
+            and self.isActiveWindow()
+        )
+
+    def _sync_chat_session_activity(self) -> None:
+        """Propagate current page/window visibility into chat read-state handling."""
+        if not hasattr(self, "chat_interface"):
+            return
+        self.chat_interface.set_session_visibility_active(self._is_chat_session_active())
 
     def _init_user_card(self) -> None:
         """Insert the current-account user card into the navigation area."""
@@ -326,6 +357,7 @@ class MainWindow(FluentWindow):
             self.show()
         self.raise_()
         self.activateWindow()
+        QTimer.singleShot(0, self._sync_chat_session_activity)
 
     def _on_tray_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
         if reason in {QSystemTrayIcon.ActivationReason.Trigger, QSystemTrayIcon.ActivationReason.DoubleClick}:
@@ -378,6 +410,7 @@ class MainWindow(FluentWindow):
 
     def closeEvent(self, event: QCloseEvent):
         self.user_profile.close_flyout()
+        self.chat_interface.set_session_visibility_active(False)
         if self._allow_exit:
             logger.info("MainWindow closeEvent, exiting application")
             if self._theme_poll_timer.isActive():

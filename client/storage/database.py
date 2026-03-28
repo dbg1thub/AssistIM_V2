@@ -6,6 +6,7 @@ SQLite database using aiosqlite for async operations.
 import aiosqlite
 import json
 import os
+import time
 from pathlib import Path
 from typing import Any, Optional
 
@@ -55,6 +56,7 @@ class Database:
         self._db.row_factory = aiosqlite.Row
         
         await self._create_tables()
+        await self._normalize_cached_session_types()
         logger.info(f"Database connected: {self._db_path}")
     
     async def _create_tables(self) -> None:
@@ -90,6 +92,31 @@ class Database:
                 FOREIGN KEY (session_id) REFERENCES sessions(session_id)
             );
             
+            CREATE TABLE IF NOT EXISTS contacts_cache (
+                contact_id TEXT PRIMARY KEY,
+                display_name TEXT NOT NULL DEFAULT '',
+                username TEXT NOT NULL DEFAULT '',
+                nickname TEXT NOT NULL DEFAULT '',
+                remark TEXT NOT NULL DEFAULT '',
+                assistim_id TEXT NOT NULL DEFAULT '',
+                avatar TEXT NOT NULL DEFAULT '',
+                signature TEXT NOT NULL DEFAULT '',
+                category TEXT NOT NULL DEFAULT 'friend',
+                status TEXT NOT NULL DEFAULT '',
+                extra TEXT NOT NULL DEFAULT '{}',
+                updated_at INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS groups_cache (
+                group_id TEXT PRIMARY KEY,
+                name TEXT NOT NULL DEFAULT '',
+                avatar TEXT NOT NULL DEFAULT '',
+                owner_id TEXT NOT NULL DEFAULT '',
+                session_id TEXT NOT NULL DEFAULT '',
+                member_count INTEGER NOT NULL DEFAULT 0,
+                extra TEXT NOT NULL DEFAULT '{}',
+                updated_at INTEGER NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS app_state (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
@@ -100,8 +127,23 @@ class Database:
             
             CREATE INDEX IF NOT EXISTS idx_sessions_updated 
                 ON sessions(updated_at DESC);
+
+            CREATE INDEX IF NOT EXISTS idx_contacts_cache_updated
+                ON contacts_cache(updated_at DESC);
+
+            CREATE INDEX IF NOT EXISTS idx_groups_cache_updated
+                ON groups_cache(updated_at DESC);
         """)
         await self._db.commit()
+
+    async def _normalize_cached_session_types(self) -> None:
+        """Upgrade legacy cached one-to-one sessions to the canonical direct type."""
+        cursor = await self._db.execute(
+            "UPDATE sessions SET session_type = 'direct' WHERE session_type = 'private'"
+        )
+        await self._db.commit()
+        if int(getattr(cursor, "rowcount", 0) or 0) > 0:
+            logger.info("Normalized %s cached sessions from private to direct", cursor.rowcount)
     
     # ============== Session Operations ==============
     
@@ -440,6 +482,164 @@ class Database:
 
         rows = await cursor.fetchall()
         return [self._row_to_message(row) for row in rows]
+
+    async def replace_contacts_cache(self, contacts: list[dict[str, Any]]) -> None:
+        """Replace the cached contact directory snapshot."""
+        await self._db.execute("DELETE FROM contacts_cache")
+        updated_at = int(time.time())
+
+        for contact in contacts:
+            extra = dict(contact.get("extra") or {})
+            await self._db.execute(
+                """
+                INSERT OR REPLACE INTO contacts_cache
+                (contact_id, display_name, username, nickname, remark,
+                 assistim_id, avatar, signature, category, status, extra, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    str(contact.get("id", "") or ""),
+                    str(contact.get("display_name") or contact.get("name") or ""),
+                    str(contact.get("username", "") or ""),
+                    str(contact.get("nickname", "") or ""),
+                    str(contact.get("remark", "") or ""),
+                    str(contact.get("assistim_id", "") or ""),
+                    str(contact.get("avatar", "") or ""),
+                    str(contact.get("signature", "") or ""),
+                    str(contact.get("category", "friend") or "friend"),
+                    str(contact.get("status", "") or ""),
+                    json.dumps(extra),
+                    updated_at,
+                ),
+            )
+
+        await self._db.commit()
+        logger.debug(f"Replaced contact cache with {len(contacts)} contacts")
+
+    async def replace_groups_cache(self, groups: list[dict[str, Any]]) -> None:
+        """Replace the cached group directory snapshot."""
+        await self._db.execute("DELETE FROM groups_cache")
+        updated_at = int(time.time())
+
+        for group in groups:
+            extra = dict(group.get("extra") or {})
+            await self._db.execute(
+                """
+                INSERT OR REPLACE INTO groups_cache
+                (group_id, name, avatar, owner_id, session_id, member_count, extra, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    str(group.get("id", "") or ""),
+                    str(group.get("name", "") or ""),
+                    str(group.get("avatar", "") or ""),
+                    str(group.get("owner_id", "") or ""),
+                    str(group.get("session_id", "") or ""),
+                    max(0, int(group.get("member_count", 0) or 0)),
+                    json.dumps(extra),
+                    updated_at,
+                ),
+            )
+
+        await self._db.commit()
+        logger.debug(f"Replaced group cache with {len(groups)} groups")
+
+    async def search_contacts(
+        self,
+        keyword: str,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Search cached contacts by one literal keyword."""
+        normalized_keyword = str(keyword or "").strip()
+        if not normalized_keyword:
+            return []
+
+        normalized_limit = max(1, int(limit or 0))
+        like_pattern = self._escape_like_pattern(normalized_keyword)
+        cursor = await self._db.execute(
+            """
+            SELECT * FROM contacts_cache
+            WHERE display_name LIKE ? ESCAPE '\\'
+               OR username LIKE ? ESCAPE '\\'
+               OR nickname LIKE ? ESCAPE '\\'
+               OR remark LIKE ? ESCAPE '\\'
+               OR assistim_id LIKE ? ESCAPE '\\'
+               OR signature LIKE ? ESCAPE '\\'
+            ORDER BY updated_at DESC
+            LIMIT ?
+            """,
+            (
+                like_pattern,
+                like_pattern,
+                like_pattern,
+                like_pattern,
+                like_pattern,
+                like_pattern,
+                normalized_limit,
+            ),
+        )
+        rows = await cursor.fetchall()
+        return [self._row_to_contact_cache(row) for row in rows]
+
+    async def search_groups(
+        self,
+        keyword: str,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Search cached groups by one literal keyword."""
+        normalized_keyword = str(keyword or "").strip()
+        if not normalized_keyword:
+            return []
+
+        normalized_limit = max(1, int(limit or 0))
+        like_pattern = self._escape_like_pattern(normalized_keyword)
+        cursor = await self._db.execute(
+            """
+            SELECT * FROM groups_cache
+            WHERE name LIKE ? ESCAPE '\\'
+               OR group_id LIKE ? ESCAPE '\\'
+               OR session_id LIKE ? ESCAPE '\\'
+            ORDER BY updated_at DESC
+            LIMIT ?
+            """,
+            (
+                like_pattern,
+                like_pattern,
+                like_pattern,
+                normalized_limit,
+            ),
+        )
+        rows = await cursor.fetchall()
+        return [self._row_to_group_cache(row) for row in rows]
+
+    def _row_to_contact_cache(self, row: aiosqlite.Row) -> dict[str, Any]:
+        """Convert one cached contact row into a normalized payload."""
+        return {
+            "id": row["contact_id"],
+            "name": row["display_name"],
+            "display_name": row["display_name"],
+            "username": row["username"],
+            "nickname": row["nickname"],
+            "remark": row["remark"],
+            "assistim_id": row["assistim_id"],
+            "avatar": row["avatar"],
+            "signature": row["signature"],
+            "category": row["category"],
+            "status": row["status"],
+            "extra": json.loads(row["extra"]),
+        }
+
+    def _row_to_group_cache(self, row: aiosqlite.Row) -> dict[str, Any]:
+        """Convert one cached group row into a normalized payload."""
+        return {
+            "id": row["group_id"],
+            "name": row["name"],
+            "avatar": row["avatar"],
+            "owner_id": row["owner_id"],
+            "session_id": row["session_id"],
+            "member_count": row["member_count"],
+            "extra": json.loads(row["extra"]),
+        }
     
     async def delete_message(self, message_id: str) -> None:
         """
@@ -577,9 +777,11 @@ class Database:
         logger.debug(f"Messages deleted for session: {session_id}")
 
     async def clear_chat_state(self) -> None:
-        """Remove all locally cached sessions, messages, and sync markers."""
+        """Remove all locally cached sessions, messages, search caches, and sync markers."""
         await self._db.execute("DELETE FROM messages")
         await self._db.execute("DELETE FROM sessions")
+        await self._db.execute("DELETE FROM contacts_cache")
+        await self._db.execute("DELETE FROM groups_cache")
         await self._db.execute(
             "DELETE FROM app_state WHERE key IN (?, ?, ?, ?)",
             ("last_sync_session_cursors", "last_sync_event_cursors", "last_sync_timestamp", "chat.hidden_sessions"),
@@ -836,6 +1038,9 @@ def get_database() -> Database:
     if _database is None:
         _database = Database()
     return _database
+
+
+
 
 
 

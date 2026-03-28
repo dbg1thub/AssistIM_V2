@@ -324,6 +324,34 @@ def test_connection_manager_loads_cached_message_and_event_cursors_and_builds_sy
     asyncio.run(scenario())
 
 
+def test_connection_manager_sends_canonical_message_id_for_mutation_commands(monkeypatch) -> None:
+    fake_ws_client = FakeWebSocketClient()
+
+    monkeypatch.setattr(connection_manager_module, 'get_auth_service', lambda: FakeAuthService())
+
+    async def scenario() -> None:
+        manager = connection_manager_module.ConnectionManager()
+        manager._ws_client = fake_ws_client
+        try:
+            recall_sent = await manager.send_recall('session-1', 'message-1')
+            edit_sent = await manager.send_edit('session-1', 'message-1', 'updated content')
+
+            assert recall_sent is True
+            assert edit_sent is True
+            assert fake_ws_client.sent_nowait[-2]['data'] == {
+                'session_id': 'session-1',
+                'message_id': 'message-1',
+            }
+            assert fake_ws_client.sent_nowait[-1]['data'] == {
+                'session_id': 'session-1',
+                'message_id': 'message-1',
+                'content': 'updated content',
+            }
+        finally:
+            await manager.close()
+
+    asyncio.run(scenario())
+
 def test_connection_manager_advances_message_and_event_cursors_from_ws_payloads(monkeypatch) -> None:
     fake_db = FakeDatabase()
 

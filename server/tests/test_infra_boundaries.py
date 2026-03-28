@@ -14,7 +14,7 @@ from fastapi.routing import APIRoute
 from starlette.routing import WebSocketRoute
 
 from app.core.config import Settings, reload_settings
-from app.core.database import SessionLocal, configure_database, get_engine
+from app.core.database import Base, SessionLocal, configure_database, get_engine, init_db
 from app.core.errors import ErrorCode
 from app.core.rate_limit import InMemoryRateLimitStore, RateLimiter, RateLimitStore
 from app.core.security import create_access_token, decode_access_token
@@ -59,34 +59,32 @@ class FakeWebSocket:
 
 def test_reload_settings_rebuilds_from_current_environment() -> None:
     original_app_name = os.environ.get("APP_NAME")
-    original_legacy_ws = os.environ.get("ENABLE_LEGACY_CHAT_WS")
+    original_api_v1_prefix = os.environ.get("API_V1_PREFIX")
 
     try:
         os.environ["APP_NAME"] = "AssistIM Runtime One"
-        os.environ["ENABLE_LEGACY_CHAT_WS"] = "false"
+        os.environ["API_V1_PREFIX"] = "/api/v1"
         first = reload_settings()
         assert first.app_name == "AssistIM Runtime One"
-        assert first.enable_legacy_chat_ws is False
+        assert first.api_v1_prefix == "/api/v1"
 
         os.environ["APP_NAME"] = "AssistIM Runtime Two"
-        os.environ["ENABLE_LEGACY_CHAT_WS"] = "true"
+        os.environ["API_V1_PREFIX"] = "/runtime/v2"
         second = reload_settings()
         assert second.app_name == "AssistIM Runtime Two"
-        assert second.enable_legacy_chat_ws is True
+        assert second.api_v1_prefix == "/runtime/v2"
     finally:
         if original_app_name is None:
             os.environ.pop("APP_NAME", None)
         else:
             os.environ["APP_NAME"] = original_app_name
 
-        if original_legacy_ws is None:
-            os.environ.pop("ENABLE_LEGACY_CHAT_WS", None)
+        if original_api_v1_prefix is None:
+            os.environ.pop("API_V1_PREFIX", None)
         else:
-            os.environ["ENABLE_LEGACY_CHAT_WS"] = original_legacy_ws
+            os.environ["API_V1_PREFIX"] = original_api_v1_prefix
 
         reload_settings()
-
-
 
 def test_security_helpers_use_explicit_settings_snapshot() -> None:
     custom_settings = Settings(secret_key="runtime-boundary-secret")
@@ -132,6 +130,53 @@ def test_bind_websocket_user_uses_websocket_app_settings_snapshot(monkeypatch: p
     assert bindings == [("conn-1", "user-42")]
 
 
+
+def test_presence_event_payload_uses_type_only() -> None:
+    payload = presence_ws.event_payload("online", {"user_id": "alice"}, msg_id="msg-1")
+
+    assert payload == {
+        "type": "online",
+        "seq": 0,
+        "msg_id": "msg-1",
+        "data": {"user_id": "alice"},
+        "timestamp": payload["timestamp"],
+    }
+    assert "event" not in payload
+
+
+
+def test_chat_ws_message_uses_type_only() -> None:
+    from app.websocket import chat_ws
+
+    payload = chat_ws._ws_message("message_ack", {"ok": True}, msg_id="msg-2", seq=7)
+
+    assert payload == {
+        "type": "message_ack",
+        "seq": 7,
+        "msg_id": "msg-2",
+        "timestamp": payload["timestamp"],
+        "data": {"ok": True},
+    }
+    assert "event" not in payload
+
+
+
+
+def test_message_service_event_message_id_uses_canonical_field_only() -> None:
+    from app.services.message_service import MessageService
+
+    assert MessageService._event_message_id("message_edit", {"message_id": "message-1", "msg_id": "legacy-1"}) == "message-1"
+    assert MessageService._event_message_id("message_edit", {"msg_id": "legacy-1"}) == ""
+    assert MessageService._event_message_id("read", {"message_id": "message-1", "last_read_message_id": "message-2"}) == "message-1"
+
+def test_api_schema_models_use_canonical_session_and_friend_request_fields() -> None:
+    from app.schemas.friend import FriendRequestOut
+    from app.schemas.session import SessionOut
+
+    assert "request_id" in FriendRequestOut.model_fields
+    assert "id" not in FriendRequestOut.model_fields
+    assert "session_type" in SessionOut.model_fields
+    assert "type" not in SessionOut.model_fields
 
 def test_configure_database_rebinds_engine_and_session_factory() -> None:
     baseline_engine = get_engine()
@@ -238,22 +283,37 @@ def test_in_memory_rate_limit_store_is_resettable() -> None:
 
 
 
-def test_create_app_can_disable_legacy_chat_aliases() -> None:
+def test_create_app_only_mounts_canonical_chat_endpoints() -> None:
     custom_db_path = Path("server/.testdata/runtime-aliases.db")
     custom_db_path.parent.mkdir(parents=True, exist_ok=True)
     custom_db_path.unlink(missing_ok=True)
-    settings = Settings(
-        database_url=f"sqlite:///{custom_db_path.as_posix()}",
-        enable_legacy_chat_http=False,
-        enable_legacy_chat_ws=False,
-    )
+    settings = Settings(database_url=f"sqlite:///{custom_db_path.as_posix()}")
 
     try:
         app = create_app(settings)
-        http_paths = [route.path for route in app.routes if isinstance(route, APIRoute)]
+        http_routes = [route for route in app.routes if isinstance(route, APIRoute)]
+        http_paths = [route.path for route in http_routes]
+        http_route_methods = {
+            (route.path, method)
+            for route in http_routes
+            for method in (route.methods or set())
+        }
         websocket_paths = [route.path for route in app.routes if isinstance(route, WebSocketRoute)]
 
         assert app.state.settings is settings
+        assert "/api/v1/auth/register" in http_paths
+        assert "/api/v1/files/upload" in http_paths
+        assert ("/api/v1/sessions", "GET") in http_route_methods
+        assert ("/api/v1/sessions/direct", "POST") in http_route_methods
+        assert "/api/v1/sessions/{session_id}/messages" in http_paths
+        assert ("/api/v1/sessions", "POST") not in http_route_methods
+        assert ("/api/v1/messages", "POST") not in http_route_methods
+        assert ("/api/v1/messages/history", "GET") not in http_route_methods
+        assert ("/api/v1/messages/read", "POST") not in http_route_methods
+        assert ("/api/v1/messages/{message_id}/read", "POST") not in http_route_methods
+        assert "/api/auth/register" not in http_paths
+        assert "/api/v1/upload" not in http_paths
+        assert "/api/upload" not in http_paths
         assert "/ws" in websocket_paths
         assert "/ws/chat" not in websocket_paths
         assert "/ws/presence" in websocket_paths
@@ -262,7 +322,27 @@ def test_create_app_can_disable_legacy_chat_aliases() -> None:
         restored_settings = reload_settings()
         configure_database(restored_settings)
         custom_db_path.unlink(missing_ok=True)
+    settings = Settings(database_url=f"sqlite:///{custom_db_path.as_posix()}")
 
+    try:
+        app = create_app(settings)
+        http_paths = [route.path for route in app.routes if isinstance(route, APIRoute)]
+        websocket_paths = [route.path for route in app.routes if isinstance(route, WebSocketRoute)]
+
+        assert app.state.settings is settings
+        assert "/api/v1/auth/register" in http_paths
+        assert "/api/v1/files/upload" in http_paths
+        assert "/api/auth/register" not in http_paths
+        assert "/api/v1/upload" not in http_paths
+        assert "/api/upload" not in http_paths
+        assert "/ws" in websocket_paths
+        assert "/ws/chat" not in websocket_paths
+        assert "/ws/presence" in websocket_paths
+        assert not any(path.startswith("/api/chat") for path in http_paths)
+    finally:
+        restored_settings = reload_settings()
+        configure_database(restored_settings)
+        custom_db_path.unlink(missing_ok=True)
 
 def test_auth_routes_and_dependencies_use_app_settings_snapshot() -> None:
     custom_db_path = Path("server/.testdata/runtime-auth-boundary.db")
@@ -274,11 +354,11 @@ def test_auth_routes_and_dependencies_use_app_settings_snapshot() -> None:
         database_url=f"sqlite:///{custom_db_path.as_posix()}",
         secret_key="runtime-auth-boundary-secret",
         upload_dir=upload_dir.as_posix(),
-        enable_legacy_chat_http=False,
-        enable_legacy_chat_ws=False,
     )
 
     try:
+        engine = configure_database(custom_settings)
+        Base.metadata.create_all(bind=engine)
         app = create_app(custom_settings)
         assert app.state.settings is custom_settings
 
@@ -305,6 +385,22 @@ def test_auth_routes_and_dependencies_use_app_settings_snapshot() -> None:
         configure_database(restored_settings)
         custom_db_path.unlink(missing_ok=True)
         shutil.rmtree(upload_dir, ignore_errors=True)
+
+
+def test_init_db_requires_existing_runtime_schema() -> None:
+    custom_db_path = Path("server/.testdata/runtime-init-db-empty.db")
+    custom_db_path.parent.mkdir(parents=True, exist_ok=True)
+    custom_db_path.unlink(missing_ok=True)
+    custom_settings = Settings(database_url=f"sqlite:///{custom_db_path.as_posix()}", debug=True)
+
+    try:
+        with pytest.raises(RuntimeError, match="alembic upgrade head"):
+            init_db(custom_settings)
+    finally:
+        restored_settings = reload_settings()
+        configure_database(restored_settings)
+        custom_db_path.unlink(missing_ok=True)
+
 
 
 def test_in_memory_realtime_hub_tracks_presence_and_reset() -> None:
@@ -342,3 +438,76 @@ def test_in_memory_realtime_hub_tracks_presence_and_reset() -> None:
         assert hub.online_user_ids() == []
 
     asyncio.run(scenario())
+def test_schema_compatibility_is_noop_for_current_runtime_schema() -> None:
+    from app.core.database import Base
+    from app.core.schema_compat import ensure_schema_compatibility
+    from app.models import file, group, message, moment, session, user  # noqa: F401
+
+    custom_db_path = Path("server/.testdata/runtime-schema-compat.db")
+    custom_db_path.parent.mkdir(parents=True, exist_ok=True)
+    custom_db_path.unlink(missing_ok=True)
+    custom_settings = Settings(database_url=f"sqlite:///{custom_db_path.as_posix()}", debug=True)
+
+    try:
+        engine = configure_database(custom_settings)
+        Base.metadata.drop_all(bind=engine)
+        Base.metadata.create_all(bind=engine)
+
+        assert ensure_schema_compatibility(engine) == []
+    finally:
+        restored_settings = reload_settings()
+        configure_database(restored_settings)
+        custom_db_path.unlink(missing_ok=True)
+
+
+
+def test_sqlite_alembic_upgrade_head_succeeds() -> None:
+    import subprocess
+    import sys
+
+    custom_db_path = Path("server/.testdata/runtime-alembic-upgrade.db")
+    custom_db_path.parent.mkdir(parents=True, exist_ok=True)
+    custom_db_path.unlink(missing_ok=True)
+    server_root = Path(__file__).resolve().parents[1]
+    env = os.environ.copy()
+    env["DATABASE_URL"] = f"sqlite:///{custom_db_path.resolve().as_posix()}"
+
+    try:
+        result = subprocess.run(
+            [sys.executable, "-m", "alembic", "upgrade", "head"],
+            cwd=server_root,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+    finally:
+        custom_db_path.unlink(missing_ok=True)
+
+
+
+
+
+def test_schema_compatibility_skips_runtime_checks_when_runtime_migration_present(monkeypatch: pytest.MonkeyPatch) -> None:
+    from sqlalchemy import create_engine, text
+
+    from app.core import schema_compat as schema_compat_module
+
+    def _unexpected_runtime_schema_check(*_args, **_kwargs):
+        raise AssertionError("runtime schema inspection should be skipped for migrated databases")
+
+    engine = create_engine("sqlite+pysqlite:///:memory:", future=True)
+    with engine.begin() as connection:
+        connection.execute(text("CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL)"))
+        connection.execute(
+            text("INSERT INTO alembic_version (version_num) VALUES (:revision)"),
+            {"revision": schema_compat_module.RUNTIME_SCHEMA_ALEMBIC_REVISION},
+        )
+
+    monkeypatch.setattr(schema_compat_module, "_has_current_runtime_schema", _unexpected_runtime_schema_check)
+
+    try:
+        assert schema_compat_module.ensure_schema_compatibility(engine) == []
+    finally:
+        engine.dispose()

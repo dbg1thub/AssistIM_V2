@@ -4,6 +4,7 @@ AI Service Module
 Service for AI chat with streaming support.
 """
 import asyncio
+import json
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
@@ -49,6 +50,87 @@ class AIResponse:
     model: str
     finish_reason: Optional[str] = None
     usage: dict[str, int] = field(default_factory=dict)
+
+
+async def _stream_openai_compatible_chunks(
+    http_client,
+    url: str,
+    payload: dict[str, Any],
+    headers: dict[str, str],
+    on_chunk: Callable[[str], Any],
+) -> tuple[str, Optional[str], dict[str, int]]:
+    """Stream one OpenAI-compatible SSE response."""
+    content_parts: list[str] = []
+    finish_reason: Optional[str] = None
+    usage: dict[str, int] = {}
+
+    async for line in http_client.stream_lines(
+        "POST",
+        url,
+        json=payload,
+        headers=headers,
+        use_auth=False,
+    ):
+        if not line.startswith("data: "):
+            continue
+
+        if line == "data: [DONE]":
+            finish_reason = finish_reason or "stop"
+            break
+
+        try:
+            chunk = json.loads(line[6:])
+        except Exception as exc:
+            logger.warning(f"Failed to parse stream chunk: {exc}")
+            continue
+
+        choice = (chunk.get("choices") or [{}])[0]
+        delta = choice.get("delta") or {}
+        content = delta.get("content", "")
+        if content:
+            content_parts.append(content)
+            on_chunk(content)
+
+        finish_reason = choice.get("finish_reason") or finish_reason
+        chunk_usage = chunk.get("usage")
+        if isinstance(chunk_usage, dict):
+            usage = chunk_usage
+
+    return "".join(content_parts), finish_reason, usage
+
+
+async def _stream_ndjson_chunks(
+    http_client,
+    url: str,
+    payload: dict[str, Any],
+    on_chunk: Callable[[str], Any],
+) -> tuple[str, Optional[str]]:
+    """Stream one newline-delimited JSON response."""
+    content_parts: list[str] = []
+    finish_reason: Optional[str] = None
+
+    async for line in http_client.stream_lines(
+        "POST",
+        url,
+        json=payload,
+        use_auth=False,
+    ):
+        try:
+            chunk = json.loads(line)
+        except Exception as exc:
+            logger.warning(f"Failed to parse stream chunk: {exc}")
+            continue
+
+        content = chunk.get("message", {}).get("content", "")
+        if content:
+            content_parts.append(content)
+            on_chunk(content)
+
+        if chunk.get("done"):
+            finish_reason = "stop"
+            break
+
+    return "".join(content_parts), finish_reason
 
 
 class AIProvider(ABC):
@@ -133,13 +215,11 @@ class OpenAIProvider(AIProvider):
         request: AIRequest,
         on_chunk: Callable[[str], Any],
     ) -> AIResponse:
-        import aiohttp
-        
         headers = {
             "Authorization": f"Bearer {self._api_key}",
             "Content-Type": "application/json",
         }
-        
+
         payload = {
             "model": request.model,
             "messages": request.messages,
@@ -147,50 +227,17 @@ class OpenAIProvider(AIProvider):
             "max_tokens": request.max_tokens,
             "stream": True,
         }
-        
-        content_parts = []
-        finish_reason = None
-        usage = {}
-        
-        session = await self._http._ensure_session()
-        
-        try:
-            async with session.post(
-                f"{self._base_url}/chat/completions",
-                json=payload,
-                headers=headers,
-            ) as response:
-                async for line in response.content:
-                    line = line.decode("utf-8").strip()
-                    
-                    if not line.startswith("data: "):
-                        continue
-                    
-                    if line == "data: [DONE]":
-                        finish_reason = "stop"
-                        break
-                    
-                    try:
-                        json_str = line[6:]
-                        chunk = aiohttp.json.loads(json_str)
-                        
-                        delta = chunk.get("choices", [{}])[0].get("delta", {})
-                        content = delta.get("content", "")
-                        
-                        if content:
-                            content_parts.append(content)
-                            on_chunk(content)
-                    
-                    except Exception as e:
-                        logger.warning(f"Failed to parse stream chunk: {e}")
-                        continue
-        
-        except Exception as e:
-            logger.error(f"Stream error: {e}")
-            raise
-        
+
+        content, finish_reason, usage = await _stream_openai_compatible_chunks(
+            self._http,
+            f"{self._base_url}/chat/completions",
+            payload,
+            headers,
+            on_chunk,
+        )
+
         return AIResponse(
-            content="".join(content_parts),
+            content=content,
             model=request.model,
             finish_reason=finish_reason,
             usage=usage,
@@ -238,8 +285,6 @@ class OllamaProvider(AIProvider):
         request: AIRequest,
         on_chunk: Callable[[str], Any],
     ) -> AIResponse:
-        import aiohttp
-        
         payload = {
             "model": request.model,
             "messages": request.messages,
@@ -249,45 +294,16 @@ class OllamaProvider(AIProvider):
                 "num_predict": request.max_tokens,
             },
         }
-        
-        content_parts = []
-        finish_reason = None
-        
-        session = await self._http._ensure_session()
-        
-        try:
-            async with session.post(
-                f"{self._base_url}/api/chat",
-                json=payload,
-            ) as response:
-                async for line in response.content:
-                    line = line.decode("utf-8").strip()
-                    
-                    if not line:
-                        continue
-                    
-                    try:
-                        chunk = aiohttp.json.loads(line)
-                        content = chunk.get("message", {}).get("content", "")
-                        
-                        if content:
-                            content_parts.append(content)
-                            on_chunk(content)
-                        
-                        if chunk.get("done"):
-                            finish_reason = "stop"
-                            break
-                    
-                    except Exception as e:
-                        logger.warning(f"Failed to parse stream chunk: {e}")
-                        continue
-        
-        except Exception as e:
-            logger.error(f"Stream error: {e}")
-            raise
-        
+
+        content, finish_reason = await _stream_ndjson_chunks(
+            self._http,
+            f"{self._base_url}/api/chat",
+            payload,
+            on_chunk,
+        )
+
         return AIResponse(
-            content="".join(content_parts),
+            content=content,
             model=request.model,
             finish_reason=finish_reason,
         )
@@ -344,12 +360,10 @@ class HTTPProvider(AIProvider):
         request: AIRequest,
         on_chunk: Callable[[str], Any],
     ) -> AIResponse:
-        import aiohttp
-        
         headers = dict(self._custom_headers)
         if self._api_key:
             headers["Authorization"] = f"Bearer {self._api_key}"
-        
+
         payload = {
             "model": request.model,
             "messages": request.messages,
@@ -357,49 +371,17 @@ class HTTPProvider(AIProvider):
             "max_tokens": request.max_tokens,
             "stream": True,
         }
-        
-        content_parts = []
-        finish_reason = None
-        
-        session = await self._http._ensure_session()
-        
-        try:
-            async with session.post(
-                f"{self._base_url}/chat/completions",
-                json=payload,
-                headers=headers,
-            ) as response:
-                async for line in response.content:
-                    line = line.decode("utf-8").strip()
-                    
-                    if not line.startswith("data: "):
-                        continue
-                    
-                    if line == "data: [DONE]":
-                        finish_reason = "stop"
-                        break
-                    
-                    try:
-                        json_str = line[6:]
-                        chunk = aiohttp.json.loads(json_str)
-                        
-                        delta = chunk.get("choices", [{}])[0].get("delta", {})
-                        content = delta.get("content", "")
-                        
-                        if content:
-                            content_parts.append(content)
-                            on_chunk(content)
-                    
-                    except Exception as e:
-                        logger.warning(f"Failed to parse stream chunk: {e}")
-                        continue
-        
-        except Exception as e:
-            logger.error(f"Stream error: {e}")
-            raise
-        
+
+        content, finish_reason, _usage = await _stream_openai_compatible_chunks(
+            self._http,
+            f"{self._base_url}/chat/completions",
+            payload,
+            headers,
+            on_chunk,
+        )
+
         return AIResponse(
-            content="".join(content_parts),
+            content=content,
             model=request.model,
             finish_reason=finish_reason,
         )

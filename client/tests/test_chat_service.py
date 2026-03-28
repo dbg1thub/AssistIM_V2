@@ -1,0 +1,67 @@
+from __future__ import annotations
+
+import asyncio
+import sys
+import types
+
+
+if 'aiohttp' not in sys.modules:
+    aiohttp = types.ModuleType('aiohttp')
+
+    class _DummyClientError(Exception):
+        pass
+
+    class _DummyClientTimeout:
+        def __init__(self, total=None):
+            self.total = total
+
+    class _DummyClientSession:
+        def __init__(self, *args, **kwargs):
+            self.closed = False
+
+        async def close(self):
+            self.closed = True
+
+    class _DummyClientResponse:
+        status = 200
+
+        async def json(self):
+            return {}
+
+        async def text(self):
+            return ''
+
+    aiohttp.ClientError = _DummyClientError
+    aiohttp.ClientTimeout = _DummyClientTimeout
+    aiohttp.ClientSession = _DummyClientSession
+    aiohttp.ClientResponse = _DummyClientResponse
+    sys.modules['aiohttp'] = aiohttp
+
+from client.services import chat_service as chat_service_module
+
+class FakeHTTPClient:
+    def __init__(self) -> None:
+        self.post_calls: list[dict] = []
+
+    async def post(self, path: str, json=None):
+        self.post_calls.append({"path": path, "json": json})
+        return {"success": True}
+
+
+
+def test_chat_service_persist_read_receipt_uses_canonical_message_id(monkeypatch) -> None:
+    async def scenario() -> None:
+        fake_http = FakeHTTPClient()
+        monkeypatch.setattr(chat_service_module, "get_http_client", lambda: fake_http)
+
+        service = chat_service_module.ChatService()
+        await service.persist_read_receipt("session-1", "message-1")
+
+        assert fake_http.post_calls == [
+            {
+                "path": "/messages/read/batch",
+                "json": {"session_id": "session-1", "message_id": "message-1"},
+            }
+        ]
+
+    asyncio.run(scenario())

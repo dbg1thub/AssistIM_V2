@@ -1,4 +1,4 @@
-﻿"""
+"""
 Message Manager Module
 
 Manager for message handling, ACK processing, and caching.
@@ -371,7 +371,6 @@ class MessageManager:
             normalized.setdefault("is_self", True)
 
         normalized.setdefault("message_id", msg_id)
-        normalized.setdefault("msg_id", msg_id)
         return self._normalize_loaded_message(
             normalized,
             default_session_id=str(normalized.get("session_id", "") or ""),
@@ -467,10 +466,14 @@ class MessageManager:
     
     async def _process_incoming_message(self, data: dict) -> None:
         """Process incoming chat message."""
-        msg_data = data.get("data", {})
+        msg_data = data.get("data", {}) if isinstance(data.get("data"), dict) else {}
         payload = dict(msg_data)
-        payload.setdefault("msg_id", data.get("msg_id", str(uuid.uuid4())))
-        payload.setdefault("message_id", data.get("msg_id", payload.get("message_id", "")))
+        message_id = str(payload.get("message_id") or "")
+        if not message_id:
+            logger.warning("Incoming chat message missing canonical message_id; ignored")
+            return
+
+        payload.setdefault("message_id", message_id)
         payload.setdefault("timestamp", msg_data.get("timestamp") or data.get("timestamp") or time.time())
         payload.setdefault("created_at", msg_data.get("created_at") or data.get("timestamp"))
         payload.setdefault("updated_at", msg_data.get("updated_at") or msg_data.get("created_at") or data.get("timestamp"))
@@ -728,7 +731,7 @@ class MessageManager:
         """Normalize one backend payload into a safe local message model."""
         data = dict(payload or {})
         sender_id = str(data.get("sender_id", "") or "")
-        raw_type = str(data.get("message_type") or data.get("type") or "text")
+        raw_type = str(data.get("message_type") or "text")
         raw_status = str(data.get("status") or ("sent" if sender_id == self._user_id else "received"))
 
         try:
@@ -754,7 +757,7 @@ class MessageManager:
             content = extra["recall_notice"]
 
         return ChatMessage(
-            message_id=str(data.get("message_id") or data.get("id") or data.get("msg_id") or str(uuid.uuid4())),
+            message_id=str(data.get("message_id") or ""),
             session_id=str(data.get("session_id", "") or default_session_id),
             sender_id=sender_id,
             content=content,
@@ -771,7 +774,7 @@ class MessageManager:
         """Process history messages from sync response."""
         started = time.perf_counter()
         await asyncio.sleep(0)
-        msg_data = data.get("data", {})
+        msg_data = data.get("data", {}) if isinstance(data.get("data"), dict) else {}
         messages_data = msg_data.get("messages", [])
 
         if not messages_data:
@@ -781,7 +784,11 @@ class MessageManager:
             })
             return
 
-        candidate_ids = [msg_item.get("msg_id") for msg_item in messages_data if msg_item.get("msg_id")]
+        candidate_ids = [
+            str(msg_item.get("message_id") or "")
+            for msg_item in messages_data
+            if isinstance(msg_item, dict) and str(msg_item.get("message_id") or "")
+        ]
         query_started = time.perf_counter()
         existing_ids = await self._db.get_existing_message_ids(candidate_ids)
         logger.info(
@@ -794,8 +801,17 @@ class MessageManager:
         skipped_count = 0
 
         for msg_item in messages_data:
-            msg_id = msg_item.get("msg_id")
-            if msg_id and msg_id in existing_ids:
+            if not isinstance(msg_item, dict):
+                skipped_count += 1
+                continue
+
+            message_id = str(msg_item.get("message_id") or "")
+            if not message_id:
+                skipped_count += 1
+                logger.warning("History message missing canonical message_id; ignored")
+                continue
+
+            if message_id in existing_ids:
                 skipped_count += 1
                 continue
 
@@ -819,7 +835,7 @@ class MessageManager:
 
         logger.info(f"History messages synced: {len(saved_messages)} new, {skipped_count} skipped")
         logger.info("History message processing finished in %.1fms", (time.perf_counter() - started) * 1000)
-    
+
     async def _process_history_events(self, data: dict) -> None:
         """Replay a batch of offline mutation events in order."""
         msg_data = data.get("data", {}) if isinstance(data.get("data"), dict) else {}
@@ -846,7 +862,7 @@ class MessageManager:
         """Process cumulative read-receipt cursor updates."""
         read_data = data.get("data", {})
         session_id = read_data.get("session_id", "")
-        message_id = read_data.get("last_read_message_id") or read_data.get("message_id", "")
+        message_id = read_data.get("message_id", "")
         user_id = read_data.get("user_id", "")
         last_read_seq = self._coerce_read_int(read_data.get("last_read_seq"))
 
@@ -863,11 +879,12 @@ class MessageManager:
     async def _process_delivered(self, data: dict) -> None:
         """Process delivery receipt for a sent message."""
         delivered_data = data.get("data", {})
-        message_id = delivered_data.get("msg_id") or data.get("msg_id", "")
+        message_id = delivered_data.get("message_id", "")
         session_id = delivered_data.get("session_id", "")
         user_ids = delivered_data.get("user_ids", [])
 
         if not message_id:
+            logger.warning("Delivery event missing canonical message_id; ignored")
             return
 
         message = await self._db.get_message(message_id)
@@ -888,9 +905,13 @@ class MessageManager:
     async def _process_recall(self, data: dict) -> None:
         """Process message recall."""
         recall_data = data.get("data", {})
-        message_id = recall_data.get("msg_id", "")
+        message_id = recall_data.get("message_id", "")
         session_id = recall_data.get("session_id", "")
         user_id = recall_data.get("user_id", "")
+
+        if not message_id:
+            logger.warning("Recall event missing canonical message_id; ignored")
+            return
 
         message = await self._db.get_message(message_id)
         if message is None:
@@ -920,19 +941,20 @@ class MessageManager:
     async def _process_edit(self, data: dict) -> None:
         """Process message edit."""
         edit_data = data.get("data", {})
-        message_id = edit_data.get("msg_id", "")
+        message_id = edit_data.get("message_id", "")
         session_id = edit_data.get("session_id", "")
         user_id = edit_data.get("user_id", "")
         new_content = edit_data.get("content", "")
 
-        # Update message content in database
+        if not message_id:
+            logger.warning("Edit event missing canonical message_id; ignored")
+            return
+
         await self._db.update_message_content(message_id, new_content)
         await self._db.update_message_status(message_id, MessageStatus.EDITED)
 
-        # Get the updated message
         message = await self._db.get_message(message_id)
 
-        # Emit edit event
         await self._event_bus.emit(MessageEvent.EDITED, {
             "message_id": message_id,
             "session_id": session_id,
@@ -946,9 +968,13 @@ class MessageManager:
     async def _process_delete(self, data: dict) -> None:
         """Process message deletion."""
         delete_data = data.get("data", {})
-        message_id = delete_data.get("msg_id", "")
+        message_id = delete_data.get("message_id", "")
         session_id = delete_data.get("session_id", "")
         user_id = delete_data.get("user_id", "")
+
+        if not message_id:
+            logger.warning("Delete event missing canonical message_id; ignored")
+            return
 
         await self._db.delete_message(message_id)
 
@@ -1132,6 +1158,10 @@ class MessageManager:
         Returns:
             ``(success, reason)`` where reason is non-empty on failure.
         """
+        if not message_id:
+            logger.warning("Recall request missing canonical message_id; ignored")
+            return False, tr("message.error.not_found", "Message not found")
+
         message = await self._db.get_message(message_id)
 
         if not message:
@@ -1188,6 +1218,10 @@ class MessageManager:
         import time
 
         # Get message from database
+        if not message_id:
+            logger.warning("Edit request missing canonical message_id; ignored")
+            return False
+
         message = await self._db.get_message(message_id)
 
         if not message:
@@ -1247,6 +1281,10 @@ class MessageManager:
 
     async def delete_message(self, message_id: str) -> bool:
         """Delete a message locally without affecting other participants."""
+        if not message_id:
+            logger.warning("Delete request missing canonical message_id; ignored")
+            return False
+
         message = await self._db.get_message(message_id)
 
         if not message:
@@ -1424,6 +1462,14 @@ class MessageManager:
         remote_messages: list[ChatMessage] = []
 
         for item in payload:
+            if not isinstance(item, dict):
+                continue
+
+            message_id = str(item.get("message_id") or "")
+            if not message_id:
+                logger.warning("Remote history message missing canonical message_id; ignored")
+                continue
+
             remote_messages.append(
                 self._normalize_loaded_message(
                     item,
@@ -1471,6 +1517,7 @@ class MessageManager:
                     )
 
         return messages
+
     async def close(self) -> None:
         """Close message manager."""
         logger.info("Closing message manager")
@@ -1515,6 +1562,7 @@ def get_message_manager() -> MessageManager:
     if _message_manager is None:
         _message_manager = MessageManager()
     return _message_manager
+
 
 
 

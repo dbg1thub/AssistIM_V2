@@ -64,6 +64,29 @@ class FakeResponse:
         return False
 
 
+class FakeStreamContent:
+    def __init__(self, lines: list[str]) -> None:
+        self._lines = [line.encode("utf-8") for line in lines]
+        self._index = 0
+
+    def __aiter__(self):
+        self._index = 0
+        return self
+
+    async def __anext__(self) -> bytes:
+        if self._index >= len(self._lines):
+            raise StopAsyncIteration
+        line = self._lines[self._index]
+        self._index += 1
+        return line
+
+
+class FakeStreamResponse(FakeResponse):
+    def __init__(self, status: int, lines: list[str], payload: dict | None = None, text: str = "") -> None:
+        super().__init__(status=status, payload=payload, text=text)
+        self.content = FakeStreamContent(lines)
+
+
 class FakeSession:
     def __init__(self, request_handler=None, post_handler=None) -> None:
         self.closed = False
@@ -115,7 +138,7 @@ def _write_upload_fixture(name: str) -> Path:
 
 def test_http_client_absolute_url_skips_base_url_and_app_auth() -> None:
     async def scenario() -> None:
-        client = HTTPClient(base_url="http://app.local/api")
+        client = HTTPClient(base_url="http://app.local/api/v1")
         client.set_tokens("app-access", "refresh-token")
 
         fake_session = FakeSession(
@@ -138,7 +161,7 @@ def test_http_client_absolute_url_skips_base_url_and_app_auth() -> None:
 
 def test_http_client_external_401_does_not_trigger_app_refresh() -> None:
     async def scenario() -> None:
-        client = HTTPClient(base_url="http://app.local/api")
+        client = HTTPClient(base_url="http://app.local/api/v1")
         client.set_tokens("app-access", "refresh-token")
 
         refresh_calls = 0
@@ -167,7 +190,7 @@ def test_http_client_external_401_does_not_trigger_app_refresh() -> None:
 
 def test_http_client_internal_401_refresh_is_singleflight() -> None:
     async def scenario() -> None:
-        client = HTTPClient(base_url="http://app.local/api")
+        client = HTTPClient(base_url="http://app.local/api/v1")
         client.set_tokens("old-access", "refresh-token")
 
         refresh_calls = 0
@@ -198,8 +221,8 @@ def test_http_client_internal_401_refresh_is_singleflight() -> None:
         )
 
         assert results == [
-            {"url": "http://app.local/api/profile"},
-            {"url": "http://app.local/api/sessions"},
+            {"url": "http://app.local/api/v1/profile"},
+            {"url": "http://app.local/api/v1/sessions"},
         ]
         assert refresh_calls == 1
 
@@ -222,7 +245,7 @@ def test_http_client_internal_401_refresh_is_singleflight() -> None:
 def test_http_client_upload_file_internal_401_retries_after_refresh() -> None:
     async def scenario() -> None:
         file_path = _write_upload_fixture("upload-internal.bin")
-        client = HTTPClient(base_url="http://app.local/api")
+        client = HTTPClient(base_url="http://app.local/api/v1")
         client.set_tokens("old-access", "refresh-token")
 
         refresh_calls = 0
@@ -262,10 +285,32 @@ def test_http_client_upload_file_internal_401_retries_after_refresh() -> None:
 
 
 
+def test_http_client_upload_file_defaults_to_files_upload_endpoint() -> None:
+    async def scenario() -> None:
+        file_path = _write_upload_fixture("upload-default.bin")
+        client = HTTPClient(base_url="http://app.local/api/v1")
+        client.set_tokens("app-access", "refresh-token")
+
+        fake_session = FakeSession(
+            post_handler=lambda **_kwargs: FakeResponse(201, {"data": {"url": "/uploads/default.bin", "file_type": "application/octet-stream"}}),
+        )
+        client._session = fake_session
+
+        payload = await client.upload_file(str(file_path))
+
+        assert payload["url"] == "/uploads/default.bin"
+        assert fake_session.post_calls[0]["url"] == "http://app.local/api/v1/files/upload"
+
+        await client.close()
+
+    asyncio.run(scenario())
+
+
+
 def test_http_client_upload_file_absolute_url_skips_app_auth_and_refresh() -> None:
     async def scenario() -> None:
         file_path = _write_upload_fixture("upload-external.bin")
-        client = HTTPClient(base_url="http://app.local/api")
+        client = HTTPClient(base_url="http://app.local/api/v1")
         client.set_tokens("app-access", "refresh-token")
 
         refresh_calls = 0
@@ -294,3 +339,71 @@ def test_http_client_upload_file_absolute_url_skips_app_auth_and_refresh() -> No
 
     asyncio.run(scenario())
 
+
+def test_http_client_stream_lines_absolute_url_skips_base_url_and_app_auth() -> None:
+    async def scenario() -> None:
+        client = HTTPClient(base_url="http://app.local/api/v1")
+        client.set_tokens("app-access", "refresh-token")
+
+        fake_session = FakeSession(
+            request_handler=lambda **_kwargs: FakeStreamResponse(200, ["line-1", "", "line-2"]),
+        )
+        client._session = fake_session
+
+        lines = [
+            line async for line in client.stream_lines(
+                "POST",
+                "http://localhost:11434/api/chat",
+                json={"message": "hello"},
+            )
+        ]
+
+        assert lines == ["line-1", "line-2"]
+        assert len(fake_session.request_calls) == 1
+        call = fake_session.request_calls[0]
+        assert call["url"] == "http://localhost:11434/api/chat"
+        assert "Authorization" not in call["headers"]
+
+        await client.close()
+
+    asyncio.run(scenario())
+
+
+def test_http_client_stream_lines_internal_401_retries_after_refresh() -> None:
+    async def scenario() -> None:
+        client = HTTPClient(base_url="http://app.local/api/v1")
+        client.set_tokens("old-access", "refresh-token")
+
+        refresh_calls = 0
+
+        async def fake_perform_refresh() -> bool:
+            nonlocal refresh_calls
+            refresh_calls += 1
+            client.set_tokens("new-access", "refresh-token-2")
+            return True
+
+        client._perform_token_refresh = fake_perform_refresh  # type: ignore[method-assign]
+
+        def request_handler(**call):
+            authorization = call["headers"].get("Authorization")
+            if authorization == "Bearer old-access":
+                return FakeStreamResponse(401, [], payload={"message": "token expired"})
+            if authorization == "Bearer new-access":
+                return FakeStreamResponse(200, ["retry-ok"])
+            return FakeStreamResponse(500, [], payload={"message": f"unexpected auth header: {authorization}"})
+
+        fake_session = FakeSession(request_handler=request_handler)
+        client._session = fake_session
+
+        lines = [line async for line in client.stream_lines("GET", "/stream")]
+
+        assert lines == ["retry-ok"]
+        assert refresh_calls == 1
+        assert [call["headers"].get("Authorization") for call in fake_session.request_calls] == [
+            "Bearer old-access",
+            "Bearer new-access",
+        ]
+
+        await client.close()
+
+    asyncio.run(scenario())

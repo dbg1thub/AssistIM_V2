@@ -1,4 +1,4 @@
-﻿"""Session routes."""
+"""Session routes."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 from app.core.database import get_db
 from app.dependencies.auth_dependency import get_current_user
 from app.models.user import User
-from app.schemas.session import CreateGroupSessionRequest, CreatePrivateSessionRequest
+from app.schemas.session import CreateDirectSessionRequest, CreateGroupSessionRequest
 from app.services.message_service import MessageService
 from app.services.session_service import SessionService
 from app.utils.response import success_response
@@ -29,14 +29,10 @@ def list_sessions(current_user: User = Depends(get_current_user), db: Session = 
     return success_response(SessionService(db).list_sessions(current_user))
 
 
-@router.post("")
-def create_session(payload: dict, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
-    return success_response(SessionService(db).create_generic(current_user, payload))
 
-
-@router.post("/private")
-def create_private_session(
-    payload: CreatePrivateSessionRequest,
+@router.post("/direct")
+def create_direct_session(
+    payload: CreateDirectSessionRequest,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> dict:
@@ -60,11 +56,7 @@ async def typing_session(session_id: str, payload: dict, current_user: User = De
     member_ids = service.get_session_member_ids(session_id, current_user.id)
     await connection_manager.send_json_to_users(
         member_ids,
-        event_payload(
-            event="typing",
-            msg_type="typing",
-            data={"session_id": session_id, "user_id": current_user.id, "typing": payload.get("typing", True)},
-        ),
+        event_payload("typing", {"session_id": session_id, "user_id": current_user.id, "typing": payload.get("typing", True)}),
     )
     return success_response({"typing": payload.get("typing", True)})
 
@@ -78,3 +70,4 @@ def get_session(session_id: str, current_user: User = Depends(get_current_user),
 def delete_session(session_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> Response:
     SessionService(db).delete_session(current_user, session_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+

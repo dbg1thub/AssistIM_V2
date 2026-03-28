@@ -1,10 +1,10 @@
-﻿"""Database engine and session management."""
+"""Database engine and session management."""
 
 from __future__ import annotations
 
 from collections.abc import Generator
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, inspect
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
@@ -26,6 +26,16 @@ SessionLocal = sessionmaker(
 
 _engine: Engine | None = None
 _engine_signature: tuple[str, bool] | None = None
+RUNTIME_SCHEMA_REQUIRED_TABLES = frozenset(
+    {
+        "users",
+        "messages",
+        "sessions",
+        "session_members",
+        "files",
+        "session_events",
+    }
+)
 
 
 def _connect_args_for_database_url(database_url: str) -> dict[str, object]:
@@ -81,12 +91,24 @@ def get_db() -> Generator[Session, None, None]:
         db.close()
 
 
+def _missing_runtime_schema_tables(engine: Engine) -> set[str]:
+    """Return required runtime tables that are still missing."""
+    return set(RUNTIME_SCHEMA_REQUIRED_TABLES) - set(inspect(engine).get_table_names())
+
+
 def init_db(settings: Settings | None = None) -> None:
-    """Create database tables and apply lightweight compatibility upgrades."""
+    """Validate runtime schema presence and apply fallback-only compatibility upgrades."""
     from app.models import file, group, message, moment, session, user  # noqa: F401
 
     engine = configure_database(settings)
-    Base.metadata.create_all(bind=engine)
+    missing_tables = _missing_runtime_schema_tables(engine)
+    if missing_tables:
+        missing_list = ", ".join(sorted(missing_tables))
+        raise RuntimeError(
+            "Database schema is not initialized for runtime use. "
+            "Run `alembic upgrade head` before starting the API. "
+            f"Missing tables: {missing_list}"
+        )
     applied = ensure_schema_compatibility(engine)
     if applied:
         logger.warning(describe_schema_compatibility(applied))

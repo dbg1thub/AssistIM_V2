@@ -55,6 +55,7 @@ class SessionManager:
 
         self._sessions: dict[str, Session] = {}
         self._current_session_id: Optional[str] = None
+        self._current_session_active = False
         self._lock = asyncio.Lock()
         self._session_fetch_tasks: dict[str, asyncio.Task[Optional[Session]]] = {}
         self._hidden_sessions: dict[str, float] = {}
@@ -321,9 +322,7 @@ class SessionManager:
 
         data.setdefault("session_id", data.get("id", ""))
         data.setdefault("name", fallback_name)
-        session_type = str(data.get("session_type") or data.get("type") or "direct")
-        if session_type == "private":
-            session_type = "direct"
+        session_type = str(data.get("session_type") or "direct")
         data["session_type"] = session_type
 
         current_user = await self._get_current_user_context()
@@ -378,8 +377,6 @@ class SessionManager:
         current_user_id = await self._get_current_user_id()
         participant_ids = [value for value in (current_user_id, message.sender_id) if value]
         session_type = str(message.extra.get("session_type", "direct") or "direct")
-        if session_type == "private":
-            session_type = "direct"
 
         session = Session(
             session_id=message.session_id,
@@ -548,15 +545,18 @@ class SessionManager:
             message=message,
         )
 
-        if self._current_session_id != message.session_id:
+        if not (
+            self._current_session_active
+            and self._current_session_id == message.session_id
+        ):
             await self.increment_unread(message.session_id)
 
     async def _on_history_synced(self, data: dict) -> None:
         """Apply a synced message batch without re-emitting per-message updates."""
         messages: list[ChatMessage] = data.get("messages") or []
         if not messages:
+            await self._reconcile_unread_counts()
             return
-
         for message in messages:
             await self._unhide_session(message.session_id)
             await self._ensure_session_exists(message)
@@ -581,11 +581,12 @@ class SessionManager:
         if changed_sessions and db.is_connected:
             await db.save_sessions_batch(list(changed_sessions.values()))
 
+        await self._reconcile_unread_counts()
+
         if changed_sessions:
             await self._event_bus.emit(SessionEvent.UPDATED, {
                 "sessions": self.sessions,
             })
-
     async def _on_message_mutated(self, data: dict) -> None:
         """Refresh session preview after edit/recall/delete events."""
         session_id = str(data.get("session_id", "") or "")
@@ -691,13 +692,13 @@ class SessionManager:
         logger.info("Refreshed %d remote sessions", len(remote_sessions))
         return self.sessions
 
-    async def _fetch_remote_unread_counts(self) -> dict[str, int]:
+    async def _fetch_remote_unread_counts(self) -> dict[str, int] | None:
         """Fetch authoritative unread counts from the backend."""
         try:
             payload = await self._session_service.fetch_unread_counts()
         except Exception as exc:
             logger.warning("Refresh remote unread counts failed: %s", exc)
-            return {}
+            return None
 
         unread_by_session: dict[str, int] = {}
         for item in payload or []:
@@ -710,6 +711,38 @@ class SessionManager:
                 unread_by_session[session_id] = 0
         return unread_by_session
 
+    async def _reconcile_unread_counts(self) -> None:
+        """Refresh local unread counters from the authoritative backend snapshot."""
+        if not self._sessions:
+            return
+
+        unread_count_map = await self._fetch_remote_unread_counts()
+        if unread_count_map is None:
+            return
+
+        changed_sessions: list[Session] = []
+        db = get_database()
+
+        async with self._lock:
+            for session in self._sessions.values():
+                remote_unread = int(unread_count_map.get(session.session_id, 0))
+                if session.unread_count == remote_unread:
+                    continue
+                session.unread_count = remote_unread
+                changed_sessions.append(session)
+
+            if db.is_connected:
+                for session in changed_sessions:
+                    await db.update_session_unread(session.session_id, session.unread_count)
+
+        for session in changed_sessions:
+            await self._event_bus.emit(SessionEvent.UNREAD_CHANGED, {
+                "session_id": session.session_id,
+                "unread_count": session.unread_count,
+            })
+            await self._event_bus.emit(SessionEvent.UPDATED, {
+                "session": session,
+            })
     async def add_session(self, session: Session) -> None:
         """Add a new session."""
         async with self._lock:
@@ -935,7 +968,8 @@ class SessionManager:
                 "previous_session_id": old_id,
             })
 
-            await self.clear_unread(session_id)
+            if self._current_session_active:
+                await self.clear_unread(session_id)
 
             logger.info(f"Session selected: {session_id}")
 
@@ -943,11 +977,22 @@ class SessionManager:
         """Clear current session selection."""
         old_id = self._current_session_id
         self._current_session_id = None
+        self._current_session_active = False
 
         await self._event_bus.emit(SessionEvent.SELECTED, {
             "session_id": None,
             "previous_session_id": old_id,
         })
+
+    async def set_current_session_active(self, active: bool) -> None:
+        """Mark whether the selected session is actually foreground-readable."""
+        normalized_active = bool(active and self._current_session_id)
+        if self._current_session_active == normalized_active:
+            return
+
+        self._current_session_active = normalized_active
+        if normalized_active and self._current_session_id:
+            await self.clear_unread(self._current_session_id)
 
     async def add_message_to_session(
             self,
@@ -1108,6 +1153,7 @@ def get_session_manager() -> SessionManager:
     if _session_manager is None:
         _session_manager = SessionManager()
     return _session_manager
+
 
 
 

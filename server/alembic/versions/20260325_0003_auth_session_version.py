@@ -1,4 +1,4 @@
-﻿"""Add auth session version to users."""
+"""Add auth session version to users."""
 
 from __future__ import annotations
 
@@ -17,7 +17,8 @@ def upgrade() -> None:
         "users",
         sa.Column("auth_session_version", sa.Integer(), nullable=False, server_default="0"),
     )
-    op.alter_column("users", "auth_session_version", server_default=None)
+    if op.get_bind().dialect.name != "sqlite":
+        op.alter_column("users", "auth_session_version", server_default=None)
 
 
 def downgrade() -> None:

@@ -1,4 +1,4 @@
-﻿"""Message service."""
+"""Message service."""
 
 from __future__ import annotations
 
@@ -32,10 +32,9 @@ class MessageService:
         session_id: str,
         limit: int = 50,
         before: datetime | None = None,
-        before_id: str | None = None,
     ) -> list[dict]:
         self._ensure_membership(current_user.id, session_id)
-        items = self.messages.list_session_messages(session_id, limit=limit, before=before, before_id=before_id)
+        items = self.messages.list_session_messages(session_id, limit=limit, before=before)
         return self._serialize_messages(items, current_user.id)
 
     def send_message(
@@ -113,15 +112,15 @@ class MessageService:
             **payload,
         }
 
-    def batch_read(self, current_user: User, session_id: str, last_read_id: str) -> dict:
+    def batch_read(self, current_user: User, session_id: str, message_id: str) -> dict:
         self._ensure_membership(current_user.id, session_id)
-        last_message = self.messages.get_by_id(last_read_id)
+        last_message = self.messages.get_by_id(message_id)
         if last_message is None:
             raise AppError(ErrorCode.RESOURCE_NOT_FOUND, "message not found", 404)
         if last_message.session_id != session_id:
             raise AppError(ErrorCode.INVALID_REQUEST, "message does not belong to the session", 422)
 
-        payload = self.messages.mark_read_batch(session_id, current_user.id, last_read_id, commit=False)
+        payload = self.messages.mark_read_batch(session_id, current_user.id, message_id, commit=False)
         if payload is None:
             raise AppError(ErrorCode.INVALID_REQUEST, "invalid read target", 422)
 
@@ -153,7 +152,6 @@ class MessageService:
         self.messages.update_status(message, "recalled", commit=False)
         payload = {
             "session_id": message.session_id,
-            "msg_id": message.id,
             "message_id": message.id,
             "user_id": current_user.id,
             "status": "recalled",
@@ -184,7 +182,6 @@ class MessageService:
         serialized = self.serialize_message(message, current_user.id)
         payload = {
             "session_id": serialized["session_id"],
-            "msg_id": serialized["msg_id"],
             "message_id": serialized["message_id"],
             "user_id": current_user.id,
             "content": serialized["content"],
@@ -215,7 +212,6 @@ class MessageService:
 
         payload = {
             "session_id": message.session_id,
-            "msg_id": message.id,
             "message_id": message.id,
             "user_id": current_user.id,
             "status": "deleted",
@@ -340,13 +336,10 @@ class MessageService:
         read_metadata = self._message_read_metadata(message, current_user_id, session_members)
         extra = self._message_extra(message, read_metadata)
         return {
-            "id": message.id,
             "message_id": message.id,
-            "msg_id": message.id,
             "session_id": message.session_id,
             "sender_id": message.sender_id,
             "content": self._serialize_message_content(message, current_user_id),
-            "type": message.type,
             "message_type": message.type,
             "status": message.status,
             "created_at": isoformat_utc(message.created_at),
@@ -412,7 +405,6 @@ class MessageService:
         return {
             "session_id": payload.get("session_id", ""),
             "message_id": payload.get("message_id", ""),
-            "last_read_message_id": payload.get("last_read_message_id", ""),
             "last_read_seq": int(payload.get("last_read_seq", 0) or 0),
             "user_id": payload.get("user_id", ""),
             "read_at": payload.get("read_at"),
@@ -420,7 +412,8 @@ class MessageService:
 
     @staticmethod
     def _event_message_id(event_type: str, data: dict[str, Any]) -> str:
-        if event_type == "read":
-            return str(data.get("last_read_message_id") or data.get("message_id") or "")
-        return str(data.get("msg_id") or data.get("message_id") or "")
+        return str(data.get("message_id") or "")
+
+
+
 

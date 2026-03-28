@@ -16,6 +16,3 @@ api_router.include_router(messages.router, tags=["messages"])
 api_router.include_router(groups.router, prefix="/groups", tags=["groups"])
 api_router.include_router(moments.router, prefix="/moments", tags=["moments"])
 api_router.include_router(files.router, tags=["files"])
-
-legacy_chat_router = APIRouter()
-legacy_chat_router.include_router(messages.legacy_router)

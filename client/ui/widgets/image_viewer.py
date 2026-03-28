@@ -91,9 +91,8 @@ class ImageViewer(QDialog):
         if value.startswith(("http://", "https://")):
             return value
         if value.startswith("/"):
-            api_base = get_config().server.api_base_url.rstrip("/")
-            host_base = api_base[:-4] if api_base.endswith("/api") else api_base
-            return f"{host_base}{value}"
+            origin_base = get_config().server.origin_url.rstrip("/")
+            return f"{origin_base}{value}"
         return value
 
     def _on_image_loaded(self, reply: QNetworkReply) -> None:

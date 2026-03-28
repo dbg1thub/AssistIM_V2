@@ -239,7 +239,7 @@ if 'qfluentwidgets' not in sys.modules:
 
 from client.events.contact_events import ContactEvent
 from client.managers import message_manager as message_manager_module
-from client.models.message import ChatMessage, MessageStatus
+from client.models.message import ChatMessage, MessageStatus, MessageType
 
 
 class FakeEventBus:
@@ -289,6 +289,7 @@ class FakeDatabase:
     def __init__(self) -> None:
         self.is_connected = False
         self.messages: dict[str, ChatMessage] = {}
+        self.saved_batches: list[list[ChatMessage]] = []
 
     async def save_message(self, message: ChatMessage) -> None:
         self.messages[message.message_id] = message
@@ -298,6 +299,9 @@ class FakeDatabase:
 
     async def get_existing_message_ids(self, message_ids: list[str]) -> set[str]:
         return {message_id for message_id in message_ids if message_id in self.messages}
+
+    async def get_messages(self, session_id: str, limit: int = 50, before_timestamp=None) -> list[ChatMessage]:
+        return [message for message in self.messages.values() if message.session_id == session_id][:limit]
 
     async def apply_read_receipt(self, session_id: str, reader_id: str, message_id: str, last_read_seq: int) -> list[str]:
         return []
@@ -314,6 +318,11 @@ class FakeDatabase:
 
     async def delete_message(self, message_id: str) -> None:
         self.messages.pop(message_id, None)
+
+    async def save_messages_batch(self, messages: list[ChatMessage]) -> None:
+        self.saved_batches.append(list(messages))
+        for message in messages:
+            self.messages[message.message_id] = message
 
 
 async def _wait_until(predicate, *, timeout: float = 0.5) -> None:
@@ -362,7 +371,6 @@ def test_message_manager_retries_on_ack_timeout_and_merges_canonical_ack(monkeyp
                         'success': True,
                         'message': {
                             'message_id': message.message_id,
-                            'msg_id': message.message_id,
                             'session_id': 'session-1',
                             'sender_id': 'alice',
                             'content': 'hello world',
@@ -482,7 +490,6 @@ def test_message_manager_replays_history_events(monkeypatch) -> None:
                                 'type': 'message_edit',
                                 'data': {
                                     'session_id': 'session-1',
-                                    'msg_id': 'm-1',
                                     'message_id': 'm-1',
                                     'user_id': 'alice',
                                     'content': 'edited',
@@ -494,7 +501,6 @@ def test_message_manager_replays_history_events(monkeypatch) -> None:
                                 'type': 'message_recall',
                                 'data': {
                                     'session_id': 'session-1',
-                                    'msg_id': 'm-1',
                                     'message_id': 'm-1',
                                     'user_id': 'alice',
                                     'status': 'recalled',
@@ -513,6 +519,251 @@ def test_message_manager_replays_history_events(monkeypatch) -> None:
             assert 'recall_notice' in stored.extra
             assert any(event == message_manager_module.MessageEvent.EDITED for event, _ in fake_event_bus.events)
             assert any(event == message_manager_module.MessageEvent.RECALLED for event, _ in fake_event_bus.events)
+        finally:
+            await manager.close()
+
+    asyncio.run(scenario())
+
+
+
+def test_message_manager_normalize_loaded_message_ignores_legacy_aliases(monkeypatch) -> None:
+    fake_event_bus = FakeEventBus()
+    fake_conn_manager = FakeConnectionManager([])
+    fake_db = FakeDatabase()
+
+    monkeypatch.setattr(message_manager_module, 'get_event_bus', lambda: fake_event_bus)
+    monkeypatch.setattr(message_manager_module, 'get_connection_manager', lambda: fake_conn_manager)
+    monkeypatch.setattr(message_manager_module, 'get_database', lambda: fake_db)
+
+    async def scenario() -> None:
+        manager = message_manager_module.MessageManager()
+        manager.set_user_id('alice')
+        await manager.initialize()
+        try:
+            message = manager._normalize_loaded_message(
+                {
+                    'id': 'legacy-id',
+                    'msg_id': 'legacy-msg-id',
+                    'type': 'image',
+                    'sender_id': 'bob',
+                    'content': 'legacy payload',
+                },
+                default_session_id='session-1',
+            )
+
+            assert message.message_id == ''
+            assert message.message_type == MessageType.TEXT
+        finally:
+            await manager.close()
+
+    asyncio.run(scenario())
+
+
+def test_message_manager_history_messages_deduplicates_by_canonical_message_id(monkeypatch) -> None:
+    fake_event_bus = FakeEventBus()
+    fake_conn_manager = FakeConnectionManager([])
+    fake_db = FakeDatabase()
+    fake_db.messages['m-1'] = ChatMessage(
+        message_id='m-1',
+        session_id='session-1',
+        sender_id='alice',
+        content='existing',
+        status=MessageStatus.SENT,
+        is_self=False,
+    )
+
+    monkeypatch.setattr(message_manager_module, 'get_event_bus', lambda: fake_event_bus)
+    monkeypatch.setattr(message_manager_module, 'get_connection_manager', lambda: fake_conn_manager)
+    monkeypatch.setattr(message_manager_module, 'get_database', lambda: fake_db)
+
+    async def scenario() -> None:
+        manager = message_manager_module.MessageManager()
+        manager.set_user_id('bob')
+        await manager.initialize()
+        try:
+            await manager._handle_ws_message(
+                {
+                    'type': 'history_messages',
+                    'data': {
+                        'messages': [
+                            {
+                                'message_id': 'm-1',
+                                'session_id': 'session-1',
+                                'sender_id': 'alice',
+                                'content': 'duplicate',
+                                'message_type': 'text',
+                            }
+                        ],
+                    },
+                }
+            )
+
+            assert fake_db.saved_batches == []
+            assert fake_event_bus.events[-1][0] == message_manager_module.MessageEvent.SYNC_COMPLETED
+            assert fake_event_bus.events[-1][1]['count'] == 0
+            assert fake_event_bus.events[-1][1]['skipped'] == 1
+        finally:
+            await manager.close()
+
+    asyncio.run(scenario())
+
+
+def test_message_manager_ignores_legacy_mutation_event_message_id_alias(monkeypatch) -> None:
+    fake_event_bus = FakeEventBus()
+    fake_conn_manager = FakeConnectionManager([])
+    fake_db = FakeDatabase()
+    fake_db.messages['m-1'] = ChatMessage(
+        message_id='m-1',
+        session_id='session-1',
+        sender_id='alice',
+        content='original',
+        status=MessageStatus.SENT,
+        is_self=False,
+    )
+
+    monkeypatch.setattr(message_manager_module, 'get_event_bus', lambda: fake_event_bus)
+    monkeypatch.setattr(message_manager_module, 'get_connection_manager', lambda: fake_conn_manager)
+    monkeypatch.setattr(message_manager_module, 'get_database', lambda: fake_db)
+
+    async def scenario() -> None:
+        manager = message_manager_module.MessageManager()
+        manager.set_user_id('bob')
+        await manager.initialize()
+        try:
+            await manager._handle_ws_message(
+                {
+                    'type': 'message_recall',
+                    'data': {
+                        'session_id': 'session-1',
+                        'msg_id': 'm-1',
+                        'user_id': 'alice',
+                    },
+                }
+            )
+
+            stored = await fake_db.get_message('m-1')
+            assert stored is not None
+            assert stored.status == MessageStatus.SENT
+            assert all(event != message_manager_module.MessageEvent.RECALLED for event, _ in fake_event_bus.events)
+        finally:
+            await manager.close()
+
+    asyncio.run(scenario())
+
+def test_message_manager_ignores_incoming_chat_message_without_canonical_message_id(monkeypatch) -> None:
+    fake_event_bus = FakeEventBus()
+    fake_conn_manager = FakeConnectionManager([])
+    fake_db = FakeDatabase()
+
+    monkeypatch.setattr(message_manager_module, 'get_event_bus', lambda: fake_event_bus)
+    monkeypatch.setattr(message_manager_module, 'get_connection_manager', lambda: fake_conn_manager)
+    monkeypatch.setattr(message_manager_module, 'get_database', lambda: fake_db)
+
+    async def scenario() -> None:
+        manager = message_manager_module.MessageManager()
+        manager.set_user_id('bob')
+        await manager.initialize()
+        try:
+            await manager._handle_ws_message(
+                {
+                    'type': 'chat_message',
+                    'msg_id': 'legacy-envelope-id',
+                    'data': {
+                        'session_id': 'session-1',
+                        'sender_id': 'alice',
+                        'content': 'hello',
+                        'message_type': 'text',
+                    },
+                }
+            )
+
+            assert fake_db.messages == {}
+            assert all(event != message_manager_module.MessageEvent.RECEIVED for event, _ in fake_event_bus.events)
+        finally:
+            await manager.close()
+
+    asyncio.run(scenario())
+
+def test_message_manager_remote_history_skips_payloads_without_canonical_message_id(monkeypatch) -> None:
+    fake_event_bus = FakeEventBus()
+    fake_conn_manager = FakeConnectionManager([])
+    fake_db = FakeDatabase()
+
+    class FakeChatService:
+        async def fetch_messages(self, session_id: str, limit: int, before_timestamp=None) -> list[dict]:
+            return [
+                {
+                    'session_id': session_id,
+                    'sender_id': 'alice',
+                    'content': 'remote legacy payload',
+                    'message_type': 'text',
+                }
+            ]
+
+    monkeypatch.setattr(message_manager_module, 'get_event_bus', lambda: fake_event_bus)
+    monkeypatch.setattr(message_manager_module, 'get_connection_manager', lambda: fake_conn_manager)
+    monkeypatch.setattr(message_manager_module, 'get_database', lambda: fake_db)
+    monkeypatch.setattr(message_manager_module, 'get_chat_service', lambda: FakeChatService())
+
+    async def scenario() -> None:
+        manager = message_manager_module.MessageManager()
+        manager.set_user_id('bob')
+        await manager.initialize()
+        try:
+            messages = await manager.get_messages('session-1', limit=10)
+
+            assert messages == []
+            assert fake_db.saved_batches == []
+        finally:
+            await manager.close()
+
+    asyncio.run(scenario())
+
+def test_message_manager_ignores_legacy_read_event_message_id_alias(monkeypatch) -> None:
+    fake_event_bus = FakeEventBus()
+    fake_conn_manager = FakeConnectionManager([])
+    fake_db = FakeDatabase()
+
+    apply_calls: list[tuple[str, str, str, int]] = []
+
+    async def apply_read_receipt(session_id: str, reader_id: str, message_id: str, last_read_seq: int) -> list[str]:
+        apply_calls.append((session_id, reader_id, message_id, last_read_seq))
+        return []
+
+    fake_db.apply_read_receipt = apply_read_receipt  # type: ignore[method-assign]
+
+    monkeypatch.setattr(message_manager_module, 'get_event_bus', lambda: fake_event_bus)
+    monkeypatch.setattr(message_manager_module, 'get_connection_manager', lambda: fake_conn_manager)
+    monkeypatch.setattr(message_manager_module, 'get_database', lambda: fake_db)
+
+    async def scenario() -> None:
+        manager = message_manager_module.MessageManager()
+        manager.set_user_id('alice')
+        await manager.initialize()
+        try:
+            await manager._handle_ws_message(
+                {
+                    'type': 'read',
+                    'data': {
+                        'session_id': 'session-1',
+                        'last_read_message_id': 'legacy-message-id',
+                        'user_id': 'bob',
+                        'last_read_seq': 3,
+                    },
+                }
+            )
+
+            assert apply_calls == [('session-1', 'bob', '', 3)]
+            assert fake_event_bus.events[-1] == (
+                message_manager_module.MessageEvent.READ,
+                {
+                    'session_id': 'session-1',
+                    'message_id': '',
+                    'user_id': 'bob',
+                    'last_read_seq': 3,
+                    'changed_message_ids': [],
+                },
+            )
         finally:
             await manager.close()
 

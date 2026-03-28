@@ -450,6 +450,8 @@ class FakeDatabase:
     def __init__(self) -> None:
         self.app_state: dict[str, object] = {}
         self.is_connected = False
+        self.replaced_contacts: list[list[dict]] = []
+        self.replaced_groups: list[list[dict]] = []
 
     async def set_app_state(self, key: str, value) -> None:
         self.app_state[key] = value
@@ -462,6 +464,12 @@ class FakeDatabase:
 
     async def clear_chat_state(self) -> None:
         return None
+
+    async def replace_contacts_cache(self, contacts: list[dict]) -> None:
+        self.replaced_contacts.append([dict(item) for item in contacts])
+
+    async def replace_groups_cache(self, groups: list[dict]) -> None:
+        self.replaced_groups.append([dict(item) for item in groups])
 
 
 class FakeChatControllerContext:
@@ -560,13 +568,30 @@ class FakeDiscoveryService:
 
 
 class FakeSearchDatabase:
-    def __init__(self, messages: list[ChatMessage]) -> None:
+    def __init__(
+        self,
+        messages: list[ChatMessage],
+        contacts: list[dict] | None = None,
+        groups: list[dict] | None = None,
+    ) -> None:
         self.messages = list(messages)
+        self.contacts = [dict(item) for item in (contacts or [])]
+        self.groups = [dict(item) for item in (groups or [])]
         self.search_calls: list[tuple[str, str | None, int]] = []
+        self.search_contact_calls: list[tuple[str, int]] = []
+        self.search_group_calls: list[tuple[str, int]] = []
 
     async def search_messages(self, keyword: str, session_id: str | None = None, limit: int = 100) -> list[ChatMessage]:
         self.search_calls.append((keyword, session_id, limit))
         return list(self.messages)
+
+    async def search_contacts(self, keyword: str, limit: int = 20) -> list[dict]:
+        self.search_contact_calls.append((keyword, limit))
+        return [dict(item) for item in self.contacts]
+
+    async def search_groups(self, keyword: str, limit: int = 20) -> list[dict]:
+        self.search_group_calls.append((keyword, limit))
+        return [dict(item) for item in self.groups]
 
     async def execute(self, *_args, **_kwargs):
         raise AssertionError('SearchManager should not execute raw SQL directly')
@@ -609,6 +634,15 @@ class FakeEventBus:
 
 class FakeSessionStateDatabase:
     is_connected = False
+
+
+class FakeSessionUnreadDatabase:
+    def __init__(self) -> None:
+        self.is_connected = True
+        self.updated_unread: list[tuple[str, int]] = []
+
+    async def update_session_unread(self, session_id: str, unread_count: int) -> None:
+        self.updated_unread.append((session_id, unread_count))
 
 
 class FakeSessionProfileDatabase:
@@ -960,6 +994,42 @@ def test_chat_controller_send_file_marks_failed_on_upload_error(monkeypatch) -> 
 
 
 
+def test_chat_controller_send_file_offloads_video_probe(monkeypatch) -> None:
+    fake_message_manager = FakeMessageManager()
+    fake_session_manager = FakeSessionManager()
+    fake_file_service = FakeFileService({'url': 'https://cdn.example/files/video.mp4', 'file_type': 'video/mp4'})
+    to_thread_calls: list[tuple[object, str]] = []
+
+    async def fake_to_thread(func, *args, **kwargs):
+        to_thread_calls.append((func, args[0]))
+        return 42
+
+    monkeypatch.setattr(chat_controller_module, 'get_message_manager', lambda: fake_message_manager)
+    monkeypatch.setattr(chat_controller_module, 'get_session_manager', lambda: fake_session_manager)
+    monkeypatch.setattr(chat_controller_module, 'get_file_service', lambda: fake_file_service)
+    monkeypatch.setattr(chat_controller_module.asyncio, 'to_thread', fake_to_thread)
+
+    workspace_tmp = Path('client/tests/.pytest_tmp')
+    workspace_tmp.mkdir(parents=True, exist_ok=True)
+    file_path = workspace_tmp / 'clip.mp4'
+    file_path.write_bytes(b'mp4-data')
+
+    async def scenario() -> None:
+        controller = chat_controller_module.ChatController()
+        message = await controller.send_file(str(file_path))
+
+        assert message is not None
+        assert to_thread_calls == [(controller._probe_video_duration, str(file_path))]
+        assert fake_session_manager.added[0][1].extra['duration'] == 42
+        assert fake_message_manager.sent_messages[-1].extra['duration'] == 42
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        file_path.unlink(missing_ok=True)
+
+
+
 def test_file_service_normalizes_backend_upload_payload(monkeypatch) -> None:
     class FakeUploadHttpClient:
         def __init__(self, payload: dict) -> None:
@@ -1033,6 +1103,42 @@ def test_contact_controller_load_contacts_and_search_users_use_services(monkeypa
     asyncio.run(scenario())
 
 
+def test_contact_controller_load_contacts_and_groups_persist_local_search_cache(monkeypatch) -> None:
+    fake_contact_service = FakeContactService()
+    fake_user_service = FakeUserService()
+    fake_auth_context = FakeAuthContext()
+    fake_db = FakeDatabase()
+    fake_db.is_connected = True
+    fake_contact_service.friends_payload = [
+        {'id': 'user-2', 'username': 'zoe', 'nickname': 'Zoe', 'remark': '', 'avatar': ''},
+        {'id': 'user-1', 'username': 'alice', 'nickname': 'Alice', 'remark': 'A Friend', 'avatar': ''},
+    ]
+    fake_contact_service.groups_payload = [
+        {'id': 'group-2', 'name': 'Zeta Squad', 'member_count': 8, 'session_id': 'session-group-2'},
+        {'id': 'group-1', 'name': 'Core Team', 'member_count': 3, 'session_id': 'session-group-1'},
+    ]
+
+    monkeypatch.setattr(contact_controller_module, 'get_contact_service', lambda: fake_contact_service)
+    monkeypatch.setattr(contact_controller_module, 'get_user_service', lambda: fake_user_service)
+    monkeypatch.setattr(contact_controller_module, 'get_auth_controller', lambda: fake_auth_context)
+    monkeypatch.setattr(contact_controller_module, 'get_database', lambda: fake_db)
+
+    async def scenario() -> None:
+        controller = contact_controller_module.ContactController()
+        contacts = await controller.load_contacts()
+        groups = await controller.load_groups()
+
+        assert [item.display_name for item in contacts] == ['A Friend', 'Zoe']
+        assert [item.name for item in groups] == ['Core Team', 'Zeta Squad']
+        assert len(fake_db.replaced_contacts) == 1
+        assert len(fake_db.replaced_groups) == 1
+        assert [item['id'] for item in fake_db.replaced_contacts[0]] == ['user-1', 'user-2']
+        assert [item['display_name'] for item in fake_db.replaced_contacts[0]] == ['A Friend', 'Zoe']
+        assert [item['id'] for item in fake_db.replaced_groups[0]] == ['group-1', 'group-2']
+
+    asyncio.run(scenario())
+
+
 def test_contact_controller_load_requests_resolves_counterpart_names(monkeypatch) -> None:
     fake_contact_service = FakeContactService()
     fake_user_service = FakeUserService()
@@ -1041,7 +1147,7 @@ def test_contact_controller_load_requests_resolves_counterpart_names(monkeypatch
     incoming_sender_id = '66666666-7777-8888-9999-000000000000'
     fake_contact_service.requests_payload = [
         {
-            'id': 'req-1',
+            'request_id': 'req-1',
             'sender_id': 'user-1',
             'receiver_id': outgoing_target_id,
             'message': 'hello',
@@ -1049,7 +1155,7 @@ def test_contact_controller_load_requests_resolves_counterpart_names(monkeypatch
             'created_at': '2026-03-27T10:00:00Z',
         },
         {
-            'id': 'req-2',
+            'request_id': 'req-2',
             'sender_id': incoming_sender_id,
             'receiver_id': 'user-1',
             'message': 'hi',
@@ -1217,6 +1323,65 @@ def test_search_manager_uses_database_search_boundary(monkeypatch) -> None:
     asyncio.run(scenario())
 
 
+def test_search_manager_search_all_uses_storage_boundaries(monkeypatch) -> None:
+    fake_db = FakeSearchDatabase(
+        [
+            ChatMessage(
+                message_id='msg-1',
+                session_id='session-1',
+                sender_id='user-1',
+                content='Core roadmap is ready',
+                message_type=MessageType.TEXT,
+                status=MessageStatus.SENT,
+                is_self=True,
+            )
+        ],
+        contacts=[
+            {
+                'id': 'user-2',
+                'display_name': 'Corey',
+                'username': 'corey',
+                'nickname': 'Corey',
+                'remark': '',
+                'assistim_id': 'corey',
+                'signature': 'core collaborator',
+            }
+        ],
+        groups=[
+            {
+                'id': 'group-1',
+                'name': 'Core Team',
+                'session_id': 'session-group-1',
+            }
+        ],
+    )
+
+    monkeypatch.setattr(search_manager_module, 'get_database', lambda: fake_db)
+
+    async def scenario() -> None:
+        manager = search_manager_module.SearchManager()
+        results = await manager.search_all(
+            'core',
+            session_id='session-1',
+            message_limit=3,
+            contact_limit=4,
+            group_limit=5,
+        )
+
+        assert fake_db.search_calls == [('core', 'session-1', 3)]
+        assert fake_db.search_contact_calls == [('core', 4)]
+        assert fake_db.search_group_calls == [('core', 5)]
+        assert len(results.messages) == 1
+        assert len(results.contacts) == 1
+        assert len(results.groups) == 1
+        assert results.messages[0].message.message_id == 'msg-1'
+        assert results.contacts[0].contact['id'] == 'user-2'
+        assert results.groups[0].group['id'] == 'group-1'
+        assert manager.last_catalog_results == results
+
+    asyncio.run(scenario())
+
+
 def test_database_search_messages_escapes_like_wildcards() -> None:
     fake_connection = FakeSearchConnection(
         [
@@ -1326,6 +1491,44 @@ def test_session_manager_refresh_remote_sessions_prefers_counterpart_profile(mon
     asyncio.run(scenario())
 
 
+def test_session_manager_history_sync_reconciles_authoritative_unread_counts(monkeypatch) -> None:
+    fake_session_service = FakeSessionService()
+    fake_session_service.unread_payload = [{'session_id': 'session-1', 'unread': 4}]
+    fake_event_bus = FakeEventBus()
+    fake_db = FakeSessionUnreadDatabase()
+
+    monkeypatch.setattr(session_manager_module, 'get_session_service', lambda: fake_session_service)
+    monkeypatch.setattr(session_manager_module, 'get_event_bus', lambda: fake_event_bus)
+    monkeypatch.setattr(session_manager_module, 'get_message_manager', lambda: FakeMessageManager())
+    monkeypatch.setattr(session_manager_module, 'get_database', lambda: fake_db)
+
+    async def scenario() -> None:
+        manager = session_manager_module.SessionManager()
+        session = Session(
+            session_id='session-1',
+            name='Core Team',
+            session_type='group',
+            unread_count=1,
+            created_at=datetime(2026, 3, 27, 18, 0, 0),
+            updated_at=datetime(2026, 3, 27, 18, 0, 0),
+            last_message_time=datetime(2026, 3, 27, 18, 0, 0),
+        )
+        manager._sessions[session.session_id] = session
+
+        await manager._on_history_synced({'count': 0, 'messages': []})
+
+        assert fake_session_service.fetch_unread_counts_calls == 1
+        assert session.unread_count == 4
+        assert fake_db.updated_unread == [('session-1', 4)]
+        assert (
+            session_manager_module.SessionEvent.UNREAD_CHANGED,
+            {'session_id': 'session-1', 'unread_count': 4},
+        ) in fake_event_bus.events
+
+    asyncio.run(scenario())
+
+
+
 def test_session_manager_ensure_direct_session_uses_session_service(monkeypatch) -> None:
     fake_session_service = FakeSessionService()
 
@@ -1388,6 +1591,80 @@ def test_session_manager_refresh_session_preview_preserves_last_message_time_wit
         assert saved_sessions[-1].last_message_time == preserved_time
 
     asyncio.run(scenario())
+
+
+def test_session_manager_hidden_current_session_still_increments_unread(monkeypatch) -> None:
+    fake_event_bus = FakeEventBus()
+
+    monkeypatch.setattr(session_manager_module, 'get_session_service', lambda: FakeSessionService())
+    monkeypatch.setattr(session_manager_module, 'get_event_bus', lambda: fake_event_bus)
+    monkeypatch.setattr(session_manager_module, 'get_message_manager', lambda: FakeMessageManager())
+    monkeypatch.setattr(session_manager_module, 'get_database', lambda: FakeSessionStateDatabase())
+
+    async def scenario() -> None:
+        manager = session_manager_module.SessionManager()
+        session = Session(
+            session_id='session-1',
+            name='Bob',
+            last_message='',
+            last_message_time=datetime(2026, 3, 27, 18, 0, 0),
+            created_at=datetime(2026, 3, 27, 18, 0, 0),
+            updated_at=datetime(2026, 3, 27, 18, 0, 0),
+            extra={},
+        )
+        manager._sessions[session.session_id] = session
+
+        await manager.select_session(session.session_id)
+        await manager.set_current_session_active(False)
+        await manager._on_message_received({
+            'message': ChatMessage(
+                message_id='msg-1',
+                session_id='session-1',
+                sender_id='user-2',
+                content='hello',
+                timestamp=datetime(2026, 3, 27, 18, 4, 0),
+                is_self=False,
+            )
+        })
+
+        assert session.unread_count == 1
+
+    asyncio.run(scenario())
+
+
+def test_session_manager_activating_selected_session_clears_unread(monkeypatch) -> None:
+    fake_event_bus = FakeEventBus()
+
+    monkeypatch.setattr(session_manager_module, 'get_session_service', lambda: FakeSessionService())
+    monkeypatch.setattr(session_manager_module, 'get_event_bus', lambda: fake_event_bus)
+    monkeypatch.setattr(session_manager_module, 'get_message_manager', lambda: FakeMessageManager())
+    monkeypatch.setattr(session_manager_module, 'get_database', lambda: FakeSessionStateDatabase())
+
+    async def scenario() -> None:
+        manager = session_manager_module.SessionManager()
+        session = Session(
+            session_id='session-1',
+            name='Bob',
+            last_message='',
+            last_message_time=datetime(2026, 3, 27, 18, 0, 0),
+            created_at=datetime(2026, 3, 27, 18, 0, 0),
+            updated_at=datetime(2026, 3, 27, 18, 0, 0),
+            extra={},
+        )
+        session.unread_count = 2
+        manager._sessions[session.session_id] = session
+
+        await manager.select_session(session.session_id)
+        await manager.set_current_session_active(True)
+
+        assert session.unread_count == 0
+        assert (
+            session_manager_module.SessionEvent.UNREAD_CHANGED,
+            {'session_id': 'session-1', 'unread_count': 0},
+        ) in fake_event_bus.events
+
+    asyncio.run(scenario())
+
 
 def test_normalize_profile_gender_preserves_supported_values() -> None:
     assert profile_fields_module.normalize_profile_gender('female') == 'female'
@@ -1611,4 +1888,6 @@ def test_sound_manager_handles_incoming_message_event(monkeypatch) -> None:
         await manager.close()
 
     asyncio.run(scenario())
+
+
 

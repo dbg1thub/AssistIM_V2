@@ -5,6 +5,7 @@ Controller for chat UI interactions.
 Receives UI input and coordinates with MessageManager.
 """
 
+import asyncio
 import os
 import subprocess
 from typing import Any, Optional
@@ -105,7 +106,11 @@ class ChatController:
         file_name = os.path.basename(file_path)
         file_size = os.path.getsize(file_path)
         message_type = infer_message_type_from_path(file_path)
-        duration = self._probe_video_duration(file_path) if message_type == MessageType.VIDEO else None
+        duration = (
+            await asyncio.to_thread(self._probe_video_duration, file_path)
+            if message_type == MessageType.VIDEO
+            else None
+        )
 
         placeholder = await self._msg_manager.create_local_message(
             session_id=session_id,
@@ -268,6 +273,10 @@ class ChatController:
     async def clear_current_session(self) -> None:
         """Clear current session selection."""
         await self._session_manager.clear_current_session()
+
+    async def set_current_session_active(self, active: bool) -> None:
+        """Mark whether the selected session is currently foreground-readable."""
+        await self._session_manager.set_current_session_active(active)
 
     def get_current_session_id(self) -> Optional[str]:
         """Get current session ID."""

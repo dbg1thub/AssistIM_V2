@@ -1,4 +1,4 @@
-﻿"""Chat websocket endpoints."""
+"""Chat websocket endpoints."""
 
 from __future__ import annotations
 
@@ -19,34 +19,27 @@ from app.websocket.presence_ws import bind_websocket_user, event_payload
 
 
 websocket_router = APIRouter()
-legacy_chat_websocket_router = APIRouter()
 logger = logging.getLogger(__name__)
 
 
-def _compat_message(
+def _ws_message(
     msg_type: str,
     data: dict,
     msg_id: str | None = None,
-    event: str | None = None,
     seq: int = 0,
 ) -> dict:
-    payload = {
+    return {
         "type": msg_type,
         "seq": int(seq or 0),
         "msg_id": msg_id or "",
         "timestamp": int(time.time()),
         "data": data,
     }
-    if event:
-        payload["event"] = event
-    return payload
-
 
 def _read_broadcast_payload(data: dict) -> dict:
     return {
         "session_id": data.get("session_id", ""),
         "message_id": data.get("message_id", ""),
-        "last_read_message_id": data.get("last_read_message_id", ""),
         "last_read_seq": int(data.get("last_read_seq", 0) or 0),
         "user_id": data.get("user_id", ""),
         "read_at": data.get("read_at"),
@@ -56,14 +49,14 @@ def _read_broadcast_payload(data: dict) -> dict:
 
 async def _broadcast_offline_if_needed(user_id: str | None, became_offline: bool) -> None:
     if user_id and became_offline:
-        await connection_manager.broadcast_json(event_payload("offline", {"user_id": user_id}, msg_type="offline"))
+        await connection_manager.broadcast_json(event_payload("offline", {"user_id": user_id}))
 
 
 async def _send_app_error(connection_id: str, msg_id: str, exc: AppError) -> None:
     """Return an application-level websocket error without tearing down the socket."""
     await connection_manager.send_json(
         connection_id,
-        _compat_message("error", {"message": exc.message, "code": exc.code}, msg_id=msg_id, event="error"),
+        _ws_message("error", {"message": exc.message, "code": exc.code}, msg_id=msg_id),
     )
 
 
@@ -107,29 +100,22 @@ def _resolve_ws_user(db, user_id: str):
     return user
 
 
-def _target_message_id(message: dict, data: dict) -> str:
-    return str(
-        data.get("msg_id")
-        or data.get("message_id")
-        or data.get("last_read_id")
-        or message.get("message_id")
-        or message.get("msg_id")
-        or ""
-    )
-
+def _require_target_message_id(data: dict) -> str:
+    message_id = str(data.get("message_id") or "")
+    if not message_id:
+        raise AppError(ErrorCode.INVALID_REQUEST, "message_id is required", 422)
+    return message_id
 
 def _outbound_message_data(saved: dict, *, content_override: str | None = None, extra_override: dict | None = None) -> dict:
     merged_extra = dict(saved.get("extra") or {})
     if extra_override:
         merged_extra.update(extra_override)
     return {
-        "id": saved["id"],
         "message_id": saved["message_id"],
-        "msg_id": saved["msg_id"],
         "session_id": saved["session_id"],
         "sender_id": saved["sender_id"],
         "content": saved["content"] if content_override is None else content_override,
-        "message_type": saved.get("message_type") or saved.get("type") or "text",
+        "message_type": saved.get("message_type") or "text",
         "status": saved.get("status", "sent"),
         "timestamp": saved.get("timestamp") or saved.get("created_at"),
         "created_at": saved.get("created_at"),
@@ -148,7 +134,7 @@ async def _handle_chat_socket(websocket: WebSocket) -> None:
     connection_id = await connection_manager.connect(websocket)
     user_id = bind_websocket_user(websocket, connection_id)
     if user_id is not None:
-        await connection_manager.broadcast_json(event_payload("online", {"user_id": user_id}, msg_type="online"))
+        await connection_manager.broadcast_json(event_payload("online", {"user_id": user_id}))
 
     try:
         while True:
@@ -172,16 +158,16 @@ async def _handle_chat_socket(websocket: WebSocket) -> None:
 
                 if not was_authenticated:
                     await connection_manager.broadcast_json(
-                        event_payload("online", {"user_id": user_id}, msg_type="online")
+                        event_payload("online", {"user_id": user_id})
                     )
                 await connection_manager.send_json(
                     connection_id,
-                    _compat_message("auth_ack", {"success": True, "user_id": user_id}, event="auth"),
+                    _ws_message("auth_ack", {"success": True, "user_id": user_id}),
                 )
                 continue
 
             if msg_type in {"heartbeat", "ping"}:
-                await connection_manager.send_json(connection_id, event_payload("pong", {}, msg_type="pong"))
+                await connection_manager.send_json(connection_id, event_payload("pong", {}))
                 continue
 
             try:
@@ -203,18 +189,18 @@ async def _handle_chat_socket(websocket: WebSocket) -> None:
                     continue
                 await connection_manager.send_json(
                     connection_id,
-                    _compat_message("history_messages", {"messages": messages}, event="history"),
+                    _ws_message("history_messages", {"messages": messages}),
                 )
                 await connection_manager.send_json(
                     connection_id,
-                    _compat_message("history_events", {"events": events}, event="history"),
+                    _ws_message("history_events", {"events": events}),
                 )
                 continue
 
-            if msg_type in {"chat_message", "message"}:
-                session_id = data.get("session_id") or message.get("session_id", "")
-                content = data.get("content") or message.get("content", "")
-                message_type = data.get("message_type") or message.get("message_type") or data.get("type") or "text"
+            if msg_type == "chat_message":
+                session_id = data.get("session_id", "")
+                content = data.get("content", "")
+                message_type = data.get("message_type") or "text"
                 message_extra = data.get("extra", {}) if isinstance(data.get("extra"), dict) else {}
                 try:
                     with SessionLocal() as db:
@@ -236,22 +222,20 @@ async def _handle_chat_socket(websocket: WebSocket) -> None:
                 recipient_ids = [member_id for member_id in member_ids if member_id != current_user_id]
                 await connection_manager.send_json(
                     connection_id,
-                    _compat_message(
+                    _ws_message(
                         "message_ack",
                         {"msg_id": msg_id, "success": True, "message": ack_message},
                         msg_id=msg_id,
-                        event="ack",
                     ),
                 )
                 if not created:
                     logger.info("Idempotent websocket resend acknowledged without rebroadcast: %s", msg_id)
                     continue
 
-                payload = _compat_message(
+                payload = _ws_message(
                     "chat_message",
                     ack_message,
-                    msg_id=saved["msg_id"],
-                    event="message",
+                    msg_id=saved["message_id"],
                 )
                 delivered_user_ids = await connection_manager.send_json_to_users(
                     recipient_ids,
@@ -261,21 +245,20 @@ async def _handle_chat_socket(websocket: WebSocket) -> None:
                 if delivered_user_ids:
                     await connection_manager.send_json_to_users(
                         [current_user_id],
-                        _compat_message(
+                        _ws_message(
                             "message_delivered",
                             {
                                 "session_id": session_id,
-                                "msg_id": saved["msg_id"],
+                                "message_id": saved["message_id"],
                                 "user_ids": sorted(delivered_user_ids),
                             },
-                            msg_id=saved["msg_id"],
-                            event="delivered",
+                            msg_id=saved["message_id"],
                         ),
                     )
                 continue
 
             if msg_type == "typing":
-                session_id = data.get("session_id") or message.get("session_id", "")
+                session_id = data.get("session_id", "")
                 try:
                     with SessionLocal() as db:
                         member_ids = MessageService(db).get_session_member_ids(session_id, current_user_id)
@@ -284,15 +267,15 @@ async def _handle_chat_socket(websocket: WebSocket) -> None:
                     continue
                 await connection_manager.send_json_to_users(
                     member_ids,
-                    event_payload("typing", {"session_id": session_id, "user_id": current_user_id}, msg_type="typing"),
+                    event_payload("typing", {"session_id": session_id, "user_id": current_user_id}),
                     exclude_connection_id=connection_id,
                 )
                 continue
 
             if msg_type in {"read_ack", "read"}:
-                session_id = data.get("session_id") or message.get("session_id", "")
-                target_message_id = _target_message_id(message, data)
+                session_id = data.get("session_id", "")
                 try:
+                    target_message_id = _require_target_message_id(data)
                     with SessionLocal() as db:
                         service = MessageService(db)
                         current_user = _resolve_ws_user(db, current_user_id)
@@ -304,11 +287,10 @@ async def _handle_chat_socket(websocket: WebSocket) -> None:
                 if read_state.get("advanced"):
                     await connection_manager.send_json_to_users(
                         member_ids,
-                        _compat_message(
+                        _ws_message(
                             "read",
                             _read_broadcast_payload(read_state),
-                            msg_id=read_state.get("last_read_message_id", ""),
-                            event="read",
+                            msg_id=read_state.get("message_id", ""),
                             seq=int(read_state.get("event_seq", 0) or 0),
                         ),
                         exclude_connection_id=connection_id,
@@ -316,8 +298,8 @@ async def _handle_chat_socket(websocket: WebSocket) -> None:
                 continue
 
             if msg_type == "message_recall":
-                target_message_id = _target_message_id(message, data)
                 try:
+                    target_message_id = _require_target_message_id(data)
                     with SessionLocal() as db:
                         service = MessageService(db)
                         current_user = _resolve_ws_user(db, current_user_id)
@@ -328,19 +310,18 @@ async def _handle_chat_socket(websocket: WebSocket) -> None:
                     continue
                 await connection_manager.send_json_to_users(
                     member_ids,
-                    _compat_message(
+                    _ws_message(
                         "message_recall",
                         recalled,
-                        msg_id=recalled["msg_id"],
-                        event="recall",
+                        msg_id=recalled["message_id"],
                         seq=int(recalled.get("event_seq", 0) or 0),
                     ),
                 )
                 continue
 
             if msg_type == "message_edit":
-                target_message_id = _target_message_id(message, data)
                 try:
+                    target_message_id = _require_target_message_id(data)
                     with SessionLocal() as db:
                         service = MessageService(db)
                         current_user = _resolve_ws_user(db, current_user_id)
@@ -351,19 +332,18 @@ async def _handle_chat_socket(websocket: WebSocket) -> None:
                     continue
                 await connection_manager.send_json_to_users(
                     member_ids,
-                    _compat_message(
+                    _ws_message(
                         "message_edit",
                         edited,
-                        msg_id=edited["msg_id"],
-                        event="edit",
+                        msg_id=edited["message_id"],
                         seq=int(edited.get("event_seq", 0) or 0),
                     ),
                 )
                 continue
 
             if msg_type == "message_delete":
-                target_message_id = _target_message_id(message, data)
                 try:
+                    target_message_id = _require_target_message_id(data)
                     with SessionLocal() as db:
                         service = MessageService(db)
                         current_user = _resolve_ws_user(db, current_user_id)
@@ -374,11 +354,10 @@ async def _handle_chat_socket(websocket: WebSocket) -> None:
                     continue
                 await connection_manager.send_json_to_users(
                     member_ids,
-                    _compat_message(
+                    _ws_message(
                         "message_delete",
                         deleted,
-                        msg_id=deleted["msg_id"],
-                        event="delete",
+                        msg_id=deleted["message_id"],
                         seq=int(deleted.get("event_seq", 0) or 0),
                     ),
                 )
@@ -386,11 +365,10 @@ async def _handle_chat_socket(websocket: WebSocket) -> None:
 
             await connection_manager.send_json(
                 connection_id,
-                _compat_message(
+                _ws_message(
                     "error",
                     {"message": f"unsupported message type: {msg_type}"},
                     msg_id=msg_id,
-                    event="error",
                 ),
             )
 
@@ -408,9 +386,8 @@ async def websocket_chat(websocket: WebSocket) -> None:
     await _handle_chat_socket(websocket)
 
 
-@legacy_chat_websocket_router.websocket("/ws/chat")
-async def websocket_chat_legacy(websocket: WebSocket) -> None:
-    await _handle_chat_socket(websocket)
+
+
 
 
 

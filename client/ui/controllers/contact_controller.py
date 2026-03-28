@@ -11,6 +11,7 @@ from client.core.i18n import tr
 from client.core.logging import setup_logging
 from client.services.contact_service import get_contact_service
 from client.services.user_service import get_user_service
+from client.storage.database import get_database
 from client.ui.controllers.auth_controller import get_auth_controller
 
 
@@ -76,6 +77,7 @@ class GroupRecord:
 
     id: str
     name: str
+    avatar: str = ""
     owner_id: str = ""
     session_id: str = ""
     member_count: int = 0
@@ -177,6 +179,7 @@ class ContactController:
         self._contact_service = get_contact_service()
         self._user_service = get_user_service()
         self._auth = get_auth_controller()
+        self._db = get_database()
 
     def get_current_user_id(self) -> str:
         """Return the authenticated user id for UI flows that need directionality."""
@@ -213,6 +216,7 @@ class ContactController:
             )
 
         contacts.sort(key=lambda item: (self.sort_letter(item.display_name), item.display_name.lower()))
+        await self._persist_contacts_cache(contacts)
         return contacts
 
     async def load_groups(self) -> list[GroupRecord]:
@@ -222,6 +226,7 @@ class ContactController:
             GroupRecord(
                 id=str(item.get("id", "") or ""),
                 name=str(item.get("name", "") or "Untitled Group"),
+                avatar=str(item.get("avatar", "") or ""),
                 owner_id=str(item.get("owner_id", "") or ""),
                 session_id=str(item.get("session_id", "") or ""),
                 member_count=int(item.get("member_count", 0) or 0),
@@ -231,7 +236,57 @@ class ContactController:
             for item in (payload or [])
         ]
         groups.sort(key=lambda item: item.name.lower())
+        await self._persist_groups_cache(groups)
         return groups
+
+    async def _persist_contacts_cache(self, contacts: list[ContactRecord]) -> None:
+        """Persist one lightweight contact snapshot for local search."""
+        if not getattr(self._db, "is_connected", False):
+            return
+
+        payload = [
+            {
+                "id": item.id,
+                "name": item.name,
+                "display_name": item.display_name,
+                "username": item.username,
+                "nickname": item.nickname,
+                "remark": item.remark,
+                "assistim_id": item.assistim_id,
+                "avatar": item.avatar,
+                "signature": item.signature,
+                "category": item.category,
+                "status": item.status,
+                "extra": dict(item.extra),
+            }
+            for item in contacts
+        ]
+        try:
+            await self._db.replace_contacts_cache(payload)
+        except Exception:
+            logger.debug("Failed to persist contacts cache", exc_info=True)
+
+    async def _persist_groups_cache(self, groups: list[GroupRecord]) -> None:
+        """Persist one lightweight group snapshot for local search."""
+        if not getattr(self._db, "is_connected", False):
+            return
+
+        payload = [
+            {
+                "id": item.id,
+                "name": item.name,
+                "avatar": item.avatar,
+                "owner_id": item.owner_id,
+                "session_id": item.session_id,
+                "member_count": item.member_count,
+                "extra": dict(item.extra),
+            }
+            for item in groups
+        ]
+        try:
+            await self._db.replace_groups_cache(payload)
+        except Exception:
+            logger.debug("Failed to persist groups cache", exc_info=True)
 
     async def load_requests(self) -> list[FriendRequestRecord]:
         """Load pending friend requests."""
@@ -263,7 +318,7 @@ class ContactController:
 
             pending_records.append(
                 {
-                    "id": str(item.get("id", "") or ""),
+                    "id": str(item.get("request_id", "") or ""),
                     "sender_id": sender_id,
                     "receiver_id": receiver_id,
                     "message": str(item.get("message", "") or ""),
@@ -342,6 +397,7 @@ class ContactController:
         return GroupRecord(
             id=str(data.get("id", "") or ""),
             name=str(data.get("name", "") or name),
+            avatar=str(data.get("avatar", "") or ""),
             owner_id=str(data.get("owner_id", "") or ""),
             session_id=str(data.get("session_id", "") or ""),
             member_count=len(data.get("members", []) or []) or int(data.get("member_count", 0) or 0),
@@ -398,3 +454,6 @@ def get_contact_controller() -> ContactController:
     if _contact_controller is None:
         _contact_controller = ContactController()
     return _contact_controller
+
+
+

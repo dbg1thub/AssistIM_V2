@@ -20,11 +20,14 @@ from client.core.i18n import tr
 from client.core.message_actions import should_offer_delete, should_offer_recall
 from client.events.event_bus import get_event_bus
 from client.managers.message_manager import MessageEvent
-from client.managers.session_manager import SessionEvent
+from client.managers.session_manager import SessionEvent, get_session_manager
 from client.models.message import MessageStatus, MessageType, format_message_preview
+from client.ui.controllers.auth_controller import get_auth_controller
 from client.ui.controllers.chat_controller import get_chat_controller
+from client.ui.controllers.contact_controller import ContactRecord, get_contact_controller
 from client.ui.controllers.session_controller import get_session_controller
 from client.ui.styles import StyleSheet
+from client.ui.windows.contact_interface import StartGroupChatDialog
 from client.ui.widgets.chat_panel import ChatPanel
 from client.ui.widgets.fluent_splitter import FluentSplitter
 from client.ui.widgets.screenshot_overlay import ScreenshotOverlay
@@ -152,6 +155,8 @@ class ChatInterface(QWidget):
         super().__init__(parent)
 
         self._chat_controller = get_chat_controller()
+        self._contact_controller = get_contact_controller()
+        self._auth_controller = get_auth_controller()
         self._session_controller = get_session_controller()
         self._current_session_id: Optional[str] = None
         self._load_task: Optional[asyncio.Task] = None
@@ -159,6 +164,9 @@ class ChatInterface(QWidget):
         self._event_subscriptions: list[tuple[str, object]] = []
         self._screenshot_overlays: set[ScreenshotOverlay] = set()
         self._screenshot_dialogs: set[ScreenshotPreviewDialog] = set()
+        self._dialog_refs: set[QDialog] = set()
+        self._session_visibility_active = False
+        self._current_session_active = False
         self._oldest_loaded_timestamp: Optional[float] = None
         self._has_more_history = True
         self._history_load_task: Optional[asyncio.Task] = None
@@ -266,6 +274,9 @@ class ChatInterface(QWidget):
         self._load_task = None
         self._cancel_pending_task(self._history_load_task)
         self._history_load_task = None
+        for dialog in list(self._dialog_refs):
+            dialog.close()
+        self._dialog_refs.clear()
         self._cancel_all_ui_tasks()
 
     def _cancel_pending_task(self, task: Optional[asyncio.Task]) -> None:
@@ -324,6 +335,7 @@ class ChatInterface(QWidget):
         )
         if is_delete_event:
             self._current_session_id = None
+            self._set_current_session_active(False)
             self.chat_panel.clear_messages()
             self.chat_panel.show_welcome()
             return
@@ -489,6 +501,8 @@ class ChatInterface(QWidget):
             self.chat_panel.clear_composer_draft()
             self.chat_panel.restore_composer_draft(self._composer_drafts.get(session_id, []))
         else:
+            self._current_session_id = None
+            self._set_current_session_active(False)
             self.chat_panel.show_welcome()
             return
 
@@ -512,6 +526,7 @@ class ChatInterface(QWidget):
         """Load local messages for the selected session."""
         try:
             await self._chat_controller.select_session(session_id)
+            self._activate_selected_session_if_visible(session_id)
             messages = await self._load_history_page(
                 session_id,
                 before_timestamp=None,
@@ -587,6 +602,7 @@ class ChatInterface(QWidget):
         """Update session selection side effects without reloading the visible page from storage."""
         try:
             await self._chat_controller.select_session(session_id)
+            self._activate_selected_session_if_visible(session_id)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -915,12 +931,20 @@ class ChatInterface(QWidget):
         )
 
     def _on_chat_info_add_requested(self) -> None:
-        """Show placeholder feedback for the future add-member action."""
-        InfoBar.info(
-            tr("chat.info.add.title", "Add"),
-            tr("chat.info.add.unavailable", "This entry is reserved for future group-chat expansion."),
-            parent=self.window(),
-            duration=1800,
+        """Open the contact selector used to turn the current private chat into a new group."""
+        session = self._get_session(self._current_session_id or "")
+        if session is None or session.is_ai_session or session.session_type != "direct":
+            InfoBar.info(
+                tr("chat.info.add.title", "Add"),
+                tr("chat.info.add.unavailable", "This entry is reserved for future group-chat expansion."),
+                parent=self.window(),
+                duration=1800,
+            )
+            return
+
+        self._schedule_ui_task(
+            self._show_start_group_dialog(session),
+            f"start group chat selector {session.session_id}",
         )
 
     def _on_chat_info_clear_requested(self) -> None:
@@ -971,6 +995,132 @@ class ChatInterface(QWidget):
     def close_transient_panels(self) -> None:
         """Close floating transient UI owned by the chat page."""
         self.chat_panel.close_chat_info_drawer(immediate=True)
+
+    async def _show_start_group_dialog(self, session) -> None:
+        """Load contacts and open the frameless modal used to start one new group chat."""
+        counterpart_id = self._resolve_counterpart_id(session)
+        if not counterpart_id:
+            InfoBar.warning(
+                tr("chat.group_picker.title", "Start Group Chat"),
+                tr("chat.group_picker.no_counterpart", "Unable to resolve the current private chat participant."),
+                parent=self.window(),
+                duration=2200,
+            )
+            return
+
+        try:
+            contacts = await self._contact_controller.load_contacts()
+        except Exception as exc:
+            InfoBar.error(
+                tr("chat.group_picker.title", "Start Group Chat"),
+                str(exc) or tr("chat.group_picker.load_failed", "Unable to load contacts right now."),
+                parent=self.window(),
+                duration=2200,
+            )
+            return
+
+        contacts = self._merge_group_picker_contacts(contacts, session, counterpart_id)
+        if not contacts:
+            InfoBar.info(
+                tr("chat.group_picker.title", "Start Group Chat"),
+                tr("chat.group_picker.no_contacts", "There are no additional contacts available to add."),
+                parent=self.window(),
+                duration=2200,
+            )
+            return
+
+        dialog = StartGroupChatDialog(
+            self._contact_controller,
+            contacts,
+            excluded_contact_id=counterpart_id,
+            parent=self.window(),
+        )
+        dialog.group_created.connect(self._on_group_chat_created)
+        self._show_dialog(dialog)
+
+    def _resolve_counterpart_id(self, session) -> str:
+        """Resolve the other participant id for the current direct chat."""
+        extra = dict(getattr(session, "extra", {}) or {})
+        counterpart_id = str(extra.get("counterpart_id", "") or "").strip()
+        if counterpart_id:
+            return counterpart_id
+
+        current_user = self._auth_controller.current_user or {}
+        current_user_id = str(current_user.get("id", "") or "")
+        for participant_id in getattr(session, "participant_ids", []) or []:
+            normalized_id = str(participant_id or "").strip()
+            if not normalized_id or normalized_id == current_user_id:
+                continue
+            return normalized_id
+        return ""
+
+    def _merge_group_picker_contacts(
+        self,
+        contacts: list[ContactRecord],
+        session,
+        counterpart_id: str,
+    ) -> list[ContactRecord]:
+        """Return deduplicated friends excluding the active private-chat participant."""
+        deduped: dict[str, ContactRecord] = {}
+        for contact in contacts:
+            if contact.id and contact.id != counterpart_id:
+                deduped[contact.id] = contact
+
+        return sorted(
+            deduped.values(),
+            key=lambda item: item.display_name.lower(),
+        )
+
+    def _show_dialog(self, dialog: QDialog) -> None:
+        """Keep one non-blocking modal dialog alive while it is visible."""
+        self._dialog_refs.add(dialog)
+        dialog.finished.connect(lambda _result=0, dlg=dialog: self._dialog_refs.discard(dlg))
+        dialog.finished.connect(dialog.deleteLater)
+        dialog.open()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def _on_group_chat_created(self, group: object) -> None:
+        """Jump from the current private chat into the newly created group."""
+        self.chat_panel.close_chat_info_drawer(immediate=True)
+        session_id = str(getattr(group, "session_id", "") or "")
+        if not session_id:
+            InfoBar.warning(
+                tr("chat.group_picker.title", "Start Group Chat"),
+                tr("main_window.contact_jump.unavailable_message", "Unable to open this conversation right now."),
+                parent=self.window(),
+                duration=2200,
+            )
+            return
+
+        self._schedule_ui_task(
+            self._open_created_group_session(group),
+            f"open created group {session_id}",
+        )
+
+    async def _open_created_group_session(self, group: object) -> None:
+        """Open the freshly created group session and report failures."""
+        session_id = str(getattr(group, "session_id", "") or "")
+        opened = await self.open_group_session(session_id)
+        if opened:
+            session = self.get_session(session_id)
+            avatar = str(getattr(group, "avatar", "") or getattr(group, "extra", {}).get("avatar", "") or "")
+            member_preview = list(getattr(group, "extra", {}).get("member_preview") or [])
+            if session and avatar:
+                session.avatar = avatar
+                session.extra["member_preview"] = member_preview
+                await get_session_manager().update_session(session_id, avatar=avatar, extra=session.extra)
+                self.session_panel.update_session(session_id, avatar=avatar)
+                if self._current_session_id == session_id:
+                    self.chat_panel.set_session(session)
+            return
+
+        InfoBar.warning(
+            tr("chat.group_picker.title", "Start Group Chat"),
+            tr("main_window.contact_jump.unavailable_message", "Unable to open this conversation right now."),
+            parent=self.window(),
+            duration=2200,
+        )
 
     async def _send_file_message(self, session_id: str, file_path: str) -> None:
         """Upload and send a file via ChatController."""
@@ -1230,7 +1380,7 @@ class ChatInterface(QWidget):
     def _schedule_read_receipt(self) -> None:
         """Defer read-receipt sending until after the current UI update completes."""
         session_id = self._current_session_id
-        if not session_id:
+        if not session_id or not self._can_mark_session_read():
             return
 
         latest_incoming = self._latest_readable_message()
@@ -1256,6 +1406,8 @@ class ChatInterface(QWidget):
         """Send a cumulative read receipt for a specific session/message pair."""
         pending_key = (session_id, message_id)
         try:
+            if session_id != self._current_session_id or not self._can_mark_session_read():
+                return
             if self._last_read_receipts.get(session_id) == message_id:
                 return
 
@@ -1282,6 +1434,52 @@ class ChatInterface(QWidget):
     def _get_session(self, session_id: str):
         """Find session object by ID."""
         return self._chat_controller.get_session(session_id)
+
+    def set_session_visibility_active(self, active: bool) -> None:
+        """Toggle whether the current session is actually visible and foreground-readable."""
+        normalized = bool(active)
+        if self._session_visibility_active == normalized:
+            return
+        self._session_visibility_active = normalized
+        self._set_current_session_active(normalized)
+
+    def _activate_selected_session_if_visible(self, session_id: Optional[str]) -> None:
+        """Promote the selected session into active/readable state when the page is visible."""
+        if session_id != self._current_session_id:
+            return
+        self._set_current_session_active(self._session_visibility_active)
+
+    def _set_current_session_active(self, active: bool) -> None:
+        """Keep controller/session-manager read state aligned with window visibility."""
+        is_active = bool(self._session_visibility_active and self._current_session_id)
+        if not active:
+            is_active = False
+        if self._current_session_active == is_active:
+            return
+
+        self._current_session_active = is_active
+        self._schedule_ui_task(
+            self._chat_controller.set_current_session_active(is_active),
+            f"set current session active {is_active}",
+        )
+        if is_active:
+            self._schedule_read_receipt()
+
+    def _can_mark_session_read(self) -> bool:
+        """Return whether the selected session is actively visible to the user."""
+        if not self._current_session_active or not self._current_session_id:
+            return False
+
+        window = self.window()
+        if window is None:
+            return False
+
+        return bool(
+            self.isVisible()
+            and window.isVisible()
+            and not window.isMinimized()
+            and window.isActiveWindow()
+        )
 
     def get_session_panel(self) -> SessionPanel:
         """Return session panel widget."""

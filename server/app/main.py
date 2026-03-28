@@ -12,7 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from app.api.v1.router import api_router, legacy_chat_router
+from app.api.v1.router import api_router
 from app.core.config import Settings, get_settings
 from app.core.database import configure_database, init_db
 from app.core.errors import AppError, ErrorCode
@@ -21,7 +21,7 @@ from app.core.security import decode_access_token
 from app.media.default_avatars import sync_default_avatar_assets
 from app.media.storage import get_local_media_mount_path
 from app.utils.response import error_response, success_response
-from app.websocket.chat_ws import legacy_chat_websocket_router, websocket_router
+from app.websocket.chat_ws import websocket_router
 from app.websocket.presence_ws import presence_router
 
 
@@ -56,17 +56,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
 
     app.include_router(api_router, prefix=current_settings.api_v1_prefix)
-    app.include_router(api_router, prefix=current_settings.api_compat_prefix)
-    if current_settings.enable_legacy_chat_http:
-        # The legacy router already carries the historical `/api/chat/*` prefix.
-        # Mount it once as an explicit compatibility adapter instead of creating
-        # duplicate `/api/api/chat/*` aliases.
-        app.include_router(legacy_chat_router)
     app.include_router(websocket_router)
-    if current_settings.enable_legacy_chat_ws:
-        # Keep the historical `/ws/chat` endpoint as one explicit compatibility
-        # adapter instead of leaving it hidden inside the canonical websocket router.
-        app.include_router(legacy_chat_websocket_router)
     app.include_router(presence_router)
     if current_settings.media_storage_backend == "local":
         app.mount(

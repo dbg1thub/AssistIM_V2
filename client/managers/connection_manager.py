@@ -725,7 +725,7 @@ class ConnectionManager:
             "timestamp": int(time.time()),
             "data": {
                 "session_id": session_id,
-                "msg_id": message_id,
+                "message_id": message_id,
             },
         }
 
@@ -740,7 +740,7 @@ class ConnectionManager:
             "timestamp": int(time.time()),
             "data": {
                 "session_id": session_id,
-                "msg_id": message_id,
+                "message_id": message_id,
                 "content": new_content,
             },
         }

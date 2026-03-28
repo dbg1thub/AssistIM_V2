@@ -18,10 +18,15 @@ class ServerConfig:
     use_ssl: bool = field(default_factory=lambda: os.getenv("ASSISTIM_USE_SSL", "false").lower() == "true")
 
     @property
-    def api_base_url(self) -> str:
-        """Get API base URL."""
+    def origin_url(self) -> str:
+        """Get the server origin URL without one API prefix."""
         scheme = "https" if self.use_ssl else "http"
-        return f"{scheme}://{self.host}:{self.port}/api"
+        return f"{scheme}://{self.host}:{self.port}"
+
+    @property
+    def api_base_url(self) -> str:
+        """Get the canonical API base URL."""
+        return f"{self.origin_url}/api/v1"
 
     @property
     def ws_url(self) -> str:

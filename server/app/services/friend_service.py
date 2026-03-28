@@ -127,7 +127,6 @@ class FriendService:
     @staticmethod
     def serialize_request(request: FriendRequest) -> dict:
         return {
-            "id": request.id,
             "request_id": request.id,
             "sender_id": request.sender_id,
             "receiver_id": request.receiver_id,

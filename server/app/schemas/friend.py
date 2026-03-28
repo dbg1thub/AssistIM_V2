@@ -1,4 +1,4 @@
-﻿"""Friend schemas."""
+"""Friend schemas."""
 
 from __future__ import annotations
 
@@ -14,10 +14,12 @@ class FriendRequestCreate(BaseModel):
 
 
 class FriendRequestOut(ORMModel):
-    id: str
+    request_id: str
     sender_id: str
     receiver_id: str
     status: str
+    message: str | None = None
+    created_at: str | None = None
 
 
 class FriendOut(BaseModel):

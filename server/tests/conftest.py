@@ -26,9 +26,6 @@ os.environ["SECRET_KEY"] = "assistim-test-secret"
 os.environ["DATABASE_URL"] = f"sqlite:///{TEST_DB_PATH.as_posix()}"
 os.environ["UPLOAD_DIR"] = TEST_UPLOAD_DIR.as_posix()
 os.environ["API_V1_PREFIX"] = "/api/v1"
-os.environ["API_COMPAT_PREFIX"] = "/api"
-os.environ["ENABLE_LEGACY_CHAT_HTTP"] = "true"
-os.environ["ENABLE_LEGACY_CHAT_WS"] = "true"
 os.environ["CORS_ORIGINS"] = "*"
 
 if str(SERVER_ROOT) not in sys.path:
@@ -37,6 +34,7 @@ if str(SERVER_ROOT) not in sys.path:
 from app.core.config import reload_settings
 from app.core.database import Base, get_engine
 from app.core.rate_limit import rate_limiter
+from app.models import file, group, message, moment, session, user  # noqa: F401
 from app.main import create_app
 from app.websocket.manager import connection_manager
 
@@ -44,7 +42,8 @@ from app.websocket.manager import connection_manager
 @pytest.fixture(autouse=True)
 def reset_test_state() -> None:
     engine = get_engine()
-    Base.metadata.drop_all(bind=engine)
+    engine.dispose()
+    TEST_DB_PATH.unlink(missing_ok=True)
     Base.metadata.create_all(bind=engine)
     rate_limiter.reset()
     connection_manager.reset()
@@ -86,6 +85,3 @@ def auth_header() -> Callable[[str], dict[str, str]]:
         return {"Authorization": f"Bearer {access_token}"}
 
     return build
-
-
-

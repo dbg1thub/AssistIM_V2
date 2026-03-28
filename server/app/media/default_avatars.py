@@ -71,12 +71,6 @@ def sync_default_avatar_assets(settings: Settings) -> list[str]:
     return published_urls
 
 
-def default_avatar_url_for_seed(settings: Settings, *, seed: object, gender: object = "") -> str | None:
-    """Return one stable published default-avatar URL for a deterministic seed."""
-    asset_path = _select_seeded_asset(gender=gender, seed=seed)
-    if asset_path is None:
-        return None
-    return _publish_asset(settings, asset_path)
 
 
 def random_default_avatar_url(settings: Settings, *, gender: object = "") -> str | None:

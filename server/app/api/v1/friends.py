@@ -33,7 +33,7 @@ def _contact_refresh_message(reason: str, payload: dict | None = None) -> dict:
     return {
         "type": "contact_refresh",
         "seq": 0,
-        "msg_id": str(data.get("request_id") or data.get("id") or data.get("friend_id") or ""),
+        "msg_id": str(data.get("request_id") or data.get("friend_id") or ""),
         "timestamp": int(time.time()),
         "data": data,
     }

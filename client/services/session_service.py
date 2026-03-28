@@ -46,10 +46,9 @@ class SessionService:
     async def create_direct_session(self, user_id: str, *, display_name: str) -> dict[str, Any]:
         """Create one direct session for the given user."""
         payload = await self._http.post(
-            "/sessions",
+            "/sessions/direct",
             json={
-                "type": "private",
-                "user_id": user_id,
+                "participant_ids": [user_id],
                 "name": display_name,
             },
         )
@@ -65,3 +64,4 @@ def get_session_service() -> SessionService:
     if _session_service is None:
         _session_service = SessionService()
     return _session_service
+

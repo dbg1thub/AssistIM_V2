@@ -1,4 +1,4 @@
-﻿"""Session service."""
+"""Session service."""
 
 from __future__ import annotations
 
@@ -76,18 +76,6 @@ class SessionService:
         session = self._run_transaction(action)
         return self.serialize_session(session, viewer_user_id=current_user.id, include_members=True, participant_ids=members)
 
-    def create_generic(self, current_user: User, payload: dict) -> dict:
-        session_type = payload.get("type", "private")
-        if session_type == "private":
-            user_id = payload.get("user_id")
-            if not user_id:
-                raise AppError(ErrorCode.INVALID_REQUEST, "user_id is required", 422)
-            return self.create_private(current_user, [user_id], payload.get("name"))
-        if session_type == "group":
-            members = payload.get("members") or payload.get("participant_ids") or []
-            return self.create_group(current_user, payload.get("name", "Group Chat"), members)
-        raise AppError(ErrorCode.INVALID_REQUEST, "invalid session type", 422)
-
     def get_session(self, current_user: User, session_id: str) -> dict:
         session = self.sessions.get_by_id(session_id)
         if session is None:
@@ -137,11 +125,11 @@ class SessionService:
         member_ids = participant_ids if participant_ids is not None else self.sessions.list_member_ids(session.id)
         messages = self.messages.list_session_messages(session.id, limit=1)
         last_message = messages[-1] if messages else None
+        normalized_session_type = "direct" if session.type == "private" else session.type
         data = {
             "id": session.id,
             "session_id": session.id,
-            "type": session.type,
-            "session_type": session.type,
+            "session_type": normalized_session_type,
             "name": session.name,
             "participant_ids": member_ids,
             "last_message": self._serialize_last_message_preview(last_message),
@@ -232,3 +220,4 @@ class SessionService:
         except Exception:
             self.db.rollback()
             raise
+

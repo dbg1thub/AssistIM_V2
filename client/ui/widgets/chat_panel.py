@@ -826,9 +826,8 @@ class ChatPanel(QWidget):
             return content
 
         if content.startswith("/"):
-            api_base = get_config().server.api_base_url.rstrip("/")
-            host_base = api_base[:-4] if api_base.endswith("/api") else api_base
-            return f"{host_base}{content}"
+            origin_base = get_config().server.origin_url.rstrip("/")
+            return f"{origin_base}{content}"
 
         return content
 

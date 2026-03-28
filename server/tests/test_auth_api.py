@@ -49,13 +49,13 @@ def test_auth_register_login_refresh_and_me(client: TestClient, auth_header) -> 
     assert stale_me_response.status_code == 401
 
     stale_refresh_response = client.post(
-        "/api/v1/auth/token",
+        "/api/v1/auth/refresh",
         json={"refresh_token": register_payload["data"]["refresh_token"]},
     )
     assert stale_refresh_response.status_code == 401
 
     refresh_response = client.post(
-        "/api/v1/auth/token",
+        "/api/v1/auth/refresh",
         json={"refresh_token": login_payload["refresh_token"]},
     )
     assert refresh_response.status_code == 200

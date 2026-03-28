@@ -1,4 +1,4 @@
-﻿"""Message repository."""
+"""Message repository."""
 
 from __future__ import annotations
 
@@ -73,15 +73,8 @@ class MessageRepository:
         session_id: str,
         limit: int = 50,
         before: datetime | None = None,
-        before_id: str | None = None,
     ) -> list[Message]:
         stmt = select(Message).where(Message.session_id == session_id)
-        if before_id is not None:
-            before_message = self.get_by_id(before_id)
-            if before_message is not None and before_message.session_id == session_id:
-                stmt = stmt.where(Message.session_seq < before_message.session_seq)
-            elif before_message is not None:
-                before = before_message.created_at
         if before is not None:
             stmt = stmt.where(Message.created_at < before)
         stmt = stmt.order_by(desc(Message.session_seq), desc(Message.created_at)).limit(limit)
@@ -200,8 +193,8 @@ class MessageRepository:
             return None
         return self._advance_read_cursor(message.session_id, user_id, message, commit=commit)
 
-    def mark_read_batch(self, session_id: str, user_id: str, last_read_id: str, *, commit: bool = True) -> dict | None:
-        last_message = self.get_by_id(last_read_id)
+    def mark_read_batch(self, session_id: str, user_id: str, message_id: str, *, commit: bool = True) -> dict | None:
+        last_message = self.get_by_id(message_id)
         if last_message is None or last_message.session_id != session_id:
             return None
         return self._advance_read_cursor(session_id, user_id, last_message, commit=commit)
@@ -273,7 +266,6 @@ class MessageRepository:
         return {
             "session_id": session_id,
             "message_id": message.id,
-            "last_read_message_id": member.last_read_message_id or message.id,
             "last_read_seq": int(member.last_read_seq or target_seq),
             "user_id": user_id,
             "read_at": isoformat_utc(member.last_read_at),
@@ -346,4 +338,5 @@ class MessageRepository:
         except (TypeError, ValueError, json.JSONDecodeError):
             return {}
         return payload if isinstance(payload, dict) else {}
+
 

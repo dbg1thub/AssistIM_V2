@@ -1,4 +1,4 @@
-﻿"""Schema compatibility helpers for environments without Alembic upgrades applied."""
+"""Schema compatibility helpers for environments without Alembic upgrades applied."""
 
 from __future__ import annotations
 
@@ -54,6 +54,11 @@ FILE_INDEX_DDL: dict[str, str] = {
     "idx_files_storage_provider_key": "CREATE UNIQUE INDEX IF NOT EXISTS idx_files_storage_provider_key ON files (storage_provider, storage_key)",
 }
 
+SESSION_EVENT_INDEX_DDL: dict[str, str] = {
+    "idx_session_events_session_id": "CREATE INDEX IF NOT EXISTS idx_session_events_session_id ON session_events (session_id)",
+    "idx_session_events_type": "CREATE INDEX IF NOT EXISTS idx_session_events_type ON session_events (type)",
+}
+
 
 def _get_table_names(bind: Engine | Connection) -> set[str]:
     return set(inspect(bind).get_table_names())
@@ -65,6 +70,70 @@ def _get_column_names(bind: Engine | Connection, table_name: str) -> set[str]:
 
 def _get_index_names(bind: Engine | Connection, table_name: str) -> set[str]:
     return {index["name"] for index in inspect(bind).get_indexes(table_name)}
+
+
+def _has_columns(bind: Engine | Connection, table_name: str, required_columns: Iterable[str]) -> bool:
+    if table_name not in _get_table_names(bind):
+        return False
+    columns = _get_column_names(bind, table_name)
+    return all(column_name in columns for column_name in required_columns)
+
+
+def _has_indexes(bind: Engine | Connection, table_name: str, required_indexes: Iterable[str]) -> bool:
+    if table_name not in _get_table_names(bind):
+        return False
+    indexes = _get_index_names(bind, table_name)
+    return all(index_name in indexes for index_name in required_indexes)
+
+
+RUNTIME_SCHEMA_ALEMBIC_REVISION = "20260328_0004"
+
+def _parse_revision(revision: str) -> tuple[int, int] | None:
+    candidate = str(revision or "").strip()
+    if "_" not in candidate:
+        return None
+    date_part, seq_part = candidate.split("_", 1)
+    if len(date_part) != 8 or len(seq_part) != 4 or not date_part.isdigit() or not seq_part.isdigit():
+        return None
+    return int(date_part), int(seq_part)
+
+
+def _has_runtime_schema_migration(bind: Engine | Connection) -> bool:
+    if "alembic_version" not in _get_table_names(bind):
+        return False
+
+    target_revision = _parse_revision(RUNTIME_SCHEMA_ALEMBIC_REVISION)
+    if target_revision is None:
+        return False
+
+    rows = bind.execute(text("SELECT version_num FROM alembic_version")).scalars().all()
+    if not rows:
+        return False
+
+    parsed_rows = [_parse_revision(str(row or "")) for row in rows]
+    if any(parsed is None for parsed in parsed_rows):
+        return False
+
+    return all(parsed >= target_revision for parsed in parsed_rows if parsed is not None)
+
+
+
+def _has_current_runtime_schema(bind: Engine | Connection) -> bool:
+    required_tables = {"users", "messages", "sessions", "session_members", "files", "session_events"}
+    if required_tables - _get_table_names(bind):
+        return False
+
+    return (
+        _has_columns(bind, "users", USER_PROFILE_COLUMN_DDL)
+        and _has_columns(bind, "messages", MESSAGE_COLUMN_DDL)
+        and _has_columns(bind, "sessions", SESSION_COLUMN_DDL)
+        and _has_columns(bind, "session_members", SESSION_MEMBER_COLUMN_DDL)
+        and _has_columns(bind, "files", FILE_COLUMN_DDL)
+        and _has_indexes(bind, "users", USER_PROFILE_INDEX_DDL)
+        and _has_indexes(bind, "messages", CHAT_INDEX_DDL)
+        and _has_indexes(bind, "files", FILE_INDEX_DDL)
+        and _has_indexes(bind, "session_events", SESSION_EVENT_INDEX_DDL)
+    )
 
 
 def _ensure_columns(connection: Connection, table_name: str, column_ddl: dict[str, str], applied: list[str]) -> None:
@@ -467,10 +536,16 @@ def _backfill_file_storage_metadata(connection: Connection, applied: list[str]) 
 
 
 def ensure_schema_compatibility(engine: Engine) -> list[str]:
-    """Apply lightweight idempotent schema fixes for known legacy drift."""
+    """Apply fallback-only schema fixes for databases that skipped migrations."""
     applied: list[str] = []
 
     with engine.begin() as connection:
+        if _has_runtime_schema_migration(connection):
+            return applied
+
+        if _has_current_runtime_schema(connection):
+            return applied
+
         _ensure_columns(connection, "users", USER_PROFILE_COLUMN_DDL, applied)
         _ensure_indexes(connection, "users", USER_PROFILE_INDEX_DDL, applied)
 
@@ -488,6 +563,7 @@ def ensure_schema_compatibility(engine: Engine) -> list[str]:
 
         _ensure_indexes(connection, "messages", CHAT_INDEX_DDL, applied)
         _ensure_indexes(connection, "files", FILE_INDEX_DDL, applied)
+        _ensure_indexes(connection, "session_events", SESSION_EVENT_INDEX_DDL, applied)
 
     return applied
 

@@ -1,4 +1,4 @@
-"""File routes and upload aliases."""
+"""File routes."""
 
 from __future__ import annotations
 
@@ -28,16 +28,6 @@ def list_files(
 
 @router.post("/files/upload")
 def upload_file(
-    file: UploadFile = File(...),
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-    settings: Settings = Depends(get_request_settings),
-) -> dict:
-    return success_response(FileService(db, settings).save_upload(current_user, file))
-
-
-@router.post("/upload")
-def upload_file_alias(
     file: UploadFile = File(...),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),

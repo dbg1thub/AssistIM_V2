@@ -13,12 +13,11 @@ This backend implements the sections 1-127 from `backend_architecture.md`:
 - JWT auth, password hashing, request logging, basic rate limiting, file upload
 - Database schema layer aligned to sections 27-47
 - Alembic bootstrap and initial migration
-- Compatibility routes for the current desktop client:
-  - `POST /api/auth/refresh`
-  - `POST /api/upload`
+- Current client-facing compatibility routes:
+  - `POST /api/v1/auth/refresh`
+  - `POST /api/v1/files/upload`
   - `WS /ws` (canonical chat websocket)
-  - legacy chat websocket alias under `/ws/chat`
-  - legacy chat aliases under `/api/chat/*`
+
 ## Recommended local setup on Windows
 
 1. Copy `server/.env.postgres.example` to `server/.env` and replace `YOUR_PASSWORD`.
@@ -40,16 +39,23 @@ powershell -ExecutionPolicy Bypass -File server/scripts/init-postgres.ps1
 powershell -ExecutionPolicy Bypass -File server/scripts/migrate.ps1
 ```
 
-5. Seed demo data if you want a non-empty local database:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File server/scripts/seed-data.ps1 -Reset
-```
-
-6. Start the API:
+5. Start the API:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File server/scripts/run-api.ps1 -Reload
+```
+
+6. Create test accounts manually from the desktop client or with `POST /api/v1/auth/register`.
+
+```powershell
+Invoke-RestMethod -Method Post `
+  -Uri "http://127.0.0.1:8000/api/v1/auth/register" `
+  -ContentType "application/json" `
+  -Body (@{
+    username = "alice"
+    password = "Passw0rd!"
+    nickname = "Alice"
+  } | ConvertTo-Json)
 ```
 
 The scripts automatically prefer `server/.venv/Scripts/python.exe` when present.
@@ -66,43 +72,34 @@ The current test suite covers:
 
 - auth register/login/refresh/me
 - friend request accept flow
-- private session creation and message read flow
+- direct session creation and message read flow
 - group permission and ownership transfer
-- idempotent demo seed generation
 
-## Demo seed data
+## Creating test accounts
 
-`server/scripts/seed-data.ps1` writes a reusable local dataset. The seeded demo users are:
+The backend no longer ships a demo seed path. This keeps local development on the same code path as production and avoids a second, schema-sensitive data writer.
 
-- `demo_alice`
-- `demo_bob`
-- `demo_carla`
-- `demo_derek`
+Use the desktop client to register users normally, or create them over HTTP:
 
-All demo users use the same password:
-
-```text
-Passw0rd!
+```powershell
+Invoke-RestMethod -Method Post `
+  -Uri "http://127.0.0.1:8000/api/v1/auth/register" `
+  -ContentType "application/json" `
+  -Body (@{
+    username = "bob"
+    password = "Passw0rd!"
+    nickname = "Bob"
+  } | ConvertTo-Json)
 ```
 
-The seed currently creates:
-
-- 4 users
-- 1 pending friend request
-- 4 friendship rows
-- 2 sessions
-- 5 messages
-- 1 group
-- 2 moments
-- 1 demo file record under `data/uploads/seed-demo-note.txt`
+After registration, use the normal client flows to add friends, create direct sessions, create groups, and upload files.
 
 ## Alternative without `.env`
 
-If you do not want to create `server/.env` yet, `migrate.ps1`, `run-api.ps1`, and `seed-data.ps1` also accept explicit overrides:
+If you do not want to create `server/.env` yet, `migrate.ps1` and `run-api.ps1` accept explicit overrides:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File server/scripts/migrate.ps1 -DatabaseUrl "postgresql+psycopg://postgres:YOUR_PASSWORD@localhost:5432/assistim"
-powershell -ExecutionPolicy Bypass -File server/scripts/seed-data.ps1 -DatabaseUrl "postgresql+psycopg://postgres:YOUR_PASSWORD@localhost:5432/assistim" -Reset
 powershell -ExecutionPolicy Bypass -File server/scripts/run-api.ps1 -DatabaseUrl "postgresql+psycopg://postgres:YOUR_PASSWORD@localhost:5432/assistim" -Reload
 ```
 
@@ -118,7 +115,6 @@ From `server/`:
 
 ```bash
 python -m alembic upgrade head
-python -m app.seed --reset
 python -m pytest tests
 ```
 
@@ -131,9 +127,8 @@ Copy `server/.env.postgres.example` to `server/.env` or pass `-DatabaseUrl` to t
 - Default development database is PostgreSQL.
 - Native UUID columns are used through SQLAlchemy `Uuid`, which maps to PostgreSQL UUID natively.
 - Uploaded files are stored under `data/uploads` and exposed at `/uploads/...`.
-- For compatibility with the current desktop client, WebSocket payloads include both `type` and `event` style fields where useful.
-- `/ws` is the canonical chat websocket endpoint; `/ws/chat` is kept as one explicit legacy alias.
-- Message history pagination currently uses `before_id` by resolving the referenced message timestamp, because IDs are UUIDs rather than auto-increment integers.
+- WebSocket payloads use the canonical `type` field for realtime events.
+- Message history uses the session-scoped `/api/v1/sessions/{session_id}/messages` endpoint with an optional `before` timestamp cursor.
 - WebSocket incremental sync now filters messages by session membership instead of returning all recent messages globally.
-- Legacy HTTP POST /api/chat/sync now mirrors the cursor-based replay model and returns both messages and events.
 - Your PostgreSQL service was detected as `postgresql-x64-18`, and `server/scripts/init-postgres.ps1` can resolve `psql.exe` from that service path automatically.
+

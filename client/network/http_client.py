@@ -1,11 +1,11 @@
-﻿"""
+"""
 HTTP Client Module
 
 Async HTTP client using aiohttp with unified request handling,
 automatic token management, and error handling.
 """
 import asyncio
-from typing import Any, Callable, Optional
+from typing import Any, AsyncIterator, Callable, Optional
 
 import aiohttp
 
@@ -295,6 +295,101 @@ class HTTPClient:
         except (TypeError, ValueError):
             return None
 
+    async def _read_error_response_payload(self, response: aiohttp.ClientResponse) -> tuple[Any, str]:
+        """Read one error response body as JSON when possible, falling back to text."""
+        try:
+            payload = await response.json()
+            return payload, ""
+        except Exception:
+            return None, await response.text()
+
+    async def stream_lines(
+            self,
+            method: str,
+            path: str,
+            params: Optional[dict[str, Any]] = None,
+            json: Optional[dict[str, Any]] = None,
+            headers: Optional[dict[str, str]] = None,
+            retry_on_401: bool = True,
+            use_auth: Optional[bool] = None,
+    ) -> AsyncIterator[str]:
+        """Yield decoded non-empty lines from one streaming HTTP response."""
+        url = self._resolve_url(path)
+        apply_auth = self._should_use_app_auth(path, use_auth)
+        request_headers = self._build_headers(
+            include_auth=apply_auth,
+            extra_headers=headers,
+        )
+        session = await self._ensure_session()
+
+        try:
+            logger.debug(f"{method} {url} (stream)")
+
+            async with session.request(
+                    method,
+                    url,
+                    params=params,
+                    json=json,
+                    headers=request_headers,
+            ) as response:
+                if response.status == 401:
+                    payload, response_text = await self._read_error_response_payload(response)
+                    if apply_auth and retry_on_401 and self._refresh_token:
+                        success = await self._refresh_access_token()
+                        if success:
+                            async for line in self.stream_lines(
+                                method,
+                                path,
+                                params=params,
+                                json=json,
+                                headers=headers,
+                                retry_on_401=False,
+                                use_auth=apply_auth,
+                            ):
+                                yield line
+                            return
+
+                    message = self._error_message_from_payload(
+                        payload,
+                        response_text,
+                        fallback="Authentication failed" if apply_auth else "Unauthorized",
+                    )
+                    if apply_auth:
+                        raise AuthExpiredError(message)
+                    raise APIError(
+                        message,
+                        code=self._error_code_from_payload(payload),
+                        status_code=response.status,
+                    )
+
+                if response.status >= 400:
+                    payload, response_text = await self._read_error_response_payload(response)
+                    if response.status >= 500:
+                        raise ServerError(
+                            self._error_message_from_payload(payload, response_text, fallback="Server error"),
+                            status_code=response.status,
+                        )
+                    raise APIError(
+                        self._error_message_from_payload(
+                            payload,
+                            response_text,
+                            fallback=f"Request failed ({response.status})",
+                        ),
+                        code=self._error_code_from_payload(payload),
+                        status_code=response.status,
+                    )
+
+                async for raw_line in response.content:
+                    line = raw_line.decode("utf-8").strip()
+                    if line:
+                        yield line
+
+        except aiohttp.ClientError as e:
+            logger.error(f"Network error: {e}")
+            raise NetworkError(f"Request failed: {e}") from e
+        except asyncio.TimeoutError as e:
+            logger.error(f"Request timeout: {url}")
+            raise NetworkError(f"Request timeout: {e}") from e
     async def _handle_upload_response(
             self,
             response: aiohttp.ClientResponse,
@@ -464,7 +559,7 @@ class HTTPClient:
     async def upload_file(
             self,
             file_path: str,
-            upload_path: str = "/upload",
+            upload_path: str = "/files/upload",
             use_auth: Optional[bool] = None,
     ) -> dict[str, Any]:
         """Upload one file using the same structured error model as normal HTTP requests."""

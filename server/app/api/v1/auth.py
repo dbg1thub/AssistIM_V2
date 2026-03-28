@@ -77,10 +77,10 @@ async def login(
             user_id,
             close_code=4001,
             reason="session_replaced",
-            payload=event_payload("force_logout", {"reason": "session_replaced"}, msg_type="force_logout"),
+            payload=event_payload("force_logout", {"reason": "session_replaced"}),
         )
         if became_offline:
-            await connection_manager.broadcast_json(event_payload("offline", {"user_id": user_id}, msg_type="offline"))
+            await connection_manager.broadcast_json(event_payload("offline", {"user_id": user_id}))
     return success_response(auth_payload)
 
 
@@ -93,15 +93,6 @@ def refresh(
     return success_response(AuthService(db, settings).refresh(payload.refresh_token))
 
 
-@router.post("/token")
-def refresh_token(
-    payload: RefreshTokenRequest,
-    db: Session = Depends(get_db),
-    settings: Settings = Depends(get_request_settings),
-) -> dict:
-    return success_response(AuthService(db, settings).refresh_access_token(payload.refresh_token))
-
-
 @router.delete("/session", status_code=status.HTTP_204_NO_CONTENT)
 async def logout(
     current_user: User = Depends(get_current_user),
@@ -112,10 +103,10 @@ async def logout(
         current_user.id,
         close_code=4001,
         reason="logout",
-        payload=event_payload("force_logout", {"reason": "logout"}, msg_type="force_logout"),
+        payload=event_payload("force_logout", {"reason": "logout"}),
     )
     if became_offline:
-        await connection_manager.broadcast_json(event_payload("offline", {"user_id": current_user.id}, msg_type="offline"))
+        await connection_manager.broadcast_json(event_payload("offline", {"user_id": current_user.id}))
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
