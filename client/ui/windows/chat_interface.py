@@ -1,4 +1,4 @@
-"""Chat window container that keeps the new architecture but migrates old UI styling."""
+﻿"""Chat window container that keeps the new architecture but migrates old UI styling."""
 
 from __future__ import annotations
 
@@ -31,14 +31,14 @@ from client.core.i18n import tr
 from client.core.message_actions import should_offer_delete, should_offer_recall
 from client.events.event_bus import get_event_bus
 from client.managers.message_manager import MessageEvent
-from client.managers.session_manager import SessionEvent, get_session_manager
+from client.managers.session_manager import SessionEvent
 from client.models.message import MessageStatus, MessageType, format_message_preview
 from client.ui.controllers.auth_controller import get_auth_controller
 from client.ui.controllers.chat_controller import get_chat_controller
-from client.ui.controllers.contact_controller import ContactRecord, get_contact_controller
+from client.ui.controllers.contact_controller import get_contact_controller
 from client.ui.controllers.session_controller import get_session_controller
 from client.ui.styles import StyleSheet
-from client.ui.windows.contact_interface import StartGroupChatDialog
+from client.ui.windows.chat_group_flow import ChatGroupFlowCoordinator
 from client.ui.widgets.chat_panel import ChatPanel
 from client.ui.widgets.fluent_splitter import FluentSplitter
 from client.ui.widgets.screenshot_overlay import ScreenshotOverlay
@@ -243,6 +243,15 @@ class ChatInterface(QWidget):
         self._typing_indicator_timer.setSingleShot(True)
 
         self._setup_ui()
+        self._group_flow = ChatGroupFlowCoordinator(
+            auth_controller=self._auth_controller,
+            contact_controller=self._contact_controller,
+            dialog_refs=self._dialog_refs,
+            window_provider=self.window,
+            schedule_ui_task=self._schedule_ui_task,
+            close_chat_info_drawer=lambda: self.chat_panel.close_chat_info_drawer(immediate=True),
+            open_group_session=self.open_group_session,
+        )
         self._typing_indicator_timer.timeout.connect(self.chat_panel.hide_typing_indicator)
         self._connect_signals()
         self._subscribe_to_events()
@@ -1224,7 +1233,7 @@ class ChatInterface(QWidget):
             return
 
         self._schedule_ui_task(
-            self._show_start_group_dialog(session),
+            self._group_flow.show_start_group_dialog(session),
             f"start group chat selector {session.session_id}",
         )
 
@@ -1241,15 +1250,10 @@ class ChatInterface(QWidget):
         )
 
     def _on_chat_info_mute_toggled(self, muted: bool) -> None:
-        """Persist local do-not-disturb state for the current session."""
+        """Route local do-not-disturb changes through the session controller only."""
         session_id = self._current_session_id
         if not session_id:
             return
-
-        session = self._get_session(session_id)
-        if session is not None:
-            session.extra["is_muted"] = bool(muted)
-            self._event_bus.emit_sync(SessionEvent.UPDATED, {"session": session})
 
         self._schedule_ui_task(
             self._session_controller.set_muted(session_id, muted),
@@ -1257,16 +1261,10 @@ class ChatInterface(QWidget):
         )
 
     def _on_chat_info_pin_toggled(self, pinned: bool) -> None:
-        """Persist pin state for the current session."""
+        """Route pin changes through the session controller only."""
         session_id = self._current_session_id
         if not session_id:
             return
-
-        session = self._get_session(session_id)
-        if session is not None:
-            setattr(session, "is_pinned", bool(pinned))
-            session.extra["is_pinned"] = bool(pinned)
-            self._event_bus.emit_sync(SessionEvent.UPDATED, {"session": session})
 
         self._schedule_ui_task(
             self._session_controller.set_pinned(session_id, pinned),
@@ -1276,132 +1274,6 @@ class ChatInterface(QWidget):
     def close_transient_panels(self) -> None:
         """Close floating transient UI owned by the chat page."""
         self.chat_panel.close_chat_info_drawer(immediate=True)
-
-    async def _show_start_group_dialog(self, session) -> None:
-        """Load contacts and open the frameless modal used to start one new group chat."""
-        counterpart_id = self._resolve_counterpart_id(session)
-        if not counterpart_id:
-            InfoBar.warning(
-                tr("chat.group_picker.title", "Start Group Chat"),
-                tr("chat.group_picker.no_counterpart", "Unable to resolve the current private chat participant."),
-                parent=self.window(),
-                duration=2200,
-            )
-            return
-
-        try:
-            contacts = await self._contact_controller.load_contacts()
-        except Exception as exc:
-            InfoBar.error(
-                tr("chat.group_picker.title", "Start Group Chat"),
-                str(exc) or tr("chat.group_picker.load_failed", "Unable to load contacts right now."),
-                parent=self.window(),
-                duration=2200,
-            )
-            return
-
-        contacts = self._merge_group_picker_contacts(contacts, session, counterpart_id)
-        if not contacts:
-            InfoBar.info(
-                tr("chat.group_picker.title", "Start Group Chat"),
-                tr("chat.group_picker.no_contacts", "There are no additional contacts available to add."),
-                parent=self.window(),
-                duration=2200,
-            )
-            return
-
-        dialog = StartGroupChatDialog(
-            self._contact_controller,
-            contacts,
-            excluded_contact_id=counterpart_id,
-            parent=self.window(),
-        )
-        dialog.group_created.connect(self._on_group_chat_created)
-        self._show_dialog(dialog)
-
-    def _resolve_counterpart_id(self, session) -> str:
-        """Resolve the other participant id for the current direct chat."""
-        extra = dict(getattr(session, "extra", {}) or {})
-        counterpart_id = str(extra.get("counterpart_id", "") or "").strip()
-        if counterpart_id:
-            return counterpart_id
-
-        current_user = self._auth_controller.current_user or {}
-        current_user_id = str(current_user.get("id", "") or "")
-        for participant_id in getattr(session, "participant_ids", []) or []:
-            normalized_id = str(participant_id or "").strip()
-            if not normalized_id or normalized_id == current_user_id:
-                continue
-            return normalized_id
-        return ""
-
-    def _merge_group_picker_contacts(
-        self,
-        contacts: list[ContactRecord],
-        session,
-        counterpart_id: str,
-    ) -> list[ContactRecord]:
-        """Return deduplicated friends excluding the active private-chat participant."""
-        deduped: dict[str, ContactRecord] = {}
-        for contact in contacts:
-            if contact.id and contact.id != counterpart_id:
-                deduped[contact.id] = contact
-
-        return sorted(
-            deduped.values(),
-            key=lambda item: item.display_name.lower(),
-        )
-
-    def _show_dialog(self, dialog: QDialog) -> None:
-        """Keep one non-blocking modal dialog alive while it is visible."""
-        self._dialog_refs.add(dialog)
-        dialog.finished.connect(lambda _result=0, dlg=dialog: self._dialog_refs.discard(dlg))
-        dialog.finished.connect(dialog.deleteLater)
-        dialog.open()
-        dialog.raise_()
-        dialog.activateWindow()
-
-    def _on_group_chat_created(self, group: object) -> None:
-        """Jump from the current private chat into the newly created group."""
-        self.chat_panel.close_chat_info_drawer(immediate=True)
-        session_id = str(getattr(group, "session_id", "") or "")
-        if not session_id:
-            InfoBar.warning(
-                tr("chat.group_picker.title", "Start Group Chat"),
-                tr("main_window.contact_jump.unavailable_message", "Unable to open this conversation right now."),
-                parent=self.window(),
-                duration=2200,
-            )
-            return
-
-        self._schedule_ui_task(
-            self._open_created_group_session(group),
-            f"open created group {session_id}",
-        )
-
-    async def _open_created_group_session(self, group: object) -> None:
-        """Open the freshly created group session and report failures."""
-        session_id = str(getattr(group, "session_id", "") or "")
-        opened = await self.open_group_session(session_id)
-        if opened:
-            session = self.get_session(session_id)
-            avatar = str(getattr(group, "avatar", "") or getattr(group, "extra", {}).get("avatar", "") or "")
-            member_preview = list(getattr(group, "extra", {}).get("member_preview") or [])
-            if session and avatar:
-                session.avatar = avatar
-                session.extra["member_preview"] = member_preview
-                await get_session_manager().update_session(session_id, avatar=avatar, extra=session.extra)
-                self.session_panel.update_session(session_id, avatar=avatar)
-                if self._current_session_id == session_id:
-                    self.chat_panel.set_session(session)
-            return
-
-        InfoBar.warning(
-            tr("chat.group_picker.title", "Start Group Chat"),
-            tr("main_window.contact_jump.unavailable_message", "Unable to open this conversation right now."),
-            parent=self.window(),
-            duration=2200,
-        )
 
     async def _send_file_message(self, session_id: str, file_path: str) -> None:
         """Upload and send a file via ChatController."""
@@ -1817,6 +1689,8 @@ class ChatInterface(QWidget):
             return False
 
         return self.focus_session(session.session_id)
+
+
 
 
 

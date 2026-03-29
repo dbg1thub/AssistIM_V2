@@ -13,8 +13,9 @@ from app.models.user import User
 from app.schemas.message import MessageCreate, MessageReadBatch, MessageUpdate
 from app.services.message_service import MessageService
 from app.utils.response import success_response
-from app.utils.time import ensure_utc, utcnow
+from app.utils.time import ensure_utc
 from app.websocket.manager import connection_manager
+from app.websocket.payloads import read_broadcast_payload, ws_message
 
 
 router = APIRouter()
@@ -27,32 +28,6 @@ def _parse_before(value: str | None) -> datetime | None:
         return ensure_utc(datetime.fromisoformat(value))
     except ValueError:
         return datetime.fromtimestamp(float(value), tz=UTC)
-
-
-def _ws_message(
-    msg_type: str,
-    data: dict,
-    msg_id: str | None = None,
-    seq: int = 0,
-) -> dict:
-    return {
-        "type": msg_type,
-        "seq": int(seq or 0),
-        "msg_id": msg_id or "",
-        "timestamp": int(utcnow().timestamp()),
-        "data": data,
-    }
-
-
-def _read_broadcast_payload(data: dict) -> dict:
-    return {
-        "session_id": data.get("session_id", ""),
-        "message_id": data.get("message_id", ""),
-        "last_read_seq": int(data.get("last_read_seq", 0) or 0),
-        "user_id": data.get("user_id", ""),
-        "read_at": data.get("read_at"),
-        "event_seq": int(data.get("event_seq", 0) or 0),
-    }
 
 
 @router.get("/messages/unread")
@@ -68,9 +43,9 @@ async def read_message_batch(payload: MessageReadBatch, current_user: User = Dep
         member_ids = service.get_session_member_ids(data["session_id"], current_user.id)
         await connection_manager.send_json_to_users(
             member_ids,
-            _ws_message(
+            ws_message(
                 "read",
-                _read_broadcast_payload(data),
+                read_broadcast_payload(data),
                 msg_id=data.get("message_id", ""),
                 seq=int(data.get("event_seq", 0) or 0),
             ),
@@ -119,7 +94,7 @@ async def edit_message(
     member_ids = service.get_session_member_ids(data["session_id"], current_user.id)
     await connection_manager.send_json_to_users(
         member_ids,
-        _ws_message(
+        ws_message(
             "message_edit",
             data,
             msg_id=data["message_id"],
@@ -136,7 +111,7 @@ async def recall_message(message_id: str, current_user: User = Depends(get_curre
     member_ids = service.get_session_member_ids(data["session_id"], current_user.id)
     await connection_manager.send_json_to_users(
         member_ids,
-        _ws_message(
+        ws_message(
             "message_recall",
             data,
             msg_id=data["message_id"],
@@ -153,7 +128,7 @@ async def delete_message(message_id: str, current_user: User = Depends(get_curre
     member_ids = service.get_session_member_ids(data["session_id"], current_user.id)
     await connection_manager.send_json_to_users(
         member_ids,
-        _ws_message(
+        ws_message(
             "message_delete",
             data,
             msg_id=data["message_id"],

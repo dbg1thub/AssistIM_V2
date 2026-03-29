@@ -1,4 +1,4 @@
-"""User schemas."""
+﻿"""User schemas."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import re
 from datetime import date
 from typing import ClassVar
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.schemas.common import ORMModel
 
@@ -16,6 +16,7 @@ class UserOut(ORMModel):
     username: str
     nickname: str
     avatar: str | None = None
+    avatar_kind: str = "default"
     email: str | None = None
     phone: str | None = None
     birthday: date | None = None
@@ -26,13 +27,13 @@ class UserOut(ORMModel):
 
 
 class UserUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra='forbid')
     _EMAIL_PATTERN: ClassVar[re.Pattern[str]] = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
     _PHONE_PATTERN: ClassVar[re.Pattern[str]] = re.compile(r"^\+?[0-9][0-9()\-\.\s]{5,31}$")
     _GENDER_VALUES: ClassVar[set[str]] = {"female", "male", "non_binary", "other"}
     _STATUS_VALUES: ClassVar[set[str]] = {"online", "busy", "away", "invisible", "offline"}
 
     nickname: str | None = Field(default=None, min_length=1, max_length=64)
-    avatar: str | None = Field(default=None, max_length=512)
     email: str | None = Field(default=None, max_length=255)
     phone: str | None = Field(default=None, max_length=32)
     birthday: date | None = None
@@ -41,14 +42,14 @@ class UserUpdateRequest(BaseModel):
     gender: str | None = Field(default=None, max_length=32)
     status: str | None = Field(default=None, max_length=32)
 
-    @field_validator("nickname", "avatar", "email", "phone", "region", "signature", "gender", "status", mode="before")
+    @field_validator("nickname", "email", "phone", "region", "signature", "gender", "status", mode="before")
     @classmethod
     def _strip_string_fields(cls, value):
         if isinstance(value, str):
             return value.strip()
         return value
 
-    @field_validator("avatar", "email", "phone", "region", "signature", "gender", mode="before")
+    @field_validator("email", "phone", "region", "signature", "gender", mode="before")
     @classmethod
     def _empty_string_to_none(cls, value):
         if isinstance(value, str) and not value.strip():
@@ -99,3 +100,5 @@ class UserUpdateRequest(BaseModel):
         if normalized not in cls._STATUS_VALUES:
             raise ValueError("invalid status value")
         return normalized
+
+

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import time
 from datetime import datetime
 from typing import Optional
 
@@ -12,7 +11,7 @@ from PySide6.QtCore import QEvent, QItemSelectionModel, QSortFilterProxyModel, Q
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import QAbstractItemView, QDialog, QFrame, QHBoxLayout, QListView, QSizePolicy, QVBoxLayout, QWidget
 
-from qfluentwidgets import Action, BodyLabel, MessageBoxBase, RoundMenu, ScrollBarHandleDisplayMode, SearchLineEdit, SubtitleLabel, ToolButton
+from qfluentwidgets import Action, BodyLabel, InfoBar, MessageBoxBase, RoundMenu, ScrollBarHandleDisplayMode, SearchLineEdit, SubtitleLabel, ToolButton
 from qfluentwidgets.components.widgets.scroll_bar import SmoothScrollDelegate
 
 from client.core.app_icons import AppIcon
@@ -77,7 +76,7 @@ class SessionFilterProxyModel(QSortFilterProxyModel):
         if not session:
             return False
 
-        name = (session.name or "").lower()
+        name = (session.display_name() or "").lower()
         preview = (session.last_message or "").lower()
         draft_preview = (getattr(session, "draft_preview", "") or "").lower()
         return self._filter_text in name or self._filter_text in preview or self._filter_text in draft_preview
@@ -498,46 +497,21 @@ class SessionPanel(QWidget):
         menu.exec(self.session_list.viewport().mapToGlobal(position))
 
     def _trigger_session_delete(self, session_id: str) -> None:
-        """Delete a session locally first, then persist the removal."""
+        """Request session removal and wait for manager-driven deletion updates."""
         session = self._session_model.get_session_by_id(session_id) if self._session_model else None
-        session_name = getattr(session, "name", "") if session else ""
+        session_name = session.display_name() if session else ""
         dialog = DeleteSessionConfirmDialog(session_name, self.window())
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
 
-        self._remove_session_safe(session_id)
         self._schedule_ui_task(self._session_controller.remove_session(session_id), f"delete session {session_id}")
 
     def _toggle_session_pin_local(self, session_id: str, pinned: bool) -> None:
-        """Apply pin state immediately in the list, then persist asynchronously."""
-        selected_session_id = self._current_selected_session_id()
-        if self._session_model:
-            pinned_at = time.time() if pinned else None
-            self._session_model.set_pinned(session_id, pinned, pinned_at=pinned_at)
-            session = self._session_model.get_session_by_id(session_id)
-            if session is not None:
-                self._event_bus.emit_sync(SessionEvent.UPDATED, {"session": session})
-        self._sessions_snapshot = None
-        if selected_session_id:
-            self.select_session(selected_session_id, emit_signal=False)
+        """Delegate pin state changes to the controller/manager chain only."""
         self._schedule_ui_task(self._session_controller.set_pinned(session_id, pinned), f"toggle pin {session_id}")
 
     def _toggle_session_mute_local(self, session_id: str, muted: bool) -> None:
-        """Apply mute state immediately in the list, then persist asynchronously."""
-        if not self._session_model:
-            return
-
-        session = self._session_model.get_session_by_id(session_id)
-        if session is None:
-            return
-
-        extra = dict(session.extra or {})
-        extra["is_muted"] = bool(muted)
-        self._sessions_snapshot = None
-        self._session_model.update_session(session_id, extra=extra)
-        updated = self._session_model.get_session_by_id(session_id)
-        if updated is not None:
-            self._event_bus.emit_sync(SessionEvent.UPDATED, {"session": updated})
+        """Delegate mute state changes to the controller/manager chain only."""
         self._schedule_ui_task(self._session_controller.set_muted(session_id, muted), f"toggle mute {session_id}")
 
     def _current_selected_session_id(self) -> str | None:
@@ -578,15 +552,20 @@ class SessionPanel(QWidget):
         self._ui_tasks.discard(task)
         self._log_ui_task_result(task, context)
 
-    @staticmethod
-    def _log_ui_task_result(task: asyncio.Task, context: str) -> None:
-        """Log background task failures from session-menu actions."""
+    def _log_ui_task_result(self, task: asyncio.Task, context: str) -> None:
+        """Log background task failures from session-menu actions and surface one visible error."""
         try:
             task.result()
         except asyncio.CancelledError:
             return
         except Exception:
             logger.exception("Session menu task failed: %s", context)
+            InfoBar.error(
+                tr("session.action.failed.title", "Session Action Failed"),
+                tr("session.action.failed.content", "Unable to complete the latest session action."),
+                parent=self.window(),
+                duration=2200,
+            )
 
     def clear_search(self) -> None:
         """Reset the shared sidebar search state."""
@@ -634,7 +613,7 @@ class SessionPanel(QWidget):
         return tuple(
             (
                 session.session_id,
-                session.name,
+                session.display_name(),
                 session.last_message,
                 normalize_timestamp(session.last_message_time),
                 session.unread_count,

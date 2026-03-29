@@ -1,4 +1,4 @@
-"""Group repository."""
+﻿"""Group repository."""
 
 from __future__ import annotations
 
@@ -15,8 +15,25 @@ class GroupRepository:
     def __init__(self, db: Session) -> None:
         self.db = db
 
-    def create(self, name: str, owner_id: str, session_id: str, *, commit: bool = True) -> Group:
-        group = Group(name=name, owner_id=owner_id, session_id=session_id)
+    def create(
+        self,
+        name: str,
+        owner_id: str,
+        session_id: str,
+        *,
+        avatar_kind: str = "generated",
+        avatar_file_id: str | None = None,
+        avatar_version: int = 1,
+        commit: bool = True,
+    ) -> Group:
+        group = Group(
+            name=name,
+            owner_id=owner_id,
+            session_id=session_id,
+            avatar_kind=avatar_kind,
+            avatar_file_id=avatar_file_id,
+            avatar_version=max(1, int(avatar_version or 1)),
+        )
         self.db.add(group)
         self.db.flush()
         if commit:
@@ -84,6 +101,25 @@ class GroupRepository:
             self.db.commit()
             self.db.refresh(member)
         return member
+
+    def update_avatar_state(
+        self,
+        group: Group,
+        *,
+        avatar_kind: str,
+        avatar_file_id: str | None,
+        avatar_version: int,
+        commit: bool = True,
+    ) -> Group:
+        group.avatar_kind = avatar_kind
+        group.avatar_file_id = avatar_file_id
+        group.avatar_version = max(1, int(avatar_version or 1))
+        self.db.add(group)
+        self.db.flush()
+        if commit:
+            self.db.commit()
+            self.db.refresh(group)
+        return group
 
     def remove_member(self, group_id: str, user_id: str, *, commit: bool = True) -> bool:
         member = self.get_member(group_id, user_id)

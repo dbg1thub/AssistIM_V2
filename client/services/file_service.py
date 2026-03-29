@@ -1,4 +1,4 @@
-"""File Service Module.
+﻿"""File Service Module.
 
 Centralized file-upload boundary used by chat/media/profile flows.
 """
@@ -19,9 +19,10 @@ logger = logging.get_logger(__name__)
 
 
 class FileService:
-    """Encapsulate file upload operations behind a reusable service boundary."""
+    """Encapsulate file upload operations behind explicit service boundaries."""
 
     DEFAULT_UPLOAD_PATH = "/files/upload"
+    PROFILE_AVATAR_UPLOAD_PATH = "/users/me/avatar"
 
     def __init__(self) -> None:
         self._http = get_http_client()
@@ -40,7 +41,7 @@ class FileService:
             raise ServerError("Upload response must be a JSON object")
 
         normalized = dict(payload)
-        file_url = str(normalized.get("url") or normalized.get("file_url") or "")
+        file_url = str(normalized.get("url") or normalized.get("file_url") or normalized.get("avatar") or "")
         if not file_url:
             logger.error("Upload response missing url for %s: %r", file_path, payload)
             raise ServerError("Upload response missing url")
@@ -98,9 +99,25 @@ class FileService:
         """Upload one chat attachment using the standard file endpoint."""
         return await self.upload_file(file_path)
 
-    async def upload_avatar(self, file_path: str) -> dict[str, Any]:
-        """Upload one profile avatar using the standard file endpoint."""
-        return await self.upload_file(file_path)
+    async def upload_profile_avatar(self, file_path: str) -> dict[str, Any]:
+        """Upload one profile avatar using the dedicated avatar endpoint."""
+        payload = await self._http.upload_file(file_path, upload_path=self.PROFILE_AVATAR_UPLOAD_PATH)
+        if not isinstance(payload, dict):
+            logger.error("Avatar upload response must be a JSON object for %s: %r", file_path, payload)
+            raise ServerError("Avatar upload response must be a JSON object")
+        avatar_url = str(payload.get("avatar") or "")
+        if not avatar_url:
+            logger.error("Avatar upload response missing avatar for %s: %r", file_path, payload)
+            raise ServerError("Avatar upload response missing avatar")
+        return dict(payload)
+
+    async def reset_profile_avatar(self) -> dict[str, Any]:
+        """Reset the current user's avatar to the server-assigned default avatar."""
+        payload = await self._http.delete(self.PROFILE_AVATAR_UPLOAD_PATH)
+        if not isinstance(payload, dict):
+            logger.error("Avatar reset response must be a JSON object: %r", payload)
+            raise ServerError("Avatar reset response must be a JSON object")
+        return dict(payload)
 
 
 _file_service: Optional[FileService] = None
@@ -112,3 +129,4 @@ def get_file_service() -> FileService:
     if _file_service is None:
         _file_service = FileService()
     return _file_service
+

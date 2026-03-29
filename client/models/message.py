@@ -454,7 +454,139 @@ class Session:
     def clear_unread(self) -> None:
         """Clear unread count."""
         self.unread_count = 0
-    
+
+    def display_avatar(self) -> Optional[str]:
+        """Return the UI avatar source without mutating the stored session avatar semantics."""
+        if self.session_type == "direct" and not self.is_ai_session:
+            return str(self.extra.get("counterpart_avatar") or self.avatar or "") or None
+        return self.avatar
+
+    def display_gender(self) -> str:
+        """Return the UI gender hint for avatar fallback rendering."""
+        if self.session_type == "direct" and not self.is_ai_session:
+            return str(self.extra.get("counterpart_gender") or self.extra.get("gender") or "")
+        return str(self.extra.get("gender") or "")
+
+    def display_avatar_seed(self) -> str:
+        """Return the UI seed for deterministic avatar fallback rendering."""
+        return str(self.extra.get("avatar_seed") or self.session_id or "")
+
+    @staticmethod
+    def _preferred_member_name(member: dict[str, Any]) -> str:
+        """Resolve one stable member display name for group-derived presentation."""
+        return (
+            str(member.get("remark", "") or "").strip()
+            or str(member.get("group_nickname", "") or "").strip()
+            or str(member.get("nickname", "") or "").strip()
+            or str(member.get("display_name", "") or "").strip()
+            or str(member.get("username", "") or "").strip()
+            or str(member.get("id", "") or "").strip()
+        )
+
+    def has_custom_group_name(self) -> bool:
+        """Return whether this group uses an explicit server-side name instead of member-derived naming."""
+        if self.session_type != "group" or self.is_ai_session:
+            return True
+        explicit_name = str(self.extra.get("server_name", self.name) or "").strip()
+        if not explicit_name:
+            return False
+
+        names = self._group_display_names(limit=3)
+        if not names:
+            return True
+
+        joined = "、".join(names)
+        generated_names = {joined}
+        if self.group_member_count() > 3:
+            generated_names.add(joined + "...")
+            generated_names.add(joined + "…")
+        return explicit_name not in generated_names
+
+    def group_member_count(self) -> int:
+        """Return the best available member count for a group session."""
+        raw_count = self.extra.get("member_count")
+        try:
+            normalized_count = int(raw_count or 0)
+        except (TypeError, ValueError):
+            normalized_count = 0
+        if normalized_count > 0:
+            return normalized_count
+        members = list(self.extra.get("members") or [])
+        if members:
+            return len(members)
+        return len([item for item in self.participant_ids if str(item or "").strip()])
+
+    def _group_display_names(self, *, limit: int) -> list[str]:
+        """Return group member display names for default naming, excluding the current user when possible."""
+        members = list(self.extra.get("members") or [])
+        if not members:
+            return []
+
+        current_user_id = str(self.extra.get("current_user_id", "") or "").strip()
+
+        def collect(include_current_user: bool) -> list[str]:
+            names: list[str] = []
+            seen: set[str] = set()
+            for member in members:
+                member_id = str(member.get("id", "") or "").strip()
+                if not include_current_user and current_user_id and member_id == current_user_id:
+                    continue
+                name = self._preferred_member_name(member)
+                if not name or name in seen:
+                    continue
+                seen.add(name)
+                names.append(name)
+                if len(names) >= limit:
+                    break
+            return names
+
+        names = collect(include_current_user=False)
+        if names:
+            return names
+        return collect(include_current_user=True)
+
+    def display_name(self) -> str:
+        """Return the list/header display name without mutating the persisted session name."""
+        explicit_name = str(self.extra.get("server_name", self.name) or "").strip()
+        if self.session_type != "group" or self.is_ai_session or explicit_name:
+            return explicit_name or str(self.name or "").strip()
+
+        names = self._group_display_names(limit=3)
+        if not names:
+            return str(self.name or "").strip()
+
+        joined = "、".join(names)
+        return joined if self.group_member_count() <= 3 else joined + "..."
+
+    def chat_title(self) -> str:
+        """Return the chat-header title, including member count for default-named groups."""
+        display_name = self.display_name()
+        if self.session_type != "group" or self.is_ai_session or self.has_custom_group_name():
+            return display_name
+
+        names = self._group_display_names(limit=3)
+        if not names:
+            return display_name
+
+        member_count = self.group_member_count()
+        title = "、".join(names)
+        return f"{title}（{member_count}）" if member_count > 0 else title
+
+    def preview_sender_name(self) -> str:
+        """Return the sender name prefix for group-session preview rows."""
+        if self.session_type != "group" or self.is_ai_session:
+            return ""
+
+        sender_id = str(self.extra.get("last_message_sender_id", "") or "").strip()
+        if not sender_id:
+            return ""
+
+        for member in list(self.extra.get("members") or []):
+            if str(member.get("id", "") or "").strip() != sender_id:
+                continue
+            return self._preferred_member_name(member) or sender_id
+        return sender_id
+
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary."""
         return {
@@ -566,6 +698,7 @@ class AISession:
             max_tokens=data.get("max_tokens", 2048),
             context_messages=data.get("context_messages", 10),
         )
+
 
 
 

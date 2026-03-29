@@ -14,6 +14,8 @@ from app.models.session import SessionEvent
 from app.models.user import User
 from app.repositories.message_repo import MessageIdConflictError, MessageRepository
 from app.repositories.session_repo import SessionRepository
+from app.repositories.user_repo import UserRepository
+from app.services.avatar_service import AvatarService
 from app.utils.time import ensure_utc, isoformat_utc, utcnow
 
 
@@ -25,6 +27,8 @@ class MessageService:
         self.db = db
         self.messages = MessageRepository(db)
         self.sessions = SessionRepository(db)
+        self.users = UserRepository(db)
+        self.avatars = AvatarService(db)
 
     def list_messages(
         self,
@@ -317,24 +321,58 @@ class MessageService:
         return message.content
 
     def _serialize_messages(self, messages: list, current_user_id: str) -> list[dict]:
+        session_ids = {message.session_id for message in messages}
         session_members_by_session = {
             session_id: self._load_session_members(session_id)
-            for session_id in {message.session_id for message in messages}
+            for session_id in session_ids
         }
+        session_metadata_by_session = {
+            session_id: self._load_session_metadata(
+                session_id,
+                session_members=session_members_by_session.get(session_id, []),
+            )
+            for session_id in session_ids
+        }
+        sender_ids = sorted(
+            {
+                str(message.sender_id or "")
+                for message in messages
+                if str(message.sender_id or "")
+            }
+        )
+        sender_users_by_id = self.users.list_users_by_ids(sender_ids) if sender_ids else {}
         return [
             self.serialize_message(
                 message,
                 current_user_id,
                 session_members=session_members_by_session.get(message.session_id, []),
+                session_metadata=session_metadata_by_session.get(message.session_id),
+                sender_users_by_id=sender_users_by_id,
             )
             for message in messages
         ]
 
-    def serialize_message(self, message, current_user_id: str, session_members: list | None = None) -> dict:
+    def serialize_message(
+        self,
+        message,
+        current_user_id: str,
+        session_members: list | None = None,
+        session_metadata: dict[str, Any] | None = None,
+        sender_users_by_id: dict[str, User] | None = None,
+    ) -> dict:
         if session_members is None:
             session_members = self._load_session_members(message.session_id)
+        if session_metadata is None:
+            session_metadata = self._load_session_metadata(
+                message.session_id,
+                session_members=session_members,
+            )
         read_metadata = self._message_read_metadata(message, current_user_id, session_members)
         extra = self._message_extra(message, read_metadata)
+        sender_profile = self._serialize_sender_profile(
+            str(message.sender_id or ""),
+            users_by_id=sender_users_by_id,
+        )
         return {
             "message_id": message.id,
             "session_id": message.session_id,
@@ -347,12 +385,74 @@ class MessageService:
             "updated_at": isoformat_utc(message.updated_at),
             "is_self": message.sender_id == current_user_id,
             "is_ai": False,
+            "session_type": session_metadata.get("session_type", ""),
+            "session_name": session_metadata.get("session_name", ""),
+            "session_avatar": session_metadata.get("session_avatar"),
+            "participant_ids": session_metadata.get("participant_ids", []),
+            "is_ai_session": session_metadata.get("is_ai_session", False),
+            "sender_profile": sender_profile,
             "session_seq": read_metadata["session_seq"],
             "read_count": read_metadata["read_count"],
             "read_target_count": read_metadata["read_target_count"],
             "read_by_user_ids": read_metadata["read_by_user_ids"],
             "is_read_by_me": read_metadata["is_read_by_me"],
             "extra": extra,
+        }
+
+    def _load_session_metadata(
+        self,
+        session_id: str,
+        *,
+        session_members: list | None = None,
+    ) -> dict[str, Any]:
+        session = self.sessions.get_by_id(session_id)
+        if session is None:
+            return {
+                "session_type": "",
+                "session_name": "",
+                "session_avatar": None,
+                "participant_ids": [],
+                "is_ai_session": False,
+            }
+
+        members = session_members if session_members is not None else self._load_session_members(session_id)
+        normalized_session_type = "direct" if session.type == "private" else str(session.type or "")
+        participant_ids = list(dict.fromkeys(str(member.user_id or "") for member in members if str(member.user_id or "")))
+        return {
+            "session_type": normalized_session_type,
+            "session_name": str(session.name or ""),
+            "session_avatar": session.avatar,
+            "participant_ids": participant_ids,
+            "is_ai_session": bool(session.is_ai_session),
+        }
+
+    def _serialize_sender_profile(
+        self,
+        user_id: str,
+        *,
+        users_by_id: dict[str, User] | None = None,
+    ) -> dict[str, Any] | None:
+        normalized_user_id = str(user_id or "").strip()
+        if not normalized_user_id:
+            return None
+
+        user = (users_by_id or {}).get(normalized_user_id)
+        if user is None:
+            user = self.users.get_by_id(normalized_user_id)
+        if user is None:
+            return None
+
+        user = self.avatars.backfill_user_avatar_state(user)
+        nickname = str(user.nickname or "")
+        username = str(user.username or "")
+        return {
+            "id": user.id,
+            "username": username,
+            "nickname": nickname,
+            "display_name": nickname or username or user.id,
+            "avatar": self.avatars.resolve_user_avatar_url(user),
+            "avatar_kind": str(getattr(user, "avatar_kind", "") or ""),
+            "gender": str(user.gender or ""),
         }
 
     def _message_extra(self, message, read_metadata: dict[str, Any]) -> dict[str, Any]:
@@ -413,6 +513,11 @@ class MessageService:
     @staticmethod
     def _event_message_id(event_type: str, data: dict[str, Any]) -> str:
         return str(data.get("message_id") or "")
+
+
+
+
+
 
 
 

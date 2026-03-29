@@ -270,15 +270,6 @@ class ChatController:
             before_timestamp=before_timestamp,
         )
 
-    async def load_more_messages(
-        self,
-        session_id: str,
-        limit: int = 50,
-    ) -> list[ChatMessage]:
-        """Load older messages for a session."""
-        messages = await self._msg_manager.get_messages(session_id=session_id, limit=limit)
-        return list(reversed(messages))
-
     async def select_session(self, session_id: str) -> None:
         """Select a session."""
         await self._session_manager.select_session(session_id)

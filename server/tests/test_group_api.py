@@ -73,3 +73,33 @@ def test_group_owner_cannot_remove_self_without_transfer(client: TestClient, use
         headers=auth_header(owner["access_token"]),
     )
     assert remove_owner_response.status_code == 403
+
+def test_create_group_generates_server_managed_group_avatar(client: TestClient, user_factory, auth_header) -> None:
+    owner = user_factory("group-avatar-owner", "Owner")
+    member = user_factory("group-avatar-member", "Member")
+
+    response = client.post(
+        "/api/v1/groups",
+        json={"name": "Avatar Group", "member_ids": [member["user"]["id"]]},
+        headers=auth_header(owner["access_token"]),
+    )
+    assert response.status_code == 201
+    payload = response.json()["data"]
+    assert payload["avatar_kind"] == "generated"
+    assert payload["avatar"].startswith("/uploads/group_avatars/")
+
+
+def test_create_group_accepts_blank_name_for_default_naming(client: TestClient, user_factory, auth_header) -> None:
+    owner = user_factory("blank-group-owner", "Owner")
+    member = user_factory("blank-group-member", "Member")
+
+    response = client.post(
+        "/api/v1/groups",
+        json={"name": "", "member_ids": [member["user"]["id"]]},
+        headers=auth_header(owner["access_token"]),
+    )
+
+    assert response.status_code == 201
+    payload = response.json()["data"]
+    assert payload["name"] == ""
+    assert payload["member_count"] == 2

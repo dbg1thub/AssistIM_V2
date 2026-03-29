@@ -94,6 +94,7 @@ class AuthInterface(FluentWidget):
         self._busy_mode: Optional[str] = None
         self._centered_once = False
         self._transient_dialogs: set[QDialog] = set()
+        self.last_success_message = ""
 
         self._setup_ui()
         self._connect_signals()
@@ -480,12 +481,10 @@ class AuthInterface(FluentWidget):
             logger.exception("Unexpected login error")
             self._show_error(tr("auth.error.unexpected_sign_in", "Unexpected error while signing in."))
         else:
-            self._show_success(
-                tr(
-                    "auth.success.welcome_back",
-                    "Welcome back, {name}",
-                    name=user.get("nickname") or user.get("username", ""),
-                )
+            self.last_success_message = tr(
+                "auth.success.welcome_back",
+                "Welcome back, {name}",
+                name=user.get("nickname") or user.get("username", ""),
             )
             self.authenticated.emit(user)
             self.close()
@@ -530,12 +529,10 @@ class AuthInterface(FluentWidget):
             logger.exception("Unexpected registration error")
             self._show_error(tr("auth.error.unexpected_register", "Unexpected error while creating account."))
         else:
-            self._show_success(
-                tr(
-                    "auth.success.account_created",
-                    "Account created for {name}",
-                    name=user.get("nickname") or user.get("username", ""),
-                )
+            self.last_success_message = tr(
+                "auth.success.account_created",
+                "Account created for {name}",
+                name=user.get("nickname") or user.get("username", ""),
             )
             self.authenticated.emit(user)
             self.close()
@@ -545,8 +542,6 @@ class AuthInterface(FluentWidget):
     def _show_error(self, message: str) -> None:
         InfoBar.error(tr("auth.feedback.title", "Authentication"), message, parent=self.form_card)
 
-    def _show_success(self, message: str) -> None:
-        InfoBar.success(tr("auth.feedback.title", "Authentication"), message, parent=self.form_card)
 
     def showEvent(self, event: QShowEvent) -> None:
         super().showEvent(event)

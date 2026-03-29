@@ -1,4 +1,4 @@
-"""Authentication controller for login, registration, and session restore."""
+﻿"""Authentication controller for login, registration, and session restore."""
 
 from __future__ import annotations
 
@@ -124,8 +124,8 @@ class AuthController:
         self,
         *,
         nickname: str | None = None,
-        avatar: str | None = None,
         avatar_file_path: str | None = None,
+        reset_avatar: bool = False,
         email: str | None = None,
         phone: str | None = None,
         birthday: str | None = None,
@@ -135,16 +135,11 @@ class AuthController:
         status: str | None = None,
     ) -> dict[str, Any]:
         """Update the current user's profile and persist the refreshed auth context."""
-        resolved_avatar = avatar
-        if avatar_file_path:
-            upload_result = await self._file_service.upload_avatar(avatar_file_path)
-            resolved_avatar = str(upload_result["url"])
-
-        payload = {
+        user = dict(self._current_user or {})
+        profile_payload = {
             key: value
             for key, value in {
                 "nickname": nickname,
-                "avatar": resolved_avatar,
                 "email": email,
                 "phone": phone,
                 "birthday": birthday,
@@ -156,13 +151,21 @@ class AuthController:
             if value is not None
         }
 
-        if not payload:
-            return dict(self._current_user or {})
+        if profile_payload:
+            user = await self._user_service.update_me(profile_payload)
+            self._apply_runtime_context(user)
+            await self._persist_user_profile(user)
 
-        user = await self._user_service.update_me(payload)
-        self._apply_runtime_context(user)
-        await self._persist_user_profile(user)
-        return user
+        if avatar_file_path:
+            user = await self._file_service.upload_profile_avatar(avatar_file_path)
+            self._apply_runtime_context(user)
+            await self._persist_user_profile(user)
+        elif reset_avatar:
+            user = await self._file_service.reset_profile_avatar()
+            self._apply_runtime_context(user)
+            await self._persist_user_profile(user)
+
+        return dict(user or {})
 
     async def clear_session(self) -> None:
         self._cancel_pending_task(self._token_state_task)
@@ -354,3 +357,4 @@ def get_auth_controller() -> AuthController:
     if _auth_controller is None:
         _auth_controller = AuthController()
     return _auth_controller
+

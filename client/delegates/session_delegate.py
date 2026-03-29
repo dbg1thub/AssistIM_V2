@@ -104,7 +104,7 @@ class SessionDelegate(QStyledItemDelegate):
 
         name_available = max(0, content_width - time_width - unread_width - 18)
         name_text = name_fm.elidedText(
-            session.name or tr("session.unnamed", "Untitled Session"),
+            session.display_name() or tr("session.unnamed", "Untitled Session"),
             Qt.TextElideMode.ElideRight,
             name_available,
         )
@@ -212,7 +212,7 @@ class SessionDelegate(QStyledItemDelegate):
         painter.setClipPath(path)
 
         avatar_seed_value = (
-            getattr(session, "extra", {}).get("avatar_seed", "")
+            session.display_avatar_seed()
             or profile_avatar_seed(
                 user_id=getattr(session, "extra", {}).get("counterpart_id", ""),
                 username=getattr(session, "extra", {}).get("counterpart_username", ""),
@@ -221,8 +221,8 @@ class SessionDelegate(QStyledItemDelegate):
             )
         )
         _avatar_source, avatar_path = self._avatar_store.resolve_display_path(
-            getattr(session, "avatar", None),
-            gender=getattr(session, "extra", {}).get("gender", ""),
+            session.display_avatar(),
+            gender=session.display_gender(),
             seed=avatar_seed_value,
         )
 
@@ -245,7 +245,7 @@ class SessionDelegate(QStyledItemDelegate):
         painter.setClipping(False)
 
         if not avatar_path:
-            initial = (session.name or "?")[:1].upper()
+            initial = (session.display_name() or "?")[:1].upper()
             font = QFont()
             font.setPixelSize(18)
             font.setBold(True)
@@ -440,7 +440,11 @@ class SessionDelegate(QStyledItemDelegate):
         """Format preview text for media and file messages."""
         preview = session.last_message or tr("session.start_new", "Start a new conversation")
         message_type = session.extra.get("last_message_type") if getattr(session, "extra", None) else None
-        return format_message_preview(preview, message_type)
+        preview_text = format_message_preview(preview, message_type)
+        sender_name = session.preview_sender_name() if hasattr(session, "preview_sender_name") else ""
+        if sender_name and session.last_message:
+            return f"{sender_name}：{preview_text}"
+        return preview_text
 
     def _format_time(self, timestamp) -> str:
         """Format timestamp using the previous UI's Chinese-friendly style."""
@@ -449,4 +453,7 @@ class SessionDelegate(QStyledItemDelegate):
     def _normalize_datetime(self, value) -> datetime | None:
         """Normalize datetime values from model or storage."""
         return coerce_local_datetime(value)
+
+
+
 

@@ -1,4 +1,4 @@
-"""Quick user-profile flyout and profile actions for the main window."""
+﻿"""Quick user-profile flyout and profile actions for the main window."""
 
 from __future__ import annotations
 
@@ -132,6 +132,7 @@ class ProfileEditDialog(QDialog):
         super().__init__(parent)
         self._user = dict(user or {})
         self._avatar_file_path = ""
+        self._reset_avatar_requested = False
 
         self.setWindowTitle(tr("profile.edit.window_title", "Edit Profile"))
         self.setMinimumWidth(520)
@@ -149,7 +150,11 @@ class ProfileEditDialog(QDialog):
         )
         subtitle.setWordWrap(True)
 
-        seed = profile_avatar_seed(user_id=self._user.get("id"), username=self._user.get("username"), display_name=self._user.get("nickname"))
+        seed = profile_avatar_seed(
+            user_id=self._user.get("id"),
+            username=self._user.get("username"),
+            display_name=self._user.get("nickname"),
+        )
         self.avatar_preview = AvatarWidget(self)
         self.avatar_preview.setRadius(40)
         _set_avatar_widget(
@@ -167,7 +172,10 @@ class ProfileEditDialog(QDialog):
         avatar_actions.setSpacing(10)
         choose_button = PushButton(tr("profile.edit.avatar.choose", "Choose Avatar"), self)
         choose_button.clicked.connect(self._choose_avatar)
+        reset_button = PushButton(tr("profile.edit.avatar.reset", "Use Default Avatar"), self)
+        reset_button.clicked.connect(self._reset_avatar)
         avatar_actions.addWidget(choose_button, 0)
+        avatar_actions.addWidget(reset_button, 0)
         avatar_actions.addStretch(1)
 
         form = QFormLayout()
@@ -270,7 +278,7 @@ class ProfileEditDialog(QDialog):
         }:
             _apply_themed_dialog_surface(self, "ProfileEditDialog")
 
-    def profile_payload(self) -> dict[str, str | None]:
+    def profile_payload(self) -> dict[str, str | bool | None]:
         """Return dialog values after acceptance."""
         birthday_value = ""
         if self.birthday_edit.date() != _EMPTY_BIRTHDAY:
@@ -286,6 +294,7 @@ class ProfileEditDialog(QDialog):
             "gender": str(self.gender_combo.currentData() or ""),
             "status": str(self.status_combo.currentData() or "online"),
             "avatar_file_path": self._avatar_file_path,
+            "reset_avatar": self._reset_avatar_requested,
         }
 
     def _set_combo_value(self, combo: QComboBox, value: object) -> None:
@@ -308,7 +317,12 @@ class ProfileEditDialog(QDialog):
             return
 
         self._avatar_file_path = file_path
-        seed = profile_avatar_seed(user_id=self._user.get("id"), username=self._user.get("username"), display_name=self.nickname_edit.text().strip())
+        self._reset_avatar_requested = False
+        seed = profile_avatar_seed(
+            user_id=self._user.get("id"),
+            username=self._user.get("username"),
+            display_name=self.nickname_edit.text().strip(),
+        )
         _set_avatar_widget(
             self.avatar_preview,
             file_path,
@@ -317,6 +331,13 @@ class ProfileEditDialog(QDialog):
             seed=seed,
         )
         self.avatar_path_label.setText(os.path.basename(file_path))
+
+    def _reset_avatar(self) -> None:
+        self._avatar_file_path = ""
+        self._reset_avatar_requested = True
+        self.avatar_path_label.setText(
+            tr("profile.edit.avatar.reset_pending", "Will restore the server default avatar after saving")
+        )
 
     def _submit(self) -> None:
         if not self.nickname_edit.text().strip():
@@ -529,8 +550,9 @@ class UserProfileCoordinator(QWidget):
         self._close_flyout()
         self.request_logout()
 
-    async def _save_profile_async(self, payload: dict[str, str | None]) -> None:
+    async def _save_profile_async(self, payload: dict[str, str | bool | None]) -> None:
         avatar_file_path = str(payload.get("avatar_file_path", "") or "").strip()
+        reset_avatar = bool(payload.get("reset_avatar", False))
 
         try:
             user = await self._auth_controller.update_profile(
@@ -543,6 +565,7 @@ class UserProfileCoordinator(QWidget):
                 gender=normalize_profile_gender(payload.get("gender")),
                 status=str(payload.get("status", "") or "").strip(),
                 avatar_file_path=avatar_file_path or None,
+                reset_avatar=reset_avatar and not avatar_file_path,
             )
         except asyncio.CancelledError:
             raise
@@ -614,3 +637,7 @@ class UserProfileCoordinator(QWidget):
             if not task.done():
                 task.cancel()
         super().closeEvent(event)
+
+
+
+

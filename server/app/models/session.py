@@ -13,11 +13,15 @@ from app.utils.time import utcnow
 
 class ChatSession(IdMixin, TimestampMixin, Base):
     __tablename__ = "sessions"
+    __table_args__ = (
+        Index("idx_sessions_direct_key", "direct_key", unique=True),
+    )
 
     type: Mapped[str] = mapped_column(nullable=False, default="private")
     name: Mapped[str] = mapped_column(nullable=False, default="New Session")
     avatar: Mapped[str | None] = mapped_column(nullable=True)
     is_ai_session: Mapped[bool] = mapped_column(default=False)
+    direct_key: Mapped[str | None] = mapped_column(nullable=True)
     last_message_seq: Mapped[int] = mapped_column(nullable=False, default=0)
     last_event_seq: Mapped[int] = mapped_column(nullable=False, default=0)
 

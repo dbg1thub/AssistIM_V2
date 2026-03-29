@@ -57,12 +57,12 @@ Thumbs.db
 # demo 文件
 demo
 
-# cursor 规则
-.cursorrules
-
 # 临时文件
 tmp
 
-# 上传文件
-data/uploads
-data/video_thumbnail
+# 测试数据
+server/.testdata
+server/.testdata_manual
+client/tests/.pytest_tmp
+client/data/screenshots
+

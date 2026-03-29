@@ -1,4 +1,4 @@
-"""User service."""
+﻿"""User service."""
 
 from __future__ import annotations
 
@@ -7,21 +7,25 @@ from sqlalchemy.orm import Session
 from app.core.errors import AppError, ErrorCode
 from app.models.user import User
 from app.repositories.user_repo import UserRepository
+from app.services.avatar_service import AvatarService
 
 
 class UserService:
-    _NULLABLE_FIELDS = {"avatar", "email", "phone", "birthday", "region", "signature", "gender"}
+    _NULLABLE_FIELDS = {"email", "phone", "birthday", "region", "signature", "gender"}
 
     def __init__(self, db: Session) -> None:
+        self.db = db
         self.users = UserRepository(db)
+        self.avatars = AvatarService(db)
 
     def list_users(self) -> list[dict]:
-        return [self.serialize_user(user) for user in self.users.list_users()]
+        return [self.serialize_user(self.avatars.backfill_user_avatar_state(user)) for user in self.users.list_users()]
 
     def get_user(self, user_id: str) -> dict:
         user = self.users.get_by_id(user_id)
         if user is None:
             raise AppError(ErrorCode.USER_NOT_FOUND, "user not found", 404)
+        user = self.avatars.backfill_user_avatar_state(user)
         return self.serialize_user(user)
 
     def search_users(self, keyword: str, page: int = 1, size: int = 20) -> dict:
@@ -30,7 +34,7 @@ class UserService:
             "total": total,
             "page": page,
             "size": size,
-            "items": [self.serialize_user(user) for user in users],
+            "items": [self.serialize_user(self.avatars.backfill_user_avatar_state(user)) for user in users],
         }
 
     def update_me(self, current_user: User, **fields: object) -> dict:
@@ -41,6 +45,7 @@ class UserService:
             else:
                 normalized_fields[key] = value
         user = self.users.update(current_user, **normalized_fields)
+        user = self.avatars.backfill_user_avatar_state(user)
         return self.serialize_user(user)
 
     @staticmethod
@@ -50,6 +55,7 @@ class UserService:
             "username": user.username,
             "nickname": user.nickname,
             "avatar": user.avatar,
+            "avatar_kind": str(getattr(user, "avatar_kind", "default") or "default"),
             "email": user.email,
             "phone": user.phone,
             "birthday": user.birthday.isoformat() if user.birthday else None,

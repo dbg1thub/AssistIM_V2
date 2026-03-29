@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import sqlite3
 import sys
 import time
 import types
+from datetime import datetime
 from enum import Enum
 
 
@@ -101,20 +104,48 @@ if 'PySide6.QtCore' not in sys.modules:
 if 'aiosqlite' not in sys.modules:
     aiosqlite = types.ModuleType('aiosqlite')
 
+    class _Cursor:
+        def __init__(self, cursor: sqlite3.Cursor) -> None:
+            self._cursor = cursor
+            self.rowcount = cursor.rowcount
+
+        async def fetchone(self):
+            return self._cursor.fetchone()
+
+        async def fetchall(self):
+            return self._cursor.fetchall()
+
     class _DummyConnection:
-        row_factory = None
+        def __init__(self, path: str = ':memory:') -> None:
+            self._conn = sqlite3.connect(path)
+            self._row_factory = None
+
+        @property
+        def row_factory(self):
+            return self._row_factory
+
+        @row_factory.setter
+        def row_factory(self, value) -> None:
+            self._row_factory = value
+            self._conn.row_factory = value
+
+        async def execute(self, sql: str, params=()):
+            return _Cursor(self._conn.execute(sql, params))
+
+        async def executescript(self, script: str):
+            self._conn.executescript(script)
+
+        async def commit(self) -> None:
+            self._conn.commit()
 
         async def close(self):
-            return None
+            self._conn.close()
 
-    class _DummyRow(dict):
-        pass
-
-    async def _dummy_connect(*args, **kwargs):
-        return _DummyConnection()
+    async def _dummy_connect(path=':memory:', *args, **kwargs):
+        return _DummyConnection(path)
 
     aiosqlite.Connection = _DummyConnection
-    aiosqlite.Row = _DummyRow
+    aiosqlite.Row = sqlite3.Row
     aiosqlite.connect = _dummy_connect
     sys.modules['aiosqlite'] = aiosqlite
 if 'websockets' not in sys.modules:
@@ -239,6 +270,8 @@ if 'qfluentwidgets' not in sys.modules:
 
 from client.events.contact_events import ContactEvent
 from client.managers import message_manager as message_manager_module
+from client.managers import session_manager as session_manager_module
+from client.ui.controllers import chat_controller as chat_controller_module
 from client.models.message import ChatMessage, MessageStatus, MessageType
 
 
@@ -559,6 +592,46 @@ def test_message_manager_normalize_loaded_message_ignores_legacy_aliases(monkeyp
     asyncio.run(scenario())
 
 
+def test_message_manager_normalize_loaded_message_captures_authoritative_session_metadata(monkeypatch) -> None:
+    fake_event_bus = FakeEventBus()
+    fake_conn_manager = FakeConnectionManager([])
+    fake_db = FakeDatabase()
+
+    monkeypatch.setattr(message_manager_module, 'get_event_bus', lambda: fake_event_bus)
+    monkeypatch.setattr(message_manager_module, 'get_connection_manager', lambda: fake_conn_manager)
+    monkeypatch.setattr(message_manager_module, 'get_database', lambda: fake_db)
+
+    async def scenario() -> None:
+        manager = message_manager_module.MessageManager()
+        manager.set_user_id('alice')
+        await manager.initialize()
+        try:
+            message = manager._normalize_loaded_message(
+                {
+                    'message_id': 'm-1',
+                    'session_id': 'session-group-1',
+                    'sender_id': 'bob',
+                    'content': 'hello team',
+                    'message_type': 'text',
+                    'session_type': 'group',
+                    'session_name': 'Core Team',
+                    'session_avatar': '/uploads/team.png',
+                    'participant_ids': ['alice', 'bob', 'charlie', 'alice'],
+                    'is_ai_session': False,
+                }
+            )
+
+            assert message.extra['session_type'] == 'group'
+            assert message.extra['session_name'] == 'Core Team'
+            assert message.extra['session_avatar'] == '/uploads/team.png'
+            assert message.extra['participant_ids'] == ['alice', 'bob', 'charlie']
+            assert message.extra['is_ai_session'] is False
+        finally:
+            await manager.close()
+
+    asyncio.run(scenario())
+
+
 def test_message_manager_history_messages_deduplicates_by_canonical_message_id(monkeypatch) -> None:
     fake_event_bus = FakeEventBus()
     fake_conn_manager = FakeConnectionManager([])
@@ -766,5 +839,114 @@ def test_message_manager_ignores_legacy_read_event_message_id_alias(monkeypatch)
             )
         finally:
             await manager.close()
+
+    asyncio.run(scenario())
+
+
+def test_session_manager_build_fallback_group_session_uses_authoritative_metadata(monkeypatch) -> None:
+    class FakeSessionDatabase:
+        is_connected = True
+
+        async def get_app_state(self, key: str):
+            if key == 'auth.user_profile':
+                return json.dumps({'id': 'alice'})
+            if key == 'auth.user_id':
+                return 'alice'
+            return None
+
+    monkeypatch.setattr(session_manager_module, 'get_event_bus', lambda: FakeEventBus())
+    monkeypatch.setattr(session_manager_module, 'get_message_manager', lambda: object())
+    monkeypatch.setattr(session_manager_module, 'get_session_service', lambda: object())
+    monkeypatch.setattr(session_manager_module, 'get_database', lambda: FakeSessionDatabase())
+
+    async def scenario() -> None:
+        manager = session_manager_module.SessionManager()
+        session = await manager._build_fallback_session(
+            ChatMessage(
+                message_id='m-group-1',
+                session_id='session-group-1',
+                sender_id='bob',
+                content='group hello',
+                message_type=MessageType.TEXT,
+                status=MessageStatus.RECEIVED,
+                timestamp=datetime(2026, 3, 29, 9, 0, 0),
+                extra={
+                    'session_type': 'group',
+                    'session_name': 'Core Team',
+                    'session_avatar': '/uploads/core-team.png',
+                    'participant_ids': ['alice', 'bob', 'charlie'],
+                },
+            )
+        )
+
+        assert session is not None
+        assert session.session_type == 'group'
+        assert session.name == 'Core Team'
+        assert session.avatar == '/uploads/core-team.png'
+        assert session.participant_ids == ['alice', 'bob', 'charlie']
+
+    asyncio.run(scenario())
+
+
+def test_session_manager_skips_fallback_session_without_authoritative_session_type(monkeypatch) -> None:
+    class FakeSessionDatabase:
+        is_connected = True
+
+        async def get_app_state(self, key: str):
+            if key == 'auth.user_profile':
+                return json.dumps({'id': 'alice'})
+            if key == 'auth.user_id':
+                return 'alice'
+            return None
+
+    monkeypatch.setattr(session_manager_module, 'get_event_bus', lambda: FakeEventBus())
+    monkeypatch.setattr(session_manager_module, 'get_message_manager', lambda: object())
+    monkeypatch.setattr(session_manager_module, 'get_session_service', lambda: object())
+    monkeypatch.setattr(session_manager_module, 'get_database', lambda: FakeSessionDatabase())
+
+    async def scenario() -> None:
+        manager = session_manager_module.SessionManager()
+        session = await manager._build_fallback_session(
+            ChatMessage(
+                message_id='m-unknown-1',
+                session_id='session-unknown-1',
+                sender_id='bob',
+                content='hello',
+                message_type=MessageType.TEXT,
+                status=MessageStatus.RECEIVED,
+                timestamp=datetime(2026, 3, 29, 9, 5, 0),
+                extra={
+                    'sender_nickname': 'Bobby',
+                    'sender_avatar': '/uploads/bob.png',
+                },
+            )
+        )
+
+        assert session is None
+
+    asyncio.run(scenario())
+
+
+def test_chat_controller_load_messages_forwards_before_timestamp(monkeypatch) -> None:
+    class FakeBoundaryMessageManager:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, int, float | None]] = []
+
+        async def get_messages(self, session_id: str, limit: int = 50, before_timestamp=None):
+            self.calls.append((session_id, limit, before_timestamp))
+            return ['page']
+
+    fake_message_manager = FakeBoundaryMessageManager()
+
+    monkeypatch.setattr(chat_controller_module, 'get_message_manager', lambda: fake_message_manager)
+    monkeypatch.setattr(chat_controller_module, 'get_session_manager', lambda: object())
+    monkeypatch.setattr(chat_controller_module, 'get_file_service', lambda: object())
+
+    async def scenario() -> None:
+        controller = chat_controller_module.ChatController()
+        messages = await controller.load_messages('session-1', limit=20, before_timestamp=123.45)
+
+        assert messages == ['page']
+        assert fake_message_manager.calls == [('session-1', 20, 123.45)]
 
     asyncio.run(scenario())

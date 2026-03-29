@@ -58,7 +58,7 @@ class SessionModel(QAbstractListModel):
         session = self._sessions[row]
 
         if role == Qt.ItemDataRole.DisplayRole:
-            return session.name
+            return session.display_name()
         if role == Qt.ItemDataRole.UserRole:
             return session
         if role == self.SessionRole:
@@ -72,7 +72,7 @@ class SessionModel(QAbstractListModel):
         if role == self.IsPinnedRole:
             return getattr(session, 'is_pinned', False)
         if role == self.AvatarRole:
-            return session.avatar
+            return session.display_avatar()
         if role == Qt.ItemDataRole.TextAlignmentRole:
             return Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
 

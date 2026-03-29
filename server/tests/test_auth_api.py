@@ -243,3 +243,58 @@ def test_auth_login_requires_confirmation_before_replacing_online_session(client
         headers=auth_header(forced_payload["access_token"]),
     )
     assert fresh_me_response.status_code == 200
+
+
+def test_users_me_avatar_endpoints_replace_and_reset_avatar(client: TestClient, auth_header) -> None:
+    register_response = client.post(
+        "/api/v1/auth/register",
+        json={
+            "username": "avatar-user",
+            "password": "secret123",
+            "nickname": "Avatar User",
+        },
+    )
+    assert register_response.status_code == 200
+    payload = register_response.json()["data"]
+    access_token = payload["access_token"]
+    default_avatar = payload["user"]["avatar"]
+
+    upload_response = client.post(
+        "/api/v1/users/me/avatar",
+        headers=auth_header(access_token),
+        files={"file": ("avatar.png", b"not-a-real-png-but-valid-for-boundary-test", "image/png")},
+    )
+    assert upload_response.status_code == 200
+    upload_payload = upload_response.json()["data"]
+    assert upload_payload["avatar_kind"] == "custom"
+    assert upload_payload["avatar"] != default_avatar
+    assert upload_payload["avatar"].startswith("/uploads/")
+
+    reset_response = client.delete(
+        "/api/v1/users/me/avatar",
+        headers=auth_header(access_token),
+    )
+    assert reset_response.status_code == 200
+    reset_payload = reset_response.json()["data"]
+    assert reset_payload["avatar_kind"] == "default"
+    assert reset_payload["avatar"] == default_avatar
+
+
+def test_update_me_rejects_avatar_field_after_avatar_api_split(client: TestClient, auth_header) -> None:
+    register_response = client.post(
+        "/api/v1/auth/register",
+        json={
+            "username": "strict-avatar-user",
+            "password": "secret123",
+            "nickname": "Strict Avatar",
+        },
+    )
+    assert register_response.status_code == 200
+    access_token = register_response.json()["data"]["access_token"]
+
+    response = client.put(
+        "/api/v1/users/me",
+        headers=auth_header(access_token),
+        json={"avatar": "https://example.com/avatar.png"},
+    )
+    assert response.status_code == 422

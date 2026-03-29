@@ -1,4 +1,4 @@
-"""Contact interface built with qfluentwidgets."""
+﻿"""Contact interface built with qfluentwidgets."""
 
 from __future__ import annotations
 
@@ -22,12 +22,10 @@ from qfluentwidgets import (
     PushButton,
     ScrollArea,
     SearchLineEdit,
-    SingleDirectionScrollArea,
     SegmentedWidget,
     SubtitleLabel,
     ToolButton,
     TitleLabel,
-    MaskDialogBase,
     isDarkTheme,
 )
 from qframelesswindow.titlebar import CloseButton
@@ -35,9 +33,7 @@ from shiboken6 import isValid as is_valid_qt_object
 
 from client.core.app_icons import AppIcon
 from client.core import logging
-from client.core.group_avatar import build_group_avatar_path
-from client.core.avatar_rendering import get_avatar_image_store
-from client.core.avatar_utils import avatar_seed, profile_avatar_seed
+from client.core.avatar_utils import profile_avatar_seed
 from client.core.exceptions import APIError, NetworkError
 from client.core.i18n import format_relative_time, tr
 from client.core.profile_fields import format_profile_birthday, localize_profile_gender, localize_profile_status
@@ -45,7 +41,6 @@ from client.core.logging import setup_logging
 from client.events.contact_events import ContactEvent
 from client.events.event_bus import get_event_bus
 from client.managers.search_manager import search_all
-from client.ui.controllers.auth_controller import get_auth_controller
 from client.ui.controllers.contact_controller import (
     ContactRecord,
     FriendRequestRecord,
@@ -60,49 +55,26 @@ from client.ui.styles import StyleSheet
 from client.ui.widgets.chat_info_drawer import AcrylicDrawerSurface
 from client.ui.widgets.global_search_panel import GlobalSearchPopupOverlay
 from client.ui.widgets.fluent_divider import FluentDivider
-from client.ui.widgets.fluent_splitter import FluentSplitter
+from client.ui.widgets.contact_shared import (
+    CONTACT_SIDEBAR_AVATAR_SIZE,
+    CONTACT_SIDEBAR_CONTENT_GAP,
+    CONTACT_SIDEBAR_ITEM_HEIGHT,
+    CONTACT_SECTION_INSET,
+    CONTACT_SIDEBAR_ITEM_PADDING,
+    CONTACT_SIDEBAR_TEXT_SPACING,
+    CONTACT_SIDEBAR_TEXT_TOP_OFFSET,
+    CONTACT_SIDEBAR_TITLE_FONT_SIZE,
+    ContactAvatar,
+    ContactSectionHeader,
+    ElidedBodyLabel,
+    ElidedCaptionLabel,
+    apply_themed_dialog_surface as _apply_themed_dialog_surface,
+    prepare_transparent_scroll_area as _prepare_transparent_scroll_area,
+)
+from client.ui.windows.group_creation_dialogs import CreateGroupDialog
 
 setup_logging()
 logger = logging.get_logger(__name__)
-
-CONTACT_SIDEBAR_AVATAR_SIZE = 44
-CONTACT_SIDEBAR_ITEM_HEIGHT = 80
-CONTACT_SIDEBAR_ITEM_PADDING = 12
-CONTACT_SIDEBAR_CONTENT_GAP = 12
-CONTACT_SIDEBAR_TEXT_TOP_OFFSET = 2
-CONTACT_SIDEBAR_TEXT_SPACING = 4
-CONTACT_SIDEBAR_META_GAP = 8
-CONTACT_SIDEBAR_TITLE_FONT_SIZE = 16
-CONTACT_SECTION_INSET = 32
-CONTACT_SECTION_LABEL_GAP = 8
-
-
-def _apply_themed_dialog_surface(dialog: QDialog, object_name: str, *, radius: int = 14) -> None:
-    """Apply one stable theme-aware palette to a plain QDialog."""
-    dialog.setObjectName(object_name)
-    dialog.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, False)
-    dialog.setAutoFillBackground(True)
-    background = QColor(39, 43, 48) if isDarkTheme() else QColor(255, 255, 255)
-    palette = dialog.palette()
-    palette.setColor(QPalette.ColorRole.Window, background)
-    palette.setColor(QPalette.ColorRole.Base, background)
-    dialog.setPalette(palette)
-
-
-def _prepare_transparent_scroll_area(area: ScrollArea | SingleDirectionScrollArea) -> None:
-    """Keep qfluent scroll areas transparent so parent surfaces show through."""
-    area.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, False)
-    area.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-    area.setAutoFillBackground(False)
-    area.setStyleSheet("QAbstractScrollArea{background: transparent; border: none;} QScrollArea{background: transparent; border: none;}")
-    viewport = area.viewport()
-    if viewport is not None:
-        viewport.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, False)
-        viewport.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        viewport.setAutoFillBackground(False)
-        viewport.setStyleSheet("background: transparent; border: none;")
-    if hasattr(area, "enableTransparentBackground"):
-        area.enableTransparentBackground()
 
 
 def _request_status_text(status: str) -> str:
@@ -130,175 +102,6 @@ def _request_message_text(request: FriendRequestRecord, current_user_id: str) ->
     if request.is_outgoing(current_user_id):
         return request.message or tr("contact.request.default_outgoing", "You sent a friend request.")
     return request.message or tr("contact.request.default_incoming", "The other user sent you a friend request.")
-
-
-class ContactAvatar(QWidget):
-    def __init__(self, size: int = 48, parent=None):
-        super().__init__(parent)
-        self._size = size
-        self._radius = max(8, size // 6)
-        self._pixmap: Optional[QPixmap] = None
-        self._fallback = "?"
-        self._avatar_source = ""
-        self._avatar_gender = ""
-        self._avatar_seed = ""
-        self._avatar_store = get_avatar_image_store()
-        self._avatar_store.avatar_ready.connect(self._on_avatar_ready)
-        self.setFixedSize(size, size)
-
-    def set_avatar(self, avatar_path: str = "", fallback: str = "?", *, gender: str = "", seed: str = "") -> None:
-        self._fallback = (fallback or "?").strip()[:2].upper() or "?"
-        self._avatar_gender = str(gender or "")
-        self._avatar_seed = str(seed or avatar_seed(fallback, avatar_path, gender))
-        self._avatar_source, resolved = self._avatar_store.resolve_display_path(
-            avatar_path,
-            gender=self._avatar_gender,
-            seed=self._avatar_seed,
-        )
-        self._apply_avatar_path(resolved)
-
-    def _apply_avatar_path(self, avatar_path: str) -> None:
-        self._pixmap = None
-        if avatar_path:
-            pixmap = QPixmap(avatar_path)
-            if not pixmap.isNull():
-                self._pixmap = pixmap
-        self.update()
-
-    def _on_avatar_ready(self, source: str) -> None:
-        if source != self._avatar_source:
-            return
-        resolved = self._avatar_store.display_path_for_source(
-            source,
-            gender=self._avatar_gender,
-            seed=self._avatar_seed,
-        )
-        self._apply_avatar_path(resolved)
-
-    def paintEvent(self, event) -> None:
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        rect = self.rect()
-        clip = QPainterPath()
-        clip.addRoundedRect(rect, self._radius, self._radius)
-        painter.setClipPath(clip)
-
-        if self._pixmap is not None:
-            scaled = self._pixmap.scaled(
-                rect.size(),
-                Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-                Qt.TransformationMode.SmoothTransformation,
-            )
-            painter.drawPixmap(rect, scaled)
-            return
-
-        painter.fillPath(clip, QColor("#626B76") if isDarkTheme() else QColor("#D7DEE8"))
-        painter.setClipping(False)
-        font = QFont()
-        font.setBold(True)
-        font.setPixelSize(max(12, self._size // 3))
-        painter.setFont(font)
-        painter.setPen(QColor("#FFFFFF") if isDarkTheme() else QColor("#27486B"))
-        painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, self._fallback)
-
-
-class ElidedBodyLabel(QLabel):
-    """Body label that elides long text to the available width."""
-
-    def __init__(self, text: str = "", parent=None):
-        super().__init__("", parent)
-        self._full_text = ""
-        self.setWordWrap(False)
-        self.setMinimumWidth(0)
-        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-        font = QFont(self.font())
-        font.setPixelSize(15)
-        self.setFont(font)
-        self.setObjectName("elidedBodyLabel")
-        self.setText(text)
-
-    def setText(self, text: str) -> None:
-        self._full_text = text or ""
-        self._refresh_text()
-
-    def resizeEvent(self, event) -> None:
-        super().resizeEvent(event)
-        self._refresh_text()
-
-    def _refresh_text(self) -> None:
-        available = max(0, self.contentsRect().width())
-        display = self._full_text
-        if available > 0:
-            display = self.fontMetrics().elidedText(display, Qt.TextElideMode.ElideRight, available)
-        super().setText(display)
-        self.setToolTip(self._full_text if display != self._full_text else "")
-
-
-class ElidedCaptionLabel(QLabel):
-    """Caption label that elides long text to the available width."""
-
-    def __init__(self, text: str = "", parent=None):
-        super().__init__("", parent)
-        self._full_text = ""
-        self.setWordWrap(False)
-        self.setMinimumWidth(0)
-        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-        font = QFont(self.font())
-        font.setPixelSize(12)
-        self.setFont(font)
-        self.setObjectName("elidedCaptionLabel")
-        self.setText(text)
-
-    def setText(self, text: str) -> None:
-        self._full_text = text or ""
-        self._refresh_text()
-
-    def resizeEvent(self, event) -> None:
-        super().resizeEvent(event)
-        self._refresh_text()
-
-    def _refresh_text(self) -> None:
-        available = max(0, self.contentsRect().width())
-        display = self._full_text
-        if available > 0:
-            display = self.fontMetrics().elidedText(display, Qt.TextElideMode.ElideRight, available)
-        super().setText(display)
-        self.setToolTip(self._full_text if display != self._full_text else "")
-
-
-class ContactSectionHeader(QWidget):
-    """WeChat-like alphabetical divider shown inside the friends list."""
-
-    def __init__(self, letter: str, parent=None):
-        super().__init__(parent)
-        self.letter = (letter or "#").upper()
-        self.setObjectName("contactSectionHeader")
-        self.setFixedHeight(40)
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 8, 0, 4)
-        layout.setSpacing(CONTACT_SECTION_LABEL_GAP)
-
-        self.label = CaptionLabel(self.letter, self)
-        self.label.setObjectName("contactSectionIndexLabel")
-        self.label.setTextColor(QColor(122, 122, 122), QColor(196, 196, 196))
-
-        label_row = QHBoxLayout()
-        label_row.setContentsMargins(CONTACT_SECTION_INSET, 0, 0, 0)
-        label_row.setSpacing(0)
-        label_row.addWidget(self.label, 0, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-        label_row.addStretch(1)
-
-        divider = FluentDivider(
-            self,
-            variant=FluentDivider.FULL,
-            left_inset=CONTACT_SECTION_INSET,
-            right_inset=0,
-        )
-
-        layout.addLayout(label_row)
-        layout.addWidget(divider, 0, Qt.AlignmentFlag.AlignVCenter)
-
 
 class ContactListItem(QWidget):
     clicked = Signal(str)
@@ -409,7 +212,15 @@ class RequestListItem(QWidget):
         layout.setSpacing(CONTACT_SIDEBAR_CONTENT_GAP)
 
         self.avatar = ContactAvatar(CONTACT_SIDEBAR_AVATAR_SIZE, self)
-        self.avatar.set_avatar(fallback=request.counterpart_name(current_user_id))
+        self.avatar.set_avatar(
+            request.counterpart_avatar(current_user_id),
+            fallback=request.counterpart_name(current_user_id),
+            gender=request.counterpart_gender(current_user_id),
+            seed=profile_avatar_seed(
+                user_id=request.counterpart_id(current_user_id),
+                display_name=request.counterpart_name(current_user_id),
+            ),
+        )
 
         text_layout = QVBoxLayout()
         text_layout.setContentsMargins(0, CONTACT_SIDEBAR_TEXT_TOP_OFFSET, 0, 0)
@@ -1199,710 +1010,6 @@ class UserSearchItem(CardWidget):
         layout.addWidget(self.add_button, 0)
 
 
-class GroupMemberItem(CardWidget):
-    toggled = Signal(str, bool)
-
-    def __init__(self, contact: ContactRecord, parent=None):
-        super().__init__(parent)
-        self.setObjectName("GroupMemberItem")
-        self.contact = contact
-        self._selected = False
-        self._hovered = False
-        self.setCursor(Qt.CursorShape.PointingHandCursor)
-
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(16, 14, 16, 14)
-        layout.setSpacing(12)
-
-        self.avatar = ContactAvatar(42, self)
-        self.avatar.set_avatar(
-            contact.avatar,
-            contact.display_name,
-            gender=contact.gender,
-            seed=profile_avatar_seed(user_id=contact.id, username=contact.username, display_name=contact.display_name),
-        )
-
-        text_layout = QVBoxLayout()
-        text_layout.setContentsMargins(0, 0, 0, 0)
-        text_layout.setSpacing(4)
-        text_layout.addWidget(BodyLabel(contact.display_name, self))
-
-        subtitle = CaptionLabel(contact.signature or contact.username or "-", self)
-        subtitle.setWordWrap(True)
-        text_layout.addWidget(subtitle)
-
-        self.state_label = CaptionLabel(tr("contact.group_member.unselected", "Not Selected"), self)
-
-        layout.addWidget(self.avatar, 0)
-        layout.addLayout(text_layout, 1)
-        layout.addWidget(self.state_label, 0)
-
-    def set_selected(self, selected: bool) -> None:
-        self._selected = selected
-        self.state_label.setText(
-            tr("contact.group_member.selected", "Selected")
-            if selected
-            else tr("contact.group_member.unselected", "Not Selected")
-        )
-        self.update()
-
-    def enterEvent(self, event) -> None:
-        self._hovered = True
-        self.update()
-        super().enterEvent(event)
-
-    def leaveEvent(self, event) -> None:
-        self._hovered = False
-        self.update()
-        super().leaveEvent(event)
-
-    def mousePressEvent(self, event) -> None:
-        if event.button() == Qt.MouseButton.LeftButton:
-            self.set_selected(not self._selected)
-            self.toggled.emit(self.contact.id, self._selected)
-        super().mousePressEvent(event)
-
-    def paintEvent(self, event) -> None:
-        super().paintEvent(event)
-        if not self._selected and not self._hovered:
-            return
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        rect = self.rect().adjusted(2, 2, -2, -2)
-        path = QPainterPath()
-        path.addRoundedRect(rect, 16, 16)
-        painter.fillPath(path, QColor(94, 146, 255, 22 if self._selected else 10))
-
-
-class ContactSelectionIndicator(QWidget):
-    """Draw one circular WeChat-like multi-select indicator."""
-
-    def __init__(self, parent=None) -> None:
-        super().__init__(parent)
-        self._checked = False
-        self._locked = False
-        self.setFixedSize(20, 20)
-        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-
-    def set_state(self, checked: bool, *, locked: bool = False) -> None:
-        self._checked = bool(checked)
-        self._locked = bool(locked)
-        self.update()
-
-    def paintEvent(self, event) -> None:
-        del event
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        rect = self.rect().adjusted(1, 1, -1, -1)
-
-        if self._checked:
-            fill = QColor("#07C160")
-            if self._locked:
-                fill = QColor(fill)
-                fill.setAlpha(200)
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(fill)
-            painter.drawEllipse(rect)
-
-            pen = painter.pen()
-            pen.setColor(QColor("#FFFFFF"))
-            pen.setWidth(2)
-            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-            pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
-            painter.setPen(pen)
-            painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.drawLine(6, 10, 9, 13)
-            painter.drawLine(9, 13, 14, 7)
-            return
-
-        border = QColor(0, 0, 0, 56) if not isDarkTheme() else QColor(255, 255, 255, 86)
-        painter.setPen(border)
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.drawEllipse(rect)
-
-
-class SelectableContactListItem(QWidget):
-    """Friend-list row with one leading multi-select indicator."""
-
-    toggled = Signal(str, bool)
-
-    def __init__(self, contact: ContactRecord, *, locked: bool = False, parent=None):
-        super().__init__(parent)
-        self.contact = contact
-        self._locked = bool(locked)
-        self._selected = bool(locked)
-        self._hovered = False
-        self.setCursor(Qt.CursorShape.PointingHandCursor if not locked else Qt.CursorShape.ArrowCursor)
-        self.setFixedHeight(CONTACT_SIDEBAR_ITEM_HEIGHT)
-        self.setMinimumWidth(0)
-        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(
-            CONTACT_SIDEBAR_ITEM_PADDING,
-            CONTACT_SIDEBAR_ITEM_PADDING,
-            CONTACT_SIDEBAR_ITEM_PADDING,
-            CONTACT_SIDEBAR_ITEM_PADDING,
-        )
-        layout.setSpacing(CONTACT_SIDEBAR_CONTENT_GAP)
-
-        self.indicator = ContactSelectionIndicator(self)
-        self.indicator.set_state(self._selected, locked=self._locked)
-
-        self.avatar = ContactAvatar(CONTACT_SIDEBAR_AVATAR_SIZE, self)
-        self.avatar.set_avatar(
-            contact.avatar,
-            contact.display_name,
-            gender=contact.gender,
-            seed=profile_avatar_seed(
-                user_id=contact.id,
-                username=contact.username,
-                display_name=contact.display_name,
-            ),
-        )
-
-        text_layout = QVBoxLayout()
-        text_layout.setContentsMargins(0, CONTACT_SIDEBAR_TEXT_TOP_OFFSET, 0, 0)
-        text_layout.setSpacing(CONTACT_SIDEBAR_TEXT_SPACING)
-
-        self.title_label = ElidedBodyLabel(contact.display_name, self)
-        title_font = QFont(self.title_label.font())
-        title_font.setPixelSize(CONTACT_SIDEBAR_TITLE_FONT_SIZE)
-        title_font.setBold(False)
-        self.title_label.setFont(title_font)
-
-        self.subtitle_label = ElidedCaptionLabel(
-            contact.assistim_id or contact.username or contact.signature,
-            self,
-        )
-        self.subtitle_label.setVisible(bool(self.subtitle_label.text()))
-
-        text_layout.addWidget(self.title_label)
-        text_layout.addWidget(self.subtitle_label)
-
-        layout.addWidget(self.indicator, 0, Qt.AlignmentFlag.AlignVCenter)
-        layout.addWidget(self.avatar, 0, Qt.AlignmentFlag.AlignVCenter)
-        layout.addLayout(text_layout, 1)
-
-    @property
-    def is_locked(self) -> bool:
-        return self._locked
-
-    def set_selected(self, selected: bool) -> None:
-        self._selected = bool(selected or self._locked)
-        self.indicator.set_state(self._selected, locked=self._locked)
-        self.update()
-
-    def enterEvent(self, event) -> None:
-        if not self._locked:
-            self._hovered = True
-            self.update()
-        super().enterEvent(event)
-
-    def leaveEvent(self, event) -> None:
-        self._hovered = False
-        self.update()
-        super().leaveEvent(event)
-
-    def mousePressEvent(self, event) -> None:
-        if event.button() == Qt.MouseButton.LeftButton and not self._locked:
-            self.set_selected(not self._selected)
-            self.toggled.emit(self.contact.id, self._selected)
-        super().mousePressEvent(event)
-
-    def paintEvent(self, event) -> None:
-        painter = QPainter(self)
-        dark = isDarkTheme()
-        if self._hovered:
-            painter.fillRect(self.rect(), QColor(255, 255, 255, 24) if dark else QColor(0, 0, 0, 10))
-        super().paintEvent(event)
-
-
-class SelectedContactSummaryItem(QWidget):
-    """Compact row shown in the group-picker side panel for selected contacts."""
-
-    remove_requested = Signal(str)
-
-    def __init__(self, contact: ContactRecord, *, removable: bool = True, parent=None) -> None:
-        super().__init__(parent)
-        self.contact = contact
-        self._removable = bool(removable)
-        self.setObjectName("startGroupChatSelectedItem")
-        self.setFixedHeight(64)
-        self.setMinimumWidth(0)
-        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(0, 10, 0, 10)
-        layout.setSpacing(12)
-
-        self.avatar = ContactAvatar(38, self)
-        self.avatar.set_avatar(
-            contact.avatar,
-            contact.display_name,
-            gender=contact.gender,
-            seed=profile_avatar_seed(
-                user_id=contact.id,
-                username=contact.username,
-                display_name=contact.display_name,
-            ),
-        )
-
-        text_layout = QVBoxLayout()
-        text_layout.setContentsMargins(0, 0, 0, 0)
-        text_layout.setSpacing(4)
-
-        self.title_label = ElidedBodyLabel(contact.display_name, self)
-        title_font = QFont(self.title_label.font())
-        title_font.setPixelSize(14)
-        title_font.setBold(False)
-        self.title_label.setFont(title_font)
-
-        self.subtitle_label = ElidedCaptionLabel(contact.assistim_id or contact.username or "-", self)
-        self.subtitle_label.setVisible(bool(self.subtitle_label.text()))
-
-        text_layout.addWidget(self.title_label)
-        text_layout.addWidget(self.subtitle_label)
-
-        self.remove_button = ToolButton(AppIcon.CLOSE, self)
-        self.remove_button.setObjectName("startGroupChatSelectedRemoveButton")
-        self.remove_button.setFixedSize(28, 28)
-        self.remove_button.setVisible(self._removable)
-        self.remove_button.clicked.connect(lambda: self.remove_requested.emit(self.contact.id))
-
-        layout.addWidget(self.avatar, 0, Qt.AlignmentFlag.AlignVCenter)
-        layout.addLayout(text_layout, 1)
-        layout.addWidget(self.remove_button, 0, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-
-
-class StartGroupChatDialog(MaskDialogBase):
-    """Frameless modal used by private-chat info to start one new group chat."""
-
-    group_created = Signal(object)
-
-    def __init__(
-        self,
-        controller,
-        contacts: list[ContactRecord],
-        *,
-        excluded_contact_id: str,
-        parent=None,
-    ) -> None:
-        super().__init__(parent=parent)
-        self._controller = controller
-        self._excluded_contact_id = str(excluded_contact_id or "")
-        self._contacts = [contact for contact in contacts if contact.id and contact.id != self._excluded_contact_id]
-        self._selected_ids: set[str] = set()
-        self._member_items: dict[str, SelectableContactListItem] = {}
-        self._create_task: Optional[asyncio.Task] = None
-        self._ui_tasks: set[asyncio.Task] = set()
-
-        self.setModal(True)
-        self.setObjectName("StartGroupChatDialog")
-        self.widget.setObjectName("startGroupChatDialogWidget")
-        self.widget.setFixedSize(700, 540)
-        self._hBoxLayout.setContentsMargins(24, 24, 24, 24)
-        self._hBoxLayout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.setShadowEffect(68, (0, 18), QColor(0, 0, 0, 70))
-        self.setMaskColor(QColor(0, 0, 0, 88))
-
-        self._setup_ui()
-        self._apply_styles()
-        self._rebuild_member_list()
-        self.finished.connect(self._on_finished)
-        self.destroyed.connect(self._on_destroyed)
-
-    def _setup_ui(self) -> None:
-        layout = QHBoxLayout(self.widget)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
-
-        self.left_panel = QWidget(self.widget)
-        self.left_panel.setObjectName("startGroupChatLeftPanel")
-        left_layout = QVBoxLayout(self.left_panel)
-        left_layout.setContentsMargins(0, 0, 0, 0)
-        left_layout.setSpacing(0)
-
-        self.search_bar = QWidget(self.left_panel)
-        self.search_bar.setObjectName("sessionSearchBar")
-        search_row = QHBoxLayout(self.search_bar)
-        search_row.setContentsMargins(12, 12, 12, 12)
-        search_row.setSpacing(12)
-
-        self.search_edit = SearchLineEdit(self.search_bar)
-        self.search_edit.setPlaceholderText(tr("chat.group_picker.search_placeholder", "Search"))
-        self.search_edit.setFixedHeight(36)
-        search_row.addWidget(self.search_edit, 1)
-
-        self.list_area = SingleDirectionScrollArea(self.left_panel, orient=Qt.Orientation.Vertical)
-        self.list_area.setWidgetResizable(True)
-        self.list_area.setFrameShape(QFrame.Shape.NoFrame)
-        self.list_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.list_area.setViewportMargins(0, 0, 0, 0)
-        self.list_area.setObjectName("startGroupChatListArea")
-        self.list_area.viewport().setObjectName("startGroupChatListViewport")
-
-        self.list_container = QWidget(self.list_area)
-        self.list_container.setObjectName("startGroupChatListContainer")
-        self.list_layout = QVBoxLayout(self.list_container)
-        self.list_layout.setContentsMargins(0, 0, 0, 0)
-        self.list_layout.setSpacing(0)
-        self.list_area.setWidget(self.list_container)
-
-        left_layout.addWidget(self.search_bar, 0)
-        left_layout.addWidget(self.list_area, 1)
-
-        self.right_panel = QWidget(self.widget)
-        self.right_panel.setObjectName("startGroupChatRightPanel")
-        right_layout = QVBoxLayout(self.right_panel)
-        right_layout.setContentsMargins(20, 18, 20, 18)
-        right_layout.setSpacing(12)
-
-        self.title_label = BodyLabel(tr("chat.group_picker.title", "Start Group Chat"), self.right_panel)
-        title_font = QFont(self.title_label.font())
-        title_font.setPixelSize(18)
-        title_font.setBold(False)
-        self.title_label.setFont(title_font)
-        self.title_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-
-        self.status_label = CaptionLabel(tr("chat.group_picker.status_idle", "Select Contacts"), self.right_panel)
-        self.status_label.setObjectName("startGroupChatStatusLabel")
-
-        right_top_row = QHBoxLayout()
-        right_top_row.setContentsMargins(0, 0, 0, 0)
-        right_top_row.setSpacing(12)
-        right_top_row.addWidget(self.title_label, 0, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-        right_top_row.addStretch(1)
-        right_top_row.addWidget(self.status_label, 0, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-
-        self.selected_area = SingleDirectionScrollArea(self.right_panel, orient=Qt.Orientation.Vertical)
-        self.selected_area.setWidgetResizable(True)
-        self.selected_area.setFrameShape(QFrame.Shape.NoFrame)
-        self.selected_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.selected_area.setViewportMargins(0, 0, 0, 0)
-        self.selected_area.setObjectName("startGroupChatSelectedArea")
-        self.selected_area.viewport().setObjectName("startGroupChatSelectedViewport")
-        self.selected_area.setMinimumWidth(220)
-
-        self.selected_container = QWidget(self.selected_area)
-        self.selected_container.setObjectName("startGroupChatSelectedContainer")
-        self.selected_layout = QVBoxLayout(self.selected_container)
-        self.selected_layout.setContentsMargins(0, 0, 0, 0)
-        self.selected_layout.setSpacing(0)
-        self.selected_area.setWidget(self.selected_container)
-
-        footer = QHBoxLayout()
-        footer.setContentsMargins(0, 0, 0, 0)
-        footer.setSpacing(12)
-        footer.addStretch(1)
-        self.complete_button = PrimaryPushButton(tr("chat.group_picker.complete", "Done"), self.right_panel)
-        self.cancel_button = PushButton(tr("common.cancel", "Cancel"), self.right_panel)
-        self.complete_button.setFixedWidth(124)
-        self.cancel_button.setFixedWidth(124)
-        footer.addWidget(self.complete_button, 0)
-        footer.addWidget(self.cancel_button, 0)
-
-        right_layout.addLayout(right_top_row)
-        right_layout.addWidget(self.selected_area, 1)
-        right_layout.addLayout(footer)
-
-        self.body_splitter = FluentSplitter(Qt.Orientation.Horizontal, self.widget)
-        self.body_splitter.setObjectName("startGroupChatSplitter")
-        self.body_splitter.setChildrenCollapsible(False)
-        self.body_splitter.setHandleWidth(1)
-        self.body_splitter.addWidget(self.left_panel)
-        self.body_splitter.addWidget(self.right_panel)
-        self.body_splitter.setStretchFactor(0, 11)
-        self.body_splitter.setStretchFactor(1, 10)
-        self.body_splitter.setSizes([350, 330])
-
-        layout.addWidget(self.body_splitter, 1)
-
-        self.search_edit.textChanged.connect(self._rebuild_member_list)
-        self.complete_button.clicked.connect(self._create_group)
-        self.cancel_button.clicked.connect(self.close)
-
-    def _apply_styles(self) -> None:
-        dark = isDarkTheme()
-        border = "rgba(255, 255, 255, 28)" if dark else "rgba(15, 23, 42, 18)"
-        background = "#262626" if dark else "#FFFFFF"
-        footer_color = "rgba(255, 255, 255, 0.52)" if dark else "rgba(15, 23, 42, 0.42)"
-        status_color = "rgb(196, 196, 196)" if dark else "rgb(122, 122, 122)"
-        self.setStyleSheet(
-            f"""
-            QFrame#startGroupChatDialogWidget {{
-                background: {background};
-                border: 1px solid {border};
-                border-radius: 14px;
-            }}
-            QLabel#startGroupChatStatusLabel {{
-                color: {status_color};
-                font-size: 13px;
-            }}
-            QWidget#startGroupChatLeftPanel {{
-                background: transparent;
-            }}
-            QWidget#startGroupChatListContainer {{
-                background: transparent;
-            }}
-            QWidget#startGroupChatListViewport {{
-                background: transparent;
-            }}
-            QWidget#startGroupChatRightPanel {{
-                background: transparent;
-            }}
-            QWidget#startGroupChatSelectedContainer {{
-                background: transparent;
-            }}
-            QWidget#startGroupChatSelectedViewport {{
-                background: transparent;
-            }}
-            QAbstractScrollArea#startGroupChatListArea {{
-                background: transparent;
-                border: none;
-            }}
-            QAbstractScrollArea#startGroupChatSelectedArea {{
-                background: transparent;
-                border: none;
-            }}
-            QToolButton#startGroupChatSelectedRemoveButton {{
-                background: transparent;
-                border: none;
-                border-radius: 14px;
-                padding: 0;
-            }}
-            QToolButton#startGroupChatSelectedRemoveButton:hover {{
-                background: rgba(127, 127, 127, 0.12);
-            }}
-            """
-        )
-
-    def _rebuild_member_list(self) -> None:
-        self._clear_layout(self.list_layout)
-        self._member_items.clear()
-
-        keyword = self.search_edit.text().strip().lower()
-        filtered = [
-            contact
-            for contact in self._contacts
-            if not keyword
-            or keyword in str(contact.display_name or "").lower()
-            or keyword in str(contact.username or "").lower()
-            or keyword in str(contact.assistim_id or "").lower()
-            or keyword in str(contact.signature or "").lower()
-        ]
-
-        if not filtered:
-            empty = BodyLabel(tr("contact.create_group.empty_results", "No matching friends."), self.list_container)
-            empty.setObjectName("startGroupChatEmptyLabel")
-            self.list_layout.addWidget(empty)
-            self.list_layout.addStretch(1)
-            self._update_footer()
-            return
-
-        grouped = self._controller.group_contacts(filtered)
-        for letter, contacts in grouped.items():
-            self.list_layout.addWidget(ContactSectionHeader(letter, self.list_container))
-            for contact in contacts:
-                item = SelectableContactListItem(
-                    contact,
-                    locked=False,
-                    parent=self.list_container,
-                )
-                item.set_selected(contact.id in self._selected_ids)
-                item.toggled.connect(self._toggle_member)
-                self.list_layout.addWidget(item)
-                self._member_items[contact.id] = item
-
-        self.list_layout.addStretch(1)
-        self._update_footer()
-
-    def _toggle_member(self, contact_id: str, selected: bool) -> None:
-        if selected:
-            self._selected_ids.add(contact_id)
-        else:
-            self._selected_ids.discard(contact_id)
-        self._update_footer()
-
-    def _remove_selected_member(self, contact_id: str) -> None:
-        if not contact_id:
-            return
-        self._selected_ids.discard(contact_id)
-        member_item = self._member_items.get(contact_id)
-        if member_item is not None:
-            member_item.set_selected(False)
-        self._update_footer()
-
-    def _update_footer(self) -> None:
-        selected_count = len(self._selected_ids)
-        if selected_count > 0:
-            self.status_label.setText(
-                tr("chat.group_picker.status_selected", "{count} contacts selected", count=selected_count)
-            )
-        else:
-            self.status_label.setText(tr("chat.group_picker.status_idle", "Select Contacts"))
-        self._rebuild_selected_list()
-        self.complete_button.setEnabled(selected_count > 0)
-
-    def _selected_contacts(self) -> list[ContactRecord]:
-        selected_ids = list(self._selected_ids)
-        selected_contacts = [contact for contact in self._contacts if contact.id in selected_ids]
-        selected_contacts.sort(key=lambda item: item.display_name.lower())
-        return selected_contacts
-
-    def _group_member_preview(self) -> list[dict[str, str]]:
-        preview: list[dict[str, str]] = []
-        current_user = get_auth_controller().current_user or {}
-        current_user_id = str(current_user.get("id", "") or "")
-        if current_user_id:
-            preview.append(
-                {
-                    "id": current_user_id,
-                    "name": str(current_user.get("nickname", "") or current_user.get("username", "") or current_user_id),
-                    "username": str(current_user.get("username", "") or ""),
-                    "avatar": str(current_user.get("avatar", "") or ""),
-                    "gender": str(current_user.get("gender", "") or ""),
-                }
-            )
-
-        preview.extend(
-            {
-                "id": contact.id,
-                "name": contact.display_name,
-                "username": contact.username,
-                "avatar": contact.avatar,
-                "gender": contact.gender,
-            }
-            for contact in self._selected_contacts()
-        )
-        return preview
-
-    def _rebuild_selected_list(self) -> None:
-        self._clear_layout(self.selected_layout)
-        contacts = self._selected_contacts()
-        for index, contact in enumerate(contacts):
-            item = SelectedContactSummaryItem(
-                contact,
-                removable=True,
-                parent=self.selected_container,
-            )
-            item.remove_requested.connect(self._remove_selected_member)
-            self.selected_layout.addWidget(item)
-            if index != len(contacts) - 1:
-                self.selected_layout.addWidget(
-                    FluentDivider(
-                        self.selected_container,
-                        variant=FluentDivider.FULL,
-                        left_inset=50,
-                        right_inset=0,
-                    )
-                )
-        self.selected_layout.addStretch(1)
-
-    def _default_group_name(self) -> str:
-        names = [contact.display_name for contact in self._selected_contacts() if contact.display_name]
-        if not names:
-            return tr("chat.group_picker.default_name", "Group Chat")
-        if len(names) <= 3:
-            return "、".join(names)
-        return "、".join(names[:3]) + "…"
-
-    def _create_group(self) -> None:
-        if self._create_task and not self._create_task.done():
-            return
-        if not self._selected_ids:
-            InfoBar.warning(
-                tr("chat.group_picker.title", "Start Group Chat"),
-                tr("chat.group_picker.validation_members", "Select at least one contact."),
-                parent=self,
-                duration=1800,
-            )
-            return
-        self._set_create_task(self._create_group_async())
-
-    async def _create_group_async(self) -> None:
-        member_ids = list(dict.fromkeys(contact.id for contact in self._selected_contacts()))
-        name = self._default_group_name()
-        self.complete_button.setEnabled(False)
-        self.complete_button.setText(tr("chat.group_picker.creating", "Creating..."))
-        try:
-            group = await self._controller.create_group(name, member_ids)
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            InfoBar.error(
-                tr("chat.group_picker.title", "Start Group Chat"),
-                str(exc),
-                parent=self,
-                duration=2200,
-            )
-        else:
-            group.extra["member_preview"] = self._group_member_preview()
-            group_avatar = build_group_avatar_path(
-                group.extra["member_preview"],
-                group_id=getattr(group, "session_id", "") or getattr(group, "id", ""),
-                group_name=getattr(group, "name", ""),
-            )
-            if group_avatar:
-                group.avatar = group_avatar
-                group.extra["avatar"] = group_avatar
-            self.group_created.emit(group)
-            self.close()
-        finally:
-            self.complete_button.setEnabled(True)
-            self.complete_button.setText(tr("chat.group_picker.complete", "Done"))
-
-    def _on_finished(self, _result: int) -> None:
-        self._cancel_pending_task(self._create_task)
-        self._create_task = None
-        self._cancel_all_ui_tasks()
-
-    def _on_destroyed(self, *_args) -> None:
-        self._on_finished(0)
-
-    def _cancel_pending_task(self, task: Optional[asyncio.Task]) -> None:
-        if task is not None and not task.done():
-            task.cancel()
-
-    def _cancel_all_ui_tasks(self) -> None:
-        for task in list(self._ui_tasks):
-            if not task.done():
-                task.cancel()
-
-    def _create_ui_task(self, coro, context: str, *, on_done=None) -> asyncio.Task:
-        task = asyncio.create_task(coro)
-        self._ui_tasks.add(task)
-        task.add_done_callback(lambda finished, name=context, callback=on_done: self._finalize_ui_task(finished, name, callback))
-        return task
-
-    def _finalize_ui_task(self, task: asyncio.Task, context: str, on_done=None) -> None:
-        self._ui_tasks.discard(task)
-        if on_done is not None:
-            on_done(task)
-
-        try:
-            task.result()
-        except asyncio.CancelledError:
-            return
-        except Exception:
-            logger.exception("StartGroupChatDialog task failed: %s", context)
-
-    def _set_create_task(self, coro) -> None:
-        self._cancel_pending_task(self._create_task)
-        self._create_task = self._create_ui_task(coro, "start group chat", on_done=self._clear_create_task)
-
-    def _clear_create_task(self, task: asyncio.Task) -> None:
-        if self._create_task is task:
-            self._create_task = None
-
-    def _clear_layout(self, layout: QVBoxLayout) -> None:
-        while layout.count():
-            item = layout.takeAt(0)
-            widget = item.widget()
-            if widget is not None:
-                widget.deleteLater()
-
-
 class AcrylicToolWindow(QWidget):
     """Frameless floating window with one shared acrylic surface and close button."""
 
@@ -2269,251 +1376,6 @@ class AddFriendDialog(FluentWidget):
                 widget.deleteLater()
 
 
-class CreateGroupDialog(QDialog):
-    group_created = Signal(object)
-
-    def __init__(self, controller, contacts: list[ContactRecord], parent=None):
-        super().__init__(parent)
-        self._controller = controller
-        self._contacts = list(contacts)
-        self._selected_ids: set[str] = set()
-        self._member_items: dict[str, GroupMemberItem] = {}
-        self._create_task: Optional[asyncio.Task] = None
-        self._ui_tasks: set[asyncio.Task] = set()
-
-        self.setWindowTitle(tr("contact.create_group.window_title", "Create Group"))
-        self.setModal(True)
-        self.resize(580, 720)
-        _apply_themed_dialog_surface(self, "CreateGroupDialog")
-
-        self._setup_ui()
-        self._rebuild_member_list()
-        self.finished.connect(self._on_finished)
-        self.destroyed.connect(self._on_destroyed)
-
-    def _setup_ui(self) -> None:
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(24, 24, 24, 24)
-        layout.setSpacing(16)
-
-        layout.addWidget(TitleLabel(tr("contact.create_group.title", "Create Group"), self))
-        subtitle = CaptionLabel(
-            tr(
-                "contact.create_group.subtitle",
-                "Select members from your current friends to create a new group session.",
-            ),
-            self,
-        )
-        subtitle.setWordWrap(True)
-        layout.addWidget(subtitle)
-
-        self.name_edit = LineEdit(self)
-        self.name_edit.setPlaceholderText(tr("contact.create_group.name_placeholder", "Enter group name"))
-        self.name_edit.setMinimumHeight(38)
-        layout.addWidget(self.name_edit)
-
-        self.search_edit = SearchLineEdit(self)
-        self.search_edit.setPlaceholderText(tr("contact.create_group.search_placeholder", "Filter friends"))
-        self.search_edit.setMinimumHeight(38)
-        layout.addWidget(self.search_edit)
-
-        self.summary_label = CaptionLabel(
-            tr("contact.create_group.summary_minimum", "Select at least one friend."),
-            self,
-        )
-        self.summary_label.setObjectName("contactSummaryLabel")
-        layout.addWidget(self.summary_label)
-
-        self.member_area = ScrollArea(self)
-        self.member_area.setWidgetResizable(True)
-        self.member_area.setFrameShape(QFrame.Shape.NoFrame)
-        self.member_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        _prepare_transparent_scroll_area(self.member_area)
-        self.member_container = QWidget(self.member_area)
-        self.member_container.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, False)
-        self.member_container.setAutoFillBackground(False)
-        self.member_container.setStyleSheet("background: transparent; border: none;")
-        self.member_layout = QVBoxLayout(self.member_container)
-        self.member_layout.setContentsMargins(6, 6, 6, 6)
-        self.member_layout.setSpacing(8)
-        self.member_layout.addStretch(1)
-        self.member_area.setWidget(self.member_container)
-        layout.addWidget(self.member_area, 1)
-
-        footer = QHBoxLayout()
-        footer.setContentsMargins(0, 0, 0, 0)
-        footer.setSpacing(10)
-        footer.addStretch(1)
-        self.cancel_button = PushButton(tr("common.cancel", "Cancel"), self)
-        self.create_button = PrimaryPushButton(tr("contact.create_group.create", "Create Group"), self)
-        footer.addWidget(self.cancel_button, 0)
-        footer.addWidget(self.create_button, 0)
-        layout.addLayout(footer)
-
-        self.search_edit.textChanged.connect(self._rebuild_member_list)
-        self.cancel_button.clicked.connect(self.close)
-        self.create_button.clicked.connect(self._create_group)
-
-    def changeEvent(self, event) -> None:
-        super().changeEvent(event)
-        if event.type() in {
-            QEvent.Type.PaletteChange,
-            QEvent.Type.ApplicationPaletteChange,
-            QEvent.Type.StyleChange,
-        }:
-            _apply_themed_dialog_surface(self, "CreateGroupDialog")
-
-    def _rebuild_member_list(self) -> None:
-        self._clear_layout(self.member_layout)
-        self._member_items.clear()
-
-        keyword = self.search_edit.text().strip().lower()
-        filtered = [
-            contact
-            for contact in self._contacts
-            if not keyword
-            or keyword in contact.display_name.lower()
-            or keyword in contact.username.lower()
-            or keyword in contact.signature.lower()
-        ]
-
-        if not filtered:
-            self.member_layout.addWidget(
-                BodyLabel(tr("contact.create_group.empty_results", "No matching friends."), self.member_container)
-            )
-            self.member_layout.addStretch(1)
-            self._update_summary()
-            return
-
-        for contact in filtered:
-            item = GroupMemberItem(contact, self.member_container)
-            item.set_selected(contact.id in self._selected_ids)
-            item.toggled.connect(self._toggle_member)
-            self.member_layout.addWidget(item)
-            self._member_items[contact.id] = item
-
-        self.member_layout.addStretch(1)
-        self._update_summary()
-
-    def _toggle_member(self, contact_id: str, selected: bool) -> None:
-        if selected:
-            self._selected_ids.add(contact_id)
-        else:
-            self._selected_ids.discard(contact_id)
-        self._update_summary()
-
-    def _update_summary(self) -> None:
-        self.summary_label.setText(
-            tr("contact.create_group.summary_selected", "{count} friends selected", count=len(self._selected_ids))
-        )
-
-    def _create_group(self) -> None:
-        if self._create_task and not self._create_task.done():
-            return
-
-        name = self.name_edit.text().strip()
-        if not name:
-            InfoBar.warning(
-                tr("contact.create_group.title", "Create Group"),
-                tr("contact.create_group.validation_name", "Please enter a group name."),
-                parent=self,
-                duration=1800,
-            )
-            self.name_edit.setFocus()
-            return
-
-        if not self._selected_ids:
-            InfoBar.warning(
-                tr("contact.create_group.title", "Create Group"),
-                tr("contact.create_group.validation_members", "Please select at least one friend."),
-                parent=self,
-                duration=1800,
-            )
-            return
-
-        self._set_create_task(self._create_group_async(name))
-
-    async def _create_group_async(self, name: str) -> None:
-        self.create_button.setEnabled(False)
-        self.create_button.setText(tr("contact.create_group.creating", "Creating..."))
-        try:
-            group = await self._controller.create_group(name, list(self._selected_ids))
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            InfoBar.error(tr("contact.create_group.title", "Create Group"), str(exc), parent=self, duration=2200)
-        else:
-            InfoBar.success(
-                tr("contact.create_group.title", "Create Group"),
-                tr("contact.create_group.success", "Group created."),
-                parent=self,
-                duration=1800,
-            )
-            self.group_created.emit(group)
-            self.close()
-        finally:
-            self.create_button.setEnabled(True)
-            self.create_button.setText(tr("contact.create_group.create", "Create Group"))
-
-    def _on_finished(self, _result: int) -> None:
-        """Stop background creation work after the dialog closes."""
-        self._cancel_pending_task(self._create_task)
-        self._create_task = None
-        self._cancel_all_ui_tasks()
-
-    def _on_destroyed(self, *_args) -> None:
-        """Mirror close cleanup when the dialog is destroyed externally."""
-        self._on_finished(0)
-
-    def _cancel_pending_task(self, task: Optional[asyncio.Task]) -> None:
-        """Cancel a tracked task if it is still running."""
-        if task is not None and not task.done():
-            task.cancel()
-
-    def _cancel_all_ui_tasks(self) -> None:
-        """Cancel every task launched from this dialog."""
-        for task in list(self._ui_tasks):
-            if not task.done():
-                task.cancel()
-
-    def _create_ui_task(self, coro, context: str, *, on_done=None) -> asyncio.Task:
-        """Track dialog-owned tasks for reliable cleanup."""
-        task = asyncio.create_task(coro)
-        self._ui_tasks.add(task)
-        task.add_done_callback(lambda finished, name=context, callback=on_done: self._finalize_ui_task(finished, name, callback))
-        return task
-
-    def _finalize_ui_task(self, task: asyncio.Task, context: str, on_done=None) -> None:
-        """Drop bookkeeping and log task failures."""
-        self._ui_tasks.discard(task)
-        if on_done is not None:
-            on_done(task)
-
-        try:
-            task.result()
-        except asyncio.CancelledError:
-            return
-        except Exception:
-            logger.exception("CreateGroupDialog task failed: %s", context)
-
-    def _set_create_task(self, coro) -> None:
-        """Track the active create-group request."""
-        self._cancel_pending_task(self._create_task)
-        self._create_task = self._create_ui_task(coro, "create group", on_done=self._clear_create_task)
-
-    def _clear_create_task(self, task: asyncio.Task) -> None:
-        """Clear the tracked create task when it finishes."""
-        if self._create_task is task:
-            self._create_task = None
-
-    def _clear_layout(self, layout: QVBoxLayout) -> None:
-        while layout.count():
-            item = layout.takeAt(0)
-            widget = item.widget()
-            if widget is not None:
-                widget.deleteLater()
-
-
 class ContactInterface(QWidget):
     message_requested = Signal(object)
 
@@ -2674,9 +1536,13 @@ class ContactInterface(QWidget):
     def _show_detail_panel(self) -> None:
         self.detail_stack.setCurrentWidget(self.detail_panel)
 
-    def _switch_page(self, key: str) -> None:
+    def _activate_page(self, key: str) -> None:
         self._current_page = key
+        self.segmented.setCurrentItem(key)
         self.page_stack.setCurrentIndex({"friends": 0, "groups": 1, "requests": 2}[key])
+
+    def _switch_page(self, key: str) -> None:
+        self._activate_page(key)
         self._rebuild_current_page()
 
     def reload_data(self) -> None:
@@ -2744,15 +1610,7 @@ class ContactInterface(QWidget):
             len(self._groups),
             len(self._requests),
         )
-        self.summary_label.setText(
-            tr(
-                "contact.sidebar.summary",
-                "{friends} friends · {groups} groups · {requests} requests",
-                friends=len(self._contacts),
-                groups=len(self._groups),
-                requests=len(self._requests),
-            )
-        )
+        self._update_summary_counts()
         logger.info("Contact interface rebuilding sidebar pages")
         self._build_friends_page()
         self._build_groups_page()
@@ -2772,6 +1630,63 @@ class ContactInterface(QWidget):
         else:
             self._build_requests_page()
         self._restore_selection(full_reload=False)
+
+    def _update_summary_counts(self) -> None:
+        if not self._can_update_contact_ui():
+            return
+        self.summary_label.setText(
+            tr(
+                "contact.sidebar.summary",
+                "{friends} friends · {groups} groups · {requests} requests",
+                friends=len(self._contacts),
+                groups=len(self._groups),
+                requests=len(self._requests),
+            )
+        )
+
+    async def _refresh_requests_only(self, *, focus_request_id: str = "") -> None:
+        self._requests = await self._controller.load_requests()
+        if self._destroyed:
+            return
+        self._update_summary_counts()
+        self._build_requests_page()
+        self._activate_page("requests")
+        if focus_request_id and focus_request_id in self._request_items:
+            self._select_request(focus_request_id, force=True)
+            return
+        self._restore_selection(full_reload=False)
+
+    async def _refresh_contacts_and_requests(self, *, focus_page: str, focus_friend_id: str = "") -> None:
+        self._contacts = await self._controller.load_contacts()
+        if self._destroyed:
+            return
+        self._requests = await self._controller.load_requests()
+        if self._destroyed:
+            return
+        self._update_summary_counts()
+        self._build_friends_page()
+        self._build_requests_page()
+        self._activate_page(focus_page)
+        if focus_page == "friends" and focus_friend_id and focus_friend_id in self._friend_items:
+            self._select_friend(focus_friend_id, force=True)
+            return
+        self._restore_selection(full_reload=False)
+
+    @staticmethod
+    def _coerce_group_record(group: object) -> GroupRecord:
+        if isinstance(group, GroupRecord):
+            return group
+        extra = dict(getattr(group, "extra", {}) or {})
+        return GroupRecord(
+            id=str(getattr(group, "id", "") or extra.get("id", "") or ""),
+            name=str(getattr(group, "name", "") or extra.get("name", "") or ""),
+            avatar=str(getattr(group, "avatar", "") or extra.get("avatar", "") or ""),
+            owner_id=str(getattr(group, "owner_id", "") or extra.get("owner_id", "") or ""),
+            session_id=str(getattr(group, "session_id", "") or extra.get("session_id", "") or ""),
+            member_count=int(getattr(group, "member_count", 0) or extra.get("member_count", 0) or 0),
+            created_at=str(getattr(group, "created_at", "") or extra.get("created_at", "") or ""),
+            extra=extra,
+        )
 
     def _on_search_text_changed(self, text: str) -> None:
         """Open or update the anchored search flyout for the current keyword."""
@@ -3054,8 +1969,11 @@ class ContactInterface(QWidget):
         )
 
     async def _accept_request_async(self, request_id: str) -> None:
+        request = next((item for item in self._requests if item.id == request_id), None)
+        counterpart_id = request.counterpart_id(self._current_user_id) if request else ""
         try:
             await self._controller.accept_request(request_id)
+            await self._refresh_contacts_and_requests(focus_page="friends", focus_friend_id=counterpart_id)
         except Exception as exc:
             InfoBar.error(tr("contact.request.tab_title", "New Friends"), str(exc), parent=self.window(), duration=2200)
             return
@@ -3065,7 +1983,6 @@ class ContactInterface(QWidget):
             parent=self.window(),
             duration=1800,
         )
-        self.reload_data()
 
     def _reject_request(self, request_id: str) -> None:
         request = next((item for item in self._requests if item.id == request_id), None)
@@ -3080,6 +1997,7 @@ class ContactInterface(QWidget):
     async def _reject_request_async(self, request_id: str) -> None:
         try:
             await self._controller.reject_request(request_id)
+            await self._refresh_requests_only()
         except Exception as exc:
             InfoBar.error(tr("contact.request.tab_title", "New Friends"), str(exc), parent=self.window(), duration=2200)
             return
@@ -3089,7 +2007,6 @@ class ContactInterface(QWidget):
             parent=self.window(),
             duration=1800,
         )
-        self.reload_data()
 
     def _show_add_placeholder(self) -> None:
         if self._current_page == "friends":
@@ -3137,24 +2054,35 @@ class ContactInterface(QWidget):
         dialog.activateWindow()
 
     def _on_friend_request_sent(self, status: str = "pending") -> None:
-        """Refresh data after a friend action is completed from the add dialog."""
+        """Refresh only the affected sidebar slices after a friend action dialog completes."""
         if status == "accepted":
-            self._current_page = "friends"
-            self.segmented.setCurrentItem("friends")
-            self.page_stack.setCurrentIndex(0)
-        else:
-            self._current_page = "requests"
-            self.segmented.setCurrentItem("requests")
-            self.page_stack.setCurrentIndex(2)
-        self.reload_data()
+            self._schedule_keyed_ui_task(
+                ("refresh_contacts_requests", "friend_request_sent"),
+                self._refresh_contacts_and_requests(focus_page="friends"),
+                "refresh contacts after friend request",
+            )
+            return
+
+        self._schedule_keyed_ui_task(
+            ("refresh_requests", "friend_request_sent"),
+            self._refresh_requests_only(),
+            "refresh requests after friend request",
+        )
 
     def _on_group_created(self, group: object) -> None:
-        """Switch to groups and jump into the new group chat."""
-        self._current_page = "groups"
-        self.segmented.setCurrentItem("groups")
-        self.page_stack.setCurrentIndex(1)
-        self.reload_data()
-        self.message_requested.emit({"type": "group", "data": group})
+        """Switch to groups, merge the new group locally, and jump into the new group chat."""
+        created_group = self._coerce_group_record(group)
+        self._groups = [item for item in self._groups if item.id != created_group.id]
+        self._groups.append(created_group)
+        self._groups.sort(key=lambda item: item.name.lower())
+        self._update_summary_counts()
+        self._build_groups_page()
+        self._activate_page("groups")
+        if created_group.id in self._group_items:
+            self._select_group(created_group.id, force=True)
+        else:
+            self._restore_selection(full_reload=False)
+        self.message_requested.emit({"type": "group", "data": created_group})
 
     def _request_detail_like_toggle(self, moment_id: str, liked: bool, like_count: int) -> None:
         self._schedule_keyed_ui_task(
@@ -3320,6 +2248,7 @@ class ContactInterface(QWidget):
         """Clear a keyed action slot once its task finishes."""
         if self._keyed_ui_tasks.get(key) is task:
             self._keyed_ui_tasks.pop(key, None)
+
 
 
 

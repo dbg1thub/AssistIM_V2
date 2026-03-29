@@ -12,11 +12,6 @@ class CreateDirectSessionRequest(BaseModel):
     name: str | None = None
 
 
-class CreateGroupSessionRequest(BaseModel):
-    name: str = Field(min_length=1, max_length=128)
-    participant_ids: list[str] = Field(min_length=1)
-
-
 class SessionMemberOut(ORMModel):
     id: str
     nickname: str = ""
@@ -41,4 +36,9 @@ class SessionOut(ORMModel):
     avatar: str | None = None
     is_ai_session: bool
     created_at: str | None = None
+    counterpart_id: str | None = None
+    counterpart_name: str | None = None
+    counterpart_username: str | None = None
+    counterpart_avatar: str | None = None
+    counterpart_gender: str | None = None
     members: list[SessionMemberOut] = Field(default_factory=list)

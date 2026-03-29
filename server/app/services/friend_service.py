@@ -1,4 +1,4 @@
-"""Friend service."""
+﻿"""Friend service."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ from app.core.errors import AppError, ErrorCode
 from app.models.user import FriendRequest, User
 from app.repositories.friend_repo import FriendRepository
 from app.repositories.user_repo import UserRepository
+from app.services.avatar_service import AvatarService
 
 
 class FriendService:
@@ -18,6 +19,7 @@ class FriendService:
     def __init__(self, db: Session) -> None:
         self.friends = FriendRepository(db)
         self.users = UserRepository(db)
+        self.avatars = AvatarService(db)
 
     def create_request(self, current_user: User, receiver_id: str | None, message: str | None = None) -> dict:
         if not receiver_id:
@@ -79,12 +81,14 @@ class FriendService:
         for friendship in self.friends.list_friends(current_user.id):
             friend = self.users.get_by_id(friendship.friend_id)
             if friend is not None:
+                friend = self.avatars.backfill_user_avatar_state(friend)
                 items.append(
                     {
                         "id": friend.id,
                         "username": friend.username,
                         "nickname": friend.nickname,
                         "avatar": friend.avatar,
+                        "avatar_kind": str(getattr(friend, "avatar_kind", "default") or "default"),
                         "email": friend.email,
                         "phone": friend.phone,
                         "birthday": friend.birthday.isoformat() if friend.birthday else None,
@@ -124,8 +128,13 @@ class FriendService:
             return self.friends.update_request_status(request, "expired")
         return request
 
-    @staticmethod
-    def serialize_request(request: FriendRequest) -> dict:
+    def serialize_request(self, request: FriendRequest) -> dict:
+        sender = self.users.get_by_id(request.sender_id)
+        receiver = self.users.get_by_id(request.receiver_id)
+        if sender is not None:
+            sender = self.avatars.backfill_user_avatar_state(sender)
+        if receiver is not None:
+            receiver = self.avatars.backfill_user_avatar_state(receiver)
         return {
             "request_id": request.id,
             "sender_id": request.sender_id,
@@ -133,4 +142,20 @@ class FriendService:
             "status": request.status,
             "message": request.message,
             "created_at": request.created_at.isoformat() if request.created_at else None,
+            "from_user": self._serialize_request_party(sender),
+            "to_user": self._serialize_request_party(receiver),
+        }
+
+    @staticmethod
+    def _serialize_request_party(user: User | None) -> dict:
+        if user is None:
+            return {}
+        return {
+            "id": user.id,
+            "username": user.username,
+            "nickname": user.nickname,
+            "avatar": user.avatar,
+            "avatar_kind": str(getattr(user, "avatar_kind", "default") or "default"),
+            "gender": user.gender,
+            "region": user.region,
         }

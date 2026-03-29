@@ -1,4 +1,4 @@
-"""Controller for loading and normalizing contact-related data."""
+﻿"""Controller for loading and normalizing contact-related data."""
 
 from __future__ import annotations
 
@@ -97,6 +97,10 @@ class FriendRequestRecord:
     created_at: str = ""
     sender_name: str = ""
     receiver_name: str = ""
+    sender_avatar: str = ""
+    receiver_avatar: str = ""
+    sender_gender: str = ""
+    receiver_gender: str = ""
 
     @property
     def display_name(self) -> str:
@@ -132,6 +136,18 @@ class FriendRequestRecord:
                 fallback_default="Target User",
             )
         return self.display_name
+
+    def counterpart_avatar(self, current_user_id: str) -> str:
+        """Return the authoritative avatar for the other party when present."""
+        if self.is_outgoing(current_user_id):
+            return self.receiver_avatar
+        return self.sender_avatar
+
+    def counterpart_gender(self, current_user_id: str) -> str:
+        """Return the other party gender for avatar fallback rendering."""
+        if self.is_outgoing(current_user_id):
+            return self.receiver_gender
+        return self.sender_gender
 
     def direction_label(self, current_user_id: str) -> str:
         """Return a UI label describing request direction."""
@@ -335,8 +351,8 @@ class ContactController:
         for item in payload or []:
             from_user = item.get("from_user") or item.get("sender") or {}
             to_user = item.get("to_user") or item.get("receiver") or {}
-            sender_id = str(item.get("sender_id", "") or "")
-            receiver_id = str(item.get("receiver_id", "") or "")
+            sender_id = str(item.get("sender_id", "") or from_user.get("id", "") or "")
+            receiver_id = str(item.get("receiver_id", "") or to_user.get("id", "") or "")
             sender_name = (
                 str(from_user.get("nickname", "") or "")
                 or str(from_user.get("username", "") or "")
@@ -362,6 +378,10 @@ class ContactController:
                     "created_at": str(item.get("created_at", "") or ""),
                     "sender_name": sender_name,
                     "receiver_name": receiver_name,
+                    "sender_avatar": str(from_user.get("avatar", "") or item.get("sender_avatar", "") or ""),
+                    "receiver_avatar": str(to_user.get("avatar", "") or item.get("receiver_avatar", "") or ""),
+                    "sender_gender": str(from_user.get("gender", "") or item.get("sender_gender", "") or ""),
+                    "receiver_gender": str(to_user.get("gender", "") or item.get("receiver_gender", "") or ""),
                 }
             )
 
@@ -377,6 +397,10 @@ class ContactController:
                     created_at=item["created_at"],
                     sender_name=item["sender_name"] or resolved_names.get(item["sender_id"], ""),
                     receiver_name=item["receiver_name"] or resolved_names.get(item["receiver_id"], ""),
+                    sender_avatar=item["sender_avatar"],
+                    receiver_avatar=item["receiver_avatar"],
+                    sender_gender=item["sender_gender"],
+                    receiver_gender=item["receiver_gender"],
                 )
             )
 
@@ -490,6 +514,9 @@ def get_contact_controller() -> ContactController:
     if _contact_controller is None:
         _contact_controller = ContactController()
     return _contact_controller
+
+
+
 
 
 

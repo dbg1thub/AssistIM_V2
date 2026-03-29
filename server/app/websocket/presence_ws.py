@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-import time
-
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, status
 
-from app.core.security import decode_access_token
 from app.dependencies.settings_dependency import get_websocket_settings
+from app.websocket.auth import require_websocket_user_id
+from app.websocket.payloads import ws_message
 from app.websocket.manager import connection_manager
 
 
@@ -15,13 +14,7 @@ presence_router = APIRouter()
 
 
 def event_payload(msg_type: str, data: dict, msg_id: str = "") -> dict:
-    return {
-        "type": msg_type,
-        "seq": 0,
-        "msg_id": msg_id,
-        "data": data,
-        "timestamp": int(time.time()),
-    }
+    return ws_message(msg_type, data, msg_id=msg_id, seq=0)
 
 
 def bind_websocket_user(websocket: WebSocket, connection_id: str) -> str | None:
@@ -29,11 +22,8 @@ def bind_websocket_user(websocket: WebSocket, connection_id: str) -> str | None:
     if not token:
         return None
     try:
-        payload = decode_access_token(token, settings=get_websocket_settings(websocket))
+        user_id = require_websocket_user_id(token, settings=get_websocket_settings(websocket))
     except Exception:
-        return None
-    user_id = str(payload.get("sub") or "").strip()
-    if not user_id:
         return None
     connection_manager.bind_user(connection_id, user_id)
     return user_id

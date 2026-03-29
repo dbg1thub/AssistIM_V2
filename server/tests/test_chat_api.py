@@ -10,6 +10,29 @@ from starlette.routing import WebSocketRoute
 from starlette.websockets import WebSocketDisconnect
 
 
+def receive_until(ws, expected_type: str, *, unexpected_type: str | None = None):
+    while True:
+        payload = ws.receive_json()
+        payload_type = payload.get("type")
+        if unexpected_type and payload_type == unexpected_type:
+            raise AssertionError(f"unexpected websocket payload: {payload}")
+        if payload_type == expected_type:
+            return payload
+
+
+def authenticate_ws(ws, token: str, *, msg_id: str = "ws-auth") -> dict:
+    ws.send_json(
+        {
+            "type": "auth",
+            "msg_id": msg_id,
+            "data": {"token": token},
+        }
+    )
+    payload = receive_until(ws, "auth_ack")
+    assert payload["data"]["success"] is True
+    return payload
+
+
 def test_friend_request_private_session_and_message_flow(
     client: TestClient,
     user_factory,
@@ -92,6 +115,9 @@ def test_friend_request_private_session_and_message_flow(
     assert session_payload["session_type"] == "direct"
     assert "type" not in session_payload
     assert bob["user"]["id"] in session_payload["participant_ids"]
+    assert session_payload["counterpart_id"] == bob["user"]["id"]
+    assert session_payload["counterpart_username"] == bob["user"]["username"]
+    assert session_payload["counterpart_avatar"] == bob["user"]["avatar"]
 
     send_message_response = client.post(
         f"/api/v1/sessions/{session_id}/messages",
@@ -109,6 +135,12 @@ def test_friend_request_private_session_and_message_flow(
     assert datetime.fromisoformat(message_payload["created_at"])
     assert datetime.fromisoformat(message_payload["updated_at"])
     assert message_payload["timestamp"] == message_payload["created_at"]
+    assert message_payload["session_type"] == "direct"
+    assert sorted(message_payload["participant_ids"]) == sorted([alice["user"]["id"], bob["user"]["id"]])
+    assert message_payload["session_name"] == "Alice & Bob"
+    assert message_payload["sender_profile"]["id"] == alice["user"]["id"]
+    assert message_payload["sender_profile"]["username"] == alice["user"]["username"]
+    assert message_payload["sender_profile"]["avatar"] == alice["user"]["avatar"]
 
     history_response = client.get(
         f"/api/v1/sessions/{session_id}/messages",
@@ -123,6 +155,10 @@ def test_friend_request_private_session_and_message_flow(
     assert "type" not in history_payload[0]
     assert datetime.fromisoformat(history_payload[0]["timestamp"])
     assert history_payload[0]["timestamp"] == message_payload["timestamp"]
+    assert history_payload[0]["session_type"] == "direct"
+    assert sorted(history_payload[0]["participant_ids"]) == sorted([alice["user"]["id"], bob["user"]["id"]])
+    assert history_payload[0]["sender_profile"]["id"] == alice["user"]["id"]
+    assert history_payload[0]["sender_profile"]["avatar"] == alice["user"]["avatar"]
 
     sessions_response = client.get(
         "/api/v1/sessions",
@@ -132,6 +168,60 @@ def test_friend_request_private_session_and_message_flow(
     session_payload = sessions_response.json()["data"]
     assert datetime.fromisoformat(session_payload[0]["last_message_time"])
     assert session_payload[0]["last_message_time"] == message_payload["timestamp"]
+
+def test_create_direct_session_is_idempotent_and_reuses_same_session(
+    client: TestClient,
+    user_factory,
+    auth_header,
+) -> None:
+    from sqlalchemy import select
+
+    from app.core.database import SessionLocal
+    from app.models.session import ChatSession
+
+    alice = user_factory("alice_direct_unique", "Alice Direct Unique")
+    bob = user_factory("bob_direct_unique", "Bob Direct Unique")
+
+    first_response = client.post(
+        "/api/v1/sessions/direct",
+        json={"participant_ids": [bob["user"]["id"]], "name": "Alice & Bob"},
+        headers=auth_header(alice["access_token"]),
+    )
+    assert first_response.status_code == 200
+    first_payload = first_response.json()["data"]
+
+    second_response = client.post(
+        "/api/v1/sessions/direct",
+        json={"participant_ids": [bob["user"]["id"]], "name": "Renamed Private Chat"},
+        headers=auth_header(alice["access_token"]),
+    )
+    assert second_response.status_code == 200
+    second_payload = second_response.json()["data"]
+
+    assert second_payload["id"] == first_payload["id"]
+    assert second_payload["participant_ids"] == first_payload["participant_ids"]
+
+    with SessionLocal() as db:
+        private_sessions = db.execute(select(ChatSession).where(ChatSession.type == "private")).scalars().all()
+        assert len(private_sessions) == 1
+        assert private_sessions[0].direct_key == ":".join(sorted([alice["user"]["id"], bob["user"]["id"]]))
+
+
+def test_legacy_group_session_route_is_removed(
+    client: TestClient,
+    user_factory,
+    auth_header,
+) -> None:
+    alice = user_factory("alice_group_route_removed", "Alice Group Route Removed")
+    bob = user_factory("bob_group_route_removed", "Bob Group Route Removed")
+
+    response = client.post(
+        "/api/v1/sessions/group",
+        json={"name": "Legacy Group", "participant_ids": [bob["user"]["id"]]},
+        headers=auth_header(alice["access_token"]),
+    )
+
+    assert response.status_code == 405
 
 
 def test_send_message_requires_canonical_message_type_field(
@@ -181,9 +271,9 @@ def test_invalid_read_ack_does_not_disconnect_websocket(
             if payload.get("type") == expected_type:
                 return payload
 
-    with client.websocket_connect(f"/ws?token={alice['access_token']}") as alice_ws, client.websocket_connect(
-        f"/ws?token={bob['access_token']}"
-    ) as bob_ws:
+    with client.websocket_connect("/ws") as alice_ws, client.websocket_connect("/ws") as bob_ws:
+        authenticate_ws(alice_ws, alice["access_token"], msg_id="ws-auth-invalid-read-alice")
+        authenticate_ws(bob_ws, bob["access_token"], msg_id="ws-auth-invalid-read-bob")
         alice_ws.send_json(
             {
                 "type": "chat_message",
@@ -239,7 +329,8 @@ def test_websocket_read_ack_requires_message_id_field(client: TestClient, user_f
             if payload.get("type") == expected_type:
                 return payload
 
-    with client.websocket_connect(f"/ws?token={alice['access_token']}") as websocket:
+    with client.websocket_connect("/ws") as websocket:
+        authenticate_ws(websocket, alice["access_token"], msg_id="ws-auth-read-ack-required")
         websocket.send_json(
             {
                 "type": "read_ack",
@@ -263,7 +354,8 @@ def test_websocket_rejects_legacy_message_alias(client: TestClient, user_factory
             if payload.get("type") == expected_type:
                 return payload
 
-    with client.websocket_connect(f"/ws?token={alice['access_token']}") as websocket:
+    with client.websocket_connect("/ws") as websocket:
+        authenticate_ws(websocket, alice["access_token"], msg_id="ws-auth-legacy-alias")
         websocket.send_json(
             {
                 "type": "message",
@@ -279,7 +371,7 @@ def test_websocket_rejects_legacy_message_alias(client: TestClient, user_factory
         assert error_payload["data"]["message"] == "unsupported message type: message"
 
 
-def test_private_websocket_delivers_multiple_messages_with_token_query(
+def test_private_websocket_delivers_multiple_messages_after_explicit_auth(
     client: TestClient,
     user_factory,
     auth_header,
@@ -301,9 +393,9 @@ def test_private_websocket_delivers_multiple_messages_with_token_query(
             if payload.get("type") == expected_type:
                 return payload
 
-    with client.websocket_connect(f"/ws?token={alice['access_token']}") as alice_ws, client.websocket_connect(
-        f"/ws?token={bob['access_token']}"
-    ) as bob_ws:
+    with client.websocket_connect("/ws") as alice_ws, client.websocket_connect("/ws") as bob_ws:
+        authenticate_ws(alice_ws, alice["access_token"], msg_id="ws-auth-private-alice")
+        authenticate_ws(bob_ws, bob["access_token"], msg_id="ws-auth-private-bob")
         for index, content in enumerate(["one", "two", "three"], start=1):
             alice_ws.send_json(
                 {
@@ -320,9 +412,13 @@ def test_private_websocket_delivers_multiple_messages_with_token_query(
             received = receive_until(bob_ws, "chat_message")
             assert received["data"]["content"] == content
             assert received["data"]["session_id"] == session_id
+            assert received["data"]["session_type"] == "direct"
+            assert received["data"]["session_name"] == "Alice & Bob"
+            assert received["data"]["sender_profile"]["id"] == alice["user"]["id"]
+            assert received["data"]["sender_profile"]["avatar"] == alice["user"]["avatar"]
 
 
-def test_group_websocket_delivers_multiple_messages_with_token_query(
+def test_group_websocket_delivers_multiple_messages_after_explicit_auth(
     client: TestClient,
     user_factory,
     auth_header,
@@ -344,9 +440,9 @@ def test_group_websocket_delivers_multiple_messages_with_token_query(
             if payload.get("type") == expected_type:
                 return payload
 
-    with client.websocket_connect(f"/ws?token={alice['access_token']}") as alice_ws, client.websocket_connect(
-        f"/ws?token={bob['access_token']}"
-    ) as bob_ws:
+    with client.websocket_connect("/ws") as alice_ws, client.websocket_connect("/ws") as bob_ws:
+        authenticate_ws(alice_ws, alice["access_token"], msg_id="ws-auth-group-alice")
+        authenticate_ws(bob_ws, bob["access_token"], msg_id="ws-auth-group-bob")
         for index, content in enumerate(["g-one", "g-two", "g-three"], start=1):
             alice_ws.send_json(
                 {
@@ -363,6 +459,10 @@ def test_group_websocket_delivers_multiple_messages_with_token_query(
             received = receive_until(bob_ws, "chat_message")
             assert received["data"]["content"] == content
             assert received["data"]["session_id"] == session_id
+            assert received["data"]["session_type"] == "group"
+            assert received["data"]["session_name"] == "Team"
+            assert received["data"]["sender_profile"]["id"] == alice["user"]["id"]
+            assert received["data"]["sender_profile"]["avatar"] == alice["user"]["avatar"]
 
 
 def test_presence_websocket_requires_valid_token(client: TestClient) -> None:
@@ -408,6 +508,27 @@ def test_chat_websocket_rejects_user_id_only_auth_and_keeps_socket_open(
         assert auth_payload["data"]["success"] is True
         assert auth_payload["data"]["user_id"] == alice["user"]["id"]
 
+
+def test_chat_websocket_ignores_query_token_until_explicit_auth(
+    client: TestClient,
+    user_factory,
+) -> None:
+    alice = user_factory("alice_query_token", "Alice Query Token")
+
+    with client.websocket_connect(f"/ws?token={alice['access_token']}") as websocket:
+        websocket.send_json(
+            {
+                "type": "sync_messages",
+                "msg_id": "91000000-0000-4000-8000-000000000003",
+                "data": {"session_cursors": {}, "event_cursors": {}},
+            }
+        )
+        error_payload = receive_until(websocket, "error")
+        assert error_payload["data"]["code"] == 1004
+        assert error_payload["data"]["message"] == "websocket authentication required"
+
+        authenticate_ws(websocket, alice["access_token"], msg_id="ws-auth-query-token")
+
 def test_websocket_message_mutations_require_message_owner(
     client: TestClient,
     user_factory,
@@ -438,7 +559,8 @@ def test_websocket_message_mutations_require_message_owner(
             if payload.get("type") == expected_type:
                 return payload
 
-    with client.websocket_connect(f"/ws?token={bob['access_token']}") as websocket:
+    with client.websocket_connect("/ws") as websocket:
+        authenticate_ws(websocket, bob["access_token"], msg_id="ws-auth-owner-check")
         websocket.send_json(
             {
                 "type": "message_recall",
@@ -673,9 +795,9 @@ def test_read_ack_websocket_broadcasts_read_cursor(
             if payload.get("type") == expected_type:
                 return payload
 
-    with client.websocket_connect(f"/ws?token={alice['access_token']}") as alice_ws, client.websocket_connect(
-        f"/ws?token={bob['access_token']}"
-    ) as bob_ws:
+    with client.websocket_connect("/ws") as alice_ws, client.websocket_connect("/ws") as bob_ws:
+        authenticate_ws(alice_ws, alice["access_token"], msg_id="ws-auth-read-broadcast-alice")
+        authenticate_ws(bob_ws, bob["access_token"], msg_id="ws-auth-read-broadcast-bob")
         bob_ws.send_json(
             {
                 "type": "read_ack",
@@ -728,9 +850,9 @@ def test_websocket_duplicate_message_id_is_idempotent_and_ack_returns_canonical_
         },
     }
 
-    with client.websocket_connect(f"/ws?token={alice['access_token']}") as alice_ws, client.websocket_connect(
-        f"/ws?token={bob['access_token']}"
-    ) as bob_ws:
+    with client.websocket_connect("/ws") as alice_ws, client.websocket_connect("/ws") as bob_ws:
+        authenticate_ws(alice_ws, alice["access_token"], msg_id="ws-auth-idempotent-alice")
+        authenticate_ws(bob_ws, bob["access_token"], msg_id="ws-auth-idempotent-bob")
         alice_ws.send_json(payload)
         first_ack = receive_until(alice_ws, "message_ack")
         assert first_ack["data"]["success"] is True
@@ -786,7 +908,8 @@ def test_websocket_rejects_conflicting_duplicate_message_id(
 
     message_id = "95000000-0000-4000-8000-000000000001"
 
-    with client.websocket_connect(f"/ws?token={alice['access_token']}") as alice_ws:
+    with client.websocket_connect("/ws") as alice_ws:
+        authenticate_ws(alice_ws, alice["access_token"], msg_id="ws-auth-conflict")
         alice_ws.send_json(
             {
                 "type": "chat_message",
@@ -865,7 +988,8 @@ def test_websocket_sync_messages_uses_session_cursors(
             if payload.get("type") == expected_type:
                 return payload
 
-    with client.websocket_connect(f"/ws?token={bob['access_token']}") as websocket:
+    with client.websocket_connect("/ws") as websocket:
+        authenticate_ws(websocket, bob["access_token"], msg_id="ws-auth-sync-messages")
         websocket.send_json(
             {
                 "type": "sync_messages",
@@ -933,7 +1057,8 @@ def test_websocket_sync_messages_replays_offline_read_and_edit_events(
             if payload.get("type") == expected_type:
                 return payload
 
-    with client.websocket_connect(f"/ws?token={alice['access_token']}") as websocket:
+    with client.websocket_connect("/ws") as websocket:
+        authenticate_ws(websocket, alice["access_token"], msg_id="ws-auth-sync-events-read-edit")
         websocket.send_json(
             {
                 "type": "sync_messages",
@@ -1013,7 +1138,8 @@ def test_websocket_sync_messages_replays_offline_recall_and_delete_events(
             if payload.get("type") == expected_type:
                 return payload
 
-    with client.websocket_connect(f"/ws?token={bob['access_token']}") as websocket:
+    with client.websocket_connect("/ws") as websocket:
+        authenticate_ws(websocket, bob["access_token"], msg_id="ws-auth-sync-events-recall-delete")
         websocket.send_json(
             {
                 "type": "sync_messages",
@@ -1149,7 +1275,8 @@ def test_attachment_message_extra_roundtrips_through_history_and_sync_messages(
             if payload.get("type") == expected_type:
                 return payload
 
-    with client.websocket_connect(f"/ws?token={bob['access_token']}") as websocket:
+    with client.websocket_connect("/ws") as websocket:
+        authenticate_ws(websocket, bob["access_token"], msg_id="ws-auth-attachment-sync")
         websocket.send_json(
             {
                 "type": "sync_messages",
@@ -1291,8 +1418,6 @@ def test_delete_group_removes_group_session_messages_and_events(
         assert db.execute(select(Message.id).where(Message.session_id == session_id)).scalars().all() == []
         assert db.execute(select(MessageRead.message_id).where(MessageRead.message_id == message_id)).scalars().all() == []
         assert db.execute(select(SessionEvent.id).where(SessionEvent.session_id == session_id)).scalars().all() == []
-
-
 
 
 

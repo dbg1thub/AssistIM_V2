@@ -22,6 +22,9 @@ class User(IdMixin, TimestampMixin, Base):
     password_hash: Mapped[str] = mapped_column(nullable=False)
     nickname: Mapped[str] = mapped_column(nullable=False)
     avatar: Mapped[str | None] = mapped_column(nullable=True)
+    avatar_kind: Mapped[str] = mapped_column(String(length=16), nullable=False, default="default")
+    avatar_default_key: Mapped[str | None] = mapped_column(String(length=128), nullable=True)
+    avatar_file_id: Mapped[str | None] = mapped_column(Uuid(as_uuid=False), ForeignKey("files.id"), nullable=True)
     email: Mapped[str | None] = mapped_column(String(length=255), nullable=True)
     phone: Mapped[str | None] = mapped_column(String(length=32), nullable=True)
     birthday: Mapped[date | None] = mapped_column(Date(), nullable=True)
@@ -54,7 +57,3 @@ class Friendship(IdMixin, TimestampMixin, Base):
 
     user_id: Mapped[str] = mapped_column(Uuid(as_uuid=False), ForeignKey("users.id"), nullable=False)
     friend_id: Mapped[str] = mapped_column(Uuid(as_uuid=False), ForeignKey("users.id"), nullable=False)
-
-
-
-

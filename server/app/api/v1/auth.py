@@ -1,4 +1,4 @@
-"""Auth routes."""
+﻿"""Auth routes."""
 
 from __future__ import annotations
 
@@ -41,19 +41,6 @@ async def register(
 ) -> dict:
     auth_payload = AuthService(db, settings).register(payload.username, payload.password, payload.nickname)
     return success_response(auth_payload)
-
-
-@router.post(
-    "/users",
-    status_code=status.HTTP_201_CREATED,
-    dependencies=[Depends(rate_limiter.dynamic_dependency("register", _register_limit))],
-)
-def register_user(
-    payload: RegisterRequest,
-    db: Session = Depends(get_db),
-    settings: Settings = Depends(get_request_settings),
-) -> dict:
-    return success_response(AuthService(db, settings).register_user_only(payload.username, payload.password, payload.nickname))
 
 
 @router.post("/login", dependencies=[Depends(rate_limiter.dynamic_dependency("login", _login_limit))])

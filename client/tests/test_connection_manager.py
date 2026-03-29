@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sqlite3
 import sys
 import types
 from enum import Enum
@@ -101,20 +102,48 @@ if 'PySide6.QtCore' not in sys.modules:
 if 'aiosqlite' not in sys.modules:
     aiosqlite = types.ModuleType('aiosqlite')
 
+    class _Cursor:
+        def __init__(self, cursor: sqlite3.Cursor) -> None:
+            self._cursor = cursor
+            self.rowcount = cursor.rowcount
+
+        async def fetchone(self):
+            return self._cursor.fetchone()
+
+        async def fetchall(self):
+            return self._cursor.fetchall()
+
     class _DummyConnection:
-        row_factory = None
+        def __init__(self, path: str = ':memory:') -> None:
+            self._conn = sqlite3.connect(path)
+            self._row_factory = None
+
+        @property
+        def row_factory(self):
+            return self._row_factory
+
+        @row_factory.setter
+        def row_factory(self, value) -> None:
+            self._row_factory = value
+            self._conn.row_factory = value
+
+        async def execute(self, sql: str, params=()):
+            return _Cursor(self._conn.execute(sql, params))
+
+        async def executescript(self, script: str):
+            self._conn.executescript(script)
+
+        async def commit(self) -> None:
+            self._conn.commit()
 
         async def close(self):
-            return None
+            self._conn.close()
 
-    class _DummyRow(dict):
-        pass
-
-    async def _dummy_connect(*args, **kwargs):
-        return _DummyConnection()
+    async def _dummy_connect(path=':memory:', *args, **kwargs):
+        return _DummyConnection(path)
 
     aiosqlite.Connection = _DummyConnection
-    aiosqlite.Row = _DummyRow
+    aiosqlite.Row = sqlite3.Row
     aiosqlite.connect = _dummy_connect
     sys.modules['aiosqlite'] = aiosqlite
 
@@ -308,6 +337,7 @@ def test_connection_manager_loads_cached_message_and_event_cursors_and_builds_sy
         manager = connection_manager_module.ConnectionManager()
         manager._ws_client = fake_ws_client
         manager._base_ws_url = fake_ws_client.url
+        manager._ws_authenticated = True
         try:
             await manager.reload_sync_timestamp()
             assert manager.session_sync_cursors == {'session-1': 3}
@@ -332,6 +362,7 @@ def test_connection_manager_sends_canonical_message_id_for_mutation_commands(mon
     async def scenario() -> None:
         manager = connection_manager_module.ConnectionManager()
         manager._ws_client = fake_ws_client
+        manager._ws_authenticated = True
         try:
             recall_sent = await manager.send_recall('session-1', 'message-1')
             edit_sent = await manager.send_edit('session-1', 'message-1', 'updated content')
@@ -423,23 +454,22 @@ def test_connection_manager_advances_message_and_event_cursors_from_ws_payloads(
     asyncio.run(scenario())
 
 
-def test_connection_manager_uses_auth_service_token_for_ws_url_and_auth_message(monkeypatch) -> None:
+def test_connection_manager_uses_auth_service_token_for_auth_message_without_mutating_ws_url(monkeypatch) -> None:
     fake_auth_service = FakeAuthService(access_token='ws-token')
     fake_ws_client = FakeWebSocketClient()
+    fake_ws_client.url = 'ws://example.test/ws?client=desktop'
 
     monkeypatch.setattr(connection_manager_module, 'get_auth_service', lambda: fake_auth_service)
 
     async def scenario() -> None:
         manager = connection_manager_module.ConnectionManager()
         manager._ws_client = fake_ws_client
-        manager._base_ws_url = 'ws://example.test/ws?client=desktop'
+        manager._base_ws_url = fake_ws_client.url
         try:
-            manager._apply_authenticated_ws_url()
-            assert manager._ws_client.url == 'ws://example.test/ws?client=desktop&token=ws-token'
-
             sent = manager._authenticate_websocket_nowait()
 
             assert sent is True
+            assert manager._ws_client.url == 'ws://example.test/ws?client=desktop'
             assert fake_ws_client.sent_nowait[-1] == {
                 'type': 'auth',
                 'seq': 0,
@@ -449,6 +479,33 @@ def test_connection_manager_uses_auth_service_token_for_ws_url_and_auth_message(
                     'token': 'ws-token',
                 },
             }
+        finally:
+            await manager.close()
+
+    asyncio.run(scenario())
+
+
+def test_connection_manager_waits_for_auth_ack_before_sync_and_business_messages(monkeypatch) -> None:
+    fake_ws_client = FakeWebSocketClient()
+
+    monkeypatch.setattr(connection_manager_module, 'get_auth_service', lambda: FakeAuthService())
+
+    async def scenario() -> None:
+        manager = connection_manager_module.ConnectionManager()
+        manager._ws_client = fake_ws_client
+        try:
+            pre_auth_sent = await manager.send_chat_message('session-1', 'hello', 'msg-1')
+            assert pre_auth_sent is False
+
+            manager._on_message({'type': 'auth_ack', 'data': {'success': True, 'user_id': 'user-1'}})
+            await asyncio.sleep(0.05)
+
+            assert manager._ws_authenticated is True
+            assert fake_ws_client.sent_nowait[-1]['type'] == 'sync_messages'
+
+            post_auth_sent = await manager.send_chat_message('session-1', 'hello', 'msg-2')
+            assert post_auth_sent is True
+            assert fake_ws_client.sent_nowait[-1]['type'] == 'chat_message'
         finally:
             await manager.close()
 

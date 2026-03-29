@@ -3,48 +3,23 @@
 from __future__ import annotations
 
 import logging
-import time
 import uuid
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from app.core.database import SessionLocal
 from app.core.errors import AppError, ErrorCode
-from app.core.security import decode_access_token, token_session_version
 from app.dependencies.settings_dependency import get_websocket_settings
 from app.repositories.user_repo import UserRepository
 from app.services.message_service import MessageService
+from app.websocket.auth import require_websocket_user_id
 from app.websocket.manager import connection_manager
-from app.websocket.presence_ws import bind_websocket_user, event_payload
+from app.websocket.payloads import read_broadcast_payload, ws_message
+from app.websocket.presence_ws import event_payload
 
 
 websocket_router = APIRouter()
 logger = logging.getLogger(__name__)
-
-
-def _ws_message(
-    msg_type: str,
-    data: dict,
-    msg_id: str | None = None,
-    seq: int = 0,
-) -> dict:
-    return {
-        "type": msg_type,
-        "seq": int(seq or 0),
-        "msg_id": msg_id or "",
-        "timestamp": int(time.time()),
-        "data": data,
-    }
-
-def _read_broadcast_payload(data: dict) -> dict:
-    return {
-        "session_id": data.get("session_id", ""),
-        "message_id": data.get("message_id", ""),
-        "last_read_seq": int(data.get("last_read_seq", 0) or 0),
-        "user_id": data.get("user_id", ""),
-        "read_at": data.get("read_at"),
-        "event_seq": int(data.get("event_seq", 0) or 0),
-    }
 
 
 async def _broadcast_offline_if_needed(user_id: str | None, became_offline: bool) -> None:
@@ -56,7 +31,7 @@ async def _send_app_error(connection_id: str, msg_id: str, exc: AppError) -> Non
     """Return an application-level websocket error without tearing down the socket."""
     await connection_manager.send_json(
         connection_id,
-        _ws_message("error", {"message": exc.message, "code": exc.code}, msg_id=msg_id),
+        ws_message("error", {"message": exc.message, "code": exc.code}, msg_id=msg_id),
     )
 
 
@@ -67,25 +42,12 @@ def _authenticate_connection(
     *,
     secret_settings,
 ) -> str:
-    if not token:
-        raise AppError(ErrorCode.UNAUTHORIZED, "websocket authentication token required", 401)
-
-    payload = decode_access_token(token, settings=secret_settings)
-    user_id = payload.get("sub")
-    if not user_id:
-        raise AppError(ErrorCode.UNAUTHORIZED, "invalid access token", 401)
-    with SessionLocal() as db:
-        user = UserRepository(db).get_by_id(user_id)
-        if user is None:
-            raise AppError(ErrorCode.UNAUTHORIZED, "user not found for websocket connection", 401)
-        if token_session_version(payload) != int(getattr(user, "auth_session_version", 0) or 0):
-            raise AppError(ErrorCode.UNAUTHORIZED, "session expired", 401)
+    user_id = require_websocket_user_id(token, settings=secret_settings)
     if current_user_id is not None and current_user_id != user_id:
         raise AppError(ErrorCode.FORBIDDEN, "connection already authenticated as another user", 403)
 
     connection_manager.bind_user(connection_id, user_id)
     return user_id
-
 
 def _require_authenticated_user(user_id: str | None) -> str:
     if user_id is None:
@@ -107,34 +69,34 @@ def _require_target_message_id(data: dict) -> str:
     return message_id
 
 def _outbound_message_data(saved: dict, *, content_override: str | None = None, extra_override: dict | None = None) -> dict:
-    merged_extra = dict(saved.get("extra") or {})
+    payload = dict(saved or {})
+    merged_extra = dict(payload.get("extra") or {})
     if extra_override:
         merged_extra.update(extra_override)
-    return {
-        "message_id": saved["message_id"],
-        "session_id": saved["session_id"],
-        "sender_id": saved["sender_id"],
-        "content": saved["content"] if content_override is None else content_override,
-        "message_type": saved.get("message_type") or "text",
-        "status": saved.get("status", "sent"),
-        "timestamp": saved.get("timestamp") or saved.get("created_at"),
-        "created_at": saved.get("created_at"),
-        "updated_at": saved.get("updated_at") or saved.get("created_at"),
-        "session_seq": saved.get("session_seq", 0),
-        "read_count": saved.get("read_count", 0),
-        "read_target_count": saved.get("read_target_count", 0),
-        "read_by_user_ids": saved.get("read_by_user_ids", []),
-        "is_read_by_me": saved.get("is_read_by_me", False),
-        "extra": merged_extra,
-    }
+    payload["content"] = payload.get("content") if content_override is None else content_override
+    payload["message_type"] = payload.get("message_type") or "text"
+    payload["status"] = payload.get("status", "sent")
+    payload["timestamp"] = payload.get("timestamp") or payload.get("created_at")
+    payload["created_at"] = payload.get("created_at")
+    payload["updated_at"] = payload.get("updated_at") or payload.get("created_at")
+    payload["session_type"] = payload.get("session_type") or ""
+    payload["session_name"] = payload.get("session_name") or ""
+    payload["session_avatar"] = payload.get("session_avatar")
+    payload["participant_ids"] = payload.get("participant_ids") or []
+    payload["is_ai_session"] = bool(payload.get("is_ai_session", False))
+    payload["session_seq"] = payload.get("session_seq", 0)
+    payload["read_count"] = payload.get("read_count", 0)
+    payload["read_target_count"] = payload.get("read_target_count", 0)
+    payload["read_by_user_ids"] = payload.get("read_by_user_ids", [])
+    payload["is_read_by_me"] = payload.get("is_read_by_me", False)
+    payload["extra"] = merged_extra
+    return payload
 
 
 async def _handle_chat_socket(websocket: WebSocket) -> None:
     ws_settings = get_websocket_settings(websocket)
     connection_id = await connection_manager.connect(websocket)
-    user_id = bind_websocket_user(websocket, connection_id)
-    if user_id is not None:
-        await connection_manager.broadcast_json(event_payload("online", {"user_id": user_id}))
+    user_id: str | None = None
 
     try:
         while True:
@@ -162,7 +124,7 @@ async def _handle_chat_socket(websocket: WebSocket) -> None:
                     )
                 await connection_manager.send_json(
                     connection_id,
-                    _ws_message("auth_ack", {"success": True, "user_id": user_id}),
+                    ws_message("auth_ack", {"success": True, "user_id": user_id}),
                 )
                 continue
 
@@ -189,11 +151,11 @@ async def _handle_chat_socket(websocket: WebSocket) -> None:
                     continue
                 await connection_manager.send_json(
                     connection_id,
-                    _ws_message("history_messages", {"messages": messages}),
+                    ws_message("history_messages", {"messages": messages}),
                 )
                 await connection_manager.send_json(
                     connection_id,
-                    _ws_message("history_events", {"events": events}),
+                    ws_message("history_events", {"events": events}),
                 )
                 continue
 
@@ -222,7 +184,7 @@ async def _handle_chat_socket(websocket: WebSocket) -> None:
                 recipient_ids = [member_id for member_id in member_ids if member_id != current_user_id]
                 await connection_manager.send_json(
                     connection_id,
-                    _ws_message(
+                    ws_message(
                         "message_ack",
                         {"msg_id": msg_id, "success": True, "message": ack_message},
                         msg_id=msg_id,
@@ -232,7 +194,7 @@ async def _handle_chat_socket(websocket: WebSocket) -> None:
                     logger.info("Idempotent websocket resend acknowledged without rebroadcast: %s", msg_id)
                     continue
 
-                payload = _ws_message(
+                payload = ws_message(
                     "chat_message",
                     ack_message,
                     msg_id=saved["message_id"],
@@ -245,7 +207,7 @@ async def _handle_chat_socket(websocket: WebSocket) -> None:
                 if delivered_user_ids:
                     await connection_manager.send_json_to_users(
                         [current_user_id],
-                        _ws_message(
+                        ws_message(
                             "message_delivered",
                             {
                                 "session_id": session_id,
@@ -287,9 +249,9 @@ async def _handle_chat_socket(websocket: WebSocket) -> None:
                 if read_state.get("advanced"):
                     await connection_manager.send_json_to_users(
                         member_ids,
-                        _ws_message(
+                        ws_message(
                             "read",
-                            _read_broadcast_payload(read_state),
+                            read_broadcast_payload(read_state),
                             msg_id=read_state.get("message_id", ""),
                             seq=int(read_state.get("event_seq", 0) or 0),
                         ),
@@ -310,7 +272,7 @@ async def _handle_chat_socket(websocket: WebSocket) -> None:
                     continue
                 await connection_manager.send_json_to_users(
                     member_ids,
-                    _ws_message(
+                    ws_message(
                         "message_recall",
                         recalled,
                         msg_id=recalled["message_id"],
@@ -332,7 +294,7 @@ async def _handle_chat_socket(websocket: WebSocket) -> None:
                     continue
                 await connection_manager.send_json_to_users(
                     member_ids,
-                    _ws_message(
+                    ws_message(
                         "message_edit",
                         edited,
                         msg_id=edited["message_id"],
@@ -354,7 +316,7 @@ async def _handle_chat_socket(websocket: WebSocket) -> None:
                     continue
                 await connection_manager.send_json_to_users(
                     member_ids,
-                    _ws_message(
+                    ws_message(
                         "message_delete",
                         deleted,
                         msg_id=deleted["message_id"],
@@ -365,7 +327,7 @@ async def _handle_chat_socket(websocket: WebSocket) -> None:
 
             await connection_manager.send_json(
                 connection_id,
-                _ws_message(
+                ws_message(
                     "error",
                     {"message": f"unsupported message type: {msg_type}"},
                     msg_id=msg_id,
@@ -384,10 +346,3 @@ async def _handle_chat_socket(websocket: WebSocket) -> None:
 @websocket_router.websocket("/ws")
 async def websocket_chat(websocket: WebSocket) -> None:
     await _handle_chat_socket(websocket)
-
-
-
-
-
-
-

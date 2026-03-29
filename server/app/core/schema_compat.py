@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import json
+
 from collections.abc import Iterable
 
 from sqlalchemy import inspect, text
 from sqlalchemy.engine import Connection, Engine
 
+from app.media.default_avatars import choose_seeded_default_avatar_key, default_avatar_key_from_url
 
 USER_PROFILE_COLUMN_DDL: dict[str, str] = {
     "email": "VARCHAR(255)",
@@ -18,9 +21,21 @@ USER_PROFILE_COLUMN_DDL: dict[str, str] = {
     "auth_session_version": "INTEGER NOT NULL DEFAULT 0",
 }
 
+USER_AVATAR_COLUMN_DDL: dict[str, str] = {
+    "avatar_kind": "VARCHAR(16) NOT NULL DEFAULT 'default'",
+    "avatar_default_key": "VARCHAR(128)",
+    "avatar_file_id": "VARCHAR(36)",
+}
+
 USER_PROFILE_INDEX_DDL: dict[str, str] = {
     "idx_users_email": "CREATE INDEX IF NOT EXISTS idx_users_email ON users (email)",
     "idx_users_phone": "CREATE INDEX IF NOT EXISTS idx_users_phone ON users (phone)",
+}
+
+GROUP_AVATAR_COLUMN_DDL: dict[str, str] = {
+    "avatar_kind": "VARCHAR(16) NOT NULL DEFAULT 'generated'",
+    "avatar_file_id": "VARCHAR(36)",
+    "avatar_version": "INTEGER NOT NULL DEFAULT 1",
 }
 
 MESSAGE_COLUMN_DDL: dict[str, str] = {
@@ -31,6 +46,7 @@ MESSAGE_COLUMN_DDL: dict[str, str] = {
 SESSION_COLUMN_DDL: dict[str, str] = {
     "last_message_seq": "INTEGER NOT NULL DEFAULT 0",
     "last_event_seq": "INTEGER NOT NULL DEFAULT 0",
+    "direct_key": "VARCHAR(255)",
 }
 
 SESSION_MEMBER_COLUMN_DDL: dict[str, str] = {
@@ -48,6 +64,10 @@ FILE_COLUMN_DDL: dict[str, str] = {
 
 CHAT_INDEX_DDL: dict[str, str] = {
     "idx_messages_session_seq": "CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_session_seq ON messages (session_id, session_seq)",
+}
+
+SESSION_INDEX_DDL: dict[str, str] = {
+    "idx_sessions_direct_key": "CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_direct_key ON sessions (direct_key)",
 }
 
 FILE_INDEX_DDL: dict[str, str] = {
@@ -86,7 +106,7 @@ def _has_indexes(bind: Engine | Connection, table_name: str, required_indexes: I
     return all(index_name in indexes for index_name in required_indexes)
 
 
-RUNTIME_SCHEMA_ALEMBIC_REVISION = "20260328_0004"
+RUNTIME_SCHEMA_ALEMBIC_REVISION = "20260329_0006"
 
 def _parse_revision(revision: str) -> tuple[int, int] | None:
     candidate = str(revision or "").strip()
@@ -119,19 +139,22 @@ def _has_runtime_schema_migration(bind: Engine | Connection) -> bool:
 
 
 def _has_current_runtime_schema(bind: Engine | Connection) -> bool:
-    required_tables = {"users", "messages", "sessions", "session_members", "files", "session_events"}
+    required_tables = {"users", "messages", "sessions", "session_members", "files", "session_events", "groups"}
     if required_tables - _get_table_names(bind):
         return False
 
     return (
         _has_columns(bind, "users", USER_PROFILE_COLUMN_DDL)
+        and _has_columns(bind, "users", USER_AVATAR_COLUMN_DDL)
         and _has_columns(bind, "messages", MESSAGE_COLUMN_DDL)
         and _has_columns(bind, "sessions", SESSION_COLUMN_DDL)
         and _has_columns(bind, "session_members", SESSION_MEMBER_COLUMN_DDL)
         and _has_columns(bind, "files", FILE_COLUMN_DDL)
         and _has_indexes(bind, "users", USER_PROFILE_INDEX_DDL)
         and _has_indexes(bind, "messages", CHAT_INDEX_DDL)
+        and _has_indexes(bind, "sessions", SESSION_INDEX_DDL)
         and _has_indexes(bind, "files", FILE_INDEX_DDL)
+        and _has_columns(bind, "groups", GROUP_AVATAR_COLUMN_DDL)
         and _has_indexes(bind, "session_events", SESSION_EVENT_INDEX_DDL)
     )
 
@@ -485,6 +508,347 @@ def _backfill_session_member_read_state(connection: Connection, applied: list[st
 
 
 
+def _update_session_event_payload_session_id(raw_payload: str | None, canonical_session_id: str) -> str:
+    if not raw_payload:
+        return "{}"
+    try:
+        payload = json.loads(raw_payload)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return raw_payload
+    if not isinstance(payload, dict):
+        return raw_payload
+    if payload.get("session_id") == canonical_session_id:
+        return raw_payload
+    payload["session_id"] = canonical_session_id
+    return json.dumps(payload, ensure_ascii=True, sort_keys=True)
+
+
+def _merge_duplicate_private_session(connection: Connection, canonical_session_id: str, duplicate_session_id: str) -> None:
+    table_names = _get_table_names(connection)
+    duplicate_updated_at = connection.execute(
+        text("SELECT updated_at FROM sessions WHERE id = :session_id"),
+        {"session_id": duplicate_session_id},
+    ).scalar_one_or_none()
+
+    if "messages" in table_names:
+        next_session_seq = int(
+            connection.execute(
+                text("SELECT COALESCE(MAX(session_seq), 0) FROM messages WHERE session_id = :session_id"),
+                {"session_id": canonical_session_id},
+            ).scalar_one()
+            or 0
+        )
+        message_ids = connection.execute(
+            text(
+                """
+                SELECT id
+                FROM messages
+                WHERE session_id = :session_id
+                ORDER BY created_at ASC, session_seq ASC, id ASC
+                """
+            ),
+            {"session_id": duplicate_session_id},
+        ).scalars().all()
+        for message_id in message_ids:
+            next_session_seq += 1
+            connection.execute(
+                text(
+                    """
+                    UPDATE messages
+                    SET session_id = :canonical_session_id,
+                        session_seq = :session_seq
+                    WHERE id = :message_id
+                    """
+                ),
+                {
+                    "canonical_session_id": canonical_session_id,
+                    "session_seq": next_session_seq,
+                    "message_id": message_id,
+                },
+            )
+
+    if "session_events" in table_names:
+        next_event_seq = int(
+            connection.execute(
+                text("SELECT COALESCE(MAX(event_seq), 0) FROM session_events WHERE session_id = :session_id"),
+                {"session_id": canonical_session_id},
+            ).scalar_one()
+            or 0
+        )
+        events = connection.execute(
+            text(
+                """
+                SELECT id, payload
+                FROM session_events
+                WHERE session_id = :session_id
+                ORDER BY created_at ASC, event_seq ASC, id ASC
+                """
+            ),
+            {"session_id": duplicate_session_id},
+        ).mappings().all()
+        for row in events:
+            next_event_seq += 1
+            connection.execute(
+                text(
+                    """
+                    UPDATE session_events
+                    SET session_id = :canonical_session_id,
+                        event_seq = :event_seq,
+                        payload = :payload
+                    WHERE id = :event_id
+                    """
+                ),
+                {
+                    "canonical_session_id": canonical_session_id,
+                    "event_seq": next_event_seq,
+                    "payload": _update_session_event_payload_session_id(row["payload"], canonical_session_id),
+                    "event_id": row["id"],
+                },
+            )
+
+    if "session_members" in table_names:
+        duplicate_members = connection.execute(
+            text(
+                """
+                SELECT user_id, joined_at, last_read_message_id, last_read_at
+                FROM session_members
+                WHERE session_id = :session_id
+                ORDER BY user_id ASC
+                """
+            ),
+            {"session_id": duplicate_session_id},
+        ).mappings().all()
+        for row in duplicate_members:
+            member_exists = int(
+                connection.execute(
+                    text(
+                        """
+                        SELECT COUNT(*)
+                        FROM session_members
+                        WHERE session_id = :session_id
+                          AND user_id = :user_id
+                        """
+                    ),
+                    {"session_id": canonical_session_id, "user_id": row["user_id"]},
+                ).scalar_one()
+                or 0
+            )
+            if member_exists == 0:
+                connection.execute(
+                    text(
+                        """
+                        INSERT INTO session_members (
+                            session_id,
+                            user_id,
+                            joined_at,
+                            last_read_seq,
+                            last_read_message_id,
+                            last_read_at
+                        )
+                        VALUES (
+                            :session_id,
+                            :user_id,
+                            :joined_at,
+                            0,
+                            NULL,
+                            NULL
+                        )
+                        """
+                    ),
+                    {
+                        "session_id": canonical_session_id,
+                        "user_id": row["user_id"],
+                        "joined_at": row["joined_at"],
+                    },
+                )
+
+            last_read_message_id = row["last_read_message_id"]
+            if last_read_message_id:
+                read_seq = connection.execute(
+                    text(
+                        """
+                        SELECT session_seq
+                        FROM messages
+                        WHERE id = :message_id
+                          AND session_id = :session_id
+                        """
+                    ),
+                    {"message_id": last_read_message_id, "session_id": canonical_session_id},
+                ).scalar_one_or_none()
+                if read_seq is not None:
+                    current_seq = int(
+                        connection.execute(
+                            text(
+                                """
+                                SELECT COALESCE(last_read_seq, 0)
+                                FROM session_members
+                                WHERE session_id = :session_id
+                                  AND user_id = :user_id
+                                """
+                            ),
+                            {"session_id": canonical_session_id, "user_id": row["user_id"]},
+                        ).scalar_one()
+                        or 0
+                    )
+                    if int(read_seq or 0) > current_seq:
+                        connection.execute(
+                            text(
+                                """
+                                UPDATE session_members
+                                SET last_read_seq = :last_read_seq,
+                                    last_read_message_id = :last_read_message_id,
+                                    last_read_at = :last_read_at
+                                WHERE session_id = :session_id
+                                  AND user_id = :user_id
+                                """
+                            ),
+                            {
+                                "last_read_seq": int(read_seq or 0),
+                                "last_read_message_id": last_read_message_id,
+                                "last_read_at": row["last_read_at"],
+                                "session_id": canonical_session_id,
+                                "user_id": row["user_id"],
+                            },
+                        )
+
+        connection.execute(
+            text("DELETE FROM session_members WHERE session_id = :session_id"),
+            {"session_id": duplicate_session_id},
+        )
+
+    if duplicate_updated_at is not None:
+        connection.execute(
+            text(
+                """
+                UPDATE sessions
+                SET updated_at = CASE
+                    WHEN updated_at IS NULL OR updated_at < :updated_at THEN :updated_at
+                    ELSE updated_at
+                END
+                WHERE id = :session_id
+                """
+            ),
+            {"updated_at": duplicate_updated_at, "session_id": canonical_session_id},
+        )
+
+    connection.execute(
+        text("DELETE FROM sessions WHERE id = :session_id"),
+        {"session_id": duplicate_session_id},
+    )
+
+
+def _backfill_private_session_direct_keys(connection: Connection, applied: list[str]) -> None:
+    table_names = _get_table_names(connection)
+    if {"sessions", "session_members"} - table_names:
+        return
+    if "direct_key" not in _get_column_names(connection, "sessions"):
+        return
+
+    rows = connection.execute(
+        text(
+            """
+            SELECT id
+            FROM sessions
+            WHERE type = 'private'
+              AND COALESCE(is_ai_session, FALSE) = FALSE
+            ORDER BY COALESCE(updated_at, created_at) DESC,
+                     COALESCE(created_at, updated_at) DESC,
+                     id ASC
+            """
+        )
+    ).mappings().all()
+
+    grouped_session_ids: dict[str, list[str]] = {}
+    invalid_session_ids: list[str] = []
+    touched = False
+    for row in rows:
+        session_id = row["id"]
+        member_ids = [
+            str(user_id or "").strip()
+            for user_id in connection.execute(
+                text(
+                    """
+                    SELECT user_id
+                    FROM session_members
+                    WHERE session_id = :session_id
+                    ORDER BY user_id ASC
+                    """
+                ),
+                {"session_id": session_id},
+            ).scalars().all()
+            if str(user_id or "").strip()
+        ]
+        member_key = tuple(sorted(set(member_ids)))
+        if len(member_key) != 2:
+            invalid_session_ids.append(session_id)
+            continue
+        grouped_session_ids.setdefault(":".join(member_key), []).append(session_id)
+
+    for session_id in invalid_session_ids:
+        connection.execute(
+            text("UPDATE sessions SET direct_key = NULL WHERE id = :session_id"),
+            {"session_id": session_id},
+        )
+        touched = True
+
+    for direct_key, session_ids in grouped_session_ids.items():
+        canonical_session_id = session_ids[0]
+        connection.execute(
+            text("UPDATE sessions SET direct_key = :direct_key WHERE id = :session_id"),
+            {"direct_key": direct_key, "session_id": canonical_session_id},
+        )
+        touched = True
+        for duplicate_session_id in session_ids[1:]:
+            _merge_duplicate_private_session(connection, canonical_session_id, duplicate_session_id)
+            touched = True
+
+    connection.execute(
+        text(
+            """
+            UPDATE sessions
+            SET direct_key = NULL
+            WHERE type <> 'private'
+               OR COALESCE(is_ai_session, FALSE) <> FALSE
+            """
+        )
+    )
+
+    connection.execute(
+        text(
+            """
+            UPDATE sessions
+            SET last_message_seq = COALESCE(
+                (
+                    SELECT MAX(m.session_seq)
+                    FROM messages AS m
+                    WHERE m.session_id = sessions.id
+                ),
+                0
+            )
+            """
+        )
+    )
+    if "session_events" in table_names:
+        connection.execute(
+            text(
+                """
+                UPDATE sessions
+                SET last_event_seq = COALESCE(
+                    (
+                        SELECT MAX(se.event_seq)
+                        FROM session_events AS se
+                        WHERE se.session_id = sessions.id
+                    ),
+                    0
+                )
+                """
+            )
+        )
+
+    if touched:
+        applied.append("sessions.direct_key.backfill")
+
+
 def _backfill_file_storage_metadata(connection: Connection, applied: list[str]) -> None:
     table_names = _get_table_names(connection)
     if "files" not in table_names:
@@ -535,6 +899,107 @@ def _backfill_file_storage_metadata(connection: Connection, applied: list[str]) 
         applied.append("files.storage_metadata.backfill")
 
 
+
+def _backfill_user_avatar_state(connection: Connection, applied: list[str]) -> None:
+    if "users" not in _get_table_names(connection):
+        return
+
+    required_columns = {"avatar_kind", "avatar_default_key", "avatar_file_id", "avatar"}
+    if not required_columns.issubset(_get_column_names(connection, "users")):
+        return
+
+    rows = connection.execute(
+        text(
+            """
+            SELECT id, username, gender, avatar, avatar_kind, avatar_default_key, avatar_file_id
+            FROM users
+            ORDER BY created_at ASC, id ASC
+            """
+        )
+    ).mappings().all()
+
+    touched = False
+    for row in rows:
+        avatar_value = str(row["avatar"] or "").strip()
+        avatar_kind = str(row["avatar_kind"] or "").strip().lower()
+        avatar_default_key = str(row["avatar_default_key"] or "").strip()
+        avatar_file_id = str(row["avatar_file_id"] or "").strip() or None
+
+        inferred_default_key = avatar_default_key or default_avatar_key_from_url(avatar_value)
+        if inferred_default_key:
+            resolved_kind = "default"
+            resolved_default_key = inferred_default_key
+            resolved_file_id = None
+            resolved_avatar = avatar_value or f"/uploads/default_avatars/{inferred_default_key}"
+        elif avatar_value:
+            resolved_kind = "custom"
+            resolved_default_key = avatar_default_key or None
+            resolved_file_id = avatar_file_id
+            resolved_avatar = avatar_value
+        else:
+            resolved_kind = "default"
+            resolved_default_key = choose_seeded_default_avatar_key(
+                str(row["id"] or "") or str(row["username"] or ""),
+                gender=row["gender"],
+            )
+            resolved_file_id = None
+            resolved_avatar = f"/uploads/default_avatars/{resolved_default_key}" if resolved_default_key else None
+
+        if (
+            avatar_kind != resolved_kind
+            or avatar_default_key != str(resolved_default_key or "")
+            or str(avatar_file_id or "") != str(resolved_file_id or "")
+            or avatar_value != str(resolved_avatar or "")
+        ):
+            connection.execute(
+                text(
+                    """
+                    UPDATE users
+                    SET avatar_kind = :avatar_kind,
+                        avatar_default_key = :avatar_default_key,
+                        avatar_file_id = :avatar_file_id,
+                        avatar = :avatar
+                    WHERE id = :user_id
+                    """
+                ),
+                {
+                    "avatar_kind": resolved_kind,
+                    "avatar_default_key": resolved_default_key,
+                    "avatar_file_id": resolved_file_id,
+                    "avatar": resolved_avatar,
+                    "user_id": row["id"],
+                },
+            )
+            touched = True
+
+    if touched:
+        applied.append("users.avatar_state.backfill")
+
+
+def _backfill_group_avatar_state(connection: Connection, applied: list[str]) -> None:
+    if "groups" not in _get_table_names(connection):
+        return
+
+    required_columns = {"avatar_kind", "avatar_file_id", "avatar_version"}
+    if not required_columns.issubset(_get_column_names(connection, "groups")):
+        return
+
+    updated = connection.execute(
+        text(
+            """
+            UPDATE groups
+            SET avatar_kind = COALESCE(NULLIF(TRIM(avatar_kind), ''), 'generated'),
+                avatar_version = CASE
+                    WHEN COALESCE(avatar_version, 0) > 0 THEN avatar_version
+                    ELSE 1
+                END
+            WHERE COALESCE(NULLIF(TRIM(avatar_kind), ''), 'generated') <> avatar_kind
+               OR COALESCE(avatar_version, 0) <= 0
+            """
+        )
+    )
+    if int(getattr(updated, "rowcount", 0) or 0) > 0:
+        applied.append("groups.avatar_state.backfill")
 def ensure_schema_compatibility(engine: Engine) -> list[str]:
     """Apply fallback-only schema fixes for databases that skipped migrations."""
     applied: list[str] = []
@@ -547,21 +1012,27 @@ def ensure_schema_compatibility(engine: Engine) -> list[str]:
             return applied
 
         _ensure_columns(connection, "users", USER_PROFILE_COLUMN_DDL, applied)
+        _ensure_columns(connection, "users", USER_AVATAR_COLUMN_DDL, applied)
         _ensure_indexes(connection, "users", USER_PROFILE_INDEX_DDL, applied)
 
         _ensure_columns(connection, "messages", MESSAGE_COLUMN_DDL, applied)
         _ensure_columns(connection, "sessions", SESSION_COLUMN_DDL, applied)
         _ensure_columns(connection, "session_members", SESSION_MEMBER_COLUMN_DDL, applied)
         _ensure_columns(connection, "files", FILE_COLUMN_DDL, applied)
+        _ensure_columns(connection, "groups", GROUP_AVATAR_COLUMN_DDL, applied)
 
         _backfill_message_session_seq(connection, applied)
+        _backfill_group_chat_membership(connection, applied)
+        _backfill_private_session_direct_keys(connection, applied)
         _backfill_session_last_message_seq(connection, applied)
         _backfill_session_last_event_seq(connection, applied)
-        _backfill_group_chat_membership(connection, applied)
         _backfill_session_member_read_state(connection, applied)
         _backfill_file_storage_metadata(connection, applied)
+        _backfill_user_avatar_state(connection, applied)
+        _backfill_group_avatar_state(connection, applied)
 
         _ensure_indexes(connection, "messages", CHAT_INDEX_DDL, applied)
+        _ensure_indexes(connection, "sessions", SESSION_INDEX_DDL, applied)
         _ensure_indexes(connection, "files", FILE_INDEX_DDL, applied)
         _ensure_indexes(connection, "session_events", SESSION_EVENT_INDEX_DDL, applied)
 
@@ -573,6 +1044,12 @@ def describe_schema_compatibility(applied: Iterable[str]) -> str:
     if not items:
         return "Schema compatibility already up to date."
     return "Applied schema compatibility updates: " + ", ".join(items)
+
+
+
+
+
+
 
 
 

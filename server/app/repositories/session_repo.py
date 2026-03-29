@@ -1,4 +1,4 @@
-"""Session repository."""
+﻿"""Session repository."""
 
 from __future__ import annotations
 
@@ -31,6 +31,7 @@ class SessionRepository:
         session_type: str,
         avatar: str | None = None,
         is_ai_session: bool = False,
+        direct_key: str | None = None,
         *,
         commit: bool = True,
     ) -> ChatSession:
@@ -39,6 +40,7 @@ class SessionRepository:
             type=session_type,
             avatar=avatar,
             is_ai_session=is_ai_session,
+            direct_key=direct_key,
         )
         self.db.add(session)
         self.db.flush()
@@ -54,6 +56,7 @@ class SessionRepository:
         session_type: str,
         avatar: str | None = None,
         is_ai_session: bool = False,
+        direct_key: str | None = None,
         *,
         commit: bool = True,
     ) -> ChatSession:
@@ -63,6 +66,7 @@ class SessionRepository:
             type=session_type,
             avatar=avatar,
             is_ai_session=is_ai_session,
+            direct_key=direct_key,
         )
         self.db.add(session)
         self.db.flush()
@@ -122,6 +126,21 @@ class SessionRepository:
         )
         return list(self.db.execute(stmt).scalars().all())
 
+    def list_members_for_sessions(self, session_ids: list[str]) -> dict[str, list[SessionMember]]:
+        normalized_session_ids = [str(session_id or "").strip() for session_id in session_ids if str(session_id or "").strip()]
+        if not normalized_session_ids:
+            return {}
+
+        stmt = (
+            select(SessionMember)
+            .where(SessionMember.session_id.in_(normalized_session_ids))
+            .order_by(SessionMember.session_id.asc(), SessionMember.joined_at.asc(), SessionMember.user_id.asc())
+        )
+        members_by_session: dict[str, list[SessionMember]] = {session_id: [] for session_id in normalized_session_ids}
+        for member in self.db.execute(stmt).scalars().all():
+            members_by_session.setdefault(str(member.session_id or ""), []).append(member)
+        return members_by_session
+
     def list_user_sessions(self, user_id: str) -> list[ChatSession]:
         stmt = (
             select(ChatSession)
@@ -131,27 +150,30 @@ class SessionRepository:
         )
         return list(self.db.execute(stmt).scalars().all())
 
-    def find_private_session_by_members(self, user_ids: list[str]) -> ChatSession | None:
-        normalized_ids = list(dict.fromkeys(user_ids))
-        if len(normalized_ids) < 2:
+    @staticmethod
+    def build_private_direct_key(user_ids: list[str]) -> str | None:
+        normalized_ids = tuple(sorted({str(user_id or "").strip() for user_id in user_ids if str(user_id or "").strip()}))
+        if len(normalized_ids) != 2:
             return None
+        return ":".join(normalized_ids)
 
-        seed_user_id = normalized_ids[0]
+    def get_private_session_by_direct_key(self, direct_key: str | None) -> ChatSession | None:
+        normalized_key = str(direct_key or "").strip()
+        if not normalized_key:
+            return None
         stmt = (
             select(ChatSession)
-            .join(SessionMember, SessionMember.session_id == ChatSession.id)
-            .where(ChatSession.type == "private", SessionMember.user_id == seed_user_id)
-            .order_by(ChatSession.updated_at.desc())
+            .where(
+                ChatSession.type == "private",
+                ChatSession.is_ai_session.is_(False),
+                ChatSession.direct_key == normalized_key,
+            )
+            .limit(1)
         )
-        candidates = list(self.db.execute(stmt).scalars().all())
-        expected_members = set(normalized_ids)
+        return self.db.execute(stmt).scalar_one_or_none()
 
-        for session in candidates:
-            member_ids = set(self.list_member_ids(session.id))
-            if member_ids == expected_members:
-                return session
-
-        return None
+    def find_private_session_by_members(self, user_ids: list[str]) -> ChatSession | None:
+        return self.get_private_session_by_direct_key(self.build_private_direct_key(user_ids))
 
     def touch(self, session_id: str) -> ChatSession | None:
         session = self.get_by_id(session_id)
@@ -161,6 +183,18 @@ class SessionRepository:
         self.db.add(session)
         self.db.commit()
         self.db.refresh(session)
+        return session
+
+    def update_avatar(self, session_id: str, avatar: str | None, *, commit: bool = True) -> ChatSession | None:
+        session = self.get_by_id(session_id)
+        if session is None:
+            return None
+        session.avatar = str(avatar or "").strip() or None
+        self.db.add(session)
+        self.db.flush()
+        if commit:
+            self.db.commit()
+            self.db.refresh(session)
         return session
 
     def delete_session(self, session_id: str, *, commit: bool = True) -> None:

@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 from app.core.database import get_db
 from app.dependencies.auth_dependency import get_current_user
 from app.models.user import User
-from app.schemas.session import CreateDirectSessionRequest, CreateGroupSessionRequest
+from app.schemas.session import CreateDirectSessionRequest
 from app.services.message_service import MessageService
 from app.services.session_service import SessionService
 from app.utils.response import success_response
@@ -39,15 +39,6 @@ def create_direct_session(
     return success_response(
         SessionService(db).create_private(current_user, payload.participant_ids, payload.name)
     )
-
-
-@router.post("/group")
-def create_group_session(
-    payload: CreateGroupSessionRequest,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-) -> dict:
-    return success_response(SessionService(db).create_group(current_user, payload.name, payload.participant_ids))
 
 
 @router.post("/{session_id}/typing")

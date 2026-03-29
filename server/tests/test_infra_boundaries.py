@@ -117,16 +117,24 @@ def test_bind_websocket_user_uses_websocket_app_settings_snapshot(monkeypatch: p
         query_params={"token": token},
     )
     bindings: list[tuple[str, str]] = []
+    captured: dict[str, object] = {}
+
+    def fake_require(token_value: str | None, *, settings: Settings) -> str:
+        captured["token"] = token_value
+        captured["settings"] = settings
+        return "user-42"
 
     monkeypatch.setattr(
         presence_ws.connection_manager,
         "bind_user",
         lambda connection_id, user_id: bindings.append((connection_id, user_id)),
     )
+    monkeypatch.setattr(presence_ws, "require_websocket_user_id", fake_require)
 
     user_id = presence_ws.bind_websocket_user(websocket, "conn-1")
 
     assert user_id == "user-42"
+    assert captured == {"token": token, "settings": custom_settings}
     assert bindings == [("conn-1", "user-42")]
 
 
@@ -145,10 +153,10 @@ def test_presence_event_payload_uses_type_only() -> None:
 
 
 
-def test_chat_ws_message_uses_type_only() -> None:
-    from app.websocket import chat_ws
+def test_shared_ws_message_uses_type_only() -> None:
+    from app.websocket.payloads import ws_message
 
-    payload = chat_ws._ws_message("message_ack", {"ok": True}, msg_id="msg-2", seq=7)
+    payload = ws_message("message_ack", {"ok": True}, msg_id="msg-2", seq=7)
 
     assert payload == {
         "type": "message_ack",
@@ -171,12 +179,20 @@ def test_message_service_event_message_id_uses_canonical_field_only() -> None:
 
 def test_api_schema_models_use_canonical_session_and_friend_request_fields() -> None:
     from app.schemas.friend import FriendRequestOut
+    from app.schemas.message import MessageOut
     from app.schemas.session import SessionOut
 
     assert "request_id" in FriendRequestOut.model_fields
     assert "id" not in FriendRequestOut.model_fields
     assert "session_type" in SessionOut.model_fields
     assert "type" not in SessionOut.model_fields
+    assert "session_type" in MessageOut.model_fields
+    assert "participant_ids" in MessageOut.model_fields
+    assert "sender_profile" in MessageOut.model_fields
+    assert "counterpart_avatar" in SessionOut.model_fields
+    assert "counterpart_id" in SessionOut.model_fields
+    assert "msg_id" not in MessageOut.model_fields
+    assert "type" not in MessageOut.model_fields
 
 def test_configure_database_rebinds_engine_and_session_factory() -> None:
     baseline_engine = get_engine()
@@ -305,6 +321,7 @@ def test_create_app_only_mounts_canonical_chat_endpoints() -> None:
         assert "/api/v1/files/upload" in http_paths
         assert ("/api/v1/sessions", "GET") in http_route_methods
         assert ("/api/v1/sessions/direct", "POST") in http_route_methods
+        assert ("/api/v1/sessions/group", "POST") not in http_route_methods
         assert "/api/v1/sessions/{session_id}/messages" in http_paths
         assert ("/api/v1/sessions", "POST") not in http_route_methods
         assert ("/api/v1/messages", "POST") not in http_route_methods
@@ -511,3 +528,70 @@ def test_schema_compatibility_skips_runtime_checks_when_runtime_migration_presen
         assert schema_compat_module.ensure_schema_compatibility(engine) == []
     finally:
         engine.dispose()
+
+
+def test_private_session_direct_key_backfill_uses_boolean_safe_coalesce() -> None:
+    schema_compat = Path('server/app/core/schema_compat.py').read_text(encoding='utf-8')
+    migration = Path('server/alembic/versions/20260329_0005_private_session_direct_key.py').read_text(encoding='utf-8')
+
+    assert 'COALESCE(is_ai_session, 0)' not in schema_compat
+    assert 'COALESCE(is_ai_session, 0)' not in migration
+    assert 'COALESCE(is_ai_session, FALSE)' in schema_compat
+    assert 'COALESCE(is_ai_session, FALSE)' in migration
+
+
+def test_svg_rasterizer_converts_default_avatar_to_png() -> None:
+    from app.media.svg_rasterizer import ensure_rasterized_svg
+
+    cache_dir = Path("server/.testdata/svg-raster-cache")
+    if cache_dir.exists():
+        shutil.rmtree(cache_dir)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
+    svg_path = Path("client/resources/avatars/avatar_default_female_01.svg").resolve()
+    raster_path = ensure_rasterized_svg(svg_path, cache_dir, size=128)
+
+    assert raster_path is not None
+    assert raster_path.is_file()
+    assert raster_path.suffix == ".png"
+    assert raster_path.read_bytes().startswith(b"\x89PNG")
+
+
+
+
+
+def test_schema_compatibility_backfills_avatar_columns_for_legacy_runtime_schema() -> None:
+    from sqlalchemy import create_engine, inspect, text
+
+    from app.core import schema_compat as schema_compat_module
+
+    engine = create_engine("sqlite+pysqlite:///:memory:", future=True)
+    with engine.begin() as connection:
+        connection.execute(text("CREATE TABLE users (id VARCHAR(36) PRIMARY KEY, username VARCHAR(255), password_hash VARCHAR(255), nickname VARCHAR(255), avatar VARCHAR(255), status VARCHAR(32), created_at TIMESTAMP, updated_at TIMESTAMP)"))
+        connection.execute(text("CREATE TABLE messages (id VARCHAR(36) PRIMARY KEY, session_id VARCHAR(36), sender_id VARCHAR(36), content TEXT, type VARCHAR(32), status VARCHAR(32), created_at TIMESTAMP, updated_at TIMESTAMP)"))
+        connection.execute(text("CREATE TABLE sessions (id VARCHAR(36) PRIMARY KEY, name VARCHAR(255), type VARCHAR(32), avatar VARCHAR(255), is_ai_session BOOLEAN, created_at TIMESTAMP, updated_at TIMESTAMP)"))
+        connection.execute(text("CREATE TABLE session_members (session_id VARCHAR(36), user_id VARCHAR(36), joined_at TIMESTAMP)"))
+        connection.execute(text("CREATE TABLE files (id VARCHAR(36) PRIMARY KEY, user_id VARCHAR(36), file_url VARCHAR(255), file_name VARCHAR(255), file_type VARCHAR(255), created_at TIMESTAMP, updated_at TIMESTAMP)"))
+        connection.execute(text("CREATE TABLE session_events (id VARCHAR(36) PRIMARY KEY, session_id VARCHAR(36), type VARCHAR(32), payload TEXT, event_seq INTEGER, created_at TIMESTAMP, updated_at TIMESTAMP)"))
+        connection.execute(text("CREATE TABLE groups (id VARCHAR(36) PRIMARY KEY, session_id VARCHAR(36), owner_id VARCHAR(36), name VARCHAR(255), created_at TIMESTAMP, updated_at TIMESTAMP)"))
+        connection.execute(text("INSERT INTO users (id, username, password_hash, nickname, avatar, status) VALUES ('user-1', 'legacy', 'hash', 'Legacy', NULL, 'offline')"))
+
+    applied = schema_compat_module.ensure_schema_compatibility(engine)
+    columns_by_table = {
+        table_name: {column["name"] for column in inspect(engine).get_columns(table_name)}
+        for table_name in ["users", "groups"]
+    }
+
+    assert "users.avatar_kind" in applied
+    assert "users.avatar_default_key" in applied
+    assert "users.avatar_file_id" in applied
+    assert "groups.avatar_kind" in applied
+    assert "groups.avatar_file_id" in applied
+    assert "groups.avatar_version" in applied
+    assert {"avatar_kind", "avatar_default_key", "avatar_file_id"}.issubset(columns_by_table["users"])
+    assert {"avatar_kind", "avatar_file_id", "avatar_version"}.issubset(columns_by_table["groups"])
+
+    with engine.begin() as connection:
+        user_row = connection.execute(text("SELECT avatar_kind, avatar_default_key FROM users WHERE id = 'user-1'")) .mappings().one()
+    assert user_row["avatar_kind"] == "default"
+    assert str(user_row["avatar_default_key"] or "") != ""

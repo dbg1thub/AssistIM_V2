@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sqlite3
 from datetime import datetime, timedelta
 import pytest
 import sys
@@ -129,20 +130,48 @@ if 'PySide6.QtCore' not in sys.modules:
 if 'aiosqlite' not in sys.modules:
     aiosqlite = types.ModuleType('aiosqlite')
 
+    class _Cursor:
+        def __init__(self, cursor: sqlite3.Cursor) -> None:
+            self._cursor = cursor
+            self.rowcount = cursor.rowcount
+
+        async def fetchone(self):
+            return self._cursor.fetchone()
+
+        async def fetchall(self):
+            return self._cursor.fetchall()
+
     class _DummyConnection:
-        row_factory = None
+        def __init__(self, path: str = ':memory:') -> None:
+            self._conn = sqlite3.connect(path)
+            self._row_factory = None
+
+        @property
+        def row_factory(self):
+            return self._row_factory
+
+        @row_factory.setter
+        def row_factory(self, value) -> None:
+            self._row_factory = value
+            self._conn.row_factory = value
+
+        async def execute(self, sql: str, params=()):
+            return _Cursor(self._conn.execute(sql, params))
+
+        async def executescript(self, script: str):
+            self._conn.executescript(script)
+
+        async def commit(self) -> None:
+            self._conn.commit()
 
         async def close(self):
-            return None
+            self._conn.close()
 
-    class _DummyRow(dict):
-        pass
-
-    async def _dummy_connect(*args, **kwargs):
-        return _DummyConnection()
+    async def _dummy_connect(path=':memory:', *args, **kwargs):
+        return _DummyConnection(path)
 
     aiosqlite.Connection = _DummyConnection
-    aiosqlite.Row = _DummyRow
+    aiosqlite.Row = sqlite3.Row
     aiosqlite.connect = _dummy_connect
     sys.modules['aiosqlite'] = aiosqlite
 
@@ -375,13 +404,18 @@ class FakeFileService:
         self.result = dict(result or {})
         self.chat_uploads: list[str] = []
         self.avatar_uploads: list[str] = []
+        self.avatar_resets = 0
 
     async def upload_chat_attachment(self, file_path: str) -> dict:
         self.chat_uploads.append(file_path)
         return dict(self.result)
 
-    async def upload_avatar(self, file_path: str) -> dict:
+    async def upload_profile_avatar(self, file_path: str) -> dict:
         self.avatar_uploads.append(file_path)
+        return dict(self.result)
+
+    async def reset_profile_avatar(self) -> dict:
+        self.avatar_resets += 1
         return dict(self.result)
 
 
@@ -814,50 +848,58 @@ def test_chat_controller_send_file_uses_file_service(monkeypatch) -> None:
     asyncio.run(scenario())
 
 
-def test_message_manager_get_messages_hydrates_sender_profiles(monkeypatch) -> None:
-    stored_messages = [
-        ChatMessage(
-            message_id='m-self',
-            session_id='session-1',
-            sender_id='user-1',
-            content='hello',
-            message_type=MessageType.TEXT,
-            status=MessageStatus.SENT,
-            is_self=True,
-            extra={},
-        ),
-        ChatMessage(
-            message_id='m-other',
-            session_id='session-1',
-            sender_id='user-2',
-            content='hi',
-            message_type=MessageType.TEXT,
-            status=MessageStatus.RECEIVED,
-            is_self=False,
-            extra={},
-        ),
-    ]
-    fake_db = FakeMessageStoreDatabase(
-        stored_messages,
-        session_payload={
-            'session_id': 'session-1',
-            'name': 'Bob',
-            'session_type': 'direct',
-            'participant_ids': ['user-1', 'user-2'],
-            'avatar': '/uploads/bob.svg',
-            'extra': {
-                'members': [
-                    {'id': 'user-1', 'username': 'alice', 'nickname': 'Alice', 'avatar': '/uploads/alice.svg', 'gender': 'female'},
-                    {'id': 'user-2', 'username': 'bob', 'nickname': 'Bob', 'avatar': '/uploads/bob.svg', 'gender': 'male'},
-                ]
-            },
-        },
-    )
+def test_message_manager_get_messages_uses_server_sender_profiles(monkeypatch) -> None:
+    class RemoteMessageStoreDatabase(FakeMessageStoreDatabase):
+        async def save_messages_batch(self, messages: list[ChatMessage]) -> None:
+            await super().save_messages_batch(messages)
+            self.messages = list(messages)
+
+    class RemoteProfileChatService(FakeChatService):
+        async def fetch_messages(self, session_id: str, limit: int, before_timestamp=None) -> list[dict]:
+            await super().fetch_messages(session_id, limit, before_timestamp)
+            return [
+                {
+                    'message_id': 'm-self',
+                    'session_id': session_id,
+                    'sender_id': 'user-1',
+                    'content': 'hello',
+                    'message_type': 'text',
+                    'status': 'sent',
+                    'timestamp': '2026-03-29T10:00:00',
+                    'sender_profile': {
+                        'id': 'user-1',
+                        'username': 'alice',
+                        'nickname': 'Alice',
+                        'display_name': 'Alice',
+                        'avatar': '/uploads/alice.svg',
+                        'gender': 'female',
+                    },
+                },
+                {
+                    'message_id': 'm-other',
+                    'session_id': session_id,
+                    'sender_id': 'user-2',
+                    'content': 'hi',
+                    'message_type': 'text',
+                    'status': 'received',
+                    'timestamp': '2026-03-29T10:01:00',
+                    'sender_profile': {
+                        'id': 'user-2',
+                        'username': 'bob',
+                        'nickname': 'Bob',
+                        'display_name': 'Bob',
+                        'avatar': '/uploads/bob.svg',
+                        'gender': 'male',
+                    },
+                },
+            ]
+
+    fake_db = RemoteMessageStoreDatabase([])
 
     monkeypatch.setattr(message_manager_module, 'get_event_bus', lambda: FakeEventBus())
     monkeypatch.setattr(message_manager_module, 'get_connection_manager', lambda: FakeConnectionManager())
     monkeypatch.setattr(message_manager_module, 'get_database', lambda: fake_db)
-    monkeypatch.setattr(message_manager_module, 'get_chat_service', lambda: FakeChatService())
+    monkeypatch.setattr(message_manager_module, 'get_chat_service', lambda: RemoteProfileChatService())
     monkeypatch.setattr(message_manager_module, 'get_file_service', lambda: FakeNoopFileService())
 
     async def scenario() -> None:
@@ -875,14 +917,13 @@ def test_message_manager_get_messages_hydrates_sender_profiles(monkeypatch) -> N
 
     asyncio.run(scenario())
 
-
 def test_auth_controller_update_profile_uploads_avatar_via_file_service(monkeypatch) -> None:
     fake_auth_service = FakeAuthService()
     fake_user_service = FakeUserService()
     fake_db = FakeDatabase()
     fake_message_manager = FakeMessageManager()
     fake_chat_controller = FakeChatControllerContext()
-    fake_file_service = FakeFileService({'url': 'https://cdn.example/files/avatar.png'})
+    fake_file_service = FakeFileService({'id': 'user-1', 'avatar': 'https://cdn.example/files/avatar.png', 'avatar_kind': 'custom'})
 
     monkeypatch.setattr(auth_controller_module, 'get_auth_service', lambda: fake_auth_service)
     monkeypatch.setattr(auth_controller_module, 'get_user_service', lambda: fake_user_service)
@@ -903,7 +944,6 @@ def test_auth_controller_update_profile_uploads_avatar_via_file_service(monkeypa
         assert fake_user_service.update_calls == [
             {
                 'nickname': 'Alice',
-                'avatar': 'https://cdn.example/files/avatar.png',
                 'signature': 'Hello',
             }
         ]
@@ -1059,16 +1099,16 @@ def test_file_service_normalizes_backend_upload_payload(monkeypatch) -> None:
             self.upload_calls.append((file_path, upload_path))
             return dict(self.payload)
 
-    fake_http = FakeUploadHttpClient({'file_url': '/uploads/avatar.png', 'file_type': 'image/png'})
+    fake_http = FakeUploadHttpClient({'id': 'user-1', 'avatar': '/uploads/avatar.png', 'avatar_kind': 'custom'})
     monkeypatch.setattr(file_service_module, 'get_http_client', lambda: fake_http)
 
     async def scenario() -> None:
         service = file_service_module.FileService()
-        payload = await service.upload_avatar('D:/tmp/avatar.png')
+        payload = await service.upload_profile_avatar('D:/tmp/avatar.png')
 
-        assert payload['url'] == '/uploads/avatar.png'
-        assert payload['file_url'] == '/uploads/avatar.png'
-        assert fake_http.upload_calls == [('D:/tmp/avatar.png', '/files/upload')]
+        assert payload['avatar'] == '/uploads/avatar.png'
+        assert payload['avatar_kind'] == 'custom'
+        assert fake_http.upload_calls == [('D:/tmp/avatar.png', '/users/me/avatar')]
 
     asyncio.run(scenario())
 
@@ -1151,7 +1191,7 @@ def test_message_manager_get_cached_messages_skips_remote_backfill(monkeypatch) 
 
         assert len(messages) == 1
         assert fake_chat_service.fetch_messages_calls == []
-        assert len(fake_db.saved_batches) == 1
+        assert len(fake_db.saved_batches) == 0
 
     asyncio.run(scenario())
 
@@ -1237,6 +1277,7 @@ def test_contact_controller_load_requests_resolves_counterpart_names(monkeypatch
             'message': 'hello',
             'status': 'accepted',
             'created_at': '2026-03-27T10:00:00Z',
+            'to_user': {'id': outgoing_target_id, 'nickname': 'Test 2', 'username': 'test2', 'avatar': '/uploads/test2.png', 'gender': 'female'},
         },
         {
             'request_id': 'req-2',
@@ -1245,6 +1286,7 @@ def test_contact_controller_load_requests_resolves_counterpart_names(monkeypatch
             'message': 'hi',
             'status': 'pending',
             'created_at': '2026-03-26T09:00:00Z',
+            'from_user': {'id': incoming_sender_id, 'nickname': 'Test 3', 'username': 'test3', 'avatar': '/uploads/test3.png', 'gender': 'male'},
         },
     ]
     fake_user_service.user_payloads = {
@@ -1260,10 +1302,14 @@ def test_contact_controller_load_requests_resolves_counterpart_names(monkeypatch
         controller = contact_controller_module.ContactController()
         requests = await controller.load_requests()
 
-        assert set(fake_user_service.fetch_user_calls) == {outgoing_target_id, incoming_sender_id}
+        assert fake_user_service.fetch_user_calls == []
         assert [item.id for item in requests] == ['req-1', 'req-2']
         assert requests[0].counterpart_name('user-1') == 'Test 2'
+        assert requests[0].counterpart_avatar('user-1') == '/uploads/test2.png'
+        assert requests[0].counterpart_gender('user-1') == 'female'
         assert requests[1].counterpart_name('user-1') == 'Test 3'
+        assert requests[1].counterpart_avatar('user-1') == '/uploads/test3.png'
+        assert requests[1].counterpart_gender('user-1') == 'male'
 
     asyncio.run(scenario())
 
@@ -1603,8 +1649,10 @@ def test_session_manager_refresh_remote_sessions_prefers_counterpart_profile(mon
         assert len(sessions) == 1
         session = sessions[0]
         assert session.name == 'Bobby'
-        assert session.avatar == '/uploads/bob.svg'
-        assert session.extra['gender'] == 'male'
+        assert session.avatar is None
+        assert session.display_avatar() == '/uploads/bob.svg'
+        assert session.extra['counterpart_gender'] == 'male'
+        assert session.extra['counterpart_avatar'] == '/uploads/bob.svg'
         assert session.extra['counterpart_id'] == 'user-2'
         assert session.extra['counterpart_username'] == 'bob'
         assert session.extra['avatar_seed'] == session_manager_module.profile_avatar_seed(
@@ -2014,6 +2062,64 @@ def test_sound_manager_handles_incoming_message_event(monkeypatch) -> None:
         await manager.close()
 
     asyncio.run(scenario())
+
+
+
+
+
+
+def test_file_service_reset_profile_avatar_uses_dedicated_endpoint(monkeypatch) -> None:
+    class FakeUploadHttpClient:
+        def __init__(self) -> None:
+            self.delete_calls: list[str] = []
+
+        async def delete(self, path: str) -> dict:
+            self.delete_calls.append(path)
+            return {'id': 'user-1', 'avatar': '/uploads/default-avatar.svg', 'avatar_kind': 'default'}
+
+    fake_http = FakeUploadHttpClient()
+    monkeypatch.setattr(file_service_module, 'get_http_client', lambda: fake_http)
+
+    async def scenario() -> None:
+        service = file_service_module.FileService()
+        payload = await service.reset_profile_avatar()
+
+        assert payload['avatar_kind'] == 'default'
+        assert fake_http.delete_calls == ['/users/me/avatar']
+
+    asyncio.run(scenario())
+
+
+def test_auth_controller_update_profile_can_reset_avatar(monkeypatch) -> None:
+    fake_auth_service = FakeAuthService()
+    fake_user_service = FakeUserService()
+    fake_db = FakeDatabase()
+    fake_message_manager = FakeMessageManager()
+    fake_chat_controller = FakeChatControllerContext()
+    fake_file_service = FakeFileService({'id': 'user-1', 'avatar': '/uploads/default-avatar.svg', 'avatar_kind': 'default'})
+
+    monkeypatch.setattr(auth_controller_module, 'get_auth_service', lambda: fake_auth_service)
+    monkeypatch.setattr(auth_controller_module, 'get_user_service', lambda: fake_user_service)
+    monkeypatch.setattr(auth_controller_module, 'get_database', lambda: fake_db)
+    monkeypatch.setattr(auth_controller_module, 'get_message_manager', lambda: fake_message_manager)
+    monkeypatch.setattr(auth_controller_module, 'get_chat_controller', lambda: fake_chat_controller)
+    monkeypatch.setattr(auth_controller_module, 'get_file_service', lambda: fake_file_service)
+
+    async def scenario() -> None:
+        controller = auth_controller_module.AuthController()
+        user = await controller.update_profile(reset_avatar=True)
+
+        assert fake_file_service.avatar_resets == 1
+        assert fake_file_service.avatar_uploads == []
+        assert fake_user_service.update_calls == []
+        assert user['avatar_kind'] == 'default'
+        assert fake_db.app_state[controller.USER_ID_KEY] == 'user-1'
+
+    asyncio.run(scenario())
+
+
+
+
 
 
 

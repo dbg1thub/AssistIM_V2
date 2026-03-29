@@ -218,27 +218,6 @@ class SessionManager:
             return False
         return self._session_activity_timestamp(session) <= hidden_at
 
-    def _dedupe_direct_sessions(self, sessions: list[Session]) -> list[Session]:
-        """Keep only the newest direct session for the same participant set."""
-        visible_sessions: list[Session] = []
-        seen_direct_keys: set[tuple[str, ...]] = set()
-
-        for session in sessions:
-            if session.is_ai_session or session.session_type == "group":
-                visible_sessions.append(session)
-                continue
-
-            member_key = tuple(sorted({str(item or "") for item in session.participant_ids if str(item or "")}))
-            if len(member_key) < 2:
-                continue
-            if member_key in seen_direct_keys:
-                continue
-
-            seen_direct_keys.add(member_key)
-            visible_sessions.append(session)
-
-        return visible_sessions
-
     async def _ensure_session_exists(self, message: ChatMessage) -> Optional[Session]:
         """Ensure a session exists locally before applying message updates."""
         session_id = message.session_id
@@ -322,11 +301,15 @@ class SessionManager:
 
         data.setdefault("session_id", data.get("id", ""))
         data.setdefault("name", fallback_name)
-        session_type = str(data.get("session_type") or "direct")
+        session_type = str(data.get("session_type") or "").strip()
+        if session_type not in {"direct", "group", "ai"}:
+            logger.warning("Session payload missing authoritative session_type: %s", data.get("session_id") or data.get("id"))
+            return None
         data["session_type"] = session_type
 
         current_user = await self._get_current_user_context()
         current_user_id = str(current_user.get("id", "") or "")
+        authoritative_name = str(data.get("name", "") or "").strip()
         if str(data.get("last_message_status") or "") == MessageStatus.RECALLED.value:
             actor_id = str(data.get("last_message_sender_id", "") or "")
             data["last_message"] = (
@@ -335,16 +318,20 @@ class SessionManager:
                 else tr("message.recalled.other", "The other side recalled a message")
             )
 
-        if session_type != "group" and not data.get("is_ai_session"):
-            counterpart_name = self._resolve_counterpart_name(
-                data.get("members") or [],
-                current_user_id,
-            ) or self._resolve_counterpart_id(
-                data.get("participant_ids") or [],
-                current_user_id,
-            )
+        counterpart_name = str(data.get("counterpart_name", "") or "").strip()
+        if session_type == "direct" and not data.get("is_ai_session"):
             if counterpart_name:
                 data["name"] = counterpart_name
+            else:
+                fallback_counterpart_name = self._resolve_counterpart_name(
+                    data.get("members") or [],
+                    current_user_id,
+                ) or self._resolve_counterpart_id(
+                    data.get("participant_ids") or [],
+                    current_user_id,
+                )
+                if fallback_counterpart_name:
+                    data["name"] = fallback_counterpart_name
 
         if avatar and not data.get("avatar"):
             data["avatar"] = avatar
@@ -356,10 +343,25 @@ class SessionManager:
             return None
 
         session.extra["members"] = data.get("members") or []
+        session.extra["server_name"] = authoritative_name
         if data.get("last_message_status"):
             session.extra["last_message_status"] = data.get("last_message_status")
         if data.get("last_message_sender_id"):
             session.extra["last_message_sender_id"] = data.get("last_message_sender_id")
+        if session_type == "direct":
+            counterpart_id = str(data.get("counterpart_id", "") or "").strip()
+            counterpart_username = str(data.get("counterpart_username", "") or "").strip()
+            counterpart_avatar = str(data.get("counterpart_avatar", "") or "").strip()
+            counterpart_gender = str(data.get("counterpart_gender", "") or "").strip()
+            if counterpart_id:
+                session.extra["counterpart_id"] = counterpart_id
+            if counterpart_username:
+                session.extra["counterpart_username"] = counterpart_username
+            if counterpart_avatar:
+                session.extra["counterpart_avatar"] = counterpart_avatar
+            if counterpart_gender:
+                session.extra["counterpart_gender"] = counterpart_gender
+        await self._decorate_session_members([session], current_user)
         self._normalize_session_display(session, current_user)
         return session
 
@@ -372,38 +374,83 @@ class SessionManager:
         await self.add_session(session)
         return session
 
-    async def _build_fallback_session(self, message: ChatMessage) -> Session:
-        """Build a minimal local session when the backend detail fetch fails."""
+    async def _build_fallback_session(self, message: ChatMessage) -> Optional[Session]:
+        """Build one session snapshot only from authoritative message metadata."""
         current_user_id = await self._get_current_user_id()
-        participant_ids = [value for value in (current_user_id, message.sender_id) if value]
-        session_type = str(message.extra.get("session_type", "direct") or "direct")
+        session_type = str(message.extra.get("session_type") or "").strip()
+        if session_type not in {"direct", "group", "ai"}:
+            logger.warning(
+                "Skip fallback session bootstrap for %s: authoritative session_type missing",
+                message.session_id,
+            )
+            return None
+
+        participant_ids = [
+            value
+            for value in dict.fromkeys(
+                str(item or "").strip() for item in (message.extra.get("participant_ids") or [])
+            )
+            if value
+        ]
+        if not participant_ids and session_type == "direct":
+            participant_ids = [value for value in (current_user_id, message.sender_id) if value]
+
+        session_name = str(message.extra.get("session_name", "") or "").strip()
+        session_avatar = str(message.extra.get("session_avatar", "") or "").strip()
+        sender_name = (
+            str(message.extra.get("sender_nickname", "") or "").strip()
+            or str(message.extra.get("sender_name", "") or "").strip()
+            or str(message.sender_id or "").strip()
+        )
+        counterpart_id = self._resolve_counterpart_id(participant_ids, current_user_id)
+        counterpart_username = str(message.extra.get("sender_username", "") or "").strip()
+        counterpart_avatar = str(message.extra.get("sender_avatar", "") or "").strip()
+        counterpart_gender = str(message.extra.get("sender_gender", "") or "").strip()
+
+        if session_type == "group":
+            display_name = session_name
+            avatar = session_avatar or None
+        elif session_type == "ai":
+            display_name = session_name or "AI Assistant"
+            avatar = session_avatar or None
+        else:
+            sender_is_counterpart = bool(message.sender_id and message.sender_id != current_user_id)
+            display_name = sender_name if sender_is_counterpart else (counterpart_id or session_name or tr("session.private_chat", "Private Chat"))
+            avatar = session_avatar or None
 
         session = Session(
             session_id=message.session_id,
-            name=(
-                str(message.extra.get("sender_nickname", "") or "")
-                or str(message.extra.get("sender_name", "") or "")
-                or message.sender_id
-                or "New Chat"
-            ),
+            name=display_name or session_name or "New Chat",
             session_type=session_type,
-            participant_ids=list(dict.fromkeys(participant_ids)),
+            participant_ids=participant_ids,
             last_message=format_message_preview(message.content, message.message_type),
             last_message_time=message.timestamp,
-            avatar=str(message.extra.get("sender_avatar", "") or "") or None,
+            avatar=avatar,
             created_at=message.timestamp,
             updated_at=message.timestamp,
+            is_ai_session=bool(message.extra.get("is_ai_session", False) or session_type == "ai"),
         )
         session.extra["last_message_type"] = message.message_type.value
+        session.extra["last_message_sender_id"] = str(message.sender_id or "")
         session.extra["members"] = list(message.extra.get("members") or [])
-        session.extra["counterpart_id"] = str(message.sender_id or "")
-        session.extra["counterpart_username"] = str(message.extra.get("sender_username", "") or "")
-        session.extra["gender"] = str(message.extra.get("sender_gender", "") or "")
+        session.extra["server_name"] = session_name
+        if session_type == "direct":
+            if counterpart_id:
+                session.extra["counterpart_id"] = counterpart_id
+            if counterpart_username:
+                session.extra["counterpart_username"] = counterpart_username
+            if counterpart_avatar:
+                session.extra["counterpart_avatar"] = counterpart_avatar
+            if counterpart_gender:
+                session.extra["counterpart_gender"] = counterpart_gender
         session.extra["avatar_seed"] = profile_avatar_seed(
-            user_id=message.sender_id,
-            username=message.extra.get("sender_username", ""),
-            display_name=message.extra.get("sender_nickname", "") or message.extra.get("sender_name", ""),
+            user_id=counterpart_id or message.session_id,
+            username=counterpart_username,
+            display_name=display_name or session_name or message.session_id,
         )
+        current_user = await self._get_current_user_context()
+        await self._decorate_session_members([session], current_user)
+        self._normalize_session_display(session, current_user)
         return session
 
     async def _get_current_user_id(self) -> str:
@@ -424,9 +471,89 @@ class SessionManager:
         except Exception:
             return {}
 
+    @staticmethod
+    def _member_display_name(member: dict[str, Any]) -> str:
+        """Resolve one stable display name using remark-first priority."""
+        return (
+            str(member.get("remark", "") or "").strip()
+            or str(member.get("group_nickname", "") or "").strip()
+            or str(member.get("nickname", "") or "").strip()
+            or str(member.get("display_name", "") or "").strip()
+            or str(member.get("username", "") or "").strip()
+            or str(member.get("id", "") or "").strip()
+        )
+
+    async def _load_contact_cache_map(self, user_ids: list[str]) -> dict[str, dict[str, Any]]:
+        """Load one contact lookup map so session presentation can prefer remarks."""
+        normalized_user_ids = [
+            value
+            for value in dict.fromkeys(str(user_id or "").strip() for user_id in user_ids)
+            if value
+        ]
+        if not normalized_user_ids:
+            return {}
+
+        db = get_database()
+        if not getattr(db, "is_connected", False):
+            return {}
+        loader = getattr(db, "list_contacts_cache_by_ids", None)
+        if loader is None:
+            return {}
+
+        try:
+            return await loader(normalized_user_ids)
+        except Exception as exc:
+            logger.debug("Load contact cache map failed: %s", exc)
+            return {}
+
+    async def _decorate_session_members(self, sessions: list[Session], current_user: dict[str, Any]) -> None:
+        """Overlay contact remarks onto session members for all presentation rules."""
+        current_user_id = str(current_user.get("id", "") or "")
+        user_ids: list[str] = []
+        for session in sessions:
+            members = list(session.extra.get("members") or [])
+            for member in members:
+                member_id = str(member.get("id", "") or "").strip()
+                if member_id:
+                    user_ids.append(member_id)
+
+        contacts_by_id = await self._load_contact_cache_map(user_ids)
+        for session in sessions:
+            members = []
+            for raw_member in list(session.extra.get("members") or []):
+                member = dict(raw_member or {})
+                member_id = str(member.get("id", "") or "").strip()
+                contact = contacts_by_id.get(member_id) or {}
+                remark = str(contact.get("remark", "") or "").strip()
+                if remark:
+                    member["remark"] = remark
+                if not str(member.get("username", "") or "").strip() and contact.get("username"):
+                    member["username"] = str(contact.get("username") or "")
+                if not str(member.get("nickname", "") or "").strip() and contact.get("nickname"):
+                    member["nickname"] = str(contact.get("nickname") or "")
+                member["display_name"] = self._member_display_name(member)
+                members.append(member)
+            session.extra["members"] = members
+            session.extra["current_user_id"] = current_user_id
+            if session.session_type == "group":
+                session.extra["member_count"] = max(
+                    len([item for item in session.participant_ids if str(item or "").strip()]),
+                    len(members),
+                    int(session.extra.get("member_count", 0) or 0),
+                )
+
     def _normalize_session_display(self, session: Session, current_user: dict[str, Any]) -> None:
         """Normalize direct-session display fields to the counterpart profile."""
-        if session.is_ai_session or session.session_type == "group":
+        if session.is_ai_session:
+            return
+
+        session.extra["current_user_id"] = str(current_user.get("id", "") or "")
+        if session.session_type == "group":
+            session.extra["member_count"] = max(
+                len([item for item in session.participant_ids if str(item or "").strip()]),
+                len(list(session.extra.get("members") or [])),
+                int(session.extra.get("member_count", 0) or 0),
+            )
             return
 
         counterpart = self._resolve_counterpart_profile(
@@ -435,13 +562,12 @@ class SessionManager:
             current_user,
         )
         counterpart_name = str(counterpart.get("display_name", "") or "")
-        counterpart_id = str(counterpart.get("id", "") or "")
-        counterpart_username = str(counterpart.get("username", "") or "")
-        counterpart_avatar = str(counterpart.get("avatar", "") or "")
-        counterpart_gender = str(counterpart.get("gender", "") or "")
+        counterpart_id = str(counterpart.get("id", "") or session.extra.get("counterpart_id", "") or "")
+        counterpart_username = str(counterpart.get("username", "") or session.extra.get("counterpart_username", "") or "")
+        counterpart_avatar = str(counterpart.get("avatar", "") or session.extra.get("counterpart_avatar", "") or "")
+        counterpart_gender = str(counterpart.get("gender", "") or session.extra.get("counterpart_gender", "") or "")
 
         if counterpart_name:
-            session.extra["server_name"] = session.name
             session.name = counterpart_name
 
         current_user_id = str(current_user.get("id", "") or "")
@@ -450,17 +576,16 @@ class SessionManager:
         private_chat_label = tr("session.private_chat", "Private Chat")
         self_names = {value for value in {current_user_id, current_username, current_nickname, private_chat_label} if value}
         if (not session.name or session.name in self_names) and counterpart_id:
-            session.extra["server_name"] = session.name
             session.name = counterpart_id
 
-        if counterpart_avatar:
-            session.avatar = counterpart_avatar
-        if counterpart_gender:
-            session.extra["gender"] = counterpart_gender
         if counterpart_id:
             session.extra["counterpart_id"] = counterpart_id
         if counterpart_username:
             session.extra["counterpart_username"] = counterpart_username
+        if counterpart_avatar:
+            session.extra["counterpart_avatar"] = counterpart_avatar
+        if counterpart_gender:
+            session.extra["counterpart_gender"] = counterpart_gender
 
         session.extra["avatar_seed"] = profile_avatar_seed(
             user_id=counterpart_id or session.session_id,
@@ -491,11 +616,7 @@ class SessionManager:
                 "nickname": str(member.get("nickname", "") or ""),
                 "avatar": str(member.get("avatar", "") or ""),
                 "gender": str(member.get("gender", "") or ""),
-                "display_name": (
-                    str(member.get("nickname", "") or "")
-                    or member_username
-                    or member_id
-                ),
+                "display_name": self._member_display_name(member) or member_username or member_id,
             }
 
         counterpart_id = self._resolve_counterpart_id(participant_ids, current_user_id)
@@ -508,18 +629,13 @@ class SessionManager:
             "display_name": counterpart_id,
         }
 
-    @staticmethod
-    def _resolve_counterpart_name(members: list[dict[str, Any]], current_user_id: str) -> str:
+    def _resolve_counterpart_name(self, members: list[dict[str, Any]], current_user_id: str) -> str:
         """Resolve the other participant's display name for direct chats."""
         for member in members:
             member_id = str(member.get("id", "") or "")
             if current_user_id and member_id == current_user_id:
                 continue
-            return (
-                str(member.get("nickname", "") or "")
-                or str(member.get("username", "") or "")
-                or member_id
-            )
+            return self._member_display_name(member) or member_id
         return ""
 
     @staticmethod
@@ -575,6 +691,7 @@ class SessionManager:
                     timestamp=message.timestamp,
                 )
                 session.extra["last_message_type"] = message.message_type.value
+                session.extra["last_message_sender_id"] = str(message.sender_id or "")
 
                 changed_sessions[session.session_id] = session
 
@@ -619,9 +736,10 @@ class SessionManager:
     async def load_sessions(self, sessions: list[Session]) -> None:
         """Load sessions from storage."""
         current_user = await self._get_current_user_context()
+        await self._decorate_session_members(sessions, current_user)
         async with self._lock:
             self._sessions.clear()
-            for session in self._dedupe_direct_sessions(sessions):
+            for session in sessions:
                 self._normalize_session_display(session, current_user)
                 if not self._is_session_visible(session, current_user):
                     continue
@@ -636,11 +754,12 @@ class SessionManager:
     async def _replace_sessions(self, sessions: list[Session]) -> None:
         """Replace the in-memory session snapshot with a normalized remote snapshot."""
         current_user = await self._get_current_user_context()
+        await self._decorate_session_members(sessions, current_user)
         hidden_changed = False
         async with self._lock:
             existing_sessions = dict(self._sessions)
             self._sessions.clear()
-            for session in self._dedupe_direct_sessions(sessions):
+            for session in sessions:
                 self._normalize_session_display(session, current_user)
                 if not self._is_session_visible(session, current_user):
                     continue
@@ -947,8 +1066,10 @@ class SessionManager:
         extra = dict(session.extra)
         if last_message:
             extra["last_message_type"] = last_message.message_type.value
+            extra["last_message_sender_id"] = str(last_message.sender_id or "")
         else:
             extra.pop("last_message_type", None)
+            extra.pop("last_message_sender_id", None)
 
         await self.update_session(
             session_id,
@@ -1009,6 +1130,7 @@ class SessionManager:
                     timestamp=message.timestamp,
                 )
                 session.extra["last_message_type"] = message.message_type.value
+                session.extra["last_message_sender_id"] = str(message.sender_id or "")
 
                 db = get_database()
                 if db.is_connected:
@@ -1153,6 +1275,10 @@ def get_session_manager() -> SessionManager:
     if _session_manager is None:
         _session_manager = SessionManager()
     return _session_manager
+
+
+
+
 
 
 

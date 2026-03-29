@@ -94,6 +94,14 @@ class Database:
                 extra TEXT NOT NULL DEFAULT '{}',
                 FOREIGN KEY (session_id) REFERENCES sessions(session_id)
             );
+
+            CREATE TABLE IF NOT EXISTS session_read_cursors (
+                session_id TEXT NOT NULL,
+                reader_id TEXT NOT NULL,
+                last_read_seq INTEGER NOT NULL DEFAULT 0,
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY (session_id, reader_id)
+            );
             
             CREATE TABLE IF NOT EXISTS contacts_cache (
                 contact_id TEXT PRIMARY KEY,
@@ -129,6 +137,9 @@ class Database:
             
             CREATE INDEX IF NOT EXISTS idx_messages_session 
                 ON messages(session_id, timestamp DESC);
+
+            CREATE INDEX IF NOT EXISTS idx_session_read_cursors_session
+                ON session_read_cursors(session_id, last_read_seq DESC);
             
             CREATE INDEX IF NOT EXISTS idx_sessions_updated 
                 ON sessions(updated_at DESC);
@@ -467,21 +478,28 @@ class Database:
         placeholders = ", ".join("?" for _ in normalized_ids)
         cursor = await self._db.execute(
             f"""
-            SELECT session_id, name, avatar, session_type
+            SELECT session_id, name, avatar, session_type, extra
             FROM sessions
             WHERE session_id IN ({placeholders})
             """,
             tuple(normalized_ids),
         )
         rows = await cursor.fetchall()
-        return {
-            str(row["session_id"]): {
+        metadata: dict[str, dict[str, str]] = {}
+        for row in rows:
+            extra = json.loads(row["extra"] or "{}")
+            if not isinstance(extra, dict):
+                extra = {}
+            session_type = str(row["session_type"] or "")
+            session_avatar = str(row["avatar"] or "")
+            if session_type == "direct":
+                session_avatar = str(extra.get("counterpart_avatar") or session_avatar or "")
+            metadata[str(row["session_id"])] = {
                 "session_name": str(row["name"] or ""),
-                "session_avatar": str(row["avatar"] or ""),
-                "session_type": str(row["session_type"] or ""),
+                "session_avatar": session_avatar,
+                "session_type": session_type,
             }
-            for row in rows
-        }
+        return metadata
     
     async def get_all_sessions(self) -> list[Session]:
         """
@@ -504,6 +522,7 @@ class Database:
             session_id: Session ID
         """
         await self._db.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
+        await self._db.execute("DELETE FROM session_read_cursors WHERE session_id = ?", (session_id,))
         await self._db.execute("DELETE FROM sessions WHERE session_id = ?", (session_id,))
         await self._db.commit()
         logger.debug(f"Session deleted: {session_id}")
@@ -604,8 +623,10 @@ class Database:
         
         if row is None:
             return None
-        
-        return self._row_to_message(row)
+
+        message = self._row_to_message(row)
+        read_cursors = await self._load_session_read_cursors(message.session_id)
+        return self._overlay_read_cursors_on_message(message, read_cursors)
 
     async def get_existing_message_ids(self, message_ids: list[str]) -> set[str]:
         """
@@ -668,7 +689,8 @@ class Database:
             )
         
         rows = await cursor.fetchall()
-        messages = [self._row_to_message(row) for row in rows]
+        read_cursors = await self._load_session_read_cursors(session_id)
+        messages = [self._overlay_read_cursors_on_message(self._row_to_message(row), read_cursors) for row in rows]
         messages.reverse()
         return messages
 
@@ -909,6 +931,28 @@ class Database:
 
         await self._db.commit()
         logger.debug(f"Replaced group cache with {len(groups)} groups")
+
+    async def list_contacts_cache_by_ids(self, contact_ids: list[str]) -> dict[str, dict[str, Any]]:
+        """Return one contact lookup map for the given ids."""
+        normalized_ids = [
+            value
+            for value in dict.fromkeys(str(contact_id or "").strip() for contact_id in (contact_ids or []))
+            if value
+        ]
+        if not normalized_ids:
+            return {}
+
+        placeholders = ",".join("?" for _ in normalized_ids)
+        cursor = await self._db.execute(
+            f"SELECT * FROM contacts_cache WHERE contact_id IN ({placeholders})",
+            tuple(normalized_ids),
+        )
+        rows = await cursor.fetchall()
+        return {
+            payload["id"]: payload
+            for payload in (self._row_to_contact_cache(row) for row in rows)
+            if str(payload.get("id", "") or "").strip()
+        }
 
     async def search_contacts(
         self,
@@ -1165,71 +1209,128 @@ class Database:
         message_id: str,
         last_read_seq: int,
     ) -> list[str]:
-        """Apply one cumulative read receipt to locally cached self messages."""
-        import datetime
-
-        from client.models.message import MessageStatus
-
+        """Persist one cumulative read cursor without rewriting every cached message row."""
         if not session_id or not reader_id or last_read_seq <= 0:
             return []
 
         cursor = await self._db.execute(
             """
-            SELECT * FROM messages
-            WHERE session_id = ? AND is_self = 1
-            ORDER BY timestamp ASC
+            SELECT COALESCE(last_read_seq, 0) AS last_read_seq
+            FROM session_read_cursors
+            WHERE session_id = ? AND reader_id = ?
+            """,
+            (session_id, reader_id),
+        )
+        row = await cursor.fetchone()
+        current_seq = max(0, int((row["last_read_seq"] if row is not None else 0) or 0))
+        if current_seq >= last_read_seq:
+            return []
+
+        await self._db.execute(
+            """
+            INSERT INTO session_read_cursors (session_id, reader_id, last_read_seq, updated_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(session_id, reader_id) DO UPDATE SET
+                last_read_seq = CASE
+                    WHEN excluded.last_read_seq > session_read_cursors.last_read_seq THEN excluded.last_read_seq
+                    ELSE session_read_cursors.last_read_seq
+                END,
+                updated_at = CASE
+                    WHEN excluded.last_read_seq > session_read_cursors.last_read_seq THEN excluded.updated_at
+                    ELSE session_read_cursors.updated_at
+                END
+            """,
+            (session_id, reader_id, last_read_seq, time.time()),
+        )
+        await self._db.commit()
+
+        logger.debug(
+            f"Applied read receipt cursor: session={session_id}, reader={reader_id}, message={message_id}, seq={last_read_seq}"
+        )
+        return []
+
+
+    async def _load_session_read_cursors(self, session_id: str) -> dict[str, int]:
+        """Return the latest per-reader read cursor for one session."""
+        if not session_id:
+            return {}
+
+        cursor = await self._db.execute(
+            """
+            SELECT reader_id, last_read_seq
+            FROM session_read_cursors
+            WHERE session_id = ?
             """,
             (session_id,),
         )
         rows = await cursor.fetchall()
-        changed_message_ids: list[str] = []
-
+        read_cursors: dict[str, int] = {}
         for row in rows:
-            message = self._row_to_message(row)
-            try:
-                message_seq = max(0, int((message.extra or {}).get("session_seq", 0) or 0))
-            except (TypeError, ValueError):
-                message_seq = 0
-
-            if message_seq <= 0 or message_seq > last_read_seq:
+            reader_id = str(row["reader_id"] or "").strip()
+            if not reader_id:
                 continue
-
-            read_by_user_ids = list(message.extra.get("read_by_user_ids") or [])
-            normalized_reader_ids: list[str] = []
-            for existing_reader_id in read_by_user_ids:
-                normalized_reader = str(existing_reader_id or "").strip()
-                if normalized_reader and normalized_reader not in normalized_reader_ids:
-                    normalized_reader_ids.append(normalized_reader)
-
-            if reader_id in normalized_reader_ids:
-                continue
-
-            normalized_reader_ids.append(reader_id)
-            normalized_reader_ids.sort()
-
             try:
-                read_target_count = max(0, int(message.extra.get("read_target_count", 0) or 0))
+                read_cursors[reader_id] = max(0, int(row["last_read_seq"] or 0))
             except (TypeError, ValueError):
-                read_target_count = 0
+                continue
+        return read_cursors
 
-            message.extra["read_by_user_ids"] = normalized_reader_ids
-            message.extra["read_count"] = len(normalized_reader_ids)
-            message.extra["read_target_count"] = read_target_count
+    @staticmethod
+    def _normalized_reader_ids(raw_reader_ids: list[Any]) -> list[str]:
+        normalized_reader_ids: list[str] = []
+        for existing_reader_id in raw_reader_ids or []:
+            normalized_reader = str(existing_reader_id or "").strip()
+            if normalized_reader and normalized_reader not in normalized_reader_ids:
+                normalized_reader_ids.append(normalized_reader)
+        normalized_reader_ids.sort()
+        return normalized_reader_ids
 
-            if read_target_count <= 1 and message.status not in {MessageStatus.FAILED, MessageStatus.RECALLED}:
-                message.status = MessageStatus.READ
-            elif message.status in {MessageStatus.SENT, MessageStatus.DELIVERED, MessageStatus.READ}:
-                message.status = MessageStatus.DELIVERED
+    @staticmethod
+    def _message_session_seq(message: ChatMessage) -> int:
+        try:
+            return max(0, int((message.extra or {}).get("session_seq", 0) or 0))
+        except (TypeError, ValueError):
+            return 0
 
-            message.updated_at = datetime.datetime.now()
-            await self.save_message(message)
-            changed_message_ids.append(message.message_id)
+    def _overlay_read_cursors_on_message(
+        self,
+        message: ChatMessage,
+        read_cursors: dict[str, int],
+    ) -> ChatMessage:
+        """Project per-session read cursors onto one cached self message."""
+        if not message.is_self or not read_cursors:
+            return message
 
-        logger.debug(
-            f"Applied read receipt: session={session_id}, reader={reader_id}, message={message_id}, seq={last_read_seq}, changed={len(changed_message_ids)}"
-        )
-        return changed_message_ids
+        from client.models.message import MessageStatus
 
+        message_seq = self._message_session_seq(message)
+        if message_seq <= 0:
+            return message
+
+        read_by_user_ids = self._normalized_reader_ids(list((message.extra or {}).get("read_by_user_ids") or []))
+        changed = False
+        for reader_id, reader_seq in read_cursors.items():
+            if reader_seq < message_seq or reader_id == message.sender_id:
+                continue
+            if reader_id not in read_by_user_ids:
+                read_by_user_ids.append(reader_id)
+                changed = True
+
+        if not changed and read_by_user_ids == list((message.extra or {}).get("read_by_user_ids") or []):
+            return message
+
+        read_by_user_ids = self._normalized_reader_ids(read_by_user_ids)
+        read_target_count = max(0, int((message.extra or {}).get("read_target_count", 0) or 0))
+        message.extra["read_by_user_ids"] = read_by_user_ids
+        message.extra["read_count"] = len(read_by_user_ids)
+        message.extra["read_target_count"] = read_target_count
+
+        if read_by_user_ids and read_target_count <= 1 and message.status not in {MessageStatus.FAILED, MessageStatus.RECALLED}:
+            message.status = MessageStatus.READ
+        elif read_by_user_ids and message.status in {MessageStatus.SENT, MessageStatus.DELIVERED, MessageStatus.READ}:
+            message.status = MessageStatus.DELIVERED
+
+        return message
 
     async def update_message_content(self, message_id: str, content: str) -> None:
         """
@@ -1257,12 +1358,17 @@ class Database:
             "DELETE FROM messages WHERE session_id = ?",
             (session_id,),
         )
+        await self._db.execute(
+            "DELETE FROM session_read_cursors WHERE session_id = ?",
+            (session_id,),
+        )
         await self._db.commit()
         logger.debug(f"Messages deleted for session: {session_id}")
 
     async def clear_chat_state(self) -> None:
         """Remove all locally cached sessions, messages, search caches, and sync markers."""
         await self._db.execute("DELETE FROM messages")
+        await self._db.execute("DELETE FROM session_read_cursors")
         await self._db.execute("DELETE FROM sessions")
         await self._db.execute("DELETE FROM contacts_cache")
         await self._db.execute("DELETE FROM groups_cache")
@@ -1296,8 +1402,10 @@ class Database:
         
         if row is None:
             return None
-        
-        return self._row_to_message(row)
+
+        message = self._row_to_message(row)
+        read_cursors = await self._load_session_read_cursors(session_id)
+        return self._overlay_read_cursors_on_message(message, read_cursors)
 
     async def get_message_count(self, session_id: str) -> int:
         """
@@ -1522,6 +1630,7 @@ def get_database() -> Database:
     if _database is None:
         _database = Database()
     return _database
+
 
 
 

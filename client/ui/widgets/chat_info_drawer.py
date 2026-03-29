@@ -265,13 +265,13 @@ class ChatInfoPrivateContent(QWidget):
 
         self.setEnabled(True)
         extra = dict(session.extra or {})
-        display_name = str(session.name or "").strip() or tr("session.unnamed", "Untitled Session")
+        display_name = str(session.chat_title() or session.display_name() or "").strip() or tr("session.unnamed", "Untitled Session")
         self.counterpart_tile.set_participant(
             title=display_name,
-            avatar=session.avatar or "",
+            avatar=session.display_avatar() or "",
             user_id=str(extra.get("counterpart_id", "") or session.session_id),
             username=str(extra.get("counterpart_username", "") or ""),
-            gender=str(extra.get("gender", "") or ""),
+            gender=session.display_gender(),
         )
         self.mute_row.set_checked(bool(extra.get("is_muted", False)))
         self.pin_row.set_checked(bool(getattr(session, "is_pinned", False) or extra.get("is_pinned", False)))
@@ -625,3 +625,4 @@ class ChatInfoDrawerOverlay(QWidget):
             event.accept()
             return
         super().mousePressEvent(event)
+

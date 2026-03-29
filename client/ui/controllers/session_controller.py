@@ -1,4 +1,4 @@
-"""
+﻿"""
 Session Controller Module
 
 Controller for session list interactions.

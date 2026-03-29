@@ -1,4 +1,4 @@
-"""Group service."""
+﻿"""Group service."""
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ from app.models.user import User
 from app.repositories.group_repo import GroupRepository
 from app.repositories.session_repo import SessionRepository
 from app.repositories.user_repo import UserRepository
+from app.services.avatar_service import AvatarService
 
 
 T = TypeVar("T")
@@ -23,23 +24,26 @@ class GroupService:
         self.groups = GroupRepository(db)
         self.sessions = SessionRepository(db)
         self.users = UserRepository(db)
+        self.avatars = AvatarService(db)
 
     def list_groups(self, current_user: User) -> list[dict]:
         groups = self.groups.list_user_groups(current_user.id)
-        return [self.serialize_group(item, include_members=False) for item in groups]
+        return [self.serialize_group(item, include_members=True) for item in groups]
 
     def create_group(self, current_user: User, name: str, member_ids: list[str]) -> dict:
         members = self._normalize_group_members(current_user, member_ids)
+        normalized_name = str(name or "").strip()
 
         def action() -> object:
-            session = self.sessions.create(name, "group", commit=False)
+            session = self.sessions.create(normalized_name, "group", commit=False)
             for member_id in members:
                 self.sessions.add_member(session.id, member_id, commit=False)
 
-            group = self.groups.create(name, current_user.id, session.id, commit=False)
+            group = self.groups.create(normalized_name, current_user.id, session.id, commit=False)
             for member_id in members:
                 role = "owner" if member_id == current_user.id else "member"
                 self.groups.update_member_role(group.id, member_id, role, commit=False)
+            self.avatars.ensure_group_avatar(group)
             return group
 
         group = self._run_transaction(action)
@@ -60,9 +64,14 @@ class GroupService:
         def action() -> None:
             self.sessions.add_member(group.session_id, normalized_user_id, commit=False)
             self.groups.update_member_role(group.id, normalized_user_id, normalized_role, commit=False)
+            self.avatars.bump_group_avatar_version(group)
+            self.avatars.ensure_group_avatar(group)
 
         self._run_transaction(action)
-        return {"status": "added"}
+        return {
+            "status": "added",
+            "group": self.serialize_group(group, include_members=True),
+        }
 
     def remove_member(self, current_user: User, group_id: str, user_id: str) -> None:
         group = self._get_group_or_404(group_id)
@@ -75,6 +84,8 @@ class GroupService:
         def action() -> None:
             self.groups.remove_member(group.id, normalized_user_id, commit=False)
             self.sessions.remove_member(group.session_id, normalized_user_id, commit=False)
+            self.avatars.bump_group_avatar_version(group)
+            self.avatars.ensure_group_avatar(group)
 
         self._run_transaction(action)
 
@@ -98,6 +109,8 @@ class GroupService:
         def action() -> None:
             self.groups.remove_member(group.id, current_user.id, commit=False)
             self.sessions.remove_member(group.session_id, current_user.id, commit=False)
+            self.avatars.bump_group_avatar_version(group)
+            self.avatars.ensure_group_avatar(group)
 
         self._run_transaction(action)
         return {"status": "left"}
@@ -118,25 +131,41 @@ class GroupService:
         return self.serialize_group(group, include_members=True)
 
     def serialize_group(self, group, include_members: bool = True) -> dict:
+        avatar = self.avatars.ensure_group_avatar(group)
         session_members = self.sessions.list_members(group.session_id)
         role_by_user_id = {item.user_id: item.role for item in self.groups.list_members(group.id)}
+        user_ids = [str(item.user_id or "") for item in session_members if str(item.user_id or "")]
+        users_by_id = self.users.list_users_by_ids(user_ids)
         data = {
             "id": group.id,
             "name": group.name,
+            "avatar": avatar,
+            "avatar_kind": str(getattr(group, "avatar_kind", "generated") or "generated"),
             "owner_id": group.owner_id,
             "session_id": group.session_id,
             "member_count": len(session_members),
             "created_at": group.created_at.isoformat() if group.created_at else None,
         }
         if include_members:
-            data["members"] = [
-                {
-                    "user_id": item.user_id,
-                    "role": role_by_user_id.get(item.user_id, "owner" if item.user_id == group.owner_id else "member"),
-                    "joined_at": item.joined_at.isoformat() if item.joined_at else None,
-                }
-                for item in session_members
-            ]
+            members = []
+            for item in session_members:
+                user = users_by_id.get(str(item.user_id or ""))
+                if user is None:
+                    continue
+                members.append(
+                    {
+                        "user_id": item.user_id,
+                        "id": user.id,
+                        "username": user.username,
+                        "nickname": user.nickname,
+                        "avatar": self.avatars.resolve_user_avatar_url(user),
+                        "gender": user.gender,
+                        "region": user.region,
+                        "role": role_by_user_id.get(item.user_id, "owner" if item.user_id == group.owner_id else "member"),
+                        "joined_at": item.joined_at.isoformat() if item.joined_at else None,
+                    }
+                )
+            data["members"] = members
         return data
 
     def _get_group_or_404(self, group_id: str):
@@ -181,3 +210,7 @@ class GroupService:
         except Exception:
             self.db.rollback()
             raise
+
+
+
+

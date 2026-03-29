@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import ForeignKey, Index, UniqueConstraint, Uuid
+from sqlalchemy import ForeignKey, Index, String, UniqueConstraint, Uuid
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base, IdMixin, TimestampMixin
@@ -20,6 +20,9 @@ class Group(IdMixin, TimestampMixin, Base):
     name: Mapped[str] = mapped_column(nullable=False)
     owner_id: Mapped[str] = mapped_column(Uuid(as_uuid=False), ForeignKey("users.id"), nullable=False)
     session_id: Mapped[str] = mapped_column(Uuid(as_uuid=False), ForeignKey("sessions.id"), nullable=False, unique=True)
+    avatar_kind: Mapped[str] = mapped_column(String(length=16), nullable=False, default="generated")
+    avatar_file_id: Mapped[str | None] = mapped_column(Uuid(as_uuid=False), ForeignKey("files.id"), nullable=True)
+    avatar_version: Mapped[int] = mapped_column(nullable=False, default=1)
 
 
 class GroupMember(Base):

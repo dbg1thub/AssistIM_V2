@@ -27,16 +27,12 @@ from qfluentwidgets.multimedia import VideoWidget
 
 
 def _session_status_text(session: Session | None) -> str:
-    """Return the localized status label for the active session."""
+    """Return the header secondary text for the active session."""
     if session is None:
         return ""
     if session.is_ai_session:
         return tr("chat.status.ai", "AI Session")
-    return (
-        tr("chat.status.group", "Group Chat")
-        if session.session_type == "group"
-        else tr("chat.status.direct", "Direct Chat")
-    )
+    return ""
 
 
 class WelcomeWidget(QWidget):
@@ -259,9 +255,9 @@ class ChatPanel(QWidget):
             self._chat_info_overlay.close_drawer(immediate=True)
         self._current_session = session
         self.chat_header.set_session_info(
-            title=session.name,
+            title=session.chat_title() or session.display_name(),
             status=_session_status_text(session),
-            avatar=session.avatar,
+            avatar=session.display_avatar(),
             is_ai=session.is_ai_session,
         )
         if self._chat_info_overlay:
@@ -832,11 +828,13 @@ class ChatPanel(QWidget):
         return content
 
     def show_typing_indicator(self) -> None:
-        """Display typing status in header."""
+        """Display typing status in header for direct chats only."""
+        if not self._current_session or self._current_session.session_type != "direct" or self._current_session.is_ai_session:
+            return
         self.chat_header.set_status(tr("chat.status.typing", "The other side is typing..."))
 
     def hide_typing_indicator(self) -> None:
-        """Clear typing status and restore session type label."""
+        """Clear typing status and restore the non-typing secondary text."""
         if self._current_session:
             self.chat_header.set_status(_session_status_text(self._current_session))
         else:
@@ -860,3 +858,4 @@ class ChatPanel(QWidget):
         if not self._chat_info_overlay or not self.chat_page:
             return
         self._chat_info_overlay.set_content_geometry(self.chat_page.rect())
+

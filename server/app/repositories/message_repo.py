@@ -80,6 +80,32 @@ class MessageRepository:
         stmt = stmt.order_by(desc(Message.session_seq), desc(Message.created_at)).limit(limit)
         return list(reversed(self.db.execute(stmt).scalars().all()))
 
+    def list_last_messages_for_sessions(self, session_ids: list[str]) -> dict[str, Message]:
+        normalized_session_ids = [str(session_id or "").strip() for session_id in session_ids if str(session_id or "").strip()]
+        if not normalized_session_ids:
+            return {}
+
+        latest_seq_subquery = (
+            select(
+                Message.session_id.label("session_id"),
+                func.max(Message.session_seq).label("last_session_seq"),
+            )
+            .where(Message.session_id.in_(normalized_session_ids))
+            .group_by(Message.session_id)
+            .subquery()
+        )
+        stmt = (
+            select(Message)
+            .join(
+                latest_seq_subquery,
+                and_(
+                    Message.session_id == latest_seq_subquery.c.session_id,
+                    Message.session_seq == latest_seq_subquery.c.last_session_seq,
+                ),
+            )
+        )
+        return {str(message.session_id or ""): message for message in self.db.execute(stmt).scalars().all()}
+
     def list_missing_messages_for_user(self, session_cursors: dict[str, int], user_id: str) -> list[Message]:
         session_ids = list(
             self.db.execute(

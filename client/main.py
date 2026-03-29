@@ -17,7 +17,7 @@ if __package__ in {None, ""}:
 from PySide6.QtCore import QLockFile, QTimer
 from PySide6.QtWidgets import QApplication, QMessageBox
 from qasync import QEventLoop
-from qfluentwidgets import setTheme, setThemeColor
+from qfluentwidgets import InfoBar, setTheme, setThemeColor
 
 from client.core import logging
 from client.core.config_backend import get_config
@@ -103,6 +103,7 @@ class Application:
         self._tasks: set[asyncio.Task] = set()
         self._logout_task: asyncio.Task | None = None
         self._forced_logout_in_progress = False
+        self._pending_auth_success_message = ""
 
         self.main_window = None
         self.auth_window = None
@@ -210,6 +211,8 @@ class Application:
         self.auth_window = AuthInterface()
 
         def _on_authenticated(_user: dict) -> None:
+            if self.auth_window is not None:
+                self._pending_auth_success_message = str(getattr(self.auth_window, "last_success_message", "") or "")
             if not auth_future.done():
                 auth_future.set_result(True)
 
@@ -277,6 +280,14 @@ class Application:
         self.main_window.showNormal()
         self.main_window.raise_()
         self.main_window.activateWindow()
+        if self._pending_auth_success_message:
+            InfoBar.success(
+                tr("auth.feedback.title", "Authentication"),
+                self._pending_auth_success_message,
+                parent=self.main_window,
+                duration=1800,
+            )
+            self._pending_auth_success_message = ""
         QTimer.singleShot(0, self.main_window.raise_)
         QTimer.singleShot(0, self.main_window.activateWindow)
         QTimer.singleShot(80, self.main_window.raise_)

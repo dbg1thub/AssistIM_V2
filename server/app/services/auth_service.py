@@ -1,4 +1,4 @@
-"""Authentication service."""
+﻿"""Authentication service."""
 
 from __future__ import annotations
 
@@ -14,16 +14,18 @@ from app.core.security import (
     token_session_version,
     verify_password,
 )
-from app.media.default_avatars import random_default_avatar_url
 from app.models.user import User
 from app.repositories.user_repo import UserRepository
+from app.services.avatar_service import AvatarService
 from app.services.user_service import UserService
 
 
 class AuthService:
     def __init__(self, db: Session, settings: Settings | None = None) -> None:
         self.settings = settings or get_settings()
+        self.db = db
         self.users = UserRepository(db)
+        self.avatars = AvatarService(db, self.settings)
 
     def register(self, username: str, password: str, nickname: str) -> dict:
         if self.users.get_by_username(username) is not None:
@@ -33,25 +35,10 @@ class AuthService:
             username=username,
             password_hash=hash_password(password),
             nickname=nickname,
-            avatar=random_default_avatar_url(self.settings),
+            avatar_kind="default",
         )
+        user = self.avatars.assign_default_user_avatar(user, seed=user.id or username)
         return self._build_auth_payload(user, rotate_session=True)
-
-    def register_user_only(self, username: str, password: str, nickname: str) -> dict:
-        if self.users.get_by_username(username) is not None:
-            raise AppError(ErrorCode.USER_EXISTS, "user already exists", 409)
-        user = self.users.create(
-            username=username,
-            password_hash=hash_password(password),
-            nickname=nickname,
-            avatar=random_default_avatar_url(self.settings),
-        )
-        return {
-            "id": user.id,
-            "username": user.username,
-            "nickname": user.nickname,
-            "created_at": user.created_at.isoformat() if user.created_at else None,
-        }
 
     def login(self, username: str, password: str) -> dict:
         user = self.authenticate_credentials(username, password)
@@ -100,6 +87,7 @@ class AuthService:
             raise AppError(ErrorCode.UNAUTHORIZED, "session expired", 401)
 
     def _build_auth_payload(self, user: User, *, rotate_session: bool) -> dict:
+        user = self.avatars.backfill_user_avatar_state(user)
         if rotate_session:
             user = self.users.advance_auth_session_version(user)
 

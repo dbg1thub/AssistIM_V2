@@ -329,3 +329,119 @@ def test_database_connect_upgrades_local_search_cache_columns() -> None:
         except PermissionError:
             pass
         shutil.rmtree(temp_root, ignore_errors=True)
+
+
+def test_database_read_cursor_overlay_updates_cached_self_messages_without_row_rewrites() -> None:
+    temp_root = (Path.cwd() / "client/tests/.pytest_tmp").resolve()
+    temp_root.mkdir(parents=True, exist_ok=True)
+    db_path = temp_root / "database-read-cursor-overlay.db"
+    try:
+        db_path.unlink(missing_ok=True)
+
+        async def scenario() -> None:
+            database = Database(str(db_path))
+            await database.connect()
+            try:
+                session = Session(
+                    session_id="session-1",
+                    name="Core Team",
+                    session_type="group",
+                    participant_ids=["alice", "bob", "charlie"],
+                    created_at=datetime.now(),
+                    updated_at=datetime.now(),
+                )
+                await database.save_session(session)
+
+                base_time = datetime(2026, 3, 29, 10, 0, 0)
+                await database.save_messages_batch(
+                    [
+                        ChatMessage(
+                            message_id="m-1",
+                            session_id="session-1",
+                            sender_id="alice",
+                            content="one",
+                            message_type=MessageType.TEXT,
+                            status=MessageStatus.SENT,
+                            timestamp=base_time,
+                            updated_at=base_time,
+                            is_self=True,
+                            extra={
+                                "session_seq": 1,
+                                "read_target_count": 2,
+                                "read_count": 0,
+                                "read_by_user_ids": [],
+                            },
+                        ),
+                        ChatMessage(
+                            message_id="m-2",
+                            session_id="session-1",
+                            sender_id="alice",
+                            content="two",
+                            message_type=MessageType.TEXT,
+                            status=MessageStatus.SENT,
+                            timestamp=base_time.replace(second=1),
+                            updated_at=base_time.replace(second=1),
+                            is_self=True,
+                            extra={
+                                "session_seq": 2,
+                                "read_target_count": 2,
+                                "read_count": 0,
+                                "read_by_user_ids": [],
+                            },
+                        ),
+                        ChatMessage(
+                            message_id="m-3",
+                            session_id="session-1",
+                            sender_id="alice",
+                            content="three",
+                            message_type=MessageType.TEXT,
+                            status=MessageStatus.SENT,
+                            timestamp=base_time.replace(second=2),
+                            updated_at=base_time.replace(second=2),
+                            is_self=True,
+                            extra={
+                                "session_seq": 3,
+                                "read_target_count": 2,
+                                "read_count": 0,
+                                "read_by_user_ids": [],
+                            },
+                        ),
+                    ]
+                )
+
+                changed_ids = await database.apply_read_receipt("session-1", "bob", "m-2", 2)
+                loaded_messages = await database.get_messages("session-1", limit=10)
+
+                assert changed_ids == []
+                assert [message.message_id for message in loaded_messages] == ["m-1", "m-2", "m-3"]
+                assert loaded_messages[0].extra["read_by_user_ids"] == ["bob"]
+                assert loaded_messages[1].extra["read_by_user_ids"] == ["bob"]
+                assert loaded_messages[2].extra["read_by_user_ids"] == []
+                assert loaded_messages[0].status == MessageStatus.DELIVERED
+                assert loaded_messages[1].status == MessageStatus.DELIVERED
+                assert loaded_messages[2].status == MessageStatus.SENT
+            finally:
+                await database.close()
+
+        asyncio.run(scenario())
+
+        with sqlite3.connect(str(db_path)) as connection:
+            cursor_seq = connection.execute(
+                "SELECT last_read_seq FROM session_read_cursors WHERE session_id = ? AND reader_id = ?",
+                ("session-1", "bob"),
+            ).fetchone()[0]
+            persisted_extra = json.loads(
+                connection.execute(
+                    "SELECT extra FROM messages WHERE message_id = ?",
+                    ("m-1",),
+                ).fetchone()[0]
+            )
+
+        assert cursor_seq == 2
+        assert persisted_extra["read_by_user_ids"] == []
+    finally:
+        try:
+            db_path.unlink(missing_ok=True)
+        except PermissionError:
+            pass
+        shutil.rmtree(temp_root, ignore_errors=True)

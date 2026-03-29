@@ -9,7 +9,6 @@ import json
 import time
 from concurrent.futures import Future
 from typing import Any, Callable, Optional
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from client.core import logging
 from client.core.logging import setup_logging
@@ -54,6 +53,8 @@ class ConnectionManager:
         self._initialized = False
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._auth_service = get_auth_service()
+        self._ws_authenticated = False
+        self._ws_auth_in_flight = False
 
     @property
     def state(self) -> ConnectionState:
@@ -260,8 +261,6 @@ class ConnectionManager:
 
         self._ws_client = get_websocket_client()
         self._base_ws_url = self._base_ws_url or str(self._ws_client.url or "")
-        self._apply_authenticated_ws_url()
-
         self._ws_client.set_callbacks(
             on_connect=self._on_connect,
             on_disconnect=self._on_disconnect,
@@ -273,26 +272,6 @@ class ConnectionManager:
         self._initialized = True
 
         logger.info("Connection manager initialized")
-
-    def _apply_authenticated_ws_url(self) -> None:
-        """Attach the current access token to the websocket URL for early server binding."""
-        if self._ws_client is None:
-            return
-
-        base_url = self._base_ws_url or str(self._ws_client.url or "")
-        if not base_url:
-            return
-
-        parts = urlsplit(base_url)
-        query_items = [(key, value) for key, value in parse_qsl(parts.query, keep_blank_values=True) if key != "token"]
-
-        access_token = self._auth_service.access_token
-        if access_token:
-            query_items.append(("token", access_token))
-
-        self._ws_client.url = urlunsplit(
-            (parts.scheme, parts.netloc, parts.path, urlencode(query_items), parts.fragment)
-        )
 
     async def _load_sync_state(self) -> None:
         """Load message and event reconnect cursors from database state or local cache."""
@@ -409,6 +388,8 @@ class ConnectionManager:
     def _on_connect(self) -> None:
         """Handle connection established."""
         self._connect_started_at = time.perf_counter()
+        self._ws_authenticated = False
+        self._ws_auth_in_flight = False
         old_state = self._state
         self._notify_state_change(old_state, ConnectionState.CONNECTED)
 
@@ -416,7 +397,7 @@ class ConnectionManager:
         self._schedule_post_connect_handshake()
 
     def _schedule_post_connect_handshake(self) -> None:
-        """Schedule auth/sync without awaiting worker sends on the UI loop."""
+        """Schedule websocket authentication without awaiting worker sends on the UI loop."""
         started = time.perf_counter()
         logger.info("Post-connect handshake started (+%.1fms)", (time.perf_counter() - started) * 1000)
 
@@ -428,19 +409,13 @@ class ConnectionManager:
             (time.perf_counter() - auth_started) * 1000,
         )
 
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            return
-
-        loop.call_later(0.2, self._send_sync_request_nowait)
-
     async def _authenticate_websocket(self) -> bool:
         """Send auth payload over websocket if access token exists."""
         access_token = self._auth_service.access_token
 
         if not access_token:
             logger.info("Skipping websocket auth: no access token present")
+            self._ws_auth_in_flight = False
             return False
 
         auth_message = {
@@ -454,8 +429,10 @@ class ConnectionManager:
         }
         success = await self.send(auth_message)
         if success:
+            self._ws_auth_in_flight = True
             logger.info("WebSocket auth message sent")
         else:
+            self._ws_auth_in_flight = False
             logger.warning("Failed to send websocket auth message")
         return success
 
@@ -465,6 +442,7 @@ class ConnectionManager:
 
         if not access_token:
             logger.info("Skipping websocket auth: no access token present")
+            self._ws_auth_in_flight = False
             return False
 
         auth_message = {
@@ -478,13 +456,18 @@ class ConnectionManager:
         }
         success = bool(self._ws_client and self._ws_client.send_nowait(auth_message))
         if success:
+            self._ws_auth_in_flight = True
             logger.info("WebSocket auth message sent")
         else:
+            self._ws_auth_in_flight = False
             logger.warning("Failed to send websocket auth message")
         return success
 
     async def _send_sync_request(self) -> None:
         """Send sync request using per-session reconnect cursors."""
+        if not self._ws_authenticated:
+            logger.warning("Skipping sync request: websocket not authenticated")
+            return
         sync_message = {
             "type": "sync_messages",
             "seq": 0,
@@ -504,6 +487,9 @@ class ConnectionManager:
 
     def _send_sync_request_nowait(self) -> None:
         """Send sync request without awaiting worker send completion on the main loop."""
+        if not self._ws_authenticated:
+            logger.warning("Skipping sync request: websocket not authenticated")
+            return
         sync_started = time.perf_counter()
         sync_message = {
             "type": "sync_messages",
@@ -525,6 +511,8 @@ class ConnectionManager:
 
     def _on_disconnect(self) -> None:
         """Handle disconnection."""
+        self._ws_authenticated = False
+        self._ws_auth_in_flight = False
         old_state = self._state
 
         if old_state != ConnectionState.RECONNECTING:
@@ -538,7 +526,14 @@ class ConnectionManager:
         message_started = time.perf_counter()
         sync_state_changed = False
 
-        if msg_type == "history_messages":
+        if msg_type == "auth_ack":
+            data = message.get("data", {})
+            was_authenticated = self._ws_authenticated
+            self._ws_auth_in_flight = False
+            self._ws_authenticated = bool(isinstance(data, dict) and data.get("success"))
+            if self._ws_authenticated and not was_authenticated:
+                self._schedule_message_coroutine(self._send_sync_request())
+        elif msg_type == "history_messages":
             data = message.get("data", {})
             messages = data.get("messages", [])
             sync_state_changed = self._advance_cursors_from_history_payload(messages)
@@ -558,6 +553,8 @@ class ConnectionManager:
             sync_state_changed = self._advance_cursor_from_message_payload(
                 (message.get("data") or {}).get("message", {})
             )
+        elif msg_type == "error" and self._ws_auth_in_flight:
+            self._ws_auth_in_flight = False
         elif msg_type in {"message_edit", "message_recall", "message_delete", "read"}:
             sync_state_changed = self._advance_event_cursor_from_event_payload(message.get("data", {}))
 
@@ -590,8 +587,6 @@ class ConnectionManager:
             self._loop = asyncio.get_running_loop()
         except RuntimeError:
             pass
-
-        self._apply_authenticated_ws_url()
 
         old_state = self._state
         self._notify_state_change(old_state, ConnectionState.CONNECTING)
@@ -643,6 +638,11 @@ class ConnectionManager:
         """
         if not self._ws_client or not self._ws_client.is_connected:
             logger.warning("Cannot send: not connected")
+            return False
+
+        msg_type = str(message.get("type") or "")
+        if msg_type != "auth" and not self._ws_authenticated:
+            logger.warning("Cannot send %s: websocket not authenticated", msg_type or "<unknown>")
             return False
 
         return await self._ws_client.send(message, timeout)
@@ -770,6 +770,9 @@ class ConnectionManager:
         self._connect_started_at = 0.0
         self._db = None
         self._session_sync_cursors = {}
+        self._event_sync_cursors = {}
+        self._ws_authenticated = False
+        self._ws_auth_in_flight = False
         self._initialized = False
 
         logger.info("Connection manager closed")
