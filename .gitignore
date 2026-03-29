@@ -33,9 +33,7 @@ env/
 *~
 
 # 数据文件（保持 data/ 目录结构，但不提交本地数据库和日志）
-data/vector_db/
-data/*.db
-data/*.log
+data
 
 # 环境变量
 .env
@@ -65,4 +63,5 @@ server/.testdata
 server/.testdata_manual
 client/tests/.pytest_tmp
 client/data/screenshots
+
 
