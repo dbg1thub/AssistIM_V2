@@ -301,8 +301,11 @@ class ChatInterface(QWidget):
         self.chat_panel.chat_info_search_requested.connect(self._on_chat_info_search_requested)
         self.chat_panel.chat_info_add_requested.connect(self._on_chat_info_add_requested)
         self.chat_panel.chat_info_clear_requested.connect(self._on_chat_info_clear_requested)
+        self.chat_panel.chat_info_leave_requested.connect(self._on_chat_info_leave_requested)
         self.chat_panel.chat_info_mute_toggled.connect(self._on_chat_info_mute_toggled)
         self.chat_panel.chat_info_pin_toggled.connect(self._on_chat_info_pin_toggled)
+        self.chat_panel.chat_info_group_profile_update_requested.connect(self._on_chat_info_group_profile_update_requested)
+        self.chat_panel.chat_info_group_self_profile_update_requested.connect(self._on_chat_info_group_self_profile_update_requested)
         self.chat_panel.get_message_list().customContextMenuRequested.connect(self._on_message_context_menu)
 
     def _on_splitter_moved(self, _pos: int, _index: int) -> None:
@@ -1266,6 +1269,15 @@ class ChatInterface(QWidget):
             duration=2200,
         )
 
+    def _on_chat_info_leave_requested(self) -> None:
+        """Show placeholder feedback for leaving a group chat until backend flow is connected."""
+        InfoBar.info(
+            tr("chat.info.group.leave.title", "Leave Group Chat"),
+            tr("chat.info.group.leave.unavailable", "The leave-group action will be connected next."),
+            parent=self.window(),
+            duration=2000,
+        )
+
     def _on_chat_info_mute_toggled(self, muted: bool) -> None:
         """Route local do-not-disturb changes through the session controller only."""
         session_id = self._current_session_id
@@ -1286,6 +1298,64 @@ class ChatInterface(QWidget):
         self._schedule_ui_task(
             self._session_controller.set_pinned(session_id, pinned),
             f"pin session {session_id}",
+        )
+
+    def _on_chat_info_group_profile_update_requested(self, payload: object) -> None:
+        session = self._session_controller.get_current_session()
+        if session is None or getattr(session, "session_type", "") != "group":
+            return
+        self._schedule_ui_task(
+            self._update_group_profile_async(dict(payload or {})),
+            f"update group profile {getattr(session, 'session_id', '')}",
+        )
+
+    def _on_chat_info_group_self_profile_update_requested(self, payload: object) -> None:
+        session = self._session_controller.get_current_session()
+        if session is None or getattr(session, "session_type", "") != "group":
+            return
+        self._schedule_ui_task(
+            self._update_my_group_profile_async(dict(payload or {})),
+            f"update my group profile {getattr(session, 'session_id', '')}",
+        )
+
+    async def _update_group_profile_async(self, payload: dict[str, object]) -> None:
+        session = self._session_controller.get_current_session()
+        if session is None:
+            return
+        group_id = str(getattr(session, "extra", {}).get("group_id", "") or "").strip()
+        if not group_id:
+            return
+        record = await self._contact_controller.update_group_profile(
+            group_id,
+            name=payload.get("name") if "name" in payload else None,
+            announcement=payload.get("announcement") if "announcement" in payload else None,
+        )
+        await self._apply_group_record(record, include_self_fields=True)
+
+    async def _update_my_group_profile_async(self, payload: dict[str, object]) -> None:
+        session = self._session_controller.get_current_session()
+        if session is None:
+            return
+        group_id = str(getattr(session, "extra", {}).get("group_id", "") or "").strip()
+        if not group_id:
+            return
+        record = await self._contact_controller.update_my_group_profile(
+            group_id,
+            note=payload.get("note") if "note" in payload else None,
+            my_group_nickname=payload.get("my_group_nickname") if "my_group_nickname" in payload else None,
+        )
+        await self._apply_group_record(record, include_self_fields=True)
+
+    async def _apply_group_record(self, record, *, include_self_fields: bool) -> None:
+        session = self._session_controller.get_current_session()
+        if session is None:
+            return
+
+        payload = dict(getattr(record, "extra", {}) or {})
+        await self._session_controller.apply_group_payload(
+            session.session_id,
+            payload,
+            include_self_fields=include_self_fields,
         )
 
     def close_transient_panels(self) -> None:

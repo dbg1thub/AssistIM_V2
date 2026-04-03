@@ -1613,6 +1613,12 @@ class ContactInterface(QWidget):
         if reason == "user_profile_update":
             self._apply_profile_update_payload(dict(event_payload.get("payload") or {}))
             return
+        if reason == "group_profile_update":
+            self._apply_group_update_payload(dict(event_payload.get("payload") or {}))
+            return
+        if reason == "group_self_profile_update":
+            self._apply_group_self_profile_update_payload(dict(event_payload.get("payload") or {}))
+            return
         self.reload_data()
 
     def _can_update_contact_ui(self) -> bool:
@@ -1796,6 +1802,20 @@ class ContactInterface(QWidget):
         self.groups_layout.insertWidget(insert_at, item)
         self._group_items[group.id] = item
 
+    def _remove_group_item_view(self, group_id: str) -> None:
+        item = self._group_items.pop(group_id, None)
+        if item is not None:
+            self.groups_layout.removeWidget(item)
+            item.deleteLater()
+        if self._group_items:
+            return
+        self._clear_layout(self.groups_layout)
+        self._add_empty_state(
+            self.groups_layout,
+            AppIcon.PEOPLE,
+            tr("contact.sidebar.empty_groups", "No groups yet"),
+        )
+
     def _insert_request_item_view(self, request: FriendRequestRecord) -> None:
         if request.id in self._request_items:
             self._update_request_item_view(request)
@@ -1933,6 +1953,54 @@ class ContactInterface(QWidget):
         display_name = contact.display_name
         return self._controller.sort_letter(display_name), display_name.lower()
 
+    def _schedule_groups_cache_persist(self) -> None:
+        """Persist the current normalized group snapshot after local incremental mutations."""
+        self._schedule_keyed_ui_task(
+            ("persist_groups_cache", "groups"),
+            self._controller.persist_groups_cache(list(self._groups)),
+            "persist groups cache",
+        )
+
+    def _sync_group_record_view(self, group: GroupRecord, *, rebuild: bool) -> None:
+        """Update the group sidebar/detail widgets after the controller produced a new record."""
+        self._update_summary_counts()
+        needs_selection_restore = False
+        if rebuild:
+            if group.id in self._group_items:
+                self._remove_group_item_view(group.id)
+            self._insert_group_item_view(group)
+            needs_selection_restore = self._current_page == "groups"
+        elif group.id in self._group_items:
+            self._update_group_item_view(group)
+        elif self._group_items or self._current_page == "groups":
+            self._insert_group_item_view(group)
+            needs_selection_restore = self._current_page == "groups"
+
+        if needs_selection_restore:
+            self._restore_selection(full_reload=False)
+
+        if self._selected_key == ("group", group.id):
+            self.detail_panel.set_group(group, self._current_detail_moments())
+
+    def _apply_group_update_payload(self, payload: dict[str, object]) -> None:
+        """Apply one realtime shared group-profile update without reloading the contact page."""
+        group_payload = dict(payload.get("group") or payload) if isinstance(payload, dict) else {}
+        groups, record, rebuild = self._controller.merge_group_record(self._groups, group_payload)
+        if record is None:
+            return
+        self._groups = groups
+        self._sync_group_record_view(record, rebuild=rebuild)
+        self._schedule_groups_cache_persist()
+
+    def _apply_group_self_profile_update_payload(self, payload: dict[str, object]) -> None:
+        """Apply one realtime self-scoped group-profile update without reloading the contact page."""
+        groups, record = self._controller.apply_group_self_profile_update(self._groups, payload)
+        if record is None:
+            return
+        self._groups = groups
+        self._sync_group_record_view(record, rebuild=False)
+        self._schedule_groups_cache_persist()
+
     def _apply_profile_update_payload(self, payload: dict[str, object]) -> None:
         """Apply one realtime user-profile update without reloading the whole contact page."""
         user_id = str(payload.get("user_id", "") or "").strip()
@@ -1987,16 +2055,9 @@ class ContactInterface(QWidget):
                 continue
             if not session_avatar or group.avatar == session_avatar:
                 continue
-            updated = GroupRecord(
-                id=group.id,
-                name=group.name,
-                avatar=session_avatar,
-                owner_id=group.owner_id,
-                session_id=group.session_id,
-                member_count=group.member_count,
-                created_at=group.created_at,
-                extra=dict(group.extra or {}),
-            )
+            updated = self._controller.normalize_group_record({"avatar": session_avatar}, existing=group, fallback_id=group.id)
+            if updated is None:
+                continue
             self._groups[index] = updated
             self._update_group_item_view(updated)
             if self._selected_key == ("group", updated.id):
@@ -2129,22 +2190,6 @@ class ContactInterface(QWidget):
                 groups=len(self._groups),
                 requests=len(self._requests),
             )
-        )
-
-    @staticmethod
-    def _coerce_group_record(group: object) -> GroupRecord:
-        if isinstance(group, GroupRecord):
-            return group
-        extra = dict(getattr(group, "extra", {}) or {})
-        return GroupRecord(
-            id=str(getattr(group, "id", "") or extra.get("id", "") or ""),
-            name=str(getattr(group, "name", "") or extra.get("name", "") or ""),
-            avatar=str(getattr(group, "avatar", "") or extra.get("avatar", "") or ""),
-            owner_id=str(getattr(group, "owner_id", "") or extra.get("owner_id", "") or ""),
-            session_id=str(getattr(group, "session_id", "") or extra.get("session_id", "") or ""),
-            member_count=int(getattr(group, "member_count", 0) or extra.get("member_count", 0) or 0),
-            created_at=str(getattr(group, "created_at", "") or extra.get("created_at", "") or ""),
-            extra=extra,
         )
 
     def _on_search_text_changed(self, text: str) -> None:
@@ -2507,13 +2552,12 @@ class ContactInterface(QWidget):
 
     def _on_group_created(self, group: object) -> None:
         """Switch to groups, merge the new group locally, and jump into the new group chat."""
-        created_group = self._coerce_group_record(group)
-        self._groups = [item for item in self._groups if item.id != created_group.id]
-        self._groups.append(created_group)
-        self._groups.sort(key=lambda item: item.name.lower())
-        self._update_summary_counts()
+        self._groups, created_group, rebuild = self._controller.merge_group_record(self._groups, group)
+        if created_group is None:
+            return
         self._activate_page("groups")
-        self._insert_group_item_view(created_group)
+        self._sync_group_record_view(created_group, rebuild=rebuild)
+        self._schedule_groups_cache_persist()
         if created_group.id in self._group_items:
             self._select_group(created_group.id, force=True)
         else:

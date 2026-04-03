@@ -574,22 +574,29 @@ def test_schema_compatibility_backfills_avatar_columns_for_legacy_runtime_schema
         connection.execute(text("CREATE TABLE files (id VARCHAR(36) PRIMARY KEY, user_id VARCHAR(36), file_url VARCHAR(255), file_name VARCHAR(255), file_type VARCHAR(255), created_at TIMESTAMP, updated_at TIMESTAMP)"))
         connection.execute(text("CREATE TABLE session_events (id VARCHAR(36) PRIMARY KEY, session_id VARCHAR(36), type VARCHAR(32), payload TEXT, event_seq INTEGER, created_at TIMESTAMP, updated_at TIMESTAMP)"))
         connection.execute(text("CREATE TABLE groups (id VARCHAR(36) PRIMARY KEY, session_id VARCHAR(36), owner_id VARCHAR(36), name VARCHAR(255), created_at TIMESTAMP, updated_at TIMESTAMP)"))
+        connection.execute(text("CREATE TABLE group_members (group_id VARCHAR(36), user_id VARCHAR(36), role VARCHAR(32), joined_at TIMESTAMP)"))
+        connection.execute(text("CREATE TABLE user_session_events (id VARCHAR(36) PRIMARY KEY, session_id VARCHAR(36), user_id VARCHAR(36), type VARCHAR(32), payload TEXT, event_seq INTEGER, created_at TIMESTAMP)"))
         connection.execute(text("INSERT INTO users (id, username, password_hash, nickname, avatar, status) VALUES ('user-1', 'legacy', 'hash', 'Legacy', NULL, 'offline')"))
 
     applied = schema_compat_module.ensure_schema_compatibility(engine)
     columns_by_table = {
         table_name: {column["name"] for column in inspect(engine).get_columns(table_name)}
-        for table_name in ["users", "groups"]
+        for table_name in ["users", "groups", "group_members", "user_session_events"]
     }
 
     assert "users.avatar_kind" in applied
     assert "users.avatar_default_key" in applied
     assert "users.avatar_file_id" in applied
+    assert "groups.announcement" in applied
     assert "groups.avatar_kind" in applied
     assert "groups.avatar_file_id" in applied
     assert "groups.avatar_version" in applied
+    assert "group_members.group_nickname" in applied
+    assert "group_members.note" in applied
     assert {"avatar_kind", "avatar_default_key", "avatar_file_id"}.issubset(columns_by_table["users"])
-    assert {"avatar_kind", "avatar_file_id", "avatar_version"}.issubset(columns_by_table["groups"])
+    assert {"announcement", "avatar_kind", "avatar_file_id", "avatar_version"}.issubset(columns_by_table["groups"])
+    assert {"group_nickname", "note"}.issubset(columns_by_table["group_members"])
+    assert {"id", "session_id", "user_id", "event_seq", "type", "payload", "created_at"}.issubset(columns_by_table["user_session_events"])
 
     with engine.begin() as connection:
         user_row = connection.execute(text("SELECT avatar_kind, avatar_default_key FROM users WHERE id = 'user-1'")) .mappings().one()

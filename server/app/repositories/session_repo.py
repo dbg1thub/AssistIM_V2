@@ -1,4 +1,4 @@
-﻿"""Session repository."""
+"""Session repository."""
 
 from __future__ import annotations
 
@@ -183,6 +183,28 @@ class SessionRepository:
         self.db.add(session)
         self.db.commit()
         self.db.refresh(session)
+        return session
+
+    def touch_without_commit(self, session_id: str) -> ChatSession | None:
+        session = self.get_by_id(session_id)
+        if session is None:
+            return None
+        session.updated_at = utcnow()
+        self.db.add(session)
+        self.db.flush()
+        return session
+
+    def rename(self, session_id: str, name: str, *, commit: bool = True) -> ChatSession | None:
+        session = self.get_by_id(session_id)
+        if session is None:
+            return None
+        session.name = str(name or "").strip()
+        session.updated_at = utcnow()
+        self.db.add(session)
+        self.db.flush()
+        if commit:
+            self.db.commit()
+            self.db.refresh(session)
         return session
 
     def update_avatar(self, session_id: str, avatar: str | None, *, commit: bool = True) -> ChatSession | None:

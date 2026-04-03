@@ -44,6 +44,8 @@ class MessageEvent:
     EDITED = "message_edited"
     DELETED = "message_deleted"
     PROFILE_UPDATED = "message_profile_updated"
+    GROUP_UPDATED = "message_group_updated"
+    GROUP_SELF_UPDATED = "message_group_self_updated"
 
 
 @dataclass
@@ -420,6 +422,12 @@ class MessageManager:
 
         elif msg_type == "user_profile_update":
             await self._process_user_profile_update(data)
+
+        elif msg_type == "group_profile_update":
+            await self._process_group_profile_update(data)
+
+        elif msg_type == "group_self_profile_update":
+            await self._process_group_self_profile_update(data)
 
         else:
             logger.debug(f"Unknown message type: {msg_type}")
@@ -969,6 +977,55 @@ class MessageManager:
             ContactEvent.SYNC_REQUIRED,
             {
                 "reason": "user_profile_update",
+                "payload": dict(event_payload),
+                "message": dict(data or {}),
+            },
+        )
+
+    async def _process_group_profile_update(self, data: dict) -> None:
+        """Apply one shared group-profile update across session and contact views."""
+        payload = data.get("data", {}) if isinstance(data.get("data"), dict) else {}
+        session_id = str(payload.get("session_id", "") or "")
+        group_id = str(payload.get("group_id", "") or payload.get("id", "") or "")
+        if not session_id or not group_id:
+            return
+
+        event_payload = {
+            "session_id": session_id,
+            "group_id": group_id,
+            "group": dict(payload),
+            "event_seq": int(payload.get("event_seq", 0) or 0),
+        }
+        await self._event_bus.emit(MessageEvent.GROUP_UPDATED, event_payload)
+        await self._event_bus.emit(
+            ContactEvent.SYNC_REQUIRED,
+            {
+                "reason": "group_profile_update",
+                "payload": dict(event_payload),
+                "message": dict(data or {}),
+            },
+        )
+
+    async def _process_group_self_profile_update(self, data: dict) -> None:
+        """Apply one self-scoped group-profile update for the current user's other clients."""
+        payload = data.get("data", {}) if isinstance(data.get("data"), dict) else {}
+        session_id = str(payload.get("session_id", "") or "")
+        group_id = str(payload.get("group_id", "") or "")
+        if not session_id or not group_id:
+            return
+
+        event_payload = {
+            "session_id": session_id,
+            "group_id": group_id,
+            "group_note": str(payload.get("group_note", "") or ""),
+            "my_group_nickname": str(payload.get("my_group_nickname", "") or ""),
+            "event_seq": int(payload.get("event_seq", 0) or 0),
+        }
+        await self._event_bus.emit(MessageEvent.GROUP_SELF_UPDATED, event_payload)
+        await self._event_bus.emit(
+            ContactEvent.SYNC_REQUIRED,
+            {
+                "reason": "group_self_profile_update",
                 "payload": dict(event_payload),
                 "message": dict(data or {}),
             },

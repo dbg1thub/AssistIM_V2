@@ -76,6 +76,14 @@ class SessionController:
         """Persist local do-not-disturb state for a session."""
         await self._session_manager.set_muted(session_id, muted)
 
+    async def apply_group_payload(self, session_id: str, payload: dict[str, Any], *, include_self_fields: bool) -> Optional[Any]:
+        """Apply one authoritative group payload to the cached session state."""
+        return await self._session_manager.apply_group_payload(
+            session_id,
+            payload,
+            include_self_fields=include_self_fields,
+        )
+
     def is_session_muted(self, session_id: str) -> bool:
         """Return whether local do-not-disturb is enabled for a session."""
         return self._session_manager.is_session_muted(session_id)

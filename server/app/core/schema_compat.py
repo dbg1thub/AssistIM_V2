@@ -33,9 +33,15 @@ USER_PROFILE_INDEX_DDL: dict[str, str] = {
 }
 
 GROUP_AVATAR_COLUMN_DDL: dict[str, str] = {
+    "announcement": "TEXT NOT NULL DEFAULT ''",
     "avatar_kind": "VARCHAR(16) NOT NULL DEFAULT 'generated'",
     "avatar_file_id": "VARCHAR(36)",
     "avatar_version": "INTEGER NOT NULL DEFAULT 1",
+}
+
+GROUP_MEMBER_PROFILE_COLUMN_DDL: dict[str, str] = {
+    "group_nickname": "VARCHAR(64) NOT NULL DEFAULT ''",
+    "note": "TEXT NOT NULL DEFAULT ''",
 }
 
 MESSAGE_COLUMN_DDL: dict[str, str] = {
@@ -79,6 +85,12 @@ SESSION_EVENT_INDEX_DDL: dict[str, str] = {
     "idx_session_events_type": "CREATE INDEX IF NOT EXISTS idx_session_events_type ON session_events (type)",
 }
 
+USER_SESSION_EVENT_INDEX_DDL: dict[str, str] = {
+    "idx_user_session_events_session_id": "CREATE INDEX IF NOT EXISTS idx_user_session_events_session_id ON user_session_events (session_id)",
+    "idx_user_session_events_user_id": "CREATE INDEX IF NOT EXISTS idx_user_session_events_user_id ON user_session_events (user_id)",
+    "idx_user_session_events_type": "CREATE INDEX IF NOT EXISTS idx_user_session_events_type ON user_session_events (type)",
+}
+
 
 def _get_table_names(bind: Engine | Connection) -> set[str]:
     return set(inspect(bind).get_table_names())
@@ -106,7 +118,7 @@ def _has_indexes(bind: Engine | Connection, table_name: str, required_indexes: I
     return all(index_name in indexes for index_name in required_indexes)
 
 
-RUNTIME_SCHEMA_ALEMBIC_REVISION = "20260329_0006"
+RUNTIME_SCHEMA_ALEMBIC_REVISION = "20260403_0008"
 
 def _parse_revision(revision: str) -> tuple[int, int] | None:
     candidate = str(revision or "").strip()
@@ -139,7 +151,7 @@ def _has_runtime_schema_migration(bind: Engine | Connection) -> bool:
 
 
 def _has_current_runtime_schema(bind: Engine | Connection) -> bool:
-    required_tables = {"users", "messages", "sessions", "session_members", "files", "session_events", "groups"}
+    required_tables = {"users", "messages", "sessions", "session_members", "files", "session_events", "groups", "group_members", "user_session_events"}
     if required_tables - _get_table_names(bind):
         return False
 
@@ -155,7 +167,9 @@ def _has_current_runtime_schema(bind: Engine | Connection) -> bool:
         and _has_indexes(bind, "sessions", SESSION_INDEX_DDL)
         and _has_indexes(bind, "files", FILE_INDEX_DDL)
         and _has_columns(bind, "groups", GROUP_AVATAR_COLUMN_DDL)
+        and _has_columns(bind, "group_members", GROUP_MEMBER_PROFILE_COLUMN_DDL)
         and _has_indexes(bind, "session_events", SESSION_EVENT_INDEX_DDL)
+        and _has_indexes(bind, "user_session_events", USER_SESSION_EVENT_INDEX_DDL)
     )
 
 
@@ -170,6 +184,36 @@ def _ensure_columns(connection: Connection, table_name: str, column_ddl: dict[st
         connection.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {ddl}"))
         applied.append(f"{table_name}.{column_name}")
         columns.add(column_name)
+
+
+def _ensure_user_session_events_table(connection: Connection, applied: list[str]) -> None:
+    table_names = _get_table_names(connection)
+    if "user_session_events" in table_names:
+        return
+
+    connection.execute(
+        text(
+            """
+            CREATE TABLE user_session_events (
+                id VARCHAR(36) PRIMARY KEY,
+                session_id VARCHAR(36) NOT NULL,
+                user_id VARCHAR(36) NOT NULL,
+                event_seq INTEGER NOT NULL DEFAULT 0,
+                type VARCHAR(32) NOT NULL,
+                actor_user_id VARCHAR(36),
+                payload TEXT NOT NULL DEFAULT '{}',
+                created_at TIMESTAMP
+            )
+            """
+        )
+    )
+    connection.execute(
+        text(
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_user_session_event_seq ON user_session_events (session_id, user_id, event_seq)"
+        )
+    )
+    applied.append("user_session_events.create")
+    applied.append("uq_user_session_event_seq")
 
 
 def _ensure_indexes(connection: Connection, table_name: str, index_ddl: dict[str, str], applied: list[str]) -> None:
@@ -1020,6 +1064,7 @@ def ensure_schema_compatibility(engine: Engine) -> list[str]:
         _ensure_columns(connection, "session_members", SESSION_MEMBER_COLUMN_DDL, applied)
         _ensure_columns(connection, "files", FILE_COLUMN_DDL, applied)
         _ensure_columns(connection, "groups", GROUP_AVATAR_COLUMN_DDL, applied)
+        _ensure_columns(connection, "group_members", GROUP_MEMBER_PROFILE_COLUMN_DDL, applied)
 
         _backfill_message_session_seq(connection, applied)
         _backfill_group_chat_membership(connection, applied)
@@ -1035,6 +1080,8 @@ def ensure_schema_compatibility(engine: Engine) -> list[str]:
         _ensure_indexes(connection, "sessions", SESSION_INDEX_DDL, applied)
         _ensure_indexes(connection, "files", FILE_INDEX_DDL, applied)
         _ensure_indexes(connection, "session_events", SESSION_EVENT_INDEX_DDL, applied)
+        _ensure_user_session_events_table(connection, applied)
+        _ensure_indexes(connection, "user_session_events", USER_SESSION_EVENT_INDEX_DDL, applied)
 
     return applied
 

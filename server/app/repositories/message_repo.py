@@ -11,7 +11,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.models.message import Message, MessageRead
-from app.models.session import ChatSession, SessionEvent, SessionMember
+from app.models.session import ChatSession, SessionEvent, SessionMember, UserSessionEvent
 from app.utils.time import isoformat_utc, utcnow
 
 
@@ -132,7 +132,7 @@ class MessageRepository:
         )
         return list(self.db.execute(stmt).scalars().all())
 
-    def list_missing_events_for_user(self, event_cursors: dict[str, int], user_id: str) -> list[SessionEvent]:
+    def list_missing_events_for_user(self, event_cursors: dict[str, int], user_id: str) -> list[SessionEvent | UserSessionEvent]:
         session_ids = list(
             self.db.execute(
                 select(SessionMember.session_id).where(SessionMember.user_id == user_id)
@@ -141,22 +141,51 @@ class MessageRepository:
         if not session_ids:
             return []
 
-        conditions = [
+        shared_conditions = [
             and_(
                 SessionEvent.session_id == session_id,
                 SessionEvent.event_seq > max(0, int(event_cursors.get(session_id, 0) or 0)),
             )
             for session_id in session_ids
         ]
-        if not conditions:
-            return []
+        private_conditions = [
+            and_(
+                UserSessionEvent.session_id == session_id,
+                UserSessionEvent.user_id == user_id,
+                UserSessionEvent.event_seq > max(0, int(event_cursors.get(session_id, 0) or 0)),
+            )
+            for session_id in session_ids
+        ]
 
-        stmt = (
-            select(SessionEvent)
-            .where(or_(*conditions))
-            .order_by(SessionEvent.session_id.asc(), SessionEvent.event_seq.asc(), SessionEvent.created_at.asc(), SessionEvent.id.asc())
+        shared_events: list[SessionEvent] = []
+        private_events: list[UserSessionEvent] = []
+        if shared_conditions:
+            shared_events = list(
+                self.db.execute(
+                    select(SessionEvent)
+                    .where(or_(*shared_conditions))
+                    .order_by(SessionEvent.session_id.asc(), SessionEvent.event_seq.asc(), SessionEvent.created_at.asc(), SessionEvent.id.asc())
+                ).scalars().all()
+            )
+        if private_conditions:
+            private_events = list(
+                self.db.execute(
+                    select(UserSessionEvent)
+                    .where(or_(*private_conditions))
+                    .order_by(UserSessionEvent.session_id.asc(), UserSessionEvent.event_seq.asc(), UserSessionEvent.created_at.asc(), UserSessionEvent.id.asc())
+                ).scalars().all()
+            )
+
+        events: list[SessionEvent | UserSessionEvent] = [*shared_events, *private_events]
+        events.sort(
+            key=lambda item: (
+                str(item.session_id or ''),
+                int(item.event_seq or 0),
+                item.created_at or utcnow(),
+                str(item.id or ''),
+            )
         )
-        return list(self.db.execute(stmt).scalars().all())
+        return events
 
     def append_session_event(
         self,
@@ -173,6 +202,32 @@ class MessageRepository:
             event_seq=self._reserve_next_event_seq(session_id),
             type=event_type,
             message_id=message_id,
+            actor_user_id=actor_user_id,
+            payload=json.dumps(data, ensure_ascii=True, sort_keys=True),
+        )
+        self.db.add(event)
+        self.db.flush()
+        if commit:
+            self.db.commit()
+            self.db.refresh(event)
+        return event
+
+
+    def append_private_session_event(
+        self,
+        session_id: str,
+        user_id: str,
+        event_type: str,
+        data: dict,
+        *,
+        actor_user_id: str | None = None,
+        commit: bool = True,
+    ) -> UserSessionEvent:
+        event = UserSessionEvent(
+            session_id=session_id,
+            user_id=user_id,
+            event_seq=self._reserve_next_event_seq(session_id),
+            type=event_type,
             actor_user_id=actor_user_id,
             payload=json.dumps(data, ensure_ascii=True, sort_keys=True),
         )

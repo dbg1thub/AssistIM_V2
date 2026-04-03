@@ -1,4 +1,4 @@
-﻿"""Group schemas."""
+"""Group schemas."""
 
 from __future__ import annotations
 
@@ -26,11 +26,21 @@ class GroupTransferOwner(BaseModel):
     new_owner_id: str
 
 
+class GroupProfileUpdate(BaseModel):
+    name: str | None = Field(default=None, max_length=128)
+    announcement: str | None = Field(default=None, max_length=1000)
+
+
+class GroupSelfProfileUpdate(BaseModel):
+    note: str | None = Field(default=None, max_length=1000)
+    my_group_nickname: str | None = Field(default=None, max_length=64)
+
+
 class GroupOut(ORMModel):
     id: str
     name: str
+    announcement: str = ""
     avatar: str | None = None
     avatar_kind: str = "generated"
     owner_id: str
     session_id: str
-

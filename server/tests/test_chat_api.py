@@ -1577,3 +1577,137 @@ def test_websocket_sync_messages_replays_offline_user_profile_update_events(
         assert events[0]["data"]["session_id"] == session_id
         assert events[0]["data"]["profile"]["nickname"] == "Alice Prime"
         assert events[0]["data"]["event_seq"] == 1
+
+
+def test_websocket_receives_realtime_group_profile_update_events(
+    client: TestClient,
+    user_factory,
+    auth_header,
+) -> None:
+    owner = user_factory('group_profile_ws_owner', 'Owner')
+    member = user_factory('group_profile_ws_member', 'Member')
+
+    create_group_response = client.post(
+        '/api/v1/groups',
+        json={'name': 'Before', 'member_ids': [member['user']['id']]},
+        headers=auth_header(owner['access_token']),
+    )
+    assert create_group_response.status_code == 201
+    group_payload = create_group_response.json()['data']
+    group_id = group_payload['id']
+    session_id = group_payload['session_id']
+
+    with client.websocket_connect('/ws') as member_ws:
+        authenticate_ws(member_ws, member['access_token'], msg_id='ws-auth-group-profile-member')
+
+        response = client.patch(
+            f'/api/v1/groups/{group_id}',
+            json={'name': 'After', 'announcement': 'Deploy tonight'},
+            headers=auth_header(owner['access_token']),
+        )
+        assert response.status_code == 200
+
+        payload = receive_until(member_ws, 'group_profile_update')
+        assert payload['data']['session_id'] == session_id
+        assert payload['data']['group_id'] == group_id
+        assert payload['data']['name'] == 'After'
+        assert payload['data']['announcement'] == 'Deploy tonight'
+        assert int(payload['data']['event_seq']) > 0
+
+
+def test_websocket_sync_messages_replays_offline_group_profile_update_events(
+    client: TestClient,
+    user_factory,
+    auth_header,
+) -> None:
+    owner = user_factory('group_profile_sync_owner', 'Owner')
+    member = user_factory('group_profile_sync_member', 'Member')
+
+    create_group_response = client.post(
+        '/api/v1/groups',
+        json={'name': 'Before', 'member_ids': [member['user']['id']]},
+        headers=auth_header(owner['access_token']),
+    )
+    assert create_group_response.status_code == 201
+    group_payload = create_group_response.json()['data']
+    group_id = group_payload['id']
+    session_id = group_payload['session_id']
+
+    response = client.patch(
+        f'/api/v1/groups/{group_id}',
+        json={'name': 'After', 'announcement': 'Deploy tonight'},
+        headers=auth_header(owner['access_token']),
+    )
+    assert response.status_code == 200
+
+    with client.websocket_connect('/ws') as websocket:
+        authenticate_ws(websocket, member['access_token'], msg_id='ws-auth-group-profile-sync')
+        websocket.send_json(
+            {
+                'type': 'sync_messages',
+                'msg_id': 'sync-group-profile-update',
+                'data': {
+                    'session_cursors': {},
+                    'event_cursors': {session_id: 0},
+                },
+            }
+        )
+        receive_until(websocket, 'history_messages')
+        events_payload = receive_until(websocket, 'history_events')
+        events = events_payload['data']['events']
+        assert len(events) == 1
+        assert events[0]['type'] == 'group_profile_update'
+        assert events[0]['data']['session_id'] == session_id
+        assert events[0]['data']['group_id'] == group_id
+        assert events[0]['data']['name'] == 'After'
+        assert events[0]['data']['announcement'] == 'Deploy tonight'
+
+
+def test_websocket_sync_messages_replays_offline_group_self_profile_update_events(
+    client: TestClient,
+    user_factory,
+    auth_header,
+) -> None:
+    owner = user_factory('group_self_profile_sync_owner', 'Owner')
+    member = user_factory('group_self_profile_sync_member', 'Member')
+
+    create_group_response = client.post(
+        '/api/v1/groups',
+        json={'name': 'Ops', 'member_ids': [member['user']['id']]},
+        headers=auth_header(owner['access_token']),
+    )
+    assert create_group_response.status_code == 201
+    group_payload = create_group_response.json()['data']
+    group_id = group_payload['id']
+    session_id = group_payload['session_id']
+
+    response = client.patch(
+        f'/api/v1/groups/{group_id}/me',
+        json={'note': 'private note', 'my_group_nickname': 'oncall'},
+        headers=auth_header(member['access_token']),
+    )
+    assert response.status_code == 200
+
+    with client.websocket_connect('/ws') as websocket:
+        authenticate_ws(websocket, member['access_token'], msg_id='ws-auth-group-self-profile-sync')
+        websocket.send_json(
+            {
+                'type': 'sync_messages',
+                'msg_id': 'sync-group-self-profile-update',
+                'data': {
+                    'session_cursors': {},
+                    'event_cursors': {session_id: 0},
+                },
+            }
+        )
+        receive_until(websocket, 'history_messages')
+        events_payload = receive_until(websocket, 'history_events')
+        events = events_payload['data']['events']
+        assert len(events) == 2
+        assert events[0]['type'] == 'group_profile_update'
+        assert events[1]['type'] == 'group_self_profile_update'
+        assert events[1]['data']['session_id'] == session_id
+        assert events[1]['data']['group_id'] == group_id
+        assert events[1]['data']['group_note'] == 'private note'
+        assert events[1]['data']['my_group_nickname'] == 'oncall'
+        assert int(events[1]['data']['event_seq']) > int(events[0]['data']['event_seq'])

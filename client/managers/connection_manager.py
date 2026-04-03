@@ -555,7 +555,7 @@ class ConnectionManager:
             )
         elif msg_type == "error" and self._ws_auth_in_flight:
             self._ws_auth_in_flight = False
-        elif msg_type in {"message_edit", "message_recall", "message_delete", "read"}:
+        elif msg_type in {"message_edit", "message_recall", "message_delete", "read", "group_profile_update", "group_self_profile_update"}:
             sync_state_changed = self._advance_event_cursor_from_event_payload(message.get("data", {}))
 
         if sync_state_changed:

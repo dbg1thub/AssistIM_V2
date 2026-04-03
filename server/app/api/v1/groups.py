@@ -8,13 +8,65 @@ from sqlalchemy.orm import Session
 from app.core.database import get_db
 from app.dependencies.auth_dependency import get_current_user
 from app.models.user import User
-from app.schemas.group import GroupCreate, GroupMemberAdd, GroupMemberRoleUpdate, GroupTransferOwner
+from app.schemas.group import (
+    GroupCreate,
+    GroupMemberAdd,
+    GroupMemberRoleUpdate,
+    GroupProfileUpdate,
+    GroupSelfProfileUpdate,
+    GroupTransferOwner,
+)
 from app.services.group_service import GroupService
 from app.utils.response import success_response
+from app.websocket.manager import connection_manager
+from app.websocket.payloads import ws_message
 
 
 router = APIRouter()
 
+
+async def _broadcast_group_profile_update(db: Session, group_id: str, *, actor_user_id: str) -> None:
+    service = GroupService(db)
+    event_item = service.record_group_profile_update_event(group_id, actor_user_id=actor_user_id)
+    if not event_item:
+        return
+
+    payload = dict(event_item.get("payload") or {})
+    participant_ids = [
+        value
+        for value in dict.fromkeys(str(raw_id or "").strip() for raw_id in event_item.get("participant_ids", []))
+        if value
+    ]
+    if not participant_ids:
+        return
+
+    session_id = str(payload.get("session_id", "") or "")
+    event_seq = int(payload.get("event_seq", 0) or 0)
+    await connection_manager.send_json_to_users(
+        participant_ids,
+        ws_message(
+            "group_profile_update",
+            payload,
+            msg_id=f"group-profile:{session_id}:{event_seq}",
+            seq=event_seq,
+        ),
+    )
+
+
+async def _broadcast_group_self_profile_update(db: Session, current_user: User, group_id: str) -> None:
+    service = GroupService(db)
+    payload = service.record_group_self_profile_update_event(current_user, group_id)
+    session_id = str(payload.get("session_id", "") or "")
+    event_seq = int(payload.get("event_seq", 0) or 0)
+    await connection_manager.send_json_to_users(
+        [current_user.id],
+        ws_message(
+            "group_self_profile_update",
+            payload,
+            msg_id=f"group-self-profile:{session_id}:{event_seq}",
+            seq=event_seq,
+        ),
+    )
 
 @router.get("")
 def list_groups(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
@@ -30,6 +82,32 @@ def create_group(payload: GroupCreate, current_user: User = Depends(get_current_
 @router.get("/{group_id}")
 def get_group(group_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
     return success_response(GroupService(db).get_group(current_user, group_id))
+
+
+@router.patch("/{group_id}")
+async def update_group_profile(
+    group_id: str,
+    payload: GroupProfileUpdate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    data = GroupService(db).update_group_profile(current_user, group_id, payload.name, payload.announcement)
+    await _broadcast_group_profile_update(db, group_id, actor_user_id=current_user.id)
+    return success_response(data)
+
+
+@router.patch("/{group_id}/me")
+async def update_my_group_profile(
+    group_id: str,
+    payload: GroupSelfProfileUpdate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    data = GroupService(db).update_my_group_profile(current_user, group_id, payload.note, payload.my_group_nickname)
+    if payload.my_group_nickname is not None:
+        await _broadcast_group_profile_update(db, group_id, actor_user_id=current_user.id)
+    await _broadcast_group_self_profile_update(db, current_user, group_id)
+    return success_response(data)
 
 
 @router.delete("/{group_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -78,3 +156,5 @@ def transfer_group(
     db: Session = Depends(get_db),
 ) -> dict:
     return success_response(GroupService(db).transfer_ownership(current_user, group_id, payload.new_owner_id))
+
+

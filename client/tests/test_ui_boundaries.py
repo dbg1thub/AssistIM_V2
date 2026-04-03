@@ -44,7 +44,7 @@ def test_contact_interface_request_and_group_actions_avoid_full_reload() -> None
     contact_interface = Path('client/ui/windows/contact_interface.py').read_text(encoding='utf-8')
 
     assert contact_interface.count('self.reload_data()') == 1
-    assert 'self._groups.append(created_group)' in contact_interface
+    assert 'self._controller.merge_group_record(self._groups, group)' in contact_interface
     assert 'self._build_groups_page()' in contact_interface
     assert 'def _refresh_contacts_and_requests(' not in contact_interface
     assert 'def _refresh_requests_only(' not in contact_interface
@@ -78,9 +78,18 @@ def test_contact_interface_handles_user_profile_update_incrementally() -> None:
     contact_interface = Path('client/ui/windows/contact_interface.py').read_text(encoding='utf-8')
 
     assert 'if reason == "user_profile_update":' in contact_interface
+    assert 'if reason == "group_profile_update":' in contact_interface
+    assert 'if reason == "group_self_profile_update":' in contact_interface
     assert 'self._apply_profile_update_payload(dict(event_payload.get("payload") or {}))' in contact_interface
+    assert 'self._apply_group_update_payload(dict(event_payload.get("payload") or {}))' in contact_interface
+    assert 'self._apply_group_self_profile_update_payload(dict(event_payload.get("payload") or {}))' in contact_interface
     assert 'def refresh_groups_after_profile_change(self) -> None:' in contact_interface
     assert 'def _apply_profile_update_payload(self, payload: dict[str, object]) -> None:' in contact_interface
+    assert 'def _apply_group_update_payload(self, payload: dict[str, object]) -> None:' in contact_interface
+    assert 'def _apply_group_self_profile_update_payload(self, payload: dict[str, object]) -> None:' in contact_interface
+    assert 'def _schedule_groups_cache_persist(self) -> None:' in contact_interface
+    assert 'self._controller.merge_group_record(self._groups, group_payload)' in contact_interface
+    assert 'self._controller.apply_group_self_profile_update(self._groups, payload)' in contact_interface
 
 
 def test_contact_interface_profile_update_avoids_unneeded_page_rebuilds() -> None:
@@ -89,9 +98,13 @@ def test_contact_interface_profile_update_avoids_unneeded_page_rebuilds() -> Non
     assert 'def _friend_sort_key(self, contact: ContactRecord) -> tuple[str, str]:' in contact_interface
     assert 'def _insert_friend_item_view(self, contact: ContactRecord) -> None:' in contact_interface
     assert 'def _remove_friend_item_view(self, contact_id: str) -> None:' in contact_interface
+    assert 'def _remove_group_item_view(self, group_id: str) -> None:' in contact_interface
     assert 'if previous_sort_key != self._friend_sort_key(updated):' in contact_interface
     assert 'self._remove_friend_item_view(updated.id)' in contact_interface
     assert 'self._insert_friend_item_view(updated)' in contact_interface
+    assert 'self._build_groups_page()' not in contact_interface.split('def _sync_group_record_view(self, group: GroupRecord, *, rebuild: bool) -> None:')[1].split('def _apply_group_update_payload', 1)[0]
+    assert 'self._remove_group_item_view(group.id)' in contact_interface
+    assert 'self._insert_group_item_view(group)' in contact_interface
     assert 'if groups_changed and self._current_page == "groups":' not in contact_interface
     assert 'if requests_changed and self._current_page == "requests":' not in contact_interface
 
@@ -120,9 +133,11 @@ def test_contact_interface_add_friend_and_group_creation_insert_locally() -> Non
     contact_interface = Path('client/ui/windows/contact_interface.py').read_text(encoding='utf-8')
 
     assert 'def _insert_group_item_view(self, group: GroupRecord) -> None:' in contact_interface
+    assert 'def _remove_group_item_view(self, group_id: str) -> None:' in contact_interface
     assert 'def _insert_request_item_view(self, request: FriendRequestRecord) -> None:' in contact_interface
     assert 'self._insert_request_item_view(request)' in contact_interface
-    assert 'self._insert_group_item_view(created_group)' in contact_interface
+    assert 'self._controller.merge_group_record(self._groups, group)' in contact_interface
+    assert 'self._sync_group_record_view(created_group, rebuild=rebuild)' in contact_interface
     assert 'self._activate_page("requests")' in contact_interface
     assert 'self._build_groups_page()' not in contact_interface.split('def _on_group_created(self, group: object) -> None:')[1]
 
@@ -253,3 +268,132 @@ def test_code_uses_half_width_parentheses_in_reviewed_paths() -> None:
         content = path.read_text(encoding='utf-8')
         assert '\uFF08' not in content
         assert '\uFF09' not in content
+
+
+def test_chat_info_drawer_uses_hover_scrollbar_and_removes_group_fold_rows() -> None:
+    drawer = Path('client/ui/widgets/chat_info_drawer.py').read_text(encoding='utf-8')
+
+    assert 'self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)' in drawer
+    assert 'self.scroll_area.setViewportMargins(0, 0, 0, 0)' in drawer
+    assert 'self.drawer.installEventFilter(self)' in drawer
+    assert 'self.scroll_area.viewport().installEventFilter(self)' in drawer
+    assert 'self.scroll_area.verticalScrollBar().installEventFilter(self)' in drawer
+    assert 'def _set_scrollbar_visible(self, visible: bool) -> None:' in drawer
+    assert 'def _sync_scrollbar_hover_state(self) -> None:' in drawer
+    assert 'self.fold_row = ChatInfoActionRow' not in drawer
+    assert 'self.save_contact_row = ChatInfoActionRow' not in drawer
+    assert 'layout.addWidget(self.fold_row)' not in drawer
+    assert 'layout.addWidget(self.save_contact_row)' not in drawer
+    assert 'self.fold_row.set_checked' not in drawer
+    assert 'self.save_contact_row.set_checked' not in drawer
+
+
+def test_chat_info_drawer_avatars_are_rounded_rect_and_action_tiles_are_dashed() -> None:
+    drawer = Path('client/ui/widgets/chat_info_drawer.py').read_text(encoding='utf-8')
+    light_qss = Path('client/ui/styles/qss/light/chat_panel.qss').read_text(encoding='utf-8')
+    dark_qss = Path('client/ui/styles/qss/dark/chat_panel.qss').read_text(encoding='utf-8')
+
+    assert 'class ChatInfoAvatarWidget(QWidget):' in drawer
+    assert 'class ChatInfoTileCard(QFrame):' in drawer
+    assert 'def paintEvent(self, event) -> None:' in drawer.split('class ChatInfoTileCard(QFrame):', 1)[1]
+    assert 'pen.setStyle(Qt.PenStyle.DashLine)' in drawer
+    assert 'self.avatar = ChatInfoAvatarWidget(parent=self.card, size=44, radius=8)' in drawer
+    assert 'self.avatar = ChatInfoAvatarWidget(parent=self, size=44, radius=9)' in drawer
+    assert 'self.setFixedWidth(60)' in drawer
+    assert 'self.card.setFixedSize(44, 44)' in drawer
+    assert 'dashed=True,' in drawer.split('action_label=tr("chat.info.group.remove", "Remove"),', 1)[1]
+    assert 'remove_tile.setEnabled(False)' not in drawer
+    assert 'QFrame#chatInfoParticipantCard {' in light_qss
+    assert 'background: transparent;' in light_qss.split('QFrame#chatInfoParticipantCard {', 1)[1]
+    assert 'border: none;' in light_qss.split('QFrame#chatInfoParticipantCard {', 1)[1]
+    assert 'QFrame#chatInfoAddGlyph {' in light_qss
+    assert 'border: 1px dashed rgba(0, 0, 0, 0.18);' in light_qss
+    assert 'QFrame#chatInfoParticipantCard {' in dark_qss
+    assert 'background: transparent;' in dark_qss.split('QFrame#chatInfoParticipantCard {', 1)[1]
+    assert 'border: none;' in dark_qss.split('QFrame#chatInfoParticipantCard {', 1)[1]
+    assert 'border: 1px dashed rgba(255, 255, 255, 0.16);' in dark_qss
+
+
+def test_chat_info_detail_field_styles_match_drawer_requirements() -> None:
+    drawer = Path('client/ui/widgets/chat_info_drawer.py').read_text(encoding='utf-8')
+    light_qss = Path('client/ui/styles/qss/light/chat_panel.qss').read_text(encoding='utf-8')
+    dark_qss = Path('client/ui/styles/qss/dark/chat_panel.qss').read_text(encoding='utf-8')
+
+    assert 'class ChatInfoAnnouncementDialog(QDialog):' in drawer
+    assert 'class ChatInfoAnnouncementPreview(CaptionLabel):' in drawer
+    assert 'valueCommitted = Signal(str)' in drawer
+    assert 'self.editor = LineEdit(self)' in drawer
+    assert 'self.editor.installEventFilter(self)' in drawer
+    assert 'def eventFilter(self, watched, event) -> bool:' in drawer
+    assert 'def _begin_edit(self) -> None:' in drawer
+    assert 'def _commit_edit(self) -> None:' in drawer
+    assert 'def _apply_fonts(self) -> None:' in drawer
+    assert 'self.title_label = BodyLabel(title, self)' in drawer
+    assert 'self.value_label.installEventFilter(self)' in drawer
+    assert 'self.group_name_field.valueCommitted.connect(lambda value: self.groupProfileUpdateRequested.emit({"name": value}))' in drawer
+    assert 'self.announcement_row = ChatInfoActionRow(tr("chat.info.group.announcement", "Announcement"), parent=self)' in drawer
+    assert 'self.announcement_preview = ChatInfoAnnouncementPreview(self)' in drawer
+    assert 'self.announcement_row.activated.connect(self._open_announcement_editor)' in drawer
+    assert 'def _open_announcement_editor(self) -> None:' in drawer
+    assert 'def _apply_announcement_value(self, value: str) -> None:' in drawer
+    assert 'self.note_field.valueCommitted.connect(lambda value: self.groupSelfProfileUpdateRequested.emit({"note": value}))' in drawer
+    assert 'self.nickname_field.valueCommitted.connect(lambda value: self.groupSelfProfileUpdateRequested.emit({"my_group_nickname": value}))' in drawer
+    assert 'QLabel#chatInfoDetailFieldTitle {' in light_qss
+    assert 'font: 13px "Segoe UI", "Microsoft YaHei", "PingFang SC";' in light_qss
+    assert 'QLabel#chatInfoDetailFieldValue {' in light_qss
+    assert 'color: #8A8A8A;' in light_qss
+    assert 'QLabel#chatInfoDetailFieldTitle {' in dark_qss
+    assert 'font: 13px "Segoe UI", "Microsoft YaHei", "PingFang SC";' in dark_qss
+    assert 'QLabel#chatInfoDetailFieldValue {' in dark_qss
+    assert 'color: rgba(196, 196, 196, 220);' in dark_qss
+
+
+def test_group_profile_realtime_pipeline_is_wired() -> None:
+    message_manager = Path('client/managers/message_manager.py').read_text(encoding='utf-8')
+    session_manager = Path('client/managers/session_manager.py').read_text(encoding='utf-8')
+    connection_manager = Path('client/managers/connection_manager.py').read_text(encoding='utf-8')
+    groups_api = Path('server/app/api/v1/groups.py').read_text(encoding='utf-8')
+    group_service = Path('server/app/services/group_service.py').read_text(encoding='utf-8')
+
+    assert 'GROUP_UPDATED = "message_group_updated"' in message_manager
+    assert 'GROUP_SELF_UPDATED = "message_group_self_updated"' in message_manager
+    assert 'elif msg_type == "group_profile_update":' in message_manager
+    assert 'elif msg_type == "group_self_profile_update":' in message_manager
+    assert 'await self._subscribe(MessageEvent.GROUP_UPDATED, self._on_group_updated)' in session_manager
+    assert 'await self._subscribe(MessageEvent.GROUP_SELF_UPDATED, self._on_group_self_updated)' in session_manager
+    assert 'elif msg_type in {"message_edit", "message_recall", "message_delete", "read", "group_profile_update", "group_self_profile_update"}:' in connection_manager
+    assert 'async def _broadcast_group_profile_update' in groups_api
+    assert 'async def _broadcast_group_self_profile_update' in groups_api
+    assert 'def record_group_profile_update_event(' in group_service
+    assert 'def build_group_self_profile_payload(' in group_service
+
+
+
+def test_chat_interface_group_profile_updates_use_session_controller_boundary() -> None:
+    chat_interface = Path('client/ui/windows/chat_interface.py').read_text(encoding='utf-8')
+    session_controller = Path('client/ui/controllers/session_controller.py').read_text(encoding='utf-8')
+    session_manager = Path('client/managers/session_manager.py').read_text(encoding='utf-8')
+
+    assert 'async def apply_group_payload(self, session_id: str, payload: dict[str, Any], *, include_self_fields: bool)' in session_controller
+    assert 'async def apply_group_payload(' in session_manager
+    assert 'await self._apply_group_record(record, include_self_fields=True)' in chat_interface
+    assert 'await self._session_controller.apply_group_payload(' in chat_interface
+    assert 'self._session_controller._session_manager.update_session(' not in chat_interface
+    assert 'self.session_panel.update_session(' not in chat_interface.split('def _apply_group_record(', 1)[1]
+    assert 'self.chat_panel.set_session(updated_session)' not in chat_interface.split('def _apply_group_record(', 1)[1]
+
+
+def test_contact_controller_owns_group_record_merge_rules() -> None:
+    contact_controller = Path('client/ui/controllers/contact_controller.py').read_text(encoding='utf-8')
+    contact_interface = Path('client/ui/windows/contact_interface.py').read_text(encoding='utf-8')
+
+    assert 'def _group_record_id(' in contact_controller
+    assert 'def group_sort_key(group: GroupRecord) -> str:' in contact_controller
+    assert 'def normalize_group_record(' in contact_controller
+    assert 'def merge_group_record(' in contact_controller
+    assert 'def apply_group_self_profile_update(' in contact_controller
+    assert 'async def persist_groups_cache(self, groups: list[GroupRecord]) -> None:' in contact_controller
+    assert 'def _group_record_from_payload(' not in contact_interface
+    assert 'def _upsert_group_record(' not in contact_interface
+    assert 'def _coerce_group_record(' not in contact_interface
+    assert 'GroupRecord(' not in contact_interface

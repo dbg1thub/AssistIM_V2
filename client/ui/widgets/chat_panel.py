@@ -84,8 +84,11 @@ class ChatPanel(QWidget):
     chat_info_search_requested = Signal()
     chat_info_add_requested = Signal()
     chat_info_clear_requested = Signal()
+    chat_info_leave_requested = Signal()
     chat_info_mute_toggled = Signal(bool)
     chat_info_pin_toggled = Signal(bool)
+    chat_info_group_profile_update_requested = Signal(object)
+    chat_info_group_self_profile_update_requested = Signal(object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -187,8 +190,11 @@ class ChatPanel(QWidget):
         self._chat_info_overlay.searchRequested.connect(self.chat_info_search_requested.emit)
         self._chat_info_overlay.addRequested.connect(self.chat_info_add_requested.emit)
         self._chat_info_overlay.clearRequested.connect(self.chat_info_clear_requested.emit)
+        self._chat_info_overlay.leaveRequested.connect(self.chat_info_leave_requested.emit)
         self._chat_info_overlay.muteToggled.connect(self.chat_info_mute_toggled.emit)
         self._chat_info_overlay.pinToggled.connect(self.chat_info_pin_toggled.emit)
+        self._chat_info_overlay.groupProfileUpdateRequested.connect(self.chat_info_group_profile_update_requested.emit)
+        self._chat_info_overlay.groupSelfProfileUpdateRequested.connect(self.chat_info_group_self_profile_update_requested.emit)
         self.chat_header.history_clicked.connect(self.chat_history_requested.emit)
         self.chat_header.info_clicked.connect(self.toggle_chat_info_drawer)
 

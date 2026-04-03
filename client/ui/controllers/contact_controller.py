@@ -235,23 +235,139 @@ class ContactController:
         await self._persist_contacts_cache(contacts)
         return contacts
 
+    @staticmethod
+    def _group_record_id(
+        payload: dict[str, object] | GroupRecord | object | None,
+        *,
+        fallback_id: str = "",
+    ) -> str:
+        """Extract one stable group id from dict, record, or lightweight object payloads."""
+        if isinstance(payload, GroupRecord):
+            return str(payload.id or fallback_id or "").strip()
+        if isinstance(payload, dict):
+            return str(payload.get("group_id", "") or payload.get("id", "") or fallback_id or "").strip()
+        return str(
+            getattr(payload, "group_id", "")
+            or getattr(payload, "id", "")
+            or fallback_id
+            or ""
+        ).strip()
+
+    @staticmethod
+    def group_sort_key(group: GroupRecord) -> str:
+        """Return the canonical sort key for one normalized group entry."""
+        return str(group.name or "").lower()
+
+    def normalize_group_record(
+        self,
+        payload: dict[str, object] | GroupRecord | object | None,
+        *,
+        existing: GroupRecord | None = None,
+        fallback_id: str = "",
+    ) -> GroupRecord | None:
+        """Normalize one group payload into the shared UI/data record shape."""
+        if isinstance(payload, GroupRecord):
+            return payload
+        if isinstance(payload, dict):
+            data = dict(payload or {})
+        else:
+            extra = dict(getattr(payload, "extra", {}) or {})
+            data = {
+                **extra,
+                "id": getattr(payload, "id", "") or extra.get("id", ""),
+                "group_id": getattr(payload, "group_id", "") or extra.get("group_id", ""),
+                "name": getattr(payload, "name", "") or extra.get("name", ""),
+                "avatar": getattr(payload, "avatar", "") or extra.get("avatar", ""),
+                "owner_id": getattr(payload, "owner_id", "") or extra.get("owner_id", ""),
+                "session_id": getattr(payload, "session_id", "") or extra.get("session_id", ""),
+                "member_count": getattr(payload, "member_count", 0) or extra.get("member_count", 0),
+                "created_at": getattr(payload, "created_at", "") or extra.get("created_at", ""),
+            }
+        group_id = self._group_record_id(data, fallback_id=fallback_id)
+        if not group_id:
+            return None
+
+        extra = {**dict(getattr(existing, "extra", {}) or {}), **data}
+        return GroupRecord(
+            id=group_id,
+            name=str(data.get("name", getattr(existing, "name", "")) or getattr(existing, "name", "") or ""),
+            avatar=str(data.get("avatar", getattr(existing, "avatar", "")) or getattr(existing, "avatar", "") or ""),
+            owner_id=str(data.get("owner_id", getattr(existing, "owner_id", "")) or getattr(existing, "owner_id", "") or ""),
+            session_id=str(data.get("session_id", getattr(existing, "session_id", "")) or getattr(existing, "session_id", "") or ""),
+            member_count=int(data.get("member_count", getattr(existing, "member_count", 0)) or getattr(existing, "member_count", 0) or 0),
+            created_at=str(data.get("created_at", getattr(existing, "created_at", "")) or getattr(existing, "created_at", "") or ""),
+            extra=extra,
+        )
+
+    def _service_group_record(
+        self,
+        payload: dict[str, object] | GroupRecord | object | None,
+        *,
+        fallback_id: str = "",
+        fallback_name: str = "",
+        existing: GroupRecord | None = None,
+    ) -> GroupRecord:
+        """Coerce one service payload into a normalized group record without duplicating mapping logic."""
+        record = self.normalize_group_record(payload, existing=existing, fallback_id=fallback_id)
+        if record is None:
+            return GroupRecord(id=str(fallback_id or ""), name=str(fallback_name or ""), extra=dict(payload or {}) if isinstance(payload, dict) else {})
+        if fallback_name and not record.name:
+            record.name = str(fallback_name or "")
+        raw = dict(record.extra or {})
+        record.member_count = len(raw.get("members", []) or []) or int(raw.get("member_count", 0) or record.member_count or 0)
+        return record
+
+    def merge_group_record(
+        self,
+        groups: list[GroupRecord],
+        payload: dict[str, object] | GroupRecord | object | None,
+    ) -> tuple[list[GroupRecord], GroupRecord | None, bool]:
+        """Insert or replace one group record and return the sorted snapshot."""
+        group_id = self._group_record_id(payload)
+        existing = next((item for item in groups if item.id == group_id), None)
+        record = self.normalize_group_record(payload, existing=existing, fallback_id=group_id)
+        if record is None:
+            return list(groups), None, False
+
+        updated_groups = [item for item in groups if item.id != record.id]
+        updated_groups.append(record)
+        updated_groups.sort(key=self.group_sort_key)
+        rebuild_required = existing is None or existing.name != record.name
+        return updated_groups, record, rebuild_required
+
+    def apply_group_self_profile_update(
+        self,
+        groups: list[GroupRecord],
+        payload: dict[str, object] | None,
+    ) -> tuple[list[GroupRecord], GroupRecord | None]:
+        """Merge one self-scoped group payload into the current group snapshot."""
+        data = dict(payload or {}) if isinstance(payload, dict) else {}
+        group_id = str(data.get("group_id", "") or "").strip()
+        if not group_id:
+            return list(groups), None
+
+        existing = next((item for item in groups if item.id == group_id), None)
+        if existing is None:
+            return list(groups), None
+
+        merged_payload = dict(existing.extra or {})
+        merged_payload["group_note"] = str(data.get("group_note", "") or "")
+        merged_payload["my_group_nickname"] = str(data.get("my_group_nickname", "") or "")
+        record = self.normalize_group_record(merged_payload, existing=existing, fallback_id=group_id)
+        if record is None:
+            return list(groups), None
+        updated_groups = [record if item.id == group_id else item for item in groups]
+        return updated_groups, record
+
     async def load_groups(self) -> list[GroupRecord]:
         """Load and normalize the group list."""
         payload = await self._contact_service.fetch_groups()
         groups = [
-            GroupRecord(
-                id=str(item.get("id", "") or ""),
-                name=str(item.get("name", "") or "Untitled Group"),
-                avatar=str(item.get("avatar", "") or ""),
-                owner_id=str(item.get("owner_id", "") or ""),
-                session_id=str(item.get("session_id", "") or ""),
-                member_count=int(item.get("member_count", 0) or 0),
-                created_at=str(item.get("created_at", "") or ""),
-                extra=dict(item or {}),
-            )
-            for item in (payload or [])
+            record
+            for record in (self.normalize_group_record(item) for item in (payload or []))
+            if record is not None
         ]
-        groups.sort(key=lambda item: item.name.lower())
+        groups.sort(key=self.group_sort_key)
         await self._persist_groups_cache(groups)
         return groups
 
@@ -282,6 +398,10 @@ class ContactController:
             await self._db.replace_contacts_cache(payload)
         except Exception:
             logger.debug("Failed to persist contacts cache", exc_info=True)
+
+    async def persist_groups_cache(self, groups: list[GroupRecord]) -> None:
+        """Persist one normalized group snapshot after incremental realtime updates."""
+        await self._persist_groups_cache(groups)
 
     async def _persist_groups_cache(self, groups: list[GroupRecord]) -> None:
         """Persist one lightweight group snapshot for local search."""
@@ -453,17 +573,29 @@ class ContactController:
     async def create_group(self, name: str, member_ids: list[str]) -> GroupRecord:
         """Create a new group from selected members."""
         payload = await self._contact_service.create_group(name, member_ids)
-        data = dict(payload or {})
-        return GroupRecord(
-            id=str(data.get("id", "") or ""),
-            name=str(data.get("name", "") or name),
-            avatar=str(data.get("avatar", "") or ""),
-            owner_id=str(data.get("owner_id", "") or ""),
-            session_id=str(data.get("session_id", "") or ""),
-            member_count=len(data.get("members", []) or []) or int(data.get("member_count", 0) or 0),
-            created_at=str(data.get("created_at", "") or ""),
-            extra=data,
-        )
+        return self._service_group_record(payload, fallback_name=name)
+
+    async def update_group_profile(
+        self,
+        group_id: str,
+        *,
+        name: str | None = None,
+        announcement: str | None = None,
+    ) -> GroupRecord:
+        """Update shared group metadata."""
+        data = await self._contact_service.update_group_profile(group_id, name=name, announcement=announcement)
+        return self._service_group_record(data, fallback_id=group_id, fallback_name=str(name or ""))
+
+    async def update_my_group_profile(
+        self,
+        group_id: str,
+        *,
+        note: str | None = None,
+        my_group_nickname: str | None = None,
+    ) -> GroupRecord:
+        """Update the current user's group-scoped metadata."""
+        data = await self._contact_service.update_my_group_profile(group_id, note=note, my_group_nickname=my_group_nickname)
+        return self._service_group_record(data, fallback_id=group_id)
 
     async def accept_request(self, request_id: str) -> dict:
         """Accept a pending friend request."""

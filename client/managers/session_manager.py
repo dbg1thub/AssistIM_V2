@@ -102,6 +102,8 @@ class SessionManager:
         await self._subscribe(MessageEvent.RECALLED, self._on_message_mutated)
         await self._subscribe(MessageEvent.DELETED, self._on_message_mutated)
         await self._subscribe(MessageEvent.PROFILE_UPDATED, self._on_profile_updated)
+        await self._subscribe(MessageEvent.GROUP_UPDATED, self._on_group_updated)
+        await self._subscribe(MessageEvent.GROUP_SELF_UPDATED, self._on_group_self_updated)
 
         self._running = True
         self._initialized = True
@@ -345,6 +347,14 @@ class SessionManager:
 
         session.extra["members"] = data.get("members") or []
         session.extra["server_name"] = authoritative_name
+        if data.get("group_id"):
+            session.extra["group_id"] = str(data.get("group_id") or "")
+        if "group_announcement" in data:
+            session.extra["group_announcement"] = str(data.get("group_announcement", "") or "")
+        if "group_note" in data:
+            session.extra["group_note"] = str(data.get("group_note", "") or "")
+        if "my_group_nickname" in data:
+            session.extra["my_group_nickname"] = str(data.get("my_group_nickname", "") or "")
         if data.get("last_message_status"):
             session.extra["last_message_status"] = data.get("last_message_status")
         if data.get("last_message_sender_id"):
@@ -777,6 +787,117 @@ class SessionManager:
 
         if updated_session is not None:
             await self._event_bus.emit(SessionEvent.UPDATED, {"session": updated_session})
+
+    async def _merge_group_payload_into_session(
+        self,
+        session: Session,
+        payload: dict[str, Any],
+        current_user: dict[str, Any],
+        *,
+        include_self_fields: bool,
+    ) -> bool:
+        """Apply one authoritative group payload onto a cached session."""
+        changed = False
+        group_name = str(payload.get("name", "") or "")
+        group_avatar = str(payload.get("avatar", "") or "")
+        if session.name != group_name:
+            session.name = group_name
+            changed = True
+        if str(session.avatar or "") != group_avatar:
+            session.avatar = group_avatar or None
+            changed = True
+
+        mapping = {
+            "group_id": str(payload.get("group_id", "") or payload.get("id", "") or session.extra.get("group_id", "") or ""),
+            "server_name": group_name,
+            "group_announcement": str(payload.get("announcement", "") or ""),
+            "owner_id": str(payload.get("owner_id", "") or ""),
+            "member_count": int(payload.get("member_count", 0) or 0),
+        }
+        for key, value in mapping.items():
+            if session.extra.get(key) != value:
+                session.extra[key] = value
+                changed = True
+
+        members = payload.get("members")
+        if isinstance(members, list):
+            normalized_members = [dict(item or {}) for item in members if isinstance(item, dict)]
+            if session.extra.get("members") != normalized_members:
+                session.extra["members"] = normalized_members
+                changed = True
+            current_user_id = str(current_user.get("id", "") or "")
+            if current_user_id:
+                current_member = next((item for item in normalized_members if str(item.get("id", "") or "") == current_user_id), None)
+                derived_nickname = str((current_member or {}).get("group_nickname", "") or "")
+                if session.extra.get("my_group_nickname") != derived_nickname:
+                    session.extra["my_group_nickname"] = derived_nickname
+                    changed = True
+
+        if include_self_fields:
+            for key in ("group_note", "my_group_nickname"):
+                if key not in payload:
+                    continue
+                value = str(payload.get(key, "") or "")
+                if session.extra.get(key) != value:
+                    session.extra[key] = value
+                    changed = True
+
+        previous_name = session.name
+        previous_seed = str(session.extra.get("avatar_seed", "") or "")
+        await self._decorate_session_members([session], current_user)
+        self._normalize_session_display(session, current_user)
+        if session.name != previous_name or str(session.extra.get("avatar_seed", "") or "") != previous_seed:
+            changed = True
+        return changed
+
+    async def apply_group_payload(
+        self,
+        session_id: str,
+        payload: dict[str, Any],
+        *,
+        include_self_fields: bool,
+    ) -> Optional[Session]:
+        """Apply one authoritative group payload through the same path used by realtime events."""
+        normalized_session_id = str(session_id or "").strip()
+        normalized_payload = dict(payload or {})
+        if not normalized_session_id or not normalized_payload:
+            return None
+
+        current_user = await self._get_current_user_context()
+        db = get_database()
+        updated_session: Optional[Session] = None
+        async with self._lock:
+            session = self._sessions.get(normalized_session_id)
+            if session is None or session.session_type != "group":
+                return None
+            if not await self._merge_group_payload_into_session(session, normalized_payload, current_user, include_self_fields=include_self_fields):
+                return session
+            updated_session = session
+
+        if updated_session is not None and db.is_connected:
+            await db.save_session(updated_session)
+        if updated_session is not None:
+            await self._event_bus.emit(SessionEvent.UPDATED, {"session": updated_session})
+        return updated_session
+
+    async def _on_group_updated(self, data: dict) -> None:
+        """Apply one shared group-profile update to cached group sessions."""
+        session_id = str(data.get("session_id", "") or "")
+        payload = dict(data.get("group") or {}) if isinstance(data.get("group"), dict) else {}
+        if not session_id or not payload:
+            return
+        await self.apply_group_payload(session_id, payload, include_self_fields=False)
+
+    async def _on_group_self_updated(self, data: dict) -> None:
+        """Apply one self-scoped group-profile update to cached group sessions."""
+        session_id = str(data.get("session_id", "") or "")
+        if not session_id:
+            return
+        payload = {
+            "group_note": str(data.get("group_note", "") or ""),
+            "my_group_nickname": str(data.get("my_group_nickname", "") or ""),
+        }
+        await self.apply_group_payload(session_id, payload, include_self_fields=True)
 
     def _is_session_visible(self, session: Session, current_user: dict[str, Any]) -> bool:
         """Return whether a session has a valid visible counterpart for the current user."""

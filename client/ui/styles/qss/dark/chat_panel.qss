@@ -61,14 +61,19 @@ QFrame#chatInfoDrawerBorder {
     border-bottom-right-radius: 0;
 }
 
-QFrame#chatInfoParticipantCard,
-QFrame#chatInfoAddGlyph {
-    background: rgba(255, 255, 255, 0.06);
-    border: 1px solid rgba(255, 255, 255, 0.08);
+QFrame#chatInfoParticipantCard {
+    background: transparent;
+    border: none;
     border-radius: 14px;
 }
 
 QFrame#chatInfoAddGlyph {
+    background: transparent;
+    border: 1px dashed rgba(255, 255, 255, 0.16);
+    border-radius: 14px;
+}
+
+QFrame#chatInfoAddGlyph:disabled {
     border-style: dashed;
 }
 
@@ -77,6 +82,55 @@ QLabel#chatInfoAddName,
 QLabel#chatInfoActionTitle {
     color: {{TEXT_PRIMARY}};
     font: 13px "Segoe UI", "Microsoft YaHei", "PingFang SC";
+}
+
+QWidget#chatInfoDetailField {
+    background: transparent;
+}
+
+QLabel#chatInfoDetailFieldTitle,
+QLabel#chatInfoGroupMemberMeta,
+QLabel#chatInfoMemberSearchEmpty {
+    color: {{TEXT_SECONDARY}};
+    font: 12px "Segoe UI", "Microsoft YaHei", "PingFang SC";
+}
+
+QLabel#chatInfoDetailFieldTitle {
+    color: rgba(196, 196, 196, 220);
+    font: 13px "Segoe UI", "Microsoft YaHei", "PingFang SC";
+}
+
+QLabel#chatInfoDetailFieldValue {
+    color: rgba(196, 196, 196, 220);
+    font: 13px "Segoe UI", "Microsoft YaHei", "PingFang SC";
+}
+
+QLabel#chatInfoGroupMemberName {
+    color: {{TEXT_PRIMARY}};
+    font: 13px "Segoe UI", "Microsoft YaHei", "PingFang SC";
+}
+
+QWidget#chatInfoGroupMemberRow {
+    background: transparent;
+}
+
+QWidget#chatInfoGroupMemberRow:hover {
+    background: rgba(255, 255, 255, 0.08);
+}
+
+QPushButton#chatInfoSecondaryLink {
+    background: transparent;
+    border: none;
+    color: {{TEXT_SECONDARY}};
+    font: 12px "Segoe UI", "Microsoft YaHei", "PingFang SC";
+    padding: 3px 0;
+}
+
+QPushButton#chatInfoSecondaryLink:hover,
+QPushButton#chatInfoSecondaryLink:pressed {
+    background: transparent;
+    border: none;
+    color: {{TEXT_PRIMARY}};
 }
 
 QLabel#chatInfoPlaceholderTitle {

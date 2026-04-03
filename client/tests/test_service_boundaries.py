@@ -546,6 +546,8 @@ class FakeContactService:
         self.fetch_friend_requests_calls = 0
         self.send_friend_request_calls: list[tuple[str, str]] = []
         self.create_group_calls: list[tuple[str, list[str]]] = []
+        self.update_group_profile_calls: list[tuple[str, str | None, str | None]] = []
+        self.update_my_group_profile_calls: list[tuple[str, str | None, str | None]] = []
         self.accept_calls: list[str] = []
         self.reject_calls: list[str] = []
         self.remove_calls: list[str] = []
@@ -577,6 +579,29 @@ class FakeContactService:
             'owner_id': 'user-1',
             'session_id': 'session-group-1',
             'members': [{'id': 'user-1'}, *({'id': item} for item in member_ids)],
+        }
+
+    async def update_group_profile(self, group_id: str, *, name: str | None = None, announcement: str | None = None) -> dict:
+        self.update_group_profile_calls.append((group_id, name, announcement))
+        return {
+            'id': group_id,
+            'name': name or 'Core Team',
+            'announcement': announcement or '',
+            'session_id': 'session-group-1',
+            'owner_id': 'user-1',
+            'members': [{'id': 'user-1'}, {'id': 'user-2'}],
+        }
+
+    async def update_my_group_profile(self, group_id: str, *, note: str | None = None, my_group_nickname: str | None = None) -> dict:
+        self.update_my_group_profile_calls.append((group_id, note, my_group_nickname))
+        return {
+            'id': group_id,
+            'name': 'Core Team',
+            'note': note or '',
+            'my_group_nickname': my_group_nickname or '',
+            'session_id': 'session-group-1',
+            'owner_id': 'user-1',
+            'members': [{'id': 'user-1'}, {'id': 'user-2'}],
         }
 
     async def accept_friend_request(self, request_id: str) -> dict:
@@ -1333,6 +1358,8 @@ def test_contact_controller_mutations_use_contact_service(monkeypatch) -> None:
         controller = contact_controller_module.ContactController()
         request_payload = await controller.send_friend_request('user-2', 'hello')
         group = await controller.create_group('Core Team', ['user-2', 'user-3'])
+        shared_group = await controller.update_group_profile('group-1', name='Renamed Team', announcement='Ship tonight')
+        self_group = await controller.update_my_group_profile('group-1', note='private note', my_group_nickname='lead')
         accepted = await controller.accept_request('req-1')
         rejected = await controller.reject_request('req-2')
         await controller.remove_friend('user-2')
@@ -1342,6 +1369,12 @@ def test_contact_controller_mutations_use_contact_service(monkeypatch) -> None:
         assert fake_contact_service.create_group_calls == [('Core Team', ['user-2', 'user-3'])]
         assert group.session_id == 'session-group-1'
         assert group.member_count == 3
+        assert shared_group.name == 'Renamed Team'
+        assert shared_group.extra['announcement'] == 'Ship tonight'
+        assert self_group.extra['note'] == 'private note'
+        assert self_group.extra['my_group_nickname'] == 'lead'
+        assert fake_contact_service.update_group_profile_calls == [('group-1', 'Renamed Team', 'Ship tonight')]
+        assert fake_contact_service.update_my_group_profile_calls == [('group-1', 'private note', 'lead')]
         assert accepted['status'] == 'accepted'
         assert rejected['status'] == 'rejected'
         assert fake_contact_service.accept_calls == ['req-1']
@@ -2198,5 +2231,106 @@ def test_session_manager_profile_update_refreshes_direct_counterpart_presentatio
         assert session.extra['members'][1]['nickname'] == 'Bobby'
         assert fake_db.saved_sessions and fake_db.saved_sessions[-1].session_id == 'session-1'
         assert any(event == session_manager_module.SessionEvent.UPDATED for event, _ in fake_event_bus.events)
+
+    asyncio.run(scenario())
+
+
+def test_contact_controller_normalize_group_record_supports_object_payloads(monkeypatch) -> None:
+    fake_contact_service = FakeContactService()
+    fake_user_service = FakeUserService()
+    fake_auth_context = FakeAuthContext()
+    fake_db = FakeDatabase()
+
+    monkeypatch.setattr(contact_controller_module, 'get_contact_service', lambda: fake_contact_service)
+    monkeypatch.setattr(contact_controller_module, 'get_user_service', lambda: fake_user_service)
+    monkeypatch.setattr(contact_controller_module, 'get_auth_controller', lambda: fake_auth_context)
+    monkeypatch.setattr(contact_controller_module, 'get_database', lambda: fake_db)
+
+    class _Payload:
+        id = 'group-9'
+        name = 'Ops'
+        avatar = 'ops.png'
+        owner_id = 'owner-9'
+        session_id = 'session-group-9'
+        member_count = 2
+        created_at = '2026-04-03T09:00:00Z'
+        extra = {'announcement': 'ready'}
+
+    controller = contact_controller_module.ContactController()
+    record = controller.normalize_group_record(_Payload())
+
+    assert record is not None
+    assert record.id == 'group-9'
+    assert record.name == 'Ops'
+    assert record.extra['announcement'] == 'ready'
+
+
+def test_contact_controller_group_merge_helpers_preserve_extra_and_sort(monkeypatch) -> None:
+    fake_contact_service = FakeContactService()
+    fake_user_service = FakeUserService()
+    fake_auth_context = FakeAuthContext()
+    fake_db = FakeDatabase()
+    fake_db.is_connected = True
+
+    monkeypatch.setattr(contact_controller_module, 'get_contact_service', lambda: fake_contact_service)
+    monkeypatch.setattr(contact_controller_module, 'get_user_service', lambda: fake_user_service)
+    monkeypatch.setattr(contact_controller_module, 'get_auth_controller', lambda: fake_auth_context)
+    monkeypatch.setattr(contact_controller_module, 'get_database', lambda: fake_db)
+
+    async def scenario() -> None:
+        controller = contact_controller_module.ContactController()
+        existing = [
+            contact_controller_module.GroupRecord(
+                id='group-2',
+                name='Zeta Squad',
+                avatar='zeta.png',
+                owner_id='owner-2',
+                session_id='session-group-2',
+                member_count=8,
+                created_at='2026-04-01T00:00:00Z',
+                extra={'id': 'group-2', 'name': 'Zeta Squad', 'group_note': 'keep me'},
+            )
+        ]
+
+        updated_groups, updated_record, rebuild = controller.merge_group_record(
+            existing,
+            {
+                'id': 'group-1',
+                'name': 'Core Team',
+                'avatar': 'core.png',
+                'owner_id': 'owner-1',
+                'session_id': 'session-group-1',
+                'member_count': 3,
+                'members': [{'nickname': 'Alice', 'region': 'Shenzhen'}],
+            },
+        )
+        assert rebuild is True
+        assert updated_record is not None
+        assert [item.id for item in updated_groups] == ['group-1', 'group-2']
+
+        second_groups, second_record, rebuild_again = controller.merge_group_record(
+            updated_groups,
+            {
+                'group_id': 'group-1',
+                'announcement': 'Ship tonight',
+                'member_count': 4,
+            },
+        )
+        assert rebuild_again is False
+        assert second_record is not None
+        assert second_record.extra['announcement'] == 'Ship tonight'
+        assert second_record.member_count == 4
+
+        final_groups, final_record = controller.apply_group_self_profile_update(
+            second_groups,
+            {'group_id': 'group-1', 'group_note': 'private note', 'my_group_nickname': 'lead'},
+        )
+        assert final_record is not None
+        assert final_record.extra['group_note'] == 'private note'
+        assert final_record.extra['my_group_nickname'] == 'lead'
+
+        await controller.persist_groups_cache(final_groups)
+        assert fake_db.replaced_groups[-1][0]['id'] == 'group-1'
+        assert fake_db.replaced_groups[-1][0]['extra']['member_previews'] == ['Alice(地区: Shenzhen)']
 
     asyncio.run(scenario())

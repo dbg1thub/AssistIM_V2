@@ -2,55 +2,190 @@
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Any, Optional
 
-from PySide6.QtCore import QEasingCurve, QPoint, QPropertyAnimation, QRect, QRectF, QSignalBlocker, Qt, Signal
-from PySide6.QtGui import QColor, QMouseEvent, QPainter, QPainterPath, QPen
-from PySide6.QtWidgets import QFrame, QHBoxLayout, QSizePolicy, QStackedWidget, QVBoxLayout, QWidget
+from PySide6.QtCore import QEasingCurve, QEvent, QPoint, QPropertyAnimation, QRect, QRectF, QSignalBlocker, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QCursor, QFont, QMouseEvent, QPainter, QPainterPath, QPen, QPixmap
+from PySide6.QtWidgets import QDialog, QFrame, QGridLayout, QHBoxLayout, QSizePolicy, QStackedWidget, QVBoxLayout, QWidget
 
 from qfluentwidgets import (
-    AvatarWidget,
     BodyLabel,
     CaptionLabel,
     HyperlinkButton,
     IconWidget,
     IndicatorPosition,
+    LineEdit,
+    PrimaryPushButton,
+    PushButton,
+    SearchLineEdit,
     SingleDirectionScrollArea,
     SwitchButton,
+    TextEdit,
     isDarkTheme,
 )
 from qfluentwidgets.components.widgets.acrylic_label import AcrylicBrush
 
 from client.core.app_icons import AppIcon, CollectionIcon
-from client.core.avatar_rendering import apply_avatar_widget_image
+from client.core.avatar_rendering import get_avatar_image_store
 from client.core.avatar_utils import profile_avatar_seed
 from client.core.i18n import tr
 from client.models.message import Session
+from client.ui.widgets.contact_shared import apply_themed_dialog_surface
 from client.ui.widgets.fluent_divider import FluentDivider
 
 
-class ChatInfoTileCard(QWidget):
-    """Rounded tile surface for avatar and add-entry cards."""
+class ChatInfoTileCard(QFrame):
+    """Tile surface used by participant and action entries."""
 
     def __init__(self, *, dashed: bool = False, parent=None) -> None:
         super().__init__(parent)
         self._dashed = dashed
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
 
     def paintEvent(self, event) -> None:
-        rect = self.rect().adjusted(1, 1, -1, -1)
-        fill = QColor(255, 255, 255, 108) if not isDarkTheme() else QColor(255, 255, 255, 18)
-        border = QColor(0, 0, 0, 26) if not isDarkTheme() else QColor(255, 255, 255, 22)
-
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.setBrush(fill)
-        pen = QPen(border, 1)
-        if self._dashed:
-            pen.setDashPattern([6, 5])
-        painter.setPen(pen)
-        painter.drawRoundedRect(rect, 12, 12)
         super().paintEvent(event)
+        if not self._dashed:
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        rect = self.rect().adjusted(1, 1, -1, -1)
+        border = QColor(255, 255, 255, 42) if isDarkTheme() else QColor(0, 0, 0, 52)
+        pen = QPen(border, 1)
+        pen.setStyle(Qt.PenStyle.DashLine)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRoundedRect(rect, 12, 12)
+        painter.end()
+
+
+class ChatInfoAvatarWidget(QWidget):
+    """Rounded-rect avatar used by the chat info drawer."""
+
+    def __init__(
+        self,
+        avatar: str = "",
+        *,
+        gender: str = "",
+        seed: str = "",
+        size: int = 52,
+        radius: int = 10,
+        parent=None,
+    ) -> None:
+        super().__init__(parent)
+        self._source = str(avatar or "")
+        self._gender = str(gender or "")
+        self._seed = str(seed or "")
+        self._radius = max(0, int(radius))
+        self._store = get_avatar_image_store()
+        self._store.avatar_ready.connect(self._handle_avatar_ready)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setFixedSize(size, size)
+
+    def set_avatar(self, avatar: str, *, gender: str = "", seed: str = "") -> None:
+        self._source = str(avatar or "")
+        self._gender = str(gender or "")
+        self._seed = str(seed or "")
+        self.update()
+
+    def paintEvent(self, event) -> None:
+        del event
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        rect = QRectF(self.rect())
+        path = QPainterPath()
+        path.addRoundedRect(rect, self._radius, self._radius)
+        painter.setClipPath(path)
+
+        _source, display_path = self._store.resolve_display_path(self._source, gender=self._gender, seed=self._seed)
+        pixmap = QPixmap(display_path) if display_path else QPixmap()
+        if not pixmap.isNull():
+            scaled = pixmap.scaled(
+                self.size(),
+                Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            painter.drawPixmap(self.rect(), scaled)
+        else:
+            painter.fillPath(path, QColor("#626B76") if isDarkTheme() else QColor("#D7DEE8"))
+
+        painter.setClipping(False)
+        if pixmap.isNull():
+            initial = (self._seed or "?")[:1].upper()
+            font = QFont()
+            font.setPixelSize(16)
+            font.setBold(True)
+            painter.setFont(font)
+            painter.setPen(QPen(Qt.GlobalColor.white))
+            painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, initial)
+        painter.end()
+
+    def _handle_avatar_ready(self, source: str) -> None:
+        if str(source or "") == self._source:
+            self.update()
+
+
+class ChatInfoAnnouncementDialog(QDialog):
+    """Non-modal editor used for group announcements."""
+
+    submitted = Signal(str)
+
+    def __init__(self, initial_text: str, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(tr("chat.info.group.announcement", "Announcement"))
+        self.setModal(False)
+        self.resize(360, 260)
+        apply_themed_dialog_surface(self, "ChatInfoAnnouncementDialog")
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(12)
+
+        self.editor = TextEdit(self)
+        self.editor.setPlaceholderText(tr("chat.info.group.announcement.empty", "No group announcement yet"))
+        self.editor.setPlainText(str(initial_text or "").strip())
+
+        button_row = QHBoxLayout()
+        button_row.addStretch(1)
+        self.cancel_button = PushButton(tr("common.cancel", "Cancel"), self)
+        self.save_button = PrimaryPushButton(tr("common.save", "Save"), self)
+        button_row.addWidget(self.cancel_button)
+        button_row.addWidget(self.save_button)
+
+        layout.addWidget(self.editor, 1)
+        layout.addLayout(button_row)
+
+        self.cancel_button.clicked.connect(self.close)
+        self.save_button.clicked.connect(self._submit)
+
+    def _submit(self) -> None:
+        self.submitted.emit(self.editor.toPlainText().strip())
+        self.close()
+
+
+class ChatInfoAnnouncementPreview(CaptionLabel):
+    """Single-line announcement preview that elides overflowing text."""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._raw_text = ""
+        self.setObjectName("chatInfoDetailFieldValue")
+        self.setWordWrap(False)
+        self.setToolTip("")
+
+    def set_preview_text(self, value: str) -> None:
+        self._raw_text = str(value or "").strip()
+        self.setToolTip(self._raw_text)
+        self._refresh_text()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._refresh_text()
+
+    def _refresh_text(self) -> None:
+        fm = self.fontMetrics()
+        self.setText(fm.elidedText(self._raw_text, Qt.TextElideMode.ElideRight, max(0, self.width())))
 
 
 class ChatInfoParticipantTile(QWidget):
@@ -58,33 +193,42 @@ class ChatInfoParticipantTile(QWidget):
 
     clicked = Signal()
 
-    def __init__(self, *, is_add_tile: bool = False, parent=None) -> None:
+    def __init__(
+        self,
+        *,
+        is_add_tile: bool = False,
+        action_icon: AppIcon | CollectionIcon | None = None,
+        action_label: str | None = None,
+        dashed: bool | None = None,
+        clickable: bool | None = None,
+        parent=None,
+    ) -> None:
         super().__init__(parent)
         self._is_add_tile = is_add_tile
+        self._action_clickable = bool(is_add_tile if clickable is None else clickable)
         self.setObjectName("chatInfoAddTile" if is_add_tile else "chatInfoParticipantTile")
-        self.setCursor(Qt.PointingHandCursor if is_add_tile else Qt.ArrowCursor)
-        self.setFixedWidth(76)
+        self.setCursor(Qt.PointingHandCursor if self._action_clickable else Qt.ArrowCursor)
+        self.setFixedWidth(60)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(8)
+        layout.setSpacing(5)
         layout.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter)
 
-        self.card = ChatInfoTileCard(dashed=is_add_tile, parent=self)
+        self.card = ChatInfoTileCard(dashed=bool(is_add_tile if dashed is None else dashed), parent=self)
         self.card.setObjectName("chatInfoAddGlyph" if is_add_tile else "chatInfoParticipantCard")
-        self.card.setFixedSize(56, 56)
+        self.card.setFixedSize(44, 44)
         card_layout = QVBoxLayout(self.card)
         card_layout.setContentsMargins(0, 0, 0, 0)
         card_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         if is_add_tile:
             self.avatar = None
-            self.add_icon = IconWidget(AppIcon.ADD, self.card)
-            self.add_icon.setFixedSize(22, 22)
+            self.add_icon = IconWidget(action_icon or AppIcon.ADD, self.card)
+            self.add_icon.setFixedSize(16, 16)
             card_layout.addWidget(self.add_icon, 0, Qt.AlignmentFlag.AlignCenter)
         else:
-            self.avatar = AvatarWidget(self.card)
-            self.avatar.setRadius(28)
+            self.avatar = ChatInfoAvatarWidget(parent=self.card, size=44, radius=8)
             card_layout.addWidget(self.avatar, 0, Qt.AlignmentFlag.AlignCenter)
             self.add_icon = None
 
@@ -92,13 +236,13 @@ class ChatInfoParticipantTile(QWidget):
         self.name_label.setObjectName("chatInfoAddName" if is_add_tile else "chatInfoParticipantName")
         self.name_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
         self.name_label.setWordWrap(True)
-        self.name_label.setFixedWidth(76)
+        self.name_label.setFixedWidth(60)
 
         layout.addWidget(self.card, 0, Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self.name_label, 0, Qt.AlignmentFlag.AlignCenter)
 
         if is_add_tile:
-            self.name_label.setText(tr("chat.info.add", "Add"))
+            self.name_label.setText(str(action_label or tr("chat.info.add", "Add")))
 
     def set_participant(self, *, title: str, avatar: object = "", user_id: str = "", username: str = "", gender: str = "") -> None:
         """Update one participant tile with avatar and display name."""
@@ -107,15 +251,19 @@ class ChatInfoParticipantTile(QWidget):
 
         display_name = (title or "").strip() or tr("session.unnamed", "Untitled Session")
         self.name_label.setText(display_name)
-        apply_avatar_widget_image(
-            self.avatar,
-            avatar,
+        self.avatar.set_avatar(
+            str(avatar or ""),
             gender=gender,
             seed=profile_avatar_seed(user_id=user_id, username=username, display_name=display_name),
         )
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:
-        if self._is_add_tile and event.button() == Qt.MouseButton.LeftButton and self.rect().contains(event.position().toPoint()):
+        if (
+            self._is_add_tile
+            and self._action_clickable
+            and event.button() == Qt.MouseButton.LeftButton
+            and self.rect().contains(event.position().toPoint())
+        ):
             self.clicked.emit()
             event.accept()
             return
@@ -130,7 +278,7 @@ class ChatInfoActionRow(QWidget):
 
     def __init__(self, title: str, *, switch: bool = False, parent=None) -> None:
         super().__init__(parent)
-        self.setFixedHeight(44)
+        self.setFixedHeight(40)
         self.setCursor(Qt.PointingHandCursor)
 
         layout = QHBoxLayout(self)
@@ -218,8 +366,8 @@ class ChatInfoPrivateContent(QWidget):
         self._session: Optional[Session] = None
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(16, 16, 16, 18)
-        layout.setSpacing(14)
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setSpacing(10)
 
         members_layout = QHBoxLayout()
         members_layout.setContentsMargins(0, 0, 0, 0)
@@ -277,6 +425,490 @@ class ChatInfoPrivateContent(QWidget):
         self.pin_row.set_checked(bool(getattr(session, "is_pinned", False) or extra.get("is_pinned", False)))
 
 
+class ChatInfoDetailField(QWidget):
+    """Editable label/value pair used by group-chat metadata blocks."""
+
+    valueCommitted = Signal(str)
+
+    def __init__(self, title: str, *, parent=None) -> None:
+        super().__init__(parent)
+        self.setObjectName("chatInfoDetailField")
+        self._editing = False
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 3, 12, 3)
+        layout.setSpacing(3)
+
+        self.title_label = BodyLabel(title, self)
+        self.title_label.setObjectName("chatInfoDetailFieldTitle")
+        self.value_label = CaptionLabel(self)
+        self.value_label.setObjectName("chatInfoDetailFieldValue")
+        self.value_label.setWordWrap(True)
+        self.value_label.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.editor = LineEdit(self)
+        self.editor.setObjectName("chatInfoDetailFieldEditor")
+        self.editor.hide()
+        self.editor.editingFinished.connect(self._commit_edit)
+        self.editor.installEventFilter(self)
+        self.value_label.installEventFilter(self)
+        self._apply_fonts()
+
+        layout.addWidget(self.title_label)
+        layout.addWidget(self.value_label)
+        layout.addWidget(self.editor)
+
+    def set_value(self, value: str) -> None:
+        normalized = str(value or "").strip()
+        self.value_label.setText(normalized)
+        self.editor.setText(normalized)
+        self._apply_fonts()
+
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:
+        super().mouseReleaseEvent(event)
+
+    def eventFilter(self, watched, event) -> bool:
+        if watched is self.value_label and event.type() == QEvent.Type.MouseButtonRelease and not self._editing:
+            self._begin_edit()
+            event.accept()
+            return True
+        if watched is self.editor and event.type() == QEvent.Type.FocusOut:
+            QTimer.singleShot(0, self._commit_edit)
+        return super().eventFilter(watched, event)
+
+    def _begin_edit(self) -> None:
+        if self._editing:
+            return
+        self._editing = True
+        self.value_label.hide()
+        self.editor.show()
+        self.editor.setFocus()
+        self.editor.selectAll()
+
+    def _commit_edit(self) -> None:
+        if not self._editing:
+            return
+        self._editing = False
+        value = str(self.editor.text() or "").strip()
+        self.value_label.setText(value)
+        self.editor.hide()
+        self.value_label.show()
+        self.valueCommitted.emit(value)
+
+    def _apply_fonts(self) -> None:
+        title_font = self.title_label.font()
+        title_font.setPixelSize(13)
+        title_font.setBold(False)
+        self.title_label.setFont(title_font)
+
+        value_font = self.value_label.font()
+        value_font.setPixelSize(13)
+        self.value_label.setFont(value_font)
+        self.editor.setFont(value_font)
+
+        value_color = QColor(196, 196, 196, 220) if isDarkTheme() else QColor("#8A8A8A")
+        self.title_label.setStyleSheet(f"color: {value_color.name(QColor.NameFormat.HexArgb)};")
+        self.value_label.setStyleSheet(f"color: {value_color.name(QColor.NameFormat.HexArgb)};")
+        self.editor.setStyleSheet(
+            "border: 1px solid rgba(127, 127, 127, 0.32);"
+            " border-radius: 6px;"
+            " padding: 4px 8px;"
+            f" color: {value_color.name(QColor.NameFormat.HexArgb)};"
+            " background: transparent;"
+        )
+
+
+class ChatInfoGroupMemberRow(QWidget):
+    """One compact row shown when filtering group members from the search box."""
+
+    def __init__(self, member: dict[str, Any], parent=None) -> None:
+        super().__init__(parent)
+        self.setObjectName("chatInfoGroupMemberRow")
+        self.setFixedHeight(58)
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(4, 8, 4, 8)
+        layout.setSpacing(10)
+
+        self.avatar = ChatInfoAvatarWidget(parent=self, size=44, radius=9)
+
+        text_layout = QVBoxLayout()
+        text_layout.setContentsMargins(0, 0, 0, 0)
+        text_layout.setSpacing(2)
+        self.name_label = BodyLabel(self)
+        self.name_label.setObjectName("chatInfoGroupMemberName")
+        self.meta_label = CaptionLabel(self)
+        self.meta_label.setObjectName("chatInfoGroupMemberMeta")
+        self.meta_label.setWordWrap(False)
+
+        text_layout.addWidget(self.name_label)
+        text_layout.addWidget(self.meta_label)
+        layout.addWidget(self.avatar, 0, Qt.AlignmentFlag.AlignVCenter)
+        layout.addLayout(text_layout, 1)
+
+        self.set_member(member)
+
+    def set_member(self, member: dict[str, Any]) -> None:
+        display_name = ChatInfoGroupContent.member_display_name(member)
+        self.name_label.setText(display_name)
+        username = str(member.get("username", "") or "").strip()
+        assistim_id = str(member.get("assistim_id", "") or "").strip()
+        meta = username or assistim_id or str(member.get("id", "") or "").strip()
+        self.meta_label.setText(meta)
+        self.meta_label.setVisible(bool(meta))
+        self.avatar.set_avatar(
+            str(member.get("avatar", "") or ""),
+            gender=str(member.get("gender", "") or ""),
+            seed=profile_avatar_seed(
+                user_id=str(member.get("id", "") or ""),
+                username=username,
+                display_name=display_name,
+            ),
+        )
+
+
+class ChatInfoGroupContent(QWidget):
+    """Group-chat content shown inside the info drawer."""
+
+    MAX_VISIBLE_TILES = 12
+    MAX_VISIBLE_MEMBER_TILES = 10
+    SEARCH_RESULT_LIMIT = 60
+
+    searchRequested = Signal()
+    addRequested = Signal()
+    clearRequested = Signal()
+    leaveRequested = Signal()
+    muteToggled = Signal(bool)
+    pinToggled = Signal(bool)
+    groupProfileUpdateRequested = Signal(dict)
+    groupSelfProfileUpdateRequested = Signal(dict)
+    groupProfileUpdateRequested = Signal(dict)
+    groupSelfProfileUpdateRequested = Signal(dict)
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._session: Optional[Session] = None
+        self._members: list[dict[str, Any]] = []
+        self._announcement_dialog: ChatInfoAnnouncementDialog | None = None
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setSpacing(10)
+
+        self.member_search_box = SearchLineEdit(self)
+        self.member_search_box.setObjectName("chatInfoMemberSearchBox")
+        self.member_search_box.setPlaceholderText(tr("chat.info.group.member_search.placeholder", "Search Group Members"))
+        self.member_search_box.setFixedHeight(36)
+
+        self.members_grid_widget = QWidget(self)
+        self.members_grid_widget.setObjectName("chatInfoMembersGrid")
+        self.members_grid_layout = QGridLayout(self.members_grid_widget)
+        self.members_grid_layout.setContentsMargins(0, 0, 0, 0)
+        self.members_grid_layout.setHorizontalSpacing(7)
+        self.members_grid_layout.setVerticalSpacing(10)
+
+        self.view_more_button = StaticHyperlinkButton(parent=self)
+        self.view_more_button.setObjectName("chatInfoSecondaryLink")
+        self.view_more_button.setText(tr("chat.info.group.view_more", "View More Members"))
+        self.view_more_button.setVisible(False)
+
+        self.search_results_widget = QWidget(self)
+        self.search_results_widget.setObjectName("chatInfoMemberSearchResults")
+        self.search_results_layout = QVBoxLayout(self.search_results_widget)
+        self.search_results_layout.setContentsMargins(0, 0, 0, 0)
+        self.search_results_layout.setSpacing(0)
+        self.search_results_widget.setVisible(False)
+
+        self.search_empty_label = CaptionLabel(tr("chat.info.group.member_search.empty", "No matching group members"), self)
+        self.search_empty_label.setObjectName("chatInfoMemberSearchEmpty")
+        self.search_empty_label.setVisible(False)
+
+        self.group_name_field = ChatInfoDetailField(tr("chat.info.group.name", "Group Name"), parent=self)
+        self.announcement_row = ChatInfoActionRow(tr("chat.info.group.announcement", "Announcement"), parent=self)
+        self.announcement_preview = ChatInfoAnnouncementPreview(self)
+        self.note_field = ChatInfoDetailField(tr("chat.info.group.note", "Note"), parent=self)
+        self.nickname_field = ChatInfoDetailField(tr("chat.info.group.my_nickname", "My Group Nickname"), parent=self)
+
+        self.search_row = ChatInfoActionRow(tr("chat.info.search", "Find Chat Content"), parent=self)
+        self.mute_row = ChatInfoActionRow(tr("chat.info.mute", "Mute Notifications"), switch=True, parent=self)
+        self.pin_row = ChatInfoActionRow(tr("chat.info.pin", "Pin Chat"), switch=True, parent=self)
+        self.show_nickname_row = ChatInfoActionRow(
+            tr("chat.info.group.show_member_nickname", "Show Group Member Nicknames"),
+            switch=True,
+            parent=self,
+        )
+
+        self.clear_button = StaticHyperlinkButton(parent=self)
+        self.clear_button.setObjectName("chatInfoClearLink")
+        self.clear_button.setText(tr("chat.info.clear", "Clear Chat History"))
+        self.leave_button = StaticHyperlinkButton(parent=self)
+        self.leave_button.setObjectName("chatInfoClearLink")
+        self.leave_button.setText(tr("chat.info.group.leave", "Leave Group Chat"))
+
+        layout.addWidget(self.member_search_box)
+        layout.addWidget(self.members_grid_widget)
+        layout.addWidget(self.search_results_widget)
+        layout.addWidget(self.search_empty_label)
+        layout.addWidget(self.view_more_button, 0, Qt.AlignmentFlag.AlignLeft)
+        layout.addWidget(FluentDivider(self, variant=FluentDivider.INSET, inset=12))
+        layout.addWidget(self.group_name_field)
+        layout.addWidget(self.announcement_row)
+        layout.addWidget(self.announcement_preview)
+        layout.addWidget(self.note_field)
+        layout.addWidget(self.nickname_field)
+        layout.addWidget(FluentDivider(self, variant=FluentDivider.INSET, inset=12))
+        layout.addWidget(self.search_row)
+        layout.addWidget(FluentDivider(self, variant=FluentDivider.INSET, inset=12))
+        layout.addWidget(self.mute_row)
+        layout.addWidget(self.pin_row)
+        layout.addWidget(self.show_nickname_row)
+        layout.addWidget(FluentDivider(self, variant=FluentDivider.INSET, inset=12))
+        layout.addSpacing(6)
+        layout.addWidget(self.clear_button, 0, Qt.AlignmentFlag.AlignHCenter)
+        layout.addWidget(FluentDivider(self, variant=FluentDivider.INSET, inset=12))
+        layout.addWidget(self.leave_button, 0, Qt.AlignmentFlag.AlignHCenter)
+        layout.addStretch(1)
+
+        self.member_search_box.textChanged.connect(self._on_member_search_text_changed)
+        self.search_row.activated.connect(self.searchRequested.emit)
+        self.mute_row.toggled.connect(self.muteToggled.emit)
+        self.pin_row.toggled.connect(self.pinToggled.emit)
+        self.announcement_row.activated.connect(self._open_announcement_editor)
+        self.clear_button.clicked.connect(self.clearRequested.emit)
+        self.leave_button.clicked.connect(self.leaveRequested.emit)
+        self.group_name_field.valueCommitted.connect(lambda value: self.groupProfileUpdateRequested.emit({"name": value}))
+        self.note_field.valueCommitted.connect(lambda value: self.groupSelfProfileUpdateRequested.emit({"note": value}))
+        self.nickname_field.valueCommitted.connect(lambda value: self.groupSelfProfileUpdateRequested.emit({"my_group_nickname": value}))
+
+    @staticmethod
+    def member_display_name(member: dict[str, Any]) -> str:
+        return (
+            str(member.get("remark", "") or "").strip()
+            or str(member.get("group_nickname", "") or "").strip()
+            or str(member.get("nickname", "") or "").strip()
+            or str(member.get("display_name", "") or "").strip()
+            or str(member.get("username", "") or "").strip()
+            or str(member.get("id", "") or "").strip()
+            or tr("session.unnamed", "Untitled Session")
+        )
+
+    @staticmethod
+    def _normalize_member_payload(member: dict[str, Any]) -> dict[str, Any]:
+        normalized = dict(member or {})
+        normalized.setdefault("id", str(normalized.get("user_id", "") or ""))
+        normalized["id"] = str(normalized.get("id", "") or "")
+        normalized["username"] = str(normalized.get("username", "") or "")
+        normalized["nickname"] = str(normalized.get("nickname", "") or "")
+        normalized["group_nickname"] = str(normalized.get("group_nickname", "") or "")
+        normalized["remark"] = str(normalized.get("remark", "") or "")
+        normalized["display_name"] = ChatInfoGroupContent.member_display_name(normalized)
+        normalized["avatar"] = str(normalized.get("avatar", "") or "")
+        normalized["gender"] = str(normalized.get("gender", "") or "")
+        return normalized
+
+    def _clear_layout(self, layout: QVBoxLayout | QGridLayout) -> None:
+        while layout.count():
+            item = layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+
+    def _render_member_grid(self) -> None:
+        self._clear_layout(self.members_grid_layout)
+        members = list(self._members)
+
+        show_view_more = len(members) > self.MAX_VISIBLE_MEMBER_TILES
+        visible_member_limit = self.MAX_VISIBLE_MEMBER_TILES - 1 if show_view_more else self.MAX_VISIBLE_MEMBER_TILES
+        visible_members = members[: max(0, visible_member_limit)]
+
+        tiles: list[ChatInfoParticipantTile] = []
+        for member in visible_members:
+            tile = ChatInfoParticipantTile(parent=self)
+            tile.set_participant(
+                title=self.member_display_name(member),
+                avatar=str(member.get("avatar", "") or ""),
+                user_id=str(member.get("id", "") or ""),
+                username=str(member.get("username", "") or ""),
+                gender=str(member.get("gender", "") or ""),
+            )
+            tiles.append(tile)
+
+        add_tile = ChatInfoParticipantTile(
+            is_add_tile=True,
+            action_icon=AppIcon.ADD,
+            action_label=tr("chat.info.add", "Add"),
+            dashed=True,
+            clickable=True,
+            parent=self,
+        )
+        add_tile.clicked.connect(self.addRequested.emit)
+        tiles.append(add_tile)
+
+        remove_tile = ChatInfoParticipantTile(
+            is_add_tile=True,
+            action_icon=AppIcon.CLOSE,
+            action_label=tr("chat.info.group.remove", "Remove"),
+            dashed=True,
+            clickable=False,
+            parent=self,
+        )
+        remove_tile.setToolTip(tr("chat.info.group.remove.unavailable", "The remove-member action is not connected yet."))
+        tiles.append(remove_tile)
+
+        if show_view_more:
+            view_more_tile = ChatInfoParticipantTile(
+                is_add_tile=True,
+                action_icon=CollectionIcon("chevron_right"),
+                action_label=tr("chat.info.group.view_more_short", "More"),
+                dashed=False,
+                clickable=False,
+                parent=self,
+            )
+            tiles.append(view_more_tile)
+
+        tiles = tiles[: self.MAX_VISIBLE_TILES]
+        for index, tile in enumerate(tiles):
+            row = index // 4
+            column = index % 4
+            self.members_grid_layout.addWidget(tile, row, column, Qt.AlignmentFlag.AlignTop)
+
+        self.view_more_button.setVisible(show_view_more)
+
+    def _render_search_results(self, keyword: str) -> None:
+        self._clear_layout(self.search_results_layout)
+        normalized_keyword = str(keyword or "").strip().lower()
+        if not normalized_keyword:
+            self.search_results_widget.setVisible(False)
+            self.search_empty_label.setVisible(False)
+            self.members_grid_widget.setVisible(True)
+            self.view_more_button.setVisible(len(self._members) > self.MAX_VISIBLE_MEMBER_TILES)
+            return
+
+        self.members_grid_widget.setVisible(False)
+        self.view_more_button.setVisible(False)
+        matches: list[dict[str, Any]] = []
+        for member in self._members:
+            tokens = [
+                str(member.get("display_name", "") or "").lower(),
+                str(member.get("username", "") or "").lower(),
+                str(member.get("remark", "") or "").lower(),
+                str(member.get("group_nickname", "") or "").lower(),
+                str(member.get("nickname", "") or "").lower(),
+                str(member.get("id", "") or "").lower(),
+            ]
+            if any(normalized_keyword in token for token in tokens if token):
+                matches.append(member)
+            if len(matches) >= self.SEARCH_RESULT_LIMIT:
+                break
+
+        if not matches:
+            self.search_results_widget.setVisible(False)
+            self.search_empty_label.setVisible(True)
+            return
+
+        for member in matches:
+            row = ChatInfoGroupMemberRow(member, self.search_results_widget)
+            self.search_results_layout.addWidget(row)
+        self.search_results_layout.addStretch(1)
+        self.search_empty_label.setVisible(False)
+        self.search_results_widget.setVisible(True)
+
+    def _resolve_my_group_nickname(self, session: Session, members: list[dict[str, Any]]) -> str:
+        extra = dict(session.extra or {})
+        explicit = (
+            str(extra.get("my_group_nickname", "") or "").strip()
+            or str(extra.get("self_nickname", "") or "").strip()
+            or str(extra.get("group_nickname", "") or "").strip()
+        )
+        if explicit:
+            return explicit
+
+        current_user_id = str(extra.get("current_user_id", "") or "").strip()
+        if not current_user_id:
+            return tr("chat.info.group.my_nickname.empty", "Not Set")
+        for member in members:
+            if str(member.get("id", "") or "").strip() != current_user_id:
+                continue
+            value = (
+                str(member.get("group_nickname", "") or "").strip()
+                or str(member.get("remark", "") or "").strip()
+                or str(member.get("nickname", "") or "").strip()
+                or str(member.get("display_name", "") or "").strip()
+            )
+            if value:
+                return value
+        return tr("chat.info.group.my_nickname.empty", "Not Set")
+
+    def _on_member_search_text_changed(self, text: str) -> None:
+        self._render_search_results(str(text or ""))
+
+    def _open_announcement_editor(self) -> None:
+        if self._session is None:
+            return
+        extra = dict(self._session.extra or {})
+        announcement = str(extra.get("group_announcement", "") or extra.get("announcement", "") or "").strip()
+        dialog = ChatInfoAnnouncementDialog(announcement, self.window())
+        dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        dialog.submitted.connect(self._apply_announcement_value)
+        dialog.destroyed.connect(lambda *_: setattr(self, "_announcement_dialog", None))
+        self._announcement_dialog = dialog
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def _apply_announcement_value(self, value: str) -> None:
+        self.announcement_row.title_label.setText(tr("chat.info.group.announcement", "Announcement"))
+        self.announcement_row.setToolTip(str(value or "").strip())
+        self.announcement_preview.set_preview_text(value)
+        self.groupProfileUpdateRequested.emit({"announcement": value})
+
+    def set_session(self, session: Session | None) -> None:
+        self._session = session
+        blocker = QSignalBlocker(self.member_search_box)
+        try:
+            self.member_search_box.clear()
+        finally:
+            del blocker
+        if session is None:
+            self.setEnabled(False)
+            self._members = []
+            self._render_member_grid()
+            self._render_search_results("")
+            self.group_name_field.set_value("")
+            self.announcement_row.title_label.setText(tr("chat.info.group.announcement", "Announcement"))
+            self.announcement_row.setToolTip("")
+            self.announcement_preview.set_preview_text("")
+            self.note_field.set_value(tr("chat.info.group.note.empty", "群聊的备注仅自己可见"))
+            self.nickname_field.set_value(tr("chat.info.group.my_nickname.empty", "Not Set"))
+            self.mute_row.set_checked(False)
+            self.pin_row.set_checked(False)
+            self.show_nickname_row.set_checked(True)
+            return
+
+        self.setEnabled(True)
+        extra = dict(session.extra or {})
+        self._members = [
+            self._normalize_member_payload(item)
+            for item in list(extra.get("members") or [])
+            if isinstance(item, dict)
+        ]
+
+        self.group_name_field.set_value(str(extra.get("server_name", "") or session.name or ""))
+        announcement_text = str(extra.get("group_announcement", "") or extra.get("announcement", "") or "").strip()
+        self.announcement_row.title_label.setText(tr("chat.info.group.announcement", "Announcement"))
+        self.announcement_row.setToolTip(announcement_text)
+        self.announcement_preview.set_preview_text(announcement_text)
+        self.note_field.set_value(
+            str(extra.get("group_note", "") or extra.get("note", "") or tr("chat.info.group.note.empty", "群聊的备注仅自己可见"))
+        )
+        self.nickname_field.set_value(self._resolve_my_group_nickname(session, self._members))
+
+        self.mute_row.set_checked(bool(extra.get("is_muted", False)))
+        self.pin_row.set_checked(bool(getattr(session, "is_pinned", False) or extra.get("is_pinned", False)))
+        self.show_nickname_row.set_checked(bool(extra.get("show_member_nickname", True)))
+
+        self._render_member_grid()
+        self._render_search_results("")
+
+
 class ChatInfoPlaceholderContent(QWidget):
     """Simple placeholder shown for unsupported drawer content variants."""
 
@@ -308,8 +940,11 @@ class ChatInfoDrawerContent(QWidget):
     searchRequested = Signal()
     addRequested = Signal()
     clearRequested = Signal()
+    leaveRequested = Signal()
     muteToggled = Signal(bool)
     pinToggled = Signal(bool)
+    groupProfileUpdateRequested = Signal(dict)
+    groupSelfProfileUpdateRequested = Signal(dict)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -321,8 +956,10 @@ class ChatInfoDrawerContent(QWidget):
 
         self.stack = QStackedWidget(self)
         self.private_content = ChatInfoPrivateContent(self)
+        self.group_content = ChatInfoGroupContent(self)
         self.placeholder_content = ChatInfoPlaceholderContent(self)
         self.stack.addWidget(self.private_content)
+        self.stack.addWidget(self.group_content)
         self.stack.addWidget(self.placeholder_content)
         layout.addWidget(self.stack)
 
@@ -331,6 +968,14 @@ class ChatInfoDrawerContent(QWidget):
         self.private_content.clearRequested.connect(self.clearRequested.emit)
         self.private_content.muteToggled.connect(self.muteToggled.emit)
         self.private_content.pinToggled.connect(self.pinToggled.emit)
+        self.group_content.searchRequested.connect(self.searchRequested.emit)
+        self.group_content.addRequested.connect(self.addRequested.emit)
+        self.group_content.clearRequested.connect(self.clearRequested.emit)
+        self.group_content.leaveRequested.connect(self.leaveRequested.emit)
+        self.group_content.muteToggled.connect(self.muteToggled.emit)
+        self.group_content.pinToggled.connect(self.pinToggled.emit)
+        self.group_content.groupProfileUpdateRequested.connect(self.groupProfileUpdateRequested.emit)
+        self.group_content.groupSelfProfileUpdateRequested.connect(self.groupSelfProfileUpdateRequested.emit)
 
     def set_session(self, session: Session | None) -> None:
         """Refresh content for the current session type."""
@@ -349,15 +994,14 @@ class ChatInfoDrawerContent(QWidget):
             return
 
         if session.session_type == "group":
-            self.placeholder_content.set_text(
-                tr("chat.info.group.title", "Group Chat Info"),
-                tr("chat.info.group.content", "The group chat info panel will be implemented next."),
-            )
-        else:
-            self.placeholder_content.set_text(
-                tr("chat.info.ai.title", "AI Session Info"),
-                tr("chat.info.ai.content", "The AI session info panel will be implemented later."),
-            )
+            self.group_content.set_session(session)
+            self.stack.setCurrentWidget(self.group_content)
+            return
+
+        self.placeholder_content.set_text(
+            tr("chat.info.ai.title", "AI Session Info"),
+            tr("chat.info.ai.content", "The AI session info panel will be implemented later."),
+        )
         self.stack.setCurrentWidget(self.placeholder_content)
 
 
@@ -480,8 +1124,11 @@ class ChatInfoDrawerOverlay(QWidget):
     searchRequested = Signal()
     addRequested = Signal()
     clearRequested = Signal()
+    leaveRequested = Signal()
     muteToggled = Signal(bool)
     pinToggled = Signal(bool)
+    groupProfileUpdateRequested = Signal(dict)
+    groupSelfProfileUpdateRequested = Signal(dict)
     visibilityChanged = Signal(bool)
 
     DRAWER_WIDTH = 322
@@ -507,9 +1154,39 @@ class ChatInfoDrawerOverlay(QWidget):
         self.scroll_area = SingleDirectionScrollArea(self.drawer, orient=Qt.Orientation.Vertical)
         self.scroll_area.setWidgetResizable(True)
         self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        self.scroll_area.setStyleSheet("QScrollArea{border: none; background: transparent}")
+        self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.scroll_area.setViewportMargins(0, 0, 0, 0)
+        self.scroll_area.setStyleSheet(
+            """
+            QScrollArea { border: none; background: transparent; }
+            QScrollBar:vertical {
+                width: 8px;
+                margin: 8px 0 8px 0;
+                border: none;
+                border-radius: 4px;
+                background: rgba(120, 120, 120, 0.18);
+            }
+            QScrollBar::handle:vertical {
+                min-height: 28px;
+                border: none;
+                border-radius: 4px;
+                background: rgba(120, 120, 120, 0.55);
+            }
+            QScrollBar::add-line:vertical,
+            QScrollBar::sub-line:vertical,
+            QScrollBar::add-page:vertical,
+            QScrollBar::sub-page:vertical {
+                border: none;
+                background: transparent;
+                height: 0;
+            }
+            """
+        )
         self.scroll_area.viewport().setStyleSheet("background: transparent")
+        self.scroll_area.verticalScrollBar().hide()
+        self.drawer.installEventFilter(self)
+        self.scroll_area.viewport().installEventFilter(self)
+        self.scroll_area.verticalScrollBar().installEventFilter(self)
 
         self.content_widget = ChatInfoDrawerContent(self)
         self.content_widget.setObjectName("chatInfoDrawerContent")
@@ -524,8 +1201,36 @@ class ChatInfoDrawerOverlay(QWidget):
         self.content_widget.searchRequested.connect(self.searchRequested.emit)
         self.content_widget.addRequested.connect(self.addRequested.emit)
         self.content_widget.clearRequested.connect(self.clearRequested.emit)
+        self.content_widget.leaveRequested.connect(self.leaveRequested.emit)
         self.content_widget.muteToggled.connect(self.muteToggled.emit)
         self.content_widget.pinToggled.connect(self.pinToggled.emit)
+        self.content_widget.groupProfileUpdateRequested.connect(self.groupProfileUpdateRequested.emit)
+        self.content_widget.groupSelfProfileUpdateRequested.connect(self.groupSelfProfileUpdateRequested.emit)
+
+    def eventFilter(self, watched, event) -> bool:
+        if watched in {self.drawer, self.scroll_area.viewport(), self.scroll_area.verticalScrollBar()}:
+            if event.type() in {QEvent.Type.Enter, QEvent.Type.MouseMove}:
+                self._set_scrollbar_visible(True)
+            elif event.type() == QEvent.Type.Leave:
+                QTimer.singleShot(0, self._sync_scrollbar_hover_state)
+        return super().eventFilter(watched, event)
+
+    def _set_scrollbar_visible(self, visible: bool) -> None:
+        scrollbar = self.scroll_area.verticalScrollBar()
+        if visible and scrollbar.maximum() > 0:
+            self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+            scrollbar.show()
+            return
+        self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scrollbar.hide()
+
+    def _sync_scrollbar_hover_state(self) -> None:
+        if not self.isVisible() or not self.drawer.isVisible():
+            self._set_scrollbar_visible(False)
+            return
+        cursor_pos = QCursor.pos()
+        drawer_rect = QRect(self.drawer.mapToGlobal(QPoint(0, 0)), self.drawer.size())
+        self._set_scrollbar_visible(drawer_rect.contains(cursor_pos))
 
     def set_session(self, session: Session | None) -> None:
         self._session = session
@@ -557,6 +1262,7 @@ class ChatInfoDrawerOverlay(QWidget):
         self.raise_()
         self.visibilityChanged.emit(True)
         self._animation.stop()
+        self._set_scrollbar_visible(False)
 
         start_rect = self._closed_rect()
         end_rect = self._open_rect()
@@ -582,6 +1288,7 @@ class ChatInfoDrawerOverlay(QWidget):
             self.drawer.setGeometry(self._closed_rect())
             self.setEnabled(False)
             self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+            self._set_scrollbar_visible(False)
             self.hide()
             return
         self._animation.setStartValue(self.drawer.geometry())
@@ -590,6 +1297,7 @@ class ChatInfoDrawerOverlay(QWidget):
 
     def _on_animation_finished(self) -> None:
         if not self._open:
+            self._set_scrollbar_visible(False)
             self.setEnabled(False)
             self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
             self.hide()

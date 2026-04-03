@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from app.core.errors import AppError, ErrorCode
 from app.models.user import User
 from app.repositories.group_repo import GroupRepository
+from app.repositories.message_repo import MessageRepository
 from app.repositories.session_repo import SessionRepository
 from app.repositories.user_repo import UserRepository
 from app.services.avatar_service import AvatarService
@@ -22,13 +23,14 @@ class GroupService:
     def __init__(self, db: Session) -> None:
         self.db = db
         self.groups = GroupRepository(db)
+        self.messages = MessageRepository(db)
         self.sessions = SessionRepository(db)
         self.users = UserRepository(db)
         self.avatars = AvatarService(db)
 
     def list_groups(self, current_user: User) -> list[dict]:
         groups = self.groups.list_user_groups(current_user.id)
-        return [self.serialize_group(item, include_members=True) for item in groups]
+        return [self.serialize_group(item, include_members=True, current_user_id=current_user.id) for item in groups]
 
     def create_group(self, current_user: User, name: str, member_ids: list[str]) -> dict:
         members = self._normalize_group_members(current_user, member_ids)
@@ -39,7 +41,7 @@ class GroupService:
             for member_id in members:
                 self.sessions.add_member(session.id, member_id, commit=False)
 
-            group = self.groups.create(normalized_name, current_user.id, session.id, commit=False)
+            group = self.groups.create(normalized_name, current_user.id, session.id, announcement="", commit=False)
             for member_id in members:
                 role = "owner" if member_id == current_user.id else "member"
                 self.groups.update_member_role(group.id, member_id, role, commit=False)
@@ -47,12 +49,103 @@ class GroupService:
             return group
 
         group = self._run_transaction(action)
-        return self.serialize_group(group, include_members=True)
+        return self.serialize_group(group, include_members=True, current_user_id=current_user.id)
 
     def get_group(self, current_user: User, group_id: str) -> dict:
         group = self._get_group_or_404(group_id)
         self._ensure_group_member(group, current_user.id)
-        return self.serialize_group(group, include_members=True)
+        return self.serialize_group(group, include_members=True, current_user_id=current_user.id)
+
+    def update_group_profile(self, current_user: User, group_id: str, name: str | None, announcement: str | None) -> dict:
+        group = self._get_group_or_404(group_id)
+        self._ensure_group_member(group, current_user.id)
+        current_role = self._member_role(group.id, current_user.id, owner_id=group.owner_id)
+        if current_role not in {"owner", "admin"}:
+            raise AppError(ErrorCode.FORBIDDEN, "only owner or admin can update group profile", 403)
+
+        def action() -> None:
+            self.groups.update_group_profile(group, name=name, announcement=announcement, commit=False)
+            if name is not None:
+                self.sessions.rename(group.session_id, str(name or "").strip(), commit=False)
+            if announcement is not None:
+                self.sessions.touch_without_commit(group.session_id)
+
+        self._run_transaction(action)
+        return self.serialize_group(group, include_members=True, current_user_id=current_user.id)
+
+    def update_my_group_profile(self, current_user: User, group_id: str, note: str | None, my_group_nickname: str | None) -> dict:
+        group = self._get_group_or_404(group_id)
+        self._ensure_group_member(group, current_user.id)
+
+        def action() -> None:
+            self.groups.update_member_profile(
+                group.id,
+                current_user.id,
+                note=note,
+                group_nickname=my_group_nickname,
+                commit=False,
+            )
+            self.sessions.touch_without_commit(group.session_id)
+
+        self._run_transaction(action)
+        return self.serialize_group(group, include_members=True, current_user_id=current_user.id)
+
+    def record_group_profile_update_event(self, group_id: str, *, actor_user_id: str) -> dict[str, object] | None:
+        """Append one shared group-profile update event for offline sync and realtime fan-out."""
+        group = self._get_group_or_404(group_id)
+        participant_ids = [
+            value
+            for value in dict.fromkeys(self.sessions.list_member_ids(group.session_id))
+            if str(value or "").strip()
+        ]
+        if not participant_ids:
+            return None
+
+        payload = self.serialize_group(group, include_members=True, current_user_id=None)
+        payload["group_id"] = group.id
+        payload["session_id"] = group.session_id
+        event = self.messages.append_session_event(
+            group.session_id,
+            "group_profile_update",
+            payload,
+            actor_user_id=actor_user_id,
+            commit=False,
+        )
+        payload["event_seq"] = int(event.event_seq or 0)
+        self.db.commit()
+        return {
+            "participant_ids": participant_ids,
+            "payload": payload,
+        }
+
+    def build_group_self_profile_payload(self, current_user: User, group_id: str) -> dict[str, object]:
+        """Build one self-scoped group-profile payload for the current user's other clients."""
+        group = self._get_group_or_404(group_id)
+        self._ensure_group_member(group, current_user.id)
+        serialized = self.serialize_group(group, include_members=False, current_user_id=current_user.id)
+        return {
+            "group_id": group.id,
+            "session_id": group.session_id,
+            "group_note": str(serialized.get("group_note", "") or ""),
+            "my_group_nickname": str(serialized.get("my_group_nickname", "") or ""),
+        }
+
+
+    def record_group_self_profile_update_event(self, current_user: User, group_id: str) -> dict[str, object]:
+        """Append one self-scoped group-profile update event for the current user's other clients and offline sync."""
+        payload = self.build_group_self_profile_payload(current_user, group_id)
+        session_id = str(payload.get("session_id", "") or "")
+        event = self.messages.append_private_session_event(
+            session_id,
+            current_user.id,
+            "group_self_profile_update",
+            payload,
+            actor_user_id=current_user.id,
+            commit=False,
+        )
+        payload["event_seq"] = int(event.event_seq or 0)
+        self.db.commit()
+        return payload
 
     def add_member(self, current_user: User, group_id: str, user_id: str, role: str = "member") -> dict:
         group = self._get_group_or_404(group_id)
@@ -70,7 +163,7 @@ class GroupService:
         self._run_transaction(action)
         return {
             "status": "added",
-            "group": self.serialize_group(group, include_members=True),
+            "group": self.serialize_group(group, include_members=True, current_user_id=current_user.id),
         }
 
     def remove_member(self, current_user: User, group_id: str, user_id: str) -> None:
@@ -107,7 +200,7 @@ class GroupService:
         self._run_transaction(action)
         return {
             "status": "role_updated",
-            "group": self.serialize_group(group, include_members=True),
+            "group": self.serialize_group(group, include_members=True, current_user_id=current_user.id),
         }
 
     def delete_group(self, current_user: User, group_id: str) -> None:
@@ -149,23 +242,36 @@ class GroupService:
             self.groups.transfer_owner(group, normalized_new_owner_id, commit=False)
 
         self._run_transaction(action)
-        return self.serialize_group(group, include_members=True)
+        return self.serialize_group(group, include_members=True, current_user_id=current_user.id)
 
-    def serialize_group(self, group, include_members: bool = True) -> dict:
+    def serialize_group(self, group, include_members: bool = True, *, current_user_id: str | None = None) -> dict:
         avatar = self.avatars.ensure_group_avatar(group)
         session_members = self.sessions.list_members(group.session_id)
-        role_by_user_id = {item.user_id: item.role for item in self.groups.list_members(group.id)}
+        group_members = self.groups.list_members(group.id)
+        role_by_user_id = {item.user_id: item.role for item in group_members}
+        member_meta_by_user_id = {
+            item.user_id: {
+                "role": str(item.role or "member"),
+                "group_nickname": str(getattr(item, "group_nickname", "") or ""),
+                "note": str(getattr(item, "note", "") or ""),
+            }
+            for item in group_members
+        }
         user_ids = [str(item.user_id or "") for item in session_members if str(item.user_id or "")]
         users_by_id = self.users.list_users_by_ids(user_ids)
+        current_member_meta = member_meta_by_user_id.get(str(current_user_id or ""), {})
         data = {
             "id": group.id,
             "name": group.name,
+            "announcement": str(getattr(group, "announcement", "") or ""),
             "avatar": avatar,
             "avatar_kind": str(getattr(group, "avatar_kind", "generated") or "generated"),
             "owner_id": group.owner_id,
             "session_id": group.session_id,
             "member_count": len(session_members),
             "created_at": group.created_at.isoformat() if group.created_at else None,
+            "group_note": str(current_member_meta.get("note", "") or ""),
+            "my_group_nickname": str(current_member_meta.get("group_nickname", "") or ""),
         }
         if include_members:
             members = []
@@ -173,12 +279,14 @@ class GroupService:
                 user = users_by_id.get(str(item.user_id or ""))
                 if user is None:
                     continue
+                member_meta = member_meta_by_user_id.get(str(item.user_id or ""), {})
                 members.append(
                     {
                         "user_id": item.user_id,
                         "id": user.id,
                         "username": user.username,
                         "nickname": user.nickname,
+                        "group_nickname": str(member_meta.get("group_nickname", "") or ""),
                         "avatar": self.avatars.resolve_user_avatar_url(user),
                         "gender": user.gender,
                         "region": user.region,
@@ -216,6 +324,12 @@ class GroupService:
             members.append(normalized_user_id)
         return list(dict.fromkeys(members))
 
+    def _member_role(self, group_id: str, user_id: str, *, owner_id: str) -> str:
+        member = self.groups.get_member(group_id, user_id)
+        if member is None:
+            return "owner" if str(user_id or "") == str(owner_id or "") else "member"
+        return str(member.role or "member")
+
     @staticmethod
     def _normalize_new_member_role(role: str) -> str:
         normalized_role = str(role or "member").strip().lower() or "member"
@@ -238,7 +352,4 @@ class GroupService:
         except Exception:
             self.db.rollback()
             raise
-
-
-
 

@@ -68,6 +68,34 @@ class ContactService:
         )
         return dict(payload or {})
 
+    async def update_group_profile(self, group_id: str, *, name: str | None = None, announcement: str | None = None) -> dict[str, Any]:
+        """Update shared group metadata."""
+        payload = await self._http.patch(
+            f"/groups/{group_id}",
+            json={
+                "name": name,
+                "announcement": announcement,
+            },
+        )
+        return dict(payload or {})
+
+    async def update_my_group_profile(
+        self,
+        group_id: str,
+        *,
+        note: str | None = None,
+        my_group_nickname: str | None = None,
+    ) -> dict[str, Any]:
+        """Update the current user's group-scoped metadata."""
+        payload = await self._http.patch(
+            f"/groups/{group_id}/me",
+            json={
+                "note": note,
+                "my_group_nickname": my_group_nickname,
+            },
+        )
+        return dict(payload or {})
+
     async def accept_friend_request(self, request_id: str) -> dict[str, Any]:
         """Accept one pending friend request."""
         payload = await self._http.post(f"/friends/requests/{request_id}/accept", json={})

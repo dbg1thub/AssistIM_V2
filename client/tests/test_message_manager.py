@@ -1045,3 +1045,82 @@ def test_message_manager_applies_user_profile_update_events(monkeypatch) -> None
             await manager.close()
 
     asyncio.run(scenario())
+
+
+def test_message_manager_applies_group_profile_update_events(monkeypatch) -> None:
+    fake_event_bus = FakeEventBus()
+    fake_conn_manager = FakeConnectionManager([])
+    fake_db = FakeDatabase()
+
+    monkeypatch.setattr(message_manager_module, 'get_event_bus', lambda: fake_event_bus)
+    monkeypatch.setattr(message_manager_module, 'get_connection_manager', lambda: fake_conn_manager)
+    monkeypatch.setattr(message_manager_module, 'get_database', lambda: fake_db)
+
+    async def scenario() -> None:
+        manager = message_manager_module.MessageManager()
+        manager.set_user_id('alice')
+        await manager.initialize()
+        try:
+            await manager._handle_ws_message(
+                {
+                    'type': 'group_profile_update',
+                    'data': {
+                        'session_id': 'session-group-1',
+                        'group_id': 'group-1',
+                        'id': 'group-1',
+                        'name': 'Ops',
+                        'announcement': 'Ship at 18:00',
+                        'avatar': '/uploads/group_avatars/ops.png',
+                        'member_count': 3,
+                        'members': [{'id': 'alice', 'group_nickname': 'lead'}],
+                        'event_seq': 9,
+                    },
+                }
+            )
+
+            assert any(event == message_manager_module.MessageEvent.GROUP_UPDATED for event, _ in fake_event_bus.events)
+            assert any(
+                event == ContactEvent.SYNC_REQUIRED and data.get('reason') == 'group_profile_update'
+                for event, data in fake_event_bus.events
+            )
+        finally:
+            await manager.close()
+
+    asyncio.run(scenario())
+
+
+def test_message_manager_applies_group_self_profile_update_events(monkeypatch) -> None:
+    fake_event_bus = FakeEventBus()
+    fake_conn_manager = FakeConnectionManager([])
+    fake_db = FakeDatabase()
+
+    monkeypatch.setattr(message_manager_module, 'get_event_bus', lambda: fake_event_bus)
+    monkeypatch.setattr(message_manager_module, 'get_connection_manager', lambda: fake_conn_manager)
+    monkeypatch.setattr(message_manager_module, 'get_database', lambda: fake_db)
+
+    async def scenario() -> None:
+        manager = message_manager_module.MessageManager()
+        manager.set_user_id('alice')
+        await manager.initialize()
+        try:
+            await manager._handle_ws_message(
+                {
+                    'type': 'group_self_profile_update',
+                    'data': {
+                        'session_id': 'session-group-1',
+                        'group_id': 'group-1',
+                        'group_note': 'only me',
+                        'my_group_nickname': 'lead',
+                    },
+                }
+            )
+
+            assert any(event == message_manager_module.MessageEvent.GROUP_SELF_UPDATED for event, _ in fake_event_bus.events)
+            assert any(
+                event == ContactEvent.SYNC_REQUIRED and data.get('reason') == 'group_self_profile_update'
+                for event, data in fake_event_bus.events
+            )
+        finally:
+            await manager.close()
+
+    asyncio.run(scenario())

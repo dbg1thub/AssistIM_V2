@@ -46,6 +46,24 @@ class SessionMember(Base):
     last_read_at: Mapped[datetime | None] = mapped_column(nullable=True)
 
 
+class UserSessionEvent(IdMixin, Base):
+    __tablename__ = "user_session_events"
+    __table_args__ = (
+        UniqueConstraint("session_id", "user_id", "event_seq", name="uq_user_session_event_seq"),
+        Index("idx_user_session_events_session_id", "session_id"),
+        Index("idx_user_session_events_user_id", "user_id"),
+        Index("idx_user_session_events_type", "type"),
+    )
+
+    session_id: Mapped[str] = mapped_column(Uuid(as_uuid=False), ForeignKey("sessions.id"), nullable=False)
+    user_id: Mapped[str] = mapped_column(Uuid(as_uuid=False), ForeignKey("users.id"), nullable=False)
+    event_seq: Mapped[int] = mapped_column(nullable=False, default=0)
+    type: Mapped[str] = mapped_column(nullable=False)
+    actor_user_id: Mapped[str | None] = mapped_column(Uuid(as_uuid=False), nullable=True)
+    payload: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    created_at: Mapped[datetime] = mapped_column(default=utcnow)
+
+
 class SessionEvent(IdMixin, Base):
     __tablename__ = "session_events"
     __table_args__ = (

@@ -74,6 +74,7 @@ def test_group_owner_cannot_remove_self_without_transfer(client: TestClient, use
     )
     assert remove_owner_response.status_code == 403
 
+
 def test_create_group_generates_server_managed_group_avatar(client: TestClient, user_factory, auth_header) -> None:
     owner = user_factory("group-avatar-owner", "Owner")
     member = user_factory("group-avatar-member", "Member")
@@ -171,3 +172,64 @@ def test_group_role_update_requires_owner_and_disallows_owner_role_change(client
         headers=auth_header(owner["access_token"]),
     )
     assert owner_change_response.status_code == 403
+
+
+def test_group_profile_update_requires_owner_or_admin_and_persists_metadata(client: TestClient, user_factory, auth_header) -> None:
+    owner = user_factory("profile-owner", "Owner")
+    admin = user_factory("profile-admin", "Admin")
+    member = user_factory("profile-member", "Member")
+
+    create_group_response = client.post(
+        "/api/v1/groups",
+        json={"name": "", "member_ids": [admin["user"]["id"], member["user"]["id"]]},
+        headers=auth_header(owner["access_token"]),
+    )
+    group_id = create_group_response.json()["data"]["id"]
+
+    promote_response = client.patch(
+        f"/api/v1/groups/{group_id}/members/{admin['user']['id']}/role",
+        json={"role": "admin"},
+        headers=auth_header(owner["access_token"]),
+    )
+    assert promote_response.status_code == 200
+
+    forbidden_response = client.patch(
+        f"/api/v1/groups/{group_id}",
+        json={"name": "New Name", "announcement": "Notice"},
+        headers=auth_header(member["access_token"]),
+    )
+    assert forbidden_response.status_code == 403
+
+    update_response = client.patch(
+        f"/api/v1/groups/{group_id}",
+        json={"name": "Ops", "announcement": "Deploy at 6"},
+        headers=auth_header(admin["access_token"]),
+    )
+    assert update_response.status_code == 200
+    payload = update_response.json()["data"]
+    assert payload["name"] == "Ops"
+    assert payload["announcement"] == "Deploy at 6"
+
+
+def test_group_self_profile_update_persists_note_and_group_nickname(client: TestClient, user_factory, auth_header) -> None:
+    owner = user_factory("self-profile-owner", "Owner")
+    member = user_factory("self-profile-member", "Member")
+
+    create_group_response = client.post(
+        "/api/v1/groups",
+        json={"name": "Ops", "member_ids": [member["user"]["id"]]},
+        headers=auth_header(owner["access_token"]),
+    )
+    group_id = create_group_response.json()["data"]["id"]
+
+    update_response = client.patch(
+        f"/api/v1/groups/{group_id}/me",
+        json={"note": "private note", "my_group_nickname": "oncall"},
+        headers=auth_header(member["access_token"]),
+    )
+    assert update_response.status_code == 200
+    payload = update_response.json()["data"]
+    assert payload["group_note"] == "private note"
+    assert payload["my_group_nickname"] == "oncall"
+    updated_member = next(item for item in payload["members"] if item["id"] == member["user"]["id"])
+    assert updated_member["group_nickname"] == "oncall"

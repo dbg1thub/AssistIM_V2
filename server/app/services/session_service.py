@@ -137,16 +137,32 @@ class SessionService:
         member_rows = session_members if session_members is not None else None
         user_map = users_by_id or {}
         owner_id = ""
+        group_announcement = ""
+        group_note = ""
+        my_group_nickname = ""
         role_by_user_id: dict[str, str] = {}
+        member_profile_by_user_id: dict[str, dict[str, str]] = {}
         if normalized_session_type == "group":
             group = self.groups.get_by_session_id(session.id)
             if group is not None:
                 avatar = self.avatars.ensure_group_avatar(group)
                 owner_id = str(group.owner_id or "")
+                group_announcement = str(getattr(group, "announcement", "") or "")
+                group_members = self.groups.list_members(group.id)
                 role_by_user_id = {
                     str(item.user_id or ""): str(item.role or "member")
-                    for item in self.groups.list_members(group.id)
+                    for item in group_members
                 }
+                member_profile_by_user_id = {
+                    str(item.user_id or ""): {
+                        "group_nickname": str(getattr(item, "group_nickname", "") or ""),
+                        "note": str(getattr(item, "note", "") or ""),
+                    }
+                    for item in group_members
+                }
+                current_member_profile = member_profile_by_user_id.get(str(current_user_id or ""), {})
+                group_note = str(current_member_profile.get("note", "") or "")
+                my_group_nickname = str(current_member_profile.get("group_nickname", "") or "")
 
         if include_members or normalized_session_type == "direct":
             member_rows = member_rows if member_rows is not None else self.sessions.list_members(session.id)
@@ -178,6 +194,9 @@ class SessionService:
             "is_ai_session": session.is_ai_session,
             "created_at": isoformat_utc(session.created_at),
             "owner_id": owner_id or None,
+            "group_announcement": group_announcement,
+            "group_note": group_note,
+            "my_group_nickname": my_group_nickname,
             "counterpart_id": counterpart.get("id") or None,
             "counterpart_name": counterpart.get("display_name") or None,
             "counterpart_username": counterpart.get("username") or None,
@@ -197,6 +216,7 @@ class SessionService:
                             "username": user.username,
                             "avatar": self.avatars.resolve_user_avatar_url(user),
                             "gender": user.gender,
+                            "group_nickname": member_profile_by_user_id.get(str(user.id or ""), {}).get("group_nickname", ""),
                             "role": role_by_user_id.get(str(user.id or ""), "owner" if str(user.id or "") == owner_id else "member"),
                             "joined_at": isoformat_utc(member.joined_at),
                         }

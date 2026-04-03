@@ -1,4 +1,4 @@
-﻿"""Group repository."""
+"""Group repository."""
 
 from __future__ import annotations
 
@@ -21,6 +21,7 @@ class GroupRepository:
         owner_id: str,
         session_id: str,
         *,
+        announcement: str = "",
         avatar_kind: str = "generated",
         avatar_file_id: str | None = None,
         avatar_version: int = 1,
@@ -30,6 +31,7 @@ class GroupRepository:
             name=name,
             owner_id=owner_id,
             session_id=session_id,
+            announcement=str(announcement or "").strip(),
             avatar_kind=avatar_kind,
             avatar_file_id=avatar_file_id,
             avatar_version=max(1, int(avatar_version or 1)),
@@ -95,6 +97,48 @@ class GroupRepository:
             member = GroupMember(group_id=group_id, user_id=user_id, role=role)
         else:
             member.role = role
+        self.db.add(member)
+        self.db.flush()
+        if commit:
+            self.db.commit()
+            self.db.refresh(member)
+        return member
+
+    def update_group_profile(
+        self,
+        group: Group,
+        *,
+        name: str | None = None,
+        announcement: str | None = None,
+        commit: bool = True,
+    ) -> Group:
+        if name is not None:
+            group.name = str(name or "").strip()
+        if announcement is not None:
+            group.announcement = str(announcement or "").strip()
+        self.db.add(group)
+        self.db.flush()
+        if commit:
+            self.db.commit()
+            self.db.refresh(group)
+        return group
+
+    def update_member_profile(
+        self,
+        group_id: str,
+        user_id: str,
+        *,
+        group_nickname: str | None = None,
+        note: str | None = None,
+        commit: bool = True,
+    ) -> GroupMember:
+        member = self.get_member(group_id, user_id)
+        if member is None:
+            member = GroupMember(group_id=group_id, user_id=user_id)
+        if group_nickname is not None:
+            member.group_nickname = str(group_nickname or "").strip()
+        if note is not None:
+            member.note = str(note or "").strip()
         self.db.add(member)
         self.db.flush()
         if commit:
