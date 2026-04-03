@@ -136,10 +136,17 @@ class SessionService:
         avatar = session.avatar
         member_rows = session_members if session_members is not None else None
         user_map = users_by_id or {}
+        owner_id = ""
+        role_by_user_id: dict[str, str] = {}
         if normalized_session_type == "group":
             group = self.groups.get_by_session_id(session.id)
             if group is not None:
                 avatar = self.avatars.ensure_group_avatar(group)
+                owner_id = str(group.owner_id or "")
+                role_by_user_id = {
+                    str(item.user_id or ""): str(item.role or "member")
+                    for item in self.groups.list_members(group.id)
+                }
 
         if include_members or normalized_session_type == "direct":
             member_rows = member_rows if member_rows is not None else self.sessions.list_members(session.id)
@@ -170,6 +177,7 @@ class SessionService:
             "avatar": avatar,
             "is_ai_session": session.is_ai_session,
             "created_at": isoformat_utc(session.created_at),
+            "owner_id": owner_id or None,
             "counterpart_id": counterpart.get("id") or None,
             "counterpart_name": counterpart.get("display_name") or None,
             "counterpart_username": counterpart.get("username") or None,
@@ -189,6 +197,7 @@ class SessionService:
                             "username": user.username,
                             "avatar": self.avatars.resolve_user_avatar_url(user),
                             "gender": user.gender,
+                            "role": role_by_user_id.get(str(user.id or ""), "owner" if str(user.id or "") == owner_id else "member"),
                             "joined_at": isoformat_utc(member.joined_at),
                         }
                     )

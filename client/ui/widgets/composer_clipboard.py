@@ -6,7 +6,7 @@ import json
 import os
 from typing import Any
 
-from client.models.message import MessageType
+from client.models.message import MessageType, normalize_message_mentions
 
 COMPOSER_SEGMENTS_MIME = "application/x-assistim-composer-segments+json"
 _COMPOSER_CLIPBOARD_VERSION = 1
@@ -47,12 +47,17 @@ def normalize_clipboard_segments(segments: list[dict] | None) -> list[dict]:
         if segment_type == MessageType.TEXT.value:
             content = str(segment.get("content", "") or "")
             if content:
-                normalized_segments.append(
-                    {
-                        "type": MessageType.TEXT.value,
-                        "content": content,
-                    }
+                normalized_text_segment = {
+                    "type": MessageType.TEXT.value,
+                    "content": content,
+                }
+                mentions = normalize_message_mentions(
+                    dict(segment.get("extra") or {}).get("mentions"),
+                    content=content,
                 )
+                if mentions:
+                    normalized_text_segment["extra"] = {"mentions": mentions}
+                normalized_segments.append(normalized_text_segment)
             continue
 
         file_path = str(segment.get("file_path", "") or "")

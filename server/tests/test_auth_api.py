@@ -280,6 +280,59 @@ def test_users_me_avatar_endpoints_replace_and_reset_avatar(client: TestClient, 
     assert reset_payload["avatar"] == default_avatar
 
 
+def test_user_avatar_change_regenerates_generated_group_avatar(client: TestClient, auth_header) -> None:
+    owner_response = client.post(
+        "/api/v1/auth/register",
+        json={
+            "username": "group-owner-avatar-refresh",
+            "password": "secret123",
+            "nickname": "Owner",
+        },
+    )
+    member_response = client.post(
+        "/api/v1/auth/register",
+        json={
+            "username": "group-member-avatar-refresh",
+            "password": "secret123",
+            "nickname": "Member",
+        },
+    )
+    assert owner_response.status_code == 200
+    assert member_response.status_code == 200
+
+    owner_payload = owner_response.json()["data"]
+    member_payload = member_response.json()["data"]
+    owner_token = owner_payload["access_token"]
+    member_id = member_payload["user"]["id"]
+
+    create_group_response = client.post(
+        "/api/v1/groups",
+        json={"name": "Avatar Refresh Group", "member_ids": [member_id]},
+        headers=auth_header(owner_token),
+    )
+    assert create_group_response.status_code == 201
+    initial_group = create_group_response.json()["data"]
+    initial_avatar = initial_group["avatar"]
+    assert initial_avatar.startswith("/uploads/group_avatars/")
+
+    upload_response = client.post(
+        "/api/v1/users/me/avatar",
+        headers=auth_header(owner_token),
+        files={"file": ("avatar.png", b"owner-avatar-refresh", "image/png")},
+    )
+    assert upload_response.status_code == 200
+
+    refreshed_group_response = client.get(
+        f"/api/v1/groups/{initial_group['id']}",
+        headers=auth_header(owner_token),
+    )
+    assert refreshed_group_response.status_code == 200
+    refreshed_group = refreshed_group_response.json()["data"]
+    assert refreshed_group["avatar_kind"] == "generated"
+    assert refreshed_group["avatar"].startswith("/uploads/group_avatars/")
+    assert refreshed_group["avatar"] != initial_avatar
+
+
 def test_update_me_rejects_avatar_field_after_avatar_api_split(client: TestClient, auth_header) -> None:
     register_response = client.post(
         "/api/v1/auth/register",

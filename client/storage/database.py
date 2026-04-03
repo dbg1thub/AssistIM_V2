@@ -13,7 +13,7 @@ from typing import Any, Optional
 from client.core import logging
 from client.core.config_backend import get_config
 from client.core.logging import setup_logging
-from client.models.message import ChatMessage, Session
+from client.models.message import ChatMessage, Session, merge_sender_profile_extra
 
 
 setup_logging()
@@ -1528,6 +1528,53 @@ class Database:
         
         await self._db.commit()
         logger.debug(f"Batch saved {len(messages)} messages")
+
+    async def apply_sender_profile_update(
+        self,
+        session_id: str,
+        user_id: str,
+        sender_profile: dict[str, Any],
+    ) -> list[str]:
+        """Apply one sender-profile update to cached messages for the affected session."""
+        normalized_session_id = str(session_id or "").strip()
+        normalized_user_id = str(user_id or "").strip()
+        if not normalized_user_id:
+            return []
+
+        if normalized_session_id:
+            cursor = await self._db.execute(
+                "SELECT message_id, extra FROM messages WHERE session_id = ? AND sender_id = ?",
+                (normalized_session_id, normalized_user_id),
+            )
+        else:
+            cursor = await self._db.execute(
+                "SELECT message_id, extra FROM messages WHERE sender_id = ?",
+                (normalized_user_id,),
+            )
+        rows = await cursor.fetchall()
+
+        changed_message_ids: list[str] = []
+        for row in rows:
+            try:
+                extra = json.loads(row["extra"] or "{}")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                extra = {}
+            if not isinstance(extra, dict):
+                extra = {}
+
+            merged_extra = merge_sender_profile_extra(extra, sender_profile)
+            if merged_extra == extra:
+                continue
+
+            await self._db.execute(
+                "UPDATE messages SET extra = ? WHERE message_id = ?",
+                (json.dumps(merged_extra), row["message_id"]),
+            )
+            changed_message_ids.append(str(row["message_id"] or ""))
+
+        if changed_message_ids:
+            await self._db.commit()
+        return changed_message_ids
     
     def _row_to_message(self, row: aiosqlite.Row) -> ChatMessage:
         """Convert database row to ChatMessage."""

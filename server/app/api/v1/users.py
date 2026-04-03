@@ -12,9 +12,38 @@ from app.schemas.user import UserUpdateRequest
 from app.services.avatar_service import AvatarService
 from app.services.user_service import UserService
 from app.utils.response import success_response
+from app.websocket.manager import connection_manager
+from app.websocket.payloads import ws_message
 
 
 router = APIRouter()
+
+
+async def _broadcast_profile_update_events(db: Session, user_id: str) -> None:
+    service = UserService(db)
+    user = service.users.get_by_id(user_id)
+    if user is None:
+        return
+    for item in service.record_profile_update_events(user):
+        payload = dict(item.get("payload") or {})
+        session_id = str(payload.get("session_id", "") or "")
+        event_seq = int(payload.get("event_seq", 0) or 0)
+        participant_ids = [
+            value
+            for value in dict.fromkeys(str(raw_id or "").strip() for raw_id in item.get("participant_ids", []))
+            if value
+        ]
+        if not participant_ids:
+            continue
+        await connection_manager.send_json_to_users(
+            participant_ids,
+            ws_message(
+                "user_profile_update",
+                payload,
+                msg_id=f"user-profile:{session_id}:{event_seq}",
+                seq=event_seq,
+            ),
+        )
 
 
 @router.get("/search")
@@ -39,35 +68,37 @@ def get_user(user_id: str, current_user: User = Depends(get_current_user), db: S
 
 
 @router.put("/me")
-def update_me(
+async def update_me(
     payload: UserUpdateRequest,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> dict:
-    return success_response(
-        UserService(db).update_me(
-            current_user,
-            **payload.model_dump(exclude_unset=True),
-        )
+    data = UserService(db).update_me(
+        current_user,
+        **payload.model_dump(exclude_unset=True),
     )
+    await _broadcast_profile_update_events(db, current_user.id)
+    return success_response(data)
 
 
 @router.post("/me/avatar")
-def upload_me_avatar(
+async def upload_me_avatar(
     file: UploadFile = File(...),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> dict:
     avatar_service = AvatarService(db)
     updated_user = avatar_service.upload_user_avatar(current_user, file)
+    await _broadcast_profile_update_events(db, current_user.id)
     return success_response(UserService.serialize_user(updated_user))
 
 
 @router.delete("/me/avatar")
-def reset_me_avatar(
+async def reset_me_avatar(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> dict:
     avatar_service = AvatarService(db)
     updated_user = avatar_service.reset_user_avatar(current_user)
+    await _broadcast_profile_update_events(db, current_user.id)
     return success_response(UserService.serialize_user(updated_user))

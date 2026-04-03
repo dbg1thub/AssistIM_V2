@@ -91,13 +91,15 @@ class AvatarService:
         avatar_url = default_avatar_url(self.settings, default_key)
         if not avatar_url:
             raise AppError(ErrorCode.INVALID_REQUEST, "invalid default avatar key", 422)
-        return self.users.update_avatar_state(
+        updated = self.users.update_avatar_state(
             user,
             avatar_kind="default",
             avatar_default_key=default_key,
             avatar_file_id=None,
             avatar=avatar_url,
         )
+        self._refresh_generated_group_avatars_for_user(updated.id)
+        return updated
 
     def reset_user_avatar(self, user: User) -> User:
         """Reset one user to the persisted formal default avatar."""
@@ -114,13 +116,15 @@ class AvatarService:
         """Persist one custom profile avatar and bind it to the user."""
         self._validate_avatar_upload(file)
         stored = self.files.create_from_upload(user.id, file, settings=self.settings)
-        return self.users.update_avatar_state(
+        updated = self.users.update_avatar_state(
             user,
             avatar_kind="custom",
             avatar_default_key=str(getattr(user, "avatar_default_key", "") or "") or None,
             avatar_file_id=stored.id,
             avatar=stored.file_url,
         )
+        self._refresh_generated_group_avatars_for_user(updated.id)
+        return updated
 
     def resolve_user_avatar_url(self, user: User) -> str | None:
         """Return the effective public avatar URL for one user."""
@@ -187,6 +191,23 @@ class AvatarService:
                 }
             )
         return members
+
+    def _refresh_generated_group_avatars_for_user(self, user_id: str) -> None:
+        normalized_user_id = str(user_id or "").strip()
+        if not normalized_user_id:
+            return
+
+        touched = False
+        for group in self.groups.list_user_groups(normalized_user_id):
+            avatar_kind = str(getattr(group, "avatar_kind", "generated") or "generated").strip().lower()
+            if avatar_kind != "generated":
+                continue
+            self.bump_group_avatar_version(group)
+            self.ensure_group_avatar(group)
+            touched = True
+
+        if touched:
+            self.db.commit()
 
     @staticmethod
     def _validate_avatar_upload(file: UploadFile) -> None:

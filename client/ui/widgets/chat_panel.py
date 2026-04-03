@@ -16,7 +16,7 @@ from client.core.app_icons import AppIcon
 from client.core.config_backend import get_config
 from client.core.i18n import tr
 from client.delegates.message_delegate import MessageDelegate
-from client.models.message import ChatMessage, MessageType, Session
+from client.models.message import ChatMessage, MessageType, Session, merge_sender_profile_extra
 from client.models.message_model import MessageModel
 from client.ui.styles import StyleSheet
 from client.ui.widgets.chat_header import ChatHeader
@@ -232,6 +232,7 @@ class ChatPanel(QWidget):
         """Show welcome page and disable input."""
         self._current_session = None
         self.stack.setCurrentWidget(self.welcome_widget)
+        self.message_input.set_session(None)
         self.message_input.set_session_active(False)
         self.chat_header.set_actions_enabled(False)
         self._history_indicator.hide()
@@ -260,6 +261,7 @@ class ChatPanel(QWidget):
             avatar=session.display_avatar(),
             is_ai=session.is_ai_session,
         )
+        self.message_input.set_session(session)
         if self._chat_info_overlay:
             self._chat_info_overlay.set_session(session)
         self.show_chat()
@@ -458,6 +460,36 @@ class ChatPanel(QWidget):
         """Remove a message from the model."""
         if self._message_model:
             self._message_model.remove_message(message_id)
+
+    def apply_sender_profile_update(
+        self,
+        session_id: str,
+        user_id: str,
+        sender_profile: dict[str, object],
+        *,
+        changed_message_ids: list[str] | None = None,
+    ) -> None:
+        """Refresh visible message sender metadata after one authoritative profile update."""
+        if not self._message_model or not session_id or not user_id:
+            return
+
+        target_ids = set(changed_message_ids or [])
+        refreshed_ids: list[str] = []
+        for message in self._message_model.get_messages():
+            if message.session_id != session_id or message.sender_id != user_id:
+                continue
+            if target_ids and message.message_id not in target_ids:
+                continue
+            merged_extra = merge_sender_profile_extra(message.extra, sender_profile if isinstance(sender_profile, dict) else None)
+            if merged_extra == message.extra:
+                continue
+            message.extra = merged_extra
+            refreshed_ids.append(message.message_id)
+
+        for message_id in refreshed_ids:
+            self._message_model.refresh_message(message_id, allow_reorder=False)
+        if refreshed_ids:
+            self.message_list.viewport().update()
 
     def get_message_at(self, position, *, bubble_only: bool = False) -> Optional[ChatMessage]:
         """Return the message under a viewport position."""

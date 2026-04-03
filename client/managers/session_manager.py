@@ -101,6 +101,7 @@ class SessionManager:
         await self._subscribe(MessageEvent.EDITED, self._on_message_mutated)
         await self._subscribe(MessageEvent.RECALLED, self._on_message_mutated)
         await self._subscribe(MessageEvent.DELETED, self._on_message_mutated)
+        await self._subscribe(MessageEvent.PROFILE_UPDATED, self._on_profile_updated)
 
         self._running = True
         self._initialized = True
@@ -710,6 +711,72 @@ class SessionManager:
         if not session_id:
             return
         await self.refresh_session_preview(session_id)
+
+    async def _on_profile_updated(self, data: dict) -> None:
+        """Apply one user-profile update to cached session presentation state."""
+        session_id = str(data.get("session_id", "") or "")
+        user_id = str(data.get("user_id", "") or "")
+        profile = dict(data.get("profile") or {}) if isinstance(data.get("profile"), dict) else {}
+        if not session_id or not user_id or not profile:
+            return
+
+        current_user = await self._get_current_user_context()
+        db = get_database()
+        updated_session: Optional[Session] = None
+
+        async with self._lock:
+            session = self._sessions.get(session_id)
+            if session is None:
+                return
+
+            changed = False
+            session_avatar = str(data.get("session_avatar", "") or "").strip()
+            if session_avatar and session.avatar != session_avatar:
+                session.avatar = session_avatar
+                changed = True
+
+            members = list(session.extra.get("members") or [])
+            if members:
+                updated_members = []
+                for raw_member in members:
+                    member = dict(raw_member or {})
+                    if str(member.get("id", "") or "").strip() == user_id:
+                        for key in ("username", "nickname", "avatar", "gender"):
+                            new_value = str(profile.get(key, "") or "")
+                            if str(member.get(key, "") or "") != new_value:
+                                member[key] = new_value
+                                changed = True
+                    member["display_name"] = self._member_display_name(member)
+                    updated_members.append(member)
+                session.extra["members"] = updated_members
+
+            counterpart_id = str(session.extra.get("counterpart_id", "") or self._resolve_counterpart_id(session.participant_ids, str(current_user.get("id", "") or "")))
+            if session.session_type == "direct" and counterpart_id == user_id:
+                mapping = {
+                    "counterpart_username": str(profile.get("username", "") or ""),
+                    "counterpart_avatar": str(profile.get("avatar", "") or ""),
+                    "counterpart_gender": str(profile.get("gender", "") or ""),
+                }
+                for key, value in mapping.items():
+                    if str(session.extra.get(key, "") or "") != value:
+                        session.extra[key] = value
+                        changed = True
+
+            previous_name = session.name
+            previous_seed = str(session.extra.get("avatar_seed", "") or "")
+            self._normalize_session_display(session, current_user)
+            if session.name != previous_name or str(session.extra.get("avatar_seed", "") or "") != previous_seed:
+                changed = True
+
+            if not changed:
+                return
+            updated_session = session
+
+        if updated_session is not None and db.is_connected:
+            await db.save_session(updated_session)
+
+        if updated_session is not None:
+            await self._event_bus.emit(SessionEvent.UPDATED, {"session": updated_session})
 
     def _is_session_visible(self, session: Session, current_user: dict[str, Any]) -> bool:
         """Return whether a session has a valid visible counterpart for the current user."""

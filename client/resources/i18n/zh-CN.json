@@ -260,7 +260,7 @@
   "contact.add_friend.subtitle": "按用户名或昵称搜索用户，然后发送好友申请。",
   "contact.add_friend.search_placeholder": "搜索用户名或昵称",
   "contact.add_friend.search_button": "搜索",
-  "contact.add_friend.message_placeholder": "验证消息（可选）",
+  "contact.add_friend.message_placeholder": "验证消息(可选)",
   "contact.add_friend.summary_idle": "输入关键词后搜索用户。",
   "contact.add_friend.summary_empty_keyword": "请输入搜索关键词。",
   "contact.add_friend.summary_searching": "正在搜索用户...",

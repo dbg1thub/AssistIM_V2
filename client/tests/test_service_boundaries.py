@@ -524,9 +524,14 @@ class FakeDatabase:
 class FakeChatControllerContext:
     def __init__(self) -> None:
         self.user_ids: list[str] = []
+        self.refresh_calls = 0
 
     def set_user_id(self, user_id: str) -> None:
         self.user_ids.append(user_id)
+
+    async def refresh_sessions_snapshot(self) -> list[Session]:
+        self.refresh_calls += 1
+        return []
 
 
 class FakeAuthContext:
@@ -950,6 +955,7 @@ def test_auth_controller_update_profile_uploads_avatar_via_file_service(monkeypa
         assert user['avatar'] == 'https://cdn.example/files/avatar.png'
         assert fake_message_manager.user_ids[-1] == 'user-1'
         assert fake_chat_controller.user_ids[-1] == 'user-1'
+        assert fake_chat_controller.refresh_calls == 1
         assert fake_db.app_state[controller.USER_ID_KEY] == 'user-1'
 
     asyncio.run(scenario())
@@ -1257,8 +1263,8 @@ def test_contact_controller_load_contacts_and_groups_persist_local_search_cache(
         assert [item['display_name'] for item in fake_db.replaced_contacts[0]] == ['A Friend', 'Zoe']
         assert [item['region'] for item in fake_db.replaced_contacts[0]] == ['Shenzhen', 'Seoul']
         assert [item['id'] for item in fake_db.replaced_groups[0]] == ['group-1', 'group-2']
-        assert fake_db.replaced_groups[0][0]['member_search_text'] == 'Alice（地区：Shenzhen）'
-        assert fake_db.replaced_groups[0][0]['extra']['member_previews'] == ['Alice（地区：Shenzhen）']
+        assert fake_db.replaced_groups[0][0]['member_search_text'] == 'Alice(地区: Shenzhen)'
+        assert fake_db.replaced_groups[0][0]['extra']['member_previews'] == ['Alice(地区: Shenzhen)']
 
     asyncio.run(scenario())
 
@@ -1494,7 +1500,7 @@ def test_search_manager_search_all_uses_storage_boundaries(monkeypatch) -> None:
                 'name': 'Core Team',
                 'session_id': 'session-group-1',
                 'member_search_text': 'Alice Shenzhen',
-                'extra': {'member_previews': ['Alice（地区：Shenzhen）']},
+                'extra': {'member_previews': ['Alice(地区: Shenzhen)']},
             }
         ],
     )
@@ -1535,7 +1541,7 @@ def test_search_manager_group_member_match_uses_cached_member_previews(monkeypat
                 'name': 'Weekend Club',
                 'session_id': 'session-group-1',
                 'member_search_text': 'Alice Shenzhen',
-                'extra': {'member_previews': ['Alice（地区：Shenzhen）']},
+                'extra': {'member_previews': ['Alice(地区: Shenzhen)']},
             }
         ],
     )
@@ -2113,6 +2119,7 @@ def test_auth_controller_update_profile_can_reset_avatar(monkeypatch) -> None:
         assert fake_file_service.avatar_uploads == []
         assert fake_user_service.update_calls == []
         assert user['avatar_kind'] == 'default'
+        assert fake_chat_controller.refresh_calls == 1
         assert fake_db.app_state[controller.USER_ID_KEY] == 'user-1'
 
     asyncio.run(scenario())
@@ -2123,3 +2130,73 @@ def test_auth_controller_update_profile_can_reset_avatar(monkeypatch) -> None:
 
 
 
+
+
+def test_session_manager_profile_update_refreshes_direct_counterpart_presentation(monkeypatch) -> None:
+    class FakeSessionDb:
+        is_connected = True
+
+        def __init__(self) -> None:
+            self.saved_sessions: list[Session] = []
+
+        async def save_session(self, session: Session) -> None:
+            self.saved_sessions.append(session)
+
+        async def get_app_state(self, key: str):
+            if key == 'auth.user_profile':
+                return json.dumps({'id': 'alice', 'username': 'alice', 'nickname': 'Alice'})
+            if key == 'auth.user_id':
+                return 'alice'
+            return None
+
+    fake_db = FakeSessionDb()
+    fake_event_bus = FakeEventBus()
+
+    monkeypatch.setattr(session_manager_module, 'get_event_bus', lambda: fake_event_bus)
+    monkeypatch.setattr(session_manager_module, 'get_message_manager', lambda: object())
+    monkeypatch.setattr(session_manager_module, 'get_session_service', lambda: object())
+    monkeypatch.setattr(session_manager_module, 'get_database', lambda: fake_db)
+
+    async def scenario() -> None:
+        manager = session_manager_module.SessionManager()
+        session = Session(
+            session_id='session-1',
+            name='Bob',
+            session_type='direct',
+            participant_ids=['alice', 'bob'],
+            avatar=None,
+            extra={
+                'counterpart_id': 'bob',
+                'counterpart_username': 'bob',
+                'counterpart_avatar': '/uploads/bob-old.png',
+                'counterpart_gender': 'male',
+                'members': [
+                    {'id': 'alice', 'username': 'alice', 'nickname': 'Alice', 'avatar': '/uploads/alice.png', 'gender': 'female'},
+                    {'id': 'bob', 'username': 'bob', 'nickname': 'Bob', 'avatar': '/uploads/bob-old.png', 'gender': 'male'},
+                ],
+            },
+        )
+        manager._sessions[session.session_id] = session
+
+        await manager._on_profile_updated(
+            {
+                'session_id': 'session-1',
+                'user_id': 'bob',
+                'profile': {
+                    'id': 'bob',
+                    'username': 'bob',
+                    'nickname': 'Bobby',
+                    'display_name': 'Bobby',
+                    'avatar': '/uploads/bob-new.png',
+                    'gender': 'male',
+                },
+            }
+        )
+
+        assert session.name == 'Bobby'
+        assert session.extra['counterpart_avatar'] == '/uploads/bob-new.png'
+        assert session.extra['members'][1]['nickname'] == 'Bobby'
+        assert fake_db.saved_sessions and fake_db.saved_sessions[-1].session_id == 'session-1'
+        assert any(event == session_manager_module.SessionEvent.UPDATED for event, _ in fake_event_bus.events)
+
+    asyncio.run(scenario())

@@ -103,3 +103,71 @@ def test_create_group_accepts_blank_name_for_default_naming(client: TestClient, 
     payload = response.json()["data"]
     assert payload["name"] == ""
     assert payload["member_count"] == 2
+
+
+def test_group_owner_can_promote_and_demote_admin(client: TestClient, user_factory, auth_header) -> None:
+    owner = user_factory("role-owner", "Owner")
+    member = user_factory("role-member", "Member")
+
+    create_group_response = client.post(
+        "/api/v1/groups",
+        json={"name": "Ops Team", "member_ids": [member["user"]["id"]]},
+        headers=auth_header(owner["access_token"]),
+    )
+    assert create_group_response.status_code == 201
+    group_id = create_group_response.json()["data"]["id"]
+
+    promote_response = client.patch(
+        f"/api/v1/groups/{group_id}/members/{member['user']['id']}/role",
+        json={"role": "admin"},
+        headers=auth_header(owner["access_token"]),
+    )
+    assert promote_response.status_code == 200
+    promoted_group = promote_response.json()["data"]["group"]
+    promoted_member = next(item for item in promoted_group["members"] if item["id"] == member["user"]["id"])
+    assert promote_response.json()["data"]["status"] == "role_updated"
+    assert promoted_member["role"] == "admin"
+
+    demote_response = client.patch(
+        f"/api/v1/groups/{group_id}/members/{member['user']['id']}/role",
+        json={"role": "member"},
+        headers=auth_header(owner["access_token"]),
+    )
+    assert demote_response.status_code == 200
+    demoted_group = demote_response.json()["data"]["group"]
+    demoted_member = next(item for item in demoted_group["members"] if item["id"] == member["user"]["id"])
+    assert demoted_member["role"] == "member"
+
+
+def test_group_role_update_requires_owner_and_disallows_owner_role_change(client: TestClient, user_factory, auth_header) -> None:
+    owner = user_factory("role-guard-owner", "Owner")
+    member = user_factory("role-guard-member", "Member")
+
+    create_group_response = client.post(
+        "/api/v1/groups",
+        json={"name": "Ops Team", "member_ids": [member["user"]["id"]]},
+        headers=auth_header(owner["access_token"]),
+    )
+    assert create_group_response.status_code == 201
+    group_id = create_group_response.json()["data"]["id"]
+
+    forbidden_response = client.patch(
+        f"/api/v1/groups/{group_id}/members/{member['user']['id']}/role",
+        json={"role": "admin"},
+        headers=auth_header(member["access_token"]),
+    )
+    assert forbidden_response.status_code == 403
+
+    invalid_role_response = client.patch(
+        f"/api/v1/groups/{group_id}/members/{member['user']['id']}/role",
+        json={"role": "owner"},
+        headers=auth_header(owner["access_token"]),
+    )
+    assert invalid_role_response.status_code == 422
+
+    owner_change_response = client.patch(
+        f"/api/v1/groups/{group_id}/members/{owner['user']['id']}/role",
+        json={"role": "member"},
+        headers=auth_header(owner["access_token"]),
+    )
+    assert owner_change_response.status_code == 403

@@ -95,7 +95,7 @@ class SessionDelegate(QStyledItemDelegate):
         time_text = time_fm.elidedText(time_text, Qt.TextElideMode.ElideRight, time_width)
         muted = bool(getattr(session, "extra", {}).get("is_muted", False))
         mute_icon_size = 10
-        mute_slot_width = mute_icon_size + 2 if muted else 0
+        mute_slot_width = mute_icon_size + 8 if muted else 0
 
         unread_text = self._format_unread(session.unread_count)
         unread_width = 0
@@ -138,7 +138,7 @@ class SessionDelegate(QStyledItemDelegate):
             prefix_font = self._ui_font(13)
             prefix_fm = QFontMetrics(prefix_font)
             prefix_width = prefix_fm.horizontalAdvance(prefix_text) + 6
-            body_available = max(32, preview_available - prefix_width)
+            body_available = max(0, preview_available - prefix_width)
 
             painter.setFont(prefix_font)
             painter.setPen(prefix_color)
@@ -152,7 +152,7 @@ class SessionDelegate(QStyledItemDelegate):
             painter.setPen(preview_color)
             self._draw_preview_runs(
                 painter,
-                QRect(content_left + prefix_width, preview_y - 1, body_available + 12, 28),
+                QRect(content_left + prefix_width, preview_y - 1, body_available, 28),
                 draft_preview,
                 preview_color,
             )
@@ -160,7 +160,7 @@ class SessionDelegate(QStyledItemDelegate):
             painter.setPen(preview_color)
             self._draw_preview_runs(
                 painter,
-                QRect(content_left, preview_y - 1, preview_available + 12, 28),
+                QRect(content_left, preview_y - 1, preview_available, 28),
                 preview_text,
                 preview_color,
             )

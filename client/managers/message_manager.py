@@ -18,7 +18,7 @@ from client.core.logging import setup_logging
 from client.events.contact_events import ContactEvent
 from client.events.event_bus import get_event_bus
 from client.managers.connection_manager import get_connection_manager
-from client.models.message import ChatMessage, MessageStatus, MessageType, build_attachment_extra, sanitize_outbound_message_extra
+from client.models.message import ChatMessage, MessageStatus, MessageType, build_attachment_extra, merge_sender_profile_extra, sanitize_outbound_message_extra
 from client.services.chat_service import get_chat_service
 from client.services.file_service import get_file_service
 from client.storage.database import get_database
@@ -43,6 +43,7 @@ class MessageEvent:
     RECALLED = "message_recalled"
     EDITED = "message_edited"
     DELETED = "message_deleted"
+    PROFILE_UPDATED = "message_profile_updated"
 
 
 @dataclass
@@ -417,6 +418,9 @@ class MessageManager:
         elif msg_type == "contact_refresh":
             await self._process_contact_refresh(data)
 
+        elif msg_type == "user_profile_update":
+            await self._process_user_profile_update(data)
+
         else:
             logger.debug(f"Unknown message type: {msg_type}")
     
@@ -628,30 +632,7 @@ class MessageManager:
         sender_profile: Any,
     ) -> dict[str, Any]:
         """Merge one authoritative sender profile into message extra fields."""
-        if not isinstance(sender_profile, dict):
-            return extra
-
-        merged = dict(extra or {})
-        mapping = {
-            "sender_avatar": sender_profile.get("avatar", ""),
-            "sender_gender": sender_profile.get("gender", ""),
-            "sender_username": sender_profile.get("username", ""),
-            "sender_nickname": sender_profile.get("nickname", ""),
-        }
-        for key, raw_value in mapping.items():
-            value = str(raw_value or "").strip()
-            if value:
-                merged[key] = value
-
-        sender_name = (
-            str(sender_profile.get("display_name", "") or "").strip()
-            or str(sender_profile.get("nickname", "") or "").strip()
-            or str(sender_profile.get("username", "") or "").strip()
-            or str(sender_profile.get("id", "") or "").strip()
-        )
-        if sender_name:
-            merged["sender_name"] = sender_name
-        return merged
+        return merge_sender_profile_extra(extra, sender_profile if isinstance(sender_profile, dict) else None)
 
     async def _apply_current_user_sender_profile(self, message: ChatMessage) -> None:
         """Stamp one local self message with the current authenticated user profile."""
@@ -961,6 +942,34 @@ class MessageManager:
             {
                 "reason": str(payload.get("reason", "") or "contact_refresh"),
                 "payload": dict(payload),
+                "message": dict(data or {}),
+            },
+        )
+
+    async def _process_user_profile_update(self, data: dict) -> None:
+        """Apply one authoritative user-profile update across cached messages and UI listeners."""
+        payload = data.get("data", {}) if isinstance(data.get("data"), dict) else {}
+        session_id = str(payload.get("session_id", "") or "")
+        user_id = str(payload.get("user_id", "") or "")
+        profile = dict(payload.get("profile") or {}) if isinstance(payload.get("profile"), dict) else {}
+        if not user_id or not profile:
+            return
+
+        changed_message_ids = await self._db.apply_sender_profile_update(session_id, user_id, profile)
+        event_payload = {
+            "session_id": session_id,
+            "user_id": user_id,
+            "profile": profile,
+            "session_avatar": str(payload.get("session_avatar", "") or ""),
+            "event_seq": int(payload.get("event_seq", 0) or 0),
+            "changed_message_ids": changed_message_ids,
+        }
+        await self._event_bus.emit(MessageEvent.PROFILE_UPDATED, event_payload)
+        await self._event_bus.emit(
+            ContactEvent.SYNC_REQUIRED,
+            {
+                "reason": "user_profile_update",
+                "payload": dict(event_payload),
                 "message": dict(data or {}),
             },
         )

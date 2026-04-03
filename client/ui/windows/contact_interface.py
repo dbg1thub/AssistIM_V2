@@ -157,6 +157,30 @@ class ContactListItem(QWidget):
         layout.addWidget(self.avatar, 0, Qt.AlignmentFlag.AlignVCenter)
         layout.addLayout(text_layout, 1)
 
+    def update_content(
+        self,
+        *,
+        title: str,
+        subtitle: str = "",
+        avatar: str = "",
+        gender: str = "",
+        seed_user_id: str = "",
+        seed_username: str = "",
+    ) -> None:
+        self.title_label.setText(title)
+        self.subtitle_label.setText(subtitle)
+        self.subtitle_label.setVisible(bool(subtitle))
+        self.avatar.set_avatar(
+            avatar,
+            title,
+            gender=gender,
+            seed=profile_avatar_seed(
+                user_id=seed_user_id or self.item_id,
+                username=seed_username,
+                display_name=title,
+            ),
+        )
+
     def set_selected(self, selected: bool) -> None:
         self._selected = selected
         self.update()
@@ -236,33 +260,58 @@ class RequestListItem(QWidget):
         text_layout.addWidget(self.title_label)
         text_layout.addWidget(self.message_label)
 
-        action_layout = QVBoxLayout()
-        action_layout.setContentsMargins(0, 0, 0, 0)
-        action_layout.setSpacing(8)
-        action_layout.addStretch(1)
-        if request.can_review(current_user_id):
+        self.action_layout = QVBoxLayout()
+        self.action_layout.setContentsMargins(0, 0, 0, 0)
+        self.action_layout.setSpacing(8)
+        self._render_actions()
+
+        layout.addWidget(self.avatar, 0, Qt.AlignmentFlag.AlignVCenter)
+        layout.addLayout(text_layout, 1)
+        layout.addLayout(self.action_layout, 0)
+
+    def _status_text(self) -> str:
+        return _request_status_text(self.request.status)
+
+    def _render_actions(self) -> None:
+        while self.action_layout.count():
+            item = self.action_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        self.action_layout.addStretch(1)
+        if self.request.can_review(self.current_user_id):
             accept_button = PrimaryPushButton(tr("common.accept", "Accept"), self)
             reject_button = PushButton(tr("common.reject", "Reject"), self)
             accept_button.setFixedWidth(76)
             reject_button.setFixedWidth(76)
             accept_button.clicked.connect(lambda: self.accept_clicked.emit(self.request.id))
             reject_button.clicked.connect(lambda: self.reject_clicked.emit(self.request.id))
-            action_layout.addWidget(accept_button, 0, Qt.AlignmentFlag.AlignHCenter)
-            action_layout.addWidget(reject_button, 0, Qt.AlignmentFlag.AlignHCenter)
+            self.action_layout.addWidget(accept_button, 0, Qt.AlignmentFlag.AlignHCenter)
+            self.action_layout.addWidget(reject_button, 0, Qt.AlignmentFlag.AlignHCenter)
         else:
             status_button = PushButton(self._status_text(), self)
             status_button.setObjectName("requestStatusButton")
             status_button.setFixedWidth(88)
             status_button.setEnabled(False)
-            action_layout.addWidget(status_button, 0, Qt.AlignmentFlag.AlignHCenter)
-        action_layout.addStretch(1)
+            self.action_layout.addWidget(status_button, 0, Qt.AlignmentFlag.AlignHCenter)
+        self.action_layout.addStretch(1)
 
-        layout.addWidget(self.avatar, 0, Qt.AlignmentFlag.AlignVCenter)
-        layout.addLayout(text_layout, 1)
-        layout.addLayout(action_layout, 0)
-
-    def _status_text(self) -> str:
-        return _request_status_text(self.request.status)
+    def update_request(self, request: FriendRequestRecord, current_user_id: str) -> None:
+        self.request = request
+        self.current_user_id = current_user_id
+        counterpart_name = request.counterpart_name(current_user_id)
+        self.title_label.setText(counterpart_name)
+        self.message_label.setText(_request_message_text(request, current_user_id))
+        self.avatar.set_avatar(
+            request.counterpart_avatar(current_user_id),
+            fallback=counterpart_name,
+            gender=request.counterpart_gender(current_user_id),
+            seed=profile_avatar_seed(
+                user_id=request.counterpart_id(current_user_id),
+                display_name=counterpart_name,
+            ),
+        )
+        self._render_actions()
 
     def set_selected(self, selected: bool) -> None:
         self._selected = selected
@@ -1137,7 +1186,7 @@ class AcrylicToolWindow(QWidget):
 
 
 class AddFriendDialog(FluentWidget):
-    friend_request_sent = Signal(str)
+    friend_request_sent = Signal(object)
 
     def __init__(self, controller, existing_ids: set[str], current_user_id: str = "", parent=None):
         super().__init__(parent=parent)
@@ -1295,7 +1344,7 @@ class AddFriendDialog(FluentWidget):
             parent=self,
             duration=1800,
         )
-        self.friend_request_sent.emit(status)
+        self.friend_request_sent.emit(dict(payload or {}))
         self.close()
 
     def _on_finished(self, _result: int) -> None:
@@ -1411,6 +1460,9 @@ class ContactInterface(QWidget):
         self._destroyed = False
         self._event_bus = get_event_bus()
         self._friend_section_headers: dict[str, QWidget] = {}
+        self._friend_section_widgets: dict[str, QWidget] = {}
+        self._friend_section_layouts: dict[str, QVBoxLayout] = {}
+        self._friend_item_sections: dict[str, str] = {}
         self._setup_ui()
         self._connect_signals()
         self.destroyed.connect(self._on_destroyed)
@@ -1552,9 +1604,14 @@ class ContactInterface(QWidget):
         logger.info("Contact interface reload requested")
         self._set_load_task(self._reload_data_async())
 
-    def _on_contact_sync_required(self, _payload: object) -> None:
-        """Refresh contact data when realtime friend-domain mutations arrive."""
+    def _on_contact_sync_required(self, payload: object) -> None:
+        """Refresh only the affected contact-domain slices when realtime mutations arrive."""
         if self._destroyed:
+            return
+        event_payload = dict(payload or {}) if isinstance(payload, dict) else {}
+        reason = str(event_payload.get("reason", "") or "")
+        if reason == "user_profile_update":
+            self._apply_profile_update_payload(dict(event_payload.get("payload") or {}))
             return
         self.reload_data()
 
@@ -1564,6 +1621,436 @@ class ContactInterface(QWidget):
             return False
         summary_label = getattr(self, "summary_label", None)
         return summary_label is not None and is_valid_qt_object(summary_label)
+
+    def refresh_groups_after_profile_change(self) -> None:
+        """Refresh only the group slice after the current user changes their profile."""
+        if self._destroyed or not self._can_update_contact_ui():
+            return
+        self._schedule_keyed_ui_task(
+            ("refresh_groups_after_profile_change", self._current_user_id or "self"),
+            self._refresh_groups_only(),
+            "refresh groups after profile change",
+        )
+
+    async def _refresh_groups_only(self) -> None:
+        self._groups = await self._controller.load_groups()
+        if self._destroyed:
+            return
+        self._update_summary_counts()
+        self._build_groups_page()
+        if self._current_page == "groups":
+            self._restore_selection(full_reload=False)
+
+    def _current_detail_moments(self) -> list[MomentRecord]:
+        moments_panel = getattr(self.detail_panel, "moments_panel", None)
+        if moments_panel is None:
+            return []
+        return list(getattr(moments_panel, "_moments", []) or [])
+
+    def _update_friend_item_view(self, contact: ContactRecord) -> None:
+        item = self._friend_items.get(contact.id)
+        if item is None:
+            return
+        item.update_content(
+            title=contact.display_name,
+            subtitle=self._friend_assistim_line(contact),
+            avatar=contact.avatar,
+            gender=contact.gender,
+            seed_user_id=contact.id,
+            seed_username=contact.username,
+        )
+
+    def _create_friend_item(self, contact: ContactRecord) -> ContactListItem:
+        item = ContactListItem(
+            contact.id,
+            contact.display_name,
+            self._friend_assistim_line(contact),
+            "",
+            contact.avatar,
+            left_padding=CONTACT_SECTION_INSET,
+        )
+        item.clicked.connect(self._select_friend)
+        return item
+
+    def _ensure_friend_section_view(self, letter: str) -> QVBoxLayout:
+        layout = self._friend_section_layouts.get(letter)
+        if layout is not None:
+            return layout
+        section = QWidget(self.friends_container)
+        section_layout = QVBoxLayout(section)
+        section_layout.setContentsMargins(0, 0, 0, 0)
+        section_layout.setSpacing(0)
+        header = ContactSectionHeader(letter, section)
+        section_layout.addWidget(header)
+        insert_at = sum(1 for existing_letter in self._friend_section_widgets if existing_letter < letter)
+        self.friends_layout.insertWidget(insert_at, section)
+        self._friend_section_headers[letter] = header
+        self._friend_section_widgets[letter] = section
+        self._friend_section_layouts[letter] = section_layout
+        return section_layout
+
+    def _insert_friend_item_view(self, contact: ContactRecord) -> None:
+        if contact.id in self._friend_items:
+            self._update_friend_item_view(contact)
+            return
+        if not self._friend_items and not self._friend_section_widgets:
+            self._clear_layout(self.friends_layout)
+        letter = self._controller.sort_letter(contact.display_name)
+        section_layout = self._ensure_friend_section_view(letter)
+        section_contacts = [item for item in self._contacts if self._controller.sort_letter(item.display_name) == letter]
+        insert_at = 1 + next(
+            (
+                index
+                for index, item in enumerate(section_contacts)
+                if item.id == contact.id
+            ),
+            len(section_contacts) - 1,
+        )
+        widget = self._create_friend_item(contact)
+        section_layout.insertWidget(insert_at, widget)
+        self._friend_items[contact.id] = widget
+        self._friend_item_sections[contact.id] = letter
+
+    def _remove_friend_item_view(self, contact_id: str) -> None:
+        item = self._friend_items.pop(contact_id, None)
+        letter = self._friend_item_sections.pop(contact_id, "")
+        if item is not None:
+            item.deleteLater()
+        if not letter:
+            return
+        section_layout = self._friend_section_layouts.get(letter)
+        if section_layout is None or section_layout.count() > 1:
+            if section_layout is None:
+                return
+            remaining_items = [widget_id for widget_id, widget_letter in self._friend_item_sections.items() if widget_letter == letter]
+            if remaining_items:
+                return
+        section = self._friend_section_widgets.pop(letter, None)
+        self._friend_section_headers.pop(letter, None)
+        self._friend_section_layouts.pop(letter, None)
+        if section is not None:
+            section.deleteLater()
+        if not self._friend_items:
+            self._add_empty_state(
+                self.friends_layout,
+                AppIcon.PEOPLE,
+                tr("contact.sidebar.empty_friends", "No friends yet"),
+            )
+
+    def _update_group_item_view(self, group: GroupRecord) -> None:
+        item = self._group_items.get(group.id)
+        if item is None:
+            return
+        item.update_content(
+            title=group.name,
+            subtitle=tr("contact.group.member_summary", "{count} members", count=group.member_count),
+            avatar=group.avatar,
+            seed_user_id=group.id,
+        )
+
+    def _update_request_item_view(self, request: FriendRequestRecord) -> None:
+        item = self._request_items.get(request.id)
+        if item is None:
+            return
+        item.update_request(request, self._current_user_id)
+
+    def _ordered_requests(self) -> list[FriendRequestRecord]:
+        incoming = [item for item in self._requests if item.is_incoming(self._current_user_id)]
+        outgoing = [item for item in self._requests if item.is_outgoing(self._current_user_id)]
+        unknown = [item for item in self._requests if not item.is_incoming(self._current_user_id) and not item.is_outgoing(self._current_user_id)]
+        return incoming + outgoing + unknown
+
+    def _create_group_item(self, group: GroupRecord) -> ContactListItem:
+        item = ContactListItem(
+            group.id,
+            group.name,
+            tr("contact.group.member_summary", "{count} members", count=group.member_count),
+            tr("contact.group.badge", "Group"),
+            group.avatar,
+        )
+        item.clicked.connect(self._select_group)
+        return item
+
+    def _create_request_item(self, request: FriendRequestRecord) -> RequestListItem:
+        item = RequestListItem(request, self._current_user_id, self.requests_container)
+        if request.can_review(self._current_user_id):
+            item.accept_clicked.connect(self._accept_request)
+            item.reject_clicked.connect(self._reject_request)
+        item.selected.connect(self._select_request)
+        return item
+
+    def _insert_group_item_view(self, group: GroupRecord) -> None:
+        if group.id in self._group_items:
+            self._update_group_item_view(group)
+            return
+        if not self._group_items:
+            self._clear_layout(self.groups_layout)
+            item = self._create_group_item(group)
+            self.groups_layout.addWidget(item)
+            self.groups_layout.addStretch(1)
+            self._group_items[group.id] = item
+            return
+        ordered_ids = [item.id for item in self._groups]
+        insert_at = ordered_ids.index(group.id)
+        item = self._create_group_item(group)
+        self.groups_layout.insertWidget(insert_at, item)
+        self._group_items[group.id] = item
+
+    def _insert_request_item_view(self, request: FriendRequestRecord) -> None:
+        if request.id in self._request_items:
+            self._update_request_item_view(request)
+            return
+        if not self._request_items:
+            self._clear_layout(self.requests_layout)
+            item = self._create_request_item(request)
+            self.requests_layout.addWidget(item)
+            self.requests_layout.addStretch(1)
+            self._request_items[request.id] = item
+            return
+        ordered_ids = [item.id for item in self._ordered_requests()]
+        insert_at = ordered_ids.index(request.id)
+        item = self._create_request_item(request)
+        self.requests_layout.insertWidget(insert_at, item)
+        self._request_items[request.id] = item
+
+    @staticmethod
+    def _request_record_from_payload(payload: dict[str, object]) -> FriendRequestRecord:
+        from_user = dict(payload.get("from_user") or {}) if isinstance(payload.get("from_user"), dict) else {}
+        to_user = dict(payload.get("to_user") or {}) if isinstance(payload.get("to_user"), dict) else {}
+        return FriendRequestRecord(
+            id=str(payload.get("request_id", "") or payload.get("id", "") or ""),
+            sender_id=str(payload.get("sender_id", "") or from_user.get("id", "") or ""),
+            receiver_id=str(payload.get("receiver_id", "") or to_user.get("id", "") or ""),
+            message=str(payload.get("message", "") or ""),
+            status=str(payload.get("status", "pending") or "pending"),
+            created_at=str(payload.get("created_at", "") or ""),
+            sender_name=str(from_user.get("nickname", "") or from_user.get("username", "") or payload.get("sender_name", "") or ""),
+            receiver_name=str(to_user.get("nickname", "") or to_user.get("username", "") or payload.get("receiver_name", "") or ""),
+            sender_avatar=str(from_user.get("avatar", "") or payload.get("sender_avatar", "") or ""),
+            receiver_avatar=str(to_user.get("avatar", "") or payload.get("receiver_avatar", "") or ""),
+            sender_gender=str(from_user.get("gender", "") or payload.get("sender_gender", "") or ""),
+            receiver_gender=str(to_user.get("gender", "") or payload.get("receiver_gender", "") or ""),
+        )
+
+    def _upsert_request_record(self, request: FriendRequestRecord) -> None:
+        for index, existing in enumerate(list(self._requests)):
+            if existing.id != request.id:
+                continue
+            self._requests[index] = request
+            self._update_request_item_view(request)
+            if self._selected_key == ("request", request.id):
+                self.detail_panel.set_request(request, self._current_user_id, self._current_detail_moments())
+            return
+        self._requests.insert(0, request)
+        if self._request_items or self._current_page == "requests":
+            self._insert_request_item_view(request)
+            if self._current_page == "requests" and request.id in self._request_items:
+                self._select_request(request.id, force=True)
+
+    def _contact_record_from_request(self, request: FriendRequestRecord) -> ContactRecord:
+        counterpart_id = request.counterpart_id(self._current_user_id)
+        counterpart_name = request.counterpart_name(self._current_user_id)
+        counterpart_avatar = request.counterpart_avatar(self._current_user_id)
+        counterpart_gender = request.counterpart_gender(self._current_user_id)
+        current_user_is_receiver = request.receiver_id == self._current_user_id
+        raw_username = request.sender_name if current_user_is_receiver else request.receiver_name
+        username = str(raw_username or "").strip()
+        nickname = counterpart_name if counterpart_name and counterpart_name != username else ""
+        return ContactRecord(
+            id=counterpart_id,
+            name=username or counterpart_name,
+            username=username,
+            nickname=nickname,
+            avatar=counterpart_avatar,
+            remark="",
+            assistim_id=username,
+            region="",
+            signature="",
+            email="",
+            phone="",
+            birthday="",
+            gender=counterpart_gender,
+            status="",
+            category="friend",
+            extra={},
+        )
+
+    def _upsert_contact_record(self, contact: ContactRecord, *, select_after_upsert: bool = False) -> None:
+        replaced = False
+        previous_sort_key: tuple[str, str] | None = None
+        for index, existing in enumerate(list(self._contacts)):
+            if existing.id != contact.id:
+                continue
+            previous_sort_key = self._friend_sort_key(existing)
+            merged = ContactRecord(
+                id=existing.id,
+                name=contact.name or existing.name,
+                username=contact.username or existing.username,
+                nickname=contact.nickname or existing.nickname,
+                avatar=contact.avatar or existing.avatar,
+                remark=existing.remark,
+                assistim_id=contact.assistim_id or existing.assistim_id,
+                region=contact.region or existing.region,
+                signature=contact.signature or existing.signature,
+                email=contact.email or existing.email,
+                phone=contact.phone or existing.phone,
+                birthday=contact.birthday or existing.birthday,
+                gender=contact.gender or existing.gender,
+                status=contact.status or existing.status,
+                category=existing.category,
+                extra={**dict(existing.extra or {}), **dict(contact.extra or {})},
+            )
+            self._contacts[index] = merged
+            replaced = True
+            contact = merged
+            break
+        if not replaced:
+            self._contacts.append(contact)
+
+        self._contacts.sort(key=self._friend_sort_key)
+        self._update_summary_counts()
+        if self._friend_items or self._current_page == "friends":
+            current_sort_key = self._friend_sort_key(contact)
+            if previous_sort_key is not None and previous_sort_key != current_sort_key:
+                self._remove_friend_item_view(contact.id)
+                self._insert_friend_item_view(contact)
+            elif previous_sort_key is None:
+                self._insert_friend_item_view(contact)
+            else:
+                self._update_friend_item_view(contact)
+
+        if select_after_upsert:
+            self._activate_page("friends")
+            if contact.id in self._friend_items:
+                self._select_friend(contact.id, force=True)
+                return
+
+        if self._current_page == "friends":
+            self._restore_selection(full_reload=False)
+
+    def _friend_sort_key(self, contact: ContactRecord) -> tuple[str, str]:
+        """Return the sidebar ordering key for one friend entry."""
+        display_name = contact.display_name
+        return self._controller.sort_letter(display_name), display_name.lower()
+
+    def _apply_profile_update_payload(self, payload: dict[str, object]) -> None:
+        """Apply one realtime user-profile update without reloading the whole contact page."""
+        user_id = str(payload.get("user_id", "") or "").strip()
+        if not user_id:
+            return
+
+        profile = dict(payload.get("profile") or {}) if isinstance(payload.get("profile"), dict) else {}
+        session_id = str(payload.get("session_id", "") or "").strip()
+        session_avatar = str(payload.get("session_avatar", "") or "").strip()
+        current_moments = self._current_detail_moments()
+
+        contacts_changed = False
+
+        for index, contact in enumerate(list(self._contacts)):
+            if contact.id != user_id:
+                continue
+            previous_sort_key = self._friend_sort_key(contact)
+            updated = ContactRecord(
+                id=contact.id,
+                name=str(profile.get("username", "") or contact.name or contact.username),
+                username=str(profile.get("username", "") or contact.username),
+                nickname=str(profile.get("nickname", "") or contact.nickname),
+                avatar=str(profile.get("avatar", "") or contact.avatar),
+                remark=contact.remark,
+                assistim_id=contact.assistim_id,
+                region=str(profile.get("region", "") or contact.region),
+                signature=str(profile.get("signature", "") or contact.signature),
+                email=contact.email,
+                phone=contact.phone,
+                birthday=contact.birthday,
+                gender=str(profile.get("gender", "") or contact.gender),
+                status=str(profile.get("status", "") or contact.status),
+                category=contact.category,
+                extra={**dict(contact.extra or {}), **profile},
+            )
+            self._contacts[index] = updated
+            contacts_changed = True
+            self._contacts.sort(key=self._friend_sort_key)
+            if previous_sort_key != self._friend_sort_key(updated):
+                self._remove_friend_item_view(updated.id)
+                self._insert_friend_item_view(updated)
+            else:
+                self._update_friend_item_view(updated)
+            if self._selected_key == ("friend", updated.id):
+                self.detail_panel.set_contact(updated, current_moments)
+
+        if contacts_changed and self._current_page == "friends":
+            self._restore_selection(full_reload=False)
+
+        for index, group in enumerate(list(self._groups)):
+            if session_id and group.session_id != session_id:
+                continue
+            if not session_avatar or group.avatar == session_avatar:
+                continue
+            updated = GroupRecord(
+                id=group.id,
+                name=group.name,
+                avatar=session_avatar,
+                owner_id=group.owner_id,
+                session_id=group.session_id,
+                member_count=group.member_count,
+                created_at=group.created_at,
+                extra=dict(group.extra or {}),
+            )
+            self._groups[index] = updated
+            self._update_group_item_view(updated)
+            if self._selected_key == ("group", updated.id):
+                self.detail_panel.set_group(updated, current_moments)
+
+        for index, request in enumerate(list(self._requests)):
+            updated_request = request
+            changed = False
+            if request.sender_id == user_id:
+                sender_name = str(profile.get("nickname", "") or profile.get("username", "") or request.sender_name)
+                sender_avatar = str(profile.get("avatar", "") or request.sender_avatar)
+                sender_gender = str(profile.get("gender", "") or request.sender_gender)
+                if (sender_name, sender_avatar, sender_gender) != (request.sender_name, request.sender_avatar, request.sender_gender):
+                    updated_request = FriendRequestRecord(
+                        id=request.id,
+                        sender_id=request.sender_id,
+                        receiver_id=request.receiver_id,
+                        message=request.message,
+                        status=request.status,
+                        created_at=request.created_at,
+                        sender_name=sender_name,
+                        receiver_name=request.receiver_name,
+                        sender_avatar=sender_avatar,
+                        receiver_avatar=request.receiver_avatar,
+                        sender_gender=sender_gender,
+                        receiver_gender=request.receiver_gender,
+                    )
+                    changed = True
+            elif request.receiver_id == user_id:
+                receiver_name = str(profile.get("nickname", "") or profile.get("username", "") or request.receiver_name)
+                receiver_avatar = str(profile.get("avatar", "") or request.receiver_avatar)
+                receiver_gender = str(profile.get("gender", "") or request.receiver_gender)
+                if (receiver_name, receiver_avatar, receiver_gender) != (request.receiver_name, request.receiver_avatar, request.receiver_gender):
+                    updated_request = FriendRequestRecord(
+                        id=request.id,
+                        sender_id=request.sender_id,
+                        receiver_id=request.receiver_id,
+                        message=request.message,
+                        status=request.status,
+                        created_at=request.created_at,
+                        sender_name=request.sender_name,
+                        receiver_name=receiver_name,
+                        sender_avatar=request.sender_avatar,
+                        receiver_avatar=receiver_avatar,
+                        sender_gender=request.sender_gender,
+                        receiver_gender=receiver_gender,
+                    )
+                    changed = True
+            if not changed:
+                continue
+            self._requests[index] = updated_request
+            self._update_request_item_view(updated_request)
+            if self._selected_key == ("request", updated_request.id):
+                self.detail_panel.set_request(updated_request, self._current_user_id, current_moments)
 
     async def _reload_data_async(self) -> None:
         if not self._can_update_contact_ui():
@@ -1644,34 +2131,6 @@ class ContactInterface(QWidget):
             )
         )
 
-    async def _refresh_requests_only(self, *, focus_request_id: str = "") -> None:
-        self._requests = await self._controller.load_requests()
-        if self._destroyed:
-            return
-        self._update_summary_counts()
-        self._build_requests_page()
-        self._activate_page("requests")
-        if focus_request_id and focus_request_id in self._request_items:
-            self._select_request(focus_request_id, force=True)
-            return
-        self._restore_selection(full_reload=False)
-
-    async def _refresh_contacts_and_requests(self, *, focus_page: str, focus_friend_id: str = "") -> None:
-        self._contacts = await self._controller.load_contacts()
-        if self._destroyed:
-            return
-        self._requests = await self._controller.load_requests()
-        if self._destroyed:
-            return
-        self._update_summary_counts()
-        self._build_friends_page()
-        self._build_requests_page()
-        self._activate_page(focus_page)
-        if focus_page == "friends" and focus_friend_id and focus_friend_id in self._friend_items:
-            self._select_friend(focus_friend_id, force=True)
-            return
-        self._restore_selection(full_reload=False)
-
     @staticmethod
     def _coerce_group_record(group: object) -> GroupRecord:
         if isinstance(group, GroupRecord):
@@ -1720,11 +2179,6 @@ class ContactInterface(QWidget):
         flyout_view = self._show_search_flyout()
         if flyout_view is not None:
             flyout_view.set_results(keyword, results)
-
-    def _clear_search_results_view(self) -> None:
-        """Clear search results without tearing down the anchored flyout."""
-        if self._search_flyout_view is not None:
-            self._search_flyout_view.clear_results()
 
     def _on_search_result_activated(self, payload: object) -> None:
         """Route one grouped-search result into the shared chat-opening flow."""
@@ -1807,6 +2261,9 @@ class ContactInterface(QWidget):
         self._clear_layout(self.friends_layout)
         self._friend_items.clear()
         self._friend_section_headers.clear()
+        self._friend_section_widgets.clear()
+        self._friend_section_layouts.clear()
+        self._friend_item_sections.clear()
         grouped = self._controller.group_contacts(self._contacts)
         if not self._contacts:
             self._add_empty_state(
@@ -1816,21 +2273,9 @@ class ContactInterface(QWidget):
             )
             return
         for letter, contacts in grouped.items():
-            header = ContactSectionHeader(letter, self.friends_container)
-            self.friends_layout.addWidget(header)
-            self._friend_section_headers[letter] = header
+            self._ensure_friend_section_view(letter)
             for contact in contacts:
-                item = ContactListItem(
-                    contact.id,
-                    contact.display_name,
-                    self._friend_assistim_line(contact),
-                    "",
-                    contact.avatar,
-                    left_padding=CONTACT_SECTION_INSET,
-                )
-                item.clicked.connect(self._select_friend)
-                self.friends_layout.addWidget(item)
-                self._friend_items[contact.id] = item
+                self._insert_friend_item_view(contact)
         self.friends_layout.addStretch(1)
 
     def _build_groups_page(self) -> None:
@@ -1844,14 +2289,7 @@ class ContactInterface(QWidget):
             )
             return
         for group in self._groups:
-            item = ContactListItem(
-                group.id,
-                group.name,
-                tr("contact.group.member_summary", "{count} members", count=group.member_count),
-                tr("contact.group.badge", "Group"),
-                group.avatar,
-            )
-            item.clicked.connect(self._select_group)
+            item = self._create_group_item(group)
             self.groups_layout.addWidget(item)
             self._group_items[group.id] = item
         self.groups_layout.addStretch(1)
@@ -1872,11 +2310,7 @@ class ContactInterface(QWidget):
         unknown = [item for item in self._requests if not item.is_incoming(self._current_user_id) and not item.is_outgoing(self._current_user_id)]
         ordered_requests = incoming + outgoing + unknown
         for request in ordered_requests:
-            item = RequestListItem(request, self._current_user_id, self.requests_container)
-            if request.can_review(self._current_user_id):
-                item.accept_clicked.connect(self._accept_request)
-                item.reject_clicked.connect(self._reject_request)
-            item.selected.connect(self._select_request)
+            item = self._create_request_item(request)
             self.requests_layout.addWidget(item)
             self._request_items[request.id] = item
         self.requests_layout.addStretch(1)
@@ -1969,14 +2403,14 @@ class ContactInterface(QWidget):
         )
 
     async def _accept_request_async(self, request_id: str) -> None:
-        request = next((item for item in self._requests if item.id == request_id), None)
-        counterpart_id = request.counterpart_id(self._current_user_id) if request else ""
         try:
-            await self._controller.accept_request(request_id)
-            await self._refresh_contacts_and_requests(focus_page="friends", focus_friend_id=counterpart_id)
+            payload = await self._controller.accept_request(request_id)
         except Exception as exc:
             InfoBar.error(tr("contact.request.tab_title", "New Friends"), str(exc), parent=self.window(), duration=2200)
             return
+        updated_request = self._request_record_from_payload(dict(payload or {}))
+        self._upsert_request_record(updated_request)
+        self._upsert_contact_record(self._contact_record_from_request(updated_request), select_after_upsert=True)
         InfoBar.success(
             tr("contact.request.tab_title", "New Friends"),
             tr("contact.request.accepted", "Friend request accepted."),
@@ -1996,11 +2430,12 @@ class ContactInterface(QWidget):
 
     async def _reject_request_async(self, request_id: str) -> None:
         try:
-            await self._controller.reject_request(request_id)
-            await self._refresh_requests_only()
+            payload = await self._controller.reject_request(request_id)
         except Exception as exc:
             InfoBar.error(tr("contact.request.tab_title", "New Friends"), str(exc), parent=self.window(), duration=2200)
             return
+        self._upsert_request_record(self._request_record_from_payload(dict(payload or {})))
+        self._update_summary_counts()
         InfoBar.success(
             tr("contact.request.tab_title", "New Friends"),
             tr("contact.request.rejected", "Friend request rejected."),
@@ -2053,21 +2488,22 @@ class ContactInterface(QWidget):
         dialog.raise_()
         dialog.activateWindow()
 
-    def _on_friend_request_sent(self, status: str = "pending") -> None:
+    def _on_friend_request_sent(self, payload: object) -> None:
         """Refresh only the affected sidebar slices after a friend action dialog completes."""
-        if status == "accepted":
-            self._schedule_keyed_ui_task(
-                ("refresh_contacts_requests", "friend_request_sent"),
-                self._refresh_contacts_and_requests(focus_page="friends"),
-                "refresh contacts after friend request",
-            )
+        request_payload = dict(payload or {}) if isinstance(payload, dict) else {}
+        if not request_payload:
             return
-
-        self._schedule_keyed_ui_task(
-            ("refresh_requests", "friend_request_sent"),
-            self._refresh_requests_only(),
-            "refresh requests after friend request",
-        )
+        request = self._request_record_from_payload(request_payload)
+        self._upsert_request_record(request)
+        self._update_summary_counts()
+        if request.status == "accepted":
+            self._upsert_contact_record(self._contact_record_from_request(request), select_after_upsert=True)
+            return
+        self._activate_page("requests")
+        if request.id in self._request_items:
+            self._select_request(request.id, force=True)
+        else:
+            self._restore_selection(full_reload=False)
 
     def _on_group_created(self, group: object) -> None:
         """Switch to groups, merge the new group locally, and jump into the new group chat."""
@@ -2076,8 +2512,8 @@ class ContactInterface(QWidget):
         self._groups.append(created_group)
         self._groups.sort(key=lambda item: item.name.lower())
         self._update_summary_counts()
-        self._build_groups_page()
         self._activate_page("groups")
+        self._insert_group_item_view(created_group)
         if created_group.id in self._group_items:
             self._select_group(created_group.id, force=True)
         else:

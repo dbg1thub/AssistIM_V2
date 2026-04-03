@@ -146,10 +146,102 @@ def sanitize_outbound_message_extra(extra: dict[str, Any] | None) -> dict[str, A
     normalized.pop("local_path", None)
     normalized.pop("uploading", None)
 
+    mentions = normalize_message_mentions(normalized.get("mentions"), content=str(normalized.get("content", "") or ""))
+    if mentions:
+        normalized["mentions"] = mentions
+    else:
+        normalized.pop("mentions", None)
+    normalized.pop("content", None)
+
     media = dict(normalized.get("media") or {})
     if media:
         normalized["media"] = media
     return normalized
+
+
+def normalize_message_mentions(raw_mentions: Any, *, content: str = "") -> list[dict[str, Any]]:
+    """Normalize structured mention metadata attached to one text message."""
+    if not isinstance(raw_mentions, list):
+        return []
+
+    normalized: list[dict[str, Any]] = []
+    text = str(content or "")
+    text_length = len(text)
+
+    for raw_mention in raw_mentions:
+        if not isinstance(raw_mention, dict):
+            continue
+
+        try:
+            start = int(raw_mention.get("start", -1))
+            end = int(raw_mention.get("end", -1))
+        except (TypeError, ValueError):
+            continue
+
+        if start < 0 or end <= start:
+            continue
+
+        start = min(start, text_length) if text else start
+        end = min(end, text_length) if text else end
+        if end <= start:
+            continue
+
+        mention_type = str(raw_mention.get("mention_type", "") or "member").strip().lower()
+        if mention_type not in {"member", "all"}:
+            mention_type = "member"
+
+        display_name = str(raw_mention.get("display_name", "") or "").strip()
+        if not display_name:
+            continue
+
+        mention_text = text[start:end] if text else f"@{display_name}"
+        if text and mention_text != f"@{display_name}":
+            continue
+
+        mention: dict[str, Any] = {
+            "start": start,
+            "end": end,
+            "display_name": display_name,
+            "mention_type": mention_type,
+        }
+        if mention_type == "member":
+            member_id = str(raw_mention.get("member_id", "") or "").strip()
+            if not member_id:
+                continue
+            mention["member_id"] = member_id
+
+        normalized.append(mention)
+
+    normalized.sort(key=lambda item: (int(item["start"]), int(item["end"])))
+    return normalized
+
+
+def merge_sender_profile_extra(extra: dict[str, Any] | None, sender_profile: dict[str, Any] | None) -> dict[str, Any]:
+    """Merge one authoritative sender profile payload into message extra fields."""
+    merged = dict(extra or {})
+    if not isinstance(sender_profile, dict):
+        return merged
+
+    mapping = {
+        "sender_avatar": sender_profile.get("avatar", ""),
+        "sender_gender": sender_profile.get("gender", ""),
+        "sender_username": sender_profile.get("username", ""),
+        "sender_nickname": sender_profile.get("nickname", ""),
+    }
+    for key, raw_value in mapping.items():
+        value = str(raw_value or "").strip()
+        if merged.get(key) != value:
+            merged[key] = value
+
+    sender_name = (
+        str(sender_profile.get("display_name", "") or "").strip()
+        or str(sender_profile.get("nickname", "") or "").strip()
+        or str(sender_profile.get("username", "") or "").strip()
+        or str(sender_profile.get("id", "") or "").strip()
+    )
+    if sender_name and merged.get("sender_name") != sender_name:
+        merged["sender_name"] = sender_name
+    return merged
 
 
 def format_message_preview(content: str, message_type: MessageType | str | None = None) -> str:
@@ -570,7 +662,7 @@ class Session:
 
         member_count = self.group_member_count()
         title = "、".join(names)
-        return f"{title}（{member_count}）" if member_count > 0 else title
+        return f"{title}({member_count})" if member_count > 0 else title
 
     def preview_sender_name(self) -> str:
         """Return the sender name prefix for group-session preview rows."""

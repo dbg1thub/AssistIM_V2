@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import os
 import time
+from typing import Any, Optional
 
 from PySide6.QtCore import QByteArray, QEvent, QMimeData, QPoint, QPointF, QRect, QRectF, QSize, QTimer, Qt, QUrl, Signal
 from PySide6.QtGui import (
@@ -14,10 +15,12 @@ from PySide6.QtGui import (
     QFont,
     QFontMetrics,
     QKeyEvent,
+    QMouseEvent,
     QPainter,
     QPainterPath,
     QPalette,
     QPixmap,
+    QPen,
     QTextCharFormat,
     QTextCursor,
     QTextDocument,
@@ -39,10 +42,13 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 from qfluentwidgets import (
+    BodyLabel,
+    CaptionLabel,
     Flyout,
     FlyoutAnimationType,
     FlyoutViewBase,
     InfoBar,
+    IconWidget,
     PushButton,
     ScrollArea,
     SegmentedWidget,
@@ -53,8 +59,10 @@ from qfluentwidgets import (
 from qfluentwidgets.components.material import AcrylicToolTipFilter, AcrylicFlyoutViewBase, AcrylicFlyout
 
 from client.core.app_icons import AppIcon
+from client.core.avatar_rendering import get_avatar_image_store
+from client.core.avatar_utils import profile_avatar_seed
 from client.core.i18n import tr
-from client.models.message import MessageType, infer_message_type_from_path
+from client.models.message import MessageType, Session, infer_message_type_from_path, normalize_message_mentions
 from client.ui.common.attachment_card import attachment_card_size, draw_attachment_card
 from client.ui.common.emoji_names import emoji_display_name
 from client.ui.common.emoji_utils import (
@@ -66,6 +74,7 @@ from client.ui.common.emoji_utils import (
 )
 from client.core.video_thumbnail_cache import get_thumbnail as get_video_thumbnail, get_video_thumbnail_cache
 from client.ui.styles import StyleSheet
+from client.ui.widgets.chat_info_drawer import AcrylicDrawerSurface
 from client.ui.widgets.composer_clipboard import (
     COMPOSER_SEGMENTS_MIME,
     clipboard_file_paths,
@@ -102,6 +111,122 @@ class InlineEmoji:
 
     emoji_id: str
     value: str
+
+
+@dataclass(frozen=True)
+class MentionCandidate:
+    """One selectable @ mention candidate shown above the composer."""
+
+    member_id: str
+    display_name: str
+    username: str = ""
+    avatar: str = ""
+    gender: str = ""
+    is_everyone: bool = False
+
+
+@dataclass(frozen=True)
+class MentionToken:
+    """Structured @ mention token tracked outside QTextDocument formatting."""
+
+    start: int
+    end: int
+    display_name: str
+    mention_type: str = "member"
+    member_id: str = ""
+
+
+class MentionAvatarWidget(QWidget):
+    """Rounded-rect avatar used by mention candidates."""
+
+    def __init__(
+        self,
+        avatar: str,
+        *,
+        gender: str = "",
+        seed: str = "",
+        size: int = 28,
+        radius: int = 8,
+        parent=None,
+    ) -> None:
+        super().__init__(parent)
+        self._source = str(avatar or "")
+        self._gender = str(gender or "")
+        self._seed = str(seed or "")
+        self._radius = max(0, int(radius))
+        self._store = get_avatar_image_store()
+        self._store.avatar_ready.connect(self._handle_avatar_ready)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setFixedSize(size, size)
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        rect = QRectF(self.rect())
+        path = QPainterPath()
+        path.addRoundedRect(rect, self._radius, self._radius)
+        painter.setClipPath(path)
+
+        _source, display_path = self._store.resolve_display_path(self._source, gender=self._gender, seed=self._seed)
+        pixmap = QPixmap(display_path) if display_path else QPixmap()
+        if not pixmap.isNull():
+            scaled = pixmap.scaled(
+                self.size(),
+                Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            painter.drawPixmap(self.rect(), scaled)
+        else:
+            painter.fillPath(path, QColor("#626B76") if isDarkTheme() else QColor("#D7DEE8"))
+
+        painter.setClipping(False)
+        if pixmap.isNull():
+            initial = (self._seed or "?")[:1].upper()
+            font = QFont()
+            font.setPixelSize(14)
+            font.setBold(True)
+            painter.setFont(font)
+            painter.setPen(QPen(Qt.GlobalColor.white))
+            painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, initial)
+        painter.end()
+
+    def _handle_avatar_ready(self, source: str) -> None:
+        if str(source or "") == self._source:
+            self.update()
+
+
+def _preferred_member_name(member: dict[str, Any]) -> str:
+    """Resolve one stable group-member display name for @ mention choices."""
+    return (
+        str(member.get("remark", "") or "").strip()
+        or str(member.get("group_nickname", "") or "").strip()
+        or str(member.get("nickname", "") or "").strip()
+        or str(member.get("display_name", "") or "").strip()
+        or str(member.get("username", "") or "").strip()
+        or str(member.get("id", "") or "").strip()
+    )
+
+
+def _mention_search_tokens(candidate: MentionCandidate) -> tuple[str, ...]:
+    """Return lowercase search tokens used by the @ suggestion filter."""
+    tokens = [candidate.display_name, candidate.username]
+    if candidate.is_everyone:
+        tokens.extend(["all", "all members", "所有人"])
+    return tuple(token.lower() for token in tokens if str(token or "").strip())
+
+
+def _mention_payload_from_candidate(candidate: MentionCandidate, start: int, end: int) -> dict[str, object]:
+    """Build one normalized structured mention payload from a selected candidate."""
+    payload: dict[str, object] = {
+        "start": start,
+        "end": end,
+        "display_name": candidate.display_name,
+        "mention_type": "all" if candidate.is_everyone else "member",
+    }
+    if not candidate.is_everyone:
+        payload["member_id"] = candidate.member_id
+    return payload
 
 
 class InlineAttachmentWidget(QWidget):
@@ -279,10 +404,12 @@ class ChatTextEdit(QTextEdit):
         self._attachment_widgets: dict[str, InlineAttachmentWidget] = {}
         self._emoji_objects: dict[str, InlineEmoji] = {}
         self._emoji_widgets: dict[str, InlineEmojiWidget] = {}
+        self._mention_tokens: list[MentionToken] = []
         self._attachment_sync_pending = False
         self._inline_emoji_sync_pending = False
         self._applying_inline_emoji_sync = False
         self.document().contentsChanged.connect(self._schedule_attachment_widget_sync)
+        self.document().contentsChange.connect(self._on_document_contents_change)
         self.verticalScrollBar().valueChanged.connect(self._schedule_attachment_widget_sync)
         self.horizontalScrollBar().valueChanged.connect(self._schedule_attachment_widget_sync)
         self.textChanged.connect(self._schedule_inline_emoji_sync)
@@ -296,6 +423,82 @@ class ChatTextEdit(QTextEdit):
         cursor.setCharFormat(plain_format)
         self.setTextCursor(cursor)
         return cursor
+
+    def _on_document_contents_change(self, position: int, chars_removed: int, chars_added: int) -> None:
+        """Shift or drop tracked mention tokens after one document edit."""
+        if not self._mention_tokens:
+            return
+
+        edit_start = max(0, int(position or 0))
+        removed = max(0, int(chars_removed or 0))
+        delta = max(0, int(chars_added or 0)) - removed
+        edit_end = edit_start + removed
+        updated_tokens: list[MentionToken] = []
+
+        for token in self._mention_tokens:
+            if token.end <= edit_start:
+                updated_tokens.append(token)
+                continue
+
+            if token.start >= edit_end:
+                updated_tokens.append(
+                    MentionToken(
+                        start=token.start + delta,
+                        end=token.end + delta,
+                        display_name=token.display_name,
+                        mention_type=token.mention_type,
+                        member_id=token.member_id,
+                    )
+                )
+                continue
+
+        if updated_tokens != self._mention_tokens:
+            self._mention_tokens = updated_tokens
+            self._refresh_mention_selections()
+
+    def _refresh_mention_selections(self) -> None:
+        """Paint mention runs using transient editor selections instead of document formatting."""
+        selection_color = QColor("#3B82F6") if not self._is_dark() else QColor("#8AB4F8")
+        selections: list[QTextEdit.ExtraSelection] = []
+        document_limit = max(0, self.document().characterCount() - 1)
+
+        for token in self._mention_tokens:
+            if token.start < 0 or token.end <= token.start or token.start >= document_limit:
+                continue
+
+            cursor = QTextCursor(self.document())
+            cursor.setPosition(token.start)
+            cursor.setPosition(min(token.end, document_limit), QTextCursor.MoveMode.KeepAnchor)
+            selection = QTextEdit.ExtraSelection()
+            selection.cursor = cursor
+            selection.format.setForeground(selection_color)
+            selections.append(selection)
+
+        self.setExtraSelections(selections)
+
+    def _sorted_mention_tokens(self) -> list[MentionToken]:
+        """Return mention tokens in document order."""
+        return sorted(self._mention_tokens, key=lambda token: (token.start, token.end))
+
+    def _add_mention_token(self, token: MentionToken) -> None:
+        """Track one new mention token and refresh editor decorations."""
+        self._mention_tokens = sorted(
+            [
+                existing
+                for existing in self._mention_tokens
+                if existing.end <= token.start or existing.start >= token.end
+            ]
+            + [token],
+            key=lambda item: (item.start, item.end),
+        )
+        self._refresh_mention_selections()
+
+    def _mention_token_at(self, position: int) -> MentionToken | None:
+        """Return the mention token that covers the given document cursor position, if any."""
+        for token in self._mention_tokens:
+            if token.start <= position < token.end:
+                return token
+        return None
 
     @staticmethod
     def _build_editor_font() -> QFont:
@@ -536,6 +739,7 @@ class ChatTextEdit(QTextEdit):
         """Extract text and inline attachments in document order."""
         segments: list[dict] = []
         text_buffer: list[str] = []
+        segment_fragments: list[dict[str, object]] = []
         document = self.document()
         block = document.begin()
 
@@ -546,7 +750,7 @@ class ChatTextEdit(QTextEdit):
                 if fragment.isValid():
                     char_format = fragment.charFormat()
                     if self._is_attachment_format(char_format):
-                        self._flush_text_buffer(text_buffer, segments)
+                        self._flush_text_buffer(text_buffer, segment_fragments, segments)
                         attachment = self._attachment_from_char_format(char_format)
                         if attachment:
                             segments.append(
@@ -558,16 +762,47 @@ class ChatTextEdit(QTextEdit):
                     elif self._is_inline_emoji_format(char_format):
                         inline_emoji = self._emoji_from_char_format(char_format)
                         if inline_emoji:
-                            text_buffer.append(inline_emoji.value)
+                            fragment_position = fragment.position()
+                            fragment_text = inline_emoji.value
+                            text_buffer.append(fragment_text)
+                            segment_fragments.append(
+                                {
+                                    "kind": "emoji",
+                                    "doc_start": fragment_position,
+                                    "doc_end": fragment_position + fragment.length(),
+                                    "text": fragment_text,
+                                    "py_start": len("".join(text_buffer[:-1])),
+                                }
+                            )
                     else:
-                        text_buffer.append(fragment.text())
+                        fragment_text = fragment.text()
+                        text_buffer.append(fragment_text)
+                        segment_fragments.append(
+                            {
+                                "kind": "text",
+                                "doc_start": fragment.position(),
+                                "doc_end": fragment.position() + fragment.length(),
+                                "text": fragment_text,
+                                "py_start": len("".join(text_buffer[:-1])),
+                            }
+                        )
                 iterator += 1
 
             if block.next().isValid():
                 text_buffer.append("\n")
+                block_end = block.position() + max(0, block.length() - 1)
+                segment_fragments.append(
+                    {
+                        "kind": "text",
+                        "doc_start": block_end,
+                        "doc_end": block_end + 1,
+                        "text": "\n",
+                        "py_start": len("".join(text_buffer[:-1])),
+                    }
+                )
             block = block.next()
 
-        self._flush_text_buffer(text_buffer, segments)
+        self._flush_text_buffer(text_buffer, segment_fragments, segments)
         segments = self._normalize_attachment_boundary_newlines(segments)
         if clear_after:
             self.clear_composer()
@@ -586,6 +821,7 @@ class ChatTextEdit(QTextEdit):
 
         segments: list[dict] = []
         text_buffer: list[str] = []
+        segment_fragments: list[dict[str, object]] = []
         document = self.document()
         block = document.findBlock(selection_start)
         if not block.isValid():
@@ -606,7 +842,7 @@ class ChatTextEdit(QTextEdit):
                     if overlap_start < overlap_end:
                         char_format = fragment.charFormat()
                         if self._is_attachment_format(char_format):
-                            self._flush_selection_text_buffer(text_buffer, segments)
+                            self._flush_selection_text_buffer(text_buffer, segment_fragments, segments)
                             attachment = self._attachment_from_char_format(char_format)
                             if attachment:
                                 segments.append(
@@ -619,7 +855,17 @@ class ChatTextEdit(QTextEdit):
                         elif self._is_inline_emoji_format(char_format):
                             inline_emoji = self._emoji_from_char_format(char_format)
                             if inline_emoji:
-                                text_buffer.append(inline_emoji.value)
+                                fragment_text = inline_emoji.value
+                                text_buffer.append(fragment_text)
+                                segment_fragments.append(
+                                    {
+                                        "kind": "emoji",
+                                        "doc_start": overlap_start,
+                                        "doc_end": overlap_end,
+                                        "text": fragment_text,
+                                        "py_start": len("".join(text_buffer[:-1])),
+                                    }
+                                )
                         else:
                             fragment_text = fragment.text()
                             selected_text = self._slice_text_by_qt_positions(
@@ -629,18 +875,36 @@ class ChatTextEdit(QTextEdit):
                             )
                             if selected_text:
                                 text_buffer.append(selected_text)
+                                segment_fragments.append(
+                                    {
+                                        "kind": "text",
+                                        "doc_start": overlap_start,
+                                        "doc_end": overlap_end,
+                                        "text": selected_text,
+                                        "py_start": len("".join(text_buffer[:-1])),
+                                    }
+                                )
                 iterator += 1
 
             next_block = block.next()
             block_separator_position = block.position() + max(0, block.length() - 1)
             if next_block.isValid() and selection_start <= block_separator_position < selection_end:
                 text_buffer.append("\n")
+                segment_fragments.append(
+                    {
+                        "kind": "text",
+                        "doc_start": block_separator_position,
+                        "doc_end": block_separator_position + 1,
+                        "text": "\n",
+                        "py_start": len("".join(text_buffer[:-1])),
+                    }
+                )
 
             if not next_block.isValid() or next_block.position() >= selection_end:
                 break
             block = next_block
 
-        self._flush_selection_text_buffer(text_buffer, segments)
+        self._flush_selection_text_buffer(text_buffer, segment_fragments, segments)
         return segments
 
     def _segments_from_mime(self, mime_data: QMimeData | None) -> list[dict]:
@@ -686,12 +950,15 @@ class ChatTextEdit(QTextEdit):
             if segment_type == MessageType.TEXT:
                 content = str(segment.get("content", "") or "")
                 if content:
-                    self._insert_mixed_text_segment(content)
+                    mentions = dict(segment.get("extra") or {}).get("mentions")
+                    self._insert_mixed_text_segment(content, cursor=cursor, mentions=mentions)
+                    cursor = QTextCursor(self.textCursor())
                 continue
 
             file_path = str(segment.get("file_path", "") or "")
             if file_path:
                 self.insert_local_attachment(file_path, blockify=False)
+                cursor = QTextCursor(self.textCursor())
 
     @staticmethod
     def _slice_text_by_qt_positions(text: str, start: int, end: int) -> str:
@@ -765,6 +1032,8 @@ class ChatTextEdit(QTextEdit):
         self.clear()
         self._attachments.clear()
         self._emoji_objects.clear()
+        self._mention_tokens.clear()
+        self._refresh_mention_selections()
         self._clear_attachment_widgets()
         self._reset_cursor_to_plain_text()
 
@@ -1179,11 +1448,37 @@ class ChatTextEdit(QTextEdit):
         top = centered_emoji_top(text_top, metrics.height(), height, vertical_nudge=-2)
         return QRectF(left, float(top), width, height)
 
-    def _insert_mixed_text_segment(self, text: str, cursor: QTextCursor | None = None) -> None:
+    def _insert_mixed_text_segment(
+        self,
+        text: str,
+        cursor: QTextCursor | None = None,
+        *,
+        mentions: list[dict] | None = None,
+    ) -> None:
         """Insert text while converting emoji clusters into inline emoji objects."""
         if not text:
             return
 
+        active_cursor = QTextCursor(cursor or self.textCursor())
+        normalized_mentions = normalize_message_mentions(mentions, content=text)
+        text_position = 0
+
+        for mention in normalized_mentions:
+            mention_start = int(mention["start"])
+            mention_end = int(mention["end"])
+            if mention_start > text_position:
+                active_cursor = self._insert_plain_text_chunk(text[text_position:mention_start], active_cursor)
+
+            mention_text = text[mention_start:mention_end]
+            active_cursor = self._insert_structured_mention(mention_text, mention, active_cursor)
+            text_position = mention_end
+
+        if text_position < len(text):
+            active_cursor = self._insert_plain_text_chunk(text[text_position:], active_cursor)
+        self.setTextCursor(active_cursor)
+
+    def _insert_plain_text_chunk(self, text: str, cursor: QTextCursor | None = None) -> QTextCursor:
+        """Insert one plain-text chunk while still converting inline emoji objects."""
         active_cursor = QTextCursor(cursor or self.textCursor())
         for chunk, is_emoji_chunk in iter_text_and_emoji_clusters(text):
             if is_emoji_chunk:
@@ -1193,6 +1488,30 @@ class ChatTextEdit(QTextEdit):
             else:
                 active_cursor.insertText(chunk)
                 self.setTextCursor(active_cursor)
+        return active_cursor
+
+    def _insert_structured_mention(
+        self,
+        mention_text: str,
+        payload: dict[str, object],
+        cursor: QTextCursor | None = None,
+    ) -> QTextCursor:
+        """Insert one plain-text mention token and track its range outside the document."""
+        active_cursor = QTextCursor(cursor or self.textCursor())
+        start = active_cursor.position()
+        active_cursor.insertText(mention_text)
+        end = active_cursor.position()
+        self._add_mention_token(
+            MentionToken(
+                start=start,
+                end=end,
+                display_name=str(payload.get("display_name", "") or "").strip(),
+                mention_type=str(payload.get("mention_type", "") or "member").strip().lower() or "member",
+                member_id=str(payload.get("member_id", "") or "").strip(),
+            )
+        )
+        self.setTextCursor(active_cursor)
+        return self._reset_cursor_to_plain_text(active_cursor)
 
     def _find_plain_text_fragment_with_emoji(self) -> tuple[int, str] | None:
         """Return the first normal text fragment that still contains raw emoji glyphs."""
@@ -1231,27 +1550,95 @@ class ChatTextEdit(QTextEdit):
                 iterator += 1
             block = block.next()
 
-    @staticmethod
-    def _flush_text_buffer(text_buffer: list[str], segments: list[dict]) -> None:
+    def _mentions_for_segment(self, text: str, segment_fragments: list[dict[str, object]]) -> list[dict[str, object]]:
+        """Project tracked document mention tokens into one extracted text segment."""
+        if not text or not segment_fragments or not self._mention_tokens:
+            return []
+
+        segment_start = min(int(fragment["doc_start"]) for fragment in segment_fragments)
+        segment_end = max(int(fragment["doc_end"]) for fragment in segment_fragments)
+        mentions: list[dict[str, object]] = []
+
+        for token in self._sorted_mention_tokens():
+            if token.start < segment_start or token.end > segment_end:
+                continue
+
+            mention = {
+                "start": self._segment_py_index_for_doc_position(segment_fragments, token.start),
+                "end": self._segment_py_index_for_doc_position(segment_fragments, token.end),
+                "display_name": token.display_name,
+                "mention_type": token.mention_type,
+            }
+            if token.mention_type == "member":
+                mention["member_id"] = token.member_id
+            mentions.append(mention)
+
+        return normalize_message_mentions(mentions, content=text)
+
+    def _segment_py_index_for_doc_position(
+        self,
+        segment_fragments: list[dict[str, object]],
+        document_position: int,
+    ) -> int:
+        """Map one document UTF-16 cursor position into a segment-local Python string index."""
+        for fragment in segment_fragments:
+            fragment_start = int(fragment["doc_start"])
+            fragment_end = int(fragment["doc_end"])
+            fragment_text = str(fragment["text"])
+            fragment_kind = str(fragment.get("kind", "text"))
+            py_start = int(fragment["py_start"])
+            if document_position < fragment_start:
+                return py_start
+            if fragment_start <= document_position <= fragment_end:
+                if fragment_kind != "text":
+                    return py_start if document_position <= fragment_start else py_start + len(fragment_text)
+                qt_offset = max(0, min(document_position - fragment_start, fragment_end - fragment_start))
+                return py_start + len(self._slice_text_by_qt_positions(fragment_text, 0, qt_offset))
+
+        if not segment_fragments:
+            return 0
+        last_fragment = segment_fragments[-1]
+        return int(last_fragment["py_start"]) + len(str(last_fragment["text"]))
+
+    def _flush_text_buffer(
+        self,
+        text_buffer: list[str],
+        segment_fragments: list[dict[str, object]],
+        segments: list[dict],
+    ) -> None:
         """Flush a buffered text chunk into the composed segment list."""
         if not text_buffer:
             return
 
         text = "".join(text_buffer)
         text_buffer.clear()
+        mentions = self._mentions_for_segment(text, segment_fragments)
+        segment_fragments.clear()
         if text.strip():
-            segments.append({"type": MessageType.TEXT, "content": text})
+            segment = {"type": MessageType.TEXT, "content": text}
+            if mentions:
+                segment["extra"] = {"mentions": mentions}
+            segments.append(segment)
 
-    @staticmethod
-    def _flush_selection_text_buffer(text_buffer: list[str], segments: list[dict]) -> None:
+    def _flush_selection_text_buffer(
+        self,
+        text_buffer: list[str],
+        segment_fragments: list[dict[str, object]],
+        segments: list[dict],
+    ) -> None:
         """Flush clipboard-selected text without trimming whitespace-only segments."""
         if not text_buffer:
             return
 
         text = "".join(text_buffer)
         text_buffer.clear()
+        mentions = self._mentions_for_segment(text, segment_fragments)
+        segment_fragments.clear()
         if text:
-            segments.append({"type": MessageType.TEXT, "content": text})
+            segment = {"type": MessageType.TEXT, "content": text}
+            if mentions:
+                segment["extra"] = {"mentions": mentions}
+            segments.append(segment)
 
     @staticmethod
     def _normalize_attachment_boundary_newlines(segments: list[dict]) -> list[dict]:
@@ -1510,6 +1897,416 @@ class ModernEmojiPickerFlyout(AcrylicFlyoutViewBase):
         self._built_pages.add(route_key)
 
 
+class MentionCandidateRow(QWidget):
+    """Selectable row used by the group @ member flyout."""
+
+    activated = Signal(object)
+    AVATAR_SIZE = 28
+    AVATAR_RADIUS = 8
+    TEXT_WIDTH = 70
+
+    def __init__(self, candidate: MentionCandidate, parent=None) -> None:
+        super().__init__(parent)
+        self._candidate = candidate
+        self._full_name = str(candidate.display_name or "")
+        self._hovered = False
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setAutoFillBackground(False)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFixedHeight(34)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(8, 3, 8, 3)
+        layout.setSpacing(8)
+
+        self.leading = MentionAvatarWidget(
+            candidate.avatar,
+            gender=candidate.gender,
+            seed=profile_avatar_seed(
+                user_id=candidate.member_id,
+                username=candidate.username,
+                display_name=candidate.display_name,
+            ),
+            size=self.AVATAR_SIZE,
+            radius=self.AVATAR_RADIUS,
+            parent=self,
+        )
+
+        self.name_label = BodyLabel("", self)
+        self.name_label.setObjectName("mentionCandidateNameLabel")
+        name_font = QFont(self.name_label.font())
+        name_font.setPixelSize(14)
+        self.name_label.setFont(name_font)
+        self.name_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+
+        layout.addWidget(self.leading, 0, Qt.AlignmentFlag.AlignVCenter)
+        layout.addWidget(self.name_label, 1, Qt.AlignmentFlag.AlignVCenter)
+        self._refresh_name_label()
+
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.activated.emit(self._candidate)
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def enterEvent(self, event) -> None:
+        self._hovered = True
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:
+        self._hovered = False
+        self.update()
+        super().leaveEvent(event)
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        highlight_rect = QRectF(self.rect())
+        if self._hovered:
+            fill = QColor(255, 255, 255, 16) if isDarkTheme() else QColor(0, 0, 0, 10)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(fill)
+            painter.drawRoundedRect(highlight_rect, 8, 8)
+        super().paintEvent(event)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._refresh_name_label()
+
+    def _refresh_name_label(self) -> None:
+        metrics = QFontMetrics(self.name_label.font())
+        available = max(24, self.name_label.width() or self.TEXT_WIDTH)
+        self.name_label.setText(metrics.elidedText(self._full_name, Qt.TextElideMode.ElideRight, available))
+
+
+class GroupMentionFlyoutView(QWidget):
+    """Content widget for the group @ member picker."""
+
+    candidateSelected = Signal(object)
+    PANEL_MARGIN = 6
+    ROW_HEIGHT = 34
+    MAX_ROWS_HEIGHT = 220
+    PANEL_WIDTH = 116
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._candidates: list[MentionCandidate] = []
+        self._rows: list[MentionCandidateRow] = []
+        self._current_index = 0
+        self._show_everyone_row = False
+        self._show_member_label = False
+        self._visible_row_count = 0
+        self.setObjectName("groupMentionFlyout")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setAutoFillBackground(False)
+
+        self.v_box_layout = QVBoxLayout(self)
+        self.v_box_layout.setContentsMargins(self.PANEL_MARGIN, self.PANEL_MARGIN, self.PANEL_MARGIN, self.PANEL_MARGIN)
+        self.v_box_layout.setSpacing(0)
+
+        self.everyone_row: MentionCandidateRow | None = None
+        self.everyone_host = QWidget(self)
+        self.everyone_host.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.everyone_host.setAutoFillBackground(False)
+        self.everyone_layout = QVBoxLayout(self.everyone_host)
+        self.everyone_layout.setContentsMargins(0, 0, 0, 0)
+        self.everyone_layout.setSpacing(0)
+        self.everyone_host.hide()
+
+        self.section_host = QWidget(self)
+        self.section_host.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.section_host.setAutoFillBackground(False)
+        self.section_layout = QVBoxLayout(self.section_host)
+        self.section_layout.setContentsMargins(0, 4, 0, 3)
+        self.section_layout.setSpacing(0)
+
+        self.section_label = CaptionLabel(tr("composer.mention.members", "群成员"), self.section_host)
+        self.section_label.setObjectName("mentionSectionLabel")
+        self.section_label.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.section_label.setAutoFillBackground(False)
+        self.section_layout.addWidget(self.section_label)
+        self.section_host.hide()
+
+        self.scroll_area = ScrollArea(self)
+        self.scroll_area.setObjectName("groupMentionScrollArea")
+        self.scroll_area.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.scroll_area.setAutoFillBackground(False)
+        self.scroll_area.setWidgetResizable(True)
+        self.scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+        self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.scroll_area.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+
+        self.rows_container = QWidget(self.scroll_area)
+        self.rows_container.setObjectName("groupMentionRowsContainer")
+        self.rows_container.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.rows_container.setAutoFillBackground(False)
+        self.rows_layout = QVBoxLayout(self.rows_container)
+        self.rows_layout.setContentsMargins(0, 0, 0, 0)
+        self.rows_layout.setSpacing(0)
+        self.scroll_area.setWidget(self.rows_container)
+        if self.scroll_area.viewport() is not None:
+            self.scroll_area.viewport().setObjectName("groupMentionScrollViewport")
+            self.scroll_area.viewport().setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+            self.scroll_area.viewport().setAutoFillBackground(False)
+        self.scroll_area.setStyleSheet(
+            "QScrollArea#groupMentionScrollArea { background: transparent; border: none; }"
+            "QWidget#qt_scrollarea_viewport, QWidget#groupMentionScrollViewport { background: transparent; }"
+            "QWidget#groupMentionRowsContainer { background: transparent; }"
+            "QScrollBar:vertical {"
+            " background: transparent;"
+            " width: 6px;"
+            " margin: 2px 0 2px 0;"
+            "}"
+            "QScrollBar::handle:vertical {"
+            " background: rgba(0, 0, 0, 58);"
+            " min-height: 24px;"
+            " border-radius: 3px;"
+            "}"
+            "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical,"
+            "QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {"
+            " background: transparent;"
+            " height: 0px;"
+            "}"
+        )
+        self.scroll_area.installEventFilter(self)
+
+        self.v_box_layout.addWidget(self.everyone_host)
+        self.v_box_layout.addWidget(self.section_host)
+        self.v_box_layout.addWidget(self.scroll_area)
+        self.setFixedWidth(self.PANEL_WIDTH)
+        self.setMaximumHeight(260)
+        if self.scroll_area.viewport() is not None:
+            self.scroll_area.viewport().installEventFilter(self)
+        self.scroll_area.verticalScrollBar().installEventFilter(self)
+        self._set_scrollbar_visible(False)
+
+    def set_candidates(self, candidates: list[MentionCandidate], *, show_member_label: bool = False) -> None:
+        self._candidates = list(candidates or [])
+        self._current_index = 0
+
+        while self.rows_layout.count():
+            item = self.rows_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        self._rows.clear()
+
+        if self.everyone_row is not None:
+            self.everyone_row.deleteLater()
+            self.everyone_row = None
+
+        everyone = next((candidate for candidate in self._candidates if candidate.is_everyone), None)
+        members = [candidate for candidate in self._candidates if not candidate.is_everyone]
+        self._show_everyone_row = everyone is not None
+
+        if everyone is not None:
+            self.everyone_row = MentionCandidateRow(everyone, self.everyone_host)
+            self.everyone_row.activated.connect(self.candidateSelected.emit)
+            self.everyone_layout.addWidget(self.everyone_row)
+            self.everyone_host.show()
+            self.everyone_host.setFixedHeight(self.ROW_HEIGHT)
+        else:
+            self.everyone_host.hide()
+            self.everyone_host.setFixedHeight(0)
+
+        section_visible = bool(show_member_label and everyone is not None and members)
+        self._show_member_label = section_visible
+        self.section_host.setVisible(section_visible)
+        self.section_host.setFixedHeight(self.section_host.sizeHint().height() if section_visible else 0)
+        for candidate in members if everyone is not None else self._candidates:
+            row = MentionCandidateRow(candidate, self.rows_container)
+            row.activated.connect(self.candidateSelected.emit)
+            self.rows_layout.addWidget(row)
+            self._rows.append(row)
+
+        self._visible_row_count = len(self._rows)
+        visible_height = min(self.MAX_ROWS_HEIGHT, len(self._rows) * self.ROW_HEIGHT)
+        self.scroll_area.setFixedHeight(max(0, visible_height))
+        self.scroll_area.setVisible(bool(self._rows))
+        self._set_scrollbar_visible(False)
+        self.updateGeometry()
+        self.adjustSize()
+
+    def sizeHint(self) -> QSize:
+        everyone_height = self.ROW_HEIGHT if self._show_everyone_row else 0
+        label_height = self.section_host.sizeHint().height() if self._show_member_label else 0
+        rows_height = min(self.MAX_ROWS_HEIGHT, self._visible_row_count * self.ROW_HEIGHT) if self._visible_row_count else 0
+        content_height = self.PANEL_MARGIN * 2 + everyone_height + label_height + rows_height
+        return QSize(self.PANEL_WIDTH, content_height)
+
+    def move_selection(self, step: int) -> None:
+        if not self._candidates:
+            return
+        self._current_index = (self._current_index + step) % len(self._candidates)
+
+    def activate_current(self) -> MentionCandidate | None:
+        if not self._candidates:
+            return None
+        return self._candidates[self._current_index]
+
+    def eventFilter(self, watched, event) -> bool:
+        if watched in {self.scroll_area, self.scroll_area.viewport(), self.scroll_area.verticalScrollBar()}:
+            if event.type() == QEvent.Type.Enter:
+                self._set_scrollbar_visible(True)
+            elif event.type() == QEvent.Type.Leave:
+                QTimer.singleShot(0, self._refresh_scrollbar_visibility)
+        return super().eventFilter(watched, event)
+
+    def _refresh_scrollbar_visibility(self) -> None:
+        hovered = any(
+            widget is not None and widget.underMouse()
+            for widget in (self.scroll_area, self.scroll_area.viewport(), self.scroll_area.verticalScrollBar())
+        )
+        self._set_scrollbar_visible(hovered)
+
+    def _set_scrollbar_visible(self, visible: bool) -> None:
+        scrollbar = self.scroll_area.verticalScrollBar()
+        should_show = bool(visible and self.scroll_area.isVisible() and scrollbar.maximum() > 0)
+        scrollbar.setVisible(should_show)
+
+
+class GroupMentionPopupOverlay(QWidget):
+    """Modeless in-window overlay used for the group @ panel."""
+
+    closed = Signal()
+    EDGE_MARGIN = 12
+    CURSOR_GAP = 10
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setObjectName("groupMentionOverlay")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.hide()
+
+        self._editor: ChatTextEdit | None = None
+        self._content: GroupMentionFlyoutView | None = None
+        self._last_surface_rect: QRect | None = None
+
+        self.surface = AcrylicDrawerSurface(self, radius=7)
+        self.surface.setObjectName("groupMentionSurface")
+        self.surface.set_border_object_name("groupMentionSurfaceBorder")
+        surface_layout = QVBoxLayout(self.surface)
+        surface_layout.setContentsMargins(0, 0, 0, 0)
+        surface_layout.setSpacing(0)
+
+        if parent is not None:
+            parent.installEventFilter(self)
+
+    def bind_editor(self, editor: ChatTextEdit) -> None:
+        if self._editor is editor:
+            return
+        if self._editor is not None:
+            self._editor.removeEventFilter(self)
+            viewport = self._editor.viewport()
+            if viewport is not None:
+                viewport.removeEventFilter(self)
+        self._editor = editor
+        self._editor.installEventFilter(self)
+        viewport = self._editor.viewport()
+        if viewport is not None:
+            viewport.installEventFilter(self)
+
+    def set_content(self, content: GroupMentionFlyoutView) -> None:
+        if self._content is content:
+            return
+        layout = self.surface.layout()
+        if layout is None:
+            return
+        while layout.count():
+            item = layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.setParent(None)
+        self._content = content
+        content.setParent(self.surface)
+        layout.addWidget(content, 1)
+
+    def show_for_editor(self, editor: ChatTextEdit, content: GroupMentionFlyoutView) -> None:
+        host = self.parentWidget()
+        if host is None:
+            return
+        self.bind_editor(editor)
+        self.set_content(content)
+        self.setGeometry(host.rect())
+        self._apply_geometry(capture=not self.isVisible())
+        self.surface.show()
+        self.surface.raise_()
+        self.show()
+        self.raise_()
+
+    def reposition(self) -> None:
+        if not self.isVisible():
+            return
+        host = self.parentWidget()
+        if host is None:
+            return
+        self.setGeometry(host.rect())
+        self._apply_geometry(capture=False)
+
+    def close_overlay(self) -> None:
+        if not self.isVisible():
+            self.closed.emit()
+            return
+        self.hide()
+        self._last_surface_rect = None
+        self.closed.emit()
+
+    def eventFilter(self, watched, event) -> bool:
+        host = self.parentWidget()
+        if watched is host and event.type() in {QEvent.Type.Resize, QEvent.Type.Move, QEvent.Type.Hide}:
+            if self.isVisible():
+                self.close_overlay()
+        elif watched in {self._editor, self._editor.viewport() if self._editor is not None else None} and event.type() in {
+            QEvent.Type.Resize,
+            QEvent.Type.Move,
+            QEvent.Type.Show,
+        }:
+            if self.isVisible():
+                self.reposition()
+        return super().eventFilter(watched, event)
+
+    def mousePressEvent(self, event) -> None:
+        if not self.surface.geometry().contains(event.position().toPoint()):
+            self.close_overlay()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def _calculate_surface_rect(self) -> QRect | None:
+        host = self.parentWidget()
+        if host is None or self._editor is None or self._content is None:
+            return None
+        cursor_rect = self._editor.cursorRect()
+        anchor_top_left = self._editor.viewport().mapTo(host, cursor_rect.topLeft())
+        size_hint = self._content.sizeHint()
+        panel_width = max(GroupMentionFlyoutView.PANEL_WIDTH, size_hint.width())
+        panel_height = min(260, max(20, size_hint.height()))
+        center_x = anchor_top_left.x() + cursor_rect.width() // 2
+        panel_x = center_x - panel_width // 2
+        panel_y = anchor_top_left.y() - panel_height - self.CURSOR_GAP
+        panel_x = max(self.EDGE_MARGIN, min(panel_x, host.width() - panel_width - self.EDGE_MARGIN))
+        panel_y = max(self.EDGE_MARGIN, panel_y)
+        return QRect(panel_x, panel_y, panel_width, panel_height)
+
+    def _apply_geometry(self, *, capture: bool) -> None:
+        host = self.parentWidget()
+        panel_rect = self._calculate_surface_rect()
+        if host is None or panel_rect is None:
+            return
+        self.surface.setGeometry(panel_rect)
+        layout = self.surface.layout()
+        if layout is not None:
+            layout.activate()
+        if capture or self._last_surface_rect != panel_rect:
+            self.surface.capture_backdrop(QRect(host.mapToGlobal(panel_rect.topLeft()), panel_rect.size()))
+            self._last_surface_rect = QRect(panel_rect)
+
+
 class MessageInput(QWidget):
     """Integrated message input surface."""
 
@@ -1524,17 +2321,24 @@ class MessageInput(QWidget):
     IMAGE_FILTER = "Images (*.png *.jpg *.jpeg *.gif *.bmp *.webp)"
     FILE_FILTER = "All Files (*.*)"
     TYPING_THROTTLE = 1.0
+
     def __init__(self, parent=None):
         super().__init__(parent)
 
         self._last_typing_time = 0.0
         self._session_active = False
+        self._current_session: Optional[Session] = None
         self._emoji_flyout = None
+        self._mention_flyout = None
+        self._mention_view: Optional[GroupMentionFlyoutView] = None
+        self._mention_candidates: list[MentionCandidate] = []
+        self._mention_refresh_pending = False
+        self._mention_range: tuple[int, int] | None = None
         self._draft_emit_pending = False
         self._programmatic_edit_depth = 0
         self._setup_ui()
         self._connect_signals()
-        qconfig.themeChanged.connect(lambda *_args: self._apply_editor_transparency())
+        qconfig.themeChanged.connect(lambda *_args: (self._apply_editor_transparency(), self.text_input._refresh_mention_selections()))
         self.set_session_active(False)
         QTimer.singleShot(0, self._update_overlay_positions)
 
@@ -1748,6 +2552,8 @@ class MessageInput(QWidget):
         self.text_input.textChanged.connect(self._on_text_changed)
         self.text_input.textChanged.connect(self._update_send_button_state)
         self.text_input.textChanged.connect(self._schedule_draft_changed_emit)
+        self.text_input.textChanged.connect(self._schedule_mention_refresh)
+        self.text_input.cursorPositionChanged.connect(self._schedule_mention_refresh)
         self.text_input.send_requested.connect(self._on_send_clicked)
         self.text_input.attachment_activated.connect(self._on_attachment_activated)
         self.text_input.files_dropped.connect(self._on_files_dropped)
@@ -1771,6 +2577,11 @@ class MessageInput(QWidget):
             QEvent.Type.LayoutRequest,
         }:
             QTimer.singleShot(0, self._update_overlay_positions)
+            if self._mention_flyout is not None and self._mention_flyout.isVisible():
+                QTimer.singleShot(0, self._reposition_mention_flyout)
+        if watched is self.text_input:
+            if event.type() == QEvent.Type.KeyPress and self._handle_mention_key_event(event):
+                return True
         return super().eventFilter(watched, event)
 
     def _update_overlay_positions(self) -> None:
@@ -1833,6 +2644,7 @@ class MessageInput(QWidget):
 
     def _on_send_clicked(self) -> None:
         """Extract composed segments and hand them to the chat panel."""
+        self._close_mention_flyout()
         segments = self.text_input.take_composed_segments()
         if not segments:
             return
@@ -1919,6 +2731,9 @@ class MessageInput(QWidget):
             self.text_input.setPlaceholderText(tr("composer.placeholder.active", "Enter to send, Shift+Enter for new line"))
         else:
             self.text_input.setPlaceholderText(tr("composer.placeholder.inactive", "Select a session to start chatting"))
+            self._current_session = None
+            self._mention_candidates = []
+            self._close_mention_flyout()
             self.clear_draft()
 
         self._apply_editor_transparency()
@@ -1928,6 +2743,226 @@ class MessageInput(QWidget):
         """Focus the text editor."""
         if self._session_active:
             self.text_input.setFocus()
+
+    def set_session(self, session: Session | None) -> None:
+        """Update the active session context used by composer-only features like @ mention."""
+        self._current_session = session
+        self._mention_candidates = self._build_mention_candidates(session)
+        self._close_mention_flyout()
+
+    @staticmethod
+    def _build_mention_candidates(session: Session | None) -> list[MentionCandidate]:
+        """Build @ mention candidates for the current group session."""
+        if session is None or session.session_type != "group" or session.is_ai_session:
+            return []
+
+        members = list(getattr(session, "extra", {}).get("members") or [])
+        current_user_id = str(getattr(session, "extra", {}).get("current_user_id", "") or "").strip()
+        owner_id = str(getattr(session, "extra", {}).get("owner_id", "") or "").strip()
+        current_role = ""
+        for member in members:
+            member_id = str(member.get("id", "") or "").strip()
+            if not member_id or member_id != current_user_id:
+                continue
+            current_role = str(member.get("role", "") or "").strip().lower()
+            break
+
+        can_mention_everyone = current_role in {"owner", "admin"} or bool(owner_id and owner_id == current_user_id)
+        candidates: list[MentionCandidate] = []
+        if can_mention_everyone:
+            candidates.append(
+                MentionCandidate(
+                    member_id="all",
+                    display_name=tr("composer.mention.all_members", "所有人"),
+                    username="all",
+                    avatar=str(session.display_avatar() or session.avatar or ""),
+                    gender=str(session.display_gender() or ""),
+                    is_everyone=True,
+                )
+            )
+        seen: set[str] = set()
+        for member in members:
+            member_id = str(member.get("id", "") or "").strip()
+            if not member_id or member_id == current_user_id or member_id in seen:
+                continue
+            seen.add(member_id)
+            candidates.append(
+                MentionCandidate(
+                    member_id=member_id,
+                    display_name=_preferred_member_name(member),
+                    username=str(member.get("username", "") or "").strip(),
+                    avatar=str(member.get("avatar", "") or "").strip(),
+                    gender=str(member.get("gender", "") or "").strip(),
+                )
+            )
+        return candidates
+
+    def _schedule_mention_refresh(self) -> None:
+        """Coalesce @ mention popup updates after editor changes and cursor moves."""
+        if self._programmatic_edit_depth or self._mention_refresh_pending:
+            return
+        self._mention_refresh_pending = True
+        QTimer.singleShot(0, self._refresh_mention_popup)
+
+    def _refresh_mention_popup(self) -> None:
+        """Show, update, or close the @ mention popup based on the current cursor context."""
+        self._mention_refresh_pending = False
+        context = self._active_mention_context()
+        if context is None:
+            self._mention_range = None
+            self._close_mention_flyout()
+            return
+
+        start_pos, end_pos, query = context
+        self._mention_range = (start_pos, end_pos)
+        normalized_query = query.strip().lower()
+        everyone = next((candidate for candidate in self._mention_candidates if candidate.is_everyone), None)
+        members = [candidate for candidate in self._mention_candidates if not candidate.is_everyone]
+        matched_members = [
+            candidate
+            for candidate in members
+            if not normalized_query or any(normalized_query in token for token in _mention_search_tokens(candidate))
+        ]
+        show_member_label = False
+        if normalized_query and matched_members:
+            filtered = matched_members
+        elif normalized_query:
+            filtered = ([everyone] if everyone is not None and any(normalized_query in token for token in _mention_search_tokens(everyone)) else [])
+        else:
+            filtered = ([everyone] if everyone is not None else []) + members
+            show_member_label = everyone is not None and bool(members)
+        if not filtered:
+            self._close_mention_flyout()
+            return
+
+        if self._mention_view is None:
+            self._mention_view = GroupMentionFlyoutView(self)
+            self._mention_view.candidateSelected.connect(self._insert_mention_candidate)
+        self._mention_view.set_candidates(filtered, show_member_label=show_member_label)
+        self._show_mention_flyout()
+
+    def _active_mention_context(self) -> tuple[int, int, str] | None:
+        """Return the active @ mention replacement range around the cursor, if any."""
+        if not self._session_active or not self._mention_candidates:
+            return None
+
+        cursor = self.text_input.textCursor()
+        if cursor.hasSelection():
+            return None
+        if self.text_input._mention_token_at(cursor.position()) is not None:
+            return None
+
+        block = cursor.block()
+        if not block.isValid():
+            return None
+        block_text = block.text()
+        cursor_in_block = cursor.positionInBlock()
+        if cursor_in_block < 0:
+            return None
+
+        prefix = block_text[:cursor_in_block]
+        mention_start = prefix.rfind("@")
+        if mention_start < 0:
+            return None
+        query = prefix[mention_start + 1 :]
+        if any(char.isspace() for char in query):
+            return None
+        document_start = block.position() + mention_start
+        document_end = block.position() + cursor_in_block
+        return document_start, document_end, query
+
+    def _handle_mention_key_event(self, event) -> bool:
+        """Route navigation keys to the active @ mention popup before the editor handles them."""
+        if self._mention_flyout is None or not self._mention_flyout.isVisible() or self._mention_view is None:
+            return False
+        if not isinstance(event, QKeyEvent):
+            return False
+
+        key = event.key()
+        if key == Qt.Key.Key_Down:
+            self._mention_view.move_selection(1)
+            event.accept()
+            return True
+        if key == Qt.Key.Key_Up:
+            self._mention_view.move_selection(-1)
+            event.accept()
+            return True
+        if key in {Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Tab}:
+            candidate = self._mention_view.activate_current()
+            if candidate is not None:
+                self._insert_mention_candidate(candidate)
+            event.accept()
+            return True
+        if key == Qt.Key.Key_Escape:
+            self._close_mention_flyout()
+            event.accept()
+            return True
+        return False
+
+    def _show_mention_flyout(self) -> None:
+        """Create or reposition the in-window @ mention panel above the current cursor."""
+        if self._mention_view is None:
+            return
+        if self._mention_flyout is None:
+            host = self.window()
+            if not isinstance(host, QWidget):
+                return
+            self._mention_flyout = GroupMentionPopupOverlay(host)
+            self._mention_flyout.closed.connect(self._clear_mention_flyout)
+        if self._mention_flyout.isVisible():
+            self._reposition_mention_flyout()
+            self.text_input.setFocus()
+            return
+        self._mention_flyout.show_for_editor(self.text_input, self._mention_view)
+        self.text_input.setFocus()
+
+    def _reposition_mention_flyout(self) -> None:
+        """Move the active @ mention panel with the editor cursor and layout."""
+        if self._mention_flyout is None or not self._mention_flyout.isVisible():
+            return
+        self._mention_flyout.reposition()
+
+    def _insert_mention_candidate(self, candidate: MentionCandidate) -> None:
+        """Replace the active @ query with one completed mention token."""
+        mention_range = self._mention_range
+        if mention_range is None:
+            self._close_mention_flyout()
+            return
+
+        mention_text = f"@{candidate.display_name}"
+
+        def apply() -> None:
+            cursor = self.text_input.textCursor()
+            cursor.beginEditBlock()
+            cursor.setPosition(mention_range[0])
+            cursor.setPosition(mention_range[1], QTextCursor.MoveMode.KeepAnchor)
+            cursor.removeSelectedText()
+            payload = _mention_payload_from_candidate(
+                candidate,
+                start=0,
+                end=len(mention_text),
+            )
+            cursor = self.text_input._insert_structured_mention(mention_text, payload, cursor)
+            cursor.insertText(" ")
+            cursor.endEditBlock()
+            self.text_input._reset_cursor_to_plain_text(cursor)
+
+        self._run_programmatic_edit(apply)
+        self._close_mention_flyout()
+        self._update_send_button_state()
+        self._schedule_draft_changed_emit()
+        self.text_input.setFocus()
+
+    def _close_mention_flyout(self) -> None:
+        """Close the active @ mention panel if it is visible."""
+        if self._mention_flyout is not None:
+            self._mention_flyout.close_overlay()
+
+    def _clear_mention_flyout(self) -> None:
+        if self._mention_flyout is not None:
+            self._mention_flyout.deleteLater()
+        self._mention_flyout = None
+        self._mention_view = None
 
     def capture_draft_segments(self) -> list[dict]:
         """Return the current mixed text/attachment draft without clearing it."""

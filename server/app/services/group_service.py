@@ -89,6 +89,27 @@ class GroupService:
 
         self._run_transaction(action)
 
+    def update_member_role(self, current_user: User, group_id: str, user_id: str, role: str) -> dict:
+        group = self._get_group_or_404(group_id)
+        if group.owner_id != current_user.id:
+            raise AppError(ErrorCode.FORBIDDEN, "only owner can update member roles", 403)
+
+        normalized_user_id = self._normalize_target_user_id(user_id)
+        self._ensure_group_member(group, normalized_user_id)
+        if group.owner_id == normalized_user_id:
+            raise AppError(ErrorCode.FORBIDDEN, "owner role can only be changed via transfer", 403)
+
+        normalized_role = self._normalize_member_role_update(role)
+
+        def action() -> None:
+            self.groups.update_member_role(group.id, normalized_user_id, normalized_role, commit=False)
+
+        self._run_transaction(action)
+        return {
+            "status": "role_updated",
+            "group": self.serialize_group(group, include_members=True),
+        }
+
     def delete_group(self, current_user: User, group_id: str) -> None:
         group = self._get_group_or_404(group_id)
         if group.owner_id != current_user.id:
@@ -200,6 +221,13 @@ class GroupService:
         normalized_role = str(role or "member").strip().lower() or "member"
         if normalized_role != "member":
             raise AppError(ErrorCode.INVALID_REQUEST, "new members must use the default member role", 422)
+        return normalized_role
+
+    @staticmethod
+    def _normalize_member_role_update(role: str) -> str:
+        normalized_role = str(role or "member").strip().lower() or "member"
+        if normalized_role not in {"member", "admin"}:
+            raise AppError(ErrorCode.INVALID_REQUEST, "role must be member or admin", 422)
         return normalized_role
 
     def _run_transaction(self, action: Callable[[], T]) -> T:

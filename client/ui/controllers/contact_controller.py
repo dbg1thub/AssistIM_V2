@@ -337,7 +337,7 @@ class ContactController:
             region = str(item.get("region", "") or "").strip()
             if not name:
                 continue
-            previews.append(f"{name}（地区：{region}）" if region else name)
+            previews.append(f"{name}(地区: {region})" if region else name)
         return previews
 
     async def load_requests(self) -> list[FriendRequestRecord]:

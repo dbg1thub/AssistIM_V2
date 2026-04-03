@@ -29,7 +29,7 @@ from client.core.logging import setup_logging
 from client.core.avatar_rendering import get_avatar_image_store
 from client.core.avatar_utils import avatar_seed, profile_avatar_seed
 from client.events.event_bus import get_event_bus
-from client.managers.session_manager import SessionEvent
+from client.managers.session_manager import SessionEvent, peek_session_manager
 from client.ui.windows.chat_interface import ChatInterface
 from client.ui.windows.contact_interface import ContactInterface
 from client.ui.windows.discovery_interface import DiscoveryInterface
@@ -251,9 +251,10 @@ class MainWindow(FluentWindow):
         self.user_profile.show_user_flyout(self.user_card, self)
 
     def _on_profile_changed(self, payload: object) -> None:
-        """Keep the sidebar user card in sync with the current profile."""
+        """Keep profile-dependent UI surfaces in sync after profile changes."""
         user = dict(payload or {})
         self._sync_user_card(user)
+        self.contact_interface.refresh_groups_after_profile_change()
 
     def _on_avatar_ready(self, source: str) -> None:
         """Refresh the sidebar user avatar when a remote image finishes downloading."""
@@ -556,9 +557,17 @@ class MainWindow(FluentWindow):
             return False
         if session is None or getattr(session, "is_ai_session", False):
             return False
-        if bool(getattr(session, "extra", {}).get("is_muted", False)):
+        session_id = str(getattr(session, "session_id", "") or "")
+        if self._is_session_muted(session_id, session):
             return False
         return True
+
+    def _is_session_muted(self, session_id: str, session) -> bool:
+        """Resolve session mute state from the authoritative manager before trusting UI snapshots."""
+        manager = peek_session_manager()
+        if manager is not None and session_id:
+            return manager.is_session_muted(session_id)
+        return bool(getattr(session, "extra", {}).get("is_muted", False))
 
     def _can_trigger_tray_alert(self, session) -> bool:
         """Return whether one session should start tray flashing right now."""

@@ -365,6 +365,7 @@ class ChatInterface(QWidget):
         self._subscribe_sync(MessageEvent.RECALLED, self._on_recalled_event)
         self._subscribe_sync(MessageEvent.DELETED, self._on_deleted_event)
         self._subscribe_sync(MessageEvent.SYNC_COMPLETED, self._on_sync_completed)
+        self._subscribe_sync(MessageEvent.PROFILE_UPDATED, self._on_profile_updated)
 
     def _subscribe_sync(self, event_type: str, handler) -> None:
         """Subscribe and retain the exact handler object for later unsubscribe."""
@@ -595,6 +596,21 @@ class ChatInterface(QWidget):
             should_scroll = self.chat_panel.is_near_bottom()
             self.chat_panel.add_messages(current_session_messages, scroll_to_bottom=should_scroll)
             self._schedule_read_receipt()
+
+    def _on_profile_updated(self, data: dict) -> None:
+        """Refresh visible sender avatars/names after one participant profile change."""
+        session_id = str(data.get("session_id", "") or "")
+        if not session_id:
+            return
+        self._invalidate_session_caches(session_id)
+        if session_id != self._current_session_id:
+            return
+        self.chat_panel.apply_sender_profile_update(
+            session_id,
+            str(data.get("user_id", "") or ""),
+            dict(data.get("profile") or {}) if isinstance(data.get("profile"), dict) else {},
+            changed_message_ids=list(data.get("changed_message_ids") or []),
+        )
 
     def load_sessions(self) -> None:
         """Load current sessions into the left panel."""
@@ -1108,6 +1124,7 @@ class ChatInterface(QWidget):
                         session_id=session_id,
                         content=segment["content"],
                         message_type=MessageType.TEXT,
+                        extra=segment.get("extra"),
                     )
                 elif segment_type in {MessageType.IMAGE, MessageType.VIDEO, MessageType.FILE} and segment.get("file_path"):
                     await self._chat_controller.send_file(segment["file_path"], session_id=session_id)

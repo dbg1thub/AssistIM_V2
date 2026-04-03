@@ -31,7 +31,7 @@ from client.core.video_thumbnail_cache import (
     get_thumbnail as get_video_thumbnail,
     get_video_thumbnail_cache,
 )
-from client.models.message import ChatMessage, MessageStatus, MessageType
+from client.models.message import ChatMessage, MessageStatus, MessageType, normalize_message_mentions
 from client.models.message_model import MessageModel
 from client.ui.common.attachment_card import attachment_card_size, draw_attachment_card
 from client.ui.common.emoji_utils import (
@@ -626,13 +626,13 @@ class MessageDelegate(QStyledItemDelegate):
             or str(extra.get("sender_username", "") or "")
         )
 
-        if message.is_self and (not sender_avatar or not sender_gender):
+        if message.is_self:
             auth_controller = peek_auth_controller()
             current_user = dict(auth_controller.current_user or {}) if auth_controller is not None else {}
-            sender_avatar = sender_avatar or str(current_user.get("avatar", "") or "")
-            sender_gender = sender_gender or str(current_user.get("gender", "") or "")
-            sender_name = sender_name or str(current_user.get("nickname", "") or "") or str(current_user.get("username", "") or "")
-            sender_username = str(extra.get("sender_username", "") or current_user.get("username", "") or "")
+            sender_avatar = str(current_user.get("avatar", "") or "")
+            sender_gender = str(current_user.get("gender", "") or "")
+            sender_name = str(current_user.get("nickname", "") or "") or str(current_user.get("username", "") or "")
+            sender_username = str(current_user.get("username", "") or "")
         else:
             sender_username = str(extra.get("sender_username", "") or "")
         avatar_seed_value = profile_avatar_seed(
@@ -721,6 +721,7 @@ class MessageDelegate(QStyledItemDelegate):
         del background_fill
         content = message.content or ""
         text_rect, layout = self._text_layout(rect, content)
+        mention_ranges = self._message_mention_ranges(message)
         selection_range = (
             self._selection_index_bounds(content, self._selection_anchor, self._selection_position)
             if self.has_selected_text(message.message_id)
@@ -730,6 +731,7 @@ class MessageDelegate(QStyledItemDelegate):
         text_font = self._text_font()
         text_metrics = QFontMetrics(text_font)
         text_color = self._text_color(message)
+        mention_text_color = QColor("#0F6CBD") if not isDarkTheme() else QColor("#8AB4F8")
         selected_text_color = QColor(255, 255, 255) if isDarkTheme() else QColor("#101010")
         highlight_color = QColor(86, 157, 229, 120) if isDarkTheme() else QColor(140, 196, 255, 140)
         emoji_target = BUBBLE_EMOJI_PIXEL_SIZE
@@ -773,7 +775,9 @@ class MessageDelegate(QStyledItemDelegate):
                     run_rect,
                     baseline_y,
                     selection_range,
+                    mention_ranges,
                     text_color,
+                    mention_text_color,
                     selected_text_color,
                     highlight_color,
                 )
@@ -1225,14 +1229,20 @@ class MessageDelegate(QStyledItemDelegate):
         run_rect: QRect,
         baseline_y: int,
         selection_range: tuple[int, int] | None,
+        mention_ranges: list[tuple[int, int]],
         text_color: QColor,
+        mention_text_color: QColor,
         selected_text_color: QColor,
         highlight_color: QColor,
     ) -> None:
         """Draw a text run, splitting around any active selection."""
         painter.setFont(self._text_font())
 
-        for segment_start, segment_end, is_selected in self._text_run_segments(run, selection_range):
+        for segment_start, segment_end, is_selected, is_mentioned in self._text_run_segments(
+            run,
+            selection_range,
+            mention_ranges,
+        ):
             if segment_start >= segment_end:
                 continue
             segment_x = run_rect.x() + self._text_run_offset(run, segment_start)
@@ -1242,30 +1252,51 @@ class MessageDelegate(QStyledItemDelegate):
                 painter.fillRect(segment_rect.adjusted(0, 0, 0, -1), highlight_color)
 
             text_slice = run.text[segment_start - run.start : segment_end - run.start]
-            painter.setPen(selected_text_color if is_selected else text_color)
+            if is_selected:
+                painter.setPen(selected_text_color)
+            elif is_mentioned:
+                painter.setPen(mention_text_color)
+            else:
+                painter.setPen(text_color)
             painter.drawText(QPoint(segment_x, baseline_y), text_slice)
 
     @staticmethod
     def _text_run_segments(
         run: _TextRunLayout,
         selection_range: tuple[int, int] | None,
-    ) -> list[tuple[int, int, bool]]:
+        mention_ranges: list[tuple[int, int]],
+    ) -> list[tuple[int, int, bool, bool]]:
         """Split a text run into selected and unselected drawing segments."""
-        if not selection_range:
-            return [(run.start, run.end, False)]
+        boundaries = {run.start, run.end}
+        if selection_range:
+            selection_start = max(selection_range[0], run.start)
+            selection_end = min(selection_range[1], run.end)
+            if selection_start < selection_end:
+                boundaries.add(selection_start)
+                boundaries.add(selection_end)
+        for mention_start, mention_end in mention_ranges:
+            clamped_start = max(mention_start, run.start)
+            clamped_end = min(mention_end, run.end)
+            if clamped_start < clamped_end:
+                boundaries.add(clamped_start)
+                boundaries.add(clamped_end)
 
-        selection_start = max(selection_range[0], run.start)
-        selection_end = min(selection_range[1], run.end)
-        if selection_start >= selection_end:
-            return [(run.start, run.end, False)]
-
-        segments: list[tuple[int, int, bool]] = []
-        if run.start < selection_start:
-            segments.append((run.start, selection_start, False))
-        segments.append((selection_start, selection_end, True))
-        if selection_end < run.end:
-            segments.append((selection_end, run.end, False))
+        ordered = sorted(boundaries)
+        segments: list[tuple[int, int, bool, bool]] = []
+        for segment_start, segment_end in zip(ordered, ordered[1:]):
+            is_selected = bool(selection_range and selection_range[0] <= segment_start and selection_range[1] >= segment_end)
+            is_mentioned = any(start <= segment_start and end >= segment_end for start, end in mention_ranges)
+            segments.append((segment_start, segment_end, is_selected, is_mentioned))
         return segments
+
+    @staticmethod
+    def _message_mention_ranges(message: ChatMessage) -> list[tuple[int, int]]:
+        """Return normalized mention index ranges for one text message."""
+        mentions = normalize_message_mentions(
+            dict(message.extra or {}).get("mentions"),
+            content=message.content or "",
+        )
+        return [(int(mention["start"]), int(mention["end"])) for mention in mentions]
 
     @staticmethod
     def _text_run_offset(run: _TextRunLayout, position: int) -> int:

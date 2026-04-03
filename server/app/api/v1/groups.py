@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 from app.core.database import get_db
 from app.dependencies.auth_dependency import get_current_user
 from app.models.user import User
-from app.schemas.group import GroupCreate, GroupMemberAdd, GroupTransferOwner
+from app.schemas.group import GroupCreate, GroupMemberAdd, GroupMemberRoleUpdate, GroupTransferOwner
 from app.services.group_service import GroupService
 from app.utils.response import success_response
 
@@ -52,6 +52,17 @@ def add_member(
 def remove_member(group_id: str, user_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> Response:
     GroupService(db).remove_member(current_user, group_id, user_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.patch("/{group_id}/members/{user_id}/role")
+def update_member_role(
+    group_id: str,
+    user_id: str,
+    payload: GroupMemberRoleUpdate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    return success_response(GroupService(db).update_member_role(current_user, group_id, user_id, payload.role))
 
 
 @router.post("/{group_id}/leave")

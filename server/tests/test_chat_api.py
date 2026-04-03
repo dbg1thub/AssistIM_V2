@@ -465,6 +465,65 @@ def test_group_websocket_delivers_multiple_messages_after_explicit_auth(
             assert received["data"]["sender_profile"]["avatar"] == alice["user"]["avatar"]
 
 
+def test_group_mention_all_requires_owner_or_admin(
+    client: TestClient,
+    user_factory,
+    auth_header,
+) -> None:
+    from app.core.database import SessionLocal
+    from app.repositories.group_repo import GroupRepository
+
+    owner = user_factory("mention_owner", "Mention Owner")
+    admin = user_factory("mention_admin", "Mention Admin")
+    member = user_factory("mention_member", "Mention Member")
+
+    group_response = client.post(
+        "/api/v1/groups",
+        json={"name": "Mentions", "member_ids": [admin["user"]["id"], member["user"]["id"]]},
+        headers=auth_header(owner["access_token"]),
+    )
+    assert group_response.status_code == 201
+    group_payload = group_response.json()["data"]
+    session_id = group_payload["session_id"]
+    group_id = group_payload["id"]
+
+    with SessionLocal() as db:
+        GroupRepository(db).update_member_role(group_id, admin["user"]["id"], "admin")
+
+    mention_extra = {
+        "mentions": [
+            {
+                "start": 0,
+                "end": 4,
+                "display_name": "所有人",
+                "mention_type": "all",
+            }
+        ]
+    }
+
+    member_response = client.post(
+        f"/api/v1/sessions/{session_id}/messages",
+        json={"content": "@所有人 hi", "message_type": "text", "extra": mention_extra},
+        headers=auth_header(member["access_token"]),
+    )
+    assert member_response.status_code == 403
+
+    admin_response = client.post(
+        f"/api/v1/sessions/{session_id}/messages",
+        json={"content": "@所有人 hi", "message_type": "text", "extra": mention_extra},
+        headers=auth_header(admin["access_token"]),
+    )
+    assert admin_response.status_code == 200
+    assert admin_response.json()["data"]["extra"]["mentions"][0]["mention_type"] == "all"
+
+    owner_response = client.post(
+        f"/api/v1/sessions/{session_id}/messages",
+        json={"content": "@所有人 hi", "message_type": "text", "extra": mention_extra},
+        headers=auth_header(owner["access_token"]),
+    )
+    assert owner_response.status_code == 200
+
+
 def test_presence_websocket_requires_valid_token(client: TestClient) -> None:
     with pytest.raises(WebSocketDisconnect) as exc_info:
         with client.websocket_connect("/ws/presence") as websocket:
@@ -1424,3 +1483,97 @@ def test_delete_group_removes_group_session_messages_and_events(
 
 
 
+
+
+def test_websocket_receives_realtime_user_profile_update_events(
+    client: TestClient,
+    user_factory,
+    auth_header,
+) -> None:
+    alice = user_factory("alice_profile_event_live", "Alice")
+    bob = user_factory("bob_profile_event_live", "Bob")
+
+    create_session_response = client.post(
+        "/api/v1/sessions/direct",
+        json={"participant_ids": [bob["user"]["id"]], "name": "Alice & Bob"},
+        headers=auth_header(alice["access_token"]),
+    )
+    assert create_session_response.status_code == 200
+    session_id = create_session_response.json()["data"]["id"]
+
+    with client.websocket_connect("/ws") as bob_ws:
+        authenticate_ws(bob_ws, bob["access_token"], msg_id="ws-auth-profile-live")
+
+        update_response = client.post(
+            "/api/v1/users/me/avatar",
+            headers=auth_header(alice["access_token"]),
+            files={"file": ("avatar.png", b"profile-live-avatar", "image/png")},
+        )
+        assert update_response.status_code == 200
+        updated_avatar = update_response.json()["data"]["avatar"]
+
+        while True:
+            payload = bob_ws.receive_json()
+            if payload.get("type") == "user_profile_update":
+                break
+
+        assert payload["seq"] == 1
+        assert payload["data"]["session_id"] == session_id
+        assert payload["data"]["user_id"] == alice["user"]["id"]
+        assert payload["data"]["profile"]["avatar"] == updated_avatar
+        assert payload["data"]["event_seq"] == 1
+
+
+def test_websocket_sync_messages_replays_offline_user_profile_update_events(
+    client: TestClient,
+    user_factory,
+    auth_header,
+) -> None:
+    alice = user_factory("alice_profile_event_sync", "Alice")
+    bob = user_factory("bob_profile_event_sync", "Bob")
+
+    create_session_response = client.post(
+        "/api/v1/sessions/direct",
+        json={"participant_ids": [bob["user"]["id"]], "name": "Alice & Bob"},
+        headers=auth_header(alice["access_token"]),
+    )
+    assert create_session_response.status_code == 200
+    session_id = create_session_response.json()["data"]["id"]
+
+    update_response = client.put(
+        "/api/v1/users/me",
+        json={"nickname": "Alice Prime"},
+        headers=auth_header(alice["access_token"]),
+    )
+    assert update_response.status_code == 200
+
+    def receive_until(ws, expected_type: str):
+        while True:
+            payload = ws.receive_json()
+            if payload.get("type") == expected_type:
+                return payload
+
+    with client.websocket_connect("/ws") as websocket:
+        authenticate_ws(websocket, bob["access_token"], msg_id="ws-auth-profile-sync")
+        websocket.send_json(
+            {
+                "type": "sync_messages",
+                "msg_id": "97000000-0000-4000-8000-000000000099",
+                "data": {
+                    "session_cursors": {},
+                    "event_cursors": {session_id: 0},
+                },
+            }
+        )
+
+        history_payload = receive_until(websocket, "history_messages")
+        assert history_payload["data"]["messages"] == []
+
+        events_payload = receive_until(websocket, "history_events")
+        events = events_payload["data"]["events"]
+        assert len(events) == 1
+        assert events[0]["type"] == "user_profile_update"
+        assert events[0]["seq"] == 1
+        assert events[0]["data"]["session_id"] == session_id
+        assert events[0]["data"]["profile"]["nickname"] == "Alice Prime"
+        assert events[0]["data"]["event_seq"] == 1

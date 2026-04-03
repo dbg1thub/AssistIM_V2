@@ -165,6 +165,12 @@ class AuthController:
             self._apply_runtime_context(user)
             await self._persist_user_profile(user)
 
+        if user.get("id"):
+            try:
+                await self._chat_controller.refresh_sessions_snapshot()
+            except Exception:
+                logger.warning("Failed to refresh session snapshot after profile update", exc_info=True)
+
         return dict(user or {})
 
     async def clear_session(self) -> None:

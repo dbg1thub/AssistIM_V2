@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from app.core.errors import AppError, ErrorCode
 from app.models.session import SessionEvent
 from app.models.user import User
+from app.repositories.group_repo import GroupRepository
 from app.repositories.message_repo import MessageIdConflictError, MessageRepository
 from app.repositories.session_repo import SessionRepository
 from app.repositories.user_repo import UserRepository
@@ -27,6 +28,7 @@ class MessageService:
         self.db = db
         self.messages = MessageRepository(db)
         self.sessions = SessionRepository(db)
+        self.groups = GroupRepository(db)
         self.users = UserRepository(db)
         self.avatars = AvatarService(db)
 
@@ -51,6 +53,13 @@ class MessageService:
         extra: dict[str, Any] | None = None,
     ) -> dict:
         self._ensure_membership(current_user.id, session_id)
+        normalized_extra = self._normalize_message_extra(
+            sender_id=current_user.id,
+            session_id=session_id,
+            content=content,
+            message_type=message_type,
+            extra=extra,
+        )
         try:
             message, _ = self.messages.create(
                 session_id=session_id,
@@ -58,7 +67,7 @@ class MessageService:
                 content=content,
                 message_type=message_type,
                 message_id=message_id,
-                extra=extra,
+                extra=normalized_extra,
             )
         except MessageIdConflictError as exc:
             raise AppError(ErrorCode.INVALID_REQUEST, str(exc), 409) from exc
@@ -78,6 +87,13 @@ class MessageService:
             raise AppError(ErrorCode.RESOURCE_NOT_FOUND, "session not found", 404)
 
         self._ensure_membership(sender_id, session_id)
+        normalized_extra = self._normalize_message_extra(
+            sender_id=sender_id,
+            session_id=session_id,
+            content=content,
+            message_type=message_type,
+            extra=extra,
+        )
         try:
             message, created = self.messages.create(
                 session_id=session_id,
@@ -85,7 +101,7 @@ class MessageService:
                 content=content,
                 message_type=message_type,
                 message_id=message_id,
-                extra=extra,
+                extra=normalized_extra,
             )
         except MessageIdConflictError as exc:
             raise AppError(ErrorCode.INVALID_REQUEST, str(exc), 409) from exc
@@ -260,6 +276,94 @@ class MessageService:
     def _ensure_membership(self, user_id: str, session_id: str) -> None:
         if not self.sessions.has_member(session_id, user_id):
             raise AppError(ErrorCode.FORBIDDEN, "not a session member", 403)
+
+    def _normalize_message_extra(
+        self,
+        *,
+        sender_id: str,
+        session_id: str,
+        content: str,
+        message_type: str,
+        extra: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        normalized_extra = dict(extra or {})
+        mentions = self._normalize_mentions(normalized_extra.get("mentions"), content=content)
+        if str(message_type or "text").strip().lower() != "text":
+            mentions = []
+
+        if any(str(item.get("mention_type", "") or "") == "all" for item in mentions):
+            self._ensure_can_mention_everyone(sender_id, session_id)
+
+        if mentions:
+            normalized_extra["mentions"] = mentions
+        else:
+            normalized_extra.pop("mentions", None)
+        return normalized_extra or None
+
+    def _ensure_can_mention_everyone(self, sender_id: str, session_id: str) -> None:
+        session = self.sessions.get_by_id(session_id)
+        if session is None:
+            raise AppError(ErrorCode.RESOURCE_NOT_FOUND, "session not found", 404)
+        if str(session.type or "") != "group":
+            raise AppError(ErrorCode.INVALID_REQUEST, "@all is only available in group chats", 422)
+
+        group = self.groups.get_by_session_id(session_id)
+        if group is None:
+            raise AppError(ErrorCode.INVALID_REQUEST, "group metadata not found", 422)
+        if str(group.owner_id or "") == sender_id:
+            return
+
+        membership = self.groups.get_member(group.id, sender_id)
+        role = str(getattr(membership, "role", "") or "").strip().lower()
+        if role not in {"owner", "admin"}:
+            raise AppError(ErrorCode.FORBIDDEN, "@all requires owner or admin privileges", 403)
+
+    @staticmethod
+    def _normalize_mentions(raw_mentions: Any, *, content: str) -> list[dict[str, Any]]:
+        if not isinstance(raw_mentions, list):
+            return []
+
+        text = str(content or "")
+        text_length = len(text)
+        normalized: list[dict[str, Any]] = []
+        for item in raw_mentions:
+            if not isinstance(item, dict):
+                continue
+            try:
+                start = int(item.get("start", -1))
+                end = int(item.get("end", -1))
+            except (TypeError, ValueError):
+                continue
+
+            if start < 0 or end <= start or start >= text_length:
+                continue
+            end = min(end, text_length)
+            if end <= start:
+                continue
+
+            display_name = str(item.get("display_name", "") or "").strip()
+            if not display_name or text[start:end] != f"@{display_name}":
+                continue
+
+            mention_type = str(item.get("mention_type", "member") or "member").strip().lower()
+            if mention_type not in {"member", "all"}:
+                mention_type = "member"
+
+            payload: dict[str, Any] = {
+                "start": start,
+                "end": end,
+                "display_name": display_name,
+                "mention_type": mention_type,
+            }
+            if mention_type == "member":
+                member_id = str(item.get("member_id", "") or "").strip()
+                if not member_id:
+                    continue
+                payload["member_id"] = member_id
+            normalized.append(payload)
+
+        normalized.sort(key=lambda item: (int(item["start"]), int(item["end"])))
+        return normalized
 
     @staticmethod
     def _normalize_session_cursors(raw_cursors: dict | None) -> dict[str, int]:

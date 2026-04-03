@@ -36,7 +36,7 @@ def test_group_session_display_name_and_chat_title_follow_default_rule() -> None
     )
 
     assert session.display_name() == 'test1、test2、test3...'
-    assert session.chat_title() == 'test1、test2、test3（5）'
+    assert session.chat_title() == 'test1、test2、test3(5)'
 
 
 def test_group_session_preview_sender_name_uses_remark_priority() -> None:
@@ -120,4 +120,4 @@ def test_legacy_generated_group_name_is_treated_as_default_name() -> None:
     )
 
     assert session.has_custom_group_name() is False
-    assert session.chat_title() == 'test1、test2、test3（5）'
+    assert session.chat_title() == 'test1、test2、test3(5)'

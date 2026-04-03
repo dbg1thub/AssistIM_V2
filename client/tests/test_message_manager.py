@@ -90,7 +90,24 @@ if 'PySide6.QtCore' not in sys.modules:
         def instance():
             return None
 
+    class _DummyQDate:
+        def __init__(self, year=2000, month=1, day=1):
+            self.year = year
+            self.month = month
+            self.day = day
+
+        @staticmethod
+        def currentDate():
+            return _DummyQDate(2026, 4, 3)
+
+        def toString(self, _fmt=None):
+            return f'{self.year:04d}-{self.month:02d}-{self.day:02d}'
+
+        def __eq__(self, other):
+            return isinstance(other, _DummyQDate) and (self.year, self.month, self.day) == (other.year, other.month, other.day)
+
     qtcore.QLocale = _DummyQLocale
+    qtcore.QDate = _DummyQDate
     qtcore.QObject = _DummyQObject
     qtcore.Signal = _DummySignal
     qtcore.Slot = _DummySlot
@@ -323,6 +340,7 @@ class FakeDatabase:
         self.is_connected = False
         self.messages: dict[str, ChatMessage] = {}
         self.saved_batches: list[list[ChatMessage]] = []
+        self.profile_update_calls: list[tuple[str, str, dict]] = []
 
     async def save_message(self, message: ChatMessage) -> None:
         self.messages[message.message_id] = message
@@ -356,6 +374,17 @@ class FakeDatabase:
         self.saved_batches.append(list(messages))
         for message in messages:
             self.messages[message.message_id] = message
+
+    async def apply_sender_profile_update(self, session_id: str, user_id: str, sender_profile: dict) -> list[str]:
+        self.profile_update_calls.append((session_id, user_id, dict(sender_profile)))
+        changed: list[str] = []
+        for message in self.messages.values():
+            if message.session_id != session_id or message.sender_id != user_id:
+                continue
+            message.extra["sender_avatar"] = str(sender_profile.get("avatar", "") or "")
+            message.extra["sender_nickname"] = str(sender_profile.get("nickname", "") or "")
+            changed.append(message.message_id)
+        return changed
 
 
 async def _wait_until(predicate, *, timeout: float = 0.5) -> None:
@@ -948,5 +977,71 @@ def test_chat_controller_load_messages_forwards_before_timestamp(monkeypatch) ->
 
         assert messages == ['page']
         assert fake_message_manager.calls == [('session-1', 20, 123.45)]
+
+    asyncio.run(scenario())
+
+
+def test_message_manager_applies_user_profile_update_events(monkeypatch) -> None:
+    fake_event_bus = FakeEventBus()
+    fake_conn_manager = FakeConnectionManager([])
+    fake_db = FakeDatabase()
+    fake_db.messages['m-1'] = ChatMessage(
+        message_id='m-1',
+        session_id='session-1',
+        sender_id='alice',
+        content='hello',
+        status=MessageStatus.SENT,
+        is_self=False,
+        extra={'sender_avatar': '/uploads/old.png', 'sender_nickname': 'Alice'},
+    )
+
+    monkeypatch.setattr(message_manager_module, 'get_event_bus', lambda: fake_event_bus)
+    monkeypatch.setattr(message_manager_module, 'get_connection_manager', lambda: fake_conn_manager)
+    monkeypatch.setattr(message_manager_module, 'get_database', lambda: fake_db)
+
+    async def scenario() -> None:
+        manager = message_manager_module.MessageManager()
+        manager.set_user_id('bob')
+        await manager.initialize()
+        try:
+            await manager._handle_ws_message(
+                {
+                    'type': 'user_profile_update',
+                    'data': {
+                        'session_id': 'session-1',
+                        'user_id': 'alice',
+                        'session_avatar': '/uploads/group_avatars/s1_v2.png',
+                        'event_seq': 3,
+                        'profile': {
+                            'id': 'alice',
+                            'username': 'alice',
+                            'nickname': 'Alice Prime',
+                            'display_name': 'Alice Prime',
+                            'avatar': '/uploads/alice-new.png',
+                            'gender': 'female',
+                        },
+                    },
+                }
+            )
+
+            assert fake_db.profile_update_calls == [
+                (
+                    'session-1',
+                    'alice',
+                    {
+                        'id': 'alice',
+                        'username': 'alice',
+                        'nickname': 'Alice Prime',
+                        'display_name': 'Alice Prime',
+                        'avatar': '/uploads/alice-new.png',
+                        'gender': 'female',
+                    },
+                )
+            ]
+            assert fake_db.messages['m-1'].extra['sender_avatar'] == '/uploads/alice-new.png'
+            assert any(event == message_manager_module.MessageEvent.PROFILE_UPDATED for event, _ in fake_event_bus.events)
+            assert any(event == ContactEvent.SYNC_REQUIRED for event, _ in fake_event_bus.events)
+        finally:
+            await manager.close()
 
     asyncio.run(scenario())

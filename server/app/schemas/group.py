@@ -18,6 +18,10 @@ class GroupMemberAdd(BaseModel):
     role: str = "member"
 
 
+class GroupMemberRoleUpdate(BaseModel):
+    role: str = "member"
+
+
 class GroupTransferOwner(BaseModel):
     new_owner_id: str
 

@@ -55,6 +55,10 @@ class ChatController:
         """Set current user ID."""
         self._msg_manager.set_user_id(user_id)
 
+    async def refresh_sessions_snapshot(self) -> list[Session]:
+        """Refresh the authoritative session snapshot after profile-affecting changes."""
+        return await self._session_manager.refresh_remote_sessions()
+
     async def send_message(
         self,
         content: str,
@@ -72,11 +76,15 @@ class ChatController:
             logger.warning("Empty message content")
             return None
 
+        normalized_extra = dict(extra or {})
+        if message_type == MessageType.TEXT and normalized_extra.get("mentions"):
+            normalized_extra["content"] = content.strip()
+
         message = await self._msg_manager.send_message(
             session_id=session_id,
             content=content.strip(),
             message_type=message_type,
-            extra=extra,
+            extra=normalized_extra,
         )
 
         await self._session_manager.add_message_to_session(
@@ -200,11 +208,15 @@ class ChatController:
             logger.warning("Empty message content")
             return None
 
+        normalized_extra = dict(extra or {})
+        if message_type == MessageType.TEXT and normalized_extra.get("mentions"):
+            normalized_extra["content"] = content.strip()
+
         message = await self._msg_manager.send_message(
             session_id=session_id,
             content=content.strip(),
             message_type=message_type,
-            extra=extra,
+            extra=normalized_extra,
         )
 
         await self._session_manager.add_message_to_session(
