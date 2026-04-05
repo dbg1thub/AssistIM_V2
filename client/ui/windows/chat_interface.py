@@ -27,6 +27,7 @@ from qfluentwidgets import (
 from qfluentwidgets.components.widgets.menu import MenuAnimationType
 
 from client.core.config_backend import get_config
+from client.core.avatar_utils import profile_avatar_seed
 from client.core.datetime_utils import coerce_local_datetime
 from client.core.exceptions import AppError
 from client.core.i18n import tr
@@ -210,6 +211,7 @@ class ChatInterface(QWidget):
     INITIAL_HISTORY_WARM_SESSION_LIMIT = 6
     TYPING_INDICATOR_HIDE_DELAY_MS = 1800
     CALL_RING_REPEAT_MS = 3000
+    CALL_INCOMING_RING_RETRY_MS = 180
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1308,16 +1310,29 @@ class ChatInterface(QWidget):
         )
 
         session = self._get_session(call.session_id)
+        current_user_id = self._current_user_id()
+        peer_user_id = call.peer_user_id(current_user_id)
+        peer_name = self._call_session_name(call)
+        peer_avatar = str(session.display_avatar() if session is not None else "")
+        peer_avatar_seed = (
+            str(session.display_avatar_seed() if session is not None else "")
+            or profile_avatar_seed(
+                user_id=peer_user_id,
+                username=str(getattr(session, "extra", {}).get("counterpart_username", "") or "") if session is not None else "",
+                display_name=peer_name,
+                fallback=peer_name,
+            )
+        )
         toast = IncomingCallToast(
-            peer_name=self._call_session_name(call),
+            peer_name=peer_name,
             subtitle=tr(
                 "chat.call.incoming.content",
                 "{name} is inviting you to a {kind} call.",
-                name=self._call_session_name(call),
+                name=peer_name,
                 kind=self._call_kind_label(call.media_type),
             ),
-            avatar=str(session.display_avatar() if session is not None else ""),
-            avatar_seed=str(session.display_avatar_seed() if session is not None else ""),
+            avatar=peer_avatar,
+            avatar_seed=peer_avatar_seed,
             parent=self.window(),
         )
         self._incoming_call_toasts[call.call_id] = toast
@@ -1521,10 +1536,17 @@ class ChatInterface(QWidget):
 
         self._close_call_window()
         current_user_id = str((self._auth_controller.current_user or {}).get("id", "") or "")
+        current_user = dict(self._auth_controller.current_user or {})
         session_name = self._call_session_name(call)
         peer_label = session_name
         session = self._get_session(call.session_id)
         config = get_config()
+        self_label = str(
+            current_user.get("nickname", "")
+            or current_user.get("display_name", "")
+            or current_user.get("username", "")
+            or "Me"
+        )
 
         window = CallWindow(
             call,
@@ -1532,8 +1554,16 @@ class ChatInterface(QWidget):
             peer_label=peer_label,
             avatar=str(session.display_avatar() if session is not None else ""),
             avatar_seed=str(session.display_avatar_seed() if session is not None else ""),
+            self_avatar=str(current_user.get("avatar", "") or ""),
+            self_avatar_seed=profile_avatar_seed(
+                user_id=current_user.get("id", ""),
+                username=current_user.get("username", ""),
+                display_name=self_label,
+                fallback=self_label,
+            ),
+            self_label=self_label,
             ice_servers=config.webrtc.ice_servers,
-            parent=self.window(),
+            parent=None,
         )
         window.hangup_requested.connect(self._on_call_window_hangup_requested)
         window.signal_generated.connect(self._on_call_window_signal_generated)
@@ -1652,9 +1682,12 @@ class ChatInterface(QWidget):
             return
         self._stop_call_ring_sounds()
         self._active_call_ring_sound = sound_id
-        self._play_call_sound(sound_id)
         if sound_id == AppSound.CALL_INCOMING_RING:
+            sound_manager = get_sound_manager()
+            sound_manager.ensure_playing(sound_id)
+            QTimer.singleShot(self.CALL_INCOMING_RING_RETRY_MS, self._retry_incoming_ring_sound)
             return
+        self._play_call_sound(sound_id)
         self._call_ring_timer.start(self.CALL_RING_REPEAT_MS)
 
     def _on_call_ring_timer(self) -> None:
@@ -1662,6 +1695,15 @@ class ChatInterface(QWidget):
             self._call_ring_timer.stop()
             return
         self._play_call_sound(self._active_call_ring_sound)
+
+    def _retry_incoming_ring_sound(self) -> None:
+        """Retry one incoming ring shortly after the first play to mask backend warmup misses."""
+        if self._active_call_ring_sound != AppSound.CALL_INCOMING_RING:
+            return
+        if not self._incoming_call_toasts:
+            return
+        sound_manager = get_sound_manager()
+        sound_manager.ensure_playing(AppSound.CALL_INCOMING_RING)
 
     def _call_end_outcome(self, call: ActiveCallState) -> str:
         if call.reason == "timeout":

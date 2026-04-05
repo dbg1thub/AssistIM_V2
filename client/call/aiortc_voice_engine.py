@@ -11,12 +11,13 @@ from collections.abc import Callable, Coroutine
 from typing import Any
 
 from PySide6.QtCore import QObject, Qt, QTimer, Signal
+from PySide6.QtGui import QImage
 from PySide6.QtMultimedia import QAudioFormat, QAudioSink, QMediaDevices
 
 
 try:  # pragma: no cover - optional runtime dependency
     from aiortc import RTCConfiguration, RTCIceCandidate, RTCIceServer, RTCPeerConnection, RTCSessionDescription
-    from aiortc.contrib.media import MediaPlayer
+    from aiortc.contrib.media import MediaPlayer, MediaRelay
     from aiortc.mediastreams import MediaStreamError
     from aiortc.sdp import candidate_from_sdp, candidate_to_sdp
     import aioice.ice as aioice_ice
@@ -31,6 +32,7 @@ except Exception as exc:  # pragma: no cover - exercised via runtime fallback
     RTCIceCandidate = None  # type: ignore[assignment]
     RTCIceServer = None  # type: ignore[assignment]
     MediaPlayer = None  # type: ignore[assignment]
+    MediaRelay = None  # type: ignore[assignment]
     MediaStreamError = Exception  # type: ignore[assignment]
     candidate_from_sdp = None  # type: ignore[assignment]
     candidate_to_sdp = None  # type: ignore[assignment]
@@ -270,7 +272,9 @@ class _QtRemoteAudioOutput(QObject):
 
 
 class AiortcVoiceEngine(QObject):
-    """Minimal aiortc boundary for 1:1 voice calls."""
+    """Minimal aiortc boundary for 1:1 voice or video calls."""
+
+    VIDEO_FRAME_INTERVAL_MS = 41
 
     state_changed = Signal(str)
     signal_generated = Signal(str, object)
@@ -278,28 +282,45 @@ class AiortcVoiceEngine(QObject):
     microphone_muted_changed = Signal(bool)
     microphone_available_changed = Signal(bool)
     speaker_enabled_changed = Signal(bool)
+    camera_enabled_changed = Signal(bool)
+    camera_available_changed = Signal(bool)
+    local_video_frame_changed = Signal(object)
+    remote_video_frame_changed = Signal(object)
 
     def __init__(
         self,
         call_id: str,
         *,
+        media_type: str = "voice",
         ice_servers: list[dict[str, Any]] | None = None,
         audio_input_name: str | None = None,
+        video_input_name: str | None = None,
         parent=None,
     ) -> None:
         super().__init__(parent)
         self._call_id = str(call_id or "")
+        self._media_type = str(media_type or "voice").strip().lower()
+        self._video_enabled = self._media_type == "video"
         self._ice_servers = self._normalize_ice_servers(ice_servers)
         self._audio_input_name = str(audio_input_name or "").strip()
+        self._video_input_name = str(video_input_name or "").strip()
         self._peer_connection = None
         self._audio_transceiver = None
-        self._player = None
+        self._video_transceiver = None
+        self._audio_player = None
+        self._video_player = None
+        self._video_relay = MediaRelay() if MediaRelay is not None else None
         self._local_audio_track = None
+        self._local_video_track = None
+        self._local_video_preview_track = None
         self._remote_audio_output = _QtRemoteAudioOutput(parent=self)
         self._remote_audio_started = False
+        self._remote_video_started = False
         self._speaker_enabled = self._remote_audio_output.is_available()
         self._microphone_muted = False
         self._microphone_available = bool(self._audio_input_name)
+        self._camera_enabled = self._video_enabled and bool(self._video_input_name)
+        self._camera_available = self._camera_enabled
         self._signaling_ready = False
         self._offer_sent = False
         self._pending_signals: list[tuple[str, dict[str, Any]]] = []
@@ -310,6 +331,8 @@ class AiortcVoiceEngine(QObject):
         self._timing_markers: set[str] = set()
         self._remote_ice_added_count = 0
         self._local_ice_sent_count = 0
+        self._last_local_video_emit_at = 0.0
+        self._last_remote_video_emit_at = 0.0
 
     def prepare(self, *, is_caller: bool) -> None:
         """Prewarm local media and optionally pre-create the caller offer."""
@@ -366,6 +389,24 @@ class AiortcVoiceEngine(QObject):
         else:
             self.state_changed.emit("Speaker disabled")
 
+    def set_camera_enabled(self, enabled: bool) -> None:
+        """Toggle the local camera sender state."""
+        if not self._video_enabled:
+            self.camera_enabled_changed.emit(False)
+            return
+        if not self._camera_available:
+            self.camera_enabled_changed.emit(False)
+            return
+        self._camera_enabled = bool(enabled)
+        video_track = self._local_video_track
+        if video_track is not None:
+            video_track.enabled = self._camera_enabled
+        if not self._camera_enabled:
+            self.local_video_frame_changed.emit(None)
+        self._log_timing("camera_toggle", enabled=str(self._camera_enabled).lower())
+        self.camera_enabled_changed.emit(self._camera_enabled)
+        self.state_changed.emit("Camera active" if self._camera_enabled else "Camera off")
+
     def close(self) -> None:
         """Stop capture and close the peer connection."""
         self._release_media_resources()
@@ -406,6 +447,8 @@ class AiortcVoiceEngine(QObject):
                 if self._local_audio_track is None:
                     self.state_changed.emit("Opening microphone")
                     await self._ensure_local_audio_track()
+                if self._video_enabled:
+                    await self._ensure_local_video_track()
                 if getattr(self._peer_connection, "localDescription", None) is None:
                     self.state_changed.emit("Creating offer")
                     self._log_timing("create_offer_start")
@@ -423,6 +466,8 @@ class AiortcVoiceEngine(QObject):
                 if remote_description is not None and getattr(remote_description, "type", None) == "offer":
                     self.state_changed.emit("Opening microphone")
                     await self._ensure_local_audio_track()
+                    if self._video_enabled:
+                        await self._ensure_local_video_track()
                     await self._flush_pending_remote_ice()
                     self._normalize_transceivers_for_answer()
                     self._log_timing("create_answer_start")
@@ -445,8 +490,12 @@ class AiortcVoiceEngine(QObject):
             await self._ensure_peer_connection()
             if not is_caller:
                 await self._ensure_local_audio_capture()
+                if self._video_enabled:
+                    await self._ensure_local_video_capture()
                 return
             await self._ensure_local_audio_track()
+            if self._video_enabled:
+                await self._ensure_local_video_track()
             if getattr(self._peer_connection, "localDescription", None) is None:
                 self.state_changed.emit("Creating offer")
                 self._log_timing("create_offer_start")
@@ -474,6 +523,8 @@ class AiortcVoiceEngine(QObject):
             self._log_timing("offer_applied")
             self.state_changed.emit("Opening microphone")
             await self._ensure_local_audio_track()
+            if self._video_enabled:
+                await self._ensure_local_video_track()
             await self._flush_pending_remote_ice()
             self._normalize_transceivers_for_answer()
             self._log_timing("create_answer_start")
@@ -633,6 +684,9 @@ class AiortcVoiceEngine(QObject):
                 else:
                     self.state_changed.emit("Remote audio received (speaker off)")
                 self._launch(lambda current_track=track: self._play_remote_audio(current_track), "play remote audio")
+            elif track.kind == "video":
+                self._log_timing("remote_video_track")
+                self._launch(lambda current_track=track: self._render_remote_video(current_track), "render remote video")
 
     async def _ensure_local_audio_track(self) -> None:
         """Attach the local microphone to the peer connection once."""
@@ -659,7 +713,7 @@ class AiortcVoiceEngine(QObject):
 
     async def _ensure_local_audio_capture(self) -> None:
         """Open the local microphone once without necessarily attaching it yet."""
-        if self._player is not None and self._local_audio_track is not None:
+        if self._audio_player is not None and self._local_audio_track is not None:
             return
         if MediaPlayer is None:
             self._local_audio_track = None
@@ -698,15 +752,191 @@ class AiortcVoiceEngine(QObject):
             raise RuntimeError(str(exc) or "Unable to open local microphone") from exc
 
         self._set_microphone_available(True)
-        self._player = player
+        self._audio_player = player
         self._local_audio_track = audio_track
         self._log_timing("local_audio_capture_ready")
+
+    async def _ensure_local_video_track(self) -> None:
+        """Attach the local camera to the peer connection once."""
+        if not self._video_enabled or self._peer_connection is None:
+            return
+        await self._ensure_local_video_capture()
+        video_track = self._local_video_track
+        if video_track is None:
+            await self._ensure_recvonly_video_transceiver()
+            return
+
+        video_track.enabled = self._camera_enabled
+        transceiver = self._ensure_video_transceiver("sendrecv")
+        sender = getattr(transceiver, "sender", None)
+        if sender is not None:
+            sender.replaceTrack(video_track)
+        sender_track = getattr(sender, "track", None) if sender is not None else None
+        current_direction = str(getattr(transceiver, "direction", "") or "")
+        if current_direction == "recvonly":
+            transceiver.direction = "sendrecv"
+        elif current_direction == "inactive":
+            transceiver.direction = "sendonly"
+        self._video_transceiver = transceiver
+        self._log_timing(
+            "local_video_sender_attached",
+            direction=str(getattr(transceiver, "direction", "") or "<none>"),
+            mid=str(getattr(transceiver, "mid", "") or "<none>"),
+            sender_track="yes" if sender_track is not None else "no",
+            camera_enabled=str(self._camera_enabled).lower(),
+        )
+        self.state_changed.emit("Camera ready")
+
+    async def _ensure_local_video_capture(self) -> None:
+        """Open the local camera and preview track once."""
+        if not self._video_enabled:
+            return
+        if self._video_player is not None and self._local_video_track is not None:
+            return
+        if MediaPlayer is None:
+            self._set_camera_available(False)
+            self._local_video_track = None
+            await self._ensure_recvonly_video_transceiver()
+            return
+        if not self._video_input_name:
+            self._set_camera_available(False)
+            self._local_video_track = None
+            await self._ensure_recvonly_video_transceiver()
+            self.state_changed.emit("No camera detected")
+            return
+
+        try:
+            player = self._open_local_video_player()
+            source_video_track = getattr(player, "video", None)
+            if source_video_track is None:
+                raise RuntimeError("No local camera track is available")
+        except Exception as exc:
+            logger.warning("Local camera unavailable for call %s, falling back to receive-only video", self._call_id, exc_info=True)
+            self._set_camera_available(False)
+            self._camera_enabled = False
+            self.camera_enabled_changed.emit(False)
+            self._local_video_track = None
+            self._local_video_preview_track = None
+            self._video_player = None
+            await self._ensure_recvonly_video_transceiver()
+            self.state_changed.emit("Camera unavailable")
+            return
+
+        relay = self._video_relay
+        if relay is not None:
+            self._local_video_track = relay.subscribe(source_video_track)
+            self._local_video_preview_track = relay.subscribe(source_video_track)
+        else:
+            self._local_video_track = source_video_track
+            self._local_video_preview_track = None
+        self._video_player = player
+        self._set_camera_available(True)
+        self._camera_enabled = True
+        self.camera_enabled_changed.emit(True)
+        self._log_timing(
+            "local_video_capture_ready",
+            preview_track="yes" if self._local_video_preview_track is not None else "no",
+            relay="yes" if relay is not None else "no",
+        )
+        preview_track = self._local_video_preview_track
+        if preview_track is not None:
+            self._launch(lambda current_track=preview_track: self._render_local_video(current_track), "render local video")
+
+    def _open_local_video_player(self):
+        """Open the local camera with progressively safer capture parameters."""
+        device_path = f"video={self._video_input_name}"
+        attempts: list[tuple[str | None, dict[str, str] | None]] = []
+
+        if sys.platform.startswith("win"):
+            attempts.extend(
+                [
+                    (
+                        "dshow",
+                        {
+                            "video_size": "1280x720",
+                            "framerate": "24",
+                            "rtbufsize": "128k",
+                        },
+                    ),
+                    (
+                        "dshow",
+                        {
+                            "video_size": "960x540",
+                            "framerate": "24",
+                            "rtbufsize": "96k",
+                        },
+                    ),
+                    (
+                        "dshow",
+                        {
+                            "video_size": "640x480",
+                            "framerate": "20",
+                            "rtbufsize": "64k",
+                        },
+                    ),
+                    (
+                        "dshow",
+                        {
+                            "video_size": "640x480",
+                            "framerate": "15",
+                        },
+                    ),
+                    ("dshow", None),
+                    (None, None),
+                ]
+            )
+        else:
+            attempts.append((None, None))
+
+        last_error: Exception | None = None
+        for player_format, player_options in attempts:
+            try:
+                player = MediaPlayer(
+                    device_path,
+                    format=player_format,
+                    options=player_options,
+                )
+                self._log_timing(
+                    "local_video_capture_opened",
+                    format=player_format or "default",
+                    options="none" if not player_options else ",".join(f"{key}={value}" for key, value in player_options.items()),
+                )
+                return player
+            except Exception as exc:
+                last_error = exc
+                logger.debug(
+                    "Camera open attempt failed for %s format=%s options=%s",
+                    device_path,
+                    player_format or "<default>",
+                    player_options or {},
+                    exc_info=True,
+                )
+
+        if last_error is not None:
+            logger.warning(
+                "Unable to open local camera after all capture attempts for %s",
+                device_path,
+                exc_info=True,
+            )
+            raise last_error
+        raise RuntimeError("Unable to open local camera")
 
     async def _ensure_recvonly_audio_transceiver(self) -> None:
         """Negotiate audio even when local capture is unavailable."""
         if self._peer_connection is None:
             return
         self._audio_transceiver = self._ensure_audio_transceiver("recvonly")
+
+    async def _ensure_recvonly_video_transceiver(self) -> None:
+        """Negotiate video even when local capture is unavailable."""
+        if self._peer_connection is None or not self._video_enabled:
+            return
+        self._video_transceiver = self._ensure_video_transceiver("recvonly")
+        self._log_timing(
+            "video_recvonly_transceiver_ready",
+            direction=str(getattr(self._video_transceiver, "direction", "") or "<none>"),
+            mid=str(getattr(self._video_transceiver, "mid", "") or "<none>"),
+        )
 
     def _ensure_audio_transceiver(self, preferred_direction: str):
         """Return one audio transceiver, creating it explicitly when needed."""
@@ -734,6 +964,33 @@ class AiortcVoiceEngine(QObject):
             if getattr(transceiver, "kind", None) == "audio":
                 return transceiver
         return self._audio_transceiver
+
+    def _ensure_video_transceiver(self, preferred_direction: str):
+        """Return one video transceiver, creating it explicitly when needed."""
+        existing = self._resolve_video_transceiver()
+        if existing is not None:
+            current_direction = str(getattr(existing, "direction", "") or "")
+            if preferred_direction == "sendrecv":
+                if current_direction == "recvonly":
+                    existing.direction = "sendrecv"
+                elif current_direction == "inactive":
+                    existing.direction = "sendonly"
+            elif preferred_direction == "recvonly" and current_direction not in {"sendrecv", "sendonly"}:
+                existing.direction = "recvonly"
+            return existing
+        return self._peer_connection.addTransceiver("video", direction=preferred_direction)
+
+    def _resolve_video_transceiver(self):
+        """Return the negotiated video transceiver when one already exists."""
+        if self._peer_connection is None:
+            return None
+        transceivers = getattr(self._peer_connection, "getTransceivers", None)
+        if transceivers is None:
+            return self._video_transceiver
+        for transceiver in transceivers():
+            if getattr(transceiver, "kind", None) == "video":
+                return transceiver
+        return self._video_transceiver
 
     def _normalize_transceivers_for_answer(self) -> None:
         """Ensure aiortc answer generation does not trip on stray local transceivers."""
@@ -804,6 +1061,14 @@ class AiortcVoiceEngine(QObject):
             return
         self._microphone_available = normalized
         self.microphone_available_changed.emit(normalized)
+
+    def _set_camera_available(self, available: bool) -> None:
+        """Update the current camera availability state."""
+        normalized = bool(available)
+        if self._camera_available == normalized:
+            return
+        self._camera_available = normalized
+        self.camera_available_changed.emit(normalized)
 
     def _emit_local_description(self, event_type: str) -> None:
         """Forward one local SDP description through the signaling layer."""
@@ -894,6 +1159,60 @@ class AiortcVoiceEngine(QObject):
                 self._log_timing("first_remote_audio_frame")
                 self.state_changed.emit("In call")
 
+    async def _render_local_video(self, track) -> None:
+        """Read local preview frames and forward them to the Qt layer."""
+        first_frame_logged = False
+        while True:
+            try:
+                frame = await track.recv()
+            except MediaStreamError:
+                break
+            if not self._camera_enabled:
+                continue
+            image = self._frame_to_qimage(frame)
+            if image is not None:
+                now = time.perf_counter()
+                if (now - self._last_local_video_emit_at) * 1000.0 < self.VIDEO_FRAME_INTERVAL_MS:
+                    continue
+                self._last_local_video_emit_at = now
+                if not first_frame_logged:
+                    first_frame_logged = True
+                    self._log_timing("first_local_video_preview_frame")
+                self.local_video_frame_changed.emit(image)
+
+    async def _render_remote_video(self, track) -> None:
+        """Read remote frames and forward them to the Qt layer."""
+        while True:
+            try:
+                frame = await track.recv()
+            except MediaStreamError:
+                break
+            image = self._frame_to_qimage(frame)
+            if image is None:
+                continue
+            now = time.perf_counter()
+            if (now - self._last_remote_video_emit_at) * 1000.0 < self.VIDEO_FRAME_INTERVAL_MS:
+                continue
+            self._last_remote_video_emit_at = now
+            if not self._remote_video_started:
+                self._remote_video_started = True
+                self._log_timing("first_remote_video_frame")
+                if not self._remote_audio_started:
+                    self.state_changed.emit("In call")
+            self.remote_video_frame_changed.emit(image)
+
+    @staticmethod
+    def _frame_to_qimage(frame) -> QImage | None:
+        """Convert one av video frame into a detached QImage."""
+        try:
+            array = frame.to_ndarray(format="rgba")
+        except Exception:
+            return None
+        height, width = array.shape[:2]
+        bytes_per_line = int(array.strides[0])
+        image = QImage(array.data, width, height, bytes_per_line, QImage.Format.Format_RGBA8888)
+        return image.copy()
+
     async def _close(self) -> None:
         """Release aiortc resources."""
         current_task = asyncio.current_task()
@@ -916,9 +1235,11 @@ class AiortcVoiceEngine(QObject):
 
     def _release_media_resources(self) -> None:
         """Release local capture and playback resources immediately."""
-        if self._player is not None:
-            audio_track = getattr(self._player, "audio", None)
-            video_track = getattr(self._player, "video", None)
+        for player in (self._audio_player, self._video_player):
+            if player is None:
+                continue
+            audio_track = getattr(player, "audio", None)
+            video_track = getattr(player, "video", None)
             for track in (audio_track, video_track):
                 if track is None:
                     continue
@@ -926,11 +1247,19 @@ class AiortcVoiceEngine(QObject):
                     track.stop()
                 except Exception:
                     logger.debug("Failed to stop MediaPlayer track cleanly", exc_info=True)
-            self._player = None
+        self._audio_player = None
+        self._video_player = None
         self._local_audio_track = None
+        self._local_video_track = None
+        self._local_video_preview_track = None
 
         self._remote_audio_output.close()
         self._remote_audio_started = False
+        self._remote_video_started = False
+        self._last_local_video_emit_at = 0.0
+        self._last_remote_video_emit_at = 0.0
+        self.local_video_frame_changed.emit(None)
+        self.remote_video_frame_changed.emit(None)
 
     def _log_timing(self, stage: str, **extra: Any) -> None:
         """Log one engine-local timeline checkpoint for the active call."""

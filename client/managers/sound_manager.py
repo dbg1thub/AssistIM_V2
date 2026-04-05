@@ -181,6 +181,48 @@ class SoundManager:
                 if hasattr(effect, "stop"):
                     effect.stop()
 
+    def is_playing(self, sound_id: AppSound | str) -> bool:
+        normalized_sound_id = _normalize_sound_id(sound_id)
+        for (asset_id, _variant_name), effects in self._effect_pools.items():
+            if asset_id != normalized_sound_id:
+                continue
+            for effect in effects:
+                if getattr(effect, "isPlaying", lambda: False)():
+                    return True
+        return False
+
+    def ensure_playing(self, sound_id: AppSound | str) -> bool:
+        """Start one sound only if it is not already playing."""
+        asset = self._assets.get(_normalize_sound_id(sound_id))
+        if asset is None or not self._is_sound_enabled(asset):
+            return False
+
+        variant_name, variant_path = self._resolve_variant(asset)
+        if not variant_path.is_file():
+            return False
+
+        effect = self._acquire_effect(asset, variant_name, variant_path)
+        if effect is None:
+            return False
+
+        target_volume = self._effective_volume(asset)
+        self._cancel_fade(effect)
+        effect.setVolume(target_volume)
+
+        if hasattr(effect, "isPlaying") and effect.isPlaying():
+            return True
+
+        if hasattr(effect, "isLoaded"):
+            try:
+                if not effect.isLoaded() and self._queue_play_when_loaded(asset, variant_name, effect):
+                    return True
+            except Exception:
+                pass
+
+        effect.play()
+        self._last_played_at[asset.sound_id] = time.monotonic()
+        return True
+
     async def close(self) -> None:
         if not self._initialized:
             return
