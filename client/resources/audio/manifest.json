@@ -11,6 +11,47 @@
         "dark": "notifications/windows_notify_messaging_black.wav",
         "default": "notifications/windows_notify_messaging_light.wav"
       }
+    },
+    "call_outgoing_ring": {
+      "category": "calls",
+      "volume": 0.95,
+      "polyphony": 1,
+      "cooldown_ms": 0,
+      "fade_in_ms": 0,
+      "fade_out_ms": 0,
+      "variants": {
+        "default": "outgoing_ring.wav"
+      }
+    },
+    "call_incoming_ring": {
+      "category": "calls",
+      "volume": 0.95,
+      "polyphony": 1,
+      "cooldown_ms": 0,
+      "loop": true,
+      "fade_in_ms": 0,
+      "fade_out_ms": 0,
+      "variants": {
+        "default": "incoming_ring.wav"
+      }
+    },
+    "call_connected": {
+      "category": "calls",
+      "volume": 1.0,
+      "polyphony": 1,
+      "cooldown_ms": 0,
+      "variants": {
+        "default": "call_connected.wav"
+      }
+    },
+    "call_ended": {
+      "category": "calls",
+      "volume": 1.0,
+      "polyphony": 1,
+      "cooldown_ms": 0,
+      "variants": {
+        "default": "call_ended.wav"
+      }
     }
   }
 }

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import time
+import wave
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -29,6 +30,10 @@ _AUDIO_MANIFEST_PATH = _AUDIO_ROOT / "manifest.json"
 
 class AppSound(str, Enum):
     MESSAGE_INCOMING = "message_incoming"
+    CALL_OUTGOING_RING = "call_outgoing_ring"
+    CALL_INCOMING_RING = "call_incoming_ring"
+    CALL_CONNECTED = "call_connected"
+    CALL_ENDED = "call_ended"
 
 
 @dataclass(frozen=True)
@@ -39,9 +44,23 @@ class SoundAsset:
     volume: float = 1.0
     polyphony: int = 1
     cooldown_ms: int = 0
+    loop: bool = False
+    fade_in_ms: int = 0
+    fade_out_ms: int = 0
+    duration_ms: int = 0
 
 
-def _create_sound_effect(path: Path, volume: float):
+@dataclass
+class _FadeJob:
+    effect: Any
+    start_volume: float
+    end_volume: float
+    started_at: float
+    duration_ms: int
+    stop_after: bool = False
+
+
+def _create_sound_effect(path: Path, volume: float, *, loop: bool = False):
     try:
         from PySide6.QtCore import QUrl
         from PySide6.QtMultimedia import QSoundEffect
@@ -50,7 +69,12 @@ def _create_sound_effect(path: Path, volume: float):
 
     effect = QSoundEffect()
     effect.setSource(QUrl.fromLocalFile(str(path)))
-    effect.setLoopCount(1)
+    infinite_loop_count = getattr(QSoundEffect, "Infinite", -2)
+    try:
+        infinite_loop_count = int(infinite_loop_count)
+    except (TypeError, ValueError):
+        infinite_loop_count = -2
+    effect.setLoopCount(infinite_loop_count if loop else 1)
     effect.setVolume(volume)
     return effect
 
@@ -71,7 +95,11 @@ class SoundManager:
         self._event_subscriptions: list[tuple[str, Any]] = []
         self._last_played_at: dict[str, float] = {}
         self._pending_loaded_callbacks: dict[tuple[str, str, int], Any] = {}
+        self._fade_jobs: dict[int, _FadeJob] = {}
+        self._effect_generations: dict[int, int] = {}
+        self._fade_timer = None
         self._initialized = False
+        self._init_fade_timer()
 
     async def initialize(self) -> None:
         if self._initialized:
@@ -116,11 +144,42 @@ class SoundManager:
             logger.warning("No audio backend available for sound asset: %s", asset.sound_id)
             return False
 
-        effect.setVolume(self._effective_volume(asset))
+        target_volume = self._effective_volume(asset)
+        self._cancel_fade(effect)
+        generation = self._effect_generations.get(id(effect), 0) + 1
+        self._effect_generations[id(effect)] = generation
+        if asset.fade_in_ms > 0 and self._qt_app_available():
+            effect.setVolume(0.0)
+        else:
+            effect.setVolume(target_volume)
         if not self._play_effect(asset, variant_name, effect):
             return False
+        if asset.fade_in_ms > 0 and self._qt_app_available():
+            self._schedule_fade(effect, start_volume=0.0, end_volume=target_volume, duration_ms=asset.fade_in_ms)
+        self._schedule_auto_fade_out(asset, effect, generation)
         self._last_played_at[asset.sound_id] = now
         return True
+
+    def stop(self, sound_id: AppSound | str) -> None:
+        normalized_sound_id = _normalize_sound_id(sound_id)
+        asset = self._assets.get(normalized_sound_id)
+        for (asset_id, _variant_name), effects in self._effect_pools.items():
+            if asset_id != normalized_sound_id:
+                continue
+            for effect in effects:
+                if asset is not None and asset.fade_out_ms > 0 and self._qt_app_available():
+                    current_volume = self._effect_volume(effect)
+                    if current_volume > 0 and getattr(effect, "isPlaying", lambda: False)():
+                        self._schedule_fade(
+                            effect,
+                            start_volume=current_volume,
+                            end_volume=0.0,
+                            duration_ms=asset.fade_out_ms,
+                            stop_after=True,
+                        )
+                        continue
+                if hasattr(effect, "stop"):
+                    effect.stop()
 
     async def close(self) -> None:
         if not self._initialized:
@@ -138,8 +197,12 @@ class SoundManager:
                     continue
 
         self._effect_pools.clear()
+        self._fade_jobs.clear()
+        self._effect_generations.clear()
         self._last_played_at.clear()
         self._pending_loaded_callbacks.clear()
+        if self._fade_timer is not None and hasattr(self._fade_timer, "stop"):
+            self._fade_timer.stop()
         self._initialized = False
 
     async def _on_message_received(self, payload: dict) -> None:
@@ -179,6 +242,10 @@ class SoundManager:
                 volume=max(0.0, min(1.0, float(raw_config.get("volume", 1.0) or 1.0))),
                 polyphony=max(1, int(raw_config.get("polyphony", 1) or 1)),
                 cooldown_ms=max(0, int(raw_config.get("cooldown_ms", 0) or 0)),
+                loop=bool(raw_config.get("loop", False)),
+                fade_in_ms=max(0, int(raw_config.get("fade_in_ms", 0) or 0)),
+                fade_out_ms=max(0, int(raw_config.get("fade_out_ms", 0) or 0)),
+                duration_ms=self._sound_duration_ms(next(iter(variants.values()))),
             )
 
         self._assets = assets
@@ -192,7 +259,7 @@ class SoundManager:
                 if pool:
                     continue
 
-                effect = _create_sound_effect(path, self._effective_volume(asset))
+                effect = _create_sound_effect(path, self._effective_volume(asset), loop=asset.loop)
                 if effect is not None:
                     pool.append(effect)
 
@@ -231,7 +298,7 @@ class SoundManager:
                 return effect
 
         if len(pool) < asset.polyphony:
-            effect = _create_sound_effect(path, self._effective_volume(asset))
+            effect = _create_sound_effect(path, self._effective_volume(asset), loop=asset.loop)
             if effect is not None:
                 pool.append(effect)
             return effect
@@ -277,6 +344,143 @@ class SoundManager:
             effect.stop()
         effect.play()
         return True
+
+    def _init_fade_timer(self) -> None:
+        try:
+            from PySide6.QtCore import QTimer
+        except Exception:
+            self._fade_timer = None
+            return
+
+        self._fade_timer = QTimer()
+        self._fade_timer.setInterval(30)
+        self._fade_timer.timeout.connect(self._advance_fades)
+
+    @staticmethod
+    def _qt_app_available() -> bool:
+        try:
+            from PySide6.QtCore import QCoreApplication
+        except Exception:
+            return False
+        return QCoreApplication.instance() is not None
+
+    @staticmethod
+    def _effect_volume(effect: Any) -> float:
+        getter = getattr(effect, "volume", None)
+        if callable(getter):
+            try:
+                return float(getter())
+            except Exception:
+                return 0.0
+        return 0.0
+
+    def _schedule_fade(
+        self,
+        effect: Any,
+        *,
+        start_volume: float,
+        end_volume: float,
+        duration_ms: int,
+        stop_after: bool = False,
+    ) -> None:
+        if self._fade_timer is None or duration_ms <= 0:
+            if hasattr(effect, "setVolume"):
+                effect.setVolume(end_volume)
+            if stop_after and hasattr(effect, "stop"):
+                effect.stop()
+            return
+
+        self._fade_jobs[id(effect)] = _FadeJob(
+            effect=effect,
+            start_volume=start_volume,
+            end_volume=end_volume,
+            started_at=time.monotonic(),
+            duration_ms=duration_ms,
+            stop_after=stop_after,
+        )
+        if hasattr(effect, "setVolume"):
+            effect.setVolume(start_volume)
+        is_active = bool(getattr(self._fade_timer, "isActive", lambda: False)())
+        if not is_active and hasattr(self._fade_timer, "start"):
+            self._fade_timer.start()
+
+    def _cancel_fade(self, effect: Any) -> None:
+        self._fade_jobs.pop(id(effect), None)
+        if self._fade_timer is not None and not self._fade_jobs and hasattr(self._fade_timer, "stop"):
+            self._fade_timer.stop()
+
+    def _advance_fades(self) -> None:
+        if not self._fade_jobs:
+            if self._fade_timer is not None and hasattr(self._fade_timer, "stop"):
+                self._fade_timer.stop()
+            return
+
+        now = time.monotonic()
+        completed: list[int] = []
+        for effect_id, job in list(self._fade_jobs.items()):
+            progress = min(1.0, max(0.0, ((now - job.started_at) * 1000.0) / max(1, job.duration_ms)))
+            volume = job.start_volume + ((job.end_volume - job.start_volume) * progress)
+            if hasattr(job.effect, "setVolume"):
+                job.effect.setVolume(volume)
+            if progress >= 1.0:
+                if job.stop_after and hasattr(job.effect, "stop"):
+                    job.effect.stop()
+                completed.append(effect_id)
+
+        for effect_id in completed:
+            self._fade_jobs.pop(effect_id, None)
+
+        if self._fade_timer is not None and not self._fade_jobs and hasattr(self._fade_timer, "stop"):
+            self._fade_timer.stop()
+
+    def _schedule_auto_fade_out(self, asset: SoundAsset, effect: Any, generation: int) -> None:
+        if asset.loop or asset.fade_out_ms <= 0 or asset.duration_ms <= asset.fade_out_ms:
+            return
+        if not self._qt_app_available():
+            return
+        try:
+            from PySide6.QtCore import QTimer
+        except Exception:
+            return
+
+        delay_ms = max(0, asset.duration_ms - asset.fade_out_ms)
+        QTimer.singleShot(
+            delay_ms,
+            lambda eff=effect, sound_id=asset.sound_id, expected_generation=generation, fade_out_ms=asset.fade_out_ms: self._fade_out_if_current(
+                eff,
+                sound_id=sound_id,
+                expected_generation=expected_generation,
+                fade_out_ms=fade_out_ms,
+            ),
+        )
+
+    def _fade_out_if_current(self, effect: Any, *, sound_id: str, expected_generation: int, fade_out_ms: int) -> None:
+        if self._effect_generations.get(id(effect)) != expected_generation:
+            return
+        if not getattr(effect, "isPlaying", lambda: False)():
+            return
+        current_volume = self._effect_volume(effect)
+        if current_volume <= 0:
+            return
+        self._schedule_fade(
+            effect,
+            start_volume=current_volume,
+            end_volume=0.0,
+            duration_ms=fade_out_ms,
+            stop_after=True,
+        )
+
+    @staticmethod
+    def _sound_duration_ms(path: Path) -> int:
+        try:
+            with wave.open(str(path), "rb") as handle:
+                frames = handle.getnframes()
+                frame_rate = handle.getframerate()
+                if frame_rate <= 0:
+                    return 0
+                return max(0, int((frames / float(frame_rate)) * 1000))
+        except Exception:
+            return 0
 
     @staticmethod
     def _is_dark_theme() -> bool:

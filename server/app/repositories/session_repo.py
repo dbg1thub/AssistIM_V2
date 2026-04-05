@@ -1,14 +1,14 @@
-"""Session repository."""
+﻿"""Session repository."""
 
 from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import delete, select
+from sqlalchemy import String, cast, delete, select
 from sqlalchemy.orm import Session
 
 from app.models.message import Message, MessageRead
-from app.models.session import ChatSession, SessionEvent, SessionMember
+from app.models.session import ChatSession, SessionEvent, SessionMember, UserSessionEvent, UserSessionEvent
 from app.utils.time import utcnow
 
 
@@ -220,15 +220,19 @@ class SessionRepository:
         return session
 
     def delete_session(self, session_id: str, *, commit: bool = True) -> None:
-        message_ids = list(self.db.execute(select(Message.id).where(Message.session_id == session_id)).scalars().all())
-        self.db.execute(delete(SessionEvent).where(SessionEvent.session_id == session_id))
-        self.db.execute(delete(SessionMember).where(SessionMember.session_id == session_id))
+        normalized_session_id = str(session_id or "").strip()
+        message_ids = list(self.db.execute(select(Message.id).where(Message.session_id == normalized_session_id)).scalars().all())
+        self.db.execute(delete(SessionEvent).where(cast(SessionEvent.session_id, String()) == normalized_session_id))
+        self.db.execute(delete(UserSessionEvent).where(cast(UserSessionEvent.session_id, String()) == normalized_session_id))
+        self.db.execute(delete(SessionMember).where(SessionMember.session_id == normalized_session_id))
         if message_ids:
             self.db.execute(delete(MessageRead).where(MessageRead.message_id.in_(message_ids)))
-        self.db.execute(delete(Message).where(Message.session_id == session_id))
-        session = self.get_by_id(session_id)
+        self.db.execute(delete(Message).where(Message.session_id == normalized_session_id))
+        session = self.get_by_id(normalized_session_id)
         if session is not None:
             self.db.delete(session)
         self.db.flush()
         if commit:
             self.db.commit()
+
+

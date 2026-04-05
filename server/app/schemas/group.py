@@ -40,7 +40,13 @@ class GroupOut(ORMModel):
     id: str
     name: str
     announcement: str = ""
+    announcement_message_id: str | None = None
+    announcement_author_id: str | None = None
+    announcement_published_at: str | None = None
     avatar: str | None = None
     avatar_kind: str = "generated"
     owner_id: str
     session_id: str
+
+
+

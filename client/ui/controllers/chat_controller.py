@@ -13,6 +13,7 @@ from typing import Any, Optional
 from client.core import logging
 from client.core.exceptions import AppError
 from client.core.logging import setup_logging
+from client.managers.call_manager import get_call_manager
 from client.managers.message_manager import get_message_manager
 from client.managers.session_manager import get_session_manager
 from client.models.message import ChatMessage, MessageType, Session, build_attachment_extra, infer_message_type_from_path
@@ -37,6 +38,7 @@ class ChatController:
     def __init__(self):
         self._msg_manager = get_message_manager()
         self._session_manager = get_session_manager()
+        self._call_manager = get_call_manager()
         self._file_service = get_file_service()
         self._initialized = False
 
@@ -47,6 +49,7 @@ class ChatController:
 
         await self._msg_manager.initialize()
         await self._session_manager.initialize()
+        await self._call_manager.initialize()
 
         self._initialized = True
         logger.info("Chat controller initialized")
@@ -54,6 +57,8 @@ class ChatController:
     def set_user_id(self, user_id: str) -> None:
         """Set current user ID."""
         self._msg_manager.set_user_id(user_id)
+        self._session_manager.set_user_id(user_id)
+        self._call_manager.set_user_id(user_id)
 
     async def refresh_sessions_snapshot(self) -> list[Session]:
         """Refresh the authoritative session snapshot after profile-affecting changes."""
@@ -349,6 +354,42 @@ class ChatController:
         """Refresh the cached session preview from local storage."""
         await self._session_manager.refresh_session_preview(session_id)
 
+    async def start_call(self, session: Session, media_type: str):
+        """Start one outbound call for the given direct session."""
+        return await self._call_manager.start_call(session, media_type)
+
+    async def accept_call(self, call_id: str) -> bool:
+        """Accept one inbound call invite."""
+        return await self._call_manager.accept_call(call_id)
+
+    async def reject_call(self, call_id: str) -> bool:
+        """Reject one inbound call invite."""
+        return await self._call_manager.reject_call(call_id)
+
+    async def hangup_call(self, call_id: str, *, reason: str | None = None) -> bool:
+        """Hang up one current call."""
+        return await self._call_manager.hangup_call(call_id, reason=reason)
+
+    async def send_call_ringing(self, call_id: str) -> bool:
+        """Notify the caller that the incoming dialog is visible."""
+        return await self._call_manager.send_ringing(call_id)
+
+    async def send_call_offer(self, call_id: str, sdp: dict[str, Any]) -> bool:
+        """Forward one WebRTC offer."""
+        return await self._call_manager.send_offer(call_id, sdp)
+
+    async def send_call_answer(self, call_id: str, sdp: dict[str, Any]) -> bool:
+        """Forward one WebRTC answer."""
+        return await self._call_manager.send_answer(call_id, sdp)
+
+    async def send_call_ice_candidate(self, call_id: str, candidate: dict[str, Any]) -> bool:
+        """Forward one ICE candidate."""
+        return await self._call_manager.send_ice_candidate(call_id, candidate)
+
+    def get_active_call(self):
+        """Return the current active or pending call state."""
+        return self._call_manager.active_call
+
     def get_total_unread(self) -> int:
         """Get total unread count."""
         return self._session_manager.get_total_unread_count()
@@ -356,6 +397,7 @@ class ChatController:
     async def close(self) -> None:
         """Close chat controller."""
         logger.info("Closing chat controller")
+        await self._call_manager.close()
         self._initialized = False
         logger.info("Chat controller closed")
 

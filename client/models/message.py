@@ -285,6 +285,39 @@ def format_message_preview(content: str, message_type: MessageType | str | None 
     return text
 
 
+def _quoted_recall_actor_name(name: str) -> str:
+    """Wrap one recall actor name using the UI's quoted-member style."""
+    normalized = str(name or "").strip()
+    return f"“{normalized}”" if normalized else ""
+
+
+def build_recall_notice(
+    *,
+    is_self: bool,
+    session_type: str | None = None,
+    sender_name: str = "",
+    sender_id: str = "",
+) -> str:
+    """Build one localized recall notice from normalized message/session metadata."""
+    if is_self:
+        return _preview_token("message.recalled.self", "You recalled a message")
+
+    normalized_session_type = str(session_type or "").strip().lower()
+    actor_name = str(sender_name or "").strip() or str(sender_id or "").strip()
+    if normalized_session_type == "group" and actor_name:
+        try:
+            from client.core.i18n import tr as _tr
+        except Exception:
+            return f"{_quoted_recall_actor_name(actor_name)} recalled a message"
+        return _tr(
+            "message.recalled.by",
+            "{name} recalled a message",
+            name=_quoted_recall_actor_name(actor_name),
+        )
+
+    return _preview_token("message.recalled.other", "The other side recalled a message")
+
+
 def resolve_recall_notice(message: "ChatMessage") -> str:
     """Return the safe recall notice that should be shown to the user."""
     extra = getattr(message, "extra", {}) or {}
@@ -292,9 +325,15 @@ def resolve_recall_notice(message: "ChatMessage") -> str:
     if explicit_notice:
         return explicit_notice
 
-    fallback_notice = _preview_token(
-        "message.recalled.self" if getattr(message, "is_self", False) else "message.recalled.other",
-        "You recalled a message" if getattr(message, "is_self", False) else "The other side recalled a message",
+    fallback_notice = build_recall_notice(
+        is_self=bool(getattr(message, "is_self", False)),
+        session_type=str(extra.get("session_type", "") or ""),
+        sender_name=(
+            str(extra.get("sender_name", "") or "").strip()
+            or str(extra.get("sender_nickname", "") or "").strip()
+            or str(extra.get("sender_username", "") or "").strip()
+        ),
+        sender_id=str(getattr(message, "sender_id", "") or ""),
     )
 
     message_type = getattr(message, "message_type", None)
@@ -575,11 +614,23 @@ class Session:
             or str(member.get("id", "") or "").strip()
         )
 
+    def authoritative_group_id(self) -> str:
+        """Return the authoritative backend group id bound to this group session."""
+        if self.session_type != "group" or self.is_ai_session:
+            return ""
+        return str(self.extra.get("group_id", "") or "").strip()
+
+    def authoritative_group_name(self) -> str:
+        """Return the explicit backend group name without falling back to generated member labels."""
+        if self.session_type != "group" or self.is_ai_session:
+            return str(self.name or "").strip()
+        return str(self.extra.get("server_name", "") or "").strip()
+
     def has_custom_group_name(self) -> bool:
         """Return whether this group uses an explicit server-side name instead of member-derived naming."""
         if self.session_type != "group" or self.is_ai_session:
             return True
-        explicit_name = str(self.extra.get("server_name", self.name) or "").strip()
+        explicit_name = self.authoritative_group_name()
         if not explicit_name:
             return False
 
@@ -639,7 +690,7 @@ class Session:
 
     def display_name(self) -> str:
         """Return the list/header display name without mutating the persisted session name."""
-        explicit_name = str(self.extra.get("server_name", self.name) or "").strip()
+        explicit_name = self.authoritative_group_name()
         if self.session_type != "group" or self.is_ai_session or explicit_name:
             return explicit_name or str(self.name or "").strip()
 
@@ -664,6 +715,41 @@ class Session:
         title = "、".join(names)
         return f"{title}({member_count})" if member_count > 0 else title
 
+    def group_announcement_text(self) -> str:
+        """Return the current group announcement body for this session."""
+        if self.session_type != "group" or self.is_ai_session:
+            return ""
+        return str(self.extra.get("group_announcement", "") or "").strip()
+
+    def group_announcement_message_id(self) -> str:
+        """Return the announcement-version message id used for viewed-state tracking."""
+        if self.session_type != "group" or self.is_ai_session:
+            return ""
+        return str(self.extra.get("announcement_message_id", "") or "").strip()
+
+    def group_announcement_author_id(self) -> str:
+        """Return the user id of the announcement publisher when available."""
+        if self.session_type != "group" or self.is_ai_session:
+            return ""
+        return str(self.extra.get("announcement_author_id", "") or "").strip()
+
+    def group_announcement_published_at(self) -> Optional[datetime]:
+        """Return the local datetime for the latest group announcement publication."""
+        if self.session_type != "group" or self.is_ai_session:
+            return None
+        return _coerce_datetime(self.extra.get("announcement_published_at"))
+
+    def group_announcement_needs_view(self) -> bool:
+        """Return whether the announcement card should remain visible for the current user."""
+        announcement = self.group_announcement_text()
+        if not announcement:
+            return False
+        announcement_message_id = self.group_announcement_message_id()
+        if not announcement_message_id:
+            return True
+        last_viewed_message_id = str(self.extra.get("last_viewed_announcement_message_id", "") or "").strip()
+        return last_viewed_message_id != announcement_message_id
+
     def preview_sender_name(self) -> str:
         """Return the sender name prefix for group-session preview rows."""
         if self.session_type != "group" or self.is_ai_session:
@@ -672,12 +758,21 @@ class Session:
         sender_id = str(self.extra.get("last_message_sender_id", "") or "").strip()
         if not sender_id:
             return ""
+        current_user_id = str(self.extra.get("current_user_id", "") or "").strip()
+        if current_user_id and sender_id == current_user_id:
+            return ""
 
         for member in list(self.extra.get("members") or []):
             if str(member.get("id", "") or "").strip() != sender_id:
                 continue
             return self._preferred_member_name(member) or sender_id
         return sender_id
+
+    def preview_mentions_current_user(self) -> bool:
+        """Return whether the latest group preview should show an @-mention attention prefix."""
+        if self.session_type != "group" or self.is_ai_session:
+            return False
+        return bool(self.extra.get("last_message_mentions_current_user", False))
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary."""
@@ -790,6 +885,7 @@ class AISession:
             max_tokens=data.get("max_tokens", 2048),
             context_messages=data.get("context_messages", 10),
         )
+
 
 
 

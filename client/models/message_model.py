@@ -285,6 +285,15 @@ class MessageModel(QAbstractListModel):
         message.content = content
         self._emit_display_row_changed(message_id, self._display_roles())
 
+    def replace_message(self, message: ChatMessage, *, allow_reorder: bool = False) -> None:
+        """Replace one authoritative message snapshot in-place and refresh its display rows."""
+        for index, existing in enumerate(self._messages):
+            if existing.message_id != message.message_id:
+                continue
+            self._messages[index] = message
+            self.refresh_message(message.message_id, allow_reorder=allow_reorder)
+            return
+
     def remove_message(self, message_id: str) -> None:
         """Remove a real message by ID."""
         for i, message in enumerate(self._messages):

@@ -18,7 +18,7 @@ from client.core.logging import setup_logging
 from client.events.contact_events import ContactEvent
 from client.events.event_bus import get_event_bus
 from client.managers.connection_manager import get_connection_manager
-from client.models.message import ChatMessage, MessageStatus, MessageType, build_attachment_extra, merge_sender_profile_extra, sanitize_outbound_message_extra
+from client.models.message import ChatMessage, MessageStatus, MessageType, build_attachment_extra, build_recall_notice, merge_sender_profile_extra, resolve_recall_notice, sanitize_outbound_message_extra
 from client.services.chat_service import get_chat_service
 from client.services.file_service import get_file_service
 from client.storage.database import get_database
@@ -570,12 +570,6 @@ class MessageManager:
             if processed:
                 self._recent_incoming_message_ids[message_id] = time.monotonic()
 
-    def _default_recall_notice_for_sender(self, sender_id: str) -> str:
-        """Return a safe fallback recall notice for history payloads."""
-        if sender_id and sender_id == self._user_id:
-            return tr("message.recalled.self", "You recalled a message")
-        return tr("message.recalled.other", "The other side recalled a message")
-
     @staticmethod
     def _coerce_read_int(value: Any) -> int:
         """Coerce read-receipt counters into safe non-negative integers."""
@@ -710,11 +704,7 @@ class MessageManager:
         status, extra = self._apply_read_metadata(sender_id, status, extra)
 
         content = str(data.get("content", "") or "")
-        if status == MessageStatus.RECALLED:
-            extra.setdefault("recall_notice", self._default_recall_notice_for_sender(sender_id))
-            content = extra["recall_notice"]
-
-        return ChatMessage(
+        message = ChatMessage(
             message_id=str(data.get("message_id") or ""),
             session_id=str(data.get("session_id", "") or default_session_id),
             sender_id=sender_id,
@@ -727,6 +717,10 @@ class MessageManager:
             is_ai=bool(data.get("is_ai", False)),
             extra=extra,
         )
+        if status == MessageStatus.RECALLED:
+            message.extra.setdefault("recall_notice", resolve_recall_notice(message))
+            message.content = str(message.extra.get("recall_notice", "") or "")
+        return message
 
     async def _process_history_messages(self, data: dict) -> None:
         """Process history messages from sync response."""
@@ -1177,9 +1171,17 @@ class MessageManager:
     async def _build_recall_notice(self, message: ChatMessage, actor_user_id: str | None = None) -> str:
         """Build a viewer-specific recall notice for a message."""
         actor_id = str(actor_user_id or message.sender_id or "")
-        if message.is_self or (actor_id and actor_id == self._user_id):
-            return tr("message.recalled.self", "You recalled a message")
-        return tr("message.recalled.other", "The other side recalled a message")
+        extra = dict(message.extra or {})
+        return build_recall_notice(
+            is_self=bool(message.is_self or (actor_id and actor_id == self._user_id)),
+            session_type=str(extra.get("session_type", "") or ""),
+            sender_name=(
+                str(extra.get("sender_name", "") or "").strip()
+                or str(extra.get("sender_nickname", "") or "").strip()
+                or str(extra.get("sender_username", "") or "").strip()
+            ),
+            sender_id=str(message.sender_id or actor_id or ""),
+        )
 
     async def recall_message(self, message_id: str) -> tuple[bool, str]:
         """

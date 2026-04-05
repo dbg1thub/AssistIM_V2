@@ -533,6 +533,15 @@ class HTTPClient:
         """Make PUT request."""
         return await self._request("PUT", path, json=json, **kwargs)
 
+    async def patch(
+            self,
+            path: str,
+            json: Optional[dict[str, Any]] = None,
+            **kwargs,
+    ) -> Any:
+        """Make PATCH request."""
+        return await self._request("PATCH", path, json=json, **kwargs)
+
     async def delete(
             self,
             path: str,

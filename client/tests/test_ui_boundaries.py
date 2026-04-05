@@ -178,10 +178,21 @@ def test_main_window_tray_alerts_respect_authoritative_mute_state() -> None:
 
 def test_session_delegate_reserves_preview_space_for_mute_icon() -> None:
     session_delegate = Path('client/delegates/session_delegate.py').read_text(encoding='utf-8')
+    session_manager = Path('client/managers/session_manager.py').read_text(encoding='utf-8')
+    server_session_schema = Path('server/app/schemas/session.py').read_text(encoding='utf-8')
+    server_session_service = Path('server/app/services/session_service.py').read_text(encoding='utf-8')
 
     assert 'mute_slot_width = mute_icon_size + 8 if muted else 0' in session_delegate
+    assert 'def _attention_preview_prefix(self, session) -> str:' in session_delegate
+    assert 'tr("session.preview.mentioned", "[Mentioned]")' in session_delegate
+    assert 'avatar_rect.right() - unread_width + 7' in session_delegate
     assert 'QRect(content_left, preview_y - 1, preview_available, 28)' in session_delegate
     assert 'QRect(content_left + prefix_width, preview_y - 1, body_available, 28)' in session_delegate
+    assert 'return "99+"' in session_delegate
+    assert 'session.extra["last_message_id"] = str(message.message_id or "")' in session_manager
+    assert 'source_last_message_id = str(source.extra.get("last_message_id", "") or "")' in session_manager
+    assert 'last_message_id: str | None = None' in server_session_schema
+    assert '"last_message_id": str(last_message.id or "") if last_message else None,' in server_session_service
 
 
 def test_message_input_uses_acrylic_group_mention_flyout() -> None:
@@ -275,6 +286,8 @@ def test_chat_info_drawer_uses_hover_scrollbar_and_removes_group_fold_rows() -> 
 
     assert 'self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)' in drawer
     assert 'self.scroll_area.setViewportMargins(0, 0, 0, 0)' in drawer
+    assert 'self.scroll_area.setObjectName("chatInfoDrawerScrollArea")' in drawer
+    assert 'self.scroll_area.viewport().setObjectName("chatInfoDrawerScrollViewport")' in drawer
     assert 'self.drawer.installEventFilter(self)' in drawer
     assert 'self.scroll_area.viewport().installEventFilter(self)' in drawer
     assert 'self.scroll_area.verticalScrollBar().installEventFilter(self)' in drawer
@@ -301,17 +314,21 @@ def test_chat_info_drawer_avatars_are_rounded_rect_and_action_tiles_are_dashed()
     assert 'self.avatar = ChatInfoAvatarWidget(parent=self, size=44, radius=9)' in drawer
     assert 'self.setFixedWidth(60)' in drawer
     assert 'self.card.setFixedSize(44, 44)' in drawer
-    assert 'dashed=True,' in drawer.split('action_label=tr("chat.info.group.remove", "Remove"),', 1)[1]
-    assert 'remove_tile.setEnabled(False)' not in drawer
+    assert 'action_label=tr("chat.info.group.remove", "Remove")' in drawer
+    assert 'remove_tile = ChatInfoParticipantTile(' in drawer
     assert 'QFrame#chatInfoParticipantCard {' in light_qss
     assert 'background: transparent;' in light_qss.split('QFrame#chatInfoParticipantCard {', 1)[1]
     assert 'border: none;' in light_qss.split('QFrame#chatInfoParticipantCard {', 1)[1]
+    assert 'border-radius: 8px;' in light_qss.split('QFrame#chatInfoParticipantCard {', 1)[1]
     assert 'QFrame#chatInfoAddGlyph {' in light_qss
     assert 'border: 1px dashed rgba(0, 0, 0, 0.18);' in light_qss
+    assert 'border-radius: 8px;' in light_qss.split('QFrame#chatInfoAddGlyph {', 1)[1]
     assert 'QFrame#chatInfoParticipantCard {' in dark_qss
     assert 'background: transparent;' in dark_qss.split('QFrame#chatInfoParticipantCard {', 1)[1]
     assert 'border: none;' in dark_qss.split('QFrame#chatInfoParticipantCard {', 1)[1]
+    assert 'border-radius: 8px;' in dark_qss.split('QFrame#chatInfoParticipantCard {', 1)[1]
     assert 'border: 1px dashed rgba(255, 255, 255, 0.16);' in dark_qss
+    assert 'border-radius: 8px;' in dark_qss.split('QFrame#chatInfoAddGlyph {', 1)[1]
 
 
 def test_chat_info_detail_field_styles_match_drawer_requirements() -> None:
@@ -321,31 +338,52 @@ def test_chat_info_detail_field_styles_match_drawer_requirements() -> None:
 
     assert 'class ChatInfoAnnouncementDialog(QDialog):' in drawer
     assert 'class ChatInfoAnnouncementPreview(CaptionLabel):' in drawer
+    assert 'class ChatInfoAnnouncementField(QWidget):' in drawer
     assert 'valueCommitted = Signal(str)' in drawer
     assert 'self.editor = LineEdit(self)' in drawer
     assert 'self.editor.installEventFilter(self)' in drawer
     assert 'def eventFilter(self, watched, event) -> bool:' in drawer
     assert 'def _begin_edit(self) -> None:' in drawer
     assert 'def _commit_edit(self) -> None:' in drawer
-    assert 'def _apply_fonts(self) -> None:' in drawer
+    assert 'def set_editable(self, editable: bool) -> None:' in drawer
     assert 'self.title_label = BodyLabel(title, self)' in drawer
     assert 'self.value_label.installEventFilter(self)' in drawer
-    assert 'self.group_name_field.valueCommitted.connect(lambda value: self.groupProfileUpdateRequested.emit({"name": value}))' in drawer
-    assert 'self.announcement_row = ChatInfoActionRow(tr("chat.info.group.announcement", "Announcement"), parent=self)' in drawer
-    assert 'self.announcement_preview = ChatInfoAnnouncementPreview(self)' in drawer
-    assert 'self.announcement_row.activated.connect(self._open_announcement_editor)' in drawer
+    assert 'self.title_label.setStyleSheet(' not in drawer
+    assert 'self.group_name_field.valueCommitted.connect(self._emit_group_name_update)' in drawer
+    assert 'self.announcement_field = ChatInfoAnnouncementField(tr("chat.info.group.announcement", "Announcement"), parent=self)' in drawer
+    assert 'self.announcement_field.activated.connect(self._open_announcement_editor)' in drawer
     assert 'def _open_announcement_editor(self) -> None:' in drawer
     assert 'def _apply_announcement_value(self, value: str) -> None:' in drawer
-    assert 'self.note_field.valueCommitted.connect(lambda value: self.groupSelfProfileUpdateRequested.emit({"note": value}))' in drawer
-    assert 'self.nickname_field.valueCommitted.connect(lambda value: self.groupSelfProfileUpdateRequested.emit({"my_group_nickname": value}))' in drawer
-    assert 'QLabel#chatInfoDetailFieldTitle {' in light_qss
-    assert 'font: 13px "Segoe UI", "Microsoft YaHei", "PingFang SC";' in light_qss
+    assert 'self.note_field.valueCommitted.connect(self._emit_note_update)' in drawer
+    assert 'self.nickname_field.valueCommitted.connect(self._emit_nickname_update)' in drawer
     assert 'QLabel#chatInfoDetailFieldValue {' in light_qss
     assert 'color: #8A8A8A;' in light_qss
-    assert 'QLabel#chatInfoDetailFieldTitle {' in dark_qss
-    assert 'font: 13px "Segoe UI", "Microsoft YaHei", "PingFang SC";' in dark_qss
+    assert 'QLineEdit#chatInfoDetailFieldEditor {' in light_qss
     assert 'QLabel#chatInfoDetailFieldValue {' in dark_qss
     assert 'color: rgba(196, 196, 196, 220);' in dark_qss
+    assert 'QLineEdit#chatInfoDetailFieldEditor {' in dark_qss
+
+
+def test_chat_info_action_rows_and_search_overlay_follow_drawer_rules() -> None:
+    drawer = Path('client/ui/widgets/chat_info_drawer.py').read_text(encoding='utf-8')
+
+    assert 'self.setCursor(Qt.PointingHandCursor)' in drawer
+    assert 'self.title_label.setCursor(Qt.PointingHandCursor)' in drawer
+    assert 'self.chevron_icon.setCursor(Qt.PointingHandCursor)' in drawer
+    assert 'if self.chevron_icon is not None:' in drawer
+    assert 'self.content_stack = QStackedWidget(self)' in drawer
+    assert 'self.default_page = QWidget(self)' in drawer
+    assert 'self.search_page = QWidget(self)' in drawer
+    assert 'default_layout.setContentsMargins(0, 6, 0, 0)' in drawer
+    assert 'layout.addWidget(self.content_stack, 1)' in drawer
+    assert 'self.content_stack.setCurrentWidget(self.default_page)' in drawer
+    assert 'self.content_stack.setCurrentWidget(self.search_page)' in drawer
+    assert 'self.content_widget.refresh_visual_styles()' not in drawer
+    assert 'self.search_row = ChatInfoActionRow(tr("chat.info.search", "Find Chat Content"), parent=self)' in drawer
+    assert 'self.clear_button.setText(tr("chat.info.clear", "Clear Chat History"))' in drawer
+    assert 'self.show_nickname_row = ChatInfoActionRow(' in drawer
+    assert 'self.view_more_button.setText(tr("chat.info.group.view_more", "View More Members"))' in drawer
+    assert 'GroupMemberManagementRequest(' in drawer
 
 
 def test_group_profile_realtime_pipeline_is_wired() -> None:
@@ -369,18 +407,83 @@ def test_group_profile_realtime_pipeline_is_wired() -> None:
 
 
 
+
+def test_message_repo_event_sync_casts_ids_for_runtime_varchar_tables() -> None:
+    message_repo = Path('server/app/repositories/message_repo.py').read_text(encoding='utf-8')
+    session_repo = Path('server/app/repositories/session_repo.py').read_text(encoding='utf-8')
+
+    assert 'from sqlalchemy import String, and_, cast, desc, func, or_, select, update' in message_repo
+    assert 'cast(SessionEvent.session_id, String()) == str(session_id or "").strip()' in message_repo
+    assert 'cast(UserSessionEvent.session_id, String()) == str(session_id or "").strip()' in message_repo
+    assert 'cast(UserSessionEvent.user_id, String()) == normalized_user_id' in message_repo
+    assert 'from sqlalchemy import String, cast, delete, select' in session_repo
+    assert 'from app.models.session import ChatSession, SessionEvent, SessionMember, UserSessionEvent' in session_repo
+    assert 'delete(SessionEvent).where(cast(SessionEvent.session_id, String()) == normalized_session_id)' in session_repo
+    assert 'delete(UserSessionEvent).where(cast(UserSessionEvent.session_id, String()) == normalized_session_id)' in session_repo
 def test_chat_interface_group_profile_updates_use_session_controller_boundary() -> None:
     chat_interface = Path('client/ui/windows/chat_interface.py').read_text(encoding='utf-8')
     session_controller = Path('client/ui/controllers/session_controller.py').read_text(encoding='utf-8')
     session_manager = Path('client/managers/session_manager.py').read_text(encoding='utf-8')
+    drawer = Path('client/ui/widgets/chat_info_drawer.py').read_text(encoding='utf-8')
 
     assert 'async def apply_group_payload(self, session_id: str, payload: dict[str, Any], *, include_self_fields: bool)' in session_controller
     assert 'async def apply_group_payload(' in session_manager
-    assert 'await self._apply_group_record(record, include_self_fields=True)' in chat_interface
+    assert 'class GroupProfileUpdateRequest:' in drawer
+    assert 'class GroupSelfProfileUpdateRequest:' in drawer
+    assert 'class GroupMemberManagementRequest:' in drawer
+    assert 'await self._apply_group_record(request.session_id, record, include_self_fields=True)' in chat_interface
+    assert 'def _on_chat_info_member_management_requested(self, payload: object) -> None:' in chat_interface
+    assert 'async def _apply_group_management_record(self, session_id: str, record) -> None:' in chat_interface
     assert 'await self._session_controller.apply_group_payload(' in chat_interface
+    assert 'ContactEvent.SYNC_REQUIRED' in chat_interface
     assert 'self._session_controller._session_manager.update_session(' not in chat_interface
     assert 'self.session_panel.update_session(' not in chat_interface.split('def _apply_group_record(', 1)[1]
     assert 'self.chat_panel.set_session(updated_session)' not in chat_interface.split('def _apply_group_record(', 1)[1]
+
+
+def test_chat_info_member_management_uses_formal_dialog_boundary() -> None:
+    chat_interface = Path('client/ui/windows/chat_interface.py').read_text(encoding='utf-8')
+    dialogs = Path('client/ui/windows/group_member_management_dialogs.py').read_text(encoding='utf-8')
+    chat_panel = Path('client/ui/widgets/chat_panel.py').read_text(encoding='utf-8')
+    drawer = Path('client/ui/widgets/chat_info_drawer.py').read_text(encoding='utf-8')
+    session_controller = Path('client/ui/controllers/session_controller.py').read_text(encoding='utf-8')
+    message_delegate = Path('client/delegates/message_delegate.py').read_text(encoding='utf-8')
+
+    assert 'from client.ui.windows.group_member_management_dialogs import GroupMemberManagementDialog' in chat_interface
+    assert 'self.chat_panel.chat_info_search_requested.connect(self._on_chat_info_search_requested)' in chat_interface
+    assert 'self.chat_panel.chat_info_clear_requested.connect(self._on_chat_info_clear_requested)' in chat_interface
+    assert 'self.chat_panel.chat_info_show_nickname_toggled.connect(self._on_chat_info_show_nickname_toggled)' in chat_interface
+    assert 'self.chat_panel.chat_info_member_management_requested.connect(self._on_chat_info_member_management_requested)' in chat_interface
+    assert 'dialog = GroupMemberManagementDialog(' in chat_interface
+    assert 'def _show_dialog(self, dialog: QDialog) -> None:' in chat_interface
+    assert 'self._session_controller.set_group_member_nickname_visibility(session_id, _enabled)' in chat_interface
+    assert 'def _group_record_payload(record) -> dict[str, object]:' in chat_interface
+    assert 'class GroupManagementPermissions:' in dialogs
+    assert 'class GroupMemberManagementDialog(QDialog):' in dialogs
+    assert 'can_add_members=is_owner' in dialogs
+    assert 'can_manage_member_roles=is_owner' in dialogs
+    assert 'can_transfer_owner=is_owner' in dialogs
+    assert 'return self._session.authoritative_group_id()' in drawer
+    assert 'self.group_name_field.set_value(session.authoritative_group_name())' in drawer
+    assert 'self.announcement_field.set_preview_text(announcement_text)' in drawer
+    assert 'self.preview_label = ChatInfoAnnouncementPreview(self)' in drawer
+    assert 'async def set_group_member_nickname_visibility(self, session_id: str, enabled: bool) -> None:' in session_controller
+    assert 'def set_session(self, session) -> bool:' in message_delegate
+    assert 'class _MessageRowLayout:' in message_delegate
+    assert 'def recall_notice_action_source_at(self, view, index: QModelIndex, position: QPoint) -> str | None:' in message_delegate
+    assert 'def update_recall_notice_action_hover(self, view, index: QModelIndex, position: QPoint) -> bool:' in message_delegate
+    assert 'action_font.setUnderline(' not in message_delegate
+    assert 'def _group_sender_label_text(self, message: ChatMessage) -> str:' in message_delegate
+    assert 'chat_info_search_requested = Signal()' in chat_panel
+    assert 'chat_info_clear_requested = Signal()' in chat_panel
+    assert 'chat_info_show_nickname_toggled = Signal(bool)' in chat_panel
+    assert 'chat_info_member_management_requested = Signal(object)' in chat_panel
+    assert 'def restore_recalled_message_to_composer(self, message_id: str) -> bool:' in chat_panel
+    assert 'def replace_message(self, message: ChatMessage) -> None:' in chat_panel
+    assert 'self._message_delegate.set_session(None)' in chat_panel
+    assert 'layout_changed = bool(self._message_delegate and self._message_delegate.set_session(session))' in chat_panel
+    assert 'class EditMessageDialog(QDialog):' not in chat_interface
+    assert 'self._session_manager.set_user_id(user_id)' in Path('client/ui/controllers/chat_controller.py').read_text(encoding='utf-8')
 
 
 def test_contact_controller_owns_group_record_merge_rules() -> None:
@@ -397,3 +500,34 @@ def test_contact_controller_owns_group_record_merge_rules() -> None:
     assert 'def _upsert_group_record(' not in contact_interface
     assert 'def _coerce_group_record(' not in contact_interface
     assert 'GroupRecord(' not in contact_interface
+
+
+
+
+def test_group_announcement_flow_uses_formal_banner_dialog_and_version_state() -> None:
+    chat_panel = Path('client/ui/widgets/chat_panel.py').read_text(encoding='utf-8')
+    chat_header = Path('client/ui/widgets/chat_header.py').read_text(encoding='utf-8')
+    chat_interface = Path('client/ui/windows/chat_interface.py').read_text(encoding='utf-8')
+    session_controller = Path('client/ui/controllers/session_controller.py').read_text(encoding='utf-8')
+    session_manager = Path('client/managers/session_manager.py').read_text(encoding='utf-8')
+    groups_api = Path('server/app/api/v1/groups.py').read_text(encoding='utf-8')
+    group_service = Path('server/app/services/group_service.py').read_text(encoding='utf-8')
+    session_service = Path('server/app/services/session_service.py').read_text(encoding='utf-8')
+    banner = Path('client/ui/widgets/group_announcement_banner.py').read_text(encoding='utf-8')
+    dialog = Path('client/ui/windows/group_announcement_dialog.py').read_text(encoding='utf-8')
+
+    assert 'group_announcement_requested = Signal()' in chat_panel
+    assert 'from client.ui.widgets.group_announcement_banner import GroupAnnouncementBanner' in chat_header
+    assert 'self.group_announcement_banner = GroupAnnouncementBanner(self.info_widget)' in chat_header
+    assert 'self.chat_header.group_announcement_widget().clicked.connect(self.group_announcement_requested.emit)' in chat_panel
+    assert 'self.chat_header.set_group_announcement_session(session if show_group_announcement else None)' in chat_panel
+    assert 'from client.ui.windows.group_announcement_dialog import GroupAnnouncementDialog' in chat_interface
+    assert 'def _on_group_announcement_requested(self) -> None:' in chat_interface
+    assert 'mark_announcement_viewed: bool = False' in chat_interface
+    assert 'async def mark_group_announcement_viewed(self, session_id: str, announcement_message_id: str)' in session_controller
+    assert 'async def mark_group_announcement_viewed(self, session_id: str, announcement_message_id: str) -> Optional[Session]:' in session_manager
+    assert 'class GroupAnnouncementBanner(CardWidget):' in banner
+    assert 'class GroupAnnouncementDialog(QDialog):' in dialog
+    assert 'async def _broadcast_group_announcement_message(' in groups_api
+    assert 'announcement_message_id' in group_service
+    assert '"announcement_message_id": announcement_message_id or None' in session_service

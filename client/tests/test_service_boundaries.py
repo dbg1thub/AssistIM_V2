@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import asyncio
 import json
@@ -544,16 +544,45 @@ class FakeContactService:
         self.fetch_friends_calls = 0
         self.fetch_groups_calls = 0
         self.fetch_friend_requests_calls = 0
+        self.fetch_group_calls: list[str] = []
         self.send_friend_request_calls: list[tuple[str, str]] = []
         self.create_group_calls: list[tuple[str, list[str]]] = []
         self.update_group_profile_calls: list[tuple[str, str | None, str | None]] = []
         self.update_my_group_profile_calls: list[tuple[str, str | None, str | None]] = []
+        self.leave_group_calls: list[str] = []
+        self.add_group_member_calls: list[tuple[str, str, str]] = []
+        self.remove_group_member_calls: list[tuple[str, str]] = []
+        self.update_group_member_role_calls: list[tuple[str, str, str]] = []
+        self.transfer_group_ownership_calls: list[tuple[str, str]] = []
         self.accept_calls: list[str] = []
         self.reject_calls: list[str] = []
         self.remove_calls: list[str] = []
         self.friends_payload: list[dict] = []
         self.groups_payload: list[dict] = []
         self.requests_payload: list[dict] = []
+        self.group_members: list[dict] = [
+            {'id': 'user-1', 'username': 'alice', 'nickname': 'Alice', 'role': 'owner'},
+            {'id': 'user-2', 'username': 'bob', 'nickname': 'Bob', 'role': 'member'},
+        ]
+        self.group_name = 'Core Team'
+        self.group_announcement = ''
+        self.group_note = ''
+        self.group_my_nickname = ''
+
+    def _group_payload(self, group_id: str = 'group-1') -> dict:
+        return {
+            'id': group_id,
+            'name': self.group_name,
+            'announcement': self.group_announcement,
+            'note': self.group_note,
+            'my_group_nickname': self.group_my_nickname,
+            'session_id': 'session-group-1',
+            'owner_id': next(
+                (str(member.get('id', '') or '').strip() for member in self.group_members if str(member.get('role', '') or '').strip() == 'owner'),
+                'user-1',
+            ),
+            'members': [dict(member) for member in self.group_members],
+        }
 
     async def fetch_friends(self) -> list[dict]:
         self.fetch_friends_calls += 1
@@ -562,6 +591,10 @@ class FakeContactService:
     async def fetch_groups(self) -> list[dict]:
         self.fetch_groups_calls += 1
         return [dict(item) for item in self.groups_payload]
+
+    async def fetch_group(self, group_id: str) -> dict:
+        self.fetch_group_calls.append(group_id)
+        return self._group_payload(group_id)
 
     async def fetch_friend_requests(self) -> list[dict]:
         self.fetch_friend_requests_calls += 1
@@ -573,36 +606,60 @@ class FakeContactService:
 
     async def create_group(self, name: str, member_ids: list[str]) -> dict:
         self.create_group_calls.append((name, list(member_ids)))
-        return {
-            'id': 'group-1',
-            'name': name,
-            'owner_id': 'user-1',
-            'session_id': 'session-group-1',
-            'members': [{'id': 'user-1'}, *({'id': item} for item in member_ids)],
-        }
+        self.group_name = name
+        self.group_members = [{'id': 'user-1', 'username': 'alice', 'nickname': 'Alice', 'role': 'owner'}] + [
+            {'id': item, 'username': item, 'nickname': item.title(), 'role': 'member'}
+            for item in member_ids
+        ]
+        return self._group_payload('group-1')
 
     async def update_group_profile(self, group_id: str, *, name: str | None = None, announcement: str | None = None) -> dict:
         self.update_group_profile_calls.append((group_id, name, announcement))
-        return {
-            'id': group_id,
-            'name': name or 'Core Team',
-            'announcement': announcement or '',
-            'session_id': 'session-group-1',
-            'owner_id': 'user-1',
-            'members': [{'id': 'user-1'}, {'id': 'user-2'}],
-        }
+        if name is not None:
+            self.group_name = name
+        if announcement is not None:
+            self.group_announcement = announcement
+        return self._group_payload(group_id)
 
     async def update_my_group_profile(self, group_id: str, *, note: str | None = None, my_group_nickname: str | None = None) -> dict:
         self.update_my_group_profile_calls.append((group_id, note, my_group_nickname))
-        return {
-            'id': group_id,
-            'name': 'Core Team',
-            'note': note or '',
-            'my_group_nickname': my_group_nickname or '',
-            'session_id': 'session-group-1',
-            'owner_id': 'user-1',
-            'members': [{'id': 'user-1'}, {'id': 'user-2'}],
-        }
+        if note is not None:
+            self.group_note = note
+        if my_group_nickname is not None:
+            self.group_my_nickname = my_group_nickname
+        return self._group_payload(group_id)
+
+    async def leave_group(self, group_id: str) -> dict:
+        self.leave_group_calls.append(group_id)
+        return {'status': 'left'}
+
+    async def add_group_member(self, group_id: str, user_id: str, *, role: str = 'member') -> dict:
+        self.add_group_member_calls.append((group_id, user_id, role))
+        if not any(str(member.get('id', '') or '').strip() == user_id for member in self.group_members):
+            self.group_members.append({'id': user_id, 'username': user_id, 'nickname': user_id.title(), 'role': role})
+        return {'group': self._group_payload(group_id)}
+
+    async def remove_group_member(self, group_id: str, user_id: str) -> None:
+        self.remove_group_member_calls.append((group_id, user_id))
+        self.group_members = [member for member in self.group_members if str(member.get('id', '') or '').strip() != user_id]
+
+    async def update_group_member_role(self, group_id: str, user_id: str, *, role: str) -> dict:
+        self.update_group_member_role_calls.append((group_id, user_id, role))
+        for member in self.group_members:
+            if str(member.get('id', '') or '').strip() == user_id:
+                member['role'] = role
+                break
+        return {'group': self._group_payload(group_id)}
+
+    async def transfer_group_ownership(self, group_id: str, new_owner_id: str) -> dict:
+        self.transfer_group_ownership_calls.append((group_id, new_owner_id))
+        for member in self.group_members:
+            member_id = str(member.get('id', '') or '').strip()
+            if member_id == new_owner_id:
+                member['role'] = 'owner'
+            elif str(member.get('role', '') or '').strip() == 'owner':
+                member['role'] = 'member'
+        return {'group': self._group_payload(group_id)}
 
     async def accept_friend_request(self, request_id: str) -> dict:
         self.accept_calls.append(request_id)
@@ -759,6 +816,7 @@ class FakeSessionService:
             'id': 'session-1',
             'name': 'Core Team',
             'session_type': 'group',
+            'group_id': 'group-1',
             'participant_ids': ['alice', 'bob'],
             'avatar': 'https://cdn.example/groups/core.png',
         }
@@ -1358,8 +1416,14 @@ def test_contact_controller_mutations_use_contact_service(monkeypatch) -> None:
         controller = contact_controller_module.ContactController()
         request_payload = await controller.send_friend_request('user-2', 'hello')
         group = await controller.create_group('Core Team', ['user-2', 'user-3'])
+        fetched_group = await controller.fetch_group('group-1')
         shared_group = await controller.update_group_profile('group-1', name='Renamed Team', announcement='Ship tonight')
         self_group = await controller.update_my_group_profile('group-1', note='private note', my_group_nickname='lead')
+        group_after_add = await controller.add_group_member('group-1', 'user-4')
+        group_after_role = await controller.update_group_member_role('group-1', 'user-2', role='admin')
+        group_after_remove = await controller.remove_group_member('group-1', 'user-4')
+        group_after_transfer = await controller.transfer_group_ownership('group-1', 'user-2')
+        leave_result = await controller.leave_group('group-1')
         accepted = await controller.accept_request('req-1')
         rejected = await controller.reject_request('req-2')
         await controller.remove_friend('user-2')
@@ -1369,12 +1433,25 @@ def test_contact_controller_mutations_use_contact_service(monkeypatch) -> None:
         assert fake_contact_service.create_group_calls == [('Core Team', ['user-2', 'user-3'])]
         assert group.session_id == 'session-group-1'
         assert group.member_count == 3
+        assert fetched_group.id == 'group-1'
         assert shared_group.name == 'Renamed Team'
         assert shared_group.extra['announcement'] == 'Ship tonight'
         assert self_group.extra['note'] == 'private note'
         assert self_group.extra['my_group_nickname'] == 'lead'
+        assert group_after_add.member_count == 4
+        assert any(member.get('id') == 'user-4' for member in group_after_add.extra['members'])
+        assert any(member.get('id') == 'user-2' and member.get('role') == 'admin' for member in group_after_role.extra['members'])
+        assert all(member.get('id') != 'user-4' for member in group_after_remove.extra['members'])
+        assert group_after_transfer.owner_id == 'user-2'
+        assert leave_result['status'] == 'left'
+        assert fake_contact_service.fetch_group_calls == ['group-1', 'group-1']
         assert fake_contact_service.update_group_profile_calls == [('group-1', 'Renamed Team', 'Ship tonight')]
         assert fake_contact_service.update_my_group_profile_calls == [('group-1', 'private note', 'lead')]
+        assert fake_contact_service.add_group_member_calls == [('group-1', 'user-4', 'member')]
+        assert fake_contact_service.update_group_member_role_calls == [('group-1', 'user-2', 'admin')]
+        assert fake_contact_service.remove_group_member_calls == [('group-1', 'user-4')]
+        assert fake_contact_service.transfer_group_ownership_calls == [('group-1', 'user-2')]
+        assert fake_contact_service.leave_group_calls == ['group-1']
         assert accepted['status'] == 'accepted'
         assert rejected['status'] == 'rejected'
         assert fake_contact_service.accept_calls == ['req-1']
@@ -1645,6 +1722,7 @@ def test_session_manager_refresh_remote_sessions_uses_session_service(monkeypatc
         assert fake_session_service.fetch_unread_counts_calls == 1
         assert len(sessions) == 1
         assert sessions[0].session_id == 'session-1'
+        assert sessions[0].extra['group_id'] == 'group-1'
         assert sessions[0].unread_count == 4
 
     asyncio.run(scenario())
@@ -2058,8 +2136,9 @@ def test_sound_manager_loads_manifest_and_plays_registered_sound(monkeypatch) ->
             self.stop_calls += 1
             self._playing = False
 
-    def build_effect(path: Path, volume: float):
+    def build_effect(path: Path, volume: float, *, loop: bool = False):
         effect = DummySoundEffect(str(path), volume)
+        effect.loop = loop
         created_effects.append(effect)
         return effect
 
@@ -2071,6 +2150,7 @@ def test_sound_manager_loads_manifest_and_plays_registered_sound(monkeypatch) ->
         await manager.initialize()
 
         assert sound_manager_module.AppSound.MESSAGE_INCOMING.value in manager.available_sounds()
+        assert sound_manager_module.AppSound.CALL_OUTGOING_RING.value in manager.available_sounds()
         assert manager.play(sound_manager_module.AppSound.MESSAGE_INCOMING) is True
         assert len(created_effects) >= 1
         assert any(effect.play_calls == 1 for effect in created_effects)
@@ -2334,3 +2414,4 @@ def test_contact_controller_group_merge_helpers_preserve_extra_and_sort(monkeypa
         assert fake_db.replaced_groups[-1][0]['extra']['member_previews'] == ['Alice(地区: Shenzhen)']
 
     asyncio.run(scenario())
+

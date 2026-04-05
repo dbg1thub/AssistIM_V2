@@ -1,4 +1,4 @@
-"""Chat websocket endpoints."""
+﻿"""Chat websocket endpoints."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ from app.core.database import SessionLocal
 from app.core.errors import AppError, ErrorCode
 from app.dependencies.settings_dependency import get_websocket_settings
 from app.repositories.user_repo import UserRepository
+from app.services.call_service import CallService
 from app.services.message_service import MessageService
 from app.websocket.auth import require_websocket_user_id
 from app.websocket.manager import connection_manager
@@ -49,6 +50,7 @@ def _authenticate_connection(
     connection_manager.bind_user(connection_id, user_id)
     return user_id
 
+
 def _require_authenticated_user(user_id: str | None) -> str:
     if user_id is None:
         raise AppError(ErrorCode.UNAUTHORIZED, "websocket authentication required", 401)
@@ -67,6 +69,14 @@ def _require_target_message_id(data: dict) -> str:
     if not message_id:
         raise AppError(ErrorCode.INVALID_REQUEST, "message_id is required", 422)
     return message_id
+
+
+def _require_call_id(data: dict) -> str:
+    call_id = str(data.get("call_id") or "")
+    if not call_id:
+        raise AppError(ErrorCode.INVALID_REQUEST, "call_id is required", 422)
+    return call_id
+
 
 def _outbound_message_data(saved: dict, *, content_override: str | None = None, extra_override: dict | None = None) -> dict:
     payload = dict(saved or {})
@@ -119,9 +129,7 @@ async def _handle_chat_socket(websocket: WebSocket) -> None:
                     continue
 
                 if not was_authenticated:
-                    await connection_manager.broadcast_json(
-                        event_payload("online", {"user_id": user_id})
-                    )
+                    await connection_manager.broadcast_json(event_payload("online", {"user_id": user_id}))
                 await connection_manager.send_json(
                     connection_id,
                     ws_message("auth_ack", {"success": True, "user_id": user_id}),
@@ -325,6 +333,67 @@ async def _handle_chat_socket(websocket: WebSocket) -> None:
                 )
                 continue
 
+            if msg_type in {"call_invite", "call_ringing", "call_accept", "call_reject", "call_hangup", "call_offer", "call_answer", "call_ice"}:
+                try:
+                    with SessionLocal() as db:
+                        service = CallService(db)
+                        if msg_type == "call_invite":
+                            outbound_type, target_user_ids, payload = service.invite(
+                                session_id=str(data.get("session_id") or ""),
+                                call_id=str(data.get("call_id") or msg_id),
+                                initiator_id=current_user_id,
+                                media_type=str(data.get("media_type") or "voice"),
+                                target_user_id=str(data.get("target_user_id") or "") or None,
+                            )
+                        elif msg_type == "call_ringing":
+                            outbound_type, target_user_ids, payload = service.ringing(
+                                call_id=_require_call_id(data),
+                                user_id=current_user_id,
+                            )
+                        elif msg_type == "call_accept":
+                            outbound_type, target_user_ids, payload = service.accept(
+                                call_id=_require_call_id(data),
+                                user_id=current_user_id,
+                            )
+                        elif msg_type == "call_reject":
+                            outbound_type, target_user_ids, payload = service.reject(
+                                call_id=_require_call_id(data),
+                                user_id=current_user_id,
+                            )
+                        elif msg_type == "call_hangup":
+                            outbound_type, target_user_ids, payload = service.hangup(
+                                call_id=_require_call_id(data),
+                                user_id=current_user_id,
+                                reason=str(data.get("reason") or "") or None,
+                            )
+                        elif msg_type == "call_offer":
+                            outbound_type, target_user_ids, payload = service.relay_offer(
+                                call_id=_require_call_id(data),
+                                user_id=current_user_id,
+                                sdp=data.get("sdp", {}) if isinstance(data.get("sdp"), dict) else {},
+                            )
+                        elif msg_type == "call_answer":
+                            outbound_type, target_user_ids, payload = service.relay_answer(
+                                call_id=_require_call_id(data),
+                                user_id=current_user_id,
+                                sdp=data.get("sdp", {}) if isinstance(data.get("sdp"), dict) else {},
+                            )
+                        else:
+                            outbound_type, target_user_ids, payload = service.relay_ice(
+                                call_id=_require_call_id(data),
+                                user_id=current_user_id,
+                                candidate=data.get("candidate", {}) if isinstance(data.get("candidate"), dict) else {},
+                            )
+                except AppError as exc:
+                    await _send_app_error(connection_id, msg_id, exc)
+                    continue
+
+                await connection_manager.send_json_to_users(
+                    target_user_ids,
+                    ws_message(outbound_type, payload, msg_id=payload.get("call_id", "")),
+                )
+                continue
+
             await connection_manager.send_json(
                 connection_id,
                 ws_message(
@@ -346,3 +415,4 @@ async def _handle_chat_socket(websocket: WebSocket) -> None:
 @websocket_router.websocket("/ws")
 async def websocket_chat(websocket: WebSocket) -> None:
     await _handle_chat_socket(websocket)
+

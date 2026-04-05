@@ -1,4 +1,4 @@
-﻿"""Group routes."""
+"""Group routes."""
 
 from __future__ import annotations
 
@@ -17,12 +17,49 @@ from app.schemas.group import (
     GroupTransferOwner,
 )
 from app.services.group_service import GroupService
+from app.services.message_service import MessageService
 from app.utils.response import success_response
 from app.websocket.manager import connection_manager
 from app.websocket.payloads import ws_message
 
 
 router = APIRouter()
+
+
+async def _broadcast_group_announcement_message(
+    db: Session,
+    announcement_message_id: str,
+    participant_ids: list[str],
+) -> None:
+    normalized_message_id = str(announcement_message_id or "").strip()
+    normalized_participant_ids = [
+        value
+        for value in dict.fromkeys(str(raw_id or "").strip() for raw_id in participant_ids)
+        if value
+    ]
+    if not normalized_message_id or not normalized_participant_ids:
+        return
+
+    service = MessageService(db)
+    message = service.messages.get_by_id(normalized_message_id)
+    if message is None:
+        return
+
+    sender_id = str(message.sender_id or "").strip()
+    recipient_ids = [user_id for user_id in normalized_participant_ids if user_id != sender_id]
+    if recipient_ids:
+        payload = service.serialize_message(message, recipient_ids[0])
+        await connection_manager.send_json_to_users(
+            recipient_ids,
+            ws_message("chat_message", payload, msg_id=str(payload.get("message_id", "") or "")),
+        )
+
+    if sender_id and sender_id in normalized_participant_ids:
+        sender_payload = service.serialize_message(message, sender_id)
+        await connection_manager.send_json_to_users(
+            [sender_id],
+            ws_message("chat_message", sender_payload, msg_id=str(sender_payload.get("message_id", "") or "")),
+        )
 
 
 async def _broadcast_group_profile_update(db: Session, group_id: str, *, actor_user_id: str) -> None:
@@ -68,6 +105,7 @@ async def _broadcast_group_self_profile_update(db: Session, current_user: User, 
         ),
     )
 
+
 @router.get("")
 def list_groups(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
     return success_response(GroupService(db).list_groups(current_user))
@@ -91,9 +129,11 @@ async def update_group_profile(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> dict:
-    data = GroupService(db).update_group_profile(current_user, group_id, payload.name, payload.announcement)
+    result = GroupService(db).update_group_profile(current_user, group_id, payload.name, payload.announcement)
+    if result.announcement_message_id:
+        await _broadcast_group_announcement_message(db, result.announcement_message_id, result.participant_ids)
     await _broadcast_group_profile_update(db, group_id, actor_user_id=current_user.id)
-    return success_response(data)
+    return success_response(result.group)
 
 
 @router.patch("/{group_id}/me")
@@ -156,5 +196,3 @@ def transfer_group(
     db: Session = Depends(get_db),
 ) -> dict:
     return success_response(GroupService(db).transfer_ownership(current_user, group_id, payload.new_owner_id))
-
-

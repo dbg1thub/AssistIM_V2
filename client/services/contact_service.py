@@ -68,6 +68,11 @@ class ContactService:
         )
         return dict(payload or {})
 
+    async def fetch_group(self, group_id: str) -> dict[str, Any]:
+        """Fetch one group with authoritative member details."""
+        payload = await self._http.get(f"/groups/{group_id}")
+        return dict(payload or {})
+
     async def update_group_profile(self, group_id: str, *, name: str | None = None, announcement: str | None = None) -> dict[str, Any]:
         """Update shared group metadata."""
         payload = await self._http.patch(
@@ -109,6 +114,42 @@ class ContactService:
     async def remove_friend(self, friend_id: str) -> None:
         """Remove one existing friend."""
         await self._http.delete(f"/friends/{friend_id}")
+
+    async def leave_group(self, group_id: str) -> dict[str, Any]:
+        """Leave one joined group."""
+        payload = await self._http.post(f"/groups/{group_id}/leave", json={})
+        return dict(payload or {})
+
+    async def add_group_member(self, group_id: str, user_id: str, *, role: str = "member") -> dict[str, Any]:
+        """Add one member to a group."""
+        payload = await self._http.post(
+            f"/groups/{group_id}/members",
+            json={
+                "user_id": user_id,
+                "role": role,
+            },
+        )
+        return dict(payload or {})
+
+    async def remove_group_member(self, group_id: str, user_id: str) -> None:
+        """Remove one member from a group."""
+        await self._http.delete(f"/groups/{group_id}/members/{user_id}")
+
+    async def update_group_member_role(self, group_id: str, user_id: str, *, role: str) -> dict[str, Any]:
+        """Update one member role in a group."""
+        payload = await self._http.patch(
+            f"/groups/{group_id}/members/{user_id}/role",
+            json={"role": role},
+        )
+        return dict(payload or {})
+
+    async def transfer_group_ownership(self, group_id: str, new_owner_id: str) -> dict[str, Any]:
+        """Transfer one group to a new owner."""
+        payload = await self._http.post(
+            f"/groups/{group_id}/transfer",
+            json={"new_owner_id": new_owner_id},
+        )
+        return dict(payload or {})
 
 
 _contact_service: Optional[ContactService] = None

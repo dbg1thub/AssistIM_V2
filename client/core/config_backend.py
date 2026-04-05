@@ -6,7 +6,23 @@ Configuration Module
 
 import os
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Any, Optional
+
+
+def _parse_webrtc_ice_server_urls() -> list[str]:
+    """Parse one comma-separated ICE server URL list from the environment."""
+    raw_value = str(os.getenv("ASSISTIM_WEBRTC_ICE_SERVER_URLS", "") or "").strip()
+    if not raw_value:
+        return []
+    return [item.strip() for item in raw_value.split(",") if item.strip()]
+
+
+def _parse_csv_env(name: str) -> list[str]:
+    """Parse one comma-separated environment variable into a clean list."""
+    raw_value = str(os.getenv(name, "") or "").strip()
+    if not raw_value:
+        return []
+    return [item.strip() for item in raw_value.split(",") if item.strip()]
 
 
 @dataclass
@@ -61,6 +77,43 @@ class StorageConfig:
 
 
 @dataclass
+class WebRTCConfig:
+    """WebRTC runtime configuration."""
+
+    ice_server_urls: list[str] = field(default_factory=_parse_webrtc_ice_server_urls)
+    stun_urls: list[str] = field(default_factory=lambda: _parse_csv_env("ASSISTIM_WEBRTC_STUN_URLS"))
+    turn_urls: list[str] = field(default_factory=lambda: _parse_csv_env("ASSISTIM_WEBRTC_TURN_URLS"))
+    turn_username: str = field(default_factory=lambda: str(os.getenv("ASSISTIM_WEBRTC_TURN_USERNAME", "") or "").strip())
+    turn_credential: str = field(default_factory=lambda: str(os.getenv("ASSISTIM_WEBRTC_TURN_CREDENTIAL", "") or "").strip())
+
+    @property
+    def ice_servers(self) -> list[dict[str, Any]]:
+        """Return structured ICE server definitions with optional TURN auth."""
+        servers: list[dict[str, Any]] = []
+        seen: set[tuple[tuple[str, ...], str, str]] = set()
+
+        def add_server(urls: list[str], *, username: str = "", credential: str = "") -> None:
+            normalized_urls = tuple(str(url or "").strip() for url in urls if str(url or "").strip())
+            if not normalized_urls:
+                return
+            key = (normalized_urls, str(username or "").strip(), str(credential or "").strip())
+            if key in seen:
+                return
+            seen.add(key)
+            payload: dict[str, Any] = {"urls": list(normalized_urls)}
+            if username:
+                payload["username"] = username
+            if credential:
+                payload["credential"] = credential
+            servers.append(payload)
+
+        add_server(self.ice_server_urls)
+        add_server(self.stun_urls)
+        add_server(self.turn_urls, username=self.turn_username, credential=self.turn_credential)
+        return servers
+
+
+@dataclass
 class Config:
     """Main application configuration - 后端配置."""
 
@@ -68,6 +121,7 @@ class Config:
     reconnect: ReconnectConfig = field(default_factory=ReconnectConfig)
     heartbeat: HeartbeatConfig = field(default_factory=HeartbeatConfig)
     storage: StorageConfig = field(default_factory=StorageConfig)
+    webrtc: WebRTCConfig = field(default_factory=WebRTCConfig)
 
     debug: bool = field(default_factory=lambda: os.getenv("ASSISTIM_DEBUG", "false").lower() == "true")
 

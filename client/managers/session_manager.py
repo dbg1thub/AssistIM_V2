@@ -15,7 +15,7 @@ from client.core.i18n import tr
 from client.core.logging import setup_logging
 from client.events.event_bus import get_event_bus
 from client.managers.message_manager import MessageEvent, get_message_manager
-from client.models.message import ChatMessage, MessageStatus, Session, format_message_preview, resolve_recall_notice
+from client.models.message import ChatMessage, MessageStatus, Session, format_message_preview, normalize_message_mentions, resolve_recall_notice
 from client.services.session_service import get_session_service
 from client.storage.database import get_database
 
@@ -56,18 +56,137 @@ class SessionManager:
         self._sessions: dict[str, Session] = {}
         self._current_session_id: Optional[str] = None
         self._current_session_active = False
+        self._current_user_id = ""
         self._lock = asyncio.Lock()
         self._session_fetch_tasks: dict[str, asyncio.Task[Optional[Session]]] = {}
+        self._identity_refresh_task: Optional[asyncio.Task[None]] = None
         self._hidden_sessions: dict[str, float] = {}
 
         self._event_subscriptions: list[tuple[str, Callable]] = []
         self._running = False
         self._initialized = False
 
+    @staticmethod
+    def _message_mentions_current_user(message: ChatMessage | None, current_user_id: str) -> bool:
+        """Return whether one text message explicitly mentions the current user."""
+        if message is None or not current_user_id or message.is_self:
+            return False
+        mentions = normalize_message_mentions(
+            dict(message.extra or {}).get("mentions"),
+            content=str(message.content or ""),
+        )
+        for mention in mentions:
+            mention_type = str(mention.get("mention_type", "") or "").strip().lower()
+            if mention_type == "all":
+                return True
+            if mention_type == "member" and str(mention.get("member_id", "") or "").strip() == current_user_id:
+                return True
+        return False
+
+    def _apply_last_message_preview(self, session: Session, message: ChatMessage | None, *, current_user_id: str) -> None:
+        """Project one real last message into cached session preview fields."""
+        if message is None:
+            session.last_message = ""
+            session.extra.pop("last_message_id", None)
+            session.extra.pop("last_message_type", None)
+            session.extra.pop("last_message_sender_id", None)
+            session.extra.pop("last_message_mentions_current_user", None)
+            return
+
+        preview = resolve_recall_notice(message) if message.status == MessageStatus.RECALLED else format_message_preview(
+            message.content,
+            message.message_type,
+        )
+        session.update_last_message(content=preview, timestamp=message.timestamp)
+        session.extra["last_message_id"] = str(message.message_id or "")
+        session.extra["last_message_type"] = message.message_type.value
+        session.extra["last_message_sender_id"] = str(message.sender_id or "")
+        mentions_current_user = self._message_mentions_current_user(message, current_user_id)
+        if self._current_session_active and self._current_session_id == session.session_id:
+            mentions_current_user = False
+        session.extra["last_message_mentions_current_user"] = mentions_current_user
+
     @property
     def sessions(self) -> list[Session]:
         """Get all sessions sorted by last message time."""
         return self._get_sorted_sessions()
+
+    def set_user_id(self, user_id: str) -> None:
+        """Set the current authenticated user id for session presentation decisions."""
+        normalized_user_id = str(user_id or "").strip()
+        if self._current_user_id == normalized_user_id:
+            return
+        self._current_user_id = normalized_user_id
+        self._schedule_identity_refresh()
+
+    def _schedule_identity_refresh(self) -> None:
+        """Recompute cached preview state once the authenticated user identity changes."""
+        if not self._initialized:
+            return
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+
+        if self._identity_refresh_task is not None and not self._identity_refresh_task.done():
+            self._identity_refresh_task.cancel()
+
+        task = loop.create_task(self._refresh_cached_preview_state_for_identity())
+        self._identity_refresh_task = task
+        task.add_done_callback(self._finalize_identity_refresh_task)
+
+    def _finalize_identity_refresh_task(self, task: asyncio.Task[None]) -> None:
+        """Drop completed identity-refresh work and report unexpected failures."""
+        if self._identity_refresh_task is task:
+            self._identity_refresh_task = None
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            logger.exception("Failed to refresh cached preview state after identity change")
+
+    async def _refresh_cached_preview_state_for_identity(self) -> None:
+        """Recompute preview sender/mention state for all cached sessions after login changes."""
+        db = get_database()
+        if not db.is_connected or not self._sessions:
+            return
+
+        current_user_id = self._current_user_id
+        async with self._lock:
+            session_ids = list(self._sessions.keys())
+
+        changed_sessions: list[Session] = []
+        for session_id in session_ids:
+            last_message = await db.get_last_message(session_id)
+            async with self._lock:
+                session = self._sessions.get(session_id)
+                if session is None:
+                    continue
+
+                previous_preview = str(session.last_message or "")
+                previous_sender_id = str(session.extra.get("last_message_sender_id", "") or "")
+                previous_type = str(session.extra.get("last_message_type", "") or "")
+                previous_mentions = bool(session.extra.get("last_message_mentions_current_user", False))
+
+                self._apply_last_message_preview(session, last_message, current_user_id=current_user_id)
+
+                if (
+                    previous_preview != str(session.last_message or "")
+                    or previous_sender_id != str(session.extra.get("last_message_sender_id", "") or "")
+                    or previous_type != str(session.extra.get("last_message_type", "") or "")
+                    or previous_mentions != bool(session.extra.get("last_message_mentions_current_user", False))
+                ):
+                    changed_sessions.append(session)
+
+        for session in changed_sessions:
+            await db.save_session(session)
+
+        if changed_sessions:
+            await self._event_bus.emit(SessionEvent.UPDATED, {
+                "sessions": self.sessions,
+            })
 
     @property
     def current_session_id(self) -> Optional[str]:
@@ -267,11 +386,8 @@ class SessionManager:
             session = await self._build_fallback_session(message)
 
         if session:
-            session.update_last_message(
-                content=format_message_preview(message.content, message.message_type),
-                timestamp=message.timestamp,
-            )
-            session.extra["last_message_type"] = message.message_type.value
+            current_user_id = await self._get_current_user_id()
+            self._apply_last_message_preview(session, message, current_user_id=current_user_id)
 
         return session
 
@@ -287,7 +403,8 @@ class SessionManager:
             fallback_name=message.sender_id or "New Chat",
         )
         if session is not None:
-            session.extra["last_message_type"] = message.message_type.value
+            current_user_id = await self._get_current_user_id()
+            self._apply_last_message_preview(session, message, current_user_id=current_user_id)
         return session
 
     async def _build_session_from_payload(
@@ -351,12 +468,20 @@ class SessionManager:
             session.extra["group_id"] = str(data.get("group_id") or "")
         if "group_announcement" in data:
             session.extra["group_announcement"] = str(data.get("group_announcement", "") or "")
+        if "announcement_message_id" in data:
+            session.extra["announcement_message_id"] = str(data.get("announcement_message_id", "") or "")
+        if "announcement_author_id" in data:
+            session.extra["announcement_author_id"] = str(data.get("announcement_author_id", "") or "")
+        if "announcement_published_at" in data:
+            session.extra["announcement_published_at"] = str(data.get("announcement_published_at", "") or "")
         if "group_note" in data:
             session.extra["group_note"] = str(data.get("group_note", "") or "")
         if "my_group_nickname" in data:
             session.extra["my_group_nickname"] = str(data.get("my_group_nickname", "") or "")
         if data.get("last_message_status"):
             session.extra["last_message_status"] = data.get("last_message_status")
+        if data.get("last_message_id"):
+            session.extra["last_message_id"] = str(data.get("last_message_id") or "")
         if data.get("last_message_sender_id"):
             session.extra["last_message_sender_id"] = data.get("last_message_sender_id")
         if session_type == "direct":
@@ -442,6 +567,7 @@ class SessionManager:
             is_ai_session=bool(message.extra.get("is_ai_session", False) or session_type == "ai"),
         )
         session.extra["last_message_type"] = message.message_type.value
+        session.extra["last_message_id"] = str(message.message_id or "")
         session.extra["last_message_sender_id"] = str(message.sender_id or "")
         session.extra["members"] = list(message.extra.get("members") or [])
         session.extra["server_name"] = session_name
@@ -466,6 +592,8 @@ class SessionManager:
 
     async def _get_current_user_id(self) -> str:
         """Load current user id from persisted auth state."""
+        if self._current_user_id:
+            return self._current_user_id
         current_user = await self._get_current_user_context()
         return str(current_user.get("id", "") or "")
 
@@ -684,6 +812,7 @@ class SessionManager:
         if not messages:
             await self._reconcile_unread_counts()
             return
+        current_user_id = await self._get_current_user_id()
         for message in messages:
             await self._unhide_session(message.session_id)
             await self._ensure_session_exists(message)
@@ -697,12 +826,7 @@ class SessionManager:
                 if not session:
                     continue
 
-                session.update_last_message(
-                    content=format_message_preview(message.content, message.message_type),
-                    timestamp=message.timestamp,
-                )
-                session.extra["last_message_type"] = message.message_type.value
-                session.extra["last_message_sender_id"] = str(message.sender_id or "")
+                self._apply_last_message_preview(session, message, current_user_id=current_user_id)
 
                 changed_sessions[session.session_id] = session
 
@@ -798,23 +922,39 @@ class SessionManager:
     ) -> bool:
         """Apply one authoritative group payload onto a cached session."""
         changed = False
-        group_name = str(payload.get("name", "") or "")
-        group_avatar = str(payload.get("avatar", "") or "")
-        if session.name != group_name:
-            session.name = group_name
-            changed = True
-        if str(session.avatar or "") != group_avatar:
-            session.avatar = group_avatar or None
-            changed = True
+        if "name" in payload:
+            group_name = str(payload.get("name", "") or "")
+            if session.name != group_name:
+                session.name = group_name
+                changed = True
+            if session.extra.get("server_name") != group_name:
+                session.extra["server_name"] = group_name
+                changed = True
 
-        mapping = {
-            "group_id": str(payload.get("group_id", "") or payload.get("id", "") or session.extra.get("group_id", "") or ""),
-            "server_name": group_name,
-            "group_announcement": str(payload.get("announcement", "") or ""),
-            "owner_id": str(payload.get("owner_id", "") or ""),
-            "member_count": int(payload.get("member_count", 0) or 0),
-        }
-        for key, value in mapping.items():
+        if "avatar" in payload:
+            group_avatar = str(payload.get("avatar", "") or "")
+            if str(session.avatar or "") != group_avatar:
+                session.avatar = group_avatar or None
+                changed = True
+
+        shared_mapping: dict[str, Any] = {}
+        if "group_id" in payload or "id" in payload:
+            shared_mapping["group_id"] = str(
+                payload.get("group_id", "") or payload.get("id", "") or session.extra.get("group_id", "") or ""
+            )
+        if "announcement" in payload:
+            shared_mapping["group_announcement"] = str(payload.get("announcement", "") or "")
+        if "announcement_message_id" in payload:
+            shared_mapping["announcement_message_id"] = str(payload.get("announcement_message_id", "") or "")
+        if "announcement_author_id" in payload:
+            shared_mapping["announcement_author_id"] = str(payload.get("announcement_author_id", "") or "")
+        if "announcement_published_at" in payload:
+            shared_mapping["announcement_published_at"] = str(payload.get("announcement_published_at", "") or "")
+        if "owner_id" in payload:
+            shared_mapping["owner_id"] = str(payload.get("owner_id", "") or "")
+        if "member_count" in payload:
+            shared_mapping["member_count"] = int(payload.get("member_count", 0) or 0)
+        for key, value in shared_mapping.items():
             if session.extra.get(key) != value:
                 session.extra[key] = value
                 changed = True
@@ -840,6 +980,22 @@ class SessionManager:
                 value = str(payload.get(key, "") or "")
                 if session.extra.get(key) != value:
                     session.extra[key] = value
+                    changed = True
+            current_user_id = str(current_user.get("id", "") or "")
+            my_group_nickname = str(payload.get("my_group_nickname", "") or "")
+            if current_user_id and "my_group_nickname" in payload:
+                updated_members: list[dict[str, Any]] = []
+                members_changed = False
+                for raw_member in list(session.extra.get("members") or []):
+                    member = dict(raw_member or {})
+                    if str(member.get("id", "") or "").strip() == current_user_id:
+                        if str(member.get("group_nickname", "") or "") != my_group_nickname:
+                            member["group_nickname"] = my_group_nickname
+                            members_changed = True
+                        member["display_name"] = self._member_display_name(member)
+                    updated_members.append(member)
+                if members_changed:
+                    session.extra["members"] = updated_members
                     changed = True
 
         previous_name = session.name
@@ -920,6 +1076,30 @@ class SessionManager:
             target.extra["is_pinned"] = True
         if "pinned_at" in source.extra:
             target.extra["pinned_at"] = source.extra["pinned_at"]
+        if "is_muted" in source.extra:
+            target.extra["is_muted"] = bool(source.extra.get("is_muted", False))
+        if "show_member_nickname" in source.extra:
+            target.extra["show_member_nickname"] = bool(source.extra.get("show_member_nickname", True))
+        source_last_message_id = str(source.extra.get("last_message_id", "") or "")
+        target_last_message_id = str(target.extra.get("last_message_id", "") or "")
+        if source_last_message_id and source_last_message_id == target_last_message_id:
+            target.extra["last_message_id"] = target_last_message_id
+        if (
+            "last_message_mentions_current_user" in source.extra
+            and source_last_message_id
+            and source_last_message_id == target_last_message_id
+        ):
+            target.extra["last_message_mentions_current_user"] = bool(source.extra.get("last_message_mentions_current_user", False))
+        source_announcement_message_id = str(source.extra.get("announcement_message_id", "") or "")
+        target_announcement_message_id = str(target.extra.get("announcement_message_id", "") or "")
+        if (
+            source_announcement_message_id
+            and source_announcement_message_id == target_announcement_message_id
+            and "last_viewed_announcement_message_id" in source.extra
+        ):
+            target.extra["last_viewed_announcement_message_id"] = str(
+                source.extra.get("last_viewed_announcement_message_id", "") or ""
+            )
 
     async def load_sessions(self, sessions: list[Session]) -> None:
         """Load sessions from storage."""
@@ -1134,6 +1314,59 @@ class SessionManager:
             "session": session,
         })
 
+    async def set_group_member_nickname_visibility(self, session_id: str, enabled: bool) -> None:
+        """Persist the local group member label visibility preference for one session."""
+        async with self._lock:
+            session = self._sessions.get(session_id)
+            if not session or session.session_type != "group":
+                return
+
+            normalized_enabled = bool(enabled)
+            current_enabled = bool(session.extra.get("show_member_nickname", True))
+            if current_enabled == normalized_enabled:
+                return
+
+            session.extra["show_member_nickname"] = normalized_enabled
+
+            db = get_database()
+            if db.is_connected:
+                await db.save_session(session)
+
+        await self._event_bus.emit(
+            SessionEvent.UPDATED,
+            {
+                "session": session,
+            },
+        )
+
+    async def mark_group_announcement_viewed(self, session_id: str, announcement_message_id: str) -> Optional[Session]:
+        """Persist that the current user has opened the latest group announcement."""
+        normalized_session_id = str(session_id or "").strip()
+        normalized_message_id = str(announcement_message_id or "").strip()
+        if not normalized_session_id or not normalized_message_id:
+            return None
+
+        updated_session: Optional[Session] = None
+        db = get_database()
+        async with self._lock:
+            session = self._sessions.get(normalized_session_id)
+            if session is None or session.session_type != "group":
+                return None
+
+            current_message_id = str(session.extra.get("announcement_message_id", "") or "").strip()
+            viewed_message_id = str(session.extra.get("last_viewed_announcement_message_id", "") or "").strip()
+            if current_message_id != normalized_message_id or viewed_message_id == normalized_message_id:
+                return session
+
+            session.extra["last_viewed_announcement_message_id"] = normalized_message_id
+            updated_session = session
+
+        if updated_session is not None and db.is_connected:
+            await db.save_session(updated_session)
+        if updated_session is not None:
+            await self._event_bus.emit(SessionEvent.UPDATED, {"session": updated_session})
+        return updated_session
+
     def is_session_muted(self, session_id: str) -> bool:
         """Return whether one session has local do-not-disturb enabled."""
         session = self._sessions.get(session_id)
@@ -1246,30 +1479,35 @@ class SessionManager:
             return
 
         last_message = await db.get_last_message(session_id)
-        if last_message and last_message.status == MessageStatus.RECALLED:
-            preview = resolve_recall_notice(last_message)
-        else:
-            preview = format_message_preview(last_message.content, last_message.message_type) if last_message else ""
         preview_time = last_message.timestamp if last_message else (session.last_message_time or session.created_at)
-        extra = dict(session.extra)
-        if last_message:
-            extra["last_message_type"] = last_message.message_type.value
-            extra["last_message_sender_id"] = str(last_message.sender_id or "")
-        else:
-            extra.pop("last_message_type", None)
-            extra.pop("last_message_sender_id", None)
+        current_user_id = await self._get_current_user_id()
+        self._apply_last_message_preview(session, last_message, current_user_id=current_user_id)
 
         await self.update_session(
             session_id,
-            last_message=preview,
             last_message_time=preview_time,
-            extra=extra,
+            last_message=session.last_message,
+            extra=dict(session.extra),
         )
 
     async def select_session(self, session_id: str) -> None:
         """Select a session as current."""
         old_id = self._current_session_id
         self._current_session_id = session_id
+        selected_session: Optional[Session] = None
+
+        async with self._lock:
+            selected_session = self._sessions.get(session_id)
+            if selected_session is not None and bool(selected_session.extra.get("last_message_mentions_current_user", False)):
+                selected_session.extra["last_message_mentions_current_user"] = False
+                db = get_database()
+                if db.is_connected:
+                    await db.save_session(selected_session)
+
+        if selected_session is not None:
+            await self._event_bus.emit(SessionEvent.UPDATED, {
+                "session": selected_session,
+            })
 
         if old_id != session_id:
             await self._event_bus.emit(SessionEvent.SELECTED, {
@@ -1309,16 +1547,12 @@ class SessionManager:
             message: ChatMessage,
     ) -> None:
         """Add a message to session's last message."""
+        current_user_id = await self._get_current_user_id()
         async with self._lock:
             session = self._sessions.get(session_id)
 
             if session:
-                session.update_last_message(
-                    content=resolve_recall_notice(message) if message.status == MessageStatus.RECALLED else format_message_preview(message.content, message.message_type),
-                    timestamp=message.timestamp,
-                )
-                session.extra["last_message_type"] = message.message_type.value
-                session.extra["last_message_sender_id"] = str(message.sender_id or "")
+                self._apply_last_message_preview(session, message, current_user_id=current_user_id)
 
                 db = get_database()
                 if db.is_connected:
@@ -1441,6 +1675,11 @@ class SessionManager:
             await asyncio.gather(*self._session_fetch_tasks.values(), return_exceptions=True)
             self._session_fetch_tasks.clear()
 
+        if self._identity_refresh_task is not None and not self._identity_refresh_task.done():
+            self._identity_refresh_task.cancel()
+            await asyncio.gather(self._identity_refresh_task, return_exceptions=True)
+            self._identity_refresh_task = None
+
         await self._unsubscribe_all()
         self._sessions.clear()
         self._current_session_id = None
@@ -1463,6 +1702,9 @@ def get_session_manager() -> SessionManager:
     if _session_manager is None:
         _session_manager = SessionManager()
     return _session_manager
+
+
+
 
 
 

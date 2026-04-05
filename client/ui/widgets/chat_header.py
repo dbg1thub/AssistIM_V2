@@ -11,6 +11,7 @@ from qfluentwidgets import BodyLabel, CaptionLabel, TransparentToolButton
 from client.core.app_icons import AppIcon, CollectionIcon
 from client.core.i18n import tr
 from client.ui.styles import StyleSheet
+from client.ui.widgets.group_announcement_banner import GroupAnnouncementBanner
 
 
 class ChatHeader(QWidget):
@@ -29,16 +30,22 @@ class ChatHeader(QWidget):
         self.setObjectName("chatHeader")
         self.setMinimumWidth(0)
 
-        self.main_layout = QHBoxLayout(self)
+        self.main_layout = QVBoxLayout(self)
         self.main_layout.setContentsMargins(20, 12, 20, 12)
-        self.main_layout.setSpacing(12)
+        self.main_layout.setSpacing(0)
 
         self.info_widget = QWidget(self)
         self.info_widget.setMinimumWidth(0)
         self.info_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self.info_layout = QVBoxLayout(self.info_widget)
         self.info_layout.setContentsMargins(0, 0, 0, 0)
-        self.info_layout.setSpacing(2)
+        self.info_layout.setSpacing(0)
+
+        self.title_row = QWidget(self.info_widget)
+        self.title_row.setMinimumWidth(0)
+        self.title_row_layout = QHBoxLayout(self.title_row)
+        self.title_row_layout.setContentsMargins(0, 0, 0, 0)
+        self.title_row_layout.setSpacing(8)
 
         self.title_label = BodyLabel(tr("chat_header.placeholder_title", "Select a Conversation"), self.info_widget)
         self.status_label = CaptionLabel(
@@ -52,7 +59,12 @@ class ChatHeader(QWidget):
 
         self.title_label.setObjectName("chatHeaderTitle")
         self.status_label.setObjectName("chatHeaderStatus")
-        self.info_layout.addWidget(self.title_label)
+        self.group_announcement_banner = GroupAnnouncementBanner(self.info_widget)
+        self.group_announcement_banner.hide()
+        self.info_layout.addWidget(self.title_row)
+        self.info_layout.addSpacing(6)
+        self.info_layout.addWidget(self.group_announcement_banner, 0)
+        self.info_layout.addSpacing(2)
         self.info_layout.addWidget(self.status_label)
 
         self.history_button = TransparentToolButton(CollectionIcon("history"), self)
@@ -64,9 +76,11 @@ class ChatHeader(QWidget):
         self.info_button.setToolTip(tr("chat_header.info_tooltip", "Chat Info"))
         self._apply_safe_button_font(self.history_button, self.info_button)
 
+        self.title_row_layout.addWidget(self.title_label, 1)
+        self.title_row_layout.addWidget(self.history_button, 0)
+        self.title_row_layout.addWidget(self.info_button, 0)
+
         self.main_layout.addWidget(self.info_widget, 1)
-        self.main_layout.addWidget(self.history_button, 0)
-        self.main_layout.addWidget(self.info_button, 0)
 
         self.history_button.clicked.connect(self.history_clicked.emit)
         self.info_button.clicked.connect(self.info_clicked.emit)
@@ -98,6 +112,18 @@ class ChatHeader(QWidget):
         self.title_label.setText(title or tr("session.unnamed", "Untitled Session"))
         self.status_label.setText(status)
         self.set_actions_enabled(True)
+
+    def set_group_announcement_session(self, session) -> None:
+        """Bind the header-level announcement card to the active session."""
+        self.group_announcement_banner.set_session(session)
+
+    def group_announcement_visible(self) -> bool:
+        """Return whether the header-level announcement card should currently be shown."""
+        return bool(self.group_announcement_banner.isVisible())
+
+    def group_announcement_widget(self) -> GroupAnnouncementBanner:
+        """Expose the header-level announcement card for signal wiring."""
+        return self.group_announcement_banner
 
     def set_title(self, title: str) -> None:
         """Set chat title only."""

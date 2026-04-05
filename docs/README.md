@@ -17,18 +17,22 @@
    了解客户端总体架构、协议边界、消息一致性模型与 UI 性能要求。
 3. [backend_architecture.md](./backend_architecture.md)
    了解服务端分层、领域模型、实时链路、一致性规则与演进路径。
-4. [ui_guidelines.md](./ui_guidelines.md)
+4. [realtime_protocol.md](./realtime_protocol.md)
+   了解当前 WebSocket 实时协议、通话 signaling 扩展与 E2EE 消息 envelope。
+5. [ui_guidelines.md](./ui_guidelines.md)
    了解 QFluentWidgets 组件选型、CardWidget 规则、Acrylic 规则、Tooltip 规则与 QSS 规范。
-5. [design_decisions.md](./design_decisions.md)
+6. [design_decisions.md](./design_decisions.md)
    查看关键设计决策（ADR）与其适用范围。
-6. [code_style.md](./code_style.md)
+7. [code_style.md](./code_style.md)
    查看代码风格、async 规范、错误与日志规范、测试与文档更新要求。
-7. [ai_rules.md](./ai_rules.md)
+8. [ai_rules.md](./ai_rules.md)
    查看 AI / Cursor / Copilot 修改代码时必须遵守的硬约束。
-8. [templates.md](./templates.md)
+9. [templates.md](./templates.md)
    查看常用代码骨架与推荐写法。
-9. [pitfalls.md](./pitfalls.md)
+10. [pitfalls.md](./pitfalls.md)
    查看需要主动规避的反模式与历史问题。
+11. [chat_e2ee_calls_design.md](./chat_e2ee_calls_design.md)
+   查看聊天端到端加密与 1:1 语音 / 视频通话的增量设计草案。
 
 ## 2. 文档优先级
 

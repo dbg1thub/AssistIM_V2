@@ -64,13 +64,13 @@ QFrame#chatInfoDrawerBorder {
 QFrame#chatInfoParticipantCard {
     background: transparent;
     border: none;
-    border-radius: 14px;
+    border-radius: 8px;
 }
 
 QFrame#chatInfoAddGlyph {
     background: transparent;
     border: 1px dashed rgba(255, 255, 255, 0.16);
-    border-radius: 14px;
+    border-radius: 8px;
 }
 
 QFrame#chatInfoAddGlyph:disabled {
@@ -88,20 +88,23 @@ QWidget#chatInfoDetailField {
     background: transparent;
 }
 
-QLabel#chatInfoDetailFieldTitle,
 QLabel#chatInfoGroupMemberMeta,
 QLabel#chatInfoMemberSearchEmpty {
     color: {{TEXT_SECONDARY}};
     font: 12px "Segoe UI", "Microsoft YaHei", "PingFang SC";
 }
 
-QLabel#chatInfoDetailFieldTitle {
+QLabel#chatInfoDetailFieldValue {
     color: rgba(196, 196, 196, 220);
     font: 13px "Segoe UI", "Microsoft YaHei", "PingFang SC";
 }
 
-QLabel#chatInfoDetailFieldValue {
+QLineEdit#chatInfoDetailFieldEditor {
+    border: 1px solid rgba(127, 127, 127, 0.32);
+    border-radius: 6px;
+    padding: 4px 8px;
     color: rgba(196, 196, 196, 220);
+    background: transparent;
     font: 13px "Segoe UI", "Microsoft YaHei", "PingFang SC";
 }
 
@@ -116,6 +119,39 @@ QWidget#chatInfoGroupMemberRow {
 
 QWidget#chatInfoGroupMemberRow:hover {
     background: rgba(255, 255, 255, 0.08);
+}
+
+QAbstractScrollArea#chatInfoDrawerScrollArea {
+    border: none;
+    background: transparent;
+}
+
+QWidget#chatInfoDrawerScrollViewport {
+    background: transparent;
+}
+
+QAbstractScrollArea#chatInfoDrawerScrollArea QScrollBar:vertical {
+    width: 8px;
+    margin: 8px 0 8px 0;
+    border: none;
+    border-radius: 4px;
+    background: rgba(120, 120, 120, 0.18);
+}
+
+QAbstractScrollArea#chatInfoDrawerScrollArea QScrollBar::handle:vertical {
+    min-height: 28px;
+    border: none;
+    border-radius: 4px;
+    background: rgba(120, 120, 120, 0.55);
+}
+
+QAbstractScrollArea#chatInfoDrawerScrollArea QScrollBar::add-line:vertical,
+QAbstractScrollArea#chatInfoDrawerScrollArea QScrollBar::sub-line:vertical,
+QAbstractScrollArea#chatInfoDrawerScrollArea QScrollBar::add-page:vertical,
+QAbstractScrollArea#chatInfoDrawerScrollArea QScrollBar::sub-page:vertical {
+    border: none;
+    background: transparent;
+    height: 0;
 }
 
 QPushButton#chatInfoSecondaryLink {
@@ -143,7 +179,7 @@ QLabel#chatInfoPlaceholderContent {
     font: 13px "Segoe UI", "Microsoft YaHei", "PingFang SC";
 }
 
-QPushButton#chatInfoClearLink {
+QPushButton#chatInfoDangerLink {
     background: transparent;
     border: none;
     color: rgb(255, 107, 120);
@@ -151,9 +187,28 @@ QPushButton#chatInfoClearLink {
     padding: 4px 8px;
 }
 
-QPushButton#chatInfoClearLink:hover,
-QPushButton#chatInfoClearLink:pressed {
+QPushButton#chatInfoDangerLink:hover,
+QPushButton#chatInfoDangerLink:pressed {
     background: transparent;
     border: none;
     color: rgb(255, 107, 120);
+}
+
+QWidget#groupAnnouncementBannerHost {
+    background: transparent;
+}
+
+QWidget#groupAnnouncementBannerCard {
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 6px;
+}
+
+QWidget#groupAnnouncementBannerCard:hover {
+    background: rgba(255, 255, 255, 0.09);
+}
+
+QLabel#groupAnnouncementBannerText {
+    color: {{TEXT_SECONDARY}};
+    font: 13px "Segoe UI", "Microsoft YaHei", "PingFang SC";
 }

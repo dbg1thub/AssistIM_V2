@@ -1,4 +1,4 @@
-"""Chat and friendship API tests."""
+﻿"""Chat and friendship API tests."""
 
 from __future__ import annotations
 
@@ -1711,3 +1711,191 @@ def test_websocket_sync_messages_replays_offline_group_self_profile_update_event
         assert events[1]['data']['group_note'] == 'private note'
         assert events[1]['data']['my_group_nickname'] == 'oncall'
         assert int(events[1]['data']['event_seq']) > int(events[0]['data']['event_seq'])
+
+def test_private_call_signaling_invite_accept_and_hangup(
+    client: TestClient,
+    user_factory,
+    auth_header,
+) -> None:
+    alice = user_factory("alice_call_signal", "Alice Call Signal")
+    bob = user_factory("bob_call_signal", "Bob Call Signal")
+
+    create_session_response = client.post(
+        "/api/v1/sessions/direct",
+        json={"participant_ids": [bob["user"]["id"]], "name": "Alice & Bob"},
+        headers=auth_header(alice["access_token"]),
+    )
+    assert create_session_response.status_code == 200
+    session_id = create_session_response.json()["data"]["id"]
+
+    with client.websocket_connect("/ws") as alice_ws, client.websocket_connect("/ws") as bob_ws:
+        authenticate_ws(alice_ws, alice["access_token"], msg_id="ws-auth-call-alice")
+        authenticate_ws(bob_ws, bob["access_token"], msg_id="ws-auth-call-bob")
+
+        alice_ws.send_json(
+            {
+                "type": "call_invite",
+                "msg_id": "call-voice-001",
+                "data": {
+                    "call_id": "call-voice-001",
+                    "session_id": session_id,
+                    "media_type": "voice",
+                },
+            }
+        )
+        invite_payload = receive_until(bob_ws, "call_invite")
+        assert invite_payload["data"]["call_id"] == "call-voice-001"
+        assert invite_payload["data"]["session_id"] == session_id
+        assert invite_payload["data"]["initiator_id"] == alice["user"]["id"]
+        assert invite_payload["data"]["recipient_id"] == bob["user"]["id"]
+        assert invite_payload["data"]["media_type"] == "voice"
+
+        bob_ws.send_json(
+            {
+                "type": "call_ringing",
+                "msg_id": "call-voice-001-ringing",
+                "data": {"call_id": "call-voice-001"},
+            }
+        )
+        ringing_payload = receive_until(alice_ws, "call_ringing")
+        assert ringing_payload["data"]["call_id"] == "call-voice-001"
+        assert ringing_payload["data"]["actor_id"] == bob["user"]["id"]
+
+        bob_ws.send_json(
+            {
+                "type": "call_accept",
+                "msg_id": "call-voice-001-accept",
+                "data": {"call_id": "call-voice-001"},
+            }
+        )
+        alice_accept_payload = receive_until(alice_ws, "call_accept")
+        bob_accept_payload = receive_until(bob_ws, "call_accept")
+        assert alice_accept_payload["data"]["status"] == "accepted"
+        assert bob_accept_payload["data"]["status"] == "accepted"
+
+        alice_ws.send_json(
+            {
+                "type": "call_hangup",
+                "msg_id": "call-voice-001-hangup",
+                "data": {"call_id": "call-voice-001"},
+            }
+        )
+        alice_hangup_payload = receive_until(alice_ws, "call_hangup")
+        bob_hangup_payload = receive_until(bob_ws, "call_hangup")
+        assert alice_hangup_payload["data"]["reason"] == "hangup"
+        assert bob_hangup_payload["data"]["reason"] == "hangup"
+        assert bob_hangup_payload["data"]["actor_id"] == alice["user"]["id"]
+
+
+def test_private_call_signaling_preserves_timeout_reason(
+    client: TestClient,
+    user_factory,
+    auth_header,
+) -> None:
+    alice = user_factory("alice_call_timeout", "Alice Call Timeout")
+    bob = user_factory("bob_call_timeout", "Bob Call Timeout")
+
+    create_session_response = client.post(
+        "/api/v1/sessions/direct",
+        json={"participant_ids": [bob["user"]["id"]], "name": "Alice & Bob Timeout"},
+        headers=auth_header(alice["access_token"]),
+    )
+    assert create_session_response.status_code == 200
+    session_id = create_session_response.json()["data"]["id"]
+
+    with client.websocket_connect("/ws") as alice_ws, client.websocket_connect("/ws") as bob_ws:
+        authenticate_ws(alice_ws, alice["access_token"], msg_id="ws-auth-call-timeout-alice")
+        authenticate_ws(bob_ws, bob["access_token"], msg_id="ws-auth-call-timeout-bob")
+
+        alice_ws.send_json(
+            {
+                "type": "call_invite",
+                "msg_id": "call-timeout-001",
+                "data": {
+                    "call_id": "call-timeout-001",
+                    "session_id": session_id,
+                    "media_type": "voice",
+                },
+            }
+        )
+        invite_payload = receive_until(bob_ws, "call_invite")
+        assert invite_payload["data"]["call_id"] == "call-timeout-001"
+
+        alice_ws.send_json(
+            {
+                "type": "call_hangup",
+                "msg_id": "call-timeout-001-hangup",
+                "data": {"call_id": "call-timeout-001", "reason": "timeout"},
+            }
+        )
+        alice_hangup_payload = receive_until(alice_ws, "call_hangup")
+        bob_hangup_payload = receive_until(bob_ws, "call_hangup")
+        assert alice_hangup_payload["data"]["reason"] == "timeout"
+        assert bob_hangup_payload["data"]["reason"] == "timeout"
+        assert bob_hangup_payload["data"]["actor_id"] == alice["user"]["id"]
+
+
+def test_private_call_signaling_reports_busy_for_second_invite(
+    client: TestClient,
+    user_factory,
+    auth_header,
+) -> None:
+    alice = user_factory("alice_call_busy", "Alice Call Busy")
+    bob = user_factory("bob_call_busy", "Bob Call Busy")
+    charlie = user_factory("charlie_call_busy", "Charlie Call Busy")
+
+    first_session_response = client.post(
+        "/api/v1/sessions/direct",
+        json={"participant_ids": [bob["user"]["id"]], "name": "Alice & Bob"},
+        headers=auth_header(alice["access_token"]),
+    )
+    assert first_session_response.status_code == 200
+    first_session_id = first_session_response.json()["data"]["id"]
+
+    second_session_response = client.post(
+        "/api/v1/sessions/direct",
+        json={"participant_ids": [bob["user"]["id"]], "name": "Charlie & Bob"},
+        headers=auth_header(charlie["access_token"]),
+    )
+    assert second_session_response.status_code == 200
+    second_session_id = second_session_response.json()["data"]["id"]
+
+    with (
+        client.websocket_connect("/ws") as alice_ws,
+        client.websocket_connect("/ws") as bob_ws,
+        client.websocket_connect("/ws") as charlie_ws,
+    ):
+        authenticate_ws(alice_ws, alice["access_token"], msg_id="ws-auth-call-busy-alice")
+        authenticate_ws(bob_ws, bob["access_token"], msg_id="ws-auth-call-busy-bob")
+        authenticate_ws(charlie_ws, charlie["access_token"], msg_id="ws-auth-call-busy-charlie")
+
+        alice_ws.send_json(
+            {
+                "type": "call_invite",
+                "msg_id": "call-busy-001",
+                "data": {
+                    "call_id": "call-busy-001",
+                    "session_id": first_session_id,
+                    "media_type": "voice",
+                },
+            }
+        )
+        first_invite_payload = receive_until(bob_ws, "call_invite")
+        assert first_invite_payload["data"]["call_id"] == "call-busy-001"
+
+        charlie_ws.send_json(
+            {
+                "type": "call_invite",
+                "msg_id": "call-busy-002",
+                "data": {
+                    "call_id": "call-busy-002",
+                    "session_id": second_session_id,
+                    "media_type": "video",
+                },
+            }
+        )
+        busy_payload = receive_until(charlie_ws, "call_busy")
+        assert busy_payload["data"]["call_id"] == "call-busy-002"
+        assert busy_payload["data"]["active_call_id"] == "call-busy-001"
+        assert busy_payload["data"]["busy_user_id"] == bob["user"]["id"]
+

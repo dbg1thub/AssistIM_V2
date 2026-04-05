@@ -1,4 +1,4 @@
-"""Session schemas."""
+﻿"""Session schemas."""
 
 from __future__ import annotations
 
@@ -28,6 +28,7 @@ class SessionOut(ORMModel):
     name: str
     participant_ids: list[str] = Field(default_factory=list)
     last_message: str | None = None
+    last_message_id: str | None = None
     last_message_status: str | None = None
     last_message_sender_id: str | None = None
     last_message_time: str | None = None
@@ -42,3 +43,6 @@ class SessionOut(ORMModel):
     counterpart_avatar: str | None = None
     counterpart_gender: str | None = None
     members: list[SessionMemberOut] = Field(default_factory=list)
+
+
+

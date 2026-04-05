@@ -137,17 +137,25 @@ class SessionService:
         member_rows = session_members if session_members is not None else None
         user_map = users_by_id or {}
         owner_id = ""
+        group_id = ""
         group_announcement = ""
         group_note = ""
         my_group_nickname = ""
         role_by_user_id: dict[str, str] = {}
         member_profile_by_user_id: dict[str, dict[str, str]] = {}
+        announcement_message_id = ""
+        announcement_author_id = ""
+        announcement_published_at = None
         if normalized_session_type == "group":
             group = self.groups.get_by_session_id(session.id)
             if group is not None:
                 avatar = self.avatars.ensure_group_avatar(group)
+                group_id = str(group.id or "")
                 owner_id = str(group.owner_id or "")
                 group_announcement = str(getattr(group, "announcement", "") or "")
+                announcement_message_id = str(getattr(group, "announcement_message_id", "") or "")
+                announcement_author_id = str(getattr(group, "announcement_author_id", "") or "")
+                announcement_published_at = getattr(group, "announcement_published_at", None)
                 group_members = self.groups.list_members(group.id)
                 role_by_user_id = {
                     str(item.user_id or ""): str(item.role or "member")
@@ -183,6 +191,7 @@ class SessionService:
             "name": session.name,
             "participant_ids": member_ids,
             "last_message": self._serialize_last_message_preview(last_message),
+            "last_message_id": str(last_message.id or "") if last_message else None,
             "last_message_status": last_message.status if last_message else None,
             "last_message_sender_id": last_message.sender_id if last_message else None,
             "last_message_time": (
@@ -193,8 +202,12 @@ class SessionService:
             "avatar": avatar,
             "is_ai_session": session.is_ai_session,
             "created_at": isoformat_utc(session.created_at),
+            "group_id": group_id or None,
             "owner_id": owner_id or None,
             "group_announcement": group_announcement,
+            "announcement_message_id": announcement_message_id or None,
+            "announcement_author_id": announcement_author_id or None,
+            "announcement_published_at": announcement_published_at.isoformat() if announcement_published_at else None,
             "group_note": group_note,
             "my_group_nickname": my_group_nickname,
             "counterpart_id": counterpart.get("id") or None,
@@ -301,6 +314,15 @@ class SessionService:
         except Exception:
             self.db.rollback()
             raise
+
+
+
+
+
+
+
+
+
 
 
 

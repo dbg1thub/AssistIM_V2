@@ -36,6 +36,7 @@ from app.core.database import Base, get_engine
 from app.core.rate_limit import rate_limiter
 from app.models import file, group, message, moment, session, user  # noqa: F401
 from app.main import create_app
+from app.realtime.call_registry import get_call_registry
 from app.websocket.manager import connection_manager
 
 
@@ -47,6 +48,7 @@ def reset_test_state() -> None:
     Base.metadata.create_all(bind=engine)
     rate_limiter.reset()
     connection_manager.reset()
+    get_call_registry().reset()
 
     if TEST_UPLOAD_DIR.exists():
         shutil.rmtree(TEST_UPLOAD_DIR)

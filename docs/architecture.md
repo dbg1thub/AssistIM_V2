@@ -57,6 +57,7 @@ Controller 不是业务层，不承担状态管理，不做网络访问。
 - Controller 发起远程操作时，只调用对应 Service
 - Controller 可以做轻量 payload 归一化与界面交互编排
 - Controller 不直接依赖 `HTTPClient` 发请求
+- 通话窗口、来电弹窗等界面交互也应通过 `CallManager` / `CallService` 等边界驱动，而不是在 UI 层直接操作 WebRTC 对象
 
 ### 3.3 Manager Layer
 
@@ -74,6 +75,8 @@ Controller 不是业务层，不承担状态管理，不做网络访问。
 - Manager 可以依赖 Storage，因为本地缓存属于客户端状态的一部分
 - Manager 访问远程 HTTP 能力时，应通过对应 Service，而不是直接拿 `HTTPClient`
 - `ConnectionManager` 读取 access token 时，也通过 `AuthService` 等认证边界完成，而不是直接拿 `HTTPClient`
+- 通话状态由 `CallManager` 统一维护；UI 不直接持有 WebRTC peer connection
+- E2EE 的发送前加密、接收后解密、设备状态选择等流程由 Manager 协调，不散落在 Widget 或 Delegate 中
 
 ### 3.4 Service Layer
 
@@ -90,7 +93,7 @@ Controller 不是业务层，不承担状态管理，不做网络访问。
 - Service 不持有界面状态
 - Service 只关心远程请求，不负责本地会话状态真相
 - `FileService` 返回规范媒体描述；消息附件发给服务端前必须剥离本地临时字段
-- 典型例子包括 `AuthService`、`UserService`、`ChatService`、`FileService`、`SessionService`、`ContactService`、`DiscoveryService`
+- 典型例子包括 `AuthService`、`UserService`、`ChatService`、`FileService`、`SessionService`、`ContactService`、`DiscoveryService`、`CallService`
 
 ### 3.5 Network Layer
 
@@ -155,6 +158,8 @@ Network -> EventBus -> UI（绕过 Manager）
 - 登录、注册、鉴权刷新
 - 会话列表与历史记录拉取
 - 文件上传
+- 设备注册、公钥 / prekey 拉取
+- STUN / TURN 配置拉取
 - 好友、群组、朋友圈等非实时业务
 - 关键状态的最终持久化补写
 
@@ -163,6 +168,7 @@ Network -> EventBus -> UI（绕过 Manager）
 - 实时聊天消息
 - ACK / delivered / read 事件
 - typing、presence 等实时通知
+- 通话 signaling，例如来电、接听、拒绝、挂断、offer / answer / ICE
 - 断线重连后的补偿同步
 
 设计原则：
@@ -173,7 +179,9 @@ Network -> EventBus -> UI（绕过 Manager）
 
 ## 6. WebSocket 消息协议
 
-统一外层结构：
+统一外层结构见 [realtime_protocol.md](./realtime_protocol.md)，此处只保留架构层约束。
+
+外层结构：
 
 ```json
 {
@@ -199,6 +207,7 @@ Network -> EventBus -> UI（绕过 Manager）
 - 状态变更事件顺序使用独立 `event_seq`，在外层 `seq` 与 `data.event_seq` 中回传
 - 断线补偿同时使用 `session_cursors` 与 `event_cursors`，不使用时间戳
 - 不能用 `session_seq` 补偿 `read`、`message_edit`、`message_recall`、`message_delete` 等非消息事件
+- 通话 signaling 继续复用同一外层包结构，但不纳入 `session_seq` / `event_seq` 的消息补偿语义
 
 ## 7. 消息一致性模型
 
@@ -269,12 +278,15 @@ Network -> EventBus -> UI（绕过 Manager）
 - 消息列表
 - 本地 app_state
 - 断线补偿高水位（消息游标 + 事件游标）
+- 后续可扩展的设备标识与密钥状态
 
 规则：
 
 - 本地缓存是客户端状态恢复基础，不是业务权限判断依据
 - 消息游标与事件游标都应持久化，不能仅靠内存
 - 高水位不能只从“当前还存在的消息列表”临时推导，尤其不能试图从消息列表反推事件游标
+- 启用 E2EE 的私聊会话，持久化层优先保存密文；解密明文不应继续长期原样写回普通 SQLite
+- 本地数据库落盘加固可通过 `SQLCipher` 演进，但不改变“Storage 仍由 Manager 驱动”的边界
 
 ## 9. UI 列表与性能原则
 
@@ -295,7 +307,47 @@ AI 能力通过 Service / Provider 体系接入，目标是：
 - UI 不直接持有 provider 客户端
 - AI 会话与普通 IM 会话共享尽可能一致的数据结构与视图层能力
 
-## 11. 设计演进保留位
+约束：
+
+- AI 会话默认保持 `server_visible`，不自动继承普通私聊的 E2EE 策略
+- 如果未来需要“私聊转 AI 总结”之类能力，应通过显式用户动作把明文提交给 AI，而不是隐式绕过 E2EE
+
+## 11. 通话与端到端加密
+
+### 11.1 1:1 通话
+
+1:1 语音 / 视频通话采用两层设计：
+
+- signaling：复用现有 WebSocket
+- media：使用 WebRTC
+
+规则：
+
+- WebSocket 不传输音视频帧
+- `CallManager` 统一维护单通话状态机
+- 来电、接听、拒绝、挂断、offer / answer / ICE 都视为实时命令，而不是普通聊天消息
+
+### 11.2 1:1 私聊 E2EE
+
+私聊 E2EE 采用设备模型与 Double Ratchet 路线。
+
+规则：
+
+- 只首先适用于 `private` 会话
+- `msg_id`、`session_seq`、`event_seq` 一致性模型保持不变
+- `content` 与附件元数据在 E2EE 私聊中允许变为密文 envelope
+- 服务端只路由密文，不依赖明文执行业务规则
+- 群聊 E2EE 作为独立后续主题，不把 1:1 的简化假设直接推广到群聊
+
+### 11.3 本地搜索与缓存取舍
+
+规则：
+
+- E2EE 私聊可以在 MVP 阶段关闭本地全文搜索
+- 本地缓存恢复优先级高于“继续提供所有明文搜索体验”
+- 如果后续需要本地明文搜索，应先定义清晰的本地密钥与落盘保护策略
+
+## 12. 设计演进保留位
 
 为了保持可扩展性，当前架构预留以下演进方向：
 
@@ -303,6 +355,7 @@ AI 能力通过 Service / Provider 体系接入，目标是：
 - Presence / fanout 外置：当前通过 `RealtimeHub` 暴露，后续可从进程内实现扩展到 Redis / PubSub
 - Rate limit state 外置：当前通过 `RateLimitStore` 暴露，后续可从进程内计数扩展到共享存储
 - 文件存储切换：从本地目录扩展到对象存储
+- 本地数据库保护：从普通 SQLite 演进到 `SQLCipher`
+- 私聊 E2EE：从单主设备优先逐步演进到多设备密钥同步
+- 通话能力：从 1:1 P2P 演进到未来可能的群通话 / SFU
 - 更细粒度的 UI 设计系统：在不破坏 CardWidget / Acrylic / Tooltip 统一规范的前提下演进
-
-

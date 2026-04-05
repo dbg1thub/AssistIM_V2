@@ -21,6 +21,9 @@ class Group(IdMixin, TimestampMixin, Base):
     owner_id: Mapped[str] = mapped_column(Uuid(as_uuid=False), ForeignKey("users.id"), nullable=False)
     session_id: Mapped[str] = mapped_column(Uuid(as_uuid=False), ForeignKey("sessions.id"), nullable=False, unique=True)
     announcement: Mapped[str] = mapped_column(nullable=False, default="")
+    announcement_message_id: Mapped[str | None] = mapped_column(Uuid(as_uuid=False), ForeignKey("messages.id"), nullable=True)
+    announcement_author_id: Mapped[str | None] = mapped_column(Uuid(as_uuid=False), ForeignKey("users.id"), nullable=True)
+    announcement_published_at: Mapped[datetime | None] = mapped_column(nullable=True)
     avatar_kind: Mapped[str] = mapped_column(String(length=16), nullable=False, default="generated")
     avatar_file_id: Mapped[str | None] = mapped_column(Uuid(as_uuid=False), ForeignKey("files.id"), nullable=True)
     avatar_version: Mapped[int] = mapped_column(nullable=False, default=1)
@@ -39,3 +42,6 @@ class GroupMember(Base):
     group_nickname: Mapped[str] = mapped_column(nullable=False, default="")
     note: Mapped[str] = mapped_column(nullable=False, default="")
     joined_at: Mapped[datetime] = mapped_column(default=utcnow)
+
+
+

@@ -747,6 +747,23 @@ class ConnectionManager:
 
         return await self.send(message)
 
+    async def send_call_event(
+        self,
+        event_type: str,
+        data: dict[str, Any],
+        *,
+        msg_id: str = "",
+    ) -> bool:
+        """Send one call signaling event."""
+        message = {
+            "type": event_type,
+            "seq": 0,
+            "msg_id": msg_id,
+            "timestamp": int(time.time()),
+            "data": dict(data or {}),
+        }
+        return await self.send(message)
+
     async def close(self) -> None:
         """Close connection manager and cleanup."""
         logger.info("Closing connection manager")

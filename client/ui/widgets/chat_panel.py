@@ -87,8 +87,11 @@ class ChatPanel(QWidget):
     chat_info_leave_requested = Signal()
     chat_info_mute_toggled = Signal(bool)
     chat_info_pin_toggled = Signal(bool)
+    chat_info_show_nickname_toggled = Signal(bool)
+    chat_info_member_management_requested = Signal(object)
     chat_info_group_profile_update_requested = Signal(object)
     chat_info_group_self_profile_update_requested = Signal(object)
+    group_announcement_requested = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -129,6 +132,8 @@ class ChatPanel(QWidget):
         self.chat_layout.setSpacing(0)
 
         self.chat_header = ChatHeader(self.chat_page)
+
+        self.chat_header.group_announcement_widget().clicked.connect(self.group_announcement_requested.emit)
 
         self.message_list = QListView(self.chat_page)
         self.message_list.setObjectName("messageListView")
@@ -193,6 +198,8 @@ class ChatPanel(QWidget):
         self._chat_info_overlay.leaveRequested.connect(self.chat_info_leave_requested.emit)
         self._chat_info_overlay.muteToggled.connect(self.chat_info_mute_toggled.emit)
         self._chat_info_overlay.pinToggled.connect(self.chat_info_pin_toggled.emit)
+        self._chat_info_overlay.showNicknameToggled.connect(self.chat_info_show_nickname_toggled.emit)
+        self._chat_info_overlay.memberManagementRequested.connect(self.chat_info_member_management_requested.emit)
         self._chat_info_overlay.groupProfileUpdateRequested.connect(self.chat_info_group_profile_update_requested.emit)
         self._chat_info_overlay.groupSelfProfileUpdateRequested.connect(self.chat_info_group_self_profile_update_requested.emit)
         self.chat_header.history_clicked.connect(self.chat_history_requested.emit)
@@ -238,6 +245,9 @@ class ChatPanel(QWidget):
         """Show welcome page and disable input."""
         self._current_session = None
         self.stack.setCurrentWidget(self.welcome_widget)
+        if self._message_delegate:
+            self._message_delegate.set_session(None)
+        self.chat_header.set_group_announcement_session(None)
         self.message_input.set_session(None)
         self.message_input.set_session_active(False)
         self.chat_header.set_actions_enabled(False)
@@ -261,6 +271,8 @@ class ChatPanel(QWidget):
         if self._chat_info_overlay and previous_session_id and previous_session_id != session.session_id:
             self._chat_info_overlay.close_drawer(immediate=True)
         self._current_session = session
+        layout_changed = bool(self._message_delegate and self._message_delegate.set_session(session))
+        show_group_announcement = session.group_announcement_needs_view()
         self.chat_header.set_session_info(
             title=session.chat_title() or session.display_name(),
             status=_session_status_text(session),
@@ -268,8 +280,11 @@ class ChatPanel(QWidget):
             is_ai=session.is_ai_session,
         )
         self.message_input.set_session(session)
+        self.chat_header.set_group_announcement_session(session if show_group_announcement else None)
         if self._chat_info_overlay:
             self._chat_info_overlay.set_session(session)
+        if layout_changed and self._message_model:
+            self._message_model.set_messages(list(self._message_model.get_messages()))
         self.show_chat()
 
     def clear_messages(self) -> None:
@@ -354,6 +369,20 @@ class ChatPanel(QWidget):
     def clear_composer_draft(self) -> None:
         """Clear the current composer draft."""
         self.message_input.clear_draft()
+
+    def restore_recalled_message_to_composer(self, message_id: str) -> bool:
+        """Load recalled text back into the composer for inline direct editing."""
+        if not self._message_model:
+            return False
+        message = self._message_model.get_message_by_id(message_id)
+        if message is None:
+            return False
+        recalled_content = str((message.extra or {}).get("recalled_content", "") or "").strip()
+        if not recalled_content:
+            return False
+        self.message_input.restore_draft_segments([{"type": MessageType.TEXT, "content": recalled_content}])
+        self.message_input.focus_editor()
+        return True
 
     def add_message(self, message: ChatMessage, *, scroll_to_bottom: bool = True) -> None:
         """Append a message or refresh an existing one in-place."""
@@ -462,6 +491,11 @@ class ChatPanel(QWidget):
         if self._message_model:
             self._message_model.update_message_content(message_id, content)
 
+    def replace_message(self, message: ChatMessage) -> None:
+        """Replace one visible message with an authoritative snapshot."""
+        if self._message_model and message:
+            self._message_model.replace_message(message)
+
     def remove_message(self, message_id: str) -> None:
         """Remove a message from the model."""
         if self._message_model:
@@ -541,6 +575,7 @@ class ChatPanel(QWidget):
                 self._schedule_restore_message_viewport()
             if event.type() == QEvent.Type.Leave:
                 if self._message_delegate:
+                    self._message_delegate.clear_recall_notice_action_hover(self.message_list)
                     self._message_delegate.clear_time_separator_hover(self.message_list)
                 self.message_list.viewport().unsetCursor()
             if event.type() == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
@@ -568,6 +603,13 @@ class ChatPanel(QWidget):
                         return True
 
                 index = self.message_list.indexAt(position)
+                if index.isValid() and self._message_delegate and self._message_delegate.update_recall_notice_action_hover(
+                    self.message_list, index, position
+                ):
+                    self.message_list.viewport().setCursor(Qt.CursorShape.PointingHandCursor)
+                    return True
+                if self._message_delegate:
+                    self._message_delegate.clear_recall_notice_action_hover(self.message_list)
                 if index.isValid() and self._message_delegate and self._message_delegate.update_time_separator_hover(
                     self.message_list, index, position
                 ):
@@ -590,6 +632,14 @@ class ChatPanel(QWidget):
 
                 position = event.position().toPoint() if hasattr(event, "position") else event.pos()
                 index = self.message_list.indexAt(position)
+                if index.isValid() and self._message_delegate:
+                    recalled_message_id = self._message_delegate.recall_notice_action_source_at(
+                        self.message_list,
+                        index,
+                        position,
+                    )
+                    if recalled_message_id and self.restore_recalled_message_to_composer(recalled_message_id):
+                        return True
                 if index.isValid() and self._message_delegate and self._message_delegate.toggle_time_separator_expanded_at(
                     self.message_list, index, position
                 ):
@@ -891,9 +941,17 @@ class ChatPanel(QWidget):
         if self._chat_info_overlay:
             self._chat_info_overlay.close_drawer(immediate=immediate)
 
+    def refresh_chat_info_content(self) -> None:
+        """Re-bind the current session into the info drawer content without touching the message pane."""
+        if self._chat_info_overlay:
+            self._chat_info_overlay.set_session(self._current_session)
+
     def _layout_chat_info_overlay(self) -> None:
         """Keep the floating chat info drawer aligned to the full right-side chat pane."""
         if not self._chat_info_overlay or not self.chat_page:
             return
         self._chat_info_overlay.set_content_geometry(self.chat_page.rect())
+
+
+
 

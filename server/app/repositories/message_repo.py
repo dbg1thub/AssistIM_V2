@@ -1,4 +1,4 @@
-"""Message repository."""
+﻿"""Message repository."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import json
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import and_, desc, func, or_, select, update
+from sqlalchemy import String, and_, cast, desc, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -32,6 +32,7 @@ class MessageRepository:
         message_id: str | None = None,
         status: str = "sent",
         extra: dict[str, Any] | None = None,
+        commit: bool = True,
     ) -> tuple[Message, bool]:
         if message_id is not None:
             existing = self.get_by_id(message_id)
@@ -53,7 +54,9 @@ class MessageRepository:
         message = Message(**payload)
         self.db.add(message)
         try:
-            self.db.commit()
+            self.db.flush()
+            if commit:
+                self.db.commit()
         except IntegrityError:
             self.db.rollback()
             if message_id is not None:
@@ -62,7 +65,8 @@ class MessageRepository:
                     return self._resolve_existing_message(existing, session_id, sender_id, content, message_type, extra), False
             raise
 
-        self.db.refresh(message)
+        if commit:
+            self.db.refresh(message)
         return message, True
 
     def get_by_id(self, message_id: str) -> Message | None:
@@ -133,9 +137,10 @@ class MessageRepository:
         return list(self.db.execute(stmt).scalars().all())
 
     def list_missing_events_for_user(self, event_cursors: dict[str, int], user_id: str) -> list[SessionEvent | UserSessionEvent]:
+        normalized_user_id = str(user_id or '').strip()
         session_ids = list(
             self.db.execute(
-                select(SessionMember.session_id).where(SessionMember.user_id == user_id)
+                select(SessionMember.session_id).where(SessionMember.user_id == normalized_user_id)
             ).scalars().all()
         )
         if not session_ids:
@@ -143,15 +148,15 @@ class MessageRepository:
 
         shared_conditions = [
             and_(
-                SessionEvent.session_id == session_id,
+                cast(SessionEvent.session_id, String()) == str(session_id or "").strip(),
                 SessionEvent.event_seq > max(0, int(event_cursors.get(session_id, 0) or 0)),
             )
             for session_id in session_ids
         ]
         private_conditions = [
             and_(
-                UserSessionEvent.session_id == session_id,
-                UserSessionEvent.user_id == user_id,
+                cast(UserSessionEvent.session_id, String()) == str(session_id or "").strip(),
+                cast(UserSessionEvent.user_id, String()) == normalized_user_id,
                 UserSessionEvent.event_seq > max(0, int(event_cursors.get(session_id, 0) or 0)),
             )
             for session_id in session_ids
@@ -419,5 +424,11 @@ class MessageRepository:
         except (TypeError, ValueError, json.JSONDecodeError):
             return {}
         return payload if isinstance(payload, dict) else {}
+
+
+
+
+
+
 
 

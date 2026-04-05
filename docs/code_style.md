@@ -85,6 +85,14 @@ async def send_message(self, session_id: str, content: str) -> ChatMessage:
 - UI 能区分网络错误、鉴权错误、服务端错误、业务错误
 - Service / Network 层要保留足够的错误语义
 
+开发阶段额外原则：
+
+- 默认遵循 `let it crash`
+- 开发初期不要为了“看起来稳定”而随手加大面积 `try/except`
+- 如果错误意味着真实 bug、状态不一致、协议不满足预期，就应当直接暴露并尽快修复，而不是吞掉异常后继续运行
+- 只有在明确的边界层才适合做异常转换或兜底：例如进程入口、任务调度边界、HTTP / WebSocket 边界、面向用户的最终提示边界
+- 项目进入稳定阶段后，才针对已经识别清楚的失败模式补充精确、收敛的 `try/except`，禁止用宽泛捕获掩盖未知错误
+
 ## 7. Logging 规范
 
 项目统一使用 `logging`，禁止在正式代码中使用 `print()` 代替日志。

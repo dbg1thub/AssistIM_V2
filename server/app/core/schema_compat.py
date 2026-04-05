@@ -34,6 +34,9 @@ USER_PROFILE_INDEX_DDL: dict[str, str] = {
 
 GROUP_AVATAR_COLUMN_DDL: dict[str, str] = {
     "announcement": "TEXT NOT NULL DEFAULT ''",
+    "announcement_message_id": "VARCHAR(36)",
+    "announcement_author_id": "VARCHAR(36)",
+    "announcement_published_at": "TIMESTAMP",
     "avatar_kind": "VARCHAR(16) NOT NULL DEFAULT 'generated'",
     "avatar_file_id": "VARCHAR(36)",
     "avatar_version": "INTEGER NOT NULL DEFAULT 1",
@@ -1091,6 +1094,11 @@ def describe_schema_compatibility(applied: Iterable[str]) -> str:
     if not items:
         return "Schema compatibility already up to date."
     return "Applied schema compatibility updates: " + ", ".join(items)
+
+
+
+
+
 
 
 

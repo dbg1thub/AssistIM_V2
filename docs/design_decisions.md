@@ -207,3 +207,31 @@
 - 决策：服务端上传链路通过 `MediaStorage` 抽象承载，默认实现为 `LocalMediaStorage`；上传成功后统一返回 `storage_provider`、`storage_key`、`url`、`mime_type`、`original_name`、`size_bytes`、`checksum_sha256` 等规范媒体元数据。`files` 表保存存储真相；消息附件通过 `messages.extra` 持久化可展示、可回放的远端媒体元数据。`local_path`、`uploading` 等本地状态只允许存在于客户端。
 - 原因：只存裸 `file_url`，或者把本地临时路径混入服务端消息，会让上传、历史回放、断线补偿和后续对象存储扩展全部耦在一起。
 - 结果：客户端保留本地重试状态，服务端只保存 shareable metadata；后续接入 S3 / OSS / MinIO 时，只需要新增 `MediaStorage` 实现与公共 URL 策略，而不需要重写消息模型。
+
+## ADR-031：生产环境传输链路统一收敛到 HTTPS / WSS
+
+- 状态：Accepted
+- 决策：生产环境中的后端 API 与实时链路统一通过 `HTTPS` 与 `WSS` 提供；开发环境可以保留 `HTTP` / `WS` 作为本地调试基线，但不作为正式部署默认值。
+- 原因：认证 token、实时命令、通话 signaling 与文件上传都属于敏感链路，只靠应用层 token 而不收敛传输层安全是不完整的设计。
+- 结果：客户端配置与部署文档都应把 TLS 视为正式基线；通话、E2EE 密钥交换与普通聊天消息在生产环境里都默认跑在 TLS 保护之上。
+
+## ADR-032：1:1 语音 / 视频通话使用 WebRTC 媒体链路，信令复用聊天 WebSocket
+
+- 状态：Accepted
+- 决策：1:1 语音与视频通话的媒体层统一使用 WebRTC；来电、接听、拒绝、挂断、offer / answer / ICE 等 signaling 继续复用 AssistIM 现有 WebSocket 协议与鉴权链路。
+- 原因：WebRTC + DTLS-SRTP 是音视频实时通信里成熟、常见且经过验证的方案；把 signaling 留在现有 WebSocket 中，可以最大限度复用已有会话权限、在线状态与实时基础设施。
+- 结果：WebSocket 只承载通话信令，不传输音视频帧；服务端需补充 STUN / TURN 配置分发与活跃通话状态边界，客户端需引入 `CallManager` 统一维护通话状态机。
+
+## ADR-033：私聊端到端加密采用设备模型与 Double Ratchet 路线，AI 会话保持服务端可见
+
+- 状态：Accepted
+- 决策：端到端加密首先只适用于 `private` 会话，并采用“设备身份密钥 + prekey + Double Ratchet”的成熟路线；`AI` 会话明确保持 `server_visible`，不默认继承普通私聊的 E2EE 策略。
+- 原因：私聊 E2EE 与 AI 会话的服务端可见明文需求天然冲突；把两者混成一套默认策略会同时破坏安全边界与 AI 产品能力。
+- 结果：E2EE 私聊中服务端只路由密文与附件加密元数据，不依赖明文执行业务；AI 会话仍允许服务端与 provider 获取明文内容；群聊 E2EE 作为独立后续主题处理，不在本阶段与 1:1 私聊共用简化假设。
+
+## ADR-034：E2EE 私聊的本地缓存优先持久化密文，数据库落盘加固通过 SQLCipher 演进
+
+- 状态：Accepted
+- 决策：启用 E2EE 的私聊在客户端本地优先持久化密文，解密后的明文默认仅保留在内存态或受保护的本地密钥缓存中；桌面端数据库落盘保护后续通过 `SQLite + SQLCipher` 演进，并使用系统安全存储保护 DB key。
+- 原因：如果 E2EE 明文仍长期写回普通 SQLite，本地缓存会显著削弱端到端加密的实际收益；但 `SQLCipher` 接入涉及驱动、打包、迁移与 FTS 兼容，不适合作为第一阶段前置条件。
+- 结果：E2EE 私聊的本地搜索能力允许在 MVP 阶段降级或关闭；数据库加固作为独立后续阶段推进，不阻塞通话与私聊 E2EE 主链路落地。

@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from datetime import datetime
 from types import SimpleNamespace
@@ -107,8 +107,22 @@ class FakeUserRepo:
 
 class FakeGroupRepo:
     def get_by_session_id(self, session_id: str):
-        return None
+        if session_id != 'session-2':
+            return None
+        return SimpleNamespace(
+            id='group-1',
+            owner_id='alice',
+            avatar='/uploads/group.png',
+            announcement='',
+        )
 
+    def list_members(self, group_id: str):
+        assert group_id == 'group-1'
+        return [
+            SimpleNamespace(group_id='group-1', user_id='alice', role='owner', group_nickname='', note=''),
+            SimpleNamespace(group_id='group-1', user_id='bob', role='member', group_nickname='', note=''),
+            SimpleNamespace(group_id='group-1', user_id='charlie', role='member', group_nickname='', note=''),
+        ]
 
 class FakeAvatarService:
     def backfill_user_avatar_state(self, user):
@@ -147,6 +161,7 @@ def test_session_service_list_sessions_uses_batch_repository_loaders() -> None:
     assert payload[0]['last_message'] == 'hello bob'
     assert [member['id'] for member in payload[0]['members']] == ['alice', 'bob']
     assert payload[1]['session_type'] == 'group'
+    assert payload[1]['group_id'] == 'group-1'
     assert payload[1]['participant_ids'] == ['alice', 'bob', 'charlie']
     assert payload[1]['last_message'] == 'hello team'
     assert payload[1]['counterpart_id'] is None

@@ -1,4 +1,4 @@
-﻿"""Chat window container that keeps the new architecture but migrates old UI styling."""
+"""Chat window container that keeps the new architecture but migrates old UI styling."""
 
 from __future__ import annotations
 
@@ -22,27 +22,42 @@ from qfluentwidgets import (
     PushButton,
     RoundMenu,
     SubtitleLabel,
-    TextEdit,
     isDarkTheme,
 )
 from qfluentwidgets.components.widgets.menu import MenuAnimationType
 
+from client.core.config_backend import get_config
+from client.core.datetime_utils import coerce_local_datetime
+from client.core.exceptions import AppError
 from client.core.i18n import tr
+from client.events.contact_events import ContactEvent
 from client.core.message_actions import should_offer_delete, should_offer_recall
 from client.events.event_bus import get_event_bus
+from client.managers.call_manager import CallEvent
 from client.managers.message_manager import MessageEvent
 from client.managers.session_manager import SessionEvent
-from client.models.message import MessageStatus, MessageType, format_message_preview
+from client.managers.sound_manager import AppSound, get_sound_manager
+from client.models.call import ActiveCallState, CallMediaType
+from client.models.message import ChatMessage, MessageStatus, MessageType, format_message_preview
 from client.ui.controllers.auth_controller import get_auth_controller
 from client.ui.controllers.chat_controller import get_chat_controller
 from client.ui.controllers.contact_controller import get_contact_controller
 from client.ui.controllers.session_controller import get_session_controller
 from client.ui.styles import StyleSheet
 from client.ui.windows.chat_group_flow import ChatGroupFlowCoordinator
+from client.ui.windows.call_window import CallWindow
 from client.ui.widgets.chat_panel import ChatPanel
+from client.ui.widgets.incoming_call_toast import IncomingCallToast
+from client.ui.widgets.chat_info_drawer import (
+    GroupMemberManagementRequest,
+    GroupProfileUpdateRequest,
+    GroupSelfProfileUpdateRequest,
+)
 from client.ui.widgets.fluent_splitter import FluentSplitter
 from client.ui.widgets.screenshot_overlay import ScreenshotOverlay
 from client.ui.widgets.session_panel import SessionPanel
+from client.ui.windows.group_member_management_dialogs import GroupMemberManagementDialog
+from client.ui.windows.group_announcement_dialog import GroupAnnouncementDialog
 
 
 logger = logging.getLogger(__name__)
@@ -124,60 +139,6 @@ class ScreenshotPreviewDialog(QDialog):
             _apply_themed_dialog_surface(self, "ScreenshotPreviewDialog")
 
 
-class EditMessageDialog(QDialog):
-    """Dialog used to edit a text message."""
-
-    def __init__(self, content: str, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle(tr("chat.edit.title", "Edit Message"))
-        self.setModal(True)
-        self.resize(420, 240)
-        _apply_themed_dialog_surface(self, "EditMessageDialog")
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(20, 20, 20, 20)
-        layout.setSpacing(12)
-
-        title = SubtitleLabel(tr("chat.edit.title", "Edit Message"), self)
-        self.editor = TextEdit(self)
-        self.editor.setPlainText(content)
-        self.editor.setAcceptRichText(False)
-
-        button_row = QHBoxLayout()
-        button_row.addStretch(1)
-
-        self.cancel_button = PushButton(tr("common.cancel", "Cancel"), self)
-        self.confirm_button = PrimaryPushButton(tr("common.save", "Save"), self)
-
-        self.cancel_button.clicked.connect(self.reject)
-        self.confirm_button.clicked.connect(self._on_confirm)
-
-        button_row.addWidget(self.cancel_button)
-        button_row.addWidget(self.confirm_button)
-
-        layout.addWidget(title)
-        layout.addWidget(self.editor, 1)
-        layout.addLayout(button_row)
-
-    def changeEvent(self, event) -> None:
-        super().changeEvent(event)
-        if event.type() in {
-            QEvent.Type.PaletteChange,
-            QEvent.Type.ApplicationPaletteChange,
-            QEvent.Type.StyleChange,
-        }:
-            _apply_themed_dialog_surface(self, "EditMessageDialog")
-
-    def _on_confirm(self) -> None:
-        """Validate content before closing."""
-        if self.get_content():
-            self.accept()
-
-    def get_content(self) -> str:
-        """Return the trimmed editor content."""
-        return self.editor.toPlainText().strip()
-
-
 class DeleteMessageConfirmDialog(MessageBoxBase):
     """Ask for confirmation before deleting one local chat message."""
 
@@ -200,6 +161,45 @@ class DeleteMessageConfirmDialog(MessageBoxBase):
         self.widget.setMinimumWidth(360)
 
 
+class LeaveGroupConfirmDialog(MessageBoxBase):
+    """Ask for confirmation before leaving one group chat."""
+
+    def __init__(self, group_name: str, parent=None):
+        super().__init__(parent=parent)
+        title = SubtitleLabel(tr("chat.info.group.leave.title", "Leave Group Chat"), self.widget)
+        content = BodyLabel(
+            tr(
+                "chat.info.group.leave.confirm",
+                "Leave {name}? You will stop receiving new messages from this group.",
+                name=group_name or tr("session.unnamed", "Untitled Session"),
+            ),
+            self.widget,
+        )
+        content.setWordWrap(True)
+        self.viewLayout.addWidget(title)
+        self.viewLayout.addWidget(content)
+        self.viewLayout.addStretch(1)
+        self.yesButton.setText(tr("chat.info.group.leave.action", "Leave"))
+        self.cancelButton.setText(tr("common.cancel", "Cancel"))
+        self.widget.setMinimumWidth(380)
+
+
+class IncomingCallDialog(MessageBoxBase):
+    """Prompt the user to accept or reject one incoming call invite."""
+
+    def __init__(self, title: str, content: str, *, accept_label: str, reject_label: str, parent=None):
+        super().__init__(parent=parent)
+        title_label = SubtitleLabel(title, self.widget)
+        content_label = BodyLabel(content, self.widget)
+        content_label.setWordWrap(True)
+        self.viewLayout.addWidget(title_label)
+        self.viewLayout.addWidget(content_label)
+        self.viewLayout.addStretch(1)
+        self.yesButton.setText(accept_label)
+        self.cancelButton.setText(reject_label)
+        self.widget.setMinimumWidth(380)
+
+
 class ChatInterface(QWidget):
     """Main chat interface with session list on the left and chat view on the right."""
 
@@ -209,6 +209,7 @@ class ChatInterface(QWidget):
     INITIAL_HISTORY_WARM_CONCURRENCY = 2
     INITIAL_HISTORY_WARM_SESSION_LIMIT = 6
     TYPING_INDICATOR_HIDE_DELAY_MS = 1800
+    CALL_RING_REPEAT_MS = 3000
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -223,7 +224,11 @@ class ChatInterface(QWidget):
         self._event_subscriptions: list[tuple[str, object]] = []
         self._screenshot_overlays: set[ScreenshotOverlay] = set()
         self._screenshot_dialogs: set[ScreenshotPreviewDialog] = set()
-        self._dialog_refs: set[QDialog] = set()
+        self._dialog_refs: set[QWidget] = set()
+        self._incoming_call_toasts: dict[str, IncomingCallToast] = {}
+        self._call_window: CallWindow | None = None
+        self._call_result_messages_sent: set[tuple[str, str]] = set()
+        self._active_call_ring_sound: AppSound | None = None
         self._session_visibility_active = False
         self._current_session_active = False
         self._oldest_loaded_timestamp: Optional[float] = None
@@ -241,6 +246,8 @@ class ChatInterface(QWidget):
         self._message_context_menu: RoundMenu | None = None
         self._typing_indicator_timer = QTimer(self)
         self._typing_indicator_timer.setSingleShot(True)
+        self._call_ring_timer = QTimer(self)
+        self._call_ring_timer.setSingleShot(False)
 
         self._setup_ui()
         self._group_flow = ChatGroupFlowCoordinator(
@@ -253,6 +260,7 @@ class ChatInterface(QWidget):
             open_group_session=self.open_group_session,
         )
         self._typing_indicator_timer.timeout.connect(self.chat_panel.hide_typing_indicator)
+        self._call_ring_timer.timeout.connect(self._on_call_ring_timer)
         self._connect_signals()
         self._subscribe_to_events()
         self.destroyed.connect(self._on_destroyed)
@@ -298,14 +306,17 @@ class ChatInterface(QWidget):
         self.chat_panel.video_call_requested.connect(self._on_video_call_requested)
         self.chat_panel.older_messages_requested.connect(self._on_older_messages_requested)
         self.chat_panel.chat_history_requested.connect(self._on_chat_history_requested)
-        self.chat_panel.chat_info_search_requested.connect(self._on_chat_info_search_requested)
         self.chat_panel.chat_info_add_requested.connect(self._on_chat_info_add_requested)
+        self.chat_panel.chat_info_search_requested.connect(self._on_chat_info_search_requested)
         self.chat_panel.chat_info_clear_requested.connect(self._on_chat_info_clear_requested)
         self.chat_panel.chat_info_leave_requested.connect(self._on_chat_info_leave_requested)
         self.chat_panel.chat_info_mute_toggled.connect(self._on_chat_info_mute_toggled)
         self.chat_panel.chat_info_pin_toggled.connect(self._on_chat_info_pin_toggled)
+        self.chat_panel.chat_info_show_nickname_toggled.connect(self._on_chat_info_show_nickname_toggled)
+        self.chat_panel.chat_info_member_management_requested.connect(self._on_chat_info_member_management_requested)
         self.chat_panel.chat_info_group_profile_update_requested.connect(self._on_chat_info_group_profile_update_requested)
         self.chat_panel.chat_info_group_self_profile_update_requested.connect(self._on_chat_info_group_self_profile_update_requested)
+        self.chat_panel.group_announcement_requested.connect(self._on_group_announcement_requested)
         self.chat_panel.get_message_list().customContextMenuRequested.connect(self._on_message_context_menu)
 
     def _on_splitter_moved(self, _pos: int, _index: int) -> None:
@@ -369,6 +380,15 @@ class ChatInterface(QWidget):
         self._subscribe_sync(MessageEvent.DELETED, self._on_deleted_event)
         self._subscribe_sync(MessageEvent.SYNC_COMPLETED, self._on_sync_completed)
         self._subscribe_sync(MessageEvent.PROFILE_UPDATED, self._on_profile_updated)
+        self._subscribe_sync(CallEvent.INVITE_SENT, self._on_call_invite_sent)
+        self._subscribe_sync(CallEvent.INVITE_RECEIVED, self._on_call_invite_received)
+        self._subscribe_sync(CallEvent.RINGING, self._on_call_ringing)
+        self._subscribe_sync(CallEvent.ACCEPTED, self._on_call_accepted)
+        self._subscribe_sync(CallEvent.REJECTED, self._on_call_rejected)
+        self._subscribe_sync(CallEvent.ENDED, self._on_call_ended)
+        self._subscribe_sync(CallEvent.BUSY, self._on_call_busy)
+        self._subscribe_sync(CallEvent.FAILED, self._on_call_failed)
+        self._subscribe_sync(CallEvent.SIGNAL, self._on_call_signal)
 
     def _subscribe_sync(self, event_type: str, handler) -> None:
         """Subscribe and retain the exact handler object for later unsubscribe."""
@@ -396,6 +416,10 @@ class ChatInterface(QWidget):
         for dialog in list(self._dialog_refs):
             dialog.close()
         self._dialog_refs.clear()
+        for toast in list(self._incoming_call_toasts.values()):
+            toast.close()
+        self._incoming_call_toasts.clear()
+        self._close_call_window()
         self._cancel_all_ui_tasks()
 
     def _cancel_pending_task(self, task: Optional[asyncio.Task]) -> None:
@@ -550,25 +574,23 @@ class ChatInterface(QWidget):
         self._invalidate_session_caches(session_id)
         if session_id != self._current_session_id:
             return
-        self.chat_panel.update_message_content(data.get("message_id", ""), data.get("content", ""))
-        self.chat_panel.update_message_status(data.get("message_id", ""), MessageStatus.EDITED)
+        message = data.get("message")
+        if not isinstance(message, ChatMessage):
+            return
+        self.chat_panel.replace_message(message)
         self._schedule_ui_task(self._refresh_session_preview(session_id), f"refresh preview {session_id}")
 
     def _on_recalled_event(self, data: dict) -> None:
         """Replace recalled message content."""
         session_id = data.get("session_id", "")
         self._invalidate_session_caches(session_id)
-        notice = data.get("content") or getattr(
-            data.get("message"),
-            "content",
-            tr("message.recalled_notice", "A message was recalled"),
-        )
         if session_id != self._current_session_id:
             self._schedule_ui_task(self._refresh_session_preview(session_id), f"refresh preview {session_id}")
             return
-        message_id = data.get("message_id", "")
-        self.chat_panel.update_message_content(message_id, notice)
-        self.chat_panel.update_message_status(message_id, MessageStatus.RECALLED)
+        message = data.get("message")
+        if not isinstance(message, ChatMessage):
+            return
+        self.chat_panel.replace_message(message)
         self._schedule_ui_task(self._refresh_session_preview(session_id), f"refresh preview {session_id}")
 
     def _on_deleted_event(self, data: dict) -> None:
@@ -1205,22 +1227,519 @@ class ChatInterface(QWidget):
             self._screenshot_dialogs.discard(dialog)
 
     def _on_voice_call_requested(self) -> None:
-        """Show placeholder feedback for voice calls."""
-        InfoBar.info(
-            tr("chat.voice_call.title", "Voice Call"),
-            tr("chat.voice_call.unavailable", "Voice calling is not connected yet."),
+        """Start one voice call for the selected direct session."""
+        self._schedule_ui_task(
+            self._start_current_session_call(CallMediaType.VOICE.value),
+            "start voice call",
+        )
+
+    def _on_video_call_requested(self) -> None:
+        """Start one video call for the selected direct session."""
+        self._schedule_ui_task(
+            self._start_current_session_call(CallMediaType.VIDEO.value),
+            "start video call",
+        )
+
+    async def _start_current_session_call(self, media_type: str) -> None:
+        """Validate the selected session and send one outbound call invite."""
+        session = self._get_session(self._current_session_id or "")
+        if session is None:
+            InfoBar.warning(
+                tr("chat.call.invalid.title", "Call"),
+                tr("chat.call.invalid.session", "Open one direct chat before starting a call."),
+                parent=self.window(),
+                duration=2200,
+            )
+            return
+
+        active_call = self._chat_controller.get_active_call()
+        if active_call is not None and active_call.session_id == session.session_id:
+            await self._chat_controller.hangup_call(active_call.call_id)
+            return
+
+        try:
+            await self._chat_controller.start_call(session, media_type)
+        except AppError as exc:
+            InfoBar.warning(
+                tr("chat.call.start_failed.title", "Call"),
+                str(exc),
+                parent=self.window(),
+                duration=2400,
+            )
+
+    def _on_call_invite_sent(self, event: object) -> None:
+        """Show local feedback for one outbound invite."""
+        call = self._event_call(event)
+        if call is None:
+            return
+        logger.info("[call-ui] call_id=%s stage=invite_sent_ui status=%s direction=%s", call.call_id, call.status, call.direction)
+        window = self._ensure_call_window(call)
+        if window is not None:
+            window.set_status_text("Waiting...")
+            current_user_id = str((self._auth_controller.current_user or {}).get("id", "") or "")
+            window.prepare_media(is_caller=current_user_id == call.initiator_id)
+            window.activate_signaling()
+        self._start_call_ring_sound(AppSound.CALL_OUTGOING_RING)
+        call_label = self._call_label(call.media_type)
+        InfoBar.success(
+            call_label,
+            tr("chat.call.invite_sent", "Calling the other participant..."),
             parent=self.window(),
             duration=1800,
         )
 
-    def _on_video_call_requested(self) -> None:
-        """Show placeholder feedback for video calls."""
+    def _on_call_invite_received(self, event: object) -> None:
+        """Display one incoming call toast and notify the caller that it is ringing."""
+        call = self._event_call(event)
+        if call is None:
+            return
+        if call.direction != "incoming":
+            return
+        if call.call_id in self._incoming_call_toasts:
+            return
+        logger.info("[call-ui] call_id=%s stage=invite_received_ui status=%s direction=%s", call.call_id, call.status, call.direction)
+
+        QTimer.singleShot(
+            0,
+            lambda cid=call.call_id: self._schedule_ui_task(
+                self._chat_controller.send_call_ringing(cid),
+                f"call ringing {cid}",
+            ),
+        )
+
+        session = self._get_session(call.session_id)
+        toast = IncomingCallToast(
+            peer_name=self._call_session_name(call),
+            subtitle=tr(
+                "chat.call.incoming.content",
+                "{name} is inviting you to a {kind} call.",
+                name=self._call_session_name(call),
+                kind=self._call_kind_label(call.media_type),
+            ),
+            avatar=str(session.display_avatar() if session is not None else ""),
+            avatar_seed=str(session.display_avatar_seed() if session is not None else ""),
+            parent=self.window(),
+        )
+        self._incoming_call_toasts[call.call_id] = toast
+        self._dialog_refs.add(toast)
+        toast.destroyed.connect(lambda *_args, cid=call.call_id, ref=toast: self._on_call_toast_destroyed(cid, ref))
+        toast.accepted.connect(lambda active_call=call: self._accept_incoming_call_from_toast(active_call))
+        toast.rejected.connect(lambda cid=call.call_id: self._reject_incoming_call_from_toast(cid))
+        toast.show()
+        self._start_call_ring_sound(AppSound.CALL_INCOMING_RING)
+        window = self._ensure_call_window(call, reveal=False)
+        if window is not None:
+            QTimer.singleShot(0, lambda current_window=window: current_window.prepare_media(is_caller=False))
+
+    async def _accept_incoming_call(self, call: ActiveCallState) -> None:
+        """Accept one incoming call and optionally switch to the related chat."""
+        accepted = await self._chat_controller.accept_call(call.call_id)
+        if accepted and call.session_id and call.session_id != self._current_session_id:
+            await self.open_session(call.session_id)
+
+    def _accept_incoming_call_from_toast(self, call: ActiveCallState) -> None:
+        """Close the toast immediately and schedule accept handling."""
+        self._close_incoming_call_toast(call.call_id)
+        QTimer.singleShot(
+            0,
+            lambda active_call=call: self._schedule_ui_task(
+                self._accept_incoming_call(active_call),
+                f"accept incoming call {active_call.call_id}",
+            ),
+        )
+
+    def _reject_incoming_call_from_toast(self, call_id: str) -> None:
+        """Close the toast immediately and schedule reject handling."""
+        self._close_incoming_call_toast(call_id)
+        QTimer.singleShot(
+            0,
+            lambda cid=call_id: self._schedule_ui_task(
+                self._chat_controller.reject_call(cid),
+                f"reject incoming call {cid}",
+            ),
+        )
+
+    def _on_call_ringing(self, event: object) -> None:
+        """Show when the remote side is being alerted."""
+        call = self._event_call(event)
+        if call is None or call.direction != "outgoing":
+            return
+        logger.info("[call-ui] call_id=%s stage=ringing_ui status=%s direction=%s", call.call_id, call.status, call.direction)
+        window = self._ensure_call_window(call)
+        if window is not None:
+            window.set_status_text("Ringing...")
+            window.activate_signaling()
         InfoBar.info(
-            tr("chat.video_call.title", "Video Call"),
-            tr("chat.video_call.unavailable", "Video calling is not connected yet."),
+            self._call_label(call.media_type),
+            tr("chat.call.ringing", "The other participant is being alerted."),
             parent=self.window(),
             duration=1800,
         )
+
+    def _on_call_accepted(self, event: object) -> None:
+        """Show accepted state for the current call."""
+        call = self._event_call(event)
+        if call is None:
+            return
+        logger.info("[call-ui] call_id=%s stage=accepted_ui status=%s direction=%s", call.call_id, call.status, call.direction)
+        self._close_incoming_call_toast(call.call_id)
+        self._ensure_call_window(call, start_media=True)
+        self._stop_call_ring_sounds()
+        self._play_call_sound(AppSound.CALL_CONNECTED)
+        InfoBar.success(
+            self._call_label(call.media_type),
+            tr("chat.call.accepted", "Call accepted. Connecting media..."),
+            parent=self.window(),
+            duration=2200,
+        )
+
+    def _on_call_rejected(self, event: object) -> None:
+        """Show rejection state and close any prompt."""
+        call = self._event_call(event)
+        if call is None:
+            return
+        self._close_incoming_call_toast(call.call_id)
+        self._close_call_window(call.call_id)
+        self._play_call_terminal_sound()
+        self._schedule_call_result_message(call, outcome="rejected")
+        InfoBar.warning(
+            self._call_label(call.media_type),
+            tr("chat.call.rejected", "The call was rejected."),
+            parent=self.window(),
+            duration=2200,
+        )
+
+    def _on_call_ended(self, event: object) -> None:
+        """Show hangup state and close any prompt."""
+        call = self._event_call(event)
+        if call is None:
+            return
+        self._close_incoming_call_toast(call.call_id)
+        self._close_call_window(call.call_id)
+        self._play_call_terminal_sound()
+        self._schedule_call_result_message(call, outcome=self._call_end_outcome(call))
+        InfoBar.info(
+            self._call_label(call.media_type),
+            self._call_end_infobar_text(call),
+            parent=self.window(),
+            duration=1800,
+        )
+
+    def _on_call_busy(self, event: object) -> None:
+        """Show busy state for one outbound invite."""
+        call = self._event_call(event)
+        if call is None:
+            return
+        self._close_incoming_call_toast(call.call_id)
+        self._close_call_window(call.call_id)
+        self._play_call_terminal_sound()
+        self._schedule_call_result_message(call, outcome="busy")
+        InfoBar.warning(
+            self._call_label(call.media_type),
+            tr("chat.call.busy", "The other participant is already in another call."),
+            parent=self.window(),
+            duration=2200,
+        )
+
+    def _on_call_failed(self, event: object) -> None:
+        """Show signaling failures tied to the active call."""
+        call = self._event_call(event)
+        if call is None:
+            return
+        self._close_incoming_call_toast(call.call_id)
+        self._close_call_window(call.call_id)
+        self._play_call_terminal_sound()
+        self._schedule_call_result_message(call, outcome="failed")
+        message = call.reason or tr("chat.call.failed", "Call signaling failed.")
+        InfoBar.error(
+            self._call_label(call.media_type),
+            message,
+            parent=self.window(),
+            duration=2600,
+        )
+
+    def _on_call_signal(self, event: object) -> None:
+        """Route WebRTC SDP/ICE payloads into the active call window."""
+        if not isinstance(event, dict):
+            return
+        message_type = str(event.get("type") or "")
+        payload = event.get("data") or {}
+        if not isinstance(payload, dict):
+            return
+        call_id = str(payload.get("call_id") or "")
+        if not call_id:
+            return
+
+        window = self._call_window
+        if window is None or window.call_id != call_id:
+            active_call = self._chat_controller.get_active_call()
+            if active_call is None or active_call.call_id != call_id:
+                return
+            window = self._ensure_call_window(active_call, start_media=False)
+        if window is None:
+            return
+
+        if message_type == "call_offer":
+            window.handle_offer(payload)
+        elif message_type == "call_answer":
+            window.handle_answer(payload)
+        elif message_type == "call_ice":
+            window.handle_ice_candidate(payload)
+
+    def _on_call_toast_destroyed(self, call_id: str, toast: IncomingCallToast) -> None:
+        """Drop one tracked incoming-call toast reference."""
+        self._dialog_refs.discard(toast)
+        if self._incoming_call_toasts.get(call_id) is toast:
+            self._incoming_call_toasts.pop(call_id, None)
+
+    def _close_incoming_call_toast(self, call_id: str) -> None:
+        """Close one tracked incoming-call toast when the call state resolves."""
+        toast = self._incoming_call_toasts.pop(call_id, None)
+        if toast is None:
+            return
+        self._dialog_refs.discard(toast)
+        toast.close()
+
+    def _ensure_call_window(
+        self,
+        call: ActiveCallState,
+        *,
+        start_media: bool = False,
+        reveal: bool = True,
+    ) -> CallWindow | None:
+        """Create or reuse the active media window for one accepted call."""
+        if self._call_window is not None and self._call_window.call_id == call.call_id:
+            self._call_window.sync_call_state(call)
+            if reveal and not self._call_window.isVisible():
+                self._call_window.show()
+                self._call_window.raise_()
+                self._call_window.activateWindow()
+            if start_media:
+                current_user_id = str((self._auth_controller.current_user or {}).get("id", "") or "")
+                self._call_window.start_media(is_caller=current_user_id == call.initiator_id)
+            return self._call_window
+
+        self._close_call_window()
+        current_user_id = str((self._auth_controller.current_user or {}).get("id", "") or "")
+        session_name = self._call_session_name(call)
+        peer_label = session_name
+        session = self._get_session(call.session_id)
+        config = get_config()
+
+        window = CallWindow(
+            call,
+            session_title=session_name,
+            peer_label=peer_label,
+            avatar=str(session.display_avatar() if session is not None else ""),
+            avatar_seed=str(session.display_avatar_seed() if session is not None else ""),
+            ice_servers=config.webrtc.ice_servers,
+            parent=self.window(),
+        )
+        window.hangup_requested.connect(self._on_call_window_hangup_requested)
+        window.signal_generated.connect(self._on_call_window_signal_generated)
+        window.destroyed.connect(lambda *_args, ref=window: self._on_call_window_destroyed(ref))
+        if reveal:
+            window.show()
+            window.raise_()
+            window.activateWindow()
+        window.sync_call_state(call)
+        if start_media:
+            window.start_media(is_caller=current_user_id == call.initiator_id)
+        self._call_window = window
+        return window
+
+    def _close_call_window(self, call_id: str | None = None) -> None:
+        """Close the active media window when the call finishes."""
+        window = self._call_window
+        if window is None:
+            return
+        if call_id and window.call_id != call_id:
+            return
+        self._call_window = None
+        self._stop_call_ring_sounds()
+        window.end_call()
+
+    def _on_call_window_destroyed(self, window: CallWindow) -> None:
+        """Clear the active call window reference once the widget is gone."""
+        if self._call_window is window:
+            self._call_window = None
+
+    def _on_call_window_hangup_requested(self, call_id: str) -> None:
+        """Relay user-triggered window close actions into websocket hangup."""
+        self._schedule_ui_task(
+            self._chat_controller.hangup_call(call_id),
+            f"hangup call window {call_id}",
+        )
+
+    def _on_call_window_signal_generated(self, event_type: str, payload: object) -> None:
+        """Forward JS-generated SDP and ICE payloads through the chat controller."""
+        if not isinstance(payload, dict):
+            return
+        call_id = str(payload.get("call_id") or "")
+        if not call_id:
+            return
+        if event_type == "call_offer":
+            self._schedule_ui_task(
+                self._chat_controller.send_call_offer(call_id, payload.get("sdp", {}) if isinstance(payload.get("sdp"), dict) else {}),
+                f"send call offer {call_id}",
+            )
+        elif event_type == "call_answer":
+            self._schedule_ui_task(
+                self._chat_controller.send_call_answer(call_id, payload.get("sdp", {}) if isinstance(payload.get("sdp"), dict) else {}),
+                f"send call answer {call_id}",
+            )
+        elif event_type == "call_ice":
+            self._schedule_ui_task(
+                self._chat_controller.send_call_ice_candidate(
+                    call_id,
+                    payload.get("candidate", {}) if isinstance(payload.get("candidate"), dict) else {},
+                ),
+                f"send call ice {call_id}",
+            )
+
+    @staticmethod
+    def _event_call(event: object) -> ActiveCallState | None:
+        """Extract one call state object from an event-bus payload."""
+        if not isinstance(event, dict):
+            return None
+        call = event.get("call")
+        if isinstance(call, ActiveCallState):
+            return call
+        return None
+
+    def _call_session_name(self, call: ActiveCallState) -> str:
+        """Resolve one readable name for the current call target."""
+        session = self._get_session(call.session_id)
+        if session is not None:
+            return session.name or tr("session.unnamed", "Untitled Session")
+        peer_user_id = call.peer_user_id(str((self._auth_controller.current_user or {}).get("id", "") or ""))
+        return peer_user_id or tr("session.unnamed", "Untitled Session")
+
+    @staticmethod
+    def _call_kind_label(media_type: str) -> str:
+        """Return one readable media type label."""
+        return "video" if media_type == CallMediaType.VIDEO.value else "voice"
+
+    def _call_label(self, media_type: str) -> str:
+        """Return one title string for InfoBar feedback."""
+        if media_type == CallMediaType.VIDEO.value:
+            return tr("chat.video_call.title", "Video Call")
+        return tr("chat.voice_call.title", "Voice Call")
+
+    def _current_user_id(self) -> str:
+        return str((self._auth_controller.current_user or {}).get("id", "") or "")
+
+    def _play_call_sound(self, sound_id: AppSound) -> None:
+        sound_manager = get_sound_manager()
+        sound_manager.play(sound_id, force=True)
+
+    def _stop_call_sound(self, sound_id: AppSound) -> None:
+        sound_manager = get_sound_manager()
+        sound_manager.stop(sound_id)
+
+    def _stop_call_ring_sounds(self) -> None:
+        self._call_ring_timer.stop()
+        self._active_call_ring_sound = None
+        self._stop_call_sound(AppSound.CALL_OUTGOING_RING)
+        self._stop_call_sound(AppSound.CALL_INCOMING_RING)
+
+    def _play_call_terminal_sound(self) -> None:
+        self._stop_call_ring_sounds()
+        self._play_call_sound(AppSound.CALL_ENDED)
+
+    def _start_call_ring_sound(self, sound_id: AppSound) -> None:
+        if self._active_call_ring_sound == sound_id and self._call_ring_timer.isActive():
+            return
+        self._stop_call_ring_sounds()
+        self._active_call_ring_sound = sound_id
+        self._play_call_sound(sound_id)
+        if sound_id == AppSound.CALL_INCOMING_RING:
+            return
+        self._call_ring_timer.start(self.CALL_RING_REPEAT_MS)
+
+    def _on_call_ring_timer(self) -> None:
+        if self._active_call_ring_sound is None:
+            self._call_ring_timer.stop()
+            return
+        self._play_call_sound(self._active_call_ring_sound)
+
+    def _call_end_outcome(self, call: ActiveCallState) -> str:
+        if call.reason == "timeout":
+            return "timeout"
+        if call.answered_at is not None:
+            return "completed"
+        if call.actor_id and call.actor_id == call.initiator_id:
+            return "cancelled"
+        return "failed"
+
+    def _call_end_infobar_text(self, call: ActiveCallState) -> str:
+        if call.reason == "timeout":
+            return "The call timed out."
+        if call.answered_at is not None:
+            return tr("chat.call.ended", "The call ended.")
+        if call.actor_id and call.actor_id == call.initiator_id:
+            return "The call was canceled."
+        return tr("chat.call.ended", "The call ended.")
+
+    def _schedule_call_result_message(self, call: ActiveCallState, *, outcome: str) -> None:
+        if call.direction != "outgoing":
+            return
+        if call.initiator_id and call.initiator_id != self._current_user_id():
+            return
+        dedupe_key = (call.call_id, outcome)
+        if dedupe_key in self._call_result_messages_sent:
+            return
+        self._call_result_messages_sent.add(dedupe_key)
+        self._schedule_ui_task(
+            self._send_call_result_message(call, outcome=outcome),
+            f"call result message {call.call_id} {outcome}",
+        )
+
+    async def _send_call_result_message(self, call: ActiveCallState, *, outcome: str) -> None:
+        duration_seconds = self._call_duration_seconds(call) if outcome == "completed" else 0
+        content = self._call_result_text(call.media_type, outcome=outcome, duration_seconds=duration_seconds)
+        extra = {
+            "system_kind": "call",
+            "call_id": call.call_id,
+            "call_media_type": call.media_type,
+            "call_outcome": outcome,
+            "call_duration_seconds": duration_seconds,
+        }
+        await self._chat_controller.send_message_to(
+            call.session_id,
+            content,
+            message_type=MessageType.SYSTEM,
+            extra=extra,
+        )
+
+    def _call_duration_seconds(self, call: ActiveCallState) -> int:
+        answered_at = coerce_local_datetime(call.answered_at)
+        if answered_at is None:
+            return 0
+        return max(0, int((datetime.now() - answered_at).total_seconds()))
+
+    def _call_result_text(self, media_type: str, *, outcome: str, duration_seconds: int) -> str:
+        call_label = "视频通话" if media_type == CallMediaType.VIDEO.value else "语音通话"
+        if outcome == "completed":
+            return f"{call_label} {self._format_call_duration(duration_seconds)}"
+        if outcome == "rejected":
+            return "对方已拒绝"
+        if outcome == "cancelled":
+            return "已取消"
+        if outcome == "timeout":
+            return "无人接听"
+        if outcome == "busy":
+            return "对方忙线中"
+        return "通话失败"
+
+    @staticmethod
+    def _format_call_duration(duration_seconds: int) -> str:
+        total_seconds = max(0, int(duration_seconds))
+        minutes, seconds = divmod(total_seconds, 60)
+        hours, minutes = divmod(minutes, 60)
+        if hours > 0:
+            return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+        return f"{minutes:02d}:{seconds:02d}"
 
     def _on_chat_history_requested(self) -> None:
         """Show placeholder feedback for the reserved chat-history entry point."""
@@ -1231,25 +1750,10 @@ class ChatInterface(QWidget):
             duration=1800,
         )
 
-    def _on_chat_info_search_requested(self) -> None:
-        """Show placeholder feedback for chat-content search."""
-        InfoBar.info(
-            tr("chat.info.search.title", "Find Chat Content"),
-            tr("chat.info.search.unavailable", "The in-chat search feature will be connected next."),
-            parent=self.window(),
-            duration=1800,
-        )
-
     def _on_chat_info_add_requested(self) -> None:
         """Open the contact selector used to turn the current private chat into a new group."""
         session = self._get_session(self._current_session_id or "")
         if session is None or session.is_ai_session or session.session_type != "direct":
-            InfoBar.info(
-                tr("chat.info.add.title", "Add"),
-                tr("chat.info.add.unavailable", "This entry is reserved for future group-chat expansion."),
-                parent=self.window(),
-                duration=1800,
-            )
             return
 
         self._schedule_ui_task(
@@ -1257,25 +1761,80 @@ class ChatInterface(QWidget):
             f"start group chat selector {session.session_id}",
         )
 
-    def _on_chat_info_clear_requested(self) -> None:
-        """Show placeholder feedback for clear-history until durable sync semantics are defined."""
+    def _on_chat_info_search_requested(self) -> None:
+        """Keep the reserved chat-search entry visible until the real flow lands."""
         InfoBar.info(
-            tr("chat.info.clear.title", "Clear Chat History"),
-            tr(
-                "chat.info.clear.unavailable",
-                "The clear-history entry is reserved. Durable sync-safe clearing will be connected next.",
-            ),
+            tr("chat.info.search.title", "Find Chat Content"),
+            tr("chat.info.search.unavailable", "The in-chat search feature will be connected next."),
             parent=self.window(),
-            duration=2200,
+            duration=1800,
         )
 
-    def _on_chat_info_leave_requested(self) -> None:
-        """Show placeholder feedback for leaving a group chat until backend flow is connected."""
+    def _on_chat_info_clear_requested(self) -> None:
+        """Keep the clear-history entry visible until durable sync-safe deletion is implemented."""
         InfoBar.info(
-            tr("chat.info.group.leave.title", "Leave Group Chat"),
-            tr("chat.info.group.leave.unavailable", "The leave-group action will be connected next."),
+            tr("chat.info.clear.title", "Clear Chat History"),
+            tr("chat.info.clear.unavailable", "The clear-history entry is reserved. Durable sync-safe clearing will be connected next."),
             parent=self.window(),
-            duration=2000,
+            duration=1800,
+        )
+
+    def _on_chat_info_show_nickname_toggled(self, _enabled: bool) -> None:
+        """Persist the local group-member label visibility preference for the active session."""
+        session_id = self._current_session_id
+        if not session_id:
+            return
+        self._schedule_ui_task(
+            self._session_controller.set_group_member_nickname_visibility(session_id, _enabled),
+            f"set group member nickname visibility {session_id}",
+        )
+
+    def _show_dialog(self, dialog: QDialog) -> None:
+        """Keep non-modal dialogs alive while visible."""
+        self._dialog_refs.add(dialog)
+        dialog.destroyed.connect(lambda *_args, dlg=dialog: self._dialog_refs.discard(dlg))
+        dialog.finished.connect(dialog.deleteLater)
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def _on_chat_info_member_management_requested(self, payload: object) -> None:
+        """Open the formal group-member management dialog from chat info entry points."""
+        if not isinstance(payload, GroupMemberManagementRequest):
+            return
+
+        dialog = GroupMemberManagementDialog(
+            self._contact_controller,
+            group_id=payload.group_id,
+            session_id=payload.session_id,
+            preferred_mode=payload.mode,
+            parent=self.window(),
+        )
+        dialog.groupRecordChanged.connect(
+            lambda record, session_id=payload.session_id: self._schedule_ui_task(
+                self._apply_group_management_record(session_id, record),
+                f"apply group management record {session_id}",
+            )
+        )
+        self._show_dialog(dialog)
+
+    def _on_chat_info_leave_requested(self) -> None:
+        """Confirm and leave the currently opened group chat."""
+        session = self._session_controller.get_current_session()
+        if session is None or getattr(session, "session_type", "") != "group":
+            return
+
+        group_id = session.authoritative_group_id()
+        if not group_id:
+            return
+
+        dialog = LeaveGroupConfirmDialog(session.chat_title() or session.display_name(), self.window())
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        self._schedule_ui_task(
+            self._leave_group_async(session.session_id, group_id, session.chat_title() or session.display_name()),
+            f"leave group {session.session_id}",
         )
 
     def _on_chat_info_mute_toggled(self, muted: bool) -> None:
@@ -1301,61 +1860,173 @@ class ChatInterface(QWidget):
         )
 
     def _on_chat_info_group_profile_update_requested(self, payload: object) -> None:
-        session = self._session_controller.get_current_session()
-        if session is None or getattr(session, "session_type", "") != "group":
+        if not isinstance(payload, GroupProfileUpdateRequest):
             return
         self._schedule_ui_task(
-            self._update_group_profile_async(dict(payload or {})),
-            f"update group profile {getattr(session, 'session_id', '')}",
+            self._update_group_profile_async(payload),
+            f"update group profile {payload.session_id}",
+        )
+
+    def _on_group_announcement_requested(self) -> None:
+        session = self._get_session(self._current_session_id or "") if self._current_session_id else None
+        if session is None or not session.group_announcement_text():
+            return
+
+        dialog = GroupAnnouncementDialog(
+            session,
+            current_user=dict(self._auth_controller.current_user or {}),
+            parent=self.window(),
+        )
+        self._dialog_refs.add(dialog)
+        dialog.finished.connect(lambda _code, ref=dialog: self._dialog_refs.discard(ref))
+        viewed_message_id = session.group_announcement_message_id()
+        result = dialog.exec()
+        if viewed_message_id:
+            self._schedule_ui_task(
+                self._session_controller.mark_group_announcement_viewed(session.session_id, viewed_message_id),
+                f"view group announcement {session.session_id}",
+            )
+        if result != QDialog.DialogCode.Accepted:
+            return
+        updated_announcement = dialog.pending_announcement()
+        if updated_announcement is None:
+            return
+        self._schedule_ui_task(
+            self._update_group_profile_async(
+                GroupProfileUpdateRequest(
+                    session_id=session.session_id,
+                    group_id=session.authoritative_group_id(),
+                    name=None,
+                    announcement=updated_announcement,
+                ),
+                mark_announcement_viewed=True,
+            ),
+            f"update group announcement {session.session_id}",
         )
 
     def _on_chat_info_group_self_profile_update_requested(self, payload: object) -> None:
-        session = self._session_controller.get_current_session()
-        if session is None or getattr(session, "session_type", "") != "group":
+        if not isinstance(payload, GroupSelfProfileUpdateRequest):
             return
         self._schedule_ui_task(
-            self._update_my_group_profile_async(dict(payload or {})),
-            f"update my group profile {getattr(session, 'session_id', '')}",
+            self._update_my_group_profile_async(payload),
+            f"update my group profile {payload.session_id}",
         )
 
-    async def _update_group_profile_async(self, payload: dict[str, object]) -> None:
-        session = self._session_controller.get_current_session()
-        if session is None:
+    async def _update_group_profile_async(self, request: GroupProfileUpdateRequest, *, mark_announcement_viewed: bool = False) -> None:
+        try:
+            record = await self._contact_controller.update_group_profile(
+                request.group_id,
+                name=request.name,
+                announcement=request.announcement,
+            )
+        except Exception as exc:
+            if self._current_session_id == request.session_id:
+                self.chat_panel.refresh_chat_info_content()
+            InfoBar.error(
+                tr("chat.info.group.title", "Group Chat Info"),
+                str(exc),
+                parent=self.window(),
+                duration=2400,
+            )
             return
-        group_id = str(getattr(session, "extra", {}).get("group_id", "") or "").strip()
-        if not group_id:
-            return
-        record = await self._contact_controller.update_group_profile(
-            group_id,
-            name=payload.get("name") if "name" in payload else None,
-            announcement=payload.get("announcement") if "announcement" in payload else None,
-        )
-        await self._apply_group_record(record, include_self_fields=True)
+        updated_session = await self._apply_group_record(request.session_id, record, include_self_fields=True)
+        if mark_announcement_viewed and updated_session is not None:
+            announcement_message_id = updated_session.group_announcement_message_id()
+            if announcement_message_id:
+                await self._session_controller.mark_group_announcement_viewed(
+                    updated_session.session_id,
+                    announcement_message_id,
+                )
 
-    async def _update_my_group_profile_async(self, payload: dict[str, object]) -> None:
-        session = self._session_controller.get_current_session()
-        if session is None:
+    async def _update_my_group_profile_async(self, request: GroupSelfProfileUpdateRequest) -> None:
+        try:
+            record = await self._contact_controller.update_my_group_profile(
+                request.group_id,
+                note=request.note,
+                my_group_nickname=request.my_group_nickname,
+            )
+        except Exception as exc:
+            if self._current_session_id == request.session_id:
+                self.chat_panel.refresh_chat_info_content()
+            InfoBar.error(
+                tr("chat.info.group.title", "Group Chat Info"),
+                str(exc),
+                parent=self.window(),
+                duration=2400,
+            )
             return
-        group_id = str(getattr(session, "extra", {}).get("group_id", "") or "").strip()
-        if not group_id:
-            return
-        record = await self._contact_controller.update_my_group_profile(
-            group_id,
-            note=payload.get("note") if "note" in payload else None,
-            my_group_nickname=payload.get("my_group_nickname") if "my_group_nickname" in payload else None,
-        )
-        await self._apply_group_record(record, include_self_fields=True)
+        await self._apply_group_record(request.session_id, record, include_self_fields=True)
 
-    async def _apply_group_record(self, record, *, include_self_fields: bool) -> None:
-        session = self._session_controller.get_current_session()
-        if session is None:
-            return
-
-        payload = dict(getattr(record, "extra", {}) or {})
-        await self._session_controller.apply_group_payload(
-            session.session_id,
+    async def _apply_group_record(self, session_id: str, record, *, include_self_fields: bool):
+        payload = self._group_record_payload(record)
+        return await self._session_controller.apply_group_payload(
+            session_id,
             payload,
             include_self_fields=include_self_fields,
+        )
+
+    @staticmethod
+    def _group_record_payload(record) -> dict[str, object]:
+        """Serialize one group record back into the session/contact update shape."""
+        payload = dict(getattr(record, "extra", {}) or {})
+        payload["id"] = str(getattr(record, "id", "") or payload.get("id", "") or "")
+        payload["group_id"] = str(payload.get("group_id", "") or payload["id"] or "")
+        payload["name"] = str(getattr(record, "name", "") or payload.get("name", "") or "")
+        payload["announcement"] = str(getattr(record, "announcement", "") or payload.get("announcement", "") or "")
+        payload["avatar"] = str(getattr(record, "avatar", "") or payload.get("avatar", "") or "")
+        payload["owner_id"] = str(getattr(record, "owner_id", "") or payload.get("owner_id", "") or "")
+        payload["session_id"] = str(getattr(record, "session_id", "") or payload.get("session_id", "") or "")
+        payload["member_count"] = int(getattr(record, "member_count", 0) or payload.get("member_count", 0) or 0)
+        payload["announcement_message_id"] = str(
+            getattr(record, "announcement_message_id", "") or payload.get("announcement_message_id", "") or ""
+        )
+        payload["announcement_author_id"] = str(
+            getattr(record, "announcement_author_id", "") or payload.get("announcement_author_id", "") or ""
+        )
+        raw_published_at = getattr(record, "announcement_published_at", None) or payload.get("announcement_published_at")
+        if hasattr(raw_published_at, "isoformat"):
+            payload["announcement_published_at"] = raw_published_at.isoformat()
+        else:
+            payload["announcement_published_at"] = str(raw_published_at or "")
+        return payload
+
+    async def _apply_group_management_record(self, session_id: str, record) -> None:
+        """Mirror member-management mutations into the open session and contact page."""
+        if not session_id:
+            return
+
+        await self._apply_group_record(session_id, record, include_self_fields=True)
+
+        payload = self._group_record_payload(record)
+        payload.setdefault("session_id", session_id)
+        await self._event_bus.emit(
+            ContactEvent.SYNC_REQUIRED,
+            {"reason": "group_profile_update", "payload": {"group": payload}},
+        )
+
+    async def _leave_group_async(self, session_id: str, group_id: str, group_name: str) -> None:
+        try:
+            await self._contact_controller.leave_group(group_id)
+            await self._session_controller.remove_session(session_id)
+            await self._event_bus.emit(ContactEvent.SYNC_REQUIRED, {"reason": "group_membership_changed"})
+        except Exception as exc:
+            InfoBar.error(
+                tr("chat.info.group.leave.title", "Leave Group Chat"),
+                str(exc),
+                parent=self.window(),
+                duration=2400,
+            )
+            return
+
+        InfoBar.success(
+            tr("chat.info.group.leave.title", "Leave Group Chat"),
+            tr(
+                "chat.info.group.leave.success",
+                "You left {name}.",
+                name=group_name or tr("session.unnamed", "Untitled Session"),
+            ),
+            parent=self.window(),
+            duration=2000,
         )
 
     def close_transient_panels(self) -> None:
@@ -1386,7 +2057,6 @@ class ChatInterface(QWidget):
         translate_action = None
         quote_action = None
         multiselect_action = None
-        edit_action = None
         recall_action = None
         delete_action = None
         retry_action = None
@@ -1420,10 +2090,6 @@ class ChatInterface(QWidget):
         multiselect_action.setEnabled(False)
         placeholder_actions.append(multiselect_action)
 
-        if message.is_self and message.message_type == MessageType.TEXT and message.status != MessageStatus.RECALLED:
-            edit_action = Action(tr("chat.context.edit", "Edit"), self)
-            message_actions.append(edit_action)
-
         if should_offer_recall(message):
             recall_action = Action(tr("chat.context.recall", "Recall"), self)
             message_actions.append(recall_action)
@@ -1452,10 +2118,6 @@ class ChatInterface(QWidget):
         if open_action:
             open_action.triggered.connect(
                 lambda _checked=False, msg=message: QTimer.singleShot(0, lambda: self._open_message(msg))
-            )
-        if edit_action:
-            edit_action.triggered.connect(
-                lambda _checked=False, msg=message: QTimer.singleShot(0, lambda: self._prompt_edit_message(msg))
             )
         if recall_action:
             recall_action.triggered.connect(
@@ -1526,26 +2188,6 @@ class ChatInterface(QWidget):
                     duration=1800,
                 )
 
-    def _prompt_edit_message(self, message) -> None:
-        """Open the edit dialog for a text message."""
-        dialog = EditMessageDialog(message.content, self.window())
-        if dialog.exec() != QDialog.DialogCode.Accepted:
-            return
-
-        new_content = dialog.get_content()
-        if not new_content:
-            InfoBar.warning(
-                tr("chat.edit.title", "Edit Message"),
-                tr("chat.edit.empty", "Content cannot be empty."),
-                parent=self.window(),
-                duration=1800,
-            )
-            return
-        if new_content == message.content:
-            return
-
-        self._schedule_ui_task(self._edit_message(message.message_id, new_content), f"edit {message.message_id}")
-
     async def _retry_message(self, message_id: str) -> None:
         """Retry a failed message."""
         success = await self._chat_controller.retry_message(message_id)
@@ -1566,17 +2208,6 @@ class ChatInterface(QWidget):
                 reason or tr("chat.recall_failed", "Recall failed."),
                 parent=self.window(),
                 duration=2400,
-            )
-
-    async def _edit_message(self, message_id: str, new_content: str) -> None:
-        """Edit a message and surface errors in the UI."""
-        success = await self._chat_controller.edit_message(message_id, new_content)
-        if not success:
-            InfoBar.error(
-                tr("chat.edit.title", "Edit Message"),
-                tr("chat.edit_failed", "Edit failed."),
-                parent=self.window(),
-                duration=1800,
             )
 
     def _confirm_delete_message(self, message) -> None:
@@ -1776,6 +2407,8 @@ class ChatInterface(QWidget):
             return False
 
         return self.focus_session(session.session_id)
+
+
 
 
 

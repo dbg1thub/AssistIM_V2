@@ -1,8 +1,9 @@
-﻿"""Group service."""
+"""Group service."""
 
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from typing import TypeVar
 
 from sqlalchemy.orm import Session
@@ -17,6 +18,13 @@ from app.services.avatar_service import AvatarService
 
 
 T = TypeVar("T")
+
+
+@dataclass(frozen=True)
+class GroupProfileUpdateResult:
+    group: dict[str, object]
+    announcement_message_id: str = ""
+    participant_ids: list[str] = field(default_factory=list)
 
 
 class GroupService:
@@ -56,22 +64,62 @@ class GroupService:
         self._ensure_group_member(group, current_user.id)
         return self.serialize_group(group, include_members=True, current_user_id=current_user.id)
 
-    def update_group_profile(self, current_user: User, group_id: str, name: str | None, announcement: str | None) -> dict:
+    def update_group_profile(self, current_user: User, group_id: str, name: str | None, announcement: str | None) -> GroupProfileUpdateResult:
         group = self._get_group_or_404(group_id)
         self._ensure_group_member(group, current_user.id)
         current_role = self._member_role(group.id, current_user.id, owner_id=group.owner_id)
         if current_role not in {"owner", "admin"}:
             raise AppError(ErrorCode.FORBIDDEN, "only owner or admin can update group profile", 403)
 
-        def action() -> None:
-            self.groups.update_group_profile(group, name=name, announcement=announcement, commit=False)
+        participant_ids = [
+            value
+            for value in dict.fromkeys(self.sessions.list_member_ids(group.session_id))
+            if str(value or "").strip()
+        ]
+        previous_announcement = str(getattr(group, "announcement", "") or "")
+        normalized_name = str(name or "").strip() if name is not None else None
+        normalized_announcement = str(announcement or "").strip() if announcement is not None else None
+        announcement_changed = announcement is not None and normalized_announcement != previous_announcement
+
+        def action():
+            announcement_message = None
             if name is not None:
-                self.sessions.rename(group.session_id, str(name or "").strip(), commit=False)
+                group.name = normalized_name or ""
+                self.sessions.rename(group.session_id, group.name, commit=False)
+
             if announcement is not None:
+                group.announcement = normalized_announcement or ""
+                if group.announcement:
+                    announcement_message = self.messages.create(
+                        session_id=group.session_id,
+                        sender_id=current_user.id,
+                        content=self._build_announcement_message_body(group.announcement),
+                        message_type="text",
+                        extra={
+                            "group_announcement": True,
+                            "group_announcement_text": group.announcement,
+                        },
+                        commit=False,
+                    )[0]
+                    group.announcement_message_id = announcement_message.id
+                    group.announcement_author_id = current_user.id
+                    group.announcement_published_at = announcement_message.created_at
+                else:
+                    group.announcement_message_id = None
+                    group.announcement_author_id = None
+                    group.announcement_published_at = None
                 self.sessions.touch_without_commit(group.session_id)
 
-        self._run_transaction(action)
-        return self.serialize_group(group, include_members=True, current_user_id=current_user.id)
+            self.db.add(group)
+            self.db.flush()
+            return announcement_message
+
+        announcement_message = self._run_transaction(action)
+        return GroupProfileUpdateResult(
+            group=self.serialize_group(group, include_members=True, current_user_id=current_user.id),
+            announcement_message_id=(str(getattr(announcement_message, "id", "") or "") if announcement_changed and announcement_message is not None else ""),
+            participant_ids=participant_ids if announcement_changed and announcement_message is not None else [],
+        )
 
     def update_my_group_profile(self, current_user: User, group_id: str, note: str | None, my_group_nickname: str | None) -> dict:
         group = self._get_group_or_404(group_id)
@@ -89,6 +137,11 @@ class GroupService:
 
         self._run_transaction(action)
         return self.serialize_group(group, include_members=True, current_user_id=current_user.id)
+
+    @staticmethod
+    def _build_announcement_message_body(announcement: str) -> str:
+        normalized = str(announcement or "").strip()
+        return f"群公告\n{normalized}" if normalized else "群公告"
 
     def record_group_profile_update_event(self, group_id: str, *, actor_user_id: str) -> dict[str, object] | None:
         """Append one shared group-profile update event for offline sync and realtime fan-out."""
@@ -264,6 +317,9 @@ class GroupService:
             "id": group.id,
             "name": group.name,
             "announcement": str(getattr(group, "announcement", "") or ""),
+            "announcement_message_id": str(getattr(group, "announcement_message_id", "") or "") or None,
+            "announcement_author_id": str(getattr(group, "announcement_author_id", "") or "") or None,
+            "announcement_published_at": group.announcement_published_at.isoformat() if getattr(group, "announcement_published_at", None) else None,
             "avatar": avatar,
             "avatar_kind": str(getattr(group, "avatar_kind", "generated") or "generated"),
             "owner_id": group.owner_id,
@@ -352,4 +408,9 @@ class GroupService:
         except Exception:
             self.db.rollback()
             raise
+
+
+
+
+
 

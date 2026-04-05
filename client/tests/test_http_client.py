@@ -188,6 +188,35 @@ def test_http_client_external_401_does_not_trigger_app_refresh() -> None:
     asyncio.run(scenario())
 
 
+def test_http_client_patch_uses_patch_method() -> None:
+    async def scenario() -> None:
+        client = HTTPClient(base_url="http://app.local/api/v1")
+        fake_session = FakeSession(
+            request_handler=lambda **call: FakeResponse(200, {"data": {"method": call["method"], "json": call["json"]}}),
+        )
+        client._session = fake_session
+
+        payload = await client.patch("/groups/group-1", json={"name": "Renamed"})
+
+        assert payload == {"method": "PATCH", "json": {"name": "Renamed"}}
+        assert fake_session.request_calls == [
+            {
+                "method": "PATCH",
+                "url": "http://app.local/api/v1/groups/group-1",
+                "params": None,
+                "json": {"name": "Renamed"},
+                "headers": {
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                },
+            }
+        ]
+
+        await client.close()
+
+    asyncio.run(scenario())
+
+
 def test_http_client_internal_401_refresh_is_singleflight() -> None:
     async def scenario() -> None:
         client = HTTPClient(base_url="http://app.local/api/v1")

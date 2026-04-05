@@ -1,4 +1,4 @@
-﻿"""
+"""
 Session Controller Module
 
 Controller for session list interactions.
@@ -76,6 +76,10 @@ class SessionController:
         """Persist local do-not-disturb state for a session."""
         await self._session_manager.set_muted(session_id, muted)
 
+    async def set_group_member_nickname_visibility(self, session_id: str, enabled: bool) -> None:
+        """Persist the local group-member label visibility preference for a session."""
+        await self._session_manager.set_group_member_nickname_visibility(session_id, enabled)
+
     async def apply_group_payload(self, session_id: str, payload: dict[str, Any], *, include_self_fields: bool) -> Optional[Any]:
         """Apply one authoritative group payload to the cached session state."""
         return await self._session_manager.apply_group_payload(
@@ -83,6 +87,10 @@ class SessionController:
             payload,
             include_self_fields=include_self_fields,
         )
+
+    async def mark_group_announcement_viewed(self, session_id: str, announcement_message_id: str) -> Optional[Any]:
+        """Persist that one group announcement version was opened by the current user."""
+        return await self._session_manager.mark_group_announcement_viewed(session_id, announcement_message_id)
 
     def is_session_muted(self, session_id: str) -> bool:
         """Return whether local do-not-disturb is enabled for a session."""
@@ -111,3 +119,4 @@ def get_session_controller() -> SessionController:
     if _session_controller is None:
         _session_controller = SessionController()
     return _session_controller
+

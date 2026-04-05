@@ -1,4 +1,4 @@
-"""Message delegate that migrates the old bubble-style chat UI."""
+﻿"""Message delegate that migrates the old bubble-style chat UI."""
 
 from __future__ import annotations
 
@@ -85,6 +85,17 @@ class _RunTextLayout:
     pure_emoji: bool
 
 
+@dataclass
+class _MessageRowLayout:
+    """Resolved geometry for one rendered chat row."""
+
+    avatar_rect: QRect
+    bubble_rect: QRect
+    content_rect: QRect
+    sender_label_rect: QRect | None
+    sender_label_alignment: Qt.AlignmentFlag
+
+
 class MessageDelegate(QStyledItemDelegate):
     """Render text, image, and file messages in a Fluent bubble layout."""
 
@@ -105,11 +116,14 @@ class MessageDelegate(QStyledItemDelegate):
     TIME_SPACING = 9
     STATUS_BADGE_SIZE = 16
     RECALL_NOTICE_HEIGHT = TIME_BLOCK_HEIGHT
+    RECALL_ACTION_GAP = 8
     TEXT_MEASURE_CACHE_LIMIT = 512
     TEXT_LAYOUT_CACHE_LIMIT = 256
     MEDIA_SIZE_CACHE_LIMIT = 512
     IMAGE_RECT_CACHE_LIMIT = 512
     EMOJI_TEXT_GAP = MIXED_EMOJI_TEXT_GAP
+    GROUP_SENDER_LABEL_FONT_PIXEL_SIZE = 11
+    GROUP_SENDER_LABEL_GAP = 2
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -130,10 +144,45 @@ class MessageDelegate(QStyledItemDelegate):
         self._refresh_scheduled = False
         self._context_menu_message_id: str | None = None
         self._hovered_time_separator_id: str | None = None
+        self._hovered_recall_notice_action_id: str | None = None
         self._text_measure_cache: OrderedDict[str, QSize] = OrderedDict()
         self._text_layout_cache: OrderedDict[tuple[int, str], _RunTextLayout] = OrderedDict()
         self._media_size_cache: OrderedDict[tuple, QSize] = OrderedDict()
         self._image_rect_cache: OrderedDict[tuple, QRect] = OrderedDict()
+        self._active_session_id = ""
+        self._active_session_type = ""
+        self._show_group_member_nickname = True
+        self._group_members_by_id: dict[str, dict[str, object]] = {}
+
+    def set_session(self, session) -> bool:
+        """Update the active session context used for group sender-label rendering."""
+        if session is None:
+            next_session_id = ""
+            next_session_type = ""
+            next_show_group_member_nickname = True
+            next_members_by_id: dict[str, dict[str, object]] = {}
+        else:
+            extra = dict(getattr(session, "extra", {}) or {})
+            next_session_id = str(getattr(session, "session_id", "") or "")
+            next_session_type = str(getattr(session, "session_type", "") or "")
+            next_show_group_member_nickname = bool(extra.get("show_member_nickname", True))
+            next_members_by_id = {
+                str(member.get("id", "") or member.get("user_id", "") or "").strip(): dict(member or {})
+                for member in list(extra.get("members") or [])
+                if isinstance(member, dict) and str(member.get("id", "") or member.get("user_id", "") or "").strip()
+            }
+
+        changed = (
+            self._active_session_id != next_session_id
+            or self._active_session_type != next_session_type
+            or self._show_group_member_nickname != next_show_group_member_nickname
+            or self._group_members_by_id != next_members_by_id
+        )
+        self._active_session_id = next_session_id
+        self._active_session_type = next_session_type
+        self._show_group_member_nickname = next_show_group_member_nickname
+        self._group_members_by_id = next_members_by_id
+        return changed
 
     def sizeHint(self, option: QStyleOptionViewItem, index: QModelIndex) -> QSize:
         """Return message item size based on type and timestamp visibility."""
@@ -148,7 +197,8 @@ class MessageDelegate(QStyledItemDelegate):
             return QSize(option.rect.width(), self.TIME_BLOCK_HEIGHT + self.TIME_SPACING * 2)
 
         content_size = self._bubble_size(message, option.rect.width())
-        total_height = max(content_size.height(), self.AVATAR_SIZE) + 18
+        sender_label_block_height = self._group_sender_label_block_height(message)
+        total_height = max(content_size.height(), self.AVATAR_SIZE) + sender_label_block_height + 18
         return QSize(option.rect.width(), total_height)
 
     def paint(self, painter: QPainter, option: QStyleOptionViewItem, index: QModelIndex) -> None:
@@ -196,13 +246,14 @@ class MessageDelegate(QStyledItemDelegate):
             painter.restore()
             return
 
-        avatar_rect, bubble_rect, _ = self._layout_rects(option.rect, message)
+        row_layout = self._layout_rects(option.rect, message)
 
-        self._draw_avatar(painter, avatar_rect, message)
-        self._draw_bubble(painter, bubble_rect, message, avatar_rect)
+        self._draw_group_sender_label(painter, row_layout, message)
+        self._draw_avatar(painter, row_layout.avatar_rect, message)
+        self._draw_bubble(painter, row_layout.bubble_rect, message, row_layout.avatar_rect)
 
         if message.is_self:
-            badge_rect = self._status_badge_rect(bubble_rect, option.rect, message)
+            badge_rect = self._status_badge_rect(row_layout.bubble_rect, option.rect, message)
             self._draw_status_badge(painter, badge_rect, message)
 
         self._draw_row_divider(painter, option.rect)
@@ -222,8 +273,8 @@ class MessageDelegate(QStyledItemDelegate):
         if not row_rect.isValid():
             return False
 
-        _, _, content_rect = self._layout_rects(row_rect, message)
-        hit_rect = self._attachment_hit_rect(content_rect, message)
+        row_layout = self._layout_rects(row_rect, message)
+        hit_rect = self._attachment_hit_rect(row_layout.content_rect, message)
         return hit_rect.contains(position)
 
     def is_bubble_hit(self, view, index: QModelIndex, position: QPoint) -> bool:
@@ -239,8 +290,8 @@ class MessageDelegate(QStyledItemDelegate):
         if not row_rect.isValid():
             return False
 
-        _, bubble_rect, _ = self._layout_rects(row_rect, message)
-        return bubble_rect.contains(position)
+        row_layout = self._layout_rects(row_rect, message)
+        return row_layout.bubble_rect.contains(position)
 
     def is_text_hit(self, view, index: QModelIndex, position: QPoint) -> bool:
         """Return whether a viewport position lands on text content."""
@@ -256,8 +307,8 @@ class MessageDelegate(QStyledItemDelegate):
         if not row_rect.isValid():
             return False
 
-        _, _, content_rect = self._layout_rects(row_rect, message)
-        text_rect, layout = self._text_layout(content_rect, message.content or "")
+        row_layout = self._layout_rects(row_rect, message)
+        text_rect, layout = self._text_layout(row_layout.content_rect, message.content or "")
         return self._text_position_for_point(layout, text_rect, position, clamp=False) >= 0
 
     def begin_text_selection(self, view, index: QModelIndex, position: QPoint) -> bool:
@@ -274,8 +325,8 @@ class MessageDelegate(QStyledItemDelegate):
         if not row_rect.isValid():
             return False
 
-        _, _, content_rect = self._layout_rects(row_rect, message)
-        text_rect, layout = self._text_layout(content_rect, message.content or "")
+        row_layout = self._layout_rects(row_rect, message)
+        text_rect, layout = self._text_layout(row_layout.content_rect, message.content or "")
         cursor_pos = self._text_position_for_point(layout, text_rect, position, clamp=False)
         if cursor_pos < 0:
             return False
@@ -311,8 +362,8 @@ class MessageDelegate(QStyledItemDelegate):
         if not row_rect.isValid():
             return False
 
-        _, _, content_rect = self._layout_rects(row_rect, message)
-        text_rect, layout = self._text_layout(content_rect, message.content or "")
+        row_layout = self._layout_rects(row_rect, message)
+        text_rect, layout = self._text_layout(row_layout.content_rect, message.content or "")
         cursor_pos = self._text_position_for_point(layout, text_rect, position, clamp=True)
         if cursor_pos < 0:
             return False
@@ -549,6 +600,24 @@ class MessageDelegate(QStyledItemDelegate):
         if view is not None:
             view.viewport().update()
 
+    def update_recall_notice_action_hover(self, view, index: QModelIndex, position: QPoint) -> bool:
+        """Refresh the hovered direct-edit action on recall notices."""
+        hovered_id = self.recall_notice_action_source_at(view, index, position)
+        if hovered_id == self._hovered_recall_notice_action_id:
+            return bool(hovered_id)
+        self._hovered_recall_notice_action_id = hovered_id
+        if view is not None:
+            view.viewport().update()
+        return bool(hovered_id)
+
+    def clear_recall_notice_action_hover(self, view=None) -> None:
+        """Clear any hovered direct-edit action on recall notices."""
+        if self._hovered_recall_notice_action_id is None:
+            return
+        self._hovered_recall_notice_action_id = None
+        if view is not None:
+            view.viewport().update()
+
     def set_context_menu_message(self, view, message_id: str | None) -> None:
         """Persist one temporary bubble highlight while a context menu is open."""
         normalized = str(message_id or "").strip() or None
@@ -589,17 +658,90 @@ class MessageDelegate(QStyledItemDelegate):
             return None
         return source_message_id or None
 
+    def recall_notice_action_source_at(self, view, index: QModelIndex, position: QPoint) -> str | None:
+        """Return the recalled source message id when the inline direct-edit action is clicked."""
+        if not index.isValid():
+            return None
+
+        message: ChatMessage = index.data(Qt.ItemDataRole.UserRole)
+        if not message or self._display_kind(index, message) != MessageModel.DISPLAY_RECALL_NOTICE:
+            return None
+
+        row_rect = view.visualRect(index)
+        if not row_rect.isValid():
+            return None
+
+        notice_rect = QRect(
+            row_rect.x(),
+            row_rect.y() + self.TIME_SPACING,
+            row_rect.width(),
+            self.RECALL_NOTICE_HEIGHT,
+        )
+        _notice_text, action_text, _notice_draw_rect, action_rect = self._recall_notice_layout(notice_rect, message)
+        if not action_text or action_rect is None or not action_rect.contains(position):
+            return None
+        source_message_id = str(index.data(MessageModel.SourceMessageIdRole) or "")
+        return source_message_id or None
+
+    def is_recall_notice_action_hit(self, view, index: QModelIndex, position: QPoint) -> bool:
+        """Return whether the viewport position is over the inline direct-edit action."""
+        return bool(self.recall_notice_action_source_at(view, index, position))
+
+    def _recall_notice_layout(self, rect: QRect, message: ChatMessage) -> tuple[str, str, QRect, QRect | None]:
+        """Return notice/action text plus their draw rects for one recall notice row."""
+        notice_text = self._recall_notice_text(message)
+        action_text = ""
+        if message.is_self and str((message.extra or {}).get("recalled_content", "") or "").strip():
+            action_text = tr("message.recalled.edit_direct", "Direct Edit")
+
+        notice_font = QFont()
+        notice_font.setPixelSize(12)
+        notice_metrics = QFontMetrics(notice_font)
+        notice_width = notice_metrics.horizontalAdvance(notice_text)
+
+        action_rect: QRect | None = None
+        total_width = notice_width
+        action_width = 0
+        if action_text:
+            action_font = QFont(notice_font)
+            action_font.setBold(True)
+            action_width = QFontMetrics(action_font).horizontalAdvance(action_text)
+            total_width += self.RECALL_ACTION_GAP + action_width
+
+        start_x = rect.x() + max(0, (rect.width() - total_width) // 2)
+        notice_rect = QRect(start_x, rect.y(), notice_width, rect.height())
+        if action_text:
+            action_rect = QRect(notice_rect.right() + 1 + self.RECALL_ACTION_GAP, rect.y(), action_width, rect.height())
+        return notice_text, action_text, notice_rect, action_rect
+
     def _draw_recall_notice(self, painter: QPainter, rect: QRect, message: ChatMessage) -> None:
         """Draw a centered system-style recall notice."""
-        font = QFont()
-        font.setPixelSize(12)
-        painter.setFont(font)
+        notice_text, action_text, notice_rect, action_rect = self._recall_notice_layout(rect, message)
+        notice_font = QFont()
+        notice_font.setPixelSize(12)
+        painter.setFont(notice_font)
         painter.setPen(QColor(196, 196, 196, 220) if isDarkTheme() else QColor("#8A8A8A"))
-        painter.drawText(
-            rect,
-            Qt.AlignmentFlag.AlignCenter,
-            message.content or tr("message.recalled_notice", "A message was recalled"),
-        )
+        painter.drawText(notice_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, notice_text)
+        if action_text and action_rect is not None:
+            action_font = QFont(notice_font)
+            painter.setFont(action_font)
+            hovered = self._hovered_recall_notice_action_id == str((message.extra or {}).get(MessageModel.SOURCE_MESSAGE_ID_KEY, "") or "")
+            if hovered:
+                hover_rect = action_rect.adjusted(-6, 1, 6, -1)
+                background = QColor(255, 255, 255, 32) if isDarkTheme() else QColor(0, 0, 0, 12)
+                border = QColor(255, 255, 255, 18) if isDarkTheme() else QColor(0, 0, 0, 8)
+                path = QPainterPath()
+                path.addRoundedRect(QRectF(hover_rect), hover_rect.height() / 2, hover_rect.height() / 2)
+                painter.fillPath(path, background)
+                painter.setPen(border)
+                painter.drawPath(path)
+            action_color = (
+                QColor("#AECBFA") if hovered and isDarkTheme() else
+                QColor("#8AB4F8") if isDarkTheme() else
+                QColor("#B3261E") if hovered else QColor("#D93025")
+            )
+            painter.setPen(action_color)
+            painter.drawText(action_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, action_text)
 
     def _display_kind(self, index: QModelIndex, message: ChatMessage) -> str:
         """Return the visible row kind for the current index."""
@@ -714,7 +856,7 @@ class MessageDelegate(QStyledItemDelegate):
         elif message.message_type == MessageType.VIDEO:
             self._draw_video_content(painter, content_rect, message)
         else:
-            self._draw_text_content(painter, content_rect, message)
+            self._draw_text_content(painter, content_rect, message, bubble_color)
 
     def _draw_text_content(self, painter: QPainter, rect: QRect, message: ChatMessage, background_fill: QColor) -> None:
         """Draw wrapped text content."""
@@ -961,13 +1103,103 @@ class MessageDelegate(QStyledItemDelegate):
             return "Upload failed"
         return ""
 
-    def _layout_rects(self, row_rect: QRect, message: ChatMessage) -> tuple[QRect, QRect, QRect]:
-        """Compute avatar, bubble, and content rectangles for a row."""
+    def _group_sender_label_text(self, message: ChatMessage) -> str:
+        """Return the group member label shown above group bubbles when enabled."""
+        if (
+            not self._show_group_member_nickname
+            or self._active_session_type != "group"
+            or self._active_session_id != str(message.session_id or "")
+        ):
+            return ""
+
+        return self._group_member_display_name(message)
+
+    def _group_member_display_name(self, message: ChatMessage) -> str:
+        """Resolve one active-session group member display name for chat-area labels and notices."""
+        if (
+            self._active_session_type != "group"
+            or self._active_session_id != str(message.session_id or "")
+        ):
+            return (
+                str((message.extra or {}).get("sender_nickname", "") or "").strip()
+                or str((message.extra or {}).get("sender_name", "") or "").strip()
+                or str((message.extra or {}).get("sender_username", "") or "").strip()
+                or str(message.sender_id or "").strip()
+            )
+
+        member = self._group_members_by_id.get(str(message.sender_id or "").strip(), {})
+        return (
+            str(member.get("group_nickname", "") or "").strip()
+            or str(member.get("remark", "") or "").strip()
+            or str(member.get("nickname", "") or "").strip()
+            or str(member.get("display_name", "") or "").strip()
+            or str(member.get("username", "") or "").strip()
+            or str((message.extra or {}).get("sender_nickname", "") or "").strip()
+            or str((message.extra or {}).get("sender_name", "") or "").strip()
+            or str((message.extra or {}).get("sender_username", "") or "").strip()
+            or str(message.sender_id or "").strip()
+        )
+
+    def _recall_notice_text(self, message: ChatMessage) -> str:
+        """Resolve the displayed recall notice text for one chat row."""
+        if (
+            message.status == MessageStatus.RECALLED
+            and not message.is_self
+            and self._active_session_type == "group"
+            and self._active_session_id == str(message.session_id or "")
+        ):
+            actor_name = self._group_member_display_name(message)
+            if actor_name:
+                return tr("message.recalled.by", "{name} recalled a message", name=f"“{actor_name}”")
+        return message.content or tr("message.recalled_notice", "A message was recalled")
+
+    def _group_sender_label_font(self) -> QFont:
+        """Return the shared font used by group sender labels."""
+        font = QFont()
+        font.setPixelSize(self.GROUP_SENDER_LABEL_FONT_PIXEL_SIZE)
+        return font
+
+    def _group_sender_label_height(self) -> int:
+        """Return the painted height for one sender label row."""
+        return QFontMetrics(self._group_sender_label_font()).height()
+
+    def _group_sender_label_block_height(self, message: ChatMessage) -> int:
+        """Return the extra top spacing reserved for one group sender label."""
+        return self._group_sender_label_height() + self.GROUP_SENDER_LABEL_GAP if self._group_sender_label_text(message) else 0
+
+    def _draw_group_sender_label(self, painter: QPainter, row_layout: _MessageRowLayout, message: ChatMessage) -> None:
+        """Draw one compact sender label above the group bubble and align it with the avatar top edge."""
+        if row_layout.sender_label_rect is None:
+            return
+
+        label = self._group_sender_label_text(message)
+        if not label:
+            return
+
+        text_rect = row_layout.sender_label_rect
+        font = self._group_sender_label_font()
+        metrics = QFontMetrics(font)
+        painter.setFont(font)
+        painter.setPen(QColor(196, 196, 196, 220) if isDarkTheme() else QColor("#8A8A8A"))
+        elided = metrics.elidedText(label, Qt.TextElideMode.ElideRight, text_rect.width())
+        text_width = metrics.horizontalAdvance(elided)
+        if bool(row_layout.sender_label_alignment & Qt.AlignmentFlag.AlignRight):
+            text_x = text_rect.right() - text_width + 1
+        else:
+            text_x = text_rect.x()
+        text_y = text_rect.y() + metrics.ascent()
+        painter.drawText(QPoint(text_x, text_y), elided)
+
+    def _layout_rects(self, row_rect: QRect, message: ChatMessage) -> _MessageRowLayout:
+        """Compute row geometry for avatar, sender label, bubble, and content."""
         bubble_size = self._bubble_size(message, row_rect.width())
         row_top = row_rect.y() + 8
+        label = self._group_sender_label_text(message)
+        sender_label_height = self._group_sender_label_height() if label else 0
+        sender_label_block_height = sender_label_height + self.GROUP_SENDER_LABEL_GAP if label else 0
         standalone_attachment = message.message_type in {MessageType.IMAGE, MessageType.VIDEO, MessageType.FILE}
         avatar_y = row_top
-        bubble_y = row_top
+        bubble_y = row_top + sender_label_block_height
         bubble_gap = self.BUBBLE_GAP + (self.TAIL_SPACE if standalone_attachment else 0)
 
         if message.is_self:
@@ -983,6 +1215,17 @@ class MessageDelegate(QStyledItemDelegate):
                 bubble_size.width(),
                 bubble_size.height(),
             )
+            sender_label_rect = (
+                QRect(
+                    bubble_rect.x() + 2,
+                    avatar_rect.y(),
+                    max(1, bubble_rect.width() - self.TAIL_SPACE - 8),
+                    sender_label_height,
+                )
+                if label
+                else None
+            )
+            sender_label_alignment = Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignTop
         else:
             avatar_rect = QRect(
                 row_rect.x() + self.LEFT_MARGIN,
@@ -996,8 +1239,25 @@ class MessageDelegate(QStyledItemDelegate):
                 bubble_size.width(),
                 bubble_size.height(),
             )
+            sender_label_rect = (
+                QRect(
+                    bubble_rect.x() + self.TAIL_SPACE + 2,
+                    avatar_rect.y(),
+                    max(1, bubble_rect.width() - self.TAIL_SPACE - 8),
+                    sender_label_height,
+                )
+                if label
+                else None
+            )
+            sender_label_alignment = Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop
 
-        return avatar_rect, bubble_rect, self._content_rect(bubble_rect, message)
+        return _MessageRowLayout(
+            avatar_rect=avatar_rect,
+            bubble_rect=bubble_rect,
+            content_rect=self._content_rect(bubble_rect, message),
+            sender_label_rect=sender_label_rect,
+            sender_label_alignment=sender_label_alignment,
+        )
 
     def _content_rect(self, bubble_rect: QRect, message: ChatMessage) -> QRect:
         """Return the inner bubble content rectangle."""
@@ -1789,4 +2049,5 @@ class MessageDelegate(QStyledItemDelegate):
         message_list = parent.get_message_list()
         message_list.doItemsLayout()
         message_list.viewport().update()
+
 

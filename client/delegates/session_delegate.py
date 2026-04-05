@@ -15,7 +15,7 @@ from client.core.avatar_rendering import get_avatar_image_store
 from client.core.avatar_utils import profile_avatar_seed
 from client.core.datetime_utils import coerce_local_datetime
 from client.core.i18n import format_session_timestamp, tr
-from client.models.message import format_message_preview
+from client.models.message import build_recall_notice, format_message_preview
 from client.ui.common.emoji_utils import (
     centered_text_baseline,
     centered_emoji_top,
@@ -98,11 +98,9 @@ class SessionDelegate(QStyledItemDelegate):
         mute_slot_width = mute_icon_size + 8 if muted else 0
 
         unread_text = self._format_unread(session.unread_count)
-        unread_width = 0
-        if unread_text:
-            unread_width = max(16, preview_fm.horizontalAdvance(unread_text) + 12)
+        unread_width = max(20, preview_fm.horizontalAdvance(unread_text) + 14) if unread_text else 0
 
-        name_available = max(0, content_width - time_width - unread_width - 18)
+        name_available = max(0, content_width - time_width - 12)
         name_text = name_fm.elidedText(
             session.display_name() or tr("session.unnamed", "Untitled Session"),
             Qt.TextElideMode.ElideRight,
@@ -126,9 +124,13 @@ class SessionDelegate(QStyledItemDelegate):
                 name_text,
             )
 
-        badge_anchor_x = content_left + name_fm.horizontalAdvance(name_text) + 8
-        if unread_text and unread_width > 0 and badge_anchor_x + unread_width <= content_right:
-            badge_rect = QRect(badge_anchor_x, name_y + 2, unread_width, 16)
+        if unread_text and unread_width > 0:
+            badge_rect = QRect(
+                avatar_rect.right() - unread_width + 7,
+                avatar_rect.y() - 6,
+                unread_width,
+                18,
+            )
             self._draw_unread_badge(painter, badge_rect, unread_text)
 
         painter.setFont(preview_font)
@@ -157,13 +159,34 @@ class SessionDelegate(QStyledItemDelegate):
                 preview_color,
             )
         else:
-            painter.setPen(preview_color)
-            self._draw_preview_runs(
-                painter,
-                QRect(content_left, preview_y - 1, preview_available, 28),
-                preview_text,
-                preview_color,
-            )
+            attention_prefix = self._attention_preview_prefix(session)
+            if attention_prefix:
+                prefix_font = self._ui_font(13, bold=True)
+                prefix_fm = QFontMetrics(prefix_font)
+                prefix_width = prefix_fm.horizontalAdvance(attention_prefix) + 6
+                body_available = max(0, preview_available - prefix_width)
+                attention_color = QColor("#FF6B6B") if isDarkTheme() else QColor("#D93025")
+                painter.setFont(prefix_font)
+                painter.setPen(attention_color)
+                painter.drawText(
+                    QRect(content_left, preview_y, prefix_width, 24),
+                    Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                    attention_prefix,
+                )
+                self._draw_preview_runs(
+                    painter,
+                    QRect(content_left + prefix_width, preview_y - 1, body_available, 28),
+                    preview_text,
+                    attention_color,
+                )
+            else:
+                painter.setPen(preview_color)
+                self._draw_preview_runs(
+                    painter,
+                    QRect(content_left, preview_y - 1, preview_available, 28),
+                    preview_text,
+                    preview_color,
+                )
 
         painter.setFont(time_font)
         painter.setPen(time_color)
@@ -307,6 +330,12 @@ class SessionDelegate(QStyledItemDelegate):
             return self._ui_font(22)
         return self._ui_font(13)
 
+    def _attention_preview_prefix(self, session) -> str:
+        """Return the red preview prefix shown when the latest group message mentions the current user."""
+        if hasattr(session, "preview_mentions_current_user") and session.preview_mentions_current_user():
+            return tr("session.preview.mentioned", "[Mentioned]")
+        return ""
+
     def _preview_emoji_font(self) -> QFont:
         """Return the larger font used for emoji glyphs inside preview text."""
         font = QFont()
@@ -440,8 +469,16 @@ class SessionDelegate(QStyledItemDelegate):
         """Format preview text for media and file messages."""
         preview = session.last_message or tr("session.start_new", "Start a new conversation")
         message_type = session.extra.get("last_message_type") if getattr(session, "extra", None) else None
+        message_status = str(session.extra.get("last_message_status", "") or "") if getattr(session, "extra", None) else ""
         preview_text = format_message_preview(preview, message_type)
         sender_name = session.preview_sender_name() if hasattr(session, "preview_sender_name") else ""
+        if message_status == "recalled" and getattr(session, "session_type", "") == "group":
+            return build_recall_notice(
+                is_self=not bool(sender_name),
+                session_type="group",
+                sender_name=sender_name,
+                sender_id=str(session.extra.get("last_message_sender_id", "") or ""),
+            )
         if sender_name and session.last_message:
             return f"{sender_name}：{preview_text}"
         return preview_text

@@ -293,6 +293,10 @@ class SessionPanel(QWidget):
         session_id = data.get("session_id")
         message = data.get("message")
         if session_id and message:
+            session = self._session_controller.get_session(session_id)
+            if session is not None:
+                self._update_session_safe(session)
+                return
             self._session_model.update_session(
                 session_id,
                 last_message=format_message_preview(
@@ -619,6 +623,7 @@ class SessionPanel(QWidget):
                 session.unread_count,
                 getattr(session, "is_pinned", False),
                 session.extra.get("pinned_at"),
+                bool(session.extra.get("last_message_mentions_current_user", False)),
                 bool(session.extra.get("is_muted", False)),
                 getattr(session, "draft_preview", None),
             )

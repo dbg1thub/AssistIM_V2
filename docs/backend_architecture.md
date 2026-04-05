@@ -21,6 +21,7 @@
 - 进程内 `RealtimeHub` 默认实现（连接注册表 / presence / fanout）
 - 进程内 `RateLimitStore` 默认实现
 - 测试环境可使用 SQLite，生产目标优先 PostgreSQL
+- 开发环境可保留 `HTTP` / `WS`，生产环境正式基线收敛到 `HTTPS` / `WSS`
 
 ### 2.2 目标演进路径
 
@@ -29,6 +30,7 @@
 - Presence / Fanout 通过 `RealtimeHub` 从进程内实现外置到 Redis / PubSub
 - 文件存储从本地目录切换到对象存储
 - 后台任务从进程内执行演进到 worker / queue
+- 通话能力从单机 signaling 演进到可替换的通话状态基础设施
 - 历史兼容脚本逐步收敛为标准 migration 流程
 
 原则：
@@ -136,6 +138,20 @@ Service 是真正的业务边界，HTTP 与 WebSocket 都必须复用同一套 S
 - 发现反向 `pending` 请求时，直接接受已有请求并建立好友关系
 - 已经是好友时不再创建新请求
 
+### 4.4 UserDevice / PreKey / ActiveCall
+
+后续接入私聊 E2EE 与 1:1 通话后，服务端需要新增以下正式边界：
+
+- `user_devices`：表达用户设备身份、公钥与设备元数据
+- `user_prekeys` / `signed_prekeys`：表达 1:1 建链所需的 prekey bundle
+- `ActiveCall`：表达短生命周期活跃通话状态，可先通过可替换基础设施边界承载，不要求第一版落库
+
+设计要求：
+
+- 设备公钥注册与 prekey 分发走显式 API / Service 边界
+- 活跃通话状态不直接散落在 WebSocket handler 的局部变量里
+- 群聊 E2EE 与群通话不复用 1:1 的简化假设，后续单独建模
+
 ## 5. 消息一致性规则
 
 ### 5.1 `msg_id` 是命令幂等键
@@ -205,6 +221,8 @@ Service 是真正的业务边界，HTTP 与 WebSocket 都必须复用同一套 S
 
 ## 6. WebSocket 实时链路
 
+字段级 payload 约束见 [realtime_protocol.md](./realtime_protocol.md)，本节只描述职责边界与一致性规则。
+
 ### 6.1 连接阶段
 
 - 连接建立
@@ -227,6 +245,17 @@ Service 是真正的业务边界，HTTP 与 WebSocket 都必须复用同一套 S
 - 再广播结果
 - 不允许在 Gateway 内仅做“会话成员校验后直接广播”
 
+### 6.4 通话 signaling
+
+1:1 语音 / 视频通话的 signaling 继续复用聊天 WebSocket。
+
+正式设计原则：
+
+- 来电、接听、拒绝、挂断、offer / answer / ICE 由 Gateway 做协议适配，由 `CallService` 做权限与状态规则
+- 通话 signaling 不进入 `session_seq` / `event_seq` 的消息补偿语义
+- 媒体流不通过 WebSocket 传输，统一走 WebRTC
+- 服务端负责下发 STUN / TURN 配置与短时凭证，不在客户端写死长期中继密码
+
 ## 7. Presence 与广播设计
 
 当前基线可以使用进程内连接管理器，但架构上应保证它是可替换的。
@@ -236,6 +265,7 @@ Service 是真正的业务边界，HTTP 与 WebSocket 都必须复用同一套 S
 - Presence 状态缓存与 WS 连接管理解耦
 - 广播接口抽象为可替换的 fanout 通道
 - 不让业务 Service 直接依赖某种具体广播存储实现
+- 活跃通话状态与通话路由同样应通过可替换边界暴露，而不是把“谁正在通话”写死在某个 WS handler 私有结构中
 
 ## 8. 数据库与迁移策略
 
@@ -244,6 +274,7 @@ Service 是真正的业务边界，HTTP 与 WebSocket 都必须复用同一套 S
 - PostgreSQL 是生产数据库优先选择
 - SQLAlchemy 是 ORM 边界
 - Alembic 是正式 migration 机制
+- 生产部署中的外部入口统一通过 `HTTPS` / `WSS`
 
 ### 8.2 测试与兼容
 
@@ -265,6 +296,7 @@ Service 是真正的业务边界，HTTP 与 WebSocket 都必须复用同一套 S
 - 上传接口和文件列表接口统一返回规范媒体元数据，而不是只返回一个 `file_url` 字符串
 - 消息附件通过 `messages.extra` 持久化远端附件元数据，确保历史消息、断线补偿和兼容 sync 都能回放同一份附件信息
 - 服务端不持久化 `local_path`、`uploading` 之类客户端临时状态
+- 启用 E2EE 的私聊附件中，`files` 与消息附件元数据允许保存密文文件与加密 envelope；服务端不依赖文件明文内容执行业务规则
 
 ### 9.3 客户端职责边界
 
@@ -278,8 +310,24 @@ Service 是真正的业务边界，HTTP 与 WebSocket 都必须复用同一套 S
 - 不允许把“当前是本地磁盘存储”写死到消息协议和业务层判断里
 - 新增对象存储实现时，应优先新增 `MediaStorage` 子类，而不是修改 Controller / Manager / Router 逻辑
 - 上传返回字段和消息附件字段必须保持兼容，避免文件列表、聊天消息、历史回放各自发明不同格式
+- 如果附件接入 E2EE，服务端仍只持久化密文对象与规范元数据，不在上传链路偷偷生成依赖明文的第二套真相
 
-## 10. 可观测性与测试
+## 10. 端到端加密边界
+
+私聊 E2EE 的正式边界如下：
+
+- 服务端负责设备注册、公钥分发、prekey claim、密文路由和密文持久化
+- 服务端不把自己视为私聊明文真相层
+- 权限判断、会话成员判断、撤回 / 编辑 / 删除 / 已读等规则不依赖服务端解密正文
+- AI 会话默认保持服务端可见明文，不自动继承私聊 E2EE 策略
+
+MVP 约束：
+
+- 只支持 `private` 会话
+- 群聊 E2EE 延后
+- 多设备密钥恢复延后
+
+## 11. 可观测性与测试
 
 关键链路必须可验证：
 
@@ -290,6 +338,8 @@ Service 是真正的业务边界，HTTP 与 WebSocket 都必须复用同一套 S
 - 已读游标推进
 - 断线补偿（消息游标 + 事件游标）
 - 编辑 / 撤回 / 删除权限
+- 通话 signaling 权限、占线与状态流转
+- 设备注册、prekey 分发与私聊密文收发
 
 日志至少应能关联：
 
@@ -297,16 +347,21 @@ Service 是真正的业务边界，HTTP 与 WebSocket 都必须复用同一套 S
 - `session_id`
 - `message_id` / `msg_id`
 - endpoint / ws event
+- `call_id`
+- `device_id`
 
 
-## 11. 兼容入口策略
+## 12. 兼容入口策略
 
 - 正式 API 入口保持 /api/v1/* 与 /api/* 两层。
 - 历史 chat HTTP 兼容入口只保留单一显式前缀 /api/chat/*。
 - 不通过重复 router 挂载制造 /api/api/chat/* 这类二次别名。
 - POST /api/chat/sync 优先复用 session_cursors + event_cursors，返回 {messages, events}；仅对极旧调用方保留 session_id 快照 fallback。
 - /ws 是正式聊天 WebSocket 入口；历史 /ws/chat 只作为显式兼容 alias 保留，并可通过配置单独关闭。
-## 12. 配置加载策略
+
+通话与设备密钥相关接口正式收敛到主 API / WebSocket 边界中，不单独再造第二套 legacy 入口。
+
+## 13. 配置加载策略
 
 - 服务端配置通过 `Settings` 运行时快照读取，不在 dataclass 类定义时冻结环境变量。
 - 应用入口通过 `create_app(settings)` 组装，兼容开关和部署参数由 app factory 显式决定。

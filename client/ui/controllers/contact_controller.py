@@ -317,6 +317,12 @@ class ContactController:
         record.member_count = len(raw.get("members", []) or []) or int(raw.get("member_count", 0) or record.member_count or 0)
         return record
 
+    def _group_payload_from_service_result(self, payload: dict[str, object] | GroupRecord | object | None) -> dict[str, object] | GroupRecord | object | None:
+        """Extract one normalized group payload from mixed service mutation responses."""
+        if isinstance(payload, dict) and isinstance(payload.get("group"), dict):
+            return dict(payload.get("group") or {})
+        return payload
+
     def merge_group_record(
         self,
         groups: list[GroupRecord],
@@ -575,6 +581,11 @@ class ContactController:
         payload = await self._contact_service.create_group(name, member_ids)
         return self._service_group_record(payload, fallback_name=name)
 
+    async def fetch_group(self, group_id: str) -> GroupRecord:
+        """Fetch one authoritative group snapshot."""
+        payload = await self._contact_service.fetch_group(group_id)
+        return self._service_group_record(payload, fallback_id=group_id)
+
     async def update_group_profile(
         self,
         group_id: str,
@@ -608,6 +619,30 @@ class ContactController:
     async def remove_friend(self, friend_id: str) -> None:
         """Remove an existing friend."""
         await self._contact_service.remove_friend(friend_id)
+
+    async def leave_group(self, group_id: str) -> dict:
+        """Leave one existing group."""
+        return await self._contact_service.leave_group(group_id)
+
+    async def add_group_member(self, group_id: str, user_id: str, *, role: str = "member") -> GroupRecord:
+        """Add one member to the group and return the updated snapshot."""
+        payload = await self._contact_service.add_group_member(group_id, user_id, role=role)
+        return self._service_group_record(self._group_payload_from_service_result(payload), fallback_id=group_id)
+
+    async def remove_group_member(self, group_id: str, user_id: str) -> GroupRecord:
+        """Remove one member from the group and return a refreshed snapshot."""
+        await self._contact_service.remove_group_member(group_id, user_id)
+        return await self.fetch_group(group_id)
+
+    async def update_group_member_role(self, group_id: str, user_id: str, *, role: str) -> GroupRecord:
+        """Update one member role and return the updated group snapshot."""
+        payload = await self._contact_service.update_group_member_role(group_id, user_id, role=role)
+        return self._service_group_record(self._group_payload_from_service_result(payload), fallback_id=group_id)
+
+    async def transfer_group_ownership(self, group_id: str, new_owner_id: str) -> GroupRecord:
+        """Transfer group ownership and return the updated snapshot."""
+        payload = await self._contact_service.transfer_group_ownership(group_id, new_owner_id)
+        return self._service_group_record(self._group_payload_from_service_result(payload), fallback_id=group_id)
 
     def group_contacts(self, contacts: list[ContactRecord]) -> dict[str, list[ContactRecord]]:
         """Group contacts by sort letter."""
