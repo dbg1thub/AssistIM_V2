@@ -47,6 +47,8 @@ class GroupOut(ORMModel):
     avatar_kind: str = "generated"
     owner_id: str
     session_id: str
+    member_version: int = 0
+    group_member_version: int = 0
 
 
 

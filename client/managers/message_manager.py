@@ -1,10 +1,14 @@
-"""
+﻿"""
 Message Manager Module
 
 Manager for message handling, ACK processing, and caching.
 """
 import asyncio
+from copy import deepcopy
+import hashlib
 import json
+import os
+import tempfile
 import time
 import uuid
 from dataclasses import dataclass
@@ -20,6 +24,7 @@ from client.events.event_bus import get_event_bus
 from client.managers.connection_manager import get_connection_manager
 from client.models.message import ChatMessage, MessageStatus, MessageType, build_attachment_extra, build_recall_notice, merge_sender_profile_extra, resolve_recall_notice, sanitize_outbound_message_extra
 from client.services.chat_service import get_chat_service
+from client.services.e2ee_service import get_e2ee_service
 from client.services.file_service import get_file_service
 from client.storage.database import get_database
 
@@ -46,6 +51,9 @@ class MessageEvent:
     PROFILE_UPDATED = "message_profile_updated"
     GROUP_UPDATED = "message_group_updated"
     GROUP_SELF_UPDATED = "message_group_self_updated"
+    MEDIA_READY = "message_media_ready"
+    DECRYPTION_STATE_CHANGED = "message_decryption_state_changed"
+    RECOVERED = "message_recovered"
 
 
 @dataclass
@@ -197,6 +205,7 @@ class MessageManager:
         self._conn_manager = get_connection_manager()
         self._db = get_database()
         self._chat_service = get_chat_service()
+        self._e2ee_service = None
         self._file_service = get_file_service()
 
         # Send queue
@@ -208,6 +217,7 @@ class MessageManager:
         self._incoming_message_inflight: set[str] = set()
         self._recent_incoming_message_ids: dict[str, float] = {}
         self._incoming_message_dedupe_ttl = 300.0
+        self._media_prefetch_tasks: dict[str, asyncio.Task] = {}
 
         self._ack_check_task: Optional[asyncio.Task] = None
         self._running = False
@@ -370,8 +380,10 @@ class MessageManager:
             normalized.setdefault("content", fallback_message.content)
             normalized.setdefault("status", fallback_message.status.value)
             normalized.setdefault("is_self", True)
-            merged_extra = dict(fallback_message.extra or {})
-            merged_extra.update(dict(normalized.get("extra") or {}))
+            merged_extra = self._merge_ack_extra(
+                dict(fallback_message.extra or {}),
+                dict(normalized.get("extra") or {}),
+            )
             normalized["extra"] = merged_extra
         else:
             normalized.setdefault("sender_id", self._user_id)
@@ -382,6 +394,28 @@ class MessageManager:
             normalized,
             default_session_id=str(normalized.get("session_id", "") or ""),
         )
+
+    @staticmethod
+    def _merge_ack_extra(local_extra: dict[str, Any], ack_extra: dict[str, Any]) -> dict[str, Any]:
+        """Merge canonical ACK extra fields without dropping local-only decrypted caches."""
+        merged_extra = dict(local_extra or {})
+        merged_extra.update(dict(ack_extra or {}))
+
+        local_encryption = dict(local_extra.get("encryption") or {})
+        ack_encryption = dict(ack_extra.get("encryption") or {})
+        if local_encryption and ack_encryption:
+            merged_encryption = dict(local_encryption)
+            merged_encryption.update(ack_encryption)
+            merged_extra["encryption"] = merged_encryption
+
+        local_attachment = dict(local_extra.get("attachment_encryption") or {})
+        ack_attachment = dict(ack_extra.get("attachment_encryption") or {})
+        if local_attachment and ack_attachment:
+            merged_attachment = dict(local_attachment)
+            merged_attachment.update(ack_attachment)
+            merged_extra["attachment_encryption"] = merged_attachment
+
+        return merged_extra
     
     async def _handle_ws_message(self, data: dict) -> None:
         """Handle incoming WebSocket message."""
@@ -450,12 +484,15 @@ class MessageManager:
                 logger.warning("ACK received for unknown message: %s", msg_id)
                 return
 
+            message = await self._decrypt_message_for_display(message)
+
 
             if message.status in {MessageStatus.PENDING, MessageStatus.SENDING, MessageStatus.FAILED}:
                 message.status = MessageStatus.SENT
                 message.updated_at = datetime.now()
 
             await self._db.save_message(message)
+            self._maybe_schedule_encrypted_media_prefetch(message)
             logger.info(f"Message ACK received: {msg_id}")
 
             await self._event_bus.emit(MessageEvent.ACK, {
@@ -498,6 +535,7 @@ class MessageManager:
             payload,
             default_session_id=str(msg_data.get("session_id", "") or ""),
         )
+        message = await self._decrypt_message_for_display(message)
         if not message.is_self and message.status in {MessageStatus.PENDING, MessageStatus.SENDING, MessageStatus.SENT}:
             message.status = MessageStatus.RECEIVED
         if not await self._reserve_incoming_message(message.message_id):
@@ -508,6 +546,7 @@ class MessageManager:
         try:
             existing_message = await self._db.get_message(message.message_id)
             if existing_message is not None:
+                message = self._merge_local_encryption_cache(existing_message, message)
                 # Websocket reconnects or duplicate server fan-out may deliver the
                 # same chat payload more than once. Persist the freshest payload, but
                 # do not re-emit a second RECEIVED event for the same logical message
@@ -527,6 +566,7 @@ class MessageManager:
                 return
 
             await self._db.save_message(message)
+            self._maybe_schedule_encrypted_media_prefetch(message)
 
             await self._event_bus.emit(MessageEvent.RECEIVED, {
                 "message": message,
@@ -648,6 +688,602 @@ class MessageManager:
 
         message.extra = self._merge_sender_profile_into_extra(message.extra, current_user)
 
+    async def _load_session_context(self, session_id: str):
+        """Load one cached session for routing decisions such as private-chat E2EE."""
+        if not session_id:
+            return None
+        try:
+            return await self._db.get_session(session_id)
+        except Exception as exc:
+            logger.warning("Failed to load session context for %s: %s", session_id, exc)
+            return None
+
+    def _require_e2ee_service(self):
+        """Lazily initialize the E2EE helper so non-encrypted code paths stay lightweight."""
+        if self._e2ee_service is None:
+            self._e2ee_service = get_e2ee_service()
+        return self._e2ee_service
+
+    def _should_encrypt_message(self, session, message_type: MessageType) -> bool:
+        """Return whether one outbound text message should use E2EE."""
+        if session is None:
+            return False
+        if bool(getattr(session, "is_ai_session", False)):
+            return False
+        if message_type != MessageType.TEXT:
+            return False
+        return str(getattr(session, "session_type", "") or "").strip() in {"direct", "group"}
+
+    @staticmethod
+    def _resolve_group_member_ids(session, current_user_id: str) -> list[str]:
+        member_ids: list[str] = []
+        for member in list(getattr(session, "extra", {}).get("members") or []):
+            member_id = str((member or {}).get("id") or "").strip() if isinstance(member, dict) else ""
+            if member_id and member_id != current_user_id and member_id not in member_ids:
+                member_ids.append(member_id)
+        for participant_id in list(getattr(session, "participant_ids", []) or []):
+            normalized_participant_id = str(participant_id or "").strip()
+            if normalized_participant_id and normalized_participant_id != current_user_id and normalized_participant_id not in member_ids:
+                member_ids.append(normalized_participant_id)
+        return member_ids
+
+    @staticmethod
+    def _resolve_group_member_version(session, member_ids: list[str]) -> int:
+        explicit_version = getattr(session, "extra", {}).get("group_member_version")
+        try:
+            if explicit_version is not None:
+                return max(0, int(explicit_version))
+        except (TypeError, ValueError):
+            pass
+        payload = json.dumps(sorted(member_ids), ensure_ascii=True, separators=(",", ":"))
+        digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+        return int(digest[:16], 16)
+
+    async def _resolve_group_recipient_bundles(self, session) -> list[dict[str, Any]]:
+        recipient_bundles: list[dict[str, Any]] = []
+        seen_device_ids: set[str] = set()
+        for member_id in self._resolve_group_member_ids(session, self._user_id):
+            try:
+                bundles = await self._require_e2ee_service().fetch_prekey_bundle(member_id)
+            except Exception as exc:
+                logger.warning("Failed to load group member E2EE bundle for %s: %s", member_id, exc)
+                continue
+            for bundle in bundles:
+                device_id = str(dict(bundle or {}).get("device_id") or "").strip()
+                if not device_id or device_id in seen_device_ids:
+                    continue
+                seen_device_ids.add(device_id)
+                recipient_bundles.append(dict(bundle or {}))
+        return recipient_bundles
+
+    def _should_encrypt_attachment(self, session, message_type: MessageType) -> bool:
+        """Return whether one outbound attachment should be uploaded in encrypted form."""
+        if session is None:
+            return False
+        if bool(getattr(session, "is_ai_session", False)):
+            return False
+        if str(getattr(session, "session_type", "") or "").strip() not in {"direct", "group"}:
+            return False
+        return message_type in {MessageType.FILE, MessageType.IMAGE, MessageType.VIDEO}
+
+    def _resolve_direct_counterpart_id(self, session) -> str:
+        """Resolve the other participant in one direct chat session."""
+        participant_ids = [
+            str(item or "").strip()
+            for item in list(getattr(session, "participant_ids", []) or [])
+            if str(item or "").strip()
+        ]
+        for participant_id in participant_ids:
+            if participant_id != self._user_id:
+                return participant_id
+
+        session_extra = dict(getattr(session, "extra", {}) or {})
+        counterpart_id = str(session_extra.get("counterpart_id", "") or "").strip()
+        if counterpart_id and counterpart_id != self._user_id:
+            return counterpart_id
+        return ""
+
+    @staticmethod
+    def _pending_outbound_security_review(session, message_type: MessageType) -> dict[str, str] | None:
+        """Return one local-only hold reason when outbound sends should wait for user review."""
+        if session is None or message_type != MessageType.TEXT:
+            return None
+        if bool(getattr(session, "is_ai_session", False)):
+            return None
+        if str(getattr(session, "session_type", "") or "").strip() != "direct":
+            return None
+        state = dict(getattr(session, "extra", {}).get("session_crypto_state") or {})
+        if not bool(state.get("identity_review_blocking")):
+            return None
+        review_action = str(state.get("identity_review_action") or "trust_peer_identity").strip()
+        return {
+            "reason": "identity_review_required",
+            "action_id": review_action or "trust_peer_identity",
+            "headline": str(state.get("identity_status") or "identity_changed").strip() or "identity_changed",
+        }
+
+    @staticmethod
+    def _assert_session_identity_safe_for_outbound(session) -> None:
+        """Block new direct E2EE sends when the peer identity changed and requires re-trust."""
+        if session is None:
+            return
+        if bool(getattr(session, "is_ai_session", False)):
+            return
+        if str(getattr(session, "session_type", "") or "").strip() != "direct":
+            return
+        state = dict(getattr(session, "extra", {}).get("session_crypto_state") or {})
+        if not bool(state.get("identity_review_blocking")):
+            return
+        review_action = str(state.get("identity_review_action") or "trust_peer_identity").strip()
+        raise RuntimeError(
+            f"peer identity changed and must be reviewed before sending ({review_action})"
+        )
+
+    @staticmethod
+    def _build_security_pending_extra(extra: dict[str, Any] | None, pending: dict[str, str] | None) -> dict[str, Any]:
+        """Attach one local-only outbound security hold descriptor to message extra."""
+        normalized = dict(extra or {})
+        if not pending:
+            normalized.pop("security_pending", None)
+            return normalized
+        normalized["security_pending"] = {
+            "reason": str(pending.get("reason") or "identity_review_required"),
+            "action_id": str(pending.get("action_id") or "trust_peer_identity"),
+            "headline": str(pending.get("headline") or "identity_changed"),
+            "queued_at": time.time(),
+        }
+        return normalized
+
+    async def _prepare_outbound_encryption(
+        self,
+        *,
+        session_id: str,
+        content: str,
+        message_type: MessageType,
+        extra: dict[str, Any] | None,
+    ) -> tuple[str, dict[str, Any]]:
+        """Encrypt one outbound text message and keep local display metadata."""
+        normalized_extra = dict(extra or {})
+        session = await self._load_session_context(session_id)
+        if not self._should_encrypt_message(session, message_type):
+            return str(content or ""), normalized_extra
+
+        session_type = str(getattr(session, "session_type", "") or "").strip()
+        if session_type == "direct":
+            self._assert_session_identity_safe_for_outbound(session)
+            counterpart_id = self._resolve_direct_counterpart_id(session)
+            if not counterpart_id:
+                raise RuntimeError("direct session counterpart could not be resolved for E2EE")
+
+            ciphertext, encryption = await self._require_e2ee_service().encrypt_text_for_user(counterpart_id, str(content or ""))
+            normalized_extra["encryption"] = encryption
+            return ciphertext, normalized_extra
+
+        if session_type == "group":
+            member_ids = self._resolve_group_member_ids(session, self._user_id)
+            if not member_ids:
+                raise RuntimeError("group session members could not be resolved for E2EE")
+            recipient_bundles = await self._resolve_group_recipient_bundles(session)
+            if not recipient_bundles:
+                raise RuntimeError("group session has no registered recipient devices for E2EE")
+            ciphertext, encryption = await self._require_e2ee_service().encrypt_text_for_group_session(
+                session_id,
+                str(content or ""),
+                recipient_bundles,
+                member_version=self._resolve_group_member_version(session, member_ids),
+                owner_user_id=self._user_id,
+            )
+            normalized_extra["encryption"] = encryption
+            return ciphertext, normalized_extra
+
+        return str(content or ""), normalized_extra
+
+    async def _decrypt_message_for_display(self, message: ChatMessage) -> ChatMessage:
+        """Hydrate one encrypted message back into UI-friendly plaintext when possible."""
+        encryption = dict((message.extra or {}).get("encryption") or {})
+        if not encryption.get("enabled"):
+            return await self._hydrate_attachment_metadata_for_display(message)
+
+        encryption.setdefault("content_ciphertext", str(encryption.get("content_ciphertext") or message.content or ""))
+        try:
+            plaintext = await self._require_e2ee_service().decrypt_text_content(message.content, message.extra)
+        except Exception as exc:
+            logger.warning("Failed to decrypt message %s: %s", message.message_id, exc)
+            encryption["decryption_error"] = str(exc)
+            await self._apply_text_decryption_diagnostics(encryption, message.extra)
+            message.extra["encryption"] = encryption
+            if not message.content or message.content == encryption["content_ciphertext"]:
+                message.content = tr("message.encrypted.placeholder", "[Encrypted message]")
+            await self._emit_decryption_state_changed(message, encryption, attachment=False)
+            return message
+
+        if plaintext is None:
+            await self._apply_text_decryption_diagnostics(encryption, message.extra)
+            if not message.content or message.content == encryption["content_ciphertext"]:
+                message.content = tr("message.encrypted.placeholder", "[Encrypted message]")
+            message.extra["encryption"] = encryption
+            await self._emit_decryption_state_changed(message, encryption, attachment=False)
+            return message
+
+        encryption["local_plaintext"] = self._require_e2ee_service().protect_local_plaintext(plaintext)
+        encryption["local_plaintext_version"] = self._require_e2ee_service().LOCAL_PLAINTEXT_VERSION
+        self._clear_local_decryption_diagnostics(encryption)
+        message.extra["encryption"] = encryption
+        message.content = plaintext
+        await self._emit_decryption_state_changed(message, encryption, attachment=False)
+        return await self._hydrate_attachment_metadata_for_display(message)
+
+    async def _hydrate_attachment_metadata_for_display(self, message: ChatMessage) -> ChatMessage:
+        """Hydrate encrypted attachment metadata into local-only display fields."""
+        attachment_encryption = dict((message.extra or {}).get("attachment_encryption") or {})
+        if not attachment_encryption.get("enabled"):
+            return message
+
+        try:
+            metadata = await self._require_e2ee_service().decrypt_attachment_metadata(attachment_encryption)
+        except Exception as exc:
+            logger.warning("Failed to decrypt attachment metadata for %s: %s", message.message_id, exc)
+            attachment_encryption["decryption_error"] = str(exc)
+            await self._apply_attachment_decryption_diagnostics(attachment_encryption)
+            message.extra["attachment_encryption"] = attachment_encryption
+            message.extra.setdefault("name", tr("attachment.encrypted", "Encrypted attachment"))
+            message.extra.setdefault("url", message.content)
+            await self._emit_decryption_state_changed(message, attachment_encryption, attachment=True)
+            return message
+
+        if not metadata:
+            await self._apply_attachment_decryption_diagnostics(attachment_encryption)
+            message.extra["attachment_encryption"] = attachment_encryption
+            message.extra.setdefault("name", tr("attachment.encrypted", "Encrypted attachment"))
+            message.extra.setdefault("url", message.content)
+            await self._emit_decryption_state_changed(message, attachment_encryption, attachment=True)
+            return message
+
+        attachment_encryption["local_metadata"] = self._require_e2ee_service().protect_local_plaintext(
+            json.dumps(metadata, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+        )
+        attachment_encryption["local_plaintext_version"] = self._require_e2ee_service().LOCAL_PLAINTEXT_VERSION
+        self._clear_local_decryption_diagnostics(attachment_encryption)
+        message.extra["attachment_encryption"] = attachment_encryption
+        await self._emit_decryption_state_changed(message, attachment_encryption, attachment=True)
+
+        original_name = str(metadata.get("original_name") or "").strip()
+        mime_type = str(metadata.get("mime_type") or "").strip()
+        try:
+            size_bytes = max(0, int(metadata.get("size_bytes") or 0))
+        except (TypeError, ValueError):
+            size_bytes = 0
+
+        if original_name:
+            message.extra["name"] = original_name
+        message.extra["file_type"] = mime_type
+        message.extra["size"] = size_bytes
+        message.extra["url"] = message.content
+        media = dict(message.extra.get("media") or {})
+        media["url"] = message.content
+        if original_name:
+            media["original_name"] = original_name
+        if mime_type:
+            media["mime_type"] = mime_type
+        media["size_bytes"] = size_bytes
+        message.extra["media"] = media
+        return message
+
+    @staticmethod
+    def _clear_local_decryption_diagnostics(envelope: dict[str, Any]) -> None:
+        envelope.pop("decryption_error", None)
+        envelope.pop("decryption_state", None)
+        envelope.pop("recovery_action", None)
+        envelope.pop("local_device_id", None)
+        envelope.pop("target_device_id", None)
+        envelope.pop("can_decrypt", None)
+
+    async def _emit_decryption_state_changed(self, message: ChatMessage, envelope: dict[str, Any], *, attachment: bool) -> None:
+        await self._event_bus.emit(
+            MessageEvent.DECRYPTION_STATE_CHANGED,
+            {
+                "message_id": str(message.message_id or ""),
+                "session_id": str(message.session_id or ""),
+                "attachment": bool(attachment),
+                "decryption_state": str(envelope.get("decryption_state") or "ready"),
+                "recovery_action": str(envelope.get("recovery_action") or ""),
+                "can_decrypt": bool(envelope.get("can_decrypt", True)),
+                "local_device_id": str(envelope.get("local_device_id") or ""),
+                "target_device_id": str(envelope.get("target_device_id") or ""),
+                "message": message,
+            },
+        )
+
+    async def _apply_text_decryption_diagnostics(self, encryption: dict[str, Any], extra: dict[str, Any] | None) -> None:
+        state = await self._require_e2ee_service().describe_text_decryption_state(extra)
+        self._store_local_decryption_diagnostics(encryption, state)
+
+    async def _apply_attachment_decryption_diagnostics(self, attachment_encryption: dict[str, Any]) -> None:
+        state = await self._require_e2ee_service().describe_attachment_decryption_state(attachment_encryption)
+        self._store_local_decryption_diagnostics(attachment_encryption, state)
+
+    @staticmethod
+    def _store_local_decryption_diagnostics(envelope: dict[str, Any], state: dict[str, Any] | None) -> None:
+        normalized_state = dict(state or {})
+        state_name = str(normalized_state.get("state") or "").strip()
+        if state_name:
+            envelope["decryption_state"] = state_name
+        else:
+            envelope.pop("decryption_state", None)
+
+        can_decrypt = normalized_state.get("can_decrypt")
+        if can_decrypt is not None:
+            envelope["can_decrypt"] = bool(can_decrypt)
+        else:
+            envelope.pop("can_decrypt", None)
+
+        local_device_id = str(normalized_state.get("local_device_id") or "").strip()
+        if local_device_id:
+            envelope["local_device_id"] = local_device_id
+        else:
+            envelope.pop("local_device_id", None)
+
+        target_device_id = str(normalized_state.get("target_device_id") or "").strip()
+        if target_device_id:
+            envelope["target_device_id"] = target_device_id
+        else:
+            envelope.pop("target_device_id", None)
+
+        if normalized_state.get("reprovision_required"):
+            envelope["recovery_action"] = "reprovision_device"
+        elif state_name == "not_for_current_device":
+            envelope["recovery_action"] = "switch_device"
+        else:
+            envelope.pop("recovery_action", None)
+
+    async def prepare_attachment_upload(
+        self,
+        *,
+        session_id: str,
+        file_path: str,
+        message_type: MessageType,
+        fallback_name: str,
+        fallback_size: int,
+    ) -> tuple[str, dict[str, Any], Optional[str]]:
+        """Prepare one attachment upload, optionally encrypting the file before transfer."""
+        session = await self._load_session_context(session_id)
+        if not self._should_encrypt_attachment(session, message_type):
+            return file_path, {}, None
+
+        session_type = str(getattr(session, "session_type", "") or "").strip()
+        if session_type == "direct":
+            self._assert_session_identity_safe_for_outbound(session)
+            counterpart_id = self._resolve_direct_counterpart_id(session)
+            if not counterpart_id:
+                raise RuntimeError("direct session counterpart could not be resolved for attachment encryption")
+
+            encrypted_upload = await self._require_e2ee_service().encrypt_attachment_for_user(
+                counterpart_id,
+                file_path,
+                fallback_name=fallback_name,
+                size_bytes=fallback_size,
+            )
+        elif session_type == "group":
+            member_ids = self._resolve_group_member_ids(session, self._user_id)
+            if not member_ids:
+                raise RuntimeError("group session members could not be resolved for attachment encryption")
+            recipient_bundles = await self._resolve_group_recipient_bundles(session)
+            if not recipient_bundles:
+                raise RuntimeError("group session has no registered recipient devices for attachment encryption")
+            encrypted_upload = await self._require_e2ee_service().encrypt_attachment_for_group_session(
+                session_id,
+                file_path,
+                recipient_bundles,
+                fallback_name=fallback_name,
+                size_bytes=fallback_size,
+                member_version=self._resolve_group_member_version(session, member_ids),
+                owner_user_id=self._user_id,
+            )
+        else:
+            return file_path, {}, None
+        return (
+            encrypted_upload.upload_file_path,
+            {"attachment_encryption": dict(encrypted_upload.attachment_encryption)},
+            encrypted_upload.cleanup_file_path,
+        )
+
+    async def download_attachment(self, message_id: str) -> str:
+        """Ensure one file attachment exists locally, downloading and decrypting it when needed."""
+        normalized_message_id = str(message_id or "").strip()
+        if not normalized_message_id:
+            raise RuntimeError("message id is required")
+
+        message = await self._db.get_message(normalized_message_id)
+        if message is None:
+            raise RuntimeError("message not found")
+        if message.message_type not in {MessageType.FILE, MessageType.IMAGE, MessageType.VIDEO}:
+            raise RuntimeError("message is not a downloadable attachment")
+
+        local_path = str((message.extra or {}).get("local_path") or "").strip()
+        if local_path and os.path.exists(local_path):
+            return local_path
+
+        current_task = asyncio.current_task()
+        existing_task = self._media_prefetch_tasks.get(normalized_message_id)
+        if existing_task is not None and existing_task is not current_task and not existing_task.done():
+            await asyncio.shield(existing_task)
+            refreshed_message = await self._db.get_message(normalized_message_id)
+            if refreshed_message is not None:
+                refreshed_local_path = str((refreshed_message.extra or {}).get("local_path") or "").strip()
+                if refreshed_local_path and os.path.exists(refreshed_local_path):
+                    return refreshed_local_path
+
+        remote_source = self._attachment_remote_source(message)
+        if not remote_source:
+            raise RuntimeError("attachment download URL is unavailable")
+
+        payload_bytes = await self._file_service.download_chat_attachment(remote_source)
+        attachment_encryption = dict((message.extra or {}).get("attachment_encryption") or {})
+
+        file_name = self._attachment_file_name(message)
+        if attachment_encryption.get("enabled"):
+            payload_bytes, metadata = await self._require_e2ee_service().decrypt_attachment_bytes(
+                payload_bytes,
+                attachment_encryption,
+            )
+            metadata_name = str(metadata.get("original_name") or "").strip()
+            metadata_mime_type = str(metadata.get("mime_type") or "").strip()
+            if metadata_name:
+                file_name = metadata_name
+                message.extra["name"] = metadata_name
+            if metadata_mime_type:
+                message.extra["file_type"] = metadata_mime_type
+
+        target_path = self._attachment_download_path(message.message_id, file_name)
+        with open(target_path, "wb") as file_handle:
+            file_handle.write(payload_bytes)
+
+        message.extra["local_path"] = target_path
+        await self._db.save_message(message)
+        return target_path
+
+    @staticmethod
+    def _should_prefetch_encrypted_media(message: ChatMessage) -> bool:
+        """Return whether one message should download media in the background for inline preview."""
+        if message.message_type not in {MessageType.IMAGE, MessageType.VIDEO}:
+            return False
+        attachment_encryption = dict((message.extra or {}).get("attachment_encryption") or {})
+        if not attachment_encryption.get("enabled"):
+            return False
+        local_path = str((message.extra or {}).get("local_path") or "").strip()
+        if local_path and os.path.exists(local_path):
+            return False
+        return bool(MessageManager._attachment_remote_source(message))
+
+    def _maybe_schedule_encrypted_media_prefetch(self, message: ChatMessage) -> None:
+        """Schedule one background media download so encrypted images/videos regain inline preview."""
+        if not self._running or not self._should_prefetch_encrypted_media(message):
+            return
+
+        message_id = str(message.message_id or "").strip()
+        if not message_id:
+            return
+
+        existing_task = self._media_prefetch_tasks.get(message_id)
+        if existing_task is not None and not existing_task.done():
+            return
+
+        task = asyncio.create_task(self._prefetch_encrypted_media(message_id))
+        self._media_prefetch_tasks[message_id] = task
+        task.add_done_callback(lambda finished_task, msg_id=message_id: self._finalize_media_prefetch_task(msg_id, finished_task))
+
+    def _finalize_media_prefetch_task(self, message_id: str, task: asyncio.Task) -> None:
+        """Drop one completed prefetch task from local bookkeeping and log failures."""
+        current_task = self._media_prefetch_tasks.get(message_id)
+        if current_task is task:
+            self._media_prefetch_tasks.pop(message_id, None)
+
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            return
+        except Exception as exc:
+            logger.warning("Encrypted media prefetch failed for %s: %s", message_id, exc)
+
+    async def _prefetch_encrypted_media(self, message_id: str) -> None:
+        """Download and decrypt one encrypted image/video, then notify the UI to refresh it."""
+        local_path = await self.download_attachment(message_id)
+        if not local_path:
+            return
+
+        message = await self._db.get_message(message_id)
+        if message is None:
+            return
+
+        await self._event_bus.emit(MessageEvent.MEDIA_READY, {
+            "message_id": message_id,
+            "message": message,
+            "session_id": message.session_id,
+        })
+
+    @staticmethod
+    def _attachment_remote_source(message: ChatMessage) -> str:
+        """Return the best remote URL/path for one stored attachment message."""
+        extra = dict(message.extra or {})
+        return str(extra.get("url") or message.content or "").strip()
+
+    @staticmethod
+    def _attachment_file_name(message: ChatMessage) -> str:
+        """Return one safe attachment filename for local download storage."""
+        extra = dict(message.extra or {})
+        preferred_name = str(extra.get("name") or "").strip()
+        if preferred_name:
+            candidate = os.path.basename(preferred_name)
+        else:
+            source = str(extra.get("url") or message.content or "").strip().split("?", 1)[0].rstrip("/\\")
+            candidate = os.path.basename(source) or "attachment.bin"
+
+        sanitized = "".join(
+            character if character not in '<>:"/\\|?*' else "_"
+            for character in candidate
+        ).strip(" .")
+        return sanitized or "attachment.bin"
+
+    @staticmethod
+    def _attachment_download_path(message_id: str, file_name: str) -> str:
+        """Return one stable local cache path for a downloaded attachment."""
+        downloads_dir = os.path.join(tempfile.gettempdir(), "assistim_downloads")
+        os.makedirs(downloads_dir, exist_ok=True)
+        return os.path.join(downloads_dir, f"{str(message_id or '').strip() or 'attachment'}_{file_name}")
+
+    def _merge_local_encryption_cache(self, existing_message: ChatMessage | None, incoming_message: ChatMessage) -> ChatMessage:
+        """Preserve local-only decrypted plaintext when a remote payload refreshes one encrypted message."""
+        if existing_message is None:
+            return incoming_message
+
+        existing_encryption = dict((existing_message.extra or {}).get("encryption") or {})
+        incoming_encryption = dict((incoming_message.extra or {}).get("encryption") or {})
+        local_plaintext = str(existing_encryption.get("local_plaintext") or "").strip()
+        if not incoming_encryption.get("enabled") or not local_plaintext or incoming_encryption.get("local_plaintext"):
+            return incoming_message
+
+        incoming_encryption["local_plaintext"] = local_plaintext
+        incoming_encryption["local_plaintext_version"] = str(
+            existing_encryption.get("local_plaintext_version")
+            or incoming_encryption.get("local_plaintext_version")
+            or self._require_e2ee_service().LOCAL_PLAINTEXT_VERSION
+        )
+        incoming_message.extra["encryption"] = incoming_encryption
+        if existing_message.content and incoming_message.content == tr("message.encrypted.placeholder", "[Encrypted message]"):
+            incoming_message.content = existing_message.content
+
+        existing_attachment = dict((existing_message.extra or {}).get("attachment_encryption") or {})
+        incoming_attachment = dict((incoming_message.extra or {}).get("attachment_encryption") or {})
+        local_metadata = str(existing_attachment.get("local_metadata") or "").strip()
+        if incoming_attachment.get("enabled") and local_metadata and not incoming_attachment.get("local_metadata"):
+            incoming_attachment["local_metadata"] = local_metadata
+            incoming_attachment["local_plaintext_version"] = str(
+                existing_attachment.get("local_plaintext_version")
+                or incoming_attachment.get("local_plaintext_version")
+                or self._require_e2ee_service().LOCAL_PLAINTEXT_VERSION
+            )
+            incoming_message.extra["attachment_encryption"] = incoming_attachment
+            for field_name in ("name", "file_type", "size", "url", "media"):
+                if field_name in existing_message.extra and field_name not in incoming_message.extra:
+                    incoming_message.extra[field_name] = existing_message.extra[field_name]
+        return incoming_message
+
+    @staticmethod
+    def _transport_content_for_message(message: ChatMessage) -> str:
+        """Return the canonical websocket payload content for one message object."""
+        encryption = dict((message.extra or {}).get("encryption") or {})
+        ciphertext = str(encryption.get("content_ciphertext") or "").strip()
+        if encryption.get("enabled") and ciphertext:
+            return ciphertext
+        return str(message.content or "")
+
+    @staticmethod
+    def _drop_encryption_state(message: ChatMessage) -> None:
+        """Remove encryption metadata once a message becomes a local notice instead of ciphertext."""
+        updated_extra = dict(message.extra or {})
+        updated_extra.pop("encryption", None)
+        message.extra = updated_extra
+
     def _normalize_loaded_message(
         self,
         payload: dict[str, Any],
@@ -713,7 +1349,7 @@ class MessageManager:
             status=status,
             timestamp=data.get("timestamp") or data.get("created_at") or time.time(),
             updated_at=data.get("updated_at") or data.get("timestamp") or data.get("created_at") or time.time(),
-            is_self=bool(data.get("is_self", sender_id == self._user_id)),
+            is_self=(sender_id == self._user_id) if sender_id else bool(data.get("is_self", False)),
             is_ai=bool(data.get("is_ai", False)),
             extra=extra,
         )
@@ -768,14 +1404,18 @@ class MessageManager:
                 continue
 
             saved_messages.append(
-                self._normalize_loaded_message(
-                    msg_item,
-                    default_session_id=str(msg_item.get("session_id", "") or ""),
+                await self._decrypt_message_for_display(
+                    self._normalize_loaded_message(
+                        msg_item,
+                        default_session_id=str(msg_item.get("session_id", "") or ""),
+                    )
                 )
             )
 
         if saved_messages:
             await self._db.save_messages_batch(saved_messages)
+            for message in saved_messages:
+                self._maybe_schedule_encrypted_media_prefetch(message)
 
         await self._event_bus.emit(MessageEvent.SYNC_COMPLETED, {
             "count": len(saved_messages),
@@ -873,6 +1513,7 @@ class MessageManager:
         updated_extra.setdefault("recalled_content", message.content)
         updated_extra["recall_notice"] = notice
         message.extra = updated_extra
+        self._drop_encryption_state(message)
         message.status = MessageStatus.RECALLED
         message.content = notice
         message.updated_at = datetime.now()
@@ -900,17 +1541,37 @@ class MessageManager:
             logger.warning("Edit event missing canonical message_id; ignored")
             return
 
-        await self._db.update_message_content(message_id, new_content)
-        await self._db.update_message_status(message_id, MessageStatus.EDITED)
-
         message = await self._db.get_message(message_id)
+        if message is None:
+            logger.warning(f"Message not found for edit event: {message_id}")
+            return
+
+        updated_message = ChatMessage(
+            message_id=message.message_id,
+            session_id=session_id or message.session_id,
+            sender_id=message.sender_id,
+            content=str(new_content or ""),
+            message_type=message.message_type,
+            status=MessageStatus.EDITED,
+            timestamp=message.timestamp,
+            updated_at=edit_data.get("updated_at") or datetime.now(),
+            is_self=message.is_self,
+            is_ai=message.is_ai,
+            extra=dict(message.extra or {}),
+        )
+        incoming_extra = dict(edit_data.get("extra") or {}) if isinstance(edit_data.get("extra"), dict) else {}
+        if incoming_extra:
+            updated_message.extra.update(incoming_extra)
+        updated_message = await self._decrypt_message_for_display(updated_message)
+        updated_message = self._merge_local_encryption_cache(message, updated_message)
+        await self._db.save_message(updated_message)
 
         await self._event_bus.emit(MessageEvent.EDITED, {
             "message_id": message_id,
-            "session_id": session_id,
+            "session_id": session_id or updated_message.session_id,
             "user_id": user_id,
-            "content": new_content,
-            "message": message,
+            "content": updated_message.content,
+            "message": updated_message,
         })
 
         logger.info(f"Message edited: {message_id}")
@@ -1047,6 +1708,77 @@ class MessageManager:
         Returns:
             The sent message
         """
+        merged_extra = dict(extra or {})
+        security_pending: dict[str, str] | None = None
+        if existing_message is None:
+            session = await self._load_session_context(session_id)
+            security_pending = self._pending_outbound_security_review(session, message_type)
+            if security_pending:
+                message = ChatMessage(
+                    message_id=msg_id or str(uuid.uuid4()),
+                    session_id=session_id,
+                    sender_id=self._user_id,
+                    content=content,
+                    message_type=message_type,
+                    status=MessageStatus.AWAITING_SECURITY_CONFIRMATION,
+                    timestamp=time.time(),
+                    is_self=True,
+                    extra=self._build_security_pending_extra(merged_extra, security_pending),
+                )
+                await self._apply_current_user_sender_profile(message)
+                await self._db.save_message(message)
+                await self._event_bus.emit(MessageEvent.SENT, {"message": message})
+                logger.info("Queued local security-pending message: %s", message.message_id)
+                return message
+
+        transport_content = str(content or "")
+        try:
+            transport_content, merged_extra = await self._prepare_outbound_encryption(
+                session_id=session_id,
+                content=content,
+                message_type=message_type,
+                extra=merged_extra,
+            )
+        except Exception as exc:
+            logger.warning("Failed to prepare outbound encryption for %s: %s", session_id, exc)
+            if existing_message is None:
+                failed_message = ChatMessage(
+                    message_id=msg_id or str(uuid.uuid4()),
+                    session_id=session_id,
+                    sender_id=self._user_id,
+                    content=content,
+                    message_type=message_type,
+                    status=MessageStatus.FAILED,
+                    timestamp=time.time(),
+                    is_self=True,
+                    extra=merged_extra,
+                )
+                await self._apply_current_user_sender_profile(failed_message)
+                await self._db.save_message(failed_message)
+                await self._event_bus.emit(MessageEvent.SENT, {"message": failed_message})
+                await self._event_bus.emit(
+                    MessageEvent.FAILED,
+                    {
+                        "message_id": failed_message.message_id,
+                        "message": failed_message,
+                        "reason": str(exc),
+                    },
+                )
+                return failed_message
+
+            existing_message.status = MessageStatus.FAILED
+            existing_message.updated_at = datetime.now()
+            await self._db.save_message(existing_message)
+            await self._event_bus.emit(
+                MessageEvent.FAILED,
+                {
+                    "message_id": existing_message.message_id,
+                    "message": existing_message,
+                    "reason": str(exc),
+                },
+            )
+            return existing_message
+
         if existing_message is None:
             if not msg_id:
                 msg_id = str(uuid.uuid4())
@@ -1060,7 +1792,7 @@ class MessageManager:
                 status=MessageStatus.SENDING,
                 timestamp=time.time(),
                 is_self=True,
-                extra=extra or {},
+                extra=merged_extra,
             )
             await self._apply_current_user_sender_profile(message)
 
@@ -1077,10 +1809,10 @@ class MessageManager:
             message.message_type = message_type
             message.status = MessageStatus.SENDING
             message.updated_at = datetime.now()
-            merged_extra = dict(message.extra)
-            if extra:
-                merged_extra.update(extra)
-            message.extra = merged_extra
+            updated_extra = dict(message.extra or {})
+            updated_extra.pop("security_pending", None)
+            updated_extra.update(merged_extra)
+            message.extra = updated_extra
             await self._apply_current_user_sender_profile(message)
             msg_id = message.message_id
             await self._db.save_message(message)
@@ -1091,7 +1823,7 @@ class MessageManager:
         pending = self._build_pending_message(
             message,
             session_id,
-            content,
+            transport_content,
             message_type.value,
             message.extra,
         )
@@ -1109,6 +1841,72 @@ class MessageManager:
         logger.info(f"Message enqueued: {msg_id}")
 
         return message
+
+    async def _collect_security_pending_messages(self, session_id: str, *, limit: int = 200) -> list[ChatMessage]:
+        """Load local outbound messages that are waiting for security confirmation."""
+        messages = await self._db.get_messages(session_id, limit=limit)
+        return [
+            message
+            for message in messages
+            if message.is_self and message.status == MessageStatus.AWAITING_SECURITY_CONFIRMATION
+        ]
+
+    async def release_security_pending_messages(self, session_id: str) -> dict[str, Any]:
+        """Send one batch of locally held messages after the required security action succeeded."""
+        normalized_session_id = str(session_id or "").strip()
+        if not normalized_session_id:
+            raise RuntimeError("session id is required")
+
+        pending_messages = await self._collect_security_pending_messages(normalized_session_id)
+        released_ids: list[str] = []
+        failed_ids: list[str] = []
+        for message in pending_messages:
+            pending_extra = dict(message.extra or {})
+            pending_extra.pop("security_pending", None)
+            released = await self.send_message(
+                session_id=normalized_session_id,
+                content=message.content,
+                message_type=message.message_type,
+                existing_message=message,
+                extra=pending_extra,
+            )
+            if released.status == MessageStatus.FAILED:
+                failed_ids.append(released.message_id)
+            else:
+                released_ids.append(released.message_id)
+
+        return {
+            "session_id": normalized_session_id,
+            "released": len(released_ids),
+            "failed": len(failed_ids),
+            "message_ids": released_ids,
+            "failed_message_ids": failed_ids,
+        }
+
+    async def discard_security_pending_messages(self, session_id: str) -> dict[str, Any]:
+        """Delete one batch of locally held messages that have not been sent yet."""
+        normalized_session_id = str(session_id or "").strip()
+        if not normalized_session_id:
+            raise RuntimeError("session id is required")
+
+        pending_messages = await self._collect_security_pending_messages(normalized_session_id)
+        removed_ids: list[str] = []
+        for message in pending_messages:
+            await self._db.delete_message(message.message_id)
+            removed_ids.append(message.message_id)
+            await self._event_bus.emit(
+                MessageEvent.DELETED,
+                {
+                    "message_id": message.message_id,
+                    "session_id": normalized_session_id,
+                },
+            )
+
+        return {
+            "session_id": normalized_session_id,
+            "removed": len(removed_ids),
+            "message_ids": removed_ids,
+        }
 
     async def create_local_message(
         self,
@@ -1222,6 +2020,7 @@ class MessageManager:
         updated_extra.setdefault("recalled_content", message.content)
         updated_extra["recall_notice"] = notice
         message.extra = updated_extra
+        self._drop_encryption_state(message)
         message.status = MessageStatus.RECALLED
         message.content = notice
         message.updated_at = datetime.now()
@@ -1289,9 +2088,34 @@ class MessageManager:
             logger.warning(f"Message edit time limit exceeded: {message_id}")
             return False
 
+        outbound_content = str(new_content or "")
+        outbound_extra: dict[str, Any] | None = None
+        if self._require_e2ee_service().is_encrypted_extra(message.extra):
+            existing_extra = dict(message.extra or {})
+            existing_encryption = dict(existing_extra.get("encryption") or {})
+            existing_extra.pop("encryption", None)
+            try:
+                encrypted_content, encrypted_extra = await self._prepare_outbound_encryption(
+                    session_id=message.session_id,
+                    content=new_content,
+                    message_type=message.message_type,
+                    extra=existing_extra,
+                )
+            except Exception as exc:
+                logger.error(f"Failed to encrypt edit request: {message_id}, error: {exc}")
+                return False
+            updated_encryption = dict(encrypted_extra.get("encryption") or {})
+            if not updated_encryption:
+                updated_encryption = existing_encryption
+            outbound_content = encrypted_content
+            message.extra = {**existing_extra, **encrypted_extra}
+            outbound_extra = sanitize_outbound_message_extra(message.extra)
+        else:
+            outbound_extra = None
+
         success = False
         try:
-            await self._chat_service.edit_message(message_id, new_content)
+            await self._chat_service.edit_message(message_id, outbound_content, extra=outbound_extra)
             success = True
         except Exception as exc:
             logger.error(f"Failed to send edit request: {message_id}, error: {exc}")
@@ -1300,6 +2124,7 @@ class MessageManager:
             # Optimistically update
             message.content = new_content
             message.status = MessageStatus.EDITED
+            message.updated_at = datetime.now()
             await self._db.save_message(message)
 
             await self._event_bus.emit(MessageEvent.EDITED, {
@@ -1405,11 +2230,35 @@ class MessageManager:
             return False
 
         if self._needs_media_upload(message):
+            upload_path = str(message.extra.get("local_path", "") or "")
+            cleanup_upload_path: str | None = None
             try:
-                upload_result = await self._file_service.upload_chat_attachment(message.extra.get("local_path", ""))
+                upload_path, encryption_extra, cleanup_upload_path = await self.prepare_attachment_upload(
+                    session_id=message.session_id,
+                    file_path=upload_path,
+                    message_type=message.message_type,
+                    fallback_name=str(
+                        message.extra.get("name")
+                        or os.path.basename(upload_path)
+                        or "upload.bin"
+                    ),
+                    fallback_size=int(message.extra.get("size") or 0),
+                )
+                if encryption_extra:
+                    message.extra.update(encryption_extra)
+                upload_result = await self._file_service.upload_chat_attachment(upload_path)
             except AppError as exc:
                 logger.warning("Media retry upload failed: %s (%s)", msg_id, exc)
                 return False
+            except Exception as exc:
+                logger.warning("Encrypted media retry upload failed: %s (%s)", msg_id, exc)
+                return False
+            finally:
+                if cleanup_upload_path:
+                    try:
+                        os.unlink(cleanup_upload_path)
+                    except OSError:
+                        pass
 
             file_url = str(upload_result["url"])
             message.content = file_url
@@ -1440,7 +2289,7 @@ class MessageManager:
         pending = self._build_pending_message(
             message,
             message.session_id,
-            message.content,
+            self._transport_content_for_message(message),
             message.message_type.value,
             message.extra,
         )
@@ -1505,15 +2354,19 @@ class MessageManager:
                 logger.warning("Remote history message missing canonical message_id; ignored")
                 continue
 
-            remote_messages.append(
+            existing_message = await self._db.get_message(message_id)
+            message = await self._decrypt_message_for_display(
                 self._normalize_loaded_message(
                     item,
                     default_session_id=session_id,
                 )
             )
+            remote_messages.append(self._merge_local_encryption_cache(existing_message, message))
 
         if remote_messages:
             await self._db.save_messages_batch(remote_messages)
+            for message in remote_messages:
+                self._maybe_schedule_encrypted_media_prefetch(message)
 
         return remote_messages
 
@@ -1564,6 +2417,160 @@ class MessageManager:
         )
         return messages
 
+    @staticmethod
+    def _empty_recovery_stats() -> dict[str, int]:
+        return {
+            "text": 0,
+            "attachments": 0,
+            "direct_text": 0,
+            "group_text": 0,
+            "direct_attachments": 0,
+            "group_attachments": 0,
+            "other": 0,
+        }
+
+    @classmethod
+    def _accumulate_recovery_stats(cls, stats: dict[str, int], message: ChatMessage) -> None:
+        if message.message_type == MessageType.TEXT:
+            stats["text"] += 1
+            encryption = dict((message.extra or {}).get("encryption") or {})
+            scheme = str(encryption.get("scheme") or "").strip()
+            if scheme == "group-sender-key-v1":
+                stats["group_text"] += 1
+            elif encryption:
+                stats["direct_text"] += 1
+            else:
+                stats["other"] += 1
+            return
+
+        if message.message_type in {MessageType.FILE, MessageType.IMAGE, MessageType.VIDEO}:
+            stats["attachments"] += 1
+            attachment_encryption = dict((message.extra or {}).get("attachment_encryption") or {})
+            scheme = str(attachment_encryption.get("scheme") or "").strip()
+            if scheme == "aesgcm-file+group-sender-key-v1":
+                stats["group_attachments"] += 1
+            elif attachment_encryption:
+                stats["direct_attachments"] += 1
+            else:
+                stats["other"] += 1
+            return
+
+        stats["other"] += 1
+
+    async def recover_session_messages(
+        self,
+        session_id: str,
+        *,
+        limit: int = 500,
+        remote_pages: int = 3,
+    ) -> dict[str, Any]:
+        """Retry local decryption for one session after device recovery."""
+        normalized_session_id = str(session_id or "").strip()
+        if not normalized_session_id:
+            raise RuntimeError("session id is required")
+
+        effective_limit = max(1, int(limit or 1))
+        effective_remote_pages = max(0, int(remote_pages or 0))
+        cached_messages = await self._db.get_messages(normalized_session_id, limit=effective_limit)
+        updated_messages: list[ChatMessage] = []
+        recovered_ids: list[str] = []
+        recovered_seen: set[str] = set()
+        cached_recovery_stats = self._empty_recovery_stats()
+
+        for stored_message in cached_messages:
+            candidate = ChatMessage(
+                message_id=stored_message.message_id,
+                session_id=stored_message.session_id,
+                sender_id=stored_message.sender_id,
+                content=stored_message.content,
+                message_type=stored_message.message_type,
+                status=stored_message.status,
+                timestamp=stored_message.timestamp,
+                updated_at=stored_message.updated_at,
+                is_self=stored_message.is_self,
+                is_ai=stored_message.is_ai,
+                extra=deepcopy(dict(stored_message.extra or {})),
+            )
+            recovered = await self._decrypt_message_for_display(candidate)
+            if recovered.content == stored_message.content and recovered.extra == stored_message.extra:
+                continue
+            updated_messages.append(recovered)
+            self._accumulate_recovery_stats(cached_recovery_stats, recovered)
+            message_id = str(recovered.message_id or "")
+            if message_id and message_id not in recovered_seen:
+                recovered_ids.append(message_id)
+                recovered_seen.add(message_id)
+            self._maybe_schedule_encrypted_media_prefetch(recovered)
+
+        if updated_messages:
+            await self._db.save_messages_batch(updated_messages)
+
+        remote_messages: list[ChatMessage] = []
+        remote_error = ""
+        remote_pages_fetched = 0
+        next_before_timestamp: float | None = None
+        previous_before_timestamp: float | None = None
+        remote_recovery_stats = self._empty_recovery_stats()
+        try:
+            for _ in range(effective_remote_pages):
+                page = await self._fetch_remote_messages(
+                    normalized_session_id,
+                    limit=effective_limit,
+                    before_timestamp=next_before_timestamp,
+                )
+                if not page:
+                    break
+                remote_pages_fetched += 1
+                remote_messages.extend(page)
+                for message in page:
+                    self._accumulate_recovery_stats(remote_recovery_stats, message)
+
+                oldest_timestamp: float | None = None
+                for message in page:
+                    message_id = str(message.message_id or "")
+                    if message_id and message_id not in recovered_seen:
+                        recovered_ids.append(message_id)
+                        recovered_seen.add(message_id)
+                    if message.timestamp is None:
+                        continue
+                    candidate_timestamp = float(message.timestamp.timestamp())
+                    if oldest_timestamp is None or candidate_timestamp < oldest_timestamp:
+                        oldest_timestamp = candidate_timestamp
+
+                if oldest_timestamp is None:
+                    break
+                if next_before_timestamp is not None and oldest_timestamp >= next_before_timestamp:
+                    break
+                previous_before_timestamp = next_before_timestamp
+                next_before_timestamp = oldest_timestamp
+        except Exception as exc:
+            remote_error = str(exc)
+            logger.warning("Remote message recovery fetch failed for %s: %s", normalized_session_id, exc)
+
+        result = {
+            "session_id": normalized_session_id,
+            "scanned": len(cached_messages),
+            "updated": len(updated_messages),
+            "message_ids": recovered_ids,
+            "remote_fetched": len(remote_messages),
+            "remote_pages_fetched": remote_pages_fetched,
+            "recovery_stats": {
+                "cached": cached_recovery_stats,
+                "remote": remote_recovery_stats,
+            },
+        }
+        if remote_error:
+            result["remote_error"] = remote_error
+        await self._event_bus.emit(MessageEvent.RECOVERED, {
+            "session_id": normalized_session_id,
+            "count": len(updated_messages),
+            "message_ids": recovered_ids,
+            "messages": updated_messages,
+            "remote_messages": remote_messages,
+            "recovery_stats": dict(result["recovery_stats"]),
+            "result": dict(result),
+        })
+        return result
     async def close(self) -> None:
         """Close message manager."""
         logger.info("Closing message manager")
@@ -1583,6 +2590,16 @@ class MessageManager:
             except asyncio.CancelledError:
                 pass
             self._ack_check_task = None
+
+        media_prefetch_tasks = list(self._media_prefetch_tasks.values())
+        self._media_prefetch_tasks.clear()
+        for task in media_prefetch_tasks:
+            task.cancel()
+        for task in media_prefetch_tasks:
+            try:
+                await asyncio.wait_for(task, timeout=self._close_timeout)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                pass
 
         self._conn_manager.remove_message_listener(self._handle_ws_message)
         self._send_queue = None
@@ -1610,6 +2627,12 @@ def get_message_manager() -> MessageManager:
     if _message_manager is None:
         _message_manager = MessageManager()
     return _message_manager
+
+
+
+
+
+
 
 
 

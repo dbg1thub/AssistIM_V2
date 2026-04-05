@@ -46,16 +46,20 @@ from client.network.http_client import HTTPClient
 
 
 class FakeResponse:
-    def __init__(self, status: int, payload: dict | None = None, text: str = "") -> None:
+    def __init__(self, status: int, payload: dict | None = None, text: str = "", body: bytes = b"") -> None:
         self.status = status
         self._payload = payload if payload is not None else {}
         self._text = text
+        self._body = bytes(body or b"")
 
     async def json(self) -> dict:
         return dict(self._payload)
 
     async def text(self) -> str:
         return self._text
+
+    async def read(self) -> bytes:
+        return self._body or self._text.encode("utf-8")
 
     async def __aenter__(self) -> "FakeResponse":
         return self
@@ -208,6 +212,35 @@ def test_http_client_patch_uses_patch_method() -> None:
                 "headers": {
                     "Content-Type": "application/json",
                     "Accept": "application/json",
+                },
+            }
+        ]
+
+        await client.close()
+
+    asyncio.run(scenario())
+
+
+def test_http_client_download_bytes_uses_absolute_url_without_app_auth() -> None:
+    async def scenario() -> None:
+        client = HTTPClient(base_url="http://app.local/api/v1")
+        client.set_tokens("app-access", "refresh-token")
+        fake_session = FakeSession(
+            request_handler=lambda **_kwargs: FakeResponse(200, body=b"secret-bytes"),
+        )
+        client._session = fake_session
+
+        payload = await client.download_bytes("https://cdn.example/files/secret.bin")
+
+        assert payload == b"secret-bytes"
+        assert fake_session.request_calls == [
+            {
+                "method": "GET",
+                "url": "https://cdn.example/files/secret.bin",
+                "params": None,
+                "json": None,
+                "headers": {
+                    "Accept": "*/*",
                 },
             }
         ]

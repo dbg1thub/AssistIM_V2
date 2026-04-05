@@ -31,10 +31,55 @@ function Resolve-PythonPath {
     param([Parameter(Mandatory = $true)][string]$ServerRoot)
 
     $activeEnvPython = Get-Command python -ErrorAction SilentlyContinue
-    $hasActivatedEnv = [bool]$env:CONDA_PREFIX -or [bool]$env:VIRTUAL_ENV
+    $hasActivatedEnv = [bool]$env:VIRTUAL_ENV -or (([bool]$env:CONDA_PREFIX) -and ($env:CONDA_DEFAULT_ENV -ne 'base'))
+    $explicitPython = [Environment]::GetEnvironmentVariable('ASSISTIM_PYTHON', 'Process')
+
+    if (-not $explicitPython) {
+        $explicitPython = [Environment]::GetEnvironmentVariable('ASSISTIM_PYTHON', 'User')
+    }
+
+    if (-not $explicitPython) {
+        $explicitPython = [Environment]::GetEnvironmentVariable('ASSISTIM_PYTHON', 'Machine')
+    }
+
+    if ($explicitPython) {
+        if (-not (Test-Path $explicitPython)) {
+            throw "ASSISTIM_PYTHON points to a missing executable: $explicitPython"
+        }
+        return (Resolve-Path $explicitPython).Path
+    }
 
     if ($hasActivatedEnv -and $activeEnvPython) {
         return $activeEnvPython.Source
+    }
+
+    if ($activeEnvPython) {
+        $activePythonDir = Split-Path $activeEnvPython.Source -Parent
+        $assistImFromActiveRoot = Join-Path $activePythonDir 'envs\AssistIM\python.exe'
+        if (Test-Path $assistImFromActiveRoot) {
+            return (Resolve-Path $assistImFromActiveRoot).Path
+        }
+
+        $activePythonParent = Split-Path $activePythonDir -Parent
+        if ($activePythonParent) {
+            $assistImFromParentRoot = Join-Path $activePythonParent 'envs\AssistIM\python.exe'
+            if (Test-Path $assistImFromParentRoot) {
+                return (Resolve-Path $assistImFromParentRoot).Path
+            }
+        }
+    }
+
+    if ($env:CONDA_EXE) {
+        $condaExeDir = Split-Path $env:CONDA_EXE -Parent
+        if ($condaExeDir) {
+            $condaRoot = Split-Path $condaExeDir -Parent
+            if ($condaRoot) {
+                $assistImFromCondaExe = Join-Path $condaRoot 'envs\AssistIM\python.exe'
+                if (Test-Path $assistImFromCondaExe) {
+                    return (Resolve-Path $assistImFromCondaExe).Path
+                }
+            }
+        }
     }
 
     $venvPython = Join-Path $ServerRoot '.venv\Scripts\python.exe'
@@ -48,7 +93,6 @@ function Resolve-PythonPath {
 
     throw 'Python executable not found. Install Python or create server/.venv first.'
 }
-
 function Parse-PostgresUrl {
     param([string]$DatabaseUrl)
 
@@ -126,3 +170,7 @@ function Get-PsqlPath {
 
     return $resolved
 }
+
+
+
+

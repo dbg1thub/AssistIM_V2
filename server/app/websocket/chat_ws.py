@@ -184,6 +184,16 @@ async def _handle_chat_socket(websocket: WebSocket) -> None:
                             message_id=msg_id,
                             extra=message_extra,
                         )
+                        stored_message = service.messages.get_by_id(saved["message_id"])
+                        recipient_payloads = {}
+                        if stored_message is not None:
+                            recipient_payloads = {
+                                member_id: _outbound_message_data(
+                                    service.serialize_message(stored_message, member_id)
+                                )
+                                for member_id in member_ids
+                                if member_id != current_user_id
+                            }
                 except AppError as exc:
                     await _send_app_error(connection_id, msg_id, exc)
                     continue
@@ -202,16 +212,19 @@ async def _handle_chat_socket(websocket: WebSocket) -> None:
                     logger.info("Idempotent websocket resend acknowledged without rebroadcast: %s", msg_id)
                     continue
 
-                payload = ws_message(
-                    "chat_message",
-                    ack_message,
-                    msg_id=saved["message_id"],
-                )
-                delivered_user_ids = await connection_manager.send_json_to_users(
-                    recipient_ids,
-                    payload,
-                    exclude_connection_id=connection_id,
-                )
+                delivered_user_ids: set[str] = set()
+                for recipient_id in recipient_ids:
+                    recipient_message = recipient_payloads.get(recipient_id, ack_message)
+                    delivered = await connection_manager.send_json_to_users(
+                        [recipient_id],
+                        ws_message(
+                            "chat_message",
+                            recipient_message,
+                            msg_id=saved["message_id"],
+                        ),
+                        exclude_connection_id=connection_id,
+                    )
+                    delivered_user_ids.update(delivered)
                 if delivered_user_ids:
                     await connection_manager.send_json_to_users(
                         [current_user_id],
@@ -295,7 +308,12 @@ async def _handle_chat_socket(websocket: WebSocket) -> None:
                     with SessionLocal() as db:
                         service = MessageService(db)
                         current_user = _resolve_ws_user(db, current_user_id)
-                        edited = service.edit(current_user, target_message_id, data.get("content", ""))
+                        edited = service.edit(
+                            current_user,
+                            target_message_id,
+                            data.get("content", ""),
+                            extra=data.get("extra", {}) if isinstance(data.get("extra"), dict) else None,
+                        )
                         member_ids = service.get_session_member_ids(edited["session_id"], current_user_id)
                 except AppError as exc:
                     await _send_app_error(connection_id, msg_id, exc)

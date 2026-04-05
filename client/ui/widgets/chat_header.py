@@ -1,4 +1,4 @@
-"""Chat header widget with session info and top-right actions."""
+"""Chat header widget with session info, security badges, and top-right actions."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from PySide6.QtCore import Signal
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import QHBoxLayout, QSizePolicy, QVBoxLayout, QWidget
 
-from qfluentwidgets import BodyLabel, CaptionLabel, TransparentToolButton
+from qfluentwidgets import BodyLabel, CaptionLabel, InfoBadge, InfoLevel, TransparentToolButton
 
 from client.core.app_icons import AppIcon, CollectionIcon
 from client.core.i18n import tr
@@ -76,7 +76,16 @@ class ChatHeader(QWidget):
         self.info_button.setToolTip(tr("chat_header.info_tooltip", "Chat Info"))
         self._apply_safe_button_font(self.history_button, self.info_button)
 
+        self.badge_container = QWidget(self.title_row)
+        self.badge_container.setObjectName("chatHeaderBadgeContainer")
+        self.badge_layout = QHBoxLayout(self.badge_container)
+        self.badge_layout.setContentsMargins(0, 0, 0, 0)
+        self.badge_layout.setSpacing(6)
+        self.badge_container.hide()
+        self._badge_widgets: list[InfoBadge] = []
+
         self.title_row_layout.addWidget(self.title_label, 1)
+        self.title_row_layout.addWidget(self.badge_container, 0)
         self.title_row_layout.addWidget(self.history_button, 0)
         self.title_row_layout.addWidget(self.info_button, 0)
 
@@ -137,6 +146,36 @@ class ChatHeader(QWidget):
         """Enable or disable the header action buttons together."""
         self.history_button.setEnabled(enabled)
         self.info_button.setEnabled(enabled)
+
+    def set_security_badges(self, badges: list[dict[str, str]]) -> None:
+        """Replace the current header badge list with one compact session-status strip."""
+        while self._badge_widgets:
+            widget = self._badge_widgets.pop()
+            self.badge_layout.removeWidget(widget)
+            widget.deleteLater()
+
+        normalized_badges = [item for item in badges if isinstance(item, dict) and str(item.get("text", "") or "").strip()]
+        if not normalized_badges:
+            self.badge_container.hide()
+            return
+
+        level_map = {
+            "secure": InfoLevel.SUCCESS,
+            "neutral": InfoLevel.INFOAMTION,
+            "muted": InfoLevel.INFOAMTION,
+            "warning": InfoLevel.WARNING,
+            "danger": InfoLevel.ERROR,
+        }
+        for badge in normalized_badges:
+            widget = InfoBadge(self.badge_container, level_map.get(str(badge.get("tone", "neutral") or "neutral"), InfoLevel.INFOAMTION))
+            widget.setText(str(badge.get("text", "") or "").strip())
+            tooltip = str(badge.get("tooltip", "") or "").strip()
+            if tooltip:
+                widget.setToolTip(tooltip)
+            self.badge_layout.addWidget(widget, 0)
+            self._badge_widgets.append(widget)
+
+        self.badge_container.show()
 
     def get_title_label(self) -> BodyLabel:
         """Get title label widget."""

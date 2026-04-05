@@ -11,12 +11,14 @@ import subprocess
 from typing import Any, Optional
 
 from client.core import logging
+from client.core.config_backend import get_config
 from client.core.exceptions import AppError
 from client.core.logging import setup_logging
 from client.managers.call_manager import get_call_manager
 from client.managers.message_manager import get_message_manager
 from client.managers.session_manager import get_session_manager
 from client.models.message import ChatMessage, MessageType, Session, build_attachment_extra, infer_message_type_from_path
+from client.services.call_service import get_call_service
 from client.services.file_service import get_file_service
 
 
@@ -39,8 +41,35 @@ class ChatController:
         self._msg_manager = get_message_manager()
         self._session_manager = get_session_manager()
         self._call_manager = get_call_manager()
+        self._call_service = None
         self._file_service = get_file_service()
+        self._call_ice_servers = self._clone_ice_servers(get_config().webrtc.ice_servers)
+        self._fallback_call_ice_servers = self._clone_ice_servers(self._call_ice_servers)
+        self._call_ice_servers_loaded = False
         self._initialized = False
+
+    @staticmethod
+    def _clone_ice_servers(servers: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+        return [dict(server) for server in list(servers or []) if isinstance(server, dict)]
+
+    def get_call_ice_servers(self) -> list[dict[str, Any]]:
+        """Return the current cached ICE server list for call windows."""
+        return self._clone_ice_servers(self._call_ice_servers)
+
+    async def refresh_call_ice_servers(self, *, force_refresh: bool = False) -> list[dict[str, Any]]:
+        """Refresh runtime ICE server config from the backend with local fallback."""
+        if self._call_ice_servers_loaded and not force_refresh:
+            return self.get_call_ice_servers()
+
+        try:
+            if self._call_service is None:
+                self._call_service = get_call_service()
+            self._call_ice_servers = self._clone_ice_servers(await self._call_service.fetch_ice_servers())
+            self._call_ice_servers_loaded = True
+        except Exception:
+            logger.warning("Failed to refresh call ICE servers; using local fallback", exc_info=True)
+            self._call_ice_servers = self._clone_ice_servers(self._fallback_call_ice_servers)
+        return self.get_call_ice_servers()
 
     async def initialize(self) -> None:
         """Initialize chat controller."""
@@ -63,6 +92,68 @@ class ChatController:
     async def refresh_sessions_snapshot(self) -> list[Session]:
         """Refresh the authoritative session snapshot after profile-affecting changes."""
         return await self._session_manager.refresh_remote_sessions()
+
+    async def recover_session_crypto(self, session_id: str) -> dict[str, Any]:
+        """Execute one non-UI E2EE recovery action for a specific session."""
+        return await self._session_manager.recover_session_crypto(session_id)
+
+    async def recover_current_session_crypto(self) -> dict[str, Any]:
+        """Execute one non-UI E2EE recovery action for the currently selected session."""
+        session_id = str(self._session_manager.current_session_id or "").strip()
+        if not session_id:
+            raise RuntimeError("no current session selected")
+        return await self.recover_session_crypto(session_id)
+
+    async def trust_session_identities(self, session_id: str) -> dict[str, Any]:
+        """Trust the current remote E2EE device identities for a specific session."""
+        return await self._session_manager.trust_session_identities(session_id)
+
+    async def trust_current_session_identities(self) -> dict[str, Any]:
+        """Trust the current remote E2EE device identities for the selected session."""
+        session_id = str(self._session_manager.current_session_id or "").strip()
+        if not session_id:
+            raise RuntimeError("no current session selected")
+        return await self.trust_session_identities(session_id)
+
+    async def get_session_security_summary(self, session_id: str) -> dict[str, Any]:
+        """Return one normalized security summary for a specific session."""
+        return await self._session_manager.get_session_security_summary(session_id)
+
+    async def get_current_session_security_summary(self) -> dict[str, Any]:
+        """Return one normalized security summary for the selected session."""
+        return await self._session_manager.get_current_session_security_summary()
+
+    async def get_session_identity_verification(self, session_id: str) -> dict[str, Any]:
+        """Return one direct-session identity verification snapshot for a specific session."""
+        return await self._session_manager.get_session_identity_verification(session_id)
+
+    async def get_current_session_identity_verification(self) -> dict[str, Any]:
+        """Return one direct-session identity verification snapshot for the selected session."""
+        return await self._session_manager.get_current_session_identity_verification()
+
+    async def get_session_identity_review_details(self, session_id: str) -> dict[str, Any]:
+        """Return one richer identity-review payload for a specific session."""
+        return await self._session_manager.get_session_identity_review_details(session_id)
+
+    async def get_current_session_identity_review_details(self) -> dict[str, Any]:
+        """Return one richer identity-review payload for the selected session."""
+        return await self._session_manager.get_current_session_identity_review_details()
+
+    async def get_session_security_diagnostics(self, session_id: str) -> dict[str, Any]:
+        """Return one unified session security diagnostics payload for a specific session."""
+        return await self._session_manager.get_session_security_diagnostics(session_id)
+
+    async def get_current_session_security_diagnostics(self) -> dict[str, Any]:
+        """Return one unified session security diagnostics payload for the selected session."""
+        return await self._session_manager.get_current_session_security_diagnostics()
+
+    async def execute_session_security_action(self, session_id: str, action_id: str) -> dict[str, Any]:
+        """Execute one normalized security action for a specific session."""
+        return await self._session_manager.execute_session_security_action(session_id, action_id)
+
+    async def execute_current_session_security_action(self, action_id: str) -> dict[str, Any]:
+        """Execute one normalized security action for the selected session."""
+        return await self._session_manager.execute_current_session_security_action(action_id)
 
     async def send_message(
         self,
@@ -144,13 +235,36 @@ class ChatController:
             message=placeholder,
         )
 
+        upload_path = file_path
+        cleanup_upload_path: str | None = None
         try:
-            upload_result = await self._file_service.upload_chat_attachment(file_path)
+            upload_path, encryption_extra, cleanup_upload_path = await self._msg_manager.prepare_attachment_upload(
+                session_id=session_id,
+                file_path=file_path,
+                message_type=message_type,
+                fallback_name=file_name,
+                fallback_size=file_size,
+            )
+            if encryption_extra:
+                placeholder.extra.update(encryption_extra)
+
+            upload_result = await self._file_service.upload_chat_attachment(upload_path)
         except AppError as exc:
             reason = str(exc) or "Upload failed"
             logger.error("Failed to upload file %s: %s", file_path, exc)
             await self._msg_manager.mark_message_failed(placeholder, reason)
             return placeholder
+        except Exception as exc:
+            reason = str(exc) or "Upload failed"
+            logger.error("Failed to prepare/upload encrypted file %s: %s", file_path, exc)
+            await self._msg_manager.mark_message_failed(placeholder, reason)
+            return placeholder
+        finally:
+            if cleanup_upload_path:
+                try:
+                    os.unlink(cleanup_upload_path)
+                except OSError:
+                    pass
 
         file_url = str(upload_result["url"])
 
@@ -248,6 +362,22 @@ class ChatController:
     async def retry_message(self, message_id: str) -> bool:
         """Retry sending a failed message."""
         return await self._msg_manager.retry_message(message_id)
+
+    async def release_session_security_pending_messages(self, session_id: str) -> dict[str, Any]:
+        """Release one session's locally held messages after the user confirms the security action."""
+        result = await self._msg_manager.release_security_pending_messages(session_id)
+        await self._session_manager.refresh_session_preview(session_id)
+        return result
+
+    async def discard_session_security_pending_messages(self, session_id: str) -> dict[str, Any]:
+        """Delete one session's locally held messages that were never sent."""
+        result = await self._msg_manager.discard_security_pending_messages(session_id)
+        await self._session_manager.refresh_session_preview(session_id)
+        return result
+
+    async def download_message_attachment(self, message_id: str) -> str:
+        """Ensure one file attachment is downloaded locally and return the local path."""
+        return await self._msg_manager.download_attachment(message_id)
 
     async def recall_message(self, message_id: str) -> tuple[bool, str]:
         """Recall a previously sent message."""
@@ -356,10 +486,12 @@ class ChatController:
 
     async def start_call(self, session: Session, media_type: str):
         """Start one outbound call for the given direct session."""
+        await self.refresh_call_ice_servers(force_refresh=True)
         return await self._call_manager.start_call(session, media_type)
 
     async def accept_call(self, call_id: str) -> bool:
         """Accept one inbound call invite."""
+        await self.refresh_call_ice_servers(force_refresh=True)
         return await self._call_manager.accept_call(call_id)
 
     async def reject_call(self, call_id: str) -> bool:

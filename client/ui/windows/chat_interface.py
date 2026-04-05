@@ -26,7 +26,6 @@ from qfluentwidgets import (
 )
 from qfluentwidgets.components.widgets.menu import MenuAnimationType
 
-from client.core.config_backend import get_config
 from client.core.avatar_utils import profile_avatar_seed
 from client.core.datetime_utils import coerce_local_datetime
 from client.core.exceptions import AppError
@@ -280,7 +279,10 @@ class ChatInterface(QWidget):
         self.chat_panel.setMinimumWidth(0)
 
         self.chat_panel.set_send_segments_callback(self._on_send_segments)
+        self.chat_panel.security_pending_confirm_requested.connect(self._on_security_pending_confirm_requested)
+        self.chat_panel.security_pending_discard_requested.connect(self._on_security_pending_discard_requested)
         self.chat_panel.set_send_typing_callback(self._on_send_typing)
+        self.chat_panel.set_attachment_open_callback(self._open_message)
 
         self.splitter.addWidget(self.session_panel)
         self.splitter.addWidget(self.chat_panel)
@@ -380,6 +382,7 @@ class ChatInterface(QWidget):
         self._subscribe_sync(MessageEvent.EDITED, self._on_edited_event)
         self._subscribe_sync(MessageEvent.RECALLED, self._on_recalled_event)
         self._subscribe_sync(MessageEvent.DELETED, self._on_deleted_event)
+        self._subscribe_sync(MessageEvent.MEDIA_READY, self._on_media_ready)
         self._subscribe_sync(MessageEvent.SYNC_COMPLETED, self._on_sync_completed)
         self._subscribe_sync(MessageEvent.PROFILE_UPDATED, self._on_profile_updated)
         self._subscribe_sync(CallEvent.INVITE_SENT, self._on_call_invite_sent)
@@ -602,6 +605,19 @@ class ChatInterface(QWidget):
         if session_id == self._current_session_id:
             self.chat_panel.remove_message(data.get("message_id", ""))
         self._schedule_ui_task(self._refresh_session_preview(session_id), f"refresh preview {session_id}")
+
+    def _on_media_ready(self, data: dict) -> None:
+        """Refresh one visible message after its encrypted media finished downloading locally."""
+        session_id = str(data.get("session_id", "") or "")
+        if not session_id:
+            return
+        self._invalidate_session_caches(session_id)
+        if session_id != self._current_session_id:
+            return
+        message = data.get("message")
+        if not isinstance(message, ChatMessage):
+            return
+        self.chat_panel.replace_message(message)
 
     def _on_sync_completed(self, data: dict) -> None:
         """Append synced history messages for the currently open session only."""
@@ -1342,6 +1358,17 @@ class ChatInterface(QWidget):
         toast.rejected.connect(lambda cid=call.call_id: self._reject_incoming_call_from_toast(cid))
         toast.show()
         self._start_call_ring_sound(AppSound.CALL_INCOMING_RING)
+        QTimer.singleShot(
+            0,
+            lambda active_call=call: self._schedule_ui_task(
+                self._prepare_incoming_call_window(active_call),
+                f"prepare incoming call window {active_call.call_id}",
+            ),
+        )
+
+    async def _prepare_incoming_call_window(self, call: ActiveCallState) -> None:
+        """Refresh runtime ICE config before prewarming one incoming call window."""
+        await self._chat_controller.refresh_call_ice_servers(force_refresh=True)
         window = self._ensure_call_window(call, reveal=False)
         if window is not None:
             QTimer.singleShot(0, lambda current_window=window: current_window.prepare_media(is_caller=False))
@@ -1540,7 +1567,6 @@ class ChatInterface(QWidget):
         session_name = self._call_session_name(call)
         peer_label = session_name
         session = self._get_session(call.session_id)
-        config = get_config()
         self_label = str(
             current_user.get("nickname", "")
             or current_user.get("display_name", "")
@@ -1562,7 +1588,7 @@ class ChatInterface(QWidget):
                 fallback=self_label,
             ),
             self_label=self_label,
-            ice_servers=config.webrtc.ice_servers,
+            ice_servers=self._chat_controller.get_call_ice_servers(),
             parent=None,
         )
         window.hangup_requested.connect(self._on_call_window_hangup_requested)
@@ -2204,6 +2230,18 @@ class ChatInterface(QWidget):
 
     def _open_message(self, message) -> None:
         """Open an image, file, or video attachment."""
+        attachment_encryption = dict((message.extra or {}).get("attachment_encryption") or {})
+        if attachment_encryption.get("enabled") and message.message_type in {
+            MessageType.IMAGE,
+            MessageType.VIDEO,
+            MessageType.FILE,
+        }:
+            self._schedule_ui_task(
+                self._open_file_attachment(message),
+                f"open attachment {message.message_id}",
+            )
+            return
+
         if message.message_type == MessageType.IMAGE:
             from client.ui.widgets.image_viewer import ImageViewer
 
@@ -2222,13 +2260,34 @@ class ChatInterface(QWidget):
             return
 
         if message.message_type == MessageType.FILE:
-            if not self.chat_panel.open_message_attachment(message):
-                InfoBar.warning(
-                    tr("chat.message.title", "Message"),
-                    tr("chat.attachment.file_open_failed", "Unable to open this attachment."),
-                    parent=self.window(),
-                    duration=1800,
-                )
+            self._schedule_ui_task(
+                self._open_file_attachment(message),
+                f"open attachment {message.message_id}",
+            )
+
+    async def _open_file_attachment(self, message) -> None:
+        """Download one file attachment when needed, then open the local file."""
+        try:
+            local_path = await self._chat_controller.download_message_attachment(message.message_id)
+        except Exception as exc:
+            InfoBar.warning(
+                tr("chat.message.title", "Message"),
+                str(exc) or tr("chat.attachment.file_open_failed", "Unable to open this attachment."),
+                parent=self.window(),
+                duration=1800,
+            )
+            return
+
+        if local_path:
+            message.extra["local_path"] = local_path
+
+        if not self.chat_panel.open_local_attachment(local_path, message.message_type):
+            InfoBar.warning(
+                tr("chat.message.title", "Message"),
+                tr("chat.attachment.file_open_failed", "Unable to open this attachment."),
+                parent=self.window(),
+                duration=1800,
+            )
 
     async def _retry_message(self, message_id: str) -> None:
         """Retry a failed message."""
@@ -2240,6 +2299,87 @@ class ChatInterface(QWidget):
                 parent=self.window(),
                 duration=1800,
             )
+
+    def _on_security_pending_confirm_requested(self, session_id: str, action_id: str) -> None:
+        """Confirm one queued security action, then send the held local messages."""
+        self._schedule_ui_task(
+            self._confirm_security_pending_messages(session_id, action_id),
+            f"confirm pending security messages {session_id}",
+        )
+
+    def _on_security_pending_discard_requested(self, session_id: str) -> None:
+        """Discard locally held messages that are still waiting for security confirmation."""
+        self._schedule_ui_task(
+            self._discard_security_pending_messages(session_id),
+            f"discard pending security messages {session_id}",
+        )
+
+    async def _confirm_security_pending_messages(self, session_id: str, action_id: str) -> None:
+        """Run one security action and release the locally queued messages for the session."""
+        try:
+            action_result = await self._chat_controller.execute_session_security_action(session_id, action_id)
+        except Exception as exc:
+            InfoBar.error(
+                tr("chat.message.title", "Message"),
+                str(exc) or tr("chat.security_pending.confirm_failed", "Unable to confirm the required security action."),
+                parent=self.window(),
+                duration=2400,
+            )
+            return
+
+        if not bool(action_result.get("performed")):
+            message = str(action_result.get("explanation") or action_result.get("reason") or "").strip()
+            InfoBar.warning(
+                tr("chat.message.title", "Message"),
+                message or tr("chat.security_pending.confirm_failed", "Unable to confirm the required security action."),
+                parent=self.window(),
+                duration=2400,
+            )
+            return
+
+        release_result = await self._chat_controller.release_session_security_pending_messages(session_id)
+        released_count = max(0, int(release_result.get("released", 0) or 0))
+        failed_count = max(0, int(release_result.get("failed", 0) or 0))
+        if failed_count:
+            InfoBar.warning(
+                tr("chat.message.title", "Message"),
+                tr(
+                    "chat.security_pending.release_partial",
+                    "{released} queued messages were sent, {failed} failed.",
+                    released=released_count,
+                    failed=failed_count,
+                ),
+                parent=self.window(),
+                duration=2400,
+            )
+            return
+        InfoBar.success(
+            tr("chat.message.title", "Message"),
+            tr(
+                "chat.security_pending.release_success",
+                "{count} queued messages are now sending.",
+                count=released_count,
+            ),
+            parent=self.window(),
+            duration=2000,
+        )
+
+    async def _discard_security_pending_messages(self, session_id: str) -> None:
+        """Delete queued local messages that were never sent because security confirmation is missing."""
+        result = await self._chat_controller.discard_session_security_pending_messages(session_id)
+        removed_count = max(0, int(result.get("removed", 0) or 0))
+        if removed_count <= 0:
+            return
+        InfoBar.info(
+            tr("chat.message.title", "Message"),
+            tr(
+                "chat.security_pending.discarded",
+                "{count} queued messages were discarded.",
+                count=removed_count,
+            ),
+            parent=self.window(),
+            duration=1800,
+        )
 
     async def _recall_message(self, message_id: str) -> None:
         """Recall a message and surface errors in the UI."""

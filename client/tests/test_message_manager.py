@@ -1,13 +1,17 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import asyncio
 import json
 import sqlite3
 import sys
+import tempfile
 import time
 import types
 from datetime import datetime
 from enum import Enum
+from pathlib import Path
+
+import pytest
 
 
 if 'PySide6.QtCore' not in sys.modules:
@@ -289,7 +293,7 @@ from client.events.contact_events import ContactEvent
 from client.managers import message_manager as message_manager_module
 from client.managers import session_manager as session_manager_module
 from client.ui.controllers import chat_controller as chat_controller_module
-from client.models.message import ChatMessage, MessageStatus, MessageType
+from client.models.message import ChatMessage, MessageStatus, MessageType, Session
 
 
 class FakeEventBus:
@@ -339,6 +343,7 @@ class FakeDatabase:
     def __init__(self) -> None:
         self.is_connected = False
         self.messages: dict[str, ChatMessage] = {}
+        self.sessions: dict[str, Session] = {}
         self.saved_batches: list[list[ChatMessage]] = []
         self.profile_update_calls: list[tuple[str, str, dict]] = []
 
@@ -353,6 +358,9 @@ class FakeDatabase:
 
     async def get_messages(self, session_id: str, limit: int = 50, before_timestamp=None) -> list[ChatMessage]:
         return [message for message in self.messages.values() if message.session_id == session_id][:limit]
+
+    async def get_session(self, session_id: str) -> Session | None:
+        return self.sessions.get(session_id)
 
     async def apply_read_receipt(self, session_id: str, reader_id: str, message_id: str, last_read_seq: int) -> list[str]:
         return []
@@ -385,6 +393,219 @@ class FakeDatabase:
             message.extra["sender_nickname"] = str(sender_profile.get("nickname", "") or "")
             changed.append(message.message_id)
         return changed
+
+
+class FakeE2EEService:
+    LOCAL_PLAINTEXT_VERSION = 'dpapi-text-v1'
+    GROUP_SENDER_KEY_SCHEME = 'group-sender-key-v1'
+    GROUP_FANOUT_SCHEME = 'group-sender-key-fanout-v1'
+
+    def __init__(self) -> None:
+        self.encrypt_calls: list[tuple[str, str]] = []
+        self.group_encrypt_calls: list[tuple[str, str, int, str, int]] = []
+        self.group_attachment_encrypt_calls: list[tuple[str, str, int, str, int, str, int | None]] = []
+        self.fetch_prekey_bundle_calls: list[str] = []
+        self.group_prekey_bundles: dict[str, list[dict]] = {}
+        self.decrypt_calls: list[tuple[str, dict]] = []
+        self.decrypt_attachment_calls: list[tuple[bytes, dict]] = []
+        self.text_decryption_state: dict[str, object] = {
+            'state': 'ready',
+            'can_decrypt': True,
+            'reprovision_required': False,
+            'local_device_id': 'device-bob',
+            'target_device_id': 'device-bob',
+        }
+        self.attachment_decryption_state: dict[str, object] = {
+            'state': 'ready',
+            'can_decrypt': True,
+            'reprovision_required': False,
+            'local_device_id': 'device-bob',
+            'target_device_id': 'device-bob',
+        }
+
+    @staticmethod
+    def is_encrypted_extra(extra: dict | None) -> bool:
+        return bool(dict((extra or {}).get('encryption') or {}).get('enabled'))
+
+    @staticmethod
+    def protect_local_plaintext(plaintext: str) -> str:
+        return f'local:{plaintext}'
+
+    @staticmethod
+    def recover_local_plaintext(protected_text: str) -> str:
+        return str(protected_text or '').removeprefix('local:')
+
+    async def encrypt_text_for_user(self, recipient_user_id: str, plaintext: str) -> tuple[str, dict]:
+        self.encrypt_calls.append((recipient_user_id, plaintext))
+        ciphertext = f'cipher:{plaintext}'
+        return (
+            ciphertext,
+            {
+                'enabled': True,
+                'scheme': 'x25519-aesgcm-v1',
+                'sender_device_id': 'device-alice',
+                'recipient_device_id': 'device-bob',
+                'recipient_user_id': recipient_user_id,
+                'recipient_prekey_type': 'signed',
+                'recipient_prekey_id': 1,
+                'content_ciphertext': ciphertext,
+                'nonce': 'nonce-1',
+                'sender_identity_key_public': 'pub-alice',
+                'local_plaintext': self.protect_local_plaintext(plaintext),
+                'local_plaintext_version': self.LOCAL_PLAINTEXT_VERSION,
+            },
+        )
+
+    async def fetch_prekey_bundle(self, user_id: str) -> list[dict]:
+        self.fetch_prekey_bundle_calls.append(user_id)
+        return [dict(item) for item in self.group_prekey_bundles.get(user_id, [])]
+
+    async def encrypt_text_for_group_session(
+        self,
+        session_id: str,
+        plaintext: str,
+        recipient_bundles: list[dict],
+        *,
+        member_version: int = 0,
+        owner_user_id: str = '',
+        force_rotate: bool = False,
+    ) -> tuple[str, dict]:
+        self.group_encrypt_calls.append((session_id, plaintext, member_version, owner_user_id, len(recipient_bundles)))
+        ciphertext = f'groupcipher:{plaintext}'
+        fanout = [
+            {
+                'enabled': True,
+                'scheme': self.GROUP_FANOUT_SCHEME,
+                'session_id': session_id,
+                'recipient_device_id': str(dict(bundle).get('device_id') or ''),
+            }
+            for bundle in recipient_bundles
+        ]
+        return (
+            ciphertext,
+            {
+                'enabled': True,
+                'scheme': self.GROUP_SENDER_KEY_SCHEME,
+                'session_id': session_id,
+                'sender_device_id': 'device-alice',
+                'sender_key_id': 'group-key-1',
+                'member_version': member_version,
+                'owner_user_id': owner_user_id,
+                'content_ciphertext': ciphertext,
+                'nonce': 'group-nonce-1',
+                'fanout': fanout,
+                'local_plaintext': self.protect_local_plaintext(plaintext),
+                'local_plaintext_version': self.LOCAL_PLAINTEXT_VERSION,
+            },
+        )
+
+    async def decrypt_text_content(self, content: str, extra: dict | None) -> str | None:
+        normalized_extra = dict(extra or {})
+        self.decrypt_calls.append((content, normalized_extra))
+        encryption = dict(normalized_extra.get('encryption') or {})
+        protected_plaintext = str(encryption.get('local_plaintext') or '')
+        if protected_plaintext:
+            return self.recover_local_plaintext(protected_plaintext)
+        ciphertext = str(encryption.get('content_ciphertext') or content or '')
+        if str(encryption.get('scheme') or '') == self.GROUP_SENDER_KEY_SCHEME:
+            return ciphertext.removeprefix('groupcipher:')
+        return ciphertext.removeprefix('cipher:')
+
+    async def decrypt_attachment_bytes(self, ciphertext_bytes: bytes, attachment_encryption: dict | None) -> tuple[bytes, dict]:
+        normalized = dict(attachment_encryption or {})
+        self.decrypt_attachment_calls.append((bytes(ciphertext_bytes), normalized))
+        metadata = {
+            'original_name': 'secret.pdf',
+            'mime_type': 'application/pdf',
+            'size_bytes': 9,
+        }
+        return b'plain-pdf', metadata
+
+    async def describe_text_decryption_state(self, extra: dict | None) -> dict:
+        return dict(self.text_decryption_state)
+
+    async def describe_attachment_decryption_state(self, attachment_encryption: dict | None) -> dict:
+        return dict(self.attachment_decryption_state)
+
+    async def encrypt_attachment_for_user(
+        self,
+        recipient_user_id: str,
+        file_path: str,
+        *,
+        fallback_name: str = '',
+        size_bytes: int | None = None,
+        mime_type: str = '',
+    ):
+        target = Path(tempfile.gettempdir()) / 'assistim_test_encrypted_attachment.bin'
+        target.write_bytes(b'encrypted-upload')
+        return types.SimpleNamespace(
+            upload_file_path=str(target),
+            cleanup_file_path=str(target),
+            attachment_encryption={
+                'enabled': True,
+                'scheme': 'aesgcm-file+x25519-v1',
+                'recipient_user_id': recipient_user_id,
+                'original_name': fallback_name,
+                'size_bytes': size_bytes,
+                'mime_type': mime_type,
+            },
+        )
+
+    async def encrypt_attachment_for_group_session(
+        self,
+        session_id: str,
+        file_path: str,
+        recipient_bundles: list[dict],
+        *,
+        fallback_name: str = '',
+        size_bytes: int | None = None,
+        mime_type: str = '',
+        member_version: int = 0,
+        owner_user_id: str = '',
+        force_rotate: bool = False,
+    ):
+        del file_path, force_rotate
+        self.group_attachment_encrypt_calls.append(
+            (session_id, fallback_name, member_version, owner_user_id, len(recipient_bundles), mime_type, size_bytes)
+        )
+        target = Path(tempfile.gettempdir()) / 'assistim_test_group_encrypted_attachment.bin'
+        target.write_bytes(b'group-encrypted-upload')
+        return types.SimpleNamespace(
+            upload_file_path=str(target),
+            cleanup_file_path=str(target),
+            attachment_encryption={
+                'enabled': True,
+                'scheme': 'aesgcm-file+group-sender-key-v1',
+                'session_id': session_id,
+                'sender_device_id': 'device-alice',
+                'sender_key_id': 'group-key-1',
+                'member_version': member_version,
+                'owner_user_id': owner_user_id,
+                'fanout': [
+                    {
+                        'enabled': True,
+                        'scheme': self.GROUP_FANOUT_SCHEME,
+                        'session_id': session_id,
+                        'recipient_device_id': str(dict(bundle).get('device_id') or ''),
+                    }
+                    for bundle in recipient_bundles
+                ],
+                'metadata_ciphertext': 'meta:cipher',
+                'nonce': 'group-meta-nonce-1',
+                'local_metadata': self.protect_local_plaintext(
+                    json.dumps(
+                        {
+                            'original_name': fallback_name,
+                            'mime_type': mime_type,
+                            'size_bytes': size_bytes,
+                        },
+                        ensure_ascii=True,
+                        sort_keys=True,
+                    )
+                ),
+                'local_plaintext_version': self.LOCAL_PLAINTEXT_VERSION,
+            },
+        )
 
 
 async def _wait_until(predicate, *, timeout: float = 0.5) -> None:
@@ -588,6 +809,1013 @@ def test_message_manager_replays_history_events(monkeypatch) -> None:
 
 
 
+def test_message_manager_edits_encrypted_message_with_sanitized_transport_extra(monkeypatch) -> None:
+    fake_event_bus = FakeEventBus()
+    fake_conn_manager = FakeConnectionManager([])
+    fake_db = FakeDatabase()
+    fake_e2ee_service = FakeE2EEService()
+
+    class FakeChatService:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, str, dict | None]] = []
+
+        async def edit_message(self, message_id: str, new_content: str, *, extra=None) -> None:
+            self.calls.append((message_id, new_content, dict(extra) if isinstance(extra, dict) else None))
+
+    fake_chat_service = FakeChatService()
+    fake_db.sessions['session-1'] = Session(
+        session_id='session-1',
+        name='Bob',
+        session_type='direct',
+        participant_ids=['alice', 'bob'],
+    )
+    fake_db.messages['m-enc-1'] = ChatMessage(
+        message_id='m-enc-1',
+        session_id='session-1',
+        sender_id='alice',
+        content='old secret',
+        message_type=MessageType.TEXT,
+        status=MessageStatus.SENT,
+        is_self=True,
+        extra={
+            'session_type': 'direct',
+            'participant_ids': ['alice', 'bob'],
+            'encryption': {
+                'enabled': True,
+                'content_ciphertext': 'cipher:old secret',
+                'local_plaintext': 'local:old secret',
+            },
+        },
+    )
+
+    monkeypatch.setattr(message_manager_module, 'get_event_bus', lambda: fake_event_bus)
+    monkeypatch.setattr(message_manager_module, 'get_connection_manager', lambda: fake_conn_manager)
+    monkeypatch.setattr(message_manager_module, 'get_database', lambda: fake_db)
+    monkeypatch.setattr(message_manager_module, 'get_chat_service', lambda: fake_chat_service)
+    monkeypatch.setattr(message_manager_module, 'get_e2ee_service', lambda: fake_e2ee_service)
+
+    async def scenario() -> None:
+        manager = message_manager_module.MessageManager()
+        manager.set_user_id('alice')
+        await manager.initialize()
+        try:
+            success = await manager.edit_message('m-enc-1', 'edited secret')
+
+            assert success is True
+            assert fake_e2ee_service.encrypt_calls == [('bob', 'edited secret')]
+            assert fake_chat_service.calls == [
+                (
+                    'm-enc-1',
+                    'cipher:edited secret',
+                    {
+                        'session_type': 'direct',
+                        'participant_ids': ['alice', 'bob'],
+                        'encryption': {
+                            'enabled': True,
+                            'scheme': 'x25519-aesgcm-v1',
+                            'sender_device_id': 'device-alice',
+                            'recipient_device_id': 'device-bob',
+                            'recipient_user_id': 'bob',
+                            'recipient_prekey_type': 'signed',
+                            'recipient_prekey_id': 1,
+                            'content_ciphertext': 'cipher:edited secret',
+                            'nonce': 'nonce-1',
+                            'sender_identity_key_public': 'pub-alice',
+                            'local_plaintext_version': 'dpapi-text-v1',
+                        },
+                    },
+                )
+            ]
+            stored = await fake_db.get_message('m-enc-1')
+            assert stored is not None
+            assert stored.content == 'edited secret'
+            assert stored.status == MessageStatus.EDITED
+            assert stored.extra['encryption']['local_plaintext'] == 'local:edited secret'
+            assert any(event == message_manager_module.MessageEvent.EDITED for event, _ in fake_event_bus.events)
+        finally:
+            await manager.close()
+
+    asyncio.run(scenario())
+
+
+def test_message_manager_processes_encrypted_edit_event(monkeypatch) -> None:
+    fake_event_bus = FakeEventBus()
+    fake_conn_manager = FakeConnectionManager([])
+    fake_db = FakeDatabase()
+    fake_e2ee_service = FakeE2EEService()
+    fake_db.messages['m-enc-2'] = ChatMessage(
+        message_id='m-enc-2',
+        session_id='session-1',
+        sender_id='alice',
+        content='old secret',
+        message_type=MessageType.TEXT,
+        status=MessageStatus.SENT,
+        is_self=False,
+        extra={'session_type': 'direct'},
+    )
+
+    monkeypatch.setattr(message_manager_module, 'get_event_bus', lambda: fake_event_bus)
+    monkeypatch.setattr(message_manager_module, 'get_connection_manager', lambda: fake_conn_manager)
+    monkeypatch.setattr(message_manager_module, 'get_database', lambda: fake_db)
+    monkeypatch.setattr(message_manager_module, 'get_e2ee_service', lambda: fake_e2ee_service)
+
+    async def scenario() -> None:
+        manager = message_manager_module.MessageManager()
+        manager.set_user_id('bob')
+        await manager.initialize()
+        try:
+            await manager._handle_ws_message(
+                {
+                    'type': 'message_edit',
+                    'data': {
+                        'session_id': 'session-1',
+                        'message_id': 'm-enc-2',
+                        'user_id': 'alice',
+                        'content': 'cipher:edited secret',
+                        'status': 'edited',
+                        'extra': {
+                            'session_type': 'direct',
+                            'encryption': {
+                                'enabled': True,
+                                'content_ciphertext': 'cipher:edited secret',
+                                'sender_device_id': 'device-alice',
+                                'recipient_device_id': 'device-bob',
+                                'sender_identity_key_public': 'pub-alice',
+                                'nonce': 'nonce-1',
+                            },
+                        },
+                    },
+                }
+            )
+
+            stored = await fake_db.get_message('m-enc-2')
+            assert stored is not None
+            assert stored.content == 'edited secret'
+            assert stored.status == MessageStatus.EDITED
+            assert stored.extra['encryption']['local_plaintext'] == 'local:edited secret'
+            assert fake_e2ee_service.decrypt_calls
+            assert any(event == message_manager_module.MessageEvent.EDITED for event, _ in fake_event_bus.events)
+        finally:
+            await manager.close()
+
+    asyncio.run(scenario())
+
+
+def test_message_manager_ack_preserves_local_plaintext_for_direct_e2ee_sender(monkeypatch) -> None:
+    fake_event_bus = FakeEventBus()
+    fake_conn_manager = FakeConnectionManager([True])
+    fake_db = FakeDatabase()
+    fake_e2ee_service = FakeE2EEService()
+    fake_db.sessions['session-1'] = Session(
+        session_id='session-1',
+        name='Bob',
+        session_type='direct',
+        participant_ids=['alice', 'bob'],
+        extra={},
+    )
+
+    monkeypatch.setattr(message_manager_module, 'get_event_bus', lambda: fake_event_bus)
+    monkeypatch.setattr(message_manager_module, 'get_connection_manager', lambda: fake_conn_manager)
+    monkeypatch.setattr(message_manager_module, 'get_database', lambda: fake_db)
+
+    async def scenario() -> None:
+        manager = message_manager_module.MessageManager()
+        manager.set_user_id('alice')
+        manager._e2ee_service = fake_e2ee_service
+        await manager.initialize()
+        try:
+            message = await manager.send_message('session-1', 'hello bob', MessageType.TEXT)
+            await _wait_until(lambda: len(fake_conn_manager.sent_payloads) == 1)
+
+            await manager._process_ack(
+                {
+                    'type': 'message_ack',
+                    'msg_id': message.message_id,
+                    'data': {
+                        'msg_id': message.message_id,
+                        'success': True,
+                        'message': {
+                            'message_id': message.message_id,
+                            'session_id': 'session-1',
+                            'sender_id': 'alice',
+                            'content': 'cipher:hello bob',
+                            'message_type': 'text',
+                            'status': 'sent',
+                            'extra': {
+                                'encryption': {
+                                    'enabled': True,
+                                    'scheme': 'x25519-aesgcm-v1',
+                                    'sender_device_id': 'device-alice',
+                                    'recipient_device_id': 'device-bob',
+                                    'recipient_user_id': 'bob',
+                                    'recipient_prekey_type': 'signed',
+                                    'recipient_prekey_id': 1,
+                                    'content_ciphertext': 'cipher:hello bob',
+                                    'nonce': 'nonce-1',
+                                    'sender_identity_key_public': 'pub-alice',
+                                }
+                            },
+                        },
+                    },
+                }
+            )
+
+            stored = await fake_db.get_message(message.message_id)
+            assert stored is not None
+            assert stored.status == MessageStatus.SENT
+            assert stored.content == 'hello bob'
+            assert stored.extra['encryption']['local_plaintext'] == 'local:hello bob'
+        finally:
+            await manager.close()
+
+    asyncio.run(scenario())
+
+
+def test_message_manager_edits_group_encrypted_message_with_sender_key_transport(monkeypatch) -> None:
+    fake_event_bus = FakeEventBus()
+    fake_conn_manager = FakeConnectionManager([])
+    fake_db = FakeDatabase()
+    fake_e2ee_service = FakeE2EEService()
+    class FakeChatService:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, str, dict | None]] = []
+
+        async def edit_message(self, message_id: str, new_content: str, *, extra=None) -> None:
+            self.calls.append((message_id, new_content, extra))
+
+    fake_chat_service = FakeChatService()
+    fake_e2ee_service.group_prekey_bundles = {
+        'bob': [{'device_id': 'device-bob'}],
+        'charlie': [{'device_id': 'device-charlie'}],
+    }
+    fake_db.sessions['session-group-1'] = Session(
+        session_id='session-group-1',
+        name='Team',
+        session_type='group',
+        participant_ids=['alice', 'bob', 'charlie'],
+        extra={
+            'members': [
+                {'id': 'alice'},
+                {'id': 'bob'},
+                {'id': 'charlie'},
+            ],
+            'group_member_version': 9,
+        },
+    )
+    fake_db.messages['m-group-edit-1'] = ChatMessage(
+        message_id='m-group-edit-1',
+        session_id='session-group-1',
+        sender_id='alice',
+        content='old group secret',
+        message_type=MessageType.TEXT,
+        status=MessageStatus.SENT,
+        is_self=True,
+        extra={
+            'session_type': 'group',
+            'participant_ids': ['alice', 'bob', 'charlie'],
+            'members': [{'id': 'alice'}, {'id': 'bob'}, {'id': 'charlie'}],
+            'group_member_version': 9,
+            'encryption': {
+                'enabled': True,
+                'scheme': 'group-sender-key-v1',
+                'session_id': 'session-group-1',
+                'sender_device_id': 'device-alice',
+                'sender_key_id': 'group-key-1',
+                'member_version': 9,
+                'content_ciphertext': 'groupcipher:old group secret',
+                'local_plaintext': 'local:old group secret',
+            },
+        },
+    )
+
+    monkeypatch.setattr(message_manager_module, 'get_event_bus', lambda: fake_event_bus)
+    monkeypatch.setattr(message_manager_module, 'get_connection_manager', lambda: fake_conn_manager)
+    monkeypatch.setattr(message_manager_module, 'get_database', lambda: fake_db)
+    monkeypatch.setattr(message_manager_module, 'get_chat_service', lambda: fake_chat_service)
+    monkeypatch.setattr(message_manager_module, 'get_e2ee_service', lambda: fake_e2ee_service)
+
+    async def scenario() -> None:
+        manager = message_manager_module.MessageManager()
+        manager.set_user_id('alice')
+        await manager.initialize()
+        try:
+            success = await manager.edit_message('m-group-edit-1', 'edited team secret')
+
+            assert success is True
+            assert fake_e2ee_service.fetch_prekey_bundle_calls == ['bob', 'charlie']
+            assert fake_e2ee_service.group_encrypt_calls == [
+                ('session-group-1', 'edited team secret', 9, 'alice', 2)
+            ]
+            assert fake_chat_service.calls == [
+                (
+                    'm-group-edit-1',
+                    'groupcipher:edited team secret',
+                    {
+                        'session_type': 'group',
+                        'participant_ids': ['alice', 'bob', 'charlie'],
+                        'members': [{'id': 'alice'}, {'id': 'bob'}, {'id': 'charlie'}],
+                        'group_member_version': 9,
+                        'encryption': {
+                            'enabled': True,
+                            'scheme': 'group-sender-key-v1',
+                            'session_id': 'session-group-1',
+                            'sender_device_id': 'device-alice',
+                            'sender_key_id': 'group-key-1',
+                            'member_version': 9,
+                            'owner_user_id': 'alice',
+                            'content_ciphertext': 'groupcipher:edited team secret',
+                            'nonce': 'group-nonce-1',
+                            'fanout': [
+                                {
+                                    'enabled': True,
+                                    'scheme': 'group-sender-key-fanout-v1',
+                                    'session_id': 'session-group-1',
+                                    'recipient_device_id': 'device-bob',
+                                },
+                                {
+                                    'enabled': True,
+                                    'scheme': 'group-sender-key-fanout-v1',
+                                    'session_id': 'session-group-1',
+                                    'recipient_device_id': 'device-charlie',
+                                },
+                            ],
+                            'local_plaintext_version': 'dpapi-text-v1',
+                        },
+                    },
+                )
+            ]
+            stored = await fake_db.get_message('m-group-edit-1')
+            assert stored is not None
+            assert stored.content == 'edited team secret'
+            assert stored.status == MessageStatus.EDITED
+            assert stored.extra['encryption']['local_plaintext'] == 'local:edited team secret'
+        finally:
+            await manager.close()
+
+    asyncio.run(scenario())
+
+
+def test_message_manager_processes_group_encrypted_edit_event(monkeypatch) -> None:
+    fake_event_bus = FakeEventBus()
+    fake_conn_manager = FakeConnectionManager([])
+    fake_db = FakeDatabase()
+    fake_e2ee_service = FakeE2EEService()
+    fake_db.messages['m-group-edit-2'] = ChatMessage(
+        message_id='m-group-edit-2',
+        session_id='session-group-1',
+        sender_id='alice',
+        content='old group secret',
+        message_type=MessageType.TEXT,
+        status=MessageStatus.SENT,
+        is_self=False,
+        extra={'session_type': 'group'},
+    )
+
+    monkeypatch.setattr(message_manager_module, 'get_event_bus', lambda: fake_event_bus)
+    monkeypatch.setattr(message_manager_module, 'get_connection_manager', lambda: fake_conn_manager)
+    monkeypatch.setattr(message_manager_module, 'get_database', lambda: fake_db)
+    monkeypatch.setattr(message_manager_module, 'get_e2ee_service', lambda: fake_e2ee_service)
+
+    async def scenario() -> None:
+        manager = message_manager_module.MessageManager()
+        manager.set_user_id('bob')
+        await manager.initialize()
+        try:
+            await manager._handle_ws_message(
+                {
+                    'type': 'message_edit',
+                    'data': {
+                        'session_id': 'session-group-1',
+                        'message_id': 'm-group-edit-2',
+                        'user_id': 'alice',
+                        'content': 'groupcipher:edited team secret',
+                        'status': 'edited',
+                        'extra': {
+                            'session_type': 'group',
+                            'encryption': {
+                                'enabled': True,
+                                'scheme': 'group-sender-key-v1',
+                                'session_id': 'session-group-1',
+                                'sender_device_id': 'device-alice',
+                                'sender_key_id': 'group-key-1',
+                                'member_version': 9,
+                                'content_ciphertext': 'groupcipher:edited team secret',
+                                'nonce': 'group-nonce-1',
+                                'fanout': [
+                                    {
+                                        'enabled': True,
+                                        'scheme': 'group-sender-key-fanout-v1',
+                                        'session_id': 'session-group-1',
+                                        'recipient_device_id': 'device-bob',
+                                    }
+                                ],
+                            },
+                        },
+                    },
+                }
+            )
+
+            stored = await fake_db.get_message('m-group-edit-2')
+            assert stored is not None
+            assert stored.content == 'edited team secret'
+            assert stored.status == MessageStatus.EDITED
+            assert stored.extra['encryption']['scheme'] == 'group-sender-key-v1'
+            assert stored.extra['encryption']['local_plaintext'] == 'local:edited team secret'
+            assert fake_e2ee_service.decrypt_calls
+            assert any(event == message_manager_module.MessageEvent.EDITED for event, _ in fake_event_bus.events)
+        finally:
+            await manager.close()
+
+    asyncio.run(scenario())
+
+
+def test_message_manager_marks_missing_private_key_for_encrypted_text(monkeypatch) -> None:
+    fake_event_bus = FakeEventBus()
+    fake_conn_manager = FakeConnectionManager([])
+    fake_db = FakeDatabase()
+    fake_e2ee_service = FakeE2EEService()
+    fake_e2ee_service.text_decryption_state = {
+        'state': 'missing_private_key',
+        'can_decrypt': False,
+        'reprovision_required': True,
+        'local_device_id': 'device-bob',
+        'target_device_id': 'device-bob',
+    }
+
+    async def failing_decrypt(content: str, extra: dict | None) -> str | None:
+        raise RuntimeError('local device does not have the required private prekey')
+
+    fake_e2ee_service.decrypt_text_content = failing_decrypt  # type: ignore[method-assign]
+
+    monkeypatch.setattr(message_manager_module, 'get_event_bus', lambda: fake_event_bus)
+    monkeypatch.setattr(message_manager_module, 'get_connection_manager', lambda: fake_conn_manager)
+    monkeypatch.setattr(message_manager_module, 'get_database', lambda: fake_db)
+    monkeypatch.setattr(message_manager_module, 'get_e2ee_service', lambda: fake_e2ee_service)
+
+    async def scenario() -> None:
+        manager = message_manager_module.MessageManager()
+        manager.set_user_id('bob')
+        await manager.initialize()
+        try:
+            message = ChatMessage(
+                message_id='m-missing-key',
+                session_id='session-1',
+                sender_id='alice',
+                content='cipher:secret',
+                message_type=MessageType.TEXT,
+                status=MessageStatus.RECEIVED,
+                is_self=False,
+                extra={
+                    'encryption': {
+                        'enabled': True,
+                        'content_ciphertext': 'cipher:secret',
+                        'sender_device_id': 'device-alice',
+                        'recipient_device_id': 'device-bob',
+                    },
+                },
+            )
+
+            updated = await manager._decrypt_message_for_display(message)
+
+            assert updated.content == '[Encrypted message]'
+            assert updated.extra['encryption']['decryption_state'] == 'missing_private_key'
+            assert updated.extra['encryption']['recovery_action'] == 'reprovision_device'
+            assert updated.extra['encryption']['can_decrypt'] is False
+            assert updated.extra['encryption']['local_device_id'] == 'device-bob'
+            assert updated.extra['encryption']['target_device_id'] == 'device-bob'
+            assert 'decryption_error' in updated.extra['encryption']
+            assert any(event == message_manager_module.MessageEvent.DECRYPTION_STATE_CHANGED for event, _ in fake_event_bus.events)
+        finally:
+            await manager.close()
+
+    asyncio.run(scenario())
+
+
+def test_message_manager_marks_attachment_for_other_device(monkeypatch) -> None:
+    fake_event_bus = FakeEventBus()
+    fake_conn_manager = FakeConnectionManager([])
+    fake_db = FakeDatabase()
+    fake_e2ee_service = FakeE2EEService()
+    fake_e2ee_service.attachment_decryption_state = {
+        'state': 'not_for_current_device',
+        'can_decrypt': False,
+        'reprovision_required': False,
+        'local_device_id': 'device-laptop',
+        'target_device_id': 'device-phone',
+    }
+
+    async def missing_metadata(attachment_encryption: dict | None) -> dict | None:
+        return None
+
+    fake_e2ee_service.decrypt_attachment_metadata = missing_metadata  # type: ignore[method-assign]
+
+    monkeypatch.setattr(message_manager_module, 'get_event_bus', lambda: fake_event_bus)
+    monkeypatch.setattr(message_manager_module, 'get_connection_manager', lambda: fake_conn_manager)
+    monkeypatch.setattr(message_manager_module, 'get_database', lambda: fake_db)
+    monkeypatch.setattr(message_manager_module, 'get_e2ee_service', lambda: fake_e2ee_service)
+
+    async def scenario() -> None:
+        manager = message_manager_module.MessageManager()
+        manager.set_user_id('bob')
+        await manager.initialize()
+        try:
+            message = ChatMessage(
+                message_id='m-attachment-switch-device',
+                session_id='session-1',
+                sender_id='alice',
+                content='https://cdn.example/files/blob.bin',
+                message_type=MessageType.FILE,
+                status=MessageStatus.RECEIVED,
+                is_self=False,
+                extra={
+                    'attachment_encryption': {
+                        'enabled': True,
+                        'scheme': 'aesgcm-file+x25519-v1',
+                        'sender_device_id': 'device-alice',
+                        'recipient_device_id': 'device-phone',
+                    },
+                },
+            )
+
+            updated = await manager._hydrate_attachment_metadata_for_display(message)
+
+            assert updated.extra['name'] == 'Encrypted attachment'
+            assert updated.extra['attachment_encryption']['decryption_state'] == 'not_for_current_device'
+            assert updated.extra['attachment_encryption']['recovery_action'] == 'switch_device'
+            assert updated.extra['attachment_encryption']['can_decrypt'] is False
+            assert updated.extra['attachment_encryption']['local_device_id'] == 'device-laptop'
+            assert updated.extra['attachment_encryption']['target_device_id'] == 'device-phone'
+            assert any(event == message_manager_module.MessageEvent.DECRYPTION_STATE_CHANGED for event, _ in fake_event_bus.events)
+        finally:
+            await manager.close()
+
+    asyncio.run(scenario())
+
+
+def test_message_manager_download_attachment_decrypts_and_caches_local_file(monkeypatch) -> None:
+    fake_event_bus = FakeEventBus()
+    fake_conn_manager = FakeConnectionManager([])
+    fake_db = FakeDatabase()
+    fake_e2ee_service = FakeE2EEService()
+
+    class FakeFileService:
+        def __init__(self) -> None:
+            self.download_calls: list[str] = []
+
+        async def download_chat_attachment(self, file_url: str) -> bytes:
+            self.download_calls.append(file_url)
+            return b'cipher-bytes'
+
+    fake_file_service = FakeFileService()
+    fake_db.messages['m-file-1'] = ChatMessage(
+        message_id='m-file-1',
+        session_id='session-1',
+        sender_id='bob',
+        content='https://cdn.example/files/blob.bin',
+        message_type=MessageType.FILE,
+        status=MessageStatus.SENT,
+        is_self=False,
+        extra={
+            'attachment_encryption': {
+                'enabled': True,
+                'scheme': 'aesgcm-file+x25519-v1',
+            },
+            'url': 'https://cdn.example/files/blob.bin',
+        },
+    )
+
+    monkeypatch.setattr(message_manager_module, 'get_event_bus', lambda: fake_event_bus)
+    monkeypatch.setattr(message_manager_module, 'get_connection_manager', lambda: fake_conn_manager)
+    monkeypatch.setattr(message_manager_module, 'get_database', lambda: fake_db)
+    monkeypatch.setattr(message_manager_module, 'get_file_service', lambda: fake_file_service)
+
+    async def scenario() -> None:
+        manager = message_manager_module.MessageManager()
+        manager.set_user_id('alice')
+        manager._e2ee_service = fake_e2ee_service
+        local_path = ''
+        try:
+            local_path = await manager.download_attachment('m-file-1')
+
+            assert fake_file_service.download_calls == ['https://cdn.example/files/blob.bin']
+            assert fake_e2ee_service.decrypt_attachment_calls == [
+                (
+                    b'cipher-bytes',
+                    {
+                        'enabled': True,
+                        'scheme': 'aesgcm-file+x25519-v1',
+                    },
+                )
+            ]
+            assert local_path.endswith('m-file-1_secret.pdf')
+            assert Path(local_path).read_bytes() == b'plain-pdf'
+
+            stored = await fake_db.get_message('m-file-1')
+            assert stored is not None
+            assert stored.extra['local_path'] == local_path
+            assert stored.extra['name'] == 'secret.pdf'
+            assert stored.extra['file_type'] == 'application/pdf'
+        finally:
+            if local_path:
+                Path(local_path).unlink(missing_ok=True)
+
+    asyncio.run(scenario())
+
+
+def test_message_manager_prepare_attachment_upload_encrypts_direct_image_messages(monkeypatch) -> None:
+    fake_event_bus = FakeEventBus()
+    fake_conn_manager = FakeConnectionManager([])
+    fake_db = FakeDatabase()
+    fake_e2ee_service = FakeE2EEService()
+    workspace_tmp = Path('client/tests/.pytest_tmp')
+    workspace_tmp.mkdir(parents=True, exist_ok=True)
+    source_path = workspace_tmp / 'encrypted-image.png'
+    source_path.write_bytes(b'png-data')
+    fake_db.sessions['session-1'] = Session(
+        session_id='session-1',
+        name='Bob',
+        session_type='direct',
+        participant_ids=['alice', 'bob'],
+    )
+
+    monkeypatch.setattr(message_manager_module, 'get_event_bus', lambda: fake_event_bus)
+    monkeypatch.setattr(message_manager_module, 'get_connection_manager', lambda: fake_conn_manager)
+    monkeypatch.setattr(message_manager_module, 'get_database', lambda: fake_db)
+
+    async def scenario() -> None:
+        manager = message_manager_module.MessageManager()
+        manager.set_user_id('alice')
+        manager._e2ee_service = fake_e2ee_service
+        cleanup_path = ''
+        try:
+            upload_path, extra, cleanup_path = await manager.prepare_attachment_upload(
+                session_id='session-1',
+                file_path=str(source_path),
+                message_type=MessageType.IMAGE,
+                fallback_name='encrypted-image.png',
+                fallback_size=8,
+            )
+
+            assert upload_path == cleanup_path
+            assert Path(upload_path).exists()
+            assert extra['attachment_encryption']['enabled'] is True
+            assert extra['attachment_encryption']['recipient_user_id'] == 'bob'
+        finally:
+            if cleanup_path:
+                Path(cleanup_path).unlink(missing_ok=True)
+            source_path.unlink(missing_ok=True)
+
+    asyncio.run(scenario())
+
+
+def test_message_manager_blocks_direct_sends_when_identity_review_is_required(monkeypatch) -> None:
+    fake_event_bus = FakeEventBus()
+    fake_conn_manager = FakeConnectionManager([])
+    fake_db = FakeDatabase()
+    fake_e2ee_service = FakeE2EEService()
+    fake_db.sessions['session-1'] = Session(
+        session_id='session-1',
+        name='Bob',
+        session_type='direct',
+        participant_ids=['alice', 'bob'],
+        extra={
+            'session_crypto_state': {
+                'identity_status': 'identity_changed',
+                'identity_action_required': True,
+                'identity_review_action': 'trust_peer_identity',
+                'identity_review_blocking': True,
+                'identity_alert_severity': 'critical',
+            }
+        },
+    )
+
+    monkeypatch.setattr(message_manager_module, 'get_event_bus', lambda: fake_event_bus)
+    monkeypatch.setattr(message_manager_module, 'get_connection_manager', lambda: fake_conn_manager)
+    monkeypatch.setattr(message_manager_module, 'get_database', lambda: fake_db)
+
+    async def scenario() -> None:
+        manager = message_manager_module.MessageManager()
+        manager.set_user_id('alice')
+        manager._e2ee_service = fake_e2ee_service
+
+        message = await manager.send_message(
+            session_id='session-1',
+            content='should fail',
+            message_type=MessageType.TEXT,
+        )
+
+        assert message.status == MessageStatus.AWAITING_SECURITY_CONFIRMATION
+        assert message.content == 'should fail'
+        assert dict(message.extra.get('security_pending') or {}).get('action_id') == 'trust_peer_identity'
+        assert fake_e2ee_service.encrypt_calls == []
+        assert fake_conn_manager.sent_payloads == []
+        sent_payloads = [
+            payload
+            for event, payload in fake_event_bus.events
+            if event == message_manager_module.MessageEvent.SENT
+        ]
+        assert sent_payloads
+        assert sent_payloads[0]['message'].status == MessageStatus.AWAITING_SECURITY_CONFIRMATION
+
+    asyncio.run(scenario())
+
+
+def test_message_manager_release_security_pending_messages_sends_after_confirmation(monkeypatch) -> None:
+    fake_event_bus = FakeEventBus()
+    fake_conn_manager = FakeConnectionManager([True])
+    fake_db = FakeDatabase()
+    fake_e2ee_service = FakeE2EEService()
+    fake_db.sessions['session-1'] = Session(
+        session_id='session-1',
+        name='Bob',
+        session_type='direct',
+        participant_ids=['alice', 'bob'],
+        extra={
+            'session_crypto_state': {
+                'identity_status': 'identity_changed',
+                'identity_action_required': True,
+                'identity_review_action': 'trust_peer_identity',
+                'identity_review_blocking': True,
+                'identity_alert_severity': 'critical',
+            }
+        },
+    )
+
+    monkeypatch.setattr(message_manager_module, 'get_event_bus', lambda: fake_event_bus)
+    monkeypatch.setattr(message_manager_module, 'get_connection_manager', lambda: fake_conn_manager)
+    monkeypatch.setattr(message_manager_module, 'get_database', lambda: fake_db)
+
+    async def scenario() -> None:
+        manager = message_manager_module.MessageManager()
+        manager.set_user_id('alice')
+        manager._e2ee_service = fake_e2ee_service
+        await manager.initialize()
+        try:
+            message = await manager.send_message(
+                session_id='session-1',
+                content='hold then send',
+                message_type=MessageType.TEXT,
+            )
+
+            assert message.status == MessageStatus.AWAITING_SECURITY_CONFIRMATION
+            assert fake_conn_manager.sent_payloads == []
+
+            fake_db.sessions['session-1'].extra['session_crypto_state'] = {
+                'identity_status': 'verified',
+                'identity_review_blocking': False,
+            }
+            result = await manager.release_security_pending_messages('session-1')
+            await asyncio.sleep(0.05)
+
+            assert result['released'] == 1
+            assert result['failed'] == 0
+            stored = await fake_db.get_message(message.message_id)
+            assert stored is not None
+            assert stored.status == MessageStatus.SENDING
+            assert 'security_pending' not in stored.extra
+            assert fake_e2ee_service.encrypt_calls == [('bob', 'hold then send')]
+            assert len(fake_conn_manager.sent_payloads) == 1
+            assert fake_conn_manager.sent_payloads[0]['msg_id'] == message.message_id
+            assert fake_conn_manager.sent_payloads[0]['content'] == 'cipher:hold then send'
+        finally:
+            await manager.close()
+
+    asyncio.run(scenario())
+
+
+def test_message_manager_discard_security_pending_messages_removes_local_only_messages(monkeypatch) -> None:
+    fake_event_bus = FakeEventBus()
+    fake_conn_manager = FakeConnectionManager([])
+    fake_db = FakeDatabase()
+    fake_e2ee_service = FakeE2EEService()
+    fake_db.sessions['session-1'] = Session(
+        session_id='session-1',
+        name='Bob',
+        session_type='direct',
+        participant_ids=['alice', 'bob'],
+        extra={
+            'session_crypto_state': {
+                'identity_status': 'identity_changed',
+                'identity_action_required': True,
+                'identity_review_action': 'trust_peer_identity',
+                'identity_review_blocking': True,
+                'identity_alert_severity': 'critical',
+            }
+        },
+    )
+
+    monkeypatch.setattr(message_manager_module, 'get_event_bus', lambda: fake_event_bus)
+    monkeypatch.setattr(message_manager_module, 'get_connection_manager', lambda: fake_conn_manager)
+    monkeypatch.setattr(message_manager_module, 'get_database', lambda: fake_db)
+
+    async def scenario() -> None:
+        manager = message_manager_module.MessageManager()
+        manager.set_user_id('alice')
+        manager._e2ee_service = fake_e2ee_service
+
+        message = await manager.send_message(
+            session_id='session-1',
+            content='discard me',
+            message_type=MessageType.TEXT,
+        )
+
+        result = await manager.discard_security_pending_messages('session-1')
+        assert result['removed'] == 1
+        assert result['message_ids'] == [message.message_id]
+        assert await fake_db.get_message(message.message_id) is None
+        deleted_payloads = [
+            payload
+            for event, payload in fake_event_bus.events
+            if event == message_manager_module.MessageEvent.DELETED
+        ]
+        assert deleted_payloads
+        assert deleted_payloads[-1]['message_id'] == message.message_id
+
+    asyncio.run(scenario())
+
+
+def test_message_manager_blocks_direct_attachment_encryption_when_identity_review_is_required(monkeypatch) -> None:
+    fake_event_bus = FakeEventBus()
+    fake_conn_manager = FakeConnectionManager([])
+    fake_db = FakeDatabase()
+    fake_e2ee_service = FakeE2EEService()
+    workspace_tmp = Path('client/tests/.pytest_tmp')
+    workspace_tmp.mkdir(parents=True, exist_ok=True)
+    source_path = workspace_tmp / 'identity-blocked.png'
+    source_path.write_bytes(b'png-data')
+    fake_db.sessions['session-1'] = Session(
+        session_id='session-1',
+        name='Bob',
+        session_type='direct',
+        participant_ids=['alice', 'bob'],
+        extra={
+            'session_crypto_state': {
+                'identity_status': 'identity_changed',
+                'identity_action_required': True,
+                'identity_review_action': 'trust_peer_identity',
+                'identity_review_blocking': True,
+                'identity_alert_severity': 'critical',
+            }
+        },
+    )
+
+    monkeypatch.setattr(message_manager_module, 'get_event_bus', lambda: fake_event_bus)
+    monkeypatch.setattr(message_manager_module, 'get_connection_manager', lambda: fake_conn_manager)
+    monkeypatch.setattr(message_manager_module, 'get_database', lambda: fake_db)
+
+    async def scenario() -> None:
+        manager = message_manager_module.MessageManager()
+        manager.set_user_id('alice')
+        manager._e2ee_service = fake_e2ee_service
+
+        with pytest.raises(RuntimeError) as exc_info:
+            await manager.prepare_attachment_upload(
+                session_id='session-1',
+                file_path=str(source_path),
+                message_type=MessageType.IMAGE,
+                fallback_name='identity-blocked.png',
+                fallback_size=8,
+            )
+
+        assert 'identity changed' in str(exc_info.value)
+        assert fake_e2ee_service.group_attachment_encrypt_calls == []
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        source_path.unlink(missing_ok=True)
+
+
+def test_message_manager_prepare_attachment_upload_encrypts_group_image_messages(monkeypatch) -> None:
+    fake_event_bus = FakeEventBus()
+    fake_conn_manager = FakeConnectionManager([])
+    fake_db = FakeDatabase()
+    fake_e2ee_service = FakeE2EEService()
+    fake_e2ee_service.group_prekey_bundles = {
+        'bob': [{'device_id': 'device-bob'}],
+        'charlie': [{'device_id': 'device-charlie'}],
+    }
+    workspace_tmp = Path('client/tests/.pytest_tmp')
+    workspace_tmp.mkdir(parents=True, exist_ok=True)
+    source_path = workspace_tmp / 'group-encrypted-image.png'
+    source_path.write_bytes(b'group-png-data')
+    fake_db.sessions['session-group-attach-1'] = Session(
+        session_id='session-group-attach-1',
+        name='Team',
+        session_type='group',
+        participant_ids=['alice', 'bob', 'charlie'],
+        extra={
+            'members': [
+                {'id': 'alice'},
+                {'id': 'bob'},
+                {'id': 'charlie'},
+            ],
+            'group_member_version': 5,
+        },
+    )
+
+    monkeypatch.setattr(message_manager_module, 'get_event_bus', lambda: fake_event_bus)
+    monkeypatch.setattr(message_manager_module, 'get_connection_manager', lambda: fake_conn_manager)
+    monkeypatch.setattr(message_manager_module, 'get_database', lambda: fake_db)
+
+    async def scenario() -> None:
+        manager = message_manager_module.MessageManager()
+        manager.set_user_id('alice')
+        manager._e2ee_service = fake_e2ee_service
+        cleanup_path = ''
+        try:
+            upload_path, extra, cleanup_path = await manager.prepare_attachment_upload(
+                session_id='session-group-attach-1',
+                file_path=str(source_path),
+                message_type=MessageType.IMAGE,
+                fallback_name='group-encrypted-image.png',
+                fallback_size=14,
+            )
+
+            assert upload_path == cleanup_path
+            assert Path(upload_path).exists()
+            assert fake_e2ee_service.fetch_prekey_bundle_calls == ['bob', 'charlie']
+            assert fake_e2ee_service.group_attachment_encrypt_calls == [
+                ('session-group-attach-1', 'group-encrypted-image.png', 5, 'alice', 2, '', 14)
+            ]
+            assert extra['attachment_encryption']['enabled'] is True
+            assert extra['attachment_encryption']['scheme'] == 'aesgcm-file+group-sender-key-v1'
+            assert extra['attachment_encryption']['sender_key_id'] == 'group-key-1'
+            assert len(extra['attachment_encryption']['fanout']) == 2
+        finally:
+            if cleanup_path:
+                Path(cleanup_path).unlink(missing_ok=True)
+            source_path.unlink(missing_ok=True)
+
+    asyncio.run(scenario())
+
+
+def test_message_manager_prefetches_encrypted_incoming_image_and_emits_media_ready(monkeypatch) -> None:
+    fake_event_bus = FakeEventBus()
+    fake_conn_manager = FakeConnectionManager([])
+    fake_db = FakeDatabase()
+    fake_e2ee_service = FakeE2EEService()
+
+    class FakeFileService:
+        def __init__(self) -> None:
+            self.download_calls: list[str] = []
+
+        async def download_chat_attachment(self, file_url: str) -> bytes:
+            self.download_calls.append(file_url)
+            return b'cipher-image'
+
+    fake_file_service = FakeFileService()
+
+    monkeypatch.setattr(message_manager_module, 'get_event_bus', lambda: fake_event_bus)
+    monkeypatch.setattr(message_manager_module, 'get_connection_manager', lambda: fake_conn_manager)
+    monkeypatch.setattr(message_manager_module, 'get_database', lambda: fake_db)
+    monkeypatch.setattr(message_manager_module, 'get_file_service', lambda: fake_file_service)
+
+    async def scenario() -> None:
+        manager = message_manager_module.MessageManager()
+        manager.set_user_id('alice')
+        manager._e2ee_service = fake_e2ee_service
+        await manager.initialize()
+        local_path = ''
+        try:
+            await manager._process_incoming_message(
+                {
+                    'data': {
+                        'message_id': 'm-img-1',
+                        'session_id': 'session-1',
+                        'sender_id': 'bob',
+                        'content': 'https://cdn.example/files/blob.bin',
+                        'message_type': 'image',
+                        'status': 'received',
+                        'extra': {
+                            'attachment_encryption': {
+                                'enabled': True,
+                                'scheme': 'aesgcm-file+x25519-v1',
+                            },
+                            'url': 'https://cdn.example/files/blob.bin',
+                        },
+                    }
+                }
+            )
+
+            await _wait_until(
+                lambda: any(event == message_manager_module.MessageEvent.MEDIA_READY for event, _ in fake_event_bus.events)
+            )
+
+            stored = await fake_db.get_message('m-img-1')
+            assert stored is not None
+            local_path = str(stored.extra.get('local_path') or '')
+            assert local_path.endswith('m-img-1_secret.pdf')
+            assert Path(local_path).read_bytes() == b'plain-pdf'
+            assert fake_file_service.download_calls == ['https://cdn.example/files/blob.bin']
+        finally:
+            if local_path:
+                Path(local_path).unlink(missing_ok=True)
+            await manager.close()
+
+    asyncio.run(scenario())
+
+
 def test_message_manager_normalize_loaded_message_ignores_legacy_aliases(monkeypatch) -> None:
     fake_event_bus = FakeEventBus()
     fake_conn_manager = FakeConnectionManager([])
@@ -781,6 +2009,45 @@ def test_message_manager_ignores_incoming_chat_message_without_canonical_message
 
             assert fake_db.messages == {}
             assert all(event != message_manager_module.MessageEvent.RECEIVED for event, _ in fake_event_bus.events)
+        finally:
+            await manager.close()
+
+    asyncio.run(scenario())
+
+
+def test_message_manager_incoming_chat_message_derives_is_self_from_sender_id(monkeypatch) -> None:
+    fake_event_bus = FakeEventBus()
+    fake_conn_manager = FakeConnectionManager([])
+    fake_db = FakeDatabase()
+
+    monkeypatch.setattr(message_manager_module, 'get_event_bus', lambda: fake_event_bus)
+    monkeypatch.setattr(message_manager_module, 'get_connection_manager', lambda: fake_conn_manager)
+    monkeypatch.setattr(message_manager_module, 'get_database', lambda: fake_db)
+
+    async def scenario() -> None:
+        manager = message_manager_module.MessageManager()
+        manager.set_user_id('bob')
+        await manager.initialize()
+        try:
+            await manager._handle_ws_message(
+                {
+                    'type': 'chat_message',
+                    'data': {
+                        'message_id': 'm-remote-self-1',
+                        'session_id': 'session-1',
+                        'sender_id': 'alice',
+                        'content': 'hello from alice',
+                        'message_type': 'text',
+                        'status': 'sent',
+                        'is_self': True,
+                    },
+                }
+            )
+
+            stored = await fake_db.get_message('m-remote-self-1')
+            assert stored is not None
+            assert stored.sender_id == 'alice'
+            assert stored.is_self is False
         finally:
             await manager.close()
 
@@ -1120,6 +2387,435 @@ def test_message_manager_applies_group_self_profile_update_events(monkeypatch) -
                 event == ContactEvent.SYNC_REQUIRED and data.get('reason') == 'group_self_profile_update'
                 for event, data in fake_event_bus.events
             )
+        finally:
+            await manager.close()
+
+    asyncio.run(scenario())
+
+
+def test_message_manager_recover_session_messages_retries_cached_e2ee_payloads(monkeypatch) -> None:
+    fake_event_bus = FakeEventBus()
+    fake_conn_manager = FakeConnectionManager([])
+    fake_db = FakeDatabase()
+    fake_e2ee_service = FakeE2EEService()
+
+    class FakeChatService:
+        def __init__(self) -> None:
+            self.fetch_calls: list[tuple[str, int, float | None]] = []
+
+        async def fetch_messages(self, session_id: str, limit: int, before_timestamp=None) -> list[dict]:
+            self.fetch_calls.append((session_id, limit, before_timestamp))
+            if before_timestamp is None:
+                return [
+                    {
+                        'message_id': 'm-remote-text',
+                        'session_id': session_id,
+                        'sender_id': 'alice',
+                        'content': 'cipher:remote restored',
+                        'message_type': 'text',
+                        'status': 'received',
+                        'timestamp': 1700000200.0,
+                        'updated_at': 1700000200.0,
+                        'extra': {
+                            'encryption': {
+                                'enabled': True,
+                                'content_ciphertext': 'cipher:remote restored',
+                                'sender_device_id': 'device-alice',
+                                'recipient_device_id': 'device-bob',
+                            },
+                        },
+                    }
+                ]
+            if before_timestamp == 1700000200.0:
+                return [
+                    {
+                        'message_id': 'm-remote-older',
+                        'session_id': session_id,
+                        'sender_id': 'alice',
+                        'content': 'cipher:older restored',
+                        'message_type': 'text',
+                        'status': 'received',
+                        'timestamp': 1699990000.0,
+                        'updated_at': 1699990000.0,
+                        'extra': {
+                            'encryption': {
+                                'enabled': True,
+                                'content_ciphertext': 'cipher:older restored',
+                                'sender_device_id': 'device-alice',
+                                'recipient_device_id': 'device-bob',
+                            },
+                        },
+                    }
+                ]
+            return []
+
+    fake_chat_service = FakeChatService()
+
+    async def decrypted_attachment_metadata(attachment_encryption: dict | None) -> dict | None:
+        return {
+            'original_name': 'secret.pdf',
+            'mime_type': 'application/pdf',
+            'size_bytes': 9,
+        }
+
+    fake_e2ee_service.decrypt_attachment_metadata = decrypted_attachment_metadata  # type: ignore[method-assign]
+
+    fake_db.messages['m-recover-text'] = ChatMessage(
+        message_id='m-recover-text',
+        session_id='session-1',
+        sender_id='alice',
+        content='cipher:restored secret',
+        message_type=MessageType.TEXT,
+        status=MessageStatus.RECEIVED,
+        is_self=False,
+        extra={
+            'encryption': {
+                'enabled': True,
+                'content_ciphertext': 'cipher:restored secret',
+                'sender_device_id': 'device-alice',
+                'recipient_device_id': 'device-bob',
+                'decryption_state': 'missing_private_key',
+                'recovery_action': 'reprovision_device',
+            },
+        },
+    )
+    fake_db.messages['m-recover-file'] = ChatMessage(
+        message_id='m-recover-file',
+        session_id='session-1',
+        sender_id='alice',
+        content='https://cdn.example/files/blob.bin',
+        message_type=MessageType.FILE,
+        status=MessageStatus.RECEIVED,
+        is_self=False,
+        extra={
+            'attachment_encryption': {
+                'enabled': True,
+                'scheme': 'aesgcm-file+x25519-v1',
+                'sender_device_id': 'device-alice',
+                'recipient_device_id': 'device-bob',
+                'decryption_state': 'missing_private_key',
+                'recovery_action': 'reprovision_device',
+            },
+            'url': 'https://cdn.example/files/blob.bin',
+        },
+    )
+
+    monkeypatch.setattr(message_manager_module, 'get_event_bus', lambda: fake_event_bus)
+    monkeypatch.setattr(message_manager_module, 'get_connection_manager', lambda: fake_conn_manager)
+    monkeypatch.setattr(message_manager_module, 'get_database', lambda: fake_db)
+    monkeypatch.setattr(message_manager_module, 'get_chat_service', lambda: fake_chat_service)
+    monkeypatch.setattr(message_manager_module, 'get_e2ee_service', lambda: fake_e2ee_service)
+
+    async def scenario() -> None:
+        manager = message_manager_module.MessageManager()
+        manager.set_user_id('bob')
+        await manager.initialize()
+        try:
+            result = await manager.recover_session_messages('session-1')
+
+            assert result == {
+                'session_id': 'session-1',
+                'scanned': 2,
+                'updated': 2,
+                'message_ids': ['m-recover-text', 'm-recover-file', 'm-remote-text', 'm-remote-older'],
+                'remote_fetched': 2,
+                'remote_pages_fetched': 2,
+                'recovery_stats': {
+                    'cached': {
+                        'text': 1,
+                        'attachments': 1,
+                        'direct_text': 1,
+                        'group_text': 0,
+                        'direct_attachments': 1,
+                        'group_attachments': 0,
+                        'other': 0,
+                    },
+                    'remote': {
+                        'text': 2,
+                        'attachments': 0,
+                        'direct_text': 2,
+                        'group_text': 0,
+                        'direct_attachments': 0,
+                        'group_attachments': 0,
+                        'other': 0,
+                    },
+                },
+            }
+            assert fake_chat_service.fetch_calls == [('session-1', 500, None), ('session-1', 500, 1700000200.0), ('session-1', 500, 1699990000.0)]
+
+            stored_text = await fake_db.get_message('m-recover-text')
+            assert stored_text is not None
+            assert stored_text.content == 'restored secret'
+            assert stored_text.extra['encryption']['local_plaintext'] == 'local:restored secret'
+            assert 'decryption_state' not in stored_text.extra['encryption']
+            assert 'recovery_action' not in stored_text.extra['encryption']
+
+            stored_file = await fake_db.get_message('m-recover-file')
+            assert stored_file is not None
+            assert stored_file.extra['name'] == 'secret.pdf'
+            assert stored_file.extra['file_type'] == 'application/pdf'
+            assert stored_file.extra['size'] == 9
+            assert stored_file.extra['attachment_encryption']['local_metadata'].startswith('local:')
+            assert 'decryption_state' not in stored_file.extra['attachment_encryption']
+            assert 'recovery_action' not in stored_file.extra['attachment_encryption']
+
+            stored_remote = await fake_db.get_message('m-remote-text')
+            assert stored_remote is not None
+            assert stored_remote.content == 'remote restored'
+            assert stored_remote.extra['encryption']['local_plaintext'] == 'local:remote restored'
+
+            stored_remote_older = await fake_db.get_message('m-remote-older')
+            assert stored_remote_older is not None
+            assert stored_remote_older.content == 'older restored'
+            assert stored_remote_older.extra['encryption']['local_plaintext'] == 'local:older restored'
+
+            recovered_events = [data for event, data in fake_event_bus.events if event == message_manager_module.MessageEvent.RECOVERED]
+            assert len(recovered_events) == 1
+            assert recovered_events[0]['count'] == 2
+            assert recovered_events[0]['message_ids'] == ['m-recover-text', 'm-recover-file', 'm-remote-text', 'm-remote-older']
+            assert len(recovered_events[0]['remote_messages']) == 2
+            assert recovered_events[0]['recovery_stats']['cached']['direct_text'] == 1
+            assert recovered_events[0]['recovery_stats']['cached']['direct_attachments'] == 1
+            assert recovered_events[0]['recovery_stats']['remote']['direct_text'] == 2
+        finally:
+            await manager.close()
+
+    asyncio.run(scenario())
+
+
+def test_message_manager_recover_session_messages_reports_group_recovery_breakdown(monkeypatch) -> None:
+    fake_event_bus = FakeEventBus()
+    fake_conn_manager = FakeConnectionManager([])
+    fake_db = FakeDatabase()
+    fake_e2ee_service = FakeE2EEService()
+
+    class FakeChatService:
+        async def fetch_messages(self, session_id: str, limit: int, before_timestamp=None) -> list[dict]:
+            assert session_id == 'session-group-1'
+            assert limit == 500
+            assert before_timestamp is None
+            return []
+
+    fake_db.messages['m-group-recover-text'] = ChatMessage(
+        message_id='m-group-recover-text',
+        session_id='session-group-1',
+        sender_id='alice',
+        content='groupcipher:restored team secret',
+        message_type=MessageType.TEXT,
+        status=MessageStatus.RECEIVED,
+        is_self=False,
+        extra={
+            'encryption': {
+                'enabled': True,
+                'scheme': 'group-sender-key-v1',
+                'content_ciphertext': 'groupcipher:restored team secret',
+                'sender_device_id': 'device-alice',
+                'sender_key_id': 'group-key-1',
+                'decryption_state': 'missing_group_sender_key',
+            },
+        },
+    )
+    fake_db.messages['m-group-recover-file'] = ChatMessage(
+        message_id='m-group-recover-file',
+        session_id='session-group-1',
+        sender_id='alice',
+        content='https://cdn.example/files/group-blob.bin',
+        message_type=MessageType.FILE,
+        status=MessageStatus.RECEIVED,
+        is_self=False,
+        extra={
+            'attachment_encryption': {
+                'enabled': True,
+                'scheme': 'aesgcm-file+group-sender-key-v1',
+                'sender_device_id': 'device-alice',
+                'sender_key_id': 'group-key-1',
+                'decryption_state': 'missing_group_sender_key',
+            },
+            'url': 'https://cdn.example/files/group-blob.bin',
+        },
+    )
+
+    async def decrypted_group_attachment_metadata(attachment_encryption: dict | None) -> dict | None:
+        normalized = dict(attachment_encryption or {})
+        if str(normalized.get('scheme') or '') != 'aesgcm-file+group-sender-key-v1':
+            return None
+        return {
+            'original_name': 'team-plan.pdf',
+            'mime_type': 'application/pdf',
+            'size_bytes': 21,
+        }
+
+    fake_e2ee_service.decrypt_attachment_metadata = decrypted_group_attachment_metadata  # type: ignore[method-assign]
+
+    monkeypatch.setattr(message_manager_module, 'get_event_bus', lambda: fake_event_bus)
+    monkeypatch.setattr(message_manager_module, 'get_connection_manager', lambda: fake_conn_manager)
+    monkeypatch.setattr(message_manager_module, 'get_database', lambda: fake_db)
+    monkeypatch.setattr(message_manager_module, 'get_chat_service', lambda: FakeChatService())
+    monkeypatch.setattr(message_manager_module, 'get_e2ee_service', lambda: fake_e2ee_service)
+
+    async def scenario() -> None:
+        manager = message_manager_module.MessageManager()
+        manager.set_user_id('bob')
+        await manager.initialize()
+        try:
+            result = await manager.recover_session_messages('session-group-1', remote_pages=1)
+
+            assert result['recovery_stats'] == {
+                'cached': {
+                    'text': 1,
+                    'attachments': 1,
+                    'direct_text': 0,
+                    'group_text': 1,
+                    'direct_attachments': 0,
+                    'group_attachments': 1,
+                    'other': 0,
+                },
+                'remote': {
+                    'text': 0,
+                    'attachments': 0,
+                    'direct_text': 0,
+                    'group_text': 0,
+                    'direct_attachments': 0,
+                    'group_attachments': 0,
+                    'other': 0,
+                },
+            }
+
+            stored_text = await fake_db.get_message('m-group-recover-text')
+            assert stored_text is not None
+            assert stored_text.content == 'restored team secret'
+
+            stored_file = await fake_db.get_message('m-group-recover-file')
+            assert stored_file is not None
+            assert stored_file.extra['name'] == 'team-plan.pdf'
+            assert stored_file.extra['attachment_encryption']['local_metadata'].startswith('local:')
+        finally:
+            await manager.close()
+
+    asyncio.run(scenario())
+
+
+
+
+
+
+
+
+
+def test_message_manager_sends_group_text_with_sender_key_encryption(monkeypatch) -> None:
+    fake_event_bus = FakeEventBus()
+    fake_conn_manager = FakeConnectionManager([True])
+    fake_db = FakeDatabase()
+    fake_e2ee_service = FakeE2EEService()
+    fake_e2ee_service.group_prekey_bundles = {
+        'bob': [{'device_id': 'device-bob', 'user_id': 'bob'}],
+        'charlie': [{'device_id': 'device-charlie', 'user_id': 'charlie'}],
+    }
+    fake_db.sessions['session-group-1'] = Session(
+        session_id='session-group-1',
+        name='Ops',
+        session_type='group',
+        participant_ids=['alice', 'bob', 'charlie'],
+        extra={
+            'members': [
+                {'id': 'alice', 'username': 'alice'},
+                {'id': 'bob', 'username': 'bob'},
+                {'id': 'charlie', 'username': 'charlie'},
+            ],
+        },
+    )
+
+    monkeypatch.setattr(message_manager_module, 'get_event_bus', lambda: fake_event_bus)
+    monkeypatch.setattr(message_manager_module, 'get_connection_manager', lambda: fake_conn_manager)
+    monkeypatch.setattr(message_manager_module, 'get_database', lambda: fake_db)
+    monkeypatch.setattr(message_manager_module, 'get_e2ee_service', lambda: fake_e2ee_service)
+
+    async def scenario() -> None:
+        manager = message_manager_module.MessageManager()
+        manager.set_user_id('alice')
+        manager._ack_timeout = 0.01
+        await manager.initialize()
+        try:
+            message = await manager.send_message('session-group-1', 'group secret')
+            await _wait_until(lambda: len(fake_conn_manager.sent_payloads) == 1)
+
+            assert message.content == 'group secret'
+            assert fake_e2ee_service.fetch_prekey_bundle_calls == ['bob', 'charlie']
+            assert fake_e2ee_service.group_encrypt_calls and fake_e2ee_service.group_encrypt_calls[0][:2] == ('session-group-1', 'group secret')
+            payload = fake_conn_manager.sent_payloads[0]
+            assert payload['content'] == 'groupcipher:group secret'
+            assert payload['extra']['encryption']['scheme'] == 'group-sender-key-v1'
+            assert payload['extra']['encryption']['sender_key_id'] == 'group-key-1'
+            assert len(payload['extra']['encryption']['fanout']) == 2
+            assert 'local_plaintext' not in payload['extra']['encryption']
+
+            stored = await fake_db.get_message(message.message_id)
+            assert stored is not None
+            assert stored.content == 'group secret'
+            assert stored.extra['encryption']['local_plaintext'] == 'local:group secret'
+        finally:
+            await manager.close()
+
+    asyncio.run(scenario())
+
+
+def test_message_manager_receives_group_text_and_decrypts_sender_key_payload(monkeypatch) -> None:
+    fake_event_bus = FakeEventBus()
+    fake_conn_manager = FakeConnectionManager([])
+    fake_db = FakeDatabase()
+    fake_e2ee_service = FakeE2EEService()
+
+    monkeypatch.setattr(message_manager_module, 'get_event_bus', lambda: fake_event_bus)
+    monkeypatch.setattr(message_manager_module, 'get_connection_manager', lambda: fake_conn_manager)
+    monkeypatch.setattr(message_manager_module, 'get_database', lambda: fake_db)
+    monkeypatch.setattr(message_manager_module, 'get_e2ee_service', lambda: fake_e2ee_service)
+
+    async def scenario() -> None:
+        manager = message_manager_module.MessageManager()
+        manager.set_user_id('bob')
+        await manager.initialize()
+        try:
+            await manager._handle_ws_message(
+                {
+                    'type': 'chat_message',
+                    'data': {
+                        'message_id': 'm-group-enc-1',
+                        'session_id': 'session-group-1',
+                        'sender_id': 'alice',
+                        'content': 'groupcipher:hello team',
+                        'message_type': 'text',
+                        'status': 'received',
+                        'extra': {
+                            'session_type': 'group',
+                            'participant_ids': ['alice', 'bob', 'charlie'],
+                            'encryption': {
+                                'enabled': True,
+                                'scheme': 'group-sender-key-v1',
+                                'session_id': 'session-group-1',
+                                'sender_device_id': 'device-alice',
+                                'sender_key_id': 'group-key-1',
+                                'content_ciphertext': 'groupcipher:hello team',
+                                'nonce': 'group-nonce-1',
+                                'fanout': [
+                                    {
+                                        'enabled': True,
+                                        'scheme': 'group-sender-key-fanout-v1',
+                                        'session_id': 'session-group-1',
+                                        'recipient_device_id': 'device-bob',
+                                    }
+                                ],
+                            },
+                        },
+                    },
+                }
+            )
+
+            stored = await fake_db.get_message('m-group-enc-1')
+            assert stored is not None
+            assert stored.content == 'hello team'
+            assert stored.extra['encryption']['scheme'] == 'group-sender-key-v1'
+            assert stored.extra['encryption']['local_plaintext'] == 'local:hello team'
+            assert any(event == message_manager_module.MessageEvent.RECEIVED for event, _ in fake_event_bus.events)
         finally:
             await manager.close()
 

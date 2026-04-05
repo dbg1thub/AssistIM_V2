@@ -234,4 +234,4 @@
 - 状态：Accepted
 - 决策：启用 E2EE 的私聊在客户端本地优先持久化密文，解密后的明文默认仅保留在内存态或受保护的本地密钥缓存中；桌面端数据库落盘保护后续通过 `SQLite + SQLCipher` 演进，并使用系统安全存储保护 DB key。
 - 原因：如果 E2EE 明文仍长期写回普通 SQLite，本地缓存会显著削弱端到端加密的实际收益；但 `SQLCipher` 接入涉及驱动、打包、迁移与 FTS 兼容，不适合作为第一阶段前置条件。
-- 结果：E2EE 私聊的本地搜索能力允许在 MVP 阶段降级或关闭；数据库加固作为独立后续阶段推进，不阻塞通话与私聊 E2EE 主链路落地。
+- 结果：E2EE 私聊的本地搜索能力允许在 MVP 阶段降级或关闭；数据库加固作为独立后续阶段推进，不阻塞通话与私聊 E2EE 主链路落地。当前实现已经先落地 `messages.is_encrypted` / `messages.encryption_scheme` 显式列，以及 `db_encryption_mode=plain|sqlcipher_pending` 的本地状态管理；同时 DB key 材料已迁移到数据库外部的 DPAPI 保护 sidecar 元数据，避免未来 SQLCipher 落地时出现“密钥与数据库互相依赖”的死锁设计。为后续真实驱动接入与打包验收，当前状态还会显式暴露 `requested_provider/runtime_provider/provider_match`，用来区分配置错误、缺驱动和已接入可用 runtime。

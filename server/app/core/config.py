@@ -62,6 +62,15 @@ class Settings:
     rate_limit_login: int = field(default_factory=lambda: _env_int("RATE_LIMIT_LOGIN", 5))
     rate_limit_register: int = field(default_factory=lambda: _env_int("RATE_LIMIT_REGISTER", 3))
     rate_limit_friend_request: int = field(default_factory=lambda: _env_int("RATE_LIMIT_FRIEND_REQUEST", 10))
+    webrtc_ice_server_urls: tuple[str, ...] = field(default_factory=lambda: _env_csv("WEBRTC_ICE_SERVER_URLS", ""))
+    webrtc_stun_urls: tuple[str, ...] = field(default_factory=lambda: _env_csv("WEBRTC_STUN_URLS", ""))
+    webrtc_turn_urls: tuple[str, ...] = field(default_factory=lambda: _env_csv("WEBRTC_TURN_URLS", ""))
+    webrtc_turn_username: str = field(default_factory=lambda: _env_str("WEBRTC_TURN_USERNAME", ""))
+    webrtc_turn_credential: str = field(default_factory=lambda: _env_str("WEBRTC_TURN_CREDENTIAL", ""))
+    webrtc_turn_shared_secret: str = field(default_factory=lambda: _env_str("WEBRTC_TURN_SHARED_SECRET", ""))
+    webrtc_turn_credential_ttl_seconds: int = field(
+        default_factory=lambda: _env_int("WEBRTC_TURN_CREDENTIAL_TTL_SECONDS", 3600)
+    )
 
 
 @lru_cache

@@ -1065,6 +1065,8 @@ class MessageDelegate(QStyledItemDelegate):
 
         if self._is_uploading(message):
             return info_color, AppIcon.SYNC
+        if message.status == MessageStatus.AWAITING_SECURITY_CONFIRMATION:
+            return QColor(230, 178, 62) if dark else QColor(161, 107, 0), AppIcon.INFO
         if message.status in (MessageStatus.PENDING, MessageStatus.SENDING):
             return info_color, AppIcon.SEND_FILL
         if message.status == MessageStatus.SENT:
@@ -1328,6 +1330,10 @@ class MessageDelegate(QStyledItemDelegate):
         local_path = message.extra.get("local_path") if message.extra else None
         if local_path and os.path.exists(local_path):
             return local_path
+
+        attachment_encryption = dict((message.extra or {}).get("attachment_encryption") or {})
+        if attachment_encryption.get("enabled"):
+            return ""
 
         content = ((message.extra.get("url") if message.extra else None) or (message.content or "").strip())
         if not content:
@@ -1960,6 +1966,10 @@ class MessageDelegate(QStyledItemDelegate):
         local_path = message.extra.get("local_path") if message.extra else None
         if local_path and os.path.exists(local_path):
             return local_path
+
+        attachment_encryption = dict((message.extra or {}).get("attachment_encryption") or {})
+        if attachment_encryption.get("enabled"):
+            return ""
 
         content = (message.content or "").strip()
         if not content:

@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from datetime import datetime
 from types import SimpleNamespace
@@ -64,6 +64,7 @@ class FakeMessageRepo:
         now = datetime(2026, 3, 29, 12, 1, 0)
         self.last_messages_by_session = {
             'session-1': SimpleNamespace(
+                id='message-1',
                 session_id='session-1',
                 status='sent',
                 sender_id='alice',
@@ -71,6 +72,7 @@ class FakeMessageRepo:
                 content='hello bob',
             ),
             'session-2': SimpleNamespace(
+                id='message-2',
                 session_id='session-2',
                 status='sent',
                 sender_id='charlie',
@@ -151,6 +153,9 @@ def test_session_service_list_sessions_uses_batch_repository_loaders() -> None:
 
     assert [item['session_id'] for item in payload] == ['session-1', 'session-2']
     assert payload[0]['session_type'] == 'direct'
+    assert payload[0]['encryption_mode'] == 'e2ee_private'
+    assert payload[0]['session_crypto_state'] == {}
+    assert payload[0]['call_capabilities'] == {'voice': True, 'video': True}
     assert payload[0]['participant_ids'] == ['alice', 'bob']
     assert payload[0]['avatar'] == '/uploads/direct.png'
     assert payload[0]['counterpart_id'] == 'bob'
@@ -161,7 +166,11 @@ def test_session_service_list_sessions_uses_batch_repository_loaders() -> None:
     assert payload[0]['last_message'] == 'hello bob'
     assert [member['id'] for member in payload[0]['members']] == ['alice', 'bob']
     assert payload[1]['session_type'] == 'group'
+    assert payload[1]['encryption_mode'] == 'e2ee_group'
+    assert payload[1]['session_crypto_state'] == {}
+    assert payload[1]['call_capabilities'] == {'voice': False, 'video': False}
     assert payload[1]['group_id'] == 'group-1'
+    assert payload[1]['group_member_version'] == service._group_member_version(['alice', 'bob', 'charlie'])
     assert payload[1]['participant_ids'] == ['alice', 'bob', 'charlie']
     assert payload[1]['last_message'] == 'hello team'
     assert payload[1]['counterpart_id'] is None

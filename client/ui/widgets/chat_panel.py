@@ -7,16 +7,16 @@ from typing import Callable, Optional
 
 from PySide6.QtCore import QEvent, Qt, QTimer, Signal, QUrl
 from PySide6.QtGui import QDesktopServices, QGuiApplication, QKeySequence
-from PySide6.QtWidgets import QAbstractItemView, QFrame, QListView, QStackedWidget, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QAbstractItemView, QFrame, QHBoxLayout, QListView, QStackedWidget, QVBoxLayout, QWidget
 
-from qfluentwidgets import BodyLabel, CaptionLabel, IconWidget, ScrollBarHandleDisplayMode
+from qfluentwidgets import BodyLabel, CaptionLabel, IconWidget, PushButton, ScrollBarHandleDisplayMode
 from qfluentwidgets.components.widgets.scroll_bar import SmoothScrollDelegate
 
 from client.core.app_icons import AppIcon
 from client.core.config_backend import get_config
 from client.core.i18n import tr
 from client.delegates.message_delegate import MessageDelegate
-from client.models.message import ChatMessage, MessageType, Session, merge_sender_profile_extra
+from client.models.message import ChatMessage, MessageStatus, MessageType, Session, merge_sender_profile_extra
 from client.models.message_model import MessageModel
 from client.ui.styles import StyleSheet
 from client.ui.widgets.chat_header import ChatHeader
@@ -33,6 +33,103 @@ def _session_status_text(session: Session | None) -> str:
     if session.is_ai_session:
         return tr("chat.status.ai", "AI Session")
     return ""
+
+
+def _session_security_badges(session: Session | None) -> list[dict[str, str]]:
+    """Return one compact badge list for the active session header."""
+    if session is None:
+        return []
+
+    summary = session.security_summary()
+    headline = str(summary.get("headline") or "").strip()
+    encryption_mode = str(summary.get("encryption_mode") or "").strip()
+    uses_e2ee = bool(summary.get("uses_e2ee", False))
+    badges: list[dict[str, str]] = []
+
+    if headline == "identity_review_required":
+        badges.append(
+            {
+                "text": tr("chat.header.badge.verify_identity", "Verify Identity"),
+                "tone": "danger",
+                "tooltip": tr(
+                    "chat.header.badge.verify_identity.tooltip",
+                    "The peer device identity changed. Review and trust it before sending more encrypted messages.",
+                ),
+            }
+        )
+    elif headline == "identity_unverified":
+        badges.append(
+            {
+                "text": tr("chat.header.badge.unverified", "Unverified"),
+                "tone": "warning",
+                "tooltip": tr(
+                    "chat.header.badge.unverified.tooltip",
+                    "This encrypted session has not been manually verified yet.",
+                ),
+            }
+        )
+    elif headline == "decryption_recovery_required":
+        badges.append(
+            {
+                "text": tr("chat.header.badge.recovery_needed", "Recovery Needed"),
+                "tone": "warning",
+                "tooltip": tr(
+                    "chat.header.badge.recovery_needed.tooltip",
+                    "Some encrypted messages need local device recovery before they can be decrypted.",
+                ),
+            }
+        )
+    elif headline == "group_recovery_required":
+        badges.append(
+            {
+                "text": tr("chat.header.badge.group_recovery", "Group Recovery"),
+                "tone": "warning",
+                "tooltip": tr(
+                    "chat.header.badge.group_recovery.tooltip",
+                    "This group session needs sender-key recovery on the current device.",
+                ),
+            }
+        )
+    elif uses_e2ee:
+        secure_text = tr("chat.header.badge.e2ee_group", "Group E2EE") if encryption_mode == "e2ee_group" else tr(
+            "chat.header.badge.e2ee",
+            "E2EE",
+        )
+        badges.append(
+            {
+                "text": secure_text,
+                "tone": "secure",
+                "tooltip": tr(
+                    "chat.header.badge.e2ee.tooltip",
+                    "Messages in this session are protected with end-to-end encryption.",
+                ),
+            }
+        )
+    elif session.is_ai_session:
+        badges.append(
+            {
+                "text": tr("chat.header.badge.ai_visible", "AI Visible"),
+                "tone": "neutral",
+                "tooltip": tr(
+                    "chat.header.badge.ai_visible.tooltip",
+                    "AI sessions remain server-visible and do not use end-to-end encryption.",
+                ),
+            }
+        )
+
+    if uses_e2ee:
+        badges.append(
+            {
+                "text": tr("chat.header.badge.no_search", "No Search"),
+                "tone": "muted",
+                "tooltip": tr(
+                    "chat.header.badge.no_search.tooltip",
+                    "Encrypted messages are excluded from local full-text search results.",
+                ),
+            }
+        )
+
+    return badges
 
 
 class WelcomeWidget(QWidget):
@@ -69,6 +166,81 @@ class WelcomeWidget(QWidget):
         layout.addWidget(self.subtitle_label, 0, Qt.AlignmentFlag.AlignCenter)
 
 
+class SecurityPendingBanner(QFrame):
+    """Persistent inline prompt shown when local messages are waiting for security confirmation."""
+
+    confirm_requested = Signal(str)
+    discard_requested = Signal()
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setObjectName("securityPendingBanner")
+        self.setFrameShape(QFrame.Shape.NoFrame)
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(16, 10, 16, 10)
+        layout.setSpacing(12)
+
+        self.icon = IconWidget(AppIcon.INFO, self)
+        self.icon.setFixedSize(18, 18)
+        layout.addWidget(self.icon, 0, Qt.AlignmentFlag.AlignTop)
+
+        text_layout = QVBoxLayout()
+        text_layout.setContentsMargins(0, 0, 0, 0)
+        text_layout.setSpacing(2)
+        self.title_label = BodyLabel("", self)
+        self.detail_label = CaptionLabel("", self)
+        self.detail_label.setWordWrap(True)
+        text_layout.addWidget(self.title_label)
+        text_layout.addWidget(self.detail_label)
+        layout.addLayout(text_layout, 1)
+
+        self.confirm_button = PushButton(tr("chat.security_pending.confirm", "Verify and Send"), self)
+        self.confirm_button.clicked.connect(lambda: self.confirm_requested.emit(self._action_id))
+        layout.addWidget(self.confirm_button, 0, Qt.AlignmentFlag.AlignVCenter)
+
+        self.discard_button = PushButton(tr("chat.security_pending.discard", "Discard"), self)
+        self.discard_button.clicked.connect(self.discard_requested.emit)
+        layout.addWidget(self.discard_button, 0, Qt.AlignmentFlag.AlignVCenter)
+
+        self._action_id = "trust_peer_identity"
+        self.hide()
+
+    def set_pending_state(self, *, count: int, action_id: str, summary: dict[str, object] | None = None) -> None:
+        """Update the banner text for one session's queued local messages."""
+        normalized_count = max(0, int(count or 0))
+        normalized_summary = dict(summary or {})
+        self._action_id = str(action_id or "trust_peer_identity").strip() or "trust_peer_identity"
+        if normalized_count <= 0:
+            self.hide()
+            return
+
+        if normalized_count == 1:
+            title = tr("chat.security_pending.title.single", "1 message is waiting for security confirmation")
+        else:
+            title = tr(
+                "chat.security_pending.title.multi",
+                "{count} messages are waiting for security confirmation",
+                count=normalized_count,
+            )
+        self.title_label.setText(title)
+
+        if self._action_id == "trust_peer_identity":
+            detail = tr(
+                "chat.security_pending.detail.identity",
+                "The peer identity changed. Confirm it before these encrypted messages are sent.",
+            )
+            self.confirm_button.setText(tr("chat.security_pending.confirm", "Verify and Send"))
+        else:
+            detail = str(normalized_summary.get("headline") or "").strip() or tr(
+                "chat.security_pending.detail.generic",
+                "Complete the required security action before these messages are sent.",
+            )
+            self.confirm_button.setText(tr("chat.security_pending.confirm.generic", "Continue Sending"))
+        self.detail_label.setText(detail)
+        self.show()
+
+
 class ChatPanel(QWidget):
     """Chat panel composed of welcome page and active conversation page."""
 
@@ -92,6 +264,8 @@ class ChatPanel(QWidget):
     chat_info_group_profile_update_requested = Signal(object)
     chat_info_group_self_profile_update_requested = Signal(object)
     group_announcement_requested = Signal()
+    security_pending_confirm_requested = Signal(str, str)
+    security_pending_discard_requested = Signal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -101,6 +275,7 @@ class ChatPanel(QWidget):
         self._scroll_delegate: Optional[SmoothScrollDelegate] = None
         self._send_segments_callback: Optional[Callable] = None
         self._send_typing_callback: Optional[Callable] = None
+        self._attachment_open_callback: Optional[Callable[[ChatMessage], None]] = None
         self._current_session: Optional[Session] = None
         self._message_scroll_gap = 0
         self._restoring_message_view = False
@@ -110,6 +285,7 @@ class ChatPanel(QWidget):
         self.message_input: Optional[MessageInput] = None
         self.content_splitter: Optional[FluentSplitter] = None
         self._chat_info_overlay: Optional[ChatInfoDrawerOverlay] = None
+        self._security_pending_banner: Optional[SecurityPendingBanner] = None
 
         self._setup_ui()
 
@@ -174,13 +350,23 @@ class ChatPanel(QWidget):
         self.message_input.typing_signal.connect(self._on_typing)
         self.message_input.draft_changed.connect(self.composer_draft_changed.emit)
 
+        self._security_pending_banner = SecurityPendingBanner(self.chat_page)
+        self._security_pending_banner.confirm_requested.connect(self._on_security_pending_confirm_requested)
+        self._security_pending_banner.discard_requested.connect(self._on_security_pending_discard_requested)
+
         self.content_splitter = FluentSplitter(Qt.Orientation.Vertical, self.chat_page)
         self.content_splitter.setObjectName("chatContentSplitter")
         self.content_splitter.setChildrenCollapsible(False)
         self.content_splitter.setHandleWidth(1)
         self.message_list.setMinimumHeight(0)
         self.content_splitter.addWidget(self.message_list)
-        self.content_splitter.addWidget(self.message_input)
+        composer_container = QWidget(self.chat_page)
+        composer_layout = QVBoxLayout(composer_container)
+        composer_layout.setContentsMargins(0, 0, 0, 0)
+        composer_layout.setSpacing(0)
+        composer_layout.addWidget(self._security_pending_banner, 0)
+        composer_layout.addWidget(self.message_input, 1)
+        self.content_splitter.addWidget(composer_container)
         self.content_splitter.setStretchFactor(0, 1)
         self.content_splitter.setStretchFactor(1, 0)
         self.content_splitter.setSizes([560, 220])
@@ -213,6 +399,46 @@ class ChatPanel(QWidget):
         StyleSheet.CHAT_PANEL.apply(self)
         self._position_history_indicator()
         self._layout_chat_info_overlay()
+
+    def _pending_security_messages(self) -> list[ChatMessage]:
+        """Return visible self messages that are waiting for security confirmation."""
+        if not self._message_model:
+            return []
+        return [
+            message
+            for message in self._message_model.get_messages()
+            if message.is_self and message.status == MessageStatus.AWAITING_SECURITY_CONFIRMATION
+        ]
+
+    def _refresh_security_pending_banner(self) -> None:
+        """Show or hide the inline security prompt for queued local messages."""
+        if self._security_pending_banner is None:
+            return
+        if self._current_session is None:
+            self._security_pending_banner.hide()
+            return
+        pending_messages = self._pending_security_messages()
+        if not pending_messages:
+            self._security_pending_banner.hide()
+            return
+        summary = self._current_session.security_summary()
+        self._security_pending_banner.set_pending_state(
+            count=len(pending_messages),
+            action_id=str(summary.get("recommended_action") or "trust_peer_identity"),
+            summary=summary,
+        )
+
+    def _on_security_pending_confirm_requested(self, action_id: str) -> None:
+        """Forward one inline security confirmation request for the active session."""
+        if self._current_session is None:
+            return
+        self.security_pending_confirm_requested.emit(self._current_session.session_id, str(action_id or "trust_peer_identity"))
+
+    def _on_security_pending_discard_requested(self) -> None:
+        """Forward one discard request for queued security-pending messages."""
+        if self._current_session is None:
+            return
+        self.security_pending_discard_requested.emit(self._current_session.session_id)
 
     def resizeEvent(self, event) -> None:
         """Keep message/input layout responsive while the chat panel is being resized."""
@@ -248,6 +474,8 @@ class ChatPanel(QWidget):
         if self._message_delegate:
             self._message_delegate.set_session(None)
         self.chat_header.set_group_announcement_session(None)
+        self.chat_header.set_security_badges([])
+        self._refresh_security_pending_banner()
         self.message_input.set_session(None)
         self.message_input.set_session_active(False)
         self.chat_header.set_actions_enabled(False)
@@ -279,12 +507,14 @@ class ChatPanel(QWidget):
             avatar=session.display_avatar(),
             is_ai=session.is_ai_session,
         )
+        self.chat_header.set_security_badges(_session_security_badges(session))
         self.message_input.set_session(session)
         self.chat_header.set_group_announcement_session(session if show_group_announcement else None)
         if self._chat_info_overlay:
             self._chat_info_overlay.set_session(session)
         if layout_changed and self._message_model:
             self._message_model.set_messages(list(self._message_model.get_messages()))
+        self._refresh_security_pending_banner()
         self.show_chat()
 
     def clear_messages(self) -> None:
@@ -293,6 +523,7 @@ class ChatPanel(QWidget):
             self._message_model.clear()
         self._history_request_pending = False
         self._has_more_history = True
+        self._refresh_security_pending_banner()
 
     def set_messages(self, messages: list[ChatMessage], *, scroll_to_bottom: bool = True) -> None:
         """Replace the visible message list in one model reset."""
@@ -305,6 +536,7 @@ class ChatPanel(QWidget):
         if scroll_to_bottom:
             self.message_list.scrollToBottom()
             self._remember_message_scroll_gap()
+        self._refresh_security_pending_banner()
 
     def _on_segments_submitted(self, segments: list[dict]) -> None:
         """Forward composed text/media segments in document order."""
@@ -331,6 +563,10 @@ class ChatPanel(QWidget):
     def set_send_typing_callback(self, callback: Callable[[], None]) -> None:
         """Set typing callback."""
         self._send_typing_callback = callback
+
+    def set_attachment_open_callback(self, callback: Callable[[ChatMessage], None] | None) -> None:
+        """Set one callback used when the user opens a file attachment bubble."""
+        self._attachment_open_callback = callback
 
     def get_chat_header(self) -> ChatHeader:
         """Return header widget."""
@@ -403,12 +639,14 @@ class ChatPanel(QWidget):
             existing.extra = dict(message.extra)
             self._message_model.refresh_message(message.message_id, allow_reorder=True)
             self.message_list.viewport().update()
+            self._refresh_security_pending_banner()
             return
 
         self._message_model.add_message(message)
         if scroll_to_bottom:
             self.message_list.scrollToBottom()
             self._remember_message_scroll_gap()
+        self._refresh_security_pending_banner()
 
     def add_messages(self, messages: list[ChatMessage], *, scroll_to_bottom: bool = True) -> None:
         """Append multiple messages in one batch update."""
@@ -439,6 +677,7 @@ class ChatPanel(QWidget):
         if scroll_to_bottom:
             self.message_list.scrollToBottom()
             self._remember_message_scroll_gap()
+        self._refresh_security_pending_banner()
 
     def prepend_messages(self, messages: list[ChatMessage]) -> None:
         """Insert older history above the current viewport without changing visible content."""
@@ -474,11 +713,13 @@ class ChatPanel(QWidget):
                 self._history_indicator.hide()
 
         QTimer.singleShot(0, restore_position)
+        self._refresh_security_pending_banner()
 
     def update_message_status(self, message_id: str, status) -> None:
         """Update message status in model."""
         if self._message_model:
             self._message_model.update_message_status(message_id, status)
+        self._refresh_security_pending_banner()
 
     def apply_read_receipt(self, session_id: str, reader_id: str, last_read_seq: int) -> None:
         """Apply one cumulative read receipt in the visible model."""
@@ -495,11 +736,13 @@ class ChatPanel(QWidget):
         """Replace one visible message with an authoritative snapshot."""
         if self._message_model and message:
             self._message_model.replace_message(message)
+        self._refresh_security_pending_banner()
 
     def remove_message(self, message_id: str) -> None:
         """Remove a message from the model."""
         if self._message_model:
             self._message_model.remove_message(message_id)
+        self._refresh_security_pending_banner()
 
     def apply_sender_profile_update(
         self,
@@ -814,6 +1057,11 @@ class ChatPanel(QWidget):
         if not message:
             return
 
+        attachment_encryption = dict((message.extra or {}).get("attachment_encryption") or {})
+        if attachment_encryption.get("enabled") and self._attachment_open_callback is not None:
+            self._attachment_open_callback(message)
+            return
+
         if message.message_type == MessageType.IMAGE:
             from client.ui.widgets.image_viewer import ImageViewer
 
@@ -827,6 +1075,9 @@ class ChatPanel(QWidget):
             return
 
         if message.message_type == MessageType.FILE:
+            if self._attachment_open_callback is not None:
+                self._attachment_open_callback(message)
+                return
             self.open_message_attachment(message)
 
     def open_message_attachment(self, message: ChatMessage) -> bool:

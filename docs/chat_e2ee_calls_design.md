@@ -236,6 +236,22 @@
 
 正式实现建议优先接近 Signal 的设备模型，而不是自定义协议。
 
+当前代码已经补了一层本地身份校验基础能力：
+
+- 客户端会为对端设备缓存本地 trust state，并区分 `unverified` / `verified` / `identity_changed`
+- 该状态会进入会话级 `session_crypto_state`，供后续 UI 提示与人工确认流程复用
+- 当私聊会话处于 `identity_changed` 时，客户端当前会阻止继续发送新的 E2EE 文本与附件，直到用户重新信任对端设备身份
+- 当前代码还提供统一的会话级 `security_summary` / `session_security_summary`，把加密、identity 告警、恢复动作和通话状态收口成单一摘要对象，便于后续 UI 与诊断页面直接消费
+- 当前 `security_summary` 还会输出稳定的 `actions` 列表，例如 `trust_peer_identity`、`reprovision_device`，后续界面层可直接据此渲染操作入口
+- 当前控制器/管理器边界还提供统一的 `execute_session_security_action` 执行入口，上层只需传 `action_id` 即可执行对应安全动作并拿到刷新后的摘要
+- 对于 `switch_device` 这类当前设备无法本地完成的动作，执行结果还会补充稳定的 `explanation` / `external_requirement` 结构，而不只是返回一个 `reason` 字符串
+- 当前 identity summary 还会输出本机/对端设备指纹摘要，以及可供人工比对的 `primary_verification_code` / `primary_verification_code_short`；会话级 runtime state 和控制器边界也都可直接读取这份校验摘要
+- 当前 trust state 还会持久化基础审计字段，例如 `first_seen_at`、`last_seen_at`、`last_changed_at`、`last_trusted_at`、`change_count`，供后续 identity 变化提示与确认记录复用
+- 当前管理器/控制器边界还提供 `identity_review_details` 结果对象，把 primary device、verification 摘要和审计 timeline 收口成一份稳定 payload，后续界面层不需要再自行拼装
+- 当前还提供统一的 `security_diagnostics` 结果对象，把 `security_summary`、`identity_review_details` 和 actions 合并为单一输出；后续界面层可优先消费这一层，而不是分别请求多个接口
+- 当前认证层还提供更高一级的 `e2ee_diagnostics` 聚合结果，把 runtime security、history recovery diagnostics 和当前会话安全诊断合并为单一入口，便于设置页或诊断面板统一读取
+- 当前应用层也会缓存一份 `e2ee_runtime_diagnostics`，和 `startup_security_status` 一样可作为启动后统一的运行时安全快照，便于主流程或后续 UI 直接读取
+
 ### 8.3 设备模型
 
 服务端新增设备注册与 prekey 分发能力。
@@ -342,6 +358,12 @@ MVP 建议先约束为：
 - 新设备建链
 - 设备间 session key fanout
 - 历史消息密钥恢复或重新封装
+
+当前实现已经补了一条迁移基础能力：
+
+- 旧设备可向同账号新设备导出历史恢复包，用于恢复旧私聊 prekey 解密能力以及旧群 sender key 历史
+- 当前代码还会为恢复包返回 `package_summary`，并提供设备级 `history_recovery_diagnostics`，统一汇总来源设备、导入时间、group session 覆盖范围和当前可恢复历史规模
+- 当前认证层还已接出 `list_my_e2ee_devices`、`export_history_recovery_package`、`import_history_recovery_package` 入口，后续上层界面无需直接依赖底层 `E2EEService`
 
 ## 9. 附件 E2EE
 
@@ -547,6 +569,7 @@ AI 会话默认不启用 E2EE。
 
 - `POST /api/v1/devices/register`
 - `GET /api/v1/devices`
+- `POST /api/v1/devices/{device_id}/keys/refresh`
 - `DELETE /api/v1/devices/{device_id}`
 - `GET /api/v1/keys/prekey-bundle/{user_id}`
 - `POST /api/v1/keys/prekeys/claim`
@@ -557,6 +580,7 @@ AI 会话默认不启用 E2EE。
 - `devices/register` 用于桌面端首次生成并注册设备公钥
 - `prekey-bundle` 用于建立 1:1 E2EE 会话
 - `ice-servers` 返回 STUN / TURN 列表与短时凭证
+- 当前代码已实现 `GET /api/v1/calls/ice-servers`，客户端通话窗口会优先拉取后端返回的 ICE/TURN 配置，并在失败时回退到本地环境变量配置
 
 ### 14.4 消息 schema 改动建议
 
@@ -598,6 +622,8 @@ AI 会话默认不启用 E2EE。
 
 - 服务端不得依赖 `ciphertext_preview` 做权限判断
 - `ciphertext_preview` 仅用于占位 UI 或本地回退，不应被视为权威明文
+- decryption_state / 
+ecovery_action 这类恢复提示仅允许客户端本地维护，不得上传服务端
 
 ### 14.5 Session extra 改动建议
 
@@ -612,6 +638,7 @@ AI 会话默认不启用 E2EE。
 - `encryption_mode`：`plain` / `e2ee_private` / `server_visible_ai`
 - `call_capabilities`：例如 `{"voice": true, "video": true}`
 - `call_state`：仅客户端运行时可维护，不要求服务端持久化
+- 当前代码已在会话 payload 中补齐 `call_capabilities`，并由客户端 `SessionManager` 维护运行时 `call_state`
 
 ## 15. 数据库改动清单
 
@@ -664,6 +691,9 @@ MVP 建议保持当前结构不变：
 
 - 如果第一版不改消息表结构，也可以先把这些状态塞入 `extra`
 - 从长期维护看，后续拆成明确列更稳
+- 当前实现已经落地 `messages.is_encrypted` 与 `messages.encryption_scheme` 两个显式列，并在本地搜索层统一用于禁搜 E2EE 文本与附件消息
+- 当前实现已经落地 `app_state.storage.db_encryption_mode`，运行时状态区分为 `plain` 与 `sqlcipher_pending`；后者表示 DPAPI 保护的 DB key 已准备好，但尚未真正迁移到 SQLCipher 文件格式
+- 当前实现中 DB key 材料不再存放在同一个 SQLite 的 `app_state` 中，而是迁移到数据库外部的受保护 sidecar 元数据文件 `<db>.crypto.json`，避免未来 SQLCipher 落地后出现“密钥也被锁在库里”的循环依赖
 
 ### 15.4 SQLCipher 接入注意项
 
@@ -679,6 +709,22 @@ MVP 建议保持当前结构不变：
 
 - 不要把 `SQLCipher` 作为 Phase 1 前置条件
 - 在 E2EE 私聊稳定后再推进本地库加密
+- 当前代码已支持通过 `ASSISTIM_DB_ENCRYPTION_MODE=sqlcipher` 预生成并持久化本地 DB key 材料，作为后续 SQLCipher 迁移前置步骤
+- 当前代码已支持通过 `ASSISTIM_DB_ENCRYPTION_PROVIDER=auto|sqlcipher-compatible|sqlite-default` 显式表达期望的本地数据库加密 provider；默认 `auto`
+- 当前代码已把 `sqlcipher-compatible` provider 真正接到底层数据库连接模块选择，不再只是状态探测；`auto` 模式在 `sqlcipher` 请求下会优先尝试 `sqlcipher3 -> pysqlcipher3.dbapi2 -> pysqlcipher3`
+- 当前 Windows 环境已实测 `sqlcipher3==0.6.2` 可同时提供 `SQLCipher 4.12.0 community` 与 `FTS5`，并支持项目当前使用的 `trigram` / `unicode61 remove_diacritics 2` tokenizer；应优先作为 Windows 推荐驱动
+- 当前代码已支持探测运行时 SQLCipher 能力并暴露 `driver_available/driver_version/migration_required` 状态，用于区分“缺驱动”和“尚未迁移”
+- 当前代码已支持在 `ASSISTIM_DB_ENCRYPTION_MODE=sqlcipher` 且运行时驱动可用时，于数据库连接阶段自动完成一次 SQLCipher 迁移；迁移前会保留 `*.pre-sqlcipher.bak` 备份文件
+- 当前代码会在 sidecar 元数据已标记为 `sqlcipher` 时，于打开数据库连接阶段先验证运行时是否具备 SQLCipher 支持，并验证当前 key 是否能成功解锁数据库；缺驱动或 key 不匹配都会以明确错误快速失败
+- 当前代码会把 `requested_provider/runtime_provider/runtime_module/provider_match` 一并暴露到本地数据库加密状态里，便于区分“配置错 provider”“模块没装”和“provider 对了但驱动没装”
+- 当前代码已把本地数据库加密状态再收口成稳定的 `self_check` 结果，输出 `state/severity/can_start/action_required/message`，并在客户端启动日志与认证控制器边界都可直接消费
+- 当前 `self_check` 还会在缺驱动或 provider 错配时输出 `recommended_action/install_hint`，给启动链、诊断页或用户提示直接复用
+- 当前 `self_check` 还会显式输出 `search_mode/search_message`，用来表明本地搜索当前是 `FTS5` 还是降级到 `LIKE`
+- 当前代码已把这份结果进一步缓存到应用启动态 `startup_security_status`，这样主流程、后续 UI 或故障诊断都能读取同一份启动安全快照，而不是重复拼装数据库与认证状态
+- 当前代码已提供应用级 `startup_preflight_result`，统一输出 `can_continue/blocking/action_required/state/severity/message/runtime_security`，后续如需接入启动拦截页或非阻塞告警，可直接复用这一层结果
+- 当前主流程已在 `startup_preflight_result.blocking=true` 时中止启动，不再继续进入认证或主窗口阶段
+- 当前主流程还会在上述阻塞场景下返回独立退出码，便于外层脚本、启动器或诊断流程区分“正常退出”和“预检阻塞退出”
+- 当前 `main()` 还会在上述阻塞场景下弹出一条明确的启动失败提示，而不是只写日志后静默退出
 
 ## 16. 实施路线图
 
@@ -764,6 +810,7 @@ MVP 建议保持当前结构不变：
 完成标准：
 
 - 直接复制本地 `.db` 文件无法明文读取
+- `sqlcipher` 模式在驱动可用时能自动完成一次就地迁移，并保留迁移前备份
 
 ## 17. 风险与取舍
 
@@ -819,3 +866,4 @@ MVP 建议保持当前结构不变：
 2. 为 E2EE 设备模型补后端 schema 设计
 3. 先实现 `CallManager + call_service + WS signaling`
 4. 语音通话跑通后，再开始私聊文本 E2EE
+

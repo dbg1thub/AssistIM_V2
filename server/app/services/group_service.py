@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
+import hashlib
+import json
 from typing import TypeVar
 
 from sqlalchemy.orm import Session
@@ -325,6 +327,8 @@ class GroupService:
             "owner_id": group.owner_id,
             "session_id": group.session_id,
             "member_count": len(session_members),
+            "member_version": self._group_member_version(user_ids),
+            "group_member_version": self._group_member_version(user_ids),
             "created_at": group.created_at.isoformat() if group.created_at else None,
             "group_note": str(current_member_meta.get("note", "") or ""),
             "my_group_nickname": str(current_member_meta.get("group_nickname", "") or ""),
@@ -352,6 +356,17 @@ class GroupService:
                 )
             data["members"] = members
         return data
+
+    @staticmethod
+    def _group_member_version(member_ids: list[str]) -> int:
+        normalized_member_ids = [
+            value
+            for value in dict.fromkeys(str(raw_id or "").strip() for raw_id in member_ids or [])
+            if value
+        ]
+        payload = json.dumps(sorted(normalized_member_ids), ensure_ascii=True, separators=(",", ":"))
+        digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+        return int(digest[:16], 16)
 
     def _get_group_or_404(self, group_id: str):
         group = self.groups.get_by_id(group_id)

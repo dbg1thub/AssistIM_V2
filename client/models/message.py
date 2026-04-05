@@ -30,6 +30,7 @@ class MessageStatus(Enum):
     """Message sending status."""
 
     PENDING = "pending"
+    AWAITING_SECURITY_CONFIRMATION = "awaiting_security_confirmation"
     SENDING = "sending"
     SENT = "sent"
     RECEIVED = "received"
@@ -145,6 +146,7 @@ def sanitize_outbound_message_extra(extra: dict[str, Any] | None) -> dict[str, A
     normalized = dict(extra or {})
     normalized.pop("local_path", None)
     normalized.pop("uploading", None)
+    normalized.pop("security_pending", None)
 
     mentions = normalize_message_mentions(normalized.get("mentions"), content=str(normalized.get("content", "") or ""))
     if mentions:
@@ -156,6 +158,40 @@ def sanitize_outbound_message_extra(extra: dict[str, Any] | None) -> dict[str, A
     media = dict(normalized.get("media") or {})
     if media:
         normalized["media"] = media
+
+    encryption = dict(normalized.get("encryption") or {})
+    if encryption:
+        encryption.pop("local_plaintext", None)
+        encryption.pop("decryption_error", None)
+        encryption.pop("decryption_state", None)
+        encryption.pop("recovery_action", None)
+        encryption.pop("local_device_id", None)
+        encryption.pop("target_device_id", None)
+        encryption.pop("can_decrypt", None)
+        if encryption:
+            normalized["encryption"] = encryption
+        else:
+            normalized.pop("encryption", None)
+
+    attachment_encryption = dict(normalized.get("attachment_encryption") or {})
+    if attachment_encryption:
+        attachment_encryption.pop("local_metadata", None)
+        attachment_encryption.pop("decryption_error", None)
+        attachment_encryption.pop("decryption_state", None)
+        attachment_encryption.pop("recovery_action", None)
+        attachment_encryption.pop("local_device_id", None)
+        attachment_encryption.pop("target_device_id", None)
+        attachment_encryption.pop("can_decrypt", None)
+        if attachment_encryption.get("enabled"):
+            normalized.pop("url", None)
+            normalized.pop("name", None)
+            normalized.pop("file_type", None)
+            normalized.pop("size", None)
+            normalized.pop("media", None)
+        if attachment_encryption:
+            normalized["attachment_encryption"] = attachment_encryption
+        else:
+            normalized.pop("attachment_encryption", None)
     return normalized
 
 
@@ -592,6 +628,203 @@ class Session:
             return str(self.extra.get("counterpart_avatar") or self.avatar or "") or None
         return self.avatar
 
+
+    def encryption_mode(self) -> str:
+        """Return the authoritative encryption mode for this session."""
+        explicit_mode = str(self.extra.get("encryption_mode", "") or "").strip()
+        if explicit_mode:
+            return explicit_mode
+        if self.is_ai_session or self.session_type == "ai":
+            return "server_visible_ai"
+        if self.session_type == "direct":
+            return "e2ee_private"
+        if self.session_type == "group":
+            return "e2ee_group"
+        return "plain"
+
+    def session_crypto_state(self) -> dict[str, Any]:
+        """Return one normalized runtime crypto-state snapshot for this session."""
+        return dict(self.extra.get("session_crypto_state") or {})
+
+    def call_capabilities(self) -> dict[str, bool]:
+        """Return the normalized runtime call capability map for this session."""
+        raw = self.extra.get("call_capabilities")
+        if isinstance(raw, dict):
+            return {
+                "voice": bool(raw.get("voice", False)),
+                "video": bool(raw.get("video", False)),
+            }
+        supports_direct_call = self.session_type == "direct" and not self.is_ai_session
+        return {
+            "voice": supports_direct_call,
+            "video": supports_direct_call,
+        }
+
+    def call_state(self) -> dict[str, Any]:
+        """Return one normalized runtime call-state snapshot for this session."""
+        return dict(self.extra.get("call_state") or {})
+
+    def supports_call(self) -> bool:
+        """Return whether this session currently supports any call modality."""
+        capabilities = self.call_capabilities()
+        return bool(capabilities.get("voice") or capabilities.get("video"))
+
+    def uses_e2ee(self) -> bool:
+        """Return whether this session should use end-to-end encryption."""
+        return self.encryption_mode() in {"e2ee_private", "e2ee_group"}
+
+    def security_summary(self) -> dict[str, Any]:
+        """Return one high-level security summary for UI and diagnostics."""
+        crypto_state = self.session_crypto_state()
+        encryption_mode = self.encryption_mode()
+        identity_status = str(crypto_state.get("identity_status") or "").strip()
+        call_state = self.call_state()
+        summary = {
+            "session_id": str(self.session_id or ""),
+            "encryption_mode": encryption_mode,
+            "uses_e2ee": self.uses_e2ee(),
+            "crypto_ready": bool(crypto_state.get("ready", False)),
+            "device_registered": bool(crypto_state.get("device_registered", False)),
+            "identity_status": identity_status,
+            "identity_action_required": bool(crypto_state.get("identity_action_required", False)),
+            "identity_review_action": str(crypto_state.get("identity_review_action") or ""),
+            "identity_review_blocking": bool(crypto_state.get("identity_review_blocking", False)),
+            "identity_alert_severity": str(crypto_state.get("identity_alert_severity") or ""),
+            "identity_change_count": int(crypto_state.get("identity_change_count", 0) or 0),
+            "identity_last_changed_at": str(crypto_state.get("identity_last_changed_at") or ""),
+            "identity_last_trusted_at": str(crypto_state.get("identity_last_trusted_at") or ""),
+            "identity_verification_available": bool(crypto_state.get("identity_verification_available", False)),
+            "identity_primary_verification_device_id": str(
+                crypto_state.get("identity_primary_verification_device_id") or ""
+            ),
+            "identity_primary_verification_fingerprint_short": str(
+                crypto_state.get("identity_primary_verification_fingerprint_short") or ""
+            ),
+            "identity_primary_verification_code": str(
+                crypto_state.get("identity_primary_verification_code") or ""
+            ),
+            "identity_primary_verification_code_short": str(
+                crypto_state.get("identity_primary_verification_code_short") or ""
+            ),
+            "identity_local_fingerprint_short": str(crypto_state.get("identity_local_fingerprint_short") or ""),
+            "decryption_state": str(crypto_state.get("decryption_state") or ""),
+            "recovery_action": str(crypto_state.get("recovery_action") or ""),
+            "supports_call": self.supports_call(),
+            "call_active": bool(call_state.get("active", False)),
+            "call_status": str(call_state.get("status") or ""),
+            "actions": [],
+        }
+        if encryption_mode == "e2ee_private":
+            if summary["identity_review_blocking"]:
+                summary["headline"] = "identity_review_required"
+                summary["recommended_action"] = str(summary["identity_review_action"] or "trust_peer_identity")
+                summary["actions"] = [
+                    self._security_action(
+                        action_id="trust_peer_identity",
+                        kind="identity_review",
+                        label="Trust peer identity",
+                        description="Confirm the peer device identity before sending more encrypted messages.",
+                        blocking=True,
+                        primary=True,
+                    )
+                ]
+            elif summary["identity_action_required"]:
+                summary["headline"] = "identity_unverified"
+                summary["recommended_action"] = str(summary["identity_review_action"] or "trust_peer_identity")
+                summary["actions"] = [
+                    self._security_action(
+                        action_id="trust_peer_identity",
+                        kind="identity_review",
+                        label="Trust peer identity",
+                        description="Verify and trust the peer device identity for this encrypted session.",
+                        blocking=False,
+                        primary=True,
+                    )
+                ]
+            elif summary["decryption_state"]:
+                summary["headline"] = "decryption_recovery_required"
+                summary["recommended_action"] = str(summary["recovery_action"] or "")
+                if summary["recommended_action"]:
+                    if summary["recommended_action"] == "switch_device":
+                        summary["actions"] = [
+                            self._security_action(
+                                action_id="switch_device",
+                                kind="crypto_recovery",
+                                label="Switch device",
+                                description="Open the device that owns this encrypted history to continue recovery.",
+                                blocking=True,
+                                primary=True,
+                                available=False,
+                                external_requirement={
+                                    "kind": "switch_device",
+                                    "target_device_id": str(crypto_state.get("target_device_id") or ""),
+                                    "blocking": True,
+                                },
+                            )
+                        ]
+                    else:
+                        summary["actions"] = [
+                            self._security_action(
+                                action_id=str(summary["recommended_action"]),
+                                kind="crypto_recovery",
+                                label=str(summary["recommended_action"]).replace("_", " "),
+                                description="Run the recommended encrypted-session recovery flow on this device.",
+                                blocking=False,
+                                primary=True,
+                            )
+                        ]
+            else:
+                summary["headline"] = "secure"
+                summary["recommended_action"] = ""
+        elif encryption_mode == "e2ee_group":
+            if summary["decryption_state"]:
+                summary["headline"] = "group_recovery_required"
+                summary["recommended_action"] = str(summary["recovery_action"] or "")
+                if summary["recommended_action"]:
+                    summary["actions"] = [
+                        self._security_action(
+                            action_id=str(summary["recommended_action"]),
+                            kind="crypto_recovery",
+                            label=str(summary["recommended_action"]).replace("_", " "),
+                            description="Run the recommended group encryption recovery flow on this device.",
+                            blocking=False,
+                            primary=True,
+                        )
+                    ]
+            else:
+                summary["headline"] = "secure"
+                summary["recommended_action"] = ""
+        else:
+            summary["headline"] = "not_e2ee"
+            summary["recommended_action"] = ""
+        return summary
+
+    @staticmethod
+    def _security_action(
+        *,
+        action_id: str,
+        kind: str,
+        label: str,
+        description: str,
+        blocking: bool,
+        primary: bool,
+        available: bool = True,
+        external_requirement: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        action = {
+            "id": str(action_id or ""),
+            "kind": str(kind or ""),
+            "label": str(label or ""),
+            "title": str(label or ""),
+            "description": str(description or ""),
+            "blocking": bool(blocking),
+            "primary": bool(primary),
+            "available": bool(available),
+        }
+        if external_requirement:
+            action["external_requirement"] = dict(external_requirement)
+        return action
+
     def display_gender(self) -> str:
         """Return the UI gender hint for avatar fallback rendering."""
         if self.session_type == "direct" and not self.is_ai_session:
@@ -885,6 +1118,8 @@ class AISession:
             max_tokens=data.get("max_tokens", 2048),
             context_messages=data.get("context_messages", 10),
         )
+
+
 
 
 

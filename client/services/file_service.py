@@ -99,6 +99,10 @@ class FileService:
         """Upload one chat attachment using the standard file endpoint."""
         return await self.upload_file(file_path)
 
+    async def download_chat_attachment(self, file_url: str) -> bytes:
+        """Download one chat attachment as raw bytes."""
+        return await self._http.download_bytes(file_url)
+
     async def upload_profile_avatar(self, file_path: str) -> dict[str, Any]:
         """Upload one profile avatar using the dedicated avatar endpoint."""
         payload = await self._http.upload_file(file_path, upload_path=self.PROFILE_AVATAR_UPLOAD_PATH)

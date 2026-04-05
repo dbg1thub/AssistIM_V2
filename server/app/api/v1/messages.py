@@ -90,7 +90,7 @@ async def edit_message(
     db: Session = Depends(get_db),
 ) -> dict:
     service = MessageService(db)
-    data = service.edit(current_user, message_id, payload.content)
+    data = service.edit(current_user, message_id, payload.content, extra=payload.extra)
     member_ids = service.get_session_member_ids(data["session_id"], current_user.id)
     await connection_manager.send_json_to_users(
         member_ids,

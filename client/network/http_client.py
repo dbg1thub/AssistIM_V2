@@ -212,6 +212,59 @@ class HTTPClient:
             logger.error(f"Request timeout: {url}")
             raise NetworkError(f"Request timeout: {e}") from e
 
+    async def _handle_binary_response(
+            self,
+            response: aiohttp.ClientResponse,
+            retry_on_401: bool,
+            path: str,
+            headers: Optional[dict[str, str]],
+            use_auth: bool,
+    ) -> bytes:
+        """Handle one binary download response using the standard client error model."""
+        if response.status == 401:
+            payload, response_text = await self._read_error_response_payload(response)
+            if use_auth and retry_on_401 and self._refresh_token:
+                success = await self._refresh_access_token()
+                if success:
+                    return await self.download_bytes(
+                        path,
+                        headers=headers,
+                        retry_on_401=False,
+                        use_auth=use_auth,
+                    )
+
+            message = self._error_message_from_payload(
+                payload,
+                response_text,
+                fallback="Authentication failed" if use_auth else "Unauthorized",
+            )
+            if use_auth:
+                raise AuthExpiredError(message)
+            raise APIError(
+                message,
+                code=self._error_code_from_payload(payload),
+                status_code=response.status,
+            )
+
+        if response.status >= 400:
+            payload, response_text = await self._read_error_response_payload(response)
+            if response.status >= 500:
+                raise ServerError(
+                    self._error_message_from_payload(payload, response_text, fallback="Server error"),
+                    status_code=response.status,
+                )
+            raise APIError(
+                self._error_message_from_payload(
+                    payload,
+                    response_text,
+                    fallback=f"Request failed ({response.status})",
+                ),
+                code=self._error_code_from_payload(payload),
+                status_code=response.status,
+            )
+
+        return await response.read()
+
     async def _handle_response(
             self,
             response: aiohttp.ClientResponse,
@@ -549,6 +602,48 @@ class HTTPClient:
     ) -> Any:
         """Make DELETE request."""
         return await self._request("DELETE", path, **kwargs)
+
+    async def download_bytes(
+            self,
+            path: str,
+            *,
+            headers: Optional[dict[str, str]] = None,
+            retry_on_401: bool = True,
+            use_auth: Optional[bool] = None,
+    ) -> bytes:
+        """Download one binary payload from an internal or absolute URL."""
+        url = self._resolve_url(path)
+        apply_auth = self._should_use_app_auth(path, use_auth)
+        request_headers = {"Accept": "*/*"}
+        if apply_auth and self._access_token:
+            request_headers["Authorization"] = f"Bearer {self._access_token}"
+        if headers:
+            request_headers.update(headers)
+
+        session = await self._ensure_session()
+
+        try:
+            logger.debug(f"GET {url} (binary)")
+
+            async with session.request(
+                    "GET",
+                    url,
+                    headers=request_headers,
+            ) as response:
+                return await self._handle_binary_response(
+                    response,
+                    retry_on_401,
+                    path,
+                    headers,
+                    apply_auth,
+                )
+
+        except aiohttp.ClientError as e:
+            logger.error(f"Network error: {e}")
+            raise NetworkError(f"Request failed: {e}") from e
+        except asyncio.TimeoutError as e:
+            logger.error(f"Request timeout: {url}")
+            raise NetworkError(f"Request timeout: {e}") from e
 
     async def close(self) -> None:
         """Close the HTTP session."""

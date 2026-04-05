@@ -1,6 +1,8 @@
-﻿"""Session schemas."""
+"""Session schemas."""
 
 from __future__ import annotations
+
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -36,6 +38,10 @@ class SessionOut(ORMModel):
     unread_count: int = 0
     avatar: str | None = None
     is_ai_session: bool
+    encryption_mode: str = 'plain'
+    session_crypto_state: dict[str, Any] = Field(default_factory=dict)
+    call_capabilities: dict[str, bool] = Field(default_factory=dict)
+    group_member_version: int = 0
     created_at: str | None = None
     counterpart_id: str | None = None
     counterpart_name: str | None = None
@@ -43,6 +49,7 @@ class SessionOut(ORMModel):
     counterpart_avatar: str | None = None
     counterpart_gender: str | None = None
     members: list[SessionMemberOut] = Field(default_factory=list)
+
 
 
 

@@ -345,6 +345,43 @@ def test_websocket_read_ack_requires_message_id_field(client: TestClient, user_f
         assert error_payload["data"]["message"] == "message_id is required"
 
 
+def test_websocket_chat_message_uses_recipient_is_self_view(client: TestClient, user_factory, auth_header) -> None:
+    alice = user_factory("alice_ws_is_self", "Alice WS Is Self")
+    bob = user_factory("bob_ws_is_self", "Bob WS Is Self")
+
+    create_session_response = client.post(
+        "/api/v1/sessions/direct",
+        json={"participant_ids": [bob["user"]["id"]], "name": "Alice & Bob"},
+        headers=auth_header(alice["access_token"]),
+    )
+    assert create_session_response.status_code == 200
+    session_id = create_session_response.json()["data"]["id"]
+
+    with client.websocket_connect("/ws") as alice_ws, client.websocket_connect("/ws") as bob_ws:
+        authenticate_ws(alice_ws, alice["access_token"], msg_id="ws-auth-is-self-alice")
+        authenticate_ws(bob_ws, bob["access_token"], msg_id="ws-auth-is-self-bob")
+
+        alice_ws.send_json(
+            {
+                "type": "chat_message",
+                "msg_id": "66666666-6666-4666-8666-666666666666",
+                "data": {
+                    "session_id": session_id,
+                    "content": "hello bob",
+                    "message_type": "text",
+                },
+            }
+        )
+
+        ack_payload = receive_until(alice_ws, "message_ack")
+        received_payload = receive_until(bob_ws, "chat_message")
+
+        assert ack_payload["data"]["message"]["sender_id"] == alice["user"]["id"]
+        assert ack_payload["data"]["message"]["is_self"] is True
+        assert received_payload["data"]["sender_id"] == alice["user"]["id"]
+        assert received_payload["data"]["is_self"] is False
+
+
 def test_websocket_rejects_legacy_message_alias(client: TestClient, user_factory) -> None:
     alice = user_factory("alice", "Alice")
 

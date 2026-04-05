@@ -23,6 +23,36 @@ from app.utils.time import ensure_utc, isoformat_utc, utcnow
 class MessageService:
     RECALL_LIMIT = timedelta(minutes=2)
     EDIT_LIMIT = timedelta(minutes=2)
+    DIRECT_TEXT_SCHEMES = {"x25519-aesgcm-v1"}
+    GROUP_TEXT_SCHEMES = {"group-sender-key-v1"}
+    DIRECT_ATTACHMENT_SCHEMES = {"aesgcm-file+x25519-v1"}
+    GROUP_ATTACHMENT_SCHEMES = {"aesgcm-file+group-sender-key-v1"}
+    LOCAL_ONLY_MESSAGE_EXTRA_KEYS = {
+        "content",
+        "local_path",
+        "uploading",
+        "client_flags",
+    }
+    LOCAL_ONLY_ENCRYPTION_KEYS = {
+        "local_plaintext",
+        "local_plaintext_version",
+        "decryption_error",
+        "decryption_state",
+        "recovery_action",
+        "local_device_id",
+        "target_device_id",
+        "can_decrypt",
+    }
+    LOCAL_ONLY_ATTACHMENT_ENCRYPTION_KEYS = {
+        "local_metadata",
+        "local_plaintext_version",
+        "decryption_error",
+        "decryption_state",
+        "recovery_action",
+        "local_device_id",
+        "target_device_id",
+        "can_decrypt",
+    }
 
     def __init__(self, db: Session) -> None:
         self.db = db
@@ -188,7 +218,14 @@ class MessageService:
         self.db.commit()
         return payload
 
-    def edit(self, current_user: User, message_id: str, content: str) -> dict:
+    def edit(
+        self,
+        current_user: User,
+        message_id: str,
+        content: str,
+        *,
+        extra: dict[str, Any] | None = None,
+    ) -> dict:
         message = self.messages.get_by_id(message_id)
         if message is None:
             raise AppError(ErrorCode.RESOURCE_NOT_FOUND, "message not found", 404)
@@ -197,7 +234,14 @@ class MessageService:
         if message.created_at and utcnow() - ensure_utc(message.created_at) > self.EDIT_LIMIT:
             raise AppError(ErrorCode.FORBIDDEN, "edit time limit exceeded", 403)
 
-        self.messages.update_content(message, content, commit=False)
+        normalized_extra = self._normalize_message_extra(
+            sender_id=current_user.id,
+            session_id=message.session_id,
+            content=content,
+            message_type=str(message.type or "text"),
+            extra=extra if extra is not None else self.messages.load_extra(message),
+        )
+        self.messages.update_content(message, content, extra=normalized_extra, commit=False)
         self.messages.update_status(message, "edited", commit=False)
         serialized = self.serialize_message(message, current_user.id)
         payload = {
@@ -286,9 +330,21 @@ class MessageService:
         message_type: str,
         extra: dict[str, Any] | None,
     ) -> dict[str, Any] | None:
-        normalized_extra = dict(extra or {})
+        session = self.sessions.get_by_id(session_id)
+        if session is None:
+            raise AppError(ErrorCode.RESOURCE_NOT_FOUND, "session not found", 404)
+
+        normalized_extra = self._sanitize_transport_extra(extra)
+        normalized_message_type = str(message_type or "text").strip().lower()
+        self._validate_message_encryption(
+            session_type="direct" if str(session.type or "") == "private" else str(session.type or ""),
+            is_ai_session=bool(getattr(session, "is_ai_session", False)),
+            message_type=normalized_message_type,
+            extra=normalized_extra,
+        )
+
         mentions = self._normalize_mentions(normalized_extra.get("mentions"), content=content)
-        if str(message_type or "text").strip().lower() != "text":
+        if normalized_message_type != "text":
             mentions = []
 
         if any(str(item.get("mention_type", "") or "") == "all" for item in mentions):
@@ -299,6 +355,216 @@ class MessageService:
         else:
             normalized_extra.pop("mentions", None)
         return normalized_extra or None
+
+    @classmethod
+    def _sanitize_transport_extra(cls, extra: dict[str, Any] | None) -> dict[str, Any]:
+        normalized = dict(extra or {})
+        for key in cls.LOCAL_ONLY_MESSAGE_EXTRA_KEYS:
+            normalized.pop(key, None)
+
+        encryption = cls._sanitize_encryption_envelope(
+            normalized.get("encryption"),
+            local_only_keys=cls.LOCAL_ONLY_ENCRYPTION_KEYS,
+        )
+        if encryption:
+            normalized["encryption"] = encryption
+        else:
+            normalized.pop("encryption", None)
+
+        attachment_encryption = cls._sanitize_encryption_envelope(
+            normalized.get("attachment_encryption"),
+            local_only_keys=cls.LOCAL_ONLY_ATTACHMENT_ENCRYPTION_KEYS,
+        )
+        if attachment_encryption:
+            normalized["attachment_encryption"] = attachment_encryption
+            if attachment_encryption.get("enabled"):
+                normalized.pop("url", None)
+                normalized.pop("name", None)
+                normalized.pop("file_type", None)
+                normalized.pop("size", None)
+                normalized.pop("media", None)
+        else:
+            normalized.pop("attachment_encryption", None)
+
+        return normalized
+
+    @staticmethod
+    def _sanitize_encryption_envelope(
+        envelope: Any,
+        *,
+        local_only_keys: set[str],
+    ) -> dict[str, Any]:
+        if not isinstance(envelope, dict):
+            return {}
+        normalized = dict(envelope)
+        for key in local_only_keys:
+            normalized.pop(key, None)
+        return normalized
+
+    @classmethod
+    def _validate_message_encryption(
+        cls,
+        *,
+        session_type: str,
+        is_ai_session: bool,
+        message_type: str,
+        extra: dict[str, Any],
+    ) -> None:
+        encryption = dict(extra.get("encryption") or {})
+        attachment_encryption = dict(extra.get("attachment_encryption") or {})
+        has_text_encryption = bool(encryption.get("enabled"))
+        has_attachment_encryption = bool(attachment_encryption.get("enabled"))
+
+        if not has_text_encryption and not has_attachment_encryption:
+            return
+
+        normalized_session_type = str(session_type or "").strip().lower()
+        normalized_message_type = str(message_type or "text").strip().lower()
+        if is_ai_session:
+            raise AppError(ErrorCode.INVALID_REQUEST, "AI sessions do not support end-to-end encryption", 422)
+        if normalized_session_type not in {"direct", "group"}:
+            raise AppError(ErrorCode.INVALID_REQUEST, "unsupported encrypted session type", 422)
+
+        if has_text_encryption:
+            if normalized_message_type != "text":
+                raise AppError(ErrorCode.INVALID_REQUEST, "text encryption is only valid for text messages", 422)
+            scheme = str(encryption.get("scheme") or "").strip()
+            allowed_text_schemes = cls.DIRECT_TEXT_SCHEMES if normalized_session_type == "direct" else cls.GROUP_TEXT_SCHEMES
+            if scheme not in allowed_text_schemes:
+                raise AppError(ErrorCode.INVALID_REQUEST, "invalid text encryption scheme for session type", 422)
+            if normalized_session_type == "direct":
+                cls._validate_direct_text_envelope(encryption)
+            else:
+                cls._validate_group_text_envelope(encryption)
+
+        if has_attachment_encryption:
+            if normalized_message_type not in {"file", "image", "video", "voice"}:
+                raise AppError(ErrorCode.INVALID_REQUEST, "attachment encryption requires an attachment message type", 422)
+            scheme = str(attachment_encryption.get("scheme") or "").strip()
+            allowed_attachment_schemes = (
+                cls.DIRECT_ATTACHMENT_SCHEMES
+                if normalized_session_type == "direct"
+                else cls.GROUP_ATTACHMENT_SCHEMES
+            )
+            if scheme not in allowed_attachment_schemes:
+                raise AppError(ErrorCode.INVALID_REQUEST, "invalid attachment encryption scheme for session type", 422)
+            if normalized_session_type == "direct":
+                cls._validate_direct_attachment_envelope(attachment_encryption)
+            else:
+                cls._validate_group_attachment_envelope(attachment_encryption)
+
+    @classmethod
+    def _validate_direct_text_envelope(cls, envelope: dict[str, Any]) -> None:
+        cls._require_envelope_fields(
+            envelope,
+            "direct text",
+            ("sender_device_id", "sender_identity_key_public", "recipient_user_id", "recipient_device_id", "content_ciphertext", "nonce"),
+        )
+        cls._require_int_field(envelope, "recipient_prekey_id", "direct text")
+        cls._require_allowed_value(
+            envelope,
+            "recipient_prekey_type",
+            {"signed", "one_time"},
+            "direct text",
+        )
+
+    @classmethod
+    def _validate_group_text_envelope(cls, envelope: dict[str, Any]) -> None:
+        cls._require_envelope_fields(
+            envelope,
+            "group text",
+            ("session_id", "sender_device_id", "sender_key_id", "content_ciphertext", "nonce"),
+        )
+        cls._require_group_fanout(envelope.get("fanout"), "group text")
+
+    @classmethod
+    def _validate_direct_attachment_envelope(cls, envelope: dict[str, Any]) -> None:
+        cls._require_envelope_fields(
+            envelope,
+            "direct attachment",
+            ("sender_device_id", "sender_identity_key_public", "recipient_user_id", "recipient_device_id", "metadata_ciphertext", "nonce"),
+        )
+        cls._require_int_field(envelope, "recipient_prekey_id", "direct attachment")
+        cls._require_allowed_value(
+            envelope,
+            "recipient_prekey_type",
+            {"signed", "one_time"},
+            "direct attachment",
+        )
+
+    @classmethod
+    def _validate_group_attachment_envelope(cls, envelope: dict[str, Any]) -> None:
+        cls._require_envelope_fields(
+            envelope,
+            "group attachment",
+            ("session_id", "sender_device_id", "sender_key_id", "metadata_ciphertext", "nonce"),
+        )
+        cls._require_group_fanout(envelope.get("fanout"), "group attachment")
+
+    @staticmethod
+    def _require_envelope_fields(envelope: dict[str, Any], envelope_label: str, fields: tuple[str, ...]) -> None:
+        missing_fields = [field_name for field_name in fields if not str(envelope.get(field_name) or "").strip()]
+        if missing_fields:
+            raise AppError(
+                ErrorCode.INVALID_REQUEST,
+                f"{envelope_label} encryption envelope is missing required fields: {', '.join(missing_fields)}",
+                422,
+            )
+
+    @staticmethod
+    def _require_int_field(envelope: dict[str, Any], field_name: str, envelope_label: str) -> None:
+        try:
+            value = int(envelope.get(field_name))
+        except (TypeError, ValueError):
+            value = 0
+        if value <= 0:
+            raise AppError(
+                ErrorCode.INVALID_REQUEST,
+                f"{envelope_label} encryption envelope has invalid field: {field_name}",
+                422,
+            )
+
+    @staticmethod
+    def _require_allowed_value(
+        envelope: dict[str, Any],
+        field_name: str,
+        allowed_values: set[str],
+        envelope_label: str,
+    ) -> None:
+        value = str(envelope.get(field_name) or "").strip()
+        if value not in allowed_values:
+            raise AppError(
+                ErrorCode.INVALID_REQUEST,
+                f"{envelope_label} encryption envelope has invalid field: {field_name}",
+                422,
+            )
+
+    @classmethod
+    def _require_group_fanout(cls, fanout: Any, envelope_label: str) -> None:
+        if not isinstance(fanout, list) or not fanout:
+            raise AppError(
+                ErrorCode.INVALID_REQUEST,
+                f"{envelope_label} encryption envelope requires a non-empty fanout list",
+                422,
+            )
+        for item in fanout:
+            if not isinstance(item, dict):
+                raise AppError(
+                    ErrorCode.INVALID_REQUEST,
+                    f"{envelope_label} encryption envelope contains an invalid fanout item",
+                    422,
+                )
+            cls._require_envelope_fields(
+                item,
+                f"{envelope_label} fanout",
+                ("recipient_user_id", "recipient_device_id", "sender_device_id", "sender_key_id", "ciphertext", "nonce"),
+            )
+            cls._require_allowed_value(
+                item,
+                "scheme",
+                {"group-sender-key-fanout-v1"},
+                f"{envelope_label} fanout",
+            )
 
     def _ensure_can_mention_everyone(self, sender_id: str, session_id: str) -> None:
         session = self.sessions.get_by_id(session_id)
@@ -560,7 +826,7 @@ class MessageService:
         }
 
     def _message_extra(self, message, read_metadata: dict[str, Any]) -> dict[str, Any]:
-        extra = self.messages.load_extra(message)
+        extra = self._sanitize_transport_extra(self.messages.load_extra(message))
         extra.update(read_metadata)
         return extra
 
@@ -571,6 +837,8 @@ class MessageService:
             data = {}
         if not isinstance(data, dict):
             data = {}
+        if isinstance(data.get("extra"), dict):
+            data["extra"] = self._sanitize_transport_extra(data.get("extra"))
 
         event_seq = int(event.event_seq or 0)
         data.setdefault("event_seq", event_seq)
@@ -593,6 +861,8 @@ class MessageService:
         actor_user_id: str | None = None,
     ) -> dict:
         payload = dict(data or {})
+        if isinstance(payload.get("extra"), dict):
+            payload["extra"] = self._sanitize_transport_extra(payload.get("extra"))
         event = self.messages.append_session_event(
             session_id,
             event_type,

@@ -20,6 +20,8 @@ class MessageIdConflictError(ValueError):
 
 
 class MessageRepository:
+    _UNSET = object()
+
     def __init__(self, db: Session) -> None:
         self.db = db
 
@@ -252,8 +254,17 @@ class MessageRepository:
             self.db.refresh(message)
         return message
 
-    def update_content(self, message: Message, content: str, *, commit: bool = True) -> Message:
+    def update_content(
+        self,
+        message: Message,
+        content: str,
+        *,
+        extra: dict[str, Any] | object = _UNSET,
+        commit: bool = True,
+    ) -> Message:
         message.content = content
+        if extra is not self._UNSET:
+            message.extra_json = self._dump_extra(extra if isinstance(extra, dict) else None)
         self.db.add(message)
         self.db.flush()
         if commit:

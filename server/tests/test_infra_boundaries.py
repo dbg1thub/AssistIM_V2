@@ -1,4 +1,4 @@
-"""Infrastructure boundary tests."""
+﻿"""Infrastructure boundary tests."""
 
 from __future__ import annotations
 
@@ -191,9 +191,18 @@ def test_api_schema_models_use_canonical_session_and_friend_request_fields() -> 
     assert "sender_profile" in MessageOut.model_fields
     assert "counterpart_avatar" in SessionOut.model_fields
     assert "counterpart_id" in SessionOut.model_fields
+    assert "encryption_mode" in SessionOut.model_fields
+    assert "session_crypto_state" in SessionOut.model_fields
+    assert "call_capabilities" in SessionOut.model_fields
     assert "msg_id" not in MessageOut.model_fields
     assert "type" not in MessageOut.model_fields
 
+
+def test_e2ee_device_model_matches_varchar_user_id_runtime_schema() -> None:
+    from app.models.device import UserDevice
+
+    user_id_column = UserDevice.__table__.c.user_id
+    assert user_id_column.type.length == 36
 def test_configure_database_rebinds_engine_and_session_factory() -> None:
     baseline_engine = get_engine()
     custom_db_path = Path("server/.testdata/runtime-boundary.db")
@@ -602,3 +611,4 @@ def test_schema_compatibility_backfills_avatar_columns_for_legacy_runtime_schema
         user_row = connection.execute(text("SELECT avatar_kind, avatar_default_key FROM users WHERE id = 'user-1'")) .mappings().one()
     assert user_row["avatar_kind"] == "default"
     assert str(user_row["avatar_default_key"] or "") != ""
+

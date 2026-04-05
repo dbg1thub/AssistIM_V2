@@ -41,6 +41,10 @@ from client.ui.windows.auth_interface import AuthInterface
 setup_logging()
 logger = logging.get_logger(__name__)
 
+EXIT_CODE_OK = 0
+EXIT_CODE_SINGLE_INSTANCE = 1
+EXIT_CODE_STARTUP_PREFLIGHT_BLOCKED = 2
+
 
 def _sanitize_profile_name(profile: str) -> str:
     """Normalize a runtime profile name for file-system usage."""
@@ -87,6 +91,25 @@ def _acquire_instance_lock(profile: str = "") -> QLockFile | None:
     return None
 
 
+def _show_startup_preflight_block_dialog(preflight: dict) -> None:
+    """Show one user-facing dialog for a blocking startup preflight failure."""
+    state = str(preflight.get("state", "unknown") or "unknown")
+    message = str(preflight.get("message", "") or "").strip()
+    body = tr(
+        "main.startup_preflight_blocked.message",
+        "AssistIM could not start because one startup safety check failed.",
+    )
+    if message:
+        body = f"{body}\n\n[{state}] {message}"
+    else:
+        body = f"{body}\n\n[{state}]"
+    QMessageBox.information(
+        None,
+        tr("main.startup_preflight_blocked.title", "Startup blocked"),
+        body,
+    )
+
+
 class Application:
     """
     Main application class that manages the client lifecycle.
@@ -104,6 +127,41 @@ class Application:
         self._logout_task: asyncio.Task | None = None
         self._forced_logout_in_progress = False
         self._pending_auth_success_message = ""
+        self._exit_code = EXIT_CODE_OK
+        self._startup_security_status = {
+            "authenticated": False,
+            "user_id": "",
+            "database_encryption": {
+                "state": "unknown",
+                "severity": "info",
+                "can_start": True,
+                "action_required": False,
+                "message": "Local database encryption status is unavailable",
+            },
+        }
+        self._e2ee_runtime_diagnostics = {
+            "authenticated": False,
+            "user_id": "",
+            "runtime_security": {
+                "authenticated": False,
+                "user_id": "",
+                "database_encryption": {
+                    "state": "unknown",
+                    "severity": "info",
+                    "can_start": True,
+                    "action_required": False,
+                    "message": "Local database encryption status is unavailable",
+                },
+            },
+            "history_recovery": {
+                "available": False,
+                "source_device_count": 0,
+            },
+            "current_session_security": {
+                "available": False,
+                "reason": "authentication required",
+            },
+        }
 
         self.main_window = None
         self.auth_window = None
@@ -142,6 +200,101 @@ class Application:
         """Yield back to qasync without re-entering Qt's event pump manually."""
         await asyncio.sleep(0)
 
+    def get_startup_security_status(self) -> dict:
+        """Expose one stable startup/runtime security snapshot for diagnostics and UI handoff."""
+        database_encryption = dict(self._startup_security_status.get("database_encryption") or {})
+        return {
+            "authenticated": bool(self._startup_security_status.get("authenticated")),
+            "user_id": str(self._startup_security_status.get("user_id", "") or ""),
+            "database_encryption": database_encryption,
+        }
+
+    def get_startup_preflight_result(self) -> dict:
+        """Return one normalized startup preflight result derived from cached runtime security state."""
+        security_status = self.get_startup_security_status()
+        database_encryption = dict(security_status.get("database_encryption") or {})
+        can_continue = bool(database_encryption.get("can_start", True))
+        return {
+            "can_continue": can_continue,
+            "blocking": not can_continue,
+            "action_required": bool(database_encryption.get("action_required")),
+            "state": str(database_encryption.get("state", "unknown") or "unknown"),
+            "severity": str(database_encryption.get("severity", "info") or "info"),
+            "message": str(database_encryption.get("message", "") or ""),
+            "runtime_security": security_status,
+        }
+
+    def get_e2ee_runtime_diagnostics(self) -> dict:
+        """Expose one stable application-level E2EE runtime diagnostics snapshot."""
+        return {
+            "authenticated": bool(self._e2ee_runtime_diagnostics.get("authenticated")),
+            "user_id": str(self._e2ee_runtime_diagnostics.get("user_id", "") or ""),
+            "runtime_security": dict(self._e2ee_runtime_diagnostics.get("runtime_security") or {}),
+            "history_recovery": dict(self._e2ee_runtime_diagnostics.get("history_recovery") or {}),
+            "current_session_security": dict(self._e2ee_runtime_diagnostics.get("current_session_security") or {}),
+        }
+
+    def get_exit_code(self) -> int:
+        """Expose the current application exit code for outer launchers and tests."""
+        return int(self._exit_code)
+
+    def _update_startup_security_status(self, *, db=None, auth_controller=None) -> dict:
+        """Refresh the cached startup security status from the best available runtime source."""
+        current = self.get_startup_security_status()
+        database_encryption = dict(current.get("database_encryption") or {})
+
+        if db is not None:
+            db_self_check_getter = getattr(db, "get_db_encryption_self_check", None)
+            if callable(db_self_check_getter):
+                database_encryption = dict(db_self_check_getter() or {})
+
+        if auth_controller is not None:
+            runtime_status_getter = getattr(auth_controller, "get_runtime_security_status", None)
+            if callable(runtime_status_getter):
+                runtime_status = dict(runtime_status_getter() or {})
+                database_encryption = dict(runtime_status.get("database_encryption") or database_encryption)
+                self._startup_security_status = {
+                    "authenticated": bool(runtime_status.get("authenticated")),
+                    "user_id": str(runtime_status.get("user_id", "") or ""),
+                    "database_encryption": database_encryption,
+                }
+                return self.get_startup_security_status()
+
+        self._startup_security_status = {
+            "authenticated": bool(current.get("authenticated")),
+            "user_id": str(current.get("user_id", "") or ""),
+            "database_encryption": database_encryption,
+        }
+        return self.get_startup_security_status()
+
+    async def _update_e2ee_runtime_diagnostics(self, *, auth_controller=None) -> dict:
+        """Refresh the cached application-level E2EE diagnostics from the auth controller when available."""
+        current = self.get_e2ee_runtime_diagnostics()
+        if auth_controller is not None:
+            diagnostics_getter = getattr(auth_controller, "get_e2ee_diagnostics", None)
+            if callable(diagnostics_getter):
+                try:
+                    diagnostics = dict(await diagnostics_getter() or {})
+                except Exception:
+                    diagnostics = {}
+                if diagnostics:
+                    self._e2ee_runtime_diagnostics = {
+                        "authenticated": bool(diagnostics.get("authenticated")),
+                        "user_id": str(diagnostics.get("user_id", "") or ""),
+                        "runtime_security": dict(diagnostics.get("runtime_security") or {}),
+                        "history_recovery": dict(diagnostics.get("history_recovery") or {}),
+                        "current_session_security": dict(diagnostics.get("current_session_security") or {}),
+                    }
+                    return self.get_e2ee_runtime_diagnostics()
+        self._e2ee_runtime_diagnostics = {
+            "authenticated": bool(current.get("authenticated")),
+            "user_id": str(current.get("user_id", "") or ""),
+            "runtime_security": dict(current.get("runtime_security") or {}),
+            "history_recovery": dict(current.get("history_recovery") or {}),
+            "current_session_security": dict(current.get("current_session_security") or {}),
+        }
+        return self.get_e2ee_runtime_diagnostics()
+
     # =========================================================
     # Initialization
     # =========================================================
@@ -157,6 +310,33 @@ class Application:
         logger.info("Initializing database...")
         db = get_database()
         await db.connect()
+        self._update_startup_security_status(db=db)
+        self._e2ee_runtime_diagnostics = {
+            "authenticated": False,
+            "user_id": "",
+            "runtime_security": self.get_startup_security_status(),
+            "history_recovery": {
+                "available": False,
+                "source_device_count": 0,
+            },
+            "current_session_security": {
+                "available": False,
+                "reason": "authentication required",
+            },
+        }
+        db_security = self.get_startup_preflight_result().get("runtime_security", {}).get("database_encryption", {})
+        if db_security.get("action_required"):
+            logger.warning(
+                "Local DB encryption self-check: %s (%s)",
+                db_security.get("state"),
+                db_security.get("message"),
+            )
+        else:
+            logger.info(
+                "Local DB encryption self-check: %s (%s)",
+                db_security.get("state"),
+                db_security.get("message"),
+            )
 
         logger.info("Initializing HTTP client...")
         get_http_client()
@@ -201,6 +381,8 @@ class Application:
 
         auth_controller = get_auth_controller()
         restored_user = await auth_controller.restore_session()
+        self._update_startup_security_status(auth_controller=auth_controller)
+        await self._update_e2ee_runtime_diagnostics(auth_controller=auth_controller)
         if restored_user:
             logger.info("Restored persisted session for user %s", restored_user.get("id"))
             return True
@@ -236,6 +418,9 @@ class Application:
         if not authenticated:
             logger.info("Authentication window closed before sign-in")
             return False
+
+        self._update_startup_security_status(auth_controller=auth_controller)
+        await self._update_e2ee_runtime_diagnostics(auth_controller=auth_controller)
 
         return True
 
@@ -556,6 +741,15 @@ class Application:
 
         try:
             await self.initialize()
+            preflight = self.get_startup_preflight_result()
+            if preflight.get("blocking"):
+                self._exit_code = EXIT_CODE_STARTUP_PREFLIGHT_BLOCKED
+                logger.error(
+                    "Startup preflight blocked application launch: %s (%s)",
+                    preflight.get("state"),
+                    preflight.get("message"),
+                )
+                return
 
             if not await self.authenticate():
                 return
@@ -610,7 +804,7 @@ def main() -> int:
                 "AssistIM is already running. Use a different --profile value if you need a second local test instance.",
             ),
         )
-        return 1
+        return EXIT_CODE_SINGLE_INSTANCE
 
     loop = QEventLoop(qt_app)
     asyncio.set_event_loop(loop)
@@ -629,9 +823,12 @@ def main() -> int:
 
         instance_lock.unlock()
 
+    if app.get_exit_code() == EXIT_CODE_STARTUP_PREFLIGHT_BLOCKED:
+        _show_startup_preflight_block_dialog(app.get_startup_preflight_result())
+
     logger.info("Application exited")
 
-    return 0
+    return app.get_exit_code()
 
 
 if __name__ == "__main__":

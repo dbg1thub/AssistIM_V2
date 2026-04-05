@@ -183,6 +183,8 @@ def test_session_delegate_reserves_preview_space_for_mute_icon() -> None:
     server_session_service = Path('server/app/services/session_service.py').read_text(encoding='utf-8')
 
     assert 'mute_slot_width = mute_icon_size + 8 if muted else 0' in session_delegate
+    assert 'unread_badge_fm = QFontMetrics(unread_badge_font)' in session_delegate
+    assert 'def _unread_badge_font() -> QFont:' in session_delegate
     assert 'def _attention_preview_prefix(self, session) -> str:' in session_delegate
     assert 'tr("session.preview.mentioned", "[Mentioned]")' in session_delegate
     assert 'avatar_rect.right() - unread_width + 7' in session_delegate
@@ -264,6 +266,26 @@ def test_message_input_uses_acrylic_group_mention_flyout() -> None:
     assert 'self.message_input.set_session(session)' in chat_panel
     assert 'extra=segment.get("extra")' in chat_interface
     assert 'def _message_mention_ranges(message: ChatMessage) -> list[tuple[int, int]]:' in message_delegate
+
+
+def test_chat_file_open_flow_routes_downloads_through_controller_boundary() -> None:
+    chat_panel = Path('client/ui/widgets/chat_panel.py').read_text(encoding='utf-8')
+    chat_interface = Path('client/ui/windows/chat_interface.py').read_text(encoding='utf-8')
+    chat_controller = Path('client/ui/controllers/chat_controller.py').read_text(encoding='utf-8')
+    message_delegate = Path('client/delegates/message_delegate.py').read_text(encoding='utf-8')
+
+    assert 'self._attachment_open_callback: Optional[Callable[[ChatMessage], None]] = None' in chat_panel
+    assert 'def set_attachment_open_callback(self, callback: Callable[[ChatMessage], None] | None) -> None:' in chat_panel
+    assert 'attachment_encryption = dict((message.extra or {}).get("attachment_encryption") or {})' in chat_panel
+    assert 'if attachment_encryption.get("enabled") and self._attachment_open_callback is not None:' in chat_panel
+    assert 'self.chat_panel.set_attachment_open_callback(self._open_message)' in chat_interface
+    assert 'if attachment_encryption.get("enabled") and message.message_type in {' in chat_interface
+    assert 'async def _open_file_attachment(self, message) -> None:' in chat_interface
+    assert 'await self._chat_controller.download_message_attachment(message.message_id)' in chat_interface
+    assert 'async def download_message_attachment(self, message_id: str) -> str:' in chat_controller
+    assert message_delegate.count('if attachment_encryption.get("enabled"):\n            return ""') >= 2
+    assert 'self._subscribe_sync(MessageEvent.MEDIA_READY, self._on_media_ready)' in chat_interface
+    assert 'def _on_media_ready(self, data: dict) -> None:' in chat_interface
 
 
 def test_code_uses_half_width_parentheses_in_reviewed_paths() -> None:
@@ -531,3 +553,31 @@ def test_group_announcement_flow_uses_formal_banner_dialog_and_version_state() -
     assert 'async def _broadcast_group_announcement_message(' in groups_api
     assert 'announcement_message_id' in group_service
     assert '"announcement_message_id": announcement_message_id or None' in session_service
+
+
+def test_chat_header_security_badges_are_driven_from_session_summary() -> None:
+    chat_header = Path('client/ui/widgets/chat_header.py').read_text(encoding='utf-8')
+    chat_panel = Path('client/ui/widgets/chat_panel.py').read_text(encoding='utf-8')
+
+    assert 'from qfluentwidgets import BodyLabel, CaptionLabel, InfoBadge, InfoLevel, TransparentToolButton' in chat_header
+    assert 'def set_security_badges(self, badges: list[dict[str, str]]) -> None:' in chat_header
+    assert 'widget = InfoBadge(self.badge_container' in chat_header
+    assert 'def _session_security_badges(session: Session | None) -> list[dict[str, str]]:' in chat_panel
+    assert 'self.chat_header.set_security_badges(_session_security_badges(session))' in chat_panel
+    assert 'self.chat_header.set_security_badges([])' in chat_panel
+
+
+def test_chat_panel_security_pending_banner_is_wired_to_current_session_actions() -> None:
+    chat_panel = Path('client/ui/widgets/chat_panel.py').read_text(encoding='utf-8')
+    chat_interface = Path('client/ui/windows/chat_interface.py').read_text(encoding='utf-8')
+
+    assert 'class SecurityPendingBanner(QFrame):' in chat_panel
+    assert 'security_pending_confirm_requested = Signal(str, str)' in chat_panel
+    assert 'security_pending_discard_requested = Signal(str)' in chat_panel
+    assert 'self._security_pending_banner = SecurityPendingBanner(self.chat_page)' in chat_panel
+    assert 'self._security_pending_banner.confirm_requested.connect(self._on_security_pending_confirm_requested)' in chat_panel
+    assert 'self._security_pending_banner.discard_requested.connect(self._on_security_pending_discard_requested)' in chat_panel
+    assert 'self.security_pending_confirm_requested.emit(self._current_session.session_id' in chat_panel
+    assert 'self.chat_panel.security_pending_confirm_requested.connect(self._on_security_pending_confirm_requested)' in chat_interface
+    assert 'async def _confirm_security_pending_messages(self, session_id: str, action_id: str) -> None:' in chat_interface
+    assert 'await self._chat_controller.release_session_security_pending_messages(session_id)' in chat_interface

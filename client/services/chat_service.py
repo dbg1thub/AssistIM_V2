@@ -54,9 +54,12 @@ class ChatService:
         """Recall one previously sent message."""
         await self._http.post(f"/messages/{message_id}/recall")
 
-    async def edit_message(self, message_id: str, new_content: str) -> None:
+    async def edit_message(self, message_id: str, new_content: str, *, extra: Optional[dict[str, Any]] = None) -> None:
         """Edit one previously sent message."""
-        await self._http.put(f"/messages/{message_id}", json={"content": new_content})
+        payload: dict[str, Any] = {"content": new_content}
+        if extra is not None:
+            payload["extra"] = dict(extra)
+        await self._http.put(f"/messages/{message_id}", json=payload)
 
 
 _chat_service: Optional[ChatService] = None

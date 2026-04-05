@@ -1,5 +1,5 @@
-﻿"""Database models."""
+"""Database models."""
 
-from app.models import file, group, message, moment, session, user
+from app.models import device, file, group, message, moment, session, user
 
-__all__ = ["file", "group", "message", "moment", "session", "user"]
+__all__ = ["device", "file", "group", "message", "moment", "session", "user"]

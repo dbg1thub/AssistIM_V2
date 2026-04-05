@@ -14,8 +14,10 @@ from client.core.avatar_utils import profile_avatar_seed
 from client.core.i18n import tr
 from client.core.logging import setup_logging
 from client.events.event_bus import get_event_bus
+from client.managers.call_manager import CallEvent, get_call_manager
 from client.managers.message_manager import MessageEvent, get_message_manager
 from client.models.message import ChatMessage, MessageStatus, Session, format_message_preview, normalize_message_mentions, resolve_recall_notice
+from client.services.e2ee_service import get_e2ee_service
 from client.services.session_service import get_session_service
 from client.storage.database import get_database
 
@@ -36,6 +38,10 @@ class SessionEvent:
 
 class SessionManager:
     HIDDEN_SESSIONS_STATE_KEY = "chat.hidden_sessions"
+    ENCRYPTION_MODE_PLAIN = "plain"
+    ENCRYPTION_MODE_E2EE_PRIVATE = "e2ee_private"
+    ENCRYPTION_MODE_E2EE_GROUP = "e2ee_group"
+    ENCRYPTION_MODE_SERVER_VISIBLE_AI = "server_visible_ai"
 
     """
     Manager for chat sessions.
@@ -52,6 +58,8 @@ class SessionManager:
         self._event_bus = get_event_bus()
         self._msg_manager = get_message_manager()
         self._session_service = get_session_service()
+        self._call_manager = None
+        self._e2ee_service = None
 
         self._sessions: dict[str, Session] = {}
         self._current_session_id: Optional[str] = None
@@ -118,6 +126,430 @@ class SessionManager:
             return
         self._current_user_id = normalized_user_id
         self._schedule_identity_refresh()
+
+
+
+    def _require_e2ee_service(self):
+        """Lazily initialize the E2EE helper so session refreshes can annotate crypto capability."""
+        if self._e2ee_service is None:
+            self._e2ee_service = get_e2ee_service()
+        return self._e2ee_service
+
+    @classmethod
+    def _default_encryption_mode(cls, *, session_type: str, is_ai_session: bool) -> str:
+        """Return the default encryption mode for one session type."""
+        normalized_session_type = str(session_type or "").strip().lower()
+        if is_ai_session or normalized_session_type == "ai":
+            return cls.ENCRYPTION_MODE_SERVER_VISIBLE_AI
+        if normalized_session_type == "direct":
+            return cls.ENCRYPTION_MODE_E2EE_PRIVATE
+        if normalized_session_type == "group":
+            return cls.ENCRYPTION_MODE_E2EE_GROUP
+        return cls.ENCRYPTION_MODE_PLAIN
+
+    @classmethod
+    def _normalize_encryption_mode(cls, value: object, *, session_type: str, is_ai_session: bool) -> str:
+        """Return one validated encryption mode, falling back to the session-type default."""
+        normalized = str(value or "").strip().lower()
+        allowed = {
+            cls.ENCRYPTION_MODE_PLAIN,
+            cls.ENCRYPTION_MODE_E2EE_PRIVATE,
+            cls.ENCRYPTION_MODE_E2EE_GROUP,
+            cls.ENCRYPTION_MODE_SERVER_VISIBLE_AI,
+        }
+        if normalized in allowed:
+            return normalized
+        return cls._default_encryption_mode(session_type=session_type, is_ai_session=is_ai_session)
+
+    @staticmethod
+    def _require_call_manager_instance():
+        return get_call_manager()
+
+    @classmethod
+    def _default_call_capabilities(cls, *, session_type: str, is_ai_session: bool) -> dict[str, bool]:
+        supports_direct_call = str(session_type or "").strip().lower() == "direct" and not is_ai_session
+        return {
+            "voice": supports_direct_call,
+            "video": supports_direct_call,
+        }
+
+    @classmethod
+    def _normalize_call_capabilities(cls, value: object, *, session_type: str, is_ai_session: bool) -> dict[str, bool]:
+        defaults = cls._default_call_capabilities(session_type=session_type, is_ai_session=is_ai_session)
+        if not isinstance(value, dict):
+            return defaults
+        return {
+            "voice": bool(value.get("voice", defaults["voice"])),
+            "video": bool(value.get("video", defaults["video"])),
+        }
+
+    @staticmethod
+    def _idle_call_state() -> dict[str, Any]:
+        return {"active": False, "status": "idle"}
+
+    async def _annotate_session_call_state(self, sessions: list[Session]) -> None:
+        active_call = self._require_call_manager_instance().active_call
+        for session in sessions:
+            session.extra["call_capabilities"] = self._normalize_call_capabilities(
+                session.extra.get("call_capabilities"),
+                session_type=session.session_type,
+                is_ai_session=bool(session.is_ai_session),
+            )
+            if not session.supports_call():
+                session.extra["call_state"] = {}
+                continue
+            if active_call is not None and active_call.session_id == session.session_id:
+                session.extra["call_state"] = self._call_state_from_active_call(active_call)
+            else:
+                session.extra["call_state"] = self._idle_call_state()
+
+    def _call_state_from_active_call(self, call) -> dict[str, Any]:
+        current_user_id = self._current_user_id
+        peer_user_id = call.peer_user_id(current_user_id) if current_user_id else ""
+        state = {
+            "active": call.status in {"inviting", "ringing", "accepted"},
+            "status": str(call.status or "idle"),
+            "call_id": str(call.call_id or ""),
+            "media_type": str(call.media_type or ""),
+            "direction": str(call.direction or ""),
+            "peer_user_id": peer_user_id,
+        }
+        if str(call.actor_id or "").strip():
+            state["actor_id"] = str(call.actor_id or "")
+        if str(call.reason or "").strip():
+            state["reason"] = str(call.reason or "")
+        if call.created_at is not None:
+            state["created_at"] = call.created_at.isoformat()
+        if call.answered_at is not None:
+            state["answered_at"] = call.answered_at.isoformat()
+        return state
+
+    async def _apply_call_state_event(self, payload: dict[str, Any]) -> None:
+        call = payload.get("call") if isinstance(payload, dict) else None
+        if call is None or not getattr(call, "session_id", ""):
+            return
+
+        async with self._lock:
+            session = self._sessions.get(str(call.session_id or ""))
+            if session is None:
+                return
+            if not session.supports_call():
+                session.extra["call_state"] = {}
+            else:
+                session.extra["call_state"] = self._call_state_from_active_call(call)
+
+        await self._event_bus.emit(SessionEvent.UPDATED, {"sessions": self.sessions})
+
+    @classmethod
+    def _build_session_crypto_state(
+        cls,
+        session: Session,
+        *,
+        device_summary: dict[str, Any] | None,
+        existing_state: dict[str, Any] | None = None,
+        group_summary: dict[str, Any] | None = None,
+        peer_identity_summary: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Build one normalized runtime crypto-state snapshot for a session."""
+        mode = session.encryption_mode()
+        device_info = dict(device_summary or {})
+        previous_state = dict(existing_state or {})
+        group_key_summary = dict(group_summary or {})
+        identity_summary = dict(peer_identity_summary or {})
+        device_id = str(device_info.get("device_id") or previous_state.get("device_id") or "").strip()
+        device_registered = bool(device_info.get("has_local_bundle") or device_id)
+        uses_e2ee = mode in {cls.ENCRYPTION_MODE_E2EE_PRIVATE, cls.ENCRYPTION_MODE_E2EE_GROUP}
+        can_decrypt = uses_e2ee and device_registered
+        state: dict[str, Any] = {
+            "enabled": uses_e2ee,
+            "ready": can_decrypt,
+            "can_decrypt": can_decrypt,
+            "device_registered": device_registered,
+        }
+        if "last_message_recovery" in previous_state:
+            state["last_message_recovery"] = dict(previous_state["last_message_recovery"] or {})
+        if "last_message_recovery_at" in previous_state:
+            state["last_message_recovery_at"] = str(previous_state["last_message_recovery_at"] or "")
+        if mode == cls.ENCRYPTION_MODE_E2EE_PRIVATE:
+            state["scheme"] = "x25519-aesgcm-v1"
+            state["attachment_scheme"] = "aesgcm-file+x25519-v1"
+            state["identity_status"] = str(
+                identity_summary.get("status") or previous_state.get("identity_status") or "unavailable"
+            ).strip()
+            state["identity_verified"] = state["identity_status"] == "verified"
+            state["identity_device_count"] = int(
+                identity_summary["device_count"]
+                if "device_count" in identity_summary
+                else previous_state.get("identity_device_count", 0)
+            )
+            state["trusted_identity_device_count"] = int(
+                identity_summary["trusted_device_count"]
+                if "trusted_device_count" in identity_summary
+                else previous_state.get("trusted_identity_device_count", 0)
+            )
+            state["unverified_identity_device_count"] = int(
+                identity_summary["unverified_device_count"]
+                if "unverified_device_count" in identity_summary
+                else previous_state.get("unverified_identity_device_count", 0)
+            )
+            state["changed_identity_device_count"] = int(
+                identity_summary["changed_device_count"]
+                if "changed_device_count" in identity_summary
+                else previous_state.get("changed_identity_device_count", 0)
+            )
+            state["unverified_identity_device_ids"] = list(
+                identity_summary["unverified_device_ids"]
+                if "unverified_device_ids" in identity_summary
+                else previous_state.get("unverified_identity_device_ids") or []
+            )
+            state["changed_identity_device_ids"] = list(
+                identity_summary["changed_device_ids"]
+                if "changed_device_ids" in identity_summary
+                else previous_state.get("changed_identity_device_ids") or []
+            )
+            state["identity_checked_at"] = str(
+                identity_summary["checked_at"]
+                if "checked_at" in identity_summary
+                else previous_state.get("identity_checked_at") or ""
+            )
+            state["identity_change_count"] = int(
+                identity_summary["change_count"]
+                if "change_count" in identity_summary
+                else previous_state.get("identity_change_count", 0)
+            )
+            state["identity_last_changed_at"] = str(
+                identity_summary["last_changed_at"]
+                if "last_changed_at" in identity_summary
+                else previous_state.get("identity_last_changed_at") or ""
+            )
+            state["identity_last_trusted_at"] = str(
+                identity_summary["last_trusted_at"]
+                if "last_trusted_at" in identity_summary
+                else previous_state.get("identity_last_trusted_at") or ""
+            )
+            state["identity_verification_available"] = bool(
+                identity_summary["verification_available"]
+                if "verification_available" in identity_summary
+                else previous_state.get("identity_verification_available", False)
+            )
+            state["identity_primary_verification_device_id"] = str(
+                identity_summary["primary_verification_device_id"]
+                if "primary_verification_device_id" in identity_summary
+                else previous_state.get("identity_primary_verification_device_id") or ""
+            )
+            state["identity_primary_verification_fingerprint"] = str(
+                identity_summary["primary_verification_fingerprint"]
+                if "primary_verification_fingerprint" in identity_summary
+                else previous_state.get("identity_primary_verification_fingerprint") or ""
+            )
+            state["identity_primary_verification_fingerprint_short"] = str(
+                identity_summary["primary_verification_fingerprint_short"]
+                if "primary_verification_fingerprint_short" in identity_summary
+                else previous_state.get("identity_primary_verification_fingerprint_short") or ""
+            )
+            state["identity_primary_verification_code"] = str(
+                identity_summary["primary_verification_code"]
+                if "primary_verification_code" in identity_summary
+                else previous_state.get("identity_primary_verification_code") or ""
+            )
+            state["identity_primary_verification_code_short"] = str(
+                identity_summary["primary_verification_code_short"]
+                if "primary_verification_code_short" in identity_summary
+                else previous_state.get("identity_primary_verification_code_short") or ""
+            )
+            state["identity_local_fingerprint_short"] = str(
+                identity_summary["local_fingerprint_short"]
+                if "local_fingerprint_short" in identity_summary
+                else previous_state.get("identity_local_fingerprint_short") or ""
+            )
+            if state["identity_status"] == "identity_changed":
+                state["identity_action_required"] = True
+                state["identity_review_action"] = "trust_peer_identity"
+                state["identity_review_blocking"] = True
+                state["identity_alert_severity"] = "critical"
+            elif state["identity_status"] == "unverified":
+                state["identity_action_required"] = True
+                state["identity_review_action"] = "trust_peer_identity"
+                state["identity_review_blocking"] = False
+                state["identity_alert_severity"] = "warning"
+            elif state["identity_status"] == "verified":
+                state["identity_action_required"] = False
+                state["identity_review_action"] = ""
+                state["identity_review_blocking"] = False
+                state["identity_alert_severity"] = "info"
+            else:
+                state["identity_action_required"] = False
+                state["identity_review_action"] = ""
+                state["identity_review_blocking"] = False
+                state["identity_alert_severity"] = "info"
+        elif mode == cls.ENCRYPTION_MODE_E2EE_GROUP:
+            state["scheme"] = "group-sender-key-v1"
+            state["attachment_scheme"] = "aesgcm-file+group-sender-key-v1"
+            state["fanout_scheme"] = "group-sender-key-fanout-v1"
+            state["group_member_version"] = int(
+                group_key_summary.get("member_version")
+                or session.extra.get("group_member_version", 0)
+                or previous_state.get("group_member_version", 0)
+                or 0
+            )
+            state["local_sender_key_ready"] = bool(group_key_summary.get("has_local_sender_key"))
+            state["local_sender_key_id"] = str(group_key_summary.get("local_sender_key_id") or "")
+            state["retired_local_key_count"] = len(list(group_key_summary.get("retired_local_sender_key_ids") or []))
+            state["inbound_sender_key_count"] = len(list(group_key_summary.get("inbound_sender_devices") or []))
+        if device_id:
+            state["device_id"] = device_id
+        return state
+
+    @staticmethod
+    def _normalize_message_recovery_bucket(payload: dict[str, Any] | None) -> dict[str, int]:
+        normalized = dict(payload or {})
+        return {
+            "text": int(normalized.get("text", 0) or 0),
+            "attachments": int(normalized.get("attachments", 0) or 0),
+            "direct_text": int(normalized.get("direct_text", 0) or 0),
+            "group_text": int(normalized.get("group_text", 0) or 0),
+            "direct_attachments": int(normalized.get("direct_attachments", 0) or 0),
+            "group_attachments": int(normalized.get("group_attachments", 0) or 0),
+            "other": int(normalized.get("other", 0) or 0),
+        }
+
+    @classmethod
+    def _summarize_message_recovery(cls, payload: dict[str, Any] | None) -> dict[str, Any]:
+        normalized = dict(payload or {})
+        recovery_stats = dict(normalized.get("recovery_stats") or {})
+        return {
+            "updated": int(normalized.get("updated", 0) or 0),
+            "remote_fetched": int(normalized.get("remote_fetched", 0) or 0),
+            "remote_pages_fetched": int(normalized.get("remote_pages_fetched", 0) or 0),
+            "message_count": len(list(normalized.get("message_ids") or [])),
+            "cached": cls._normalize_message_recovery_bucket(dict(recovery_stats.get("cached") or {})),
+            "remote": cls._normalize_message_recovery_bucket(dict(recovery_stats.get("remote") or {})),
+        }
+
+    async def _record_session_message_recovery(
+        self,
+        session_id: str,
+        message_recovery: dict[str, Any] | None,
+    ) -> None:
+        normalized_session_id = str(session_id or "").strip()
+        if not normalized_session_id:
+            return
+
+        summary = self._summarize_message_recovery(message_recovery)
+        recorded_at = datetime.now().isoformat()
+        async with self._lock:
+            session = self._sessions.get(normalized_session_id)
+            if session is None:
+                return
+            state = dict(session.extra.get("session_crypto_state") or {})
+            state["last_message_recovery"] = summary
+            state["last_message_recovery_at"] = recorded_at
+            session.extra["session_crypto_state"] = state
+
+        db = get_database()
+        if db.is_connected:
+            await db.replace_sessions(list(self._sessions.values()))
+        await self._event_bus.emit(SessionEvent.UPDATED, {"sessions": self.sessions})
+
+    async def _annotate_session_crypto_state(self, sessions: list[Session]) -> None:
+        """Attach runtime crypto-state snapshots to a batch of sessions."""
+        if not sessions:
+            return
+        try:
+            device_summary = await self._require_e2ee_service().get_local_device_summary()
+        except Exception as exc:
+            logger.debug("Failed to load local E2EE device summary for sessions: %s", exc)
+            device_summary = {}
+        for session in sessions:
+            group_summary: dict[str, Any] | None = None
+            peer_identity_summary: dict[str, Any] | None = None
+            session.extra["encryption_mode"] = self._normalize_encryption_mode(
+                session.extra.get("encryption_mode"),
+                session_type=session.session_type,
+                is_ai_session=bool(session.is_ai_session),
+            )
+            group_summary = await self._reconcile_group_sender_key_state(session)
+            if session.session_type == "direct" and not bool(session.is_ai_session):
+                counterpart_id = str(session.extra.get("counterpart_id") or "").strip()
+                if counterpart_id:
+                    try:
+                        peer_identity_summary = await self._require_e2ee_service().get_peer_identity_summary(counterpart_id)
+                    except Exception as exc:
+                        logger.debug("Failed to load peer identity summary for %s: %s", counterpart_id, exc)
+            session.extra["session_crypto_state"] = self._build_session_crypto_state(
+                session,
+                device_summary=device_summary,
+                existing_state=dict(session.extra.get("session_crypto_state") or {}),
+                group_summary=group_summary,
+                peer_identity_summary=peer_identity_summary,
+            )
+        await self._annotate_session_call_state(sessions)
+
+    @staticmethod
+    def _resolve_group_session_member_ids(session: Session) -> list[str]:
+        member_ids: list[str] = []
+        for member in list(session.extra.get("members") or []):
+            member_id = str((member or {}).get("id") or "").strip() if isinstance(member, dict) else ""
+            if member_id and member_id not in member_ids:
+                member_ids.append(member_id)
+        for participant_id in list(session.participant_ids or []):
+            normalized_participant_id = str(participant_id or "").strip()
+            if normalized_participant_id and normalized_participant_id not in member_ids:
+                member_ids.append(normalized_participant_id)
+        return member_ids
+
+    async def _reconcile_group_sender_key_state(self, session: Session) -> dict[str, Any] | None:
+        if session.session_type != "group" or bool(session.is_ai_session):
+            return None
+        group_member_version = int(session.extra.get("group_member_version", 0) or 0)
+        member_ids = self._resolve_group_session_member_ids(session)
+        if not group_member_version and not member_ids:
+            return None
+        try:
+            return await self._require_e2ee_service().reconcile_group_session_state(
+                session.session_id,
+                member_version=group_member_version,
+                member_user_ids=member_ids,
+            )
+        except Exception as exc:
+            logger.debug("Failed to reconcile group sender-key state for %s: %s", session.session_id, exc)
+            return None
+
+    @staticmethod
+    def _apply_message_crypto_state_to_session(session: Session, payload: dict[str, Any]) -> bool:
+        state = dict(session.extra.get("session_crypto_state") or {})
+        previous_state = dict(state)
+        decryption_state = str(payload.get("decryption_state") or "ready").strip()
+        recovery_action = str(payload.get("recovery_action") or "").strip()
+        local_device_id = str(payload.get("local_device_id") or state.get("device_id") or "").strip()
+        target_device_id = str(payload.get("target_device_id") or "").strip()
+        can_decrypt = bool(payload.get("can_decrypt", True))
+
+        if decryption_state == "ready":
+            state["ready"] = bool(state.get("device_registered"))
+            state["can_decrypt"] = bool(state.get("device_registered"))
+            state.pop("decryption_state", None)
+            state.pop("recovery_action", None)
+            state.pop("last_failure_message_id", None)
+            state.pop("target_device_id", None)
+        else:
+            state["ready"] = False
+            state["can_decrypt"] = can_decrypt
+            state["decryption_state"] = decryption_state
+            state["last_failure_message_id"] = str(payload.get("message_id") or "")
+            if recovery_action:
+                state["recovery_action"] = recovery_action
+            else:
+                state.pop("recovery_action", None)
+            if target_device_id:
+                state["target_device_id"] = target_device_id
+            else:
+                state.pop("target_device_id", None)
+
+        if local_device_id:
+            state["device_id"] = local_device_id
+        session.extra["session_crypto_state"] = state
+        return state != previous_state
 
     def _schedule_identity_refresh(self) -> None:
         """Recompute cached preview state once the authenticated user identity changes."""
@@ -223,6 +655,15 @@ class SessionManager:
         await self._subscribe(MessageEvent.PROFILE_UPDATED, self._on_profile_updated)
         await self._subscribe(MessageEvent.GROUP_UPDATED, self._on_group_updated)
         await self._subscribe(MessageEvent.GROUP_SELF_UPDATED, self._on_group_self_updated)
+        await self._subscribe(MessageEvent.DECRYPTION_STATE_CHANGED, self._on_message_decryption_state_changed)
+        await self._subscribe(CallEvent.INVITE_SENT, self._apply_call_state_event)
+        await self._subscribe(CallEvent.INVITE_RECEIVED, self._apply_call_state_event)
+        await self._subscribe(CallEvent.RINGING, self._apply_call_state_event)
+        await self._subscribe(CallEvent.ACCEPTED, self._apply_call_state_event)
+        await self._subscribe(CallEvent.REJECTED, self._apply_call_state_event)
+        await self._subscribe(CallEvent.ENDED, self._apply_call_state_event)
+        await self._subscribe(CallEvent.BUSY, self._apply_call_state_event)
+        await self._subscribe(CallEvent.FAILED, self._apply_call_state_event)
 
         self._running = True
         self._initialized = True
@@ -478,12 +919,25 @@ class SessionManager:
             session.extra["group_note"] = str(data.get("group_note", "") or "")
         if "my_group_nickname" in data:
             session.extra["my_group_nickname"] = str(data.get("my_group_nickname", "") or "")
+        if "group_member_version" in data or "member_version" in data:
+            session.extra["group_member_version"] = int(data.get("group_member_version", data.get("member_version", 0)) or 0)
         if data.get("last_message_status"):
             session.extra["last_message_status"] = data.get("last_message_status")
         if data.get("last_message_id"):
             session.extra["last_message_id"] = str(data.get("last_message_id") or "")
         if data.get("last_message_sender_id"):
             session.extra["last_message_sender_id"] = data.get("last_message_sender_id")
+        session.extra["encryption_mode"] = self._normalize_encryption_mode(
+            data.get("encryption_mode"),
+            session_type=session.session_type,
+            is_ai_session=bool(session.is_ai_session),
+        )
+        session.extra["session_crypto_state"] = dict(data.get("session_crypto_state") or {})
+        session.extra["call_capabilities"] = self._normalize_call_capabilities(
+            data.get("call_capabilities"),
+            session_type=session.session_type,
+            is_ai_session=bool(session.is_ai_session),
+        )
         if session_type == "direct":
             counterpart_id = str(data.get("counterpart_id", "") or "").strip()
             counterpart_username = str(data.get("counterpart_username", "") or "").strip()
@@ -498,6 +952,7 @@ class SessionManager:
             if counterpart_gender:
                 session.extra["counterpart_gender"] = counterpart_gender
         await self._decorate_session_members([session], current_user)
+        await self._annotate_session_crypto_state([session])
         self._normalize_session_display(session, current_user)
         return session
 
@@ -571,6 +1026,15 @@ class SessionManager:
         session.extra["last_message_sender_id"] = str(message.sender_id or "")
         session.extra["members"] = list(message.extra.get("members") or [])
         session.extra["server_name"] = session_name
+        session.extra["encryption_mode"] = self._default_encryption_mode(
+            session_type=session.session_type,
+            is_ai_session=bool(session.is_ai_session),
+        )
+        session.extra["session_crypto_state"] = {}
+        session.extra["call_capabilities"] = self._default_call_capabilities(
+            session_type=session.session_type,
+            is_ai_session=bool(session.is_ai_session),
+        )
         if session_type == "direct":
             if counterpart_id:
                 session.extra["counterpart_id"] = counterpart_id
@@ -839,12 +1303,34 @@ class SessionManager:
             await self._event_bus.emit(SessionEvent.UPDATED, {
                 "sessions": self.sessions,
             })
+
     async def _on_message_mutated(self, data: dict) -> None:
         """Refresh session preview after edit/recall/delete events."""
         session_id = str(data.get("session_id", "") or "")
         if not session_id:
             return
         await self.refresh_session_preview(session_id)
+
+    async def _on_message_decryption_state_changed(self, data: dict) -> None:
+        session_id = str(data.get("session_id", "") or "").strip()
+        if not session_id:
+            return
+
+        db = get_database()
+        async with self._lock:
+            session = self._sessions.get(session_id)
+            if session is None or not session.uses_e2ee():
+                return
+            changed = self._apply_message_crypto_state_to_session(session, data)
+
+        if not changed:
+            return
+
+        if db.is_connected:
+            await db.save_session(session)
+        await self._event_bus.emit(SessionEvent.UPDATED, {
+            "session": session,
+        })
 
     async def _on_profile_updated(self, data: dict) -> None:
         """Apply one user-profile update to cached session presentation state."""
@@ -954,6 +1440,8 @@ class SessionManager:
             shared_mapping["owner_id"] = str(payload.get("owner_id", "") or "")
         if "member_count" in payload:
             shared_mapping["member_count"] = int(payload.get("member_count", 0) or 0)
+        if "group_member_version" in payload or "member_version" in payload:
+            shared_mapping["group_member_version"] = int(payload.get("group_member_version", payload.get("member_version", 0)) or 0)
         for key, value in shared_mapping.items():
             if session.extra.get(key) != value:
                 session.extra[key] = value
@@ -1100,11 +1588,18 @@ class SessionManager:
             target.extra["last_viewed_announcement_message_id"] = str(
                 source.extra.get("last_viewed_announcement_message_id", "") or ""
             )
+        if "session_crypto_state" in source.extra and "session_crypto_state" not in target.extra:
+            target.extra["session_crypto_state"] = dict(source.extra.get("session_crypto_state") or {})
+        if "call_capabilities" in source.extra and "call_capabilities" not in target.extra:
+            target.extra["call_capabilities"] = dict(source.extra.get("call_capabilities") or {})
+        if "call_state" in source.extra and "call_state" not in target.extra:
+            target.extra["call_state"] = dict(source.extra.get("call_state") or {})
 
     async def load_sessions(self, sessions: list[Session]) -> None:
         """Load sessions from storage."""
         current_user = await self._get_current_user_context()
         await self._decorate_session_members(sessions, current_user)
+        await self._annotate_session_crypto_state(sessions)
         async with self._lock:
             self._sessions.clear()
             for session in sessions:
@@ -1123,6 +1618,7 @@ class SessionManager:
         """Replace the in-memory session snapshot with a normalized remote snapshot."""
         current_user = await self._get_current_user_context()
         await self._decorate_session_members(sessions, current_user)
+        await self._annotate_session_crypto_state(sessions)
         hidden_changed = False
         async with self._lock:
             existing_sessions = dict(self._sessions)
@@ -1152,6 +1648,337 @@ class SessionManager:
         await self._event_bus.emit(SessionEvent.UPDATED, {
             "sessions": self.sessions,
         })
+
+    async def recover_session_crypto(self, session_id: str) -> dict[str, Any]:
+        normalized_session_id = str(session_id or "").strip()
+        if not normalized_session_id:
+            raise RuntimeError("session id is required")
+
+        async with self._lock:
+            session = self._sessions.get(normalized_session_id)
+            if session is None:
+                raise RuntimeError("session not found")
+            crypto_state = dict(session.extra.get("session_crypto_state") or {})
+
+        if not session.uses_e2ee():
+            return {"performed": False, "reason": "session_not_e2ee"}
+
+        recovery_action = str(crypto_state.get("recovery_action") or "").strip()
+        if recovery_action != "reprovision_device":
+            return {"performed": False, "reason": recovery_action or "no_recovery_action"}
+
+        response = await self._require_e2ee_service().reprovision_local_device()
+        await self._refresh_cached_session_crypto_state(after_recovery=True)
+        message_recovery: dict[str, Any] = {
+            "session_id": normalized_session_id,
+            "attempted": False,
+            "updated": 0,
+            "message_ids": [],
+        }
+        try:
+            message_recovery = dict(await self._msg_manager.recover_session_messages(normalized_session_id))
+            message_recovery["attempted"] = True
+        except Exception as exc:
+            logger.warning("Failed to retry local message decryption for %s: %s", normalized_session_id, exc)
+            message_recovery["error"] = str(exc)
+        await self._record_session_message_recovery(normalized_session_id, message_recovery)
+        return {
+            "performed": True,
+            "session_id": normalized_session_id,
+            "recovery_action": recovery_action,
+            "device": dict(response or {}),
+            "message_recovery": message_recovery,
+        }
+
+    async def trust_session_identities(self, session_id: str) -> dict[str, Any]:
+        normalized_session_id = str(session_id or "").strip()
+        if not normalized_session_id:
+            raise RuntimeError("session id is required")
+
+        async with self._lock:
+            session = self._sessions.get(normalized_session_id)
+            if session is None:
+                raise RuntimeError("session not found")
+
+        if session.session_type != "direct" or bool(session.is_ai_session):
+            return {"performed": False, "reason": "session_not_direct_e2ee"}
+
+        counterpart_id = str(session.extra.get("counterpart_id") or "").strip()
+        if not counterpart_id:
+            return {"performed": False, "reason": "missing_counterpart_id"}
+
+        previous_identity_status = str(session.extra.get("session_crypto_state", {}).get("identity_status") or "").strip()
+        trust_summary = await self._require_e2ee_service().trust_peer_identities(counterpart_id)
+        await self._annotate_session_crypto_state([session])
+
+        db = get_database()
+        if db.is_connected:
+            await db.replace_sessions(list(self._sessions.values()))
+        await self._event_bus.emit(SessionEvent.UPDATED, {"sessions": self.sessions})
+        return {
+            "performed": True,
+            "session_id": normalized_session_id,
+            "user_id": counterpart_id,
+            "previous_identity_status": previous_identity_status,
+            "alert_cleared": previous_identity_status in {"identity_changed", "unverified"},
+            "identity_summary": dict(trust_summary or {}),
+        }
+
+    async def get_session_security_summary(self, session_id: str) -> dict[str, Any]:
+        normalized_session_id = str(session_id or "").strip()
+        if not normalized_session_id:
+            raise RuntimeError("session id is required")
+
+        async with self._lock:
+            session = self._sessions.get(normalized_session_id)
+            if session is None:
+                raise RuntimeError("session not found")
+            return session.security_summary()
+
+    async def get_current_session_security_summary(self) -> dict[str, Any]:
+        session_id = str(self._current_session_id or "").strip()
+        if not session_id:
+            raise RuntimeError("no current session selected")
+        return await self.get_session_security_summary(session_id)
+
+    async def get_session_identity_verification(self, session_id: str) -> dict[str, Any]:
+        normalized_session_id = str(session_id or "").strip()
+        if not normalized_session_id:
+            raise RuntimeError("session id is required")
+
+        async with self._lock:
+            session = self._sessions.get(normalized_session_id)
+            if session is None:
+                raise RuntimeError("session not found")
+            security_summary = session.security_summary()
+
+        if session.session_type != "direct" or bool(session.is_ai_session):
+            return {
+                "session_id": normalized_session_id,
+                "available": False,
+                "reason": "session_not_direct_e2ee",
+                "security_summary": security_summary,
+                "verification": {},
+            }
+
+        counterpart_id = str(session.extra.get("counterpart_id") or "").strip()
+        if not counterpart_id:
+            return {
+                "session_id": normalized_session_id,
+                "available": False,
+                "reason": "missing_counterpart_id",
+                "security_summary": security_summary,
+                "verification": {},
+            }
+
+        verification = dict(await self._require_e2ee_service().get_peer_identity_summary(counterpart_id))
+        return {
+            "session_id": normalized_session_id,
+            "user_id": counterpart_id,
+            "available": bool(verification.get("verification_available")),
+            "security_summary": security_summary,
+            "verification": verification,
+        }
+
+    async def get_current_session_identity_verification(self) -> dict[str, Any]:
+        session_id = str(self._current_session_id or "").strip()
+        if not session_id:
+            raise RuntimeError("no current session selected")
+        return await self.get_session_identity_verification(session_id)
+
+    @staticmethod
+    def _build_identity_review_timeline(verification: dict[str, Any]) -> list[dict[str, Any]]:
+        timeline: list[dict[str, Any]] = []
+        first_seen_at = str(verification.get("first_seen_at") or "").strip()
+        last_changed_at = str(verification.get("last_changed_at") or "").strip()
+        last_trusted_at = str(verification.get("last_trusted_at") or "").strip()
+        checked_at = str(verification.get("checked_at") or "").strip()
+        if first_seen_at:
+            timeline.append(
+                {"kind": "first_seen", "at": first_seen_at, "label": "First observed on this device"}
+            )
+        if last_changed_at:
+            timeline.append(
+                {"kind": "identity_changed", "at": last_changed_at, "label": "Peer identity changed"}
+            )
+        if last_trusted_at:
+            timeline.append(
+                {"kind": "trusted", "at": last_trusted_at, "label": "Peer identity trusted locally"}
+            )
+        if checked_at:
+            timeline.append(
+                {"kind": "last_checked", "at": checked_at, "label": "Latest identity check"}
+            )
+        return timeline
+
+    async def get_session_identity_review_details(self, session_id: str) -> dict[str, Any]:
+        verification_result = await self.get_session_identity_verification(session_id)
+        verification = dict(verification_result.get("verification") or {})
+        primary_device_id = str(verification.get("primary_verification_device_id") or "").strip()
+        primary_device = {}
+        for device in list(verification.get("devices") or []):
+            if not isinstance(device, dict):
+                continue
+            if str(device.get("device_id") or "").strip() == primary_device_id:
+                primary_device = dict(device)
+                break
+
+        return {
+            "session_id": str(verification_result.get("session_id") or ""),
+            "user_id": str(verification_result.get("user_id") or ""),
+            "available": bool(verification_result.get("available")),
+            "reason": str(verification_result.get("reason") or ""),
+            "blocking": bool(
+                dict(verification_result.get("security_summary") or {}).get("identity_review_blocking", False)
+            ),
+            "recommended_action": str(
+                dict(verification_result.get("security_summary") or {}).get("recommended_action") or ""
+            ),
+            "security_summary": dict(verification_result.get("security_summary") or {}),
+            "verification": verification,
+            "primary_device": primary_device,
+            "timeline": self._build_identity_review_timeline(
+                {
+                    **verification,
+                    "first_seen_at": str(primary_device.get("first_seen_at") or ""),
+                    "last_changed_at": str(primary_device.get("last_changed_at") or verification.get("last_changed_at") or ""),
+                    "last_trusted_at": str(primary_device.get("last_trusted_at") or verification.get("last_trusted_at") or ""),
+                    "checked_at": str(verification.get("checked_at") or ""),
+                }
+            ),
+        }
+
+    async def get_current_session_identity_review_details(self) -> dict[str, Any]:
+        session_id = str(self._current_session_id or "").strip()
+        if not session_id:
+            raise RuntimeError("no current session selected")
+        return await self.get_session_identity_review_details(session_id)
+
+    async def get_session_security_diagnostics(self, session_id: str) -> dict[str, Any]:
+        summary = await self.get_session_security_summary(session_id)
+        review_details = await self.get_session_identity_review_details(session_id)
+        return {
+            "session_id": str(summary.get("session_id") or session_id or ""),
+            "headline": str(summary.get("headline") or ""),
+            "recommended_action": str(summary.get("recommended_action") or ""),
+            "security_summary": summary,
+            "identity_review": review_details,
+            "actions": list(summary.get("actions") or []),
+        }
+
+    async def get_current_session_security_diagnostics(self) -> dict[str, Any]:
+        session_id = str(self._current_session_id or "").strip()
+        if not session_id:
+            raise RuntimeError("no current session selected")
+        return await self.get_session_security_diagnostics(session_id)
+
+    async def execute_session_security_action(self, session_id: str, action_id: str) -> dict[str, Any]:
+        normalized_session_id = str(session_id or "").strip()
+        normalized_action_id = str(action_id or "").strip()
+        if not normalized_session_id:
+            raise RuntimeError("session id is required")
+        if not normalized_action_id:
+            raise RuntimeError("action id is required")
+
+        async with self._lock:
+            session = self._sessions.get(normalized_session_id)
+            if session is None:
+                raise RuntimeError("session not found")
+            security_summary = session.security_summary()
+            crypto_state = dict(session.extra.get("session_crypto_state") or {})
+
+        allowed_action_ids = {
+            str(action.get("id") or "").strip()
+            for action in list(security_summary.get("actions") or [])
+            if isinstance(action, dict) and str(action.get("id") or "").strip()
+        }
+        if normalized_action_id not in allowed_action_ids:
+            return {
+                "performed": False,
+                "session_id": normalized_session_id,
+                "action_id": normalized_action_id,
+                "reason": "action_not_available",
+                "explanation": {
+                    "code": "action_not_available",
+                    "message": "The requested security action is not currently available for this session.",
+                    "available_action_ids": sorted(allowed_action_ids),
+                    "headline": str(security_summary.get("headline") or ""),
+                },
+                "security_summary": security_summary,
+            }
+
+        if normalized_action_id == "trust_peer_identity":
+            result = await self.trust_session_identities(normalized_session_id)
+        elif normalized_action_id == "reprovision_device":
+            result = await self.recover_session_crypto(normalized_session_id)
+        elif normalized_action_id == "switch_device":
+            result = {
+                "performed": False,
+                "session_id": normalized_session_id,
+                "action_id": normalized_action_id,
+                "reason": "switch_device_required",
+                "target_device_id": str(crypto_state.get("target_device_id") or ""),
+                "explanation": {
+                    "code": "switch_device_required",
+                    "message": "This encrypted content is addressed to a different device and cannot be recovered on the current device.",
+                },
+                "external_requirement": {
+                    "kind": "switch_device",
+                    "target_device_id": str(crypto_state.get("target_device_id") or ""),
+                    "blocking": True,
+                },
+            }
+        else:
+            result = {
+                "performed": False,
+                "session_id": normalized_session_id,
+                "action_id": normalized_action_id,
+                "reason": "unsupported_action",
+                "explanation": {
+                    "code": "unsupported_action",
+                    "message": "The requested security action is not supported by this client.",
+                },
+            }
+
+        if "session_id" not in result:
+            result["session_id"] = normalized_session_id
+        result["action_id"] = normalized_action_id
+        result["security_summary"] = await self.get_session_security_summary(normalized_session_id)
+        return result
+
+    async def execute_current_session_security_action(self, action_id: str) -> dict[str, Any]:
+        session_id = str(self._current_session_id or "").strip()
+        if not session_id:
+            raise RuntimeError("no current session selected")
+        return await self.execute_session_security_action(session_id, action_id)
+
+    async def _refresh_cached_session_crypto_state(self, *, after_recovery: bool = False) -> None:
+        async with self._lock:
+            sessions = list(self._sessions.values())
+
+        if not sessions:
+            return
+
+        await self._annotate_session_crypto_state(sessions)
+        if after_recovery:
+            recovered_at = datetime.now().isoformat()
+            for session in sessions:
+                state = dict(session.extra.get("session_crypto_state") or {})
+                if not session.uses_e2ee():
+                    continue
+                state["ready"] = bool(state.get("device_registered"))
+                state["can_decrypt"] = bool(state.get("device_registered"))
+                state.pop("decryption_state", None)
+                state.pop("recovery_action", None)
+                state.pop("last_failure_message_id", None)
+                state.pop("target_device_id", None)
+                state["last_recovered_at"] = recovered_at
+                session.extra["session_crypto_state"] = state
+
+        db = get_database()
+        if db.is_connected:
+            await db.replace_sessions(sessions)
+        await self._event_bus.emit(SessionEvent.UPDATED, {"sessions": self.sessions})
 
     async def refresh_remote_sessions(self) -> list[Session]:
         """Fetch the current user's session snapshot from the backend and replace local cache."""
@@ -1232,6 +2059,7 @@ class SessionManager:
             })
     async def add_session(self, session: Session) -> None:
         """Add a new session."""
+        await self._annotate_session_crypto_state([session])
         async with self._lock:
             self._sessions[session.session_id] = session
 
@@ -1702,6 +2530,7 @@ def get_session_manager() -> SessionManager:
     if _session_manager is None:
         _session_manager = SessionManager()
     return _session_manager
+
 
 
 

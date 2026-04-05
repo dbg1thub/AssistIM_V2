@@ -34,7 +34,7 @@ if str(SERVER_ROOT) not in sys.path:
 from app.core.config import reload_settings
 from app.core.database import Base, get_engine
 from app.core.rate_limit import rate_limiter
-from app.models import file, group, message, moment, session, user  # noqa: F401
+from app.models import device, file, group, message, moment, session, user  # noqa: F401
 from app.main import create_app
 from app.realtime.call_registry import get_call_registry
 from app.websocket.manager import connection_manager

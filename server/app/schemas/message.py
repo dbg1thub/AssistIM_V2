@@ -20,6 +20,7 @@ class MessageCreate(BaseModel):
 
 class MessageUpdate(BaseModel):
     content: str
+    extra: dict[str, Any] | None = None
 
 
 class MessageReadBatch(BaseModel):

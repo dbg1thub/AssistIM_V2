@@ -1,0 +1,88 @@
+"""Call-related API tests."""
+
+from __future__ import annotations
+
+import base64
+import hashlib
+import hmac
+
+from fastapi.testclient import TestClient
+
+from app.main import create_app
+from app.core.config import reload_settings
+
+
+def _register_user(client: TestClient, username: str) -> dict:
+    response = client.post(
+        "/api/v1/auth/register",
+        json={"username": username, "password": "secret123", "nickname": username},
+    )
+    assert response.status_code == 200, response.text
+    return response.json()["data"]
+
+
+def _auth_header(access_token: str) -> dict[str, str]:
+    return {"Authorization": f"Bearer {access_token}"}
+
+
+def test_calls_ice_servers_returns_static_runtime_config(monkeypatch) -> None:
+    monkeypatch.setenv("WEBRTC_STUN_URLS", "stun:stun1.example.org:3478,stun:stun2.example.org:3478")
+    monkeypatch.setenv("WEBRTC_TURN_URLS", "turn:turn.example.org:3478?transport=udp,turns:turn.example.org:5349")
+    monkeypatch.setenv("WEBRTC_TURN_USERNAME", "assistim")
+    monkeypatch.setenv("WEBRTC_TURN_CREDENTIAL", "secret")
+    monkeypatch.delenv("WEBRTC_TURN_SHARED_SECRET", raising=False)
+
+    with TestClient(create_app(reload_settings())) as client:
+        user = _register_user(client, "alice_call_ice_static")
+
+        response = client.get(
+            "/api/v1/calls/ice-servers",
+            headers=_auth_header(user["access_token"]),
+        )
+
+    assert response.status_code == 200
+    payload = response.json()["data"]
+    assert payload["credential_mode"] == "static"
+    assert payload["ttl_seconds"] is None
+    assert payload["expires_at"] is None
+    assert payload["ice_servers"] == [
+        {"urls": ["stun:stun1.example.org:3478", "stun:stun2.example.org:3478"]},
+        {
+            "urls": ["turn:turn.example.org:3478?transport=udp", "turns:turn.example.org:5349"],
+            "username": "assistim",
+            "credential": "secret",
+        },
+    ]
+
+
+def test_calls_ice_servers_signs_short_lived_turn_credentials(monkeypatch) -> None:
+    monkeypatch.setenv("WEBRTC_TURN_URLS", "turn:turn.example.org:3478?transport=udp")
+    monkeypatch.setenv("WEBRTC_TURN_SHARED_SECRET", "turn-shared-secret")
+    monkeypatch.setenv("WEBRTC_TURN_CREDENTIAL_TTL_SECONDS", "600")
+    monkeypatch.delenv("WEBRTC_TURN_USERNAME", raising=False)
+    monkeypatch.delenv("WEBRTC_TURN_CREDENTIAL", raising=False)
+
+    with TestClient(create_app(reload_settings())) as client:
+        user = _register_user(client, "alice_call_ice_ephemeral")
+
+        response = client.get(
+            "/api/v1/calls/ice-servers",
+            headers=_auth_header(user["access_token"]),
+        )
+
+    assert response.status_code == 200
+    payload = response.json()["data"]
+    assert payload["credential_mode"] == "shared_secret"
+    assert payload["ttl_seconds"] == 600
+    assert payload["expires_at"] > 0
+    turn_server = payload["ice_servers"][0]
+    assert turn_server["urls"] == ["turn:turn.example.org:3478?transport=udp"]
+    assert turn_server["username"].endswith(f":{user['user']['id']}")
+    expected_credential = base64.b64encode(
+        hmac.new(
+            b"turn-shared-secret",
+            turn_server["username"].encode("utf-8"),
+            hashlib.sha1,
+        ).digest()
+    ).decode("ascii")
+    assert turn_server["credential"] == expected_credential

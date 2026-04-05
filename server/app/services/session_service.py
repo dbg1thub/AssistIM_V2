@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+import hashlib
+import json
 from typing import TypeVar
 
 from sqlalchemy.exc import IntegrityError
@@ -22,6 +24,11 @@ T = TypeVar("T")
 
 
 class SessionService:
+    ENCRYPTION_MODE_PLAIN = 'plain'
+    ENCRYPTION_MODE_E2EE_PRIVATE = 'e2ee_private'
+    ENCRYPTION_MODE_E2EE_GROUP = 'e2ee_group'
+    ENCRYPTION_MODE_SERVER_VISIBLE_AI = 'server_visible_ai'
+
     def __init__(self, db: Session) -> None:
         self.db = db
         self.sessions = SessionRepository(db)
@@ -201,6 +208,15 @@ class SessionService:
             "unread_count": 0,
             "avatar": avatar,
             "is_ai_session": session.is_ai_session,
+            "encryption_mode": self._resolve_encryption_mode(
+                session_type=normalized_session_type,
+                is_ai_session=bool(session.is_ai_session),
+            ),
+            "session_crypto_state": {},
+            "call_capabilities": self._call_capabilities(
+                session_type=normalized_session_type,
+                is_ai_session=bool(session.is_ai_session),
+            ),
             "created_at": isoformat_utc(session.created_at),
             "group_id": group_id or None,
             "owner_id": owner_id or None,
@@ -216,6 +232,8 @@ class SessionService:
             "counterpart_avatar": counterpart.get("avatar") or None,
             "counterpart_gender": counterpart.get("gender") or None,
         }
+        if normalized_session_type == "group":
+            data["group_member_version"] = self._group_member_version(member_ids)
         if include_members:
             members = []
             for member in member_rows or []:
@@ -306,6 +324,17 @@ class SessionService:
             return True
         return len(set(member_ids)) >= 2
 
+    @staticmethod
+    def _group_member_version(member_ids: list[str]) -> int:
+        normalized_member_ids = [
+            value
+            for value in dict.fromkeys(str(raw_id or "").strip() for raw_id in member_ids or [])
+            if value
+        ]
+        payload = json.dumps(sorted(normalized_member_ids), ensure_ascii=True, separators=(",", ":"))
+        digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+        return int(digest[:16], 16)
+
     def _run_transaction(self, action: Callable[[], T]) -> T:
         try:
             result = action()
@@ -315,17 +344,25 @@ class SessionService:
             self.db.rollback()
             raise
 
+    @staticmethod
+    def _call_capabilities(*, session_type: str, is_ai_session: bool) -> dict[str, bool]:
+        normalized_session_type = str(session_type or "").strip().lower()
+        supports_direct_call = normalized_session_type == "direct" and not is_ai_session
+        return {
+            "voice": supports_direct_call,
+            "video": supports_direct_call,
+        }
 
-
-
-
-
-
-
-
-
-
-
-
+    @classmethod
+    def _resolve_encryption_mode(cls, *, session_type: str, is_ai_session: bool) -> str:
+        """Return the authoritative encryption mode for one session payload."""
+        normalized_session_type = str(session_type or "").strip().lower()
+        if is_ai_session or normalized_session_type == "ai":
+            return cls.ENCRYPTION_MODE_SERVER_VISIBLE_AI
+        if normalized_session_type == "direct":
+            return cls.ENCRYPTION_MODE_E2EE_PRIVATE
+        if normalized_session_type == "group":
+            return cls.ENCRYPTION_MODE_E2EE_GROUP
+        return cls.ENCRYPTION_MODE_PLAIN
 
 

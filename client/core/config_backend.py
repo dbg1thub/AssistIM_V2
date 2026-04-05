@@ -74,6 +74,8 @@ class StorageConfig:
     """Local storage configuration."""
 
     db_path: str = field(default_factory=lambda: os.getenv("ASSISTIM_DB_PATH", "data/assistim.db"))
+    db_encryption_mode: str = field(default_factory=lambda: str(os.getenv("ASSISTIM_DB_ENCRYPTION_MODE", "plain") or "plain").strip().lower())
+    db_encryption_provider: str = field(default_factory=lambda: str(os.getenv("ASSISTIM_DB_ENCRYPTION_PROVIDER", "auto") or "auto").strip().lower())
 
 
 @dataclass

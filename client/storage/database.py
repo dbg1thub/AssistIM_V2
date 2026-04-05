@@ -4,6 +4,9 @@ Database Module
 SQLite database using aiosqlite for async operations.
 """
 import aiosqlite
+import base64
+import hashlib
+import importlib
 import json
 import os
 import time
@@ -13,13 +16,32 @@ from typing import Any, Optional
 from client.core import logging
 from client.core.config_backend import get_config
 from client.core.logging import setup_logging
+from client.core.secure_storage import SecureStorage
 from client.models.message import ChatMessage, Session, merge_sender_profile_extra
 
 
 setup_logging()
 logger = logging.get_logger(__name__)
 
+ENCRYPTED_MESSAGE_PLACEHOLDER = "[Encrypted message]"
+
 class Database:
+    APP_STATE_DB_ENCRYPTION_MODE = "storage.db_encryption_mode"
+    APP_STATE_DB_ENCRYPTION_KEY = "storage.db_encryption_key"
+    APP_STATE_DB_ENCRYPTION_KEY_ID = "storage.db_encryption_key_id"
+    DB_ENCRYPTION_MODE_PLAIN = "plain"
+    DB_ENCRYPTION_MODE_SQLCIPHER = "sqlcipher"
+    DB_ENCRYPTION_MODE_SQLCIPHER_PENDING = "sqlcipher_pending"
+    DB_ENCRYPTION_PROVIDER_AUTO = "auto"
+    DB_ENCRYPTION_PROVIDER_SQLITE_DEFAULT = "sqlite-default"
+    DB_ENCRYPTION_PROVIDER_SQLCIPHER_COMPAT = "sqlcipher-compatible"
+    DB_ENCRYPTION_PROVIDER_SQLITE_MODULE = "sqlite3"
+    DB_ENCRYPTION_PROVIDER_SQLCIPHER_MODULES = (
+        "sqlcipher3",
+        "pysqlcipher3.dbapi2",
+        "pysqlcipher3",
+    )
+
     """
     SQLite database for local storage.
     
@@ -36,28 +58,132 @@ class Database:
         if db_path is None:
             config = get_config()
             db_path = config.storage.db_path
+        else:
+            config = get_config()
         
         self._db_path = str(Path(db_path).expanduser().resolve())
+        self._db_crypto_metadata_path = str(Path(f"{self._db_path}.crypto.json"))
         self._db: Optional[aiosqlite.Connection] = None
         self._search_fts_tokenizer: Optional[str] = None
+        self._active_dbapi_module_name = self.DB_ENCRYPTION_PROVIDER_SQLITE_MODULE
+        self._requested_db_encryption_mode = self._normalize_db_encryption_mode(
+            getattr(config.storage, "db_encryption_mode", self.DB_ENCRYPTION_MODE_PLAIN)
+        )
+        self._requested_db_encryption_provider = self._normalize_db_encryption_provider(
+            getattr(config.storage, "db_encryption_provider", self.DB_ENCRYPTION_PROVIDER_AUTO)
+        )
+        self._db_encryption_status: dict[str, Any] = {
+            "requested_mode": self._requested_db_encryption_mode,
+            "requested_provider": self._requested_db_encryption_provider,
+            "effective_mode": self.DB_ENCRYPTION_MODE_PLAIN,
+            "runtime_provider": self.DB_ENCRYPTION_PROVIDER_SQLITE_DEFAULT,
+            "runtime_module": self.DB_ENCRYPTION_PROVIDER_SQLITE_MODULE,
+            "provider_match": self._requested_db_encryption_provider == self.DB_ENCRYPTION_PROVIDER_AUTO,
+            "driver_available": False,
+            "driver_version": "",
+            "has_key_material": False,
+            "key_id": "",
+            "ready_for_sqlcipher": False,
+            "migration_required": False,
+            "fts_available": False,
+            "fts_tokenizer": "",
+            "supported_sqlcipher_modules": list(self.DB_ENCRYPTION_PROVIDER_SQLCIPHER_MODULES),
+            "install_hint": "",
+        }
     
     @property
     def is_connected(self) -> bool:
         """Check if database is connected."""
         return self._db is not None
-    
+
+    @staticmethod
+    def _sql_literal(value: str) -> str:
+        return "'" + str(value or "").replace("'", "''") + "'"
+
+    async def _open_connection(self) -> aiosqlite.Connection:
+        metadata = self._load_db_crypto_metadata()
+        encryption_mode = self._normalize_db_encryption_mode(metadata.get("db_encryption_mode"))
+        requires_sqlcipher = (
+            encryption_mode == self.DB_ENCRYPTION_MODE_SQLCIPHER
+            or self._requested_db_encryption_mode == self.DB_ENCRYPTION_MODE_SQLCIPHER
+            or self._requested_db_encryption_provider == self.DB_ENCRYPTION_PROVIDER_SQLCIPHER_COMPAT
+        )
+        dbapi_module, runtime_module = self._resolve_dbapi_module(requires_sqlcipher=requires_sqlcipher)
+        connection = await self._open_connection_with_dbapi_module(dbapi_module)
+        try:
+            self._db_encryption_status["runtime_module"] = self._active_dbapi_module_name or runtime_module
+            if encryption_mode == self.DB_ENCRYPTION_MODE_SQLCIPHER:
+                key_cipher = str(metadata.get("db_encryption_key") or "").strip()
+                if not key_cipher:
+                    raise RuntimeError("SQLCipher database key material is unavailable")
+                driver_available, _, runtime_provider = await self._detect_sqlcipher_runtime_on_connection(connection)
+                self._ensure_requested_db_provider_matches(runtime_provider, requires_sqlcipher=True)
+                if not driver_available:
+                    raise RuntimeError(
+                        "SQLCipher database requires SQLCipher runtime support, "
+                        "but the current sqlite driver does not provide it"
+                    )
+                await self._apply_sqlcipher_key(connection, key_cipher)
+                await self._verify_sqlcipher_connection(connection)
+            row_factory = aiosqlite.Row
+            if self._active_dbapi_module_name == runtime_module:
+                row_factory = getattr(dbapi_module, "Row", aiosqlite.Row)
+            connection.row_factory = row_factory
+            return connection
+        except Exception:
+            await connection.close()
+            raise
+
+    async def _open_connection_with_dbapi_module(self, dbapi_module: Any) -> aiosqlite.Connection:
+        module_name = str(getattr(dbapi_module, "__name__", "") or "")
+        if module_name in {"sqlite3", "_sqlite3"}:
+            self._active_dbapi_module_name = self.DB_ENCRYPTION_PROVIDER_SQLITE_MODULE
+            return await aiosqlite.connect(self._db_path)
+        original_aiosqlite_sqlite3 = getattr(aiosqlite, "sqlite3", None)
+        core_module = getattr(aiosqlite, "core", None)
+        original_core_sqlite3 = getattr(core_module, "sqlite3", None) if core_module is not None else None
+        if core_module is None or original_core_sqlite3 is None:
+            self._active_dbapi_module_name = self.DB_ENCRYPTION_PROVIDER_SQLITE_MODULE
+            return await aiosqlite.connect(self._db_path)
+        try:
+            if original_aiosqlite_sqlite3 is not None:
+                setattr(aiosqlite, "sqlite3", dbapi_module)
+            if core_module is not None and original_core_sqlite3 is not None:
+                setattr(core_module, "sqlite3", dbapi_module)
+            self._active_dbapi_module_name = module_name
+            return await aiosqlite.connect(self._db_path)
+        finally:
+            if original_aiosqlite_sqlite3 is not None:
+                setattr(aiosqlite, "sqlite3", original_aiosqlite_sqlite3)
+            if core_module is not None and original_core_sqlite3 is not None:
+                setattr(core_module, "sqlite3", original_core_sqlite3)
+
+    async def _apply_sqlcipher_key(self, connection: aiosqlite.Connection, key_cipher: str) -> None:
+        raw_key = SecureStorage.decrypt_text(str(key_cipher or "").strip())
+        await connection.execute(f"PRAGMA key = {self._sql_literal(raw_key)}")
+
+    async def _verify_sqlcipher_connection(self, connection: aiosqlite.Connection) -> None:
+        try:
+            cursor = await connection.execute("SELECT count(*) FROM sqlite_master")
+            await cursor.fetchone()
+        except Exception as exc:
+            raise RuntimeError("Failed to open SQLCipher database with the configured key") from exc
+
     async def connect(self) -> None:
         """Connect to database and create tables."""
         if self._db is not None:
             return
         
         os.makedirs(os.path.dirname(self._db_path), exist_ok=True)
-        
-        self._db = await aiosqlite.connect(self._db_path)
-        self._db.row_factory = aiosqlite.Row
+        self._db = await self._open_connection()
         
         await self._create_tables()
+        await self._ensure_db_encryption_state()
+        if await self._auto_migrate_sqlcipher_if_needed():
+            await self._create_tables()
+            await self._ensure_db_encryption_state()
         await self._ensure_local_search_cache_schema()
+        await self._ensure_message_crypto_schema()
         await self._ensure_search_fts_schema()
         await self._normalize_cached_session_types()
         logger.info(f"Database connected: {self._db_path}")
@@ -91,6 +217,8 @@ class Database:
                 updated_at INTEGER NOT NULL,
                 is_self INTEGER NOT NULL DEFAULT 0,
                 is_ai INTEGER NOT NULL DEFAULT 0,
+                is_encrypted INTEGER NOT NULL DEFAULT 0,
+                encryption_scheme TEXT NOT NULL DEFAULT '',
                 extra TEXT NOT NULL DEFAULT '{}',
                 FOREIGN KEY (session_id) REFERENCES sessions(session_id)
             );
@@ -167,6 +295,35 @@ class Database:
             },
         )
 
+    async def _ensure_message_crypto_schema(self) -> None:
+        """Add explicit encryption markers for cached messages and backfill existing rows."""
+        await self._ensure_table_columns(
+            "messages",
+            {
+                "is_encrypted": "INTEGER NOT NULL DEFAULT 0",
+                "encryption_scheme": "TEXT NOT NULL DEFAULT ''",
+            },
+        )
+        await self._db.execute(
+            """
+            UPDATE messages
+            SET
+                is_encrypted = CASE
+                    WHEN COALESCE(json_extract(extra, '$.encryption.enabled'), 0) = 1 THEN 1
+                    WHEN COALESCE(json_extract(extra, '$.attachment_encryption.enabled'), 0) = 1 THEN 1
+                    ELSE 0
+                END,
+                encryption_scheme = CASE
+                    WHEN LENGTH(COALESCE(json_extract(extra, '$.encryption.scheme'), '')) > 0
+                        THEN json_extract(extra, '$.encryption.scheme')
+                    WHEN LENGTH(COALESCE(json_extract(extra, '$.attachment_encryption.scheme'), '')) > 0
+                        THEN json_extract(extra, '$.attachment_encryption.scheme')
+                    ELSE ''
+                END
+            """
+        )
+        await self._db.commit()
+
     async def _ensure_table_columns(self, table_name: str, columns: dict[str, str]) -> None:
         """Ensure one table exposes every required column for lightweight upgrades."""
         cursor = await self._db.execute(f"PRAGMA table_info({table_name})")
@@ -178,11 +335,420 @@ class Database:
         if missing_columns:
             await self._db.commit()
 
+    @classmethod
+    def _normalize_db_encryption_mode(cls, value: object) -> str:
+        normalized = str(value or "").strip().lower()
+        if normalized == cls.DB_ENCRYPTION_MODE_SQLCIPHER_PENDING:
+            return cls.DB_ENCRYPTION_MODE_SQLCIPHER_PENDING
+        if normalized == cls.DB_ENCRYPTION_MODE_SQLCIPHER:
+            return cls.DB_ENCRYPTION_MODE_SQLCIPHER
+        return cls.DB_ENCRYPTION_MODE_PLAIN
+
+    @classmethod
+    def _normalize_db_encryption_provider(cls, value: object) -> str:
+        normalized = str(value or "").strip().lower()
+        if normalized in {
+            cls.DB_ENCRYPTION_PROVIDER_SQLITE_DEFAULT,
+            "sqlite",
+            "default",
+            "stdlib",
+        }:
+            return cls.DB_ENCRYPTION_PROVIDER_SQLITE_DEFAULT
+        if normalized in {
+            cls.DB_ENCRYPTION_PROVIDER_SQLCIPHER_COMPAT,
+            "sqlcipher",
+            "sqlcipher3",
+            "pysqlcipher3",
+        }:
+            return cls.DB_ENCRYPTION_PROVIDER_SQLCIPHER_COMPAT
+        return cls.DB_ENCRYPTION_PROVIDER_AUTO
+
+    @staticmethod
+    def _derive_db_key_id(raw_key: str) -> str:
+        return hashlib.sha256(str(raw_key or "").encode("utf-8")).hexdigest()[:16]
+
+    def _provider_matches_runtime(self, runtime_provider: str) -> bool:
+        requested_provider = self._requested_db_encryption_provider
+        if requested_provider == self.DB_ENCRYPTION_PROVIDER_AUTO:
+            return True
+        return requested_provider == runtime_provider
+
+    def _ensure_requested_db_provider_matches(self, runtime_provider: str, *, requires_sqlcipher: bool) -> None:
+        if self._provider_matches_runtime(runtime_provider):
+            return
+        requested_provider = self._requested_db_encryption_provider
+        if requires_sqlcipher or requested_provider == self.DB_ENCRYPTION_PROVIDER_SQLCIPHER_COMPAT:
+            raise RuntimeError(
+                f"Configured DB encryption provider '{requested_provider}' is unavailable; "
+                f"current runtime provider is '{runtime_provider}'"
+            )
+
+    def _iter_dbapi_module_candidates(self, *, requires_sqlcipher: bool) -> list[tuple[str, str]]:
+        requested_provider = self._requested_db_encryption_provider
+        if requested_provider == self.DB_ENCRYPTION_PROVIDER_SQLITE_DEFAULT:
+            return [(self.DB_ENCRYPTION_PROVIDER_SQLITE_DEFAULT, self.DB_ENCRYPTION_PROVIDER_SQLITE_MODULE)]
+        if requested_provider == self.DB_ENCRYPTION_PROVIDER_SQLCIPHER_COMPAT:
+            return [
+                (self.DB_ENCRYPTION_PROVIDER_SQLCIPHER_COMPAT, module_name)
+                for module_name in self.DB_ENCRYPTION_PROVIDER_SQLCIPHER_MODULES
+            ]
+        if requires_sqlcipher:
+            return [
+                *[
+                    (self.DB_ENCRYPTION_PROVIDER_SQLCIPHER_COMPAT, module_name)
+                    for module_name in self.DB_ENCRYPTION_PROVIDER_SQLCIPHER_MODULES
+                ],
+                (self.DB_ENCRYPTION_PROVIDER_SQLITE_DEFAULT, self.DB_ENCRYPTION_PROVIDER_SQLITE_MODULE),
+            ]
+        return [(self.DB_ENCRYPTION_PROVIDER_SQLITE_DEFAULT, self.DB_ENCRYPTION_PROVIDER_SQLITE_MODULE)]
+
+    def _resolve_dbapi_module(self, *, requires_sqlcipher: bool) -> tuple[Any, str]:
+        for runtime_provider, module_name in self._iter_dbapi_module_candidates(requires_sqlcipher=requires_sqlcipher):
+            try:
+                module = importlib.import_module(module_name)
+            except ImportError:
+                continue
+            return module, module_name
+        import sqlite3
+        return sqlite3, self.DB_ENCRYPTION_PROVIDER_SQLITE_MODULE
+
+    def _build_db_driver_install_hint(
+        self,
+        *,
+        runtime_provider: str,
+        provider_match: bool,
+        driver_available: bool,
+    ) -> str:
+        if self._requested_db_encryption_mode != self.DB_ENCRYPTION_MODE_SQLCIPHER:
+            return ""
+        if provider_match and driver_available:
+            return ""
+        requested_provider = self._requested_db_encryption_provider
+        if requested_provider == self.DB_ENCRYPTION_PROVIDER_SQLITE_DEFAULT:
+            return (
+                "Configure ASSISTIM_DB_ENCRYPTION_PROVIDER=sqlcipher-compatible and install one SQLCipher "
+                f"DB-API module: {', '.join(self.DB_ENCRYPTION_PROVIDER_SQLCIPHER_MODULES)}"
+            )
+        if requested_provider == self.DB_ENCRYPTION_PROVIDER_SQLCIPHER_COMPAT:
+            return (
+                "Install one SQLCipher-compatible DB-API module and ensure it is importable in the current "
+                f"environment: {', '.join(self.DB_ENCRYPTION_PROVIDER_SQLCIPHER_MODULES)}"
+            )
+        return (
+            "Install one SQLCipher-compatible DB-API module or keep auto provider selection enabled. "
+            f"Recognized modules: {', '.join(self.DB_ENCRYPTION_PROVIDER_SQLCIPHER_MODULES)}"
+        )
+
+    def _load_db_crypto_metadata(self) -> dict[str, Any]:
+        path = Path(self._db_crypto_metadata_path)
+        if not path.exists():
+            return {}
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, TypeError, ValueError, json.JSONDecodeError):
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    def _save_db_crypto_metadata(self, payload: dict[str, Any]) -> None:
+        path = Path(self._db_crypto_metadata_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload, ensure_ascii=True, sort_keys=True, indent=2), encoding="utf-8")
+
+    async def _ensure_db_encryption_state(self) -> None:
+        """Persist one stable DB encryption status snapshot and optional SQLCipher key material."""
+        metadata = self._load_db_crypto_metadata()
+        app_state_mode_raw = str(await self.get_app_state(self.APP_STATE_DB_ENCRYPTION_MODE) or "").strip()
+        stored_mode_raw = str(metadata.get("db_encryption_mode") or app_state_mode_raw or "").strip()
+        stored_mode = self._normalize_db_encryption_mode(stored_mode_raw)
+        legacy_key_cipher = str(await self.get_app_state(self.APP_STATE_DB_ENCRYPTION_KEY) or "").strip()
+        legacy_key_id = str(await self.get_app_state(self.APP_STATE_DB_ENCRYPTION_KEY_ID) or "").strip()
+        stored_key_cipher = str(metadata.get("db_encryption_key") or legacy_key_cipher or "").strip()
+        stored_key_id = str(metadata.get("db_encryption_key_id") or legacy_key_id or "").strip()
+        driver_available, driver_version, runtime_provider = await self._detect_sqlcipher_runtime()
+        provider_match = self._provider_matches_runtime(runtime_provider)
+        runtime_module = str(self._active_dbapi_module_name or self.DB_ENCRYPTION_PROVIDER_SQLITE_MODULE)
+
+        requested_mode = self._requested_db_encryption_mode
+        effective_mode = self.DB_ENCRYPTION_MODE_PLAIN
+        key_cipher = stored_key_cipher
+        key_id = stored_key_id
+        metadata_dirty = False
+
+        if (legacy_key_cipher or legacy_key_id) and (
+            metadata.get("db_encryption_key") != legacy_key_cipher
+            or metadata.get("db_encryption_key_id") != legacy_key_id
+        ):
+            metadata["db_encryption_key"] = legacy_key_cipher
+            metadata["db_encryption_key_id"] = legacy_key_id
+            metadata_dirty = True
+
+        if requested_mode == self.DB_ENCRYPTION_MODE_SQLCIPHER:
+            self._ensure_requested_db_provider_matches(runtime_provider, requires_sqlcipher=False)
+            if not key_cipher:
+                raw_key = base64.b64encode(os.urandom(32)).decode("ascii")
+                key_cipher = SecureStorage.encrypt_text(raw_key)
+                metadata["db_encryption_key"] = key_cipher
+                metadata_dirty = True
+            if not key_id:
+                raw_key = SecureStorage.decrypt_text(key_cipher)
+                key_id = self._derive_db_key_id(raw_key)
+                metadata["db_encryption_key_id"] = key_id
+                metadata_dirty = True
+            if stored_mode == self.DB_ENCRYPTION_MODE_SQLCIPHER:
+                effective_mode = self.DB_ENCRYPTION_MODE_SQLCIPHER
+            else:
+                effective_mode = self.DB_ENCRYPTION_MODE_SQLCIPHER_PENDING
+            if self._normalize_db_encryption_mode(app_state_mode_raw) != effective_mode or app_state_mode_raw != effective_mode:
+                await self.set_app_state(self.APP_STATE_DB_ENCRYPTION_MODE, effective_mode)
+        else:
+            if self._normalize_db_encryption_mode(app_state_mode_raw) != self.DB_ENCRYPTION_MODE_PLAIN or not app_state_mode_raw:
+                await self.set_app_state(self.APP_STATE_DB_ENCRYPTION_MODE, self.DB_ENCRYPTION_MODE_PLAIN)
+
+        if metadata.get("db_encryption_mode") != effective_mode and (key_cipher or metadata):
+            metadata["db_encryption_mode"] = effective_mode
+            metadata_dirty = True
+        if metadata_dirty and (key_cipher or metadata):
+            self._save_db_crypto_metadata(metadata)
+
+        if legacy_key_cipher:
+            await self.delete_app_state(self.APP_STATE_DB_ENCRYPTION_KEY)
+        if legacy_key_id:
+            await self.delete_app_state(self.APP_STATE_DB_ENCRYPTION_KEY_ID)
+
+        self._db_encryption_status = {
+            "requested_mode": requested_mode,
+            "requested_provider": self._requested_db_encryption_provider,
+            "effective_mode": effective_mode,
+            "runtime_provider": runtime_provider,
+            "runtime_module": runtime_module,
+            "provider_match": provider_match,
+            "driver_available": driver_available,
+            "driver_version": driver_version,
+            "has_key_material": bool(key_cipher),
+            "key_id": key_id,
+            "ready_for_sqlcipher": effective_mode == self.DB_ENCRYPTION_MODE_SQLCIPHER_PENDING and bool(key_cipher),
+            "migration_required": requested_mode == self.DB_ENCRYPTION_MODE_SQLCIPHER and effective_mode != self.DB_ENCRYPTION_MODE_SQLCIPHER,
+            "fts_available": bool(self._search_fts_tokenizer),
+            "fts_tokenizer": str(self._search_fts_tokenizer or ""),
+            "supported_sqlcipher_modules": list(self.DB_ENCRYPTION_PROVIDER_SQLCIPHER_MODULES),
+            "install_hint": self._build_db_driver_install_hint(
+                runtime_provider=runtime_provider,
+                provider_match=provider_match,
+                driver_available=driver_available,
+            ),
+        }
+
+    def get_db_encryption_status(self) -> dict[str, Any]:
+        """Return the current local database encryption status snapshot."""
+        return dict(self._db_encryption_status)
+
+    def get_db_encryption_self_check(self) -> dict[str, Any]:
+        """Return one stable, user-facing self-check summary for local DB encryption."""
+        status = self.get_db_encryption_status()
+        requested_mode = str(status.get("requested_mode") or self.DB_ENCRYPTION_MODE_PLAIN)
+        effective_mode = str(status.get("effective_mode") or self.DB_ENCRYPTION_MODE_PLAIN)
+        provider_match = bool(status.get("provider_match"))
+        driver_available = bool(status.get("driver_available"))
+        runtime_provider = str(status.get("runtime_provider") or self.DB_ENCRYPTION_PROVIDER_SQLITE_DEFAULT)
+        install_hint = str(status.get("install_hint") or "").strip()
+        fts_available = bool(status.get("fts_available"))
+        fts_tokenizer = str(status.get("fts_tokenizer") or "").strip()
+        search_mode = "like_fallback"
+        search_message = "Local message search is using LIKE fallback queries"
+        if fts_available:
+            normalized_tokenizer = fts_tokenizer or "fts5"
+            search_mode = f"fts5_{normalized_tokenizer}"
+            search_message = f"Local message search is using FTS5 ({normalized_tokenizer})"
+
+        result = dict(status)
+        if requested_mode == self.DB_ENCRYPTION_MODE_PLAIN:
+            result.update(
+                {
+                    "state": "plain",
+                    "severity": "info",
+                    "can_start": True,
+                    "action_required": False,
+                    "message": "Local database encryption is disabled",
+                    "search_mode": search_mode,
+                    "search_message": search_message,
+                }
+            )
+            return result
+
+        if not provider_match:
+            result.update(
+                {
+                    "state": "provider_mismatch",
+                    "severity": "error",
+                    "can_start": False,
+                    "action_required": True,
+                    "message": (
+                        "Configured DB encryption provider does not match the current runtime "
+                        f"provider ({runtime_provider})"
+                    ),
+                    "search_mode": search_mode,
+                    "search_message": search_message,
+                }
+            )
+            if install_hint:
+                result["recommended_action"] = install_hint
+            return result
+
+        if effective_mode == self.DB_ENCRYPTION_MODE_SQLCIPHER:
+            result.update(
+                {
+                    "state": "sqlcipher_active",
+                    "severity": "ok",
+                    "can_start": True,
+                    "action_required": False,
+                    "message": "SQLCipher is active for the local database",
+                    "search_mode": search_mode,
+                    "search_message": search_message,
+                }
+            )
+            return result
+
+        if driver_available:
+            result.update(
+                {
+                    "state": "migration_pending",
+                    "severity": "warning",
+                    "can_start": True,
+                    "action_required": True,
+                    "message": "SQLCipher runtime is available, but the local database still needs migration",
+                    "search_mode": search_mode,
+                    "search_message": search_message,
+                }
+            )
+            if install_hint:
+                result["recommended_action"] = install_hint
+            return result
+
+        result.update(
+            {
+                "state": "runtime_missing",
+                "severity": "warning",
+                "can_start": True,
+                "action_required": True,
+                "message": "SQLCipher key material is ready, but the current runtime does not provide SQLCipher support",
+                "search_mode": search_mode,
+                "search_message": search_message,
+            }
+        )
+        if install_hint:
+            result["recommended_action"] = install_hint
+        return result
+
+    async def _auto_migrate_sqlcipher_if_needed(self) -> bool:
+        """Automatically migrate into SQLCipher when the runtime and config are ready."""
+        status = self.get_db_encryption_status()
+        if not (
+            status.get("requested_mode") == self.DB_ENCRYPTION_MODE_SQLCIPHER
+            and status.get("driver_available")
+            and status.get("migration_required")
+        ):
+            return False
+        await self._migrate_current_connection_to_sqlcipher()
+        return True
+
+    async def migrate_to_sqlcipher(self) -> dict[str, Any]:
+        """Export the current plain SQLite database into one SQLCipher-protected file in place."""
+        if self._db is None:
+            raise RuntimeError("database must be connected before migration")
+
+        status = self.get_db_encryption_status()
+        if status.get("requested_mode") != self.DB_ENCRYPTION_MODE_SQLCIPHER:
+            raise RuntimeError("SQLCipher mode is not requested")
+        if not status.get("driver_available"):
+            raise RuntimeError("SQLCipher runtime is unavailable")
+        if not status.get("has_key_material"):
+            raise RuntimeError("SQLCipher database key material is unavailable")
+        if status.get("effective_mode") == self.DB_ENCRYPTION_MODE_SQLCIPHER:
+            return {
+                "migrated": False,
+                "effective_mode": self.DB_ENCRYPTION_MODE_SQLCIPHER,
+                "reason": "already_sqlcipher",
+            }
+
+        await self._migrate_current_connection_to_sqlcipher()
+        await self._ensure_db_encryption_state()
+        return {
+            "migrated": True,
+            "effective_mode": self.DB_ENCRYPTION_MODE_SQLCIPHER,
+            "backup_path": str(Path(f"{self._db_path}.pre-sqlcipher.bak")),
+        }
+
+    async def _migrate_current_connection_to_sqlcipher(self) -> None:
+        """Run one in-place SQLCipher export for the currently open plain SQLite connection."""
+        if self._db is None:
+            raise RuntimeError("database must be connected before migration")
+
+        metadata = self._load_db_crypto_metadata()
+        key_cipher = str(metadata.get("db_encryption_key") or "").strip()
+        if not key_cipher:
+            raise RuntimeError("SQLCipher database key material is unavailable")
+        raw_key = SecureStorage.decrypt_text(key_cipher)
+
+        temp_path = str(Path(f"{self._db_path}.sqlcipher.tmp"))
+        backup_path = str(Path(f"{self._db_path}.pre-sqlcipher.bak"))
+        temp_file = Path(temp_path)
+        backup_file = Path(backup_path)
+        if temp_file.exists():
+            temp_file.unlink()
+        if backup_file.exists():
+            backup_file.unlink()
+
+        try:
+            await self._db.execute(
+                f"ATTACH DATABASE {self._sql_literal(temp_path)} AS encrypted KEY {self._sql_literal(raw_key)}"
+            )
+            await self._db.execute("SELECT sqlcipher_export('encrypted')")
+            await self._db.execute("DETACH DATABASE encrypted")
+            await self._db.commit()
+
+            await self.close()
+            os.replace(self._db_path, backup_path)
+            os.replace(temp_path, self._db_path)
+
+            metadata["db_encryption_mode"] = self.DB_ENCRYPTION_MODE_SQLCIPHER
+            self._save_db_crypto_metadata(metadata)
+            self._db = await self._open_connection()
+        except Exception:
+            if temp_file.exists():
+                temp_file.unlink(missing_ok=True)
+            raise
+
+    async def _detect_sqlcipher_runtime_on_connection(
+        self, connection: aiosqlite.Connection
+    ) -> tuple[bool, str, str]:
+        """Return whether one sqlite connection exposes SQLCipher support."""
+        runtime_provider = self.DB_ENCRYPTION_PROVIDER_SQLITE_DEFAULT
+        try:
+            cursor = await connection.execute("PRAGMA cipher_version")
+            row = await cursor.fetchone()
+        except Exception:
+            return False, "", runtime_provider
+        if row is None:
+            return False, "", runtime_provider
+        try:
+            version = str(row[0] or "").strip()
+        except Exception:
+            version = ""
+        if version:
+            runtime_provider = self.DB_ENCRYPTION_PROVIDER_SQLCIPHER_COMPAT
+        return bool(version), version, runtime_provider
+
+    async def _detect_sqlcipher_runtime(self) -> tuple[bool, str, str]:
+        """Return whether the current sqlite runtime exposes SQLCipher support."""
+        return await self._detect_sqlcipher_runtime_on_connection(self._db)
+
     async def _ensure_search_fts_schema(self) -> None:
         """Create and backfill SQLite FTS5 search indexes when available."""
         detected_tokenizer = await self._detect_search_fts_tokenizer()
         if detected_tokenizer:
             self._search_fts_tokenizer = detected_tokenizer
+            self._db_encryption_status["fts_available"] = True
+            self._db_encryption_status["fts_tokenizer"] = "trigram" if "trigram" in detected_tokenizer else "unicode61"
             await self._create_search_fts_schema(detected_tokenizer)
             await self._rebuild_search_fts_if_needed()
             return
@@ -195,11 +761,15 @@ class Database:
                 await self._drop_search_fts_schema()
                 continue
             self._search_fts_tokenizer = "trigram" if tokenizer == "trigram" else "unicode61"
+            self._db_encryption_status["fts_available"] = True
+            self._db_encryption_status["fts_tokenizer"] = self._search_fts_tokenizer
             await self._rebuild_search_fts_if_needed(force=True)
             logger.info("Enabled local search FTS with tokenizer: %s", self._search_fts_tokenizer)
             return
 
         self._search_fts_tokenizer = None
+        self._db_encryption_status["fts_available"] = False
+        self._db_encryption_status["fts_tokenizer"] = ""
         logger.info("SQLite FTS5 search unavailable; falling back to LIKE queries")
 
     async def _detect_search_fts_tokenizer(self) -> Optional[str]:
@@ -258,19 +828,45 @@ class Database:
 
             CREATE TRIGGER IF NOT EXISTS messages_search_ai AFTER INSERT ON messages BEGIN
                 INSERT INTO message_search_fts(rowid, content)
-                VALUES (new.rowid, new.content);
+                VALUES (
+                    new.rowid,
+                    CASE
+                        WHEN COALESCE(new.is_encrypted, 0) = 1 THEN ''
+                        ELSE new.content
+                    END
+                );
             END;
 
             CREATE TRIGGER IF NOT EXISTS messages_search_ad AFTER DELETE ON messages BEGIN
                 INSERT INTO message_search_fts(message_search_fts, rowid, content)
-                VALUES ('delete', old.rowid, old.content);
+                VALUES (
+                    'delete',
+                    old.rowid,
+                    CASE
+                        WHEN COALESCE(old.is_encrypted, 0) = 1 THEN ''
+                        ELSE old.content
+                    END
+                );
             END;
 
             CREATE TRIGGER IF NOT EXISTS messages_search_au AFTER UPDATE ON messages BEGIN
                 INSERT INTO message_search_fts(message_search_fts, rowid, content)
-                VALUES ('delete', old.rowid, old.content);
+                VALUES (
+                    'delete',
+                    old.rowid,
+                    CASE
+                        WHEN COALESCE(old.is_encrypted, 0) = 1 THEN ''
+                        ELSE old.content
+                    END
+                );
                 INSERT INTO message_search_fts(rowid, content)
-                VALUES (new.rowid, new.content);
+                VALUES (
+                    new.rowid,
+                    CASE
+                        WHEN COALESCE(new.is_encrypted, 0) = 1 THEN ''
+                        ELSE new.content
+                    END
+                );
             END;
 
             CREATE TRIGGER IF NOT EXISTS contacts_search_ai AFTER INSERT ON contacts_cache BEGIN
@@ -336,11 +932,26 @@ class Database:
             return
 
         rebuild_specs = (
-            ("messages", "message_search_fts"),
             ("contacts_cache", "contact_search_fts"),
             ("groups_cache", "group_search_fts"),
         )
         rebuilt = False
+
+        await self._db.execute("INSERT INTO message_search_fts(message_search_fts) VALUES ('delete-all')")
+        await self._db.execute(
+            """
+            INSERT INTO message_search_fts(rowid, content)
+            SELECT
+                rowid,
+                CASE
+                    WHEN COALESCE(is_encrypted, 0) = 1 THEN ''
+                    ELSE content
+                END
+            FROM messages
+            """
+        )
+        rebuilt = True
+
         for base_table, fts_table in rebuild_specs:
             base_count = await self._table_row_count(base_table)
             fts_count = await self._table_row_count(fts_table)
@@ -581,24 +1192,27 @@ class Database:
         Args:
             message: Message to save
         """
+        is_encrypted, encryption_scheme = self._message_crypto_storage_fields(message)
         await self._db.execute(
             """
             INSERT OR REPLACE INTO messages
             (message_id, session_id, sender_id, content, message_type,
-             status, timestamp, updated_at, is_self, is_ai, extra)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             status, timestamp, updated_at, is_self, is_ai, is_encrypted, encryption_scheme, extra)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 message.message_id,
                 message.session_id,
                 message.sender_id,
-                message.content,
+                self._content_for_storage(message),
                 message.message_type.value,
                 message.status.value,
                 message.timestamp.timestamp() if message.timestamp else None,
                 message.updated_at.timestamp() if message.updated_at else None,
                 1 if message.is_self else 0,
                 1 if message.is_ai else 0,
+                is_encrypted,
+                encryption_scheme,
                 json.dumps(message.extra),
             ),
         )
@@ -741,7 +1355,9 @@ class Database:
             cursor = await self._db.execute(
                 """
                 SELECT * FROM messages
-                WHERE session_id = ? AND content LIKE ? ESCAPE '\\'
+                WHERE session_id = ?
+                  AND COALESCE(is_encrypted, 0) != 1
+                  AND content LIKE ? ESCAPE '\\'
                 ORDER BY timestamp DESC
                 LIMIT ?
                 """,
@@ -751,7 +1367,8 @@ class Database:
             cursor = await self._db.execute(
                 """
                 SELECT * FROM messages
-                WHERE content LIKE ? ESCAPE '\\'
+                WHERE COALESCE(is_encrypted, 0) != 1
+                  AND content LIKE ? ESCAPE '\\'
                 ORDER BY timestamp DESC
                 LIMIT ?
                 """,
@@ -783,7 +1400,9 @@ class Database:
                 """
                 SELECT COUNT(DISTINCT session_id) AS count
                 FROM messages
-                WHERE session_id = ? AND content LIKE ? ESCAPE '\\'
+                WHERE session_id = ?
+                  AND COALESCE(is_encrypted, 0) != 1
+                  AND content LIKE ? ESCAPE '\\'
                 """,
                 (session_id, like_pattern),
             )
@@ -792,7 +1411,8 @@ class Database:
                 """
                 SELECT COUNT(DISTINCT session_id) AS count
                 FROM messages
-                WHERE content LIKE ? ESCAPE '\\'
+                WHERE COALESCE(is_encrypted, 0) != 1
+                  AND content LIKE ? ESCAPE '\\'
                 """,
                 (like_pattern,),
             )
@@ -816,6 +1436,7 @@ class Database:
                 JOIN messages m ON m.rowid = f.rowid
                 WHERE message_search_fts MATCH ?
                   AND m.session_id = ?
+                  AND COALESCE(m.is_encrypted, 0) != 1
                 ORDER BY bm25(message_search_fts), m.timestamp DESC
                 LIMIT ?
                 """,
@@ -828,6 +1449,7 @@ class Database:
                 FROM message_search_fts f
                 JOIN messages m ON m.rowid = f.rowid
                 WHERE message_search_fts MATCH ?
+                  AND COALESCE(m.is_encrypted, 0) != 1
                 ORDER BY bm25(message_search_fts), m.timestamp DESC
                 LIMIT ?
                 """,
@@ -852,6 +1474,7 @@ class Database:
                 JOIN messages m ON m.rowid = f.rowid
                 WHERE message_search_fts MATCH ?
                   AND m.session_id = ?
+                  AND COALESCE(m.is_encrypted, 0) != 1
                 """,
                 (match_query, session_id),
             )
@@ -862,6 +1485,7 @@ class Database:
                 FROM message_search_fts f
                 JOIN messages m ON m.rowid = f.rowid
                 WHERE message_search_fts MATCH ?
+                  AND COALESCE(m.is_encrypted, 0) != 1
                 """,
                 (match_query,),
             )
@@ -1504,24 +2128,27 @@ class Database:
             return
         
         for message in messages:
+            is_encrypted, encryption_scheme = self._message_crypto_storage_fields(message)
             await self._db.execute(
                 """
                 INSERT OR REPLACE INTO messages
                 (message_id, session_id, sender_id, content, message_type,
-                 status, timestamp, updated_at, is_self, is_ai, extra)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 status, timestamp, updated_at, is_self, is_ai, is_encrypted, encryption_scheme, extra)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     message.message_id,
                     message.session_id,
                     message.sender_id,
-                    message.content,
+                    self._content_for_storage(message),
                     message.message_type.value,
                     message.status.value,
                     message.timestamp.timestamp() if message.timestamp else None,
                     message.updated_at.timestamp() if message.updated_at else None,
                     1 if message.is_self else 0,
                     1 if message.is_ai else 0,
+                    is_encrypted,
+                    encryption_scheme,
                     json.dumps(message.extra),
                 ),
             )
@@ -1588,20 +2215,60 @@ class Database:
         updated_at = row["updated_at"]
         if updated_at:
             updated_at = datetime.datetime.fromtimestamp(updated_at)
-        
+
+        try:
+            extra = json.loads(row["extra"] or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            extra = {}
+        if not isinstance(extra, dict):
+            extra = {}
+
         return ChatMessage(
             message_id=row["message_id"],
             session_id=row["session_id"],
             sender_id=row["sender_id"],
-            content=row["content"],
+            content=self._content_for_display(str(row["content"] or ""), extra),
             message_type=MessageType(row["message_type"]),
             status=MessageStatus(row["status"]),
             timestamp=timestamp,
             updated_at=updated_at,
             is_self=bool(row["is_self"]),
             is_ai=bool(row["is_ai"]),
-            extra=json.loads(row["extra"]),
+            extra=extra,
         )
+
+    @staticmethod
+    def _content_for_storage(message: ChatMessage) -> str:
+        encryption = dict((message.extra or {}).get("encryption") or {})
+        if encryption.get("enabled"):
+            ciphertext = str(encryption.get("content_ciphertext") or "").strip()
+            if ciphertext:
+                return ciphertext
+        return str(message.content or "")
+
+    @staticmethod
+    def _message_crypto_storage_fields(message: ChatMessage) -> tuple[int, str]:
+        encryption = dict((message.extra or {}).get("encryption") or {})
+        attachment_encryption = dict((message.extra or {}).get("attachment_encryption") or {})
+        if encryption.get("enabled"):
+            return 1, str(encryption.get("scheme") or "").strip()
+        if attachment_encryption.get("enabled"):
+            return 1, str(attachment_encryption.get("scheme") or "").strip()
+        return 0, ""
+
+    @staticmethod
+    def _content_for_display(content: str, extra: dict[str, Any]) -> str:
+        encryption = dict((extra or {}).get("encryption") or {})
+        if not encryption.get("enabled"):
+            return content
+
+        protected_plaintext = str(encryption.get("local_plaintext") or "").strip()
+        if protected_plaintext:
+            try:
+                return SecureStorage.decrypt_text(protected_plaintext)
+            except Exception as exc:
+                logger.warning("Failed to decrypt locally protected message content: %s", exc)
+        return ENCRYPTED_MESSAGE_PLACEHOLDER
     
     # ============== Utility ==============
 

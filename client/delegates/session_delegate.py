@@ -98,7 +98,9 @@ class SessionDelegate(QStyledItemDelegate):
         mute_slot_width = mute_icon_size + 8 if muted else 0
 
         unread_text = self._format_unread(session.unread_count)
-        unread_width = max(20, preview_fm.horizontalAdvance(unread_text) + 14) if unread_text else 0
+        unread_badge_font = self._unread_badge_font()
+        unread_badge_fm = QFontMetrics(unread_badge_font)
+        unread_width = max(20, unread_badge_fm.horizontalAdvance(unread_text) + 14) if unread_text else 0
 
         name_available = max(0, content_width - time_width - 12)
         name_text = name_fm.elidedText(
@@ -297,12 +299,17 @@ class SessionDelegate(QStyledItemDelegate):
         accent = QColor("#FF5A5F") if isDarkTheme() else QColor("#E53935")
         painter.fillPath(path, accent)
 
+        painter.setFont(self._unread_badge_font())
+        painter.setPen(Qt.GlobalColor.white)
+        painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, text)
+
+    @staticmethod
+    def _unread_badge_font() -> QFont:
+        """Return the compact font used by session unread badges."""
         font = QFont()
         font.setPixelSize(11)
         font.setBold(True)
-        painter.setFont(font)
-        painter.setPen(Qt.GlobalColor.white)
-        painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, text)
+        return font
 
     @staticmethod
     def _ui_font(pixel_size: int, *, bold: bool = False) -> QFont:

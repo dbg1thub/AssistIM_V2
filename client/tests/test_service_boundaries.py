@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import asyncio
 import json
@@ -322,6 +322,37 @@ class FakeMessageManager:
         self.failed: list[tuple[str, str]] = []
         self.sent_messages: list[ChatMessage] = []
         self.cached_messages_calls: list[tuple[str, int, object]] = []
+        self.attachment_upload_preparations: list[tuple[str, str, MessageType, str, int]] = []
+        self.download_attachment_calls: list[str] = []
+        self.recover_session_messages_calls: list[str] = []
+        self.recover_session_messages_result: dict[str, object] = {
+            'session_id': 'session-1',
+            'scanned': 0,
+            'updated': 0,
+            'message_ids': [],
+            'remote_fetched': 0,
+            'remote_pages_fetched': 0,
+            'recovery_stats': {
+                'cached': {
+                    'text': 0,
+                    'attachments': 0,
+                    'direct_text': 0,
+                    'group_text': 0,
+                    'direct_attachments': 0,
+                    'group_attachments': 0,
+                    'other': 0,
+                },
+                'remote': {
+                    'text': 0,
+                    'attachments': 0,
+                    'direct_text': 0,
+                    'group_text': 0,
+                    'direct_attachments': 0,
+                    'group_attachments': 0,
+                    'other': 0,
+                },
+            },
+        }
 
     def set_user_id(self, user_id: str) -> None:
         self.user_ids.append(user_id)
@@ -372,6 +403,30 @@ class FakeMessageManager:
             )
         ]
 
+    async def prepare_attachment_upload(
+        self,
+        *,
+        session_id: str,
+        file_path: str,
+        message_type: MessageType,
+        fallback_name: str,
+        fallback_size: int,
+    ):
+        self.attachment_upload_preparations.append(
+            (session_id, file_path, message_type, fallback_name, fallback_size)
+        )
+        return file_path, {}, None
+
+    async def download_attachment(self, message_id: str) -> str:
+        self.download_attachment_calls.append(message_id)
+        return f'D:/downloads/{message_id}.bin'
+
+    async def recover_session_messages(self, session_id: str, *, limit: int = 500) -> dict:
+        self.recover_session_messages_calls.append(session_id)
+        payload = dict(self.recover_session_messages_result)
+        payload.setdefault('session_id', session_id)
+        return payload
+
 
 class FakeSessionManager:
     def __init__(self) -> None:
@@ -379,6 +434,20 @@ class FakeSessionManager:
         self.added: list[tuple[str, ChatMessage]] = []
         self.sessions = []
         self.current_session = None
+        self.recover_calls: list[str] = []
+        self.recover_result: dict[str, object] = {'performed': True, 'session_id': 'session-1'}
+        self.trust_calls: list[str] = []
+        self.trust_result: dict[str, object] = {'performed': True, 'session_id': 'session-1'}
+        self.security_summary_calls: list[str] = []
+        self.security_summary_result: dict[str, object] = {'session_id': 'session-1', 'headline': 'secure'}
+        self.identity_verification_calls: list[str] = []
+        self.identity_verification_result: dict[str, object] = {'session_id': 'session-1', 'available': False, 'verification': {}}
+        self.identity_review_details_calls: list[str] = []
+        self.identity_review_details_result: dict[str, object] = {'session_id': 'session-1', 'available': False, 'timeline': []}
+        self.security_diagnostics_calls: list[str] = []
+        self.security_diagnostics_result: dict[str, object] = {'session_id': 'session-1', 'headline': 'secure'}
+        self.security_action_calls: list[tuple[str, str]] = []
+        self.security_action_result: dict[str, object] = {'performed': True, 'session_id': 'session-1', 'action_id': 'trust_peer_identity'}
 
     async def add_message_to_session(self, session_id: str, message: ChatMessage) -> None:
         self.added.append((session_id, message))
@@ -395,6 +464,75 @@ class FakeSessionManager:
     async def refresh_session_preview(self, session_id: str) -> None:
         return None
 
+    async def recover_session_crypto(self, session_id: str) -> dict:
+        self.recover_calls.append(session_id)
+        return dict(self.recover_result)
+
+    async def trust_session_identities(self, session_id: str) -> dict:
+        self.trust_calls.append(session_id)
+        return dict(self.trust_result)
+
+    async def get_session_security_summary(self, session_id: str) -> dict:
+        self.security_summary_calls.append(session_id)
+        payload = dict(self.security_summary_result)
+        payload.setdefault('session_id', session_id)
+        return payload
+
+    async def get_current_session_security_summary(self) -> dict:
+        payload = dict(self.security_summary_result)
+        payload.setdefault('session_id', self.current_session_id)
+        return payload
+
+    async def get_session_identity_verification(self, session_id: str) -> dict:
+        self.identity_verification_calls.append(session_id)
+        payload = dict(self.identity_verification_result)
+        payload.setdefault('session_id', session_id)
+        return payload
+
+    async def get_current_session_identity_verification(self) -> dict:
+        payload = dict(self.identity_verification_result)
+        payload.setdefault('session_id', self.current_session_id)
+        self.identity_verification_calls.append(self.current_session_id)
+        return payload
+
+    async def get_session_identity_review_details(self, session_id: str) -> dict:
+        self.identity_review_details_calls.append(session_id)
+        payload = dict(self.identity_review_details_result)
+        payload.setdefault('session_id', session_id)
+        return payload
+
+    async def get_current_session_identity_review_details(self) -> dict:
+        payload = dict(self.identity_review_details_result)
+        payload.setdefault('session_id', self.current_session_id)
+        self.identity_review_details_calls.append(self.current_session_id)
+        return payload
+
+    async def get_session_security_diagnostics(self, session_id: str) -> dict:
+        self.security_diagnostics_calls.append(session_id)
+        payload = dict(self.security_diagnostics_result)
+        payload.setdefault('session_id', session_id)
+        return payload
+
+    async def get_current_session_security_diagnostics(self) -> dict:
+        payload = dict(self.security_diagnostics_result)
+        payload.setdefault('session_id', self.current_session_id)
+        self.security_diagnostics_calls.append(self.current_session_id)
+        return payload
+
+    async def execute_session_security_action(self, session_id: str, action_id: str) -> dict:
+        self.security_action_calls.append((session_id, action_id))
+        payload = dict(self.security_action_result)
+        payload.setdefault('session_id', session_id)
+        payload.setdefault('action_id', action_id)
+        return payload
+
+    async def execute_current_session_security_action(self, action_id: str) -> dict:
+        payload = dict(self.security_action_result)
+        payload.setdefault('session_id', self.current_session_id)
+        payload.setdefault('action_id', action_id)
+        self.security_action_calls.append((self.current_session_id, action_id))
+        return payload
+
     def get_total_unread_count(self) -> int:
         return 0
 
@@ -403,12 +541,17 @@ class FakeFileService:
     def __init__(self, result: dict | None = None) -> None:
         self.result = dict(result or {})
         self.chat_uploads: list[str] = []
+        self.chat_downloads: list[str] = []
         self.avatar_uploads: list[str] = []
         self.avatar_resets = 0
 
     async def upload_chat_attachment(self, file_path: str) -> dict:
         self.chat_uploads.append(file_path)
         return dict(self.result)
+
+    async def download_chat_attachment(self, file_url: str) -> bytes:
+        self.chat_downloads.append(file_url)
+        return b''
 
     async def upload_profile_avatar(self, file_path: str) -> dict:
         self.avatar_uploads.append(file_path)
@@ -501,6 +644,13 @@ class FakeDatabase:
         self.is_connected = False
         self.replaced_contacts: list[list[dict]] = []
         self.replaced_groups: list[list[dict]] = []
+        self.db_encryption_self_check: dict[str, object] = {
+            'state': 'plain',
+            'severity': 'info',
+            'can_start': True,
+            'action_required': False,
+            'message': 'Local database encryption is disabled',
+        }
 
     async def set_app_state(self, key: str, value) -> None:
         self.app_state[key] = value
@@ -520,11 +670,45 @@ class FakeDatabase:
     async def replace_groups_cache(self, groups: list[dict]) -> None:
         self.replaced_groups.append([dict(item) for item in groups])
 
+    def get_db_encryption_self_check(self) -> dict[str, object]:
+        return dict(self.db_encryption_self_check)
+
 
 class FakeChatControllerContext:
     def __init__(self) -> None:
         self.user_ids: list[str] = []
         self.refresh_calls = 0
+        self.recover_calls: list[str] = []
+        self.recover_current_calls = 0
+        self.recover_result: dict[str, object] = {'performed': True, 'session_id': 'session-1'}
+        self.identity_verification_calls: list[str] = []
+        self.identity_verification_current_calls = 0
+        self.identity_verification_result: dict[str, object] = {
+            'session_id': 'session-1',
+            'available': False,
+            'verification': {},
+        }
+        self.identity_review_details_calls: list[str] = []
+        self.identity_review_details_current_calls = 0
+        self.identity_review_details_result: dict[str, object] = {
+            'session_id': 'session-1',
+            'available': False,
+            'timeline': [],
+        }
+        self.security_diagnostics_calls: list[str] = []
+        self.security_diagnostics_current_calls = 0
+        self.security_diagnostics_result: dict[str, object] = {
+            'session_id': 'session-1',
+            'headline': 'secure',
+        }
+        self.raise_current_security_diagnostics = False
+        self.security_action_calls: list[tuple[str, str]] = []
+        self.security_action_current_calls: list[str] = []
+        self.security_action_result: dict[str, object] = {
+            'performed': True,
+            'session_id': 'session-1',
+            'action_id': 'trust_peer_identity',
+        }
 
     def set_user_id(self, user_id: str) -> None:
         self.user_ids.append(user_id)
@@ -533,7 +717,61 @@ class FakeChatControllerContext:
         self.refresh_calls += 1
         return []
 
+    async def recover_session_crypto(self, session_id: str) -> dict:
+        self.recover_calls.append(session_id)
+        payload = dict(self.recover_result)
+        payload.setdefault('session_id', session_id)
+        return payload
 
+    async def recover_current_session_crypto(self) -> dict:
+        self.recover_current_calls += 1
+        return dict(self.recover_result)
+
+    async def get_session_identity_verification(self, session_id: str) -> dict:
+        self.identity_verification_calls.append(session_id)
+        payload = dict(self.identity_verification_result)
+        payload.setdefault('session_id', session_id)
+        return payload
+
+    async def get_current_session_identity_verification(self) -> dict:
+        self.identity_verification_current_calls += 1
+        return dict(self.identity_verification_result)
+
+    async def get_session_identity_review_details(self, session_id: str) -> dict:
+        self.identity_review_details_calls.append(session_id)
+        payload = dict(self.identity_review_details_result)
+        payload.setdefault('session_id', session_id)
+        return payload
+
+    async def get_current_session_identity_review_details(self) -> dict:
+        self.identity_review_details_current_calls += 1
+        return dict(self.identity_review_details_result)
+
+    async def get_session_security_diagnostics(self, session_id: str) -> dict:
+        self.security_diagnostics_calls.append(session_id)
+        payload = dict(self.security_diagnostics_result)
+        payload.setdefault('session_id', session_id)
+        return payload
+
+    async def get_current_session_security_diagnostics(self) -> dict:
+        if self.raise_current_security_diagnostics:
+            raise RuntimeError('no current session selected')
+        self.security_diagnostics_current_calls += 1
+        return dict(self.security_diagnostics_result)
+
+    async def execute_session_security_action(self, session_id: str, action_id: str) -> dict:
+        self.security_action_calls.append((session_id, action_id))
+        payload = dict(self.security_action_result)
+        payload.setdefault('session_id', session_id)
+        payload.setdefault('action_id', action_id)
+        return payload
+
+    async def execute_current_session_security_action(self, action_id: str) -> dict:
+        self.security_action_current_calls.append(action_id)
+        payload = dict(self.security_action_result)
+        payload.setdefault('session_id', 'session-1')
+        payload.setdefault('action_id', action_id)
+        return payload
 class FakeAuthContext:
     def __init__(self, user: dict | None = None) -> None:
         self.current_user = dict(user or {'id': 'user-1', 'username': 'alice', 'nickname': 'Alice', 'avatar': ''})
@@ -785,6 +1023,7 @@ class FakeSessionProfileDatabase:
     def __init__(self) -> None:
         self.is_connected = True
         self.replaced_sessions = []
+        self.saved_sessions = []
         self.app_state = {
             'auth.user_profile': json.dumps(
                 {
@@ -805,6 +1044,110 @@ class FakeSessionProfileDatabase:
     async def replace_sessions(self, sessions):
         self.replaced_sessions = list(sessions)
 
+    async def save_session(self, session) -> None:
+        self.saved_sessions.append(session)
+
+
+class FakeE2EEService:
+    def __init__(
+        self,
+        summary: dict | None = None,
+        reprovision_response: dict | None = None,
+        peer_identity_summary: dict | None = None,
+    ) -> None:
+        self.summary = dict(summary or {})
+        self.calls = 0
+        self.reprovision_calls = 0
+        self.peer_identity_calls: list[str] = []
+        self.trust_peer_identity_calls: list[str] = []
+        self.reconcile_group_session_state_calls: list[tuple[str, int, list[str]]] = []
+        self.peer_identity_summary = dict(
+            peer_identity_summary
+            or {
+                'local_device_id': 'device-local-1',
+                'local_fingerprint': '',
+                'local_fingerprint_short': '',
+                'status': 'unavailable',
+                'device_count': 0,
+                'trusted_device_count': 0,
+                'unverified_device_count': 0,
+                'changed_device_count': 0,
+                'unverified_device_ids': [],
+                'changed_device_ids': [],
+                'change_count': 0,
+                'last_changed_at': '',
+                'last_trusted_at': '',
+                'verification_available': False,
+                'primary_verification_device_id': '',
+                'primary_verification_fingerprint': '',
+                'primary_verification_fingerprint_short': '',
+                'primary_verification_code': '',
+                'primary_verification_code_short': '',
+                'checked_at': '',
+            }
+        )
+        self.group_session_summary = {
+            'session_id': 'session-1',
+            'has_local_sender_key': False,
+            'local_sender_key_id': '',
+            'member_version': 42,
+            'retired_local_sender_key_ids': [],
+            'inbound_sender_devices': [],
+        }
+        self.reprovision_response = dict(reprovision_response or {'device_id': 'device-reprovisioned-1'})
+
+    async def get_local_device_summary(self) -> dict:
+        self.calls += 1
+        return dict(self.summary)
+
+    async def get_peer_identity_summary(self, user_id: str) -> dict:
+        self.peer_identity_calls.append(user_id)
+        return {'user_id': user_id, **dict(self.peer_identity_summary)}
+
+    async def trust_peer_identities(self, user_id: str, *, device_ids: list[str] | None = None) -> dict:
+        self.trust_peer_identity_calls.append(user_id)
+        trusted_summary = dict(self.peer_identity_summary)
+        trusted_summary.update(
+            {
+                'status': 'verified',
+                'trusted_device_count': int(trusted_summary.get('device_count', 0) or 0),
+                'unverified_device_count': 0,
+                'changed_device_count': 0,
+                'unverified_device_ids': [],
+                'changed_device_ids': [],
+                'last_trusted_at': trusted_summary.get('checked_at') or '2026-04-06T12:30:00+00:00',
+                'trusted_now_device_ids': list(device_ids or []),
+                'checked_at': trusted_summary.get('checked_at') or '2026-04-06T12:30:00+00:00',
+            }
+        )
+        self.peer_identity_summary = trusted_summary
+        return {'user_id': user_id, **trusted_summary}
+
+    async def reprovision_local_device(self) -> dict:
+        self.reprovision_calls += 1
+        device_id = str(self.reprovision_response.get('device_id') or 'device-reprovisioned-1')
+        self.summary = {'device_id': device_id, 'has_local_bundle': True}
+        return dict(self.reprovision_response)
+
+    async def reconcile_group_session_state(
+        self,
+        session_id: str,
+        *,
+        member_version: int = 0,
+        member_user_ids: list[str] | None = None,
+    ) -> dict:
+        self.reconcile_group_session_state_calls.append(
+            (session_id, int(member_version or 0), list(member_user_ids or []))
+        )
+        return {
+            **dict(self.group_session_summary),
+            'session_id': session_id,
+            'member_version': int(member_version or 0),
+            'changed': False,
+            'local_sender_key_cleared': False,
+            'pruned_inbound_sender_devices': [],
+        }
+
 
 class FakeSessionService:
     def __init__(self) -> None:
@@ -819,6 +1162,7 @@ class FakeSessionService:
             'group_id': 'group-1',
             'participant_ids': ['alice', 'bob'],
             'avatar': 'https://cdn.example/groups/core.png',
+            'group_member_version': 42,
         }
         self.unread_payload = [
             {'session_id': 'session-1', 'unread': 4},
@@ -870,6 +1214,12 @@ class FakeMessageStoreDatabase:
     async def get_messages(self, session_id: str, limit: int = 50, before_timestamp=None) -> list[ChatMessage]:
         return [message for message in self.messages if message.session_id == session_id][:limit]
 
+    async def get_message(self, message_id: str):
+        for message in self.messages:
+            if message.message_id == message_id:
+                return message
+        return None
+
     async def save_messages_batch(self, messages: list[ChatMessage]) -> None:
         self.saved_batches.append([message for message in messages])
 
@@ -904,8 +1254,57 @@ class FakeChatService:
         return []
 
 
+class FakeCallService:
+    def __init__(self, payload: list[dict] | None = None, *, error: Exception | None = None) -> None:
+        self.payload = [dict(item) for item in list(payload or [])]
+        self.error = error
+        self.fetch_calls = 0
+
+    async def fetch_ice_servers(self) -> list[dict]:
+        self.fetch_calls += 1
+        if self.error is not None:
+            raise self.error
+        return [dict(item) for item in self.payload]
+
+
 class FakeNoopFileService:
     pass
+
+
+def test_chat_controller_refresh_call_ice_servers_uses_backend_service(monkeypatch) -> None:
+    fake_call_service = FakeCallService([{'urls': ['turn:turn.example.org:3478'], 'username': 'alice', 'credential': 'secret'}])
+
+    monkeypatch.setattr(chat_controller_module, 'get_call_service', lambda: fake_call_service)
+
+    async def scenario() -> None:
+        controller = chat_controller_module.ChatController()
+        payload = await controller.refresh_call_ice_servers(force_refresh=True)
+
+        assert fake_call_service.fetch_calls == 1
+        assert payload == [{'urls': ['turn:turn.example.org:3478'], 'username': 'alice', 'credential': 'secret'}]
+        assert controller.get_call_ice_servers() == payload
+
+    asyncio.run(scenario())
+
+
+def test_chat_controller_refresh_call_ice_servers_falls_back_to_local_config(monkeypatch) -> None:
+    fake_call_service = FakeCallService(error=RuntimeError('network down'))
+    fallback_config = types.SimpleNamespace(
+        webrtc=types.SimpleNamespace(ice_servers=[{'urls': ['stun:local.example.org:3478']}])
+    )
+
+    monkeypatch.setattr(chat_controller_module, 'get_call_service', lambda: fake_call_service)
+    monkeypatch.setattr(chat_controller_module, 'get_config', lambda: fallback_config)
+
+    async def scenario() -> None:
+        controller = chat_controller_module.ChatController()
+        payload = await controller.refresh_call_ice_servers(force_refresh=True)
+
+        assert fake_call_service.fetch_calls == 1
+        assert payload == [{'urls': ['stun:local.example.org:3478']}]
+        assert controller.get_call_ice_servers() == payload
+
+    asyncio.run(scenario())
 
 
 def test_chat_controller_send_file_uses_file_service(monkeypatch) -> None:
@@ -1142,6 +1541,41 @@ def test_chat_controller_send_file_marks_failed_on_upload_error(monkeypatch) -> 
 
 
 
+def test_chat_controller_send_file_uses_encrypted_upload_artifact_when_message_manager_requests_it(monkeypatch) -> None:
+    fake_message_manager = FakeMessageManager()
+    fake_session_manager = FakeSessionManager()
+    fake_file_service = FakeFileService({'url': 'https://cdn.example/files/blob.bin', 'file_type': 'application/octet-stream'})
+
+    workspace_tmp = Path('client/tests/.pytest_tmp')
+    workspace_tmp.mkdir(parents=True, exist_ok=True)
+    source_path = workspace_tmp / 'secret.pdf'
+    encrypted_path = workspace_tmp / 'secret.enc'
+    source_path.write_bytes(b'pdf-data')
+    encrypted_path.write_bytes(b'encrypted-data')
+
+    async def prepare_attachment_upload(*, session_id: str, file_path: str, message_type: MessageType, fallback_name: str, fallback_size: int):
+        fake_message_manager.attachment_upload_preparations.append((session_id, file_path, message_type, fallback_name, fallback_size))
+        return str(encrypted_path), {'attachment_encryption': {'enabled': True, 'scheme': 'aesgcm-file+x25519-v1'}}, str(encrypted_path)
+
+    fake_message_manager.prepare_attachment_upload = prepare_attachment_upload  # type: ignore[method-assign]
+
+    monkeypatch.setattr(chat_controller_module, 'get_message_manager', lambda: fake_message_manager)
+    monkeypatch.setattr(chat_controller_module, 'get_session_manager', lambda: fake_session_manager)
+    monkeypatch.setattr(chat_controller_module, 'get_file_service', lambda: fake_file_service)
+
+    async def scenario() -> None:
+        controller = chat_controller_module.ChatController()
+        message = await controller.send_file(str(source_path))
+
+        assert message is not None
+        assert fake_file_service.chat_uploads == [str(encrypted_path)]
+        assert fake_message_manager.sent_messages[-1].extra['attachment_encryption']['enabled'] is True
+        assert fake_message_manager.sent_messages[-1].extra['local_path'] == str(source_path)
+        assert not encrypted_path.exists()
+
+    asyncio.run(scenario())
+
+
 def test_chat_controller_send_file_offloads_video_probe(monkeypatch) -> None:
     fake_message_manager = FakeMessageManager()
     fake_session_manager = FakeSessionManager()
@@ -1178,6 +1612,372 @@ def test_chat_controller_send_file_offloads_video_probe(monkeypatch) -> None:
 
 
 
+def test_chat_controller_recover_session_crypto_delegates_to_session_manager(monkeypatch) -> None:
+    fake_message_manager = FakeMessageManager()
+    fake_session_manager = FakeSessionManager()
+    fake_session_manager.recover_result = {'performed': True, 'session_id': 'session-2', 'recovery_action': 'reprovision_device'}
+
+    monkeypatch.setattr(chat_controller_module, 'get_message_manager', lambda: fake_message_manager)
+    monkeypatch.setattr(chat_controller_module, 'get_session_manager', lambda: fake_session_manager)
+    monkeypatch.setattr(chat_controller_module, 'get_file_service', lambda: FakeFileService())
+
+    async def scenario() -> None:
+        controller = chat_controller_module.ChatController()
+        result = await controller.recover_session_crypto('session-2')
+
+        assert result == {'performed': True, 'session_id': 'session-2', 'recovery_action': 'reprovision_device'}
+        assert fake_session_manager.recover_calls == ['session-2']
+
+    asyncio.run(scenario())
+
+
+def test_chat_controller_recover_current_session_crypto_uses_selected_session(monkeypatch) -> None:
+    fake_message_manager = FakeMessageManager()
+    fake_session_manager = FakeSessionManager()
+
+    monkeypatch.setattr(chat_controller_module, 'get_message_manager', lambda: fake_message_manager)
+    monkeypatch.setattr(chat_controller_module, 'get_session_manager', lambda: fake_session_manager)
+    monkeypatch.setattr(chat_controller_module, 'get_file_service', lambda: FakeFileService())
+
+    async def scenario() -> None:
+        controller = chat_controller_module.ChatController()
+        result = await controller.recover_current_session_crypto()
+
+        assert result == {'performed': True, 'session_id': 'session-1'}
+        assert fake_session_manager.recover_calls == ['session-1']
+
+    asyncio.run(scenario())
+
+
+def test_chat_controller_trust_session_identities_delegates_to_session_manager(monkeypatch) -> None:
+    fake_session_manager = FakeSessionManager()
+
+    monkeypatch.setattr(chat_controller_module, 'get_message_manager', lambda: FakeMessageManager())
+    monkeypatch.setattr(chat_controller_module, 'get_session_manager', lambda: fake_session_manager)
+    monkeypatch.setattr(chat_controller_module, 'get_file_service', lambda: FakeFileService())
+    monkeypatch.setattr(chat_controller_module, 'get_call_manager', lambda: types.SimpleNamespace())
+
+    async def scenario() -> None:
+        controller = chat_controller_module.ChatController()
+        result = await controller.trust_session_identities('session-2')
+
+        assert fake_session_manager.trust_calls == ['session-2']
+        assert result == {'performed': True, 'session_id': 'session-1'}
+
+    asyncio.run(scenario())
+
+
+def test_chat_controller_trust_current_session_identities_uses_selected_session(monkeypatch) -> None:
+    fake_session_manager = FakeSessionManager()
+    fake_session_manager.current_session_id = 'session-7'
+
+    monkeypatch.setattr(chat_controller_module, 'get_message_manager', lambda: FakeMessageManager())
+    monkeypatch.setattr(chat_controller_module, 'get_session_manager', lambda: fake_session_manager)
+    monkeypatch.setattr(chat_controller_module, 'get_file_service', lambda: FakeFileService())
+    monkeypatch.setattr(chat_controller_module, 'get_call_manager', lambda: types.SimpleNamespace())
+
+    async def scenario() -> None:
+        controller = chat_controller_module.ChatController()
+        result = await controller.trust_current_session_identities()
+
+        assert fake_session_manager.trust_calls == ['session-7']
+        assert result == {'performed': True, 'session_id': 'session-1'}
+
+    asyncio.run(scenario())
+
+
+def test_chat_controller_get_session_security_summary_delegates_to_session_manager(monkeypatch) -> None:
+    fake_session_manager = FakeSessionManager()
+    fake_session_manager.security_summary_result = {'session_id': 'session-1', 'headline': 'identity_review_required'}
+
+    monkeypatch.setattr(chat_controller_module, 'get_message_manager', lambda: FakeMessageManager())
+    monkeypatch.setattr(chat_controller_module, 'get_session_manager', lambda: fake_session_manager)
+    monkeypatch.setattr(chat_controller_module, 'get_file_service', lambda: FakeFileService())
+    monkeypatch.setattr(chat_controller_module, 'get_call_manager', lambda: types.SimpleNamespace())
+
+    async def scenario() -> None:
+        controller = chat_controller_module.ChatController()
+        result = await controller.get_session_security_summary('session-8')
+
+        assert fake_session_manager.security_summary_calls == ['session-8']
+        assert result == {'session_id': 'session-1', 'headline': 'identity_review_required'}
+
+    asyncio.run(scenario())
+
+
+def test_chat_controller_get_current_session_security_summary_uses_selected_session(monkeypatch) -> None:
+    fake_session_manager = FakeSessionManager()
+    fake_session_manager.current_session_id = 'session-9'
+    fake_session_manager.security_summary_result = {'session_id': 'session-9', 'headline': 'secure'}
+
+    monkeypatch.setattr(chat_controller_module, 'get_message_manager', lambda: FakeMessageManager())
+    monkeypatch.setattr(chat_controller_module, 'get_session_manager', lambda: fake_session_manager)
+    monkeypatch.setattr(chat_controller_module, 'get_file_service', lambda: FakeFileService())
+    monkeypatch.setattr(chat_controller_module, 'get_call_manager', lambda: types.SimpleNamespace())
+
+    async def scenario() -> None:
+        controller = chat_controller_module.ChatController()
+        result = await controller.get_current_session_security_summary()
+
+        assert result == {'session_id': 'session-9', 'headline': 'secure'}
+
+    asyncio.run(scenario())
+
+
+def test_chat_controller_get_session_identity_verification_delegates_to_session_manager(monkeypatch) -> None:
+    fake_session_manager = FakeSessionManager()
+    fake_session_manager.identity_verification_result = {
+        'session_id': 'session-1',
+        'available': True,
+        'verification': {'primary_verification_device_id': 'device-bob-1'},
+    }
+
+    monkeypatch.setattr(chat_controller_module, 'get_message_manager', lambda: FakeMessageManager())
+    monkeypatch.setattr(chat_controller_module, 'get_session_manager', lambda: fake_session_manager)
+    monkeypatch.setattr(chat_controller_module, 'get_file_service', lambda: FakeFileService())
+    monkeypatch.setattr(chat_controller_module, 'get_call_manager', lambda: types.SimpleNamespace())
+
+    async def scenario() -> None:
+        controller = chat_controller_module.ChatController()
+        result = await controller.get_session_identity_verification('session-10')
+
+        assert fake_session_manager.identity_verification_calls == ['session-10']
+        assert result == {
+            'session_id': 'session-1',
+            'available': True,
+            'verification': {'primary_verification_device_id': 'device-bob-1'},
+        }
+
+    asyncio.run(scenario())
+
+
+def test_chat_controller_get_current_session_identity_verification_uses_selected_session(monkeypatch) -> None:
+    fake_session_manager = FakeSessionManager()
+    fake_session_manager.current_session_id = 'session-11'
+    fake_session_manager.identity_verification_result = {
+        'session_id': 'session-11',
+        'available': False,
+        'verification': {},
+    }
+
+    monkeypatch.setattr(chat_controller_module, 'get_message_manager', lambda: FakeMessageManager())
+    monkeypatch.setattr(chat_controller_module, 'get_session_manager', lambda: fake_session_manager)
+    monkeypatch.setattr(chat_controller_module, 'get_file_service', lambda: FakeFileService())
+    monkeypatch.setattr(chat_controller_module, 'get_call_manager', lambda: types.SimpleNamespace())
+
+    async def scenario() -> None:
+        controller = chat_controller_module.ChatController()
+        result = await controller.get_current_session_identity_verification()
+
+        assert fake_session_manager.identity_verification_calls == ['session-11']
+        assert result == {
+            'session_id': 'session-11',
+            'available': False,
+            'verification': {},
+        }
+
+    asyncio.run(scenario())
+
+
+def test_chat_controller_get_session_identity_review_details_delegates_to_session_manager(monkeypatch) -> None:
+    fake_session_manager = FakeSessionManager()
+    fake_session_manager.identity_review_details_result = {
+        'session_id': 'session-12',
+        'available': True,
+        'timeline': [{'kind': 'first_seen'}],
+    }
+
+    monkeypatch.setattr(chat_controller_module, 'get_message_manager', lambda: FakeMessageManager())
+    monkeypatch.setattr(chat_controller_module, 'get_session_manager', lambda: fake_session_manager)
+    monkeypatch.setattr(chat_controller_module, 'get_file_service', lambda: FakeFileService())
+    monkeypatch.setattr(chat_controller_module, 'get_call_manager', lambda: types.SimpleNamespace())
+
+    async def scenario() -> None:
+        controller = chat_controller_module.ChatController()
+        result = await controller.get_session_identity_review_details('session-12')
+
+        assert fake_session_manager.identity_review_details_calls == ['session-12']
+        assert result == {
+            'session_id': 'session-12',
+            'available': True,
+            'timeline': [{'kind': 'first_seen'}],
+        }
+
+    asyncio.run(scenario())
+
+
+def test_chat_controller_get_current_session_identity_review_details_uses_selected_session(monkeypatch) -> None:
+    fake_session_manager = FakeSessionManager()
+    fake_session_manager.current_session_id = 'session-13'
+    fake_session_manager.identity_review_details_result = {
+        'session_id': 'session-13',
+        'available': False,
+        'timeline': [],
+    }
+
+    monkeypatch.setattr(chat_controller_module, 'get_message_manager', lambda: FakeMessageManager())
+    monkeypatch.setattr(chat_controller_module, 'get_session_manager', lambda: fake_session_manager)
+    monkeypatch.setattr(chat_controller_module, 'get_file_service', lambda: FakeFileService())
+    monkeypatch.setattr(chat_controller_module, 'get_call_manager', lambda: types.SimpleNamespace())
+
+    async def scenario() -> None:
+        controller = chat_controller_module.ChatController()
+        result = await controller.get_current_session_identity_review_details()
+
+        assert fake_session_manager.identity_review_details_calls == ['session-13']
+        assert result == {
+            'session_id': 'session-13',
+            'available': False,
+            'timeline': [],
+        }
+
+    asyncio.run(scenario())
+
+
+def test_chat_controller_get_session_security_diagnostics_delegates_to_session_manager(monkeypatch) -> None:
+    fake_session_manager = FakeSessionManager()
+    fake_session_manager.security_diagnostics_result = {
+        'session_id': 'session-14',
+        'headline': 'identity_review_required',
+    }
+
+    monkeypatch.setattr(chat_controller_module, 'get_message_manager', lambda: FakeMessageManager())
+    monkeypatch.setattr(chat_controller_module, 'get_session_manager', lambda: fake_session_manager)
+    monkeypatch.setattr(chat_controller_module, 'get_file_service', lambda: FakeFileService())
+    monkeypatch.setattr(chat_controller_module, 'get_call_manager', lambda: types.SimpleNamespace())
+
+    async def scenario() -> None:
+        controller = chat_controller_module.ChatController()
+        result = await controller.get_session_security_diagnostics('session-14')
+
+        assert fake_session_manager.security_diagnostics_calls == ['session-14']
+        assert result == {
+            'session_id': 'session-14',
+            'headline': 'identity_review_required',
+        }
+
+    asyncio.run(scenario())
+
+
+def test_chat_controller_get_current_session_security_diagnostics_uses_selected_session(monkeypatch) -> None:
+    fake_session_manager = FakeSessionManager()
+    fake_session_manager.current_session_id = 'session-15'
+    fake_session_manager.security_diagnostics_result = {
+        'session_id': 'session-15',
+        'headline': 'secure',
+    }
+
+    monkeypatch.setattr(chat_controller_module, 'get_message_manager', lambda: FakeMessageManager())
+    monkeypatch.setattr(chat_controller_module, 'get_session_manager', lambda: fake_session_manager)
+    monkeypatch.setattr(chat_controller_module, 'get_file_service', lambda: FakeFileService())
+    monkeypatch.setattr(chat_controller_module, 'get_call_manager', lambda: types.SimpleNamespace())
+
+    async def scenario() -> None:
+        controller = chat_controller_module.ChatController()
+        result = await controller.get_current_session_security_diagnostics()
+
+        assert fake_session_manager.security_diagnostics_calls == ['session-15']
+        assert result == {
+            'session_id': 'session-15',
+            'headline': 'secure',
+        }
+
+    asyncio.run(scenario())
+
+
+def test_chat_controller_execute_session_security_action_delegates_to_session_manager(monkeypatch) -> None:
+    fake_session_manager = FakeSessionManager()
+    fake_session_manager.security_action_result = {
+        'performed': True,
+        'session_id': 'session-1',
+        'action_id': 'trust_peer_identity',
+    }
+
+    monkeypatch.setattr(chat_controller_module, 'get_message_manager', lambda: FakeMessageManager())
+    monkeypatch.setattr(chat_controller_module, 'get_session_manager', lambda: fake_session_manager)
+    monkeypatch.setattr(chat_controller_module, 'get_file_service', lambda: FakeFileService())
+    monkeypatch.setattr(chat_controller_module, 'get_call_manager', lambda: types.SimpleNamespace())
+
+    async def scenario() -> None:
+        controller = chat_controller_module.ChatController()
+        result = await controller.execute_session_security_action('session-8', 'trust_peer_identity')
+
+        assert fake_session_manager.security_action_calls == [('session-8', 'trust_peer_identity')]
+        assert result == {
+            'performed': True,
+            'session_id': 'session-1',
+            'action_id': 'trust_peer_identity',
+        }
+
+    asyncio.run(scenario())
+
+
+def test_chat_controller_execute_current_session_security_action_uses_selected_session(monkeypatch) -> None:
+    fake_session_manager = FakeSessionManager()
+    fake_session_manager.current_session_id = 'session-9'
+    fake_session_manager.security_action_result = {
+        'performed': False,
+        'session_id': 'session-9',
+        'action_id': 'switch_device',
+        'reason': 'switch_device_required',
+        'explanation': {
+            'code': 'switch_device_required',
+            'message': 'This encrypted content is addressed to a different device and cannot be recovered on the current device.',
+        },
+        'external_requirement': {
+            'kind': 'switch_device',
+            'target_device_id': 'device-bob-2',
+            'blocking': True,
+        },
+    }
+
+    monkeypatch.setattr(chat_controller_module, 'get_message_manager', lambda: FakeMessageManager())
+    monkeypatch.setattr(chat_controller_module, 'get_session_manager', lambda: fake_session_manager)
+    monkeypatch.setattr(chat_controller_module, 'get_file_service', lambda: FakeFileService())
+    monkeypatch.setattr(chat_controller_module, 'get_call_manager', lambda: types.SimpleNamespace())
+
+    async def scenario() -> None:
+        controller = chat_controller_module.ChatController()
+        result = await controller.execute_current_session_security_action('switch_device')
+
+        assert fake_session_manager.security_action_calls == [('session-9', 'switch_device')]
+        assert result == {
+            'performed': False,
+            'session_id': 'session-9',
+            'action_id': 'switch_device',
+            'reason': 'switch_device_required',
+            'explanation': {
+                'code': 'switch_device_required',
+                'message': 'This encrypted content is addressed to a different device and cannot be recovered on the current device.',
+            },
+            'external_requirement': {
+                'kind': 'switch_device',
+                'target_device_id': 'device-bob-2',
+                'blocking': True,
+            },
+        }
+
+    asyncio.run(scenario())
+
+
+def test_chat_controller_download_message_attachment_delegates_to_message_manager(monkeypatch) -> None:
+    fake_message_manager = FakeMessageManager()
+    fake_session_manager = FakeSessionManager()
+
+    monkeypatch.setattr(chat_controller_module, 'get_message_manager', lambda: fake_message_manager)
+    monkeypatch.setattr(chat_controller_module, 'get_session_manager', lambda: fake_session_manager)
+    monkeypatch.setattr(chat_controller_module, 'get_file_service', lambda: FakeFileService())
+
+    async def scenario() -> None:
+        controller = chat_controller_module.ChatController()
+        local_path = await controller.download_message_attachment('msg-file-1')
+
+        assert local_path == 'D:/downloads/msg-file-1.bin'
+        assert fake_message_manager.download_attachment_calls == ['msg-file-1']
+
+    asyncio.run(scenario())
+
+
 def test_file_service_normalizes_backend_upload_payload(monkeypatch) -> None:
     class FakeUploadHttpClient:
         def __init__(self, payload: dict) -> None:
@@ -1201,6 +2001,28 @@ def test_file_service_normalizes_backend_upload_payload(monkeypatch) -> None:
 
     asyncio.run(scenario())
 
+
+
+def test_file_service_downloads_chat_attachment_bytes(monkeypatch) -> None:
+    class FakeDownloadHttpClient:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        async def download_bytes(self, file_url: str) -> bytes:
+            self.calls.append(file_url)
+            return b'cipher-bytes'
+
+    fake_http = FakeDownloadHttpClient()
+    monkeypatch.setattr(file_service_module, 'get_http_client', lambda: fake_http)
+
+    async def scenario() -> None:
+        service = file_service_module.FileService()
+        payload = await service.download_chat_attachment('/uploads/blob.bin')
+
+        assert payload == b'cipher-bytes'
+        assert fake_http.calls == ['/uploads/blob.bin']
+
+    asyncio.run(scenario())
 
 
 def test_file_service_rejects_upload_payload_without_url(monkeypatch) -> None:
@@ -1708,8 +2530,10 @@ def test_database_search_messages_escapes_like_wildcards() -> None:
 
 def test_session_manager_refresh_remote_sessions_uses_session_service(monkeypatch) -> None:
     fake_session_service = FakeSessionService()
+    fake_e2ee_service = FakeE2EEService({'device_id': 'device-local-1', 'has_local_bundle': True})
 
     monkeypatch.setattr(session_manager_module, 'get_session_service', lambda: fake_session_service)
+    monkeypatch.setattr(session_manager_module, 'get_e2ee_service', lambda: fake_e2ee_service)
     monkeypatch.setattr(session_manager_module, 'get_event_bus', lambda: FakeEventBus())
     monkeypatch.setattr(session_manager_module, 'get_message_manager', lambda: FakeMessageManager())
     monkeypatch.setattr(session_manager_module, 'get_database', lambda: FakeSessionStateDatabase())
@@ -1720,9 +2544,35 @@ def test_session_manager_refresh_remote_sessions_uses_session_service(monkeypatc
 
         assert fake_session_service.fetch_sessions_calls == 1
         assert fake_session_service.fetch_unread_counts_calls == 1
+        assert fake_e2ee_service.calls >= 1
         assert len(sessions) == 1
         assert sessions[0].session_id == 'session-1'
         assert sessions[0].extra['group_id'] == 'group-1'
+        assert sessions[0].extra['group_member_version'] == 42
+        assert fake_e2ee_service.reconcile_group_session_state_calls
+        assert all(
+            item == ('session-1', 42, ['alice', 'bob'])
+            for item in fake_e2ee_service.reconcile_group_session_state_calls
+        )
+        assert sessions[0].extra['encryption_mode'] == 'e2ee_group'
+        assert sessions[0].extra['call_capabilities'] == {'voice': False, 'video': False}
+        assert sessions[0].extra['call_state'] == {}
+        assert sessions[0].extra['session_crypto_state'] == {
+            'enabled': True,
+            'ready': True,
+            'can_decrypt': True,
+            'device_registered': True,
+            'scheme': 'group-sender-key-v1',
+            'attachment_scheme': 'aesgcm-file+group-sender-key-v1',
+            'fanout_scheme': 'group-sender-key-fanout-v1',
+            'group_member_version': 42,
+            'local_sender_key_ready': False,
+            'local_sender_key_id': '',
+            'retired_local_key_count': 0,
+            'inbound_sender_key_count': 0,
+            'device_id': 'device-local-1',
+        }
+        assert sessions[0].uses_e2ee() is True
         assert sessions[0].unread_count == 4
 
     asyncio.run(scenario())
@@ -1730,6 +2580,22 @@ def test_session_manager_refresh_remote_sessions_uses_session_service(monkeypatc
 
 def test_session_manager_refresh_remote_sessions_prefers_counterpart_profile(monkeypatch) -> None:
     fake_session_service = FakeSessionService()
+    fake_e2ee_service = FakeE2EEService(
+        {'device_id': 'device-local-1', 'has_local_bundle': True},
+        peer_identity_summary={
+            'status': 'identity_changed',
+            'device_count': 2,
+            'trusted_device_count': 1,
+            'unverified_device_count': 0,
+            'changed_device_count': 1,
+            'unverified_device_ids': [],
+            'changed_device_ids': ['device-bob-2'],
+            'change_count': 1,
+            'last_changed_at': '2026-04-06T12:15:00+00:00',
+            'last_trusted_at': '2026-04-06T11:45:00+00:00',
+            'checked_at': '2026-04-06T12:00:00+00:00',
+        },
+    )
     fake_db = FakeSessionProfileDatabase()
     fake_session_service.session_payload = {
         'id': 'session-1',
@@ -1755,6 +2621,7 @@ def test_session_manager_refresh_remote_sessions_prefers_counterpart_profile(mon
     }
 
     monkeypatch.setattr(session_manager_module, 'get_session_service', lambda: fake_session_service)
+    monkeypatch.setattr(session_manager_module, 'get_e2ee_service', lambda: fake_e2ee_service)
     monkeypatch.setattr(session_manager_module, 'get_event_bus', lambda: FakeEventBus())
     monkeypatch.setattr(session_manager_module, 'get_message_manager', lambda: FakeMessageManager())
     monkeypatch.setattr(session_manager_module, 'get_database', lambda: fake_db)
@@ -1772,6 +2639,43 @@ def test_session_manager_refresh_remote_sessions_prefers_counterpart_profile(mon
         assert session.extra['counterpart_avatar'] == '/uploads/bob.svg'
         assert session.extra['counterpart_id'] == 'user-2'
         assert session.extra['counterpart_username'] == 'bob'
+        assert session.extra['encryption_mode'] == 'e2ee_private'
+        assert session.extra['call_capabilities'] == {'voice': True, 'video': True}
+        assert session.extra['call_state'] == {'active': False, 'status': 'idle'}
+        assert fake_e2ee_service.peer_identity_calls == ['user-2']
+        assert session.extra['session_crypto_state'] == {
+            'enabled': True,
+            'ready': True,
+            'can_decrypt': True,
+            'device_registered': True,
+            'scheme': 'x25519-aesgcm-v1',
+            'attachment_scheme': 'aesgcm-file+x25519-v1',
+            'identity_status': 'identity_changed',
+            'identity_verified': False,
+            'identity_device_count': 2,
+            'trusted_identity_device_count': 1,
+            'unverified_identity_device_count': 0,
+            'changed_identity_device_count': 1,
+            'unverified_identity_device_ids': [],
+            'changed_identity_device_ids': ['device-bob-2'],
+            'identity_checked_at': '2026-04-06T12:00:00+00:00',
+            'identity_change_count': 1,
+            'identity_last_changed_at': '2026-04-06T12:15:00+00:00',
+            'identity_last_trusted_at': '2026-04-06T11:45:00+00:00',
+            'identity_action_required': True,
+            'identity_review_action': 'trust_peer_identity',
+            'identity_review_blocking': True,
+            'identity_alert_severity': 'critical',
+            'identity_verification_available': False,
+            'identity_primary_verification_device_id': '',
+            'identity_primary_verification_fingerprint': '',
+            'identity_primary_verification_fingerprint_short': '',
+            'identity_primary_verification_code': '',
+            'identity_primary_verification_code_short': '',
+            'identity_local_fingerprint_short': '',
+            'device_id': 'device-local-1',
+        }
+        assert session.uses_e2ee() is True
         assert session.extra['avatar_seed'] == session_manager_module.profile_avatar_seed(
             user_id='user-2',
             username='bob',
@@ -1780,6 +2684,949 @@ def test_session_manager_refresh_remote_sessions_prefers_counterpart_profile(mon
         assert len(fake_db.replaced_sessions) == 1
 
     asyncio.run(scenario())
+
+
+def test_session_manager_call_events_update_runtime_call_state(monkeypatch) -> None:
+    from client.models.call import ActiveCallState
+
+    fake_event_bus = FakeEventBus()
+
+    monkeypatch.setattr(session_manager_module, 'get_session_service', lambda: FakeSessionService())
+    monkeypatch.setattr(session_manager_module, 'get_e2ee_service', lambda: FakeE2EEService({'device_id': 'device-local-1', 'has_local_bundle': True}))
+    monkeypatch.setattr(session_manager_module, 'get_event_bus', lambda: fake_event_bus)
+    monkeypatch.setattr(session_manager_module, 'get_message_manager', lambda: FakeMessageManager())
+    monkeypatch.setattr(session_manager_module, 'get_database', lambda: FakeSessionStateDatabase())
+    monkeypatch.setattr(session_manager_module, 'get_call_manager', lambda: types.SimpleNamespace(active_call=None))
+
+    async def scenario() -> None:
+        manager = session_manager_module.SessionManager()
+        session = Session(
+            session_id='session-1',
+            name='Bob',
+            session_type='direct',
+            participant_ids=['user-1', 'user-2'],
+        )
+        session.extra['call_capabilities'] = {'voice': True, 'video': True}
+        session.extra['call_state'] = {'active': False, 'status': 'idle'}
+        manager._sessions[session.session_id] = session
+        manager._current_user_id = 'user-1'
+
+        await manager._apply_call_state_event(
+            {
+                'call': ActiveCallState(
+                    call_id='call-1',
+                    session_id='session-1',
+                    initiator_id='user-1',
+                    recipient_id='user-2',
+                    media_type='video',
+                    direction='outgoing',
+                    status='accepted',
+                )
+            }
+        )
+
+        assert session.extra['call_state'] == {
+            'active': True,
+            'status': 'accepted',
+            'call_id': 'call-1',
+            'media_type': 'video',
+            'direction': 'outgoing',
+            'peer_user_id': 'user-2',
+        }
+
+        await manager._apply_call_state_event(
+            {
+                'call': ActiveCallState(
+                    call_id='call-1',
+                    session_id='session-1',
+                    initiator_id='user-1',
+                    recipient_id='user-2',
+                    media_type='video',
+                    direction='outgoing',
+                    status='ended',
+                    reason='hangup',
+                )
+            }
+        )
+
+        assert session.extra['call_state'] == {
+            'active': False,
+            'status': 'ended',
+            'call_id': 'call-1',
+            'media_type': 'video',
+            'direction': 'outgoing',
+            'peer_user_id': 'user-2',
+            'reason': 'hangup',
+        }
+        assert any(event == session_manager_module.SessionEvent.UPDATED for event, _ in fake_event_bus.events)
+
+    asyncio.run(scenario())
+
+
+def test_session_manager_message_decryption_state_updates_session_crypto_state(monkeypatch) -> None:
+    fake_event_bus = FakeEventBus()
+
+    monkeypatch.setattr(session_manager_module, 'get_session_service', lambda: FakeSessionService())
+    monkeypatch.setattr(session_manager_module, 'get_e2ee_service', lambda: FakeE2EEService({'device_id': 'device-local-1', 'has_local_bundle': True}))
+    monkeypatch.setattr(session_manager_module, 'get_event_bus', lambda: fake_event_bus)
+    monkeypatch.setattr(session_manager_module, 'get_message_manager', lambda: FakeMessageManager())
+    monkeypatch.setattr(session_manager_module, 'get_database', lambda: FakeSessionStateDatabase())
+
+    async def scenario() -> None:
+        manager = session_manager_module.SessionManager()
+        session = Session(
+            session_id='session-1',
+            name='Bob',
+            session_type='direct',
+            participant_ids=['user-1', 'user-2'],
+        )
+        session.extra['encryption_mode'] = 'e2ee_private'
+        session.extra['session_crypto_state'] = {
+            'enabled': True,
+            'ready': True,
+            'can_decrypt': True,
+            'device_registered': True,
+            'scheme': 'x25519-aesgcm-v1',
+            'attachment_scheme': 'aesgcm-file+x25519-v1',
+            'device_id': 'device-local-1',
+        }
+        manager._sessions[session.session_id] = session
+
+        await manager._on_message_decryption_state_changed(
+            {
+                'session_id': 'session-1',
+                'message_id': 'm-1',
+                'decryption_state': 'missing_private_key',
+                'recovery_action': 'reprovision_device',
+                'can_decrypt': False,
+                'local_device_id': 'device-local-1',
+                'target_device_id': 'device-local-1',
+            }
+        )
+
+        assert session.extra['session_crypto_state']['ready'] is False
+        assert session.extra['session_crypto_state']['can_decrypt'] is False
+        assert session.extra['session_crypto_state']['decryption_state'] == 'missing_private_key'
+        assert session.extra['session_crypto_state']['recovery_action'] == 'reprovision_device'
+        assert session.extra['session_crypto_state']['last_failure_message_id'] == 'm-1'
+
+        await manager._on_message_decryption_state_changed(
+            {
+                'session_id': 'session-1',
+                'message_id': 'm-1',
+                'decryption_state': 'ready',
+                'can_decrypt': True,
+                'local_device_id': 'device-local-1',
+                'target_device_id': 'device-local-1',
+            }
+        )
+
+        assert session.extra['session_crypto_state']['ready'] is True
+        assert session.extra['session_crypto_state']['can_decrypt'] is True
+        assert 'decryption_state' not in session.extra['session_crypto_state']
+        assert 'recovery_action' not in session.extra['session_crypto_state']
+        assert 'last_failure_message_id' not in session.extra['session_crypto_state']
+        assert any(event == session_manager_module.SessionEvent.UPDATED for event, _ in fake_event_bus.events)
+
+    asyncio.run(scenario())
+
+
+def test_session_manager_recover_session_crypto_reprovisions_local_device(monkeypatch) -> None:
+    fake_event_bus = FakeEventBus()
+    fake_db = FakeSessionProfileDatabase()
+    fake_e2ee_service = FakeE2EEService(
+        {'device_id': 'device-local-1', 'has_local_bundle': True},
+        reprovision_response={'device_id': 'device-local-2'},
+    )
+    fake_message_manager = FakeMessageManager()
+    fake_message_manager.recover_session_messages_result = {
+        'session_id': 'session-1',
+        'scanned': 3,
+        'updated': 2,
+        'message_ids': ['m-1', 'm-2'],
+        'remote_fetched': 4,
+        'remote_pages_fetched': 2,
+        'recovery_stats': {
+            'cached': {
+                'text': 2,
+                'attachments': 0,
+                'direct_text': 2,
+                'group_text': 0,
+                'direct_attachments': 0,
+                'group_attachments': 0,
+                'other': 0,
+            },
+            'remote': {
+                'text': 4,
+                'attachments': 0,
+                'direct_text': 4,
+                'group_text': 0,
+                'direct_attachments': 0,
+                'group_attachments': 0,
+                'other': 0,
+            },
+        },
+    }
+
+    monkeypatch.setattr(session_manager_module, 'get_session_service', lambda: FakeSessionService())
+    monkeypatch.setattr(session_manager_module, 'get_e2ee_service', lambda: fake_e2ee_service)
+    monkeypatch.setattr(session_manager_module, 'get_event_bus', lambda: fake_event_bus)
+    monkeypatch.setattr(session_manager_module, 'get_message_manager', lambda: fake_message_manager)
+    monkeypatch.setattr(session_manager_module, 'get_database', lambda: fake_db)
+
+    async def scenario() -> None:
+        manager = session_manager_module.SessionManager()
+        session = Session(
+            session_id='session-1',
+            name='Bob',
+            session_type='direct',
+            participant_ids=['user-1', 'user-2'],
+        )
+        session.extra['encryption_mode'] = 'e2ee_private'
+        session.extra['session_crypto_state'] = {
+            'enabled': True,
+            'ready': False,
+            'can_decrypt': False,
+            'device_registered': True,
+            'scheme': 'x25519-aesgcm-v1',
+            'attachment_scheme': 'aesgcm-file+x25519-v1',
+            'device_id': 'device-local-1',
+            'decryption_state': 'missing_private_key',
+            'recovery_action': 'reprovision_device',
+            'last_failure_message_id': 'm-1',
+            'target_device_id': 'device-local-1',
+        }
+        manager._sessions[session.session_id] = session
+
+        result = await manager.recover_session_crypto('session-1')
+
+        assert result == {
+            'performed': True,
+            'session_id': 'session-1',
+            'recovery_action': 'reprovision_device',
+            'device': {'device_id': 'device-local-2'},
+            'message_recovery': {
+                'session_id': 'session-1',
+                'scanned': 3,
+                'updated': 2,
+                'message_ids': ['m-1', 'm-2'],
+                'remote_fetched': 4,
+                'remote_pages_fetched': 2,
+                'recovery_stats': {
+                    'cached': {
+                        'text': 2,
+                        'attachments': 0,
+                        'direct_text': 2,
+                        'group_text': 0,
+                        'direct_attachments': 0,
+                        'group_attachments': 0,
+                        'other': 0,
+                    },
+                    'remote': {
+                        'text': 4,
+                        'attachments': 0,
+                        'direct_text': 4,
+                        'group_text': 0,
+                        'direct_attachments': 0,
+                        'group_attachments': 0,
+                        'other': 0,
+                    },
+                },
+                'attempted': True,
+            },
+        }
+        assert fake_e2ee_service.reprovision_calls == 1
+        assert fake_message_manager.recover_session_messages_calls == ['session-1']
+        assert session.extra['session_crypto_state']['ready'] is True
+        assert session.extra['session_crypto_state']['can_decrypt'] is True
+        assert session.extra['session_crypto_state']['device_id'] == 'device-local-2'
+        assert 'decryption_state' not in session.extra['session_crypto_state']
+        assert 'recovery_action' not in session.extra['session_crypto_state']
+        assert 'last_failure_message_id' not in session.extra['session_crypto_state']
+        assert 'last_recovered_at' in session.extra['session_crypto_state']
+        assert session.extra['session_crypto_state']['last_message_recovery'] == {
+            'updated': 2,
+            'remote_fetched': 4,
+            'remote_pages_fetched': 2,
+            'message_count': 2,
+            'cached': {
+                'text': 2,
+                'attachments': 0,
+                'direct_text': 2,
+                'group_text': 0,
+                'direct_attachments': 0,
+                'group_attachments': 0,
+                'other': 0,
+            },
+            'remote': {
+                'text': 4,
+                'attachments': 0,
+                'direct_text': 4,
+                'group_text': 0,
+                'direct_attachments': 0,
+                'group_attachments': 0,
+                'other': 0,
+            },
+        }
+        assert 'last_message_recovery_at' in session.extra['session_crypto_state']
+        assert len(fake_db.replaced_sessions) == 1
+        assert any(event == session_manager_module.SessionEvent.UPDATED for event, _ in fake_event_bus.events)
+
+    asyncio.run(scenario())
+
+
+def test_session_manager_trust_session_identities_updates_direct_session_crypto_state(monkeypatch) -> None:
+    fake_event_bus = FakeEventBus()
+    fake_db = FakeSessionProfileDatabase()
+    fake_e2ee_service = FakeE2EEService(
+        {'device_id': 'device-local-1', 'has_local_bundle': True},
+        peer_identity_summary={
+            'local_device_id': 'device-local-1',
+            'local_fingerprint': 'LOCALFINGERPRINT1234567890',
+            'local_fingerprint_short': 'LOCALFINGERP',
+            'status': 'unverified',
+            'device_count': 2,
+            'trusted_device_count': 0,
+            'unverified_device_count': 2,
+            'changed_device_count': 0,
+            'unverified_device_ids': ['device-bob-1', 'device-bob-2'],
+            'changed_device_ids': [],
+            'change_count': 0,
+            'last_changed_at': '',
+            'last_trusted_at': '',
+            'verification_available': True,
+            'primary_verification_device_id': 'device-bob-1',
+            'primary_verification_fingerprint': 'REMOTEFINGERPRINT1234567890',
+            'primary_verification_fingerprint_short': 'REMOTEFINGER',
+            'primary_verification_code': '12345 67890 11111 22222 33333 44444 55555 66666 77777 88888 99999 00000',
+            'primary_verification_code_short': '12345 67890 11111',
+            'checked_at': '2026-04-06T12:00:00+00:00',
+        },
+    )
+
+    monkeypatch.setattr(session_manager_module, 'get_session_service', lambda: FakeSessionService())
+    monkeypatch.setattr(session_manager_module, 'get_e2ee_service', lambda: fake_e2ee_service)
+    monkeypatch.setattr(session_manager_module, 'get_event_bus', lambda: fake_event_bus)
+    monkeypatch.setattr(session_manager_module, 'get_message_manager', lambda: FakeMessageManager())
+    monkeypatch.setattr(session_manager_module, 'get_database', lambda: fake_db)
+
+    async def scenario() -> None:
+        manager = session_manager_module.SessionManager()
+        session = Session(
+            session_id='session-1',
+            name='Bob',
+            session_type='direct',
+            participant_ids=['user-1', 'user-2'],
+        )
+        session.extra['counterpart_id'] = 'user-2'
+        session.extra['encryption_mode'] = 'e2ee_private'
+        session.extra['session_crypto_state'] = {
+            'enabled': True,
+            'ready': True,
+            'can_decrypt': True,
+            'device_registered': True,
+            'scheme': 'x25519-aesgcm-v1',
+            'attachment_scheme': 'aesgcm-file+x25519-v1',
+            'identity_status': 'unverified',
+            'identity_verified': False,
+            'identity_device_count': 2,
+            'trusted_identity_device_count': 0,
+            'unverified_identity_device_count': 2,
+            'changed_identity_device_count': 0,
+            'unverified_identity_device_ids': ['device-bob-1', 'device-bob-2'],
+            'changed_identity_device_ids': [],
+            'identity_checked_at': '2026-04-06T12:00:00+00:00',
+            'identity_change_count': 0,
+            'identity_last_changed_at': '',
+            'identity_last_trusted_at': '',
+            'device_id': 'device-local-1',
+        }
+        manager._sessions[session.session_id] = session
+
+        result = await manager.trust_session_identities('session-1')
+
+        assert result['performed'] is True
+        assert result['user_id'] == 'user-2'
+        assert result['previous_identity_status'] == 'unverified'
+        assert result['alert_cleared'] is True
+        assert fake_e2ee_service.trust_peer_identity_calls == ['user-2']
+        assert session.extra['session_crypto_state']['identity_status'] == 'verified'
+        assert session.extra['session_crypto_state']['identity_verified'] is True
+        assert session.extra['session_crypto_state']['trusted_identity_device_count'] == 2
+        assert session.extra['session_crypto_state']['unverified_identity_device_count'] == 0
+        assert session.extra['session_crypto_state']['changed_identity_device_count'] == 0
+        assert session.extra['session_crypto_state']['unverified_identity_device_ids'] == []
+        assert session.extra['session_crypto_state']['changed_identity_device_ids'] == []
+        assert session.extra['session_crypto_state']['identity_action_required'] is False
+        assert session.extra['session_crypto_state']['identity_review_action'] == ''
+        assert session.extra['session_crypto_state']['identity_review_blocking'] is False
+        assert session.extra['session_crypto_state']['identity_alert_severity'] == 'info'
+        assert session.extra['session_crypto_state']['identity_change_count'] == 0
+        assert session.extra['session_crypto_state']['identity_last_changed_at'] == ''
+        assert session.extra['session_crypto_state']['identity_last_trusted_at'] == '2026-04-06T12:00:00+00:00'
+        assert session.extra['session_crypto_state']['identity_verification_available'] is True
+        assert session.extra['session_crypto_state']['identity_primary_verification_device_id'] == 'device-bob-1'
+        assert session.extra['session_crypto_state']['identity_primary_verification_fingerprint_short'] == 'REMOTEFINGER'
+        assert session.extra['session_crypto_state']['identity_primary_verification_code_short'] == '12345 67890 11111'
+        assert session.extra['session_crypto_state']['identity_local_fingerprint_short'] == 'LOCALFINGERP'
+        assert len(fake_db.replaced_sessions) == 1
+        assert any(event == session_manager_module.SessionEvent.UPDATED for event, _ in fake_event_bus.events)
+
+    asyncio.run(scenario())
+
+
+def test_session_manager_get_session_security_summary_returns_identity_review_headline(monkeypatch) -> None:
+    monkeypatch.setattr(session_manager_module, 'get_session_service', lambda: FakeSessionService())
+    monkeypatch.setattr(
+        session_manager_module,
+        'get_e2ee_service',
+        lambda: FakeE2EEService({'device_id': 'device-local-1', 'has_local_bundle': True}),
+    )
+    monkeypatch.setattr(session_manager_module, 'get_event_bus', lambda: FakeEventBus())
+    monkeypatch.setattr(session_manager_module, 'get_message_manager', lambda: FakeMessageManager())
+    monkeypatch.setattr(session_manager_module, 'get_database', lambda: FakeSessionProfileDatabase())
+
+    async def scenario() -> None:
+        manager = session_manager_module.SessionManager()
+        session = Session(
+            session_id='session-1',
+            name='Bob',
+            session_type='direct',
+            participant_ids=['user-1', 'user-2'],
+        )
+        session.extra['encryption_mode'] = 'e2ee_private'
+        session.extra['call_capabilities'] = {'voice': True, 'video': True}
+        session.extra['call_state'] = {'active': False, 'status': 'idle'}
+        session.extra['session_crypto_state'] = {
+            'enabled': True,
+            'ready': True,
+            'can_decrypt': True,
+            'device_registered': True,
+            'scheme': 'x25519-aesgcm-v1',
+            'attachment_scheme': 'aesgcm-file+x25519-v1',
+            'identity_status': 'identity_changed',
+            'identity_verified': False,
+            'identity_action_required': True,
+            'identity_review_action': 'trust_peer_identity',
+            'identity_review_blocking': True,
+            'identity_alert_severity': 'critical',
+            'identity_change_count': 1,
+            'identity_last_changed_at': '2026-04-06T12:15:00+00:00',
+            'identity_last_trusted_at': '2026-04-06T11:45:00+00:00',
+            'identity_verification_available': True,
+            'identity_primary_verification_device_id': 'device-bob-1',
+            'identity_primary_verification_fingerprint_short': 'REMOTEFINGER',
+            'identity_primary_verification_code': '12345 67890 11111 22222 33333 44444 55555 66666 77777 88888 99999 00000',
+            'identity_primary_verification_code_short': '12345 67890 11111',
+            'identity_local_fingerprint_short': 'LOCALFINGERP',
+            'device_id': 'device-local-1',
+        }
+        manager._sessions[session.session_id] = session
+        manager._current_session_id = 'session-1'
+
+        summary = await manager.get_session_security_summary('session-1')
+        current_summary = await manager.get_current_session_security_summary()
+
+        assert summary == {
+            'session_id': 'session-1',
+            'encryption_mode': 'e2ee_private',
+            'uses_e2ee': True,
+            'crypto_ready': True,
+            'device_registered': True,
+            'identity_status': 'identity_changed',
+            'identity_action_required': True,
+            'identity_review_action': 'trust_peer_identity',
+            'identity_review_blocking': True,
+            'identity_alert_severity': 'critical',
+            'identity_change_count': 1,
+            'identity_last_changed_at': '2026-04-06T12:15:00+00:00',
+            'identity_last_trusted_at': '2026-04-06T11:45:00+00:00',
+            'identity_verification_available': True,
+            'identity_primary_verification_device_id': 'device-bob-1',
+            'identity_primary_verification_fingerprint_short': 'REMOTEFINGER',
+            'identity_primary_verification_code': '12345 67890 11111 22222 33333 44444 55555 66666 77777 88888 99999 00000',
+            'identity_primary_verification_code_short': '12345 67890 11111',
+            'identity_local_fingerprint_short': 'LOCALFINGERP',
+            'decryption_state': '',
+            'recovery_action': '',
+            'supports_call': True,
+            'call_active': False,
+            'call_status': 'idle',
+            'headline': 'identity_review_required',
+            'recommended_action': 'trust_peer_identity',
+            'actions': [
+                {
+                    'id': 'trust_peer_identity',
+                    'kind': 'identity_review',
+                    'label': 'Trust peer identity',
+                    'title': 'Trust peer identity',
+                    'description': 'Confirm the peer device identity before sending more encrypted messages.',
+                    'blocking': True,
+                    'primary': True,
+                    'available': True,
+                }
+            ],
+        }
+        assert current_summary == summary
+
+    asyncio.run(scenario())
+
+
+def test_session_manager_get_session_identity_verification_returns_peer_snapshot(monkeypatch) -> None:
+    fake_e2ee_service = FakeE2EEService(
+        {'device_id': 'device-local-1', 'has_local_bundle': True},
+        peer_identity_summary={
+            'local_device_id': 'device-local-1',
+            'local_fingerprint': 'LOCALFINGERPRINT1234567890',
+            'local_fingerprint_short': 'LOCALFINGERP',
+            'status': 'unverified',
+            'device_count': 1,
+            'trusted_device_count': 0,
+            'unverified_device_count': 1,
+            'changed_device_count': 0,
+            'unverified_device_ids': ['device-bob-1'],
+            'changed_device_ids': [],
+            'change_count': 0,
+            'last_changed_at': '',
+            'last_trusted_at': '',
+            'verification_available': True,
+            'primary_verification_device_id': 'device-bob-1',
+            'primary_verification_fingerprint': 'REMOTEFINGERPRINT1234567890',
+            'primary_verification_fingerprint_short': 'REMOTEFINGER',
+            'primary_verification_code': '12345 67890 11111 22222 33333 44444 55555 66666 77777 88888 99999 00000',
+            'primary_verification_code_short': '12345 67890 11111',
+            'checked_at': '2026-04-06T12:00:00+00:00',
+        },
+    )
+
+    monkeypatch.setattr(session_manager_module, 'get_session_service', lambda: FakeSessionService())
+    monkeypatch.setattr(session_manager_module, 'get_e2ee_service', lambda: fake_e2ee_service)
+    monkeypatch.setattr(session_manager_module, 'get_event_bus', lambda: FakeEventBus())
+    monkeypatch.setattr(session_manager_module, 'get_message_manager', lambda: FakeMessageManager())
+    monkeypatch.setattr(session_manager_module, 'get_database', lambda: FakeSessionProfileDatabase())
+
+    async def scenario() -> None:
+        manager = session_manager_module.SessionManager()
+        session = Session(
+            session_id='session-verify-1',
+            name='Bob',
+            session_type='direct',
+            participant_ids=['user-1', 'user-2'],
+        )
+        session.extra['counterpart_id'] = 'user-2'
+        session.extra['encryption_mode'] = 'e2ee_private'
+        session.extra['session_crypto_state'] = {
+            'enabled': True,
+            'ready': True,
+            'can_decrypt': True,
+            'device_registered': True,
+            'scheme': 'x25519-aesgcm-v1',
+            'attachment_scheme': 'aesgcm-file+x25519-v1',
+            'identity_status': 'unverified',
+            'identity_action_required': True,
+            'identity_review_action': 'trust_peer_identity',
+            'identity_review_blocking': False,
+            'identity_alert_severity': 'warning',
+        }
+        manager._sessions[session.session_id] = session
+        manager._current_session_id = session.session_id
+
+        verification = await manager.get_session_identity_verification(session.session_id)
+        current_verification = await manager.get_current_session_identity_verification()
+
+        assert fake_e2ee_service.peer_identity_calls == ['user-2', 'user-2']
+        assert verification['session_id'] == 'session-verify-1'
+        assert verification['user_id'] == 'user-2'
+        assert verification['available'] is True
+        assert verification['verification']['primary_verification_device_id'] == 'device-bob-1'
+        assert verification['verification']['primary_verification_code_short'] == '12345 67890 11111'
+        assert verification['security_summary']['headline'] == 'identity_unverified'
+        assert current_verification == verification
+
+    asyncio.run(scenario())
+
+
+def test_session_manager_get_session_identity_review_details_builds_timeline(monkeypatch) -> None:
+    fake_e2ee_service = FakeE2EEService(
+        {'device_id': 'device-local-1', 'has_local_bundle': True},
+        peer_identity_summary={
+            'local_device_id': 'device-local-1',
+            'local_fingerprint': 'LOCALFINGERPRINT1234567890',
+            'local_fingerprint_short': 'LOCALFINGERP',
+            'status': 'identity_changed',
+            'device_count': 1,
+            'trusted_device_count': 0,
+            'unverified_device_count': 0,
+            'changed_device_count': 1,
+            'unverified_device_ids': [],
+            'changed_device_ids': ['device-bob-1'],
+            'change_count': 2,
+            'last_changed_at': '2026-04-06T12:15:00+00:00',
+            'last_trusted_at': '2026-04-05T12:00:00+00:00',
+            'verification_available': True,
+            'primary_verification_device_id': 'device-bob-1',
+            'primary_verification_fingerprint': 'REMOTEFINGERPRINT1234567890',
+            'primary_verification_fingerprint_short': 'REMOTEFINGER',
+            'primary_verification_code': '12345 67890 11111 22222 33333 44444 55555 66666 77777 88888 99999 00000',
+            'primary_verification_code_short': '12345 67890 11111',
+            'checked_at': '2026-04-06T12:30:00+00:00',
+            'devices': [
+                {
+                    'device_id': 'device-bob-1',
+                    'device_name': 'Bob Desktop',
+                    'fingerprint': 'REMOTEFINGERPRINT1234567890',
+                    'fingerprint_short': 'REMOTEFINGER',
+                    'verification_code': '12345 67890 11111 22222 33333 44444 55555 66666 77777 88888 99999 00000',
+                    'verification_code_short': '12345 67890 11111',
+                    'trust_status': 'identity_changed',
+                    'first_seen_at': '2026-04-01T12:00:00+00:00',
+                    'last_seen_at': '2026-04-06T12:30:00+00:00',
+                    'last_changed_at': '2026-04-06T12:15:00+00:00',
+                    'last_trusted_at': '2026-04-05T12:00:00+00:00',
+                    'change_count': 2,
+                }
+            ],
+        },
+    )
+
+    monkeypatch.setattr(session_manager_module, 'get_session_service', lambda: FakeSessionService())
+    monkeypatch.setattr(session_manager_module, 'get_e2ee_service', lambda: fake_e2ee_service)
+    monkeypatch.setattr(session_manager_module, 'get_event_bus', lambda: FakeEventBus())
+    monkeypatch.setattr(session_manager_module, 'get_message_manager', lambda: FakeMessageManager())
+    monkeypatch.setattr(session_manager_module, 'get_database', lambda: FakeSessionProfileDatabase())
+
+    async def scenario() -> None:
+        manager = session_manager_module.SessionManager()
+        session = Session(
+            session_id='session-review-1',
+            name='Bob',
+            session_type='direct',
+            participant_ids=['user-1', 'user-2'],
+        )
+        session.extra['counterpart_id'] = 'user-2'
+        session.extra['encryption_mode'] = 'e2ee_private'
+        session.extra['session_crypto_state'] = {
+            'enabled': True,
+            'ready': True,
+            'can_decrypt': True,
+            'device_registered': True,
+            'scheme': 'x25519-aesgcm-v1',
+            'attachment_scheme': 'aesgcm-file+x25519-v1',
+            'identity_status': 'identity_changed',
+            'identity_action_required': True,
+            'identity_review_action': 'trust_peer_identity',
+            'identity_review_blocking': True,
+            'identity_alert_severity': 'critical',
+        }
+        manager._sessions[session.session_id] = session
+        manager._current_session_id = session.session_id
+
+        details = await manager.get_session_identity_review_details(session.session_id)
+        current_details = await manager.get_current_session_identity_review_details()
+
+        assert details['session_id'] == 'session-review-1'
+        assert details['user_id'] == 'user-2'
+        assert details['available'] is True
+        assert details['blocking'] is True
+        assert details['recommended_action'] == 'trust_peer_identity'
+        assert details['primary_device']['device_id'] == 'device-bob-1'
+        assert details['primary_device']['change_count'] == 2
+        assert details['timeline'] == [
+            {'kind': 'first_seen', 'at': '2026-04-01T12:00:00+00:00', 'label': 'First observed on this device'},
+            {'kind': 'identity_changed', 'at': '2026-04-06T12:15:00+00:00', 'label': 'Peer identity changed'},
+            {'kind': 'trusted', 'at': '2026-04-05T12:00:00+00:00', 'label': 'Peer identity trusted locally'},
+            {'kind': 'last_checked', 'at': '2026-04-06T12:30:00+00:00', 'label': 'Latest identity check'},
+        ]
+        assert current_details == details
+
+    asyncio.run(scenario())
+
+
+def test_session_manager_get_session_security_diagnostics_unifies_summary_and_review(monkeypatch) -> None:
+    fake_e2ee_service = FakeE2EEService(
+        {'device_id': 'device-local-1', 'has_local_bundle': True},
+        peer_identity_summary={
+            'local_device_id': 'device-local-1',
+            'local_fingerprint': 'LOCALFINGERPRINT1234567890',
+            'local_fingerprint_short': 'LOCALFINGERP',
+            'status': 'identity_changed',
+            'device_count': 1,
+            'trusted_device_count': 0,
+            'unverified_device_count': 0,
+            'changed_device_count': 1,
+            'unverified_device_ids': [],
+            'changed_device_ids': ['device-bob-1'],
+            'change_count': 2,
+            'last_changed_at': '2026-04-06T12:15:00+00:00',
+            'last_trusted_at': '2026-04-05T12:00:00+00:00',
+            'verification_available': True,
+            'primary_verification_device_id': 'device-bob-1',
+            'primary_verification_fingerprint': 'REMOTEFINGERPRINT1234567890',
+            'primary_verification_fingerprint_short': 'REMOTEFINGER',
+            'primary_verification_code': '12345 67890 11111 22222 33333 44444 55555 66666 77777 88888 99999 00000',
+            'primary_verification_code_short': '12345 67890 11111',
+            'checked_at': '2026-04-06T12:30:00+00:00',
+            'devices': [
+                {
+                    'device_id': 'device-bob-1',
+                    'device_name': 'Bob Desktop',
+                    'fingerprint': 'REMOTEFINGERPRINT1234567890',
+                    'fingerprint_short': 'REMOTEFINGER',
+                    'verification_code': '12345 67890 11111 22222 33333 44444 55555 66666 77777 88888 99999 00000',
+                    'verification_code_short': '12345 67890 11111',
+                    'trust_status': 'identity_changed',
+                    'first_seen_at': '2026-04-01T12:00:00+00:00',
+                    'last_seen_at': '2026-04-06T12:30:00+00:00',
+                    'last_changed_at': '2026-04-06T12:15:00+00:00',
+                    'last_trusted_at': '2026-04-05T12:00:00+00:00',
+                    'change_count': 2,
+                }
+            ],
+        },
+    )
+
+    monkeypatch.setattr(session_manager_module, 'get_session_service', lambda: FakeSessionService())
+    monkeypatch.setattr(session_manager_module, 'get_e2ee_service', lambda: fake_e2ee_service)
+    monkeypatch.setattr(session_manager_module, 'get_event_bus', lambda: FakeEventBus())
+    monkeypatch.setattr(session_manager_module, 'get_message_manager', lambda: FakeMessageManager())
+    monkeypatch.setattr(session_manager_module, 'get_database', lambda: FakeSessionProfileDatabase())
+
+    async def scenario() -> None:
+        manager = session_manager_module.SessionManager()
+        session = Session(
+            session_id='session-diagnostics-1',
+            name='Bob',
+            session_type='direct',
+            participant_ids=['user-1', 'user-2'],
+        )
+        session.extra['counterpart_id'] = 'user-2'
+        session.extra['encryption_mode'] = 'e2ee_private'
+        session.extra['session_crypto_state'] = {
+            'enabled': True,
+            'ready': True,
+            'can_decrypt': True,
+            'device_registered': True,
+            'scheme': 'x25519-aesgcm-v1',
+            'attachment_scheme': 'aesgcm-file+x25519-v1',
+            'identity_status': 'identity_changed',
+            'identity_action_required': True,
+            'identity_review_action': 'trust_peer_identity',
+            'identity_review_blocking': True,
+            'identity_alert_severity': 'critical',
+            'identity_change_count': 2,
+            'identity_last_changed_at': '2026-04-06T12:15:00+00:00',
+            'identity_last_trusted_at': '2026-04-05T12:00:00+00:00',
+            'identity_verification_available': True,
+            'identity_primary_verification_device_id': 'device-bob-1',
+            'identity_primary_verification_fingerprint_short': 'REMOTEFINGER',
+            'identity_primary_verification_code': '12345 67890 11111 22222 33333 44444 55555 66666 77777 88888 99999 00000',
+            'identity_primary_verification_code_short': '12345 67890 11111',
+            'identity_local_fingerprint_short': 'LOCALFINGERP',
+        }
+        manager._sessions[session.session_id] = session
+        manager._current_session_id = session.session_id
+
+        diagnostics = await manager.get_session_security_diagnostics(session.session_id)
+        current_diagnostics = await manager.get_current_session_security_diagnostics()
+
+        assert diagnostics['session_id'] == 'session-diagnostics-1'
+        assert diagnostics['headline'] == 'identity_review_required'
+        assert diagnostics['recommended_action'] == 'trust_peer_identity'
+        assert diagnostics['security_summary']['headline'] == 'identity_review_required'
+        assert diagnostics['identity_review']['primary_device']['device_id'] == 'device-bob-1'
+        assert diagnostics['actions'] == diagnostics['security_summary']['actions']
+        assert current_diagnostics == diagnostics
+
+    asyncio.run(scenario())
+
+
+def test_session_manager_execute_session_security_action_routes_actions(monkeypatch) -> None:
+    fake_event_bus = FakeEventBus()
+    fake_db = FakeSessionProfileDatabase()
+    fake_e2ee_service = FakeE2EEService(
+        {'device_id': 'device-local-1', 'has_local_bundle': True},
+        peer_identity_summary={
+            'status': 'identity_changed',
+            'device_count': 1,
+            'trusted_device_count': 0,
+            'unverified_device_count': 0,
+            'changed_device_count': 1,
+            'unverified_device_ids': [],
+            'changed_device_ids': ['device-bob-1'],
+            'change_count': 1,
+            'last_changed_at': '2026-04-06T12:15:00+00:00',
+            'last_trusted_at': '2026-04-06T11:45:00+00:00',
+            'checked_at': '2026-04-06T12:00:00+00:00',
+        },
+    )
+
+    monkeypatch.setattr(session_manager_module, 'get_session_service', lambda: FakeSessionService())
+    monkeypatch.setattr(session_manager_module, 'get_e2ee_service', lambda: fake_e2ee_service)
+    monkeypatch.setattr(session_manager_module, 'get_event_bus', lambda: fake_event_bus)
+    monkeypatch.setattr(session_manager_module, 'get_message_manager', lambda: FakeMessageManager())
+    monkeypatch.setattr(session_manager_module, 'get_database', lambda: fake_db)
+
+    async def scenario() -> None:
+        manager = session_manager_module.SessionManager()
+        session = Session(
+            session_id='session-1',
+            name='Bob',
+            session_type='direct',
+            participant_ids=['user-1', 'user-2'],
+        )
+        session.extra['counterpart_id'] = 'user-2'
+        session.extra['encryption_mode'] = 'e2ee_private'
+        session.extra['session_crypto_state'] = {
+            'enabled': True,
+            'ready': True,
+            'can_decrypt': True,
+            'device_registered': True,
+            'scheme': 'x25519-aesgcm-v1',
+            'attachment_scheme': 'aesgcm-file+x25519-v1',
+            'identity_status': 'identity_changed',
+            'identity_verified': False,
+            'identity_action_required': True,
+            'identity_review_action': 'trust_peer_identity',
+            'identity_review_blocking': True,
+            'identity_alert_severity': 'critical',
+            'device_id': 'device-local-1',
+        }
+        manager._sessions[session.session_id] = session
+        manager._current_session_id = 'session-1'
+
+        trusted = await manager.execute_session_security_action('session-1', 'trust_peer_identity')
+        unavailable = await manager.execute_session_security_action('session-1', 'reprovision_device')
+        unavailable_summary = dict(unavailable.get('security_summary') or {})
+
+        session.extra['session_crypto_state'] = {
+            'enabled': True,
+            'ready': False,
+            'can_decrypt': False,
+            'device_registered': True,
+            'scheme': 'x25519-aesgcm-v1',
+            'attachment_scheme': 'aesgcm-file+x25519-v1',
+            'decryption_state': 'not_for_current_device',
+            'recovery_action': 'switch_device',
+            'target_device_id': 'device-bob-2',
+            'device_id': 'device-local-1',
+        }
+        switched = await manager.execute_current_session_security_action('switch_device')
+
+        assert trusted['performed'] is True
+        assert trusted['action_id'] == 'trust_peer_identity'
+        assert trusted['security_summary']['headline'] == 'secure'
+        assert unavailable == {
+            'performed': False,
+            'session_id': 'session-1',
+            'action_id': 'reprovision_device',
+            'reason': 'action_not_available',
+            'explanation': {
+                'code': 'action_not_available',
+                'message': 'The requested security action is not currently available for this session.',
+                'available_action_ids': [],
+                'headline': 'secure',
+            },
+            'security_summary': unavailable_summary,
+        }
+        assert switched == {
+            'performed': False,
+            'session_id': 'session-1',
+            'action_id': 'switch_device',
+            'reason': 'switch_device_required',
+            'target_device_id': 'device-bob-2',
+            'explanation': {
+                'code': 'switch_device_required',
+                'message': 'This encrypted content is addressed to a different device and cannot be recovered on the current device.',
+            },
+            'external_requirement': {
+                'kind': 'switch_device',
+                'target_device_id': 'device-bob-2',
+                'blocking': True,
+            },
+            'security_summary': session.security_summary(),
+        }
+
+    asyncio.run(scenario())
+
+
+def test_session_security_summary_exposes_recovery_actions() -> None:
+    session = Session(
+        session_id='session-2',
+        name='Bob',
+        session_type='direct',
+        participant_ids=['user-1', 'user-2'],
+    )
+    session.extra['encryption_mode'] = 'e2ee_private'
+    session.extra['session_crypto_state'] = {
+        'enabled': True,
+        'ready': False,
+        'can_decrypt': False,
+        'device_registered': True,
+        'scheme': 'x25519-aesgcm-v1',
+        'attachment_scheme': 'aesgcm-file+x25519-v1',
+        'decryption_state': 'missing_private_key',
+        'recovery_action': 'reprovision_device',
+    }
+
+    summary = session.security_summary()
+
+    assert summary['headline'] == 'decryption_recovery_required'
+    assert summary['recommended_action'] == 'reprovision_device'
+    assert summary['actions'] == [
+        {
+            'id': 'reprovision_device',
+            'kind': 'crypto_recovery',
+            'label': 'reprovision device',
+            'title': 'reprovision device',
+            'description': 'Run the recommended encrypted-session recovery flow on this device.',
+            'blocking': False,
+            'primary': True,
+            'available': True,
+        }
+    ]
+
+
+def test_session_security_summary_exposes_switch_device_external_requirement() -> None:
+    session = Session(
+        session_id='session-3',
+        name='Bob',
+        session_type='direct',
+        participant_ids=['user-1', 'user-2'],
+    )
+    session.extra['encryption_mode'] = 'e2ee_private'
+    session.extra['session_crypto_state'] = {
+        'enabled': True,
+        'ready': False,
+        'can_decrypt': False,
+        'device_registered': True,
+        'scheme': 'x25519-aesgcm-v1',
+        'attachment_scheme': 'aesgcm-file+x25519-v1',
+        'decryption_state': 'not_for_current_device',
+        'recovery_action': 'switch_device',
+        'target_device_id': 'device-bob-2',
+    }
+
+    summary = session.security_summary()
+
+    assert summary['headline'] == 'decryption_recovery_required'
+    assert summary['recommended_action'] == 'switch_device'
+    assert summary['actions'] == [
+        {
+            'id': 'switch_device',
+            'kind': 'crypto_recovery',
+            'label': 'Switch device',
+            'title': 'Switch device',
+            'description': 'Open the device that owns this encrypted history to continue recovery.',
+            'blocking': True,
+            'primary': True,
+            'available': False,
+            'external_requirement': {
+                'kind': 'switch_device',
+                'target_device_id': 'device-bob-2',
+                'blocking': True,
+            },
+        }
+    ]
 
 
 def test_session_manager_history_sync_reconciles_authoritative_unread_counts(monkeypatch) -> None:
@@ -2414,4 +4261,10 @@ def test_contact_controller_group_merge_helpers_preserve_extra_and_sort(monkeypa
         assert fake_db.replaced_groups[-1][0]['extra']['member_previews'] == ['Alice(地区: Shenzhen)']
 
     asyncio.run(scenario())
+
+
+
+
+
+
 
