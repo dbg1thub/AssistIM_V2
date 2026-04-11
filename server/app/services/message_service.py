@@ -168,6 +168,7 @@ class MessageService:
         if payload is None:
             raise AppError(ErrorCode.INVALID_REQUEST, "invalid read target", 422)
 
+        event_payload = None
         if payload.get("advanced"):
             event_payload = self._record_session_event(
                 message.session_id,
@@ -176,13 +177,9 @@ class MessageService:
                 message_id=message.id,
                 actor_user_id=current_user.id,
             )
-            payload = {**payload, **event_payload}
 
         self.db.commit()
-        return {
-            "status": "read",
-            **payload,
-        }
+        return self._read_result(payload, event_payload)
 
     def batch_read(self, current_user: User, session_id: str, message_id: str) -> dict:
         self._ensure_visible_session_membership(current_user.id, session_id)
@@ -196,6 +193,7 @@ class MessageService:
         if payload is None:
             raise AppError(ErrorCode.INVALID_REQUEST, "invalid read target", 422)
 
+        event_payload = None
         if payload.get("advanced"):
             event_payload = self._record_session_event(
                 session_id,
@@ -204,13 +202,9 @@ class MessageService:
                 message_id=last_message.id,
                 actor_user_id=current_user.id,
             )
-            payload = {**payload, **event_payload}
 
         self.db.commit()
-        return {
-            "success": True,
-            **payload,
-        }
+        return self._read_result(payload, event_payload)
 
     def recall(self, current_user: User, message_id: str) -> dict:
         message = self.messages.get_by_id(message_id)
@@ -1047,7 +1041,39 @@ class MessageService:
             "message_id": payload.get("message_id", ""),
             "last_read_seq": int(payload.get("last_read_seq", 0) or 0),
             "user_id": payload.get("user_id", ""),
-            "read_at": payload.get("read_at"),
+            "read_at": MessageService._read_timestamp(payload.get("read_at")),
+        }
+
+    @staticmethod
+    def _read_timestamp(value: Any) -> str | None:
+        if value is None:
+            return None
+        if isinstance(value, datetime):
+            return ensure_utc(value).isoformat()
+        if isinstance(value, str):
+            normalized = value.strip()
+            if not normalized:
+                return None
+            try:
+                return ensure_utc(datetime.fromisoformat(normalized.replace("Z", "+00:00"))).isoformat()
+            except ValueError:
+                return normalized
+        return str(value)
+
+    @staticmethod
+    def _read_result(payload: dict[str, Any], event_payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        advanced = bool(payload.get("advanced"))
+        event_payload = event_payload or {}
+        return {
+            "status": "read",
+            "session_id": str(payload.get("session_id") or ""),
+            "message_id": str(payload.get("message_id") or ""),
+            "last_read_seq": int(payload.get("last_read_seq", 0) or 0),
+            "user_id": str(payload.get("user_id") or ""),
+            "read_at": MessageService._read_timestamp(payload.get("read_at")),
+            "advanced": advanced,
+            "noop": not advanced,
+            "event_seq": int(event_payload.get("event_seq", 0) or 0),
         }
 
     @staticmethod

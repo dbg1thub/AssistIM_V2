@@ -1086,11 +1086,14 @@ def test_group_read_receipts_are_tracked_per_member(
     )
     assert bob_read_response.status_code == 200
     bob_read_payload = bob_read_response.json()["data"]
-    assert bob_read_payload["success"] is True
+    assert bob_read_payload["status"] == "read"
+    assert bob_read_payload["advanced"] is True
+    assert bob_read_payload["noop"] is False
     assert bob_read_payload["message_id"] == message_id
     assert "last_read_message_id" not in bob_read_payload
     assert bob_read_payload["last_read_seq"] == 1
     assert bob_read_payload["user_id"] == bob["user"]["id"]
+    assert int(bob_read_payload["event_seq"]) > 0
 
     bob_unread_response = client.get(
         "/api/v1/messages/unread",
@@ -1126,6 +1129,93 @@ def test_group_read_receipts_are_tracked_per_member(
     charlie_payload = charlie_history.json()["data"][0]
     assert charlie_payload["is_read_by_me"] is False
 
+
+def test_read_batch_returns_stable_payload_for_noop(
+    client: TestClient,
+    user_factory,
+    auth_header,
+) -> None:
+    from sqlalchemy import func, select
+
+    from app.core.database import SessionLocal
+    from app.models.session import SessionEvent
+
+    alice = user_factory("alice_read_noop", "Alice Read Noop")
+    bob = user_factory("bob_read_noop", "Bob Read Noop")
+
+    create_session_response = client.post(
+        "/api/v1/sessions/direct",
+        json={"participant_ids": [bob["user"]["id"]]},
+        headers=auth_header(alice["access_token"]),
+    )
+    assert create_session_response.status_code == 200
+    session_id = create_session_response.json()["data"]["id"]
+
+    send_message_response = client.post(
+        f"/api/v1/sessions/{session_id}/messages",
+        json={"msg_id": "10000000-0000-4000-8000-000000000028", "content": "read once", "message_type": "text"},
+        headers=auth_header(alice["access_token"]),
+    )
+    assert send_message_response.status_code == 200
+    message_id = send_message_response.json()["data"]["message_id"]
+
+    expected_keys = {
+        "status",
+        "session_id",
+        "message_id",
+        "last_read_seq",
+        "user_id",
+        "read_at",
+        "advanced",
+        "noop",
+        "event_seq",
+    }
+
+    first_response = client.post(
+        "/api/v1/messages/read/batch",
+        json={"session_id": session_id, "message_id": message_id},
+        headers=auth_header(bob["access_token"]),
+    )
+    assert first_response.status_code == 200
+    first_payload = first_response.json()["data"]
+    assert set(first_payload) == expected_keys
+    assert first_payload["status"] == "read"
+    assert first_payload["session_id"] == session_id
+    assert first_payload["message_id"] == message_id
+    assert first_payload["last_read_seq"] == 1
+    assert first_payload["user_id"] == bob["user"]["id"]
+    assert first_payload["read_at"] is not None
+    assert first_payload["advanced"] is True
+    assert first_payload["noop"] is False
+    assert int(first_payload["event_seq"]) > 0
+
+    second_response = client.post(
+        "/api/v1/messages/read/batch",
+        json={"session_id": session_id, "message_id": message_id},
+        headers=auth_header(bob["access_token"]),
+    )
+    assert second_response.status_code == 200
+    second_payload = second_response.json()["data"]
+    assert set(second_payload) == expected_keys
+    assert second_payload["status"] == "read"
+    assert second_payload["session_id"] == session_id
+    assert second_payload["message_id"] == message_id
+    assert second_payload["last_read_seq"] == 1
+    assert second_payload["user_id"] == bob["user"]["id"]
+    assert second_payload["read_at"] == first_payload["read_at"]
+    assert second_payload["advanced"] is False
+    assert second_payload["noop"] is True
+    assert second_payload["event_seq"] == 0
+
+    with SessionLocal() as db:
+        read_event_count = db.execute(
+            select(func.count(SessionEvent.id)).where(
+                SessionEvent.session_id == session_id,
+                SessionEvent.type == "read",
+            )
+        ).scalar_one()
+
+    assert read_event_count == 1
 
 
 def test_read_batch_requires_canonical_message_id_field(
