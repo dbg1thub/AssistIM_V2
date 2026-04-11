@@ -168,6 +168,20 @@ def test_group_role_update_requires_owner_and_disallows_owner_role_change(client
     )
     assert invalid_role_response.status_code == 422
 
+    non_string_role_response = client.patch(
+        f"/api/v1/groups/{group_id}/members/{member['user']['id']}/role",
+        json={"role": 123},
+        headers=auth_header(owner["access_token"]),
+    )
+    assert non_string_role_response.status_code == 422
+
+    missing_role_response = client.patch(
+        f"/api/v1/groups/{group_id}/members/{member['user']['id']}/role",
+        json={},
+        headers=auth_header(owner["access_token"]),
+    )
+    assert missing_role_response.status_code == 422
+
     owner_change_response = client.patch(
         f"/api/v1/groups/{group_id}/members/{owner['user']['id']}/role",
         json={"role": "member"},
@@ -295,6 +309,36 @@ def test_group_schema_rejects_conflicting_member_sources_and_extra_fields(client
     )
     assert extra_field.status_code == 422
 
+    blank_member = client.post(
+        "/api/v1/groups",
+        json={"name": "Ops", "member_ids": ["   "]},
+        headers=auth_header(owner["access_token"]),
+    )
+    assert blank_member.status_code == 422
+
+    oversized_member = client.post(
+        "/api/v1/groups",
+        json={"name": "Ops", "member_ids": ["u" * 129]},
+        headers=auth_header(owner["access_token"]),
+    )
+    assert oversized_member.status_code == 422
+
+    non_string_member = client.post(
+        "/api/v1/groups",
+        json={"name": "Ops", "member_ids": [123]},
+        headers=auth_header(owner["access_token"]),
+    )
+    assert non_string_member.status_code == 422
+
+    normalized_duplicate = client.post(
+        "/api/v1/groups",
+        json={"name": "Ops", "member_ids": [f"  {member['user']['id']}  ", member["user"]["id"]]},
+        headers=auth_header(owner["access_token"]),
+    )
+    assert normalized_duplicate.status_code == 201
+    normalized_members = normalized_duplicate.json()["data"]["members"]
+    normalized_member_ids = [item["id"] for item in normalized_members]
+    assert normalized_member_ids.count(member["user"]["id"]) == 1
 
 
 def test_group_member_and_profile_schemas_reject_extra_fields(client: TestClient, user_factory, auth_header) -> None:
@@ -314,6 +358,41 @@ def test_group_member_and_profile_schemas_reject_extra_fields(client: TestClient
         headers=auth_header(owner["access_token"]),
     )
     assert extra_add.status_code == 422
+
+    blank_add = client.post(
+        f"/api/v1/groups/{group_id}/members",
+        json={"user_id": "   ", "role": "member"},
+        headers=auth_header(owner["access_token"]),
+    )
+    assert blank_add.status_code == 422
+
+    oversized_add = client.post(
+        f"/api/v1/groups/{group_id}/members",
+        json={"user_id": "u" * 129, "role": "member"},
+        headers=auth_header(owner["access_token"]),
+    )
+    assert oversized_add.status_code == 422
+
+    non_string_add = client.post(
+        f"/api/v1/groups/{group_id}/members",
+        json={"user_id": 123, "role": "member"},
+        headers=auth_header(owner["access_token"]),
+    )
+    assert non_string_add.status_code == 422
+
+    blank_transfer = client.post(
+        f"/api/v1/groups/{group_id}/transfer",
+        json={"new_owner_id": "   "},
+        headers=auth_header(owner["access_token"]),
+    )
+    assert blank_transfer.status_code == 422
+
+    oversized_transfer = client.post(
+        f"/api/v1/groups/{group_id}/transfer",
+        json={"new_owner_id": "u" * 129},
+        headers=auth_header(owner["access_token"]),
+    )
+    assert oversized_transfer.status_code == 422
 
     extra_profile = client.patch(
         f"/api/v1/groups/{group_id}",

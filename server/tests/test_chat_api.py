@@ -2426,6 +2426,20 @@ def test_create_direct_session_requires_exactly_one_normalized_participant(clien
     )
     assert multiple_participants.status_code == 422
 
+    oversized_participant = client.post(
+        "/api/v1/sessions/direct",
+        json={"participant_ids": ["u" * 129]},
+        headers=auth_header(alice["access_token"]),
+    )
+    assert oversized_participant.status_code == 422
+
+    non_string_participant = client.post(
+        "/api/v1/sessions/direct",
+        json={"participant_ids": [123]},
+        headers=auth_header(alice["access_token"]),
+    )
+    assert non_string_participant.status_code == 422
+
     extra_field = client.post(
         "/api/v1/sessions/direct",
         json={"participant_ids": [bob["user"]["id"]], "extra": True},
@@ -2449,6 +2463,17 @@ def test_create_direct_session_requires_exactly_one_normalized_participant(clien
     normalized_payload = normalized_participant.json()["data"]
     assert normalized_payload["counterpart_id"] == bob["user"]["id"]
     assert bob["user"]["id"] in normalized_payload["participant_ids"]
+
+    duplicate_participant = client.post(
+        "/api/v1/sessions/direct",
+        json={"participant_ids": [bob["user"]["id"], f"  {bob['user']['id']}  "]},
+        headers=auth_header(alice["access_token"]),
+    )
+    assert duplicate_participant.status_code == 200
+    duplicate_payload = duplicate_participant.json()["data"]
+    assert duplicate_payload["counterpart_id"] == bob["user"]["id"]
+    assert duplicate_payload["participant_ids"].count(bob["user"]["id"]) == 1
+
 
 def test_friend_request_requires_one_consistent_target_field(client: TestClient, user_factory, auth_header) -> None:
     alice = user_factory("alice_friend_schema", "Alice")

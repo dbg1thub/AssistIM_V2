@@ -2,20 +2,28 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator, model_validator
 
 from app.schemas.common import ORMModel
+
+
+MAX_GROUP_IDENTIFIER_LENGTH = 128
+GroupIdentifier = Annotated[
+    str,
+    StringConstraints(strip_whitespace=True, min_length=1, max_length=MAX_GROUP_IDENTIFIER_LENGTH),
+]
+GroupMemberRole = Literal["member", "admin"]
 
 
 class GroupCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: str = Field(default="", max_length=128)
-    member_ids: list[str] = Field(default_factory=list)
+    member_ids: list[GroupIdentifier] = Field(default_factory=list)
     encryption_mode: Literal["plain", "e2ee_group"] = "plain"
-    members: list[str] = Field(default_factory=list)
+    members: list[GroupIdentifier] = Field(default_factory=list)
 
     @field_validator("name")
     @classmethod
@@ -24,15 +32,8 @@ class GroupCreate(BaseModel):
 
     @field_validator("member_ids", "members")
     @classmethod
-    def _normalize_member_list(cls, values: list[str]) -> list[str]:
-        normalized: list[str] = []
-        for raw_id in list(values or []):
-            normalized_id = str(raw_id or "").strip()
-            if not normalized_id:
-                raise ValueError("member ids cannot contain blank values")
-            if normalized_id not in normalized:
-                normalized.append(normalized_id)
-        return normalized
+    def _dedupe_member_list(cls, values: list[str]) -> list[str]:
+        return list(dict.fromkeys(values or []))
 
     @model_validator(mode="after")
     def _validate_member_sources(self) -> "GroupCreate":
@@ -48,36 +49,34 @@ class GroupCreate(BaseModel):
 class GroupMemberAdd(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    user_id: str
+    user_id: GroupIdentifier
     role: Literal["member"] = "member"
 
-    @field_validator("user_id")
+    @field_validator("role", mode="before")
     @classmethod
-    def _normalize_user_id(cls, value: str) -> str:
-        normalized = str(value or "").strip()
-        if not normalized:
-            raise ValueError("user_id is required")
-        return normalized
+    def _normalize_role(cls, value: object) -> str:
+        if not isinstance(value, str):
+            raise ValueError("role must be a string")
+        return value.strip().lower()
 
 
 class GroupMemberRoleUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    role: Literal["member", "admin"] = "member"
+    role: GroupMemberRole
+
+    @field_validator("role", mode="before")
+    @classmethod
+    def _normalize_role(cls, value: object) -> str:
+        if not isinstance(value, str):
+            raise ValueError("role must be a string")
+        return value.strip().lower()
 
 
 class GroupTransferOwner(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    new_owner_id: str
-
-    @field_validator("new_owner_id")
-    @classmethod
-    def _normalize_new_owner_id(cls, value: str) -> str:
-        normalized = str(value or "").strip()
-        if not normalized:
-            raise ValueError("new_owner_id is required")
-        return normalized
+    new_owner_id: GroupIdentifier
 
 
 class GroupProfileUpdate(BaseModel):
