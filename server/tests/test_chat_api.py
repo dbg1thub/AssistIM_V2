@@ -1,9 +1,10 @@
-﻿"""Chat and friendship API tests."""
+"""Chat and friendship API tests."""
 
 from __future__ import annotations
 
 from datetime import datetime
 import hashlib
+from unittest.mock import AsyncMock
 import pytest
 from fastapi.testclient import TestClient
 from starlette.routing import WebSocketRoute
@@ -106,7 +107,7 @@ def test_friend_request_private_session_and_message_flow(
 
     create_session_response = client.post(
         "/api/v1/sessions/direct",
-        json={"participant_ids": [bob["user"]["id"]], "name": "Alice & Bob"},
+        json={"participant_ids": [bob["user"]["id"]]},
         headers=auth_header(alice["access_token"]),
     )
     assert create_session_response.status_code == 200
@@ -121,7 +122,7 @@ def test_friend_request_private_session_and_message_flow(
 
     send_message_response = client.post(
         f"/api/v1/sessions/{session_id}/messages",
-        json={"content": "hello bob", "message_type": "text"},
+        json={"msg_id": "10000000-0000-4000-8000-000000000001", "content": "hello bob", "message_type": "text"},
         headers=auth_header(alice["access_token"]),
     )
     assert send_message_response.status_code == 200
@@ -137,7 +138,7 @@ def test_friend_request_private_session_and_message_flow(
     assert message_payload["timestamp"] == message_payload["created_at"]
     assert message_payload["session_type"] == "direct"
     assert sorted(message_payload["participant_ids"]) == sorted([alice["user"]["id"], bob["user"]["id"]])
-    assert message_payload["session_name"] == "Alice & Bob"
+    assert message_payload["session_name"] == "Private Chat"
     assert message_payload["sender_profile"]["id"] == alice["user"]["id"]
     assert message_payload["sender_profile"]["username"] == alice["user"]["username"]
     assert message_payload["sender_profile"]["avatar"] == alice["user"]["avatar"]
@@ -184,7 +185,7 @@ def test_create_direct_session_is_idempotent_and_reuses_same_session(
 
     first_response = client.post(
         "/api/v1/sessions/direct",
-        json={"participant_ids": [bob["user"]["id"]], "name": "Alice & Bob"},
+        json={"participant_ids": [bob["user"]["id"]]},
         headers=auth_header(alice["access_token"]),
     )
     assert first_response.status_code == 200
@@ -192,7 +193,7 @@ def test_create_direct_session_is_idempotent_and_reuses_same_session(
 
     second_response = client.post(
         "/api/v1/sessions/direct",
-        json={"participant_ids": [bob["user"]["id"]], "name": "Renamed Private Chat"},
+        json={"participant_ids": [bob["user"]["id"]]},
         headers=auth_header(alice["access_token"]),
     )
     assert second_response.status_code == 200
@@ -234,7 +235,7 @@ def test_send_message_requires_canonical_message_type_field(
 
     create_session_response = client.post(
         "/api/v1/sessions/direct",
-        json={"participant_ids": [bob["user"]["id"]], "name": "Alice & Bob"},
+        json={"participant_ids": [bob["user"]["id"]]},
         headers=auth_header(alice["access_token"]),
     )
     assert create_session_response.status_code == 200
@@ -242,12 +243,132 @@ def test_send_message_requires_canonical_message_type_field(
 
     response = client.post(
         f"/api/v1/sessions/{session_id}/messages",
-        json={"content": "legacy http body", "type": "text"},
+        json={"msg_id": "10000000-0000-4000-8000-000000000003", "content": "legacy http body", "type": "text"},
         headers=auth_header(alice["access_token"]),
     )
 
     assert response.status_code == 422
     assert "type" in response.json()["message"]
+
+
+def test_http_send_message_requires_msg_id_and_rejects_system_type(
+    client: TestClient,
+    user_factory,
+    auth_header,
+) -> None:
+    alice = user_factory("alice_http_formal_send", "Alice Http Formal Send")
+    bob = user_factory("bob_http_formal_send", "Bob Http Formal Send")
+
+    create_session_response = client.post(
+        "/api/v1/sessions/direct",
+        json={"participant_ids": [bob["user"]["id"]]},
+        headers=auth_header(alice["access_token"]),
+    )
+    assert create_session_response.status_code == 200
+    session_id = create_session_response.json()["data"]["id"]
+
+    missing_msg_id = client.post(
+        f"/api/v1/sessions/{session_id}/messages",
+        json={"content": "missing id", "message_type": "text"},
+        headers=auth_header(alice["access_token"]),
+    )
+    assert missing_msg_id.status_code == 422
+
+    system_type = client.post(
+        f"/api/v1/sessions/{session_id}/messages",
+        json={
+            "msg_id": "11000000-0000-4000-8000-000000000001",
+            "content": "forged system",
+            "message_type": "system",
+        },
+        headers=auth_header(alice["access_token"]),
+    )
+    assert system_type.status_code == 422
+
+
+def test_http_send_message_uses_msg_id_and_realtime_broadcasts(
+    client: TestClient,
+    user_factory,
+    auth_header,
+) -> None:
+    alice = user_factory("alice_http_realtime", "Alice Http Realtime")
+    bob = user_factory("bob_http_realtime", "Bob Http Realtime")
+
+    create_session_response = client.post(
+        "/api/v1/sessions/direct",
+        json={"participant_ids": [bob["user"]["id"]]},
+        headers=auth_header(alice["access_token"]),
+    )
+    assert create_session_response.status_code == 200
+    session_id = create_session_response.json()["data"]["id"]
+    msg_id = "11000000-0000-4000-8000-000000000002"
+
+    with client.websocket_connect("/ws") as bob_ws:
+        authenticate_ws(bob_ws, bob["access_token"], msg_id="ws-auth-http-realtime-bob")
+        send_response = client.post(
+            f"/api/v1/sessions/{session_id}/messages",
+            json={"msg_id": msg_id, "content": "hello over http", "message_type": "text"},
+            headers=auth_header(alice["access_token"]),
+        )
+        assert send_response.status_code == 200
+        send_payload = send_response.json()["data"]
+        assert send_payload["message_id"] == msg_id
+
+        realtime_payload = receive_until(bob_ws, "chat_message")
+        assert realtime_payload["msg_id"] == msg_id
+        assert realtime_payload["data"]["message_id"] == msg_id
+        assert realtime_payload["data"]["content"] == "hello over http"
+        assert realtime_payload["data"]["is_self"] is False
+
+        duplicate_response = client.post(
+            f"/api/v1/sessions/{session_id}/messages",
+            json={"msg_id": msg_id, "content": "hello over http", "message_type": "text"},
+            headers=auth_header(alice["access_token"]),
+        )
+        assert duplicate_response.status_code == 200
+        assert duplicate_response.json()["data"]["message_id"] == msg_id
+
+
+def test_websocket_chat_message_rejects_system_type(
+    client: TestClient,
+    user_factory,
+    auth_header,
+) -> None:
+    alice = user_factory("alice_ws_system_type", "Alice Ws System Type")
+    bob = user_factory("bob_ws_system_type", "Bob Ws System Type")
+
+    create_session_response = client.post(
+        "/api/v1/sessions/direct",
+        json={"participant_ids": [bob["user"]["id"]]},
+        headers=auth_header(alice["access_token"]),
+    )
+    assert create_session_response.status_code == 200
+    session_id = create_session_response.json()["data"]["id"]
+
+    with client.websocket_connect("/ws") as alice_ws:
+        authenticate_ws(alice_ws, alice["access_token"], msg_id="ws-auth-system-type")
+        alice_ws.send_json(
+            {
+                "type": "chat_message",
+                "msg_id": "11000000-0000-4000-8000-000000000003",
+                "data": {
+                    "session_id": session_id,
+                    "content": "forged system over ws",
+                    "message_type": "system",
+                },
+            }
+        )
+        error_payload = receive_until(alice_ws, "error")
+        assert error_payload["msg_id"] == "11000000-0000-4000-8000-000000000003"
+        assert error_payload["data"]["message"] == "unsupported message type"
+
+    history_response = client.get(
+        f"/api/v1/sessions/{session_id}/messages",
+        headers=auth_header(alice["access_token"]),
+    )
+    assert history_response.status_code == 200
+    assert history_response.json()["data"] == []
+
 
 def test_invalid_read_ack_does_not_disconnect_websocket(
     client: TestClient,
@@ -259,7 +380,7 @@ def test_invalid_read_ack_does_not_disconnect_websocket(
 
     create_session_response = client.post(
         "/api/v1/sessions/direct",
-        json={"participant_ids": [bob["user"]["id"]], "name": "Alice & Bob"},
+        json={"participant_ids": [bob["user"]["id"]]},
         headers=auth_header(alice["access_token"]),
     )
     assert create_session_response.status_code == 200
@@ -300,7 +421,7 @@ def test_invalid_read_ack_does_not_disconnect_websocket(
             }
         )
         error_payload = receive_until(bob_ws, "error")
-        assert "not a session member" in error_payload["data"]["message"]
+        assert "session not found" in error_payload["data"]["message"]
 
         alice_ws.send_json(
             {
@@ -351,7 +472,7 @@ def test_websocket_chat_message_uses_recipient_is_self_view(client: TestClient, 
 
     create_session_response = client.post(
         "/api/v1/sessions/direct",
-        json={"participant_ids": [bob["user"]["id"]], "name": "Alice & Bob"},
+        json={"participant_ids": [bob["user"]["id"]]},
         headers=auth_header(alice["access_token"]),
     )
     assert create_session_response.status_code == 200
@@ -418,7 +539,7 @@ def test_private_websocket_delivers_multiple_messages_after_explicit_auth(
 
     create_session_response = client.post(
         "/api/v1/sessions/direct",
-        json={"participant_ids": [bob["user"]["id"]], "name": "Alice & Bob"},
+        json={"participant_ids": [bob["user"]["id"]]},
         headers=auth_header(alice["access_token"]),
     )
     assert create_session_response.status_code == 200
@@ -450,7 +571,7 @@ def test_private_websocket_delivers_multiple_messages_after_explicit_auth(
             assert received["data"]["content"] == content
             assert received["data"]["session_id"] == session_id
             assert received["data"]["session_type"] == "direct"
-            assert received["data"]["session_name"] == "Alice & Bob"
+            assert received["data"]["session_name"] == "Private Chat"
             assert received["data"]["sender_profile"]["id"] == alice["user"]["id"]
             assert received["data"]["sender_profile"]["avatar"] == alice["user"]["avatar"]
 
@@ -540,14 +661,14 @@ def test_group_mention_all_requires_owner_or_admin(
 
     member_response = client.post(
         f"/api/v1/sessions/{session_id}/messages",
-        json={"content": "@所有人 hi", "message_type": "text", "extra": mention_extra},
+        json={"msg_id": "10000000-0000-4000-8000-000000000004", "content": "@所有人 hi", "message_type": "text", "extra": mention_extra},
         headers=auth_header(member["access_token"]),
     )
     assert member_response.status_code == 403
 
     admin_response = client.post(
         f"/api/v1/sessions/{session_id}/messages",
-        json={"content": "@所有人 hi", "message_type": "text", "extra": mention_extra},
+        json={"msg_id": "10000000-0000-4000-8000-000000000005", "content": "@所有人 hi", "message_type": "text", "extra": mention_extra},
         headers=auth_header(admin["access_token"]),
     )
     assert admin_response.status_code == 200
@@ -555,7 +676,7 @@ def test_group_mention_all_requires_owner_or_admin(
 
     owner_response = client.post(
         f"/api/v1/sessions/{session_id}/messages",
-        json={"content": "@所有人 hi", "message_type": "text", "extra": mention_extra},
+        json={"msg_id": "10000000-0000-4000-8000-000000000006", "content": "@所有人 hi", "message_type": "text", "extra": mention_extra},
         headers=auth_header(owner["access_token"]),
     )
     assert owner_response.status_code == 200
@@ -635,7 +756,7 @@ def test_websocket_message_mutations_require_message_owner(
 
     create_session_response = client.post(
         "/api/v1/sessions/direct",
-        json={"participant_ids": [bob["user"]["id"]], "name": "Alice & Bob"},
+        json={"participant_ids": [bob["user"]["id"]]},
         headers=auth_header(alice["access_token"]),
     )
     assert create_session_response.status_code == 200
@@ -643,7 +764,7 @@ def test_websocket_message_mutations_require_message_owner(
 
     send_message_response = client.post(
         f"/api/v1/sessions/{session_id}/messages",
-        json={"content": "hello bob", "message_type": "text"},
+        json={"msg_id": "10000000-0000-4000-8000-000000000007", "content": "hello bob", "message_type": "text"},
         headers=auth_header(alice["access_token"]),
     )
     assert send_message_response.status_code == 200
@@ -719,7 +840,7 @@ def test_edit_message_rejects_messages_older_than_two_minutes(
 
     create_session_response = client.post(
         "/api/v1/sessions/direct",
-        json={"participant_ids": [bob["user"]["id"]], "name": "Alice & Bob"},
+        json={"participant_ids": [bob["user"]["id"]]},
         headers=auth_header(alice["access_token"]),
     )
     assert create_session_response.status_code == 200
@@ -727,7 +848,7 @@ def test_edit_message_rejects_messages_older_than_two_minutes(
 
     send_message_response = client.post(
         f"/api/v1/sessions/{session_id}/messages",
-        json={"content": "original content", "message_type": "text"},
+        json={"msg_id": "10000000-0000-4000-8000-000000000009", "content": "original content", "message_type": "text"},
         headers=auth_header(alice["access_token"]),
     )
     assert send_message_response.status_code == 200
@@ -759,6 +880,33 @@ def test_edit_message_rejects_messages_older_than_two_minutes(
     assert history_payload[0]["content"] == "original content"
     assert history_payload[0]["status"] == "sent"
 
+
+def test_edit_message_rejects_unknown_fields_and_blank_content(client: TestClient, user_factory, auth_header) -> None:
+    alice = user_factory("alice_edit_schema", "Alice Edit Schema")
+
+    extra_field = client.put(
+        "/api/v1/messages/message-1",
+        json={"content": "updated", "legacy": True},
+        headers=auth_header(alice["access_token"]),
+    )
+    assert extra_field.status_code == 422
+
+    blank_content = client.put(
+        "/api/v1/messages/message-1",
+        json={"content": "   "},
+        headers=auth_header(alice["access_token"]),
+    )
+    assert blank_content.status_code == 422
+
+    oversized_content = client.put(
+        "/api/v1/messages/message-1",
+        json={"content": "x" * 20001},
+        headers=auth_header(alice["access_token"]),
+    )
+
+    assert oversized_content.status_code == 422
+
+
 def test_group_read_receipts_are_tracked_per_member(
     client: TestClient,
     user_factory,
@@ -778,7 +926,7 @@ def test_group_read_receipts_are_tracked_per_member(
 
     send_message_response = client.post(
         f"/api/v1/sessions/{session_id}/messages",
-        json={"content": "group hello", "message_type": "text"},
+        json={"msg_id": "10000000-0000-4000-8000-000000000011", "content": "group hello", "message_type": "text"},
         headers=auth_header(alice["access_token"]),
     )
     assert send_message_response.status_code == 200
@@ -860,6 +1008,27 @@ def test_read_batch_requires_canonical_message_id_field(
     assert response.status_code == 422
     assert "message_id" in response.json()["message"]
 
+    extra_field = client.post(
+        "/api/v1/messages/read/batch",
+        json={"session_id": "session-1", "message_id": "message-1", "last_read_id": "message-1"},
+        headers=auth_header(alice["access_token"]),
+    )
+    assert extra_field.status_code == 422
+
+    blank_session = client.post(
+        "/api/v1/messages/read/batch",
+        json={"session_id": "   ", "message_id": "message-1"},
+        headers=auth_header(alice["access_token"]),
+    )
+    assert blank_session.status_code == 422
+
+    oversized_message_id = client.post(
+        "/api/v1/messages/read/batch",
+        json={"session_id": "session-1", "message_id": "m" * 129},
+        headers=auth_header(alice["access_token"]),
+    )
+    assert oversized_message_id.status_code == 422
+
 
 def test_read_ack_websocket_broadcasts_read_cursor(
     client: TestClient,
@@ -871,7 +1040,7 @@ def test_read_ack_websocket_broadcasts_read_cursor(
 
     create_session_response = client.post(
         "/api/v1/sessions/direct",
-        json={"participant_ids": [bob["user"]["id"]], "name": "Alice & Bob"},
+        json={"participant_ids": [bob["user"]["id"]]},
         headers=auth_header(alice["access_token"]),
     )
     assert create_session_response.status_code == 200
@@ -879,7 +1048,7 @@ def test_read_ack_websocket_broadcasts_read_cursor(
 
     send_message_response = client.post(
         f"/api/v1/sessions/{session_id}/messages",
-        json={"content": "hello bob", "message_type": "text"},
+        json={"msg_id": "10000000-0000-4000-8000-000000000014", "content": "hello bob", "message_type": "text"},
         headers=auth_header(alice["access_token"]),
     )
     assert send_message_response.status_code == 200
@@ -922,7 +1091,7 @@ def test_websocket_duplicate_message_id_is_idempotent_and_ack_returns_canonical_
 
     create_session_response = client.post(
         "/api/v1/sessions/direct",
-        json={"participant_ids": [bob["user"]["id"]], "name": "Alice & Bob"},
+        json={"participant_ids": [bob["user"]["id"]]},
         headers=auth_header(alice["access_token"]),
     )
     assert create_session_response.status_code == 200
@@ -990,7 +1159,7 @@ def test_websocket_rejects_conflicting_duplicate_message_id(
 
     create_session_response = client.post(
         "/api/v1/sessions/direct",
-        json={"participant_ids": [bob["user"]["id"]], "name": "Alice & Bob"},
+        json={"participant_ids": [bob["user"]["id"]]},
         headers=auth_header(alice["access_token"]),
     )
     assert create_session_response.status_code == 200
@@ -1056,7 +1225,7 @@ def test_websocket_sync_messages_uses_session_cursors(
 
     create_session_response = client.post(
         "/api/v1/sessions/direct",
-        json={"participant_ids": [bob["user"]["id"]], "name": "Alice & Bob"},
+        json={"participant_ids": [bob["user"]["id"]]},
         headers=auth_header(alice["access_token"]),
     )
     assert create_session_response.status_code == 200
@@ -1064,7 +1233,7 @@ def test_websocket_sync_messages_uses_session_cursors(
 
     first_response = client.post(
         f"/api/v1/sessions/{session_id}/messages",
-        json={"content": "first sync message", "message_type": "text"},
+        json={"msg_id": "10000000-0000-4000-8000-000000000017", "content": "first sync message", "message_type": "text"},
         headers=auth_header(alice["access_token"]),
     )
     assert first_response.status_code == 200
@@ -1072,7 +1241,7 @@ def test_websocket_sync_messages_uses_session_cursors(
 
     second_response = client.post(
         f"/api/v1/sessions/{session_id}/messages",
-        json={"content": "second sync message", "message_type": "text"},
+        json={"msg_id": "10000000-0000-4000-8000-000000000018", "content": "second sync message", "message_type": "text"},
         headers=auth_header(alice["access_token"]),
     )
     assert second_response.status_code == 200
@@ -1116,7 +1285,7 @@ def test_websocket_sync_messages_replays_offline_read_and_edit_events(
 
     create_session_response = client.post(
         "/api/v1/sessions/direct",
-        json={"participant_ids": [bob["user"]["id"]], "name": "Alice & Bob"},
+        json={"participant_ids": [bob["user"]["id"]]},
         headers=auth_header(alice["access_token"]),
     )
     assert create_session_response.status_code == 200
@@ -1124,7 +1293,7 @@ def test_websocket_sync_messages_replays_offline_read_and_edit_events(
 
     send_message_response = client.post(
         f"/api/v1/sessions/{session_id}/messages",
-        json={"content": "original sync payload", "message_type": "text"},
+        json={"msg_id": "10000000-0000-4000-8000-000000000019", "content": "original sync payload", "message_type": "text"},
         headers=auth_header(alice["access_token"]),
     )
     assert send_message_response.status_code == 200
@@ -1191,7 +1360,7 @@ def test_websocket_sync_messages_replays_offline_recall_and_delete_events(
 
     create_session_response = client.post(
         "/api/v1/sessions/direct",
-        json={"participant_ids": [bob["user"]["id"]], "name": "Alice & Bob"},
+        json={"participant_ids": [bob["user"]["id"]]},
         headers=auth_header(alice["access_token"]),
     )
     assert create_session_response.status_code == 200
@@ -1199,7 +1368,7 @@ def test_websocket_sync_messages_replays_offline_recall_and_delete_events(
 
     first_message = client.post(
         f"/api/v1/sessions/{session_id}/messages",
-        json={"content": "first message", "message_type": "text"},
+        json={"msg_id": "10000000-0000-4000-8000-000000000020", "content": "first message", "message_type": "text"},
         headers=auth_header(alice["access_token"]),
     )
     assert first_message.status_code == 200
@@ -1208,7 +1377,7 @@ def test_websocket_sync_messages_replays_offline_recall_and_delete_events(
 
     second_message = client.post(
         f"/api/v1/sessions/{session_id}/messages",
-        json={"content": "second message", "message_type": "text"},
+        json={"msg_id": "10000000-0000-4000-8000-000000000021", "content": "second message", "message_type": "text"},
         headers=auth_header(alice["access_token"]),
     )
     assert second_message.status_code == 200
@@ -1315,7 +1484,7 @@ def test_attachment_message_extra_roundtrips_through_history_and_sync_messages(
 
     create_session_response = client.post(
         "/api/v1/sessions/direct",
-        json={"participant_ids": [bob["user"]["id"]], "name": "Alice & Bob"},
+        json={"participant_ids": [bob["user"]["id"]]},
         headers=auth_header(alice["access_token"]),
     )
     assert create_session_response.status_code == 200
@@ -1323,7 +1492,6 @@ def test_attachment_message_extra_roundtrips_through_history_and_sync_messages(
 
     attachment_extra = {
         "url": "/uploads/2026/03/24/demo-image.png",
-        "name": "demo-image.png",
         "file_type": "image/png",
         "size": 2048,
         "media": {
@@ -1340,7 +1508,7 @@ def test_attachment_message_extra_roundtrips_through_history_and_sync_messages(
     create_message_response = client.post(
         f"/api/v1/sessions/{session_id}/messages",
         json={
-            "session_id": session_id,
+            "msg_id": "10000000-0000-4000-8000-000000000022",
             "content": "/uploads/2026/03/24/demo-image.png",
             "message_type": "image",
             "extra": attachment_extra,
@@ -1423,7 +1591,7 @@ def test_delete_private_session_removes_messages_reads_members_and_events(
 
     create_session_response = client.post(
         "/api/v1/sessions/direct",
-        json={"participant_ids": [bob["user"]["id"]], "name": "Delete Me"},
+        json={"participant_ids": [bob["user"]["id"]]},
         headers=auth_header(alice["access_token"]),
     )
     assert create_session_response.status_code == 200
@@ -1431,7 +1599,7 @@ def test_delete_private_session_removes_messages_reads_members_and_events(
 
     send_message_response = client.post(
         f"/api/v1/sessions/{session_id}/messages",
-        json={"content": "cleanup target", "message_type": "text"},
+        json={"msg_id": "10000000-0000-4000-8000-000000000024", "content": "cleanup target", "message_type": "text"},
         headers=auth_header(alice["access_token"]),
     )
     assert send_message_response.status_code == 200
@@ -1486,7 +1654,7 @@ def test_delete_group_removes_group_session_messages_and_events(
 
     send_message_response = client.post(
         f"/api/v1/sessions/{session_id}/messages",
-        json={"content": "group cleanup target", "message_type": "text"},
+        json={"msg_id": "10000000-0000-4000-8000-000000000025", "content": "group cleanup target", "message_type": "text"},
         headers=auth_header(alice["access_token"]),
     )
     assert send_message_response.status_code == 200
@@ -1532,7 +1700,7 @@ def test_websocket_receives_realtime_user_profile_update_events(
 
     create_session_response = client.post(
         "/api/v1/sessions/direct",
-        json={"participant_ids": [bob["user"]["id"]], "name": "Alice & Bob"},
+        json={"participant_ids": [bob["user"]["id"]]},
         headers=auth_header(alice["access_token"]),
     )
     assert create_session_response.status_code == 200
@@ -1571,7 +1739,7 @@ def test_websocket_sync_messages_replays_offline_user_profile_update_events(
 
     create_session_response = client.post(
         "/api/v1/sessions/direct",
-        json={"participant_ids": [bob["user"]["id"]], "name": "Alice & Bob"},
+        json={"participant_ids": [bob["user"]["id"]]},
         headers=auth_header(alice["access_token"]),
     )
     assert create_session_response.status_code == 200
@@ -1759,7 +1927,7 @@ def test_private_call_signaling_invite_accept_and_hangup(
 
     create_session_response = client.post(
         "/api/v1/sessions/direct",
-        json={"participant_ids": [bob["user"]["id"]], "name": "Alice & Bob"},
+        json={"participant_ids": [bob["user"]["id"]]},
         headers=auth_header(alice["access_token"]),
     )
     assert create_session_response.status_code == 200
@@ -1834,7 +2002,7 @@ def test_private_call_signaling_preserves_timeout_reason(
 
     create_session_response = client.post(
         "/api/v1/sessions/direct",
-        json={"participant_ids": [bob["user"]["id"]], "name": "Alice & Bob Timeout"},
+        json={"participant_ids": [bob["user"]["id"]]},
         headers=auth_header(alice["access_token"]),
     )
     assert create_session_response.status_code == 200
@@ -1883,7 +2051,7 @@ def test_private_call_signaling_reports_busy_for_second_invite(
 
     first_session_response = client.post(
         "/api/v1/sessions/direct",
-        json={"participant_ids": [bob["user"]["id"]], "name": "Alice & Bob"},
+        json={"participant_ids": [bob["user"]["id"]]},
         headers=auth_header(alice["access_token"]),
     )
     assert first_session_response.status_code == 200
@@ -1891,7 +2059,7 @@ def test_private_call_signaling_reports_busy_for_second_invite(
 
     second_session_response = client.post(
         "/api/v1/sessions/direct",
-        json={"participant_ids": [bob["user"]["id"]], "name": "Charlie & Bob"},
+        json={"participant_ids": [bob["user"]["id"]]},
         headers=auth_header(charlie["access_token"]),
     )
     assert second_session_response.status_code == 200
@@ -1936,3 +2104,156 @@ def test_private_call_signaling_reports_busy_for_second_invite(
         assert busy_payload["data"]["active_call_id"] == "call-busy-001"
         assert busy_payload["data"]["busy_user_id"] == bob["user"]["id"]
 
+
+
+
+def test_edit_message_succeeds_when_realtime_fanout_fails(
+    client: TestClient,
+    user_factory,
+    auth_header,
+    monkeypatch,
+) -> None:
+    from app.api.v1 import messages as message_routes
+
+    alice = user_factory("alice_edit_fanout", "Alice")
+    bob = user_factory("bob_edit_fanout", "Bob")
+
+    session_response = client.post(
+        "/api/v1/sessions/direct",
+        json={"participant_ids": [bob["user"]["id"]]},
+        headers=auth_header(alice["access_token"]),
+    )
+    session_id = session_response.json()["data"]["id"]
+    send_response = client.post(
+        f"/api/v1/sessions/{session_id}/messages",
+        json={"msg_id": "10000000-0000-4000-8000-000000000026", "content": "before", "message_type": "text"},
+        headers=auth_header(alice["access_token"]),
+    )
+    message_id = send_response.json()["data"]["message_id"]
+
+    monkeypatch.setattr(
+        message_routes.connection_manager,
+        "send_json_to_users",
+        AsyncMock(side_effect=RuntimeError("fanout failed")),
+    )
+
+    response = client.put(
+        f"/api/v1/messages/{message_id}",
+        json={"content": "after"},
+        headers=auth_header(alice["access_token"]),
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["content"] == "after"
+
+
+
+def test_accept_friend_request_succeeds_when_contact_refresh_fails(
+    client: TestClient,
+    user_factory,
+    auth_header,
+    monkeypatch,
+) -> None:
+    from app.api.v1 import friends as friend_routes
+
+    alice = user_factory("alice_accept_fanout", "Alice")
+    bob = user_factory("bob_accept_fanout", "Bob")
+
+    request_response = client.post(
+        "/api/v1/friends/requests",
+        json={"receiver_id": bob["user"]["id"], "message": "ping"},
+        headers=auth_header(alice["access_token"]),
+    )
+    request_id = request_response.json()["data"]["request_id"]
+
+    monkeypatch.setattr(
+        friend_routes.connection_manager,
+        "send_json_to_users",
+        AsyncMock(side_effect=RuntimeError("fanout failed")),
+    )
+
+    response = client.post(
+        f"/api/v1/friends/requests/{request_id}/accept",
+        headers=auth_header(bob["access_token"]),
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["status"] == "accepted"
+
+
+def test_create_direct_session_requires_exactly_one_normalized_participant(client: TestClient, user_factory, auth_header) -> None:
+    alice = user_factory("alice_direct_schema", "Alice")
+    bob = user_factory("bob_direct_schema", "Bob")
+    charlie = user_factory("charlie_direct_schema", "Charlie")
+
+    blank_participant = client.post(
+        "/api/v1/sessions/direct",
+        json={"participant_ids": ["   "]},
+        headers=auth_header(alice["access_token"]),
+    )
+    assert blank_participant.status_code == 422
+
+    multiple_participants = client.post(
+        "/api/v1/sessions/direct",
+        json={"participant_ids": [bob["user"]["id"], charlie["user"]["id"]]},
+        headers=auth_header(alice["access_token"]),
+    )
+    assert multiple_participants.status_code == 422
+
+    extra_field = client.post(
+        "/api/v1/sessions/direct",
+        json={"participant_ids": [bob["user"]["id"]], "extra": True},
+        headers=auth_header(alice["access_token"]),
+    )
+    assert extra_field.status_code == 422
+
+    name_field = client.post(
+        "/api/v1/sessions/direct",
+        json={"participant_ids": [bob["user"]["id"]], "name": "Alice & Bob"},
+        headers=auth_header(alice["access_token"]),
+    )
+    assert name_field.status_code == 422
+
+    normalized_participant = client.post(
+        "/api/v1/sessions/direct",
+        json={"participant_ids": [f"  {bob['user']['id']}  "]},
+        headers=auth_header(alice["access_token"]),
+    )
+    assert normalized_participant.status_code == 200
+    normalized_payload = normalized_participant.json()["data"]
+    assert normalized_payload["counterpart_id"] == bob["user"]["id"]
+    assert bob["user"]["id"] in normalized_payload["participant_ids"]
+
+def test_friend_request_requires_one_consistent_target_field(client: TestClient, user_factory, auth_header) -> None:
+    alice = user_factory("alice_friend_schema", "Alice")
+    bob = user_factory("bob_friend_schema", "Bob")
+    charlie = user_factory("charlie_friend_schema", "Charlie")
+
+    missing_target = client.post(
+        "/api/v1/friends/requests",
+        json={"message": "hello"},
+        headers=auth_header(alice["access_token"]),
+    )
+    assert missing_target.status_code == 422
+
+    conflicting_target = client.post(
+        "/api/v1/friends/requests",
+        json={"receiver_id": bob["user"]["id"], "user_id": charlie["user"]["id"]},
+        headers=auth_header(alice["access_token"]),
+    )
+    assert conflicting_target.status_code == 422
+
+    extra_field = client.post(
+        "/api/v1/friends/requests",
+        json={"receiver_id": bob["user"]["id"], "extra": True},
+        headers=auth_header(alice["access_token"]),
+    )
+    assert extra_field.status_code == 422
+
+    normalized_target = client.post(
+        "/api/v1/friends/requests",
+        json={"user_id": f"  {bob['user']['id']}  ", "message": "  hi  "},
+        headers=auth_header(alice["access_token"]),
+    )
+    assert normalized_target.status_code == 200
+    assert normalized_target.json()["data"]["receiver_id"] == bob["user"]["id"]

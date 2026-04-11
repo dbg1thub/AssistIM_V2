@@ -14,6 +14,13 @@ if "aiohttp" not in sys.modules:
         def __init__(self, total=None):
             self.total = total
 
+    class _DummyFormData:
+        def __init__(self):
+            self.fields = []
+
+        def add_field(self, name, value, **kwargs):
+            self.fields.append({'name': name, 'value': value, **kwargs})
+
     class _DummyClientSession:
         def __init__(self, *args, **kwargs):
             self.closed = False
@@ -25,6 +32,7 @@ if "aiohttp" not in sys.modules:
         status = 200
 
     aiohttp.ClientError = _DummyClientError
+    aiohttp.FormData = _DummyFormData
     aiohttp.ClientTimeout = _DummyClientTimeout
     aiohttp.ClientSession = _DummyClientSession
     aiohttp.ClientResponse = _DummyClientResponse

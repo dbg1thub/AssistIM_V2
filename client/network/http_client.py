@@ -46,7 +46,10 @@ class HTTPClient:
         self._refresh_token: Optional[str] = None
         self._token_lock = asyncio.Lock()
         self._refresh_task: Optional[asyncio.Task[bool]] = None
+        self._refresh_task_generation = 0
+        self._token_generation = 0
         self._token_listeners: list[Callable[[Optional[str], Optional[str]], None]] = []
+        self._auth_loss_listeners: list[Callable[[str], None]] = []
 
     @property
     def is_connected(self) -> bool:
@@ -77,6 +80,7 @@ class HTTPClient:
             access_token: JWT access token
             refresh_token: Optional refresh token
         """
+        self._token_generation += 1
         self._access_token = access_token
         self._refresh_token = refresh_token
         self._notify_token_listeners()
@@ -84,6 +88,7 @@ class HTTPClient:
 
     def clear_tokens(self) -> None:
         """Clear authentication tokens."""
+        self._token_generation += 1
         self._access_token = None
         self._refresh_token = None
         self._notify_token_listeners()
@@ -99,6 +104,16 @@ class HTTPClient:
         if listener in self._token_listeners:
             self._token_listeners.remove(listener)
 
+    def add_auth_loss_listener(self, listener: Callable[[str], None]) -> None:
+        """Subscribe to terminal auth-loss notifications."""
+        if listener not in self._auth_loss_listeners:
+            self._auth_loss_listeners.append(listener)
+
+    def remove_auth_loss_listener(self, listener: Callable[[str], None]) -> None:
+        """Remove an auth-loss listener."""
+        if listener in self._auth_loss_listeners:
+            self._auth_loss_listeners.remove(listener)
+
     def _notify_token_listeners(self) -> None:
         """Notify all token change listeners."""
         for listener in list(self._token_listeners):
@@ -106,6 +121,15 @@ class HTTPClient:
                 listener(self._access_token, self._refresh_token)
             except Exception:
                 logger.exception("Token listener error")
+
+    def _notify_auth_loss(self, reason: str) -> None:
+        """Notify application-level auth state owner that credentials are no longer valid."""
+        normalized_reason = str(reason or "").strip() or "auth_lost"
+        for listener in list(self._auth_loss_listeners):
+            try:
+                listener(normalized_reason)
+            except Exception:
+                logger.exception("Auth-loss listener error")
 
     @staticmethod
     def _is_absolute_url(path: str) -> bool:
@@ -511,10 +535,19 @@ class HTTPClient:
             if not self._refresh_token:
                 return False
 
+            refresh_token = self._refresh_token
+            token_generation = self._token_generation
             refresh_task = self._refresh_task
-            if refresh_task is None or refresh_task.done():
-                refresh_task = asyncio.create_task(self._perform_token_refresh())
+            if (
+                    refresh_task is None
+                    or refresh_task.done()
+                    or self._refresh_task_generation != token_generation
+            ):
+                refresh_task = asyncio.create_task(
+                    self._perform_token_refresh(refresh_token, token_generation)
+                )
                 self._refresh_task = refresh_task
+                self._refresh_task_generation = token_generation
 
         try:
             return await refresh_task
@@ -522,10 +555,17 @@ class HTTPClient:
             async with self._token_lock:
                 if self._refresh_task is refresh_task and refresh_task.done():
                     self._refresh_task = None
+                    self._refresh_task_generation = 0
 
-    async def _perform_token_refresh(self) -> bool:
+    def _is_refresh_context_current(self, refresh_token: str, token_generation: int) -> bool:
+        """Return whether one refresh result still belongs to the current auth generation."""
+        return (
+            token_generation == self._token_generation
+            and refresh_token == self._refresh_token
+        )
+
+    async def _perform_token_refresh(self, refresh_token: str, token_generation: int) -> bool:
         """Execute one refresh HTTP call and update in-memory tokens."""
-        refresh_token = self._refresh_token
         if not refresh_token:
             return False
 
@@ -543,6 +583,9 @@ class HTTPClient:
                 if response.status == 200:
                     data = await response.json()
                     auth_data = data.get("data", {}) if isinstance(data, dict) else {}
+                    if not self._is_refresh_context_current(refresh_token, token_generation):
+                        logger.info("Ignoring stale token refresh result")
+                        return False
                     self.set_tokens(
                         auth_data.get("access_token"),
                         auth_data.get("refresh_token", refresh_token),
@@ -551,12 +594,15 @@ class HTTPClient:
                     return bool(self._access_token)
 
                 logger.warning("Token refresh failed")
+                if not self._is_refresh_context_current(refresh_token, token_generation):
+                    logger.info("Ignoring stale token refresh failure")
+                    return False
                 self.clear_tokens()
+                self._notify_auth_loss("refresh_rejected")
                 return False
 
         except Exception as e:
             logger.error(f"Token refresh error: {e}")
-            self.clear_tokens()
             return False
 
     async def get(
@@ -659,6 +705,7 @@ class HTTPClient:
             await self._session.close()
             logger.debug("HTTP client session closed")
         self._session = None
+        self._auth_loss_listeners.clear()
 
     async def upload_file(
             self,

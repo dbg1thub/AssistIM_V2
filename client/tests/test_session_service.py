@@ -15,6 +15,13 @@ if "aiohttp" not in sys.modules:
         def __init__(self, total=None):
             self.total = total
 
+    class _DummyFormData:
+        def __init__(self):
+            self.fields = []
+
+        def add_field(self, name, value, **kwargs):
+            self.fields.append({'name': name, 'value': value, **kwargs})
+
     class _DummyClientSession:
         def __init__(self, *args, **kwargs):
             self.closed = False
@@ -32,6 +39,7 @@ if "aiohttp" not in sys.modules:
             return ""
 
     aiohttp.ClientError = _DummyClientError
+    aiohttp.FormData = _DummyFormData
     aiohttp.ClientTimeout = _DummyClientTimeout
     aiohttp.ClientSession = _DummyClientSession
     aiohttp.ClientResponse = _DummyClientResponse
@@ -55,13 +63,13 @@ def test_session_service_create_direct_session_uses_direct_endpoint(monkeypatch)
         monkeypatch.setattr(session_service_module, "get_http_client", lambda: fake_http)
 
         service = session_service_module.SessionService()
-        payload = await service.create_direct_session("bob", display_name="Bob")
+        payload = await service.create_direct_session("bob")
 
         assert payload == {"id": "session-direct-1", "name": "Bob"}
         assert fake_http.post_calls == [
             {
                 "path": "/sessions/direct",
-                "json": {"participant_ids": ["bob"], "name": "Bob"},
+                "json": {"participant_ids": ["bob"]},
             }
         ]
 

@@ -1,4 +1,4 @@
-﻿"""Call signaling service for 1:1 voice and video sessions."""
+"""Call signaling service for 1:1 voice and video sessions."""
 
 from __future__ import annotations
 
@@ -203,9 +203,10 @@ class CallService:
         if session.type != "private" or session.is_ai_session:
             raise AppError(ErrorCode.INVALID_REQUEST, "calls only support private non-AI sessions", 422)
         member_ids = self.sessions.list_member_ids(normalized_session_id)
-        if len(member_ids) != 2:
+        distinct_member_ids = list(dict.fromkeys(str(member_id or '').strip() for member_id in member_ids if str(member_id or '').strip()))
+        if len(distinct_member_ids) != 2:
             raise AppError(ErrorCode.SESSION_CONFLICT, "private call requires exactly two session members", 409)
-        return session, member_ids
+        return session, distinct_member_ids
 
     def _require_participant_call(self, call_id: str, user_id: str) -> ActiveCall:
         normalized_call_id = str(call_id or "").strip()
@@ -265,5 +266,6 @@ class CallService:
         payload["to_user_id"] = self._peer_id(call, from_user_id)
         payload.update(extra)
         return payload
+
 
 

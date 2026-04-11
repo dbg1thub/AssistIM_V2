@@ -1,4 +1,4 @@
-﻿from pathlib import Path
+from pathlib import Path
 
 
 def test_ui_does_not_emit_session_updated_events_directly() -> None:
@@ -31,6 +31,40 @@ def test_group_flow_no_longer_writes_local_group_avatar_metadata() -> None:
     assert 'extra["avatar"]' not in group_dialogs
 
 
+def test_session_ui_uses_local_added_event_instead_of_created_lifecycle_name() -> None:
+    session_manager = Path('client/managers/session_manager.py').read_text(encoding='utf-8')
+    session_panel = Path('client/ui/widgets/session_panel.py').read_text(encoding='utf-8')
+    chat_interface = Path('client/ui/windows/chat_interface.py').read_text(encoding='utf-8')
+
+    assert 'ADDED = "session_added"' in session_manager
+    assert 'CREATED = "session_created"' not in session_manager
+    assert 'SessionEvent.ADDED' in session_panel
+    assert 'SessionEvent.CREATED' not in session_panel
+    assert 'SessionEvent.ADDED' in chat_interface
+    assert 'SessionEvent.CREATED' not in chat_interface
+
+
+def test_session_ui_applies_authoritative_empty_snapshots_instead_of_ignoring_them() -> None:
+    session_panel = Path('client/ui/widgets/session_panel.py').read_text(encoding='utf-8')
+    session_block = session_panel.split('def _on_session_updated', 1)[1].split('def _on_session_deleted', 1)[0]
+
+    assert 'if isinstance(sessions, list):' in session_block
+    assert 'if sessions:' not in session_block
+
+
+
+def test_chat_interface_clears_stale_current_session_after_authoritative_snapshot_drop() -> None:
+    chat_interface = Path('client/ui/windows/chat_interface.py').read_text(encoding='utf-8')
+    session_block = chat_interface.split('def _on_session_event', 1)[1].split('def _on_message_sent', 1)[0]
+
+    assert 'if isinstance(sessions, list):' in session_block
+    assert 'current_session = next(' in session_block
+    assert 'if current_session is None:' in session_block
+    assert 'self._current_session_id = None' in session_block
+    assert 'self.chat_panel.show_welcome()' in session_block
+
+
+
 def test_chat_interface_group_creation_flow_is_delegated_to_coordinator() -> None:
     chat_interface = Path('client/ui/windows/chat_interface.py').read_text(encoding='utf-8')
 
@@ -38,6 +72,104 @@ def test_chat_interface_group_creation_flow_is_delegated_to_coordinator() -> Non
     assert 'def _show_start_group_dialog' not in chat_interface
     assert 'def _on_group_chat_created' not in chat_interface
     assert 'def _open_created_group_session' not in chat_interface
+
+
+def test_call_result_messages_are_sent_as_text_not_client_system_messages() -> None:
+    chat_interface = Path('client/ui/windows/chat_interface.py').read_text(encoding='utf-8')
+    call_result_block = chat_interface.split('async def _send_call_result_message', 1)[1].split(
+        'def _call_duration_seconds',
+        1,
+    )[0]
+
+    assert 'message_type=MessageType.TEXT' in call_result_block
+    assert 'message_type=MessageType.SYSTEM' not in call_result_block
+
+
+def test_chat_interface_typing_indicator_ignores_self_and_hides_on_explicit_stop() -> None:
+    chat_interface = Path('client/ui/windows/chat_interface.py').read_text(encoding='utf-8')
+    typing_block = chat_interface.split('def _on_typing_event', 1)[1].split('def _on_read_event', 1)[0]
+
+    assert 'if user_id == self._current_user_id():' in typing_block
+    assert 'if typing:' in typing_block
+    assert 'self._typing_indicator_timer.stop()' in typing_block
+    assert 'self.chat_panel.hide_typing_indicator()' in typing_block
+
+
+def test_chat_interface_session_open_and_history_tasks_are_generation_guarded() -> None:
+    chat_interface = Path('client/ui/windows/chat_interface.py').read_text(encoding='utf-8')
+
+    assert 'self._session_focus_generation = 0' in chat_interface
+    assert 'def _advance_session_focus_generation(self) -> int:' in chat_interface
+    assert 'def _is_session_focus_generation_current(self, generation: int) -> bool:' in chat_interface
+    assert 'def _is_current_session_context(self, session_id: str, generation: int) -> bool:' in chat_interface
+    assert 'generation = self._advance_session_focus_generation()' in chat_interface
+    assert 'async def _open_sidebar_search_result(self, payload: object, generation: int) -> None:' in chat_interface
+    assert 'opened = await self.open_group_session(session_id, generation=generation)' in chat_interface
+    assert 'opened = await self.open_session(session_id, generation=generation)' in chat_interface
+    assert 'generation=generation,' in chat_interface
+    assert 'self._set_load_task(self._select_session_only(session_id, generation), f"select session {session_id}")' in chat_interface
+    assert 'self._set_load_task(self._load_session_messages(session_id, generation), f"load session {session_id}")' in chat_interface
+    assert 'async def _load_session_messages(self, session_id: str, generation: int) -> None:' in chat_interface
+    assert 'async def _select_session_only(self, session_id: str, generation: int) -> None:' in chat_interface
+    assert 'async def _load_older_messages(self, session_id: str, generation: int) -> None:' in chat_interface
+    assert 'generation = self._session_focus_generation' in chat_interface
+    assert 'async def _send_read_receipt_for(self, session_id: str, message_id: str, generation: int) -> None:' in chat_interface
+    assert 'async def open_session(self, session_id: str, *, generation: int | None = None) -> bool:' in chat_interface
+    assert 'async def open_group_session(self, session_id: str, *, generation: int | None = None) -> bool:' in chat_interface
+    assert 'generation: int | None = None,' in chat_interface
+    assert 'if not self._is_session_focus_generation_current(open_generation):' in chat_interface
+    assert chat_interface.count('if not self._is_current_session_context(session_id, generation):') >= 6
+
+
+def test_chat_interface_call_dialog_and_menu_callbacks_are_instance_guarded() -> None:
+    chat_interface = Path('client/ui/windows/chat_interface.py').read_text(encoding='utf-8')
+
+    assert 'self._ui_callback_generation = 0' in chat_interface
+    assert 'def _invalidate_ui_callback_generation(self) -> None:' in chat_interface
+    assert 'def _make_generation_bound_ui_callback(self, callback, *, generation: int | None = None):' in chat_interface
+    assert 'def _schedule_ui_single_shot(self, delay: int, callback, *, generation: int | None = None) -> None:' in chat_interface
+    assert chat_interface.count('QTimer.singleShot(') == 1
+    assert 'self._schedule_ui_single_shot(0, self.session_panel._relayout_session_list)' in chat_interface
+    assert 'self._schedule_ui_single_shot(0, self.chat_panel._relayout_message_list)' in chat_interface
+    assert 'overlay.captured.connect(lambda file_path, current=overlay: self._handle_screenshot_captured(file_path, current))' in chat_interface
+    assert 'overlay.canceled.connect(lambda current=overlay: self._discard_screenshot_overlay(current))' in chat_interface
+    assert 'def _handle_screenshot_captured(self, file_path: str, source_overlay: ScreenshotOverlay) -> None:' in chat_interface
+    assert 'if source_overlay not in self._screenshot_overlays:' in chat_interface
+    assert 'toast.accepted.connect(lambda active_call=call, ref=toast: self._accept_incoming_call_from_toast(active_call, ref))' in chat_interface
+    assert 'toast.rejected.connect(lambda cid=call.call_id, ref=toast: self._reject_incoming_call_from_toast(cid, ref))' in chat_interface
+    assert 'def _accept_incoming_call_from_toast(self, call: ActiveCallState, source_toast: IncomingCallToast) -> None:' in chat_interface
+    assert 'def _reject_incoming_call_from_toast(self, call_id: str, source_toast: IncomingCallToast) -> None:' in chat_interface
+    assert 'self._schedule_ui_single_shot(self.CALL_INCOMING_RING_RETRY_MS, self._retry_incoming_ring_sound)' in chat_interface
+    assert 'def _prepare_current_call_window_media(self, window: CallWindow) -> None:' in chat_interface
+    assert 'if self._call_window is not window:' in chat_interface
+    assert 'window.hangup_requested.connect(lambda call_id, ref=window: self._on_call_window_hangup_requested(call_id, ref))' in chat_interface
+    assert 'def _on_call_window_hangup_requested(self, call_id: str, source_window: CallWindow) -> None:' in chat_interface
+    assert 'def _on_call_window_signal_generated(self, event_type: str, payload: object, source_window: CallWindow) -> None:' in chat_interface
+    assert chat_interface.count('if self._call_window is not source_window:') == 2
+    assert 'if self._message_context_menu is not menu:' in chat_interface
+
+
+def test_chat_interface_async_message_action_results_are_session_generation_guarded() -> None:
+    chat_interface = Path('client/ui/windows/chat_interface.py').read_text(encoding='utf-8')
+
+    assert 'def _is_current_message_context(self, message, generation: int) -> bool:' in chat_interface
+    assert 'async def _send_image_message(self, session_id: str, file_path: str, generation: int) -> None:' in chat_interface
+    assert 'if message and self._is_current_session_context(session_id, generation):' in chat_interface
+    assert 'self._send_image_message(self._current_session_id, file_path, generation)' in chat_interface
+    assert 'def _open_message(self, message, generation: int | None = None) -> None:' in chat_interface
+    assert 'current_generation = self._session_focus_generation if generation is None else generation' in chat_interface
+    assert 'if not self._is_current_message_context(message, current_generation):' in chat_interface
+    assert 'async def _open_file_attachment(self, message, generation: int) -> None:' in chat_interface
+    assert chat_interface.count('if not self._is_current_message_context(message, generation):') >= 4
+    assert 'async def _retry_message(self, message_id: str, session_id: str, generation: int) -> None:' in chat_interface
+    assert 'async def _recall_message(self, message_id: str, session_id: str, generation: int) -> None:' in chat_interface
+    assert 'def _confirm_delete_message(self, message, generation: int) -> None:' in chat_interface
+    assert 'async def _delete_message(self, message, generation: int) -> None:' in chat_interface
+    assert 'self._delete_message(message, generation)' in chat_interface
+    assert 'async def _confirm_security_pending_messages(self, session_id: str, action_id: str, generation: int) -> None:' in chat_interface
+    assert 'async def _discard_security_pending_messages(self, session_id: str, generation: int) -> None:' in chat_interface
+    assert chat_interface.count('if not self._is_current_session_context(session_id, generation):') >= 8
+    assert 'removed_count <= 0 or not self._is_current_session_context(session_id, generation)' in chat_interface
 
 
 def test_contact_interface_request_and_group_actions_avoid_full_reload() -> None:
@@ -56,13 +188,40 @@ def test_auth_success_feedback_moves_to_main_window() -> None:
     auth_interface = Path('client/ui/windows/auth_interface.py').read_text(encoding='utf-8')
     app_main = Path('client/main.py').read_text(encoding='utf-8')
     main_window = Path('client/ui/windows/main_window.py').read_text(encoding='utf-8')
+    warmup_block = app_main.split('async def _warm_authenticated_runtime', 1)[1].split('async def show_main_window', 1)[0]
+    show_block = app_main.split('async def show_main_window', 1)[1].split('def _on_main_window_closed', 1)[0]
 
     assert 'InfoBar.success(tr("auth.feedback.title", "Authentication"), message, parent=self.form_card)' not in auth_interface
     assert 'self.last_success_message =' in auth_interface
     assert 'self._pending_auth_success_message' in app_main
-    assert 'InfoBar.success(' in app_main
+    assert 'InfoBar.success(' in warmup_block
+    assert 'InfoBar.warning(' in warmup_block
+    assert 'retry_button = QPushButton(tr("common.retry", "Retry"), self.main_window)' in warmup_block
+    assert 'main_window.runtimeRefreshRequested.connect(' in app_main
+    assert 'lambda window=main_window: self.retry_authenticated_runtime(source_window=window)' in app_main
+    assert 'InfoBar.success(' not in show_block
     assert 'self.contact_interface.reload_data()' not in main_window
     assert 'self.contact_interface.refresh_groups_after_profile_change()' in main_window
+    assert 'runtimeRefreshRequested = Signal()' in main_window
+    assert 'Action(AppIcon.SYNC, tr("main_window.refresh_connection", "Refresh Connection"), self)' in main_window
+    assert 'self._make_generation_bound_main_window_callback' in app_main
+    assert 'main_window.closed.connect(lambda window=main_window: self._on_main_window_closed(window))' in app_main
+    assert 'main_window.logoutRequested.connect(lambda window=main_window: self._on_logout_requested(window))' in app_main
+
+
+def test_user_profile_flyout_surfaces_degraded_session_snapshot_after_profile_save() -> None:
+    flyout = Path('client/ui/widgets/user_profile_flyout.py').read_text(encoding='utf-8')
+    save_block = flyout.split('async def _save_profile_async', 1)[1].split('def _emit_profile_changed', 1)[0]
+
+    assert 'update_result = await self._auth_controller.update_profile(' in save_block
+    assert 'user = dict(update_result.user or {})' in save_block
+    assert 'snapshot = update_result.session_snapshot' in save_block
+    assert 'if snapshot is not None and not snapshot.authoritative:' in save_block
+    assert 'elif snapshot is not None and not snapshot.unread_synchronized:' in save_block
+    assert 'InfoBar.warning(' in save_block
+    assert 'InfoBar.info(' in save_block
+    assert 'InfoBar.success(' in save_block
+
 
 
 def test_message_delegate_uses_live_auth_profile_for_self_avatar_rendering() -> None:
@@ -176,6 +335,34 @@ def test_main_window_tray_alerts_respect_authoritative_mute_state() -> None:
     assert 'if self._is_session_muted(session_id, session):' in main_window
 
 
+def test_main_window_internal_delayed_callbacks_are_generation_and_instance_guarded() -> None:
+    main_window = Path('client/ui/windows/main_window.py').read_text(encoding='utf-8')
+
+    assert 'self._ui_callback_generation = 0' in main_window
+    assert 'def _invalidate_ui_callback_generation(self) -> None:' in main_window
+    assert 'def _make_generation_bound_ui_callback(self, callback, *, generation: int | None = None):' in main_window
+    assert 'def _is_ui_callback_generation_current(self, generation: int) -> bool:' in main_window
+    assert 'def _schedule_ui_single_shot(self, delay: int, callback, *, generation: int | None = None) -> None:' in main_window
+    assert 'self._schedule_ui_single_shot(0, self.chat_interface.load_sessions)' in main_window
+    assert 'self._schedule_ui_single_shot(0, self._sync_chat_session_activity)' in main_window
+    assert main_window.count('self._schedule_ui_single_shot(100, lambda: self.windowEffect.setMicaEffect(self.winId(), isDarkTheme()))') == 2
+    assert main_window.count('self._invalidate_ui_callback_generation()') >= 2
+    assert 'self._force_logout_timer.timeout.connect(self._make_generation_bound_ui_callback(self._request_forced_exit))' in main_window
+    assert 'self._force_logout_info_bar.closedSignal.connect(' in main_window
+    assert 'view.hoverEntered.connect(lambda current=flyout: self._on_tray_flyout_hover_entered(current))' in main_window
+    assert 'view.hoverLeft.connect(lambda current=flyout: self._on_tray_flyout_hover_left(current))' in main_window
+    assert 'flyout.closed.connect(lambda current=flyout: self._clear_tray_flyout(current))' in main_window
+    assert 'if source_flyout is not None and source_flyout is not self._tray_flyout:' in main_window
+    assert 'if source_flyout is not None and not self._is_current_tray_flyout(source_flyout):' in main_window
+    assert 'async def _open_tray_session(self, session_id: str, generation: int) -> None:' in main_window
+    assert 'async def _open_contact_target(self, payload: object, generation: int) -> None:' in main_window
+    assert 'self._create_ui_task(' in main_window
+    assert 'generation=generation,' in main_window
+    assert 'if generation is not None and not self._is_ui_callback_generation_current(generation):' in main_window
+    assert main_window.count('if not self._is_ui_callback_generation_current(generation):') >= 4
+    assert main_window.count('self._consume_ui_task_result(task, context)') >= 2
+
+
 def test_session_delegate_reserves_preview_space_for_mute_icon() -> None:
     session_delegate = Path('client/delegates/session_delegate.py').read_text(encoding='utf-8')
     session_manager = Path('client/managers/session_manager.py').read_text(encoding='utf-8')
@@ -280,7 +467,7 @@ def test_chat_file_open_flow_routes_downloads_through_controller_boundary() -> N
     assert 'if attachment_encryption.get("enabled") and self._attachment_open_callback is not None:' in chat_panel
     assert 'self.chat_panel.set_attachment_open_callback(self._open_message)' in chat_interface
     assert 'if attachment_encryption.get("enabled") and message.message_type in {' in chat_interface
-    assert 'async def _open_file_attachment(self, message) -> None:' in chat_interface
+    assert 'async def _open_file_attachment(self, message, generation: int) -> None:' in chat_interface
     assert 'await self._chat_controller.download_message_attachment(message.message_id)' in chat_interface
     assert 'async def download_message_attachment(self, message_id: str) -> str:' in chat_controller
     assert message_delegate.count('if attachment_encryption.get("enabled"):\n            return ""') >= 2
@@ -430,18 +617,22 @@ def test_group_profile_realtime_pipeline_is_wired() -> None:
 
 
 
-def test_message_repo_event_sync_casts_ids_for_runtime_varchar_tables() -> None:
+def test_message_repo_event_sync_uses_uuid_column_comparisons() -> None:
     message_repo = Path('server/app/repositories/message_repo.py').read_text(encoding='utf-8')
     session_repo = Path('server/app/repositories/session_repo.py').read_text(encoding='utf-8')
 
-    assert 'from sqlalchemy import String, and_, cast, desc, func, or_, select, update' in message_repo
-    assert 'cast(SessionEvent.session_id, String()) == str(session_id or "").strip()' in message_repo
-    assert 'cast(UserSessionEvent.session_id, String()) == str(session_id or "").strip()' in message_repo
-    assert 'cast(UserSessionEvent.user_id, String()) == normalized_user_id' in message_repo
-    assert 'from sqlalchemy import String, cast, delete, select' in session_repo
+    assert 'from sqlalchemy import and_, desc, func, or_, select, update' in message_repo
+    assert 'cast(' not in message_repo
+    assert 'SessionEvent.session_id == str(session_id or "").strip()' in message_repo
+    assert 'UserSessionEvent.session_id == str(session_id or "").strip()' in message_repo
+    assert 'UserSessionEvent.user_id == normalized_user_id' in message_repo
+    assert 'from sqlalchemy import delete, select' in session_repo
     assert 'from app.models.session import ChatSession, SessionEvent, SessionMember, UserSessionEvent' in session_repo
-    assert 'delete(SessionEvent).where(cast(SessionEvent.session_id, String()) == normalized_session_id)' in session_repo
-    assert 'delete(UserSessionEvent).where(cast(UserSessionEvent.session_id, String()) == normalized_session_id)' in session_repo
+    assert 'cast(' not in session_repo
+    assert 'delete(SessionEvent).where(SessionEvent.session_id == normalized_session_id)' in session_repo
+    assert 'delete(UserSessionEvent).where(UserSessionEvent.session_id == normalized_session_id)' in session_repo
+
+
 def test_chat_interface_group_profile_updates_use_session_controller_boundary() -> None:
     chat_interface = Path('client/ui/windows/chat_interface.py').read_text(encoding='utf-8')
     session_controller = Path('client/ui/controllers/session_controller.py').read_text(encoding='utf-8')
@@ -579,5 +770,5 @@ def test_chat_panel_security_pending_banner_is_wired_to_current_session_actions(
     assert 'self._security_pending_banner.discard_requested.connect(self._on_security_pending_discard_requested)' in chat_panel
     assert 'self.security_pending_confirm_requested.emit(self._current_session.session_id' in chat_panel
     assert 'self.chat_panel.security_pending_confirm_requested.connect(self._on_security_pending_confirm_requested)' in chat_interface
-    assert 'async def _confirm_security_pending_messages(self, session_id: str, action_id: str) -> None:' in chat_interface
+    assert 'async def _confirm_security_pending_messages(self, session_id: str, action_id: str, generation: int) -> None:' in chat_interface
     assert 'await self._chat_controller.release_session_security_pending_messages(session_id)' in chat_interface

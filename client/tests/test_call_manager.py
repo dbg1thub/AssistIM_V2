@@ -151,3 +151,24 @@ def test_call_manager_times_out_unanswered_outgoing_call(monkeypatch) -> None:
         await manager.close()
 
     asyncio.run(scenario())
+
+
+def test_call_manager_close_clears_authenticated_user_context(monkeypatch) -> None:
+    fake_conn = FakeConnectionManager()
+    fake_event_bus = FakeEventBus()
+
+    monkeypatch.setattr(call_manager_module, "get_connection_manager", lambda: fake_conn)
+    monkeypatch.setattr(call_manager_module, "get_event_bus", lambda: fake_event_bus)
+
+    async def scenario() -> None:
+        manager = CallManager()
+        manager.set_user_id("alice")
+        await manager.initialize()
+        manager._timing_origins["call-1"] = 123.0
+        await manager.close()
+
+        assert manager._user_id == ""
+        assert manager._timing_origins == {}
+        assert fake_conn.listener is None
+
+    asyncio.run(scenario())

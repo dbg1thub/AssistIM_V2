@@ -16,7 +16,7 @@ from client.core.exceptions import AppError
 from client.core.logging import setup_logging
 from client.managers.call_manager import get_call_manager
 from client.managers.message_manager import get_message_manager
-from client.managers.session_manager import get_session_manager
+from client.managers.session_manager import SessionRefreshResult, get_session_manager
 from client.models.message import ChatMessage, MessageType, Session, build_attachment_extra, infer_message_type_from_path
 from client.services.call_service import get_call_service
 from client.services.file_service import get_file_service
@@ -89,7 +89,7 @@ class ChatController:
         self._session_manager.set_user_id(user_id)
         self._call_manager.set_user_id(user_id)
 
-    async def refresh_sessions_snapshot(self) -> list[Session]:
+    async def refresh_sessions_snapshot(self) -> SessionRefreshResult:
         """Refresh the authoritative session snapshot after profile-affecting changes."""
         return await self._session_manager.refresh_remote_sessions()
 
@@ -346,11 +346,11 @@ class ChatController:
         logger.info("Message sent to %s: %s", session_id, message.message_id)
         return message
 
-    async def send_typing(self) -> None:
+    async def send_typing(self, *, typing: bool = True) -> None:
         """Send typing indicator for current session."""
         session_id = self._session_manager.current_session_id
         if session_id:
-            await self._msg_manager.send_typing(session_id)
+            await self._msg_manager.send_typing(session_id, typing=typing)
 
     async def send_read_receipt(self, message_id: str, session_id: Optional[str] = None) -> bool:
         """Send read receipt for a message."""

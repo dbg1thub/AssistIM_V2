@@ -1,4 +1,4 @@
-﻿"""Local device-key management and MVP private-message encryption helpers."""
+"""Local device-key management and MVP private-message encryption helpers."""
 
 from __future__ import annotations
 
@@ -769,7 +769,6 @@ class E2EEService:
         state["devices"] = devices
         await self._save_history_recovery_state(state)
 
-        diagnostics = await self.get_history_recovery_diagnostics()
         return {
             "source_device_id": source_device_id,
             "source_user_id": str(device_record.get("source_user_id") or "").strip(),
@@ -777,7 +776,6 @@ class E2EEService:
             "imported_one_time_prekeys": imported_one_time_prekeys,
             "imported_group_sessions": imported_group_sessions,
             "imported_group_sender_keys": imported_group_sender_keys,
-            **diagnostics,
         }
 
     async def get_group_sender_key_record(
@@ -2840,6 +2838,7 @@ def get_e2ee_service() -> E2EEService:
     if _e2ee_service is None:
         _e2ee_service = E2EEService()
     return _e2ee_service
+
 
 
 

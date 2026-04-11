@@ -41,7 +41,7 @@ if "aiohttp" not in sys.modules:
     aiohttp.ClientResponse = _DummyClientResponse
     sys.modules["aiohttp"] = aiohttp
 
-from client.core.exceptions import APIError
+from client.core.exceptions import APIError, AuthExpiredError
 from client.network.http_client import HTTPClient
 
 
@@ -257,7 +257,7 @@ def test_http_client_internal_401_refresh_is_singleflight() -> None:
 
         refresh_calls = 0
 
-        async def fake_perform_refresh() -> bool:
+        async def fake_perform_refresh(*_args) -> bool:
             nonlocal refresh_calls
             refresh_calls += 1
             await asyncio.sleep(0.01)
@@ -304,6 +304,46 @@ def test_http_client_internal_401_refresh_is_singleflight() -> None:
     asyncio.run(scenario())
 
 
+def test_http_client_ignores_stale_refresh_result_after_tokens_change() -> None:
+    async def scenario() -> None:
+        client = HTTPClient(base_url="http://app.local/api/v1")
+        client.set_tokens("old-access", "old-refresh")
+
+        refresh_started = asyncio.Event()
+        release_refresh = asyncio.Event()
+
+        class DelayedRefreshResponse(FakeResponse):
+            async def json(self) -> dict:
+                refresh_started.set()
+                await release_refresh.wait()
+                return {
+                    "data": {
+                        "access_token": "late-old-access",
+                        "refresh_token": "late-old-refresh",
+                    }
+                }
+
+        fake_session = FakeSession(
+            post_handler=lambda **_kwargs: DelayedRefreshResponse(200),
+        )
+        client._session = fake_session
+
+        refresh_task = asyncio.create_task(client._refresh_access_token())
+        await refresh_started.wait()
+
+        client.clear_tokens()
+        client.set_tokens("new-access", "new-refresh")
+        release_refresh.set()
+
+        assert await refresh_task is False
+        assert client.access_token == "new-access"
+        assert client.refresh_token == "new-refresh"
+
+        await client.close()
+
+    asyncio.run(scenario())
+
+
 def test_http_client_upload_file_internal_401_retries_after_refresh() -> None:
     async def scenario() -> None:
         file_path = _write_upload_fixture("upload-internal.bin")
@@ -312,7 +352,7 @@ def test_http_client_upload_file_internal_401_retries_after_refresh() -> None:
 
         refresh_calls = 0
 
-        async def fake_perform_refresh() -> bool:
+        async def fake_perform_refresh(*_args) -> bool:
             nonlocal refresh_calls
             refresh_calls += 1
             await asyncio.sleep(0.01)
@@ -362,6 +402,31 @@ def test_http_client_upload_file_defaults_to_files_upload_endpoint() -> None:
 
         assert payload["url"] == "/uploads/default.bin"
         assert fake_session.post_calls[0]["url"] == "http://app.local/api/v1/files/upload"
+
+        await client.close()
+
+    asyncio.run(scenario())
+
+
+def test_http_client_refresh_rejection_notifies_auth_loss_once() -> None:
+    async def scenario() -> None:
+        client = HTTPClient(base_url="http://app.local/api/v1")
+        client.set_tokens("old-access", "bad-refresh")
+        auth_loss_reasons: list[str] = []
+        client.add_auth_loss_listener(auth_loss_reasons.append)
+
+        fake_session = FakeSession(
+            request_handler=lambda **_kwargs: FakeResponse(401, {"message": "token expired"}),
+            post_handler=lambda **_kwargs: FakeResponse(401, {"message": "refresh rejected"}),
+        )
+        client._session = fake_session
+
+        with pytest.raises(AuthExpiredError):
+            await client.get("/profile")
+
+        assert auth_loss_reasons == ["refresh_rejected"]
+        assert client.access_token is None
+        assert client.refresh_token is None
 
         await client.close()
 
@@ -438,7 +503,7 @@ def test_http_client_stream_lines_internal_401_retries_after_refresh() -> None:
 
         refresh_calls = 0
 
-        async def fake_perform_refresh() -> bool:
+        async def fake_perform_refresh(*_args) -> bool:
             nonlocal refresh_calls
             refresh_calls += 1
             client.set_tokens("new-access", "refresh-token-2")

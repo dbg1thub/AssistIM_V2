@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from unittest.mock import AsyncMock
+
 from fastapi.testclient import TestClient
 
 
@@ -233,3 +235,89 @@ def test_group_self_profile_update_persists_note_and_group_nickname(client: Test
     assert payload["my_group_nickname"] == "oncall"
     updated_member = next(item for item in payload["members"] if item["id"] == member["user"]["id"])
     assert updated_member["group_nickname"] == "oncall"
+
+
+
+def test_group_profile_update_succeeds_when_realtime_fanout_fails(
+    client: TestClient,
+    user_factory,
+    auth_header,
+    monkeypatch,
+) -> None:
+    from app.api.v1 import groups as group_routes
+
+    owner = user_factory("group-fanout-owner", "Owner")
+    member = user_factory("group-fanout-member", "Member")
+
+    create_group_response = client.post(
+        "/api/v1/groups",
+        json={"name": "Ops", "member_ids": [member["user"]["id"]]},
+        headers=auth_header(owner["access_token"]),
+    )
+    group_id = create_group_response.json()["data"]["id"]
+
+    monkeypatch.setattr(
+        group_routes.connection_manager,
+        "send_json_to_users",
+        AsyncMock(side_effect=RuntimeError("fanout failed")),
+    )
+
+    response = client.patch(
+        f"/api/v1/groups/{group_id}",
+        json={"name": "Ops 2"},
+        headers=auth_header(owner["access_token"]),
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["name"] == "Ops 2"
+
+
+def test_group_schema_rejects_conflicting_member_sources_and_extra_fields(client: TestClient, user_factory, auth_header) -> None:
+    owner = user_factory("group-schema-owner", "Owner")
+    member = user_factory("group-schema-member", "Member")
+    outsider = user_factory("group-schema-outsider", "Outsider")
+
+    conflicting_members = client.post(
+        "/api/v1/groups",
+        json={
+            "name": "Ops",
+            "member_ids": [member["user"]["id"]],
+            "members": [outsider["user"]["id"]],
+        },
+        headers=auth_header(owner["access_token"]),
+    )
+    assert conflicting_members.status_code == 422
+
+    extra_field = client.post(
+        "/api/v1/groups",
+        json={"name": "Ops", "member_ids": [member["user"]["id"]], "extra": True},
+        headers=auth_header(owner["access_token"]),
+    )
+    assert extra_field.status_code == 422
+
+
+
+def test_group_member_and_profile_schemas_reject_extra_fields(client: TestClient, user_factory, auth_header) -> None:
+    owner = user_factory("group-schema-owner-2", "Owner")
+    member = user_factory("group-schema-member-2", "Member")
+
+    create_group_response = client.post(
+        "/api/v1/groups",
+        json={"name": "Ops", "member_ids": [member["user"]["id"]]},
+        headers=auth_header(owner["access_token"]),
+    )
+    group_id = create_group_response.json()["data"]["id"]
+
+    extra_add = client.post(
+        f"/api/v1/groups/{group_id}/members",
+        json={"user_id": member["user"]["id"], "role": "member", "extra": True},
+        headers=auth_header(owner["access_token"]),
+    )
+    assert extra_add.status_code == 422
+
+    extra_profile = client.patch(
+        f"/api/v1/groups/{group_id}",
+        json={"name": "Ops 2", "extra": True},
+        headers=auth_header(owner["access_token"]),
+    )
+    assert extra_profile.status_code == 422

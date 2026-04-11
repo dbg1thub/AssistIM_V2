@@ -11,7 +11,10 @@ def test_edit_message_preserves_encrypted_extra_payload(
 
     create_session_response = client.post(
         "/api/v1/sessions/direct",
-        json={"participant_ids": [bob["user"]["id"]], "name": "Alice & Bob"},
+        json={
+            "participant_ids": [bob["user"]["id"]],
+            "encryption_mode": "e2ee_private",
+        },
         headers=auth_header(alice["access_token"]),
     )
     assert create_session_response.status_code == 200
@@ -41,6 +44,7 @@ def test_edit_message_preserves_encrypted_extra_payload(
     send_message_response = client.post(
         f"/api/v1/sessions/{session_id}/messages",
         json={
+            "msg_id": "10000000-0000-4000-8000-000000000027",
             "content": "cipher-original",
             "message_type": "text",
             "extra": original_extra,
@@ -120,7 +124,10 @@ def test_send_message_strips_local_only_encrypted_attachment_fields(
 
     create_session_response = client.post(
         "/api/v1/sessions/direct",
-        json={"participant_ids": [bob["user"]["id"]], "name": "Alice & Bob"},
+        json={
+            "participant_ids": [bob["user"]["id"]],
+            "encryption_mode": "e2ee_private",
+        },
         headers=auth_header(alice["access_token"]),
     )
     assert create_session_response.status_code == 200
@@ -129,13 +136,13 @@ def test_send_message_strips_local_only_encrypted_attachment_fields(
     send_message_response = client.post(
         f"/api/v1/sessions/{session_id}/messages",
         json={
+            "msg_id": "10000000-0000-4000-8000-000000000029",
             "content": "https://cdn.example/files/blob.bin",
             "message_type": "file",
             "extra": {
                 "local_path": "C:/secret/plan.pdf",
                 "uploading": False,
                 "url": "https://cdn.example/files/blob.bin",
-                "name": "plan.pdf",
                 "file_type": "application/pdf",
                 "size": 128,
                 "media": {"duration": 3},
@@ -219,7 +226,10 @@ def test_direct_session_rejects_group_text_encryption_scheme(
 
     create_session_response = client.post(
         "/api/v1/sessions/direct",
-        json={"participant_ids": [bob["user"]["id"]], "name": "Alice & Bob"},
+        json={
+            "participant_ids": [bob["user"]["id"]],
+            "encryption_mode": "e2ee_private",
+        },
         headers=auth_header(alice["access_token"]),
     )
     assert create_session_response.status_code == 200
@@ -228,6 +238,7 @@ def test_direct_session_rejects_group_text_encryption_scheme(
     response = client.post(
         f"/api/v1/sessions/{session_id}/messages",
         json={
+            "msg_id": "10000000-0000-4000-8000-000000000031",
             "content": "groupcipher:oops",
             "message_type": "text",
             "extra": {
@@ -258,7 +269,11 @@ def test_group_session_rejects_direct_attachment_encryption_scheme(
 
     create_group_response = client.post(
         "/api/v1/groups",
-        json={"name": "Team", "member_ids": [bob["user"]["id"], charlie["user"]["id"]]},
+        json={
+            "name": "Team",
+            "member_ids": [bob["user"]["id"], charlie["user"]["id"]],
+            "encryption_mode": "e2ee_group",
+        },
         headers=auth_header(alice["access_token"]),
     )
     assert create_group_response.status_code == 201
@@ -267,6 +282,7 @@ def test_group_session_rejects_direct_attachment_encryption_scheme(
     response = client.post(
         f"/api/v1/sessions/{session_id}/messages",
         json={
+            "msg_id": "10000000-0000-4000-8000-000000000032",
             "content": "https://cdn.example/files/direct-style.bin",
             "message_type": "file",
             "extra": {
@@ -297,7 +313,10 @@ def test_direct_text_encryption_requires_prekey_metadata(
 
     create_session_response = client.post(
         "/api/v1/sessions/direct",
-        json={"participant_ids": [bob["user"]["id"]], "name": "Alice & Bob"},
+        json={
+            "participant_ids": [bob["user"]["id"]],
+            "encryption_mode": "e2ee_private",
+        },
         headers=auth_header(alice["access_token"]),
     )
     assert create_session_response.status_code == 200
@@ -306,6 +325,7 @@ def test_direct_text_encryption_requires_prekey_metadata(
     response = client.post(
         f"/api/v1/sessions/{session_id}/messages",
         json={
+            "msg_id": "10000000-0000-4000-8000-000000000033",
             "content": "cipher-required",
             "message_type": "text",
             "extra": {
@@ -340,7 +360,11 @@ def test_group_text_encryption_requires_fanout(
 
     create_group_response = client.post(
         "/api/v1/groups",
-        json={"name": "Team", "member_ids": [bob["user"]["id"], charlie["user"]["id"]]},
+        json={
+            "name": "Team",
+            "member_ids": [bob["user"]["id"], charlie["user"]["id"]],
+            "encryption_mode": "e2ee_group",
+        },
         headers=auth_header(alice["access_token"]),
     )
     assert create_group_response.status_code == 201
@@ -349,6 +373,7 @@ def test_group_text_encryption_requires_fanout(
     response = client.post(
         f"/api/v1/sessions/{session_id}/messages",
         json={
+            "msg_id": "10000000-0000-4000-8000-000000000034",
             "content": "groupcipher:required",
             "message_type": "text",
             "extra": {
@@ -381,7 +406,10 @@ def test_direct_attachment_encryption_requires_metadata_ciphertext(
 
     create_session_response = client.post(
         "/api/v1/sessions/direct",
-        json={"participant_ids": [bob["user"]["id"]], "name": "Alice & Bob"},
+        json={
+            "participant_ids": [bob["user"]["id"]],
+            "encryption_mode": "e2ee_private",
+        },
         headers=auth_header(alice["access_token"]),
     )
     assert create_session_response.status_code == 200
@@ -390,6 +418,7 @@ def test_direct_attachment_encryption_requires_metadata_ciphertext(
     response = client.post(
         f"/api/v1/sessions/{session_id}/messages",
         json={
+            "msg_id": "10000000-0000-4000-8000-000000000035",
             "content": "https://cdn.example/files/required.bin",
             "message_type": "file",
             "extra": {
@@ -424,7 +453,11 @@ def test_group_attachment_encryption_requires_fanout(
 
     create_group_response = client.post(
         "/api/v1/groups",
-        json={"name": "Team", "member_ids": [bob["user"]["id"], charlie["user"]["id"]]},
+        json={
+            "name": "Team",
+            "member_ids": [bob["user"]["id"], charlie["user"]["id"]],
+            "encryption_mode": "e2ee_group",
+        },
         headers=auth_header(alice["access_token"]),
     )
     assert create_group_response.status_code == 201
@@ -433,6 +466,7 @@ def test_group_attachment_encryption_requires_fanout(
     response = client.post(
         f"/api/v1/sessions/{session_id}/messages",
         json={
+            "msg_id": "10000000-0000-4000-8000-000000000036",
             "content": "https://cdn.example/files/group-required.bin",
             "message_type": "file",
             "extra": {

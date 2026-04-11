@@ -233,7 +233,7 @@ class SessionPanel(QWidget):
 
     def _subscribe_to_events(self) -> None:
         """Subscribe to session events."""
-        self._subscribe_sync(SessionEvent.CREATED, self._on_session_created)
+        self._subscribe_sync(SessionEvent.ADDED, self._on_session_added)
         self._subscribe_sync(SessionEvent.UPDATED, self._on_session_updated)
         self._subscribe_sync(SessionEvent.DELETED, self._on_session_deleted)
         self._subscribe_sync(SessionEvent.MESSAGE_ADDED, self._on_message_added)
@@ -265,8 +265,8 @@ class SessionPanel(QWidget):
             if not task.done():
                 task.cancel()
 
-    def _on_session_created(self, data: dict) -> None:
-        """Handle newly created sessions."""
+    def _on_session_added(self, data: dict) -> None:
+        """Handle newly cached visible sessions."""
         session = data.get("session")
         if session:
             self._add_session_safe(session)
@@ -279,7 +279,7 @@ class SessionPanel(QWidget):
             return
 
         sessions = data.get("sessions")
-        if sessions:
+        if isinstance(sessions, list):
             self._load_all_sessions_safe(sessions)
 
     def _on_session_deleted(self, data: dict) -> None:

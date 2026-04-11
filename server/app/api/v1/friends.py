@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import time
 
 from fastapi import APIRouter, Depends, Request, Response, status
@@ -19,6 +20,7 @@ from app.websocket.manager import connection_manager
 
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 def _friend_request_limit(request: Request) -> int:
@@ -44,10 +46,13 @@ async def _broadcast_contact_refresh(user_ids: list[str], reason: str, payload: 
     deduped_user_ids = [user_id for index, user_id in enumerate(user_ids) if user_id and user_id not in user_ids[:index]]
     if not deduped_user_ids:
         return
-    await connection_manager.send_json_to_users(
-        deduped_user_ids,
-        _contact_refresh_message(reason, payload),
-    )
+    try:
+        await connection_manager.send_json_to_users(
+            deduped_user_ids,
+            _contact_refresh_message(reason, payload),
+        )
+    except Exception:
+        logger.exception("Contact refresh fanout failed after committed friendship mutation")
 
 
 @router.get("")
@@ -66,7 +71,7 @@ async def send_request(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> dict:
-    receiver_id = payload.receiver_id or payload.user_id
+    receiver_id = payload.target_user_id
     result = FriendService(db).create_request(current_user, receiver_id, payload.message)
     reason = "friendship_created" if result.get("status") == "accepted" else "friend_request_created"
     await _broadcast_contact_refresh([current_user.id, receiver_id or ""], reason, result)
@@ -104,3 +109,4 @@ async def remove_friend(friend_id: str, current_user: User = Depends(get_current
         },
     )
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+

@@ -42,12 +42,28 @@ class GroupService:
         groups = self.groups.list_user_groups(current_user.id)
         return [self.serialize_group(item, include_members=True, current_user_id=current_user.id) for item in groups]
 
-    def create_group(self, current_user: User, name: str, member_ids: list[str]) -> dict:
+    def create_group(
+        self,
+        current_user: User,
+        name: str,
+        member_ids: list[str],
+        encryption_mode: str = "plain",
+    ) -> dict:
         members = self._normalize_group_members(current_user, member_ids)
         normalized_name = str(name or "").strip()
+        normalized_encryption_mode = (
+            "e2ee_group"
+            if str(encryption_mode or "").strip().lower() == "e2ee_group"
+            else "plain"
+        )
 
         def action() -> object:
-            session = self.sessions.create(normalized_name, "group", commit=False)
+            session = self.sessions.create(
+                normalized_name,
+                "group",
+                encryption_mode=normalized_encryption_mode,
+                commit=False,
+            )
             for member_id in members:
                 self.sessions.add_member(session.id, member_id, commit=False)
 

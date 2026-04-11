@@ -34,6 +34,14 @@ class AuthService:
         """Unsubscribe from token updates."""
         self._http.remove_token_listener(listener)
 
+    def add_auth_loss_listener(self, listener: Callable[[str], None]) -> None:
+        """Subscribe to terminal auth-loss notifications from the HTTP transport."""
+        self._http.add_auth_loss_listener(listener)
+
+    def remove_auth_loss_listener(self, listener: Callable[[str], None]) -> None:
+        """Unsubscribe from terminal auth-loss notifications."""
+        self._http.remove_auth_loss_listener(listener)
+
     def set_tokens(self, access_token: Optional[str], refresh_token: Optional[str] = None) -> None:
         """Update in-memory auth tokens."""
         self._http.set_tokens(access_token, refresh_token)
@@ -56,6 +64,8 @@ class AuthService:
                 "password": password,
                 "force": force,
             },
+            use_auth=False,
+            retry_on_401=False,
         )
         return dict(payload or {})
 
@@ -68,6 +78,8 @@ class AuthService:
                 "password": password,
                 "nickname": nickname,
             },
+            use_auth=False,
+            retry_on_401=False,
         )
         return dict(payload or {})
 

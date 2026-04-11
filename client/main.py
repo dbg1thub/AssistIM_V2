@@ -7,6 +7,7 @@ import sys
 import asyncio
 import argparse
 import os
+from dataclasses import dataclass
 from pathlib import Path
 
 if __package__ in {None, ""}:
@@ -15,7 +16,7 @@ if __package__ in {None, ""}:
         sys.path.insert(0, str(workspace_root))
 
 from PySide6.QtCore import QLockFile, QTimer
-from PySide6.QtWidgets import QApplication, QMessageBox
+from PySide6.QtWidgets import QApplication, QMessageBox, QPushButton
 from qasync import QEventLoop
 from qfluentwidgets import InfoBar, setTheme, setThemeColor
 
@@ -44,6 +45,15 @@ logger = logging.get_logger(__name__)
 EXIT_CODE_OK = 0
 EXIT_CODE_SINGLE_INSTANCE = 1
 EXIT_CODE_STARTUP_PREFLIGHT_BLOCKED = 2
+
+
+@dataclass(frozen=True)
+class AuthAttemptResult:
+    """One completed auth attempt plus the runtime generation it committed, if any."""
+
+    attempt_generation: int
+    runtime_generation: int
+    authenticated: bool
 
 
 def _sanitize_profile_name(profile: str) -> str:
@@ -125,9 +135,17 @@ class Application:
         self._quit_event = asyncio.Event()
         self._tasks: set[asyncio.Task] = set()
         self._logout_task: asyncio.Task | None = None
+        self._warm_runtime_task: asyncio.Task | None = None
+        self._auth_loss_task: asyncio.Task | None = None
         self._forced_logout_in_progress = False
         self._pending_auth_success_message = ""
+        self._runtime_warmup_warning_bar = None
         self._exit_code = EXIT_CODE_OK
+        self._lifecycle_state = "unauthenticated"
+        self._auth_attempt_generation = 0
+        self._active_auth_attempt_generation = 0
+        self._runtime_generation = 0
+        self._active_runtime_generation = 0
         self._startup_security_status = {
             "authenticated": False,
             "user_id": "",
@@ -195,6 +213,100 @@ class Application:
         self._tasks.add(task)
 
         return task
+
+    def _set_lifecycle_state(self, state: str) -> None:
+        """Record one coarse application lifecycle state for auth/runtime transitions."""
+        self._lifecycle_state = str(state or "").strip() or "unknown"
+        logger.debug("Application lifecycle state -> %s", self._lifecycle_state)
+
+    def _start_new_auth_attempt(self) -> int:
+        """Create one new auth attempt and mark it as the only live auth flow."""
+        self._auth_attempt_generation += 1
+        self._active_auth_attempt_generation = self._auth_attempt_generation
+        return self._active_auth_attempt_generation
+
+    def _is_auth_attempt_current(self, attempt: int) -> bool:
+        """Check whether one auth flow still belongs to the current auth attempt."""
+        return attempt > 0 and attempt == self._active_auth_attempt_generation
+
+    def _invalidate_auth_attempts(self) -> None:
+        """Mark all in-flight auth attempts as stale."""
+        self._active_auth_attempt_generation = 0
+
+    def _is_auth_result_current(self, result: AuthAttemptResult) -> bool:
+        """Check whether one authenticated result still belongs to the live auth/runtime flow."""
+        return (
+            bool(result.authenticated)
+            and self._is_auth_attempt_current(result.attempt_generation)
+            and self._is_runtime_generation_current(result.runtime_generation)
+        )
+
+    def _is_current_main_window(self, window: object, *, generation: int | None = None) -> bool:
+        """Check whether one main-window callback still belongs to the live shell."""
+        if self.main_window is not window:
+            return False
+        if generation is None:
+            return True
+        return self._is_runtime_generation_current(generation)
+
+    def _make_generation_bound_main_window_callback(self, generation: int, window: object, method_name: str):
+        """Bind one UI callback to a specific main-window instance and runtime generation."""
+
+        def _callback() -> None:
+            if not self._is_current_main_window(window, generation=generation):
+                return
+            method = getattr(window, method_name, None)
+            if callable(method):
+                method()
+
+        return _callback
+
+    def _start_new_runtime_generation(self) -> int:
+        """Create one new authenticated runtime generation and mark it active."""
+        self._runtime_generation += 1
+        self._active_runtime_generation = self._runtime_generation
+        return self._active_runtime_generation
+
+    def _is_runtime_generation_current(self, generation: int) -> bool:
+        """Check whether one async path still belongs to the active runtime generation."""
+        return generation > 0 and generation == self._active_runtime_generation
+
+    def _cancel_runtime_warmup(self) -> None:
+        """Cancel the current authenticated warmup task, if any."""
+        task = self._warm_runtime_task
+        if task is not None and not task.done():
+            task.cancel()
+        self._warm_runtime_task = None
+
+    def _clear_runtime_warmup_warning(self) -> None:
+        """Dismiss the active runtime warmup warning bar when state recovers or tears down."""
+        warning_bar = self._runtime_warmup_warning_bar
+        self._runtime_warmup_warning_bar = None
+        if warning_bar is None:
+            return
+        try:
+            warning_bar.close()
+        except Exception:
+            logger.debug("Ignoring runtime warmup warning-bar close failure", exc_info=True)
+
+    def _on_runtime_warmup_warning_closed(self) -> None:
+        """Drop warning-bar bookkeeping after the UI element closes itself."""
+        self._runtime_warmup_warning_bar = None
+
+    async def _quiesce_authenticated_runtime(self) -> None:
+        """Stop authenticated runtime work before clearing persisted auth/chat state."""
+        self._set_lifecycle_state("tearing_down_runtime")
+        self._invalidate_auth_attempts()
+        self._active_runtime_generation = 0
+        self._cancel_runtime_warmup()
+        self._clear_runtime_warmup_warning()
+        if self.auth_window:
+            self.auth_window.close()
+            self.auth_window.deleteLater()
+            self.auth_window = None
+        await self._teardown_authenticated_runtime()
+        self._pending_auth_success_message = ""
+        self._set_lifecycle_state("unauthenticated")
 
     async def _yield_to_ui(self) -> None:
         """Yield back to qasync without re-entering Qt's event pump manually."""
@@ -301,29 +413,29 @@ class Application:
 
     async def initialize(self) -> None:
         """
-        Initialize all application components.
+        Initialize the pre-auth application runtime.
 
-        Initializes database, HTTP client, WebSocket client, and all managers
-        in the correct order.
+        Initializes only the components required before authentication.
         """
 
         logger.info("Initializing database...")
         db = get_database()
         await db.connect()
         self._update_startup_security_status(db=db)
-        self._e2ee_runtime_diagnostics = {
-            "authenticated": False,
-            "user_id": "",
-            "runtime_security": self.get_startup_security_status(),
-            "history_recovery": {
-                "available": False,
-                "source_device_count": 0,
-            },
-            "current_session_security": {
-                "available": False,
-                "reason": "authentication required",
-            },
-        }
+        if not self.get_startup_security_status().get("authenticated"):
+            self._e2ee_runtime_diagnostics = {
+                "authenticated": False,
+                "user_id": "",
+                "runtime_security": self.get_startup_security_status(),
+                "history_recovery": {
+                    "available": False,
+                    "source_device_count": 0,
+                },
+                "current_session_security": {
+                    "available": False,
+                    "reason": "authentication required",
+                },
+            }
         db_security = self.get_startup_preflight_result().get("runtime_security", {}).get("database_encryption", {})
         if db_security.get("action_required"):
             logger.warning(
@@ -338,8 +450,29 @@ class Application:
                 db_security.get("message"),
             )
 
+        if self.get_startup_preflight_result().get("blocking"):
+            logger.error("Startup preflight blocked runtime component initialization")
+            return
+
         logger.info("Initializing HTTP client...")
-        get_http_client()
+        http_client = get_http_client()
+        auth_loss_subscribe = getattr(http_client, "add_auth_loss_listener", None)
+        if callable(auth_loss_subscribe):
+            auth_loss_subscribe(self._on_auth_loss)
+
+        logger.info("Pre-auth application runtime initialized")
+
+    async def initialize_authenticated_runtime(self, *, generation: int | None = None) -> None:
+        """Initialize runtime components that are valid only for one authenticated user."""
+        target_generation = generation if generation is not None else self._active_runtime_generation
+        if not self._is_runtime_generation_current(target_generation):
+            logger.info("Skipping authenticated runtime initialization for stale generation %s", target_generation)
+            return
+
+        auth_controller = get_auth_controller()
+        current_user_id = str((auth_controller.current_user or {}).get("id", "") or "").strip()
+        if not current_user_id:
+            raise RuntimeError("authenticated runtime initialization requires current user context")
 
         logger.info("Initializing WebSocket client...")
         get_websocket_client()
@@ -348,123 +481,160 @@ class Application:
         conn_manager = get_connection_manager()
         await conn_manager.initialize()
         conn_manager.add_message_listener(self._handle_transport_message)
-
-        logger.info("Initializing message manager...")
-        msg_manager = get_message_manager()
-        await msg_manager.initialize()
-
-        logger.info("Initializing session manager...")
-        session_manager = get_session_manager()
-        await session_manager.initialize()
+        if not self._is_runtime_generation_current(target_generation):
+            logger.info("Authenticated runtime initialization stopped for stale generation %s", target_generation)
+            return
 
         logger.info("Initializing chat controller...")
         chat_controller = get_chat_controller()
+        chat_controller.set_user_id(current_user_id)
         await chat_controller.initialize()
+        if not self._is_runtime_generation_current(target_generation):
+            logger.info("Authenticated runtime initialization stopped for stale generation %s", target_generation)
+            return
 
         logger.info("Initializing sound manager...")
         sound_manager = get_sound_manager()
         await sound_manager.initialize()
 
-        logger.info("Application initialized")
+        logger.info("Authenticated runtime initialized for user %s", current_user_id)
 
     # =========================================================
     # UI
     # =========================================================
 
-    async def authenticate(self) -> bool:
+    async def authenticate(self) -> AuthAttemptResult:
         """
         Restore an existing session or present the auth interface.
 
         Returns:
-            True when the user is authenticated, False when auth was cancelled.
+            One auth-attempt result including the committed runtime generation, if any.
         """
-
+        auth_attempt = self._start_new_auth_attempt()
+        self._set_lifecycle_state("restoring_auth")
         auth_controller = get_auth_controller()
         restored_user = await auth_controller.restore_session()
+        if not self._is_auth_attempt_current(auth_attempt):
+            logger.info("Ignoring stale restore result for auth attempt %s", auth_attempt)
+            return AuthAttemptResult(auth_attempt, 0, False)
         self._update_startup_security_status(auth_controller=auth_controller)
         await self._update_e2ee_runtime_diagnostics(auth_controller=auth_controller)
         if restored_user:
+            self._set_lifecycle_state("auth_committing")
+            runtime_generation = self._start_new_runtime_generation()
+            self._set_lifecycle_state("authenticated_bootstrapping")
             logger.info("Restored persisted session for user %s", restored_user.get("id"))
-            return True
+            return AuthAttemptResult(auth_attempt, runtime_generation, True)
 
         loop = asyncio.get_running_loop()
         auth_future: asyncio.Future[bool] = loop.create_future()
+        self._pending_auth_success_message = ""
+        self._set_lifecycle_state("auth_shell_visible")
 
-        self.auth_window = AuthInterface()
+        auth_window = AuthInterface()
+        self.auth_window = auth_window
+
+        def _is_current_auth_window() -> bool:
+            return self.auth_window is auth_window
 
         def _on_authenticated(_user: dict) -> None:
-            if self.auth_window is not None:
-                self._pending_auth_success_message = str(getattr(self.auth_window, "last_success_message", "") or "")
+            if not _is_current_auth_window():
+                return
+            self._pending_auth_success_message = str(getattr(auth_window, "last_success_message", "") or "")
             if not auth_future.done():
                 auth_future.set_result(True)
 
         def _on_closed() -> None:
+            if not _is_current_auth_window():
+                return
             if not auth_future.done():
                 auth_future.set_result(False)
 
-        self.auth_window.authenticated.connect(_on_authenticated)
-        self.auth_window.closed.connect(_on_closed)
-        self.auth_window.show()
-        self.auth_window.raise_()
-        self.auth_window.activateWindow()
+        auth_window.authenticated.connect(_on_authenticated)
+        auth_window.closed.connect(_on_closed)
+        auth_window.show()
+        auth_window.raise_()
+        auth_window.activateWindow()
 
         authenticated = await auth_future
 
-        if self.auth_window:
-            self.auth_window.deleteLater()
+        if self.auth_window is auth_window:
             self.auth_window = None
+            auth_window.deleteLater()
             await self._yield_to_ui()
+
+        if not self._is_auth_attempt_current(auth_attempt):
+            logger.info("Ignoring stale auth-shell result for auth attempt %s", auth_attempt)
+            return AuthAttemptResult(auth_attempt, 0, False)
 
         if not authenticated:
             logger.info("Authentication window closed before sign-in")
-            return False
+            self._set_lifecycle_state("unauthenticated")
+            return AuthAttemptResult(auth_attempt, 0, False)
 
+        self._set_lifecycle_state("auth_committing")
+        runtime_generation = self._start_new_runtime_generation()
+        self._set_lifecycle_state("authenticated_bootstrapping")
         self._update_startup_security_status(auth_controller=auth_controller)
         await self._update_e2ee_runtime_diagnostics(auth_controller=auth_controller)
 
-        return True
+        return AuthAttemptResult(auth_attempt, runtime_generation, True)
 
-    async def _synchronize_authenticated_runtime(self) -> None:
+    async def _synchronize_authenticated_runtime(self, generation: int) -> None:
         """Reload per-user runtime state after authentication succeeds."""
+        if not self._is_runtime_generation_current(generation):
+            return
         conn_manager = get_connection_manager()
         await conn_manager.reload_sync_timestamp()
+        if not self._is_runtime_generation_current(generation):
+            return
         await self._yield_to_ui()
 
         session_manager = get_session_manager()
         await session_manager.refresh_remote_sessions()
+        if not self._is_runtime_generation_current(generation):
+            return
         await self._yield_to_ui()
 
-    async def _warm_authenticated_runtime(self) -> None:
+    async def _warm_authenticated_runtime(self, generation: int) -> None:
         """Refresh authenticated runtime state after the main shell is already visible."""
+        previous_state = self._lifecycle_state
         try:
-            await self._synchronize_authenticated_runtime()
-            await self.start_background_services()
+            await self._synchronize_authenticated_runtime(generation)
+            if not self._is_runtime_generation_current(generation):
+                return
+            await self.start_background_services(generation=generation)
         except asyncio.CancelledError:
             raise
         except Exception:
             logger.exception("Authenticated runtime warmup failed")
+            if self.main_window is not None and self._is_runtime_generation_current(generation):
+                self._clear_runtime_warmup_warning()
+                warning_bar = InfoBar.warning(
+                    tr("main.runtime_warmup_failed.title", "Connection incomplete"),
+                    tr(
+                        "main.runtime_warmup_failed.message",
+                        "Some data could not be refreshed. Messages and sessions may stay stale until the next retry.",
+                    ),
+                    parent=self.main_window,
+                    duration=5000,
+                )
+                retry_button = QPushButton(tr("common.retry", "Retry"), self.main_window)
+                retry_button.clicked.connect(self.retry_authenticated_runtime)
+                if hasattr(warning_bar, "addWidget"):
+                    warning_bar.addWidget(retry_button)
+                if hasattr(warning_bar, "closedSignal"):
+                    warning_bar.closedSignal.connect(self._on_runtime_warmup_warning_closed)
+                self._runtime_warmup_warning_bar = warning_bar
+                self._pending_auth_success_message = ""
+                self._set_lifecycle_state("authenticated_degraded")
             return
 
-        if self.main_window is None:
+        if self.main_window is None or not self._is_runtime_generation_current(generation):
             return
 
+        self._clear_runtime_warmup_warning()
         self.main_window.chat_interface.load_sessions()
-
-    async def show_main_window(self) -> None:
-        """
-        Create and display the main application window.
-        """
-
-        from client.ui.windows.main_window import MainWindow
-
-        self.main_window = MainWindow()
-        self.main_window.closed.connect(self._on_main_window_closed)
-        self.main_window.logoutRequested.connect(self._on_logout_requested)
-        self.main_window.restore_default_geometry()
-        self.main_window.show()
-        self.main_window.showNormal()
-        self.main_window.raise_()
-        self.main_window.activateWindow()
         if self._pending_auth_success_message:
             InfoBar.success(
                 tr("auth.feedback.title", "Authentication"),
@@ -473,27 +643,118 @@ class Application:
                 duration=1800,
             )
             self._pending_auth_success_message = ""
-        QTimer.singleShot(0, self.main_window.raise_)
-        QTimer.singleShot(0, self.main_window.activateWindow)
-        QTimer.singleShot(80, self.main_window.raise_)
-        QTimer.singleShot(80, self.main_window.activateWindow)
+        elif previous_state == "authenticated_degraded":
+            InfoBar.success(
+                tr("main.runtime_warmup_recovered.title", "Connection restored"),
+                tr(
+                    "main.runtime_warmup_recovered.message",
+                    "Messages and sessions are refreshed again.",
+                ),
+                parent=self.main_window,
+                duration=1800,
+            )
+        self._set_lifecycle_state("authenticated_ready")
+
+    def retry_authenticated_runtime(self, *_args, source_window=None) -> None:
+        """Retry or refresh the authenticated runtime from the current generation."""
+        if self._lifecycle_state in {"shutting_down", "tearing_down_runtime", "auth_lost", "logout_requested"}:
+            return
+        if self._logout_task is not None and not self._logout_task.done():
+            return
+        if self._auth_loss_task is not None and not self._auth_loss_task.done():
+            return
+        if source_window is not None and not self._is_current_main_window(source_window):
+            return
+        generation = self._active_runtime_generation
+        if self.main_window is None or not self._is_runtime_generation_current(generation):
+            return
+
+        self._clear_runtime_warmup_warning()
+        if self._lifecycle_state == "authenticated_degraded":
+            self._set_lifecycle_state("authenticated_bootstrapping")
+        self._cancel_runtime_warmup()
+        self._warm_runtime_task = self.create_task(self._warm_authenticated_runtime(generation))
+
+    async def _continue_authenticated_runtime(self, result: AuthAttemptResult) -> bool:
+        """Initialize and display the authenticated shell only for the current auth attempt/result."""
+        if not self._is_auth_result_current(result):
+            logger.info("Skipping stale authenticated flow for auth attempt %s", result.attempt_generation)
+            return False
+
+        await self.initialize_authenticated_runtime(generation=result.runtime_generation)
+        if not self._is_auth_result_current(result):
+            logger.info(
+                "Authenticated runtime init completed for stale auth attempt %s",
+                result.attempt_generation,
+            )
+            return False
+
+        await self.show_main_window(generation=result.runtime_generation)
+        if not self._is_auth_result_current(result):
+            logger.info(
+                "Main-window activation completed for stale auth attempt %s",
+                result.attempt_generation,
+            )
+            return False
+        return True
+
+    async def show_main_window(self, *, generation: int | None = None) -> None:
+        """
+        Create and display the main application window.
+        """
+        target_generation = generation if generation is not None else self._active_runtime_generation
+        if not self._is_runtime_generation_current(target_generation):
+            logger.info("Skipping main window creation for inactive runtime generation %s", target_generation)
+            return
+        from client.ui.windows.main_window import MainWindow
+
+        main_window = MainWindow()
+        self.main_window = main_window
+        main_window.closed.connect(lambda window=main_window: self._on_main_window_closed(window))
+        main_window.logoutRequested.connect(lambda window=main_window: self._on_logout_requested(window))
+        main_window.runtimeRefreshRequested.connect(
+            lambda window=main_window: self.retry_authenticated_runtime(source_window=window)
+        )
+        main_window.restore_default_geometry()
+        main_window.show()
+        main_window.showNormal()
+        main_window.raise_()
+        main_window.activateWindow()
+        QTimer.singleShot(0, self._make_generation_bound_main_window_callback(target_generation, main_window, "raise_"))
+        QTimer.singleShot(
+            0,
+            self._make_generation_bound_main_window_callback(target_generation, main_window, "activateWindow"),
+        )
+        QTimer.singleShot(80, self._make_generation_bound_main_window_callback(target_generation, main_window, "raise_"))
+        QTimer.singleShot(
+            80,
+            self._make_generation_bound_main_window_callback(target_generation, main_window, "activateWindow"),
+        )
         await self._yield_to_ui()
-        self.create_task(self._warm_authenticated_runtime())
+        self._cancel_runtime_warmup()
+        self._warm_runtime_task = self.create_task(self._warm_authenticated_runtime(target_generation))
+        self._set_lifecycle_state("main_shell_visible")
 
         logger.info("Main window displayed")
 
-    def _on_main_window_closed(self) -> None:
+    def _on_main_window_closed(self, source_window=None) -> None:
         """
         Handle main window close event.
         """
+        if source_window is not None and not self._is_current_main_window(source_window):
+            return
 
         logger.info("Main window closed")
 
         self._quit_event.set()
 
-    def _on_logout_requested(self) -> None:
+    def _on_logout_requested(self, source_window=None) -> None:
         """Start the sign-out flow from the account page."""
+        if source_window is not None and not self._is_current_main_window(source_window):
+            return
         if self._logout_task is not None and not self._logout_task.done():
+            return
+        if self._auth_loss_task is not None and not self._auth_loss_task.done():
             return
 
         self._logout_task = self.create_task(self._perform_logout_flow())
@@ -504,50 +765,101 @@ class Application:
         if self._logout_task is task:
             self._logout_task = None
 
+    def _on_auth_loss(self, reason: str) -> None:
+        """Schedule the single top-level auth-loss state transition."""
+        if self._lifecycle_state == "shutting_down":
+            return
+        if self._auth_loss_task is not None and not self._auth_loss_task.done():
+            return
+        self._auth_loss_task = self.create_task(self._handle_auth_lost(reason))
+        self._auth_loss_task.add_done_callback(self._clear_auth_loss_task)
+
+    def _clear_auth_loss_task(self, task: asyncio.Task) -> None:
+        """Drop auth-loss bookkeeping after the flow finishes."""
+        if self._auth_loss_task is task:
+            self._auth_loss_task = None
+
+    async def _handle_auth_lost(self, reason: str) -> None:
+        """Handle HTTP/WS credential loss through one lifecycle path."""
+        normalized_reason = str(reason or "").strip() or "auth_lost"
+        if self._lifecycle_state in {"shutting_down", "tearing_down_runtime"}:
+            return
+        if self._logout_task is not None and not self._logout_task.done():
+            return
+
+        self._set_lifecycle_state("auth_lost")
+        logger.warning("Authentication lost: %s", normalized_reason)
+
+        if self.main_window:
+            self.main_window.setEnabled(False)
+            self.main_window.hide()
+
+        try:
+            await self._quiesce_authenticated_runtime()
+            auth_controller = get_auth_controller()
+            await auth_controller.clear_session(clear_local_chat_state=False)
+
+            auth_result = await self.authenticate()
+            if not auth_result.authenticated:
+                if self._is_auth_attempt_current(auth_result.attempt_generation):
+                    logger.info("Authentication cancelled after auth loss")
+                    self._quit_event.set()
+                return
+
+            await self._continue_authenticated_runtime(auth_result)
+        except Exception:
+            logger.exception("Auth-loss flow failed")
+            self._quit_event.set()
 
     async def _handle_transport_message(self, message: dict) -> None:
         """Handle raw websocket control messages that should bypass the normal message manager."""
-        if not isinstance(message, dict) or message.get("type") != "force_logout":
+        if not isinstance(message, dict):
+            return
+
+        msg_type = str(message.get("type") or "")
+        if msg_type == "auth_ack":
+            data = message.get("data", {}) if isinstance(message.get("data"), dict) else {}
+            if data.get("success") is False:
+                self._on_auth_loss("ws_auth_rejected")
+            return
+
+        if msg_type == "error":
+            data = message.get("data", {}) if isinstance(message.get("data"), dict) else {}
+            try:
+                code = int(data.get("code", 0) or 0)
+            except (TypeError, ValueError):
+                code = 0
+            if code in {401, 40101}:
+                self._on_auth_loss("ws_auth_error")
+            return
+
+        if msg_type != "force_logout":
             return
 
         reason = str((message.get("data") or {}).get("reason", "") or "")
-        if reason != "session_replaced":
+        if reason not in {"session_replaced", "logout"}:
             return
-        if self._forced_logout_in_progress:
+        if self._forced_logout_in_progress or self._logout_task is not None:
+            return
+        if self._auth_loss_task is not None and not self._auth_loss_task.done():
             return
 
         self._forced_logout_in_progress = True
-        logger.warning("Session replaced by another client login")
+        logger.warning("Forced logout requested by transport control message: %s", reason)
 
         try:
-            auth_controller = get_auth_controller()
-            await auth_controller.clear_session()
+            await self._handle_auth_lost(f"force_logout:{reason}")
         except Exception:
-            logger.exception("Failed to clear auth state after forced logout")
-
-        try:
-            conn_manager = peek_connection_manager()
-            if conn_manager is not None:
-                await conn_manager.close()
-        except Exception:
-            logger.exception("Failed to close connection manager after forced logout")
-
-        if self.main_window is not None:
-            self.main_window.show_session_replaced_warning()
-            return
-
-        if self.auth_window is not None:
-            self.auth_window.close()
-            self.auth_window.deleteLater()
-            self.auth_window = None
-
-        self._quit_event.set()
+            logger.exception("Forced logout flow failed")
+            self._quit_event.set()
+        finally:
+            self._forced_logout_in_progress = False
 
     # =========================================================
     # Background services
     # =========================================================
 
-    async def start_background_services(self) -> None:
+    async def start_background_services(self, *, generation: int | None = None) -> None:
         """
         Start all background services.
 
@@ -555,6 +867,9 @@ class Application:
         """
 
         logger.info("Starting background services...")
+        if generation is not None and not self._is_runtime_generation_current(generation):
+            logger.info("Skipping background services for stale runtime generation %s", generation)
+            return
 
         conn_manager = get_connection_manager()
         try:
@@ -562,30 +877,36 @@ class Application:
         except Exception:
             logger.exception("Initial websocket connect failed")
 
+        if generation is not None and not self._is_runtime_generation_current(generation):
+            logger.info("Background services completed for stale runtime generation %s", generation)
+            return
         logger.info("Background services started")
 
     async def _perform_logout_flow(self) -> None:
         """Sign out the current user, reset authenticated runtime state, and reopen auth UI."""
         logger.info("Starting logout flow")
+        self._set_lifecycle_state("logout_requested")
 
         if self.main_window:
             self.main_window.setEnabled(False)
             self.main_window.hide()
 
         auth_controller = get_auth_controller()
-        await auth_controller.logout()
-        await self._teardown_authenticated_runtime()
+        await self._quiesce_authenticated_runtime()
+        await auth_controller.logout(clear_local_chat_state=True)
 
-        if not await self.authenticate():
-            logger.info("Authentication cancelled after logout")
-            self._quit_event.set()
+        auth_result = await self.authenticate()
+        if not auth_result.authenticated:
+            if self._is_auth_attempt_current(auth_result.attempt_generation):
+                logger.info("Authentication cancelled after logout")
+                self._quit_event.set()
             return
 
-        await self.initialize()
-        await self.show_main_window()
+        await self._continue_authenticated_runtime(auth_result)
 
     async def _teardown_authenticated_runtime(self) -> None:
         """Reset UI and runtime services that are tied to one authenticated user session."""
+        self._cancel_runtime_warmup()
         if self.main_window:
             self.main_window.hide()
             self.main_window.deleteLater()
@@ -625,13 +946,6 @@ class Application:
             peek_sound_manager,
         )
 
-        try:
-            db = peek_database()
-            if db is not None:
-                await db.clear_chat_state()
-        except Exception:
-            logger.exception("Database chat-state cleanup during logout failed")
-
     async def _close_optional_component(
         self,
         failure_message: str,
@@ -666,6 +980,9 @@ class Application:
         """
 
         logger.info("Shutting down application...")
+        self._set_lifecycle_state("shutting_down")
+        self._invalidate_auth_attempts()
+        self._cancel_runtime_warmup()
 
         if self.auth_window:
             self.auth_window.close()
@@ -751,10 +1068,12 @@ class Application:
                 )
                 return
 
-            if not await self.authenticate():
+            auth_result = await self.authenticate()
+            if not auth_result.authenticated:
                 return
 
-            await self.show_main_window()
+            if not await self._continue_authenticated_runtime(auth_result):
+                return
             await self._quit_event.wait()
         finally:
             await self.shutdown()

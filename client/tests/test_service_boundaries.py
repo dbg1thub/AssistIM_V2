@@ -294,6 +294,8 @@ if 'qfluentwidgets' not in sys.modules:
     qfluentwidgets.QConfig = _DummyQConfig
     qfluentwidgets.Theme = _DummyTheme
     qfluentwidgets.getIconColor = lambda theme: 'black'
+    qfluentwidgets.isDarkTheme = lambda: False
+    qfluentwidgets.themeColor = lambda: '#07c160'
     qfluentwidgets.qconfig = types.SimpleNamespace(load=lambda path, cfg: None)
     sys.modules['qfluentwidgets'] = qfluentwidgets
 
@@ -678,6 +680,12 @@ class FakeChatControllerContext:
     def __init__(self) -> None:
         self.user_ids: list[str] = []
         self.refresh_calls = 0
+        self.refresh_result = session_manager_module.SessionRefreshResult(
+            sessions=[],
+            authoritative=True,
+            unread_synchronized=True,
+        )
+        self.refresh_exception: Exception | None = None
         self.recover_calls: list[str] = []
         self.recover_current_calls = 0
         self.recover_result: dict[str, object] = {'performed': True, 'session_id': 'session-1'}
@@ -713,9 +721,11 @@ class FakeChatControllerContext:
     def set_user_id(self, user_id: str) -> None:
         self.user_ids.append(user_id)
 
-    async def refresh_sessions_snapshot(self) -> list[Session]:
+    async def refresh_sessions_snapshot(self) -> session_manager_module.SessionRefreshResult:
         self.refresh_calls += 1
-        return []
+        if self.refresh_exception is not None:
+            raise self.refresh_exception
+        return self.refresh_result
 
     async def recover_session_crypto(self, session_id: str) -> dict:
         self.recover_calls.append(session_id)
@@ -1155,6 +1165,8 @@ class FakeSessionService:
         self.fetch_sessions_calls = 0
         self.fetch_unread_counts_calls = 0
         self.create_direct_session_calls: list[tuple[str, str]] = []
+        self.fetch_sessions_error: Exception | None = None
+        self.fetch_unread_counts_error: Exception | None = None
         self.session_payload = {
             'id': 'session-1',
             'name': 'Core Team',
@@ -1180,16 +1192,19 @@ class FakeSessionService:
 
     async def fetch_sessions(self) -> list[dict]:
         self.fetch_sessions_calls += 1
+        if self.fetch_sessions_error is not None:
+            raise self.fetch_sessions_error
         return [dict(self.session_payload)]
 
     async def fetch_unread_counts(self) -> list[dict]:
         self.fetch_unread_counts_calls += 1
+        if self.fetch_unread_counts_error is not None:
+            raise self.fetch_unread_counts_error
         return [dict(item) for item in self.unread_payload]
 
-    async def create_direct_session(self, user_id: str, *, display_name: str) -> dict:
-        self.create_direct_session_calls.append((user_id, display_name))
+    async def create_direct_session(self, user_id: str) -> dict:
+        self.create_direct_session_calls.append(user_id)
         return dict(self.direct_session_payload)
-
 
 class FakeMessageStoreDatabase:
     def __init__(self, messages: list[ChatMessage], session_payload: dict | None = None) -> None:
@@ -1416,16 +1431,19 @@ def test_auth_controller_update_profile_uploads_avatar_via_file_service(monkeypa
     monkeypatch.setattr(auth_controller_module, 'get_user_service', lambda: fake_user_service)
     monkeypatch.setattr(auth_controller_module, 'get_database', lambda: fake_db)
     monkeypatch.setattr(auth_controller_module, 'get_message_manager', lambda: fake_message_manager)
+    monkeypatch.setattr(auth_controller_module, 'peek_message_manager', lambda: fake_message_manager)
     monkeypatch.setattr(auth_controller_module, 'get_chat_controller', lambda: fake_chat_controller)
+    monkeypatch.setattr(auth_controller_module, 'peek_chat_controller', lambda: fake_chat_controller)
     monkeypatch.setattr(auth_controller_module, 'get_file_service', lambda: fake_file_service)
 
     async def scenario() -> None:
         controller = auth_controller_module.AuthController()
-        user = await controller.update_profile(
+        result = await controller.update_profile(
             nickname='Alice',
             signature='Hello',
             avatar_file_path='D:/tmp/avatar.png',
         )
+        user = result.user
 
         assert fake_file_service.avatar_uploads == ['D:/tmp/avatar.png']
         assert fake_user_service.update_calls == [
@@ -1435,12 +1453,67 @@ def test_auth_controller_update_profile_uploads_avatar_via_file_service(monkeypa
             }
         ]
         assert user['avatar'] == 'https://cdn.example/files/avatar.png'
+        assert result.session_snapshot is not None
+        assert result.session_snapshot.authoritative is True
+        assert result.session_snapshot.unread_synchronized is True
         assert fake_message_manager.user_ids[-1] == 'user-1'
         assert fake_chat_controller.user_ids[-1] == 'user-1'
         assert fake_chat_controller.refresh_calls == 1
         assert fake_db.app_state[controller.USER_ID_KEY] == 'user-1'
 
     asyncio.run(scenario())
+
+
+def test_auth_controller_update_profile_reports_degraded_session_snapshot_when_refresh_fails(monkeypatch) -> None:
+    fake_auth_service = FakeAuthService()
+    fake_user_service = FakeUserService()
+    fake_db = FakeDatabase()
+    fake_message_manager = FakeMessageManager()
+    fake_chat_controller = FakeChatControllerContext()
+    fake_chat_controller.refresh_exception = RuntimeError('refresh failed')
+    fake_file_service = FakeFileService({'id': 'user-1', 'avatar': 'https://cdn.example/files/avatar.png', 'avatar_kind': 'custom'})
+
+    monkeypatch.setattr(auth_controller_module, 'get_auth_service', lambda: fake_auth_service)
+    monkeypatch.setattr(auth_controller_module, 'get_user_service', lambda: fake_user_service)
+    monkeypatch.setattr(auth_controller_module, 'get_database', lambda: fake_db)
+    monkeypatch.setattr(auth_controller_module, 'get_message_manager', lambda: fake_message_manager)
+    monkeypatch.setattr(auth_controller_module, 'peek_message_manager', lambda: fake_message_manager)
+    monkeypatch.setattr(auth_controller_module, 'get_chat_controller', lambda: fake_chat_controller)
+    monkeypatch.setattr(auth_controller_module, 'peek_chat_controller', lambda: fake_chat_controller)
+    monkeypatch.setattr(auth_controller_module, 'get_file_service', lambda: fake_file_service)
+
+    async def scenario() -> None:
+        controller = auth_controller_module.AuthController()
+        result = await controller.update_profile(avatar_file_path='D:/tmp/avatar.png')
+
+        assert result.user['avatar'] == 'https://cdn.example/files/avatar.png'
+        assert result.session_snapshot is not None
+        assert result.session_snapshot.authoritative is False
+        assert result.session_snapshot.unread_synchronized is False
+        assert fake_chat_controller.refresh_calls == 1
+
+    asyncio.run(scenario())
+
+
+def test_auth_controller_constructor_does_not_materialize_chat_runtime(monkeypatch) -> None:
+    fake_auth_service = FakeAuthService()
+    fake_user_service = FakeUserService()
+    fake_db = FakeDatabase()
+    materialized: list[str] = []
+
+    monkeypatch.setattr(auth_controller_module, 'get_auth_service', lambda: fake_auth_service)
+    monkeypatch.setattr(auth_controller_module, 'get_user_service', lambda: fake_user_service)
+    monkeypatch.setattr(auth_controller_module, 'get_database', lambda: fake_db)
+    monkeypatch.setattr(auth_controller_module, 'get_file_service', lambda: FakeFileService())
+    monkeypatch.setattr(auth_controller_module, 'get_message_manager', lambda: materialized.append('message_manager'))
+    monkeypatch.setattr(auth_controller_module, 'get_chat_controller', lambda: materialized.append('chat_controller'))
+    monkeypatch.setattr(auth_controller_module, 'peek_message_manager', lambda: None)
+    monkeypatch.setattr(auth_controller_module, 'peek_chat_controller', lambda: None)
+
+    controller = auth_controller_module.AuthController()
+
+    assert controller.current_user is None
+    assert materialized == []
 
 
 def test_auth_controller_login_uses_auth_service(monkeypatch) -> None:
@@ -1454,7 +1527,9 @@ def test_auth_controller_login_uses_auth_service(monkeypatch) -> None:
     monkeypatch.setattr(auth_controller_module, 'get_user_service', lambda: fake_user_service)
     monkeypatch.setattr(auth_controller_module, 'get_database', lambda: fake_db)
     monkeypatch.setattr(auth_controller_module, 'get_message_manager', lambda: fake_message_manager)
+    monkeypatch.setattr(auth_controller_module, 'peek_message_manager', lambda: fake_message_manager)
     monkeypatch.setattr(auth_controller_module, 'get_chat_controller', lambda: fake_chat_controller)
+    monkeypatch.setattr(auth_controller_module, 'peek_chat_controller', lambda: fake_chat_controller)
     monkeypatch.setattr(auth_controller_module, 'get_file_service', lambda: FakeFileService())
     monkeypatch.setattr(auth_controller_module, 'peek_connection_manager', lambda: None)
 
@@ -1492,7 +1567,9 @@ def test_auth_controller_register_uses_backend_default_avatar_without_follow_up_
     monkeypatch.setattr(auth_controller_module, 'get_user_service', lambda: fake_user_service)
     monkeypatch.setattr(auth_controller_module, 'get_database', lambda: fake_db)
     monkeypatch.setattr(auth_controller_module, 'get_message_manager', lambda: fake_message_manager)
+    monkeypatch.setattr(auth_controller_module, 'peek_message_manager', lambda: fake_message_manager)
     monkeypatch.setattr(auth_controller_module, 'get_chat_controller', lambda: fake_chat_controller)
+    monkeypatch.setattr(auth_controller_module, 'peek_chat_controller', lambda: fake_chat_controller)
     monkeypatch.setattr(auth_controller_module, 'get_file_service', lambda: fake_file_service)
     monkeypatch.setattr(auth_controller_module, 'peek_connection_manager', lambda: None)
 
@@ -2540,39 +2617,30 @@ def test_session_manager_refresh_remote_sessions_uses_session_service(monkeypatc
 
     async def scenario() -> None:
         manager = session_manager_module.SessionManager()
-        sessions = await manager.refresh_remote_sessions()
+        result = await manager.refresh_remote_sessions()
+        sessions = result.sessions
 
         assert fake_session_service.fetch_sessions_calls == 1
         assert fake_session_service.fetch_unread_counts_calls == 1
         assert fake_e2ee_service.calls >= 1
+        assert result.authoritative is True
+        assert result.unread_synchronized is True
         assert len(sessions) == 1
         assert sessions[0].session_id == 'session-1'
         assert sessions[0].extra['group_id'] == 'group-1'
         assert sessions[0].extra['group_member_version'] == 42
-        assert fake_e2ee_service.reconcile_group_session_state_calls
-        assert all(
-            item == ('session-1', 42, ['alice', 'bob'])
-            for item in fake_e2ee_service.reconcile_group_session_state_calls
-        )
-        assert sessions[0].extra['encryption_mode'] == 'e2ee_group'
+        assert fake_e2ee_service.reconcile_group_session_state_calls == []
+        assert sessions[0].extra['encryption_mode'] == 'plain'
         assert sessions[0].extra['call_capabilities'] == {'voice': False, 'video': False}
         assert sessions[0].extra['call_state'] == {}
         assert sessions[0].extra['session_crypto_state'] == {
-            'enabled': True,
-            'ready': True,
-            'can_decrypt': True,
+            'enabled': False,
+            'ready': False,
+            'can_decrypt': False,
             'device_registered': True,
-            'scheme': 'group-sender-key-v1',
-            'attachment_scheme': 'aesgcm-file+group-sender-key-v1',
-            'fanout_scheme': 'group-sender-key-fanout-v1',
-            'group_member_version': 42,
-            'local_sender_key_ready': False,
-            'local_sender_key_id': '',
-            'retired_local_key_count': 0,
-            'inbound_sender_key_count': 0,
             'device_id': 'device-local-1',
         }
-        assert sessions[0].uses_e2ee() is True
+        assert sessions[0].uses_e2ee() is False
         assert sessions[0].unread_count == 4
 
     asyncio.run(scenario())
@@ -2628,10 +2696,12 @@ def test_session_manager_refresh_remote_sessions_prefers_counterpart_profile(mon
 
     async def scenario() -> None:
         manager = session_manager_module.SessionManager()
-        sessions = await manager.refresh_remote_sessions()
+        result = await manager.refresh_remote_sessions()
 
-        assert len(sessions) == 1
-        session = sessions[0]
+        assert result.authoritative is True
+        assert result.unread_synchronized is True
+        assert len(result.sessions) == 1
+        session = result.sessions[0]
         assert session.name == 'Bobby'
         assert session.avatar is None
         assert session.display_avatar() == '/uploads/bob.svg'
@@ -2639,43 +2709,18 @@ def test_session_manager_refresh_remote_sessions_prefers_counterpart_profile(mon
         assert session.extra['counterpart_avatar'] == '/uploads/bob.svg'
         assert session.extra['counterpart_id'] == 'user-2'
         assert session.extra['counterpart_username'] == 'bob'
-        assert session.extra['encryption_mode'] == 'e2ee_private'
+        assert session.extra['encryption_mode'] == 'plain'
         assert session.extra['call_capabilities'] == {'voice': True, 'video': True}
         assert session.extra['call_state'] == {'active': False, 'status': 'idle'}
-        assert fake_e2ee_service.peer_identity_calls == ['user-2']
+        assert fake_e2ee_service.peer_identity_calls == []
         assert session.extra['session_crypto_state'] == {
-            'enabled': True,
-            'ready': True,
-            'can_decrypt': True,
+            'enabled': False,
+            'ready': False,
+            'can_decrypt': False,
             'device_registered': True,
-            'scheme': 'x25519-aesgcm-v1',
-            'attachment_scheme': 'aesgcm-file+x25519-v1',
-            'identity_status': 'identity_changed',
-            'identity_verified': False,
-            'identity_device_count': 2,
-            'trusted_identity_device_count': 1,
-            'unverified_identity_device_count': 0,
-            'changed_identity_device_count': 1,
-            'unverified_identity_device_ids': [],
-            'changed_identity_device_ids': ['device-bob-2'],
-            'identity_checked_at': '2026-04-06T12:00:00+00:00',
-            'identity_change_count': 1,
-            'identity_last_changed_at': '2026-04-06T12:15:00+00:00',
-            'identity_last_trusted_at': '2026-04-06T11:45:00+00:00',
-            'identity_action_required': True,
-            'identity_review_action': 'trust_peer_identity',
-            'identity_review_blocking': True,
-            'identity_alert_severity': 'critical',
-            'identity_verification_available': False,
-            'identity_primary_verification_device_id': '',
-            'identity_primary_verification_fingerprint': '',
-            'identity_primary_verification_fingerprint_short': '',
-            'identity_primary_verification_code': '',
-            'identity_primary_verification_code_short': '',
-            'identity_local_fingerprint_short': '',
             'device_id': 'device-local-1',
         }
-        assert session.uses_e2ee() is True
+        assert session.uses_e2ee() is False
         assert session.extra['avatar_seed'] == session_manager_module.profile_avatar_seed(
             user_id='user-2',
             username='bob',
@@ -2684,6 +2729,84 @@ def test_session_manager_refresh_remote_sessions_prefers_counterpart_profile(mon
         assert len(fake_db.replaced_sessions) == 1
 
     asyncio.run(scenario())
+
+
+def test_session_manager_refresh_remote_sessions_reports_non_authoritative_failure(monkeypatch) -> None:
+    fake_session_service = FakeSessionService()
+    fake_session_service.fetch_sessions_error = RuntimeError('sessions unavailable')
+    fake_event_bus = FakeEventBus()
+
+    monkeypatch.setattr(session_manager_module, 'get_session_service', lambda: fake_session_service)
+    monkeypatch.setattr(session_manager_module, 'get_event_bus', lambda: fake_event_bus)
+    monkeypatch.setattr(session_manager_module, 'get_message_manager', lambda: FakeMessageManager())
+    monkeypatch.setattr(session_manager_module, 'get_database', lambda: FakeSessionStateDatabase())
+
+    async def scenario() -> None:
+        manager = session_manager_module.SessionManager()
+        existing = Session(
+            session_id='session-1',
+            name='Cached Session',
+            session_type='group',
+            participant_ids=['alice', 'bob'],
+            unread_count=7,
+        )
+        manager._sessions[existing.session_id] = existing
+
+        result = await manager.refresh_remote_sessions()
+
+        assert fake_session_service.fetch_sessions_calls == 1
+        assert fake_session_service.fetch_unread_counts_calls == 0
+        assert result.authoritative is False
+        assert result.unread_synchronized is False
+        assert result.sessions == [existing]
+        assert manager.sessions == [existing]
+        assert fake_event_bus.events == []
+
+    asyncio.run(scenario())
+
+
+
+def test_session_manager_refresh_remote_sessions_preserves_local_unread_when_unread_snapshot_fails(monkeypatch) -> None:
+    fake_session_service = FakeSessionService()
+    fake_session_service.fetch_unread_counts_error = RuntimeError('unread unavailable')
+    fake_event_bus = FakeEventBus()
+    fake_db = FakeSessionProfileDatabase()
+
+    monkeypatch.setattr(session_manager_module, 'get_session_service', lambda: fake_session_service)
+    monkeypatch.setattr(session_manager_module, 'get_event_bus', lambda: fake_event_bus)
+    monkeypatch.setattr(session_manager_module, 'get_message_manager', lambda: FakeMessageManager())
+    monkeypatch.setattr(session_manager_module, 'get_database', lambda: fake_db)
+
+    async def scenario() -> None:
+        manager = session_manager_module.SessionManager()
+        existing = Session(
+            session_id='session-1',
+            name='Cached Session',
+            session_type='group',
+            participant_ids=['alice', 'bob'],
+            unread_count=7,
+        )
+        manager._sessions[existing.session_id] = existing
+
+        result = await manager.refresh_remote_sessions()
+
+        assert fake_session_service.fetch_sessions_calls == 1
+        assert fake_session_service.fetch_unread_counts_calls == 1
+        assert result.authoritative is True
+        assert result.unread_synchronized is False
+        assert len(result.sessions) == 1
+        assert result.sessions[0].session_id == 'session-1'
+        assert result.sessions[0].unread_count == 7
+        assert result.sessions[0].name == 'Core Team'
+        assert fake_db.replaced_sessions[0].unread_count == 7
+        assert any(
+            event_type == session_manager_module.SessionEvent.UPDATED
+            and payload.get('sessions') == result.sessions
+            for event_type, payload in fake_event_bus.events
+        )
+
+    asyncio.run(scenario())
+
 
 
 def test_session_manager_call_events_update_runtime_call_state(monkeypatch) -> None:
@@ -3679,13 +3802,175 @@ def test_session_manager_ensure_direct_session_uses_session_service(monkeypatch)
         manager = session_manager_module.SessionManager()
         session = await manager.ensure_direct_session('bob', display_name='Bob')
 
-        assert fake_session_service.create_direct_session_calls == [('bob', 'Bob')]
+        assert fake_session_service.create_direct_session_calls == ['bob']
         assert session is not None
         assert session.session_id == 'session-direct-1'
 
     asyncio.run(scenario())
 
 
+
+
+class HiddenSessionRuntimeDatabase:
+    def __init__(self) -> None:
+        self.is_connected = True
+        self.saved_sessions = []
+        self.saved_batches = []
+        self.updated_unread: list[tuple[str, int]] = []
+        self.app_state = {
+            'auth.user_profile': json.dumps({'id': 'alice', 'username': 'alice', 'nickname': 'Alice'}),
+        }
+
+    async def get_app_state(self, key: str):
+        return self.app_state.get(key)
+
+    async def save_session(self, session) -> None:
+        self.saved_sessions.append(session)
+
+    async def save_sessions_batch(self, sessions) -> None:
+        self.saved_batches.append(list(sessions))
+
+    async def update_session_unread(self, session_id: str, unread_count: int) -> None:
+        self.updated_unread.append((session_id, unread_count))
+
+    async def set_app_state(self, key: str, value: str) -> None:
+        self.app_state[key] = value
+
+    async def delete_app_state(self, key: str) -> None:
+        self.app_state.pop(key, None)
+
+
+def test_session_manager_ensure_remote_session_does_not_revive_hidden_session(monkeypatch) -> None:
+    fake_session_service = FakeSessionService()
+    fake_event_bus = FakeEventBus()
+    fake_db = HiddenSessionRuntimeDatabase()
+
+    monkeypatch.setattr(session_manager_module, 'get_session_service', lambda: fake_session_service)
+    monkeypatch.setattr(session_manager_module, 'get_event_bus', lambda: fake_event_bus)
+    monkeypatch.setattr(session_manager_module, 'get_message_manager', lambda: FakeMessageManager())
+    monkeypatch.setattr(session_manager_module, 'get_database', lambda: fake_db)
+
+    async def scenario() -> None:
+        manager = session_manager_module.SessionManager()
+        manager._hidden_sessions['session-1'] = datetime(2026, 3, 27, 18, 0, 0).timestamp()
+
+        session = await manager.ensure_remote_session('session-1', fallback_name='Core Team')
+
+        assert session is None
+        assert manager._sessions == {}
+        assert fake_db.saved_sessions == []
+        assert fake_event_bus.events == []
+
+    asyncio.run(scenario())
+
+
+def test_session_manager_ensure_direct_session_does_not_revive_hidden_session(monkeypatch) -> None:
+    fake_session_service = FakeSessionService()
+    fake_event_bus = FakeEventBus()
+    fake_db = HiddenSessionRuntimeDatabase()
+
+    monkeypatch.setattr(session_manager_module, 'get_session_service', lambda: fake_session_service)
+    monkeypatch.setattr(session_manager_module, 'get_event_bus', lambda: fake_event_bus)
+    monkeypatch.setattr(session_manager_module, 'get_message_manager', lambda: FakeMessageManager())
+    monkeypatch.setattr(session_manager_module, 'get_database', lambda: fake_db)
+
+    async def scenario() -> None:
+        manager = session_manager_module.SessionManager()
+        manager._hidden_sessions['session-direct-1'] = datetime(2026, 3, 27, 18, 0, 0).timestamp()
+
+        session = await manager.ensure_direct_session('bob', display_name='Bob')
+
+        assert session is None
+        assert manager._sessions == {}
+        assert fake_db.saved_sessions == []
+        assert fake_event_bus.events == []
+
+    asyncio.run(scenario())
+
+
+def test_session_manager_history_sync_does_not_restore_hidden_session_from_old_messages(monkeypatch) -> None:
+    fake_session_service = FakeSessionService()
+    fake_session_service.session_payload = {
+        **fake_session_service.session_payload,
+        'created_at': '2026-03-27T17:30:00',
+        'updated_at': '2026-03-27T17:30:00',
+        'last_message_time': '2026-03-27T17:30:00',
+    }
+    fake_event_bus = FakeEventBus()
+    fake_db = HiddenSessionRuntimeDatabase()
+
+    monkeypatch.setattr(session_manager_module, 'get_session_service', lambda: fake_session_service)
+    monkeypatch.setattr(session_manager_module, 'get_event_bus', lambda: fake_event_bus)
+    monkeypatch.setattr(session_manager_module, 'get_message_manager', lambda: FakeMessageManager())
+    monkeypatch.setattr(session_manager_module, 'get_database', lambda: fake_db)
+
+    async def scenario() -> None:
+        manager = session_manager_module.SessionManager()
+        hidden_at = datetime(2026, 3, 27, 18, 0, 0)
+        manager._hidden_sessions['session-1'] = hidden_at.timestamp()
+
+        await manager._on_history_synced({
+            'messages': [
+                ChatMessage(
+                    message_id='msg-old-1',
+                    session_id='session-1',
+                    sender_id='bob',
+                    content='older message',
+                    timestamp=hidden_at - timedelta(minutes=5),
+                    is_self=False,
+                )
+            ]
+        })
+
+        assert 'session-1' not in manager._sessions
+        assert manager._hidden_sessions['session-1'] == hidden_at.timestamp()
+        assert fake_db.saved_sessions == []
+        assert fake_db.saved_batches == []
+        assert fake_event_bus.events == []
+
+    asyncio.run(scenario())
+
+
+def test_session_manager_live_message_restores_hidden_session_only_after_new_activity(monkeypatch) -> None:
+    fake_session_service = FakeSessionService()
+    fake_session_service.session_payload = {
+        **fake_session_service.session_payload,
+        'created_at': '2026-03-27T17:30:00',
+        'updated_at': '2026-03-27T17:30:00',
+        'last_message_time': '2026-03-27T17:30:00',
+    }
+    fake_event_bus = FakeEventBus()
+    fake_db = HiddenSessionRuntimeDatabase()
+
+    monkeypatch.setattr(session_manager_module, 'get_session_service', lambda: fake_session_service)
+    monkeypatch.setattr(session_manager_module, 'get_event_bus', lambda: fake_event_bus)
+    monkeypatch.setattr(session_manager_module, 'get_message_manager', lambda: FakeMessageManager())
+    monkeypatch.setattr(session_manager_module, 'get_database', lambda: fake_db)
+
+    async def scenario() -> None:
+        manager = session_manager_module.SessionManager()
+        hidden_at = datetime(2026, 3, 27, 18, 0, 0)
+        manager._hidden_sessions['session-1'] = hidden_at.timestamp()
+
+        await manager._on_message_received({
+            'message': ChatMessage(
+                message_id='msg-new-1',
+                session_id='session-1',
+                sender_id='bob',
+                content='new message',
+                timestamp=hidden_at + timedelta(minutes=5),
+                is_self=False,
+            )
+        })
+
+        session = manager._sessions.get('session-1')
+        assert session is not None
+        assert session.unread_count == 1
+        assert 'session-1' not in manager._hidden_sessions
+        assert fake_db.updated_unread == [('session-1', 1)]
+        assert any(event == session_manager_module.SessionEvent.ADDED for event, _ in fake_event_bus.events)
+
+    asyncio.run(scenario())
 
 
 def test_session_manager_refresh_session_preview_preserves_last_message_time_without_local_message(monkeypatch) -> None:
@@ -3932,7 +4217,8 @@ def test_format_session_timestamp_uses_yesterday_with_time(monkeypatch) -> None:
 
     monkeypatch.setattr(i18n_module, 'datetime', FrozenDateTime)
     monkeypatch.setattr(i18n_module, '_localized_time_text', lambda moment: f'{moment.hour:02d}:{moment.minute:02d}')
-    i18n_module.initialize_i18n()
+    from client.core.config import Language
+    i18n_module.initialize_i18n(Language.ENGLISH)
 
     assert i18n_module.format_session_timestamp(datetime(2026, 3, 26, 9, 30, 0)) == 'Yesterday 09:30'
 
@@ -3944,7 +4230,9 @@ def test_format_session_timestamp_uses_full_year_date_for_older_year(monkeypatch
             return cls(2026, 3, 27, 14, 0, 0)
 
     monkeypatch.setattr(i18n_module, 'datetime', FrozenDateTime)
-    i18n_module.initialize_i18n()
+    monkeypatch.setattr(i18n_module, '_localized_time_text', lambda moment: f'{moment.hour:02d}:{moment.minute:02d}')
+    from client.core.config import Language
+    i18n_module.initialize_i18n(Language.ENGLISH)
 
     assert i18n_module.format_session_timestamp(datetime(2025, 12, 31, 9, 30, 0)) == '2025/12/31'
 
@@ -4073,12 +4361,16 @@ def test_auth_controller_update_profile_can_reset_avatar(monkeypatch) -> None:
 
     async def scenario() -> None:
         controller = auth_controller_module.AuthController()
-        user = await controller.update_profile(reset_avatar=True)
+        result = await controller.update_profile(reset_avatar=True)
+        user = result.user
 
         assert fake_file_service.avatar_resets == 1
         assert fake_file_service.avatar_uploads == []
         assert fake_user_service.update_calls == []
         assert user['avatar_kind'] == 'default'
+        assert result.session_snapshot is not None
+        assert result.session_snapshot.authoritative is True
+        assert result.session_snapshot.unread_synchronized is True
         assert fake_chat_controller.refresh_calls == 1
         assert fake_db.app_state[controller.USER_ID_KEY] == 'user-1'
 
@@ -4261,10 +4553,3 @@ def test_contact_controller_group_merge_helpers_preserve_extra_and_sort(monkeypa
         assert fake_db.replaced_groups[-1][0]['extra']['member_previews'] == ['Alice(地区: Shenzhen)']
 
     asyncio.run(scenario())
-
-
-
-
-
-
-

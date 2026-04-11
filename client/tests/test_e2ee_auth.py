@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import asyncio
 
@@ -149,7 +149,10 @@ def test_auth_controller_recover_session_crypto_refreshes_sessions_after_recover
             'performed': True,
             'session_id': 'session-2',
             'recovery_action': 'reprovision_device',
-            'sessions_refreshed': True,
+            'session_snapshot': {
+                'authoritative': True,
+                'unread_synchronized': True,
+            },
         }
 
     asyncio.run(scenario())
@@ -187,7 +190,7 @@ def test_auth_controller_recover_current_session_crypto_skips_refresh_when_not_p
         assert result == {
             'performed': False,
             'reason': 'no_recovery_action',
-            'sessions_refreshed': False,
+            'session_snapshot': None,
         }
 
     asyncio.run(scenario())
@@ -206,6 +209,11 @@ def test_auth_controller_execute_session_security_action_refreshes_sessions_afte
         'session_id': 'session-2',
         'action_id': 'trust_peer_identity',
     }
+    fake_chat_controller.refresh_result = boundaries.session_manager_module.SessionRefreshResult(
+        sessions=[],
+        authoritative=True,
+        unread_synchronized=False,
+    )
 
     monkeypatch.setattr(auth_controller_module, 'get_auth_service', lambda: fake_auth_service)
     monkeypatch.setattr(auth_controller_module, 'get_user_service', lambda: fake_user_service)
@@ -227,7 +235,10 @@ def test_auth_controller_execute_session_security_action_refreshes_sessions_afte
             'performed': True,
             'session_id': 'session-2',
             'action_id': 'trust_peer_identity',
-            'sessions_refreshed': True,
+            'session_snapshot': {
+                'authoritative': True,
+                'unread_synchronized': False,
+            },
         }
 
     asyncio.run(scenario())
@@ -287,7 +298,7 @@ def test_auth_controller_execute_current_session_security_action_skips_refresh_w
                 'target_device_id': 'device-bob-2',
                 'blocking': True,
             },
-            'sessions_refreshed': False,
+            'session_snapshot': None,
         }
 
     asyncio.run(scenario())
@@ -631,17 +642,13 @@ def test_auth_controller_export_history_recovery_package_defaults_to_current_use
                 'scheme': 'device-history-recovery-v1',
                 'recipient_device_id': 'device-new-1',
             },
-            'history_recovery_diagnostics': {
-                'local_device_id': 'device-1',
-                'available': True,
-                'source_device_count': 1,
-            },
         }
+        assert fake_e2ee_service.history_recovery_diagnostics_calls == 0
 
     asyncio.run(scenario())
 
 
-def test_auth_controller_import_history_recovery_package_appends_diagnostics(monkeypatch) -> None:
+def test_auth_controller_import_history_recovery_package_returns_import_result(monkeypatch) -> None:
     fake_auth_service = boundaries.FakeAuthService()
     fake_user_service = boundaries.FakeUserService()
     fake_db = boundaries.FakeDatabase()
@@ -676,12 +683,8 @@ def test_auth_controller_import_history_recovery_package_appends_diagnostics(mon
         assert result == {
             'source_device_id': 'device-old-1',
             'available': True,
-            'history_recovery_diagnostics': {
-                'local_device_id': 'device-1',
-                'available': True,
-                'source_device_count': 1,
-            },
         }
+        assert fake_e2ee_service.history_recovery_diagnostics_calls == 0
 
     asyncio.run(scenario())
 
@@ -825,4 +828,3 @@ def test_auth_controller_runtime_security_status_exposes_database_self_check(mon
         }
 
     asyncio.run(scenario())
-

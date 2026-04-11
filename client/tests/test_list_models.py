@@ -87,6 +87,101 @@ def _install_qt_stubs() -> None:
         def instance():
             return None
 
+    class _DummyQThread:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            return None
+
+    class _DummyQUrl:
+        def __init__(self, value=''):
+            self.value = value
+
+        @staticmethod
+        def fromLocalFile(value):
+            return _DummyQUrl(value)
+
+    class _DummyQSize:
+        def __init__(self, width=0, height=0):
+            if hasattr(width, 'width') and hasattr(width, 'height') and height == 0:
+                self._width = int(width.width())
+                self._height = int(width.height())
+            else:
+                self._width = int(width)
+                self._height = int(height)
+
+        def width(self):
+            return self._width
+
+        def height(self):
+            return self._height
+
+        def isEmpty(self):
+            return self._width <= 0 or self._height <= 0
+
+    class _DummyQPoint:
+        def __init__(self, x=0, y=0):
+            self._x = int(x)
+            self._y = int(y)
+
+        def x(self):
+            return self._x
+
+        def y(self):
+            return self._y
+
+    class _DummyQRect:
+        def __init__(self, x=0, y=0, width=0, height=0):
+            if hasattr(x, 'x') and hasattr(x, 'y') and hasattr(x, 'width') and hasattr(x, 'height') and y == 0 and width == 0 and height == 0:
+                self._x = int(x.x())
+                self._y = int(x.y())
+                self._width = int(x.width())
+                self._height = int(x.height())
+            else:
+                self._x = int(x)
+                self._y = int(y)
+                self._width = int(width)
+                self._height = int(height)
+
+        def x(self):
+            return self._x
+
+        def y(self):
+            return self._y
+
+        def width(self):
+            return self._width
+
+        def height(self):
+            return self._height
+
+        def left(self):
+            return self._x
+
+        def top(self):
+            return self._y
+
+        def right(self):
+            return self._x + self._width - 1
+
+        def bottom(self):
+            return self._y + self._height - 1
+
+        def size(self):
+            return _DummyQSize(self._width, self._height)
+
+        def adjusted(self, left, top, right, bottom):
+            return _DummyQRect(
+                self._x + int(left),
+                self._y + int(top),
+                self._width - int(left) + int(right),
+                self._height - int(top) + int(bottom),
+            )
+
+    class _DummyQRectF(_DummyQRect):
+        pass
+
     class _DummyModelIndex:
         def __init__(self, row: int = -1, column: int = 0):
             self._row = row
@@ -106,6 +201,7 @@ def _install_qt_stubs() -> None:
         AlignRight = 2
         AlignLeft = 4
         AlignVCenter = 8
+        AlignTop = 16
 
     class _DummyItemDataRole:
         DisplayRole = 0
@@ -113,9 +209,26 @@ def _install_qt_stubs() -> None:
         SizeHintRole = 2
         UserRole = 1000
 
+    class _DummyTextElideMode:
+        ElideRight = 1
+
+    class _DummyAspectRatioMode:
+        KeepAspectRatio = 1
+
+    class _DummyTransformationMode:
+        SmoothTransformation = 1
+
+    class _DummyGlobalColor:
+        white = 'white'
+        transparent = 'transparent'
+
     class _DummyQt:
         ItemDataRole = _DummyItemDataRole
         AlignmentFlag = _DummyAlignmentFlag
+        TextElideMode = _DummyTextElideMode
+        AspectRatioMode = _DummyAspectRatioMode
+        TransformationMode = _DummyTransformationMode
+        GlobalColor = _DummyGlobalColor
 
     class _DummyAbstractListModel:
         def __init__(self, *args, **kwargs):
@@ -157,14 +270,189 @@ def _install_qt_stubs() -> None:
     qtcore.Slot = _DummySlot
     qtcore.QTimer = _DummyQTimer
     qtcore.QCoreApplication = _DummyQCoreApplication
+    qtcore.QThread = _DummyQThread
+    qtcore.QUrl = _DummyQUrl
+    qtcore.QSize = _DummyQSize
+    qtcore.QPoint = _DummyQPoint
+    qtcore.QRect = _DummyQRect
+    qtcore.QRectF = _DummyQRectF
     qtcore.QModelIndex = _DummyModelIndex
     qtcore.QAbstractListModel = _DummyAbstractListModel
     qtcore.Qt = _DummyQt
 
+    qtgui = types.ModuleType('PySide6.QtGui')
+
+    class _DummyQColor:
+        def __init__(self, *args, **kwargs):
+            self.args = args
+
+    class _DummyQFont:
+        class SpacingType:
+            AbsoluteSpacing = 0
+
+        def __init__(self, *args, **kwargs):
+            self._pixel_size = 12
+            self._bold = False
+
+        def setPixelSize(self, value):
+            self._pixel_size = int(value)
+
+        def pixelSize(self):
+            return self._pixel_size
+
+        def setBold(self, value):
+            self._bold = bool(value)
+
+        def setFamilies(self, families):
+            self._families = list(families)
+
+        def setFamily(self, family):
+            self._family = family
+
+        def setLetterSpacing(self, *args, **kwargs):
+            return None
+
+    class _DummyQFontMetrics:
+        def __init__(self, font=None):
+            self._font = font or _DummyQFont()
+
+        def height(self):
+            return max(1, int(getattr(self._font, '_pixel_size', 12) * 1.25))
+
+        def ascent(self):
+            return max(1, int(self.height() * 0.8))
+
+        def descent(self):
+            return max(0, self.height() - self.ascent())
+
+        def horizontalAdvance(self, text):
+            return max(0, len(str(text or '')) * max(1, int(getattr(self._font, '_pixel_size', 12) * 0.55)))
+
+        def elidedText(self, text, mode, width):
+            text = str(text or '')
+            if self.horizontalAdvance(text) <= width:
+                return text
+            char_width = max(1, self.horizontalAdvance('M'))
+            max_chars = max(0, int(width) // char_width - 1)
+            return text[:max_chars] + ('...' if max_chars else '')
+
+    class _DummyQPixmap:
+        def __init__(self, *args, **kwargs):
+            self._width = 0
+            self._height = 0
+
+        def isNull(self):
+            return self._width <= 0 or self._height <= 0
+
+        def width(self):
+            return self._width
+
+        def height(self):
+            return self._height
+
+        def size(self):
+            return _DummyQSize(self._width, self._height)
+
+        def scaled(self, width, height, *args, **kwargs):
+            pixmap = _DummyQPixmap()
+            pixmap._width = int(width)
+            pixmap._height = int(height)
+            return pixmap
+
+        def fill(self, *args, **kwargs):
+            return None
+
+        def loadFromData(self, payload):
+            return bool(payload)
+
+        def save(self, path):
+            return True
+
+        @staticmethod
+        def fromImage(image):
+            return _DummyQPixmap()
+
+    class _DummyPainter:
+        class RenderHint:
+            Antialiasing = 1
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __getattr__(self, name):
+            def _noop(*args, **kwargs):
+                return None
+            return _noop
+
+    class _DummyQImageReader:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def setScaledSize(self, *args, **kwargs):
+            return None
+
+        def read(self):
+            return None
+
+    qtgui.QColor = _DummyQColor
+    qtgui.QFont = _DummyQFont
+    qtgui.QFontMetrics = _DummyQFontMetrics
+    qtgui.QPainter = _DummyPainter
+    qtgui.QPainterPath = type('QPainterPath', (), {})
+    qtgui.QPen = type('QPen', (), {'__init__': lambda self, *args, **kwargs: None})
+    qtgui.QPixmap = _DummyQPixmap
+    qtgui.QImageReader = _DummyQImageReader
+    qtgui.QIcon = type('QIcon', (), {'__init__': lambda self, *args, **kwargs: None})
+    qtgui.QIconEngine = type('QIconEngine', (), {'__init__': lambda self, *args, **kwargs: None})
+
+    qtwidgets = types.ModuleType('PySide6.QtWidgets')
+
+    class _DummyQApplication:
+        _instance = None
+
+        def __init__(self, *args, **kwargs):
+            _DummyQApplication._instance = self
+
+        @staticmethod
+        def instance():
+            return _DummyQApplication._instance
+
+    qtwidgets.QApplication = _DummyQApplication
+    qtwidgets.QStyledItemDelegate = type('QStyledItemDelegate', (), {'__init__': lambda self, *args, **kwargs: None})
+    qtwidgets.QStyleOptionViewItem = type('QStyleOptionViewItem', (), {})
+    qtwidgets.QStyle = type(
+        'QStyle',
+        (),
+        {'StateFlag': type('StateFlag', (), {'State_Selected': 1, 'State_MouseOver': 2})},
+    )
+
+    qtnetwork = types.ModuleType('PySide6.QtNetwork')
+
+    class _DummyQNetworkAccessManager:
+        def __init__(self, *args, **kwargs):
+            self.finished = _DummySignalInstance()
+
+        def get(self, request):
+            return types.SimpleNamespace(finished=_DummySignalInstance())
+
+    qtnetwork.QNetworkAccessManager = _DummyQNetworkAccessManager
+    qtnetwork.QNetworkRequest = type('QNetworkRequest', (), {'__init__': lambda self, *args, **kwargs: None})
+    qtnetwork.QNetworkReply = type(
+        'QNetworkReply',
+        (),
+        {'NetworkError': type('NetworkError', (), {'NoError': 0})},
+    )
+
     pyside = types.ModuleType('PySide6')
     pyside.QtCore = qtcore
+    pyside.QtGui = qtgui
+    pyside.QtWidgets = qtwidgets
+    pyside.QtNetwork = qtnetwork
     sys.modules['PySide6'] = pyside
     sys.modules['PySide6.QtCore'] = qtcore
+    sys.modules['PySide6.QtGui'] = qtgui
+    sys.modules['PySide6.QtWidgets'] = qtwidgets
+    sys.modules['PySide6.QtNetwork'] = qtnetwork
 
 
 _install_qt_stubs()
@@ -238,6 +526,24 @@ def test_message_model_prepend_messages_uses_incremental_insert() -> None:
     assert model.data(model.index(0, 0), model.DisplayKindRole) == model.DISPLAY_TIME_SEPARATOR
     assert model.data(model.index(2, 0), model.DisplayKindRole) == model.DISPLAY_TIME_SEPARATOR
 
+
+
+def test_session_model_add_session_upserts_existing_session_id() -> None:
+    model = SessionModel()
+    original = _session('s-1', 0)
+    replacement = _session('s-1', 15)
+    replacement.last_message = 'replacement'
+
+    model.add_session(original)
+    model._qt_ops.clear()
+    model.dataChanged.events.clear()
+    model.add_session(replacement)
+
+    assert model.rowCount() == 1
+    assert ('insert', 0, 0) not in model._qt_ops
+    assert model.get_session(0).last_message == 'replacement'
+    assert model.get_session(0).last_message_time == replacement.last_message_time
+    assert model.dataChanged.events
 
 
 def test_message_model_refresh_recalled_message_without_full_reset() -> None:

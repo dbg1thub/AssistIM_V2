@@ -222,17 +222,18 @@
 
 ### 5.2 共同字段
 
-通话相关 `data` 统一至少包含：
+服务端下发的通话相关 `data` 统一至少包含：
 
 - `call_id`
 - `session_id`
-- `initiator_user_id`
-- `target_user_id`
+- `initiator_id`
+- `recipient_id`
 
 其中：
 
 - `call_id`：一次通话的稳定 ID
 - `session_id`：必须是 `private` 会话
+- 客户端发起 `call_invite` 时仍可附带 `target_user_id` 作为目标用户提示
 
 ### 5.3 邀请与状态类事件
 
@@ -242,8 +243,8 @@
 {
   "call_id": "call_x",
   "session_id": "session_x",
-  "initiator_user_id": "user_a",
-  "target_user_id": "user_b",
+  "initiator_id": "user_a",
+  "recipient_id": "user_b",
   "media_type": "voice",
   "created_at": "2026-04-05T12:00:00Z"
 }
@@ -255,9 +256,9 @@
 {
   "call_id": "call_x",
   "session_id": "session_x",
-  "initiator_user_id": "user_a",
-  "target_user_id": "user_b",
-  "actor_user_id": "user_b",
+  "initiator_id": "user_a",
+  "recipient_id": "user_b",
+  "actor_id": "user_b",
   "reason": "busy"
 }
 ```
@@ -275,9 +276,9 @@
 {
   "call_id": "call_x",
   "session_id": "session_x",
-  "initiator_user_id": "user_a",
-  "target_user_id": "user_b",
-  "actor_user_id": "user_a",
+  "initiator_id": "user_a",
+  "recipient_id": "user_b",
+  "actor_id": "user_a",
   "sdp": "v=0..."
 }
 ```
@@ -288,9 +289,9 @@
 {
   "call_id": "call_x",
   "session_id": "session_x",
-  "initiator_user_id": "user_a",
-  "target_user_id": "user_b",
-  "actor_user_id": "user_b",
+  "initiator_id": "user_a",
+  "recipient_id": "user_b",
+  "actor_id": "user_b",
   "sdp": "v=0..."
 }
 ```
@@ -303,9 +304,9 @@
 {
   "call_id": "call_x",
   "session_id": "session_x",
-  "initiator_user_id": "user_a",
-  "target_user_id": "user_b",
-  "actor_user_id": "user_a",
+  "initiator_id": "user_a",
+  "recipient_id": "user_b",
+  "actor_id": "user_a",
   "candidate": "candidate:...",
   "sdp_mid": "0",
   "sdp_mline_index": 0

@@ -144,13 +144,15 @@
 }
 ```
 
-其中 `data` 至少包含：
+其中服务端下发的 `data` 至少包含：
 
 - `call_id`
 - `session_id`
-- `initiator_user_id`
-- `target_user_id`
+- `initiator_id`
+- `recipient_id`
 - `media_type`，值为 `voice` 或 `video`
+
+客户端发起 `call_invite` 时仍可附带 `target_user_id` 作为目标用户提示。
 
 `call_offer` / `call_answer` 附带：
 
@@ -406,7 +408,7 @@ AI 会话默认不启用 E2EE。
 建议：
 
 - 普通私聊：可启用 E2EE
-- AI 会话：明确标记为 `encryption_mode=server_visible`
+- AI 会话：明确标记为 `encryption_mode=server_visible_ai`
 
 不要把这两类会话混成同一个默认策略。
 
@@ -535,8 +537,8 @@ AI 会话默认不启用 E2EE。
 
 - `call_id`
 - `session_id`
-- `initiator_user_id`
-- `target_user_id`
+- `initiator_id`
+- `recipient_id`
 - `media_type`
 - `created_at`
 
@@ -544,21 +546,21 @@ AI 会话默认不启用 E2EE。
 
 - `call_id`
 - `session_id`
-- `actor_user_id`
+- `actor_id`
 - `reason`
 
 `call_offer` / `call_answer`：
 
 - `call_id`
 - `session_id`
-- `actor_user_id`
+- `actor_id`
 - `sdp`
 
 `call_ice`：
 
 - `call_id`
 - `session_id`
-- `actor_user_id`
+- `actor_id`
 - `candidate`
 - `sdp_mid`
 - `sdp_mline_index`
@@ -829,7 +831,7 @@ MVP 建议保持当前结构不变：
 
 建议：
 
-- AI 会话明确保持 `server_visible`
+- AI 会话明确保持 `server_visible_ai`
 
 ### 17.3 E2EE 与多端
 
@@ -866,4 +868,3 @@ MVP 建议保持当前结构不变：
 2. 为 E2EE 设备模型补后端 schema 设计
 3. 先实现 `CallManager + call_service + WS signaling`
 4. 语音通话跑通后，再开始私聊文本 E2EE
-

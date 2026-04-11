@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import asyncio
 import json
@@ -286,6 +286,8 @@ if 'qfluentwidgets' not in sys.modules:
     qfluentwidgets.QConfig = _DummyQConfig
     qfluentwidgets.Theme = _DummyTheme
     qfluentwidgets.getIconColor = lambda theme: 'black'
+    qfluentwidgets.isDarkTheme = lambda: False
+    qfluentwidgets.themeColor = lambda: '#07c160'
     qfluentwidgets.qconfig = types.SimpleNamespace(load=lambda path, cfg: None)
     sys.modules['qfluentwidgets'] = qfluentwidgets
 
@@ -332,12 +334,18 @@ class FakeConnectionManager:
             return self._send_results.pop(0)
         return True
 
-    async def send_typing(self, session_id: str) -> bool:
+    async def send_typing(self, session_id: str, *, typing: bool = True) -> bool:
+        self.sent_payloads.append(
+            {
+                'type': 'typing',
+                'session_id': session_id,
+                'typing': typing,
+            }
+        )
         return True
 
     async def send_read_ack(self, session_id: str, message_id: str) -> bool:
         return True
-
 
 class FakeDatabase:
     def __init__(self) -> None:
@@ -828,6 +836,7 @@ def test_message_manager_edits_encrypted_message_with_sanitized_transport_extra(
         name='Bob',
         session_type='direct',
         participant_ids=['alice', 'bob'],
+        extra={'encryption_mode': 'e2ee_private'},
     )
     fake_db.messages['m-enc-1'] = ChatMessage(
         message_id='m-enc-1',
@@ -971,7 +980,7 @@ def test_message_manager_ack_preserves_local_plaintext_for_direct_e2ee_sender(mo
         name='Bob',
         session_type='direct',
         participant_ids=['alice', 'bob'],
-        extra={},
+        extra={'encryption_mode': 'e2ee_private'},
     )
 
     monkeypatch.setattr(message_manager_module, 'get_event_bus', lambda: fake_event_bus)
@@ -1054,6 +1063,7 @@ def test_message_manager_edits_group_encrypted_message_with_sender_key_transport
         session_type='group',
         participant_ids=['alice', 'bob', 'charlie'],
         extra={
+            'encryption_mode': 'e2ee_group',
             'members': [
                 {'id': 'alice'},
                 {'id': 'bob'},
@@ -1436,6 +1446,7 @@ def test_message_manager_prepare_attachment_upload_encrypts_direct_image_message
         name='Bob',
         session_type='direct',
         participant_ids=['alice', 'bob'],
+        extra={'encryption_mode': 'e2ee_private'},
     )
 
     monkeypatch.setattr(message_manager_module, 'get_event_bus', lambda: fake_event_bus)
@@ -1479,6 +1490,7 @@ def test_message_manager_blocks_direct_sends_when_identity_review_is_required(mo
         session_type='direct',
         participant_ids=['alice', 'bob'],
         extra={
+            'encryption_mode': 'e2ee_private',
             'session_crypto_state': {
                 'identity_status': 'identity_changed',
                 'identity_action_required': True,
@@ -1531,6 +1543,7 @@ def test_message_manager_release_security_pending_messages_sends_after_confirmat
         session_type='direct',
         participant_ids=['alice', 'bob'],
         extra={
+            'encryption_mode': 'e2ee_private',
             'session_crypto_state': {
                 'identity_status': 'identity_changed',
                 'identity_action_required': True,
@@ -1594,6 +1607,7 @@ def test_message_manager_discard_security_pending_messages_removes_local_only_me
         session_type='direct',
         participant_ids=['alice', 'bob'],
         extra={
+            'encryption_mode': 'e2ee_private',
             'session_crypto_state': {
                 'identity_status': 'identity_changed',
                 'identity_action_required': True,
@@ -1649,6 +1663,7 @@ def test_message_manager_blocks_direct_attachment_encryption_when_identity_revie
         session_type='direct',
         participant_ids=['alice', 'bob'],
         extra={
+            'encryption_mode': 'e2ee_private',
             'session_crypto_state': {
                 'identity_status': 'identity_changed',
                 'identity_action_required': True,
@@ -1705,6 +1720,7 @@ def test_message_manager_prepare_attachment_upload_encrypts_group_image_messages
         session_type='group',
         participant_ids=['alice', 'bob', 'charlie'],
         extra={
+            'encryption_mode': 'e2ee_group',
             'members': [
                 {'id': 'alice'},
                 {'id': 'bob'},
@@ -2087,6 +2103,45 @@ def test_message_manager_remote_history_skips_payloads_without_canonical_message
             await manager.close()
 
     asyncio.run(scenario())
+
+def test_message_manager_emits_strict_typing_state(monkeypatch) -> None:
+    fake_event_bus = FakeEventBus()
+    fake_conn_manager = FakeConnectionManager([])
+    fake_db = FakeDatabase()
+
+    monkeypatch.setattr(message_manager_module, 'get_event_bus', lambda: fake_event_bus)
+    monkeypatch.setattr(message_manager_module, 'get_connection_manager', lambda: fake_conn_manager)
+    monkeypatch.setattr(message_manager_module, 'get_database', lambda: fake_db)
+
+    async def scenario() -> None:
+        manager = message_manager_module.MessageManager()
+        manager.set_user_id('alice')
+        await manager.initialize()
+        try:
+            await manager._handle_ws_message(
+                {
+                    'type': 'typing',
+                    'data': {
+                        'session_id': 'session-1',
+                        'user_id': 'bob',
+                        'typing': False,
+                    },
+                }
+            )
+
+            assert fake_event_bus.events[-1] == (
+                message_manager_module.MessageEvent.TYPING,
+                {
+                    'session_id': 'session-1',
+                    'user_id': 'bob',
+                    'typing': False,
+                },
+            )
+        finally:
+            await manager.close()
+
+    asyncio.run(scenario())
+
 
 def test_message_manager_ignores_legacy_read_event_message_id_alias(monkeypatch) -> None:
     fake_event_bus = FakeEventBus()
@@ -2717,6 +2772,7 @@ def test_message_manager_sends_group_text_with_sender_key_encryption(monkeypatch
         session_type='group',
         participant_ids=['alice', 'bob', 'charlie'],
         extra={
+            'encryption_mode': 'e2ee_group',
             'members': [
                 {'id': 'alice', 'username': 'alice'},
                 {'id': 'bob', 'username': 'bob'},
@@ -2818,5 +2874,35 @@ def test_message_manager_receives_group_text_and_decrypts_sender_key_payload(mon
             assert any(event == message_manager_module.MessageEvent.RECEIVED for event, _ in fake_event_bus.events)
         finally:
             await manager.close()
+
+    asyncio.run(scenario())
+
+
+def test_message_manager_close_clears_authenticated_user_context(monkeypatch) -> None:
+    fake_event_bus = FakeEventBus()
+    fake_conn_manager = FakeConnectionManager([])
+    fake_db = FakeDatabase()
+
+    class FakeChatService:
+        async def fetch_messages(self, session_id: str, limit: int = 50, before=None) -> list[dict]:
+            return []
+
+    class FakeFileService:
+        pass
+
+    monkeypatch.setattr(message_manager_module, 'get_event_bus', lambda: fake_event_bus)
+    monkeypatch.setattr(message_manager_module, 'get_connection_manager', lambda: fake_conn_manager)
+    monkeypatch.setattr(message_manager_module, 'get_database', lambda: fake_db)
+    monkeypatch.setattr(message_manager_module, 'get_chat_service', lambda: FakeChatService())
+    monkeypatch.setattr(message_manager_module, 'get_file_service', lambda: FakeFileService())
+
+    async def scenario() -> None:
+        manager = message_manager_module.MessageManager()
+        manager.set_user_id('alice')
+        await manager.initialize()
+        await manager.close()
+
+        assert manager._user_id == ''
+        assert fake_conn_manager._listeners == []
 
     asyncio.run(scenario())

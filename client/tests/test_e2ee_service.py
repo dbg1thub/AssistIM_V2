@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import asyncio
 from copy import deepcopy
@@ -621,9 +621,9 @@ def test_e2ee_service_exports_and_imports_direct_history_recovery_package(monkey
         assert package["package_summary"]["signed_prekey_count"] >= 1
         assert package["package_summary"]["one_time_prekey_count"] >= 1
         assert import_result["source_device_id"] == bob_old_bundle["device_id"]
+        assert import_result["source_user_id"] == "bob"
         assert import_result["imported_signed_prekeys"] >= 1
-        assert import_result["available"] is True
-        assert import_result["primary_source_device_id"] == bob_old_bundle["device_id"]
+        assert import_result["imported_one_time_prekeys"] >= 1
         assert plaintext == "recoverable secret"
         assert summary["source_device_count"] == 1
         assert summary["signed_prekey_count"] >= 1
@@ -1282,3 +1282,4 @@ def test_e2ee_service_encrypts_group_attachment_with_sender_key_fanout(monkeypat
         asyncio.run(scenario())
     finally:
         shutil.rmtree(workspace_tmp, ignore_errors=True)
+

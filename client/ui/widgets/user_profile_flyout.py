@@ -1,4 +1,4 @@
-﻿"""Quick user-profile flyout and profile actions for the main window."""
+"""Quick user-profile flyout and profile actions for the main window."""
 
 from __future__ import annotations
 
@@ -555,7 +555,7 @@ class UserProfileCoordinator(QWidget):
         reset_avatar = bool(payload.get("reset_avatar", False))
 
         try:
-            user = await self._auth_controller.update_profile(
+            update_result = await self._auth_controller.update_profile(
                 nickname=str(payload.get("nickname", "") or "").strip(),
                 signature=str(payload.get("signature", "") or "").strip(),
                 region=str(payload.get("region", "") or "").strip(),
@@ -577,13 +577,30 @@ class UserProfileCoordinator(QWidget):
                 duration=2400,
             )
         else:
-            self.profileChanged.emit(dict(user or {}))
-            InfoBar.success(
-                tr("profile.edit.title", "Edit Profile"),
-                tr("profile.edit.success", "Profile updated."),
-                parent=self.window(),
-                duration=1800,
-            )
+            user = dict(update_result.user or {})
+            snapshot = update_result.session_snapshot
+            self.profileChanged.emit(user)
+            if snapshot is not None and not snapshot.authoritative:
+                InfoBar.warning(
+                    tr("profile.edit.title", "Edit Profile"),
+                    tr("profile.edit.session_refresh_degraded", "Profile updated. Some conversations may refresh later."),
+                    parent=self.window(),
+                    duration=2400,
+                )
+            elif snapshot is not None and not snapshot.unread_synchronized:
+                InfoBar.info(
+                    tr("profile.edit.title", "Edit Profile"),
+                    tr("profile.edit.unread_refresh_degraded", "Profile updated. Unread counters may update shortly."),
+                    parent=self.window(),
+                    duration=2200,
+                )
+            else:
+                InfoBar.success(
+                    tr("profile.edit.title", "Edit Profile"),
+                    tr("profile.edit.success", "Profile updated."),
+                    parent=self.window(),
+                    duration=1800,
+                )
         finally:
             self._close_flyout()
 

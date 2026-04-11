@@ -76,6 +76,7 @@ class MainWindow(FluentWindow):
 
     closed = Signal()
     logoutRequested = Signal()
+    runtimeRefreshRequested = Signal()
     NAVIGATION_MENU_THRESHOLD = 1400
     DEFAULT_WIDTH = 1200
     DEFAULT_HEIGHT = 900
@@ -107,6 +108,7 @@ class MainWindow(FluentWindow):
         self._tray_leave_timer.setSingleShot(True)
         self._tray_leave_timer.setInterval(240)
         self._tray_leave_timer.timeout.connect(self._close_tray_alert_flyout)
+        self._ui_callback_generation = 0
         self._ui_tasks: set[asyncio.Task] = set()
         self._contact_open_task: asyncio.Task | None = None
         self._event_bus = get_event_bus()
@@ -115,7 +117,7 @@ class MainWindow(FluentWindow):
         self._force_logout_info_bar = None
         self._force_logout_timer = QTimer(self)
         self._force_logout_timer.setSingleShot(True)
-        self._force_logout_timer.timeout.connect(self._request_forced_exit)
+        self._force_logout_timer.timeout.connect(self._make_generation_bound_ui_callback(self._request_forced_exit))
         self.user_card = None
         self._avatar_store = get_avatar_image_store()
         self._avatar_store.avatar_ready.connect(self._on_avatar_ready)
@@ -151,8 +153,8 @@ class MainWindow(FluentWindow):
             self._theme_poll_timer.start()
 
         self.restore_default_geometry()
-        QTimer.singleShot(0, self.chat_interface.load_sessions)
-        QTimer.singleShot(0, self._sync_chat_session_activity)
+        self._schedule_ui_single_shot(0, self.chat_interface.load_sessions)
+        self._schedule_ui_single_shot(0, self._sync_chat_session_activity)
 
     def restore_default_geometry(self) -> None:
         """Restore the expected shell size and center it on the primary display."""
@@ -192,7 +194,7 @@ class MainWindow(FluentWindow):
         if interface is not self.chat_interface:
             self.chat_interface.close_transient_panels()
         result = super().switchTo(interface)
-        QTimer.singleShot(0, self._sync_chat_session_activity)
+        self._schedule_ui_single_shot(0, self._sync_chat_session_activity)
         return result
 
     def changeEvent(self, event) -> None:
@@ -202,7 +204,7 @@ class MainWindow(FluentWindow):
             QEvent.Type.ActivationChange,
             QEvent.Type.WindowStateChange,
         }:
-            QTimer.singleShot(0, self._sync_chat_session_activity)
+            self._schedule_ui_single_shot(0, self._sync_chat_session_activity)
 
     def _is_chat_session_active(self) -> bool:
         """Return whether the chat page is truly foreground-visible to the user."""
@@ -221,6 +223,28 @@ class MainWindow(FluentWindow):
         if not hasattr(self, "chat_interface"):
             return
         self.chat_interface.set_session_visibility_active(self._is_chat_session_active())
+
+    def _invalidate_ui_callback_generation(self) -> None:
+        """Drop delayed callbacks that belong to an older window UI lifetime."""
+        self._ui_callback_generation += 1
+
+    def _make_generation_bound_ui_callback(self, callback, *, generation: int | None = None):
+        """Wrap one callback so it only runs for the current UI generation."""
+        callback_generation = self._ui_callback_generation if generation is None else generation
+
+        def guarded_callback(*args, **kwargs):
+            if not self._is_ui_callback_generation_current(callback_generation):
+                return
+            callback(*args, **kwargs)
+
+        return guarded_callback
+
+    def _is_ui_callback_generation_current(self, generation: int) -> bool:
+        return generation == self._ui_callback_generation
+
+    def _schedule_ui_single_shot(self, delay: int, callback, *, generation: int | None = None) -> None:
+        """Schedule one delayed callback that expires when the window tears down."""
+        QTimer.singleShot(delay, self._make_generation_bound_ui_callback(callback, generation=generation))
 
     def _init_user_card(self) -> None:
         """Insert the current-account user card into the navigation area."""
@@ -314,10 +338,13 @@ class MainWindow(FluentWindow):
 
         self._tray_menu = AcrylicSystemTrayMenu(parent=self)
         show_action = Action(AppIcon.HOME, tr("common.show_main_window", "Show Main Window"), self)
+        refresh_action = Action(AppIcon.SYNC, tr("main_window.refresh_connection", "Refresh Connection"), self)
         exit_action = Action(AppIcon.CLOSE, tr("common.exit", "Exit"), self)
         show_action.triggered.connect(self.show_from_tray)
+        refresh_action.triggered.connect(self.request_runtime_refresh)
         exit_action.triggered.connect(self.request_exit)
         self._tray_menu.addAction(show_action)
+        self._tray_menu.addAction(refresh_action)
         self._tray_menu.addAction(exit_action)
         self._tray_icon.setContextMenu(self._tray_menu)
         self._tray_icon.show()
@@ -327,7 +354,7 @@ class MainWindow(FluentWindow):
         """Refresh mica effect after theme changes."""
         super()._onThemeChangedFinished()
         if self.isMicaEffectEnabled():
-            QTimer.singleShot(100, lambda: self.windowEffect.setMicaEffect(self.winId(), isDarkTheme()))
+            self._schedule_ui_single_shot(100, lambda: self.windowEffect.setMicaEffect(self.winId(), isDarkTheme()))
         self._refresh_tray_icons()
 
     def _detect_system_theme(self) -> str:
@@ -354,7 +381,7 @@ class MainWindow(FluentWindow):
         self.setMicaEffectEnabled(enabled)
         self.navigationInterface.setAcrylicEnabled(enabled)
         if enabled:
-            QTimer.singleShot(100, lambda: self.windowEffect.setMicaEffect(self.winId(), isDarkTheme()))
+            self._schedule_ui_single_shot(100, lambda: self.windowEffect.setMicaEffect(self.winId(), isDarkTheme()))
 
     def show_from_tray(self) -> None:
         self._dismiss_tray_attention(clear_entries=True)
@@ -364,7 +391,12 @@ class MainWindow(FluentWindow):
             self.show()
         self.raise_()
         self.activateWindow()
-        QTimer.singleShot(0, self._sync_chat_session_activity)
+        self._schedule_ui_single_shot(0, self._sync_chat_session_activity)
+
+    def request_runtime_refresh(self) -> None:
+        """Ask the application shell to retry the authenticated runtime refresh."""
+        self.show_from_tray()
+        self.runtimeRefreshRequested.emit()
 
     def _on_tray_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
         if reason in {QSystemTrayIcon.ActivationReason.Trigger, QSystemTrayIcon.ActivationReason.DoubleClick}:
@@ -390,7 +422,9 @@ class MainWindow(FluentWindow):
             duration=3000,
         )
         if hasattr(self._force_logout_info_bar, "closedSignal"):
-            self._force_logout_info_bar.closedSignal.connect(self._request_forced_exit)
+            self._force_logout_info_bar.closedSignal.connect(
+                self._make_generation_bound_ui_callback(self._request_forced_exit)
+            )
         self._force_logout_timer.start(3000)
 
     def _request_forced_exit(self) -> None:
@@ -420,6 +454,7 @@ class MainWindow(FluentWindow):
         self.chat_interface.set_session_visibility_active(False)
         if self._allow_exit:
             logger.info("MainWindow closeEvent, exiting application")
+            self._invalidate_ui_callback_generation()
             if self._theme_poll_timer.isActive():
                 self._theme_poll_timer.stop()
             if self._tray_icon and self._tray_icon.isVisible():
@@ -451,10 +486,12 @@ class MainWindow(FluentWindow):
 
     def _on_contact_message_requested(self, payload: object) -> None:
         """Open the selected contact or group in the chat interface."""
-        self._set_contact_open_task(self._open_contact_target(payload))
+        generation = self._ui_callback_generation
+        self._set_contact_open_task(self._open_contact_target(payload, generation), generation=generation)
 
     def _on_destroyed(self, *_args) -> None:
         """Cancel outstanding UI tasks when the window is torn down."""
+        self._invalidate_ui_callback_generation()
         self._unsubscribe_from_events()
         self._dismiss_tray_attention(clear_entries=True)
         self.user_profile.close()
@@ -738,14 +775,16 @@ class MainWindow(FluentWindow):
             return
 
         view = TrayMessageFlyoutView()
-        view.set_entries(list(self._tray_alert_entries.values()))
-        view.sessionActivated.connect(self._on_tray_alert_session_activated)
-        view.ignoreRequested.connect(self._on_tray_alert_ignore_requested)
-        view.hoverEntered.connect(self._tray_leave_timer.stop)
-        view.hoverLeft.connect(lambda: self._tray_leave_timer.start())
-
         flyout = AcrylicFlyout(view, None)
-        flyout.closed.connect(self._clear_tray_flyout)
+        view.set_entries(list(self._tray_alert_entries.values()))
+        view.sessionActivated.connect(
+            lambda session_id, current=flyout: self._on_tray_alert_session_activated(session_id, current)
+        )
+        view.ignoreRequested.connect(lambda current=flyout: self._on_tray_alert_ignore_requested(current))
+        view.hoverEntered.connect(lambda current=flyout: self._on_tray_flyout_hover_entered(current))
+        view.hoverLeft.connect(lambda current=flyout: self._on_tray_flyout_hover_left(current))
+
+        flyout.closed.connect(lambda current=flyout: self._clear_tray_flyout(current))
         flyout.show()
         flyout.adjustSize()
 
@@ -813,21 +852,48 @@ class MainWindow(FluentWindow):
         else:
             self._clear_tray_flyout()
 
-    def _clear_tray_flyout(self) -> None:
+    def _is_current_tray_flyout(self, source_flyout) -> bool:
+        """Return whether one tray-flyout callback still belongs to the live flyout."""
+        return source_flyout is not None and source_flyout is self._tray_flyout
+
+    def _on_tray_flyout_hover_entered(self, source_flyout) -> None:
+        if not self._is_current_tray_flyout(source_flyout):
+            return
+        self._tray_leave_timer.stop()
+
+    def _on_tray_flyout_hover_left(self, source_flyout) -> None:
+        if not self._is_current_tray_flyout(source_flyout):
+            return
+        self._tray_leave_timer.start()
+
+    def _clear_tray_flyout(self, source_flyout=None) -> None:
+        if source_flyout is not None and source_flyout is not self._tray_flyout:
+            return
         self._tray_flyout = None
         self._tray_flyout_view = None
         if self._tray_attention_enabled:
             self._tray_flash_on = False
             self._apply_tray_icon()
 
-    def _on_tray_alert_ignore_requested(self) -> None:
+    def _on_tray_alert_ignore_requested(self, source_flyout=None) -> None:
+        if source_flyout is not None and not self._is_current_tray_flyout(source_flyout):
+            return
         self._dismiss_tray_attention(clear_entries=False)
 
-    def _on_tray_alert_session_activated(self, session_id: str) -> None:
+    def _on_tray_alert_session_activated(self, session_id: str, source_flyout=None) -> None:
+        if source_flyout is not None and not self._is_current_tray_flyout(source_flyout):
+            return
         self._dismiss_tray_attention(clear_entries=True)
-        self._create_ui_task(self._open_tray_session(session_id), f"open tray session {session_id}")
+        generation = self._ui_callback_generation
+        self._create_ui_task(
+            self._open_tray_session(session_id, generation),
+            f"open tray session {session_id}",
+            generation=generation,
+        )
 
-    async def _open_tray_session(self, session_id: str) -> None:
+    async def _open_tray_session(self, session_id: str, generation: int) -> None:
+        if not self._is_ui_callback_generation_current(generation):
+            return
         self.show_from_tray()
         if hasattr(self, "switchTo"):
             self.switchTo(self.chat_interface)
@@ -835,6 +901,8 @@ class MainWindow(FluentWindow):
             self.stackedWidget.setCurrentWidget(self.chat_interface)
 
         opened = await self.chat_interface.open_session(session_id)
+        if not self._is_ui_callback_generation_current(generation):
+            return
         if not opened:
             InfoBar.warning(
                 tr("main_window.contact_jump.unavailable_title", "Chat"),
@@ -848,19 +916,41 @@ class MainWindow(FluentWindow):
         if task is not None and not task.done():
             task.cancel()
 
-    def _create_ui_task(self, coro, context: str, *, on_done=None) -> asyncio.Task:
+    def _create_ui_task(self, coro, context: str, *, on_done=None, generation: int | None = None) -> asyncio.Task:
         """Create a tracked UI task that logs failures and clears bookkeeping."""
+        task_generation = self._ui_callback_generation if generation is None else generation
         task = asyncio.create_task(coro)
         self._ui_tasks.add(task)
-        task.add_done_callback(lambda finished, name=context, callback=on_done: self._finalize_ui_task(finished, name, callback))
+        task.add_done_callback(
+            lambda finished, name=context, callback=on_done, current=task_generation: self._finalize_ui_task(
+                finished,
+                name,
+                callback,
+                generation=current,
+            )
+        )
         return task
 
-    def _finalize_ui_task(self, task: asyncio.Task, context: str, on_done=None) -> None:
+    def _finalize_ui_task(
+        self,
+        task: asyncio.Task,
+        context: str,
+        on_done=None,
+        *,
+        generation: int | None = None,
+    ) -> None:
         """Remove completed tasks from tracking and report failures."""
         self._ui_tasks.discard(task)
+        if generation is not None and not self._is_ui_callback_generation_current(generation):
+            self._consume_ui_task_result(task, context)
+            return
+
         if on_done is not None:
             on_done(task)
 
+        self._consume_ui_task_result(task, context)
+
+    def _consume_ui_task_result(self, task: asyncio.Task, context: str) -> None:
         try:
             task.result()
         except asyncio.CancelledError:
@@ -868,18 +958,25 @@ class MainWindow(FluentWindow):
         except Exception:
             logger.exception("MainWindow UI task failed: %s", context)
 
-    def _set_contact_open_task(self, coro) -> None:
+    def _set_contact_open_task(self, coro, *, generation: int) -> None:
         """Keep only the latest contact-jump task alive."""
         self._cancel_pending_task(self._contact_open_task)
-        self._contact_open_task = self._create_ui_task(coro, "open contact target", on_done=self._clear_contact_open_task)
+        self._contact_open_task = self._create_ui_task(
+            coro,
+            "open contact target",
+            on_done=self._clear_contact_open_task,
+            generation=generation,
+        )
 
     def _clear_contact_open_task(self, task: asyncio.Task) -> None:
         """Clear the tracked contact-open task when it finishes."""
         if self._contact_open_task is task:
             self._contact_open_task = None
 
-    async def _open_contact_target(self, payload: object) -> None:
+    async def _open_contact_target(self, payload: object, generation: int) -> None:
         """Route contact actions into the chat page."""
+        if not self._is_ui_callback_generation_current(generation):
+            return
         if hasattr(self, "switchTo"):
             self.switchTo(self.chat_interface)
         else:
@@ -923,6 +1020,8 @@ class MainWindow(FluentWindow):
                     str(_target_value(target, "avatar", "") or ""),
                 )
 
+        if not self._is_ui_callback_generation_current(generation):
+            return
         if not opened:
             InfoBar.warning(
                 tr("main_window.contact_jump.unavailable_title", "Chat"),

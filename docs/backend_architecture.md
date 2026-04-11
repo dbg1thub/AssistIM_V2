@@ -351,15 +351,12 @@ MVP 约束：
 - `device_id`
 
 
-## 12. 兼容入口策略
+## 12. 当前入口策略
 
-- 正式 API 入口保持 /api/v1/* 与 /api/* 两层。
-- 历史 chat HTTP 兼容入口只保留单一显式前缀 /api/chat/*。
-- 不通过重复 router 挂载制造 /api/api/chat/* 这类二次别名。
-- POST /api/chat/sync 优先复用 session_cursors + event_cursors，返回 {messages, events}；仅对极旧调用方保留 session_id 快照 fallback。
-- /ws 是正式聊天 WebSocket 入口；历史 /ws/chat 只作为显式兼容 alias 保留，并可通过配置单独关闭。
-
-通话与设备密钥相关接口正式收敛到主 API / WebSocket 边界中，不单独再造第二套 legacy 入口。
+- 当前正式 HTTP API 入口为 /api/v1/*。
+- 当前未保留 /api/chat/* HTTP 兼容入口，也未保留 POST /api/chat/sync。
+- 当前正式聊天 WebSocket 入口为 /ws，未保留 /ws/chat 兼容 alias。
+- 通话与设备密钥相关接口继续收敛到主 API / WebSocket 边界中，不再新增第二套 legacy 入口。
 
 ## 13. 配置加载策略
 
@@ -367,4 +364,3 @@ MVP 约束：
 - 应用入口通过 `create_app(settings)` 组装，兼容开关和部署参数由 app factory 显式决定。
 - 数据库 engine 通过 `configure_database(settings)` 在 runtime 绑定；`SessionLocal` 作为稳定工厂保留，但不在模块导入时提前冻结具体连接。
 - 需要读取当前限流阈值等运行时配置的依赖，应通过动态 dependency 获取，不在路由装饰期固化具体数值。
-

@@ -5,6 +5,43 @@ import importlib
 import sys
 import types
 
+import pytest
+
+
+_MISSING_MODULE = object()
+_MAIN_RUNTIME_STUB_MODULES = (
+    "client.main",
+    "client.storage.database",
+    "client.network.http_client",
+    "client.network.websocket_client",
+    "client.managers.connection_manager",
+    "client.managers.message_manager",
+    "client.managers.session_manager",
+    "client.managers.sound_manager",
+    "client.ui.controllers.auth_controller",
+    "client.ui.controllers.chat_controller",
+    "client.ui.controllers.message_controller",
+    "client.ui.controllers.session_controller",
+    "client.ui.windows",
+    "client.ui.windows.auth_interface",
+    "client.core.config",
+    "client.core.i18n",
+)
+
+
+@pytest.fixture(autouse=True)
+def _restore_main_runtime_stubs():
+    original_modules = {
+        module_name: sys.modules.get(module_name, _MISSING_MODULE)
+        for module_name in _MAIN_RUNTIME_STUB_MODULES
+    }
+    yield
+    for module_name, module in original_modules.items():
+        if module is _MISSING_MODULE:
+            sys.modules.pop(module_name, None)
+        else:
+            sys.modules[module_name] = module
+
 
 class _FakeQtApp:
     def processEvents(self) -> None:
@@ -54,6 +91,7 @@ class _FakeAuthController:
         e2ee_diagnostics: dict[str, object] | None = None,
     ) -> None:
         self._restored_user = restored_user
+        self.current_user = dict(restored_user or {}) if restored_user else None
         self._runtime_status = dict(runtime_status)
         self._e2ee_diagnostics = dict(
             e2ee_diagnostics
@@ -76,6 +114,65 @@ class _FakeAuthController:
 
     async def get_e2ee_diagnostics(self) -> dict[str, object]:
         return dict(self._e2ee_diagnostics)
+
+
+class _FakeAuthControllerForLogout:
+    def __init__(self, events: list[str]) -> None:
+        self._events = events
+
+    async def logout(self, *, clear_local_chat_state: bool = True) -> None:
+        self._events.append(f"logout(clear_local_chat_state={clear_local_chat_state})")
+
+    async def clear_session(self, *, clear_local_chat_state: bool = True) -> None:
+        self._events.append(f"clear_session(clear_local_chat_state={clear_local_chat_state})")
+
+
+class _FakeSignal:
+    def __init__(self) -> None:
+        self._callbacks: list[object] = []
+
+    def connect(self, callback) -> None:
+        self._callbacks.append(callback)
+
+    def emit(self, *args, **kwargs) -> None:
+        for callback in list(self._callbacks):
+            callback(*args, **kwargs)
+
+
+class _FakeAuthInterfaceWindow:
+    instances: list["_FakeAuthInterfaceWindow"] = []
+
+    def __init__(self) -> None:
+        self.authenticated = _FakeSignal()
+        self.closed = _FakeSignal()
+        self.last_success_message = ""
+        self.deleted = False
+        self.shown = False
+        _FakeAuthInterfaceWindow.instances.append(self)
+
+    def show(self) -> None:
+        self.shown = True
+
+    def raise_(self) -> None:
+        return None
+
+    def activateWindow(self) -> None:
+        return None
+
+    def deleteLater(self) -> None:
+        self.deleted = True
+
+
+class _DeferredRestoreAuthController(_FakeAuthController):
+    def __init__(self, runtime_status: dict[str, object]) -> None:
+        super().__init__(None, runtime_status)
+        self.restore_waiters: list[asyncio.Future] = []
+
+    async def restore_session(self) -> dict[str, object] | None:
+        self.restore_calls += 1
+        waiter = asyncio.get_running_loop().create_future()
+        self.restore_waiters.append(waiter)
+        return await waiter
 
 
 def _load_main_module():
@@ -107,6 +204,16 @@ def _load_main_module():
         qtcore.QLockFile = type("QLockFile", (), {})
     if not hasattr(qtcore, "QTimer"):
         qtcore.QTimer = type("QTimer", (), {"singleShot": staticmethod(lambda *args, **kwargs: None)})
+    if not hasattr(qtcore, "QDate"):
+        class _FakeQDate:
+            @staticmethod
+            def currentDate():
+                return _FakeQDate()
+
+            def toString(self, _fmt=None):
+                return "2026-04-12"
+
+        qtcore.QDate = _FakeQDate
 
     qtwidgets = sys.modules.get("PySide6.QtWidgets")
     if qtwidgets is None:
@@ -116,6 +223,16 @@ def _load_main_module():
         qtwidgets.QApplication = type("QApplication", (), {})
     if not hasattr(qtwidgets, "QMessageBox"):
         qtwidgets.QMessageBox = type("QMessageBox", (), {"information": staticmethod(lambda *args, **kwargs: None)})
+    if not hasattr(qtwidgets, "QPushButton"):
+        class _FakeButtonSignal:
+            def connect(self, callback):
+                self._callback = callback
+
+        class _FakePushButton:
+            def __init__(self, *args, **kwargs):
+                self.clicked = _FakeButtonSignal()
+
+        qtwidgets.QPushButton = _FakePushButton
 
     pyside = sys.modules.get("PySide6")
     if pyside is None:
@@ -145,7 +262,14 @@ def _load_main_module():
         qfluentwidgets = types.ModuleType("qfluentwidgets")
         sys.modules["qfluentwidgets"] = qfluentwidgets
     if not hasattr(qfluentwidgets, "InfoBar"):
-        qfluentwidgets.InfoBar = type("InfoBar", (), {"success": staticmethod(lambda *args, **kwargs: None)})
+        qfluentwidgets.InfoBar = type(
+            "InfoBar",
+            (),
+            {
+                "success": staticmethod(lambda *args, **kwargs: None),
+                "warning": staticmethod(lambda *args, **kwargs: None),
+            },
+        )
     if not hasattr(qfluentwidgets, "setTheme"):
         qfluentwidgets.setTheme = lambda *args, **kwargs: None
     if not hasattr(qfluentwidgets, "setThemeColor"):
@@ -232,6 +356,15 @@ def _load_main_module():
     return importlib.reload(main_module)
 
 
+def _auth_result(main_module, *, attempt: int = 1, runtime_generation: int | None = None, authenticated: bool) -> object:
+    generation = runtime_generation if runtime_generation is not None else (attempt if authenticated else 0)
+    return main_module.AuthAttemptResult(
+        attempt_generation=attempt,
+        runtime_generation=generation,
+        authenticated=authenticated,
+    )
+
+
 def test_application_initialize_caches_startup_security_status(monkeypatch) -> None:
     main_module = _load_main_module()
     db_self_check = {
@@ -262,12 +395,12 @@ def test_application_initialize_caches_startup_security_status(monkeypatch) -> N
         await app.initialize()
 
         assert fake_db.connected is True
-        assert fake_connection_manager.initialized is True
-        assert len(fake_connection_manager.listeners) == 1
-        assert fake_message_manager.initialized is True
-        assert fake_session_manager.initialized is True
-        assert fake_chat_controller.initialized is True
-        assert fake_sound_manager.initialized is True
+        assert fake_connection_manager.initialized is False
+        assert fake_connection_manager.listeners == []
+        assert fake_message_manager.initialized is False
+        assert fake_session_manager.initialized is False
+        assert fake_chat_controller.initialized is False
+        assert fake_sound_manager.initialized is False
         assert app.get_startup_security_status() == {
             "authenticated": False,
             "user_id": "",
@@ -304,6 +437,55 @@ def test_application_initialize_caches_startup_security_status(monkeypatch) -> N
                 "database_encryption": dict(db_self_check),
             },
         }
+
+    asyncio.run(scenario())
+
+
+def test_application_initialize_authenticated_runtime_builds_chat_stack_after_auth(monkeypatch) -> None:
+    main_module = _load_main_module()
+    fake_connection_manager = _FakeConnectionManager()
+    fake_sound_manager = _FakeInitializable()
+    fake_auth_controller = _FakeAuthController(
+        {"id": "user-1", "username": "alice"},
+        {
+            "authenticated": True,
+            "user_id": "user-1",
+            "database_encryption": {
+                "state": "sqlcipher_active",
+                "severity": "ok",
+                "can_start": True,
+                "action_required": False,
+                "message": "SQLCipher is active for the local database",
+            },
+        },
+    )
+
+    class _FakeChatRuntime(_FakeInitializable):
+        def __init__(self) -> None:
+            super().__init__()
+            self.user_ids: list[str] = []
+
+        def set_user_id(self, user_id: str) -> None:
+            self.user_ids.append(user_id)
+
+    fake_chat_runtime = _FakeChatRuntime()
+
+    monkeypatch.setattr(main_module, "get_websocket_client", lambda: object())
+    monkeypatch.setattr(main_module, "get_connection_manager", lambda: fake_connection_manager)
+    monkeypatch.setattr(main_module, "get_auth_controller", lambda: fake_auth_controller)
+    monkeypatch.setattr(main_module, "get_chat_controller", lambda: fake_chat_runtime)
+    monkeypatch.setattr(main_module, "get_sound_manager", lambda: fake_sound_manager)
+
+    async def scenario() -> None:
+        app = main_module.Application(_FakeQtApp())
+        generation = app._start_new_runtime_generation()
+        await app.initialize_authenticated_runtime(generation=generation)
+
+        assert fake_connection_manager.initialized is True
+        assert len(fake_connection_manager.listeners) == 1
+        assert fake_chat_runtime.user_ids == ["user-1"]
+        assert fake_chat_runtime.initialized is True
+        assert fake_sound_manager.initialized is True
 
     asyncio.run(scenario())
 
@@ -345,9 +527,11 @@ def test_application_authenticate_updates_startup_security_status_from_auth_cont
 
     async def scenario() -> None:
         app = main_module.Application(_FakeQtApp())
-        authenticated = await app.authenticate()
+        auth_result = await app.authenticate()
 
-        assert authenticated is True
+        assert auth_result.authenticated is True
+        assert auth_result.attempt_generation == 1
+        assert auth_result.runtime_generation == 1
         assert fake_auth_controller.restore_calls == 1
         assert app.get_startup_security_status() == runtime_status
         assert app.get_e2ee_runtime_diagnostics() == e2ee_diagnostics
@@ -361,6 +545,111 @@ def test_application_authenticate_updates_startup_security_status_from_auth_cont
             "message": "SQLCipher is active for the local database",
             "runtime_security": runtime_status,
         }
+
+    asyncio.run(scenario())
+
+
+def test_application_authenticate_ignores_stale_auth_window_callbacks(monkeypatch) -> None:
+    main_module = _load_main_module()
+    _FakeAuthInterfaceWindow.instances.clear()
+    runtime_status = {
+        "authenticated": False,
+        "user_id": "",
+        "database_encryption": {
+            "state": "plain",
+            "severity": "info",
+            "can_start": True,
+            "action_required": False,
+            "message": "Local database encryption is disabled",
+        },
+    }
+    fake_auth_controller = _FakeAuthController(None, runtime_status)
+
+    monkeypatch.setattr(main_module, "get_auth_controller", lambda: fake_auth_controller)
+    monkeypatch.setattr(main_module, "AuthInterface", _FakeAuthInterfaceWindow)
+
+    async def scenario() -> None:
+        app = main_module.Application(_FakeQtApp())
+
+        first_attempt = asyncio.create_task(app.authenticate())
+        await asyncio.sleep(0)
+        first_window = _FakeAuthInterfaceWindow.instances[-1]
+        first_window.closed.emit()
+
+        first_result = await first_attempt
+        assert first_result.authenticated is False
+        assert first_result.attempt_generation == 1
+        assert app.auth_window is None
+        assert first_window.deleted is True
+
+        second_attempt = asyncio.create_task(app.authenticate())
+        await asyncio.sleep(0)
+        second_window = _FakeAuthInterfaceWindow.instances[-1]
+        second_window.last_success_message = "second-attempt-message"
+
+        first_window.authenticated.emit({"id": "user-stale"})
+        await asyncio.sleep(0)
+
+        assert app._pending_auth_success_message == ""
+        assert second_attempt.done() is False
+
+        second_window.closed.emit()
+        second_result = await second_attempt
+        assert second_result.authenticated is False
+        assert second_result.attempt_generation == 2
+        assert app._pending_auth_success_message == ""
+
+    asyncio.run(scenario())
+
+
+def test_application_authenticate_ignores_stale_restore_success_after_newer_attempt(monkeypatch) -> None:
+    main_module = _load_main_module()
+    _FakeAuthInterfaceWindow.instances.clear()
+    runtime_status = {
+        "authenticated": False,
+        "user_id": "",
+        "database_encryption": {
+            "state": "plain",
+            "severity": "info",
+            "can_start": True,
+            "action_required": False,
+            "message": "Local database encryption is disabled",
+        },
+    }
+    fake_auth_controller = _DeferredRestoreAuthController(runtime_status)
+
+    monkeypatch.setattr(main_module, "get_auth_controller", lambda: fake_auth_controller)
+    monkeypatch.setattr(main_module, "AuthInterface", _FakeAuthInterfaceWindow)
+
+    async def scenario() -> None:
+        app = main_module.Application(_FakeQtApp())
+
+        first_attempt = asyncio.create_task(app.authenticate())
+        await asyncio.sleep(0)
+        assert len(fake_auth_controller.restore_waiters) == 1
+
+        second_attempt = asyncio.create_task(app.authenticate())
+        await asyncio.sleep(0)
+        assert len(fake_auth_controller.restore_waiters) == 2
+
+        fake_auth_controller.restore_waiters[0].set_result({"id": "user-stale", "username": "stale"})
+        first_result = await first_attempt
+        assert first_result.authenticated is False
+        assert first_result.attempt_generation == 1
+        assert app._active_runtime_generation == 0
+        assert app._pending_auth_success_message == ""
+
+        fake_auth_controller.restore_waiters[1].set_result(None)
+        await asyncio.sleep(0)
+        second_window = _FakeAuthInterfaceWindow.instances[-1]
+        assert second_window.shown is True
+
+        second_window.closed.emit()
+        second_result = await second_attempt
+        assert second_result.authenticated is False
+        assert second_result.attempt_generation == 2
+        assert app._active_runtime_generation == 0
+        assert app._pending_auth_success_message == ""
 
     asyncio.run(scenario())
 
@@ -439,9 +728,9 @@ def test_application_run_stops_before_auth_when_preflight_blocks(monkeypatch) ->
     auth_calls = {"count": 0}
     show_calls = {"count": 0}
 
-    async def fake_authenticate() -> bool:
+    async def fake_authenticate():
         auth_calls["count"] += 1
-        return True
+        return _auth_result(main_module, authenticated=True)
 
     async def fake_show_main_window() -> None:
         show_calls["count"] += 1
@@ -456,6 +745,386 @@ def test_application_run_stops_before_auth_when_preflight_blocks(monkeypatch) ->
         assert show_calls["count"] == 0
         assert app.get_startup_preflight_result()["blocking"] is True
         assert app.get_exit_code() == main_module.EXIT_CODE_STARTUP_PREFLIGHT_BLOCKED
+
+    asyncio.run(scenario())
+
+
+def test_application_run_initializes_authenticated_runtime_only_after_auth(monkeypatch) -> None:
+    main_module = _load_main_module()
+    db_self_check = {
+        "state": "plain",
+        "severity": "info",
+        "can_start": True,
+        "action_required": False,
+        "message": "Local database encryption is disabled",
+    }
+    fake_db = _FakeDatabase(db_self_check)
+    fake_connection_manager = _FakeConnectionManager()
+    events: list[str] = []
+
+    monkeypatch.setattr(main_module, "get_database", lambda: fake_db)
+    monkeypatch.setattr(main_module, "get_http_client", lambda: object())
+    monkeypatch.setattr(main_module, "get_connection_manager", lambda: fake_connection_manager)
+
+    async def scenario() -> None:
+        app = main_module.Application(_FakeQtApp())
+
+        async def fake_authenticate():
+            assert fake_connection_manager.initialized is False
+            events.append("authenticate")
+            attempt = app._start_new_auth_attempt()
+            generation = app._start_new_runtime_generation()
+            return _auth_result(
+                main_module,
+                attempt=attempt,
+                runtime_generation=generation,
+                authenticated=True,
+            )
+
+        async def fake_initialize_authenticated_runtime(*, generation: int | None = None) -> None:
+            events.append(f"initialize_authenticated_runtime({generation})")
+
+        async def fake_show_main_window(*, generation: int | None = None) -> None:
+            events.append(f"show_main_window({generation})")
+            app._quit_event.set()
+
+        async def fake_shutdown() -> None:
+            events.append("shutdown")
+
+        app.authenticate = fake_authenticate  # type: ignore[method-assign]
+        app.initialize_authenticated_runtime = fake_initialize_authenticated_runtime  # type: ignore[method-assign]
+        app.show_main_window = fake_show_main_window  # type: ignore[method-assign]
+        app.shutdown = fake_shutdown  # type: ignore[method-assign]
+
+        await app.run()
+
+        assert events == [
+            "authenticate",
+            "initialize_authenticated_runtime(1)",
+            "show_main_window(1)",
+            "shutdown",
+        ]
+
+    asyncio.run(scenario())
+
+
+def test_application_continue_authenticated_runtime_ignores_stale_auth_result() -> None:
+    main_module = _load_main_module()
+    events: list[str] = []
+
+    async def scenario() -> None:
+        app = main_module.Application(_FakeQtApp())
+        app._active_auth_attempt_generation = 2
+        app._active_runtime_generation = 1
+
+        async def fake_initialize_authenticated_runtime(*, generation: int | None = None) -> None:
+            events.append(f"initialize_authenticated_runtime({generation})")
+
+        async def fake_show_main_window(*, generation: int | None = None) -> None:
+            events.append(f"show_main_window({generation})")
+
+        app.initialize_authenticated_runtime = fake_initialize_authenticated_runtime  # type: ignore[method-assign]
+        app.show_main_window = fake_show_main_window  # type: ignore[method-assign]
+
+        continued = await app._continue_authenticated_runtime(
+            main_module.AuthAttemptResult(
+                attempt_generation=1,
+                runtime_generation=1,
+                authenticated=True,
+            )
+        )
+
+        assert continued is False
+        assert events == []
+
+    asyncio.run(scenario())
+
+
+def test_application_show_main_window_ignores_stale_window_signals_and_delayed_callbacks(monkeypatch) -> None:
+    main_module = _load_main_module()
+    scheduled_callbacks: list[object] = []
+    events: list[str] = []
+
+    class _FakeMainWindow:
+        def __init__(self) -> None:
+            self.closed = _FakeSignal()
+            self.logoutRequested = _FakeSignal()
+            self.runtimeRefreshRequested = _FakeSignal()
+            self.raise_calls = 0
+            self.activate_calls = 0
+            self.show_calls = 0
+            self.show_normal_calls = 0
+            self.restore_calls = 0
+
+        def restore_default_geometry(self) -> None:
+            self.restore_calls += 1
+
+        def show(self) -> None:
+            self.show_calls += 1
+
+        def showNormal(self) -> None:
+            self.show_normal_calls += 1
+
+        def raise_(self) -> None:
+            self.raise_calls += 1
+
+        def activateWindow(self) -> None:
+            self.activate_calls += 1
+
+    class _FakeQTimer:
+        @staticmethod
+        def singleShot(_delay: int, callback) -> None:
+            scheduled_callbacks.append(callback)
+
+    fake_main_window_module = types.ModuleType("client.ui.windows.main_window")
+    fake_main_window_module.MainWindow = _FakeMainWindow
+
+    monkeypatch.setitem(sys.modules, "client.ui.windows.main_window", fake_main_window_module)
+    monkeypatch.setattr(main_module, "QTimer", _FakeQTimer)
+
+    async def scenario() -> None:
+        app = main_module.Application(_FakeQtApp())
+        generation = app._start_new_runtime_generation()
+
+        def fake_create_task(coro):
+            events.append("schedule_warmup")
+            coro.close()
+            return "warm-task"
+
+        app.create_task = fake_create_task  # type: ignore[method-assign]
+        await app.show_main_window(generation=generation)
+
+        old_window = app.main_window
+        assert isinstance(old_window, _FakeMainWindow)
+        assert old_window.raise_calls == 1
+        assert old_window.activate_calls == 1
+        assert len(scheduled_callbacks) == 4
+
+        app.main_window = None
+        app._active_runtime_generation = 0
+
+        old_window.closed.emit()
+        old_window.logoutRequested.emit()
+        old_window.runtimeRefreshRequested.emit()
+        for callback in scheduled_callbacks:
+            callback()
+
+        assert app._quit_event.is_set() is False
+        assert app._logout_task is None
+        assert old_window.raise_calls == 1
+        assert old_window.activate_calls == 1
+        assert events == ["schedule_warmup"]
+
+    asyncio.run(scenario())
+
+
+def test_application_warm_authenticated_runtime_promotes_ready_and_defers_auth_success_feedback(monkeypatch) -> None:
+    main_module = _load_main_module()
+    recorded: list[tuple[str, str, str, int]] = []
+    events: list[str] = []
+
+    class _FakeInfoBar:
+        @staticmethod
+        def success(title: str, message: str, *, parent=None, duration: int = 0) -> None:
+            recorded.append(("success", title, message, duration))
+
+        @staticmethod
+        def warning(title: str, message: str, *, parent=None, duration: int = 0) -> None:
+            recorded.append(("warning", title, message, duration))
+
+    class _FakeChatInterface:
+        def __init__(self) -> None:
+            self.load_calls = 0
+
+        def load_sessions(self) -> None:
+            self.load_calls += 1
+
+    class _FakeMainWindow:
+        def __init__(self) -> None:
+            self.chat_interface = _FakeChatInterface()
+
+    monkeypatch.setattr(main_module, "InfoBar", _FakeInfoBar)
+
+    async def scenario() -> None:
+        app = main_module.Application(_FakeQtApp())
+        generation = app._start_new_runtime_generation()
+        app.main_window = _FakeMainWindow()
+        app._pending_auth_success_message = "Signed in"
+        app._set_lifecycle_state("main_shell_visible")
+
+        async def fake_sync(runtime_generation: int) -> None:
+            events.append(f"sync({runtime_generation})")
+
+        async def fake_background_services(*, generation: int | None = None) -> None:
+            events.append(f"background({generation})")
+
+        app._synchronize_authenticated_runtime = fake_sync  # type: ignore[method-assign]
+        app.start_background_services = fake_background_services  # type: ignore[method-assign]
+
+        await app._warm_authenticated_runtime(generation)
+
+        assert events == ["sync(1)", "background(1)"]
+        assert app.main_window.chat_interface.load_calls == 1
+        assert recorded == [("success", "Authentication", "Signed in", 1800)]
+        assert app._pending_auth_success_message == ""
+        assert app._lifecycle_state == "authenticated_ready"
+
+    asyncio.run(scenario())
+
+
+def test_application_warm_authenticated_runtime_surfaces_degraded_state_on_failure(monkeypatch) -> None:
+    main_module = _load_main_module()
+    recorded: list[tuple[str, str, str, int]] = []
+
+    class _FakeInfoBar:
+        @staticmethod
+        def success(title: str, message: str, *, parent=None, duration: int = 0) -> None:
+            recorded.append(("success", title, message, duration))
+
+        @staticmethod
+        def warning(title: str, message: str, *, parent=None, duration: int = 0) -> None:
+            recorded.append(("warning", title, message, duration))
+
+    class _FakeChatInterface:
+        def __init__(self) -> None:
+            self.load_calls = 0
+
+        def load_sessions(self) -> None:
+            self.load_calls += 1
+
+    class _FakeMainWindow:
+        def __init__(self) -> None:
+            self.chat_interface = _FakeChatInterface()
+
+    monkeypatch.setattr(main_module, "InfoBar", _FakeInfoBar)
+
+    async def scenario() -> None:
+        app = main_module.Application(_FakeQtApp())
+        generation = app._start_new_runtime_generation()
+        app.main_window = _FakeMainWindow()
+        app._pending_auth_success_message = "Signed in"
+        app._set_lifecycle_state("main_shell_visible")
+
+        async def fake_sync(runtime_generation: int) -> None:
+            raise RuntimeError(f"sync failed for generation {runtime_generation}")
+
+        app._synchronize_authenticated_runtime = fake_sync  # type: ignore[method-assign]
+
+        await app._warm_authenticated_runtime(generation)
+
+        assert app.main_window.chat_interface.load_calls == 0
+        assert recorded == [
+            (
+                "warning",
+                "Connection incomplete",
+                "Some data could not be refreshed. Messages and sessions may stay stale until the next retry.",
+                5000,
+            )
+        ]
+        assert app._pending_auth_success_message == ""
+        assert app._lifecycle_state == "authenticated_degraded"
+
+    asyncio.run(scenario())
+
+
+def test_application_warm_authenticated_runtime_recovers_from_degraded_state(monkeypatch) -> None:
+    main_module = _load_main_module()
+    recorded: list[tuple[str, str, str, int]] = []
+
+    class _FakeInfoBar:
+        @staticmethod
+        def success(title: str, message: str, *, parent=None, duration: int = 0) -> None:
+            recorded.append(("success", title, message, duration))
+
+        @staticmethod
+        def warning(title: str, message: str, *, parent=None, duration: int = 0):
+            recorded.append(("warning", title, message, duration))
+            return None
+
+    class _FakeChatInterface:
+        def __init__(self) -> None:
+            self.load_calls = 0
+
+        def load_sessions(self) -> None:
+            self.load_calls += 1
+
+    class _FakeMainWindow:
+        def __init__(self) -> None:
+            self.chat_interface = _FakeChatInterface()
+
+    monkeypatch.setattr(main_module, "InfoBar", _FakeInfoBar)
+
+    async def scenario() -> None:
+        app = main_module.Application(_FakeQtApp())
+        generation = app._start_new_runtime_generation()
+        app.main_window = _FakeMainWindow()
+        app._set_lifecycle_state("authenticated_degraded")
+
+        async def fake_sync(runtime_generation: int) -> None:
+            return None
+
+        async def fake_background_services(*, generation: int | None = None) -> None:
+            return None
+
+        app._synchronize_authenticated_runtime = fake_sync  # type: ignore[method-assign]
+        app.start_background_services = fake_background_services  # type: ignore[method-assign]
+
+        await app._warm_authenticated_runtime(generation)
+
+        assert app.main_window.chat_interface.load_calls == 1
+        assert recorded == [
+            ("success", "Connection restored", "Messages and sessions are refreshed again.", 1800)
+        ]
+        assert app._lifecycle_state == "authenticated_ready"
+
+    asyncio.run(scenario())
+
+
+def test_application_retry_authenticated_runtime_reschedules_warmup(monkeypatch) -> None:
+    main_module = _load_main_module()
+    events: list[str] = []
+
+    class _FakeWarningBar:
+        def __init__(self) -> None:
+            self.close_calls = 0
+
+        def close(self) -> None:
+            self.close_calls += 1
+
+    class _FakeTask:
+        def done(self) -> bool:
+            return False
+
+        def cancel(self) -> None:
+            events.append("cancel_old_task")
+
+    async def scenario() -> None:
+        app = main_module.Application(_FakeQtApp())
+        generation = app._start_new_runtime_generation()
+        app.main_window = object()
+        app._set_lifecycle_state("authenticated_degraded")
+        warning_bar = _FakeWarningBar()
+        app._runtime_warmup_warning_bar = warning_bar
+
+        async def fake_warm(runtime_generation: int):
+            events.append(f"warm({runtime_generation})")
+
+        def fake_create_task(coro):
+            events.append("schedule")
+            coro.close()
+            return "scheduled-task"
+
+        app._warm_runtime_task = _FakeTask()
+        app._warm_authenticated_runtime = fake_warm  # type: ignore[method-assign]
+        app.create_task = fake_create_task  # type: ignore[method-assign]
+
+        app.retry_authenticated_runtime()
+
+        assert warning_bar.close_calls == 1
+        assert app._runtime_warmup_warning_bar is None
+        assert app._warm_runtime_task == "scheduled-task"
+        assert app._lifecycle_state == "authenticated_bootstrapping"
+        assert events == ["cancel_old_task", "schedule"]
 
     asyncio.run(scenario())
 
@@ -488,3 +1157,151 @@ def test_show_startup_preflight_block_dialog_uses_preflight_message(monkeypatch)
             "[provider_mismatch] Configured DB encryption provider does not match the current runtime provider"
         ),
     }
+
+
+def test_application_logout_quiesces_runtime_before_clearing_auth_state(monkeypatch) -> None:
+    main_module = _load_main_module()
+    events: list[str] = []
+    fake_auth_controller = _FakeAuthControllerForLogout(events)
+
+    class _FakeMainWindow:
+        def setEnabled(self, enabled: bool) -> None:
+            events.append(f"main_window.setEnabled({enabled})")
+
+        def hide(self) -> None:
+            events.append("main_window.hide")
+
+    monkeypatch.setattr(main_module, "get_auth_controller", lambda: fake_auth_controller)
+
+    async def scenario() -> None:
+        app = main_module.Application(_FakeQtApp())
+        app.main_window = _FakeMainWindow()
+
+        async def fake_quiesce() -> None:
+            events.append("quiesce")
+
+        async def fake_authenticate():
+            events.append("authenticate")
+            attempt = app._start_new_auth_attempt()
+            return _auth_result(main_module, attempt=attempt, authenticated=False)
+
+        app._quiesce_authenticated_runtime = fake_quiesce  # type: ignore[method-assign]
+        app.authenticate = fake_authenticate  # type: ignore[method-assign]
+        await app._perform_logout_flow()
+
+        assert events == [
+            "main_window.setEnabled(False)",
+            "main_window.hide",
+            "quiesce",
+            "logout(clear_local_chat_state=True)",
+            "authenticate",
+        ]
+        assert app._quit_event.is_set() is True
+
+    asyncio.run(scenario())
+
+
+def test_application_quiesce_invalidates_runtime_generation_before_teardown() -> None:
+    main_module = _load_main_module()
+    events: list[str] = []
+
+    async def scenario() -> None:
+        app = main_module.Application(_FakeQtApp())
+        generation = app._start_new_runtime_generation()
+        assert app._is_runtime_generation_current(generation) is True
+
+        async def fake_teardown() -> None:
+            events.append(f"teardown(active_generation={app._active_runtime_generation})")
+
+        app._teardown_authenticated_runtime = fake_teardown  # type: ignore[method-assign]
+        await app._quiesce_authenticated_runtime()
+
+        assert events == ["teardown(active_generation=0)"]
+        assert app._is_runtime_generation_current(generation) is False
+        assert app._lifecycle_state == "unauthenticated"
+
+    asyncio.run(scenario())
+
+
+def test_application_auth_loss_uses_single_flow_without_purging_local_chat(monkeypatch) -> None:
+    main_module = _load_main_module()
+    events: list[str] = []
+    fake_auth_controller = _FakeAuthControllerForLogout(events)
+
+    class _FakeMainWindow:
+        def setEnabled(self, enabled: bool) -> None:
+            events.append(f"main_window.setEnabled({enabled})")
+
+        def hide(self) -> None:
+            events.append("main_window.hide")
+
+    monkeypatch.setattr(main_module, "get_auth_controller", lambda: fake_auth_controller)
+
+    async def scenario() -> None:
+        app = main_module.Application(_FakeQtApp())
+        app.main_window = _FakeMainWindow()
+        app._set_lifecycle_state("authenticated_ready")
+
+        async def fake_quiesce() -> None:
+            events.append("quiesce")
+            app._active_runtime_generation = 0
+            app._set_lifecycle_state("unauthenticated")
+
+        async def fake_authenticate():
+            events.append("authenticate")
+            attempt = app._start_new_auth_attempt()
+            generation = app._start_new_runtime_generation()
+            return _auth_result(
+                main_module,
+                attempt=attempt,
+                runtime_generation=generation,
+                authenticated=True,
+            )
+
+        async def fake_initialize_authenticated_runtime(*, generation: int | None = None) -> None:
+            events.append(f"initialize_authenticated_runtime({generation})")
+
+        async def fake_show_main_window(*, generation: int | None = None) -> None:
+            events.append(f"show_main_window({generation})")
+
+        app._quiesce_authenticated_runtime = fake_quiesce  # type: ignore[method-assign]
+        app.authenticate = fake_authenticate  # type: ignore[method-assign]
+        app.initialize_authenticated_runtime = fake_initialize_authenticated_runtime  # type: ignore[method-assign]
+        app.show_main_window = fake_show_main_window  # type: ignore[method-assign]
+
+        await app._handle_auth_lost("refresh_rejected")
+
+        assert events == [
+            "main_window.setEnabled(False)",
+            "main_window.hide",
+            "quiesce",
+            "clear_session(clear_local_chat_state=False)",
+            "authenticate",
+            "initialize_authenticated_runtime(1)",
+            "show_main_window(1)",
+        ]
+
+    asyncio.run(scenario())
+
+
+def test_application_ws_business_forbidden_error_does_not_trigger_auth_loss() -> None:
+    main_module = _load_main_module()
+    reasons: list[str] = []
+
+    async def scenario() -> None:
+        app = main_module.Application(_FakeQtApp())
+        app._on_auth_loss = reasons.append  # type: ignore[method-assign]
+
+        await app._handle_transport_message(
+            {
+                "type": "error",
+                "data": {
+                    "code": 403,
+                    "message": "not a session member",
+                },
+            }
+        )
+
+        assert reasons == []
+
+    asyncio.run(scenario())

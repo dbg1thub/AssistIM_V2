@@ -88,12 +88,21 @@ if 'PySide6.QtCore' not in sys.modules:
         def instance():
             return None
 
+    class _DummyQDate:
+        @staticmethod
+        def currentDate():
+            return _DummyQDate()
+
+        def toString(self, _fmt=None):
+            return '2026-04-12'
+
     qtcore.QLocale = _DummyQLocale
     qtcore.QObject = _DummyQObject
     qtcore.Signal = _DummySignal
     qtcore.Slot = _DummySlot
     qtcore.QTimer = _DummyQTimer
     qtcore.QCoreApplication = _DummyQCoreApplication
+    qtcore.QDate = _DummyQDate
     pyside = types.ModuleType('PySide6')
     pyside.QtCore = qtcore
     sys.modules['PySide6'] = pyside
@@ -266,6 +275,8 @@ if 'qfluentwidgets' not in sys.modules:
     qfluentwidgets.QConfig = _DummyQConfig
     qfluentwidgets.Theme = _DummyTheme
     qfluentwidgets.getIconColor = lambda theme: 'black'
+    qfluentwidgets.isDarkTheme = lambda: False
+    qfluentwidgets.themeColor = lambda: '#07c160'
     qfluentwidgets.qconfig = types.SimpleNamespace(load=lambda path, cfg: None)
     sys.modules['qfluentwidgets'] = qfluentwidgets
 
@@ -296,6 +307,7 @@ class FakeWebSocketClient:
     def __init__(self) -> None:
         self.url = 'ws://example.test/ws'
         self.is_connected = True
+        self.disconnect_calls = 0
         self.sent_nowait: list[dict] = []
 
     def set_callbacks(self, **kwargs) -> None:
@@ -310,18 +322,35 @@ class FakeWebSocketClient:
         return True
 
     async def connect(self) -> None:
+        self.is_connected = True
         return None
 
     async def disconnect(self) -> None:
+        self.disconnect_calls += 1
+        self.is_connected = False
         return None
 
     async def close(self) -> None:
+        self.is_connected = False
         return None
 
 
 class FakeAuthService:
     def __init__(self, access_token: str = 'token') -> None:
         self.access_token = access_token
+        self._listeners = []
+
+    def add_token_listener(self, listener) -> None:
+        self._listeners.append(listener)
+
+    def remove_token_listener(self, listener) -> None:
+        if listener in self._listeners:
+            self._listeners.remove(listener)
+
+    def clear_tokens(self) -> None:
+        self.access_token = None
+        for listener in list(self._listeners):
+            listener(None, None)
 
 
 def test_connection_manager_loads_cached_message_and_event_cursors_and_builds_sync_request(monkeypatch) -> None:
@@ -335,6 +364,7 @@ def test_connection_manager_loads_cached_message_and_event_cursors_and_builds_sy
 
     async def scenario() -> None:
         manager = connection_manager_module.ConnectionManager()
+        manager._db = fake_db
         manager._ws_client = fake_ws_client
         manager._base_ws_url = fake_ws_client.url
         manager._ws_authenticated = True
@@ -382,6 +412,33 @@ def test_connection_manager_sends_canonical_message_id_for_mutation_commands(mon
             await manager.close()
 
     asyncio.run(scenario())
+
+def test_connection_manager_rejects_business_messages_after_tokens_are_cleared(monkeypatch) -> None:
+    fake_ws_client = FakeWebSocketClient()
+    fake_auth_service = FakeAuthService(access_token='ws-token')
+
+    monkeypatch.setattr(connection_manager_module, 'get_auth_service', lambda: fake_auth_service)
+
+    async def scenario() -> None:
+        manager = connection_manager_module.ConnectionManager()
+        manager._ws_client = fake_ws_client
+        manager._ws_authenticated = True
+        try:
+            fake_auth_service.clear_tokens()
+            await asyncio.sleep(0)
+
+            sent = await manager.send_chat_message('session-1', 'hello', 'msg-1')
+
+            assert sent is False
+            assert manager._ws_authenticated is False
+            assert fake_ws_client.disconnect_calls == 1
+            assert fake_ws_client.sent_nowait == []
+        finally:
+            await manager.close()
+
+    asyncio.run(scenario())
+
+
 
 def test_connection_manager_advances_message_and_event_cursors_from_ws_payloads(monkeypatch) -> None:
     fake_db = FakeDatabase()
@@ -508,5 +565,29 @@ def test_connection_manager_waits_for_auth_ack_before_sync_and_business_messages
             assert fake_ws_client.sent_nowait[-1]['type'] == 'chat_message'
         finally:
             await manager.close()
+
+    asyncio.run(scenario())
+
+
+def test_connection_manager_ignores_late_callbacks_from_closed_generation(monkeypatch) -> None:
+    fake_ws_client = FakeWebSocketClient()
+    received: list[dict] = []
+
+    monkeypatch.setattr(connection_manager_module, 'get_auth_service', lambda: FakeAuthService())
+    monkeypatch.setattr(connection_manager_module, 'get_websocket_client', lambda: fake_ws_client)
+
+    async def scenario() -> None:
+        manager = connection_manager_module.ConnectionManager()
+        await manager.initialize()
+        manager.add_message_listener(lambda message: received.append(dict(message)))
+        stale_on_message = fake_ws_client.callbacks['on_message']
+
+        await manager.close()
+        stale_on_message({'type': 'chat_message', 'data': {'session_id': 'session-1', 'session_seq': 1}})
+        await asyncio.sleep(0.05)
+
+        assert received == []
+        assert manager.ws_client is None
+        assert manager._loop is None
 
     asyncio.run(scenario())

@@ -636,10 +636,6 @@ class Session:
             return explicit_mode
         if self.is_ai_session or self.session_type == "ai":
             return "server_visible_ai"
-        if self.session_type == "direct":
-            return "e2ee_private"
-        if self.session_type == "group":
-            return "e2ee_group"
         return "plain"
 
     def session_crypto_state(self) -> dict[str, Any]:
@@ -1118,10 +1114,3 @@ class AISession:
             max_tokens=data.get("max_tokens", 2048),
             context_messages=data.get("context_messages", 10),
         )
-
-
-
-
-
-
-

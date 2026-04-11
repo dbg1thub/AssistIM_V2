@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from unittest.mock import AsyncMock
+
 from fastapi.testclient import TestClient
 
 from app.core.errors import ErrorCode
@@ -351,3 +353,33 @@ def test_update_me_rejects_avatar_field_after_avatar_api_split(client: TestClien
         json={"avatar": "https://example.com/avatar.png"},
     )
     assert response.status_code == 422
+
+
+
+def test_update_me_succeeds_when_profile_fanout_fails(client: TestClient, auth_header, monkeypatch) -> None:
+    from app.api.v1 import users as user_routes
+
+    register_response = client.post(
+        "/api/v1/auth/register",
+        json={
+            "username": "fanout-profile-user",
+            "password": "secret123",
+            "nickname": "Profile User",
+        },
+    )
+    access_token = register_response.json()["data"]["access_token"]
+
+    monkeypatch.setattr(
+        user_routes.connection_manager,
+        "send_json_to_users",
+        AsyncMock(side_effect=RuntimeError("fanout failed")),
+    )
+
+    response = client.put(
+        "/api/v1/users/me",
+        headers=auth_header(access_token),
+        json={"nickname": "Profile User Updated"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["nickname"] == "Profile User Updated"

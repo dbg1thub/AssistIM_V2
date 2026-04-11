@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter, Depends, Response, status
 from sqlalchemy.orm import Session
 
@@ -24,6 +26,7 @@ from app.websocket.payloads import ws_message
 
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 async def _broadcast_group_announcement_message(
@@ -49,17 +52,23 @@ async def _broadcast_group_announcement_message(
     recipient_ids = [user_id for user_id in normalized_participant_ids if user_id != sender_id]
     if recipient_ids:
         payload = service.serialize_message(message, recipient_ids[0])
-        await connection_manager.send_json_to_users(
-            recipient_ids,
-            ws_message("chat_message", payload, msg_id=str(payload.get("message_id", "") or "")),
-        )
+        try:
+            await connection_manager.send_json_to_users(
+                recipient_ids,
+                ws_message("chat_message", payload, msg_id=str(payload.get("message_id", "") or "")),
+            )
+        except Exception:
+            logger.exception("Group announcement fanout failed after committed group profile mutation")
 
     if sender_id and sender_id in normalized_participant_ids:
         sender_payload = service.serialize_message(message, sender_id)
-        await connection_manager.send_json_to_users(
-            [sender_id],
-            ws_message("chat_message", sender_payload, msg_id=str(sender_payload.get("message_id", "") or "")),
-        )
+        try:
+            await connection_manager.send_json_to_users(
+                [sender_id],
+                ws_message("chat_message", sender_payload, msg_id=str(sender_payload.get("message_id", "") or "")),
+            )
+        except Exception:
+            logger.exception("Group announcement sender echo failed after committed group profile mutation")
 
 
 async def _broadcast_group_profile_update(db: Session, group_id: str, *, actor_user_id: str) -> None:
@@ -79,15 +88,18 @@ async def _broadcast_group_profile_update(db: Session, group_id: str, *, actor_u
 
     session_id = str(payload.get("session_id", "") or "")
     event_seq = int(payload.get("event_seq", 0) or 0)
-    await connection_manager.send_json_to_users(
-        participant_ids,
-        ws_message(
-            "group_profile_update",
-            payload,
-            msg_id=f"group-profile:{session_id}:{event_seq}",
-            seq=event_seq,
-        ),
-    )
+    try:
+        await connection_manager.send_json_to_users(
+            participant_ids,
+            ws_message(
+                "group_profile_update",
+                payload,
+                msg_id=f"group-profile:{session_id}:{event_seq}",
+                seq=event_seq,
+            ),
+        )
+    except Exception:
+        logger.exception("Group profile fanout failed after committed group profile mutation")
 
 
 async def _broadcast_group_self_profile_update(db: Session, current_user: User, group_id: str) -> None:
@@ -95,15 +107,18 @@ async def _broadcast_group_self_profile_update(db: Session, current_user: User, 
     payload = service.record_group_self_profile_update_event(current_user, group_id)
     session_id = str(payload.get("session_id", "") or "")
     event_seq = int(payload.get("event_seq", 0) or 0)
-    await connection_manager.send_json_to_users(
-        [current_user.id],
-        ws_message(
-            "group_self_profile_update",
-            payload,
-            msg_id=f"group-self-profile:{session_id}:{event_seq}",
-            seq=event_seq,
-        ),
-    )
+    try:
+        await connection_manager.send_json_to_users(
+            [current_user.id],
+            ws_message(
+                "group_self_profile_update",
+                payload,
+                msg_id=f"group-self-profile:{session_id}:{event_seq}",
+                seq=event_seq,
+            ),
+        )
+    except Exception:
+        logger.exception("Group self-profile fanout failed after committed group self-profile mutation")
 
 
 @router.get("")
@@ -113,8 +128,8 @@ def list_groups(current_user: User = Depends(get_current_user), db: Session = De
 
 @router.post("", status_code=status.HTTP_201_CREATED)
 def create_group(payload: GroupCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
-    member_ids = payload.member_ids or payload.members
-    return success_response(GroupService(db).create_group(current_user, payload.name, member_ids))
+    member_ids = payload.requested_member_ids
+    return success_response(GroupService(db).create_group(current_user, payload.name, member_ids, payload.encryption_mode))
 
 
 @router.get("/{group_id}")

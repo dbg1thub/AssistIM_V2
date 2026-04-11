@@ -27,6 +27,18 @@ class MessageService:
     GROUP_TEXT_SCHEMES = {"group-sender-key-v1"}
     DIRECT_ATTACHMENT_SCHEMES = {"aesgcm-file+x25519-v1"}
     GROUP_ATTACHMENT_SCHEMES = {"aesgcm-file+group-sender-key-v1"}
+    ENCRYPTION_MODE_PLAIN = "plain"
+    ENCRYPTION_MODE_E2EE_PRIVATE = "e2ee_private"
+    ENCRYPTION_MODE_E2EE_GROUP = "e2ee_group"
+    ENCRYPTION_MODE_SERVER_VISIBLE_AI = "server_visible_ai"
+    SUPPORTED_ENCRYPTION_MODES = {
+        ENCRYPTION_MODE_PLAIN,
+        ENCRYPTION_MODE_E2EE_PRIVATE,
+        ENCRYPTION_MODE_E2EE_GROUP,
+        ENCRYPTION_MODE_SERVER_VISIBLE_AI,
+    }
+    ATTACHMENT_MESSAGE_TYPES = {"file", "image", "video", "voice"}
+    CLIENT_MESSAGE_TYPES = {"text", *ATTACHMENT_MESSAGE_TYPES}
     LOCAL_ONLY_MESSAGE_EXTRA_KEYS = {
         "content",
         "local_path",
@@ -69,7 +81,7 @@ class MessageService:
         limit: int = 50,
         before: datetime | None = None,
     ) -> list[dict]:
-        self._ensure_membership(current_user.id, session_id)
+        self._ensure_visible_session_membership(current_user.id, session_id)
         items = self.messages.list_session_messages(session_id, limit=limit, before=before)
         return self._serialize_messages(items, current_user.id)
 
@@ -81,27 +93,28 @@ class MessageService:
         message_type: str = "text",
         message_id: str | None = None,
         extra: dict[str, Any] | None = None,
-    ) -> dict:
-        self._ensure_membership(current_user.id, session_id)
+    ) -> tuple[dict, bool]:
+        self._ensure_visible_session_membership(current_user.id, session_id)
+        normalized_message_type = self._normalize_client_message_type(message_type)
         normalized_extra = self._normalize_message_extra(
             sender_id=current_user.id,
             session_id=session_id,
             content=content,
-            message_type=message_type,
+            message_type=normalized_message_type,
             extra=extra,
         )
         try:
-            message, _ = self.messages.create(
+            message, created = self.messages.create(
                 session_id=session_id,
                 sender_id=current_user.id,
                 content=content,
-                message_type=message_type,
+                message_type=normalized_message_type,
                 message_id=message_id,
                 extra=normalized_extra,
             )
         except MessageIdConflictError as exc:
             raise AppError(ErrorCode.INVALID_REQUEST, str(exc), 409) from exc
-        return self.serialize_message(message, current_user.id)
+        return self.serialize_message(message, current_user.id), created
 
     def send_ws_message(
         self,
@@ -112,16 +125,13 @@ class MessageService:
         message_id: str | None = None,
         extra: dict[str, Any] | None = None,
     ) -> tuple[dict, bool]:
-        existing_session = self.sessions.get_by_id(session_id)
-        if existing_session is None:
-            raise AppError(ErrorCode.RESOURCE_NOT_FOUND, "session not found", 404)
-
-        self._ensure_membership(sender_id, session_id)
+        self._ensure_visible_session_membership(sender_id, session_id)
+        normalized_message_type = self._normalize_client_message_type(message_type)
         normalized_extra = self._normalize_message_extra(
             sender_id=sender_id,
             session_id=session_id,
             content=content,
-            message_type=message_type,
+            message_type=normalized_message_type,
             extra=extra,
         )
         try:
@@ -129,7 +139,7 @@ class MessageService:
                 session_id=session_id,
                 sender_id=sender_id,
                 content=content,
-                message_type=message_type,
+                message_type=normalized_message_type,
                 message_id=message_id,
                 extra=normalized_extra,
             )
@@ -137,11 +147,18 @@ class MessageService:
             raise AppError(ErrorCode.INVALID_REQUEST, str(exc), 409) from exc
         return self.serialize_message(message, sender_id), created
 
+    @classmethod
+    def _normalize_client_message_type(cls, message_type: str) -> str:
+        normalized = str(message_type or "text").strip().lower()
+        if normalized not in cls.CLIENT_MESSAGE_TYPES:
+            raise AppError(ErrorCode.INVALID_REQUEST, "unsupported message type", 422)
+        return normalized
+
     def mark_read(self, current_user: User, message_id: str) -> dict:
         message = self.messages.get_by_id(message_id)
         if message is None:
             raise AppError(ErrorCode.RESOURCE_NOT_FOUND, "message not found", 404)
-        self._ensure_membership(current_user.id, message.session_id)
+        self._ensure_visible_session_membership(current_user.id, message.session_id)
         payload = self.messages.mark_read(message_id, current_user.id, commit=False)
         if payload is None:
             raise AppError(ErrorCode.INVALID_REQUEST, "invalid read target", 422)
@@ -163,7 +180,7 @@ class MessageService:
         }
 
     def batch_read(self, current_user: User, session_id: str, message_id: str) -> dict:
-        self._ensure_membership(current_user.id, session_id)
+        self._ensure_visible_session_membership(current_user.id, session_id)
         last_message = self.messages.get_by_id(message_id)
         if last_message is None:
             raise AppError(ErrorCode.RESOURCE_NOT_FOUND, "message not found", 404)
@@ -194,6 +211,7 @@ class MessageService:
         message = self.messages.get_by_id(message_id)
         if message is None:
             raise AppError(ErrorCode.RESOURCE_NOT_FOUND, "message not found", 404)
+        self._ensure_visible_session_membership(current_user.id, message.session_id)
         if message.sender_id != current_user.id:
             raise AppError(ErrorCode.FORBIDDEN, "cannot recall this message", 403)
         if message.created_at and utcnow() - ensure_utc(message.created_at) > self.RECALL_LIMIT:
@@ -229,6 +247,7 @@ class MessageService:
         message = self.messages.get_by_id(message_id)
         if message is None:
             raise AppError(ErrorCode.RESOURCE_NOT_FOUND, "message not found", 404)
+        self._ensure_visible_session_membership(current_user.id, message.session_id)
         if message.sender_id != current_user.id:
             raise AppError(ErrorCode.FORBIDDEN, "cannot edit this message", 403)
         if message.created_at and utcnow() - ensure_utc(message.created_at) > self.EDIT_LIMIT:
@@ -271,6 +290,7 @@ class MessageService:
         message = self.messages.get_by_id(message_id)
         if message is None:
             raise AppError(ErrorCode.RESOURCE_NOT_FOUND, "message not found", 404)
+        self._ensure_visible_session_membership(current_user.id, message.session_id)
         if message.sender_id != current_user.id:
             raise AppError(ErrorCode.FORBIDDEN, "cannot delete this message", 403)
 
@@ -292,16 +312,35 @@ class MessageService:
         return payload
 
     def unread_summary(self, current_user: User) -> dict:
-        return {"total": self.messages.unread_total_for_user(current_user.id)}
+        counts = self.session_unread_counts(current_user)
+        return {"total": sum(int(item.get("unread", 0) or 0) for item in counts)}
 
     def session_unread_counts(self, current_user: User) -> list[dict]:
-        return self.messages.unread_by_session_for_user(current_user.id)
+        unread_by_session = {
+            str(item.get("session_id") or ""): int(item.get("unread", 0) or 0)
+            for item in self.messages.unread_by_session_for_user(current_user.id)
+            if str(item.get("session_id") or "")
+        }
+        if not unread_by_session:
+            return []
+
+        visible_counts: list[dict] = []
+        for session in self.sessions.list_user_sessions(current_user.id):
+            session_id = str(getattr(session, "id", "") or "")
+            if not session_id or session_id not in unread_by_session:
+                continue
+            member_ids = self.sessions.list_member_ids(session_id)
+            if not self._is_visible_private_session(session, member_ids):
+                continue
+            visible_counts.append({"session_id": session_id, "unread": unread_by_session[session_id]})
+        return visible_counts
 
     def sync_missing_messages(self, session_cursors: dict | None, current_user_id: str) -> list[dict]:
         items = self.messages.list_missing_messages_for_user(
             self._normalize_session_cursors(session_cursors),
             current_user_id,
         )
+        items = self._filter_visible_session_items(current_user_id, items)
         return self._serialize_messages(items, current_user_id)
 
     def sync_missing_events(self, event_cursors: dict | None, current_user_id: str) -> list[dict]:
@@ -309,17 +348,63 @@ class MessageService:
             self._normalize_event_cursors(event_cursors),
             current_user_id,
         )
+        items = self._filter_visible_session_items(current_user_id, items)
         return [self.serialize_session_event(item) for item in items]
 
     def get_session_member_ids(self, session_id: str, user_id: str | None = None) -> list[str]:
+        session = self._ensure_session_exists(session_id)
         member_ids = self.sessions.list_member_ids(session_id)
         if user_id is not None and user_id not in member_ids:
             raise AppError(ErrorCode.FORBIDDEN, "not a session member", 403)
+        if not self._is_visible_private_session(session, member_ids):
+            raise AppError(ErrorCode.RESOURCE_NOT_FOUND, "session not found", 404)
         return member_ids
 
+    def _ensure_session_exists(self, session_id: str):
+        session = self.sessions.get_by_id(session_id)
+        if session is None:
+            raise AppError(ErrorCode.RESOURCE_NOT_FOUND, "session not found", 404)
+        return session
+
     def _ensure_membership(self, user_id: str, session_id: str) -> None:
-        if not self.sessions.has_member(session_id, user_id):
+        self._ensure_visible_session_membership(user_id, session_id)
+
+    def _ensure_visible_session_membership(self, user_id: str, session_id: str):
+        session = self._ensure_session_exists(session_id)
+        member_ids = self.sessions.list_member_ids(session_id)
+        if user_id not in member_ids:
             raise AppError(ErrorCode.FORBIDDEN, "not a session member", 403)
+
+        if not self._is_visible_private_session(session, member_ids):
+            raise AppError(ErrorCode.RESOURCE_NOT_FOUND, "session not found", 404)
+        return session, member_ids
+
+    def _is_visible_session_for_user(self, user_id: str, session_id: str) -> bool:
+        try:
+            self._ensure_visible_session_membership(user_id, session_id)
+        except AppError:
+            return False
+        return True
+
+    def _filter_visible_session_items(self, user_id: str, items: list) -> list:
+        visibility_cache: dict[str, bool] = {}
+        visible_items = []
+        for item in items:
+            session_id = str(getattr(item, "session_id", "") or "")
+            if not session_id:
+                continue
+            if session_id not in visibility_cache:
+                visibility_cache[session_id] = self._is_visible_session_for_user(user_id, session_id)
+            if visibility_cache[session_id]:
+                visible_items.append(item)
+
+        return visible_items
+
+    @staticmethod
+    def _is_visible_private_session(session, member_ids: list[str]) -> bool:
+        if getattr(session, "type", "") != "private" or bool(getattr(session, "is_ai_session", False)):
+            return True
+        return len(set(str(member_id or "") for member_id in member_ids if str(member_id or ""))) >= 2
 
     def _normalize_message_extra(
         self,
@@ -336,9 +421,12 @@ class MessageService:
 
         normalized_extra = self._sanitize_transport_extra(extra)
         normalized_message_type = str(message_type or "text").strip().lower()
+        raw_session_type = str(getattr(session, "type", "") or "").strip().lower()
+        normalized_session_type = "direct" if raw_session_type == "private" else raw_session_type
         self._validate_message_encryption(
-            session_type="direct" if str(session.type or "") == "private" else str(session.type or ""),
+            session_type=normalized_session_type,
             is_ai_session=bool(getattr(session, "is_ai_session", False)),
+            encryption_mode=getattr(session, "encryption_mode", ""),
             message_type=normalized_message_type,
             extra=normalized_extra,
         )
@@ -407,6 +495,7 @@ class MessageService:
         *,
         session_type: str,
         is_ai_session: bool,
+        encryption_mode: str | None,
         message_type: str,
         extra: dict[str, Any],
     ) -> None:
@@ -415,15 +504,44 @@ class MessageService:
         has_text_encryption = bool(encryption.get("enabled"))
         has_attachment_encryption = bool(attachment_encryption.get("enabled"))
 
-        if not has_text_encryption and not has_attachment_encryption:
-            return
-
         normalized_session_type = str(session_type or "").strip().lower()
-        normalized_message_type = str(message_type or "text").strip().lower()
+        session_encryption_mode = cls._resolve_session_encryption_mode(
+            encryption_mode=encryption_mode,
+            session_type=normalized_session_type,
+            is_ai_session=is_ai_session,
+        )
         if is_ai_session:
-            raise AppError(ErrorCode.INVALID_REQUEST, "AI sessions do not support end-to-end encryption", 422)
+            if has_text_encryption or has_attachment_encryption:
+                raise AppError(ErrorCode.INVALID_REQUEST, "AI sessions do not support end-to-end encryption", 422)
+            return
+        if session_encryption_mode in {cls.ENCRYPTION_MODE_PLAIN, cls.ENCRYPTION_MODE_SERVER_VISIBLE_AI}:
+            if has_text_encryption or has_attachment_encryption:
+                raise AppError(ErrorCode.INVALID_REQUEST, "session encryption is not enabled", 422)
+            return
+        normalized_message_type = str(message_type or "text").strip().lower()
         if normalized_session_type not in {"direct", "group"}:
             raise AppError(ErrorCode.INVALID_REQUEST, "unsupported encrypted session type", 422)
+        if session_encryption_mode == cls.ENCRYPTION_MODE_E2EE_PRIVATE and normalized_session_type != "direct":
+            raise AppError(ErrorCode.INVALID_REQUEST, "session encryption mode does not match session type", 422)
+        if session_encryption_mode == cls.ENCRYPTION_MODE_E2EE_GROUP and normalized_session_type != "group":
+            raise AppError(ErrorCode.INVALID_REQUEST, "session encryption mode does not match session type", 422)
+
+        is_text_message = normalized_message_type == "text"
+        is_attachment_message = normalized_message_type in cls.ATTACHMENT_MESSAGE_TYPES
+        if not is_text_message and not is_attachment_message:
+            raise AppError(
+                ErrorCode.INVALID_REQUEST,
+                "end-to-end encrypted sessions only support encrypted text and attachment messages",
+                422,
+            )
+        if is_text_message and not has_text_encryption:
+            raise AppError(ErrorCode.INVALID_REQUEST, "end-to-end encrypted text messages require text encryption", 422)
+        if is_attachment_message and not has_attachment_encryption:
+            raise AppError(
+                ErrorCode.INVALID_REQUEST,
+                "end-to-end encrypted attachment messages require attachment encryption",
+                422,
+            )
 
         if has_text_encryption:
             if normalized_message_type != "text":
@@ -438,7 +556,7 @@ class MessageService:
                 cls._validate_group_text_envelope(encryption)
 
         if has_attachment_encryption:
-            if normalized_message_type not in {"file", "image", "video", "voice"}:
+            if normalized_message_type not in cls.ATTACHMENT_MESSAGE_TYPES:
                 raise AppError(ErrorCode.INVALID_REQUEST, "attachment encryption requires an attachment message type", 422)
             scheme = str(attachment_encryption.get("scheme") or "").strip()
             allowed_attachment_schemes = (
@@ -452,6 +570,22 @@ class MessageService:
                 cls._validate_direct_attachment_envelope(attachment_encryption)
             else:
                 cls._validate_group_attachment_envelope(attachment_encryption)
+
+    @classmethod
+    def _resolve_session_encryption_mode(
+        cls,
+        *,
+        encryption_mode: str | None,
+        session_type: str,
+        is_ai_session: bool,
+    ) -> str:
+        normalized_session_type = str(session_type or "").strip().lower()
+        if is_ai_session or normalized_session_type == "ai":
+            return cls.ENCRYPTION_MODE_SERVER_VISIBLE_AI
+        normalized_mode = str(encryption_mode or "").strip().lower()
+        if normalized_mode in cls.SUPPORTED_ENCRYPTION_MODES:
+            return normalized_mode
+        return cls.ENCRYPTION_MODE_PLAIN
 
     @classmethod
     def _validate_direct_text_envelope(cls, envelope: dict[str, Any]) -> None:

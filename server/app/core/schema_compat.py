@@ -56,6 +56,7 @@ SESSION_COLUMN_DDL: dict[str, str] = {
     "last_message_seq": "INTEGER NOT NULL DEFAULT 0",
     "last_event_seq": "INTEGER NOT NULL DEFAULT 0",
     "direct_key": "VARCHAR(255)",
+    "encryption_mode": "VARCHAR(32) NOT NULL DEFAULT 'plain'",
 }
 
 SESSION_MEMBER_COLUMN_DDL: dict[str, str] = {
@@ -121,7 +122,7 @@ def _has_indexes(bind: Engine | Connection, table_name: str, required_indexes: I
     return all(index_name in indexes for index_name in required_indexes)
 
 
-RUNTIME_SCHEMA_ALEMBIC_REVISION = "20260403_0008"
+RUNTIME_SCHEMA_ALEMBIC_REVISION = "20260412_0010"
 
 def _parse_revision(revision: str) -> tuple[int, int] | None:
     candidate = str(revision or "").strip()

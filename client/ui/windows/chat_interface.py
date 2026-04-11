@@ -219,7 +219,9 @@ class ChatInterface(QWidget):
         self._contact_controller = get_contact_controller()
         self._auth_controller = get_auth_controller()
         self._session_controller = get_session_controller()
+        self._ui_callback_generation = 0
         self._current_session_id: Optional[str] = None
+        self._session_focus_generation = 0
         self._load_task: Optional[asyncio.Task] = None
         self._event_bus = get_event_bus()
         self._event_subscriptions: list[tuple[str, object]] = []
@@ -325,14 +327,18 @@ class ChatInterface(QWidget):
 
     def _on_splitter_moved(self, _pos: int, _index: int) -> None:
         """Force both panes to re-layout item widths while the splitter is dragged."""
-        QTimer.singleShot(0, self.session_panel._relayout_session_list)
-        QTimer.singleShot(0, self.chat_panel._relayout_message_list)
+        self._schedule_ui_single_shot(0, self.session_panel._relayout_session_list)
+        self._schedule_ui_single_shot(0, self.chat_panel._relayout_message_list)
 
     def _on_sidebar_search_result_requested(self, payload: object) -> None:
         """Open a conversation from one grouped sidebar search result."""
-        self._schedule_ui_task(self._open_sidebar_search_result(payload), "open sidebar search result")
+        generation = self._advance_session_focus_generation()
+        self._schedule_ui_task(
+            self._open_sidebar_search_result(payload, generation),
+            "open sidebar search result",
+        )
 
-    async def _open_sidebar_search_result(self, payload: object) -> None:
+    async def _open_sidebar_search_result(self, payload: object, generation: int) -> None:
         """Route sidebar search hits into the appropriate chat open flow."""
         if not isinstance(payload, dict):
             return
@@ -344,11 +350,11 @@ class ChatInterface(QWidget):
         if target_type == "group":
             session_id = str(data.get("session_id", "") or data.get("id", "") or "")
             if session_id:
-                opened = await self.open_group_session(session_id)
+                opened = await self.open_group_session(session_id, generation=generation)
         elif target_type == "message":
             session_id = str(data.get("session_id", "") or "")
             if session_id:
-                opened = await self.open_session(session_id)
+                opened = await self.open_session(session_id, generation=generation)
         else:
             user_id = str(data.get("id", "") or "")
             if user_id:
@@ -356,8 +362,11 @@ class ChatInterface(QWidget):
                     user_id,
                     display_name=str(data.get("display_name", "") or data.get("name", "") or ""),
                     avatar=str(data.get("avatar", "") or ""),
+                    generation=generation,
                 )
 
+        if not self._is_session_focus_generation_current(generation):
+            return
         if not opened:
             InfoBar.warning(
                 tr("main_window.contact_jump.unavailable_title", "Chat"),
@@ -368,7 +377,7 @@ class ChatInterface(QWidget):
 
     def _subscribe_to_events(self) -> None:
         """Subscribe to session and message events for real-time UI updates."""
-        self._subscribe_sync(SessionEvent.CREATED, self._on_session_event)
+        self._subscribe_sync(SessionEvent.ADDED, self._on_session_event)
         self._subscribe_sync(SessionEvent.UPDATED, self._on_session_event)
         self._subscribe_sync(SessionEvent.DELETED, self._on_session_event)
 
@@ -408,6 +417,8 @@ class ChatInterface(QWidget):
 
     def _on_destroyed(self, *_args) -> None:
         """Cancel outstanding UI tasks and remove event listeners on widget teardown."""
+        self._invalidate_ui_callback_generation()
+        self._advance_session_focus_generation()
         self._unsubscribe_from_events()
         self._cancel_pending_task(self._load_task)
         self._load_task = None
@@ -474,6 +485,46 @@ class ChatInterface(QWidget):
         if self._history_load_task is task:
             self._history_load_task = None
 
+    def _invalidate_ui_callback_generation(self) -> None:
+        """Drop delayed callbacks that belong to an older widget lifetime."""
+        self._ui_callback_generation += 1
+
+    def _is_ui_callback_generation_current(self, generation: int) -> bool:
+        return generation == self._ui_callback_generation
+
+    def _make_generation_bound_ui_callback(self, callback, *, generation: int | None = None):
+        """Wrap one UI callback so stale widget-lifetime callbacks do nothing."""
+        callback_generation = self._ui_callback_generation if generation is None else generation
+
+        def guarded_callback(*args, **kwargs):
+            if not self._is_ui_callback_generation_current(callback_generation):
+                return
+            callback(*args, **kwargs)
+
+        return guarded_callback
+
+    def _schedule_ui_single_shot(self, delay: int, callback, *, generation: int | None = None) -> None:
+        """Schedule one delayed UI callback that expires on widget teardown."""
+        QTimer.singleShot(delay, self._make_generation_bound_ui_callback(callback, generation=generation))
+
+    def _advance_session_focus_generation(self) -> int:
+        """Invalidate pending async work that was targeting an older session focus."""
+        self._session_focus_generation += 1
+        return self._session_focus_generation
+
+    def _is_session_focus_generation_current(self, generation: int) -> bool:
+        return generation == self._session_focus_generation
+
+    def _is_current_session_context(self, session_id: str, generation: int) -> bool:
+        return self._is_session_focus_generation_current(generation) and session_id == self._current_session_id
+
+    @staticmethod
+    def _message_session_id(message) -> str:
+        return str(getattr(message, "session_id", "") or "")
+
+    def _is_current_message_context(self, message, generation: int) -> bool:
+        return self._is_current_session_context(self._message_session_id(message), generation)
+
     def _on_session_event(self, data: dict) -> None:
         """React to session lifecycle updates."""
         is_delete_event = (
@@ -482,6 +533,7 @@ class ChatInterface(QWidget):
             and "sessions" not in data
         )
         if is_delete_event:
+            self._advance_session_focus_generation()
             self._current_session_id = None
             self._set_current_session_active(False)
             self.chat_panel.clear_messages()
@@ -491,10 +543,29 @@ class ChatInterface(QWidget):
         if not self._current_session_id:
             return
 
+        sessions = data.get("sessions")
+        if isinstance(sessions, list):
+            current_session = next(
+                (
+                    session
+                    for session in sessions
+                    if getattr(session, "session_id", "") == self._current_session_id
+                ),
+                None,
+            )
+            if current_session is None:
+                self._advance_session_focus_generation()
+                self._current_session_id = None
+                self._set_current_session_active(False)
+                self.chat_panel.clear_messages()
+                self.chat_panel.show_welcome()
+                return
+            self.chat_panel.set_session(current_session)
+            return
+
         session = self._get_session(self._current_session_id)
         if session:
             self.chat_panel.set_session(session)
-
     def _on_message_sent(self, data: dict) -> None:
         """Append sent message to the current conversation."""
         message = data.get("message")
@@ -554,9 +625,20 @@ class ChatInterface(QWidget):
     def _on_typing_event(self, data: dict) -> None:
         """Show typing indicator for the active conversation only."""
         session_id = data.get("session_id", "")
-        if session_id == self._current_session_id:
+        user_id = data.get("user_id", "")
+        typing = data.get("typing", False)
+        if not isinstance(typing, bool):
+            return
+        if session_id != self._current_session_id:
+            return
+        if user_id == self._current_user_id():
+            return
+        if typing:
             self.chat_panel.show_typing_indicator()
             self._typing_indicator_timer.start(self.TYPING_INDICATOR_HIDE_DELAY_MS)
+            return
+        self._typing_indicator_timer.stop()
+        self.chat_panel.hide_typing_indicator()
 
     def _on_read_event(self, data: dict) -> None:
         """Update read-receipt metadata in the message list."""
@@ -690,6 +772,7 @@ class ChatInterface(QWidget):
         if session_id == self._current_session_id:
             return
 
+        generation = self._advance_session_focus_generation()
         self._remember_current_session_view_state()
         self._remember_current_composer_draft()
 
@@ -719,16 +802,23 @@ class ChatInterface(QWidget):
         cached_page = self._peek_cached_history_page(session_id, before_timestamp=None)
         if cached_state:
             self._restore_session_view_state(session_id, cached_state)
-            self._set_load_task(self._select_session_only(session_id), f"select session {session_id}")
+            self._set_load_task(self._select_session_only(session_id, generation), f"select session {session_id}")
         else:
             if cached_page:
-                self._apply_primary_history_page(session_id, cached_page, schedule_read_receipt=False)
-            self._set_load_task(self._load_session_messages(session_id), f"load session {session_id}")
+                self._apply_primary_history_page(
+                    session_id,
+                    cached_page,
+                    schedule_read_receipt=False,
+                    generation=generation,
+                )
+            self._set_load_task(self._load_session_messages(session_id, generation), f"load session {session_id}")
 
-    async def _load_session_messages(self, session_id: str) -> None:
+    async def _load_session_messages(self, session_id: str, generation: int) -> None:
         """Load local messages for the selected session."""
         try:
             await self._chat_controller.select_session(session_id)
+            if not self._is_current_session_context(session_id, generation):
+                return
             self._activate_selected_session_if_visible(session_id)
             local_messages = self._peek_cached_history_page(session_id, before_timestamp=None)
             if local_messages is None:
@@ -744,8 +834,13 @@ class ChatInterface(QWidget):
                         messages=local_messages,
                         warm=False,
                     )
-            if session_id == self._current_session_id and local_messages:
-                self._apply_primary_history_page(session_id, local_messages, schedule_read_receipt=False)
+            if self._is_current_session_context(session_id, generation) and local_messages:
+                self._apply_primary_history_page(
+                    session_id,
+                    local_messages,
+                    schedule_read_receipt=False,
+                    generation=generation,
+                )
             messages = await self._load_history_page(
                 session_id,
                 before_timestamp=None,
@@ -756,10 +851,10 @@ class ChatInterface(QWidget):
             logger.error("Failed to load messages for %s: %s", session_id, exc)
             return
 
-        if session_id != self._current_session_id:
+        if not self._is_current_session_context(session_id, generation):
             return
 
-        self._apply_primary_history_page(session_id, messages)
+        self._apply_primary_history_page(session_id, messages, generation=generation)
 
     def _apply_primary_history_page(
         self,
@@ -767,9 +862,13 @@ class ChatInterface(QWidget):
         messages: list,
         *,
         schedule_read_receipt: bool = True,
+        generation: int | None = None,
     ) -> None:
         """Render the primary history page while preserving any live in-memory messages."""
-        if session_id != self._current_session_id:
+        if generation is not None:
+            if not self._is_current_session_context(session_id, generation):
+                return
+        elif session_id != self._current_session_id:
             return
 
         merged_messages = self._merge_loaded_messages_with_visible(messages)
@@ -831,10 +930,12 @@ class ChatInterface(QWidget):
         except (TypeError, ValueError):
             return (0.0, message_id)
 
-    async def _select_session_only(self, session_id: str) -> None:
+    async def _select_session_only(self, session_id: str, generation: int) -> None:
         """Update session selection side effects without reloading the visible page from storage."""
         try:
             await self._chat_controller.select_session(session_id)
+            if not self._is_current_session_context(session_id, generation):
+                return
             self._activate_selected_session_if_visible(session_id)
         except asyncio.CancelledError:
             raise
@@ -850,13 +951,16 @@ class ChatInterface(QWidget):
         if self._history_load_task and not self._history_load_task.done():
             return
 
+        generation = self._session_focus_generation
         self._set_history_load_task(
-            self._load_older_messages(self._current_session_id),
+            self._load_older_messages(self._current_session_id, generation),
             f"load older messages {self._current_session_id}",
         )
 
-    async def _load_older_messages(self, session_id: str) -> None:
+    async def _load_older_messages(self, session_id: str, generation: int) -> None:
         """Prepend one older history page while keeping the current viewport stable."""
+        if not self._is_current_session_context(session_id, generation):
+            return
         before_timestamp = self._oldest_loaded_timestamp
         if before_timestamp is None:
             self.chat_panel.set_history_loading(False)
@@ -870,11 +974,11 @@ class ChatInterface(QWidget):
             raise
         except Exception as exc:
             logger.error("Failed to load older messages for %s: %s", session_id, exc)
-            self.chat_panel.set_history_loading(False)
+            if self._is_current_session_context(session_id, generation):
+                self.chat_panel.set_history_loading(False)
             return
 
-        if session_id != self._current_session_id:
-            self.chat_panel.set_history_loading(False)
+        if not self._is_current_session_context(session_id, generation):
             return
 
         if not messages:
@@ -1174,11 +1278,11 @@ class ChatInterface(QWidget):
             except Exception as exc:
                 logger.error("Send composed segment error: %s", exc)
 
-    async def _send_image_message(self, session_id: str, file_path: str) -> None:
+    async def _send_image_message(self, session_id: str, file_path: str, generation: int) -> None:
         """Send an image using the optimistic media upload flow."""
         try:
             message = await self._chat_controller.send_file(file_path, session_id=session_id)
-            if message:
+            if message and self._is_current_session_context(session_id, generation):
                 self.chat_panel.get_message_list().viewport().update()
         except Exception as exc:
             logger.error("Send image message error: %s", exc)
@@ -1208,13 +1312,19 @@ class ChatInterface(QWidget):
 
         overlay = ScreenshotOverlay(self.window())
         self._screenshot_overlays.add(overlay)
-        overlay.captured.connect(self._handle_screenshot_captured)
-        overlay.canceled.connect(lambda: self._screenshot_overlays.discard(overlay))
-        overlay.destroyed.connect(lambda *_args, ref=overlay: self._screenshot_overlays.discard(ref))
+        overlay.captured.connect(lambda file_path, current=overlay: self._handle_screenshot_captured(file_path, current))
+        overlay.canceled.connect(lambda current=overlay: self._discard_screenshot_overlay(current))
+        overlay.destroyed.connect(lambda *_args, ref=overlay: self._discard_screenshot_overlay(ref))
         overlay.start()
 
-    def _handle_screenshot_captured(self, file_path: str) -> None:
+    def _discard_screenshot_overlay(self, overlay: ScreenshotOverlay) -> None:
+        self._screenshot_overlays.discard(overlay)
+
+    def _handle_screenshot_captured(self, file_path: str, source_overlay: ScreenshotOverlay) -> None:
         """Preview a captured screenshot before sending it."""
+        if source_overlay not in self._screenshot_overlays:
+            return
+        self._screenshot_overlays.discard(source_overlay)
         for overlay in list(self._screenshot_overlays):
             if not overlay.isVisible():
                 self._screenshot_overlays.discard(overlay)
@@ -1232,8 +1342,9 @@ class ChatInterface(QWidget):
         try:
             if dialog.exec() == QDialog.DialogCode.Accepted:
                 if self._current_session_id:
+                    generation = self._session_focus_generation
                     self._schedule_ui_task(
-                        self._send_image_message(self._current_session_id, file_path),
+                        self._send_image_message(self._current_session_id, file_path, generation),
                         f"send screenshot {self._current_session_id}",
                     )
             else:
@@ -1317,7 +1428,7 @@ class ChatInterface(QWidget):
             return
         logger.info("[call-ui] call_id=%s stage=invite_received_ui status=%s direction=%s", call.call_id, call.status, call.direction)
 
-        QTimer.singleShot(
+        self._schedule_ui_single_shot(
             0,
             lambda cid=call.call_id: self._schedule_ui_task(
                 self._chat_controller.send_call_ringing(cid),
@@ -1354,11 +1465,11 @@ class ChatInterface(QWidget):
         self._incoming_call_toasts[call.call_id] = toast
         self._dialog_refs.add(toast)
         toast.destroyed.connect(lambda *_args, cid=call.call_id, ref=toast: self._on_call_toast_destroyed(cid, ref))
-        toast.accepted.connect(lambda active_call=call: self._accept_incoming_call_from_toast(active_call))
-        toast.rejected.connect(lambda cid=call.call_id: self._reject_incoming_call_from_toast(cid))
+        toast.accepted.connect(lambda active_call=call, ref=toast: self._accept_incoming_call_from_toast(active_call, ref))
+        toast.rejected.connect(lambda cid=call.call_id, ref=toast: self._reject_incoming_call_from_toast(cid, ref))
         toast.show()
         self._start_call_ring_sound(AppSound.CALL_INCOMING_RING)
-        QTimer.singleShot(
+        self._schedule_ui_single_shot(
             0,
             lambda active_call=call: self._schedule_ui_task(
                 self._prepare_incoming_call_window(active_call),
@@ -1371,7 +1482,10 @@ class ChatInterface(QWidget):
         await self._chat_controller.refresh_call_ice_servers(force_refresh=True)
         window = self._ensure_call_window(call, reveal=False)
         if window is not None:
-            QTimer.singleShot(0, lambda current_window=window: current_window.prepare_media(is_caller=False))
+            self._schedule_ui_single_shot(
+                0,
+                lambda current_window=window: self._prepare_current_call_window_media(current_window),
+            )
 
     async def _accept_incoming_call(self, call: ActiveCallState) -> None:
         """Accept one incoming call and optionally switch to the related chat."""
@@ -1379,10 +1493,12 @@ class ChatInterface(QWidget):
         if accepted and call.session_id and call.session_id != self._current_session_id:
             await self.open_session(call.session_id)
 
-    def _accept_incoming_call_from_toast(self, call: ActiveCallState) -> None:
+    def _accept_incoming_call_from_toast(self, call: ActiveCallState, source_toast: IncomingCallToast) -> None:
         """Close the toast immediately and schedule accept handling."""
+        if self._incoming_call_toasts.get(call.call_id) is not source_toast:
+            return
         self._close_incoming_call_toast(call.call_id)
-        QTimer.singleShot(
+        self._schedule_ui_single_shot(
             0,
             lambda active_call=call: self._schedule_ui_task(
                 self._accept_incoming_call(active_call),
@@ -1390,10 +1506,12 @@ class ChatInterface(QWidget):
             ),
         )
 
-    def _reject_incoming_call_from_toast(self, call_id: str) -> None:
+    def _reject_incoming_call_from_toast(self, call_id: str, source_toast: IncomingCallToast) -> None:
         """Close the toast immediately and schedule reject handling."""
+        if self._incoming_call_toasts.get(call_id) is not source_toast:
+            return
         self._close_incoming_call_toast(call_id)
-        QTimer.singleShot(
+        self._schedule_ui_single_shot(
             0,
             lambda cid=call_id: self._schedule_ui_task(
                 self._chat_controller.reject_call(cid),
@@ -1591,8 +1709,10 @@ class ChatInterface(QWidget):
             ice_servers=self._chat_controller.get_call_ice_servers(),
             parent=None,
         )
-        window.hangup_requested.connect(self._on_call_window_hangup_requested)
-        window.signal_generated.connect(self._on_call_window_signal_generated)
+        window.hangup_requested.connect(lambda call_id, ref=window: self._on_call_window_hangup_requested(call_id, ref))
+        window.signal_generated.connect(
+            lambda event_type, payload, ref=window: self._on_call_window_signal_generated(event_type, payload, ref)
+        )
         window.destroyed.connect(lambda *_args, ref=window: self._on_call_window_destroyed(ref))
         if reveal:
             window.show()
@@ -1603,6 +1723,12 @@ class ChatInterface(QWidget):
             window.start_media(is_caller=current_user_id == call.initiator_id)
         self._call_window = window
         return window
+
+    def _prepare_current_call_window_media(self, window: CallWindow) -> None:
+        """Prepare media only for the call window that is still active."""
+        if self._call_window is not window:
+            return
+        window.prepare_media(is_caller=False)
 
     def _close_call_window(self, call_id: str | None = None) -> None:
         """Close the active media window when the call finishes."""
@@ -1620,15 +1746,19 @@ class ChatInterface(QWidget):
         if self._call_window is window:
             self._call_window = None
 
-    def _on_call_window_hangup_requested(self, call_id: str) -> None:
+    def _on_call_window_hangup_requested(self, call_id: str, source_window: CallWindow) -> None:
         """Relay user-triggered window close actions into websocket hangup."""
+        if self._call_window is not source_window:
+            return
         self._schedule_ui_task(
             self._chat_controller.hangup_call(call_id),
             f"hangup call window {call_id}",
         )
 
-    def _on_call_window_signal_generated(self, event_type: str, payload: object) -> None:
+    def _on_call_window_signal_generated(self, event_type: str, payload: object, source_window: CallWindow) -> None:
         """Forward JS-generated SDP and ICE payloads through the chat controller."""
+        if self._call_window is not source_window:
+            return
         if not isinstance(payload, dict):
             return
         call_id = str(payload.get("call_id") or "")
@@ -1711,7 +1841,7 @@ class ChatInterface(QWidget):
         if sound_id == AppSound.CALL_INCOMING_RING:
             sound_manager = get_sound_manager()
             sound_manager.ensure_playing(sound_id)
-            QTimer.singleShot(self.CALL_INCOMING_RING_RETRY_MS, self._retry_incoming_ring_sound)
+            self._schedule_ui_single_shot(self.CALL_INCOMING_RING_RETRY_MS, self._retry_incoming_ring_sound)
             return
         self._play_call_sound(sound_id)
         self._call_ring_timer.start(self.CALL_RING_REPEAT_MS)
@@ -1776,7 +1906,7 @@ class ChatInterface(QWidget):
         await self._chat_controller.send_message_to(
             call.session_id,
             content,
-            message_type=MessageType.SYSTEM,
+            message_type=MessageType.TEXT,
             extra=extra,
         )
 
@@ -2185,24 +2315,30 @@ class ChatInterface(QWidget):
             )
         if open_action:
             open_action.triggered.connect(
-                lambda _checked=False, msg=message: QTimer.singleShot(0, lambda: self._open_message(msg))
+                lambda _checked=False, msg=message, current=self._session_focus_generation: self._schedule_ui_single_shot(
+                    0,
+                    lambda: self._open_message(msg, current),
+                )
             )
         if recall_action:
             recall_action.triggered.connect(
-                lambda _checked=False, message_id=message.message_id: self._schedule_ui_task(
-                    self._recall_message(message_id),
-                    f"recall {message_id}",
+                lambda _checked=False, msg=message, current=self._session_focus_generation: self._schedule_ui_task(
+                    self._recall_message(msg.message_id, self._message_session_id(msg), current),
+                    f"recall {msg.message_id}",
                 )
             )
         if delete_action:
             delete_action.triggered.connect(
-                lambda _checked=False, msg=message: QTimer.singleShot(0, lambda: self._confirm_delete_message(msg))
+                lambda _checked=False, msg=message, current=self._session_focus_generation: self._schedule_ui_single_shot(
+                    0,
+                    lambda: self._confirm_delete_message(msg, current),
+                )
             )
         if retry_action:
             retry_action.triggered.connect(
-                lambda _checked=False, message_id=message.message_id: self._schedule_ui_task(
-                    self._retry_message(message_id),
-                    f"retry {message_id}",
+                lambda _checked=False, msg=message, current=self._session_focus_generation: self._schedule_ui_task(
+                    self._retry_message(msg.message_id, self._message_session_id(msg), current),
+                    f"retry {msg.message_id}",
                 )
             )
 
@@ -2215,8 +2351,9 @@ class ChatInterface(QWidget):
             self.chat_panel.set_context_menu_message(message.message_id)
 
         def _on_menu_hidden() -> None:
-            if self._message_context_menu is menu:
-                self._message_context_menu = None
+            if self._message_context_menu is not menu:
+                return
+            self._message_context_menu = None
             self.chat_panel.clear_context_menu_message()
             menu.deleteLater()
 
@@ -2228,8 +2365,12 @@ class ChatInterface(QWidget):
             aniType=MenuAnimationType.DROP_DOWN,
         )
 
-    def _open_message(self, message) -> None:
+    def _open_message(self, message, generation: int | None = None) -> None:
         """Open an image, file, or video attachment."""
+        current_generation = self._session_focus_generation if generation is None else generation
+        if not self._is_current_message_context(message, current_generation):
+            return
+
         attachment_encryption = dict((message.extra or {}).get("attachment_encryption") or {})
         if attachment_encryption.get("enabled") and message.message_type in {
             MessageType.IMAGE,
@@ -2237,7 +2378,7 @@ class ChatInterface(QWidget):
             MessageType.FILE,
         }:
             self._schedule_ui_task(
-                self._open_file_attachment(message),
+                self._open_file_attachment(message, current_generation),
                 f"open attachment {message.message_id}",
             )
             return
@@ -2261,15 +2402,17 @@ class ChatInterface(QWidget):
 
         if message.message_type == MessageType.FILE:
             self._schedule_ui_task(
-                self._open_file_attachment(message),
+                self._open_file_attachment(message, current_generation),
                 f"open attachment {message.message_id}",
             )
 
-    async def _open_file_attachment(self, message) -> None:
+    async def _open_file_attachment(self, message, generation: int) -> None:
         """Download one file attachment when needed, then open the local file."""
         try:
             local_path = await self._chat_controller.download_message_attachment(message.message_id)
         except Exception as exc:
+            if not self._is_current_message_context(message, generation):
+                return
             InfoBar.warning(
                 tr("chat.message.title", "Message"),
                 str(exc) or tr("chat.attachment.file_open_failed", "Unable to open this attachment."),
@@ -2278,6 +2421,8 @@ class ChatInterface(QWidget):
             )
             return
 
+        if not self._is_current_message_context(message, generation):
+            return
         if local_path:
             message.extra["local_path"] = local_path
 
@@ -2289,9 +2434,11 @@ class ChatInterface(QWidget):
                 duration=1800,
             )
 
-    async def _retry_message(self, message_id: str) -> None:
+    async def _retry_message(self, message_id: str, session_id: str, generation: int) -> None:
         """Retry a failed message."""
         success = await self._chat_controller.retry_message(message_id)
+        if not self._is_current_session_context(session_id, generation):
+            return
         if not success:
             InfoBar.error(
                 tr("chat.message.title", "Message"),
@@ -2302,23 +2449,31 @@ class ChatInterface(QWidget):
 
     def _on_security_pending_confirm_requested(self, session_id: str, action_id: str) -> None:
         """Confirm one queued security action, then send the held local messages."""
+        generation = self._session_focus_generation
+        if not self._is_current_session_context(session_id, generation):
+            return
         self._schedule_ui_task(
-            self._confirm_security_pending_messages(session_id, action_id),
+            self._confirm_security_pending_messages(session_id, action_id, generation),
             f"confirm pending security messages {session_id}",
         )
 
     def _on_security_pending_discard_requested(self, session_id: str) -> None:
         """Discard locally held messages that are still waiting for security confirmation."""
+        generation = self._session_focus_generation
+        if not self._is_current_session_context(session_id, generation):
+            return
         self._schedule_ui_task(
-            self._discard_security_pending_messages(session_id),
+            self._discard_security_pending_messages(session_id, generation),
             f"discard pending security messages {session_id}",
         )
 
-    async def _confirm_security_pending_messages(self, session_id: str, action_id: str) -> None:
+    async def _confirm_security_pending_messages(self, session_id: str, action_id: str, generation: int) -> None:
         """Run one security action and release the locally queued messages for the session."""
         try:
             action_result = await self._chat_controller.execute_session_security_action(session_id, action_id)
         except Exception as exc:
+            if not self._is_current_session_context(session_id, generation):
+                return
             InfoBar.error(
                 tr("chat.message.title", "Message"),
                 str(exc) or tr("chat.security_pending.confirm_failed", "Unable to confirm the required security action."),
@@ -2328,6 +2483,8 @@ class ChatInterface(QWidget):
             return
 
         if not bool(action_result.get("performed")):
+            if not self._is_current_session_context(session_id, generation):
+                return
             message = str(action_result.get("explanation") or action_result.get("reason") or "").strip()
             InfoBar.warning(
                 tr("chat.message.title", "Message"),
@@ -2340,6 +2497,8 @@ class ChatInterface(QWidget):
         release_result = await self._chat_controller.release_session_security_pending_messages(session_id)
         released_count = max(0, int(release_result.get("released", 0) or 0))
         failed_count = max(0, int(release_result.get("failed", 0) or 0))
+        if not self._is_current_session_context(session_id, generation):
+            return
         if failed_count:
             InfoBar.warning(
                 tr("chat.message.title", "Message"),
@@ -2364,11 +2523,11 @@ class ChatInterface(QWidget):
             duration=2000,
         )
 
-    async def _discard_security_pending_messages(self, session_id: str) -> None:
+    async def _discard_security_pending_messages(self, session_id: str, generation: int) -> None:
         """Delete queued local messages that were never sent because security confirmation is missing."""
         result = await self._chat_controller.discard_session_security_pending_messages(session_id)
         removed_count = max(0, int(result.get("removed", 0) or 0))
-        if removed_count <= 0:
+        if removed_count <= 0 or not self._is_current_session_context(session_id, generation):
             return
         InfoBar.info(
             tr("chat.message.title", "Message"),
@@ -2381,9 +2540,11 @@ class ChatInterface(QWidget):
             duration=1800,
         )
 
-    async def _recall_message(self, message_id: str) -> None:
+    async def _recall_message(self, message_id: str, session_id: str, generation: int) -> None:
         """Recall a message and surface errors in the UI."""
         success, reason = await self._chat_controller.recall_message(message_id)
+        if not self._is_current_session_context(session_id, generation):
+            return
         if not success:
             InfoBar.error(
                 tr("chat.message.title", "Message"),
@@ -2392,17 +2553,23 @@ class ChatInterface(QWidget):
                 duration=2400,
             )
 
-    def _confirm_delete_message(self, message) -> None:
+    def _confirm_delete_message(self, message, generation: int) -> None:
         """Ask for confirmation before scheduling one local message delete."""
+        if not self._is_current_message_context(message, generation):
+            return
         dialog = DeleteMessageConfirmDialog(self.window())
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
+        if not self._is_current_message_context(message, generation):
+            return
 
-        self._schedule_ui_task(self._delete_message(message), f"delete {message.message_id}")
+        self._schedule_ui_task(self._delete_message(message, generation), f"delete {message.message_id}")
 
-    async def _delete_message(self, message) -> None:
+    async def _delete_message(self, message, generation: int) -> None:
         """Delete a message locally and refresh session preview state."""
         success = await self._chat_controller.delete_message(message.message_id)
+        if not self._is_current_message_context(message, generation):
+            return
         if not success:
             InfoBar.error(
                 tr("chat.message.title", "Message"),
@@ -2446,26 +2613,29 @@ class ChatInterface(QWidget):
         if pending_key in self._pending_read_receipts:
             return
 
+        generation = self._session_focus_generation
+        ui_generation = self._ui_callback_generation
         self._pending_read_receipts.add(pending_key)
-        QTimer.singleShot(
+        self._schedule_ui_single_shot(
             0,
-            lambda sid=session_id, mid=latest_incoming.message_id: self._schedule_ui_task(
-                self._send_read_receipt_for(sid, mid),
+            lambda sid=session_id, mid=latest_incoming.message_id, current=generation: self._schedule_ui_task(
+                self._send_read_receipt_for(sid, mid, current),
                 f"read receipt {sid}:{mid}",
             ),
+            generation=ui_generation,
         )
 
-    async def _send_read_receipt_for(self, session_id: str, message_id: str) -> None:
+    async def _send_read_receipt_for(self, session_id: str, message_id: str, generation: int) -> None:
         """Send a cumulative read receipt for a specific session/message pair."""
         pending_key = (session_id, message_id)
         try:
-            if session_id != self._current_session_id or not self._can_mark_session_read():
+            if not self._is_current_session_context(session_id, generation) or not self._can_mark_session_read():
                 return
             if self._last_read_receipts.get(session_id) == message_id:
                 return
 
             success = await self._chat_controller.send_read_receipt(message_id, session_id=session_id)
-            if success:
+            if success and self._is_current_session_context(session_id, generation):
                 self._last_read_receipts[session_id] = message_id
         finally:
             self._pending_read_receipts.discard(pending_key)
@@ -2556,8 +2726,14 @@ class ChatInterface(QWidget):
         """Return one cached session for external UI integrations."""
         return self._get_session(session_id)
 
-    async def open_session(self, session_id: str) -> bool:
+    async def open_session(self, session_id: str, *, generation: int | None = None) -> bool:
         """Open any existing session by id, fetching it when needed."""
+        open_generation = self._advance_session_focus_generation() if generation is None else generation
+        if not self._is_session_focus_generation_current(open_generation):
+            return False
+        if session_id == self._current_session_id and self._get_session(session_id):
+            return True
+
         if self.focus_session(session_id):
             return True
 
@@ -2565,17 +2741,29 @@ class ChatInterface(QWidget):
             session_id,
             fallback_name="Session",
         )
+        if not self._is_session_focus_generation_current(open_generation):
+            return False
         if not session:
             return False
 
         return self.focus_session(session.session_id)
 
-    async def open_group_session(self, session_id: str) -> bool:
+    async def open_group_session(self, session_id: str, *, generation: int | None = None) -> bool:
         """Open a group session, fetching it from the backend if needed."""
-        return await self.open_session(session_id)
+        return await self.open_session(session_id, generation=generation)
 
-    async def open_direct_session(self, user_id: str, display_name: str = "", avatar: str = "") -> bool:
+    async def open_direct_session(
+        self,
+        user_id: str,
+        display_name: str = "",
+        avatar: str = "",
+        *,
+        generation: int | None = None,
+    ) -> bool:
         """Open an existing direct session or create one for the given contact."""
+        open_generation = self._advance_session_focus_generation() if generation is None else generation
+        if not self._is_session_focus_generation_current(open_generation):
+            return False
         session = self._chat_controller.find_direct_session(user_id)
         if session:
             return self.focus_session(session.session_id)
@@ -2585,6 +2773,8 @@ class ChatInterface(QWidget):
             display_name=display_name,
             avatar=avatar,
         )
+        if not self._is_session_focus_generation_current(open_generation):
+            return False
         if not session:
             return False
 

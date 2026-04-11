@@ -6,6 +6,7 @@ Manager for chat sessions, unread counts, and current session.
 import asyncio
 import json
 import time
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Callable, Optional
 
@@ -25,10 +26,19 @@ setup_logging()
 logger = logging.get_logger(__name__)
 
 
+@dataclass(frozen=True)
+class SessionRefreshResult:
+    """Outcome of one remote session snapshot refresh."""
+
+    sessions: list[Session]
+    authoritative: bool
+    unread_synchronized: bool
+
+
 class SessionEvent:
     """Session event types."""
 
-    CREATED = "session_created"
+    ADDED = "session_added"
     UPDATED = "session_updated"
     DELETED = "session_deleted"
     SELECTED = "session_selected"
@@ -141,10 +151,6 @@ class SessionManager:
         normalized_session_type = str(session_type or "").strip().lower()
         if is_ai_session or normalized_session_type == "ai":
             return cls.ENCRYPTION_MODE_SERVER_VISIBLE_AI
-        if normalized_session_type == "direct":
-            return cls.ENCRYPTION_MODE_E2EE_PRIVATE
-        if normalized_session_type == "group":
-            return cls.ENCRYPTION_MODE_E2EE_GROUP
         return cls.ENCRYPTION_MODE_PLAIN
 
     @classmethod
@@ -468,8 +474,9 @@ class SessionManager:
                 session_type=session.session_type,
                 is_ai_session=bool(session.is_ai_session),
             )
-            group_summary = await self._reconcile_group_sender_key_state(session)
-            if session.session_type == "direct" and not bool(session.is_ai_session):
+            if session.encryption_mode() == self.ENCRYPTION_MODE_E2EE_GROUP:
+                group_summary = await self._reconcile_group_sender_key_state(session)
+            if session.encryption_mode() == self.ENCRYPTION_MODE_E2EE_PRIVATE:
                 counterpart_id = str(session.extra.get("counterpart_id") or "").strip()
                 if counterpart_id:
                     try:
@@ -767,13 +774,6 @@ class SessionManager:
         self._hidden_sessions[session_id] = max(float(hidden_at or 0.0), time.time())
         await self._save_hidden_sessions()
 
-    async def _unhide_session(self, session_id: str) -> None:
-        """Remove a local tombstone once the session should become visible again."""
-        if session_id not in self._hidden_sessions:
-            return
-        self._hidden_sessions.pop(session_id, None)
-        await self._save_hidden_sessions()
-
     def _should_hide_session(self, session: Session) -> bool:
         """Return whether a remote session should stay hidden locally."""
         hidden_at = self._hidden_sessions.get(session.session_id)
@@ -817,8 +817,7 @@ class SessionManager:
         if existing:
             return existing
 
-        await self.add_session(session)
-        return session
+        return await self.add_session(session)
 
     async def _fetch_or_build_session(self, message: ChatMessage) -> Optional[Session]:
         """Fetch session details from backend or build a fallback local session."""
@@ -956,14 +955,13 @@ class SessionManager:
         self._normalize_session_display(session, current_user)
         return session
 
-    async def _remember_session(self, session: Session) -> Session:
+    async def _remember_session(self, session: Session) -> Optional[Session]:
         """Insert a fetched session once and return the canonical cached object."""
         existing = self._sessions.get(session.session_id)
         if existing is not None:
             return existing
 
-        await self.add_session(session)
-        return session
+        return await self.add_session(session)
 
     async def _build_fallback_session(self, message: ChatMessage) -> Optional[Session]:
         """Build one session snapshot only from authoritative message metadata."""
@@ -1256,7 +1254,6 @@ class SessionManager:
     async def _on_message_received(self, data: dict) -> None:
         """Handle incoming message."""
         message: ChatMessage = data["message"]
-        await self._unhide_session(message.session_id)
         await self._ensure_session_exists(message)
 
         await self.add_message_to_session(
@@ -1278,7 +1275,6 @@ class SessionManager:
             return
         current_user_id = await self._get_current_user_id()
         for message in messages:
-            await self._unhide_session(message.session_id)
             await self._ensure_session_exists(message)
 
         db = get_database()
@@ -1980,14 +1976,53 @@ class SessionManager:
             await db.replace_sessions(sessions)
         await self._event_bus.emit(SessionEvent.UPDATED, {"sessions": self.sessions})
 
-    async def refresh_remote_sessions(self) -> list[Session]:
+    async def refresh_remote_sessions(self) -> SessionRefreshResult:
         """Fetch the current user's session snapshot from the backend and replace local cache."""
         try:
             payload = await self._session_service.fetch_sessions()
         except Exception as exc:
             logger.warning("Refresh remote sessions failed: %s", exc)
-            return self.sessions
+            return SessionRefreshResult(
+                sessions=self.sessions,
+                authoritative=False,
+                unread_synchronized=False,
+            )
 
+        unread_count_map = await self._fetch_remote_unread_counts()
+        unread_synchronized = unread_count_map is not None
+        async with self._lock:
+            existing_sessions = dict(self._sessions)
+
+        remote_sessions: list[Session] = []
+        for item in payload or []:
+            data = dict(item or {})
+            session = await self._build_session_from_payload(
+                data,
+                fallback_name=str(data.get("name", "") or tr("session.private_chat", "Private Chat")),
+                avatar=str(data.get("avatar", "") or ""),
+            )
+            if session is None:
+                continue
+            if unread_count_map is None:
+                existing_session = existing_sessions.get(session.session_id)
+                if existing_session is not None:
+                    session.unread_count = existing_session.unread_count
+            else:
+                session.unread_count = int(unread_count_map.get(session.session_id, 0))
+            remote_sessions.append(session)
+
+        await self._replace_sessions(remote_sessions)
+        refreshed_sessions = self.sessions
+        logger.info(
+            "Refreshed %d remote sessions (unread_synchronized=%s)",
+            len(remote_sessions),
+            unread_synchronized,
+        )
+        return SessionRefreshResult(
+            sessions=refreshed_sessions,
+            authoritative=True,
+            unread_synchronized=unread_synchronized,
+        )
         unread_count_map = await self._fetch_remote_unread_counts()
 
         remote_sessions: list[Session] = []
@@ -2057,21 +2092,37 @@ class SessionManager:
             await self._event_bus.emit(SessionEvent.UPDATED, {
                 "session": session,
             })
-    async def add_session(self, session: Session) -> None:
-        """Add a new session."""
+    async def add_session(self, session: Session) -> Optional[Session]:
+        """Add a new visible session to the local cache."""
         await self._annotate_session_crypto_state([session])
+        current_user = await self._get_current_user_context()
+        self._normalize_session_display(session, current_user)
+        if not self._is_session_visible(session, current_user):
+            return None
+        if self._should_hide_session(session):
+            return None
+
+        hidden_changed = False
+        if session.session_id in self._hidden_sessions:
+            self._hidden_sessions.pop(session.session_id, None)
+            hidden_changed = True
+
         async with self._lock:
             self._sessions[session.session_id] = session
+
+        if hidden_changed:
+            await self._save_hidden_sessions()
 
         db = get_database()
         if db.is_connected:
             await db.save_session(session)
 
-        await self._event_bus.emit(SessionEvent.CREATED, {
+        await self._event_bus.emit(SessionEvent.ADDED, {
             "session": session,
         })
 
         logger.info(f"Session added: {session.session_id}")
+        return session
 
     async def remove_session(self, session_id: str) -> None:
         """Hide a session locally without deleting the remote conversation."""
@@ -2262,7 +2313,8 @@ class SessionManager:
         )
         if session is None:
             return None
-        await self._unhide_session(session.session_id)
+        if session.session_id in self._hidden_sessions:
+            return None
         return await self._remember_session(session)
 
     async def ensure_direct_session(
@@ -2278,10 +2330,7 @@ class SessionManager:
             return existing
 
         try:
-            payload = await self._session_service.create_direct_session(
-                user_id,
-                display_name=display_name or tr("session.private_chat", "Private Chat"),
-            )
+            payload = await self._session_service.create_direct_session(user_id)
         except Exception as exc:
             logger.warning("Create direct session for %s failed: %s", user_id, exc)
             return None
@@ -2293,7 +2342,8 @@ class SessionManager:
         )
         if session is None:
             return None
-        await self._unhide_session(session.session_id)
+        if session.session_id in self._hidden_sessions:
+            return None
         return await self._remember_session(session)
 
     async def refresh_session_preview(self, session_id: str) -> None:
@@ -2511,6 +2561,8 @@ class SessionManager:
         await self._unsubscribe_all()
         self._sessions.clear()
         self._current_session_id = None
+        self._current_session_active = False
+        self._current_user_id = ""
         self._initialized = False
 
         logger.info("Session manager closed")
@@ -2530,15 +2582,3 @@ def get_session_manager() -> SessionManager:
     if _session_manager is None:
         _session_manager = SessionManager()
     return _session_manager
-
-
-
-
-
-
-
-
-
-
-
-

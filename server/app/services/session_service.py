@@ -28,6 +28,12 @@ class SessionService:
     ENCRYPTION_MODE_E2EE_PRIVATE = 'e2ee_private'
     ENCRYPTION_MODE_E2EE_GROUP = 'e2ee_group'
     ENCRYPTION_MODE_SERVER_VISIBLE_AI = 'server_visible_ai'
+    SUPPORTED_ENCRYPTION_MODES = {
+        ENCRYPTION_MODE_PLAIN,
+        ENCRYPTION_MODE_E2EE_PRIVATE,
+        ENCRYPTION_MODE_E2EE_GROUP,
+        ENCRYPTION_MODE_SERVER_VISIBLE_AI,
+    }
 
     def __init__(self, db: Session) -> None:
         self.db = db
@@ -71,19 +77,36 @@ class SessionService:
             )
         return payload
 
-    def create_private(self, current_user: User, participant_ids: list[str], name: str | None = None) -> dict:
+    def create_private(
+        self,
+        current_user: User,
+        participant_ids: list[str],
+        encryption_mode: str = 'plain',
+    ) -> dict:
         members = self._normalize_private_members(current_user, participant_ids)
         direct_key = self.sessions.build_private_direct_key(members)
+        normalized_encryption_mode = (
+            self.ENCRYPTION_MODE_E2EE_PRIVATE
+            if str(encryption_mode or '').strip().lower() == self.ENCRYPTION_MODE_E2EE_PRIVATE
+            else self.ENCRYPTION_MODE_PLAIN
+        )
         existing = self.sessions.get_private_session_by_direct_key(direct_key)
         if existing is not None:
+            existing_member_ids = self.sessions.list_member_ids(existing.id)
+            if (
+                not self._is_visible_private_session(existing, existing_member_ids)
+                or set(existing_member_ids) != set(members)
+            ):
+                raise AppError(ErrorCode.RESOURCE_NOT_FOUND, "session not found", 404)
             return self.serialize_session(existing, include_members=True, participant_ids=members, current_user_id=current_user.id)
 
         def action() -> object:
             session = self.sessions.create(
-                name or "Private Chat",
+                "Private Chat",
                 "private",
                 direct_key=direct_key,
                 commit=False,
+                encryption_mode=normalized_encryption_mode,
             )
             for member_id in members:
                 self.sessions.add_member(session.id, member_id, commit=False)
@@ -117,6 +140,8 @@ class SessionService:
         member_ids = self.sessions.list_member_ids(session_id)
         if current_user.id not in member_ids:
             raise AppError(ErrorCode.FORBIDDEN, "not a session member", 403)
+        if not self._is_visible_private_session(session, member_ids):
+            raise AppError(ErrorCode.RESOURCE_NOT_FOUND, "session not found", 404)
         if self.groups.get_by_session_id(session_id) is not None:
             raise AppError(ErrorCode.FORBIDDEN, "group sessions must be deleted via groups API", 403)
         self.sessions.delete_session(session_id)
@@ -209,6 +234,7 @@ class SessionService:
             "avatar": avatar,
             "is_ai_session": session.is_ai_session,
             "encryption_mode": self._resolve_encryption_mode(
+                encryption_mode=getattr(session, "encryption_mode", None),
                 session_type=normalized_session_type,
                 is_ai_session=bool(session.is_ai_session),
             ),
@@ -354,15 +380,12 @@ class SessionService:
         }
 
     @classmethod
-    def _resolve_encryption_mode(cls, *, session_type: str, is_ai_session: bool) -> str:
+    def _resolve_encryption_mode(cls, *, encryption_mode: str | None, session_type: str, is_ai_session: bool) -> str:
         """Return the authoritative encryption mode for one session payload."""
         normalized_session_type = str(session_type or "").strip().lower()
         if is_ai_session or normalized_session_type == "ai":
             return cls.ENCRYPTION_MODE_SERVER_VISIBLE_AI
-        if normalized_session_type == "direct":
-            return cls.ENCRYPTION_MODE_E2EE_PRIVATE
-        if normalized_session_type == "group":
-            return cls.ENCRYPTION_MODE_E2EE_GROUP
+        normalized_mode = str(encryption_mode or "").strip().lower()
+        if normalized_mode in cls.SUPPORTED_ENCRYPTION_MODES:
+            return normalized_mode
         return cls.ENCRYPTION_MODE_PLAIN
-
-

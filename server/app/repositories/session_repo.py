@@ -1,14 +1,14 @@
-﻿"""Session repository."""
+"""Session repository."""
 
 from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import String, cast, delete, select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from app.models.message import Message, MessageRead
-from app.models.session import ChatSession, SessionEvent, SessionMember, UserSessionEvent, UserSessionEvent
+from app.models.session import ChatSession, SessionEvent, SessionMember, UserSessionEvent
 from app.utils.time import utcnow
 
 
@@ -33,6 +33,7 @@ class SessionRepository:
         is_ai_session: bool = False,
         direct_key: str | None = None,
         *,
+        encryption_mode: str | None = None,
         commit: bool = True,
     ) -> ChatSession:
         session = ChatSession(
@@ -41,6 +42,7 @@ class SessionRepository:
             avatar=avatar,
             is_ai_session=is_ai_session,
             direct_key=direct_key,
+            encryption_mode=encryption_mode or ("server_visible_ai" if is_ai_session else "plain"),
         )
         self.db.add(session)
         self.db.flush()
@@ -58,6 +60,7 @@ class SessionRepository:
         is_ai_session: bool = False,
         direct_key: str | None = None,
         *,
+        encryption_mode: str | None = None,
         commit: bool = True,
     ) -> ChatSession:
         session = ChatSession(
@@ -67,6 +70,7 @@ class SessionRepository:
             avatar=avatar,
             is_ai_session=is_ai_session,
             direct_key=direct_key,
+            encryption_mode=encryption_mode or ("server_visible_ai" if is_ai_session else "plain"),
         )
         self.db.add(session)
         self.db.flush()
@@ -222,8 +226,8 @@ class SessionRepository:
     def delete_session(self, session_id: str, *, commit: bool = True) -> None:
         normalized_session_id = str(session_id or "").strip()
         message_ids = list(self.db.execute(select(Message.id).where(Message.session_id == normalized_session_id)).scalars().all())
-        self.db.execute(delete(SessionEvent).where(cast(SessionEvent.session_id, String()) == normalized_session_id))
-        self.db.execute(delete(UserSessionEvent).where(cast(UserSessionEvent.session_id, String()) == normalized_session_id))
+        self.db.execute(delete(SessionEvent).where(SessionEvent.session_id == normalized_session_id))
+        self.db.execute(delete(UserSessionEvent).where(UserSessionEvent.session_id == normalized_session_id))
         self.db.execute(delete(SessionMember).where(SessionMember.session_id == normalized_session_id))
         if message_ids:
             self.db.execute(delete(MessageRead).where(MessageRead.message_id.in_(message_ids)))

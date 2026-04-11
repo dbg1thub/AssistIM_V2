@@ -5,7 +5,9 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+from types import SimpleNamespace
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app.main import create_app
@@ -86,3 +88,32 @@ def test_calls_ice_servers_signs_short_lived_turn_credentials(monkeypatch) -> No
         ).digest()
     ).decode("ascii")
     assert turn_server["credential"] == expected_credential
+
+
+
+def test_call_service_rejects_private_session_with_duplicate_members() -> None:
+    from app.core.errors import AppError
+    from app.services.call_service import CallService
+
+    class _FakeSessionRepo:
+        def get_by_id(self, session_id: str):
+            return SimpleNamespace(id=session_id, type="private", is_ai_session=False)
+
+        def has_member(self, session_id: str, user_id: str) -> bool:
+            return True
+
+        def list_member_ids(self, session_id: str) -> list[str]:
+            return ["alice", "alice"]
+
+    service = CallService(db=None)
+    service.sessions = _FakeSessionRepo()
+
+    with pytest.raises(AppError) as exc_info:
+        service.invite(
+            session_id="session-1",
+            call_id="call-1",
+            initiator_id="alice",
+            media_type="voice",
+        )
+
+    assert exc_info.value.status_code == 409

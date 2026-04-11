@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import ForeignKey, Index, Text, UniqueConstraint, Uuid
+from sqlalchemy import ForeignKey, Index, String, Text, UniqueConstraint, Uuid
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base, IdMixin, TimestampMixin
@@ -21,6 +21,7 @@ class ChatSession(IdMixin, TimestampMixin, Base):
     name: Mapped[str] = mapped_column(nullable=False, default="New Session")
     avatar: Mapped[str | None] = mapped_column(nullable=True)
     is_ai_session: Mapped[bool] = mapped_column(default=False)
+    encryption_mode: Mapped[str] = mapped_column(String(32), nullable=False, default="plain", server_default="plain")
     direct_key: Mapped[str | None] = mapped_column(nullable=True)
     last_message_seq: Mapped[int] = mapped_column(nullable=False, default=0)
     last_event_seq: Mapped[int] = mapped_column(nullable=False, default=0)

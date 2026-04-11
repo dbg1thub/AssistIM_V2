@@ -1,4 +1,4 @@
-﻿"""Infrastructure boundary tests."""
+"""Infrastructure boundary tests."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import os
 import shutil
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from fastapi.testclient import TestClient
@@ -49,6 +50,7 @@ class FakeWebSocket:
     def __init__(self) -> None:
         self.accepted = False
         self.sent_payloads: list[dict] = []
+        self._incoming_messages: list[dict] = []
 
     async def accept(self) -> None:
         self.accepted = True
@@ -56,6 +58,10 @@ class FakeWebSocket:
     async def send_json(self, payload: dict) -> None:
         self.sent_payloads.append(dict(payload))
 
+    async def receive_json(self) -> dict:
+        if self._incoming_messages:
+            return self._incoming_messages.pop(0)
+        raise AssertionError("no websocket messages queued")
 
 def test_reload_settings_rebuilds_from_current_environment() -> None:
     original_app_name = os.environ.get("APP_NAME")
@@ -464,6 +470,70 @@ def test_in_memory_realtime_hub_tracks_presence_and_reset() -> None:
         assert hub.online_user_ids() == []
 
     asyncio.run(scenario())
+def test_chat_websocket_typing_events_exclude_sender_devices(monkeypatch: pytest.MonkeyPatch) -> None:
+    from fastapi import WebSocketDisconnect
+
+    from app.websocket import chat_ws
+
+    websocket = FakeWebSocket()
+    websocket._incoming_messages = [
+        {"type": "auth", "data": {"token": "token-1"}},
+        {"type": "typing", "msg_id": "typing-1", "data": {"session_id": "session-1", "typing": False}},
+    ]
+    send_json_to_users = AsyncMock(return_value={"bob"})
+    disconnect_mock = AsyncMock(return_value=("alice", False))
+    send_json_mock = AsyncMock()
+    broadcast_mock = AsyncMock()
+
+    class _FakeSessionContext:
+        def __enter__(self):
+            return None
+
+        def __exit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+    class _FakeMessageService:
+        def __init__(self, db) -> None:
+            pass
+
+        def get_session_member_ids(self, session_id: str, current_user_id: str) -> list[str]:
+            assert session_id == "session-1"
+            assert current_user_id == "alice"
+            return ["alice", "bob"]
+
+    async def fake_connect(_websocket) -> str:
+        return "conn-1"
+
+    async def fake_receive_json() -> dict:
+        if websocket._incoming_messages:
+            return websocket._incoming_messages.pop(0)
+        raise WebSocketDisconnect()
+
+    websocket.receive_json = fake_receive_json
+
+    monkeypatch.setattr(chat_ws, "get_websocket_settings", lambda _websocket: SimpleNamespace())
+    monkeypatch.setattr(chat_ws, "_authenticate_connection", lambda *args, **kwargs: "alice")
+    monkeypatch.setattr(chat_ws, "SessionLocal", _FakeSessionContext)
+    monkeypatch.setattr(chat_ws, "MessageService", _FakeMessageService)
+    monkeypatch.setattr(chat_ws.connection_manager, "connect", fake_connect)
+    monkeypatch.setattr(chat_ws.connection_manager, "send_json_to_users", send_json_to_users)
+    monkeypatch.setattr(chat_ws.connection_manager, "send_json", send_json_mock)
+    monkeypatch.setattr(chat_ws.connection_manager, "broadcast_json", broadcast_mock)
+    monkeypatch.setattr(chat_ws.connection_manager, "disconnect", disconnect_mock)
+
+    asyncio.run(chat_ws._handle_chat_socket(websocket))
+
+    assert send_json_to_users.await_count == 1
+    recipient_ids, payload = send_json_to_users.await_args.args[:2]
+    assert recipient_ids == ["bob"]
+    assert payload["type"] == "typing"
+    assert payload["data"] == {
+        "session_id": "session-1",
+        "user_id": "alice",
+        "typing": False,
+    }
+
+
 def test_schema_compatibility_is_noop_for_current_runtime_schema() -> None:
     from app.core.database import Base
     from app.core.schema_compat import ensure_schema_compatibility

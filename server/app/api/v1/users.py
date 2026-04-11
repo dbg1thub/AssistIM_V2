@@ -1,6 +1,8 @@
-﻿"""User routes."""
+"""User routes."""
 
 from __future__ import annotations
+
+import logging
 
 from fastapi import APIRouter, Depends, File, Query, UploadFile
 from sqlalchemy.orm import Session
@@ -17,6 +19,7 @@ from app.websocket.payloads import ws_message
 
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 async def _broadcast_profile_update_events(db: Session, user_id: str) -> None:
@@ -35,15 +38,18 @@ async def _broadcast_profile_update_events(db: Session, user_id: str) -> None:
         ]
         if not participant_ids:
             continue
-        await connection_manager.send_json_to_users(
-            participant_ids,
-            ws_message(
-                "user_profile_update",
-                payload,
-                msg_id=f"user-profile:{session_id}:{event_seq}",
-                seq=event_seq,
-            ),
-        )
+        try:
+            await connection_manager.send_json_to_users(
+                participant_ids,
+                ws_message(
+                    "user_profile_update",
+                    payload,
+                    msg_id=f"user-profile:{session_id}:{event_seq}",
+                    seq=event_seq,
+                ),
+            )
+        except Exception:
+            logger.exception("User profile fanout failed after committed profile mutation")
 
 
 @router.get("/search")

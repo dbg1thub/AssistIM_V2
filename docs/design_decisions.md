@@ -164,24 +164,24 @@
 - 结果：搜索语义、SQLite 兼容和结果解码统一留在 storage 层；Manager 只处理业务编排与高亮、排序、选择等 UI 相关逻辑。
 
 
-## ADR-024：Legacy Chat HTTP 兼容入口只保留单一显式前缀
+## ADR-024：Legacy Chat HTTP 兼容入口已移除
 
 - 状态：Accepted
-- 决策：历史 chat HTTP 兼容入口只保留 /api/chat/*；legacy 适配层不再通过重复挂载 router 生成 /api/api/chat/* 这类二次别名。
-- 原因：成熟且可维护的兼容策略应该保留单一、显式、可文档化的入口，而不是随着正式 API 前缀重复叠加出隐式别名。
-- 结果：正式 API 继续使用 /api/v1/* 与 /api/*；legacy chat HTTP 作为单独兼容边界保留，并可通过配置开关控制是否启用。
-## ADR-025：Legacy Chat HTTP Sync 复用正式游标协议
+- 决策：历史 /api/chat/* HTTP 兼容入口不再保留；服务端只维护正式 /api/v1/* API 边界。
+- 原因：当前客户端与测试基线已经收敛到正式 API，继续保留未使用的 legacy HTTP 入口只会制造文档和实现双重维护成本。
+- 结果：不再通过重复 router 挂载制造 /api/api/chat/* 这类二次别名，也不再维护额外的 chat HTTP 兼容层。
+## ADR-025：Legacy Chat HTTP Sync 不再单独保留
 
 - 状态：Accepted
-- 决策：POST /api/chat/sync 作为 legacy HTTP 兼容入口时，优先接受 session_cursors + event_cursors，返回 {messages, events}；仅在未提供游标时，才回退为按 session_id 拉取历史快照。
-- 原因：兼容层不应再维护一套“最近 100 条消息”的独立同步语义，否则会和正式的 session_seq / event_seq 一致性模型分叉。
-- 结果：legacy HTTP sync 与正式断线补偿模型共用同一套游标语义；极旧调用方仍可用 session_id 做快照回退，但兼容层不再偏离主设计。
-## ADR-026：Legacy Chat WebSocket 兼容入口显式化
+- 决策：历史 POST /api/chat/sync 兼容入口不再保留；断线补偿只通过正式实时链路的 session_cursors + event_cursors 语义维护。
+- 原因：未启用的兼容同步入口会持续误导文档、测试夹具和调用方，对正式一致性模型没有额外价值。
+- 结果：当前代码基线不再维护额外的 legacy HTTP sync 语义，也不再提供按 session_id 的兼容快照 fallback。
+## ADR-026：聊天 WebSocket 正式入口收敛到 /ws
 
 - 状态：Accepted
-- 决策：/ws 作为正式聊天 WebSocket 入口；历史 /ws/chat 只作为单独 legacy router 挂载，并通过配置开关显式控制是否启用。
-- 原因：成熟且低耦合的兼容策略应该让正式入口和兼容入口边界清晰、可测试、可下线，而不是把旧入口隐藏在主 router 里长期共生。
-- 结果：客户端与文档统一把 /ws 视为 canonical endpoint；/ws/chat 作为显式兼容别名保留，后续可以单独观测和退役。
+- 决策：/ws 作为唯一正式聊天 WebSocket 入口；历史 /ws/chat 兼容 alias 不再保留。
+- 原因：成熟且低耦合的入口策略应该让真实可用入口与文档、测试完全一致，而不是长期保留未使用的兼容别名。
+- 结果：客户端、测试与文档统一把 /ws 视为唯一 canonical endpoint；后续不再围绕 /ws/chat 维护兼容逻辑。
 ## ADR-027：配置读取使用运行时快照，不在类定义或路由装饰期冻结
 
 - 状态：Accepted
@@ -225,7 +225,7 @@
 ## ADR-033：私聊端到端加密采用设备模型与 Double Ratchet 路线，AI 会话保持服务端可见
 
 - 状态：Accepted
-- 决策：端到端加密首先只适用于 `private` 会话，并采用“设备身份密钥 + prekey + Double Ratchet”的成熟路线；`AI` 会话明确保持 `server_visible`，不默认继承普通私聊的 E2EE 策略。
+- 决策：端到端加密首先只适用于 `private` 会话，并采用“设备身份密钥 + prekey + Double Ratchet”的成熟路线；`AI` 会话明确保持 `server_visible_ai`，不默认继承普通私聊的 E2EE 策略。
 - 原因：私聊 E2EE 与 AI 会话的服务端可见明文需求天然冲突；把两者混成一套默认策略会同时破坏安全边界与 AI 产品能力。
 - 结果：E2EE 私聊中服务端只路由密文与附件加密元数据，不依赖明文执行业务；AI 会话仍允许服务端与 provider 获取明文内容；群聊 E2EE 作为独立后续主题处理，不在本阶段与 1:1 私聊共用简化假设。
 
@@ -235,3 +235,4 @@
 - 决策：启用 E2EE 的私聊在客户端本地优先持久化密文，解密后的明文默认仅保留在内存态或受保护的本地密钥缓存中；桌面端数据库落盘保护后续通过 `SQLite + SQLCipher` 演进，并使用系统安全存储保护 DB key。
 - 原因：如果 E2EE 明文仍长期写回普通 SQLite，本地缓存会显著削弱端到端加密的实际收益；但 `SQLCipher` 接入涉及驱动、打包、迁移与 FTS 兼容，不适合作为第一阶段前置条件。
 - 结果：E2EE 私聊的本地搜索能力允许在 MVP 阶段降级或关闭；数据库加固作为独立后续阶段推进，不阻塞通话与私聊 E2EE 主链路落地。当前实现已经先落地 `messages.is_encrypted` / `messages.encryption_scheme` 显式列，以及 `db_encryption_mode=plain|sqlcipher_pending` 的本地状态管理；同时 DB key 材料已迁移到数据库外部的 DPAPI 保护 sidecar 元数据，避免未来 SQLCipher 落地时出现“密钥与数据库互相依赖”的死锁设计。为后续真实驱动接入与打包验收，当前状态还会显式暴露 `requested_provider/runtime_provider/provider_match`，用来区分配置错误、缺驱动和已接入可用 runtime。
+

@@ -6,7 +6,7 @@ import json
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import String, and_, cast, desc, func, or_, select, update
+from sqlalchemy import and_, desc, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -150,15 +150,15 @@ class MessageRepository:
 
         shared_conditions = [
             and_(
-                cast(SessionEvent.session_id, String()) == str(session_id or "").strip(),
+                SessionEvent.session_id == str(session_id or "").strip(),
                 SessionEvent.event_seq > max(0, int(event_cursors.get(session_id, 0) or 0)),
             )
             for session_id in session_ids
         ]
         private_conditions = [
             and_(
-                cast(UserSessionEvent.session_id, String()) == str(session_id or "").strip(),
-                cast(UserSessionEvent.user_id, String()) == normalized_user_id,
+                UserSessionEvent.session_id == str(session_id or "").strip(),
+                UserSessionEvent.user_id == normalized_user_id,
                 UserSessionEvent.event_seq > max(0, int(event_cursors.get(session_id, 0) or 0)),
             )
             for session_id in session_ids

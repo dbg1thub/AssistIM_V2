@@ -43,13 +43,12 @@ class SessionService:
             return []
         return [dict(item) for item in payload if isinstance(item, dict)]
 
-    async def create_direct_session(self, user_id: str, *, display_name: str) -> dict[str, Any]:
+    async def create_direct_session(self, user_id: str) -> dict[str, Any]:
         """Create one direct session for the given user."""
         payload = await self._http.post(
             "/sessions/direct",
             json={
                 "participant_ids": [user_id],
-                "name": display_name,
             },
         )
         return dict(payload or {})

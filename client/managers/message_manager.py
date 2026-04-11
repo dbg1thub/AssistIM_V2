@@ -1,4 +1,4 @@
-﻿"""
+"""
 Message Manager Module
 
 Manager for message handling, ACK processing, and caching.
@@ -712,7 +712,9 @@ class MessageManager:
             return False
         if message_type != MessageType.TEXT:
             return False
-        return str(getattr(session, "session_type", "") or "").strip() in {"direct", "group"}
+        if not callable(getattr(session, "uses_e2ee", None)):
+            return False
+        return bool(session.uses_e2ee())
 
     @staticmethod
     def _resolve_group_member_ids(session, current_user_id: str) -> list[str]:
@@ -762,7 +764,7 @@ class MessageManager:
             return False
         if bool(getattr(session, "is_ai_session", False)):
             return False
-        if str(getattr(session, "session_type", "") or "").strip() not in {"direct", "group"}:
+        if not callable(getattr(session, "uses_e2ee", None)) or not session.uses_e2ee():
             return False
         return message_type in {MessageType.FILE, MessageType.IMAGE, MessageType.VIDEO}
 
@@ -790,6 +792,8 @@ class MessageManager:
             return None
         if bool(getattr(session, "is_ai_session", False)):
             return None
+        if not callable(getattr(session, "uses_e2ee", None)) or not session.uses_e2ee():
+            return None
         if str(getattr(session, "session_type", "") or "").strip() != "direct":
             return None
         state = dict(getattr(session, "extra", {}).get("session_crypto_state") or {})
@@ -808,6 +812,8 @@ class MessageManager:
         if session is None:
             return
         if bool(getattr(session, "is_ai_session", False)):
+            return
+        if not callable(getattr(session, "uses_e2ee", None)) or not session.uses_e2ee():
             return
         if str(getattr(session, "session_type", "") or "").strip() != "direct":
             return
@@ -1440,14 +1446,21 @@ class MessageManager:
 
     async def _process_typing(self, data: dict) -> None:
         """Process typing indicator."""
-        session_id = data.get("data", {}).get("session_id", "")
-        user_id = data.get("data", {}).get("user_id", "")
-        
+        payload = data.get("data", {})
+        if not isinstance(payload, dict):
+            return
+        typing = payload.get("typing")
+        if not isinstance(typing, bool):
+            return
+        session_id = payload.get("session_id", "")
+        user_id = payload.get("user_id", "")
+
         await self._event_bus.emit(MessageEvent.TYPING, {
             "session_id": session_id,
             "user_id": user_id,
+            "typing": typing,
         })
-    
+
     async def _process_read(self, data: dict) -> None:
         """Process cumulative read-receipt cursor updates."""
         read_data = data.get("data", {})
@@ -1950,9 +1963,9 @@ class MessageManager:
             "reason": reason,
         })
     
-    async def send_typing(self, session_id: str) -> bool:
+    async def send_typing(self, session_id: str, *, typing: bool = True) -> bool:
         """Send typing indicator."""
-        return await self._conn_manager.send_typing(session_id)
+        return await self._conn_manager.send_typing(session_id, typing=typing)
 
     async def send_read_receipt(self, session_id: str, message_id: str) -> bool:
         """Send read receipt."""
@@ -2603,6 +2616,7 @@ class MessageManager:
 
         self._conn_manager.remove_message_listener(self._handle_ws_message)
         self._send_queue = None
+        self._user_id = ""
         async with self._pending_lock:
             self._pending_messages.clear()
         async with self._incoming_message_guard:
@@ -2627,28 +2641,3 @@ def get_message_manager() -> MessageManager:
     if _message_manager is None:
         _message_manager = MessageManager()
     return _message_manager
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

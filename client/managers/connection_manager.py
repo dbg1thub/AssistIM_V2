@@ -43,6 +43,7 @@ class ConnectionManager:
         self._ws_client: Optional[WebSocketClient] = None
         self._base_ws_url: str = ""
         self._tasks: set[asyncio.Task] = set()
+        self._thread_futures: set[Future] = set()
         self._state = ConnectionState.DISCONNECTED
         self._state_listeners: list[Callable[[ConnectionState, ConnectionState], None]] = []
         self._message_listeners: list[Callable[[dict], Any]] = []
@@ -53,8 +54,11 @@ class ConnectionManager:
         self._initialized = False
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._auth_service = get_auth_service()
+        self._auth_service.add_token_listener(self._on_tokens_changed)
         self._ws_authenticated = False
         self._ws_auth_in_flight = False
+        self._callback_generation = 0
+        self._closing = False
 
     @property
     def state(self) -> ConnectionState:
@@ -261,11 +265,14 @@ class ConnectionManager:
 
         self._ws_client = get_websocket_client()
         self._base_ws_url = self._base_ws_url or str(self._ws_client.url or "")
+        self._closing = False
+        self._callback_generation += 1
+        callback_generation = self._callback_generation
         self._ws_client.set_callbacks(
-            on_connect=self._on_connect,
-            on_disconnect=self._on_disconnect,
-            on_message=self._on_message,
-            on_error=self._on_error,
+            on_connect=lambda: self._dispatch_connect(callback_generation),
+            on_disconnect=lambda: self._dispatch_disconnect(callback_generation),
+            on_message=lambda message: self._dispatch_message(callback_generation, message),
+            on_error=lambda error: self._dispatch_error(callback_generation, error),
         )
 
         await self._load_sync_state()
@@ -276,10 +283,11 @@ class ConnectionManager:
     async def _load_sync_state(self) -> None:
         """Load message and event reconnect cursors from database state or local cache."""
         try:
-            from client.storage.database import get_database
+            if self._db is None:
+                from client.storage.database import get_database
 
-            self._db = get_database()
-            if not self._db.is_connected:
+                self._db = get_database()
+            if not self._db or not self._db.is_connected:
                 return
 
             persisted_session_cursors: dict[str, int] = {}
@@ -359,6 +367,10 @@ class ConnectionManager:
 
     def _schedule_message_coroutine(self, coro) -> None:
         """Schedule websocket message processing back onto the main asyncio loop."""
+        if self._closing:
+            if inspect.iscoroutine(coro):
+                coro.close()
+            return
         loop = self._loop
         if loop is None or not loop.is_running():
             self._create_task(coro)
@@ -374,8 +386,10 @@ class ConnectionManager:
             return
 
         future = asyncio.run_coroutine_threadsafe(coro, loop)
+        self._thread_futures.add(future)
 
         def _cleanup(done_future: Future) -> None:
+            self._thread_futures.discard(done_future)
             try:
                 done_future.result()
             except asyncio.CancelledError:
@@ -384,6 +398,44 @@ class ConnectionManager:
                 logger.exception("Connection manager message task crashed")
 
         future.add_done_callback(_cleanup)
+
+    def _is_callback_current(self, generation: int) -> bool:
+        """Check whether one websocket callback still belongs to the active runtime generation."""
+        return not self._closing and generation == self._callback_generation
+
+    def _on_tokens_changed(self, access_token: Optional[str], refresh_token: Optional[str]) -> None:
+        """Invalidate the current websocket runtime when auth tokens are cleared."""
+        if access_token:
+            return
+        self._ws_authenticated = False
+        self._ws_auth_in_flight = False
+        if self._closing or not self._ws_client or not self._ws_client.is_connected:
+            return
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        self._create_task(self.disconnect())
+
+    def _dispatch_connect(self, generation: int) -> None:
+        if not self._is_callback_current(generation):
+            return
+        self._on_connect()
+
+    def _dispatch_disconnect(self, generation: int) -> None:
+        if not self._is_callback_current(generation):
+            return
+        self._on_disconnect()
+
+    def _dispatch_message(self, generation: int, message: dict) -> None:
+        if not self._is_callback_current(generation):
+            return
+        self._on_message(message)
+
+    def _dispatch_error(self, generation: int, error: str) -> None:
+        if not self._is_callback_current(generation):
+            return
+        self._on_error(error)
 
     def _on_connect(self) -> None:
         """Handle connection established."""
@@ -641,6 +693,9 @@ class ConnectionManager:
             return False
 
         msg_type = str(message.get("type") or "")
+        if msg_type != "auth" and not self._auth_service.access_token:
+            logger.warning("Cannot send %s: no access token", msg_type or "<unknown>")
+            return False
         if msg_type != "auth" and not self._ws_authenticated:
             logger.warning("Cannot send %s: websocket not authenticated", msg_type or "<unknown>")
             return False
@@ -687,7 +742,7 @@ class ConnectionManager:
 
         return await self.send(message)
 
-    async def send_typing(self, session_id: str) -> bool:
+    async def send_typing(self, session_id: str, *, typing: bool = True) -> bool:
         """Send typing indicator."""
         message = {
             "type": "typing",
@@ -696,6 +751,7 @@ class ConnectionManager:
             "timestamp": int(time.time()),
             "data": {
                 "session_id": session_id,
+                "typing": typing,
             },
         }
 
@@ -767,6 +823,9 @@ class ConnectionManager:
     async def close(self) -> None:
         """Close connection manager and cleanup."""
         logger.info("Closing connection manager")
+        self._closing = True
+        self._callback_generation += 1
+        self._auth_service.remove_token_listener(self._on_tokens_changed)
 
         for task in list(self._tasks):
             if not task.done():
@@ -776,21 +835,27 @@ class ConnectionManager:
             await asyncio.gather(*list(self._tasks), return_exceptions=True)
             self._tasks.clear()
 
+        for future in list(self._thread_futures):
+            future.cancel()
+        self._thread_futures.clear()
+
         if self._ws_client:
-            await self._ws_client.close()
             self._ws_client.set_callbacks()
+            await self._ws_client.close()
             self._ws_client = None
 
         self._state_listeners.clear()
         self._message_listeners.clear()
         self._state = ConnectionState.DISCONNECTED
         self._connect_started_at = 0.0
+        self._loop = None
         self._db = None
         self._session_sync_cursors = {}
         self._event_sync_cursors = {}
         self._ws_authenticated = False
         self._ws_auth_in_flight = False
         self._initialized = False
+        self._closing = False
 
         logger.info("Connection manager closed")
 

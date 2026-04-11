@@ -1,4 +1,4 @@
-﻿"""Chat websocket endpoints."""
+"""Chat websocket endpoints."""
 
 from __future__ import annotations
 
@@ -76,6 +76,13 @@ def _require_call_id(data: dict) -> str:
     if not call_id:
         raise AppError(ErrorCode.INVALID_REQUEST, "call_id is required", 422)
     return call_id
+
+
+def _require_typing_state(data: dict) -> bool:
+    typing = data.get("typing")
+    if not isinstance(typing, bool):
+        raise AppError(ErrorCode.INVALID_REQUEST, "typing must be a boolean", 422)
+    return typing
 
 
 def _outbound_message_data(saved: dict, *, content_override: str | None = None, extra_override: dict | None = None) -> dict:
@@ -243,14 +250,16 @@ async def _handle_chat_socket(websocket: WebSocket) -> None:
             if msg_type == "typing":
                 session_id = data.get("session_id", "")
                 try:
+                    typing = _require_typing_state(data)
                     with SessionLocal() as db:
                         member_ids = MessageService(db).get_session_member_ids(session_id, current_user_id)
                 except AppError as exc:
                     await _send_app_error(connection_id, msg_id, exc)
                     continue
+                recipient_ids = [member_id for member_id in member_ids if member_id != current_user_id]
                 await connection_manager.send_json_to_users(
-                    member_ids,
-                    event_payload("typing", {"session_id": session_id, "user_id": current_user_id}),
+                    recipient_ids,
+                    event_payload("typing", {"session_id": session_id, "user_id": current_user_id, "typing": typing}),
                     exclude_connection_id=connection_id,
                 )
                 continue

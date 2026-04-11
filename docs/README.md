@@ -33,6 +33,12 @@
    查看需要主动规避的反模式与历史问题。
 11. [chat_e2ee_calls_design.md](./chat_e2ee_calls_design.md)
    查看聊天端到端加密与 1:1 语音 / 视频通话的增量设计草案。
+12. [code_review_guide.md](./code_review_guide.md)
+   查看针对当前项目的 code review 关注点、检查顺序与结论输出格式。
+13. [review_findings_grouped.md](./review_findings_grouped.md)
+   查看按根因与业务闭环合并去重后的 review 结论整理版，适合排优先级与定修复批次。
+14. [review_findings.md](./review_findings.md)
+   查看基于当前仓库快照整理的原始 findings 台账，保留逐条编号、证据与时间顺序。
 
 ## 2. 文档优先级
 
@@ -48,6 +54,8 @@
    这是 AI 生成代码时的执行规则，不应覆盖更高层文档。
 5. [templates.md](./templates.md)
    这是示例模板，只提供推荐结构，不是强制替代架构说明。
+6. [code_review_guide.md](./code_review_guide.md)、[review_findings_grouped.md](./review_findings_grouped.md)、[review_findings.md](./review_findings.md)
+   这是 review 辅助文档。前者提供检查框架；`review_findings_grouped.md` 提供合并整理后的问题簇视图；`review_findings.md` 保留原始审查台账。三者都不覆盖 ADR 和架构文档。
 
 ## 3. 当前状态与目标状态
 

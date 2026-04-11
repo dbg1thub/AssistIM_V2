@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, Query, Response, status
@@ -19,6 +20,7 @@ from app.websocket.payloads import read_broadcast_payload, ws_message
 
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 def _parse_before(value: str | None) -> datetime | None:
@@ -28,6 +30,14 @@ def _parse_before(value: str | None) -> datetime | None:
         return ensure_utc(datetime.fromisoformat(value))
     except ValueError:
         return datetime.fromtimestamp(float(value), tz=UTC)
+
+
+async def _broadcast_message_event(member_ids: list[str], payload: dict) -> None:
+    """Best-effort websocket fanout for committed message mutations."""
+    try:
+        await connection_manager.send_json_to_users(member_ids, payload)
+    except Exception:
+        logger.exception("Message realtime fanout failed after committed mutation")
 
 
 @router.get("/messages/unread")
@@ -41,7 +51,7 @@ async def read_message_batch(payload: MessageReadBatch, current_user: User = Dep
     data = service.batch_read(current_user, payload.session_id, payload.message_id)
     if data.get("advanced"):
         member_ids = service.get_session_member_ids(data["session_id"], current_user.id)
-        await connection_manager.send_json_to_users(
+        await _broadcast_message_event(
             member_ids,
             ws_message(
                 "read",
@@ -65,21 +75,40 @@ def list_messages(
 
 
 @router.post("/sessions/{session_id}/messages")
-def send_message(
+async def send_message(
     session_id: str,
     payload: MessageCreate,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> dict:
-    return success_response(
-        MessageService(db).send_message(
-            current_user,
-            session_id,
-            payload.content,
-            payload.message_type,
-            extra=payload.extra,
-        )
+    service = MessageService(db)
+    data, created = service.send_message(
+        current_user,
+        session_id,
+        payload.content,
+        payload.message_type,
+        message_id=str(payload.msg_id),
+        extra=payload.extra,
     )
+    if created:
+        member_ids = service.get_session_member_ids(session_id, current_user.id)
+        stored_message = service.messages.get_by_id(data["message_id"])
+        for member_id in member_ids:
+            if member_id == current_user.id:
+                continue
+            recipient_payload = data
+            if stored_message is not None:
+                recipient_payload = service.serialize_message(stored_message, member_id)
+            await _broadcast_message_event(
+                [member_id],
+                ws_message(
+                    "chat_message",
+                    recipient_payload,
+                    msg_id=data["message_id"],
+                    seq=int(recipient_payload.get("session_seq", 0) or 0),
+                ),
+            )
+    return success_response(data)
 
 
 @router.put("/messages/{message_id}")
@@ -92,7 +121,7 @@ async def edit_message(
     service = MessageService(db)
     data = service.edit(current_user, message_id, payload.content, extra=payload.extra)
     member_ids = service.get_session_member_ids(data["session_id"], current_user.id)
-    await connection_manager.send_json_to_users(
+    await _broadcast_message_event(
         member_ids,
         ws_message(
             "message_edit",
@@ -109,7 +138,7 @@ async def recall_message(message_id: str, current_user: User = Depends(get_curre
     service = MessageService(db)
     data = service.recall(current_user, message_id)
     member_ids = service.get_session_member_ids(data["session_id"], current_user.id)
-    await connection_manager.send_json_to_users(
+    await _broadcast_message_event(
         member_ids,
         ws_message(
             "message_recall",
@@ -126,7 +155,7 @@ async def delete_message(message_id: str, current_user: User = Depends(get_curre
     service = MessageService(db)
     data = service.delete(current_user, message_id)
     member_ids = service.get_session_member_ids(data["session_id"], current_user.id)
-    await connection_manager.send_json_to_users(
+    await _broadcast_message_event(
         member_ids,
         ws_message(
             "message_delete",
@@ -136,4 +165,3 @@ async def delete_message(message_id: str, current_user: User = Depends(get_curre
         ),
     )
     return Response(status_code=status.HTTP_204_NO_CONTENT)
-

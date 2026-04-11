@@ -79,7 +79,24 @@ class SessionModel(QAbstractListModel):
         return None
 
     def add_session(self, session: Session) -> None:
-        """Add a session to the list."""
+        """Add a session to the list, replacing the existing row when session_id already exists."""
+        existing = self.get_session_by_id(session.session_id)
+        if existing is not None:
+            self.update_session(
+                session.session_id,
+                name=session.name,
+                session_type=session.session_type,
+                participant_ids=list(session.participant_ids),
+                last_message=session.last_message,
+                last_message_time=session.last_message_time,
+                unread_count=session.unread_count,
+                avatar=session.avatar,
+                created_at=session.created_at,
+                updated_at=session.updated_at,
+                is_ai_session=session.is_ai_session,
+                extra=dict(session.extra),
+            )
+            return
         insert_at = self._find_insert_index(session)
         self.beginInsertRows(QModelIndex(), insert_at, insert_at)
         self._sessions.insert(insert_at, session)

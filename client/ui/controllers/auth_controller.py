@@ -1,9 +1,10 @@
-﻿"""Authentication controller for login, registration, and session restore."""
+"""Authentication controller for login, registration, and session restore."""
 
 from __future__ import annotations
 
 import asyncio
 import base64
+from dataclasses import dataclass
 import json
 import time
 from typing import Any, Optional
@@ -13,17 +14,26 @@ from client.core.exceptions import APIError, AuthExpiredError, NetworkError
 from client.core.logging import setup_logging
 from client.core.secure_storage import SecureStorage, SecureStorageError
 from client.managers.connection_manager import peek_connection_manager
-from client.managers.message_manager import get_message_manager
+from client.managers.message_manager import get_message_manager, peek_message_manager
+from client.managers.session_manager import SessionRefreshResult
 from client.services.auth_service import get_auth_service
 from client.services.e2ee_service import get_e2ee_service
 from client.services.file_service import get_file_service
 from client.services.user_service import get_user_service
 from client.storage.database import get_database
-from client.ui.controllers.chat_controller import get_chat_controller
+from client.ui.controllers.chat_controller import get_chat_controller, peek_chat_controller
 
 
 setup_logging()
 logger = logging.get_logger(__name__)
+
+
+@dataclass(frozen=True)
+class ProfileUpdateResult:
+    """User-profile mutation result plus session-snapshot refresh state."""
+
+    user: dict[str, Any]
+    session_snapshot: SessionRefreshResult | None
 
 
 class AuthController:
@@ -41,8 +51,6 @@ class AuthController:
         self._user_service = get_user_service()
         self._file_service = get_file_service()
         self._db = get_database()
-        self._message_manager = get_message_manager()
-        self._chat_controller = get_chat_controller()
         self._current_user: dict[str, Any] | None = None
         self._token_state_task: Optional[asyncio.Task] = None
         self._suppress_token_listener_sync_depth = 0
@@ -110,16 +118,13 @@ class AuthController:
             "target_user_id": normalized_target_user_id,
             "target_device_id": normalized_target_device_id,
             "package": package,
-            "history_recovery_diagnostics": await self.get_history_recovery_diagnostics(),
         }
 
     async def import_history_recovery_package(self, package: dict[str, Any] | None) -> dict[str, Any]:
         """Import one history-recovery package into the currently authenticated device."""
         if not self._current_user or not self._current_user.get("id"):
             raise RuntimeError("authentication required")
-        result = dict(await self._e2ee_service.import_history_recovery_package(package) or {})
-        result["history_recovery_diagnostics"] = await self.get_history_recovery_diagnostics()
-        return result
+        return dict(await self._e2ee_service.import_history_recovery_package(package) or {})
 
     async def get_e2ee_diagnostics(self) -> dict[str, Any]:
         """Return one authenticated E2EE diagnostics snapshot for runtime, device recovery, and session state."""
@@ -159,12 +164,12 @@ class AuthController:
             refresh_token = SecureStorage.decrypt_text(refresh_cipher)
         except (SecureStorageError, ValueError) as exc:
             logger.warning("Failed to decrypt persisted auth state: %s", exc)
-            await self.clear_session()
+            await self.clear_session(clear_local_chat_state=False)
             return None
 
         if self._is_token_expired(refresh_token):
             logger.info("Stored refresh token is expired, clearing persisted auth state")
-            await self.clear_session()
+            await self.clear_session(clear_local_chat_state=False)
             return None
 
         self._cancel_pending_task(self._token_state_task)
@@ -172,17 +177,33 @@ class AuthController:
 
         try:
             user = await self._auth_service.fetch_current_user()
-        except (AuthExpiredError, APIError) as exc:
+        except AuthExpiredError as exc:
             logger.info("Stored auth session is no longer valid: %s", exc)
-            await self.clear_session()
+            await self.clear_session(clear_local_chat_state=False)
+            return None
+        except APIError as exc:
+            if exc.status_code in {401, 403}:
+                logger.info("Stored auth session is no longer valid: %s", exc)
+                await self.clear_session(clear_local_chat_state=False)
+                return None
+            logger.warning("Transient API error while restoring auth session: %s", exc)
+            if stored_profile and not self._is_token_expired(refresh_token):
+                try:
+                    cached_user = json.loads(stored_profile)
+                    if isinstance(cached_user, dict) and cached_user.get("id"):
+                        self._apply_runtime_context(cached_user)
+                        return cached_user
+                except Exception:
+                    return None
             return None
         except NetworkError as exc:
             logger.warning("Network error while restoring auth session: %s", exc)
             if stored_profile and not self._is_token_expired(refresh_token):
                 try:
                     cached_user = json.loads(stored_profile)
-                    self._apply_runtime_context(cached_user)
-                    return cached_user
+                    if isinstance(cached_user, dict) and cached_user.get("id"):
+                        self._apply_runtime_context(cached_user)
+                        return cached_user
                 except Exception:
                     return None
             return None
@@ -204,7 +225,7 @@ class AuthController:
         payload = await self._auth_service.register(username, nickname, password)
         return await self._apply_auth_payload(payload, reset_local_chat_state=True)
 
-    async def logout(self) -> None:
+    async def logout(self, *, clear_local_chat_state: bool = True) -> None:
         """Best-effort backend logout followed by local session cleanup."""
         try:
             await self._auth_service.logout()
@@ -213,7 +234,7 @@ class AuthController:
         except Exception:
             logger.exception("Unexpected logout error")
         finally:
-            await self.clear_session()
+            await self.clear_session(clear_local_chat_state=clear_local_chat_state)
 
     async def update_profile(
         self,
@@ -228,7 +249,7 @@ class AuthController:
         signature: str | None = None,
         gender: str | None = None,
         status: str | None = None,
-    ) -> dict[str, Any]:
+    ) -> ProfileUpdateResult:
         """Update the current user's profile and persist the refreshed auth context."""
         user = dict(self._current_user or {})
         profile_payload = {
@@ -260,102 +281,131 @@ class AuthController:
             self._apply_runtime_context(user)
             await self._persist_user_profile(user)
 
+        session_snapshot = None
         if user.get("id"):
-            try:
-                await self._chat_controller.refresh_sessions_snapshot()
-            except Exception:
-                logger.warning("Failed to refresh session snapshot after profile update", exc_info=True)
+            session_snapshot = await self._refresh_session_snapshot(reason="profile update")
 
-        return dict(user or {})
+        return ProfileUpdateResult(
+            user=dict(user or {}),
+            session_snapshot=session_snapshot,
+        )
 
     async def recover_session_crypto(self, session_id: str) -> dict[str, Any]:
         """Run one session-level E2EE recovery flow from the authenticated app context."""
         if not self._current_user or not self._current_user.get("id"):
             raise RuntimeError("authentication required")
-        result = await self._chat_controller.recover_session_crypto(session_id)
-        return await self._finalize_session_crypto_recovery(result)
+        result = await self._require_chat_controller().recover_session_crypto(session_id)
+        return await self._finalize_session_security_result(result, refresh_reason="E2EE recovery")
 
     async def recover_current_session_crypto(self) -> dict[str, Any]:
         """Recover the currently selected session and refresh cached session state when successful."""
         if not self._current_user or not self._current_user.get("id"):
             raise RuntimeError("authentication required")
-        result = await self._chat_controller.recover_current_session_crypto()
-        return await self._finalize_session_crypto_recovery(result)
+        result = await self._require_chat_controller().recover_current_session_crypto()
+        return await self._finalize_session_security_result(result, refresh_reason="E2EE recovery")
 
     async def execute_session_security_action(self, session_id: str, action_id: str) -> dict[str, Any]:
         """Execute one session security action from the authenticated app context."""
         if not self._current_user or not self._current_user.get("id"):
             raise RuntimeError("authentication required")
-        result = await self._chat_controller.execute_session_security_action(session_id, action_id)
-        return await self._finalize_session_crypto_recovery(result)
+        result = await self._require_chat_controller().execute_session_security_action(session_id, action_id)
+        return await self._finalize_session_security_result(result, refresh_reason="session security action")
 
     async def execute_current_session_security_action(self, action_id: str) -> dict[str, Any]:
         """Execute one security action for the currently selected session."""
         if not self._current_user or not self._current_user.get("id"):
             raise RuntimeError("authentication required")
-        result = await self._chat_controller.execute_current_session_security_action(action_id)
-        return await self._finalize_session_crypto_recovery(result)
+        result = await self._require_chat_controller().execute_current_session_security_action(action_id)
+        return await self._finalize_session_security_result(result, refresh_reason="session security action")
 
     async def get_session_identity_verification(self, session_id: str) -> dict[str, Any]:
         """Return one authenticated identity-verification snapshot for a specific session."""
         if not self._current_user or not self._current_user.get("id"):
             raise RuntimeError("authentication required")
-        return await self._chat_controller.get_session_identity_verification(session_id)
+        return await self._require_chat_controller().get_session_identity_verification(session_id)
 
     async def get_current_session_identity_verification(self) -> dict[str, Any]:
         """Return one authenticated identity-verification snapshot for the selected session."""
         if not self._current_user or not self._current_user.get("id"):
             raise RuntimeError("authentication required")
-        return await self._chat_controller.get_current_session_identity_verification()
+        return await self._require_chat_controller().get_current_session_identity_verification()
 
     async def get_session_identity_review_details(self, session_id: str) -> dict[str, Any]:
         """Return one authenticated identity-review details payload for a specific session."""
         if not self._current_user or not self._current_user.get("id"):
             raise RuntimeError("authentication required")
-        return await self._chat_controller.get_session_identity_review_details(session_id)
+        return await self._require_chat_controller().get_session_identity_review_details(session_id)
 
     async def get_current_session_identity_review_details(self) -> dict[str, Any]:
         """Return one authenticated identity-review details payload for the selected session."""
         if not self._current_user or not self._current_user.get("id"):
             raise RuntimeError("authentication required")
-        return await self._chat_controller.get_current_session_identity_review_details()
+        return await self._require_chat_controller().get_current_session_identity_review_details()
 
     async def get_session_security_diagnostics(self, session_id: str) -> dict[str, Any]:
         """Return one authenticated unified security diagnostics payload for a specific session."""
         if not self._current_user or not self._current_user.get("id"):
             raise RuntimeError("authentication required")
-        return await self._chat_controller.get_session_security_diagnostics(session_id)
+        return await self._require_chat_controller().get_session_security_diagnostics(session_id)
 
     async def get_current_session_security_diagnostics(self) -> dict[str, Any]:
         """Return one authenticated unified security diagnostics payload for the selected session."""
         if not self._current_user or not self._current_user.get("id"):
             raise RuntimeError("authentication required")
-        return await self._chat_controller.get_current_session_security_diagnostics()
+        return await self._require_chat_controller().get_current_session_security_diagnostics()
 
-    async def _finalize_session_crypto_recovery(self, result: dict[str, Any] | None) -> dict[str, Any]:
-        """Refresh the authoritative session snapshot after a successful E2EE recovery action."""
+    async def _refresh_session_snapshot(self, *, reason: str) -> SessionRefreshResult:
+        """Refresh one chat-session snapshot and surface degraded results explicitly."""
+        try:
+            snapshot = await self._require_chat_controller().refresh_sessions_snapshot()
+        except Exception:
+            logger.warning("Failed to refresh session snapshot after %s", reason, exc_info=True)
+            return SessionRefreshResult(
+                sessions=[],
+                authoritative=False,
+                unread_synchronized=False,
+            )
+
+        if not snapshot.authoritative:
+            logger.warning("Session snapshot after %s is non-authoritative", reason)
+        elif not snapshot.unread_synchronized:
+            logger.warning("Session snapshot after %s has stale unread counters", reason)
+        return snapshot
+
+    @staticmethod
+    def _session_snapshot_payload(snapshot: SessionRefreshResult | None) -> dict[str, bool] | None:
+        """Serialize one session-refresh status for controller callers."""
+        if snapshot is None:
+            return None
+        return {
+            "authoritative": bool(snapshot.authoritative),
+            "unread_synchronized": bool(snapshot.unread_synchronized),
+        }
+
+    async def _finalize_session_security_result(
+        self,
+        result: dict[str, Any] | None,
+        *,
+        refresh_reason: str,
+    ) -> dict[str, Any]:
+        """Attach explicit session-snapshot status after successful session-security mutations."""
         normalized = dict(result or {})
         if not normalized.get("performed"):
-            normalized.setdefault("sessions_refreshed", False)
+            normalized["session_snapshot"] = None
             return normalized
 
-        refreshed = False
-        try:
-            await self._chat_controller.refresh_sessions_snapshot()
-            refreshed = True
-        except Exception:
-            logger.warning("Failed to refresh session snapshot after E2EE recovery", exc_info=True)
-        normalized["sessions_refreshed"] = refreshed
+        snapshot = await self._refresh_session_snapshot(reason=refresh_reason)
+        normalized["session_snapshot"] = self._session_snapshot_payload(snapshot)
         return normalized
 
-    async def clear_session(self) -> None:
+    async def clear_session(self, *, clear_local_chat_state: bool = True) -> None:
         self._cancel_pending_task(self._token_state_task)
         self._clear_http_tokens()
         self._current_user = None
-        self._message_manager.set_user_id("")
-        self._chat_controller.set_user_id("")
+        self._set_runtime_user_id("")
 
-        await self._reset_local_chat_state()
+        if clear_local_chat_state:
+            await self._reset_local_chat_state()
         await self._clear_persisted_auth_state()
 
     async def _clear_persisted_auth_state(self) -> None:
@@ -415,9 +465,24 @@ class AuthController:
     def _apply_runtime_context(self, user: dict[str, Any]) -> None:
         user_id = user.get("id", "")
         self._current_user = user
-        self._message_manager.set_user_id(user_id)
-        self._chat_controller.set_user_id(user_id)
+        self._set_runtime_user_id(user_id)
         logger.info("Authentication context applied for user %s", user_id)
+
+    @staticmethod
+    def _require_chat_controller():
+        """Get the authenticated chat runtime on demand."""
+        return get_chat_controller()
+
+    @staticmethod
+    def _set_runtime_user_id(user_id: str) -> None:
+        """Propagate auth context only into runtime objects that already exist."""
+        message_manager = peek_message_manager()
+        if message_manager is not None:
+            message_manager.set_user_id(user_id)
+
+        chat_controller = peek_chat_controller()
+        if chat_controller is not None:
+            chat_controller.set_user_id(user_id)
 
     async def _ensure_e2ee_device_registered(self) -> None:
         """Best-effort device bootstrap for future private-chat E2EE."""
@@ -548,5 +613,3 @@ def get_auth_controller() -> AuthController:
     if _auth_controller is None:
         _auth_controller = AuthController()
     return _auth_controller
-
-

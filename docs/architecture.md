@@ -309,7 +309,7 @@ AI 能力通过 Service / Provider 体系接入，目标是：
 
 约束：
 
-- AI 会话默认保持 `server_visible`，不自动继承普通私聊的 E2EE 策略
+- AI 会话默认保持 `server_visible_ai`，不自动继承普通私聊的 E2EE 策略
 - 如果未来需要“私聊转 AI 总结”之类能力，应通过显式用户动作把明文提交给 AI，而不是隐式绕过 E2EE
 
 ## 11. 通话与端到端加密

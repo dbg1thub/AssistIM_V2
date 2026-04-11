@@ -3,6 +3,9 @@ from __future__ import annotations
 from datetime import datetime
 from types import SimpleNamespace
 
+import pytest
+
+from app.core.errors import AppError
 from app.services.session_service import SessionService
 
 
@@ -153,7 +156,7 @@ def test_session_service_list_sessions_uses_batch_repository_loaders() -> None:
 
     assert [item['session_id'] for item in payload] == ['session-1', 'session-2']
     assert payload[0]['session_type'] == 'direct'
-    assert payload[0]['encryption_mode'] == 'e2ee_private'
+    assert payload[0]['encryption_mode'] == 'plain'
     assert payload[0]['session_crypto_state'] == {}
     assert payload[0]['call_capabilities'] == {'voice': True, 'video': True}
     assert payload[0]['participant_ids'] == ['alice', 'bob']
@@ -166,7 +169,7 @@ def test_session_service_list_sessions_uses_batch_repository_loaders() -> None:
     assert payload[0]['last_message'] == 'hello bob'
     assert [member['id'] for member in payload[0]['members']] == ['alice', 'bob']
     assert payload[1]['session_type'] == 'group'
-    assert payload[1]['encryption_mode'] == 'e2ee_group'
+    assert payload[1]['encryption_mode'] == 'plain'
     assert payload[1]['session_crypto_state'] == {}
     assert payload[1]['call_capabilities'] == {'voice': False, 'video': False}
     assert payload[1]['group_id'] == 'group-1'
@@ -179,3 +182,133 @@ def test_session_service_list_sessions_uses_batch_repository_loaders() -> None:
     assert fake_sessions.list_members_for_sessions_calls == [['session-1', 'session-2']]
     assert fake_messages.list_last_messages_for_sessions_calls == [['session-1', 'session-2']]
     assert fake_users.list_users_by_ids_calls == [['alice', 'bob', 'charlie']]
+
+class _HiddenPrivateSessionRepo:
+    def __init__(self) -> None:
+        now = datetime(2026, 3, 29, 12, 0, 0)
+        self.existing = SimpleNamespace(
+            id='session-hidden',
+            type='private',
+            is_ai_session=False,
+            name='Ghost DM',
+            avatar='/uploads/ghost.png',
+            updated_at=now,
+            created_at=now,
+            direct_key='alice|bob',
+        )
+        self.deleted_session_id = None
+
+    def build_private_direct_key(self, members: list[str]) -> str:
+        return '|'.join(sorted(str(member) for member in members))
+
+    def get_private_session_by_direct_key(self, direct_key: str):
+        return self.existing if direct_key == 'alice|bob' else None
+
+    def get_by_id(self, session_id: str):
+        return self.existing if session_id == self.existing.id else None
+
+    def list_member_ids(self, session_id: str):
+        if session_id != self.existing.id:
+            return []
+        return ['alice', 'alice']
+
+    def delete_session(self, session_id: str) -> None:
+        self.deleted_session_id = session_id
+
+
+class _NullGroupRepo:
+    def get_by_session_id(self, session_id: str):
+        return None
+
+
+def test_session_service_serialize_session_uses_persisted_encryption_mode() -> None:
+    now = datetime(2026, 3, 29, 12, 0, 0)
+    member_rows = [
+        SimpleNamespace(session_id='direct-1', user_id='alice', joined_at=now),
+        SimpleNamespace(session_id='direct-1', user_id='bob', joined_at=now),
+    ]
+    service = SessionService(db=None)
+    service.messages = SimpleNamespace(list_session_messages=lambda session_id, limit=1: [])
+    service.sessions = SimpleNamespace(
+        list_member_ids=lambda session_id: ['alice', 'bob'],
+        list_members=lambda session_id: list(member_rows),
+    )
+    service.users = SimpleNamespace(list_users_by_ids=lambda user_ids: {})
+    service.groups = _NullGroupRepo()
+    service.avatars = FakeAvatarService()
+    direct_session = SimpleNamespace(
+        id='direct-1',
+        type='private',
+        is_ai_session=False,
+        name='Direct',
+        avatar=None,
+        updated_at=now,
+        created_at=now,
+        encryption_mode='e2ee_private',
+    )
+    group_session = SimpleNamespace(
+        id='group-1',
+        type='group',
+        is_ai_session=False,
+        name='Group',
+        avatar=None,
+        updated_at=now,
+        created_at=now,
+        encryption_mode='e2ee_group',
+    )
+    ai_session = SimpleNamespace(
+        id='ai-1',
+        type='private',
+        is_ai_session=True,
+        name='AI',
+        avatar=None,
+        updated_at=now,
+        created_at=now,
+        encryption_mode='plain',
+    )
+
+    direct_payload = service.serialize_session(
+        direct_session,
+        include_members=False,
+        participant_ids=['alice', 'bob'],
+    )
+    group_payload = service.serialize_session(
+        group_session,
+        include_members=False,
+        participant_ids=['alice', 'bob'],
+    )
+    ai_payload = service.serialize_session(
+        ai_session,
+        include_members=False,
+        participant_ids=['alice', 'bot'],
+    )
+
+    assert direct_payload['encryption_mode'] == 'e2ee_private'
+    assert group_payload['encryption_mode'] == 'e2ee_group'
+    assert ai_payload['encryption_mode'] == 'server_visible_ai'
+
+
+def test_session_service_create_private_rejects_hidden_existing_direct_session() -> None:
+    service = SessionService(db=None)
+    fake_sessions = _HiddenPrivateSessionRepo()
+    service.sessions = fake_sessions
+    service.groups = _NullGroupRepo()
+    service.users = SimpleNamespace(get_by_id=lambda user_id: SimpleNamespace(id=user_id) if user_id == 'bob' else None)
+
+    with pytest.raises(AppError) as exc_info:
+        service.create_private(SimpleNamespace(id='alice'), ['bob'])
+
+    assert exc_info.value.status_code == 404
+
+
+def test_session_service_delete_session_rejects_hidden_existing_direct_session() -> None:
+    service = SessionService(db=None)
+    fake_sessions = _HiddenPrivateSessionRepo()
+    service.sessions = fake_sessions
+    service.groups = _NullGroupRepo()
+
+    with pytest.raises(AppError) as exc_info:
+        service.delete_session(SimpleNamespace(id='alice'), 'session-hidden')
+
+    assert exc_info.value.status_code == 404
+    assert fake_sessions.deleted_session_id is None

@@ -78,7 +78,9 @@ class CallManager:
         if self._initialized:
             self._conn_manager.remove_message_listener(self._handle_ws_message)
         self._cancel_unanswered_timeout()
+        self._user_id = ""
         self._active_call = None
+        self._timing_origins.clear()
         self._initialized = False
 
     def set_user_id(self, user_id: str) -> None:
