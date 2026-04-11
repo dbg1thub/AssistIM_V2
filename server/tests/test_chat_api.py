@@ -907,6 +907,83 @@ def test_edit_message_rejects_unknown_fields_and_blank_content(client: TestClien
     assert oversized_content.status_code == 422
 
 
+
+def test_message_mutations_reject_terminal_status_and_non_text_edits(
+    client: TestClient,
+    user_factory,
+    auth_header,
+) -> None:
+    alice = user_factory("alice_mutation_gate", "Alice Mutation Gate")
+    bob = user_factory("bob_mutation_gate", "Bob Mutation Gate")
+
+    create_session_response = client.post(
+        "/api/v1/sessions/direct",
+        json={"participant_ids": [bob["user"]["id"]]},
+        headers=auth_header(alice["access_token"]),
+    )
+    assert create_session_response.status_code == 200
+    session_id = create_session_response.json()["data"]["id"]
+
+    text_response = client.post(
+        f"/api/v1/sessions/{session_id}/messages",
+        json={
+            "msg_id": "10000000-0000-4000-8000-000000000027",
+            "content": "can be recalled",
+            "message_type": "text",
+        },
+        headers=auth_header(alice["access_token"]),
+    )
+    assert text_response.status_code == 200
+    text_message_id = text_response.json()["data"]["message_id"]
+
+    recall_response = client.post(
+        f"/api/v1/messages/{text_message_id}/recall",
+        headers=auth_header(alice["access_token"]),
+    )
+    assert recall_response.status_code == 200
+
+    recall_again = client.post(
+        f"/api/v1/messages/{text_message_id}/recall",
+        headers=auth_header(alice["access_token"]),
+    )
+    assert recall_again.status_code == 409
+    assert recall_again.json()["message"] == "cannot recall recalled message"
+
+    edit_recalled = client.put(
+        f"/api/v1/messages/{text_message_id}",
+        json={"content": "late edit"},
+        headers=auth_header(alice["access_token"]),
+    )
+    assert edit_recalled.status_code == 409
+    assert edit_recalled.json()["message"] == "cannot edit recalled message"
+
+    delete_recalled = client.delete(
+        f"/api/v1/messages/{text_message_id}",
+        headers=auth_header(alice["access_token"]),
+    )
+    assert delete_recalled.status_code == 409
+    assert delete_recalled.json()["message"] == "cannot delete recalled message"
+
+    image_response = client.post(
+        f"/api/v1/sessions/{session_id}/messages",
+        json={
+            "msg_id": "10000000-0000-4000-8000-000000000028",
+            "content": "/uploads/demo.png",
+            "message_type": "image",
+        },
+        headers=auth_header(alice["access_token"]),
+    )
+    assert image_response.status_code == 200
+
+    edit_image = client.put(
+        f"/api/v1/messages/{image_response.json()['data']['message_id']}",
+        json={"content": "caption"},
+        headers=auth_header(alice["access_token"]),
+    )
+    assert edit_image.status_code == 422
+    assert edit_image.json()["message"] == "message type does not support edit"
+
+
 def test_group_read_receipts_are_tracked_per_member(
     client: TestClient,
     user_factory,

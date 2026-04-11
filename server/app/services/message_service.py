@@ -27,6 +27,7 @@ class MessageService:
     GROUP_TEXT_SCHEMES = {"group-sender-key-v1"}
     DIRECT_ATTACHMENT_SCHEMES = {"aesgcm-file+x25519-v1"}
     GROUP_ATTACHMENT_SCHEMES = {"aesgcm-file+group-sender-key-v1"}
+    MAX_MESSAGE_CONTENT_LENGTH = 20_000
     ENCRYPTION_MODE_PLAIN = "plain"
     ENCRYPTION_MODE_E2EE_PRIVATE = "e2ee_private"
     ENCRYPTION_MODE_E2EE_GROUP = "e2ee_group"
@@ -55,6 +56,8 @@ class MessageService:
         "target_device_id",
         "can_decrypt",
     }
+    MUTABLE_MESSAGE_STATUSES = {"sent", "edited"}
+    EDITABLE_MESSAGE_TYPES = {"text"}
     LOCAL_ONLY_ATTACHMENT_ENCRYPTION_KEYS = {
         "local_metadata",
         "local_plaintext_version",
@@ -214,6 +217,7 @@ class MessageService:
         self._ensure_visible_session_membership(current_user.id, message.session_id)
         if message.sender_id != current_user.id:
             raise AppError(ErrorCode.FORBIDDEN, "cannot recall this message", 403)
+        self._ensure_message_status_allows(message, "recall")
         if message.created_at and utcnow() - ensure_utc(message.created_at) > self.RECALL_LIMIT:
             raise AppError(ErrorCode.FORBIDDEN, "recall time limit exceeded", 403)
 
@@ -250,6 +254,9 @@ class MessageService:
         self._ensure_visible_session_membership(current_user.id, message.session_id)
         if message.sender_id != current_user.id:
             raise AppError(ErrorCode.FORBIDDEN, "cannot edit this message", 403)
+        self._ensure_message_status_allows(message, "edit")
+        self._ensure_message_type_allows_edit(message)
+        self._ensure_edit_content(content)
         if message.created_at and utcnow() - ensure_utc(message.created_at) > self.EDIT_LIMIT:
             raise AppError(ErrorCode.FORBIDDEN, "edit time limit exceeded", 403)
 
@@ -293,6 +300,7 @@ class MessageService:
         self._ensure_visible_session_membership(current_user.id, message.session_id)
         if message.sender_id != current_user.id:
             raise AppError(ErrorCode.FORBIDDEN, "cannot delete this message", 403)
+        self._ensure_message_status_allows(message, "delete")
 
         payload = {
             "session_id": message.session_id,
@@ -405,6 +413,28 @@ class MessageService:
         if getattr(session, "type", "") != "private" or bool(getattr(session, "is_ai_session", False)):
             return True
         return len(set(str(member_id or "") for member_id in member_ids if str(member_id or ""))) >= 2
+
+    def _ensure_message_status_allows(self, message, action: str) -> None:
+        status = str(getattr(message, "status", "") or "").strip().lower()
+        if status not in self.MUTABLE_MESSAGE_STATUSES:
+            raise AppError(
+                ErrorCode.INVALID_REQUEST,
+                f"cannot {action} {status or 'unknown'} message",
+                409,
+            )
+
+    def _ensure_message_type_allows_edit(self, message) -> None:
+        message_type = str(getattr(message, "type", "") or "").strip().lower()
+        if message_type not in self.EDITABLE_MESSAGE_TYPES:
+            raise AppError(ErrorCode.INVALID_REQUEST, "message type does not support edit", 422)
+
+    def _ensure_edit_content(self, content: str) -> None:
+        if not isinstance(content, str):
+            raise AppError(ErrorCode.INVALID_REQUEST, "content must be a string", 422)
+        if not content.strip():
+            raise AppError(ErrorCode.INVALID_REQUEST, "content cannot be blank", 422)
+        if len(content) > self.MAX_MESSAGE_CONTENT_LENGTH:
+            raise AppError(ErrorCode.INVALID_REQUEST, "content is too long", 422)
 
     def _normalize_message_extra(
         self,
