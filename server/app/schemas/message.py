@@ -18,9 +18,16 @@ class MessageCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     msg_id: UUID
-    content: str = Field(default="", max_length=MAX_MESSAGE_CONTENT_LENGTH)
+    content: str = Field(min_length=1, max_length=MAX_MESSAGE_CONTENT_LENGTH)
     message_type: str = Field(default="text", pattern="^(text|image|file|video|voice)$")
     extra: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("content")
+    @classmethod
+    def _require_non_blank_content(cls, value: str) -> str:
+        if not str(value or "").strip():
+            raise ValueError("content cannot be blank")
+        return value
 
 
 class MessageUpdate(BaseModel):

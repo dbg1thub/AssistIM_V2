@@ -285,6 +285,24 @@ def test_http_send_message_requires_msg_id_and_rejects_system_type(
     )
     assert system_type.status_code == 422
 
+    blank_content = client.post(
+        f"/api/v1/sessions/{session_id}/messages",
+        json={"msg_id": "11000000-0000-4000-8000-000000000101", "content": "   ", "message_type": "text"},
+        headers=auth_header(alice["access_token"]),
+    )
+    assert blank_content.status_code == 422
+
+    oversized_content = client.post(
+        f"/api/v1/sessions/{session_id}/messages",
+        json={
+            "msg_id": "11000000-0000-4000-8000-000000000102",
+            "content": "x" * 20001,
+            "message_type": "text",
+        },
+        headers=auth_header(alice["access_token"]),
+    )
+    assert oversized_content.status_code == 422
+
 
 def test_http_send_message_uses_msg_id_and_realtime_broadcasts(
     client: TestClient,
@@ -361,6 +379,47 @@ def test_websocket_chat_message_rejects_system_type(
         error_payload = receive_until(alice_ws, "error")
         assert error_payload["msg_id"] == "11000000-0000-4000-8000-000000000003"
         assert error_payload["data"]["message"] == "unsupported message type"
+
+    history_response = client.get(
+        f"/api/v1/sessions/{session_id}/messages",
+        headers=auth_header(alice["access_token"]),
+    )
+    assert history_response.status_code == 200
+    assert history_response.json()["data"] == []
+
+
+def test_websocket_chat_message_rejects_blank_content(
+    client: TestClient,
+    user_factory,
+    auth_header,
+) -> None:
+    alice = user_factory("alice_ws_blank_content", "Alice Ws Blank Content")
+    bob = user_factory("bob_ws_blank_content", "Bob Ws Blank Content")
+
+    create_session_response = client.post(
+        "/api/v1/sessions/direct",
+        json={"participant_ids": [bob["user"]["id"]]},
+        headers=auth_header(alice["access_token"]),
+    )
+    assert create_session_response.status_code == 200
+    session_id = create_session_response.json()["data"]["id"]
+
+    with client.websocket_connect("/ws") as alice_ws:
+        authenticate_ws(alice_ws, alice["access_token"], msg_id="ws-auth-blank-content")
+        alice_ws.send_json(
+            {
+                "type": "chat_message",
+                "msg_id": "11000000-0000-4000-8000-000000000103",
+                "data": {
+                    "session_id": session_id,
+                    "content": "   ",
+                    "message_type": "text",
+                },
+            }
+        )
+        error_payload = receive_until(alice_ws, "error")
+        assert error_payload["msg_id"] == "11000000-0000-4000-8000-000000000103"
+        assert error_payload["data"]["message"] == "content cannot be blank"
 
     history_response = client.get(
         f"/api/v1/sessions/{session_id}/messages",

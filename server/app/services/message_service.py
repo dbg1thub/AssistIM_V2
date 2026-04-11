@@ -99,6 +99,7 @@ class MessageService:
     ) -> tuple[dict, bool]:
         self._ensure_visible_session_membership(current_user.id, session_id)
         normalized_message_type = self._normalize_client_message_type(message_type)
+        self._ensure_message_content(content)
         normalized_extra = self._normalize_message_extra(
             sender_id=current_user.id,
             session_id=session_id,
@@ -130,6 +131,7 @@ class MessageService:
     ) -> tuple[dict, bool]:
         self._ensure_visible_session_membership(sender_id, session_id)
         normalized_message_type = self._normalize_client_message_type(message_type)
+        self._ensure_message_content(content)
         normalized_extra = self._normalize_message_extra(
             sender_id=sender_id,
             session_id=session_id,
@@ -256,7 +258,7 @@ class MessageService:
             raise AppError(ErrorCode.FORBIDDEN, "cannot edit this message", 403)
         self._ensure_message_status_allows(message, "edit")
         self._ensure_message_type_allows_edit(message)
-        self._ensure_edit_content(content)
+        self._ensure_message_content(content)
         if message.created_at and utcnow() - ensure_utc(message.created_at) > self.EDIT_LIMIT:
             raise AppError(ErrorCode.FORBIDDEN, "edit time limit exceeded", 403)
 
@@ -428,7 +430,7 @@ class MessageService:
         if message_type not in self.EDITABLE_MESSAGE_TYPES:
             raise AppError(ErrorCode.INVALID_REQUEST, "message type does not support edit", 422)
 
-    def _ensure_edit_content(self, content: str) -> None:
+    def _ensure_message_content(self, content: str) -> None:
         if not isinstance(content, str):
             raise AppError(ErrorCode.INVALID_REQUEST, "content must be a string", 422)
         if not content.strip():
