@@ -101,8 +101,11 @@ class SessionController:
         await self._session_manager.mark_session_unread(session_id, unread)
 
     async def close(self) -> None:
-        """Close the lightweight session controller state."""
+        """Close the lightweight session controller state and retire the singleton."""
         self._initialized = False
+        global _session_controller
+        if _session_controller is self:
+            _session_controller = None
 
 
 _session_controller: Optional[SessionController] = None
@@ -119,4 +122,3 @@ def get_session_controller() -> SessionController:
     if _session_controller is None:
         _session_controller = SessionController()
     return _session_controller
-

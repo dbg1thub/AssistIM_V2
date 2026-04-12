@@ -8,7 +8,7 @@ import json
 import threading
 import uuid
 from collections import deque
-from concurrent.futures import Future
+from concurrent.futures import CancelledError as ConcurrentCancelledError, Future
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable, Optional
@@ -29,6 +29,7 @@ class ConnectionState(Enum):
     
     DISCONNECTED = "disconnected"
     CONNECTING = "connecting"
+    AUTHENTICATING = "authenticating"
     CONNECTED = "connected"
     RECONNECTING = "reconnecting"
 
@@ -59,6 +60,12 @@ try:
         def queue_callback(self, callback: Callable[[], None]) -> None:
             with self._callback_lock:
                 self._pending_callbacks.append(callback)
+            if not self._dispatch_timer.isActive():
+                self._dispatch_timer.start()
+
+        def clear_callbacks(self) -> None:
+            with self._callback_lock:
+                self._pending_callbacks.clear()
 
         @Slot()
         def _drain_callbacks(self) -> None:
@@ -106,6 +113,7 @@ class WebSocketClient:
     
     # Tasks
     _connect_task: Optional[asyncio.Task] = field(default=None, init=False)
+    _connect_future: Optional[Future] = field(default=None, init=False)
     _receive_task: Optional[asyncio.Task] = field(default=None, init=False)
     _heartbeat_task: Optional[asyncio.Task] = field(default=None, init=False)
     _reconnect_task: Optional[asyncio.Task] = field(default=None, init=False)
@@ -206,7 +214,7 @@ class WebSocketClient:
             def _report_callback_result(done_future: Future) -> None:
                 try:
                     done_future.result()
-                except asyncio.CancelledError:
+                except (asyncio.CancelledError, ConcurrentCancelledError):
                     pass
                 except Exception:
                     logger.exception("Main-loop websocket callback failed")
@@ -217,8 +225,10 @@ class WebSocketClient:
 
     def _ensure_worker_loop(self) -> None:
         """Ensure the dedicated websocket worker loop is running."""
-        if self._thread and self._thread.is_alive() and self._thread_loop and self._thread_loop.is_running():
-            return
+        if self._thread and self._thread.is_alive():
+            if self._thread_loop and self._thread_loop.is_running():
+                return
+            raise RuntimeError("previous websocket worker thread did not stop cleanly")
 
         self._thread_ready.clear()
 
@@ -279,12 +289,33 @@ class WebSocketClient:
         self._intentional_disconnect = False
         self._set_state(ConnectionState.CONNECTING)
 
-        self._run_in_worker(self._connect_loop())
+        future = self._run_in_worker(self._connect_loop())
+        self._connect_future = future
+
+        def _clear_connect_future(done_future: Future) -> None:
+            if self._connect_future is done_future:
+                self._connect_future = None
+            try:
+                done_future.result()
+            except (asyncio.CancelledError, ConcurrentCancelledError):
+                pass
+            except Exception:
+                logger.exception("WebSocket connect attempt failed")
+
+        future.add_done_callback(_clear_connect_future)
     
     async def disconnect(self) -> None:
         """Disconnect WebSocket intentionally."""
         logger.info("Intentionally disconnecting WebSocket")
         self._intentional_disconnect = True
+        connect_future = self._connect_future
+        if connect_future is not None and not connect_future.done():
+            connect_future.cancel()
+            try:
+                await asyncio.wrap_future(connect_future)
+            except (asyncio.CancelledError, ConcurrentCancelledError):
+                pass
+        self._connect_future = None
         if self._thread_loop and self._thread_loop.is_running():
             await asyncio.wrap_future(self._run_in_worker(self._cleanup()))
         self._set_state(ConnectionState.DISCONNECTED)
@@ -314,7 +345,7 @@ class WebSocketClient:
 
                     return
 
-                except asyncio.CancelledError:
+                except (asyncio.CancelledError, ConcurrentCancelledError):
                     # Task was cancelled, exit the loop immediately
                     logger.info("Connect loop cancelled, exiting")
                     raise
@@ -382,7 +413,7 @@ class WebSocketClient:
                 except json.JSONDecodeError:
                     logger.warning(f"Invalid JSON: {message[:100]}")
             
-            except asyncio.CancelledError:
+            except (asyncio.CancelledError, ConcurrentCancelledError):
                 logger.info("Receive loop cancelled")
                 raise
             
@@ -410,7 +441,7 @@ class WebSocketClient:
                 )
                 logger.debug("Heartbeat sent")
             
-            except asyncio.CancelledError:
+            except (asyncio.CancelledError, ConcurrentCancelledError):
                 logger.info("Heartbeat loop cancelled")
                 raise
             
@@ -461,7 +492,7 @@ class WebSocketClient:
                 task.cancel()
                 try:
                     await task
-                except asyncio.CancelledError:
+                except (asyncio.CancelledError, ConcurrentCancelledError):
                     pass
         
         if self._ws:
@@ -575,13 +606,28 @@ class WebSocketClient:
         """Close WebSocket and cancel all tasks."""
         self._intentional_disconnect = True
 
+        connect_future = self._connect_future
+        if connect_future is not None and not connect_future.done():
+            connect_future.cancel()
+            try:
+                await asyncio.wrap_future(connect_future)
+            except (asyncio.CancelledError, ConcurrentCancelledError):
+                pass
+        self._connect_future = None
+
         if self._thread_loop and self._thread_loop.is_running():
             await asyncio.wrap_future(self._run_in_worker(self._cleanup()))
             self._thread_loop.call_soon_threadsafe(self._thread_loop.stop)
 
+        if self.signals and hasattr(self.signals, "clear_callbacks"):
+            self.signals.clear_callbacks()
+
         if self._thread and self._thread.is_alive():
             await asyncio.to_thread(self._thread.join, 2.0)
-            self._thread = None
+            if self._thread.is_alive():
+                logger.error("WebSocket worker thread did not stop within timeout")
+            else:
+                self._thread = None
 
         self._connect_task = None
         self._receive_task = None
@@ -593,6 +639,9 @@ class WebSocketClient:
         self._on_message = None
         self._on_error = None
         self._set_state(ConnectionState.DISCONNECTED)
+        global _websocket_client
+        if _websocket_client is self:
+            _websocket_client = None
 
         logger.info("WebSocket client closed")
 

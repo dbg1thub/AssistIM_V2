@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from types import SimpleNamespace
 
@@ -92,6 +93,13 @@ class FakeMessageRepo:
     def list_session_messages(self, session_id: str, limit: int = 1):
         raise AssertionError('list_session_messages should not be used in batch list_sessions path')
 
+    def unread_by_session_for_user(self, user_id: str):
+        assert user_id == 'alice'
+        return [
+            {'session_id': 'session-1', 'unread': 3},
+            {'session_id': 'session-2', 'unread': 1},
+        ]
+
 
 class FakeUserRepo:
     def __init__(self) -> None:
@@ -157,7 +165,7 @@ def test_session_service_list_sessions_uses_batch_repository_loaders() -> None:
     assert [item['session_id'] for item in payload] == ['session-1', 'session-2']
     assert payload[0]['session_type'] == 'direct'
     assert payload[0]['encryption_mode'] == 'plain'
-    assert payload[0]['session_crypto_state'] == {}
+    assert payload[0]['unread_count'] == 3
     assert payload[0]['call_capabilities'] == {'voice': True, 'video': True}
     assert payload[0]['participant_ids'] == ['alice', 'bob']
     assert payload[0]['avatar'] == '/uploads/direct.png'
@@ -170,7 +178,7 @@ def test_session_service_list_sessions_uses_batch_repository_loaders() -> None:
     assert [member['id'] for member in payload[0]['members']] == ['alice', 'bob']
     assert payload[1]['session_type'] == 'group'
     assert payload[1]['encryption_mode'] == 'plain'
-    assert payload[1]['session_crypto_state'] == {}
+    assert payload[1]['unread_count'] == 1
     assert payload[1]['call_capabilities'] == {'voice': False, 'video': False}
     assert payload[1]['group_id'] == 'group-1'
     assert payload[1]['group_member_version'] == service._group_member_version(['alice', 'bob', 'charlie'])
@@ -182,6 +190,60 @@ def test_session_service_list_sessions_uses_batch_repository_loaders() -> None:
     assert fake_sessions.list_members_for_sessions_calls == [['session-1', 'session-2']]
     assert fake_messages.list_last_messages_for_sessions_calls == [['session-1', 'session-2']]
     assert fake_users.list_users_by_ids_calls == [['alice', 'bob', 'charlie']]
+
+def test_session_service_recalled_last_message_preview_uses_formal_placeholder() -> None:
+    last_message = SimpleNamespace(status='recalled', content='original content')
+
+    payload = SessionService._serialize_last_message_preview(last_message)
+
+    assert payload == SessionService.RECALLED_MESSAGE_PLACEHOLDER
+
+
+def test_session_service_encrypted_text_last_message_preview_uses_formal_placeholder() -> None:
+    last_message = SimpleNamespace(
+        status='sent',
+        type='text',
+        content='ciphertext-should-not-preview',
+        extra_json=json.dumps({'encryption': {'enabled': True, 'content_ciphertext': 'ciphertext-should-not-preview'}}),
+    )
+
+    payload = SessionService._serialize_last_message_preview(last_message)
+
+    assert payload == SessionService.ENCRYPTED_MESSAGE_PLACEHOLDER
+
+
+@pytest.mark.parametrize(
+    ('message_type', 'expected_preview'),
+    sorted(SessionService.ATTACHMENT_MESSAGE_PREVIEW_PLACEHOLDERS.items()),
+)
+def test_session_service_attachment_last_message_preview_uses_type_placeholder(
+    message_type: str,
+    expected_preview: str,
+) -> None:
+    last_message = SimpleNamespace(
+        status='sent',
+        type=message_type,
+        content='https://uploads.example.invalid/raw-transport-url',
+        extra_json=json.dumps({'url': 'https://uploads.example.invalid/raw-transport-url'}),
+    )
+
+    payload = SessionService._serialize_last_message_preview(last_message)
+
+    assert payload == expected_preview
+
+
+def test_session_service_recalled_last_message_preview_takes_precedence_over_payload_type() -> None:
+    last_message = SimpleNamespace(
+        status='recalled',
+        type='image',
+        content='https://uploads.example.invalid/recalled-image',
+        extra_json=json.dumps({'attachment_encryption': {'enabled': True}}),
+    )
+
+    payload = SessionService._serialize_last_message_preview(last_message)
+
+    assert payload == SessionService.RECALLED_MESSAGE_PLACEHOLDER
+
 
 class _HiddenPrivateSessionRepo:
     def __init__(self) -> None:

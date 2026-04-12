@@ -88,6 +88,56 @@
 
 ### G-01：服务端权威真相与正式协议边界没有收口
 
+状态：active_remediation（2026-04-12）
+
+修复进展：
+
+- `F-529` / `F-549` 已把客户端可发送 message_type 收口为 `text/image/file/video/voice`，HTTP/WS 均拒绝 `system`
+- `F-530` 已为附件型消息建立 payload gate，非加密附件必须提供 url/name/type/size 元数据，加密附件继续走 envelope 校验
+- `F-531` / `F-532` 已为 edit 建立文本类型 gate 和 sent/edited 状态 gate
+- `F-533` 已为 recall 建立 sent/edited 状态 gate 和用户态消息类型 gate
+- `F-534` 到 `F-538` 已把 E2EE envelope 必填字段收口为非空字符串，direct/group text、attachment 和 fanout 不再接受 dict/list 伪标量
+- `F-550` 已为 HTTP edit schema 补齐 `extra=forbid`，未知字段不再静默吞掉
+- `F-592` / `F-593` 已把 message create/edit 的内容长度和非空白约束下沉到 schema
+- `F-590` / `F-591` 已把 member mention 绑定到当前 session member 集，并拒绝重复/重叠 mention span
+- `F-667` 到 `F-670` 已把 message edit/recall/delete/read 的 committed mutation 与 realtime fanout 解耦，fanout 失败不再导致 HTTP 500
+- `F-617` / `F-618` / `F-624` 已从 file upload/list 响应和聊天附件 extra 中移除内部存储字段 `storage_provider/storage_key/checksum_sha256`
+- `F-622` 已为 `GET /files` 增加 `limit` 数量边界并下推到数据库查询
+- `F-620` 已为通用文件上传建立扩展名与 MIME allowlist，非法类型在落盘前返回 422
+- `F-623` 已为通用上传和自定义头像上传建立落盘后 DB 失败补偿，避免残留孤儿文件
+- `F-621` / `F-727` 已把上传 MIME 改为服务端派生，并收口上传显示名的可打印字符与长度边界
+- `F-619` 已移除 upload_dir 的 StaticFiles 公开挂载，`/uploads/...` 改为受认证下载路由
+- `F-740` / `F-741` / `F-742` 已把文件公开响应和 FileOut 收口为单一 canonical 字段集，并移除 media 嵌套镜像
+- `F-747` 已拆分文件列表 summary 与上传结果 output，list 不再复用 upload-result detail shape
+- `F-743` / `F-744` 已为 moments like/unlike 回显 liked/changed，明确 no-op 语义
+- `F-748` 已为 direct session create 回显 created/reused，区分新建和复用旧私聊
+- `F-749` / `F-750` 已为好友请求创建回显 request_created/request_reused/friendship_created，区分 no-op 和自动接受
+- `F-745` / `F-746` 已把 moment/comment 作者 payload 收口为统一 author 子结构
+- `F-569` / `F-570` 已把建私聊“恰好一个参与者”和 extra forbid 收口到 schema
+- `F-571` / `F-572` 已把 HTTP typing 请求收口到 `SessionTypingRequest` / `StrictBool` schema
+- `F-760` 已把建私聊 `participant_ids` 的 item 级 strip / 非空 / 长度 / 去重和“恰好一个参与者”下沉到 schema
+- `F-761` / `F-762` / `F-763` 已把 group member id、transfer owner id 和成员角色枚举约束下沉到 schema
+- `F-573` / `F-575` 到 `F-580` 已把 group create/member/role/transfer/profile schema 的冲突字段和 extra forbid 收口
+- `F-554` / `F-555` / `F-556` / `F-752` 已把 `/groups/{id}/me` 收口为 self-scoped canonical payload，空/no-op 请求不再写 member profile、不再 touch shared session，群昵称变更也不再扇出 shared `group_profile_update`
+- `F-753` 已把群公告副作用纳入 `PATCH /groups/{id}` 正式响应，返回 `{group, announcement}` 并保留公告 message id / created / participant_count meta
+- `F-754` 部分收口：`DELETE /messages/{id}` 已从 `204` 改为返回 committed `message_delete` event payload；send/list 与 edit/recall 的主 contract 仍待统一
+- `F-755` / `F-756` 已把 read batch 成功响应收口为稳定 `{status, session_id, message_id, last_read_seq, user_id, read_at, advanced, noop, event_seq}` shape，并显式区分 no-op
+- `F-757` / `F-758` 已为 `MessageReadBatch` 增加 extra forbid、strip、非空和长度约束
+- `F-759` 已把 `GroupCreate.member_ids/members` item 级 strip、非空、长度和去重下沉到 schema
+- `F-567` / `F-581` / `F-582` / `F-585` 已把 friend request target、extra forbid 和 message 长度约束收口到 schema
+- `F-764` 已把 `DeviceKeysRefreshRequest` 的 key material 必填约束下沉到 schema
+- `F-767` 已把 HTTP typing ack 对齐到 realtime canonical event payload
+- `F-564` 已把群公告消息广播改为按每个 viewer 单独序列化，不再复用第一个收件人的 viewer-specific payload
+- `F-783` 已把 session `unread_count` 接到服务端权威未读计数
+- `F-784` / `F-785` 已移除服务端 session/message payload 中没有权威语义的 `session_crypto_state` / `is_ai` dummy 字段
+- `F-777` 已移除 message payload 顶层 `timestamp` 同义字段，时间语义统一到 `created_at` / `updated_at`
+- `F-778` / `F-779` 已把 message read/viewer 派生字段从 `extra` 移出，只保留在顶层 canonical 字段
+- `F-786` / `F-787` 已把 recalled session preview / message content 从空字符串收口为稳定 formal 占位
+- `F-565` / `F-566` 已把 session `last_message` preview 收口为 formal 输出，加密文本返回密文占位，附件返回类型化占位
+- `F-788` 已把单会话历史分页从 `created_at` cursor 收口为 `before_seq` / `session_seq` cursor，并同步客户端远端回拉与恢复补偿
+- `F-789` 已把缺失消息补偿排序改为同一会话内 `session_seq` 优先
+- G-01 仍未关闭：HTTP/WS 正式入口、mutation output、E2EE envelope、文件/用户/relationship 等边界仍有未收口项
+
 合并范围：
 
 - `F-005`
@@ -198,145 +248,14 @@
 
 典型表现：
 
-- HTTP 发消息缺请求级幂等键，也不做实时广播
-- 服务端正式 send / edit 边界本身也还允许空内容消息，协议合法性仍弱于业务语义
-- 服务端正式 send 边界甚至还没有 `message_type` allowlist，客户端伪造 `system` 消息也能走正式链路入库
-- direct session create schema 也还没有把“恰好一个其他参与者”建成入口约束，route 还会静默吞掉未知字段
-- direct session create 的剩余 formal contract 也还没收口：
-  - `participant_ids` 的 item 级 strip / 非空 / 唯一性还停留在 service 层偷偷做
-  - `name` 没有长度边界，纯空白名称也会被当成正式 session 名落库
-  - `CreateDirectSessionRequest.participant_ids` 的 item 级 canonicalization 也没有被 schema 正式建模
-- 公开 output schema 也没有真正进入正式边界：
-  - FastAPI route 基本都没有 `response_model`
-  - 现有 `*Out` schema 只是漂浮在 route 外的“文档碎片”
-  - `TokenPair`、`UserOut`、`FriendOut`、`FriendRequestOut`、`SessionOut`、`GroupOut`、`MomentOut`、`MomentCommentOut` 都已经落后于真实 payload
-  - session family 这组漂移现在已经是可枚举的具体缺口：
-    - `SessionOut` 缺 `group_id/owner_id/group_announcement/announcement_*/group_note/my_group_nickname`
-    - `SessionMemberOut` 缺 `group_nickname/role`
-- formal payload 自己还继续夹带多块 dummy placeholder：
-  - session `unread_count`
-  - session `session_crypto_state`
-  - message `is_ai`
-- direct 消息 formal payload 也没有单一的会话身份 contract：
-  - `serialize_message()` 继续直接下发 `session_name/session_avatar/participant_ids`
-  - 但 direct/session payload 另一边又已经在走 `counterpart_*` 语义
-  - 一条 direct 消息因此会并存 shared session identity 和 counterpart identity 两套表示
-- `success_response(data=None)` 还会把 no-payload 成功统一改写成 `{}`，把 `null`、空对象和真正无返回体抹平成一类 contract
-- 同一消息资源族的 mutation output 也还没有统一：
-  - `send/list` 返回 canonical `MessageOut`
-  - `edit/recall` 返回 event delta
-  - `delete` 返回 `204`
-  - `read_message_batch` 还会按 `advanced` 分裂成功 payload，no-op 也继续统一回 `success=true`
-- session-bound message/read route 的基础错误语义也没统一：
-  - `list_messages()` / `send_message()` / `read_message_batch()` 先做 membership gate
-  - session 根本不存在时也会直接退成 `403 not a session member`
-  - 但 `get_session()` / WS `send_ws_message()` 又会先判 session existence 并回 `404 session not found`
-- HTTP send schema 自己也还把 `system` 暴露成客户端正式可提交的 `message_type`
-- `image/file/video/voice` 这类附件型消息当前也没有正式 payload contract；没有附件元数据、没有附件密文的半残消息一样能进库
-- HTTP edit schema 与 create schema 的 extra 策略仍不一致；update 入口会静默吞掉未知字段
-- edit / recall / delete / typing / read 等动作在 HTTP 与 WS 上行为分叉
-- HTTP typing 入口也还没有正式 schema，`typing` 值甚至会被任意 JSON 类型原样广播给其它成员
-- 消息 mention 的正式 contract 也还没收口：
-  - `member_id` 不绑定当前会话成员集
-  - spans 也没有被规范成无重叠的 canonical 集合
-- message create / edit 两条正式入口都还没有 schema 级内容长度上限
-- 服务端 edit / recall 仍只有“发送者本人 + 时间窗”这一级约束，没有把消息类型和消息状态收成正式 gate
-- reconnect/history 补偿不会修正 lost-ACK 下的本地 optimistic 消息，导致消息可能长期卡在 `SENDING`
-- 本地删除消息只删数据库，不会同步取消该消息的 pending outbound / ACK retry 状态
-- 服务端对 E2EE envelope 目前主要只做“字段存在性 / scheme 合法性”验证，仍没有把 direct 对端、group session、fanout 成员集、member_version 收口成 authoritative 校验
-- 这套 envelope 甚至连基础标量类型都没有正式收口：direct/group text、direct/group attachment、以及 group fanout item 的关键字段目前都还是“`str()` 后看起来非空就算合法”
-- 这套 envelope 校验继续停留在“字段长得像”阶段：
-  - direct recipient device 不绑定 recipient user
-  - direct recipient prekey id / prekey type 不绑定目标设备的真实 prekey 库
-    - direct sender identity key / sender_device_id 也不绑定当前真实发送设备
-    - direct envelope 连 self-recipient / same-device loopback 都不会拒绝
-    - group fanout item 不绑定 recipient user/device 真实关系
-    - group fanout item 的 `sender_device_id / sender_key_id` 甚至不要求和 top-level envelope 一致
-    - group text / attachment envelope 甚至没有把 `member_version` 收成正式必填字段
-    - 重复 recipient、partial fanout、self-recipient 都不会被拒绝
-    - sender_device_id / sender_key_id 也不绑定当前认证发送者和当前群 key 谱系
-- 群公告消息广播仍会把“按第一个收件人视角序列化出的单份 payload”复用给所有收件人，viewer-specific 字段继续错位
-- 多条 HTTP mutation route 也还是“先 commit、后 fanout”的 split contract：
-  - `edit_message()` 已提交编辑后，广播失败仍会把 HTTP 请求打成 500
-  - `recall_message()` / `delete_message()` 也一样
-  - `read_message_batch()` 已推进 read cursor 后，广播失败仍会把这次 read 误报成失败
-- 服务端 session snapshot 的 `last_message` 预览 contract 也没有消息类型 / E2EE 语义：
-  - 加密文本会直接把密文原样下发
-  - 附件消息会把 URL / 传输内容直接当成预览文本
-  - recalled last-message 还会直接退化成空字符串，把“被撤回”和“没有预览”混成一类
-- message formal payload 自己也仍把 recalled 内容直接清成空字符串；`status` 和 `content` 不是单一语义 contract
-  - 协议文档遗漏 `force_logout`、`contact_refresh`、资料更新事件等真实主链路事件
-  - `error`、失败 ACK、presence、presence 子协议都处于半实现或半迁移状态
-- `history_messages` 和本地远端翻页回拉都没有逐消息隔离；一条坏消息就能打断整批 / 整页 backfill
-- `recover_session_messages()` 的本地 cached recovery 也没有逐消息隔离；最近一页里一条坏消息就会打断整批本地恢复
-- `get_messages()` 会把远端历史回拉失败静默降级成“只返回本地缓存”，上层拿不到 stale/error 信号
-- `get_messages()` 还把“首屏请求”直接等价成“必须打远端”，并把“本地页长度是否满页”误当成 freshness 判断
-- 本地翻页回源还有明显的 N+1 查重和整页重写盘
-- 消息顺序真相也还没有正式收口：
-  - 单会话历史分页继续用 `created_at` 当 cursor
-  - 但列表正式排序又按 `session_seq`
-  - reconnect 缺失消息补偿也继续把 `created_at` 排在 `session_seq` 前面
-- reconnect 缺失消息 / 缺失事件同步的服务端查询形状也还没成熟：
-  - `list_missing_messages_for_user()` 按 session 数量线性膨胀 `OR`
-  - `list_missing_events_for_user()` 还会对 shared/private 两套事件表同时放大
-- send queue 在 close 时没有正式 drain / fail contract，排队中的消息仍可能直接蒸发
-- 文件、会话列表、设备这几条正式 API boundary 也还没收口：
-  - `GET /sessions` / `GET /groups` 都没有分页边界
-  - 同时这两条列表入口又默认内联完整 `members[]`，列表与详情没有轻重分层
-  - `/files` 与 `/files/upload` 会把 `storage_provider / storage_key / checksum_sha256 / user_id` 这类内部存储字段原样暴露给客户端
-  - 文件公开 payload 还没有单一 canonical field set：
-    - `url/file_url`
-    - `mime_type/file_type`
-    - `original_name/file_name/name`
-    - 同一批字段又被顶层和 `media` 嵌套重复返回
-    - list 和 upload-result 也没有 summary/detail 分层
-  - 本地媒体后端还会把整个上传目录直接静态挂到公开 `/uploads`
-  - 通用文件上传没有 MIME / 扩展名 allowlist，也会把客户端自报 `content_type / filename` 当成正式元数据落库
-  - `/files` 没有分页或数量边界，上传链路也不是 failure-atomic，DB 失败会留下孤儿文件
-  - 上传文件名的 canonicalization 也还停留在 `basename()`；控制字符与超长原始文件名都还能进入正式元数据
-  - 客户端又会把 upload 返回的 `storage_key / checksum / provider` 继续带进附件消息 `media`
-  - moments 这条正式 feed 入口也还没有窗口化 contract：
-    - `GET /moments` 没有分页或数量边界
-    - 每条动态会把完整 comments 和 `liked_user_ids` 一起内联进列表 payload
-    - moment create / comment schema 仍只有 `min_length`，没有长度上限、没有 `extra=forbid`、也没有 strip 归一化
-    - `GET /moments?user_id=...` 没有任何 relationship / audience gate
-    - `POST/DELETE likes` 与 `POST comments` 只校验 moment 存在，不校验互动权限
-    - `GET /moments` 在不带 `user_id` 时会直接退化成全局 authenticated feed
-    - create / like / unlike / comment 四条正式互动入口也都没有 rate-limit 边界
-    - `like/unlike` 对 already-liked / already-unliked 仍统一回成功，没有正式 no-op 语义
-    - moment / comment 的 author payload 也没有单一 canonical 结构：
-      - moment 同时返回顶层作者字段和嵌套 `author`
-      - comment 又只返回顶层作者字段
-  - `/keys/prekey-bundle/{user_id}` 没有关系或授权 gate，任意已登录用户都能枚举目标设备 bundle
-  - `/keys/prekeys/claim` 同样没有 ownership / relationship gate，任意已登录用户都能消耗任意设备的 one-time prekey
-  - prekey bundle 还会继续泄露 `device_name / last_seen_at / available_prekey_count`
-  - `register_device()` 会把已存在的 `device_id` 直接重绑到当前账号
-  - one-time prekey claim 没有数据库级互斥；`list_prekey_bundles()` / `list_my_devices()` 也都还是 per-device 计数库存的 N+1 查询
-  - device / prekey schema 对大块 key material 只有 `min_length` 没有 `max_length`
-  - `refresh_my_device_keys()` 又不会推进 `last_seen_at`，已暴露的设备活跃语义本身都不稳定
-  - `DeviceKeysRefreshRequest` 也还不能在 schema 层表达“`signed_prekey` 或 `prekeys` 至少一项存在”
-  - user route family 也没有统一的 collection/detail contract：
-    - `/users/search`
-    - `/users`
-    - `/users/{id}`
-    - `/auth/me`
-    现在仍是四种不同组织方式
-  - 同时 REST user payload、realtime `user_profile_update` payload、以及 friend request participant payload 也不是一套 canonical user/relationship contract
-  - `sender_id/receiver_id` 与 `from_user/to_user` 仍在同一条 friend-request 响应里双份镜像
-  - 同名 `avatar` 字段也继续没有单一 public meaning：
-    - user/friend/moment 入口返回 raw avatar state
-    - message/session/group 成员与 sender profile 又返回解析后的 avatar URL
-  - HTTP typing 还是两套 shape：
-    - HTTP ack 只回 `typing`
-    - realtime fanout 才带 `session_id/user_id/typing`
+- G-01 仍未关闭：HTTP / WS 正式入口、mutation output、E2EE envelope、文件/用户/relationship 等边界仍有未收口项。
+- 该问题簇继续保留在后续修复队列，本次 G-03 收口不改变 G-01 状态。
 
 建议优先动作：
 
-- 先明确“消息与控制面”的正式协议边界：哪些只能走 WS，哪些允许 HTTP
-- 再统一请求级幂等键、错误返回模型、实时 fanout 和 reconnect 补偿模型
-- reconnect/history 补偿必须能把“服务端已接受但本地 ACK 丢失”的消息收口成 canonical 状态
-- 本地 history backfill 也要一起收口，避免再走 N+1 + 全页重写盘
-- 文档、服务端、桌面端必须一起收口，不要继续接受“协议里一种、实现里另一种”的状态
+- 先明确“消息与控制面”的正式协议边界：哪些只能走 WS，哪些允许 HTTP。
+- 再统一请求级幂等键、错误返回模型、实时 fanout 和 reconnect 补偿模型。
+- 文档、服务端、桌面端必须一起收口，不要继续接受“协议里一种、实现里另一种”的状态。
 
 ### G-02：会话删除 / 本地隐藏 / 全量刷新三套语义分裂
 
@@ -472,172 +391,37 @@
 
 ### G-03：authenticated runtime 没有真正按账号隔离，logout / relogin / restore 全部依赖局部手工清理
 
+状态：已修复（2026-04-13）
+
+修复进展：
+
+- `F-044` 到 `F-086`、`F-191` 到 `F-258` 已把 logout、auth-loss、restore、relogin、startup preflight、runtime ready、transport close、auth commit boundary、UI transient 等主链路分阶段收口。
+- `F-673` / `F-674` / `F-675` 已把服务端 auth mutation 与 realtime 副作用边界收口：logout 提交后断连/广播失败不再把已生效 logout 改成 500，force login 先断旧 runtime 再旋转新 session 版本，注册链用户创建/默认头像/session version 已统一为单事务。
+- `F-719` / `F-720` 已把 username identity 的大小写语义收口：注册/登录/查重统一走 lowercase canonical username，数据库侧新增 `uq_users_username_lower` 表达式唯一索引。
+- `R-091` / `R-092` / `R-093` 已收口服务端 auth 侧横切风险：限流 key 纳入请求主体维度，默认 rate limit store 改为共享数据库计数，默认 CORS 不再使用 `* + credentials=True`。
+- `R-014` 到 `R-026` 已完成尾部架构项收口：顶层 lifecycle state/runtime generation guard 成为 runtime 推进边界；logout/auth-loss/relogin 使用 quiescent teardown；账号域 controller/manager/service singleton 在 close 后退休并由下一代 runtime 重建；ChatController ICE/TURN 缓存、sync cursor batch、E2EE local bundle batch、shell UI task quiesce 都已补回归测试。
+
 合并范围：
 
 - `F-042` 到 `F-086`
-- `F-191` 到 `F-225`
-- `F-226`
-- `F-227`
-- `F-228`
-- `F-229`
-- `F-230`
-- `F-231`
-- `F-232`
-- `F-233`
-- `F-234`
-- `F-235`
-- `F-236`
-- `F-237`
-- `F-238`
-- `F-239`
-- `F-240`
-- `F-241`
-- `F-242`
-- `F-243`
-- `F-244`
-- `F-245`
-- `F-246`
-- `F-247`
-- `F-248`
-- `F-249`
-- `F-250`
-- `F-251`
-- `F-252`
-- `F-253`
-- `F-254`
-- `F-255`
-- `F-256`
-- `F-257`
-- `F-258`
+- `F-191` 到 `F-258`
 - `F-673` 到 `F-679`
 - `F-688` 到 `F-691`
 - `F-719`
 - `F-720`
-- `R-022`
-- `R-024`
-- `R-023`
-- `R-025`
-- `R-026`
+- `R-014` 到 `R-026`
 - `R-091`
 - `R-092`
 - `R-093`
-- `R-014` 到 `R-021`
 
-共同根因：
+关闭结果：
 
-- 当前客户端没有真正的 per-account authenticated runtime 生命周期
-- 普通 logout、forced logout、restore、relogin、shutdown 五条路径的 teardown / boot contract 都不一致
-- 进程级单例、全局缓存、HTTP client、WS 连接、后台任务、auth 持久化都在跨账号复用
-
-典型表现：
-
-- clear session 先于 teardown，旧账号消息、ACK、history events、cursor、token refresh、session refresh 仍会回写
-- `auth.*`、sync cursor、E2EE diagnostics、Discovery cache、contacts cache 都可能被旧账号晚到任务污染
-- HTTP auth-loss、WS auth-loss、force logout 三条认证失效链路没有统一状态机
-- restore_session 对 access/refresh/profile 的一致性校验不足，弱网和 5xx 会把“暂时失败”和“会话失效”混为一类
-- 认证失效、restore 无效、logout 请求失败都会直接触发 `clear_chat_state()`，把本地离线聊天数据一起删掉
-- authenticated runtime warmup 失败会被静默吞掉，主界面仍可能以旧缓存壳子的形式展示出来
-- login/register 与 restore 缺少明确的 commit/rollback 边界，半残 auth 快照和半登录态都可能落到本地
-- 启动 restore 和 logout/relogin 都是网络优先的串行路径，主界面和登录页都会被远端请求或串行 close 链硬阻塞
-- authenticated bootstrap 还存在重复加载会话列表这类确定性冗余，说明顶层 boot contract 仍未收口
-- 冷启动路径会在 auth 决策前先把旧本地 session runtime 装进内存，而 `clear_session()` 只清持久化、不清这些已加载对象
-- 冷启动登录成功和 relogin 走的不是同一套 runtime 建立语义，前者会复用 pre-auth manager，后者才会 rebuild post-auth manager
-- HTTP auth-loss、现有 WS 连接、UI runtime ready 三者完全脱节：老 WS 会继续被信任，客户端也没有统一的 connection/auth-loss 消费者
-- 当前 bootstrap 只把 transport connect 当成 ready，WS auth 与 initial sync 都还没进入正式 runtime ready 定义
-- `connect()/CONNECTED/SYNC_COMPLETED` 这几组 API/事件的名字都在过度承诺：实际只表示“开始尝试连接”“transport 已连”“消息批已到”，却被上层拿来当完整 ready 语义
-- auth/runtime 清理路径里还存在重复 destructive cleanup；而初始化路径则把很多 authenticated-only 子系统过早启动到了未认证阶段
-- shell UI、app 级 diagnostics、current_user 快照之间没有统一 auth-state 广播；clear auth 后仍会保留旧账号身份 UI 和旧安全快照
-- `session_replaced` forced logout 不是完整 teardown，而是“先清 auth、关连接、再让旧壳子多活 3 秒”，主窗口仍可能保持可交互
-- 离线 restore 成功后也没有“cached profile -> authoritative profile”的后续收口，主窗口身份资料会长期停在缓存快照
-- auth shell 里“窗口关闭”“认证取消”“认证成功提交”三种语义也没有被拆开，登录窗 close 与 auth commit 存在 first-win 竞态
-- app-level E2EE diagnostics 在未认证阶段仍会 copy-forward 上一代快照；同一条 `session_replaced` control event 在 main shell 和 auth shell 里的处理策略也完全不同
-- startup preflight 也没有站在真正最前面；即使最终判定 blocked，应用仍会先把一整套 runtime-heavy 组件和 worker thread 拉起来
-- 顶层还缺少统一的 quit/auth-generation guard；晚到的 restore/login/show-main/warmup 成功路径仍能继续推进 dead runtime
-- 顶层 control-event 还在用“哪个窗口对象此刻存在”代替正式 lifecycle state；logout 过程中连托盘入口都还能把旧壳子重新显示出来
-- relogin 成功后，auth shell 和 authenticated shell 之间也没有正式过渡态，用户会先失去窗口、再等待新 runtime 重建
-- startup preflight 的用户反馈也站位太晚，blocked 启动会先经历初始化/teardown 再告诉用户原因
-- 同一套 runtime rebuild 在冷启动和 relogin 上还绕过了不同的 startup preflight gate，bootstrap contract 不一致
-- 主窗口 closed 语义还被直接绑成 app quit，导致 shell 替换只能靠 `hide()+deleteLater()` 这类旁路实现
-- logout/relogin 顶层转换还不是 failure-atomic；中间任何一步抛错都可能把应用留在无窗口 headless 状态
-- 冷启动主链路同样只有 teardown contract、没有 recovery contract；认证或主窗口构建异常会直接静默退出
-- 服务端 auth route 自己也还是“先 commit、后 control fanout”的 split contract：
-  - `DELETE /auth/session` 已推进 `auth_session_version` 后，disconnect/offline fanout 失败仍会把 logout 报成 500
-  - `POST /auth/login(force=true)` 会先旋转新 session version，再去踢旧连接；disconnect/fanout 失败时，route 和服务端真实认证态会继续分裂
-- 注册链路本身也不是 failure-atomic：用户创建、默认 avatar 赋值、session version 旋转分三次提交
-- auth formal schema 还落后于其它较新入口：
-  - `RegisterRequest/LoginRequest/RefreshTokenRequest` 仍没有 `extra=forbid`
-  - `LoginRequest` / `RefreshTokenRequest` 也缺最基本的长度与归一化约束
-  - auth schema 的 `token_type` 默认值与真实响应大小写都还不一致
-  - `get_current_user()` 和 refresh 链在 token subject 已无效时还会把 auth-loss 暴露成 `404 USER_NOT_FOUND`
-  - username 入口没有 strip 和字符集 contract，register nickname 也没有复用资料编辑那套 strip/empty 归一化
-  - username 发现与认证语义也仍然分裂：
-    - 注册唯一性仍是 exact-case，`Alice` / `alice` 可并存
-    - `/users/search` 又是 `ILIKE`，和登录认证的精确大小写匹配不是同一套 identity contract
-- 平台级保护边界也还没成熟：
-  - rate limiter 只按 `client_host` 建 key，共享 NAT 下多用户会互相影响
-  - 默认 store 还是单进程内存桶，多实例部署没有全局一致性
-  - 默认 CORS 组合仍是 `allow_origins='*' + allow_credentials=True`
-- app 级 auth transient 也没有 generation 边界；像 `_pending_auth_success_message` 这种提示会跨失败的 shell transition 泄漏到下一代主窗口
-- auth shell 关闭会直接取消 in-flight `login/register`，把“用户取消”与“后端已接受认证但本地 commit 未完成”混成同一类
-- `login/register` 仍会在新 auth context 真正确认前就先做 destructive local reset，说明 auth commit boundary 还没收口
-- 主窗口里的“认证成功”提示先于 post-auth warmup / sync / connect；auth committed、shell visible、runtime ready 仍不是三层清晰语义
-- `login/register` 甚至会先把新 token 写进全局 HTTP client，再去做本地持久化；一旦持久化失败，UI 和传输层会立刻分裂
-- relogin 路径里，重新认证发生在 runtime rebuild 之前，新账号 user context 会先写进一批刚 close 过的旧 singleton
-- 多个 manager 的 `close()` 也不会清掉 auth-scoped user state，说明“closed runtime”并不等于“未认证空白 runtime”
-- best-effort E2EE bootstrap 仍被串到 auth 成功提交流程里，认证 UX 会被非关键安全初始化阻塞
-- authenticated bootstrap 还存在结构性重复初始化；甚至 `AuthController` 构造本身都会 eager materialize 聊天 runtime 单例，domain 边界在构造层就已经混在一起
-- teardown 对 close 超时/异常目前只是记日志后继续，下一轮 relogin 会直接复用一批可能还没关干净的 singleton
-- websocket client 的兜底 close 还被 “ConnectionManager 对象是否存在” 这个条件挡住，transport teardown 并不可靠
-- 从对象图层面看，所谓 runtime rebuild 实际只是同一批进程级 singleton 的 close + mutate + reinitialize，而不是新的 authenticated runtime generation
-- transport 层连“首次 connect 还在飞时如何取消”和“worker thread join 超时后如何认定已关闭”都还没有成熟 contract
-- 甚至 worker-thread 回投主循环的 transport 协程也没有进入统一 bookkeeping；当前 app 只能 cancel 自己账上的一部分 task
-- shell 自己的 UI task teardown 也只是发取消，不等真正 quiescent；auth shell 和 main shell 在切换边界上仍可能有晚到 UI side effect
-- websocket transport 的 Qt queued callback 队列在 close 后也不会被清空，而 shutdown 末尾还会主动 `processEvents()` 再冲一轮 Qt 事件
-- `ConnectionManager` 自己在 close 后还会保留主循环引用，旧 generation callback 的回投能力都没有真正失效
-
-建议优先动作：
-
-- 把“authenticated runtime”做成真正可销毁、可重建的顶层对象
-- 统一 logout / forced logout / restore / relogin / shutdown 的生命周期 contract
-- 把 auth-loss 建成顶层状态机事件，不再让 HTTP、WS、UI 各自处理一半
-- 把“auth 状态切换”和“本地聊天缓存清理”拆开，不要再让认证问题直接触发本地离线数据 purge
-
-最小修复 contract：
-
-- 顶层必须先有一套单一 lifecycle state，而不是继续靠窗口存在性、`_quit_event`、`_forced_logout_in_progress`、`current_user`、WS auth 状态去拼
-- 最少应显式区分这些状态：
-  - `unauthenticated`
-  - `restoring_auth`
-  - `auth_committing`
-  - `authenticated_bootstrapping`
-  - `authenticated_ready`
-  - `auth_lost`
-  - `tearing_down_runtime`
-  - `shutting_down`
-- 每次进入新的认证代都必须生成新的 runtime generation id；任何晚到的 HTTP/WS/UI/task 回调都必须校验 generation，旧代 callback 不得再改写新代状态
-- `auth committed`、`main shell visible`、`runtime ready` 必须拆成三层正式语义，不要继续用一个 success toast 或 `CONNECTED`/`SYNC_COMPLETED` 去暗示全部完成
-- teardown 必须升级成 quiescent teardown：
-  - manager close 成功
-  - transport close 成功
-  - worker thread 真正退出
-  - Qt queued callback 清空或失效
-  - cross-thread future / UI task 不再继续落 side effect
-- 只有在旧代 runtime 真正 quiescent 之后，才允许进入下一代 `authenticate()/initialize()/show_main_window()`
-
-建议修复顺序：
-
-1. 先补顶层 lifecycle state 和 runtime generation guard
-2. 再收口 auth commit boundary：
-   - token 何时变 live
-   - 本地 auth 何时 durable
-   - 旧本地聊天状态何时允许 destructive reset
-3. 再把 teardown 做成 quiescent teardown：
-   - manager / controller / transport / worker thread / Qt queue / UI task 全部纳管
-4. 然后统一 bootstrap contract：
-   - 冷启动和 relogin 走同一套 preflight + initialize + ready 判定
-   - success feedback 不能早于正式 ready 语义
-5. 最后再清理 diagnostics、toast、tray、profile UI 这些 app-level transient
-
+- G-03 推荐顺序中的五步已经闭合：顶层 lifecycle state/runtime generation guard、auth commit boundary、quiescent teardown、统一 bootstrap contract、app-level transient 清理均已在本簇内完成一轮实现和回归覆盖。
+- 普通 logout、auth-loss forced logout、logout relogin、cold start restore 都走统一的 auth/runtime lifecycle：旧 shell 先进入 runtime transition，旧 runtime generation 失效并 quiescent，auth/session 清理完成后才允许下一代 authenticated runtime bootstrap。
+- authenticated runtime 对象图不再依赖关闭后原地复用：Chat/Message/Session/Connection/WebSocket/Sound/Call/Search/Auth 及 AuthController 持有的 auth/e2ee/user/file service singleton 会在 close 后退休，下一账号重新创建对象。
+- 本地 per-account 状态边界已补齐：ChatController 的 ICE/TURN 缓存会随 close 清空，sync cursor 通过 `replace_app_state()` 一次 batch 保存，E2EE reprovision 会一次替换本地 device bundle 并删除旧 group/history/trust 材料。
+- async teardown 已升级：ConnectionManager 的跨线程 future、WebSocketClient 的 queued callback/worker cleanup、Application 的核心 component close gate、MainWindow 的 `quiesce_async()` 都纳入旧 runtime 退场边界。
+- 验证：`client/tests` 完整通过 `376 passed`；服务端 auth 相关尾部修复完成后 `server/tests` 通过 `155 passed`。
 ### G-04：联系人域与本地搜索缓存没有统一 authoritative cache contract
 
 合并范围：
@@ -889,26 +673,18 @@
 - 聊天页做的群操作是否能同步回联系人域，还依赖联系人页是否恰好在线
 - 群资料 / self-profile 正式边界本身也没有收口：
   - 建群和共享资料更新都允许空群名
-  - no-op PATCH 也会照样发 shared/self realtime 事件
-  - 空的 self-profile PATCH 还会创建空白 member metadata 并 touch shared session
-- 建群入口自身的 payload contract 也还是分裂的：
-  - 同时接受 `member_ids` 和 `members`，冲突时会静默偏向一个
+  - shared no-op PATCH 仍会照样发 shared realtime 事件
+- 建群入口自身的 payload contract 仍有剩余分裂：
+  - `member_ids` 和 `members` 两个入口名仍同时存在，虽然 schema 已拒绝冲突 payload
   - 空成员集仍能建出“只有自己”的群
-  - create/member/role/transfer/profile/self-profile 几条 schema 还都会静默吃掉未知字段
-  - `member_ids/members` 的 item 级 strip/去空/去重仍停留在 service 里
-  - `GroupMemberAdd.user_id`、`GroupTransferOwner.new_owner_id` 还是裸字符串
-  - `GroupMemberRoleUpdate.role` 也没有 schema 级枚举约束
 - self-only group profile 语义和 shared group profile 语义还在互相污染：
-  - note-only 更新会推进 shared session `updated_at`
-  - `my_group_nickname` 还会错误扇出 shared `group_profile_update`
   - shared `members[]` 甚至会把每个成员的私有 `group_nickname` 一起广播出去
-  - `/groups/{id}/me` 这种 self-scoped mutation 还会直接返回完整 shared group snapshot
   - shared `group_profile_update` payload 里甚至仍保留 `group_note/my_group_nickname` 这种 self-scoped 字段，只是当前退化成空字符串
   - shared profile update 也还会在每次 name/announcement 变更时内联完整 `members[]` roster，把 profile delta 和成员快照混成一条事件
 - group profile / self-profile 的 canonical snapshot 也没有定格：
   - `update_group_profile()` 先向 HTTP 调用方返回一份 group snapshot
   - route 随后又重新序列化一次当前 group，单独生成 `group_profile_update` event payload
-  - `update_my_group_profile()` 也是先返回一份 full group snapshot，再单独重建 self-profile event payload
+  - `update_my_group_profile()` 已改为 self payload，但 self-profile HTTP response 与 history/realtime event 仍是 route 层分步构造
   - 同一次 mutation 的 HTTP response、history event、realtime fanout 不保证描述的是同一份状态
 - 同一次 `update_group_profile()` 里，群公告消息广播和 `group_profile_update` 还会各自使用不同时间点取得的 participant roster；两条 realtime 链甚至可能打到不同成员集
 - 群公告消息现在还会先于 `group_profile_update` 发出；客户端公告 banner / viewed-version 状态却只会在 session 侧公告 metadata 到达后更新，公告内容和公告版本因此继续分裂
@@ -990,7 +766,6 @@
 - `leave_group()` 也只回 `{\"status\":\"left\"}`，客户端只能本地删 session 再手工刷新联系人页补闭环
 - `delete_group()` 同样只回 `204`，没有任何 authoritative tombstone / removal payload
 - 桌面端甚至没有 `delete_group` 的 service/controller/UI 边界；服务端 destructive route 继续处于游离状态
-- `update_group_profile()` route 还会把 service 已经产出的 announcement side-effect 元数据静默丢掉，只回 group snapshot
 - 群成员管理窗口里的“批量加人”并不是原子操作；中途失败会留下部分成功、当前窗口却还是旧快照
 - 群成员管理窗口在打开期间不会跟随权威 group 变化，成员列表和 owner/admin 权限会逐步过期
 - 群成员管理窗口连好友候选加载失败都只会落日志，关键入口缺少正式错误反馈

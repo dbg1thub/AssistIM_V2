@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+import warnings
 
 from collections.abc import Iterable
 
 from sqlalchemy import inspect, text
 from sqlalchemy.engine import Connection, Engine
+from sqlalchemy.exc import SAWarning
 
 from app.media.default_avatars import choose_seeded_default_avatar_key, default_avatar_key_from_url
 
@@ -30,6 +32,10 @@ USER_AVATAR_COLUMN_DDL: dict[str, str] = {
 USER_PROFILE_INDEX_DDL: dict[str, str] = {
     "idx_users_email": "CREATE INDEX IF NOT EXISTS idx_users_email ON users (email)",
     "idx_users_phone": "CREATE INDEX IF NOT EXISTS idx_users_phone ON users (phone)",
+}
+
+USERNAME_INDEX_DDL: dict[str, str] = {
+    "uq_users_username_lower": "CREATE UNIQUE INDEX IF NOT EXISTS uq_users_username_lower ON users (lower(username))",
 }
 
 GROUP_AVATAR_COLUMN_DDL: dict[str, str] = {
@@ -105,8 +111,20 @@ def _get_column_names(bind: Engine | Connection, table_name: str) -> set[str]:
 
 
 def _get_index_names(bind: Engine | Connection, table_name: str) -> set[str]:
-    return {index["name"] for index in inspect(bind).get_indexes(table_name)}
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", "Skipped unsupported reflection of expression-based index", SAWarning)
+        return {index["name"] for index in inspect(bind).get_indexes(table_name)}
 
+
+def _has_username_lower_index(bind: Engine | Connection) -> bool:
+    if "users" not in _get_table_names(bind):
+        return False
+    if bind.dialect.name == "sqlite":
+        row = bind.execute(
+            text("SELECT 1 FROM sqlite_master WHERE type = 'index' AND tbl_name = 'users' AND name = 'uq_users_username_lower'")
+        ).first()
+        return row is not None
+    return "uq_users_username_lower" in _get_index_names(bind, "users")
 
 def _has_columns(bind: Engine | Connection, table_name: str, required_columns: Iterable[str]) -> bool:
     if table_name not in _get_table_names(bind):
@@ -122,7 +140,7 @@ def _has_indexes(bind: Engine | Connection, table_name: str, required_indexes: I
     return all(index_name in indexes for index_name in required_indexes)
 
 
-RUNTIME_SCHEMA_ALEMBIC_REVISION = "20260412_0010"
+RUNTIME_SCHEMA_ALEMBIC_REVISION = "20260413_0012"
 
 def _parse_revision(revision: str) -> tuple[int, int] | None:
     candidate = str(revision or "").strip()
@@ -167,6 +185,7 @@ def _has_current_runtime_schema(bind: Engine | Connection) -> bool:
         and _has_columns(bind, "session_members", SESSION_MEMBER_COLUMN_DDL)
         and _has_columns(bind, "files", FILE_COLUMN_DDL)
         and _has_indexes(bind, "users", USER_PROFILE_INDEX_DDL)
+        and _has_username_lower_index(bind)
         and _has_indexes(bind, "messages", CHAT_INDEX_DDL)
         and _has_indexes(bind, "sessions", SESSION_INDEX_DDL)
         and _has_indexes(bind, "files", FILE_INDEX_DDL)
@@ -1062,6 +1081,7 @@ def ensure_schema_compatibility(engine: Engine) -> list[str]:
         _ensure_columns(connection, "users", USER_PROFILE_COLUMN_DDL, applied)
         _ensure_columns(connection, "users", USER_AVATAR_COLUMN_DDL, applied)
         _ensure_indexes(connection, "users", USER_PROFILE_INDEX_DDL, applied)
+        _ensure_indexes(connection, "users", USERNAME_INDEX_DDL, applied)
 
         _ensure_columns(connection, "messages", MESSAGE_COLUMN_DDL, applied)
         _ensure_columns(connection, "sessions", SESSION_COLUMN_DDL, applied)
@@ -1095,19 +1115,3 @@ def describe_schema_compatibility(applied: Iterable[str]) -> str:
     if not items:
         return "Schema compatibility already up to date."
     return "Applied schema compatibility updates: " + ", ".join(items)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

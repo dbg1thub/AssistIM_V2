@@ -79,10 +79,8 @@ class MessageOut(ORMModel):
     content: str
     status: str
     created_at: str | None = None
-    timestamp: str | None = None
     updated_at: str | None = None
     is_self: bool = False
-    is_ai: bool = False
     session_type: str = ""
     session_name: str = ""
     session_avatar: str | None = None

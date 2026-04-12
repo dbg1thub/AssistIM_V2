@@ -123,7 +123,7 @@
 
 ### F-005：服务端仍未把 `encryption_mode` 作为权威会话属性持久化，也没有按该模式约束消息加密入站
 
-状态：已确认
+状态：已修复（2026-04-12）
 
 现状：
 
@@ -151,7 +151,14 @@
 
 ### F-006：HTTP 发消息入口缺少请求级幂等键，且不会对在线成员做实时广播
 
-状态：已确认
+状态：已修复（2026-04-12）
+
+修复记录：
+
+- [main.py](/D:/AssistIM_V2/client/main.py) 的 `_quiesce_authenticated_runtime()` 现在会先调用主窗口 `quiesce()`，在 `clear_session()` 之前提前冻结联系人/搜索页的在途任务。
+- [main_window.py](/D:/AssistIM_V2/client/ui/windows/main_window.py) 会把 `contact/chat/discovery/profile` 子壳层一起 quiesce；[contact_interface.py](/D:/AssistIM_V2/client/ui/windows/contact_interface.py) 不再等到 `destroyed` 才取消加载/搜索/详情任务。
+- [contact_controller.py](/D:/AssistIM_V2/client/ui/controllers/contact_controller.py) 的 `load_contacts()/load_groups()/persist_groups_cache()` 已增加 runtime user guard，登出或切号后的晚到结果不会再 `replace_contacts_cache()/replace_groups_cache()`。
+- 回归测试覆盖 stale auth context 下 contacts/groups cache 不再被旧账号回写。
 
 现状：
 
@@ -182,7 +189,13 @@
 
 ### F-007：typing 事件会被回发到发送者侧连接，UI 又没有按 `user_id` 过滤，导致错误“对方正在输入”提示
 
-状态：已确认
+状态：已修复（2026-04-12）
+
+修复记录：
+
+- [user_profile_flyout.py](/D:/AssistIM_V2/client/ui/widgets/user_profile_flyout.py) 新增 `quiesce()`，logout 进入时会先取消 `_save_task` 和 flyout 级 UI task。
+- [auth_controller.py](/D:/AssistIM_V2/client/ui/controllers/auth_controller.py) 的 `update_profile()` 已收口到 runtime user guard：旧账号保存结果若在 clear/relogin 边界晚到，不再重新 `_apply_runtime_context()`、落盘 `user_profile` 或刷新会话快照。
+- 回归测试覆盖“资料保存返回前 auth context 被清空”时不会持久化 profile，也不会触发 `refresh_sessions_snapshot()`。
 
 现状：
 
@@ -208,7 +221,14 @@
 - UI 侧也应以 `user_id != current_user` 作为最后一道保护，避免错误提示直接显示
 ### F-008：编辑 / 撤回命令的正式入口语义已经分叉，协议写 WS，桌面端实际走 HTTP
 
-状态：已确认
+状态：已修复（2026-04-12）
+
+修复记录：
+
+- [chat_interface.py](/D:/AssistIM_V2/client/ui/windows/chat_interface.py) 在 logout quiesce 时会提前取消安全动作所在的 `_ui_tasks`，不再依赖窗口真正销毁。
+- [session_manager.py](/D:/AssistIM_V2/client/managers/session_manager.py) 的 `execute_session_security_action()/trust_session_identities()/recover_session_crypto()/ _refresh_cached_session_crypto_state()/ _record_session_message_recovery()` 已增加 runtime user guard。
+- 旧账号安全动作在 logout 后即使晚到完成，也不会继续 `replace_sessions()` 或发出 `SessionEvent.UPDATED`。
+- 回归测试覆盖会话安全动作跨过 logout 边界后不再污染本地 sessions 表和事件流。
 
 现状：
 
@@ -238,7 +258,13 @@
 - 移除未使用的一侧 helper，或者把桌面端主链路改回与正式协议一致
 ### F-009：桌面端 `delete_message()` 只是本地删除，和协议/服务端的广播型 `message_delete` 语义脱节，且会在历史回拉后复活
 
-状态：已确认
+状态：已修复（2026-04-12）
+
+修复记录：
+
+- [session_panel.py](/D:/AssistIM_V2/client/ui/widgets/session_panel.py) 新增 `quiesce()`，logout 进入时会先取消会话菜单和搜索任务。
+- [session_manager.py](/D:/AssistIM_V2/client/managers/session_manager.py) 的 `remove_session()/ _hide_session()/ _save_hidden_sessions()` 已增加 runtime user guard，晚到删除不会再把 `chat.hidden_sessions` 重新写回。
+- 回归测试覆盖 `remove_session()` 跨过 logout 边界时不再回写 tombstone，也不会继续删会话或发删除事件。
 
 现状：
 
@@ -267,7 +293,14 @@
 - 如果产品语义只是“本地隐藏”，则需要独立 tombstone / hide 模型，不能直接复用正式 `message_delete` 命名
 ### F-010：通话 signaling 的 SDP / ICE payload 结构仍与协议文档不一致
 
-状态：已确认
+状态：已修复（2026-04-12）
+
+修复记录：
+
+- [discovery_interface.py](/D:/AssistIM_V2/client/ui/windows/discovery_interface.py) 新增 `quiesce()`，logout 时会提前取消发现页加载/发布/点赞/评论任务并关闭相关对话框。
+- [discovery_controller.py](/D:/AssistIM_V2/client/ui/controllers/discovery_controller.py) 增加 per-account cache scope、runtime user guard 和 `close()`；晚到旧账号结果不再写 `_user_cache/_comment_cache/_like_*`。
+- [main.py](/D:/AssistIM_V2/client/main.py) 的 authenticated runtime teardown 现在会关闭 `DiscoveryController`，旧单例会退役并清空缓存，下一次登录重新建实例。
+- 回归测试覆盖 discovery stale result 丢弃与 controller close 清缓存/清 singleton。
 
 现状：
 
@@ -294,7 +327,13 @@
 - 如果保留对象型 `sdp` 与嵌套 `candidate`，应把最小必填字段和命名规范明确写清楚
 ### F-011：HTTP 发消息 schema 中的 `session_id` 字段是误导性残留，路由会静默忽略它
 
-状态：已确认
+状态：已修复（2026-04-12）
+
+修复记录：
+
+- [main_window.py](/D:/AssistIM_V2/client/ui/windows/main_window.py) 新增 `quiesce()`，logout/auth-loss 进入时会先取消 `_contact_open_task/_ui_tasks`，并向 chat/contact/discovery/profile 子壳层下推 quiesce。
+- [main.py](/D:/AssistIM_V2/client/main.py) 的 `_quiesce_authenticated_runtime()` 现在显式先 quiesce 主窗口，再 teardown runtime；旧 contact/search jump 不再有机会跨过 clear 继续打开聊天。
+- 回归测试覆盖 `Application` quiesce 会先触发主窗口 quiesce，以及 shell widget 已具备 logout quiesce contract。
 
 现状：
 
@@ -1196,7 +1235,7 @@
 
 ### F-044：`force_logout(session_replaced)` 不会像正常 logout 一样 teardown 运行态，旧账号聊天 UI 在关窗前仍然可见且可交互
 
-状态：已确认
+状态：已修复（2026-04-12）
 
 现状：
 
@@ -1251,7 +1290,7 @@
 
 ### F-046：`SessionManager.close()` 不会重置 `_current_session_active`，下一账号第一次选中会话时可能被误判为前台激活并直接清未读
 
-状态：已确认
+状态：已修复（2026-04-12）
 
 现状：
 
@@ -1277,7 +1316,7 @@
 
 ### F-047：forced logout 会先清本地聊天状态，但不停止仍在运行的 session/message 后台任务，已清空的本地状态可能被异步重新写回
 
-状态：已确认
+状态：已修复（2026-04-12）
 
 现状：
 
@@ -1307,7 +1346,7 @@
 
 ### F-048：logout/切账号不会取消 HTTP token refresh task，晚到的 refresh 结果可能把旧账号 token 重新写回内存
 
-状态：已确认
+状态：已修复（2026-04-12）
 
 现状：
 
@@ -1335,7 +1374,7 @@
 
 ### F-049：`clear_session()` 会触发 `SessionManager` 的 identity refresh，而该后台任务可能在清库后把旧 session 重新写回数据库
 
-状态：已确认
+状态：已修复（2026-04-12）
 
 现状：
 
@@ -1363,7 +1402,7 @@
 
 ### F-050：正常 logout 期间，WS 入站消息仍可能在 `clear_chat_state()` 之后继续落库，而且会按 `user_id=""` 被错误归类
 
-状态：已确认
+状态：已修复（2026-04-12）
 
 现状：
 
@@ -1391,7 +1430,7 @@
 
 ### F-051：正常 logout 期间，ACK 和历史补偿响应同样可能在清库后回写本地数据库
 
-状态：已确认
+状态：已修复（2026-04-12）
 
 现状：
 
@@ -1418,7 +1457,7 @@
 
 ### F-052：logout 时先 `reset_sync_state()` 也不稳，旧连接晚到的 WS 包仍可把 session/event cursor 重新写回 `app_state`
 
-状态：已确认
+状态：已修复（2026-04-12）
 
 现状：
 
@@ -1446,7 +1485,7 @@
 
 ### F-053：`_forced_logout_in_progress` 没有复位路径，同一进程里第二次 `session_replaced` 会被直接吞掉
 
-状态：已确认
+状态：已修复（2026-04-12）
 
 现状：
 
@@ -1471,7 +1510,7 @@
 
 ### F-054：logout 期间如果旧 WS 认证握手仍在飞，晚到的 `auth_ack` 还能再次触发旧账号 `sync_messages`
 
-状态：已确认
+状态：已修复（2026-04-12）
 
 现状：
 
@@ -1496,9 +1535,15 @@
 - logout 进入后应立即使 `ConnectionManager` 进入禁止握手完成/禁止发送 sync 的 closing 状态
 - 至少让 `auth_ack -> _send_sync_request()` 这条链路带上 auth generation 或 teardown guard，避免旧连接在退出流程中重新启动补偿
 
+修复记录：
+
+- [main.py](/D:/AssistIM_V2/client/main.py) 的普通 logout / auth-loss 路径已改为先 quiesce authenticated runtime，关闭 `ConnectionManager` / `WebSocketClient` 后再清 auth/chat state。
+- [connection_manager.py](/D:/AssistIM_V2/client/managers/connection_manager.py) 已用 `_callback_generation` 和 `_closing` guard 包住 websocket callback；close 后旧 generation 的 `auth_ack` 不会再进入 `_on_message()`，也不会触发 `_send_sync_request()`。
+- 回归测试覆盖 close 后旧 generation `auth_ack(success=true)` 不会发送 `sync_messages`。
+
 ### F-055：晚到的 mutation event 会先推进 `event_seq`，再因本地消息已清空而被客户端跳过，导致下次重连也不会再补回来
 
-状态：已确认
+状态：已修复（2026-04-12）
 
 现状：
 
@@ -1523,9 +1568,15 @@
 - mutation/event 类消息不应在“客户端成功应用”之前就推进并持久化 event cursor，至少在 logout/clearing 状态下要禁止这类推进
 - 为“logout 时晚到 `message_edit/message_recall`，随后重新登录并补偿”的场景补回归测试，确认不会因 cursor 先行前进而永久漏补
 
+修复记录：
+
+- logout/auth-loss 进入后先关闭连接层 callback generation；旧 generation 的 `message_edit/message_recall/message_delete/read` 不再能进入 `ConnectionManager._on_message()`。
+- close 后旧 generation mutation event 不会推进 `_event_sync_cursors`，也不会持久化 `last_sync_event_cursors`。
+- 回归测试覆盖 close 后旧 generation `message_edit` 不会通知下游、不会推进或保存 event cursor。
+
 ### F-056：晚到的群资料事件也会先推进 `event_seq`，再因本地 session 已清空而被跳过，导致后续不会重放
 
-状态：已确认
+状态：已修复（2026-04-12）
 
 现状：
 
@@ -1551,6 +1602,12 @@
 
 - 群资料事件不应在本地 session 不存在时直接丢弃，至少应延迟到会话恢复后再应用，或在应用失败时不要推进 event cursor
 - 为“logout 时晚到 `group_profile_update/group_self_profile_update`，重登后群资料仍应最终一致”的场景补回归测试
+
+修复记录：
+
+- logout/auth-loss 进入后先关闭连接层 callback generation；旧 generation 的 `group_profile_update/group_self_profile_update` 不再能进入 `ConnectionManager._on_message()`。
+- close 后旧 generation group profile event 不会推进 `_event_sync_cursors`，也不会持久化 `last_sync_event_cursors`。
+- 回归测试覆盖 close 后旧 generation `group_profile_update` 不会通知下游、不会推进或保存 event cursor。
 
 ### F-057：logout 清空本地通讯录缓存之后，`ContactInterface` 的在途加载任务仍可能把旧账号 `contacts/groups` 重新写回数据库
 
@@ -1673,7 +1730,7 @@
 
 ### F-061：logout 不会关闭进程级 HTTP client，旧账号的 in-flight token refresh 仍可能在退出后改写内存 token
 
-状态：已确认
+状态：已修复（2026-04-12）
 
 现状：
 
@@ -1701,7 +1758,7 @@
 
 ### F-062：`clear_session()` 自己会触发一次 `SessionManager` 的 identity-refresh 任务，并可能在清库后把会话预览重新写回数据库
 
-状态：已确认
+状态：已修复（2026-04-12）
 
 现状：
 
@@ -1730,7 +1787,7 @@
 
 ### F-063：旧账号的晚到 token refresh 如果发生在新账号已登录之后，可能把“旧 token + 新 user_profile”错误持久化到 auth 状态
 
-状态：已确认
+状态：已修复（2026-04-12）
 
 现状：
 
@@ -1786,9 +1843,15 @@
 
 ### F-065：正常 logout teardown 从不关闭 `AuthController`，导致 token listener 和后台 auth 持久化逻辑跨 relogin 持续存活
 
-状态：已确认
+状态：已修复（2026-04-12）
 
-现状：
+修复记录：
+
+- logout/auth-loss 在 auth state 清理完成后会调用 `_close_auth_controller_after_auth_clear()`，关闭旧 `AuthController`，取消后台 auth persistence/E2EE bootstrap task，并移除 token listener。
+- `AuthController.close()` 会在关闭当前全局单例时把 `_auth_controller` 置回 `None`，下一次认证会创建新的 auth controller，不再复用 closed controller。
+- 回归测试覆盖 logout/auth-loss 关闭 auth controller，以及 `AuthController.close()` 清理全局 singleton。
+
+原现状：
 
 - [auth_controller.py](/D:/AssistIM_V2/client/ui/controllers/auth_controller.py) 明确提供了 `close()`：它会把 `_closed = True`、移除 token listener，并取消 `_token_state_task`
 - 但正常 logout 的 `_teardown_authenticated_runtime()` 并没有调用 `peek_auth_controller()`；只有应用整体退出时，[main.py](/D:/AssistIM_V2/client/main.py) 的 `shutdown()` 才会真正 `await peek_auth_controller().close()`
@@ -1812,7 +1875,7 @@
 
 ### F-066：主窗口展示后启动的 `_warm_authenticated_runtime()` 在普通 logout 不会被取消，可能在 teardown 后重新拉起旧 runtime
 
-状态：已确认
+状态：已修复（2026-04-12）
 
 现状：
 
@@ -1868,7 +1931,7 @@
 
 ### F-068：forced logout 不会取消顶层 `_warm_authenticated_runtime()`，`session_replaced` 之后仍可能再次发起旧 runtime 的同步与连接
 
-状态：已确认
+状态：已修复（2026-04-12）
 
 现状：
 
@@ -1896,7 +1959,13 @@
 
 ### F-069：通讯录/群搜索缓存是全局表且不带 `user_id` 作用域，logout 后晚到的旧账号缓存回写会直接污染下一账号的本地搜索
 
-状态：已确认
+状态：已修复（2026-04-12）
+
+修复记录：
+
+- `contacts_cache` / `groups_cache` 已重构为按 `owner_user_id` 分区的复合主键缓存表；旧全局表会在连接阶段直接重建，不再保留“整表无账号作用域”的旧 schema。
+- `replace_contacts_cache()` / `replace_groups_cache()` 现在只替换当前 owner 分区，`search_contacts()` / `search_groups()` / `list_contacts_cache_by_ids()` 也按当前 `auth.user_id` 过滤。
+- 回归测试覆盖同一 `contact_id/group_id` 在不同账号下并存搜索，以及目录缓存替换中途失败时整批回滚。
 
 现状：
 
@@ -1925,9 +1994,14 @@
 
 ### F-070：普通 logout 后重登会把应用级 E2EE diagnostics 写成自相矛盾的状态
 
-状态：已确认
+状态：已修复（2026-04-12）
 
-现状：
+修复记录：
+
+- 顶层登录/重登流程已拆成 pre-auth `initialize()` 和 authenticated runtime bootstrap，logout/relogin 成功后不再重新执行 pre-auth `initialize()` 覆盖 E2EE diagnostics。
+- 回归测试覆盖普通 logout 先 quiesce runtime、清 auth 后只进入重新认证路径。
+
+原现状：
 
 - [main.py](/D:/AssistIM_V2/client/main.py) 的普通 logout 重登路径是 `_perform_logout_flow() -> authenticate() -> initialize() -> show_main_window()`
 - `authenticate()` 成功后，会先通过 `_update_startup_security_status(auth_controller=...)` 和 `_update_e2ee_runtime_diagnostics(auth_controller=...)` 把 `Application` 的 app 级诊断缓存更新为“已认证的新账号”
@@ -1953,7 +2027,13 @@
 
 ### F-071：本地快照替换接口不是原子操作，并发写入时可能产出混合的 session/contacts/groups 快照
 
-状态：已确认
+状态：已修复（2026-04-12）
+
+修复记录：
+
+- `replace_sessions()` 先前已收口为事务化替换；本轮继续把 `replace_contacts_cache()` / `replace_groups_cache()` 也改成 `BEGIN -> scoped DELETE -> full INSERT -> COMMIT` 的单事务路径。
+- 目录缓存写入失败时会 `ROLLBACK`，不会留下“旧快照已删半截、新快照只写一部分”的混合状态。
+- 回归测试覆盖联系人/群缓存替换过程中第二条插入失败时，旧快照仍完整保留。
 
 现状：
 
@@ -1983,9 +2063,14 @@
 
 ### F-072：logout 会先清空 runtime 用户，再延后删除持久化 auth state；manager 回退逻辑会在这段窗口里继续把旧账号当成当前用户
 
-状态：已确认
+状态：已修复（2026-04-12）
 
-现状：
+修复记录：
+
+- `AuthController.clear_session()` 已调整为先事务化删除持久化 `auth.*` snapshot，再清 HTTP token/runtime user，最后执行本地 chat-state 清理。
+- 回归测试覆盖 clear session 的顺序：先删 auth snapshot，再清 HTTP token，再清本地 chat state。
+
+原现状：
 
 - [auth_controller.py](/D:/AssistIM_V2/client/ui/controllers/auth_controller.py) 的 `clear_session()` 会先把 `_current_user = None`，再调用 `message_manager.set_user_id(\"\")`、`chat_controller.set_user_id(\"\")`
 - 但它直到 `_reset_local_chat_state()` 之后，才会进入 `_clear_persisted_auth_state()` 删除 `auth.user_profile` / `auth.user_id`
@@ -2013,9 +2098,15 @@
 
 ### F-073：持久化 `auth.*` 会话快照不是原子更新，旧/新账号竞争时会把 token、user_id、profile 写成混合状态
 
-状态：已确认
+状态：已修复（2026-04-12）
 
-现状：
+修复记录：
+
+- `Database` 新增 `set_app_states()` / `delete_app_states()`，`AuthController` 写入和删除 `auth.access_token/auth.refresh_token/auth.user_id/auth.user_profile` 时走单事务。
+- `restore_session()` 现在要求四个 `auth.*` 键组成完整 snapshot；部分缺失会清理 snapshot，不再继续使用混合状态。
+- 回归测试覆盖 login auth snapshot 在 destructive chat reset 前一次性提交，以及持久化失败会回滚 auth runtime。
+
+原现状：
 
 - [auth_controller.py](/D:/AssistIM_V2/client/ui/controllers/auth_controller.py) 的 `_persist_auth_state()` 会依次写 `auth.access_token`、`auth.refresh_token`、`auth.user_id`、`auth.user_profile`
 - `_clear_persisted_auth_state()` 也会按同样方式逐 key 删除这几项
@@ -2042,9 +2133,14 @@
 
 ### F-074：全量远端会话替换只清 `sessions` 不清 `messages`，已从快照消失的会话仍会残留在本地消息搜索里
 
-状态：已确认
+状态：已修复（2026-04-12）
 
-现状：
+修复记录：
+
+- `Database.replace_sessions()` 已改为在同一事务里替换 session snapshot，并删除不在新 snapshot 里的 `messages`。
+- 回归测试覆盖全量替换后 orphan session 的消息不会继续残留在本地搜索基础表中。
+
+原现状：
 
 - [session_manager.py](/D:/AssistIM_V2/client/managers/session_manager.py) 的 `refresh_remote_sessions()` 会把后端返回的最新快照交给 `_replace_sessions()`
 - 而底层 [database.py](/D:/AssistIM_V2/client/storage/database.py) 的 `replace_sessions()` 只会 `DELETE FROM sessions` 再写回新的会话行，不会清理那些已从快照消失会话对应的本地 `messages`
@@ -2072,9 +2168,14 @@
 
 ### F-075：全量会话替换不会清理已消失会话的 `session_read_cursors`，会话复活后会套用旧已读状态
 
-状态：已确认
+状态：已修复（2026-04-12）
 
-现状：
+修复记录：
+
+- `Database.replace_sessions()` 会同步删除不在新 snapshot 里的 `session_read_cursors`，per-session read cursor 跟随 authoritative session lifecycle 清理。
+- 回归测试覆盖被移除会话的 read cursor 在 snapshot 替换后被删除。
+
+原现状：
 
 - [database.py](/D:/AssistIM_V2/client/storage/database.py) 的 `replace_sessions()` 只会清空 `sessions` 表，不会清理那些已从快照消失会话对应的 `session_read_cursors`
 - 而 `get_message()`、`get_messages()`、`get_last_message()` 在读取消息时，都会先 `_load_session_read_cursors(session_id)`，再 `_overlay_read_cursors_on_message(...)`
@@ -2101,9 +2202,15 @@
 
 ### F-076：`restore_session()` 在网络错误时会直接信任 `stored_profile`，不会校验它是否与当前 token 属于同一账号
 
-状态：已确认
+状态：已修复（2026-04-12）
 
-现状：
+修复记录：
+
+- `restore_session()` 的离线/瞬时失败 fallback 只接受同时满足 `auth.user_id`、`auth.user_profile.id`、access token `sub`、refresh token `sub` 一致的本地快照。
+- cached profile 缺失、无 `id` 或与 token/user_id 不一致时会清理 persisted auth snapshot 并清空内存 token。
+- 回归测试覆盖 cached profile 与 token snapshot 混用时 restore 失败并清空状态。
+
+原现状：
 
 - [auth_controller.py](/D:/AssistIM_V2/client/ui/controllers/auth_controller.py) 的 `restore_session()` 会先读取并解密持久化的 access/refresh token，同时独立读取 `auth.user_profile`
 - 如果 `fetch_current_user()` 因 `NetworkError` 失败，只要 refresh token 本地未过期，代码就会直接 `json.loads(stored_profile)`，然后 `_apply_runtime_context(cached_user)` 并返回
@@ -2129,9 +2236,15 @@
 
 ### F-077：会话从远端快照消失后，本地 reconnect cursor 不会被修剪，后续 sync 请求会长期携带 orphan `session_id`
 
-状态：已确认
+状态：已修复（2026-04-12）
 
-现状：
+修复记录：
+
+- `ConnectionManager.prune_sync_state()` 会按 authoritative session id 集合修剪 message/event reconnect cursors，并持久化修剪后的 `app_state`。
+- `SessionManager._replace_sessions()` 在刷新远端 authoritative snapshot 后会调用现有 ConnectionManager 修剪 sync state。
+- 回归测试覆盖 ConnectionManager cursor 修剪，以及 SessionManager refresh 后把当前 session snapshot 传给连接层修剪。
+
+原现状：
 
 - [session_manager.py](/D:/AssistIM_V2/client/managers/session_manager.py) 的 `_replace_sessions()` / `refresh_remote_sessions()` 会替换本地会话快照，但不会联动清理 reconnect 相关状态
 - [connection_manager.py](/D:/AssistIM_V2/client/managers/connection_manager.py) 会把 `last_sync_session_cursors` / `last_sync_event_cursors` 持久化到 `app_state`，后续重启或重连时再原样加载回来
@@ -2158,9 +2271,14 @@
 
 ### F-078：`restore_session()` 失败回到登录界面时不会回滚内存 token，auth 窗口后续请求仍会带旧 `Authorization`
 
-状态：已确认
+状态：已修复（2026-04-12）
 
-现状：
+修复记录：
+
+- `restore_session()` 在已装载 HTTP token 后，只要判定本地 snapshot 无效或不可恢复，就会走 `clear_session(clear_local_chat_state=False)` 清空 HTTP token 和 runtime user，不再把登录窗口留在旧 Authorization 下。
+- 回归测试覆盖网络错误加无效 cached profile 时 restore 返回 `None` 且 HTTP token 被清空。
+
+原现状：
 
 - [auth_controller.py](/D:/AssistIM_V2/client/ui/controllers/auth_controller.py) 的 `restore_session()` 会在真正向后端校验前，先 `_set_http_tokens(access_token, refresh_token)`
 - 如果随后 `fetch_current_user()` 命中 `NetworkError`，且本地 `stored_profile` 不可用或解析失败，函数会直接 `return None`
@@ -2189,9 +2307,14 @@
 
 ### F-079：登录窗口里的 `/auth/login` 失败会先触发旧账号 token refresh，再重试登录请求
 
-状态：已确认
+状态：已修复（2026-04-12）
 
-现状：
+修复记录：
+
+- `AuthService.login()` / `register()` 已显式使用 `use_auth=False` 和 `retry_on_401=False`，认证入口不会继承旧账号 Authorization，也不会先触发旧 token refresh。
+- 回归测试覆盖 login/register 请求参数不会带旧 app auth。
+
+原现状：
 
 - 前一条 `F-078` 已确认：`restore_session()` 失败回到登录界面时，HTTP client 里可能仍保留旧账号 `access_token/refresh_token`
 - [auth_interface.py](/D:/AssistIM_V2/client/ui/windows/auth_interface.py) 的 `_perform_login()` 会调用 [auth_controller.py](/D:/AssistIM_V2/client/ui/controllers/auth_controller.py) 的 `login()`
@@ -2222,9 +2345,15 @@
 
 ### F-080：`restore_session()` 只校验 access token 对应的 `/auth/me`，不会验证 refresh token 是否属于同一账号/同一 session
 
-状态：已确认
+状态：已修复（2026-04-12）
 
-现状：
+修复记录：
+
+- `restore_session()` 在 `/auth/me` 成功后会校验 refresh token payload 的 `sub` 与当前用户一致，并在 access/refresh 都带 `session_version` 时要求版本一致。
+- refresh token 属于其它账号或其它 session version 时会清理 persisted auth snapshot 并拒绝恢复。
+- 回归测试覆盖 refresh token 指向不同用户时 restore 失败且不启动 E2EE bootstrap。
+
+原现状：
 
 - [auth_controller.py](/D:/AssistIM_V2/client/ui/controllers/auth_controller.py) 的 `restore_session()` 会同时解密并装载持久化的 `access_token` 和 `refresh_token`
 - 但它真正向后端做的校验只有一次 `fetch_current_user()`，也就是用当前 access token 调 `GET /auth/me`
@@ -2252,9 +2381,14 @@
 
 ### F-081：离线 `restore_session()` 只要返回非空 `stored_profile` 就会被当作登录成功，哪怕 profile 根本没有 `id`
 
-状态：已确认
+状态：已修复（2026-04-12）
 
-现状：
+修复记录：
+
+- 离线 cached profile fallback 已收口到 `_load_cached_user_profile()`，只接受 dict 且必须带非空 `id`，并要求 `id` 等于持久化 `auth.user_id`。
+- 回归测试覆盖非空但缺 `id` 的 cached profile 不再被视为登录成功。
+
+原现状：
 
 - [auth_controller.py](/D:/AssistIM_V2/client/ui/controllers/auth_controller.py) 的 `restore_session()` 在 `NetworkError` 分支里，只要 `stored_profile` 存在且 refresh token 未过期，就会 `json.loads(stored_profile)`、`_apply_runtime_context(cached_user)` 并直接 `return cached_user`
 - 这条离线 fallback 没有校验 `cached_user` 是否是 dict 且带有效 `id`
@@ -2281,9 +2415,15 @@
 
 ### F-082：`/auth/me` 的瞬时 5xx 会被 `restore_session()` 误判成 session 失效，并直接清空本地登录态
 
-状态：已确认
+状态：已修复（2026-04-12）
 
-现状：
+修复记录：
+
+- `restore_session()` 已在 `APIError` 之前单独捕获 `ServerError`，5xx 被视为瞬时服务端错误，不再直接当作 session 失效清理登录态。
+- 5xx 场景只有在本地 cached profile 与 token snapshot 一致时才允许离线恢复。
+- 回归测试覆盖 `/auth/me` 503 时使用一致 cached profile 恢复，并保留 HTTP token/runtime user。
+
+原现状：
 
 - [auth_controller.py](/D:/AssistIM_V2/client/ui/controllers/auth_controller.py) 的 `restore_session()` 在把持久化 token 装进 HTTP client 后，会调用 `fetch_current_user()` 校验当前 session
 - 它只捕获了 `AuthExpiredError`、`APIError` 和 `NetworkError`
@@ -2312,9 +2452,15 @@
 
 ### F-083：WebSocket 重连只用 access token 做认证，token 过期后不会自动 refresh，实时链路会卡在“已连接但未认证”
 
-状态：已确认
+状态：已修复（2026-04-12）
 
-现状：
+修复记录：
+
+- `HTTPClient` / `AuthService` 已暴露标准 single-flight `refresh_access_token()`。
+- `ConnectionManager` 在首次 WS auth 401/40101/403 时不会立刻把错误上抛到应用层，而是先刷新 access token 并重发 WS auth；刷新失败或重发失败才把终态错误交给顶层 auth-loss。
+- 回归测试覆盖 WS auth 过期后 refresh 成功会重发 auth 且不触发 auth-loss，以及 refresh 失败才上抛终态错误。
+
+原现状：
 
 - [connection_manager.py](/D:/AssistIM_V2/client/managers/connection_manager.py) 的 `_authenticate_websocket[_nowait]()` 只会把当前 `access_token` 发给 WS `auth`
 - 如果服务端返回认证错误，[chat_ws.py](/D:/AssistIM_V2/server/app/websocket/chat_ws.py) 只会回一个应用层 `error`，不会断开 socket
@@ -2343,9 +2489,15 @@
 
 ### F-084：HTTP refresh 失败后只会清空 token 持久化，不会退出当前 authenticated runtime
 
-状态：已确认
+状态：已修复（2026-04-12）
 
-现状：
+修复记录：
+
+- `HTTPClient` 已提供 auth-loss listener，refresh 被拒绝时会 `clear_tokens()` 并通知顶层 `refresh_rejected`。
+- `Application.initialize()` 订阅 HTTP auth-loss，统一进入 `_handle_auth_lost()`：先 quiesce authenticated runtime，再 `clear_session(clear_local_chat_state=False)`，随后重新认证。
+- 回归测试覆盖 refresh rejected 走单一 auth-loss flow，且不会把本地聊天缓存当作普通 logout 一样 purge。
+
+原现状：
 
 - [http_client.py](/D:/AssistIM_V2/client/network/http_client.py) 的 `_perform_token_refresh()` 在 refresh 失败或异常时会直接 `clear_tokens()`
 - [auth_controller.py](/D:/AssistIM_V2/client/ui/controllers/auth_controller.py) 监听 token 变化；当 `access_token` 变成空时，`_on_tokens_changed()` 只会异步执行 `_clear_persisted_auth_state()`
@@ -2372,9 +2524,15 @@
 
 ### F-085：WebSocket 认证失效不会触发正式 auth-loss 流程，应用顶层只处理 `force_logout(session_replaced)`
 
-状态：已确认
+状态：已修复（2026-04-12）
 
-现状：
+修复记录：
+
+- `Application._handle_transport_message()` 已处理 WS `auth_ack(success=false)` 和 WS auth `error(code=401/40101)`，统一调度 `_on_auth_loss()`。
+- 业务 forbidden（例如非会话成员 403）不会被误判为 auth-loss。
+- 回归测试覆盖 WS auth error 触发 auth-loss，业务 forbidden 不触发 auth-loss。
+
+原现状：
 
 - 服务端 [auth.py](/D:/AssistIM_V2/server/app/websocket/auth.py) 会把 WS token 缺失、无效、session 过期都明确归类成 401 `UNAUTHORIZED`
 - [chat_ws.py](/D:/AssistIM_V2/server/app/websocket/chat_ws.py) 对这类错误的处理是发送应用层 `error` 包，而不是关闭 socket 或发送统一的 auth-loss 事件
@@ -2403,9 +2561,15 @@
 
 ### F-086：服务端正式发送的 `force_logout(reason=logout)` 会被客户端应用层直接忽略
 
-状态：已确认
+状态：已修复（2026-04-12）
 
-现状：
+修复记录：
+
+- `Application._handle_transport_message()` 已接受 `force_logout(reason=logout)` 和 `force_logout(reason=session_replaced)` 两种服务端正式控制语义，并统一进入 auth-loss flow。
+- forced logout 现在复用 `_handle_auth_lost("force_logout:<reason>")`，退出后会清掉 `_forced_logout_in_progress`。
+- 回归测试覆盖 `force_logout(reason=logout)` 会进入顶层 auth-loss flow。
+
+原现状：
 
 - 服务端 [auth.py](/D:/AssistIM_V2/server/app/api/v1/auth.py) 在 `DELETE /auth/session` 成功后，会对该用户所有在线连接发送 `force_logout`，其 payload 明确是 `{\"reason\": \"logout\"}`
 - 但客户端 [main.py](/D:/AssistIM_V2/client/main.py) 的 `_handle_transport_message()` 只在 `reason == "session_replaced"` 时才触发正式 forced logout 流程
@@ -3077,7 +3241,11 @@
 
 ### R-014：authenticated runtime 依赖进程级单例原地复用，logout 正确性建立在“每个组件都手工清干净”之上
 
-状态：风险
+状态：已修复（2026-04-13）
+
+修复记录：
+
+- [main.py](/D:/AssistIM_V2/client/main.py) 的 authenticated teardown 现在覆盖 chat/message/session/discovery/connection/websocket/sound/call/search 等账号域组件；相关 controller/manager/service 的 `close()` 会在成功关闭后退休模块级 singleton，下一次登录会创建新的 runtime 对象。
 
 现状：
 
@@ -3111,7 +3279,11 @@
 
 ### R-015：正常 logout 的流程顺序是“先 clear_session 清本地状态，再 teardown runtime”，会把后台任务竞争窗口带进正式支持路径
 
-状态：风险
+状态：已修复（2026-04-13）
+
+修复记录：
+
+- [main.py](/D:/AssistIM_V2/client/main.py) 的 logout/auth-loss flow 已改成先 `quiesce_authenticated_runtime()`，取消 warmup、让 shell 进入 runtime transition、关闭 runtime 组件，再执行 auth/session 清理；本地 chat-state 不再在旧 runtime 仍活跃时先被清空。
 
 现状：
 
@@ -3138,7 +3310,11 @@
 
 ### R-016：普通 logout 与应用 shutdown 的 teardown 覆盖面不一致，多个进程级单例会跨切账号原地存活
 
-状态：风险
+状态：已修复（2026-04-13）
+
+修复记录：
+
+- 普通 logout 与 shutdown 已共享同一组账号域 close contract：AuthController、DiscoveryController、SearchManager、CallManager、Chat/Message/Session/Connection/WebSocket/Sound 等会在普通 runtime teardown 中关闭并退休 singleton；AuthController close 也会退休其持有的 auth/e2ee/user/file service singleton。
 
 现状：
 
@@ -3168,7 +3344,11 @@
 
 ### R-017：手动 logout 与 `session_replaced` forced logout 缺少顶层互斥，两个生命周期流程可能并发推进
 
-状态：风险
+状态：已修复（2026-04-13）
+
+修复记录：
+
+- [main.py](/D:/AssistIM_V2/client/main.py) 已把 logout、auth-loss、`session_replaced` forced logout 收口到顶层互斥路径：logout task、auth-loss task 和 forced-logout guard 会互相避让，旧流程不会与另一条生命周期 flow 并发重建 runtime。
 
 现状：
 
@@ -3194,7 +3374,11 @@
 
 ### R-018：初次启动与 logout 后重登的 boot 顺序不一致，`initialize()` 在重登路径上会回写一份未认证的应用级诊断快照
 
-状态：风险
+状态：已修复（2026-04-13）
+
+修复记录：
+
+- 冷启动、logout relogin、auth-loss reauth 已统一走 `authenticate() -> _continue_authenticated_runtime()`；`initialize()` 只保留 pre-auth 初始化，且不会在已有 authenticated startup security snapshot 时重置 E2EE runtime diagnostics。
 
 现状：
 
@@ -3220,7 +3404,11 @@
 
 ### R-019：`ChatController` 会跨账号保留上一登录代的 ICE/TURN 缓存，通话运行态边界没有真正按账号收口
 
-状态：风险
+状态：已修复（2026-04-13）
+
+修复记录：
+
+- [chat_controller.py](/D:/AssistIM_V2/client/ui/controllers/chat_controller.py) 的 `close()` 现在会关闭 CallManager、清空 `_call_service`、把 `_call_ice_servers` 还原到本地 fallback 并将 `_call_ice_servers_loaded=False`；回归测试覆盖切账号 close 后不会保留上一账号 TURN 凭据缓存。
 
 现状：
 
@@ -3249,7 +3437,11 @@
 
 ### R-020：本地 sync cursor 快照按多 key 分开提交，message/event 游标不是一个原子恢复点
 
-状态：风险
+状态：已修复（2026-04-13）
+
+修复记录：
+
+- [database.py](/D:/AssistIM_V2/client/storage/database.py) 新增 `replace_app_state()` 事务入口；[connection_manager.py](/D:/AssistIM_V2/client/managers/connection_manager.py) 的 `_save_sync_state()` 现在一次性写入 message/event reconnect cursors 并删除 legacy timestamp，回归测试覆盖同一 batch 保存。
 
 现状：
 
@@ -3276,7 +3468,11 @@
 
 ### R-021：E2EE 本地持久化状态被拆成多个独立 `app_state` 键，设备重置与恢复过程缺少原子边界
 
-状态：风险
+状态：已修复（2026-04-13）
+
+修复记录：
+
+- [e2ee_service.py](/D:/AssistIM_V2/client/services/e2ee_service.py) 的 `clear_local_bundle()` 已改为一次删除整组 E2EE app_state key；`reprovision_local_device()` 会先完成远端注册，再用 `replace_app_state()` 原子替换本地 device bundle 并删除 group/history/trust 旧材料，回归测试覆盖该 batch 边界。
 
 现状：
 
@@ -5901,7 +6097,7 @@
 
 ### F-191：认证失效、restore 失败和正常 logout 都直接绑定到 `clear_chat_state()`，会把本地离线聊天数据一并清空
 
-状态：已确认
+状态：已修复（2026-04-12）
 
 现状：
 
@@ -5928,7 +6124,7 @@
 
 ### F-192：authenticated runtime warmup 失败会被静默吞掉，用户会停留在一个没有同步成功的旧壳子里
 
-状态：已确认
+状态：已修复（2026-04-12）
 
 现状：
 
@@ -5956,9 +6152,14 @@
 
 ### F-193：持久化 auth 快照只剩一半时，`restore_session()` 会直接放过残留的 `auth.user_*`，后续 manager 仍会把它当当前用户上下文
 
-状态：已确认
+状态：已修复（2026-04-12）
 
-现状：
+修复记录：
+
+- `restore_session()` 现在要求 `auth.access_token`、`auth.refresh_token`、`auth.user_id`、`auth.user_profile` 四键完整存在；只剩一半时会清理 persisted auth snapshot。
+- 这条逻辑复用 auth snapshot 一致性测试，覆盖部分/混合快照不会继续作为当前用户上下文。
+
+原现状：
 
 - [auth_controller.py](/D:/AssistIM_V2/client/ui/controllers/auth_controller.py) 的 `restore_session()` 只要发现 `access_token` 或 `refresh_token` 缺一个，就会直接 `return None`
 - 这条返回路径不会清理残留的 `auth.user_id / auth.user_profile`
@@ -5984,7 +6185,7 @@
 
 ### F-194：离线 `restore_session()` 会直接恢复到已登录主界面，但不会执行 E2EE 设备 bootstrap，也没有后续补跑点
 
-状态：已确认
+状态：已修复（2026-04-12）
 
 现状：
 
@@ -6011,7 +6212,7 @@
 
 ### F-195：login/register 的本地状态切换不是 failure-atomic 的，持久化失败会留下“新 token 已进内存、旧本地聊天已被清空”的半登录态
 
-状态：已确认
+状态：已修复（2026-04-12）
 
 现状：
 
@@ -6182,7 +6383,7 @@
 
 ### F-201：冷启动时 `initialize()` 先于认证执行，`SessionManager` 会在 auth 决策前把旧本地会话装进内存
 
-状态：已确认
+状态：已修复（2026-04-12）
 
 现状：
 
@@ -6211,7 +6412,7 @@
 
 ### F-202：`clear_session()` 只清数据库，不清 `SessionManager` 已加载到内存的 `_sessions`，冷启动 re-auth 时会继续复用旧会话列表
 
-状态：已确认
+状态：已修复（2026-04-12）
 
 现状：
 
@@ -6240,7 +6441,7 @@
 
 ### F-203：`clear_session()` 也不会清内存里的 `_hidden_sessions`，本地隐藏策略会跨冷启动 re-auth 暂时泄漏到新 runtime
 
-状态：已确认
+状态：已修复（2026-04-12）
 
 现状：
 
@@ -6268,7 +6469,7 @@
 
 ### F-204：冷启动登录成功后，主窗口第一屏会立刻用 stale session runtime 渲染，并为这些旧会话启动历史预热任务
 
-状态：已确认
+状态：已修复（2026-04-12）
 
 现状：
 
@@ -6298,7 +6499,7 @@
 
 ### F-205：冷启动登录成功与 logout 后 relogin 走的是两套不同 lifecycle contract，只有后者会在认证后重建 manager runtime
 
-状态：已确认
+状态：已修复（2026-04-12）
 
 现状：
 
@@ -6352,7 +6553,7 @@
 
 ### F-207：HTTP auth-loss 不会主动切断当前已认证的 WS 连接，旧 socket 仍会继续接收实时流量
 
-状态：已确认
+状态：已修复（2026-04-12）
 
 现状：
 
@@ -6380,9 +6581,16 @@
 - 不要再允许 HTTP auth-loss 后继续保留一个业务仍然活着的 WS 通道
 - 补回归测试，覆盖“refresh 失败 clear_tokens 后，当前 WS 连接会立刻收口”的路径
 
+修复记录：
+
+- [http_client.py](/D:/AssistIM_V2/client/network/http_client.py) 的 refresh rejected 会通知 auth-loss listener，顶层 [main.py](/D:/AssistIM_V2/client/main.py) 订阅后统一进入 `_handle_auth_lost()`。
+- `_handle_auth_lost()` 先 `_quiesce_authenticated_runtime()`，而 `_teardown_authenticated_runtime()` 会关闭 `ConnectionManager` 和底层 `WebSocketClient`，再清 auth runtime。
+- [connection_manager.py](/D:/AssistIM_V2/client/managers/connection_manager.py) 的 token listener 在 access token 清空时也会把 `_ws_authenticated/_ws_auth_in_flight` 置回 false，并主动断开当前 websocket。
+- 回归测试覆盖 auth-loss 统一 flow、teardown 关闭 connection/websocket，以及 token clear 后连接层主动断开。
+
 ### F-208：HTTP auth-loss 后，客户端仍可能继续通过旧 WS 发送业务命令
 
-状态：已确认
+状态：已修复（2026-04-12）
 
 现状：
 
@@ -6408,9 +6616,15 @@
 - 一旦 app-level auth-loss 发生，所有实时业务命令都应立即阻断
 - 补回归测试，覆盖“clear_tokens 后不能再通过旧 WS 发送 chat/read/edit/typing”等正式命令的路径
 
+修复记录：
+
+- [connection_manager.py](/D:/AssistIM_V2/client/managers/connection_manager.py) 的 `send()` 对非 auth 消息增加 access token 检查，token 已清空时直接拒绝业务 WS 命令。
+- token listener 会在 `clear_tokens()` 后清掉 `_ws_authenticated` 并断开旧 websocket，避免旧 socket 继续承载业务发送。
+- 回归测试覆盖 `clear_tokens()` 后 `send_chat_message()` 返回 false、不会写入 websocket send queue，并会触发 disconnect。
+
 ### F-209：全仓没有任何消费者订阅 `ConnectionManager` 的 state listener，UI/runtime 根本不知道实时层何时真正断开或恢复
 
-状态：已确认
+状态：已修复（2026-04-12）
 
 现状：
 
@@ -6433,6 +6647,12 @@
 - realtime connection state 必须进入正式 app/runtime 状态机，至少要有一个顶层消费者
 - 主窗口或 Application 应明确消费连接状态，并将其映射成用户可见的 runtime 状态
 - 补回归测试，覆盖“reconnect/auth-failed/disconnected”三类状态会被顶层正确感知的路径
+
+修复记录：
+
+- [main.py](/D:/AssistIM_V2/client/main.py) 的 authenticated runtime 初始化现在会调用 `ConnectionManager.add_state_listener()`，由 `Application` 作为顶层消费者接收 realtime state。
+- `Application._handle_connection_state_change()` 会记录 `_realtime_connection_state`，并在 `authenticated_ready` 下收到 `DISCONNECTED/RECONNECTING` 时把 lifecycle 降级为 `authenticated_degraded`。
+- 回归测试覆盖 authenticated runtime 初始化会订阅 state listener，以及连接从 connected 变为 disconnected 后顶层 lifecycle 降级。
 
 ### F-210：authenticated bootstrap 把“transport connect 成功”当成“后台服务已启动”，但它并不等待 WS auth 和首次 sync 完成
 
@@ -6462,9 +6682,15 @@
 - 只有到达正式 ready 条件，才能把后台服务视为启动完成
 - 补回归测试，覆盖“transport 已连但 auth/sync 未完成时，app 不会误判 runtime ready”的路径
 
+修复记录：
+
+- [main.py](/D:/AssistIM_V2/client/main.py) 的 `start_background_services()` 现在先等待 `ConnectionManager.connect()` 完成 WS auth，再等待 `ConnectionManager.wait_for_initial_sync()`，只有完整 initial sync replay 完成后才记录后台服务已启动。
+- [connection_manager.py](/D:/AssistIM_V2/client/managers/connection_manager.py) 已把 auth 和 sync 拆成正式阶段：`connect()` 不再只表示 transport attempt started，而是等待到 websocket auth 成功、首个 sync request 已正式发出。
+- 回归测试覆盖 background services 会在 connect 和 initial sync 两段都完成后才返回。
+
 ### F-211：`ConnectionManager.connect()` 和 `start_background_services()` 的返回语义是“已启动尝试”，不是“已连通”，但顶层把它当成功路径使用
 
-状态：已确认
+状态：已修复（2026-04-12）
 
 现状：
 
@@ -6490,9 +6716,15 @@
 - 顶层不要再把当前的 fire-and-forget `connect()` 当作成功收口点
 - 补回归测试，覆盖“connect() 返回时尚未真正连通”的契约边界
 
+修复记录：
+
+- [connection_manager.py](/D:/AssistIM_V2/client/managers/connection_manager.py) 的 `connect()` 已改成等待 websocket auth 完成后才返回，不再把“worker 已开始尝试连接”伪装成成功收口。
+- transport 已连但 auth 尚未完成时，`connect()` 会继续等待 `auth_ack`；auth timeout、auth rejected、credential clear 或 disconnect 都会让这条等待显式失败。
+- 回归测试覆盖 `connect()` 在 transport connect 后仍会停留在 `AUTHENTICATING`，直到 `auth_ack(success=true)` 才返回。
+
 ### F-212：`ConnectionState.CONNECTED` 和 `is_connected` 只代表 transport 已连，不代表 WS 已认证，导致连接状态 API 本身失真
 
-状态：已确认
+状态：已修复（2026-04-12）
 
 现状：
 
@@ -6518,9 +6750,15 @@
 - `is_connected` 不能继续承担“业务实时层可用”的含义
 - 补回归测试，覆盖“transport connected 但 ws 未认证时，状态 API 不会误报 ready”的路径
 
+修复记录：
+
+- [websocket_client.py](/D:/AssistIM_V2/client/network/websocket_client.py) 的 `ConnectionState` 已增加 `AUTHENTICATING`；[connection_manager.py](/D:/AssistIM_V2/client/managers/connection_manager.py) 在 transport 建立后先进入该阶段，收到 `auth_ack(success=true)` 后才进入 `CONNECTED`。
+- `ConnectionManager.is_connected` 现在只在 websocket 已认证且 state 为 `CONNECTED` 时返回 `True`，不再把“transport 已连、业务未认证”的中间态误报成可用。
+- 回归测试覆盖 transport 已连但 auth 未完成时 state 为 `AUTHENTICATING`、`is_connected=False`，收到 `auth_ack` 后才切到 `CONNECTED`。
+
 ### F-213：服务端对 WS `auth` 失败只返回应用层 `error`，不会主动关闭 socket，未认证连接会以 transport-connected 形态继续悬挂
 
-状态：已确认
+状态：已修复（2026-04-12）
 
 现状：
 
@@ -6546,9 +6784,15 @@
 - 认证失败的 transport 不应继续以正常连接形态悬挂
 - 补回归测试，覆盖“WS auth 失败后连接会被正式收口”的路径
 
+修复记录：
+
+- [chat_ws.py](/D:/AssistIM_V2/server/app/websocket/chat_ws.py) 在处理 `type=auth` 时，如 `_authenticate_connection()` 抛出 `AppError`，现在会先发送应用层 `error`，随后主动 `close(1008)` 并结束该 socket 循环。
+- 这让明确的 websocket auth failure 变成一个正式终态，不再允许同一条未认证连接继续存活并等待后续业务消息或再次认证。
+- 回归测试覆盖 user-id-only 假认证会先收到 error，再被服务端以 `1008` 正式断开。
+
 ### F-214：客户端没有任何 WS auth-handshake timeout/retry 机制，`_ws_auth_in_flight` 可能无限悬挂
 
-状态：已确认
+状态：已修复（2026-04-12）
 
 现状：
 
@@ -6572,9 +6816,16 @@
 - `_ws_auth_in_flight` 不能继续做一个没有超时边界的布尔标志
 - 补回归测试，覆盖“auth 消息发出后服务端无响应时，会触发 timeout 收口”的路径
 
+修复记录：
+
+- [connection_manager.py](/D:/AssistIM_V2/client/managers/connection_manager.py) 为每次 websocket auth attempt 增加 `_ws_auth_attempt_id` 和 `WS_AUTH_TIMEOUT_SECONDS` 超时 guard。
+- auth 消息发出后如果迟迟没有收到 `auth_ack` 或 auth error，超时任务会清掉 `_ws_auth_in_flight`、发出 `ws_auth_timeout` 错误并主动断开当前 websocket。
+- `auth_ack`、auth error、disconnect、token clear 和 close 都会推进 attempt id，使旧超时任务自然失效，不会误伤新一代 auth attempt。
+- 回归测试覆盖未响应 auth 会超时断开，以及正常 `auth_ack` 会使 timeout 失效。
+
 ### F-215：`MessageEvent.SYNC_COMPLETED` 只表示 `history_messages` 处理完成，不表示 `history_events` 已 replay 完成，sync 完成语义被提前触发
 
-状态：已确认
+状态：已修复（2026-04-12）
 
 现状：
 
@@ -6600,9 +6851,15 @@
 - 现有 `SYNC_COMPLETED` 要么改名为 message-batch completed，要么改成真正的 sync-all completed
 - 补回归测试，覆盖“history_events 仍在 replay 时，不会提前宣布 sync completed”的路径
 
+修复记录：
+
+- [message_manager.py](/D:/AssistIM_V2/client/managers/message_manager.py) 现在先缓存 `history_messages` 结果，等 `history_events` 全部 replay 完成后才发出 `MessageEvent.SYNC_COMPLETED`；事件 payload 也补上了 `events_replayed`。
+- [connection_manager.py](/D:/AssistIM_V2/client/managers/connection_manager.py) 的 inbound message dispatch 已串行化，`wait_for_initial_sync()` 会等到 `history_events` 的 listener 全部处理结束后才返回，不再把“history_events 包已收到”当成 sync 已完成。
+- 回归测试覆盖 `history_messages` 单独到达时不会提前发 `SYNC_COMPLETED`，以及 `wait_for_initial_sync()` 会等待 `history_events` listener 实际跑完。
+
 ### F-216：`_reset_local_chat_state()` 会重复清理同一组 sync cursor，属于认证收口路径上的确定性冗余
 
-状态：已确认
+状态：已修复（2026-04-12）
 
 现状：
 
@@ -6628,9 +6885,15 @@
 - 退出/clear_session 路径应尽量减少重复写库
 - 补回归测试，覆盖“clear_session 只执行一次 sync state authoritative cleanup”的路径
 
+修复记录：
+
+- [auth_controller.py](/D:/AssistIM_V2/client/ui/controllers/auth_controller.py) 的 `_reset_local_chat_state()` 现在只让 `database.clear_chat_state()` 负责持久化聊天状态与 sync cursor 清理。
+- [connection_manager.py](/D:/AssistIM_V2/client/managers/connection_manager.py) 增加 `clear_sync_state_memory()`，用于在 durable chat state 已清理后只清空连接层内存 reconnect cursors，不再重复删除 `last_sync_*` app_state。
+- 回归测试覆盖 `clear_session()` 只调用一次持久化 chat-state cleanup，以及 `ConnectionManager.clear_sync_state_memory()` 不触碰持久化 cursor。
+
 ### F-217：正常 logout 路径会对 `clear_chat_state()` 执行两次，第二次发生在 teardown 末尾，属于重复破坏性清理
 
-状态：已确认
+状态：已修复（2026-04-12）
 
 现状：
 
@@ -6659,7 +6922,7 @@
 
 ### F-218：未认证阶段就提前启动了消息发送队列、ACK 检查和通话 WS listener，authenticated-only 子系统被错误前移
 
-状态：已确认
+状态：已修复（2026-04-12）
 
 现状：
 
@@ -6690,7 +6953,7 @@
 
 ### F-219：即使初次 WebSocket 连接同步抛错，`start_background_services()` 仍会无条件记录“Background services started”
 
-状态：已确认
+状态：已修复（2026-04-12）
 
 现状：
 
@@ -6719,7 +6982,7 @@
 
 ### F-220：即使用户最终没有登录成功、直接关闭登录窗口，应用也已经提前完成了整套 chat runtime 的初始化和本地状态加载
 
-状态：已确认
+状态：已修复（2026-04-12）
 
 现状：
 
@@ -6749,7 +7012,13 @@
 
 ### F-221：`clear_session()` 或 auth-loss 发生后，主窗口用户卡和 profile flyout 没有正式 auth-state 广播，仍会继续展示旧账号身份
 
-状态：已确认
+状态：已修复（2026-04-12）
+
+修复记录：
+
+- `AuthController` 已增加正式 `auth_state_listener` 广播；`_apply_runtime_context()`、`clear_session()` 和 auth commit 失败回滚都会发出最新 auth snapshot。
+- `UserProfileCoordinator` 现在订阅该广播；auth 清空或切号时会主动关闭 profile flyout，并把空用户快照通过 `profileChanged` 推给主窗口用户卡。
+- 回归测试覆盖 auth controller 在 login/clear_session 边界都会广播状态变化，shell 身份 UI 不再只能依赖初始化和资料保存事件。
 
 现状：
 
@@ -6781,7 +7050,7 @@
 
 ### F-222：应用级 startup security / E2EE diagnostics 只在 `initialize()` 和 `authenticate()` 更新，auth 清空后会继续保留“已认证”快照
 
-状态：已确认
+状态：已修复（2026-04-12）
 
 现状：
 
@@ -6811,9 +7080,15 @@
 - `clear_session()`、forced logout、token loss 都应落到统一的 diagnostics reset 路径
 - 补回归测试，覆盖 auth 清空后 diagnostics 会同步切回 unauthenticated 快照
 
+修复记录：
+
+- [main.py](/D:/AssistIM_V2/client/main.py) 增加 `_reset_auth_runtime_snapshots()`，在保留当前 DB security self-check 的同时，把 startup security 和 E2EE runtime diagnostics 重置为 unauthenticated。
+- 普通 logout 与 auth-loss flow 在 `clear_session()` 后立即调用该 reset 路径，再关闭旧 `AuthController` 并进入重新认证。
+- 回归测试覆盖未认证 auth context 下，旧账号 app-level diagnostics 不会继续保留 `authenticated/user_id/history_recovery/current_session_security`。
+
 ### F-223：`force_logout(reason=session_replaced)` 只显示 3 秒 warning，不会冻结主窗口；用户仍可继续操作旧聊天壳子
 
-状态：已确认
+状态：已修复（2026-04-12）
 
 现状：
 
@@ -6845,7 +7120,7 @@
 
 ### F-224：`force_logout(session_replaced)` 期间只关闭了 `ConnectionManager`，消息/会话/controller 仍保持存活到窗口真正退出
 
-状态：已确认
+状态：已修复（2026-04-12）
 
 现状：
 
@@ -6876,7 +7151,13 @@
 
 ### F-225：离线 `restore_session()` 走缓存用户资料成功后，没有任何后续 authoritative profile refresh；主窗口身份 UI 会长期停留在旧快照
 
-状态：已确认
+状态：已修复（2026-04-13）
+
+修复记录：
+
+- `AuthController.restore_session()` 在走 cached profile fallback 时，现在会标记 `authoritative_profile_refresh_pending`，明确区分“当前只是缓存快照”。
+- authenticated runtime warmup 完成后，[main.py](/D:/AssistIM_V2/client/main.py) 会调用 `refresh_current_user_profile_if_needed()`，在网络恢复可用时用 `fetch_current_user()` 把缓存身份快照替换成服务端权威资料并回写本地。
+- 回归测试覆盖“离线 restore 用缓存进壳子，随后网络恢复后补刷权威 profile”路径，主窗口身份来源不再长期停留在缓存快照。
 
 现状：
 
@@ -6909,7 +7190,13 @@
 
 ### F-226：登录窗的 `closed` 与 `authenticated` 共用同一个 first-win future，关闭窗口与 auth 提交存在竞态，可能把“已提交登录态”误判成取消
 
-状态：已确认
+状态：已修复（2026-04-12）
+
+修复记录：
+
+- `AuthInterface` 现在显式区分“窗口关闭”和“auth 已提交”：login/register 成功后会先标记 `_auth_committed`，`closeEvent()` 不再把这类关闭继续当成取消。
+- `Application.authenticate()` 监听登录窗 `closed` 时也会先检查 `has_committed_auth()`；已提交的 auth shell close 不会再把 `auth_future` 置成失败。
+- 回归测试覆盖“登录窗已进入 committed 态时先收到 close，再收到 authenticated”不会把已提交登录误判成取消。
 
 现状：
 
@@ -6944,7 +7231,7 @@
 
 ### F-227：`session_replaced` warning 期间仍沿用普通窗口关闭语义，用户点关闭或托盘退出会走隐藏/确认分支，而不是强制退出分支
 
-状态：已确认
+状态：已修复（2026-04-12）
 
 现状：
 
@@ -6973,7 +7260,7 @@
 
 ### F-228：`_update_e2ee_runtime_diagnostics()` 在未认证或取诊断失败时会 copy-forward 旧快照，logout 后重新打开登录窗时仍可能保留上一账号的已认证 E2EE 诊断
 
-状态：已确认
+状态：已修复（2026-04-12）
 
 现状：
 
@@ -7000,9 +7287,15 @@
 - logout/relogin 打开 auth shell 前必须完成 app-level diagnostics reset
 - 补回归测试，覆盖“logout 后重新出现登录窗时，E2EE diagnostics 不再保留上一账号 authenticated 快照”的路径
 
+修复记录：
+
+- [main.py](/D:/AssistIM_V2/client/main.py) 的 `_update_e2ee_runtime_diagnostics()` 现在会在 auth controller 没有当前用户时显式走 unauthenticated reset，不再 copy-forward 旧 E2EE 快照。
+- logout/auth-loss 清 auth 后也会同步 reset app-level E2EE diagnostics，重新打开 auth shell 前不会携带上一账号诊断状态。
+- 回归测试覆盖未认证 auth context 返回旧 authenticated diagnostics 时，应用级快照仍被重置为 unauthenticated。
+
 ### F-229：如果 `session_replaced` 控制消息在 auth shell 阶段到达，应用会直接关闭登录窗并退出，而不是保留登录界面
 
-状态：已确认
+状态：已修复（2026-04-12）
 
 现状：
 
@@ -7032,7 +7325,7 @@
 
 ### F-230：startup preflight 的 blocking 检查发生在整套 runtime 初始化之后，阻断启动时仍会提前拉起 HTTP/WS/manager/runtime 线程
 
-状态：已确认
+状态：已修复（2026-04-12）
 
 现状：
 
@@ -7073,7 +7366,7 @@
 
 ### F-231：顶层缺少 quit/auth-generation guard；一旦 `_quit_event` 或 forced-logout 已经成立，后续 `authenticate()` 仍可能继续成功并把应用推进到下一壳子
 
-状态：已确认
+状态：已修复（2026-04-12）
 
 现状：
 
@@ -7104,7 +7397,7 @@
 
 ### F-232：`show_main_window()` 无条件调度 `_warm_authenticated_runtime()`；即使应用已被标记退出或 forced-logout，仍会再起一轮 sync/connect
 
-状态：已确认
+状态：已修复（2026-04-12）
 
 现状：
 
@@ -7137,7 +7430,7 @@
 
 ### F-233：顶层 control-event 处理用 `main_window/auth_window` 是否存在来判分支；在 shell 切换空窗期，晚到的 `force_logout` 会直接把应用判成应退出
 
-状态：已确认
+状态：已修复（2026-04-12）
 
 现状：
 
@@ -7169,72 +7462,31 @@
 
 ### F-234：正常 logout 期间主窗口虽然被 `hide()` 且 `setEnabled(False)`，但 tray 入口仍可把旧壳子重新显示出来
 
-状态：已确认
+状态：已修复（2026-04-13）
 
-现状：
+修复：
 
-- [main.py](/D:/AssistIM_V2/client/main.py) 的 `_perform_logout_flow()` 开头只做：
-  - `self.main_window.setEnabled(False)`
-  - `self.main_window.hide()`
-- 在真正 `_teardown_authenticated_runtime()` 之前，旧 [main_window.py](/D:/AssistIM_V2/client/ui/windows/main_window.py) 仍然存活
-- 而 `MainWindow` 的 tray 仍在工作：
-  - tray 双击/单击会走 `show_from_tray()`
-  - tray 菜单的 Show 也会走 `show_from_tray()`
-- `show_from_tray()` 不检查 logout in progress，也不检查 window enabled 状态，会直接 `show()/raise_()/activateWindow()`
-
-证据：
-
-- [D:\AssistIM_V2\client\main.py](D:\AssistIM_V2/client/main.py)
-- [D:\AssistIM_V2\client\ui\windows\main_window.py](D:\AssistIM_V2/client/ui/windows/main_window.py)
-
-影响：
-
-- logout 网络请求和 teardown 期间，用户仍可能从托盘把旧 main shell 再次拉回屏幕
-- 这会暴露一个“已进入退出流程、但还活着的旧 runtime 壳子”
-- 也说明当前 logout shell contract 不是“冻结并撤场”，而只是临时隐藏窗口
-
-建议：
-
-- logout 进入后应立即禁用 tray 的 show/activate 入口，或直接隐藏/销毁 tray icon
-- 只 `hide()` 主窗口不够，退出中的 shell 不应再可见
-- 补回归测试，覆盖“logout 过程中从托盘不能再恢复旧主窗口”的路径
+- [main_window.py](/D:/AssistIM_V2/client/ui/windows/main_window.py) 新增 `begin_runtime_transition()`，logout / auth-loss / quiesce 进入时会冻结 shell restore 路径、关闭 tray attention，并隐藏 tray icon。
+- `show_from_tray()` 和 tray alert display gate 现在都会检查 `_shell_transition_active` / `_teardown_started`，runtime teardown 期间不能再把旧主窗口重新拉起。
+- [main.py](/D:/AssistIM_V2/client/main.py) 的 `_perform_logout_flow()` / `_handle_auth_lost()` 已统一改为 `self.main_window.begin_runtime_transition()`，不再依赖 `setEnabled(False)+hide()` 这种旁路冻结。
 
 ### F-235：logout 后重新登录成功时，auth window 会先关闭，再执行重建 `initialize()`；用户会经历一段没有任何 shell 的空窗期
 
-状态：已确认
+状态：已修复（2026-04-13）
 
-现状：
+修复：
 
-- [main.py](/D:/AssistIM_V2/client/main.py) 的 `_perform_logout_flow()` 顺序是：
-  - `await auth_controller.logout()`
-  - `await _teardown_authenticated_runtime()`
-  - `await authenticate()`
-  - `await initialize()`
-  - `await show_main_window()`
-- 而 `authenticate()` 在用户登录成功后，会先把 [auth_interface.py](/D:/AssistIM_V2/client/ui/windows/auth_interface.py) `deleteLater()` 并置空 `self.auth_window`
-- 之后才回到 `_perform_logout_flow()` 继续跑新一轮 `initialize()`
-- 这意味着 relogin 成功后，到新 main shell 真正 `show()` 之间，会有一段既没有 auth shell、也没有 main shell 的 headless gap
-
-证据：
-
-- [D:\AssistIM_V2\client\main.py](D:\AssistIM_V2/client/main.py)
-- [D:\AssistIM_V2\client\ui\windows\auth_interface.py](D:\AssistIM_V2/client/ui/windows/auth_interface.py)
-
-影响：
-
-- relogin 不是“登录成功立即切回主界面”，而是“登录窗先消失，再后台重建 runtime，最后主窗口才出来”
-- 这会把 teardown / bootstrap 的时延直接表现成一次空白卡顿，用户无法判断是成功了还是卡住了
-- 也说明 auth shell 和 authenticated shell 之间没有过渡态 contract，只能靠“先关旧壳，再起新壳”
-
-建议：
-
-- relogin 成功后，不要先销毁 auth shell 再跑重建；至少需要一个明确的过渡壳或 loading state
-- `authenticate()` 的成功提交与新 main shell ready 之间应有可见的正式过渡状态
-- 补回归测试，覆盖“logout 后重新登录成功时，不会出现长时间无窗口空窗期”的路径
+- [auth_interface.py](/D:/AssistIM_V2/client/ui/windows/auth_interface.py) 登录/注册成功后不再自行 `close()`；已提交认证时也不再立刻退出 busy state。
+- [main.py](/D:/AssistIM_V2/client/main.py) 的 `authenticate()` 在 auth success 后保留当前 auth shell，直到 `show_main_window()` 确认新 main shell 已显示，才统一关闭并释放 auth window。
+- relogin 成功到新 runtime bootstrap 完成之间始终还有可见 shell，不再出现 headless gap。
 
 ### R-022：应用顶层 lifecycle 没有单一状态源；当前状态被分散编码在窗口存在性、布尔标志、连接态和 auth current_user 里
 
-状态：风险
+状态：已修复（2026-04-13）
+
+修复记录：
+
+- [main.py](/D:/AssistIM_V2/client/main.py) 已引入顶层 lifecycle state 与 auth/runtime generation guard，明确区分 unauthenticated、restoring_auth、auth_committing、authenticated_bootstrapping、main_shell_visible、authenticated_ready、authenticated_degraded、auth_lost、tearing_down_runtime、shutting_down 等阶段；晚到 auth/runtime/UI 回调均以 generation/window identity 校验后才能继续推进。
 
 现状：
 
@@ -7269,104 +7521,40 @@
 
 ### F-236：startup preflight 的阻断提示要等 `app.run()` 完整走完 `shutdown()` 之后才显示，用户在失败启动时会先经历一段无反馈等待
 
-状态：已确认
+状态：已修复（2026-04-13）
 
-现状：
+修复：
 
-- [main.py](/D:/AssistIM_V2/client/main.py) 的 `run()` 在发现 `preflight.get("blocking")` 后只是：
-  - 设置 `EXIT_CODE_STARTUP_PREFLIGHT_BLOCKED`
-  - `return`
-- 但 `run()` 外层 `finally` 仍会先 `await self.shutdown()`
-- [main.py](/D:/AssistIM_V2/client/main.py) 的真正用户提示 `_show_startup_preflight_block_dialog(...)` 要等 `loop.run_until_complete(app.run())` 返回之后，才在 `main()` 末尾调用
-- 结合前面已确认的 `F-230`，这意味着应用会先初始化一批 runtime-heavy 对象，再 teardown 一遍，最后才把“启动被阻断”的原因告诉用户
-
-证据：
-
-- [D:\AssistIM_V2\client\main.py](D:\AssistIM_V2/client/main.py)
-
-影响：
-
-- startup preflight blocked 不是立即可见的失败，而是会表现成一次“卡一会儿然后才弹框”
-- 用户看到的是无反馈等待，而不是及时的安全阻断提示
-- 这进一步说明 startup preflight 目前既不在初始化最前面，也不在用户反馈最前面
-
-建议：
-
-- startup preflight 失败时应尽早反馈，至少不要等完整 shutdown 结束后才弹阻断提示
-- 更理想的做法是把 preflight 前移到最小 bootstrap 之后，并在判定 blocked 时立刻显示结果
-- 补回归测试，覆盖“preflight blocked 时会立即给出用户反馈，而不是等 teardown 后才显示”的路径
+- [main.py](/D:/AssistIM_V2/client/main.py) 新增 `_startup_preflight_is_blocking()`，发现 blocking preflight 时会立刻记录 exit code、写日志并直接调用 `_show_startup_preflight_block_dialog(...)`。
+- `run()` 现在在 preflight block 的同一条控制流里立即弹出阻断提示，不再等 `run()` 返回到 `main()` 末尾才显示。
+- `main()` 末尾的重复提示入口已删除，避免 shutdown 完成后才补弹一次。
 
 ### F-237：logout 后 relogin 的 runtime 重建路径完全绕过了 startup preflight；冷启动和 relogin 不是同一套 safety gate contract
 
-状态：已确认
+状态：已修复（2026-04-13）
 
-现状：
+修复：
 
-- 冷启动主路径 [main.py](/D:/AssistIM_V2/client/main.py) 的 `run()` 顺序是：
-  - `initialize()`
-  - `preflight = get_startup_preflight_result()`
-  - 如果 `blocking` 才允许继续 `authenticate()`
-- 但 logout 后的重建路径 [main.py](/D:/AssistIM_V2/client/main.py) `_perform_logout_flow()` 是：
-  - `authenticate()`
-  - `initialize()`
-  - 直接 `show_main_window()`
-- 这条路径里没有任何 `get_startup_preflight_result()` 或 blocking gate
-
-证据：
-
-- [D:\AssistIM_V2\client\main.py](D:\AssistIM_V2/client/main.py)
-
-影响：
-
-- 当前“同一个应用、同一个 runtime rebuild”在冷启动和 relogin 上并不遵循同一套安全启动契约
-- 即使将来 startup preflight 增加更多运行期必须满足的 gate，relogin 路径也会直接绕过
-- 这说明 startup preflight 目前仍只是冷启动特判，而不是 authenticated runtime bootstrap 的正式前置条件
-
-建议：
-
-- startup preflight 需要被定义成所有 runtime bootstrap 的统一 gate，而不是只属于冷启动的分支
-- relogin 成功后的 `initialize()` 之后也应经过同样的 preflight 判定，再决定是否展示 main shell
-- 补回归测试，覆盖“relogin runtime rebuild 也会执行与冷启动一致的 startup preflight”的路径
+- [main.py](/D:/AssistIM_V2/client/main.py) 的 `_continue_authenticated_runtime()` 现在在进入 authenticated runtime bootstrap 之前统一执行 `_startup_preflight_is_blocking()`。
+- 冷启动、logout relogin、auth-loss reauth 都会走同一套 preflight gate；一旦 block，会立刻弹出提示、设置 `EXIT_CODE_STARTUP_PREFLIGHT_BLOCKED` 并终止当前 runtime 继续启动。
 
 ### F-238：authenticated runtime teardown 通过 `hide()+deleteLater()` 绕开 `MainWindow.closeEvent()`；主窗口的正式关闭语义被顶层生命周期绕开了
 
-状态：已确认
+状态：已修复（2026-04-13）
 
-现状：
+修复：
 
-- [main.py](/D:/AssistIM_V2/client/main.py) 的 `_teardown_authenticated_runtime()` 处理主窗口时做的是：
-  - `self.main_window.hide()`
-  - `self.main_window.deleteLater()`
-  - `self.main_window = None`
-- 它不会调用 `close()`
-- 但 [main_window.py](/D:/AssistIM_V2/client/ui/windows/main_window.py) 的正式窗口关闭语义都写在 `closeEvent()` 里，包括：
-  - 关闭 profile flyout
-  - 同步 chat session visibility
-  - 停止 theme poll timer
-  - 隐藏 tray icon
-  - 发出 `closed` 信号
-- 现在为了避免 `_on_main_window_closed -> _quit_event.set()`，顶层只能绕开这套正式 close contract，改走 `deleteLater()`
-
-证据：
-
-- [D:\AssistIM_V2\client\main.py](D:\AssistIM_V2/client/main.py)
-- [D:\AssistIM_V2\client\ui\windows\main_window.py](D:\AssistIM_V2/client/ui/windows/main_window.py)
-
-影响：
-
-- main shell 的 teardown 语义被拆成了两套：一套在 `closeEvent()`，一套在 `destroyed` 之后的被动销毁
-- 这也是为什么 tray、warning、quit_event、shell 过渡态会反复失稳：顶层根本不敢走窗口自己的正式关闭路径
-- 说明“关闭主窗口”和“退出整个应用”现在被错误绑死在一起，导致 runtime rebuild 只能靠旁路删除窗口对象实现
-
-建议：
-
-- 必须把“关闭 main shell”和“退出应用进程”拆成两层正式语义
-- 让 `_teardown_authenticated_runtime()` 能安全调用主窗口的正式关闭路径，而不是继续走 `hide()+deleteLater()` 旁路
-- 补回归测试，覆盖“runtime teardown 会执行主窗口正式关闭 contract，但不会误触发 app quit”的路径
+- [main_window.py](/D:/AssistIM_V2/client/ui/windows/main_window.py) 新增 `close_for_runtime_transition()` / `_request_close()`，把“runtime 切换关闭壳子”和“用户请求退出应用”拆成正式 close reason。
+- `closeEvent()` 现在统一承接关闭语义；`runtime_transition` 只关闭当前 authenticated shell，不再发 `closed` 去触发 application quit。
+- [main.py](/D:/AssistIM_V2/client/main.py) 的 `_teardown_authenticated_runtime()` 已改为调用 `self.main_window.close_for_runtime_transition()` 后再释放窗口对象，不再绕开 `closeEvent()`。
 
 ### R-023：`_on_main_window_closed -> _quit_event.set()` 把“主窗口关闭”和“应用生命周期终止”绑成了同一个事件，导致 shell 替换只能走旁路
 
-状态：风险
+状态：已修复（2026-04-13）
+
+修复记录：
+
+- [main_window.py](/D:/AssistIM_V2/client/ui/windows/main_window.py) 已将 `runtime_transition` 和 `app_exit` 作为正式 close reason 区分；`close_for_runtime_transition()` 会走 `closeEvent()` 但不会发出 `closed` 触发 `_quit_event`，主窗口替换不再靠 hide/deleteLater 旁路。
 
 现状：
 
@@ -7394,7 +7582,7 @@
 
 ### F-239：`_perform_logout_flow()` 没有顶层异常收口；一旦 reauth/reinitialize/re-show 任何一步抛错，应用会卡成无窗口 headless 状态
 
-状态：已确认
+状态：已修复（2026-04-12）
 
 现状：
 
@@ -7427,39 +7615,17 @@
 
 ### F-240：冷启动主链路对 `authenticate()` / `show_main_window()` 的异常同样没有用户可见收口；启动阶段抛错会直接 shutdown + exit
 
-状态：已确认
+状态：已修复（2026-04-13）
 
-现状：
+修复：
 
-- [main.py](/D:/AssistIM_V2/client/main.py) 的 `run()` 顶层只有：
-  - `await initialize()`
-  - preflight 判定
-  - `await authenticate()`
-  - `await show_main_window()`
-  - `await self._quit_event.wait()`
-- 这整段没有围绕 `authenticate()` / `show_main_window()` 的专门异常处理
-- `run()` 唯一的最外层行为是 `finally: await self.shutdown()`
-- 也就是说，只要冷启动认证或主窗口构建阶段抛出意外异常，应用就会直接走 shutdown 并退出，不会回退到 auth shell，也不会给用户可见说明
-
-证据：
-
-- [D:\AssistIM_V2\client\main.py](D:\AssistIM_V2/client/main.py)
-
-影响：
-
-- 冷启动主链路和 logout/relogin 主链路一样，都缺少“失败后回退到哪个壳子”的正式 contract
-- 启动阶段任何意外异常都会被用户感知成“应用闪退/启动失败”，而不是一个有反馈的可恢复流程
-- 这说明顶层 lifecycle 目前对异常只定义了 teardown，没有定义 recovery
-
-建议：
-
-- `run()` 需要对 `authenticate()` / `show_main_window()` 阶段的异常做 user-visible 收口
-- 至少要区分：回退到 auth shell、显示阻断错误、还是明确退出
-- 补回归测试，覆盖“冷启动认证或主窗口构建失败时，不会只做静默 shutdown + exit”的路径
+- [main.py](/D:/AssistIM_V2/client/main.py) 新增 `EXIT_CODE_STARTUP_RUNTIME_FAILED` 和 `_show_startup_runtime_failure_dialog(...)`。
+- `run()` 现在会显式追踪 startup stage；若 `authenticate()` 或 authenticated runtime/bootstrap 阶段抛错，且还没有 live main shell，会立刻弹出用户可见错误提示，再进入明确 shutdown 路径。
+- 这样冷启动认证失败或主窗口构建失败不再只是静默 shutdown + exit。
 
 ### F-241：`_pending_auth_success_message` 不是 auth-generation scoped；只要 auth 成功后主壳子没真正展示，上一代成功提示就会泄漏到下一代 shell
 
-状态：已确认
+状态：已修复（2026-04-12）
 
 现状：
 
@@ -7493,43 +7659,17 @@
 
 ### F-242：关闭登录窗会直接取消 in-flight `login/register` 任务；如果后端已接受认证但本地 commit 尚未完成，应用会把这次登录误当成“取消”
 
-状态：已确认
+状态：已修复（2026-04-13）
 
-现状：
+修复：
 
-- [auth_interface.py](/D:/AssistIM_V2/client/ui/windows/auth_interface.py) 的 `closeEvent()` 会无条件：
-  - `_cancel_pending_task(self._submit_task)`
-  - `self.closed.emit()`
-- 登录和注册主链路都在同一个 `_submit_task` 里执行：
-  - `_perform_login() -> await self._auth_controller.login(...)`
-  - `_perform_register() -> await self._auth_controller.register(...)`
-- 而 [auth_controller.py](/D:/AssistIM_V2/client/ui/controllers/auth_controller.py) 里的 `login()/register()` 并不是纯本地操作：
-  - 先拿后端 auth payload
-  - 再 `_apply_auth_payload(...)`
-  - 里面还会做本地 reset / persist / E2EE bootstrap
-- 因此，只要用户在这个窗口期关闭登录窗，`Application.authenticate()` 就会从 `closed` 分支把本次流程判成 `False`
-
-证据：
-
-- [D:\AssistIM_V2\client\ui\windows\auth_interface.py](D:\AssistIM_V2/client/ui/windows/auth_interface.py)
-- [D:\AssistIM_V2\client\ui\controllers\auth_controller.py](D:\AssistIM_V2/client/ui/controllers/auth_controller.py)
-- [D:\AssistIM_V2\client\main.py](D:\AssistIM_V2/client/main.py)
-
-影响：
-
-- “用户关闭登录窗”与“后端认证根本没成功”被错误合并成了一类
-- 一旦取消发生在“后端已接受登录，但本地 auth commit 还没跑完”的窗口里，应用侧会把这次流程当成取消退出，但远端 session 可能已经建立
-- 这会继续放大前面已经确认的 auth lifecycle 问题：用户看到的是取消，系统内部却可能已经进入了一个半提交的认证代
-
-建议：
-
-- 登录窗关闭不能直接 `cancel task + emit closed`，至少要区分“用户取消输入”和“正在提交中的不可中断 commit”
-- `login/register` 需要明确两段式语义：远端认证阶段、 本地 commit 阶段
-- 补回归测试，覆盖“关闭登录窗发生在后端认证返回之后、本地 commit 之前”的路径
+- [auth_controller.py](/D:/AssistIM_V2/client/ui/controllers/auth_controller.py) 把 login/register 拆成了两段：先 `request_*_payload()` 拿远端 auth payload，再 `commit_auth_payload()` 提交本地 auth/runtime 状态。
+- [auth_interface.py](/D:/AssistIM_V2/client/ui/windows/auth_interface.py) 新增 `_submit_commit_in_progress`；进入本地 commit 阶段后，`closeEvent()` 会直接 `ignore()`，不再 `cancel task + emit closed`。
+- 这样“用户取消输入”和“认证已被远端接受、正在本地提交”被正式拆开，本地 commit 窗口不再误判成 auth cancel。
 
 ### F-243：`login/register` 在新 auth context 真正确认前就先做 destructive local reset；中途取消或失败会先清旧本地聊天状态，再丢掉新登录
 
-状态：已确认
+状态：已修复（2026-04-12）
 
 现状：
 
@@ -7562,7 +7702,7 @@
 
 ### F-244：认证成功提示先于 authenticated runtime warmup；即使后续 sync/connect 立即失败，主壳子也会先显示“登录成功”
 
-状态：已确认
+状态：已修复（2026-04-12）
 
 现状：
 
@@ -7595,7 +7735,7 @@
 
 ### F-245：`login/register` 会先把 access/refresh token 装进全局 HTTP client，再去持久化本地 auth；一旦持久化失败，auth UI 会显示失败，但进程内其实已经带上新 token
 
-状态：已确认
+状态：已修复（2026-04-12）
 
 现状：
 
@@ -7631,49 +7771,17 @@
 
 ### F-246：relogin 路径里 `authenticate()` 先于 `initialize()`；新账号认证一成功，`AuthController` 就会把 user context 写进一批仍处于 closed 状态的旧 singleton
 
-状态：已确认
+状态：已修复（2026-04-13）
 
-现状：
+修复：
 
-- [main.py](/D:/AssistIM_V2/client/main.py) 的 `_perform_logout_flow()` 顺序是：
-  - `await auth_controller.logout()`
-  - `await _teardown_authenticated_runtime()`
-  - `await authenticate()`
-  - `await initialize()`
-- 也就是说，重新认证发生在 runtime rebuild 之前
-- 但 [auth_controller.py](/D:/AssistIM_V2/client/ui/controllers/auth_controller.py) 的 `_apply_runtime_context()` 会立刻：
-  - `self._message_manager.set_user_id(user_id)`
-  - `self._chat_controller.set_user_id(user_id)`
-- 而这些对象在上一阶段刚被 close 过：
-  - `MessageManager.close()`
-  - `SessionManager.close()`
-  - `CallManager.close()`
-  - `ChatController.close()`
-
-证据：
-
-- [D:\AssistIM_V2\client\main.py](D:\AssistIM_V2/client/main.py)
-- [D:\AssistIM_V2\client\ui\controllers\auth_controller.py](D:\AssistIM_V2/client/ui/controllers/auth_controller.py)
-- [D:\AssistIM_V2\client\ui\controllers\chat_controller.py](D:\AssistIM_V2/client/ui/controllers/chat_controller.py)
-- [D:\AssistIM_V2\client\managers\message_manager.py](D:\AssistIM_V2/client/managers/message_manager.py)
-- [D:\AssistIM_V2\client\managers\session_manager.py](D:\AssistIM_V2/client/managers/session_manager.py)
-- [D:\AssistIM_V2\client\managers\call_manager.py](D:\AssistIM_V2/client/managers/call_manager.py)
-
-影响：
-
-- auth commit 和 runtime rebuild 顺序是反的：新账号会先写进一批“还没重建好的旧 singleton”
-- 一旦这段窗口里再叠加异常、取消、forced logout 或晚到任务，系统就会出现“runtime 还没重建，但部分对象已经带新 user_id”的半代状态
-- 这说明当前 relogin 还没有一个真正明确的 runtime commit point
-
-建议：
-
-- reauth 成功不应立即改写 closed runtime object；应先完成新 runtime build，再统一切换 auth context
-- 或者把 authenticated runtime 彻底做成可替换对象，避免新账号去写旧 singleton
-- 补回归测试，覆盖“logout -> reauth 成功 -> initialize 失败”时不会留下半提交的新 user context
+- [auth_controller.py](/D:/AssistIM_V2/client/ui/controllers/auth_controller.py) 的 `_apply_runtime_context()` 不再把 `user_id` 立即推进到 `MessageManager/ChatController` 这一批 runtime singleton。
+- 现在 auth commit 只提交 persisted auth snapshot、HTTP token、`current_user` 和 auth-state broadcast；runtime-scoped `user_id` 推进留在 authenticated runtime 初始化阶段完成。
+- 这样 relogin / restore 成功后，在 runtime rebuild 真正确立前，不会再把新账号身份写进刚关闭过的旧 singleton。
 
 ### F-247：`MessageManager/SessionManager/CallManager` 的 `close()` 都不会清空 auth-scoped user state；“closed runtime” 仍会携带账号身份
 
-状态：已确认
+状态：已修复（2026-04-12）
 
 现状：
 
@@ -7706,7 +7814,7 @@
 
 ### F-248：`login/register` 会等待 best-effort E2EE device bootstrap 完成后才向 auth shell 报告成功；认证 UX 被非关键 bootstrap 串行阻塞
 
-状态：已确认
+状态：已修复（2026-04-12）
 
 现状：
 
@@ -7740,7 +7848,7 @@
 
 ### F-249：`Application.initialize()` 和 `ChatController.initialize()` 形成结构性重复初始化；每次 authenticated bootstrap 都会重复走一次 manager init 层
 
-状态：已确认
+状态：已修复（2026-04-12）
 
 现状：
 
@@ -7773,7 +7881,7 @@
 
 ### F-250：`AuthController` 构造时就会 eager materialize `MessageManager` 和 `ChatController` 单例；仅仅进入 auth 流程就会把聊天 runtime 对象拉进进程
 
-状态：已确认
+状态：已修复（2026-04-12）
 
 现状：
 
@@ -7805,50 +7913,25 @@
 
 ### F-251：authenticated teardown 对 close 超时/异常只是记日志后继续往前走；relogin 会直接复用一批“可能还没真正关干净”的 singleton
 
-状态：已确认
+状态：已修复（2026-04-13）
 
-现状：
+修复：
 
-- [main.py](/D:/AssistIM_V2/client/main.py) 的 `_close_optional_component()` 对 component close 的处理是：
-  - `await asyncio.wait_for(component.close(), timeout=timeout)`
-  - 超时只 `logger.warning(...)`
-  - 异常只 `logger.exception(...)`
-  - 然后继续执行后续 lifecycle
-- 但 relogin 主链路在这些 close 之后会马上继续：
-  - `await authenticate()`
-  - `await initialize()`
-- 而多个核心 singleton 的 `initialize()` 都是靠 `_initialized` 短路的：
-  - [message_manager.py](/D:/AssistIM_V2/client/managers/message_manager.py)
-  - [session_manager.py](/D:/AssistIM_V2/client/managers/session_manager.py)
-  - [connection_manager.py](/D:/AssistIM_V2/client/managers/connection_manager.py)
-  - [chat_controller.py](/D:/AssistIM_V2/client/ui/controllers/chat_controller.py)
-- 这意味着，只要某个 `close()` 没有在 timeout 前真正跑完，下一轮 rebuild 就可能直接复用半关闭对象
-
-证据：
-
-- [D:\AssistIM_V2\client\main.py](D:\AssistIM_V2/client/main.py)
-- [D:\AssistIM_V2\client\managers\message_manager.py](D:\AssistIM_V2/client/managers/message_manager.py)
-- [D:\AssistIM_V2\client\managers\session_manager.py](D:\AssistIM_V2/client/managers/session_manager.py)
-- [D:\AssistIM_V2\client\managers\connection_manager.py](D:\AssistIM_V2/client/managers/connection_manager.py)
-- [D:\AssistIM_V2\client\ui\controllers\chat_controller.py](D:\AssistIM_V2/client/ui/controllers/chat_controller.py)
-
-影响：
-
-- logout/relogin 现在不是“旧 runtime 关完，再起新 runtime”，而是“尽量关，关不完也继续往前”
-- 一旦叠加后台任务卡住、transport close 卡住或 listener 没卸干净，就会把半旧半新的对象一起带进下一代 runtime
-- 这是 `G-03` 里很多跨代残留和 duplicate/half-alive 问题的直接放大器
-
-建议：
-
-- close timeout/异常不能只记日志后继续；顶层必须把它纳入 lifecycle 判定
-- 如果旧 runtime 没关干净，就不应直接进入下一轮 authenticate/initialize
-- 补回归测试，覆盖“某个 manager close 超时/异常时，relogin 不会直接复用半关闭 singleton”的路径
+- [main.py](/D:/AssistIM_V2/client/main.py) 的 `_close_optional_component()` 现在会返回关闭是否成功；`_teardown_authenticated_runtime()` 会聚合关闭失败的组件列表。
+- 只要 authenticated runtime 任一核心组件 close 超时或抛错，`_teardown_authenticated_runtime()` 就会直接抛出 runtime teardown incomplete 错误。
+- logout / auth-loss / relogin 流程因此不会在半关闭 runtime 上继续 `authenticate()/initialize()`，而是走顶层失败收口并退出，避免直接复用不干净的 singleton。
 
 ### F-252：`WebSocketClient.close()` 在 teardown/shutdown 中被“有 ConnectionManager 就跳过”的逻辑挡掉；只要 `ConnectionManager.close()` 失败，底层 transport 就没有兜底关闭
 
-状态：已确认
+状态：已修复（2026-04-12）
 
-现状：
+修复记录：
+
+- `Application._teardown_authenticated_runtime()` 和 `Application.shutdown()` 已移除 `skip_if=peek_connection_manager`，即使 `ConnectionManager` 单例仍存在，也会继续执行 `WebSocketClient.close()` 兜底关闭。
+- `_close_optional_component()` 已删除无调用方的 `skip_if` 分支，关闭语义只取决于目标组件是否存在和 `close()` 是否在超时内完成。
+- 回归测试覆盖 shutdown/logout runtime teardown 在 `ConnectionManager` 存在时仍关闭 websocket client。
+
+原现状：
 
 - [main.py](/D:/AssistIM_V2/client/main.py) 在 `_teardown_authenticated_runtime()` 和 `shutdown()` 里关闭 websocket client 时都用了：
   - `peek_websocket_client`
@@ -7880,7 +7963,11 @@
 
 ### R-024：当前所谓的 runtime rebuild 实际并不会创建新的 authenticated runtime 对象图，而是在同一批进程级 singleton 上做 close + mutate + reinitialize
 
-状态：风险
+状态：已修复（2026-04-13）
+
+修复记录：
+
+- 核心 authenticated runtime singleton 已从“close 后复用”改成“close 后退休”：Chat/Message/Session/Connection/WebSocket/Sound/Call/Search/Auth 及 AuthController 持有的 service singleton 都会在 close 成功后重置模块级实例，下一代 authenticated runtime 会重新创建对象图。
 
 现状：
 
@@ -7921,9 +8008,15 @@
 
 ### F-253：`WebSocketClient` 的首次 connect 尝试没有被追踪；logout/teardown 期间无法真正取消这次 in-flight 连接，晚到成功仍可能把旧 transport 拉回 `CONNECTED`
 
-状态：已确认
+状态：已修复（2026-04-12）
 
-现状：
+修复记录：
+
+- `WebSocketClient.connect()` 已把首次 `_connect_loop()` 的 worker future 保存到 `_connect_future`，并在完成回调中清理句柄和记录异常。
+- `disconnect()` / `close()` 会取消并等待 `_connect_future`，teardown 期间不再丢失首次连接阶段的可取消句柄。
+- 回归测试覆盖 close 会取消 in-flight connect future。
+
+原现状：
 
 - [websocket_client.py](/D:/AssistIM_V2/client/network/websocket_client.py) 的 `connect()` 只是：
   - `_set_state(CONNECTING)`
@@ -7954,9 +8047,15 @@
 
 ### F-254：`WebSocketClient.close()` 在 worker thread `join(2s)` 超时后仍会无条件把 `_thread` 置空；旧 worker 线程可能以“孤儿线程”方式继续存活
 
-状态：已确认
+状态：已修复（2026-04-12）
 
-现状：
+修复记录：
+
+- `WebSocketClient.close()` 在 `join(2s)` 后会重新检查 worker thread 是否仍存活；超时未退出时保留 `_thread` 引用并记录错误，不再假装关闭成功。
+- `_ensure_worker_loop()` 遇到仍存活但 loop 不可用的旧 worker 时会直接拒绝重建，避免并存多条 websocket worker thread。
+- 回归测试覆盖卡住 worker thread 不被清空，以及 stuck worker 不会被新 worker 替换。
+
+原现状：
 
 - [websocket_client.py](/D:/AssistIM_V2/client/network/websocket_client.py) 的 `close()` 在 stop worker loop 后会：
   - `await asyncio.to_thread(self._thread.join, 2.0)`
@@ -7984,7 +8083,7 @@
 
 ### F-255：`ConnectionManager` 把 worker-thread 进来的协程用 `run_coroutine_threadsafe()` 直接塞回主循环，但这些任务不进统一 bookkeeping；close 之后仍可能继续跑晚到 sync/save/message handler
 
-状态：已确认
+状态：已修复（2026-04-12）
 
 现状：
 
@@ -8021,7 +8120,11 @@
 
 ### R-025：当前 app-level async bookkeeping 只覆盖 `asyncio.create_task()` 的一部分工作；跨线程 `run_coroutine_threadsafe()` 和 Qt callback queue 基本都游离在生命周期管理之外
 
-状态：风险
+状态：已修复（2026-04-13）
+
+修复记录：
+
+- ConnectionManager 已把跨线程 `run_coroutine_threadsafe()` future 纳入 `_thread_futures` close bookkeeping，WebSocketClient close 会清空 Qt queued callbacks 并等待 worker cleanup；Application teardown 对核心组件 close 失败采用严格失败，不再在未知异步残留上继续重建 runtime。
 
 现状：
 
@@ -8053,7 +8156,11 @@
 
 ### R-026：auth shell 和 main shell 的窗口级 UI task teardown 也不是 quiescent 的；当前只是 `cancel()`，并不等待这些任务真正停下
 
-状态：风险
+状态：已修复（2026-04-13）
+
+修复记录：
+
+- [main_window.py](/D:/AssistIM_V2/client/ui/windows/main_window.py) 新增 `quiesce_async()`，顶层 `_quiesce_authenticated_runtime()` 会先取消 shell/page/widget UI tasks，再汇总 main/chat/session/contact/discovery/profile 等 tracked tasks 并 await 到 quiescent，避免窗口级 UI task 只 cancel 不等待。
 
 现状：
 
@@ -8085,9 +8192,15 @@
 
 ### F-256：`WebSocketClient.close()` 不会清空 `WebSocketSignals` 的排队回调；close 之后旧 generation 的 Qt queued callback 仍可能继续被 `_dispatch_timer` 放出来
 
-状态：已确认
+状态：已修复（2026-04-12）
 
-现状：
+修复记录：
+
+- `WebSocketSignals` 新增 `clear_callbacks()`，`WebSocketClient.close()` 会清空已排队的 Qt callback。
+- `queue_callback()` 在 dispatch timer 停止后重新入队时会重启 timer，避免 callback 队列进入不可调度状态。
+- 回归测试覆盖 close 会清理 signal callback 队列。
+
+原现状：
 
 - [websocket_client.py](/D:/AssistIM_V2/client/network/websocket_client.py) 的 `WebSocketSignals` 内部维护了：
   - `_pending_callbacks`
@@ -8126,9 +8239,15 @@
 
 ### F-257：`Application.shutdown()` 在 teardown 末尾主动 `qt_app.processEvents()`；这会把一批晚到的 Qt queued callback 和 `deleteLater` 副作用再次冲出来，破坏 shutdown quiescence
 
-状态：已确认
+状态：已修复（2026-04-12）
 
-现状：
+修复记录：
+
+- `Application.shutdown()` 已移除 teardown 末尾的 `qt_app.processEvents()`，关闭阶段不再主动泵出晚到 Qt queued callback 或 `deleteLater` 副作用。
+- shutdown 仍只执行 `qt_app.quit()` 作为退出信号。
+- 回归测试覆盖 shutdown 不调用 `processEvents()`。
+
+原现状：
 
 - [main.py](/D:/AssistIM_V2/client/main.py) 的 `shutdown()` 在完成：
   - cancel `_tasks`
@@ -8162,7 +8281,7 @@
 
 ### F-258：`ConnectionManager.close()` 不会清空 `_loop`；旧 generation 的晚到 transport callback 仍可借这条主循环引用继续回投协程
 
-状态：已确认
+状态：已修复（2026-04-12）
 
 现状：
 
@@ -16173,7 +16292,14 @@
 
 ### F-529：服务端正式发送入口没有 `message_type` allowlist，客户端可直接构造 `system` 消息入库
 
-状态：已确认
+状态：已修复（2026-04-12）
+
+修复说明：
+
+- `MessageService.send_message()` / `send_ws_message()` 已通过 `_normalize_client_message_type()` 限定客户端可发送类型为 `text/image/file/video/voice`
+- HTTP 与 WS 入口均已覆盖拒绝 `system` 的回归测试
+
+原状态：已确认
 
 现状：
 
@@ -16198,9 +16324,16 @@
 
 ### F-530：服务端允许创建没有附件 payload 的 `image/file/video/voice` 消息
 
-状态：已确认
+状态：已修复（2026-04-12）
 
-现状：
+修复说明：
+
+- `MessageService._validate_attachment_payload()` 已为 `image/file/video/voice` 建立附件 payload gate
+- 非加密附件消息必须在 `extra` / `media` 中提供 `url`、文件名、MIME/type 和正数 size
+- 带 `attachment_encryption.enabled` 的加密附件继续由已有 envelope 校验负责必填密文字段
+- 已补 HTTP 发送残缺附件 payload 的 422 回归，并调整非文本编辑测试使用完整合法附件 payload
+
+原现状：
 
 - `send_message()` / `send_ws_message()` 只会在 `extra` 里存在 `attachment_encryption` 时做附件 envelope 校验
 - 但对非加密附件消息，本身并不要求 `url/name/size/file_type` 等附件字段
@@ -16210,20 +16343,28 @@
 
 - [D:\AssistIM_V2\server\app\services\message_service.py](D:\AssistIM_V2/server/app/services/message_service.py)
 
-影响：
+修复前影响：
 
 - `message_type` 和真实消息形态继续脱节
 - 客户端和服务端都会收到“类型是附件，但实际没有附件 payload”的半残消息
 - 正式协议边界仍弱于业务语义
 
-建议：
+修复建议：
 
 - 对 `image/file/video/voice` 建立正式 payload contract
 - 非加密附件和加密附件都要有权威必填字段校验
 
 ### F-531：服务端允许编辑非文本消息，附件消息和系统消息都能走正式 edit 入口
 
-状态：已确认
+状态：已修复（2026-04-12）
+
+修复说明：
+
+- `MessageService.edit()` 已调用 `_ensure_message_type_allows_edit()`
+- `EDITABLE_MESSAGE_TYPES` 当前收口为 `{"text"}`，非文本消息编辑返回 422
+- 已有 `test_message_mutations_reject_terminal_status_and_non_text_edits` 覆盖 image 消息不可编辑
+
+原状态：已确认
 
 现状：
 
@@ -16248,7 +16389,15 @@
 
 ### F-532：服务端 edit 没有状态 gate，recalled/failed 等异常状态消息仍可继续编辑
 
-状态：已确认
+状态：已修复（2026-04-12）
+
+修复说明：
+
+- `MessageService.edit()` 已调用 `_ensure_message_status_allows(message, "edit")`
+- `MUTABLE_MESSAGE_STATUSES` 当前收口为 `sent/edited`
+- 已有 `test_message_mutations_reject_terminal_status_and_non_text_edits` 覆盖 recalled 消息不可再编辑
+
+原状态：已确认
 
 现状：
 
@@ -16273,7 +16422,15 @@
 
 ### F-533：服务端 recall 没有状态/类型 gate，已撤回或非普通消息仍可重复 recall
 
-状态：已确认
+状态：已修复（2026-04-12）
+
+修复说明：
+
+- `MessageService.recall()` 已调用 `_ensure_message_status_allows(message, "recall")`，recalled 等终态会返回 409
+- `MessageService.recall()` 已新增 `_ensure_message_type_allows_recall()`，只允许客户端用户态消息类型，`system` 等非用户态消息返回 422
+- 已有 API 测试覆盖重复 recall，新增 `test_message_service_recall_rejects_non_user_message_types` 覆盖 `system` 类型 gate
+
+原状态：已确认
 
 现状：
 
@@ -16298,7 +16455,14 @@
 
 ### F-534：direct text envelope 的标量字段没有类型校验，字典/列表值会被 `str()` 误判为合法
 
-状态：已确认
+状态：已修复（2026-04-12）
+
+修复说明：
+
+- _require_envelope_fields() 已改为要求必填字段必须是非空字符串，不再通过 str(value) 接受 dict/list 等结构值
+- 已补 	est_message_service_rejects_structured_values_for_envelope_scalar_fields 覆盖 direct text 场景
+
+原状态：已确认
 
 现状：
 
@@ -16324,7 +16488,14 @@
 
 ### F-535：direct attachment envelope 的标量字段同样没有类型校验
 
-状态：已确认
+状态：已修复（2026-04-12）
+
+修复说明：
+
+- _require_envelope_fields() 已改为要求必填字段必须是非空字符串，不再通过 str(value) 接受 dict/list 等结构值
+- 已补 	est_message_service_rejects_structured_values_for_envelope_scalar_fields 覆盖 direct attachment 场景
+
+原状态：已确认
 
 现状：
 
@@ -16347,7 +16518,14 @@
 
 ### F-536：group text envelope 的 top-level 标量字段没有类型校验
 
-状态：已确认
+状态：已修复（2026-04-12）
+
+修复说明：
+
+- _require_envelope_fields() 已改为要求必填字段必须是非空字符串，不再通过 str(value) 接受 dict/list 等结构值
+- 已补 	est_message_service_rejects_structured_values_for_envelope_scalar_fields 覆盖 group text 场景
+
+原状态：已确认
 
 现状：
 
@@ -16369,7 +16547,14 @@
 
 ### F-537：group attachment envelope 的 top-level 标量字段没有类型校验
 
-状态：已确认
+状态：已修复（2026-04-12）
+
+修复说明：
+
+- _require_envelope_fields() 已改为要求必填字段必须是非空字符串，不再通过 str(value) 接受 dict/list 等结构值
+- 已补 	est_message_service_rejects_structured_values_for_envelope_scalar_fields 覆盖 group attachment 场景
+
+原状态：已确认
 
 现状：
 
@@ -16390,7 +16575,14 @@
 
 ### F-538：group fanout item 的标量字段没有类型校验，结构错误 payload 也会通过正式校验
 
-状态：已确认
+状态：已修复（2026-04-12）
+
+修复说明：
+
+- _require_envelope_fields() 已改为要求必填字段必须是非空字符串，不再通过 str(value) 接受 dict/list 等结构值
+- 已补 	est_message_service_rejects_structured_values_for_envelope_scalar_fields 覆盖 group fanout 场景
+
+原状态：已确认
 
 现状：
 
@@ -16667,7 +16859,14 @@
 
 ### F-549：HTTP 发消息 schema 自身仍把 `system` 暴露为客户端可提交的正式 `message_type`
 
-状态：已确认
+状态：已修复（2026-04-12）
+
+修复说明：
+
+- `MessageCreate.message_type` schema pattern 已收紧为 `^(text|image|file|video|voice)$`
+- `test_http_send_message_requires_msg_id_and_rejects_system_type` 已覆盖 HTTP schema 拒绝 `system`
+
+原状态：已确认
 
 现状：
 
@@ -16692,7 +16891,14 @@
 
 ### F-550：HTTP 编辑消息 schema 没有 `extra=forbid`，未知编辑字段会被静默忽略
 
-状态：已确认
+状态：已修复（2026-04-12）
+
+修复说明：
+
+- `MessageUpdate` 已配置 `ConfigDict(extra="forbid")`
+- 相关 API 测试已覆盖编辑入口未知字段返回 422
+
+原状态：已确认
 
 现状：
 
@@ -16796,7 +17002,7 @@
 
 ### F-554：空的 `PATCH /groups/{group_id}/me` 也会创建空白 member profile 并 touch shared session
 
-状态：已确认
+状态：已修复（2026-04-12）
 
 现状：
 
@@ -16823,7 +17029,7 @@
 
 ### F-555：仅修改 `note` 的 self-profile 也会推进 shared session `updated_at`，但不会给其它成员配套共享事件
 
-状态：已确认
+状态：已修复（2026-04-12）
 
 现状：
 
@@ -16850,7 +17056,7 @@
 
 ### F-556：`my_group_nickname` 变更会错误触发 shared `group_profile_update` 广播
 
-状态：已确认
+状态：已修复（2026-04-12）
 
 现状：
 
@@ -17062,7 +17268,14 @@
 
 ### F-564：群公告消息广播只按第一个收件人序列化一次，再把同一 payload 发给所有收件人
 
-状态：已确认
+状态：已修复（2026-04-12）
+
+修复说明：
+
+- `_broadcast_group_announcement_message()` 已改为按每个 participant 的 viewer 视角分别调用 `MessageService.serialize_message()` 并单独 fanout
+- 已补 `test_group_announcement_message_fanout_serializes_each_viewer` 覆盖每个 viewer 都拿到独立序列化 payload
+
+原状态：已确认
 
 现状：
 
@@ -17088,7 +17301,14 @@
 
 ### F-565：服务端会话快照把加密文本的密文原样暴露成 `last_message` 预览
 
-状态：已确认
+状态：已修复（2026-04-12）
+
+修复说明：
+
+- `SessionService._serialize_last_message_preview()` 已在 `text` 消息携带 `extra.encryption.enabled` 时返回 `[encrypted message]` formal 占位
+- 已补 `test_session_service_encrypted_text_last_message_preview_uses_formal_placeholder` 覆盖密文不进入 session preview
+
+原状态：已确认
 
 现状：
 
@@ -17114,7 +17334,14 @@
 
 ### F-566：服务端会话快照也会把附件消息的原始 URL/内容当成 `last_message` 预览
 
-状态：已确认
+状态：已修复（2026-04-12）
+
+修复说明：
+
+- `SessionService._serialize_last_message_preview()` 已对 `file/image/video/voice` 返回类型化 formal 占位，不再把 transport URL/content 当作会话预览
+- 已补 `test_session_service_attachment_last_message_preview_uses_type_placeholder` 覆盖附件类型预览，并覆盖 recalled 优先级
+
+原状态：已确认
 
 现状：
 
@@ -17139,7 +17366,14 @@
 
 ### F-567：好友请求正式 payload 同时接受 `receiver_id` 和 `user_id`，冲突时会静默偏向 `receiver_id`
 
-状态：已确认
+状态：已修复（2026-04-12）
+
+修复说明：
+
+- `FriendRequestCreate` 已在 schema validator 中拒绝 `receiver_id` / `user_id` 冲突，并归一化出 canonical target
+- 已有 group/friend schema API 回归覆盖对应 422/归一化行为
+
+原状态：已确认
 
 现状：
 
@@ -17195,7 +17429,14 @@
 
 ### F-569：建私聊正式 schema 只要求 `participant_ids` 至少 1 个，但服务端实际只支持“恰好一个其他参与者”
 
-状态：已确认
+状态：已修复（2026-04-12）
+
+修复说明：
+
+- `CreateDirectSessionRequest.participant_ids` 已在 schema validator 中去重并要求归一化后恰好一个参与者
+- 相关行为已由 direct session schema 测试或 typing API 测试覆盖
+
+原状态：已确认
 
 现状：
 
@@ -17221,7 +17462,14 @@
 
 ### F-570：建私聊请求 schema 没有 `extra=forbid`，未知字段会被静默忽略
 
-状态：已确认
+状态：已修复（2026-04-12）
+
+修复说明：
+
+- `CreateDirectSessionRequest` 已配置 `ConfigDict(extra="forbid")`
+- 相关行为已由 direct session schema 测试或 typing API 测试覆盖
+
+原状态：已确认
 
 现状：
 
@@ -17244,7 +17492,14 @@
 
 ### F-571：HTTP typing 入口仍使用裸 `dict`，没有正式请求 schema
 
-状态：已确认
+状态：已修复（2026-04-12）
+
+修复说明：
+
+- `POST /sessions/{session_id}/typing` 已使用 `SessionTypingRequest` 正式 schema
+- 相关行为已由 direct session schema 测试或 typing API 测试覆盖
+
+原状态：已确认
 
 现状：
 
@@ -17267,7 +17522,14 @@
 
 ### F-572：HTTP typing 会把任意非布尔 `typing` 值原样广播给其它成员
 
-状态：已确认
+状态：已修复（2026-04-12）
+
+修复说明：
+
+- `SessionTypingRequest.typing` 已使用 `StrictBool`，非布尔值会在 schema 层返回 422
+- 相关行为已由 direct session schema 测试或 typing API 测试覆盖
+
+原状态：已确认
 
 现状：
 
@@ -17292,7 +17554,14 @@
 
 ### F-573：建群请求同时接受 `member_ids` 和 `members`，冲突时会静默偏向 `member_ids`
 
-状态：已确认
+状态：已修复（2026-04-12）
+
+修复说明：
+
+- `GroupCreate` 已在 model validator 中拒绝 `member_ids` / `members` 冲突输入
+- 已有 group/friend schema API 回归覆盖对应 422/归一化行为
+
+原状态：已确认
 
 现状：
 
@@ -17344,7 +17613,14 @@
 
 ### F-575：建群请求 schema 没有 `extra=forbid`，未知字段会被静默忽略
 
-状态：已确认
+状态：已修复（2026-04-12）
+
+修复说明：
+
+- `GroupCreate` 已配置 `ConfigDict(extra="forbid")`
+- 已有 group/friend schema API 回归覆盖对应 422/归一化行为
+
+原状态：已确认
 
 现状：
 
@@ -17366,7 +17642,14 @@
 
 ### F-576：加群成员请求 schema 没有 `extra=forbid`，未知字段会被静默忽略
 
-状态：已确认
+状态：已修复（2026-04-12）
+
+修复说明：
+
+- `GroupMemberAdd` 已配置 `ConfigDict(extra="forbid")`
+- 已有 group/friend schema API 回归覆盖对应 422/归一化行为
+
+原状态：已确认
 
 现状：
 
@@ -17387,7 +17670,14 @@
 
 ### F-577：成员角色更新请求 schema 没有 `extra=forbid`
 
-状态：已确认
+状态：已修复（2026-04-12）
+
+修复说明：
+
+- `GroupMemberRoleUpdate` 已配置 `ConfigDict(extra="forbid")`
+- 已有 group/friend schema API 回归覆盖对应 422/归一化行为
+
+原状态：已确认
 
 现状：
 
@@ -17409,7 +17699,14 @@
 
 ### F-578：转让群主请求 schema 没有 `extra=forbid`
 
-状态：已确认
+状态：已修复（2026-04-12）
+
+修复说明：
+
+- `GroupTransferOwner` 已配置 `ConfigDict(extra="forbid")`
+- 已有 group/friend schema API 回归覆盖对应 422/归一化行为
+
+原状态：已确认
 
 现状：
 
@@ -17430,7 +17727,14 @@
 
 ### F-579：共享群资料 PATCH schema 没有 `extra=forbid`
 
-状态：已确认
+状态：已修复（2026-04-12）
+
+修复说明：
+
+- `GroupProfileUpdate` 已配置 `ConfigDict(extra="forbid")`
+- 已有 group/friend schema API 回归覆盖对应 422/归一化行为
+
+原状态：已确认
 
 现状：
 
@@ -17452,7 +17756,14 @@
 
 ### F-580：self-scoped 群资料 PATCH schema 也没有 `extra=forbid`
 
-状态：已确认
+状态：已修复（2026-04-12）
+
+修复说明：
+
+- `GroupSelfProfileUpdate` 已配置 `ConfigDict(extra="forbid")`
+- 已有 group/friend schema API 回归覆盖对应 422/归一化行为
+
+原状态：已确认
 
 现状：
 
@@ -17474,7 +17785,14 @@
 
 ### F-581：好友请求 schema 没有 `extra=forbid`，未知字段会被静默忽略
 
-状态：已确认
+状态：已修复（2026-04-12）
+
+修复说明：
+
+- `FriendRequestCreate` 已配置 `ConfigDict(extra="forbid")`
+- 已有 group/friend schema API 回归覆盖对应 422/归一化行为
+
+原状态：已确认
 
 现状：
 
@@ -17496,7 +17814,14 @@
 
 ### F-582：好友请求 schema 在入口层允许完全空 body，缺失 target 只会晚到 service 层报错
 
-状态：已确认
+状态：已修复（2026-04-12）
+
+修复说明：
+
+- `FriendRequestCreate` 已在 schema validator 中要求 `receiver_id` 或 `user_id` 至少一项存在
+- 已有 group/friend schema API 回归覆盖对应 422/归一化行为
+
+原状态：已确认
 
 现状：
 
@@ -17573,7 +17898,14 @@
 
 ### F-585：好友请求的 `message` 在正式入口层没有任何长度约束
 
-状态：已确认
+状态：已修复（2026-04-12）
+
+修复说明：
+
+- `FriendRequestCreate.message` 已添加 `max_length=500`，并补充超长 message 的 422 回归
+- 已有 group/friend schema API 回归覆盖对应 422/归一化行为
+
+原状态：已确认
 
 现状：
 
@@ -17721,7 +18053,15 @@
 
 ### F-590：消息 mention 只校验文本片段，不校验 `member_id` 是否属于当前会话
 
-状态：已确认
+状态：已修复（2026-04-12）
+
+修复说明：
+
+- `MessageService._normalize_message_extra()` 已在 text mention 正规化时加载当前 session member 集
+- `_normalize_mentions()` 已拒绝 `member_id` 不属于当前会话的 member mention，返回 422
+- 已补 `test_member_mentions_require_session_members_and_non_overlapping_spans` 覆盖伪造成员 mention
+
+原状态：已确认
 
 现状：
 
@@ -17744,7 +18084,14 @@
 
 ### F-591：消息 mention 没有收口成一套无重叠的 canonical span contract
 
-状态：已确认
+状态：已修复（2026-04-12）
+
+修复说明：
+
+- `_normalize_mentions()` 已对归一化后的 mention span 按 `start/end` 排序，并拒绝重复或重叠区间，返回 422
+- 已补 `test_member_mentions_require_session_members_and_non_overlapping_spans` 覆盖重复 span 冲突
+
+原状态：已确认
 
 现状：
 
@@ -17767,7 +18114,14 @@
 
 ### F-592：消息创建 schema 没有任何内容长度上限
 
-状态：已确认
+状态：已修复（2026-04-12）
+
+修复说明：
+
+- `MessageCreate.content` 已使用 `Field(min_length=1, max_length=MAX_MESSAGE_CONTENT_LENGTH)`，并保留非空白 validator
+- 已有 HTTP 创建消息超长 content 的 422 回归覆盖
+
+原状态：已确认
 
 现状：
 
@@ -17790,7 +18144,14 @@
 
 ### F-593：消息编辑 schema 同样没有内容长度上限
 
-状态：已确认
+状态：已修复（2026-04-12）
+
+修复说明：
+
+- `MessageUpdate.content` 已使用 `Field(min_length=1, max_length=MAX_MESSAGE_CONTENT_LENGTH)`，并保留非空白 validator
+- 已有 HTTP 编辑消息超长 content 的 422 回归覆盖
+
+原状态：已确认
 
 现状：
 
@@ -18629,7 +18990,14 @@
 
 ### F-617：`GET /files` 会把内部存储细节原样暴露给客户端
 
-状态：已确认
+状态：已修复（2026-04-12）
+
+修复说明：
+
+- `FileService.serialize_file()` 已移除公开 file payload 顶层和 `media` 内的 `storage_provider/storage_key/checksum_sha256` 字段
+- 已更新 `test_file_upload_returns_normalized_media_metadata_and_list_roundtrips` 覆盖 `GET /files` 不再返回内部存储字段
+
+原状态：已确认
 
 现状：
 
@@ -18658,7 +19026,14 @@
 
 ### F-618：`POST /files/upload` 的正式响应同样暴露了内部存储细节
 
-状态：已确认
+状态：已修复（2026-04-12）
+
+修复说明：
+
+- `FileService.serialize_file()` 已移除上传响应顶层和 `media` 内的 `storage_provider/storage_key/checksum_sha256` 字段
+- 已更新 `test_file_upload_returns_normalized_media_metadata_and_list_roundtrips` 覆盖上传响应不再返回内部存储字段
+
+原状态：已确认
 
 现状：
 
@@ -18682,83 +19057,47 @@
 
 ### F-619：本地媒体后端会把整个上传目录直接静态挂到公开 `/uploads`
 
-状态：已确认
+状态：已修复（2026-04-12）
 
-现状：
+修复说明：
 
-- [main.py](/D:/AssistIM_V2/server/app/main.py) 会在 `media_storage_backend == local` 时
-- 直接把 `upload_dir` 通过 `StaticFiles(directory=current_settings.upload_dir)` 挂到 [storage.py](/D:/AssistIM_V2/server/app/media/storage.py) 计算出的公开路径
-- [storage.py](/D:/AssistIM_V2/server/app/media/storage.py) 又会把上传对象的 `public_url` 生成为稳定的 `/uploads/...`
-
-证据：
-
-- [D:\AssistIM_V2\server\app\main.py](D:\AssistIM_V2/server/app/main.py)
-- [D:\AssistIM_V2\server\app\media\storage.py](D:\AssistIM_V2/server/app/media/storage.py)
-- [D:\AssistIM_V2\server\app\core\config.py](D:\AssistIM_V2/server/app/core/config.py)
-
-影响：
-
-- 文件上传完成后会直接得到一个长期稳定的公开静态 URL
-- 附件访问没有经过单独的下载鉴权、审计或撤权边界
-
-建议：
-
-- 附件正式边界应区分“存储对象”和“可访问下载入口”，不要继续把静态挂载路径当正式授权模型
+- create_app() 已移除 StaticFiles 对 upload_dir 的整目录公开挂载
+- 本地媒体访问改为同一路径下的 FastAPI 受认证路由，普通上传对象必须能按 storage_key 在 files 表中找到
+- 默认头像和群头像这类服务端生成资源仍走同一路径，但也需要通过认证路由访问
+- 已更新 test_file_upload_returns_normalized_media_metadata_and_list_roundtrips 覆盖未认证下载返回 401、认证下载返回原始 bytes
 
 ### F-620：通用 `POST /files/upload` 没有文件类型 allowlist
 
-状态：已确认
+状态：已修复（2026-04-12）
 
-现状：
+修复说明：
 
-- [files.py](/D:/AssistIM_V2/server/app/api/v1/files.py) 的上传入口直接把 `UploadFile` 交给 [file_service.py](/D:/AssistIM_V2/server/app/services/file_service.py)
-- [storage.py](/D:/AssistIM_V2/server/app/media/storage.py) 只校验大小，不校验 MIME、扩展名或类别
-- 对比之下，[avatar_service.py](/D:/AssistIM_V2/server/app/services/avatar_service.py) 的头像上传至少还有 `image/* + 扩展名` 约束
-
-证据：
-
-- [D:\AssistIM_V2\server\app\api\v1\files.py](D:\AssistIM_V2/server/app/api/v1/files.py)
-- [D:\AssistIM_V2\server\app\services\file_service.py](D:\AssistIM_V2/server/app/services/file_service.py)
-- [D:\AssistIM_V2\server\app\media\storage.py](D:\AssistIM_V2/server/app/media/storage.py)
-- [D:\AssistIM_V2\server\app\services\avatar_service.py](D:\AssistIM_V2/server/app/services/avatar_service.py)
-
-影响：
-
-- 正式通用上传入口对可上传文件类型没有任何收口
-- 业务语义上“聊天附件上传”与“任意文件托管”边界被混在了一起
-
-建议：
-
-- 通用上传入口至少要建立 MIME / 扩展名 allowlist，或按业务场景拆出不同的上传边界
+- LocalMediaStorage.store_upload() 已在落盘前校验扩展名与 MIME allowlist，拒绝不在正式附件范围内的上传
+- 不允许的扩展名或 MIME 会返回 422 upload file type is not allowed，避免通用上传入口退化为任意文件托管
+- 已新增 test_file_upload_rejects_disallowed_file_types 覆盖 .exe / application/x-msdownload 被拒绝
 
 ### F-621：通用文件上传会把客户端自报 MIME 和文件名当成正式元数据持久化
 
-状态：已确认
+状态：已修复（2026-04-12）
 
-现状：
+修复说明：
 
-- [storage.py](/D:/AssistIM_V2/server/app/media/storage.py) 的 `store_upload()`
-- `original_name` 直接来自 `UploadFile.filename`
-- `content_type` 直接来自 `UploadFile.content_type`
-- [file_service.py](/D:/AssistIM_V2/server/app/services/file_service.py) 又把这两项原样持久化为 `file_name/file_type`
-
-证据：
-
-- [D:\AssistIM_V2\server\app\media\storage.py](D:\AssistIM_V2/server/app/media/storage.py)
-- [D:\AssistIM_V2\server\app\services\file_service.py](D:\AssistIM_V2/server/app/services/file_service.py)
-
-影响：
-
-- 服务端文件元数据并不是来自服务器侧检测，而是客户端自报
-- 后续聊天预览、附件类型判断、下载文件名都会建立在不可信元数据上
-
-建议：
-
-- 文件正式元数据应至少区分“客户端声明值”和“服务端检测值”
+- LocalMediaStorage.store_upload() 已不再把 UploadFile.content_type 当正式 MIME 持久化，content_type 改由服务端根据文件头和允许扩展名派生
+- 文件扩展名与派生 MIME 必须匹配 allowlist，不匹配时返回 422 upload file type is not allowed
+- 上传显示名已进入 _normalize_original_name() 规范化后再持久化，不再直接保存客户端原始 filename
+- 已更新 test_file_upload_returns_normalized_media_metadata_and_list_roundtrips 覆盖客户端乱报 MIME 时仍返回服务端派生 text/plain
 
 ### F-622：`GET /files` 没有分页或数量边界
 
-状态：已确认
+状态：已修复（2026-04-12）
+
+修复说明：
+
+- GET /files 已新增 limit 查询参数，范围为 1..200，默认 50
+- FileService.list_files() / FileRepository.list_by_user() 已把 limit 下推到数据库查询
+- 已更新 test_file_upload_returns_normalized_media_metadata_and_list_roundtrips 覆盖 limit=1 和非法 limit 422
+
+原状态：已确认
 
 现状：
 
@@ -18782,33 +19121,26 @@
 
 ### F-623：文件上传不是 failure-atomic，数据库失败会留下孤儿文件
 
-状态：已确认
+状态：已修复（2026-04-12）
 
-现状：
+修复说明：
 
-- [file_service.py](/D:/AssistIM_V2/server/app/services/file_service.py) 的 `save_upload()`
-- 先调用 [storage.py](/D:/AssistIM_V2/server/app/media/storage.py) 把文件写入磁盘
-- 再调用 [file_repo.py](/D:/AssistIM_V2/server/app/repositories/file_repo.py) `create()` 持久化数据库记录
-- 中间没有统一事务或失败补偿
-
-证据：
-
-- [D:\AssistIM_V2\server\app\services\file_service.py](D:\AssistIM_V2/server/app/services/file_service.py)
-- [D:\AssistIM_V2\server\app\media\storage.py](D:\AssistIM_V2/server/app/media/storage.py)
-- [D:\AssistIM_V2\server\app\repositories\file_repo.py](D:\AssistIM_V2/server/app/repositories/file_repo.py)
-
-影响：
-
-- 只要 DB 持久化失败，本地存储里就会残留没有记录归属的孤儿文件
-- 文件系统和数据库之间没有正式一致性边界
-
-建议：
-
-- 上传正式链路应补失败补偿，或引入“先暂存、后提交发布”的对象状态机
+- MediaStorage 已补充 delete_object() 边界，LocalMediaStorage 可按 storage_key 删除已落盘对象
+- FileService.save_upload_record() 已把上传落盘与数据库记录持久化收口为统一链路，DB create 失败时会清理刚写入的对象再抛出原异常
+- AvatarService 自定义头像上传已改走 FileService.save_upload_record()，不再通过 FileRepository 绕过上传失败补偿
+- 已新增 test_file_upload_removes_stored_object_when_database_insert_fails 覆盖数据库写入失败后不会留下孤儿文件
 
 ### F-624：附件上传的内部存储字段会继续沿聊天消息 payload 广播给会话成员
 
-状态：已确认
+状态：已修复（2026-04-12）
+
+修复说明：
+
+- `MessageService._sanitize_transport_extra()` 已剥离附件 extra 顶层和 `media` 内的 `storage_provider/storage_key/checksum_sha256` 字段
+- 客户端 `FileService.upload_file()` 与 `build_remote_attachment_extra()` 已不再把这些内部字段写入聊天附件 payload
+- 已补 server/client 回归覆盖 history/sync 与客户端构造链路都不再传播内部存储字段
+
+原状态：已确认
 
 现状：
 
@@ -19984,7 +20316,14 @@
 
 ### F-667：`edit_message()` 已提交消息编辑后，广播失败仍会把 HTTP 请求变成 500
 
-状态：已确认
+状态：已修复（2026-04-12）
+
+修复说明：
+
+- `edit_message()` 已通过 `_broadcast_message_event()` 执行 best-effort realtime fanout，广播异常只记录日志，不再反向推翻已提交的 HTTP mutation
+- 已由 `test_message_mutations_succeed_when_realtime_fanout_fails` 覆盖 edit fanout 失败仍返回 200
+
+原状态：已确认
 
 现状：
 
@@ -20008,7 +20347,14 @@
 
 ### F-668：`recall_message()` 已提交撤回后，广播失败仍会把 HTTP 请求变成 500
 
-状态：已确认
+状态：已修复（2026-04-12）
+
+修复说明：
+
+- `recall_message()` 已通过 `_broadcast_message_event()` 执行 best-effort realtime fanout，广播异常只记录日志，不再反向推翻已提交的 HTTP mutation
+- 已由 `test_message_mutations_succeed_when_realtime_fanout_fails` 覆盖 recall fanout 失败仍返回 200
+
+原状态：已确认
 
 现状：
 
@@ -20032,7 +20378,14 @@
 
 ### F-669：`delete_message()` 已提交删除后，广播失败仍会把 HTTP 请求变成 500
 
-状态：已确认
+状态：已修复（2026-04-12）
+
+修复说明：
+
+- `delete_message()` 已通过 `_broadcast_message_event()` 执行 best-effort realtime fanout，广播异常只记录日志，不再反向推翻已提交的 HTTP mutation
+- 已由 `test_message_mutations_succeed_when_realtime_fanout_fails` 覆盖 delete fanout 失败仍返回 204
+
+原状态：已确认
 
 现状：
 
@@ -20056,7 +20409,14 @@
 
 ### F-670：`read_message_batch()` 已推进已读游标后，广播失败仍会把 HTTP 请求变成 500
 
-状态：已确认
+状态：已修复（2026-04-12）
+
+修复说明：
+
+- `read_message_batch()` 已通过 `_broadcast_message_event()` 执行 best-effort realtime fanout，广播异常只记录日志，不再反向推翻已推进的 read cursor
+- 已由 `test_message_mutations_succeed_when_realtime_fanout_fails` 覆盖 read fanout 失败仍返回 200
+
+原状态：已确认
 
 现状：
 
@@ -20129,175 +20489,69 @@
 
 ### F-673：`DELETE /auth/session` 已推进 `auth_session_version` 后，disconnect/fanout 失败仍会把 logout 报成 500
 
-状态：已确认
+状态：已修复（2026-04-13）
 
-现状：
+修复说明：
 
-- [auth.py](/D:/AssistIM_V2/server/app/api/v1/auth.py) 的 `logout()`
-- 先调用 [auth_service.py](/D:/AssistIM_V2/server/app/services/auth_service.py) 的 `logout()`
-- 这一步会立即推进 `auth_session_version`
-- 随后才调用 `disconnect_user_connections()` 和 `broadcast_json()`
-
-证据：
-
-- [D:\AssistIM_V2\server\app\api\v1\auth.py](D:\AssistIM_V2/server/app/api/v1/auth.py)
-- [D:\AssistIM_V2\server\app\services\auth_service.py](D:\AssistIM_V2/server/app/services/auth_service.py)
-- [D:\AssistIM_V2\server\app\repositories\user_repo.py](D:\AssistIM_V2/server/app/repositories/user_repo.py)
-
-影响：
-
-- logout 已经在服务端生效
-- 但如果后续断连或 offline 广播失败，HTTP 仍会返回 500
-
-建议：
-
-- logout 的正式成功语义不应继续依赖后续 realtime/control fanout
+- [auth.py](/D:/AssistIM_V2/server/app/api/v1/auth.py) 已把 logout 的 durable auth mutation 和后续 realtime/control fanout 拆开；`AuthService.logout()` 推进 `auth_session_version` 后，断连或 offline 广播失败只记录日志，不再把已生效 logout 改写成 HTTP 500
+- 已新增 `test_logout_success_does_not_depend_on_realtime_disconnect` 覆盖 disconnect 失败时 logout 仍返回 `204`，旧 access token 也已经失效
 
 ### F-674：`POST /auth/login(force=true)` 会在踢旧连接前先旋转新 session 版本
 
-状态：已确认
+状态：已修复（2026-04-13）
 
-现状：
+修复说明：
 
-- [auth.py](/D:/AssistIM_V2/server/app/api/v1/auth.py) 的 `login()`
-- 在 `has_existing_session` 成立且 `force=true` 时
-- 先执行 `auth_service.login_user(..., rotate_session=True)`
-- 之后才去 `disconnect_user_connections(...reason=\"session_replaced\")`
-
-证据：
-
-- [D:\AssistIM_V2\server\app\api\v1\auth.py](D:\AssistIM_V2/server/app/api/v1/auth.py)
-- [D:\AssistIM_V2\server\app\services\auth_service.py](D:\AssistIM_V2/server/app/services/auth_service.py)
-
-影响：
-
-- 新 session 版本已经生效后，旧连接还可能短暂继续活着
-- 若后续 disconnect/fanout 失败，登录路由会报错，但认证状态其实已经被推进
-
-建议：
-
-- force login 需要更清晰的“先冻结旧代还是先提交新代”的单一 contract
+- `POST /auth/login(force=true)` 现在先执行旧 runtime disconnect，再旋转并提交新 session 版本；如果旧连接断开失败，路由会返回失败且不会推进新的 `auth_session_version`
+- offline broadcast 仍是 disconnect 成功后的 best-effort fanout，不再决定 durable login mutation 是否已提交
+- 已新增 `test_force_login_disconnects_existing_runtime_before_rotating_session` 覆盖断旧连接失败时旧 token 仍保持有效
 
 ### F-675：注册链路不是 failure-atomic，用户创建、默认头像赋值、session 旋转分三次提交
 
-状态：已确认
+状态：已修复（2026-04-13）
 
-现状：
+修复说明：
 
-- [auth_service.py](/D:/AssistIM_V2/server/app/services/auth_service.py) 的 `register()`
-- 先 `users.create()` 提交用户
-- 再 `assign_default_user_avatar()` 提交 avatar state
-- 最后 `_build_auth_payload(...rotate_session=True)` 再提交一次 session version
-
-证据：
-
-- [D:\AssistIM_V2\server\app\services\auth_service.py](D:\AssistIM_V2/server/app/services/auth_service.py)
-- [D:\AssistIM_V2\server\app\repositories\user_repo.py](D:\AssistIM_V2/server/app/repositories/user_repo.py)
-- [D:\AssistIM_V2\server\app\services\avatar_service.py](D:\AssistIM_V2/server/app/services/avatar_service.py)
-
-影响：
-
-- 注册中途任何一步失败，都可能留下半创建账号、半初始化 avatar、或已创建未登录的残留状态
-
-建议：
-
-- register 应收口成一条 failure-atomic 的事务边界
+- [auth_service.py](/D:/AssistIM_V2/server/app/services/auth_service.py) 的 `register()` 已收口成单事务边界：用户创建、默认头像赋值、`auth_session_version` 旋转全部使用 `commit=False`，最后统一 `commit()`，任一步异常都会 rollback
+- [user_repo.py](/D:/AssistIM_V2/server/app/repositories/user_repo.py) 和 [avatar_service.py](/D:/AssistIM_V2/server/app/services/avatar_service.py) 已补可控提交参数，避免注册链中途提前提交半成品用户
+- 已新增 `test_register_rolls_back_user_when_default_avatar_assignment_fails` 覆盖默认头像赋值失败时不会残留已创建账号
 
 ### F-676：认证三条请求 schema 仍没有 `extra=forbid`
 
-状态：已确认
+状态：已修复（2026-04-13）
 
-现状：
+修复说明：
 
-- [auth.py](/D:/AssistIM_V2/server/app/schemas/auth.py) 的：
-  - `RegisterRequest`
-  - `LoginRequest`
-  - `RefreshTokenRequest`
-- 都没有 `ConfigDict(extra=\"forbid\")`
-
-证据：
-
-- [D:\AssistIM_V2\server\app\schemas\auth.py](D:\AssistIM_V2/server/app/schemas/auth.py)
-
-影响：
-
-- auth 正式入口会静默吞掉未知字段
-- 登录/注册/刷新请求边界不如其它较新 schema 严格
-
-建议：
-
-- auth schema 也应统一到 `extra=forbid`
+- [auth.py](/D:/AssistIM_V2/server/app/schemas/auth.py) 的 `RegisterRequest`、`LoginRequest`、`RefreshTokenRequest` 已统一补上 `ConfigDict(extra="forbid")`
+- 已新增 `test_auth_request_models_reject_unknown_fields` 和 `test_auth_schema_contracts_are_strict_and_match_runtime_payloads`，覆盖 HTTP 路由和 schema 边界的 strict contract
 
 ### F-677：`LoginRequest` 没有最基本的长度/去空白约束
 
-状态：已确认
+状态：已修复（2026-04-13）
 
-现状：
+修复说明：
 
-- [auth.py](/D:/AssistIM_V2/server/app/schemas/auth.py) 的 `LoginRequest`
-- `username` 和 `password` 都只是裸 `str`
-- 没有最小/最大长度，也没有 strip 归一化
-
-证据：
-
-- [D:\AssistIM_V2\server\app\schemas\auth.py](D:\AssistIM_V2/server/app/schemas/auth.py)
-
-影响：
-
-- 登录正式入口会接受任意超长字符串、前后空白用户名等输入
-- auth 边界的输入契约明显弱于 register/update 这类其它正式入口
-
-建议：
-
-- login schema 也应补基础长度与归一化约束
+- `LoginRequest.username` 现已补齐长度边界，并在 schema 入口先做 canonical strip
+- `LoginRequest.password` 已补上和注册链一致的最小/最大长度约束
+- 已新增 `test_auth_identity_inputs_are_canonicalized_and_validated` 覆盖空白用户名和过短密码拒绝
 
 ### F-678：`RefreshTokenRequest` 也没有长度或格式边界
 
-状态：已确认
+状态：已修复（2026-04-13）
 
-现状：
+修复说明：
 
-- [auth.py](/D:/AssistIM_V2/server/app/schemas/auth.py) 的 `RefreshTokenRequest`
-- `refresh_token` 是裸 `str`
-- 没有最小长度、最大长度或 strip 规则
-
-证据：
-
-- [D:\AssistIM_V2\server\app\schemas\auth.py](D:\AssistIM_V2/server/app/schemas/auth.py)
-
-影响：
-
-- refresh 入口会直接接受任意长度 payload
-- auth 边界缺少最基本的输入约束
-
-建议：
-
-- refresh_token 入口也应补基础长度与格式边界
+- `RefreshTokenRequest.refresh_token` 已补最小/最大长度边界，并在入口先 strip 再解 token
+- 已新增 `test_auth_identity_inputs_are_canonicalized_and_validated` 覆盖带前后空白的 refresh token 仍可按 canonical 值工作
 
 ### F-679：认证响应的 `token_type` 与公开 schema 的默认值大小写不一致
 
-状态：已确认
+状态：已修复（2026-04-13）
 
-现状：
+修复说明：
 
-- [auth_service.py](/D:/AssistIM_V2/server/app/services/auth_service.py) 的 `_build_auth_payload()` / `refresh_access_token()`
-- 实际返回 `token_type: \"Bearer\"`
-- 但 [auth.py](/D:/AssistIM_V2/server/app/schemas/auth.py) 的 `TokenPair`
-- 默认值是小写 `bearer`
-
-证据：
-
-- [D:\AssistIM_V2\server\app\services\auth_service.py](D:\AssistIM_V2/server/app/services/auth_service.py)
-- [D:\AssistIM_V2\server\app\schemas\auth.py](D:\AssistIM_V2/server/app/schemas/auth.py)
-
-影响：
-
-- auth 正式响应 contract 大小写不一致
-- 文档/客户端若按 schema 默认值实现，会继续产生口径分裂
-
-建议：
-
-- `token_type` 的正式值应统一成单一大小写
+- 新增 [auth_contract.py](/D:/AssistIM_V2/server/app/core/auth_contract.py) 统一 auth contract 常量，`TokenPair.token_type` 与 `AuthService` 返回值都收口到 `Bearer`
+- 已新增 `test_auth_schema_contracts_are_strict_and_match_runtime_payloads` 钉住 schema 默认值，避免再次和运行时 payload 漂移
 
 ### F-680：删除设备不会使该设备上的现有认证 runtime 失效
 
@@ -20553,71 +20807,35 @@
 
 ### R-091：限流 key 只按 `client_host` 建，不区分账号或请求主体
 
-状态：已确认
+状态：已修复（2026-04-13）
 
-现状：
+修复说明：
 
-- [rate_limit.py](/D:/AssistIM_V2/server/app/core/rate_limit.py) 的 `_enforce_request()`
-- 只用 `key = f\"{key_prefix}:{client_host}\"`
-- 不纳入用户名、user_id 或 receiver_id
-
-证据：
-
-- [D:\AssistIM_V2\server\app\core\rate_limit.py](D:\AssistIM_V2/server/app/core/rate_limit.py)
-
-影响：
-
-- 同一 NAT / 代理后的多个真实用户会互相干扰
-- login/register/friend-request 的限流语义更像“按出口 IP”，不是按真实主体
-
-建议：
-
-- 正式限流 key 至少应支持按主体或按场景维度细分
+- [rate_limit.py](/D:/AssistIM_V2/server/app/core/rate_limit.py) 的限流 key 已从单纯 `key_prefix:client_host` 扩展为 `key_prefix:client_host:subject`
+- `login/register` 会从请求体提取并 canonicalize `username`，`friend-request` 会提取目标用户主体，避免同一 NAT / 代理后的不同账号完全挤在同一个桶里
+- 已新增 `test_rate_limiter_keys_login_attempts_by_canonical_subject`，并更新既有 rate limiter store 断言
 
 ### R-092：当前限流实现是进程内内存桶，多实例部署下没有全局一致性
 
-状态：已确认
+状态：已修复（2026-04-13）
 
-现状：
+修复说明：
 
-- [rate_limit.py](/D:/AssistIM_V2/server/app/core/rate_limit.py) 默认使用 `InMemoryRateLimitStore`
-- 桶状态只存在当前进程内
-
-证据：
-
-- [D:\AssistIM_V2\server\app\core\rate_limit.py](D:\AssistIM_V2/server/app/core/rate_limit.py)
-
-影响：
-
-- 一旦多进程或多实例部署，限流会天然失去全局一致性
-- auth 和 friend-request 的正式保护边界无法稳定成立
-
-建议：
-
-- 正式环境需要可替换的集中式 rate limit store
+- [rate_limit.py](/D:/AssistIM_V2/server/app/core/rate_limit.py) 已新增 `DatabaseRateLimitStore`，固定窗口命中记录持久化到共享数据库表 `rate_limit_hits`
+- [config.py](/D:/AssistIM_V2/server/app/core/config.py) 已新增 `RATE_LIMIT_STORE_BACKEND`，默认值为 `database`；`memory` 仍只作为显式单进程配置使用
+- [main.py](/D:/AssistIM_V2/server/app/main.py) 会在应用创建时按 settings 配置全局 rate limiter store
+- 已新增 [20260413_0012_rate_limit_hits.py](/D:/AssistIM_V2/server/alembic/versions/20260413_0012_rate_limit_hits.py) 建表迁移，并保留 store 侧 `CREATE TABLE IF NOT EXISTS` 兜底
+- 已新增 `test_database_rate_limit_store_shares_counters_across_instances` 覆盖两个 store 实例共享同一数据库计数
 
 ### R-093：默认 CORS 组合是 `allow_origins='*' + allow_credentials=True`
 
-状态：已确认
+状态：已修复（2026-04-13）
 
-现状：
+修复说明：
 
-- [config.py](/D:/AssistIM_V2/server/app/core/config.py) 默认 `CORS_ORIGINS=\"*\"`
-- [main.py](/D:/AssistIM_V2/server/app/main.py) 又固定 `allow_credentials=True`
-
-证据：
-
-- [D:\AssistIM_V2\server\app\core\config.py](D:\AssistIM_V2/server/app/core/config.py)
-- [D:\AssistIM_V2\server\app\main.py](D:\AssistIM_V2/server/app/main.py)
-
-影响：
-
-- 这套默认浏览器侧语义并不稳
-- 跨域鉴权行为容易在不同客户端/部署配置下继续分裂
-
-建议：
-
-- 默认 CORS 配置应避免 `*` 与 credentials 的模糊组合
+- [config.py](/D:/AssistIM_V2/server/app/core/config.py) 的默认 `CORS_ORIGINS` 已改成显式本地开发 origin，不再默认使用 `*`
+- [main.py](/D:/AssistIM_V2/server/app/main.py) 会在配置包含 `*` 时自动关闭 `allow_credentials`，显式 origin 才启用 credentials
+- 已新增 `test_create_app_disables_credentials_for_wildcard_cors` 覆盖 wildcard 与 explicit origin 两种配置
 
 ### R-094：group avatar 生成直接覆盖目标文件，没有临时文件或并发保护
 
@@ -20921,55 +21139,23 @@
 
 ### F-719：用户名唯一性仍是精确大小写匹配，`Alice` 和 `alice` 可并存为两个正式账号
 
-状态：已确认
+状态：已修复（2026-04-13）
 
-现状：
+修复说明：
 
-- [user_repo.py](/D:/AssistIM_V2/server/app/repositories/user_repo.py) 的 `get_by_username()`
-- 用的是 `User.username == username`
-- [models/user.py](/D:/AssistIM_V2/server/app/models/user.py) 的 `username`
-- 只有普通 `unique=True`
-- 没有统一 lower/normalize 规则
-
-证据：
-
-- [D:\AssistIM_V2\server\app\repositories\user_repo.py](D:\AssistIM_V2/server/app/repositories/user_repo.py)
-- [D:\AssistIM_V2\server\app\models\user.py](D:\AssistIM_V2/server/app/models/user.py)
-- [D:\AssistIM_V2\server\app\services\auth_service.py](D:\AssistIM_V2/server/app/services/auth_service.py)
-
-影响：
-
-- 大小写不同但视觉上接近的用户名仍可作为两个正式身份并存
-- 认证身份 canonicalization 继续缺失
-
-建议：
-
-- username 正式身份应统一 normalization，再决定唯一性口径
+- [auth_contract.py](/D:/AssistIM_V2/server/app/core/auth_contract.py) 已把用户名 canonicalization 从 `NFKC + strip` 扩展为 `NFKC + strip + lower`，注册入口会把正式用户名写成小写 canonical identity
+- [user_repo.py](/D:/AssistIM_V2/server/app/repositories/user_repo.py) 的 `get_by_username()` 已改为按 `lower(username)` 查找，大小写变体不会再绕过注册重复检查
+- [models/user.py](/D:/AssistIM_V2/server/app/models/user.py) 已增加 `uq_users_username_lower` 表达式唯一索引，并新增 [20260413_0011_username_case_canonical.py](/D:/AssistIM_V2/server/alembic/versions/20260413_0011_username_case_canonical.py) / schema compatibility DDL 覆盖运行库升级
+- 已新增 `test_username_identity_is_case_canonical_across_register_login_and_search` 覆盖 `Case.User` 注册为 `case.user`、大小写重复注册返回 409
 
 ### F-720：用户发现是 `ILIKE`，登录认证却是精确大小写匹配，发现链和认证链对 username 的语义分裂
 
-状态：已确认
+状态：已修复（2026-04-13）
 
-现状：
+修复说明：
 
-- [user_repo.py](/D:/AssistIM_V2/server/app/repositories/user_repo.py) 的 `search_users()`
-- 用 `username.ilike(pattern)`
-- [auth_service.py](/D:/AssistIM_V2/server/app/services/auth_service.py) 的 `authenticate_credentials()`
-- 又通过 `get_by_username(username)` 做精确匹配
-
-证据：
-
-- [D:\AssistIM_V2\server\app\repositories\user_repo.py](D:\AssistIM_V2/server/app/repositories/user_repo.py)
-- [D:\AssistIM_V2\server\app\services\auth_service.py](D:\AssistIM_V2/server/app/services/auth_service.py)
-
-影响：
-
-- 用户发现链会把大小写变体视为同类可命中字符串
-- 认证链却要求精确大小写，username 的正式语义继续分裂
-
-建议：
-
-- 搜索、展示、注册、登录应围绕同一套 username canonical 规则收口
+- 登录认证和注册重复检查现在都复用同一 lowercase canonical username 规则，发现链的大小写不敏感语义不再和认证链分裂
+- 已新增 `test_username_identity_is_case_canonical_across_register_login_and_search` 覆盖 `CASE.USER` 可登录同一账号，并且 `/users/search?keyword=CASE.USER` 只返回 canonical `case.user`
 
 ### F-721：`GET /moments?user_id=...` 没有任何关系或可见性 gate，任意已登录用户都能查看指定用户动态
 
@@ -21123,131 +21309,51 @@
 
 ### F-727：上传文件的 `original_name` 只做 `basename()`，没有控制字符或长度规范化
 
-状态：已确认
+状态：已修复（2026-04-12）
 
-现状：
+修复说明：
 
-- [storage.py](/D:/AssistIM_V2/server/app/media/storage.py) 的 `_normalize_original_name()`
-- 只做：
-  - `(filename or "").strip()`
-  - `os.path.basename(...)`
-- 没有进一步过滤控制字符、换行或超长文件名
-- [file.py](/D:/AssistIM_V2/server/app/models/file.py) 的 `file_name`
-- 也没有长度边界
-
-证据：
-
-- [D:\AssistIM_V2\server\app\media\storage.py](D:\AssistIM_V2/server/app/media/storage.py)
-- [D:\AssistIM_V2\server\app\models\file.py](D:\AssistIM_V2/server/app/models/file.py)
-
-影响：
-
-- 上传文件的正式显示名仍可携带异常控制字符或极长原始名称
-- 文件元数据 canonicalization 继续弱于其它较新的输入边界
-
-建议：
-
-- 文件名规范化不应止于 `basename()`；还应补可打印字符和长度边界
+- LocalMediaStorage._normalize_original_name() 已在 basename 之后过滤不可打印字符和路径/文件名危险字符
+- 上传显示名最大长度已收口为 120 字符，截断时保留扩展名
+- 已新增 test_file_upload_canonicalizes_name_and_derives_content_type 覆盖控制字符、路径分隔符、超长文件名和服务端派生 MIME
 
 ### F-688：`get_current_user()` 在 token 指向的用户已不存在时返回 `404 USER_NOT_FOUND`，不是统一的认证失效 `401`
 
-状态：已确认
+状态：已修复（2026-04-13）
 
-现状：
+修复说明：
 
-- [auth_dependency.py](/D:/AssistIM_V2/server/app/dependencies/auth_dependency.py) 的 `get_current_user()`
-- 先解 access token
-- 再按 `payload["sub"]` 查用户
-- 如果用户不存在，直接抛 `USER_NOT_FOUND / 404`
-
-证据：
-
-- [D:\AssistIM_V2\server\app\dependencies\auth_dependency.py](D:\AssistIM_V2/server/app/dependencies/auth_dependency.py)
-
-影响：
-
-- stale token、已删账号、脏 auth subject 会被路由层当成“资源不存在”，不是统一的 auth-loss
-- 同一条认证链上已经同时存在 `401 UNAUTHORIZED` 和 `404 USER_NOT_FOUND` 两套失效语义
-
-建议：
-
-- `get_current_user()` 应把“token subject 不再有效”统一收口成认证失效语义，而不是资源不存在
+- [auth_dependency.py](/D:/AssistIM_V2/server/app/dependencies/auth_dependency.py) 现在会把“access token subject 已失效/用户不存在”统一收口成 `UNAUTHORIZED / 401`
+- 已新增 `test_deleted_auth_subjects_return_unauthorized` 覆盖删除账号后旧 access token 的 `/auth/me` 路径
 
 ### F-689：refresh 链路在 refresh token 指向的用户已不存在时也返回 `404`，不是统一的 `401`
 
-状态：已确认
+状态：已修复（2026-04-13）
 
-现状：
+修复说明：
 
-- [auth_service.py](/D:/AssistIM_V2/server/app/services/auth_service.py) 的：
-  - `refresh()`
-  - `refresh_access_token()`
-- 两条链路 decode refresh token 后，都是先 `get_by_id(payload["sub"])`
-- 用户不存在时直接抛 `USER_NOT_FOUND / 404`
-
-证据：
-
-- [D:\AssistIM_V2\server\app\services\auth_service.py](D:\AssistIM_V2/server/app/services/auth_service.py)
-
-影响：
-
-- refresh token 已失效、目标账号已不存在、auth subject 脏掉，这几种情况仍被暴露成“资源不存在”
-- HTTP auth-loss 语义继续和 route-level 资源语义混在一起
-
-建议：
-
-- refresh 链路也应把“refresh token 不能再恢复有效会话”统一收口成认证失效
+- [auth_service.py](/D:/AssistIM_V2/server/app/services/auth_service.py) 的 `refresh()` 和 `refresh_access_token()` 已统一把失效 subject 收口成 `UNAUTHORIZED / 401`
+- 已新增 `test_deleted_auth_subjects_return_unauthorized` 覆盖 HTTP refresh 和直接 service 调用两条链路
 
 ### F-690：认证用户名没有 strip/字符集约束，空白和控制字符都能进入正式身份
 
-状态：已确认
+状态：已修复（2026-04-13）
 
-现状：
+修复说明：
 
-- [auth.py](/D:/AssistIM_V2/server/app/schemas/auth.py) 的 `RegisterRequest.username`
-- 只有 `min_length/max_length`
-- 没有 strip、字符集、可打印字符或 canonical normalization 规则
-- [user_repo.py](/D:/AssistIM_V2/server/app/repositories/user_repo.py) 的 `get_by_username()` 又是精确匹配
-
-证据：
-
-- [D:\AssistIM_V2\server\app\schemas\auth.py](D:\AssistIM_V2/server/app/schemas/auth.py)
-- [D:\AssistIM_V2\server\app\repositories\user_repo.py](D:\AssistIM_V2/server/app/repositories/user_repo.py)
-- [D:\AssistIM_V2\server\app\models\user.py](D:\AssistIM_V2/server/app/models/user.py)
-
-影响：
-
-- `alice`、` alice `、带换行或其他控制字符的用户名都可能成为不同正式身份
-- 这类原始值还会继续进入 JWT、日志、搜索和展示链路
-
-建议：
-
-- 认证用户名应在入口层定义正式 normalization 和允许字符集，不要继续把任意原始字符串当 canonical identity
+- 新增 [auth_contract.py](/D:/AssistIM_V2/server/app/core/auth_contract.py) 收口认证用户名 contract；用户名现在会先做 `NFKC + strip`，再校验允许字符集为字母、数字、点、下划线和连字符
+- `RegisterRequest` / `LoginRequest` 与 `AuthService` 已共同复用这套 canonicalization，注册写入和登录查找不再接受前后空白用户名
+- 已新增 `test_auth_identity_inputs_are_canonicalized_and_validated` 覆盖 strip 后登录、非法空格用户名拒绝和规范化后的持久化结果
 
 ### F-691：注册昵称没有 strip 规则，纯空白昵称会被当成合法正式资料写入
 
-状态：已确认
+状态：已修复（2026-04-13）
 
-现状：
+修复说明：
 
-- [auth.py](/D:/AssistIM_V2/server/app/schemas/auth.py) 的 `RegisterRequest.nickname`
-- 只有 `min_length=1, max_length=64`
-- 没有像 [user.py](/D:/AssistIM_V2/server/app/schemas/user.py) 的 `UserUpdateRequest` 那样先 strip 再校验
-
-证据：
-
-- [D:\AssistIM_V2\server\app\schemas\auth.py](D:\AssistIM_V2/server/app/schemas/auth.py)
-- [D:\AssistIM_V2\server\app\schemas\user.py](D:\AssistIM_V2/server/app/schemas/user.py)
-
-影响：
-
-- `"   "` 这种昵称会通过注册入口并成为正式用户资料
-- 注册链和资料编辑链对同一资料字段的 normalization contract 继续分裂
-
-建议：
-
-- 注册昵称和用户资料更新应复用同一套 strip/empty 归一化规则
-
+- 注册昵称现在会先 strip 再做长度校验，纯空白昵称会在 schema 边界直接被拒绝
+- `AuthService.register()` 已复用同一 canonical nickname 规则，注册链和资料编辑链不再各走一套 normalization
+- 已新增 `test_auth_identity_inputs_are_canonicalized_and_validated` 覆盖空白昵称拒绝
 ### F-692：`exclude_device_id` 是调用方可控的任意过滤器，调用方可以把目标用户设备静默从 bundle 列表里剔掉
 
 状态：已确认
@@ -22034,305 +22140,116 @@
 
 ### F-740：文件公开响应没有单一 canonical 字段集，而是同时暴露 `url/file_url`、`mime_type/file_type`、`original_name/file_name/name`
 
-状态：已确认
+状态：已修复（2026-04-12）
 
-现状：
+修复说明：
 
-- [file_service.py](D:\AssistIM_V2\server/app/services/file_service.py) 的 `serialize_file()`
-- 当前同一语义会并行返回多套 alias：
-  - `url`
-  - `file_url`
-  - `mime_type`
-  - `file_type`
-  - `original_name`
-  - `file_name`
-  - `name`
-
-证据：
-
-- [D:\AssistIM_V2\server\app\services\file_service.py](D:\AssistIM_V2/server/app/services/file_service.py)
-
-影响：
-
-- 文件公开 payload 没有单一 canonical field set
-- 客户端容易继续在多套别名上分裂实现
-
-建议：
-
-- 收口为一套正式 public file summary 字段
+- FileService.serialize_file() 已把公开字段收口为 id/url/mime_type/original_name/size_bytes/created_at
+- upload-result 与 list-result 不再返回 file_url/file_type/file_name/name 等 alias
+- 客户端 FileService.upload_file() 和 build_remote_attachment_extra() 已改为只读取 canonical 上传字段
+- 已更新 server/client 文件上传与附件 extra 回归用例
 
 ### F-741：文件公开响应把同一份传输元数据同时放在顶层和嵌套 `media` 里，contract 继续重复
 
-状态：已确认
+状态：已修复（2026-04-12）
 
-现状：
+修复说明：
 
-- [file_service.py](D:\AssistIM_V2\server/app/services/file_service.py) 的 `serialize_file()`
-- 顶层已经返回：
-  - `storage_provider`
-  - `storage_key`
-  - `url/file_url`
-  - `mime_type/file_type`
-  - `size_bytes`
-  - `checksum_sha256`
-  - `original_name/file_name/name`
-- 同一批字段又会被完整塞进 `media`
-
-证据：
-
-- [D:\AssistIM_V2\server\app\services\file_service.py](D:\AssistIM_V2/server/app/services/file_service.py)
-
-影响：
-
-- 文件 payload 存在结构性重复
-- 后续任何字段变更都要维护两份 shape
-
-建议：
-
-- 顶层和嵌套层二选一
-- 不要继续双份镜像同一份元数据
+- FileService.serialize_file() 已移除公开响应里的 media 嵌套镜像
+- 文件公开响应只保留顶层 canonical summary 字段，聊天附件 extra 的 media 仅由客户端发送消息时重新构造
+- 已更新 test_file_upload_returns_normalized_media_metadata_and_list_roundtrips 覆盖 upload/list payload 不再包含 media
 
 ### F-742：`FileOut` 把 alias 泛滥和 internal/public 混合字段直接固化进公开 schema
 
-状态：已确认
+状态：已修复（2026-04-12）
 
-现状：
+修复说明：
 
-- [file.py](D:\AssistIM_V2\server/app/schemas/file.py) 的 `FileOut`
-- 现在不但保留多套 alias
-- 还把：
-  - `storage_provider`
-  - `storage_key`
-  - `user_id`
-  - `media`
-- 一起并进同一个公开 schema
-
-证据：
-
-- [D:\AssistIM_V2\server\app\schemas\file.py](D:\AssistIM_V2/server/app/schemas/file.py)
-- [D:\AssistIM_V2\server\app\services\file_service.py](D:\AssistIM_V2/server/app/services/file_service.py)
-
-影响：
-
-- 文件 formal schema 本身就在继续放大 public/internal boundary 混淆
-- 即使以后补 `response_model`，也只会把当前混乱 contract 固化下来
-
-建议：
-
-- 先重做最小 public file schema
-- 再让 route 使用它
+- FileOut 已收口为 id/url/mime_type/original_name/size_bytes/created_at
+- storage_provider/storage_key/user_id/media 和 alias 字段已从公开 schema 移除
 
 ### F-743：点赞已点赞动态时仍返回统一成功，moments like 缺少显式 no-op 语义
 
-状态：已确认
+状态：已修复（2026-04-12）
 
-现状：
+修复说明：
 
-- [moment_repo.py](D:\AssistIM_V2\server/app/repositories/moment_repo.py) 的 `like()`
-- 如果当前用户已经点过赞
-- 会直接什么都不做并返回
-- route 层 [moments.py](D:\AssistIM_V2\server/app/api/v1/moments.py) 仍统一返回 `success_response()`
-
-证据：
-
-- [D:\AssistIM_V2\server\app\repositories\moment_repo.py](D:\AssistIM_V2/server/app/repositories/moment_repo.py)
-- [D:\AssistIM_V2\server\app\api\v1\moments.py](D:\AssistIM_V2/server/app/api/v1/moments.py)
-
-影响：
-
-- already-liked 与新点赞成功共享同一种正式响应
-- 客户端拿不到 state-changed / no-op 区分
-
-建议：
-
-- 至少返回显式状态
-- 或把 likes 正式定义成幂等 set-like 语义并回显最终状态
+- MomentRepository.like() 已返回 changed bool，重复点赞返回 False
+- MomentService.like() / POST /moments/{id}/likes 已回显 {liked: true, changed: bool}
+- 已新增 test_moment_like_and_unlike_echo_state_changes 覆盖首次点赞和重复点赞
 
 ### F-744：取消点赞未点赞动态时仍返回统一成功，moments unlike 缺少显式 no-op 语义
 
-状态：已确认
+状态：已修复（2026-04-12）
 
-现状：
+修复说明：
 
-- [moment_repo.py](D:\AssistIM_V2\server/app/repositories/moment_repo.py) 的 `unlike()`
-- 如果当前用户本来就没点过赞
-- 会直接什么都不做并返回
-- route 层仍统一返回 `success_response()`
-
-证据：
-
-- [D:\AssistIM_V2\server\app\repositories\moment_repo.py](D:\AssistIM_V2/server/app/repositories/moment_repo.py)
-- [D:\AssistIM_V2\server\app\api\v1\moments.py](D:\AssistIM_V2/server/app/api/v1/moments.py)
-
-影响：
-
-- already-unliked 与真实状态变化继续共用同一返回 contract
-- interaction mutation 仍缺正式 state-echo
-
-建议：
-
-- like/unlike 两条正式入口都应明确 no-op 语义
+- MomentRepository.unlike() 已返回 changed bool，重复取消点赞返回 False
+- MomentService.unlike() / DELETE /moments/{id}/likes 已回显 {liked: false, changed: bool}
+- 已新增 test_moment_like_and_unlike_echo_state_changes 覆盖首次取消点赞和重复取消点赞
 
 ### F-745：moment 正式返回把作者资料同时放在顶层和嵌套 `author` 里，author contract 重复
 
-状态：已确认
+状态：已修复（2026-04-12）
 
-现状：
+修复说明：
 
-- [moment_service.py](D:\AssistIM_V2\server/app/services/moment_service.py) 的 `serialize_moment()`
-- 当前会同时返回：
-  - 顶层 `username/nickname/avatar`
-  - 嵌套 `author.{id,username,nickname,avatar}`
-
-证据：
-
-- [D:\AssistIM_V2\server\app\services\moment_service.py](D:\AssistIM_V2/server/app/services/moment_service.py)
-
-影响：
-
-- moment author payload 没有单一 canonical 结构
-- 后续字段扩展时会继续双份维护
-
-建议：
-
-- 顶层作者字段和嵌套 author 只保留一套正式结构
+- MomentService.serialize_moment() 已移除顶层 username/nickname/avatar
+- moment 作者信息只保留 author 子结构
+- 已新增 test_moment_and_comment_author_payloads_are_canonical 覆盖 create/list moment payload
 
 ### F-746：comment payload 的作者 shape 和 moment payload 的作者 shape 不一致
 
-状态：已确认
+状态：已修复（2026-04-12）
 
-现状：
+修复说明：
 
-- moment [serialize_moment()](D:\AssistIM_V2\server/app/services/moment_service.py)
-- 用的是：
-  - 顶层作者字段
-  - 再加嵌套 `author`
-- comment [serialize_comment()](D:\AssistIM_V2\server/app/services/moment_service.py)
-- 只返回顶层：
-  - `username`
-  - `nickname`
-  - `avatar`
-- 没有统一的 `author` 子结构
-
-证据：
-
-- [D:\AssistIM_V2\server\app\services\moment_service.py](D:\AssistIM_V2/server/app/services/moment_service.py)
-
-影响：
-
-- 同一 moments 域里，author contract 已经在 moment/comment 两种对象上分裂
-- 客户端必须按对象类型写两套解析路径
-
-建议：
-
-- 给 moment 和 comment 收口一套统一 author 子结构
+- MomentService.serialize_comment() 已移除顶层 username/nickname/avatar
+- comment 作者信息已对齐为 author 子结构
+- MomentOut / MomentCommentOut 已补充共享的 MomentAuthorOut
+- 已新增 test_moment_and_comment_author_payloads_are_canonical 覆盖 comment route 与 list 中嵌套 comments
 
 ### F-747：`GET /files` 和 `POST /files/upload` 没有 summary/detail 分层，两个正式入口都直接返回同一份 internal-heavy 文件详情 payload
 
-状态：已确认
+状态：已修复（2026-04-12）
 
-现状：
+修复说明：
 
-- [files.py](D:\AssistIM_V2\server/app/api/v1/files.py) 的 `list_files()` 和 `upload_file()`
-- 都直接返回 [file_service.py](D:\AssistIM_V2\server/app/services/file_service.py) 的 `serialize_file()`
-- 也就是说：
-  - 文件列表
-  - 刚上传完的结果
-- 共享完全同一份 detail shape
-
-证据：
-
-- [D:\AssistIM_V2\server\app\api\v1\files.py](D:\AssistIM_V2/server/app/api/v1/files.py)
-- [D:\AssistIM_V2\server\app\services\file_service.py](D:\AssistIM_V2/server/app/services/file_service.py)
-
-影响：
-
-- list / upload-result 没有轻重分层
-- 文件公开 contract 继续停留在“一份大而全 detail payload 到处复用”
-
-建议：
-
-- 至少拆成 list summary 和 upload result 两套正式输出 contract
+- FileService.list_files() 已改用 serialize_file_summary()，列表返回 id/url/mime_type/original_name/size_bytes
+- POST /files/upload 已改用 serialize_upload_result()，上传结果在 summary 基础上额外返回 created_at
+- FileSummaryOut / FileOut 已拆成 summary 与 upload-result 两套 schema
+- 已更新 test_file_upload_returns_normalized_media_metadata_and_list_roundtrips 覆盖 list summary 不再与 upload result 完全同形
 
 ### F-748：建私聊命中已有会话时仍返回普通成功，正式入口没有 `created/reused` 语义
 
-状态：已确认
+状态：已修复（2026-04-12）
 
-现状：
+修复说明：
 
-- [session_service.py](D:\AssistIM_V2/server/app/services/session_service.py) 的 `create_private()`
-- 命中已有 `direct_key` 时
-- 会直接返回已有 session snapshot
-- route 层 [sessions.py](D:\AssistIM_V2/server/app/api/v1/sessions.py) 仍统一返回普通 `success_response(...)`
-
-证据：
-
-- [D:\AssistIM_V2\server\app\services\session_service.py](D:\AssistIM_V2/server/app/services/session_service.py)
-- [D:\AssistIM_V2\server\app\api\v1\sessions.py](D:\AssistIM_V2/server/app/api/v1/sessions.py)
-
-影响：
-
-- 新建私聊和复用旧私聊共用同一种成功 shape
-- 调用方拿不到 `created/reused` 区分
-
-建议：
-
-- direct create 应显式回显 `created/reused`
-- 或把“命中已有私聊”定义成独立的正式 no-op 语义
+- SessionService.create_private() 已在新建成功时回显 created=true/reused=false
+- 命中已有 direct_key 或并发唯一键冲突回退到已有会话时，回显 created=false/reused=true
+- 已新增 test_create_direct_session_echoes_created_or_reused 覆盖首次创建和复用旧私聊
 
 ### F-749：发好友请求命中已有 outgoing pending 时仍返回普通成功，联系人正式入口缺少显式 no-op 语义
 
-状态：已确认
+状态：已修复（2026-04-12）
 
-现状：
+修复说明：
 
-- [friend_service.py](D:\AssistIM_V2\server/app/services/friend_service.py) 的 `create_request()`
-- 命中已有 outgoing pending request 时
-- 直接 `return self.serialize_request(outgoing_pending)`
-- route 层 [friends.py](D:\AssistIM_V2\server/app/api/v1/friends.py) 仍统一返回 `success_response(result)`
-
-证据：
-
-- [D:\AssistIM_V2\server\app\services\friend_service.py](D:\AssistIM_V2/server/app/services/friend_service.py)
-- [D:\AssistIM_V2\server\app\api\v1\friends.py](D:\AssistIM_V2/server/app/api/v1/friends.py)
-
-影响：
-
-- “新发起请求”和“复用历史 pending 请求”共享同一种成功 contract
-- 调用方无法区分是否真的产生了新 side effect
-
-建议：
-
-- 联系人 mutation 应显式回显 `created/noop`
-- 不要继续把历史 request 直接伪装成新成功
+- FriendService.create_request() 已在新请求时回显 action=request_created、created=true、changed=true
+- 命中已有 outgoing pending 时回显 action=request_reused、created=false、changed=false
+- 已新增 test_friend_request_create_echoes_reused_and_auto_accept_actions 覆盖重复发送好友请求 no-op 语义
 
 ### F-750：发好友请求命中 incoming pending 时会自动接受，但公开返回仍是 request payload，正式动作语义混合
 
-状态：已确认
+状态：已修复（2026-04-12）
 
-现状：
+修复说明：
 
-- [friend_service.py](D:\AssistIM_V2\server/app/services/friend_service.py) 的 `create_request()`
-- 命中对向 pending request 时
-- 会直接：
-  - `update_request_status(..., "accepted")`
-  - `create_friendship_pair(...)`
-- 但 route 返回的仍是 `serialize_request(accepted_request)`
-
-证据：
-
-- [D:\AssistIM_V2\server\app\services\friend_service.py](D:\AssistIM_V2/server/app/services/friend_service.py)
-- [D:\AssistIM_V2\server\app\api\v1\friends.py](D:\AssistIM_V2/server/app/api/v1/friends.py)
-
-影响：
-
-- “发请求”这条正式入口实际上可能执行的是“直接建好友关系”
-- 公开响应却仍然伪装成 request 对象
-
-建议：
-
-- 自动接受如果继续保留
-- 就应回显正式 relationship result，而不是继续复用 request payload
+- FriendService.create_request() 命中 incoming pending 自动接受时已回显 action=friendship_created、changed=true
+- 自动接受响应已附带 friendship={is_friend, friend_id}，显式表达实际建立好友关系的结果
+- friends route 的 contact_refresh reason 已优先按 action=friendship_created 判定
+- 已新增 test_friend_request_create_echoes_reused_and_auto_accept_actions 覆盖 incoming pending 自动接受
 
 ### F-751：群 mutation 路由家族没有统一返回 contract，同一资源会返回四种不同成功 shape
 
@@ -22363,7 +22280,7 @@
 
 ### F-752：`update_my_group_profile()` 是 self-scoped mutation，却返回完整共享群快照
 
-状态：已确认
+状态：已修复（2026-04-12）
 
 现状：
 
@@ -22391,7 +22308,7 @@
 
 ### F-753：`update_group_profile()` 会丢掉 service 侧已有的 announcement side-effect 元数据，只返回 group snapshot
 
-状态：已确认
+状态：已修复（2026-04-12）
 
 现状：
 
@@ -22420,7 +22337,7 @@
 
 ### F-754：消息 route 家族没有统一 mutation contract，`send/list` 返回 `MessageOut`，`edit/recall` 返回事件 delta，`delete` 返回 `204`
 
-状态：已确认
+状态：部分修复（2026-04-12）
 
 现状：
 
@@ -22429,8 +22346,8 @@
 - 返回的是 canonical `serialize_message(...)`
 - `edit_message()` / `recall_message()`
 - 返回的是 event-style delta payload
-- `delete_message()`
-- 直接返回 `204`
+- `delete_message()` 已改为返回 committed `message_delete` event payload
+- `send/list` 的 canonical `MessageOut` 与 `edit/recall` 的 event delta 主 contract 仍未统一
 
 证据：
 
@@ -22449,7 +22366,7 @@
 
 ### F-755：`read_message_batch()` 的成功 payload 会随 `advanced` 分支分裂成两种 shape
 
-状态：已确认
+状态：已修复（2026-04-12）
 
 现状：
 
@@ -22479,7 +22396,7 @@
 
 ### F-756：`read_message_batch()` 即使没有推进任何游标，也会返回统一 `success=true`，缺少显式 no-op 语义
 
-状态：已确认
+状态：已修复（2026-04-12）
 
 现状：
 
@@ -22505,7 +22422,7 @@
 
 ### F-757：`MessageReadBatch` 请求 schema 没有 `extra=forbid`
 
-状态：已确认
+状态：已修复（2026-04-12）
 
 现状：
 
@@ -22528,7 +22445,7 @@
 
 ### F-758：`MessageReadBatch` 的 `session_id/message_id` 没有长度或去空白约束，关键标识仍靠 service 层兜底
 
-状态：已确认
+状态：已修复（2026-04-12）
 
 现状：
 
@@ -22554,7 +22471,7 @@
 
 ### F-759：建群成员列表的 item 级 strip / 去空 / 去重仍藏在 service 里，正式 schema 没有收口
 
-状态：已确认
+状态：已修复（2026-04-12）
 
 现状：
 
@@ -22583,9 +22500,15 @@
 
 ### F-760：建私聊 `participant_ids` 的 item 级 strip / 去空 / 去重仍藏在 service 里，正式 schema 没有收口
 
-状态：已确认
+状态：已修复（2026-04-12）
 
-现状：
+修复说明：
+
+- `CreateDirectSessionRequest.participant_ids` 已改为 `SessionIdentifier` item 类型，在 schema 层执行 strip、非空和长度上限约束
+- schema validator 已对 participant 列表去重，并要求归一化后恰好一个参与者
+- 已有 `test_create_direct_session_requires_exactly_one_normalized_participant` 覆盖空白、超长、非字符串、未知字段、去空白和去重场景
+
+原现状：
 
 - [session.py](D:\AssistIM_V2\server/app/schemas/session.py) 的 `CreateDirectSessionRequest`
 - `participant_ids` 只是 `list[str]`
@@ -22601,20 +22524,25 @@
 - [D:\AssistIM_V2\server\app\schemas\session.py](D:\AssistIM_V2/server/app/schemas/session.py)
 - [D:\AssistIM_V2\server\app\services\session_service.py](D:\AssistIM_V2/server/app/services/session_service.py)
 
-影响：
+修复前影响：
 
 - direct create 的正式成员输入 contract 继续依赖隐式 service 清洗
 - schema 不能表达真正的 participant canonicalization
 
-建议：
+修复建议：
 
 - `participant_ids` 的 item 级规则应前移到 schema/入口层
 
 ### F-761：`GroupMemberAdd.user_id` 没有最基本的长度或去空白约束
 
-状态：已确认
+状态：已修复（2026-04-12）
 
-现状：
+修复说明：
+
+- `GroupMemberAdd.user_id` 已改为 `GroupIdentifier`，在 schema 层执行 strip、非空和长度上限约束
+- 已有 `test_group_member_and_profile_schemas_reject_extra_fields` 覆盖空白、超长、非字符串和未知字段场景
+
+原现状：
 
 - [group.py](D:\AssistIM_V2\server/app/schemas/group.py) 的 `GroupMemberAdd.user_id`
 - 只是裸 `str`
@@ -22624,20 +22552,25 @@
 
 - [D:\AssistIM_V2\server\app\schemas\group.py](D:\AssistIM_V2/server/app/schemas/group.py)
 
-影响：
+修复前影响：
 
 - add-member 正式入口仍接受空白/异常长目标 id
 - 关键标识合法性继续后移到 service 层
 
-建议：
+修复建议：
 
 - `user_id` 应补基础长度和归一化约束
 
 ### F-762：`GroupTransferOwner.new_owner_id` 也没有最基本的长度或去空白约束
 
-状态：已确认
+状态：已修复（2026-04-12）
 
-现状：
+修复说明：
+
+- `GroupTransferOwner.new_owner_id` 已改为 `GroupIdentifier`，在 schema 层执行 strip、非空和长度上限约束
+- 已有 `test_group_member_and_profile_schemas_reject_extra_fields` 覆盖空白与超长 transfer-owner 目标
+
+原现状：
 
 - [group.py](D:\AssistIM_V2\server/app/schemas/group.py) 的 `GroupTransferOwner.new_owner_id`
 - 同样只是裸 `str`
@@ -22646,20 +22579,26 @@
 
 - [D:\AssistIM_V2\server\app\schemas\group.py](D:\AssistIM_V2/server/app/schemas/group.py)
 
-影响：
+修复前影响：
 
 - transfer-owner 正式入口仍接受空白/异常长 id
 - 群主转移目标的 canonicalization 没有在 schema 层收口
 
-建议：
+修复建议：
 
 - `new_owner_id` 也应补基础长度和归一化约束
 
 ### F-763：`GroupMemberRoleUpdate.role` 没有 schema 级枚举约束，角色合法性仍靠 service 私下收口
 
-状态：已确认
+状态：已修复（2026-04-12）
 
-现状：
+修复说明：
+
+- `GroupMemberRoleUpdate.role` 已改为 `GroupMemberRole = Literal["member", "admin"]`
+- schema 层会先对字符串角色做 strip/lower，再交给 Literal 枚举校验
+- 已有 `test_group_role_update_requires_owner_and_disallows_owner_role_change` 覆盖非法角色、非字符串和缺失角色
+
+原现状：
 
 - [group.py](D:\AssistIM_V2\server/app/schemas/group.py) 的 `GroupMemberRoleUpdate.role`
 - 只是普通 `str`
@@ -22671,20 +22610,25 @@
 - [D:\AssistIM_V2\server\app\schemas\group.py](D:\AssistIM_V2/server/app/schemas/group.py)
 - [D:\AssistIM_V2\server\app\services\group_service.py](D:\AssistIM_V2/server/app/services/group_service.py)
 
-影响：
+修复前影响：
 
 - 角色 mutation 的正式 contract 不能从 schema 直接看出
 - route 入口和 service 内部规则继续分裂
 
-建议：
+修复建议：
 
 - 角色集合应在 schema 层显式建模
 
 ### F-764：`DeviceKeysRefreshRequest` 不能表达“`signed_prekey` 或 `prekeys` 至少一项存在”的正式约束
 
-状态：已确认
+状态：已修复（2026-04-12）
 
-现状：
+修复说明：
+
+- `DeviceKeysRefreshRequest` 已通过 schema validator 明确要求 `signed_prekey` 或 `prekeys` 至少一项存在
+- 已补充回归测试覆盖空请求、空 `prekeys`、仅刷新 `signed_prekey`、仅追加 `prekeys`
+
+原现状：
 
 - [device.py](D:\AssistIM_V2\server/app/schemas/device.py) 的 `DeviceKeysRefreshRequest`
 - 允许：
@@ -22698,12 +22642,12 @@
 - [D:\AssistIM_V2\server\app\schemas\device.py](D:\AssistIM_V2/server/app/schemas/device.py)
 - [D:\AssistIM_V2\server\app\services\device_service.py](D:\AssistIM_V2/server/app/services/device_service.py)
 
-影响：
+修复前影响：
 
 - refresh-device-keys 的正式请求 contract 无法从 schema 直接读出
 - schema 和 service 继续分担同一个基本必填约束
 
-建议：
+修复建议：
 
 - 用 schema validator 显式建模 “至少一项存在”
 
@@ -22764,9 +22708,14 @@
 
 ### F-767：HTTP typing 的响应只回 `typing` 布尔值，不回 canonical event payload，和它实际广播出去的 realtime shape 分裂
 
-状态：已确认
+状态：已修复（2026-04-12）
 
-现状：
+修复说明：
+
+- `typing_session()` 的 HTTP ack 已直接返回与 realtime fanout 同源的 canonical `typing_event`
+- 已有 `test_session_api.py` 覆盖 ack / fanout 都包含 `session_id/user_id/typing`
+
+原现状：
 
 - [sessions.py](D:\AssistIM_V2\server/app/api/v1/sessions.py) 的 `typing_session()`
 - 实际广播给成员的是：
@@ -22780,12 +22729,12 @@
 
 - [D:\AssistIM_V2\server\app\api\v1\sessions.py](D:\AssistIM_V2/server/app/api/v1/sessions.py)
 
-影响：
+修复前影响：
 
 - 同一个 typing 正式动作在 HTTP ack 和 realtime event 上有两套 shape
 - 调用方拿不到 canonical `session_id/user_id` echo
 
-建议：
+修复建议：
 
 - typing HTTP ack 至少和 realtime payload 对齐到同一份 canonical shape
 
@@ -23023,9 +22972,16 @@
 
 ### F-777：message payload 同时返回 `created_at` 和 `timestamp`，两个字段当前是同一个值
 
-状态：已确认
+状态：已修复（2026-04-12）
 
-现状：
+修复说明：
+
+- `MessageService.serialize_message()` 已移除 message payload 顶层 `timestamp`，只保留 `created_at` / `updated_at`
+- `MessageOut` schema 已同步移除 `timestamp`
+- 客户端 websocket 入站消息在无 `timestamp` 时会用 message `created_at` 初始化本地 `ChatMessage.timestamp`
+- 已补 API/schema/client 入站回归断言，避免正式 message payload 再次暴露同义时间字段
+
+原现状：
 
 - [message_service.py](D:\AssistIM_V2\server/app/services/message_service.py) 的 `serialize_message()`
 - 当前同时写：
@@ -23036,20 +22992,26 @@
 
 - [D:\AssistIM_V2\server\app\services\message_service.py](D:\AssistIM_V2/server/app/services/message_service.py)
 
-影响：
+修复前影响：
 
 - message formal payload 再次出现双字段同义别名
 - 客户端会继续在 `created_at/timestamp` 两套时间字段间分裂
 
-建议：
+修复建议：
 
 - 消息时间字段应只保留一套 canonical 名称
 
 ### F-778：message payload 会把 `session_seq/read_count/read_target_count/read_by_user_ids/is_read_by_me` 同时放在顶层和 `extra` 里
 
-状态：已确认
+状态：已修复（2026-04-12）
 
-现状：
+修复说明：
+
+- `MessageService._message_extra()` 已停止把 `read_metadata` merge 进 `extra`
+- `session_seq/read_count/read_target_count/read_by_user_ids/is_read_by_me` 只保留在 message payload 顶层 canonical 字段
+- 已在 `test_group_read_receipts_are_tracked_per_member` 中断言 read metadata 不再出现在 `extra` 内
+
+原现状：
 
 - [message_service.py](D:\AssistIM_V2\server/app/services/message_service.py) 的 `serialize_message()`
 - 顶层已经返回：
@@ -23064,20 +23026,25 @@
 
 - [D:\AssistIM_V2\server\app\services\message_service.py](D:\AssistIM_V2/server/app/services/message_service.py)
 
-影响：
+修复前影响：
 
 - message output contract 出现结构性重复
 - 同一语义要维护顶层和 `extra` 两份表示
 
-建议：
+修复建议：
 
 - read metadata 应只保留一层正式表示
 
 ### F-779：`extra` 已经不再是消息持久化 extra，而是“持久化 extra + 当前查看者 read metadata”的混合体
 
-状态：已确认
+状态：已修复（2026-04-12）
 
-现状：
+修复说明：
+
+- `extra` 已恢复为服务端持久化 message extra 的 sanitized 输出
+- 当前 viewer 相关 read metadata 不再混入 `extra`，只通过 message 顶层 canonical 字段表达
+
+原现状：
 
 - [message_service.py](D:\AssistIM_V2\server/app/services/message_service.py) 的 `_message_extra()`
 - 先读取持久化 `extra`
@@ -23087,12 +23054,12 @@
 
 - [D:\AssistIM_V2\server\app\services\message_service.py](D:\AssistIM_V2/server/app/services/message_service.py)
 
-影响：
+修复前影响：
 
 - 同一条消息对不同查看者返回的 `extra` 不再一致
 - `extra` 失去“authoritative stored extra”语义
 
-建议：
+修复建议：
 
 - persisted extra 和 derived viewer metadata 应正式分层
 
@@ -23187,9 +23154,14 @@
 
 ### F-783：`serialize_session()` 会把 `unread_count` 固定写成 `0`，formal session payload 继续夹带 dummy 字段
 
-状态：已确认
+状态：已修复（2026-04-12）
 
-现状：
+修复说明：
+
+- `SessionService.list_sessions()` / `get_session()` 已把 `unread_count` 接到 `MessageRepository.unread_by_session_for_user()` 的权威计数
+- 已补充 `test_session_service.py` 覆盖 session payload 不再返回恒为 0 的 dummy unread
+
+原现状：
 
 - [session_service.py](D:\AssistIM_V2\server/app/services/session_service.py) 的 `serialize_session()`
 - 无论是：
@@ -23207,21 +23179,26 @@
 - [D:\AssistIM_V2\server\app\api\v1\sessions.py](D:\AssistIM_V2\server/app/api/v1/sessions.py)
 - [D:\AssistIM_V2\server\app\repositories\message_repo.py](D:\AssistIM_V2\server/app/repositories/message_repo.py)
 
-影响：
+修复前影响：
 
 - formal session payload 继续暴露一个看起来 authoritative、实际上恒为 0 的 dummy 字段
 - 调用方会被迫同时面对“session 自带 unread_count”和“单独 unread summary”两套真相
 
-建议：
+修复建议：
 
 - 要么把 unread 从 session snapshot 中移除
 - 要么在同一条 formal session route 上返回真实 unread，而不是继续塞 placeholder
 
 ### F-784：`serialize_session()` 里的 `session_crypto_state` 目前始终是空对象 `{}`，formal session payload 继续暴露 placeholder 状态
 
-状态：已确认
+状态：已修复（2026-04-12）
 
-现状：
+修复说明：
+
+- 服务端 `serialize_session()` 和 `SessionOut` 已移除空壳 `session_crypto_state`
+- session crypto state 继续由客户端 authenticated runtime 本地注解，不再伪装成服务端权威字段
+
+原现状：
 
 - [session_service.py](D:\AssistIM_V2\server/app/services/session_service.py) 的 `serialize_session()`
 - 当前始终写：
@@ -23232,20 +23209,25 @@
 
 - [D:\AssistIM_V2\server\app\services\session_service.py](D:\AssistIM_V2\server/app/services/session_service.py)
 
-影响：
+修复前影响：
 
 - formal session payload 再次出现“字段存在但没有 authoritative 语义”的 placeholder
 - 客户端很容易把它误当成正式安全状态，而实际上它只是一块空壳
 
-建议：
+修复建议：
 
 - 没有权威服务端安全态之前，应移除该字段或显式标为未实现
 
 ### F-785：`serialize_message()` 里的 `is_ai` 当前恒为 `False`，message formal payload 继续夹带 dummy 字段
 
-状态：已确认
+状态：已修复（2026-04-12）
 
-现状：
+修复说明：
+
+- 服务端 `serialize_message()` 和 `MessageOut` 已移除恒为 `False` 的 `is_ai` 字段
+- AI 会话身份继续由已有 `is_ai_session` 表达，避免 message payload 暴露假权威字段
+
+原现状：
 
 - [message_service.py](D:\AssistIM_V2\server/app/services/message_service.py) 的 `serialize_message()`
 - 当前始终写：
@@ -23257,21 +23239,26 @@
 - [D:\AssistIM_V2\server\app\services\message_service.py](D:\AssistIM_V2\server/app/services/message_service.py)
 - [D:\AssistIM_V2\server\app\schemas\message.py](D:\AssistIM_V2/server/app/schemas/message.py)
 
-影响：
+修复前影响：
 
 - 消息 formal payload 继续暴露一个看起来 authoritative、实际上永远为假值的字段
 - 客户端如果据此判断 AI 消息，只会得到持续错误的 contract
 
-建议：
+修复建议：
 
 - `is_ai` 要么正式实现
 - 要么从公开 message payload 中移除
 
 ### F-786：被撤回的最后一条消息在会话预览里会被序列化成空字符串，`recalled` 和“没有预览”被混成一类
 
-状态：已确认
+状态：已修复（2026-04-12）
 
-现状：
+修复说明：
+
+- `SessionService._serialize_last_message_preview()` 已为 recalled last-message 返回稳定 formal 占位 `[message recalled]`
+- 已补充 `test_session_service.py` 覆盖 recalled session preview 不再退化为空字符串
+
+原现状：
 
 - [session_service.py](D:\AssistIM_V2\server/app/services/session_service.py) 的 `_serialize_last_message_preview()`
 - 当前对 `recalled` 最后一条消息直接返回：
@@ -23281,20 +23268,25 @@
 
 - [D:\AssistIM_V2\server\app\services\session_service.py](D:\AssistIM_V2\server/app/services/session_service.py)
 
-影响：
+修复前影响：
 
 - 会话列表无法区分“最后一条消息被撤回”与“根本没有可展示预览”
 - 上层只能额外拼读 `last_message_status` 之类旁路字段补语义
 
-建议：
+修复建议：
 
 - 会话预览应给 recalled last-message 单独的 formal placeholder，而不是直接清成空字符串
 
 ### F-787：被撤回消息的 `content` 也会被序列化成空字符串，`recalled` 和“空文本消息”没有单一 formal 区分
 
-状态：已确认
+状态：已修复（2026-04-12）
 
-现状：
+修复说明：
+
+- `MessageService._serialize_message_content()` 已为 recalled message 返回稳定 formal 占位 `[message recalled]`
+- 已补充 `test_message_service.py` 覆盖 recalled message content 不再退化为空字符串
+
+原现状：
 
 - [message_service.py](D:\AssistIM_V2\server/app/services/message_service.py) 的 `_serialize_message_content()`
 - 当前对 recalled message 直接返回：
@@ -23304,20 +23296,27 @@
 
 - [D:\AssistIM_V2\server\app\services\message_service.py](D:\AssistIM_V2\server/app/services/message_service.py)
 
-影响：
+修复前影响：
 
 - message payload 本身无法只靠 `content` 区分“被撤回”与“原本就是空字符串”
 - formal contract 继续要求调用方同时拼 `status` 和内容解释语义
 
-建议：
+修复建议：
 
 - recalled message 应有明确的内容占位或独立字段语义，不要继续把 `content` 直接清空
 
 ### F-788：会话历史分页用 `created_at` 当 cursor，但正式排序用的是 `session_seq`，消息翻页 contract 继续是两套真相
 
-状态：已确认
+状态：已修复（2026-04-12）
 
-现状：
+修复说明：
+
+- 服务端 `GET /sessions/{session_id}/messages` 已从 `before` 时间戳 cursor 收口为 `before_seq` 序号 cursor
+- `MessageRepository.list_session_messages()` 已按 `Message.session_seq < before_seq` 翻页，并继续按 `session_seq DESC, created_at DESC` 取页后反转成正序返回
+- 客户端远端历史回拉、窗口历史页缓存 key、恢复补偿 `recover_session_messages()` 都已传递/推进 `before_seq`
+- 已补 `test_list_messages_uses_session_seq_cursor`、`test_chat_service_fetch_messages_uses_session_seq_cursor` 和 manager/controller 边界回归
+
+原现状：
 
 - [message_repo.py](D:\AssistIM_V2\server/app/repositories/message_repo.py) 的 `list_session_messages()`
 - `before` 条件是：
@@ -23330,20 +23329,25 @@
 - [D:\AssistIM_V2\server\app\repositories\message_repo.py](D:\AssistIM_V2/server/app/repositories/message_repo.py)
 - [D:\AssistIM_V2\server\app\api\v1\messages.py](D:\AssistIM_V2/server/app/api/v1/messages.py)
 
-影响：
+修复前影响：
 
 - history paging cursor 继续不是按 canonical `session_seq` 翻页
 - 一旦出现时间戳碰撞、时钟漂移或补写消息，翻页就可能跳过或重复消息
 
-建议：
+修复建议：
 
 - 单会话历史分页应统一到 `session_seq` 或另一套单一有序 cursor
 
 ### F-789：缺失消息补偿的服务端排序继续优先 `created_at`，而不是按每个会话的 `session_seq` authoritative 顺序输出
 
-状态：已确认
+状态：已修复（2026-04-12）
 
-现状：
+修复说明：
+
+- `list_missing_messages_for_user()` 已改为按 `session_id, session_seq, created_at, id` 输出
+- 缺失消息补偿不再让 `created_at` 排在同一会话的 authoritative `session_seq` 之前
+
+原现状：
 
 - [message_repo.py](D:\AssistIM_V2\server/app/repositories/message_repo.py) 的 `list_missing_messages_for_user()`
 - 当前排序是：
@@ -23355,12 +23359,12 @@
 
 - [D:\AssistIM_V2\server\app\repositories\message_repo.py](D:\AssistIM_V2/server/app/repositories/message_repo.py)
 
-影响：
+修复前影响：
 
 - reconnect/history 补偿继续把 `created_at` 和 `session_seq` 混成两套 ordering truth
 - 某个会话内只要 `created_at` 和 `session_seq` 不严格同向，就可能打乱 authoritative replay 顺序
 
-建议：
+修复建议：
 
 - 缺失消息补偿应按 canonical session order 输出，不要再让 `created_at` 排在 `session_seq` 之前
 

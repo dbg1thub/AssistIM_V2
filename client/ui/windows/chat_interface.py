@@ -235,11 +235,12 @@ class ChatInterface(QWidget):
         self._session_visibility_active = False
         self._current_session_active = False
         self._oldest_loaded_timestamp: Optional[float] = None
+        self._oldest_loaded_session_seq: Optional[int] = None
         self._has_more_history = True
         self._history_load_task: Optional[asyncio.Task] = None
-        self._history_page_cache: dict[str, OrderedDict[tuple[Optional[float], int], list]] = {}
-        self._history_page_warm_keys: set[tuple[str, Optional[float], int]] = set()
-        self._history_page_tasks: dict[tuple[str, Optional[float], int], asyncio.Task] = {}
+        self._history_page_cache: dict[str, OrderedDict[tuple[Optional[float], Optional[int], int], list]] = {}
+        self._history_page_warm_keys: set[tuple[str, Optional[float], Optional[int], int]] = set()
+        self._history_page_tasks: dict[tuple[str, Optional[float], Optional[int], int], asyncio.Task] = {}
         self._startup_history_prefetch_task: Optional[asyncio.Task] = None
         self._session_view_state: dict[str, dict] = {}
         self._last_read_receipts: dict[str, str] = {}
@@ -247,6 +248,7 @@ class ChatInterface(QWidget):
         self._composer_drafts: dict[str, list[dict]] = {}
         self._ui_tasks: set[asyncio.Task] = set()
         self._message_context_menu: RoundMenu | None = None
+        self._teardown_started = False
         self._typing_indicator_timer = QTimer(self)
         self._typing_indicator_timer.setSingleShot(True)
         self._call_ring_timer = QTimer(self)
@@ -417,9 +419,17 @@ class ChatInterface(QWidget):
 
     def _on_destroyed(self, *_args) -> None:
         """Cancel outstanding UI tasks and remove event listeners on widget teardown."""
+        self.quiesce()
+
+    def quiesce(self) -> None:
+        """Stop chat-page tasks before logout clears authenticated runtime."""
+        if self._teardown_started:
+            return
+        self._teardown_started = True
         self._invalidate_ui_callback_generation()
         self._advance_session_focus_generation()
         self._unsubscribe_from_events()
+        self.session_panel.quiesce()
         self._cancel_pending_task(self._load_task)
         self._load_task = None
         self._cancel_pending_task(self._history_load_task)
@@ -793,13 +803,14 @@ class ChatInterface(QWidget):
         self.chat_panel.set_has_more_history(True)
         self.chat_panel.set_history_loading(False)
         self._oldest_loaded_timestamp = None
+        self._oldest_loaded_session_seq = None
         self._has_more_history = True
 
         self._cancel_pending_task(self._load_task)
         self._cancel_pending_task(self._history_load_task)
 
         cached_state = self._session_view_state.get(session_id)
-        cached_page = self._peek_cached_history_page(session_id, before_timestamp=None)
+        cached_page = self._peek_cached_history_page(session_id, before_timestamp=None, before_seq=None)
         if cached_state:
             self._restore_session_view_state(session_id, cached_state)
             self._set_load_task(self._select_session_only(session_id, generation), f"select session {session_id}")
@@ -820,7 +831,7 @@ class ChatInterface(QWidget):
             if not self._is_current_session_context(session_id, generation):
                 return
             self._activate_selected_session_if_visible(session_id)
-            local_messages = self._peek_cached_history_page(session_id, before_timestamp=None)
+            local_messages = self._peek_cached_history_page(session_id, before_timestamp=None, before_seq=None)
             if local_messages is None:
                 local_messages = await self._chat_controller.load_cached_messages(
                     session_id,
@@ -831,6 +842,7 @@ class ChatInterface(QWidget):
                     self._cache_history_page(
                         session_id,
                         before_timestamp=None,
+                        before_seq=None,
                         messages=local_messages,
                         warm=False,
                     )
@@ -844,6 +856,7 @@ class ChatInterface(QWidget):
             messages = await self._load_history_page(
                 session_id,
                 before_timestamp=None,
+                before_seq=None,
             )
         except asyncio.CancelledError:
             raise
@@ -874,7 +887,8 @@ class ChatInterface(QWidget):
         merged_messages = self._merge_loaded_messages_with_visible(messages)
         self.chat_panel.set_messages(merged_messages)
         self._oldest_loaded_timestamp = self._extract_oldest_timestamp(merged_messages)
-        self._has_more_history = len(merged_messages) >= self.MESSAGE_PAGE_SIZE and self._oldest_loaded_timestamp is not None
+        self._oldest_loaded_session_seq = self._extract_oldest_session_seq(merged_messages)
+        self._has_more_history = len(merged_messages) >= self.MESSAGE_PAGE_SIZE and self._oldest_loaded_session_seq is not None
         self.chat_panel.set_has_more_history(self._has_more_history)
         self.chat_panel.set_history_loading(False)
         self._store_session_view_state(session_id)
@@ -962,14 +976,15 @@ class ChatInterface(QWidget):
         if not self._is_current_session_context(session_id, generation):
             return
         before_timestamp = self._oldest_loaded_timestamp
-        if before_timestamp is None:
+        before_seq = self._oldest_loaded_session_seq
+        if before_seq is None:
             self.chat_panel.set_history_loading(False)
             self._has_more_history = False
             self.chat_panel.set_has_more_history(False)
             return
 
         try:
-            messages = await self._load_history_page(session_id, before_timestamp=before_timestamp)
+            messages = await self._load_history_page(session_id, before_timestamp=before_timestamp, before_seq=before_seq)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -989,7 +1004,8 @@ class ChatInterface(QWidget):
 
         self.chat_panel.prepend_messages(messages)
         self._oldest_loaded_timestamp = self._extract_oldest_timestamp(messages)
-        self._has_more_history = len(messages) >= self.MESSAGE_PAGE_SIZE and self._oldest_loaded_timestamp is not None
+        self._oldest_loaded_session_seq = self._extract_oldest_session_seq(messages)
+        self._has_more_history = len(messages) >= self.MESSAGE_PAGE_SIZE and self._oldest_loaded_session_seq is not None
         self.chat_panel.set_has_more_history(self._has_more_history)
         self._store_session_view_state(session_id)
 
@@ -1007,23 +1023,35 @@ class ChatInterface(QWidget):
         except (TypeError, ValueError):
             return None
 
+    @staticmethod
+    def _extract_oldest_session_seq(messages) -> Optional[int]:
+        """Return the canonical session_seq cursor for the oldest loaded message."""
+        if not messages:
+            return None
+        try:
+            session_seq = int(getattr(messages[0], "extra", {}).get("session_seq", 0) or 0)
+        except (TypeError, ValueError):
+            return None
+        return session_seq if session_seq > 0 else None
+
     async def _load_history_page(
         self,
         session_id: str,
         before_timestamp: Optional[float],
+        before_seq: Optional[int],
     ) -> list:
         """Load one history page, reusing cached local pages when available."""
         cache = self._history_page_cache.setdefault(session_id, OrderedDict())
-        cache_key = (before_timestamp, self.MESSAGE_PAGE_SIZE)
+        cache_key = (before_timestamp, before_seq, self.MESSAGE_PAGE_SIZE)
         cached_page = cache.get(cache_key)
-        task_key = self._history_page_task_key(session_id, before_timestamp)
+        task_key = self._history_page_task_key(session_id, before_timestamp, before_seq)
         if cached_page is not None and (before_timestamp is not None or task_key in self._history_page_warm_keys):
             cache.move_to_end(cache_key)
             return list(cached_page)
 
         task = self._history_page_tasks.get(task_key)
         if task is None or task.done():
-            task = asyncio.create_task(self._fetch_and_cache_history_page(session_id, before_timestamp))
+            task = asyncio.create_task(self._fetch_and_cache_history_page(session_id, before_timestamp, before_seq))
             self._history_page_tasks[task_key] = task
 
         try:
@@ -1037,16 +1065,19 @@ class ChatInterface(QWidget):
         self,
         session_id: str,
         before_timestamp: Optional[float],
+        before_seq: Optional[int],
     ) -> list:
         """Fetch one history page through the normal controller path and cache it as warm data."""
         messages = await self._chat_controller.load_messages(
             session_id,
             limit=self.MESSAGE_PAGE_SIZE,
             before_timestamp=before_timestamp,
+            before_seq=before_seq,
         )
         self._cache_history_page(
             session_id,
             before_timestamp=before_timestamp,
+            before_seq=before_seq,
             messages=messages,
             warm=True,
         )
@@ -1057,16 +1088,17 @@ class ChatInterface(QWidget):
         session_id: str,
         *,
         before_timestamp: Optional[float],
+        before_seq: Optional[int],
         messages: list,
         warm: bool,
     ) -> None:
         """Store one history page and remember whether it already includes remote backfill."""
         cache = self._history_page_cache.setdefault(session_id, OrderedDict())
-        cache_key = (before_timestamp, self.MESSAGE_PAGE_SIZE)
+        cache_key = (before_timestamp, before_seq, self.MESSAGE_PAGE_SIZE)
         cache[cache_key] = list(messages)
         cache.move_to_end(cache_key)
 
-        task_key = self._history_page_task_key(session_id, before_timestamp)
+        task_key = self._history_page_task_key(session_id, before_timestamp, before_seq)
         if warm:
             self._history_page_warm_keys.add(task_key)
         else:
@@ -1074,20 +1106,21 @@ class ChatInterface(QWidget):
 
         while len(cache) > self.HISTORY_PAGE_CACHE_LIMIT:
             dropped_key, _ = cache.popitem(last=False)
-            self._history_page_warm_keys.discard((session_id, dropped_key[0], dropped_key[1]))
+            self._history_page_warm_keys.discard((session_id, dropped_key[0], dropped_key[1], dropped_key[2]))
 
     def _peek_cached_history_page(
         self,
         session_id: str,
         *,
         before_timestamp: Optional[float],
+        before_seq: Optional[int],
     ) -> Optional[list]:
         """Return one cached history page without triggering any async work."""
         cache = self._history_page_cache.get(session_id)
         if not cache:
             return None
 
-        cache_key = (before_timestamp, self.MESSAGE_PAGE_SIZE)
+        cache_key = (before_timestamp, before_seq, self.MESSAGE_PAGE_SIZE)
         cached_page = cache.get(cache_key)
         if cached_page is None:
             return None
@@ -1098,9 +1131,10 @@ class ChatInterface(QWidget):
         self,
         session_id: str,
         before_timestamp: Optional[float],
-    ) -> tuple[str, Optional[float], int]:
+        before_seq: Optional[int],
+    ) -> tuple[str, Optional[float], Optional[int], int]:
         """Build one stable identity for a cached history page."""
-        return (session_id, before_timestamp, self.MESSAGE_PAGE_SIZE)
+        return (session_id, before_timestamp, before_seq, self.MESSAGE_PAGE_SIZE)
 
     async def _warm_history_pages(self, session_ids: list[str]) -> None:
         """Warm the first history page for a batch of sessions with bounded concurrency."""
@@ -1119,7 +1153,7 @@ class ChatInterface(QWidget):
 
     async def _prime_history_page(self, session_id: str) -> None:
         """Seed the in-memory first page from local storage, then backfill it remotely."""
-        if self._peek_cached_history_page(session_id, before_timestamp=None) is None:
+        if self._peek_cached_history_page(session_id, before_timestamp=None, before_seq=None) is None:
             local_messages = await self._chat_controller.load_cached_messages(
                 session_id,
                 limit=self.MESSAGE_PAGE_SIZE,
@@ -1129,11 +1163,12 @@ class ChatInterface(QWidget):
                 self._cache_history_page(
                     session_id,
                     before_timestamp=None,
+                    before_seq=None,
                     messages=local_messages,
                     warm=False,
                 )
 
-        await self._load_history_page(session_id, before_timestamp=None)
+        await self._load_history_page(session_id, before_timestamp=None, before_seq=None)
 
     def _invalidate_history_cache(self, session_id: Optional[str] = None) -> None:
         """Drop cached local history pages when a session receives updates."""
@@ -1238,6 +1273,7 @@ class ChatInterface(QWidget):
             "messages": self.chat_panel.get_visible_messages(),
             "scroll_gap": self.chat_panel.get_message_scroll_gap(),
             "oldest_loaded_timestamp": self._oldest_loaded_timestamp,
+            "oldest_loaded_session_seq": self._oldest_loaded_session_seq,
             "has_more_history": self._has_more_history,
         }
 
@@ -1246,6 +1282,7 @@ class ChatInterface(QWidget):
         messages = list(state.get("messages") or [])
         self.chat_panel.set_messages(messages, scroll_to_bottom=False)
         self._oldest_loaded_timestamp = state.get("oldest_loaded_timestamp")
+        self._oldest_loaded_session_seq = state.get("oldest_loaded_session_seq")
         self._has_more_history = bool(state.get("has_more_history", True))
         self.chat_panel.set_has_more_history(self._has_more_history)
         self.chat_panel.set_history_loading(False)
@@ -2167,25 +2204,33 @@ class ChatInterface(QWidget):
     def _group_record_payload(record) -> dict[str, object]:
         """Serialize one group record back into the session/contact update shape."""
         payload = dict(getattr(record, "extra", {}) or {})
-        payload["id"] = str(getattr(record, "id", "") or payload.get("id", "") or "")
-        payload["group_id"] = str(payload.get("group_id", "") or payload["id"] or "")
-        payload["name"] = str(getattr(record, "name", "") or payload.get("name", "") or "")
-        payload["announcement"] = str(getattr(record, "announcement", "") or payload.get("announcement", "") or "")
-        payload["avatar"] = str(getattr(record, "avatar", "") or payload.get("avatar", "") or "")
-        payload["owner_id"] = str(getattr(record, "owner_id", "") or payload.get("owner_id", "") or "")
-        payload["session_id"] = str(getattr(record, "session_id", "") or payload.get("session_id", "") or "")
-        payload["member_count"] = int(getattr(record, "member_count", 0) or payload.get("member_count", 0) or 0)
-        payload["announcement_message_id"] = str(
-            getattr(record, "announcement_message_id", "") or payload.get("announcement_message_id", "") or ""
+        record_id = str(getattr(record, "id", "") or payload.get("id", "") or "")
+        payload["id"] = record_id
+        payload["group_id"] = str(payload.get("group_id", "") or record_id or "")
+
+        def set_if_present(key: str, value: object) -> None:
+            if key in payload or value not in (None, "", 0):
+                payload[key] = value
+
+        set_if_present("name", str(getattr(record, "name", "") or payload.get("name", "") or ""))
+        set_if_present("announcement", str(getattr(record, "announcement", "") or payload.get("announcement", "") or ""))
+        set_if_present("avatar", str(getattr(record, "avatar", "") or payload.get("avatar", "") or ""))
+        set_if_present("owner_id", str(getattr(record, "owner_id", "") or payload.get("owner_id", "") or ""))
+        set_if_present("session_id", str(getattr(record, "session_id", "") or payload.get("session_id", "") or ""))
+        set_if_present("member_count", int(getattr(record, "member_count", 0) or payload.get("member_count", 0) or 0))
+        set_if_present(
+            "announcement_message_id",
+            str(getattr(record, "announcement_message_id", "") or payload.get("announcement_message_id", "") or ""),
         )
-        payload["announcement_author_id"] = str(
-            getattr(record, "announcement_author_id", "") or payload.get("announcement_author_id", "") or ""
+        set_if_present(
+            "announcement_author_id",
+            str(getattr(record, "announcement_author_id", "") or payload.get("announcement_author_id", "") or ""),
         )
         raw_published_at = getattr(record, "announcement_published_at", None) or payload.get("announcement_published_at")
         if hasattr(raw_published_at, "isoformat"):
-            payload["announcement_published_at"] = raw_published_at.isoformat()
+            set_if_present("announcement_published_at", raw_published_at.isoformat())
         else:
-            payload["announcement_published_at"] = str(raw_published_at or "")
+            set_if_present("announcement_published_at", str(raw_published_at or ""))
         return payload
 
     async def _apply_group_management_record(self, session_id: str, record) -> None:

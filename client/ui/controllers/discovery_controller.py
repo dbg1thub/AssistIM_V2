@@ -73,10 +73,52 @@ class DiscoveryController:
         self._comment_cache: dict[str, list[MomentCommentRecord]] = {}
         self._like_state_cache: dict[str, bool] = {}
         self._like_count_cache: dict[str, int] = {}
+        self._cache_owner_user_id = ""
+        self._closed = False
+
+    def _runtime_user_id(self) -> str:
+        """Return the authenticated runtime user id for cache scoping."""
+        current_user = self._auth.current_user or {}
+        return str(current_user.get("id", "") or "").strip()
+
+    def _clear_caches(self) -> None:
+        """Drop all account-scoped discovery caches."""
+        self._user_cache.clear()
+        self._comment_cache.clear()
+        self._like_state_cache.clear()
+        self._like_count_cache.clear()
+
+    def _capture_runtime_user_id(self) -> str:
+        """Capture the live account id for one discovery task."""
+        if self._closed:
+            raise asyncio.CancelledError
+        user_id = self._runtime_user_id()
+        if not user_id:
+            raise asyncio.CancelledError
+        return user_id
+
+    def _ensure_runtime_user_id(self, expected_user_id: str) -> None:
+        """Reject late discovery results after logout or relogin."""
+        if self._closed:
+            raise asyncio.CancelledError
+        current_user_id = self._runtime_user_id()
+        if not expected_user_id or current_user_id != expected_user_id:
+            raise asyncio.CancelledError
+
+    def _sync_cache_scope(self, owner_user_id: str) -> None:
+        """Keep the global discovery cache scoped to the active account."""
+        normalized_owner = str(owner_user_id or "").strip()
+        if self._cache_owner_user_id == normalized_owner:
+            return
+        self._clear_caches()
+        self._cache_owner_user_id = normalized_owner
 
     async def load_moments(self, user_id: Optional[str] = None) -> list[MomentRecord]:
         """Load moments and enrich authors from the user API when needed."""
+        owner_user_id = self._capture_runtime_user_id()
+        self._sync_cache_scope(owner_user_id)
         payload = await self._discovery_service.fetch_moments(user_id=user_id)
+        self._ensure_runtime_user_id(owner_user_id)
         items = list(payload or [])
 
         author_ids = {
@@ -88,7 +130,11 @@ class DiscoveryController:
             for comment in item.get("comments") or []:
                 if comment.get("user_id"):
                     author_ids.add(str(comment.get("user_id", "") or ""))
-        await asyncio.gather(*[self._ensure_user_loaded(user_id) for user_id in author_ids], return_exceptions=True)
+        await asyncio.gather(
+            *[self._ensure_user_loaded(user_id, owner_user_id=owner_user_id) for user_id in author_ids],
+            return_exceptions=True,
+        )
+        self._ensure_runtime_user_id(owner_user_id)
 
         moments = [self._normalize_moment(item) for item in items]
         moments.sort(key=lambda item: item.created_at, reverse=True)
@@ -96,15 +142,21 @@ class DiscoveryController:
 
     async def create_moment(self, content: str) -> MomentRecord:
         """Create a new moment."""
+        owner_user_id = self._capture_runtime_user_id()
+        self._sync_cache_scope(owner_user_id)
         payload = await self._discovery_service.create_moment(content)
+        self._ensure_runtime_user_id(owner_user_id)
         return self._normalize_moment(payload or {})
 
     async def set_liked(self, moment_id: str, liked: bool, like_count: Optional[int] = None) -> bool:
         """Update like state for a moment."""
+        owner_user_id = self._capture_runtime_user_id()
+        self._sync_cache_scope(owner_user_id)
         if liked:
             await self._discovery_service.like_moment(moment_id)
         else:
             await self._discovery_service.unlike_moment(moment_id)
+        self._ensure_runtime_user_id(owner_user_id)
         self._like_state_cache[moment_id] = liked
         if like_count is not None:
             self._like_count_cache[moment_id] = max(0, like_count)
@@ -112,13 +164,16 @@ class DiscoveryController:
 
     async def add_comment(self, moment_id: str, content: str) -> MomentCommentRecord:
         """Add a new comment to a moment."""
+        owner_user_id = self._capture_runtime_user_id()
+        self._sync_cache_scope(owner_user_id)
         payload = await self._discovery_service.add_comment(moment_id, content)
+        self._ensure_runtime_user_id(owner_user_id)
         comment = self._normalize_comment(payload or {}, moment_id=moment_id)
         self._comment_cache.setdefault(moment_id, []).append(comment)
         self._like_count_cache.setdefault(moment_id, self._like_count_cache.get(moment_id, 0))
         return comment
 
-    async def _ensure_user_loaded(self, user_id: str) -> None:
+    async def _ensure_user_loaded(self, user_id: str, *, owner_user_id: str) -> None:
         """Load a user profile into cache if absent."""
         if not user_id or user_id in self._user_cache:
             return
@@ -127,10 +182,21 @@ class DiscoveryController:
             payload = await self._user_service.fetch_user(user_id)
         except Exception:
             logger.debug("Discovery user enrichment failed for %s", user_id, exc_info=True)
+            self._ensure_runtime_user_id(owner_user_id)
             self._user_cache[user_id] = {}
             return
 
+        self._ensure_runtime_user_id(owner_user_id)
         self._user_cache[user_id] = dict(payload or {})
+
+    async def close(self) -> None:
+        """Drop discovery caches and retire the global singleton."""
+        self._closed = True
+        self._cache_owner_user_id = ""
+        self._clear_caches()
+        global _discovery_controller
+        if _discovery_controller is self:
+            _discovery_controller = None
 
     def _normalize_moment(self, payload: dict[str, Any]) -> MomentRecord:
         """Convert backend payload to UI model."""
@@ -177,10 +243,10 @@ class DiscoveryController:
             user_id=user_id,
             content=str(data.get("content", "") or ""),
             created_at=str(data.get("created_at", "") or ""),
-            username=str(data.get("username", "") or author.get("username", "") or cached_user.get("username", "") or ""),
-            nickname=str(data.get("nickname", "") or author.get("nickname", "") or cached_user.get("nickname", "") or ""),
-            avatar=str(data.get("avatar", "") or author.get("avatar", "") or cached_user.get("avatar", "") or ""),
-            gender=str(data.get("gender", "") or author.get("gender", "") or cached_user.get("gender", "") or ""),
+            username=str(author.get("username", "") or cached_user.get("username", "") or ""),
+            nickname=str(author.get("nickname", "") or cached_user.get("nickname", "") or ""),
+            avatar=str(author.get("avatar", "") or cached_user.get("avatar", "") or ""),
+            gender=str(author.get("gender", "") or cached_user.get("gender", "") or ""),
             images=images,
             comments=normalized_comments,
             like_count=like_count,
@@ -192,7 +258,8 @@ class DiscoveryController:
     def _normalize_comment(self, payload: dict[str, Any], moment_id: str = "") -> MomentCommentRecord:
         """Convert backend payload to comment UI model."""
         data = dict(payload or {})
-        user_id = str(data.get("user_id", "") or "")
+        author = dict(data.get("author") or {})
+        user_id = str(data.get("user_id", "") or author.get("id", "") or "")
         cached_user = self._user_cache.get(user_id, {})
         current_user = self._auth.current_user or {}
 
@@ -211,14 +278,19 @@ class DiscoveryController:
             user_id=user_id,
             content=str(data.get("content", "") or ""),
             created_at=str(data.get("created_at", "") or ""),
-            username=str(data.get("username", "") or cached_user.get("username", "") or ""),
-            nickname=str(data.get("nickname", "") or cached_user.get("nickname", "") or ""),
-            avatar=str(data.get("avatar", "") or cached_user.get("avatar", "") or ""),
-            gender=str(data.get("gender", "") or cached_user.get("gender", "") or ""),
+            username=str(author.get("username", "") or cached_user.get("username", "") or ""),
+            nickname=str(author.get("nickname", "") or cached_user.get("nickname", "") or ""),
+            avatar=str(author.get("avatar", "") or cached_user.get("avatar", "") or ""),
+            gender=str(author.get("gender", "") or cached_user.get("gender", "") or ""),
         )
 
 
 _discovery_controller: Optional[DiscoveryController] = None
+
+
+def peek_discovery_controller() -> Optional[DiscoveryController]:
+    """Return the existing discovery controller singleton if it was created."""
+    return _discovery_controller
 
 
 def get_discovery_controller() -> DiscoveryController:

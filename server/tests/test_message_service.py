@@ -217,6 +217,14 @@ def test_message_service_get_session_member_ids_returns_visible_session_members(
     assert payload == ['alice', 'bob']
 
 
+def test_message_service_recalled_message_content_uses_formal_placeholder() -> None:
+    service = MessageService(db=None)
+    message = SimpleNamespace(status='recalled', content='original content')
+
+    payload = service._serialize_message_content(message, 'alice')
+
+    assert payload == MessageService.RECALLED_MESSAGE_PLACEHOLDER
+
 def _direct_text_encryption_extra() -> dict:
     return {
         'encryption': {
@@ -234,6 +242,76 @@ def _direct_text_encryption_extra() -> dict:
         },
     }
 
+
+def test_message_service_recall_rejects_non_user_message_types() -> None:
+    service = MessageService(db=None)
+
+    service._ensure_message_type_allows_recall(SimpleNamespace(type='image'))
+
+    with pytest.raises(AppError) as exc_info:
+        service._ensure_message_type_allows_recall(SimpleNamespace(type='system'))
+
+    assert exc_info.value.status_code == 422
+    assert exc_info.value.message == 'message type does not support recall'
+
+def test_message_service_rejects_structured_values_for_envelope_scalar_fields() -> None:
+    def assert_invalid(callback, field_name: str) -> None:
+        with pytest.raises(AppError) as exc_info:
+            callback()
+        assert exc_info.value.status_code == 422
+        assert field_name in exc_info.value.message
+
+    direct_text = dict(_direct_text_encryption_extra()['encryption'])
+    direct_text['recipient_device_id'] = {'device_id': 'device-bob'}
+    assert_invalid(lambda: MessageService._validate_direct_text_envelope(direct_text), 'recipient_device_id')
+
+    direct_attachment = {
+        'sender_device_id': 'device-alice',
+        'sender_identity_key_public': 'identity-alice',
+        'recipient_user_id': 'bob',
+        'recipient_device_id': 'device-bob',
+        'metadata_ciphertext': ['metadata-ciphertext'],
+        'nonce': 'nonce',
+        'recipient_prekey_id': 1,
+        'recipient_prekey_type': 'signed',
+    }
+    assert_invalid(lambda: MessageService._validate_direct_attachment_envelope(direct_attachment), 'metadata_ciphertext')
+
+    fanout_item = {
+        'recipient_user_id': 'bob',
+        'recipient_device_id': 'device-bob',
+        'sender_device_id': 'device-alice',
+        'sender_key_id': 'sender-key-1',
+        'ciphertext': 'fanout-ciphertext',
+        'nonce': 'fanout-nonce',
+        'scheme': 'group-sender-key-fanout-v1',
+    }
+    group_text = {
+        'session_id': 'session-group-1',
+        'sender_device_id': 'device-alice',
+        'sender_key_id': ['sender-key-1'],
+        'content_ciphertext': 'ciphertext',
+        'nonce': 'nonce',
+        'fanout': [dict(fanout_item)],
+    }
+    assert_invalid(lambda: MessageService._validate_group_text_envelope(group_text), 'sender_key_id')
+
+    group_attachment = {
+        'session_id': 'session-group-1',
+        'sender_device_id': 'device-alice',
+        'sender_key_id': 'sender-key-1',
+        'metadata_ciphertext': {'ciphertext': 'metadata'},
+        'nonce': 'nonce',
+        'fanout': [dict(fanout_item)],
+    }
+    assert_invalid(lambda: MessageService._validate_group_attachment_envelope(group_attachment), 'metadata_ciphertext')
+
+    invalid_fanout = dict(fanout_item)
+    invalid_fanout['ciphertext'] = {'ciphertext': 'fanout'}
+    group_text_with_invalid_fanout = dict(group_text)
+    group_text_with_invalid_fanout['sender_key_id'] = 'sender-key-1'
+    group_text_with_invalid_fanout['fanout'] = [invalid_fanout]
+    assert_invalid(lambda: MessageService._validate_group_text_envelope(group_text_with_invalid_fanout), 'ciphertext')
 
 def test_message_service_rejects_encrypted_payload_when_session_mode_plain() -> None:
     service = MessageService(db=None)

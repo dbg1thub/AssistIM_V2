@@ -1,4 +1,4 @@
-﻿"""Moment repository."""
+"""Moment repository."""
 
 from __future__ import annotations
 
@@ -66,17 +66,21 @@ class MomentRepository:
     def get_by_id(self, moment_id: str) -> Moment | None:
         return self.db.get(Moment, moment_id)
 
-    def like(self, moment_id: str, user_id: str) -> None:
-        existing = self.db.get(MomentLike, {"moment_id": moment_id, "user_id": user_id})
-        if existing is None:
-            self.db.add(MomentLike(moment_id=moment_id, user_id=user_id))
-            self.db.commit()
-
-    def unlike(self, moment_id: str, user_id: str) -> None:
+    def like(self, moment_id: str, user_id: str) -> bool:
         existing = self.db.get(MomentLike, {"moment_id": moment_id, "user_id": user_id})
         if existing is not None:
-            self.db.delete(existing)
-            self.db.commit()
+            return False
+        self.db.add(MomentLike(moment_id=moment_id, user_id=user_id))
+        self.db.commit()
+        return True
+
+    def unlike(self, moment_id: str, user_id: str) -> bool:
+        existing = self.db.get(MomentLike, {"moment_id": moment_id, "user_id": user_id})
+        if existing is None:
+            return False
+        self.db.delete(existing)
+        self.db.commit()
+        return True
 
     def comment(self, moment_id: str, user_id: str, content: str) -> MomentComment:
         comment = MomentComment(moment_id=moment_id, user_id=user_id, content=content)

@@ -524,6 +524,9 @@ class HTTPClient:
             status_code=status,
         )
 
+    async def refresh_access_token(self) -> bool:
+        """Refresh the current access token through the standard single-flight path."""
+        return await self._refresh_access_token()
     async def _refresh_access_token(self) -> bool:
         """
         Refresh access token using one single-flight task.
@@ -706,6 +709,9 @@ class HTTPClient:
             logger.debug("HTTP client session closed")
         self._session = None
         self._auth_loss_listeners.clear()
+        global _http_client
+        if _http_client is self:
+            _http_client = None
 
     async def upload_file(
             self,

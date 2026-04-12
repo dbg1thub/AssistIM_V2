@@ -24,6 +24,14 @@ T = TypeVar("T")
 
 
 class SessionService:
+    RECALLED_MESSAGE_PLACEHOLDER = "[message recalled]"
+    ENCRYPTED_MESSAGE_PLACEHOLDER = "[encrypted message]"
+    ATTACHMENT_MESSAGE_PREVIEW_PLACEHOLDERS = {
+        "file": "[file]",
+        "image": "[image]",
+        "video": "[video]",
+        "voice": "[voice]",
+    }
     ENCRYPTION_MODE_PLAIN = 'plain'
     ENCRYPTION_MODE_E2EE_PRIVATE = 'e2ee_private'
     ENCRYPTION_MODE_E2EE_GROUP = 'e2ee_group'
@@ -48,6 +56,7 @@ class SessionService:
         session_ids = [item.id for item in session_items]
         members_by_session = self.sessions.list_members_for_sessions(session_ids)
         last_messages_by_session = self.messages.list_last_messages_for_sessions(session_ids)
+        unread_counts_by_session = self._unread_counts_by_session(current_user.id)
         user_ids = sorted(
             {
                 str(member.user_id or "")
@@ -73,6 +82,7 @@ class SessionService:
                     session_members=session_members,
                     users_by_id=users_by_id,
                     current_user_id=current_user.id,
+                    unread_count=unread_counts_by_session.get(str(item.id or ""), 0),
                 )
             )
         return payload
@@ -98,7 +108,17 @@ class SessionService:
                 or set(existing_member_ids) != set(members)
             ):
                 raise AppError(ErrorCode.RESOURCE_NOT_FOUND, "session not found", 404)
-            return self.serialize_session(existing, include_members=True, participant_ids=members, current_user_id=current_user.id)
+            unread_count = self._unread_counts_by_session(current_user.id).get(str(existing.id or ""), 0)
+            payload = self.serialize_session(
+                existing,
+                include_members=True,
+                participant_ids=members,
+                current_user_id=current_user.id,
+                unread_count=unread_count,
+            )
+            payload["created"] = False
+            payload["reused"] = True
+            return payload
 
         def action() -> object:
             session = self.sessions.create(
@@ -112,6 +132,7 @@ class SessionService:
                 self.sessions.add_member(session.id, member_id, commit=False)
             return session
 
+        created = True
         try:
             session = self._run_transaction(action)
         except IntegrityError:
@@ -119,7 +140,18 @@ class SessionService:
             if existing is None:
                 raise
             session = existing
-        return self.serialize_session(session, include_members=True, participant_ids=members, current_user_id=current_user.id)
+            created = False
+        unread_count = self._unread_counts_by_session(current_user.id).get(str(session.id or ""), 0)
+        payload = self.serialize_session(
+            session,
+            include_members=True,
+            participant_ids=members,
+            current_user_id=current_user.id,
+            unread_count=unread_count,
+        )
+        payload["created"] = created
+        payload["reused"] = not created
+        return payload
 
     def get_session(self, current_user: User, session_id: str) -> dict:
         session = self.sessions.get_by_id(session_id)
@@ -131,7 +163,14 @@ class SessionService:
             raise AppError(ErrorCode.FORBIDDEN, "not a session member", 403)
         if not self._is_visible_private_session(session, member_ids):
             raise AppError(ErrorCode.RESOURCE_NOT_FOUND, "session not found", 404)
-        return self.serialize_session(session, include_members=True, participant_ids=member_ids, current_user_id=current_user.id)
+        unread_count = self._unread_counts_by_session(current_user.id).get(str(session.id or ""), 0)
+        return self.serialize_session(
+            session,
+            include_members=True,
+            participant_ids=member_ids,
+            current_user_id=current_user.id,
+            unread_count=unread_count,
+        )
 
     def delete_session(self, current_user: User, session_id: str) -> None:
         session = self.sessions.get_by_id(session_id)
@@ -159,6 +198,7 @@ class SessionService:
         session_members: list | None = None,
         users_by_id: dict[str, User] | None = None,
         current_user_id: str | None = None,
+        unread_count: int = 0,
     ) -> dict:
         member_ids = participant_ids if participant_ids is not None else self.sessions.list_member_ids(session.id)
         if last_message is None:
@@ -230,7 +270,7 @@ class SessionService:
                 isoformat_utc(last_message.created_at) if last_message else None
             ),
             "updated_at": isoformat_utc(session.updated_at),
-            "unread_count": 0,
+            "unread_count": max(0, int(unread_count or 0)),
             "avatar": avatar,
             "is_ai_session": session.is_ai_session,
             "encryption_mode": self._resolve_encryption_mode(
@@ -238,7 +278,6 @@ class SessionService:
                 session_type=normalized_session_type,
                 is_ai_session=bool(session.is_ai_session),
             ),
-            "session_crypto_state": {},
             "call_capabilities": self._call_capabilities(
                 session_type=normalized_session_type,
                 is_ai_session=bool(session.is_ai_session),
@@ -318,8 +357,35 @@ class SessionService:
         if last_message is None:
             return None
         if last_message.status == "recalled":
-            return ""
-        return last_message.content
+            return SessionService.RECALLED_MESSAGE_PLACEHOLDER
+
+        message_type = str(getattr(last_message, "type", "text") or "text").strip().lower()
+        attachment_preview = SessionService.ATTACHMENT_MESSAGE_PREVIEW_PLACEHOLDERS.get(message_type)
+        if attachment_preview is not None:
+            return attachment_preview
+
+        if message_type == "text":
+            extra = SessionService._last_message_extra(last_message)
+            encryption = extra.get("encryption") if isinstance(extra.get("encryption"), dict) else {}
+            if encryption.get("enabled"):
+                return SessionService.ENCRYPTED_MESSAGE_PLACEHOLDER
+
+        return str(getattr(last_message, "content", "") or "")
+
+    @staticmethod
+    def _last_message_extra(last_message) -> dict:
+        raw_extra = getattr(last_message, "extra", None)
+        if isinstance(raw_extra, dict):
+            return raw_extra
+
+        raw_extra_json = getattr(last_message, "extra_json", None)
+        if not raw_extra_json:
+            return {}
+        try:
+            payload = json.loads(raw_extra_json)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return {}
+        return payload if isinstance(payload, dict) else {}
 
     def _normalize_private_members(self, current_user: User, participant_ids: list[str]) -> list[str]:
         normalized_targets = []
@@ -360,6 +426,13 @@ class SessionService:
         payload = json.dumps(sorted(normalized_member_ids), ensure_ascii=True, separators=(",", ":"))
         digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
         return int(digest[:16], 16)
+
+    def _unread_counts_by_session(self, user_id: str) -> dict[str, int]:
+        return {
+            str(item.get("session_id") or ""): max(0, int(item.get("unread", 0) or 0))
+            for item in self.messages.unread_by_session_for_user(user_id)
+            if str(item.get("session_id") or "")
+        }
 
     def _run_transaction(self, action: Callable[[], T]) -> T:
         try:

@@ -1,4 +1,4 @@
-"""
+﻿"""
 Database Module
 
 SQLite database using aiosqlite for async operations.
@@ -11,7 +11,7 @@ import json
 import os
 import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Iterable, Optional
 
 from client.core import logging
 from client.core.config_backend import get_config
@@ -26,6 +26,7 @@ logger = logging.get_logger(__name__)
 ENCRYPTED_MESSAGE_PLACEHOLDER = "[Encrypted message]"
 
 class Database:
+    AUTH_USER_ID_STATE_KEY = "auth.user_id"
     APP_STATE_DB_ENCRYPTION_MODE = "storage.db_encryption_mode"
     APP_STATE_DB_ENCRYPTION_KEY = "storage.db_encryption_key"
     APP_STATE_DB_ENCRYPTION_KEY_ID = "storage.db_encryption_key_id"
@@ -182,7 +183,9 @@ class Database:
         if await self._auto_migrate_sqlcipher_if_needed():
             await self._create_tables()
             await self._ensure_db_encryption_state()
+        await self._ensure_directory_cache_scope_schema()
         await self._ensure_local_search_cache_schema()
+        await self._ensure_directory_cache_owner_indexes()
         await self._ensure_message_crypto_schema()
         await self._ensure_search_fts_schema()
         await self._normalize_cached_session_types()
@@ -232,7 +235,8 @@ class Database:
             );
             
             CREATE TABLE IF NOT EXISTS contacts_cache (
-                contact_id TEXT PRIMARY KEY,
+                owner_user_id TEXT NOT NULL,
+                contact_id TEXT NOT NULL,
                 display_name TEXT NOT NULL DEFAULT '',
                 username TEXT NOT NULL DEFAULT '',
                 nickname TEXT NOT NULL DEFAULT '',
@@ -244,11 +248,13 @@ class Database:
                 category TEXT NOT NULL DEFAULT 'friend',
                 status TEXT NOT NULL DEFAULT '',
                 extra TEXT NOT NULL DEFAULT '{}',
-                updated_at INTEGER NOT NULL
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY (owner_user_id, contact_id)
             );
 
             CREATE TABLE IF NOT EXISTS groups_cache (
-                group_id TEXT PRIMARY KEY,
+                owner_user_id TEXT NOT NULL,
+                group_id TEXT NOT NULL,
                 name TEXT NOT NULL DEFAULT '',
                 avatar TEXT NOT NULL DEFAULT '',
                 owner_id TEXT NOT NULL DEFAULT '',
@@ -256,7 +262,8 @@ class Database:
                 member_count INTEGER NOT NULL DEFAULT 0,
                 member_search_text TEXT NOT NULL DEFAULT '',
                 extra TEXT NOT NULL DEFAULT '{}',
-                updated_at INTEGER NOT NULL
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY (owner_user_id, group_id)
             );
             CREATE TABLE IF NOT EXISTS app_state (
                 key TEXT PRIMARY KEY,
@@ -280,20 +287,124 @@ class Database:
         """)
         await self._db.commit()
 
+    async def _ensure_directory_cache_scope_schema(self) -> None:
+        """Rebuild directory cache tables when one older global-cache schema is detected."""
+        contacts_requires_rebuild = await self._directory_cache_table_requires_rebuild(
+            "contacts_cache",
+            ("owner_user_id", "contact_id"),
+        )
+        groups_requires_rebuild = await self._directory_cache_table_requires_rebuild(
+            "groups_cache",
+            ("owner_user_id", "group_id"),
+        )
+        if not contacts_requires_rebuild and not groups_requires_rebuild:
+            return
+
+        await self._drop_search_fts_schema()
+        await self._db.executescript(
+            """
+            DROP TABLE IF EXISTS contacts_cache;
+            DROP TABLE IF EXISTS groups_cache;
+
+            CREATE TABLE contacts_cache (
+                owner_user_id TEXT NOT NULL,
+                contact_id TEXT NOT NULL,
+                display_name TEXT NOT NULL DEFAULT '',
+                username TEXT NOT NULL DEFAULT '',
+                nickname TEXT NOT NULL DEFAULT '',
+                remark TEXT NOT NULL DEFAULT '',
+                assistim_id TEXT NOT NULL DEFAULT '',
+                region TEXT NOT NULL DEFAULT '',
+                avatar TEXT NOT NULL DEFAULT '',
+                signature TEXT NOT NULL DEFAULT '',
+                category TEXT NOT NULL DEFAULT 'friend',
+                status TEXT NOT NULL DEFAULT '',
+                extra TEXT NOT NULL DEFAULT '{}',
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY (owner_user_id, contact_id)
+            );
+
+            CREATE TABLE groups_cache (
+                owner_user_id TEXT NOT NULL,
+                group_id TEXT NOT NULL,
+                name TEXT NOT NULL DEFAULT '',
+                avatar TEXT NOT NULL DEFAULT '',
+                owner_id TEXT NOT NULL DEFAULT '',
+                session_id TEXT NOT NULL DEFAULT '',
+                member_count INTEGER NOT NULL DEFAULT 0,
+                member_search_text TEXT NOT NULL DEFAULT '',
+                extra TEXT NOT NULL DEFAULT '{}',
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY (owner_user_id, group_id)
+            );
+
+            CREATE INDEX idx_contacts_cache_updated
+                ON contacts_cache(updated_at DESC);
+            CREATE INDEX idx_contacts_cache_owner_updated
+                ON contacts_cache(owner_user_id, updated_at DESC);
+
+            CREATE INDEX idx_groups_cache_updated
+                ON groups_cache(updated_at DESC);
+            CREATE INDEX idx_groups_cache_owner_updated
+                ON groups_cache(owner_user_id, updated_at DESC);
+            """
+        )
+        await self._db.commit()
+
+    async def _directory_cache_table_requires_rebuild(
+        self,
+        table_name: str,
+        expected_primary_key: tuple[str, ...],
+    ) -> bool:
+        """Return whether one directory cache table still uses one legacy global schema."""
+        cursor = await self._db.execute(f"PRAGMA table_info({table_name})")
+        rows = await cursor.fetchall()
+        if not rows:
+            return True
+
+        existing_columns = {str(row["name"]) for row in rows}
+        if any(column not in existing_columns for column in expected_primary_key):
+            return True
+
+        actual_primary_key = [
+            str(item["name"])
+            for item in sorted(rows, key=lambda row: int(row["pk"] or 0))
+            if int(item["pk"] or 0) > 0
+        ]
+        return tuple(actual_primary_key) != tuple(expected_primary_key)
+
     async def _ensure_local_search_cache_schema(self) -> None:
         """Add newly introduced cache columns to existing local databases."""
         await self._ensure_table_columns(
             "contacts_cache",
             {
+                "owner_user_id": "TEXT NOT NULL DEFAULT ''",
                 "region": "TEXT NOT NULL DEFAULT ''",
             },
         )
         await self._ensure_table_columns(
             "groups_cache",
             {
+                "owner_user_id": "TEXT NOT NULL DEFAULT ''",
                 "member_search_text": "TEXT NOT NULL DEFAULT ''",
             },
         )
+
+    async def _ensure_directory_cache_owner_indexes(self) -> None:
+        """Create owner-scoped cache indexes after one schema rebuild or upgrade completes."""
+        await self._db.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_contacts_cache_owner_updated
+            ON contacts_cache(owner_user_id, updated_at DESC)
+            """
+        )
+        await self._db.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_groups_cache_owner_updated
+            ON groups_cache(owner_user_id, updated_at DESC)
+            """
+        )
+        await self._db.commit()
 
     async def _ensure_message_crypto_schema(self) -> None:
         """Add explicit encryption markers for cached messages and backfill existing rows."""
@@ -1052,13 +1163,54 @@ class Database:
         logger.debug(f"Batch saved {len(sessions)} sessions")
 
     async def replace_sessions(self, sessions: list[Session]) -> None:
-        """Replace the cached session list with the provided snapshot."""
-        await self._db.execute("DELETE FROM sessions")
-        await self._db.commit()
-        if sessions:
-            await self.save_sessions_batch(sessions)
+        """Replace the cached session list and prune state for sessions outside the snapshot."""
+        snapshot_ids = [str(session.session_id or "").strip() for session in sessions if str(session.session_id or "").strip()]
+        try:
+            await self._db.execute("BEGIN")
+            if snapshot_ids:
+                placeholders = ", ".join("?" for _ in snapshot_ids)
+                await self._db.execute(
+                    f"DELETE FROM messages WHERE session_id NOT IN ({placeholders})",
+                    snapshot_ids,
+                )
+                await self._db.execute(
+                    f"DELETE FROM session_read_cursors WHERE session_id NOT IN ({placeholders})",
+                    snapshot_ids,
+                )
+            else:
+                await self._db.execute("DELETE FROM messages")
+                await self._db.execute("DELETE FROM session_read_cursors")
+
+            await self._db.execute("DELETE FROM sessions")
+            for session in sessions:
+                await self._db.execute(
+                    """
+                    INSERT OR REPLACE INTO sessions (
+                        session_id, name, session_type, participant_ids,
+                        last_message, last_message_time, unread_count,
+                        avatar, is_ai_session, extra, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        session.session_id,
+                        session.name,
+                        session.session_type,
+                        json.dumps(session.participant_ids),
+                        session.last_message,
+                        session.last_message_time.timestamp() if session.last_message_time else None,
+                        session.unread_count,
+                        session.avatar,
+                        1 if session.is_ai_session else 0,
+                        json.dumps(session.extra),
+                        session.created_at.timestamp() if session.created_at else None,
+                        session.updated_at.timestamp() if session.updated_at else None,
+                    ),
+                )
+            await self._db.commit()
+        except Exception:
+            await self._db.execute("ROLLBACK")
+            raise
         logger.debug(f"Replaced session cache with {len(sessions)} sessions")
-    
     async def get_session(self, session_id: str) -> Optional[Session]:
         """
         Get a session by ID.
@@ -1492,71 +1644,121 @@ class Database:
         row = await cursor.fetchone()
         return int((row["count"] if row is not None else 0) or 0)
 
-    async def replace_contacts_cache(self, contacts: list[dict[str, Any]]) -> None:
+    async def _resolve_directory_cache_owner_user_id(self, owner_user_id: str | None = None) -> str:
+        """Return the authoritative owner for one directory-cache read or write."""
+        normalized_owner = str(owner_user_id or "").strip()
+        if normalized_owner:
+            return normalized_owner
+        return str(await self.get_app_state(self.AUTH_USER_ID_STATE_KEY) or "").strip()
+
+    async def replace_contacts_cache(
+        self,
+        contacts: list[dict[str, Any]],
+        *,
+        owner_user_id: str | None = None,
+    ) -> None:
         """Replace the cached contact directory snapshot."""
-        await self._db.execute("DELETE FROM contacts_cache")
-        updated_at = int(time.time())
+        normalized_owner = await self._resolve_directory_cache_owner_user_id(owner_user_id)
+        if not normalized_owner:
+            logger.debug("Skip replacing contacts cache without one active owner scope")
+            return
 
-        for contact in contacts:
-            extra = dict(contact.get("extra") or {})
+        updated_at = int(time.time())
+        try:
+            await self._db.execute("BEGIN")
             await self._db.execute(
-                """
-                INSERT OR REPLACE INTO contacts_cache
-                (contact_id, display_name, username, nickname, remark,
-                 assistim_id, region, avatar, signature, category, status, extra, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    str(contact.get("id", "") or ""),
-                    str(contact.get("display_name") or contact.get("name") or ""),
-                    str(contact.get("username", "") or ""),
-                    str(contact.get("nickname", "") or ""),
-                    str(contact.get("remark", "") or ""),
-                    str(contact.get("assistim_id", "") or ""),
-                    str(contact.get("region", "") or ""),
-                    str(contact.get("avatar", "") or ""),
-                    str(contact.get("signature", "") or ""),
-                    str(contact.get("category", "friend") or "friend"),
-                    str(contact.get("status", "") or ""),
-                    json.dumps(extra),
-                    updated_at,
-                ),
+                "DELETE FROM contacts_cache WHERE owner_user_id = ?",
+                (normalized_owner,),
             )
 
-        await self._db.commit()
-        logger.debug(f"Replaced contact cache with {len(contacts)} contacts")
+            for contact in contacts:
+                extra = dict(contact.get("extra") or {})
+                await self._db.execute(
+                    """
+                    INSERT OR REPLACE INTO contacts_cache
+                    (owner_user_id, contact_id, display_name, username, nickname, remark,
+                     assistim_id, region, avatar, signature, category, status, extra, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        normalized_owner,
+                        str(contact.get("id", "") or ""),
+                        str(contact.get("display_name") or contact.get("name") or ""),
+                        str(contact.get("username", "") or ""),
+                        str(contact.get("nickname", "") or ""),
+                        str(contact.get("remark", "") or ""),
+                        str(contact.get("assistim_id", "") or ""),
+                        str(contact.get("region", "") or ""),
+                        str(contact.get("avatar", "") or ""),
+                        str(contact.get("signature", "") or ""),
+                        str(contact.get("category", "friend") or "friend"),
+                        str(contact.get("status", "") or ""),
+                        json.dumps(extra),
+                        updated_at,
+                    ),
+                )
 
-    async def replace_groups_cache(self, groups: list[dict[str, Any]]) -> None:
+            await self._db.commit()
+        except Exception:
+            await self._db.execute("ROLLBACK")
+            raise
+        logger.debug(f"Replaced contact cache with {len(contacts)} contacts for owner {normalized_owner}")
+
+    async def replace_groups_cache(
+        self,
+        groups: list[dict[str, Any]],
+        *,
+        owner_user_id: str | None = None,
+    ) -> None:
         """Replace the cached group directory snapshot."""
-        await self._db.execute("DELETE FROM groups_cache")
-        updated_at = int(time.time())
+        normalized_owner = await self._resolve_directory_cache_owner_user_id(owner_user_id)
+        if not normalized_owner:
+            logger.debug("Skip replacing groups cache without one active owner scope")
+            return
 
-        for group in groups:
-            extra = dict(group.get("extra") or {})
-            member_search_text = str(group.get("member_search_text", "") or "")
+        updated_at = int(time.time())
+        try:
+            await self._db.execute("BEGIN")
             await self._db.execute(
-                """
-                INSERT OR REPLACE INTO groups_cache
-                (group_id, name, avatar, owner_id, session_id, member_count, member_search_text, extra, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    str(group.get("id", "") or ""),
-                    str(group.get("name", "") or ""),
-                    str(group.get("avatar", "") or ""),
-                    str(group.get("owner_id", "") or ""),
-                    str(group.get("session_id", "") or ""),
-                    max(0, int(group.get("member_count", 0) or 0)),
-                    member_search_text,
-                    json.dumps(extra),
-                    updated_at,
-                ),
+                "DELETE FROM groups_cache WHERE owner_user_id = ?",
+                (normalized_owner,),
             )
 
-        await self._db.commit()
-        logger.debug(f"Replaced group cache with {len(groups)} groups")
+            for group in groups:
+                extra = dict(group.get("extra") or {})
+                member_search_text = str(group.get("member_search_text", "") or "")
+                await self._db.execute(
+                    """
+                    INSERT OR REPLACE INTO groups_cache
+                    (owner_user_id, group_id, name, avatar, owner_id, session_id, member_count, member_search_text, extra, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        normalized_owner,
+                        str(group.get("id", "") or ""),
+                        str(group.get("name", "") or ""),
+                        str(group.get("avatar", "") or ""),
+                        str(group.get("owner_id", "") or ""),
+                        str(group.get("session_id", "") or ""),
+                        max(0, int(group.get("member_count", 0) or 0)),
+                        member_search_text,
+                        json.dumps(extra),
+                        updated_at,
+                    ),
+                )
 
-    async def list_contacts_cache_by_ids(self, contact_ids: list[str]) -> dict[str, dict[str, Any]]:
+            await self._db.commit()
+        except Exception:
+            await self._db.execute("ROLLBACK")
+            raise
+        logger.debug(f"Replaced group cache with {len(groups)} groups for owner {normalized_owner}")
+
+    async def list_contacts_cache_by_ids(
+        self,
+        contact_ids: list[str],
+        *,
+        owner_user_id: str | None = None,
+    ) -> dict[str, dict[str, Any]]:
         """Return one contact lookup map for the given ids."""
         normalized_ids = [
             value
@@ -1565,11 +1767,14 @@ class Database:
         ]
         if not normalized_ids:
             return {}
+        normalized_owner = await self._resolve_directory_cache_owner_user_id(owner_user_id)
+        if not normalized_owner:
+            return {}
 
         placeholders = ",".join("?" for _ in normalized_ids)
         cursor = await self._db.execute(
-            f"SELECT * FROM contacts_cache WHERE contact_id IN ({placeholders})",
-            tuple(normalized_ids),
+            f"SELECT * FROM contacts_cache WHERE owner_user_id = ? AND contact_id IN ({placeholders})",
+            (normalized_owner, *normalized_ids),
         )
         rows = await cursor.fetchall()
         return {
@@ -1582,30 +1787,43 @@ class Database:
         self,
         keyword: str,
         limit: int = 50,
+        *,
+        owner_user_id: str | None = None,
     ) -> list[dict[str, Any]]:
         """Search cached contacts by one literal keyword."""
         normalized_keyword = str(keyword or "").strip()
         if not normalized_keyword:
             return []
+        normalized_owner = await self._resolve_directory_cache_owner_user_id(owner_user_id)
+        if not normalized_owner:
+            return []
 
         normalized_limit = max(1, int(limit or 0))
         if self._should_use_search_fts(normalized_keyword):
             try:
-                return await self._search_contacts_fts(normalized_keyword, limit=normalized_limit)
+                return await self._search_contacts_fts(
+                    normalized_keyword,
+                    owner_user_id=normalized_owner,
+                    limit=normalized_limit,
+                )
             except Exception as exc:
                 logger.debug("Contact FTS search failed, falling back to LIKE: %s", exc)
         like_pattern = self._escape_like_pattern(normalized_keyword)
         cursor = await self._db.execute(
             """
             SELECT * FROM contacts_cache
-            WHERE nickname LIKE ? ESCAPE '\\'
+            WHERE owner_user_id = ?
+              AND (
+                   nickname LIKE ? ESCAPE '\\'
                OR remark LIKE ? ESCAPE '\\'
                OR assistim_id LIKE ? ESCAPE '\\'
                OR region LIKE ? ESCAPE '\\'
+              )
             ORDER BY updated_at DESC
             LIMIT ?
             """,
             (
+                normalized_owner,
                 like_pattern,
                 like_pattern,
                 like_pattern,
@@ -1616,10 +1834,13 @@ class Database:
         rows = await cursor.fetchall()
         return [self._row_to_contact_cache(row) for row in rows]
 
-    async def count_search_contacts(self, keyword: str) -> int:
+    async def count_search_contacts(self, keyword: str, *, owner_user_id: str | None = None) -> int:
         """Count contact search hits for one keyword."""
         normalized_keyword = str(keyword or "").strip()
         if not normalized_keyword:
+            return 0
+        normalized_owner = await self._resolve_directory_cache_owner_user_id(owner_user_id)
+        if not normalized_owner:
             return 0
 
         if self._should_use_search_fts(normalized_keyword):
@@ -1627,10 +1848,12 @@ class Database:
                 cursor = await self._db.execute(
                     """
                     SELECT COUNT(*) AS count
-                    FROM contact_search_fts
+                    FROM contact_search_fts f
+                    JOIN contacts_cache c ON c.rowid = f.rowid
                     WHERE contact_search_fts MATCH ?
+                      AND c.owner_user_id = ?
                     """,
-                    (self._build_fts_match_query(normalized_keyword),),
+                    (self._build_fts_match_query(normalized_keyword), normalized_owner),
                 )
                 row = await cursor.fetchone()
                 return int((row["count"] if row is not None else 0) or 0)
@@ -1642,12 +1865,15 @@ class Database:
             """
             SELECT COUNT(*) AS count
             FROM contacts_cache
-            WHERE nickname LIKE ? ESCAPE '\\'
+            WHERE owner_user_id = ?
+              AND (
+                   nickname LIKE ? ESCAPE '\\'
                OR remark LIKE ? ESCAPE '\\'
                OR assistim_id LIKE ? ESCAPE '\\'
                OR region LIKE ? ESCAPE '\\'
+              )
             """,
-            (like_pattern, like_pattern, like_pattern, like_pattern),
+            (normalized_owner, like_pattern, like_pattern, like_pattern, like_pattern),
         )
         row = await cursor.fetchone()
         return int((row["count"] if row is not None else 0) or 0)
@@ -1656,6 +1882,7 @@ class Database:
         self,
         keyword: str,
         *,
+        owner_user_id: str,
         limit: int,
     ) -> list[dict[str, Any]]:
         """Search cached contacts through the FTS5 index."""
@@ -1665,10 +1892,11 @@ class Database:
             FROM contact_search_fts f
             JOIN contacts_cache c ON c.rowid = f.rowid
             WHERE contact_search_fts MATCH ?
+              AND c.owner_user_id = ?
             ORDER BY bm25(contact_search_fts), c.updated_at DESC
             LIMIT ?
             """,
-            (self._build_fts_match_query(keyword), limit),
+            (self._build_fts_match_query(keyword), owner_user_id, limit),
         )
         rows = await cursor.fetchall()
         return [self._row_to_contact_cache(row) for row in rows]
@@ -1677,28 +1905,41 @@ class Database:
         self,
         keyword: str,
         limit: int = 50,
+        *,
+        owner_user_id: str | None = None,
     ) -> list[dict[str, Any]]:
         """Search cached groups by one literal keyword."""
         normalized_keyword = str(keyword or "").strip()
         if not normalized_keyword:
             return []
+        normalized_owner = await self._resolve_directory_cache_owner_user_id(owner_user_id)
+        if not normalized_owner:
+            return []
 
         normalized_limit = max(1, int(limit or 0))
         if self._should_use_search_fts(normalized_keyword):
             try:
-                return await self._search_groups_fts(normalized_keyword, limit=normalized_limit)
+                return await self._search_groups_fts(
+                    normalized_keyword,
+                    owner_user_id=normalized_owner,
+                    limit=normalized_limit,
+                )
             except Exception as exc:
                 logger.debug("Group FTS search failed, falling back to LIKE: %s", exc)
         like_pattern = self._escape_like_pattern(normalized_keyword)
         cursor = await self._db.execute(
             """
             SELECT * FROM groups_cache
-            WHERE name LIKE ? ESCAPE '\\'
+            WHERE owner_user_id = ?
+              AND (
+                   name LIKE ? ESCAPE '\\'
                OR member_search_text LIKE ? ESCAPE '\\'
+              )
             ORDER BY updated_at DESC
             LIMIT ?
             """,
             (
+                normalized_owner,
                 like_pattern,
                 like_pattern,
                 normalized_limit,
@@ -1707,10 +1948,13 @@ class Database:
         rows = await cursor.fetchall()
         return [self._row_to_group_cache(row) for row in rows]
 
-    async def count_search_groups(self, keyword: str) -> int:
+    async def count_search_groups(self, keyword: str, *, owner_user_id: str | None = None) -> int:
         """Count group search hits for one keyword."""
         normalized_keyword = str(keyword or "").strip()
         if not normalized_keyword:
+            return 0
+        normalized_owner = await self._resolve_directory_cache_owner_user_id(owner_user_id)
+        if not normalized_owner:
             return 0
 
         if self._should_use_search_fts(normalized_keyword):
@@ -1718,10 +1962,12 @@ class Database:
                 cursor = await self._db.execute(
                     """
                     SELECT COUNT(*) AS count
-                    FROM group_search_fts
+                    FROM group_search_fts f
+                    JOIN groups_cache g ON g.rowid = f.rowid
                     WHERE group_search_fts MATCH ?
+                      AND g.owner_user_id = ?
                     """,
-                    (self._build_fts_match_query(normalized_keyword),),
+                    (self._build_fts_match_query(normalized_keyword), normalized_owner),
                 )
                 row = await cursor.fetchone()
                 return int((row["count"] if row is not None else 0) or 0)
@@ -1733,10 +1979,13 @@ class Database:
             """
             SELECT COUNT(*) AS count
             FROM groups_cache
-            WHERE name LIKE ? ESCAPE '\\'
+            WHERE owner_user_id = ?
+              AND (
+                   name LIKE ? ESCAPE '\\'
                OR member_search_text LIKE ? ESCAPE '\\'
+              )
             """,
-            (like_pattern, like_pattern),
+            (normalized_owner, like_pattern, like_pattern),
         )
         row = await cursor.fetchone()
         return int((row["count"] if row is not None else 0) or 0)
@@ -1745,6 +1994,7 @@ class Database:
         self,
         keyword: str,
         *,
+        owner_user_id: str,
         limit: int,
     ) -> list[dict[str, Any]]:
         """Search cached groups through the FTS5 index."""
@@ -1754,10 +2004,11 @@ class Database:
             FROM group_search_fts f
             JOIN groups_cache g ON g.rowid = f.rowid
             WHERE group_search_fts MATCH ?
+              AND g.owner_user_id = ?
             ORDER BY bm25(group_search_fts), g.updated_at DESC
             LIMIT ?
             """,
-            (self._build_fts_match_query(keyword), limit),
+            (self._build_fts_match_query(keyword), owner_user_id, limit),
         )
         rows = await cursor.fetchall()
         return [self._row_to_group_cache(row) for row in rows]
@@ -2289,6 +2540,31 @@ class Database:
         row = await cursor.fetchone()
         return row["value"] if row else None
 
+    async def replace_app_state(self, values: dict[str, str] | None = None, *, delete_keys: Iterable[str] = ()) -> None:
+        """Atomically apply app-state key updates and deletions."""
+        normalized_values = {str(key): value for key, value in dict(values or {}).items() if str(key)}
+        normalized_delete_keys = [str(key) for key in delete_keys if str(key)]
+        if not normalized_values and not normalized_delete_keys:
+            return
+
+        try:
+            await self._db.execute("BEGIN")
+            if normalized_delete_keys:
+                placeholders = ", ".join("?" for _ in normalized_delete_keys)
+                await self._db.execute(
+                    f"DELETE FROM app_state WHERE key IN ({placeholders})",
+                    normalized_delete_keys,
+                )
+            for key, value in normalized_values.items():
+                await self._db.execute(
+                    "INSERT OR REPLACE INTO app_state (key, value) VALUES (?, ?)",
+                    (key, value),
+                )
+            await self._db.commit()
+        except Exception:
+            await self._db.execute("ROLLBACK")
+            raise
+
     async def set_app_state(self, key: str, value: str) -> None:
         """
         Set app state value.
@@ -2297,11 +2573,11 @@ class Database:
             key: State key
             value: State value
         """
-        await self._db.execute(
-            "INSERT OR REPLACE INTO app_state (key, value) VALUES (?, ?)",
-            (key, value),
-        )
-        await self._db.commit()
+        await self.replace_app_state({key: value})
+
+    async def set_app_states(self, values: dict[str, str]) -> None:
+        """Set multiple app-state values in one transaction."""
+        await self.replace_app_state(values)
 
     async def delete_app_state(self, key: str) -> None:
         """
@@ -2310,11 +2586,11 @@ class Database:
         Args:
             key: State key
         """
-        await self._db.execute(
-            "DELETE FROM app_state WHERE key = ?",
-            (key,),
-        )
-        await self._db.commit()
+        await self.replace_app_state(delete_keys=[key])
+
+    async def delete_app_states(self, keys: Iterable[str]) -> None:
+        """Delete multiple app-state values in one transaction."""
+        await self.replace_app_state(delete_keys=keys)
 
     async def close(self) -> None:
         """Close database connection."""
@@ -2344,10 +2620,4 @@ def get_database() -> Database:
     if _database is None:
         _database = Database()
     return _database
-
-
-
-
-
-
 

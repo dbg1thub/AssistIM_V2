@@ -1,9 +1,69 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import json
+import time
 
+from client.core.exceptions import NetworkError, ServerError
 from client.tests import test_service_boundaries as boundaries
 from client.ui.controllers import auth_controller as auth_controller_module
+
+
+def _jwt(user_id: str, *, session_version: int = 1, expires_in: int = 3600) -> str:
+    header = {"alg": "none", "typ": "JWT"}
+    payload = {
+        "sub": user_id,
+        "session_version": session_version,
+        "exp": int(time.time()) + expires_in,
+    }
+
+    def encode(data: dict[str, object]) -> str:
+        raw = json.dumps(data, separators=(",", ":")).encode("utf-8")
+        return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+    return f"{encode(header)}.{encode(payload)}.signature"
+
+
+async def _persist_restore_snapshot(
+    db,
+    controller,
+    *,
+    stored_user_id: str = "user-1",
+    profile: dict[str, object] | None = None,
+    access_user_id: str = "user-1",
+    refresh_user_id: str = "user-1",
+    access_session_version: int = 1,
+    refresh_session_version: int = 1,
+) -> tuple[str, str]:
+    access_token = _jwt(access_user_id, session_version=access_session_version)
+    refresh_token = _jwt(refresh_user_id, session_version=refresh_session_version)
+    await db.set_app_states(
+        {
+            controller.ACCESS_TOKEN_KEY: auth_controller_module.SecureStorage.encrypt_text(access_token),
+            controller.REFRESH_TOKEN_KEY: auth_controller_module.SecureStorage.encrypt_text(refresh_token),
+            controller.USER_ID_KEY: stored_user_id,
+            controller.USER_PROFILE_KEY: json.dumps(profile or {"id": stored_user_id, "username": stored_user_id}),
+        }
+    )
+    return access_token, refresh_token
+
+
+def _wire_auth_controller(monkeypatch, fake_auth_service, fake_db, fake_e2ee_service=None):
+    fake_e2ee_service = fake_e2ee_service or FakeE2EEService()
+    fake_message_manager = boundaries.FakeMessageManager()
+    fake_chat_controller = boundaries.FakeChatControllerContext()
+    monkeypatch.setattr(auth_controller_module, "get_auth_service", lambda: fake_auth_service)
+    monkeypatch.setattr(auth_controller_module, "get_user_service", lambda: boundaries.FakeUserService())
+    monkeypatch.setattr(auth_controller_module, "get_database", lambda: fake_db)
+    monkeypatch.setattr(auth_controller_module, "get_message_manager", lambda: fake_message_manager)
+    monkeypatch.setattr(auth_controller_module, "peek_message_manager", lambda: fake_message_manager)
+    monkeypatch.setattr(auth_controller_module, "get_chat_controller", lambda: fake_chat_controller)
+    monkeypatch.setattr(auth_controller_module, "peek_chat_controller", lambda: fake_chat_controller)
+    monkeypatch.setattr(auth_controller_module, "get_file_service", lambda: boundaries.FakeFileService())
+    monkeypatch.setattr(auth_controller_module, "get_e2ee_service", lambda: fake_e2ee_service)
+    monkeypatch.setattr(auth_controller_module, "peek_connection_manager", lambda: None)
+    return fake_e2ee_service, fake_message_manager, fake_chat_controller
 
 
 class FakeE2EEService:
@@ -62,6 +122,62 @@ class FakeE2EEService:
         return dict(self.import_history_recovery_package_result)
 
 
+class OrderedAuthDatabase(boundaries.FakeDatabase):
+    def __init__(self, events: list[str], *, fail_on_key: str = "") -> None:
+        super().__init__()
+        self.events = events
+        self.fail_on_key = fail_on_key
+        self.is_connected = True
+
+    async def set_app_state(self, key: str, value) -> None:
+        await self.set_app_states({key: value})
+
+    async def set_app_states(self, values: dict[str, object]) -> None:
+        keys = list(values.keys())
+        self.events.append(f"set_app_states({','.join(keys)})")
+        if self.fail_on_key in values:
+            raise RuntimeError(f"failed to persist {self.fail_on_key}")
+        await super().set_app_states(values)
+
+    async def delete_app_state(self, key: str) -> None:
+        await self.delete_app_states([key])
+
+    async def delete_app_states(self, keys) -> None:
+        normalized = [str(key) for key in keys]
+        self.events.append(f"delete_app_states({','.join(normalized)})")
+        await super().delete_app_states(normalized)
+
+    async def clear_chat_state(self) -> None:
+        self.events.append("clear_chat_state")
+
+
+class OrderedAuthService(boundaries.FakeAuthService):
+    def __init__(self, events: list[str]) -> None:
+        super().__init__()
+        self.events = events
+
+    def set_tokens(self, access_token: str, refresh_token: str) -> None:
+        self.events.append("set_tokens")
+        super().set_tokens(access_token, refresh_token)
+
+    def clear_tokens(self) -> None:
+        self.events.append("clear_tokens")
+        super().clear_tokens()
+
+
+class RuntimeSyncStateSpy:
+    def __init__(self, events: list[str]) -> None:
+        self.events = events
+        self.clear_memory_calls = 0
+
+    def clear_sync_state_memory(self) -> None:
+        self.clear_memory_calls += 1
+        self.events.append("clear_sync_state_memory")
+
+    async def reset_sync_state(self) -> None:
+        raise AssertionError("clear_session must not delete persisted sync cursors twice")
+
+
 def test_auth_controller_login_registers_e2ee_device(monkeypatch) -> None:
     fake_auth_service = boundaries.FakeAuthService()
     fake_user_service = boundaries.FakeUserService()
@@ -82,6 +198,7 @@ def test_auth_controller_login_registers_e2ee_device(monkeypatch) -> None:
     async def scenario() -> None:
         controller = auth_controller_module.AuthController()
         user = await controller.login("alice", "secret123")
+        await asyncio.sleep(0)
 
         assert user["id"] == "user-1"
         assert fake_e2ee_service.calls == 1
@@ -109,9 +226,329 @@ def test_auth_controller_login_tolerates_e2ee_bootstrap_failure(monkeypatch) -> 
     async def scenario() -> None:
         controller = auth_controller_module.AuthController()
         user = await controller.login("alice", "secret123")
+        await asyncio.sleep(0)
 
         assert user["id"] == "user-1"
         assert fake_e2ee_service.calls == 1
+
+    asyncio.run(scenario())
+
+
+def test_auth_controller_login_commits_auth_before_destructive_chat_reset(monkeypatch) -> None:
+    events: list[str] = []
+    fake_auth_service = OrderedAuthService(events)
+    fake_user_service = boundaries.FakeUserService()
+    fake_db = OrderedAuthDatabase(events)
+    fake_message_manager = boundaries.FakeMessageManager()
+    fake_chat_controller = boundaries.FakeChatControllerContext()
+    fake_file_service = boundaries.FakeFileService()
+    fake_e2ee_service = FakeE2EEService()
+
+    monkeypatch.setattr(auth_controller_module, "get_auth_service", lambda: fake_auth_service)
+    monkeypatch.setattr(auth_controller_module, "get_user_service", lambda: fake_user_service)
+    monkeypatch.setattr(auth_controller_module, "get_database", lambda: fake_db)
+    monkeypatch.setattr(auth_controller_module, "get_message_manager", lambda: fake_message_manager)
+    monkeypatch.setattr(auth_controller_module, "get_chat_controller", lambda: fake_chat_controller)
+    monkeypatch.setattr(auth_controller_module, "get_file_service", lambda: fake_file_service)
+    monkeypatch.setattr(auth_controller_module, "get_e2ee_service", lambda: fake_e2ee_service)
+
+    async def scenario() -> None:
+        controller = auth_controller_module.AuthController()
+        user = await controller.login("alice", "secret123")
+        await asyncio.sleep(0)
+
+        assert user["id"] == "user-1"
+        assert events[:2] == [
+            "set_app_states(auth.access_token,auth.refresh_token,auth.user_id,auth.user_profile)",
+            "clear_chat_state",
+        ]
+        assert "set_tokens" in events
+        assert events.index("clear_chat_state") < events.index("set_tokens")
+        assert fake_e2ee_service.calls == 1
+
+    asyncio.run(scenario())
+
+
+def test_auth_controller_login_persist_failure_rolls_back_auth_runtime(monkeypatch) -> None:
+    events: list[str] = []
+    fake_auth_service = OrderedAuthService(events)
+    fake_user_service = boundaries.FakeUserService()
+    fake_db = OrderedAuthDatabase(events, fail_on_key="auth.refresh_token")
+    fake_message_manager = boundaries.FakeMessageManager()
+    fake_chat_controller = boundaries.FakeChatControllerContext()
+    fake_file_service = boundaries.FakeFileService()
+    fake_e2ee_service = FakeE2EEService()
+
+    monkeypatch.setattr(auth_controller_module, "get_auth_service", lambda: fake_auth_service)
+    monkeypatch.setattr(auth_controller_module, "get_user_service", lambda: fake_user_service)
+    monkeypatch.setattr(auth_controller_module, "get_database", lambda: fake_db)
+    monkeypatch.setattr(auth_controller_module, "get_message_manager", lambda: fake_message_manager)
+    monkeypatch.setattr(auth_controller_module, "get_chat_controller", lambda: fake_chat_controller)
+    monkeypatch.setattr(auth_controller_module, "peek_message_manager", lambda: fake_message_manager)
+    monkeypatch.setattr(auth_controller_module, "peek_chat_controller", lambda: fake_chat_controller)
+    monkeypatch.setattr(auth_controller_module, "get_file_service", lambda: fake_file_service)
+    monkeypatch.setattr(auth_controller_module, "get_e2ee_service", lambda: fake_e2ee_service)
+
+    async def scenario() -> None:
+        controller = auth_controller_module.AuthController()
+
+        try:
+            await controller.login("alice", "secret123")
+        except RuntimeError as exc:
+            assert "auth.refresh_token" in str(exc)
+        else:
+            raise AssertionError("login should fail when auth state cannot be persisted")
+
+        assert fake_auth_service.access_token is None
+        assert fake_auth_service.refresh_token is None
+        assert controller.current_user is None
+        assert "clear_chat_state" not in events
+        assert "set_tokens" not in events
+        assert fake_e2ee_service.calls == 0
+        assert fake_message_manager.user_ids == [""]
+        assert fake_chat_controller.user_ids == [""]
+
+    asyncio.run(scenario())
+
+
+def test_auth_controller_close_clears_global_singleton(monkeypatch) -> None:
+    fake_auth_service = boundaries.FakeAuthService()
+    fake_db = boundaries.FakeDatabase()
+    _wire_auth_controller(monkeypatch, fake_auth_service, fake_db)
+
+    async def scenario() -> None:
+        auth_controller_module._auth_controller = None
+        controller = auth_controller_module.get_auth_controller()
+
+        await controller.close()
+
+        assert auth_controller_module.peek_auth_controller() is None
+        assert fake_auth_service.listeners == []
+
+    asyncio.run(scenario())
+
+
+def test_auth_controller_clear_session_deletes_auth_snapshot_before_runtime_reset(monkeypatch) -> None:
+    events: list[str] = []
+    fake_auth_service = OrderedAuthService(events)
+    fake_db = OrderedAuthDatabase(events)
+    _wire_auth_controller(monkeypatch, fake_auth_service, fake_db)
+
+    async def scenario() -> None:
+        controller = auth_controller_module.AuthController()
+
+        await controller.clear_session(clear_local_chat_state=True)
+
+        assert events[:3] == [
+            "delete_app_states(auth.access_token,auth.refresh_token,auth.user_id,auth.user_profile)",
+            "clear_tokens",
+            "clear_chat_state",
+        ]
+
+    asyncio.run(scenario())
+
+
+def test_auth_controller_clear_session_clears_connection_sync_memory_once(monkeypatch) -> None:
+    events: list[str] = []
+    fake_auth_service = OrderedAuthService(events)
+    fake_db = OrderedAuthDatabase(events)
+    fake_connection_manager = RuntimeSyncStateSpy(events)
+    _wire_auth_controller(monkeypatch, fake_auth_service, fake_db)
+    monkeypatch.setattr(auth_controller_module, "peek_connection_manager", lambda: fake_connection_manager)
+
+    async def scenario() -> None:
+        controller = auth_controller_module.AuthController()
+
+        await controller.clear_session(clear_local_chat_state=True)
+
+        assert events[:4] == [
+            "delete_app_states(auth.access_token,auth.refresh_token,auth.user_id,auth.user_profile)",
+            "clear_tokens",
+            "clear_chat_state",
+            "clear_sync_state_memory",
+        ]
+        assert fake_connection_manager.clear_memory_calls == 1
+
+    asyncio.run(scenario())
+
+
+def test_auth_controller_restore_rejects_refresh_token_for_different_user(monkeypatch) -> None:
+    fake_auth_service = boundaries.FakeAuthService()
+    fake_db = boundaries.FakeDatabase()
+    fake_e2ee_service, _, _ = _wire_auth_controller(monkeypatch, fake_auth_service, fake_db)
+
+    async def scenario() -> None:
+        controller = auth_controller_module.AuthController()
+        await _persist_restore_snapshot(
+            fake_db,
+            controller,
+            stored_user_id="user-1",
+            profile={"id": "user-1", "username": "alice"},
+            access_user_id="user-1",
+            refresh_user_id="user-2",
+        )
+
+        restored = await controller.restore_session()
+
+        assert restored is None
+        assert controller.current_user is None
+        assert fake_auth_service.access_token is None
+        assert fake_auth_service.refresh_token is None
+        assert fake_e2ee_service.calls == 0
+        assert fake_db.app_state == {}
+
+    asyncio.run(scenario())
+
+
+def test_auth_controller_restore_recovers_from_server_error_with_consistent_cached_profile(monkeypatch) -> None:
+    fake_auth_service = boundaries.FakeAuthService()
+    fake_db = boundaries.FakeDatabase()
+    fake_e2ee_service, fake_message_manager, fake_chat_controller = _wire_auth_controller(
+        monkeypatch,
+        fake_auth_service,
+        fake_db,
+    )
+
+    async def fail_fetch_current_user():
+        raise ServerError("temporary outage", status_code=503)
+
+    fake_auth_service.fetch_current_user = fail_fetch_current_user
+
+    async def scenario() -> None:
+        controller = auth_controller_module.AuthController()
+        access_token, refresh_token = await _persist_restore_snapshot(
+            fake_db,
+            controller,
+            stored_user_id="user-1",
+            profile={"id": "user-1", "username": "alice"},
+            access_user_id="user-1",
+            refresh_user_id="user-1",
+        )
+
+        restored = await controller.restore_session()
+        await asyncio.sleep(0)
+
+        assert restored == {"id": "user-1", "username": "alice"}
+        assert fake_auth_service.access_token == access_token
+        assert fake_auth_service.refresh_token == refresh_token
+        assert controller.current_user == {"id": "user-1", "username": "alice"}
+        assert fake_message_manager.user_ids == []
+        assert fake_chat_controller.user_ids == []
+        assert fake_e2ee_service.calls == 1
+
+    asyncio.run(scenario())
+
+
+def test_auth_controller_refreshes_cached_restore_profile_when_network_recovers(monkeypatch) -> None:
+    fake_auth_service = boundaries.FakeAuthService()
+    fake_db = boundaries.FakeDatabase()
+    fake_e2ee_service, fake_message_manager, fake_chat_controller = _wire_auth_controller(
+        monkeypatch,
+        fake_auth_service,
+        fake_db,
+    )
+
+    async def fail_fetch_current_user():
+        raise NetworkError("offline")
+
+    fake_auth_service.fetch_current_user = fail_fetch_current_user
+
+    async def scenario() -> None:
+        controller = auth_controller_module.AuthController()
+        access_token, refresh_token = await _persist_restore_snapshot(
+            fake_db,
+            controller,
+            stored_user_id="user-1",
+            profile={"id": "user-1", "username": "alice", "nickname": "Cached Alice"},
+            access_user_id="user-1",
+            refresh_user_id="user-1",
+        )
+
+        restored = await controller.restore_session()
+        await asyncio.sleep(0)
+
+        assert restored == {"id": "user-1", "username": "alice", "nickname": "Cached Alice"}
+        assert controller.has_pending_authoritative_profile_refresh() is True
+        assert fake_auth_service.access_token == access_token
+        assert fake_auth_service.refresh_token == refresh_token
+        assert fake_message_manager.user_ids == []
+        assert fake_chat_controller.user_ids == []
+        assert fake_e2ee_service.calls == 1
+
+        async def fetch_authoritative_user():
+            return {"id": "user-1", "username": "alice", "nickname": "Alice Updated"}
+
+        fake_auth_service.fetch_current_user = fetch_authoritative_user
+        refreshed = await controller.refresh_current_user_profile_if_needed()
+
+        assert refreshed == {"id": "user-1", "username": "alice", "nickname": "Alice Updated"}
+        assert controller.current_user == {"id": "user-1", "username": "alice", "nickname": "Alice Updated"}
+        assert controller.has_pending_authoritative_profile_refresh() is False
+        assert json.loads(fake_db.app_state[controller.USER_PROFILE_KEY])["nickname"] == "Alice Updated"
+
+    asyncio.run(scenario())
+
+
+def test_auth_controller_restore_clears_invalid_cached_profile_and_http_tokens(monkeypatch) -> None:
+    fake_auth_service = boundaries.FakeAuthService()
+    fake_db = boundaries.FakeDatabase()
+    _wire_auth_controller(monkeypatch, fake_auth_service, fake_db)
+
+    async def fail_fetch_current_user():
+        raise NetworkError("offline")
+
+    fake_auth_service.fetch_current_user = fail_fetch_current_user
+
+    async def scenario() -> None:
+        controller = auth_controller_module.AuthController()
+        await _persist_restore_snapshot(
+            fake_db,
+            controller,
+            stored_user_id="user-1",
+            profile={"username": "missing-id"},
+            access_user_id="user-1",
+            refresh_user_id="user-1",
+        )
+
+        restored = await controller.restore_session()
+
+        assert restored is None
+        assert controller.current_user is None
+        assert fake_auth_service.access_token is None
+        assert fake_auth_service.refresh_token is None
+        assert fake_db.app_state == {}
+
+    asyncio.run(scenario())
+
+
+def test_auth_controller_restore_clears_mixed_cached_profile_and_token_snapshot(monkeypatch) -> None:
+    fake_auth_service = boundaries.FakeAuthService()
+    fake_db = boundaries.FakeDatabase()
+    _wire_auth_controller(monkeypatch, fake_auth_service, fake_db)
+
+    async def fail_fetch_current_user():
+        raise NetworkError("offline")
+
+    fake_auth_service.fetch_current_user = fail_fetch_current_user
+
+    async def scenario() -> None:
+        controller = auth_controller_module.AuthController()
+        await _persist_restore_snapshot(
+            fake_db,
+            controller,
+            stored_user_id="user-2",
+            profile={"id": "user-2", "username": "bob"},
+            access_user_id="user-1",
+            refresh_user_id="user-1",
+        )
+
+        restored = await controller.restore_session()
+
+        assert restored is None
+        assert controller.current_user is None
+        assert fake_auth_service.access_token is None
+        assert fake_auth_service.refresh_token is None
+        assert fake_db.app_state == {}
 
     asyncio.run(scenario())
 

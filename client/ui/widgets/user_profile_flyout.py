@@ -490,7 +490,11 @@ class UserProfileCoordinator(QWidget):
         self._save_task: Optional[asyncio.Task] = None
         self._ui_tasks: set[asyncio.Task] = set()
         self._flyout = None
+        self._auth_listener_attached = False
         self.hide()
+        self._auth_controller.add_auth_state_listener(self._handle_auth_state_changed)
+        self._auth_listener_attached = True
+        self.destroyed.connect(self._on_destroyed)
         self._emit_profile_changed()
 
     def current_user_snapshot(self) -> dict:
@@ -607,6 +611,11 @@ class UserProfileCoordinator(QWidget):
     def _emit_profile_changed(self) -> None:
         self.profileChanged.emit(self.current_user_snapshot())
 
+    def _handle_auth_state_changed(self, payload: object) -> None:
+        """Project committed auth-state changes into the shell identity surfaces."""
+        self._close_flyout()
+        self.profileChanged.emit(dict(payload or {}))
+
     def _close_flyout(self) -> None:
         if self._flyout is not None:
             self._flyout.close()
@@ -646,15 +655,23 @@ class UserProfileCoordinator(QWidget):
         if self._save_task is task:
             self._save_task = None
 
-    def closeEvent(self, event) -> None:
+    def quiesce(self) -> None:
+        """Cancel logout-sensitive UI work before the shell is destroyed."""
         self._cancel_pending_task(self._save_task)
         self._save_task = None
         self._close_flyout()
         for task in list(self._ui_tasks):
             if not task.done():
                 task.cancel()
+
+    def closeEvent(self, event) -> None:
+        self.quiesce()
         super().closeEvent(event)
 
-
+    def _on_destroyed(self, *_args) -> None:
+        if self._auth_listener_attached:
+            self._auth_controller.remove_auth_state_listener(self._handle_auth_state_changed)
+            self._auth_listener_attached = False
+        self.quiesce()
 
 

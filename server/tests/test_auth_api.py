@@ -383,3 +383,291 @@ def test_update_me_succeeds_when_profile_fanout_fails(client: TestClient, auth_h
 
     assert response.status_code == 200
     assert response.json()["data"]["nickname"] == "Profile User Updated"
+
+
+def test_auth_request_models_reject_unknown_fields(client: TestClient) -> None:
+    register_response = client.post(
+        "/api/v1/auth/register",
+        json={
+            "username": "strict-register-user",
+            "password": "secret123",
+            "nickname": "Strict Register",
+            "unexpected": True,
+        },
+    )
+    assert register_response.status_code == 422
+
+    seed_response = client.post(
+        "/api/v1/auth/register",
+        json={
+            "username": "strict-login-user",
+            "password": "secret123",
+            "nickname": "Strict Login",
+        },
+    )
+    assert seed_response.status_code == 200
+    refresh_token = seed_response.json()["data"]["refresh_token"]
+
+    login_response = client.post(
+        "/api/v1/auth/login",
+        json={
+            "username": "strict-login-user",
+            "password": "secret123",
+            "unexpected": True,
+        },
+    )
+    assert login_response.status_code == 422
+
+    refresh_response = client.post(
+        "/api/v1/auth/refresh",
+        json={
+            "refresh_token": refresh_token,
+            "unexpected": True,
+        },
+    )
+    assert refresh_response.status_code == 422
+
+
+def test_auth_identity_inputs_are_canonicalized_and_validated(client: TestClient) -> None:
+    register_response = client.post(
+        "/api/v1/auth/register",
+        json={
+            "username": "  trim.user-1  ",
+            "password": "secret123",
+            "nickname": "  Trim User  ",
+        },
+    )
+    assert register_response.status_code == 200
+    payload = register_response.json()["data"]
+    assert payload["user"]["username"] == "trim.user-1"
+    assert payload["user"]["nickname"] == "Trim User"
+
+    login_response = client.post(
+        "/api/v1/auth/login",
+        json={
+            "username": "  trim.user-1  ",
+            "password": "secret123",
+        },
+    )
+    assert login_response.status_code == 200
+    login_payload = login_response.json()["data"]
+
+    refresh_response = client.post(
+        "/api/v1/auth/refresh",
+        json={"refresh_token": f"  {login_payload['refresh_token']}  "},
+    )
+    assert refresh_response.status_code == 200
+
+    invalid_username_response = client.post(
+        "/api/v1/auth/register",
+        json={
+            "username": "bad user",
+            "password": "secret123",
+            "nickname": "Bad User",
+        },
+    )
+    assert invalid_username_response.status_code == 422
+
+    invalid_nickname_response = client.post(
+        "/api/v1/auth/register",
+        json={
+            "username": "blank-nickname-user",
+            "password": "secret123",
+            "nickname": "   ",
+        },
+    )
+    assert invalid_nickname_response.status_code == 422
+
+    short_password_response = client.post(
+        "/api/v1/auth/login",
+        json={
+            "username": "trim.user-1",
+            "password": "123",
+        },
+    )
+    assert short_password_response.status_code == 422
+
+
+def test_deleted_auth_subjects_return_unauthorized(client: TestClient, auth_header) -> None:
+    import pytest
+
+    from app.core.database import SessionLocal
+    from app.models.user import User
+    from app.services.auth_service import AuthService
+
+    register_response = client.post(
+        "/api/v1/auth/register",
+        json={
+            "username": "deleted-subject-user",
+            "password": "secret123",
+            "nickname": "Deleted Subject",
+        },
+    )
+    assert register_response.status_code == 200
+    payload = register_response.json()["data"]
+    user_id = payload["user"]["id"]
+
+    with SessionLocal() as db:
+        user = db.get(User, user_id)
+        assert user is not None
+        db.delete(user)
+        db.commit()
+
+    me_response = client.get(
+        "/api/v1/auth/me",
+        headers=auth_header(payload["access_token"]),
+    )
+    assert me_response.status_code == 401
+    assert me_response.json()["code"] == ErrorCode.UNAUTHORIZED
+
+    refresh_response = client.post(
+        "/api/v1/auth/refresh",
+        json={"refresh_token": payload["refresh_token"]},
+    )
+    assert refresh_response.status_code == 401
+    assert refresh_response.json()["code"] == ErrorCode.UNAUTHORIZED
+
+    with SessionLocal() as db:
+        service = AuthService(db)
+        with pytest.raises(Exception) as exc_info:
+            service.refresh_access_token(payload["refresh_token"])
+    assert exc_info.value.code == ErrorCode.UNAUTHORIZED
+
+
+def test_logout_success_does_not_depend_on_realtime_disconnect(client: TestClient, auth_header, monkeypatch) -> None:
+    from app.api.v1 import auth as auth_routes
+
+    register_response = client.post(
+        "/api/v1/auth/register",
+        json={
+            "username": "logout-fanout-user",
+            "password": "secret123",
+            "nickname": "Logout Fanout",
+        },
+    )
+    assert register_response.status_code == 200
+    payload = register_response.json()["data"]
+
+    monkeypatch.setattr(
+        auth_routes.connection_manager,
+        "disconnect_user_connections",
+        AsyncMock(side_effect=RuntimeError("disconnect failed")),
+    )
+
+    logout_response = client.delete(
+        "/api/v1/auth/session",
+        headers=auth_header(payload["access_token"]),
+    )
+    assert logout_response.status_code == 204
+
+    me_response = client.get(
+        "/api/v1/auth/me",
+        headers=auth_header(payload["access_token"]),
+    )
+    assert me_response.status_code == 401
+
+
+def test_force_login_disconnects_existing_runtime_before_rotating_session(client: TestClient, auth_header, monkeypatch) -> None:
+    from app.api.v1 import auth as auth_routes
+
+    register_response = client.post(
+        "/api/v1/auth/register",
+        json={
+            "username": "force-disconnect-user",
+            "password": "secret123",
+            "nickname": "Force Disconnect",
+        },
+    )
+    assert register_response.status_code == 200
+    payload = register_response.json()["data"]
+    user_id = payload["user"]["id"]
+    connection_manager.bind_user("force-conn", user_id)
+
+    monkeypatch.setattr(
+        auth_routes.connection_manager,
+        "disconnect_user_connections",
+        AsyncMock(side_effect=RuntimeError("disconnect failed")),
+    )
+
+    failed_login_response = client.post(
+        "/api/v1/auth/login",
+        json={
+            "username": "force-disconnect-user",
+            "password": "secret123",
+            "force": True,
+        },
+    )
+    assert failed_login_response.status_code == 500
+
+    still_valid_me = client.get(
+        "/api/v1/auth/me",
+        headers=auth_header(payload["access_token"]),
+    )
+    assert still_valid_me.status_code == 200
+
+
+def test_register_rolls_back_user_when_default_avatar_assignment_fails(client: TestClient, monkeypatch) -> None:
+    import pytest
+
+    from app.core.database import SessionLocal
+    from app.models.user import User
+    from app.services import auth_service as auth_service_module
+    from app.services.avatar_service import AvatarService
+
+    def fail_default_avatar(self, user, *, seed="", gender="", commit=True):
+        raise RuntimeError("default avatar failed")
+
+    monkeypatch.setattr(AvatarService, "assign_default_user_avatar", fail_default_avatar)
+
+    with SessionLocal() as db:
+        service = auth_service_module.AuthService(db)
+        with pytest.raises(RuntimeError):
+            service.register("rollback-register-user", "secret123", "Rollback Register")
+
+    with SessionLocal() as db:
+        user = db.query(User).filter(User.username == "rollback-register-user").one_or_none()
+    assert user is None
+
+
+def test_username_identity_is_case_canonical_across_register_login_and_search(client: TestClient, auth_header) -> None:
+    register_response = client.post(
+        "/api/v1/auth/register",
+        json={
+            "username": "Case.User",
+            "password": "secret123",
+            "nickname": "Case User",
+        },
+    )
+    assert register_response.status_code == 200
+    payload = register_response.json()["data"]
+    assert payload["user"]["username"] == "case.user"
+
+    duplicate_response = client.post(
+        "/api/v1/auth/register",
+        json={
+            "username": "case.user",
+            "password": "secret123",
+            "nickname": "Duplicate Case User",
+        },
+    )
+    assert duplicate_response.status_code == 409
+
+    login_response = client.post(
+        "/api/v1/auth/login",
+        json={
+            "username": "CASE.USER",
+            "password": "secret123",
+        },
+    )
+    assert login_response.status_code == 200
+    login_payload = login_response.json()["data"]
+    assert login_payload["user"]["id"] == payload["user"]["id"]
+
+    search_response = client.get(
+        "/api/v1/users/search",
+        headers=auth_header(login_payload["access_token"]),
+        params={"keyword": "CASE.USER"},
+    )
+    assert search_response.status_code == 200
+    search_payload = search_response.json()["data"]
+    assert [item["username"] for item in search_payload["items"]] == ["case.user"]

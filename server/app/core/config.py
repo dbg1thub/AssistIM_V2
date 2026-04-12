@@ -58,10 +58,11 @@ class Settings:
     media_public_base_url: str = field(default_factory=lambda: _env_str("MEDIA_PUBLIC_BASE_URL", "/uploads"))
     max_upload_bytes: int = field(default_factory=lambda: _env_int("MAX_UPLOAD_BYTES", 25 * 1024 * 1024))
     api_v1_prefix: str = field(default_factory=lambda: _env_str("API_V1_PREFIX", "/api/v1"))
-    cors_origins: tuple[str, ...] = field(default_factory=lambda: _env_csv("CORS_ORIGINS", "*"))
+    cors_origins: tuple[str, ...] = field(default_factory=lambda: _env_csv("CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173"))
     rate_limit_login: int = field(default_factory=lambda: _env_int("RATE_LIMIT_LOGIN", 5))
     rate_limit_register: int = field(default_factory=lambda: _env_int("RATE_LIMIT_REGISTER", 3))
     rate_limit_friend_request: int = field(default_factory=lambda: _env_int("RATE_LIMIT_FRIEND_REQUEST", 10))
+    rate_limit_store_backend: str = field(default_factory=lambda: _env_str("RATE_LIMIT_STORE_BACKEND", "database"))
     webrtc_ice_server_urls: tuple[str, ...] = field(default_factory=lambda: _env_csv("WEBRTC_ICE_SERVER_URLS", ""))
     webrtc_stun_urls: tuple[str, ...] = field(default_factory=lambda: _env_csv("WEBRTC_STUN_URLS", ""))
     webrtc_turn_urls: tuple[str, ...] = field(default_factory=lambda: _env_csv("WEBRTC_TURN_URLS", ""))
@@ -83,4 +84,3 @@ def reload_settings() -> Settings:
     """Clear the settings cache and rebuild it from the current environment."""
     get_settings.cache_clear()
     return get_settings()
-

@@ -82,6 +82,9 @@ class CallManager:
         self._active_call = None
         self._timing_origins.clear()
         self._initialized = False
+        global _call_manager
+        if _call_manager is self:
+            _call_manager = None
 
     def set_user_id(self, user_id: str) -> None:
         """Set the current authenticated user id."""
@@ -364,6 +367,11 @@ class CallManager:
 
 
 _call_manager: Optional[CallManager] = None
+
+
+def peek_call_manager() -> Optional[CallManager]:
+    """Return the existing call manager singleton if it was created."""
+    return _call_manager
 
 
 def get_call_manager() -> CallManager:

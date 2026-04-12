@@ -1,11 +1,10 @@
-﻿"""File repository."""
+"""File repository."""
 
 from __future__ import annotations
 
 from sqlalchemy import desc, select
 from sqlalchemy.orm import Session
 
-from app.media.storage import build_media_storage
 from app.models.file import StoredFile
 
 
@@ -40,20 +39,6 @@ class FileRepository:
         self.db.refresh(stored)
         return stored
 
-    def create_from_upload(self, user_id: str, file, *, settings) -> StoredFile:
-        storage = build_media_storage(settings)
-        stored_media = storage.store_upload(file)
-        return self.create(
-            user_id=user_id,
-            storage_provider=stored_media.storage_provider,
-            storage_key=stored_media.storage_key,
-            file_url=stored_media.public_url,
-            file_type=stored_media.content_type,
-            file_name=stored_media.original_name,
-            size_bytes=stored_media.size_bytes,
-            checksum_sha256=stored_media.checksum_sha256,
-        )
-
     def get_by_id(self, file_id: str) -> StoredFile | None:
         return self.db.get(StoredFile, file_id)
 
@@ -61,6 +46,15 @@ class FileRepository:
         stmt = select(StoredFile).where(StoredFile.id == file_id, StoredFile.user_id == user_id).limit(1)
         return self.db.execute(stmt).scalar_one_or_none()
 
-    def list_by_user(self, user_id: str) -> list[StoredFile]:
-        stmt = select(StoredFile).where(StoredFile.user_id == user_id).order_by(desc(StoredFile.created_at))
+    def get_by_storage_key(self, storage_provider: str, storage_key: str) -> StoredFile | None:
+        stmt = (
+            select(StoredFile)
+            .where(StoredFile.storage_provider == storage_provider, StoredFile.storage_key == storage_key)
+            .limit(1)
+        )
+        return self.db.execute(stmt).scalar_one_or_none()
+
+    def list_by_user(self, user_id: str, *, limit: int = 50) -> list[StoredFile]:
+        bounded_limit = min(200, max(1, int(limit or 50)))
+        stmt = select(StoredFile).where(StoredFile.user_id == user_id).order_by(desc(StoredFile.created_at)).limit(bounded_limit)
         return list(self.db.execute(stmt).scalars().all())

@@ -289,15 +289,23 @@ class FakeDatabase:
         self.is_connected = True
         self.app_state: dict[str, str] = {}
         self.session_cursors: dict[str, int] = {}
+        self.replace_calls: list[tuple[dict[str, str], list[str]]] = []
 
     async def get_app_state(self, key: str):
         return self.app_state.get(key)
 
+    async def replace_app_state(self, values: dict[str, str] | None = None, *, delete_keys=()) -> None:
+        self.replace_calls.append((dict(values or {}), [str(key) for key in list(delete_keys or [])]))
+        for key in list(delete_keys or []):
+            self.app_state.pop(str(key), None)
+        for key, value in dict(values or {}).items():
+            self.app_state[str(key)] = value
+
     async def set_app_state(self, key: str, value: str) -> None:
-        self.app_state[key] = value
+        await self.replace_app_state({key: value})
 
     async def delete_app_state(self, key: str) -> None:
-        self.app_state.pop(key, None)
+        await self.replace_app_state(delete_keys=[key])
 
     async def get_session_sync_cursors(self) -> dict[str, int]:
         return dict(self.session_cursors)
@@ -338,6 +346,10 @@ class FakeWebSocketClient:
 class FakeAuthService:
     def __init__(self, access_token: str = 'token') -> None:
         self.access_token = access_token
+        self.refresh_token = 'refresh-token'
+        self.refresh_calls = 0
+        self.refresh_result = True
+        self.refreshed_access_token = 'refreshed-token'
         self._listeners = []
 
     def add_token_listener(self, listener) -> None:
@@ -349,8 +361,19 @@ class FakeAuthService:
 
     def clear_tokens(self) -> None:
         self.access_token = None
+        self.refresh_token = None
         for listener in list(self._listeners):
             listener(None, None)
+
+    async def refresh_access_token(self) -> bool:
+        self.refresh_calls += 1
+        if not self.refresh_result:
+            self.clear_tokens()
+            return False
+        self.access_token = self.refreshed_access_token
+        for listener in list(self._listeners):
+            listener(self.access_token, self.refresh_token)
+        return True
 
 
 def test_connection_manager_loads_cached_message_and_event_cursors_and_builds_sync_request(monkeypatch) -> None:
@@ -511,6 +534,29 @@ def test_connection_manager_advances_message_and_event_cursors_from_ws_payloads(
     asyncio.run(scenario())
 
 
+def test_connection_manager_saves_message_and_event_cursors_in_one_app_state_batch(monkeypatch) -> None:
+    fake_db = FakeDatabase()
+
+    monkeypatch.setattr(connection_manager_module, 'get_auth_service', lambda: FakeAuthService())
+
+    async def scenario() -> None:
+        manager = connection_manager_module.ConnectionManager()
+        manager._db = fake_db
+        manager._session_sync_cursors = {'session-1': 4}
+        manager._event_sync_cursors = {'session-1': 3}
+        try:
+            await manager._save_sync_state()
+
+            values, delete_keys = fake_db.replace_calls[-1]
+            assert set(values) == {manager.LAST_SYNC_SESSION_CURSORS, manager.LAST_SYNC_EVENT_CURSORS}
+            assert manager.LEGACY_LAST_SYNC_TIMESTAMP in delete_keys
+            assert json.loads(values[manager.LAST_SYNC_SESSION_CURSORS]) == {'session-1': 4}
+            assert json.loads(values[manager.LAST_SYNC_EVENT_CURSORS]) == {'session-1': 3}
+        finally:
+            await manager.close()
+
+    asyncio.run(scenario())
+
 def test_connection_manager_uses_auth_service_token_for_auth_message_without_mutating_ws_url(monkeypatch) -> None:
     fake_auth_service = FakeAuthService(access_token='ws-token')
     fake_ws_client = FakeWebSocketClient()
@@ -569,6 +615,255 @@ def test_connection_manager_waits_for_auth_ack_before_sync_and_business_messages
     asyncio.run(scenario())
 
 
+def test_connection_manager_connect_waits_for_websocket_authentication(monkeypatch) -> None:
+    fake_ws_client = FakeWebSocketClient()
+
+    monkeypatch.setattr(connection_manager_module, 'get_auth_service', lambda: FakeAuthService(access_token='ws-token'))
+
+    async def scenario() -> None:
+        manager = connection_manager_module.ConnectionManager()
+        manager._ws_client = fake_ws_client
+        manager._loop = asyncio.get_running_loop()
+        fake_ws_client.is_connected = False
+        try:
+            connect_task = asyncio.create_task(manager.connect())
+            await asyncio.sleep(0)
+            assert connect_task.done() is False
+            assert manager.state == connection_manager_module.ConnectionState.CONNECTING
+
+            manager._on_connect()
+            await asyncio.sleep(0.05)
+            assert connect_task.done() is False
+            assert manager.state == connection_manager_module.ConnectionState.AUTHENTICATING
+            assert manager.is_connected is False
+
+            manager._on_message({'type': 'auth_ack', 'data': {'success': True, 'user_id': 'user-1'}})
+            await connect_task
+
+            assert manager.state == connection_manager_module.ConnectionState.CONNECTED
+            assert manager.is_connected is True
+            assert fake_ws_client.sent_nowait[-1]['type'] == 'sync_messages'
+        finally:
+            await manager.close()
+
+    asyncio.run(scenario())
+
+
+def test_connection_manager_wait_for_initial_sync_waits_until_history_events_listener_finishes(monkeypatch) -> None:
+    fake_ws_client = FakeWebSocketClient()
+    listener_events: list[str] = []
+
+    monkeypatch.setattr(connection_manager_module, 'get_auth_service', lambda: FakeAuthService())
+
+    async def scenario() -> None:
+        manager = connection_manager_module.ConnectionManager()
+        manager._ws_client = fake_ws_client
+        manager._loop = asyncio.get_running_loop()
+        release_listener = asyncio.get_running_loop().create_future()
+
+        async def listener(message: dict) -> None:
+            if message.get('type') != 'history_events':
+                return
+            listener_events.append('history_events_started')
+            await release_listener
+            listener_events.append('history_events_finished')
+
+        manager.add_message_listener(listener)
+        manager._ws_authenticated = True
+        manager._sync_in_flight = True
+        try:
+            wait_task = asyncio.create_task(manager.wait_for_initial_sync())
+            manager._on_message(
+                {
+                    'type': 'history_events',
+                    'data': {
+                        'events': [],
+                    },
+                }
+            )
+
+            await asyncio.sleep(0.05)
+            assert listener_events == ['history_events_started']
+            assert wait_task.done() is False
+
+            release_listener.set_result(None)
+            await wait_task
+
+            assert listener_events == ['history_events_started', 'history_events_finished']
+            assert manager.sync_in_flight is False
+        finally:
+            await manager.close()
+
+    asyncio.run(scenario())
+
+
+def test_connection_manager_times_out_unanswered_ws_auth(monkeypatch) -> None:
+    fake_ws_client = FakeWebSocketClient()
+    observed_messages: list[dict] = []
+
+    monkeypatch.setattr(connection_manager_module, 'get_auth_service', lambda: FakeAuthService(access_token='ws-token'))
+
+    async def scenario() -> None:
+        manager = connection_manager_module.ConnectionManager()
+        manager.WS_AUTH_TIMEOUT_SECONDS = 0.01
+        manager._ws_client = fake_ws_client
+        manager._loop = asyncio.get_running_loop()
+        manager.add_message_listener(lambda message: observed_messages.append(dict(message)))
+        try:
+            sent = await manager._authenticate_websocket()
+            await asyncio.sleep(0.05)
+
+            assert sent is True
+            assert manager._ws_auth_in_flight is False
+            assert manager._ws_authenticated is False
+            assert fake_ws_client.disconnect_calls == 1
+            assert observed_messages == [
+                {
+                    'type': 'error',
+                    'data': {
+                        'code': 408,
+                        'reason': 'ws_auth_timeout',
+                        'message': 'WebSocket authentication timed out',
+                    },
+                }
+            ]
+        finally:
+            await manager.close()
+
+    asyncio.run(scenario())
+
+
+def test_connection_manager_auth_ack_invalidates_ws_auth_timeout(monkeypatch) -> None:
+    fake_ws_client = FakeWebSocketClient()
+    observed_messages: list[dict] = []
+
+    monkeypatch.setattr(connection_manager_module, 'get_auth_service', lambda: FakeAuthService(access_token='ws-token'))
+
+    async def scenario() -> None:
+        manager = connection_manager_module.ConnectionManager()
+        manager.WS_AUTH_TIMEOUT_SECONDS = 0.01
+        manager._ws_client = fake_ws_client
+        manager._loop = asyncio.get_running_loop()
+        manager.add_message_listener(lambda message: observed_messages.append(dict(message)))
+        try:
+            sent = await manager._authenticate_websocket()
+            manager._on_message({'type': 'auth_ack', 'data': {'success': True}})
+            await asyncio.sleep(0.05)
+
+            assert sent is True
+            assert manager._ws_auth_in_flight is False
+            assert manager._ws_authenticated is True
+            assert fake_ws_client.disconnect_calls == 0
+            assert observed_messages == [{'type': 'auth_ack', 'data': {'success': True}}]
+        finally:
+            await manager.close()
+
+    asyncio.run(scenario())
+
+
+
+
+def test_connection_manager_prunes_orphan_sync_cursors(monkeypatch) -> None:
+    fake_db = FakeDatabase()
+    monkeypatch.setattr(connection_manager_module, 'get_auth_service', lambda: FakeAuthService())
+
+    async def scenario() -> None:
+        manager = connection_manager_module.ConnectionManager()
+        manager._db = fake_db
+        manager._session_sync_cursors = {'session-1': 5, 'session-orphan': 9}
+        manager._event_sync_cursors = {'session-1': 3, 'session-orphan': 8}
+        try:
+            await manager.prune_sync_state(['session-1'])
+
+            assert manager.session_sync_cursors == {'session-1': 5}
+            assert manager.event_sync_cursors == {'session-1': 3}
+            assert json.loads(fake_db.app_state[manager.LAST_SYNC_SESSION_CURSORS]) == {'session-1': 5}
+            assert json.loads(fake_db.app_state[manager.LAST_SYNC_EVENT_CURSORS]) == {'session-1': 3}
+        finally:
+            await manager.close()
+
+    asyncio.run(scenario())
+
+
+def test_connection_manager_clear_sync_state_memory_does_not_touch_persisted_cursors(monkeypatch) -> None:
+    fake_db = FakeDatabase()
+    fake_db.app_state['last_sync_session_cursors'] = json.dumps({'session-1': 5})
+    fake_db.app_state['last_sync_event_cursors'] = json.dumps({'session-1': 3})
+    monkeypatch.setattr(connection_manager_module, 'get_auth_service', lambda: FakeAuthService())
+
+    async def scenario() -> None:
+        manager = connection_manager_module.ConnectionManager()
+        manager._db = fake_db
+        manager._session_sync_cursors = {'session-1': 5}
+        manager._event_sync_cursors = {'session-1': 3}
+        try:
+            manager.clear_sync_state_memory()
+
+            assert manager.session_sync_cursors == {}
+            assert manager.event_sync_cursors == {}
+            assert json.loads(fake_db.app_state[manager.LAST_SYNC_SESSION_CURSORS]) == {'session-1': 5}
+            assert json.loads(fake_db.app_state[manager.LAST_SYNC_EVENT_CURSORS]) == {'session-1': 3}
+        finally:
+            await manager.close()
+
+    asyncio.run(scenario())
+
+
+def test_connection_manager_refreshes_token_and_retries_ws_auth_before_reporting_auth_loss(monkeypatch) -> None:
+    fake_ws_client = FakeWebSocketClient()
+    fake_auth_service = FakeAuthService(access_token='expired-token')
+    observed_messages: list[dict] = []
+
+    monkeypatch.setattr(connection_manager_module, 'get_auth_service', lambda: fake_auth_service)
+
+    async def scenario() -> None:
+        manager = connection_manager_module.ConnectionManager()
+        manager._ws_client = fake_ws_client
+        manager._loop = asyncio.get_running_loop()
+        manager._ws_auth_in_flight = True
+        manager.add_message_listener(lambda message: observed_messages.append(dict(message)))
+        try:
+            manager._on_message({'type': 'error', 'data': {'code': 401, 'message': 'expired'}})
+            await asyncio.sleep(0.05)
+
+            assert fake_auth_service.refresh_calls == 1
+            assert fake_ws_client.sent_nowait[-1]['type'] == 'auth'
+            assert fake_ws_client.sent_nowait[-1]['data']['token'] == 'refreshed-token'
+            assert manager._ws_auth_in_flight is True
+            assert observed_messages == []
+        finally:
+            await manager.close()
+
+    asyncio.run(scenario())
+
+
+def test_connection_manager_reports_ws_auth_error_when_token_refresh_fails(monkeypatch) -> None:
+    fake_ws_client = FakeWebSocketClient()
+    fake_auth_service = FakeAuthService(access_token='expired-token')
+    fake_auth_service.refresh_result = False
+    observed_messages: list[dict] = []
+
+    monkeypatch.setattr(connection_manager_module, 'get_auth_service', lambda: fake_auth_service)
+
+    async def scenario() -> None:
+        manager = connection_manager_module.ConnectionManager()
+        manager._ws_client = fake_ws_client
+        manager._loop = asyncio.get_running_loop()
+        manager._ws_auth_in_flight = True
+        manager.add_message_listener(lambda message: observed_messages.append(dict(message)))
+        try:
+            terminal_message = {'type': 'error', 'data': {'code': 401, 'message': 'expired'}}
+            manager._on_message(terminal_message)
+            await asyncio.sleep(0.05)
+
+            assert fake_auth_service.refresh_calls == 1
+            assert fake_ws_client.sent_nowait == []
+            assert manager._ws_auth_in_flight is False
+            assert observed_messages == [terminal_message]
+        finally:
+            await manager.close()
+
+    asyncio.run(scenario())
 def test_connection_manager_ignores_late_callbacks_from_closed_generation(monkeypatch) -> None:
     fake_ws_client = FakeWebSocketClient()
     received: list[dict] = []
@@ -589,5 +884,35 @@ def test_connection_manager_ignores_late_callbacks_from_closed_generation(monkey
         assert received == []
         assert manager.ws_client is None
         assert manager._loop is None
+
+    asyncio.run(scenario())
+
+
+def test_connection_manager_ignores_late_auth_ack_and_events_from_closed_generation(monkeypatch) -> None:
+    fake_db = FakeDatabase()
+    fake_ws_client = FakeWebSocketClient()
+    received: list[dict] = []
+
+    monkeypatch.setattr(connection_manager_module, 'get_auth_service', lambda: FakeAuthService())
+    monkeypatch.setattr(connection_manager_module, 'get_websocket_client', lambda: fake_ws_client)
+
+    async def scenario() -> None:
+        manager = connection_manager_module.ConnectionManager()
+        manager._db = fake_db
+        await manager.initialize()
+        manager.add_message_listener(lambda message: received.append(dict(message)))
+        stale_on_message = fake_ws_client.callbacks['on_message']
+
+        await manager.close()
+        stale_on_message({'type': 'auth_ack', 'data': {'success': True}})
+        stale_on_message({'type': 'message_edit', 'data': {'session_id': 'session-1', 'event_seq': 7}})
+        stale_on_message({'type': 'group_profile_update', 'data': {'session_id': 'session-2', 'event_seq': 9}})
+        await asyncio.sleep(0.05)
+
+        assert fake_ws_client.sent_nowait == []
+        assert manager.session_sync_cursors == {}
+        assert manager.event_sync_cursors == {}
+        assert fake_db.app_state == {}
+        assert received == []
 
     asyncio.run(scenario())

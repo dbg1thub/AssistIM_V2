@@ -1,10 +1,10 @@
-﻿"""User and friendship models."""
+"""User and friendship models."""
 
 from __future__ import annotations
 
 from datetime import date
 
-from sqlalchemy import Date, ForeignKey, Index, String, Text, UniqueConstraint, Uuid
+from sqlalchemy import Date, ForeignKey, Index, String, Text, UniqueConstraint, Uuid, column, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base, IdMixin, TimestampMixin
@@ -14,6 +14,7 @@ class User(IdMixin, TimestampMixin, Base):
     __tablename__ = "users"
     __table_args__ = (
         Index("idx_users_username", "username"),
+        Index("uq_users_username_lower", func.lower(column("username")), unique=True),
         Index("idx_users_email", "email"),
         Index("idx_users_phone", "phone"),
     )

@@ -1,9 +1,15 @@
-﻿"""Authentication service."""
+"""Authentication service."""
 
 from __future__ import annotations
 
 from sqlalchemy.orm import Session
 
+from app.core.auth_contract import (
+    TOKEN_TYPE_BEARER,
+    canonicalize_nickname,
+    canonicalize_refresh_token,
+    canonicalize_username,
+)
 from app.core.config import Settings, get_settings
 from app.core.errors import AppError, ErrorCode
 from app.core.security import (
@@ -28,24 +34,34 @@ class AuthService:
         self.avatars = AvatarService(db, self.settings)
 
     def register(self, username: str, password: str, nickname: str) -> dict:
-        if self.users.get_by_username(username) is not None:
+        canonical_username = canonicalize_username(username)
+        canonical_nickname = canonicalize_nickname(nickname)
+        if self.users.get_by_username(canonical_username) is not None:
             raise AppError(ErrorCode.USER_EXISTS, "user already exists", 409)
 
-        user = self.users.create(
-            username=username,
-            password_hash=hash_password(password),
-            nickname=nickname,
-            avatar_kind="default",
-        )
-        user = self.avatars.assign_default_user_avatar(user, seed=user.id or username)
-        return self._build_auth_payload(user, rotate_session=True)
+        try:
+            user = self.users.create(
+                username=canonical_username,
+                password_hash=hash_password(password),
+                nickname=canonical_nickname,
+                avatar_kind="default",
+                commit=False,
+            )
+            user = self.avatars.assign_default_user_avatar(user, seed=user.id or canonical_username, commit=False)
+            user = self.users.advance_auth_session_version(user, commit=False)
+            self.db.commit()
+            self.db.refresh(user)
+        except Exception:
+            self.db.rollback()
+            raise
+        return self._serialize_auth_payload(user)
 
     def login(self, username: str, password: str) -> dict:
         user = self.authenticate_credentials(username, password)
         return self.login_user(user, rotate_session=True)
 
     def authenticate_credentials(self, username: str, password: str) -> User:
-        user = self.users.get_by_username(username)
+        user = self.users.get_by_username(canonicalize_username(username))
         if user is None or not verify_password(password, user.password_hash):
             raise AppError(ErrorCode.INVALID_CREDENTIALS, "invalid credentials", 401)
         return user
@@ -54,18 +70,18 @@ class AuthService:
         return self._build_auth_payload(user, rotate_session=rotate_session)
 
     def refresh(self, refresh_token: str) -> dict:
-        payload = decode_refresh_token(refresh_token, settings=self.settings)
+        payload = decode_refresh_token(canonicalize_refresh_token(refresh_token), settings=self.settings)
         user = self.users.get_by_id(payload["sub"])
         if user is None:
-            raise AppError(ErrorCode.USER_NOT_FOUND, "user not found", 404)
+            raise AppError(ErrorCode.UNAUTHORIZED, "session expired", 401)
         self._ensure_active_session(user, payload)
         return self._build_auth_payload(user, rotate_session=False)
 
     def refresh_access_token(self, refresh_token: str) -> dict:
-        payload = decode_refresh_token(refresh_token, settings=self.settings)
+        payload = decode_refresh_token(canonicalize_refresh_token(refresh_token), settings=self.settings)
         user = self.users.get_by_id(payload["sub"])
         if user is None:
-            raise AppError(ErrorCode.USER_NOT_FOUND, "user not found", 404)
+            raise AppError(ErrorCode.UNAUTHORIZED, "session expired", 401)
         self._ensure_active_session(user, payload)
         return {
             "access_token": create_access_token(
@@ -74,7 +90,7 @@ class AuthService:
                 session_version=int(user.auth_session_version or 0),
                 settings=self.settings,
             ),
-            "token_type": "Bearer",
+            "token_type": TOKEN_TYPE_BEARER,
             "expires_in": self.settings.access_token_expire_minutes * 60,
             "refresh_expires_in": self.settings.refresh_token_expire_days * 24 * 60 * 60,
         }
@@ -90,7 +106,9 @@ class AuthService:
         user = self.avatars.backfill_user_avatar_state(user)
         if rotate_session:
             user = self.users.advance_auth_session_version(user)
+        return self._serialize_auth_payload(user)
 
+    def _serialize_auth_payload(self, user: User) -> dict:
         session_version = int(user.auth_session_version or 0)
         access_token = create_access_token(
             user.id,
@@ -107,7 +125,7 @@ class AuthService:
         return {
             "access_token": access_token,
             "refresh_token": refresh_token,
-            "token_type": "Bearer",
+            "token_type": TOKEN_TYPE_BEARER,
             "expires_in": self.settings.access_token_expire_minutes * 60,
             "refresh_expires_in": self.settings.refresh_token_expire_days * 24 * 60 * 60,
             "user": UserService.serialize_user(user),

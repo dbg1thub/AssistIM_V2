@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import UTC, datetime
-
-from fastapi import APIRouter, Depends, Query, Response, status
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
@@ -14,7 +12,6 @@ from app.models.user import User
 from app.schemas.message import MessageCreate, MessageReadBatch, MessageUpdate
 from app.services.message_service import MessageService
 from app.utils.response import success_response
-from app.utils.time import ensure_utc
 from app.websocket.manager import connection_manager
 from app.websocket.payloads import read_broadcast_payload, ws_message
 
@@ -22,14 +19,6 @@ from app.websocket.payloads import read_broadcast_payload, ws_message
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
-
-def _parse_before(value: str | None) -> datetime | None:
-    if not value:
-        return None
-    try:
-        return ensure_utc(datetime.fromisoformat(value))
-    except ValueError:
-        return datetime.fromtimestamp(float(value), tz=UTC)
 
 
 async def _broadcast_message_event(member_ids: list[str], payload: dict) -> None:
@@ -67,11 +56,11 @@ async def read_message_batch(payload: MessageReadBatch, current_user: User = Dep
 def list_messages(
     session_id: str,
     limit: int = Query(default=50, ge=1, le=200),
-    before: str | None = None,
+    before_seq: int | None = Query(default=None, ge=1),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> dict:
-    return success_response(MessageService(db).list_messages(current_user, session_id, limit, _parse_before(before)))
+    return success_response(MessageService(db).list_messages(current_user, session_id, limit, before_seq))
 
 
 @router.post("/sessions/{session_id}/messages")
@@ -150,8 +139,8 @@ async def recall_message(message_id: str, current_user: User = Depends(get_curre
     return success_response(data)
 
 
-@router.delete("/messages/{message_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_message(message_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> Response:
+@router.delete("/messages/{message_id}")
+async def delete_message(message_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
     service = MessageService(db)
     data = service.delete(current_user, message_id)
     member_ids = service.get_session_member_ids(data["session_id"], current_user.id)
@@ -164,4 +153,4 @@ async def delete_message(message_id: str, current_user: User = Depends(get_curre
             seq=int(data.get("event_seq", 0) or 0),
         ),
     )
-    return Response(status_code=status.HTTP_204_NO_CONTENT)
+    return success_response(data)

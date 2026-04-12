@@ -309,7 +309,7 @@ from client.managers import session_manager as session_manager_module
 from client.managers import search_manager as search_manager_module
 from client.managers import sound_manager as sound_manager_module
 from client.core import profile_fields as profile_fields_module
-from client.models.message import ChatMessage, MessageStatus, MessageType, Session
+from client.models.message import ChatMessage, MessageStatus, MessageType, Session, build_remote_attachment_extra
 from client.services import file_service as file_service_module
 from client.storage import database as database_module
 from client.ui.controllers import auth_controller as auth_controller_module
@@ -655,21 +655,28 @@ class FakeDatabase:
         }
 
     async def set_app_state(self, key: str, value) -> None:
-        self.app_state[key] = value
+        await self.set_app_states({key: value})
+
+    async def set_app_states(self, values: dict[str, object]) -> None:
+        self.app_state.update(dict(values))
 
     async def get_app_state(self, key: str):
         return self.app_state.get(key)
 
     async def delete_app_state(self, key: str) -> None:
-        self.app_state.pop(key, None)
+        await self.delete_app_states([key])
+
+    async def delete_app_states(self, keys) -> None:
+        for key in keys:
+            self.app_state.pop(key, None)
 
     async def clear_chat_state(self) -> None:
         return None
 
-    async def replace_contacts_cache(self, contacts: list[dict]) -> None:
+    async def replace_contacts_cache(self, contacts: list[dict], *, owner_user_id: str | None = None) -> None:
         self.replaced_contacts.append([dict(item) for item in contacts])
 
-    async def replace_groups_cache(self, groups: list[dict]) -> None:
+    async def replace_groups_cache(self, groups: list[dict], *, owner_user_id: str | None = None) -> None:
         self.replaced_groups.append([dict(item) for item in groups])
 
     def get_db_encryption_self_check(self) -> dict[str, object]:
@@ -867,7 +874,14 @@ class FakeContactService:
             self.group_name = name
         if announcement is not None:
             self.group_announcement = announcement
-        return self._group_payload(group_id)
+        return {
+            'group': self._group_payload(group_id),
+            'announcement': {
+                'message_id': 'announcement-message-1' if announcement else None,
+                'created': bool(announcement),
+                'participant_count': len(self.group_members),
+            },
+        }
 
     async def update_my_group_profile(self, group_id: str, *, note: str | None = None, my_group_nickname: str | None = None) -> dict:
         self.update_my_group_profile_calls.append((group_id, note, my_group_nickname))
@@ -875,7 +889,13 @@ class FakeContactService:
             self.group_note = note
         if my_group_nickname is not None:
             self.group_my_nickname = my_group_nickname
-        return self._group_payload(group_id)
+        return {
+            'group_id': group_id,
+            'session_id': 'session-group-1',
+            'group_note': self.group_note,
+            'my_group_nickname': self.group_my_nickname,
+            'changed': True,
+        }
 
     async def leave_group(self, group_id: str) -> dict:
         self.leave_group_calls.append(group_id)
@@ -1264,8 +1284,8 @@ class FakeChatService:
     def __init__(self) -> None:
         self.fetch_messages_calls: list[tuple[str, int, object]] = []
 
-    async def fetch_messages(self, session_id: str, limit: int, before_timestamp=None) -> list[dict]:
-        self.fetch_messages_calls.append((session_id, limit, before_timestamp))
+    async def fetch_messages(self, session_id: str, limit: int, before_seq=None) -> list[dict]:
+        self.fetch_messages_calls.append((session_id, limit, before_seq))
         return []
 
 
@@ -1322,10 +1342,46 @@ def test_chat_controller_refresh_call_ice_servers_falls_back_to_local_config(mon
     asyncio.run(scenario())
 
 
+def test_chat_controller_close_discards_call_ice_cache(monkeypatch) -> None:
+    fake_call_service = FakeCallService([
+        {'urls': ['turn:turn.example.org:3478'], 'username': 'alice', 'credential': 'secret'}
+    ])
+    fallback_config = types.SimpleNamespace(
+        webrtc=types.SimpleNamespace(ice_servers=[{'urls': ['stun:local.example.org:3478']}])
+    )
+
+    class FakeCallManager:
+        def __init__(self) -> None:
+            self.close_calls = 0
+
+        async def close(self) -> None:
+            self.close_calls += 1
+
+    fake_call_manager = FakeCallManager()
+    monkeypatch.setattr(chat_controller_module, 'get_call_service', lambda: fake_call_service)
+    monkeypatch.setattr(chat_controller_module, 'get_config', lambda: fallback_config)
+    monkeypatch.setattr(chat_controller_module, 'get_message_manager', lambda: FakeMessageManager())
+    monkeypatch.setattr(chat_controller_module, 'get_session_manager', lambda: FakeSessionManager())
+    monkeypatch.setattr(chat_controller_module, 'get_file_service', lambda: FakeNoopFileService())
+    monkeypatch.setattr(chat_controller_module, 'get_call_manager', lambda: fake_call_manager)
+
+    async def scenario() -> None:
+        controller = chat_controller_module.ChatController()
+        await controller.refresh_call_ice_servers(force_refresh=True)
+        assert controller.get_call_ice_servers()[0]['username'] == 'alice'
+
+        await controller.close()
+
+        assert fake_call_manager.close_calls == 1
+        assert controller.get_call_ice_servers() == [{'urls': ['stun:local.example.org:3478']}]
+        assert controller._call_ice_servers_loaded is False
+
+    asyncio.run(scenario())
+
 def test_chat_controller_send_file_uses_file_service(monkeypatch) -> None:
     fake_message_manager = FakeMessageManager()
     fake_session_manager = FakeSessionManager()
-    fake_file_service = FakeFileService({'url': 'https://cdn.example/files/picture.png', 'file_type': 'image/png'})
+    fake_file_service = FakeFileService({'url': 'https://cdn.example/files/picture.png', 'mime_type': 'image/png'})
 
     monkeypatch.setattr(chat_controller_module, 'get_message_manager', lambda: fake_message_manager)
     monkeypatch.setattr(chat_controller_module, 'get_session_manager', lambda: fake_session_manager)
@@ -1357,8 +1413,8 @@ def test_message_manager_get_messages_uses_server_sender_profiles(monkeypatch) -
             self.messages = list(messages)
 
     class RemoteProfileChatService(FakeChatService):
-        async def fetch_messages(self, session_id: str, limit: int, before_timestamp=None) -> list[dict]:
-            await super().fetch_messages(session_id, limit, before_timestamp)
+        async def fetch_messages(self, session_id: str, limit: int, before_seq=None) -> list[dict]:
+            await super().fetch_messages(session_id, limit, before_seq)
             return [
                 {
                     'message_id': 'm-self',
@@ -1456,8 +1512,8 @@ def test_auth_controller_update_profile_uploads_avatar_via_file_service(monkeypa
         assert result.session_snapshot is not None
         assert result.session_snapshot.authoritative is True
         assert result.session_snapshot.unread_synchronized is True
-        assert fake_message_manager.user_ids[-1] == 'user-1'
-        assert fake_chat_controller.user_ids[-1] == 'user-1'
+        assert fake_message_manager.user_ids == []
+        assert fake_chat_controller.user_ids == []
         assert fake_chat_controller.refresh_calls == 1
         assert fake_db.app_state[controller.USER_ID_KEY] == 'user-1'
 
@@ -1541,9 +1597,40 @@ def test_auth_controller_login_uses_auth_service(monkeypatch) -> None:
         assert fake_auth_service.access_token == 'access-token'
         assert fake_auth_service.refresh_token == 'refresh-token'
         assert user['id'] == 'user-1'
-        assert fake_message_manager.user_ids[-1] == 'user-1'
-        assert fake_chat_controller.user_ids[-1] == 'user-1'
+        assert fake_message_manager.user_ids == []
+        assert fake_chat_controller.user_ids == []
         assert fake_db.app_state[controller.USER_ID_KEY] == 'user-1'
+
+    asyncio.run(scenario())
+
+
+def test_auth_controller_broadcasts_auth_state_changes(monkeypatch) -> None:
+    fake_auth_service = FakeAuthService()
+    fake_user_service = FakeUserService()
+    fake_db = FakeDatabase()
+    fake_message_manager = FakeMessageManager()
+    fake_chat_controller = FakeChatControllerContext()
+
+    monkeypatch.setattr(auth_controller_module, 'get_auth_service', lambda: fake_auth_service)
+    monkeypatch.setattr(auth_controller_module, 'get_user_service', lambda: fake_user_service)
+    monkeypatch.setattr(auth_controller_module, 'get_database', lambda: fake_db)
+    monkeypatch.setattr(auth_controller_module, 'get_message_manager', lambda: fake_message_manager)
+    monkeypatch.setattr(auth_controller_module, 'peek_message_manager', lambda: fake_message_manager)
+    monkeypatch.setattr(auth_controller_module, 'get_chat_controller', lambda: fake_chat_controller)
+    monkeypatch.setattr(auth_controller_module, 'peek_chat_controller', lambda: fake_chat_controller)
+    monkeypatch.setattr(auth_controller_module, 'get_file_service', lambda: FakeFileService())
+    monkeypatch.setattr(auth_controller_module, 'peek_connection_manager', lambda: None)
+
+    async def scenario() -> None:
+        controller = auth_controller_module.AuthController()
+        snapshots: list[dict] = []
+        controller.add_auth_state_listener(lambda user: snapshots.append(dict(user or {})))
+
+        await controller.login('alice', 'secret')
+        await controller.clear_session(clear_local_chat_state=False)
+
+        assert snapshots[0]['id'] == 'user-1'
+        assert snapshots[-1] == {}
 
     asyncio.run(scenario())
 
@@ -1582,8 +1669,8 @@ def test_auth_controller_register_uses_backend_default_avatar_without_follow_up_
         assert fake_user_service.update_calls == []
         assert user['avatar'] == '/uploads/default_avatars/avatar_default_female_01.svg'
         assert user['gender'] is None
-        assert fake_message_manager.user_ids[-1] == 'user-1'
-        assert fake_chat_controller.user_ids[-1] == 'user-1'
+        assert fake_message_manager.user_ids == []
+        assert fake_chat_controller.user_ids == []
         assert fake_db.app_state[controller.USER_ID_KEY] == 'user-1'
 
     asyncio.run(scenario())
@@ -1621,7 +1708,7 @@ def test_chat_controller_send_file_marks_failed_on_upload_error(monkeypatch) -> 
 def test_chat_controller_send_file_uses_encrypted_upload_artifact_when_message_manager_requests_it(monkeypatch) -> None:
     fake_message_manager = FakeMessageManager()
     fake_session_manager = FakeSessionManager()
-    fake_file_service = FakeFileService({'url': 'https://cdn.example/files/blob.bin', 'file_type': 'application/octet-stream'})
+    fake_file_service = FakeFileService({'url': 'https://cdn.example/files/blob.bin', 'mime_type': 'application/octet-stream'})
 
     workspace_tmp = Path('client/tests/.pytest_tmp')
     workspace_tmp.mkdir(parents=True, exist_ok=True)
@@ -1656,7 +1743,7 @@ def test_chat_controller_send_file_uses_encrypted_upload_artifact_when_message_m
 def test_chat_controller_send_file_offloads_video_probe(monkeypatch) -> None:
     fake_message_manager = FakeMessageManager()
     fake_session_manager = FakeSessionManager()
-    fake_file_service = FakeFileService({'url': 'https://cdn.example/files/video.mp4', 'file_type': 'video/mp4'})
+    fake_file_service = FakeFileService({'url': 'https://cdn.example/files/video.mp4', 'mime_type': 'video/mp4'})
     to_thread_calls: list[tuple[object, str]] = []
 
     async def fake_to_thread(func, *args, **kwargs):
@@ -2080,6 +2167,67 @@ def test_file_service_normalizes_backend_upload_payload(monkeypatch) -> None:
 
 
 
+def test_file_service_drops_internal_upload_metadata_from_chat_payload(monkeypatch) -> None:
+    class FakeUploadHttpClient:
+        async def upload_file(self, file_path: str, upload_path: str = '/files/upload') -> dict:
+            return {
+                'url': '/uploads/blob.bin',
+                'mime_type': 'application/octet-stream',
+                'size_bytes': 8,
+                'storage_provider': 'local',
+                'storage_key': '2026/04/12/blob.bin',
+                'checksum_sha256': 'abc123',
+                'media': {
+                    'url': '/uploads/blob.bin',
+                    'storage_provider': 'local',
+                    'storage_key': '2026/04/12/blob.bin',
+                    'checksum_sha256': 'abc123',
+                },
+            }
+
+    monkeypatch.setattr(file_service_module, 'get_http_client', lambda: FakeUploadHttpClient())
+
+    async def scenario() -> None:
+        service = file_service_module.FileService()
+        payload = await service.upload_chat_attachment('D:/tmp/blob.bin')
+
+        assert 'storage_provider' not in payload
+        assert 'storage_key' not in payload
+        assert 'checksum_sha256' not in payload
+        assert payload['media'] == {
+            'url': '/uploads/blob.bin',
+            'original_name': 'blob.bin',
+            'mime_type': 'application/octet-stream',
+            'size_bytes': 8,
+        }
+
+    asyncio.run(scenario())
+
+
+def test_build_remote_attachment_extra_drops_internal_media_metadata() -> None:
+    extra = build_remote_attachment_extra(
+        {
+            'url': '/uploads/blob.bin',
+            'mime_type': 'application/octet-stream',
+            'size_bytes': 8,
+            'media': {
+                'url': '/uploads/blob.bin',
+                'storage_provider': 'local',
+                'storage_key': '2026/04/12/blob.bin',
+                'checksum_sha256': 'abc123',
+            },
+        },
+        fallback_name='blob.bin',
+    )
+
+    assert extra['media'] == {
+        'url': '/uploads/blob.bin',
+        'original_name': 'blob.bin',
+        'mime_type': 'application/octet-stream',
+        'size_bytes': 8,
+    }
+
+
 def test_file_service_downloads_chat_attachment_bytes(monkeypatch) -> None:
     class FakeDownloadHttpClient:
         def __init__(self) -> None:
@@ -2105,7 +2253,7 @@ def test_file_service_downloads_chat_attachment_bytes(monkeypatch) -> None:
 def test_file_service_rejects_upload_payload_without_url(monkeypatch) -> None:
     class FakeUploadHttpClient:
         async def upload_file(self, file_path: str, upload_path: str = '/files/upload') -> dict:
-            return {'file_type': 'image/png'}
+            return {'mime_type': 'image/png'}
 
     monkeypatch.setattr(file_service_module, 'get_http_client', lambda: FakeUploadHttpClient())
 
@@ -2335,7 +2483,7 @@ def test_contact_controller_mutations_use_contact_service(monkeypatch) -> None:
         assert fetched_group.id == 'group-1'
         assert shared_group.name == 'Renamed Team'
         assert shared_group.extra['announcement'] == 'Ship tonight'
-        assert self_group.extra['note'] == 'private note'
+        assert self_group.extra['group_note'] == 'private note'
         assert self_group.extra['my_group_nickname'] == 'lead'
         assert group_after_add.member_count == 4
         assert any(member.get('id') == 'user-4' for member in group_after_add.extra['members'])
@@ -2646,6 +2794,40 @@ def test_session_manager_refresh_remote_sessions_uses_session_service(monkeypatc
     asyncio.run(scenario())
 
 
+
+def test_session_manager_refresh_remote_sessions_prunes_connection_sync_state(monkeypatch) -> None:
+    from client.managers import connection_manager as connection_manager_module
+
+    fake_session_service = FakeSessionService()
+    fake_e2ee_service = FakeE2EEService({'device_id': 'device-local-1', 'has_local_bundle': True})
+    fake_db = FakeSessionProfileDatabase()
+
+    class _FakeConnectionManager:
+        def __init__(self) -> None:
+            self.pruned: list[list[str]] = []
+
+        async def prune_sync_state(self, active_session_ids) -> None:
+            self.pruned.append(list(active_session_ids))
+
+    fake_connection_manager = _FakeConnectionManager()
+
+    monkeypatch.setattr(session_manager_module, 'get_session_service', lambda: fake_session_service)
+    monkeypatch.setattr(session_manager_module, 'get_e2ee_service', lambda: fake_e2ee_service)
+    monkeypatch.setattr(session_manager_module, 'get_event_bus', lambda: FakeEventBus())
+    monkeypatch.setattr(session_manager_module, 'get_message_manager', lambda: FakeMessageManager())
+    monkeypatch.setattr(session_manager_module, 'get_database', lambda: fake_db)
+    monkeypatch.setattr(connection_manager_module, 'peek_connection_manager', lambda: fake_connection_manager)
+
+    async def scenario() -> None:
+        manager = session_manager_module.SessionManager()
+
+        result = await manager.refresh_remote_sessions()
+
+        assert result.authoritative is True
+        assert fake_connection_manager.pruned == [['session-1']]
+        assert [session.session_id for session in fake_db.replaced_sessions] == ['session-1']
+
+    asyncio.run(scenario())
 def test_session_manager_refresh_remote_sessions_prefers_counterpart_profile(monkeypatch) -> None:
     fake_session_service = FakeSessionService()
     fake_e2ee_service = FakeE2EEService(
@@ -4551,5 +4733,300 @@ def test_contact_controller_group_merge_helpers_preserve_extra_and_sort(monkeypa
         await controller.persist_groups_cache(final_groups)
         assert fake_db.replaced_groups[-1][0]['id'] == 'group-1'
         assert fake_db.replaced_groups[-1][0]['extra']['member_previews'] == ['Alice(地区: Shenzhen)']
+
+    asyncio.run(scenario())
+
+
+def test_contact_controller_skips_cache_writes_when_auth_context_changes(monkeypatch) -> None:
+    fake_contact_service = FakeContactService()
+    fake_contact_service.friends_payload = [{'id': 'user-2', 'username': 'bob', 'nickname': 'Bob'}]
+    fake_contact_service.groups_payload = [{'id': 'group-1', 'name': 'Core Team'}]
+    fake_user_service = FakeUserService()
+    fake_auth_context = FakeAuthContext()
+    fake_db = FakeDatabase()
+    fake_db.is_connected = True
+
+    async def stale_fetch_friends():
+        fake_auth_context.current_user = {}
+        return list(fake_contact_service.friends_payload)
+
+    async def stale_fetch_groups():
+        fake_auth_context.current_user = {}
+        return list(fake_contact_service.groups_payload)
+
+    fake_contact_service.fetch_friends = stale_fetch_friends
+    fake_contact_service.fetch_groups = stale_fetch_groups
+
+    monkeypatch.setattr(contact_controller_module, 'get_contact_service', lambda: fake_contact_service)
+    monkeypatch.setattr(contact_controller_module, 'get_user_service', lambda: fake_user_service)
+    monkeypatch.setattr(contact_controller_module, 'get_auth_controller', lambda: fake_auth_context)
+    monkeypatch.setattr(contact_controller_module, 'get_database', lambda: fake_db)
+
+    async def scenario() -> None:
+        controller = contact_controller_module.ContactController()
+
+        try:
+            await controller.load_contacts()
+        except asyncio.CancelledError:
+            pass
+        else:
+            raise AssertionError('stale contact reload must be cancelled')
+
+        fake_auth_context.current_user = {'id': 'user-1', 'username': 'alice'}
+        try:
+            await controller.load_groups()
+        except asyncio.CancelledError:
+            pass
+        else:
+            raise AssertionError('stale group reload must be cancelled')
+
+        assert fake_db.replaced_contacts == []
+        assert fake_db.replaced_groups == []
+
+    asyncio.run(scenario())
+
+
+def test_discovery_controller_clears_caches_on_close(monkeypatch) -> None:
+    fake_discovery_service = FakeDiscoveryService()
+    fake_user_service = FakeUserService()
+    fake_auth_context = FakeAuthContext()
+
+    monkeypatch.setattr(discovery_controller_module, 'get_discovery_service', lambda: fake_discovery_service)
+    monkeypatch.setattr(discovery_controller_module, 'get_user_service', lambda: fake_user_service)
+    monkeypatch.setattr(discovery_controller_module, 'get_auth_controller', lambda: fake_auth_context)
+
+    async def scenario() -> None:
+        controller = discovery_controller_module.DiscoveryController()
+        controller._user_cache['user-2'] = {'id': 'user-2'}
+        controller._comment_cache['moment-1'] = []
+        controller._like_state_cache['moment-1'] = True
+        controller._like_count_cache['moment-1'] = 3
+        discovery_controller_module._discovery_controller = controller
+
+        await controller.close()
+
+        assert controller._user_cache == {}
+        assert controller._comment_cache == {}
+        assert controller._like_state_cache == {}
+        assert controller._like_count_cache == {}
+        assert discovery_controller_module.peek_discovery_controller() is None
+
+    asyncio.run(scenario())
+
+
+def test_discovery_controller_ignores_late_results_after_auth_context_change(monkeypatch) -> None:
+    fake_discovery_service = FakeDiscoveryService()
+    fake_discovery_service.moments_payload = [
+        {'id': 'moment-1', 'user_id': 'user-2', 'content': 'hello', 'comments': []},
+    ]
+    fake_user_service = FakeUserService()
+    fake_user_service.user_payloads = {'user-2': {'id': 'user-2', 'username': 'bob'}}
+    fake_auth_context = FakeAuthContext({'id': 'user-1', 'username': 'alice'})
+
+    async def stale_fetch_moments(user_id=None):
+        fake_auth_context.current_user = {'id': 'user-2', 'username': 'bob'}
+        return list(fake_discovery_service.moments_payload)
+
+    fake_discovery_service.fetch_moments = stale_fetch_moments
+
+    monkeypatch.setattr(discovery_controller_module, 'get_discovery_service', lambda: fake_discovery_service)
+    monkeypatch.setattr(discovery_controller_module, 'get_user_service', lambda: fake_user_service)
+    monkeypatch.setattr(discovery_controller_module, 'get_auth_controller', lambda: fake_auth_context)
+
+    async def scenario() -> None:
+        controller = discovery_controller_module.DiscoveryController()
+
+        try:
+            await controller.load_moments()
+        except asyncio.CancelledError:
+            pass
+        else:
+            raise AssertionError('stale discovery load must be cancelled')
+
+        assert controller._user_cache == {}
+        assert controller._comment_cache == {}
+        assert controller._like_state_cache == {}
+        assert controller._like_count_cache == {}
+
+    asyncio.run(scenario())
+
+
+def test_auth_controller_update_profile_ignores_late_result_after_auth_clear(monkeypatch) -> None:
+    fake_auth_service = FakeAuthService()
+    fake_user_service = FakeUserService()
+    fake_db = FakeDatabase()
+    fake_message_manager = FakeMessageManager()
+    fake_chat_controller = FakeChatControllerContext()
+    fake_file_service = FakeFileService()
+
+    monkeypatch.setattr(auth_controller_module, 'get_auth_service', lambda: fake_auth_service)
+    monkeypatch.setattr(auth_controller_module, 'get_user_service', lambda: fake_user_service)
+    monkeypatch.setattr(auth_controller_module, 'get_database', lambda: fake_db)
+    monkeypatch.setattr(auth_controller_module, 'get_message_manager', lambda: fake_message_manager)
+    monkeypatch.setattr(auth_controller_module, 'peek_message_manager', lambda: fake_message_manager)
+    monkeypatch.setattr(auth_controller_module, 'get_chat_controller', lambda: fake_chat_controller)
+    monkeypatch.setattr(auth_controller_module, 'peek_chat_controller', lambda: fake_chat_controller)
+    monkeypatch.setattr(auth_controller_module, 'get_file_service', lambda: fake_file_service)
+
+    async def scenario() -> None:
+        controller = auth_controller_module.AuthController()
+        controller._current_user = {'id': 'user-1', 'username': 'alice'}
+
+        async def stale_update_me(payload: dict) -> dict:
+            controller._current_user = None
+            return {
+                'id': 'user-1',
+                'username': 'alice',
+                'nickname': payload.get('nickname', 'alice'),
+            }
+
+        fake_user_service.update_me = stale_update_me
+
+        try:
+            await controller.update_profile(nickname='Alice')
+        except asyncio.CancelledError:
+            pass
+        else:
+            raise AssertionError('stale profile save must be cancelled')
+
+        assert controller.current_user is None
+        assert fake_chat_controller.refresh_calls == 0
+        assert controller.USER_PROFILE_KEY not in fake_db.app_state
+
+    asyncio.run(scenario())
+
+
+def test_session_manager_execute_security_action_ignores_late_logout(monkeypatch) -> None:
+    fake_event_bus = FakeEventBus()
+    fake_db = FakeSessionProfileDatabase()
+    fake_e2ee_service = FakeE2EEService(
+        {'device_id': 'device-local-1', 'has_local_bundle': True},
+        peer_identity_summary={
+            'local_device_id': 'device-local-1',
+            'status': 'unverified',
+            'device_count': 1,
+            'trusted_device_count': 0,
+            'unverified_device_count': 1,
+            'changed_device_count': 0,
+            'unverified_device_ids': ['device-bob-1'],
+            'changed_device_ids': [],
+            'change_count': 0,
+            'last_changed_at': '',
+            'last_trusted_at': '',
+            'verification_available': True,
+            'primary_verification_device_id': 'device-bob-1',
+            'primary_verification_fingerprint': '',
+            'primary_verification_fingerprint_short': '',
+            'primary_verification_code': '',
+            'primary_verification_code_short': '',
+            'checked_at': '2026-04-06T12:00:00+00:00',
+        },
+    )
+
+    monkeypatch.setattr(session_manager_module, 'get_session_service', lambda: FakeSessionService())
+    monkeypatch.setattr(session_manager_module, 'get_e2ee_service', lambda: fake_e2ee_service)
+    monkeypatch.setattr(session_manager_module, 'get_event_bus', lambda: fake_event_bus)
+    monkeypatch.setattr(session_manager_module, 'get_message_manager', lambda: FakeMessageManager())
+    monkeypatch.setattr(session_manager_module, 'get_database', lambda: fake_db)
+
+    async def scenario() -> None:
+        manager = session_manager_module.SessionManager()
+        manager._current_user_id = 'user-1'
+        session = Session(
+            session_id='session-1',
+            name='Bob',
+            session_type='direct',
+            participant_ids=['user-1', 'user-2'],
+        )
+        session.extra['counterpart_id'] = 'user-2'
+        session.extra['encryption_mode'] = 'e2ee_private'
+        session.extra['session_crypto_state'] = {
+            'enabled': True,
+            'ready': True,
+            'can_decrypt': True,
+            'device_registered': True,
+            'scheme': 'x25519-aesgcm-v1',
+            'attachment_scheme': 'aesgcm-file+x25519-v1',
+            'identity_status': 'unverified',
+            'identity_verified': False,
+            'identity_action_required': True,
+            'identity_review_action': 'trust_peer_identity',
+            'identity_review_blocking': True,
+            'identity_alert_severity': 'critical',
+            'device_id': 'device-local-1',
+        }
+        manager._sessions[session.session_id] = session
+
+        async def stale_trust(user_id: str, *, device_ids: list[str] | None = None) -> dict:
+            manager._current_user_id = ''
+            return await FakeE2EEService(
+                {'device_id': 'device-local-1', 'has_local_bundle': True},
+                peer_identity_summary=fake_e2ee_service.peer_identity_summary,
+            ).trust_peer_identities(user_id, device_ids=device_ids)
+
+        fake_e2ee_service.trust_peer_identities = stale_trust
+
+        try:
+            await manager.execute_session_security_action('session-1', 'trust_peer_identity')
+        except asyncio.CancelledError:
+            pass
+        else:
+            raise AssertionError('stale session security action must be cancelled')
+
+        assert fake_db.replaced_sessions == []
+        assert fake_event_bus.events == []
+
+    asyncio.run(scenario())
+
+
+def test_session_manager_remove_session_ignores_late_logout_write(monkeypatch) -> None:
+    fake_event_bus = FakeEventBus()
+
+    class LogoutRaceDatabase:
+        def __init__(self) -> None:
+            self.is_connected = True
+            self.app_state: dict[str, object] = {}
+            self.deleted_sessions: list[str] = []
+
+        async def set_app_state(self, key: str, value) -> None:
+            self.app_state[key] = value
+
+        async def delete_app_state(self, key: str) -> None:
+            self.app_state.pop(key, None)
+
+        async def delete_session(self, session_id: str) -> None:
+            self.deleted_sessions.append(session_id)
+
+    fake_db = LogoutRaceDatabase()
+
+    monkeypatch.setattr(session_manager_module, 'get_session_service', lambda: FakeSessionService())
+    monkeypatch.setattr(session_manager_module, 'get_event_bus', lambda: fake_event_bus)
+    monkeypatch.setattr(session_manager_module, 'get_message_manager', lambda: FakeMessageManager())
+    monkeypatch.setattr(session_manager_module, 'get_database', lambda: fake_db)
+
+    async def scenario() -> None:
+        manager = session_manager_module.SessionManager()
+        manager._current_user_id = 'user-1'
+        session = Session(session_id='session-1', name='Bob', session_type='direct')
+        manager._sessions[session.session_id] = session
+
+        original_save_hidden_sessions = manager._save_hidden_sessions
+
+        async def stale_save_hidden_sessions(*, owner_user_id: str | None = None) -> None:
+            manager._current_user_id = ''
+            await original_save_hidden_sessions(owner_user_id=owner_user_id)
+
+        manager._save_hidden_sessions = stale_save_hidden_sessions  # type: ignore[method-assign]
+
+        try:
+            await manager.remove_session('session-1')
+        except asyncio.CancelledError:
+            pass
+        else:
+            raise AssertionError('stale remove_session must be cancelled')
+
+        assert fake_db.app_state == {}
+        assert fake_db.deleted_sessions == []
+        assert fake_event_bus.events == []
 
     asyncio.run(scenario())

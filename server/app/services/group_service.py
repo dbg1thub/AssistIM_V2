@@ -29,6 +29,12 @@ class GroupProfileUpdateResult:
     participant_ids: list[str] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class GroupSelfProfileUpdateResult:
+    profile: dict[str, object]
+    changed: bool = False
+
+
 class GroupService:
     def __init__(self, db: Session) -> None:
         self.db = db
@@ -139,22 +145,38 @@ class GroupService:
             participant_ids=participant_ids if announcement_changed and announcement_message is not None else [],
         )
 
-    def update_my_group_profile(self, current_user: User, group_id: str, note: str | None, my_group_nickname: str | None) -> dict:
+    def update_my_group_profile(
+        self,
+        current_user: User,
+        group_id: str,
+        note: str | None,
+        my_group_nickname: str | None,
+    ) -> GroupSelfProfileUpdateResult:
         group = self._get_group_or_404(group_id)
         self._ensure_group_member(group, current_user.id)
+        member = self.groups.get_member(group.id, current_user.id)
+        if member is None:
+            raise AppError(ErrorCode.SESSION_CONFLICT, "group member profile missing", 409)
 
-        def action() -> None:
-            self.groups.update_member_profile(
-                group.id,
-                current_user.id,
-                note=note,
-                group_nickname=my_group_nickname,
-                commit=False,
-            )
-            self.sessions.touch_without_commit(group.session_id)
+        current_note = str(getattr(member, "note", "") or "")
+        current_group_nickname = str(getattr(member, "group_nickname", "") or "")
+        next_note = str(note or "") if note is not None else current_note
+        next_group_nickname = str(my_group_nickname or "") if my_group_nickname is not None else current_group_nickname
+        changed = next_note != current_note or next_group_nickname != current_group_nickname
 
-        self._run_transaction(action)
-        return self.serialize_group(group, include_members=True, current_user_id=current_user.id)
+        if changed:
+            def action() -> None:
+                member.note = next_note
+                member.group_nickname = next_group_nickname
+                self.db.add(member)
+                self.db.flush()
+
+            self._run_transaction(action)
+
+        return GroupSelfProfileUpdateResult(
+            profile=self.serialize_group_self_profile(group, current_user.id, member=member),
+            changed=changed,
+        )
 
     @staticmethod
     def _build_announcement_message_body(announcement: str) -> str:
@@ -189,18 +211,23 @@ class GroupService:
             "payload": payload,
         }
 
+    def serialize_group_self_profile(self, group, user_id: str, *, member=None) -> dict[str, object]:
+        """Serialize only the current user's group-scoped profile fields."""
+        resolved_member = member if member is not None else self.groups.get_member(group.id, user_id)
+        if resolved_member is None:
+            raise AppError(ErrorCode.SESSION_CONFLICT, "group member profile missing", 409)
+        return {
+            "group_id": group.id,
+            "session_id": group.session_id,
+            "group_note": str(getattr(resolved_member, "note", "") or ""),
+            "my_group_nickname": str(getattr(resolved_member, "group_nickname", "") or ""),
+        }
+
     def build_group_self_profile_payload(self, current_user: User, group_id: str) -> dict[str, object]:
         """Build one self-scoped group-profile payload for the current user's other clients."""
         group = self._get_group_or_404(group_id)
         self._ensure_group_member(group, current_user.id)
-        serialized = self.serialize_group(group, include_members=False, current_user_id=current_user.id)
-        return {
-            "group_id": group.id,
-            "session_id": group.session_id,
-            "group_note": str(serialized.get("group_note", "") or ""),
-            "my_group_nickname": str(serialized.get("my_group_nickname", "") or ""),
-        }
-
+        return self.serialize_group_self_profile(group, current_user.id)
 
     def record_group_self_profile_update_event(self, current_user: User, group_id: str) -> dict[str, object]:
         """Append one self-scoped group-profile update event for the current user's other clients and offline sync."""

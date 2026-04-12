@@ -27,12 +27,12 @@ class ChatService:
         session_id: str,
         *,
         limit: int = 50,
-        before_timestamp: Optional[float] = None,
+        before_seq: Optional[int] = None,
     ) -> list[dict[str, Any]]:
         """Fetch one message page for a session from the backend."""
         params: dict[str, Any] = {"limit": limit}
-        if before_timestamp is not None:
-            params["before"] = str(before_timestamp)
+        if before_seq is not None:
+            params["before_seq"] = int(before_seq)
 
         payload = await self._http.get(f"/sessions/{session_id}/messages", params=params)
         if not isinstance(payload, list):

@@ -1,4 +1,4 @@
-﻿"""Controller for loading and normalizing contact-related data."""
+"""Controller for loading and normalizing contact-related data."""
 
 from __future__ import annotations
 
@@ -197,14 +197,33 @@ class ContactController:
         self._auth = get_auth_controller()
         self._db = get_database()
 
+    def _runtime_user_id(self) -> str:
+        """Return the authenticated runtime user id."""
+        current_user = self._auth.current_user or {}
+        return str(current_user.get("id", "") or "").strip()
+
+    def _capture_runtime_user_id(self) -> str:
+        """Capture one stable account id for a long-running contact task."""
+        user_id = self._runtime_user_id()
+        if not user_id:
+            raise asyncio.CancelledError
+        return user_id
+
+    def _ensure_runtime_user_id(self, expected_user_id: str) -> None:
+        """Reject late writes that no longer belong to the active account."""
+        current_user_id = self._runtime_user_id()
+        if not expected_user_id or current_user_id != expected_user_id:
+            raise asyncio.CancelledError
+
     def get_current_user_id(self) -> str:
         """Return the authenticated user id for UI flows that need directionality."""
-        current_user = self._auth.current_user or {}
-        return str(current_user.get("id", "") or "")
+        return self._runtime_user_id()
 
     async def load_contacts(self) -> list[ContactRecord]:
         """Load and normalize the friend list."""
+        owner_user_id = self._capture_runtime_user_id()
         payload = await self._contact_service.fetch_friends()
+        self._ensure_runtime_user_id(owner_user_id)
         contacts: list[ContactRecord] = []
 
         for item in payload or []:
@@ -232,7 +251,7 @@ class ContactController:
             )
 
         contacts.sort(key=lambda item: (self.sort_letter(item.display_name), item.display_name.lower()))
-        await self._persist_contacts_cache(contacts)
+        await self._persist_contacts_cache(contacts, owner_user_id=owner_user_id)
         return contacts
 
     @staticmethod
@@ -367,19 +386,29 @@ class ContactController:
 
     async def load_groups(self) -> list[GroupRecord]:
         """Load and normalize the group list."""
+        owner_user_id = self._capture_runtime_user_id()
         payload = await self._contact_service.fetch_groups()
+        self._ensure_runtime_user_id(owner_user_id)
         groups = [
             record
             for record in (self.normalize_group_record(item) for item in (payload or []))
             if record is not None
         ]
         groups.sort(key=self.group_sort_key)
-        await self._persist_groups_cache(groups)
+        await self._persist_groups_cache(groups, owner_user_id=owner_user_id)
         return groups
 
-    async def _persist_contacts_cache(self, contacts: list[ContactRecord]) -> None:
+    async def _persist_contacts_cache(
+        self,
+        contacts: list[ContactRecord],
+        *,
+        owner_user_id: str | None = None,
+    ) -> None:
         """Persist one lightweight contact snapshot for local search."""
         if not getattr(self._db, "is_connected", False):
+            return
+        expected_user_id = str(owner_user_id or "").strip() or self._runtime_user_id()
+        if not expected_user_id or self._runtime_user_id() != expected_user_id:
             return
 
         payload = [
@@ -401,17 +430,25 @@ class ContactController:
             for item in contacts
         ]
         try:
-            await self._db.replace_contacts_cache(payload)
+            await self._db.replace_contacts_cache(payload, owner_user_id=expected_user_id)
         except Exception:
             logger.debug("Failed to persist contacts cache", exc_info=True)
 
     async def persist_groups_cache(self, groups: list[GroupRecord]) -> None:
         """Persist one normalized group snapshot after incremental realtime updates."""
-        await self._persist_groups_cache(groups)
+        await self._persist_groups_cache(groups, owner_user_id=self._capture_runtime_user_id())
 
-    async def _persist_groups_cache(self, groups: list[GroupRecord]) -> None:
+    async def _persist_groups_cache(
+        self,
+        groups: list[GroupRecord],
+        *,
+        owner_user_id: str | None = None,
+    ) -> None:
         """Persist one lightweight group snapshot for local search."""
         if not getattr(self._db, "is_connected", False):
+            return
+        expected_user_id = str(owner_user_id or "").strip() or self._runtime_user_id()
+        if not expected_user_id or self._runtime_user_id() != expected_user_id:
             return
 
         payload = [
@@ -428,7 +465,7 @@ class ContactController:
             for item in groups
         ]
         try:
-            await self._db.replace_groups_cache(payload)
+            await self._db.replace_groups_cache(payload, owner_user_id=expected_user_id)
         except Exception:
             logger.debug("Failed to persist groups cache", exc_info=True)
 
@@ -595,7 +632,7 @@ class ContactController:
     ) -> GroupRecord:
         """Update shared group metadata."""
         data = await self._contact_service.update_group_profile(group_id, name=name, announcement=announcement)
-        return self._service_group_record(data, fallback_id=group_id, fallback_name=str(name or ""))
+        return self._service_group_record(self._group_payload_from_service_result(data), fallback_id=group_id, fallback_name=str(name or ""))
 
     async def update_my_group_profile(
         self,

@@ -29,6 +29,66 @@ def _device_payload(device_id: str, *, offset: int = 0) -> dict:
     }
 
 
+def test_device_key_refresh_requires_signed_prekey_or_prekeys(
+    client: TestClient,
+    user_factory,
+    auth_header,
+) -> None:
+    alice = user_factory("alice_e2ee_refresh_schema", "Alice E2EE Refresh Schema")
+
+    register_response = client.post(
+        "/api/v1/devices/register",
+        json=_device_payload("alice-refresh-schema-device"),
+        headers=auth_header(alice["access_token"]),
+    )
+    assert register_response.status_code == 200
+
+    empty_refresh = client.post(
+        "/api/v1/devices/alice-refresh-schema-device/keys/refresh",
+        json={},
+        headers=auth_header(alice["access_token"]),
+    )
+    assert empty_refresh.status_code == 422
+    assert "signed_prekey or prekeys is required" in empty_refresh.json()["message"]
+
+    empty_prekeys = client.post(
+        "/api/v1/devices/alice-refresh-schema-device/keys/refresh",
+        json={"prekeys": []},
+        headers=auth_header(alice["access_token"]),
+    )
+    assert empty_prekeys.status_code == 422
+    assert "signed_prekey or prekeys is required" in empty_prekeys.json()["message"]
+
+    signed_prekey_only = client.post(
+        "/api/v1/devices/alice-refresh-schema-device/keys/refresh",
+        json={
+            "signed_prekey": {
+                "key_id": 50,
+                "public_key": "signed-prekey-only-" + ("s" * 24),
+                "signature": "signature-only-" + ("t" * 24),
+            }
+        },
+        headers=auth_header(alice["access_token"]),
+    )
+    assert signed_prekey_only.status_code == 200
+    assert signed_prekey_only.json()["data"]["available_prekey_count"] == 2
+
+    prekeys_only = client.post(
+        "/api/v1/devices/alice-refresh-schema-device/keys/refresh",
+        json={
+            "prekeys": [
+                {
+                    "prekey_id": 200,
+                    "public_key": "refresh-prekey-only-" + ("u" * 24),
+                }
+            ]
+        },
+        headers=auth_header(alice["access_token"]),
+    )
+    assert prekeys_only.status_code == 200
+    assert prekeys_only.json()["data"]["available_prekey_count"] == 3
+
+
 def test_device_registration_and_prekey_claim_flow(
     client: TestClient,
     user_factory,

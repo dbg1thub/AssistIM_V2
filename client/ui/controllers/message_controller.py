@@ -57,12 +57,14 @@ class MessageController:
         session_id: str,
         limit: int = 50,
         before_timestamp: Optional[float] = None,
+        before_seq: Optional[int] = None,
     ) -> list[ChatMessage]:
         """Load messages for a session."""
         return await self._msg_manager.get_messages(
             session_id=session_id,
             limit=limit,
             before_timestamp=before_timestamp,
+            before_seq=before_seq,
         )
 
     async def retry_message(self, message_id: str) -> bool:
@@ -70,8 +72,11 @@ class MessageController:
         return await self._msg_manager.retry_message(message_id)
 
     async def close(self) -> None:
-        """Close the lightweight message controller state."""
+        """Close the lightweight message controller state and retire the singleton."""
         self._initialized = False
+        global _message_controller
+        if _message_controller is self:
+            _message_controller = None
 
 
 _message_controller: Optional[MessageController] = None

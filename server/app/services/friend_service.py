@@ -1,4 +1,4 @@
-﻿"""Friend service."""
+"""Friend service."""
 
 from __future__ import annotations
 
@@ -36,16 +36,29 @@ class FriendService:
         pair_requests = self._list_pair_requests(current_user.id, receiver_id)
         outgoing_pending = self._find_pending_request(pair_requests, current_user.id, receiver_id)
         if outgoing_pending is not None:
-            return self.serialize_request(outgoing_pending)
+            payload = self.serialize_request(outgoing_pending)
+            payload["action"] = "request_reused"
+            payload["created"] = False
+            payload["changed"] = False
+            return payload
 
         incoming_pending = self._find_pending_request(pair_requests, receiver_id, current_user.id)
         if incoming_pending is not None:
             accepted_request = self.friends.update_request_status(incoming_pending, "accepted")
             self.friends.create_friendship_pair(accepted_request.sender_id, accepted_request.receiver_id)
-            return self.serialize_request(accepted_request)
+            payload = self.serialize_request(accepted_request)
+            payload["action"] = "friendship_created"
+            payload["created"] = False
+            payload["changed"] = True
+            payload["friendship"] = {"is_friend": True, "friend_id": receiver_id}
+            return payload
 
         request = self.friends.create_request(current_user.id, receiver_id, message)
-        return self.serialize_request(request)
+        payload = self.serialize_request(request)
+        payload["action"] = "request_created"
+        payload["created"] = True
+        payload["changed"] = True
+        return payload
 
     def list_requests(self, current_user: User) -> list[dict]:
         requests = self.friends.list_requests_for_user(current_user.id)

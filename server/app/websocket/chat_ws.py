@@ -133,7 +133,8 @@ async def _handle_chat_socket(websocket: WebSocket) -> None:
                     )
                 except AppError as exc:
                     await _send_app_error(connection_id, msg_id, exc)
-                    continue
+                    await websocket.close(code=1008)
+                    break
 
                 if not was_authenticated:
                     await connection_manager.broadcast_json(event_payload("online", {"user_id": user_id}))
@@ -442,4 +443,3 @@ async def _handle_chat_socket(websocket: WebSocket) -> None:
 @websocket_router.websocket("/ws")
 async def websocket_chat(websocket: WebSocket) -> None:
     await _handle_chat_socket(websocket)
-

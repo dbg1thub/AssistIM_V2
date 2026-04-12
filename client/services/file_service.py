@@ -1,4 +1,4 @@
-﻿"""File Service Module.
+"""File Service Module.
 
 Centralized file-upload boundary used by chat/media/profile flows.
 """
@@ -40,46 +40,32 @@ class FileService:
             logger.error("Upload response must be a JSON object for %s: %r", file_path, payload)
             raise ServerError("Upload response must be a JSON object")
 
-        normalized = dict(payload)
-        file_url = str(normalized.get("url") or normalized.get("file_url") or normalized.get("avatar") or "")
+        file_url = str(payload.get("url") or "")
         if not file_url:
             logger.error("Upload response missing url for %s: %r", file_path, payload)
             raise ServerError("Upload response missing url")
 
-        original_name = str(
-            normalized.get("original_name")
-            or normalized.get("file_name")
-            or normalized.get("name")
-            or os.path.basename(file_path)
-            or "upload.bin"
-        )
-        mime_type = str(normalized.get("mime_type") or normalized.get("file_type") or "")
-        storage_provider = str(normalized.get("storage_provider") or "")
-        storage_key = str(normalized.get("storage_key") or "")
-        checksum_sha256 = str(normalized.get("checksum_sha256") or "")
-        size_bytes = self._coerce_size_bytes(normalized.get("size_bytes"), fallback_path=file_path)
+        original_name = str(payload.get("original_name") or os.path.basename(file_path) or "upload.bin")
+        mime_type = str(payload.get("mime_type") or "")
+        size_bytes = self._coerce_size_bytes(payload.get("size_bytes"), fallback_path=file_path)
 
-        media = dict(normalized.get("media") or {})
-        media.setdefault("url", file_url)
-        media.setdefault("original_name", original_name)
-        media.setdefault("mime_type", mime_type)
-        media.setdefault("storage_provider", storage_provider)
-        media.setdefault("storage_key", storage_key)
-        media.setdefault("size_bytes", size_bytes)
-        media.setdefault("checksum_sha256", checksum_sha256)
-
-        normalized["url"] = file_url
-        normalized.setdefault("file_url", file_url)
-        normalized["original_name"] = original_name
-        normalized.setdefault("file_name", original_name)
-        normalized.setdefault("name", original_name)
-        normalized["mime_type"] = mime_type
-        normalized.setdefault("file_type", mime_type)
-        normalized["storage_provider"] = storage_provider
-        normalized["storage_key"] = storage_key
-        normalized["size_bytes"] = size_bytes
-        normalized["checksum_sha256"] = checksum_sha256
-        normalized["media"] = media
+        media = {
+            "url": file_url,
+            "original_name": original_name,
+            "mime_type": mime_type,
+            "size_bytes": size_bytes,
+        }
+        normalized = {
+            "url": file_url,
+            "original_name": original_name,
+            "mime_type": mime_type,
+            "size_bytes": size_bytes,
+            "media": media,
+        }
+        if "id" in payload:
+            normalized["id"] = payload["id"]
+        if "created_at" in payload:
+            normalized["created_at"] = payload["created_at"]
         return normalized
 
     @staticmethod
@@ -123,6 +109,12 @@ class FileService:
             raise ServerError("Avatar reset response must be a JSON object")
         return dict(payload)
 
+    async def close(self) -> None:
+        """Retire the file service without closing the shared HTTP transport."""
+        global _file_service
+        if _file_service is self:
+            _file_service = None
+
 
 _file_service: Optional[FileService] = None
 
@@ -133,4 +125,3 @@ def get_file_service() -> FileService:
     if _file_service is None:
         _file_service = FileService()
     return _file_service
-

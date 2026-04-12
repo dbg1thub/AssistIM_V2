@@ -83,28 +83,17 @@ def build_remote_attachment_extra(
 ) -> dict[str, Any]:
     """Build one shareable attachment payload that is safe to send to the server."""
     normalized = dict(upload_payload or {})
-    file_url = str(normalized.get("url") or normalized.get("file_url") or "")
-    original_name = str(
-        normalized.get("original_name")
-        or normalized.get("file_name")
-        or normalized.get("name")
-        or fallback_name
-        or "upload.bin"
-    )
-    mime_type = str(normalized.get("mime_type") or normalized.get("file_type") or "")
-    storage_provider = str(normalized.get("storage_provider") or "")
-    storage_key = str(normalized.get("storage_key") or "")
-    checksum_sha256 = str(normalized.get("checksum_sha256") or "")
+    file_url = str(normalized.get("url") or "")
+    original_name = str(normalized.get("original_name") or fallback_name or "upload.bin")
+    mime_type = str(normalized.get("mime_type") or "")
     size_bytes = _coerce_size_bytes(normalized.get("size_bytes"), fallback_size)
 
-    media = dict(normalized.get("media") or {})
-    media.setdefault("url", file_url)
-    media.setdefault("original_name", original_name)
-    media.setdefault("mime_type", mime_type)
-    media.setdefault("storage_provider", storage_provider)
-    media.setdefault("storage_key", storage_key)
-    media.setdefault("size_bytes", size_bytes)
-    media.setdefault("checksum_sha256", checksum_sha256)
+    media = {
+        "url": file_url,
+        "original_name": original_name,
+        "mime_type": mime_type,
+        "size_bytes": size_bytes,
+    }
 
     extra = {
         "url": file_url,

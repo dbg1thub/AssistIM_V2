@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, File, UploadFile
+from fastapi import APIRouter, Depends, File, Query, UploadFile
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings
@@ -22,8 +22,9 @@ def list_files(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_request_settings),
+    limit: int = Query(default=50, ge=1, le=200),
 ) -> dict:
-    return success_response(FileService(db, settings).list_files(current_user))
+    return success_response(FileService(db, settings).list_files(current_user, limit=limit))
 
 
 @router.post("/files/upload")

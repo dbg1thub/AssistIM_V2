@@ -1,4 +1,4 @@
-"""Message service."""
+﻿"""Message service."""
 
 from __future__ import annotations
 
@@ -21,6 +21,7 @@ from app.utils.time import ensure_utc, isoformat_utc, utcnow
 
 
 class MessageService:
+    RECALLED_MESSAGE_PLACEHOLDER = "[message recalled]"
     RECALL_LIMIT = timedelta(minutes=2)
     EDIT_LIMIT = timedelta(minutes=2)
     DIRECT_TEXT_SCHEMES = {"x25519-aesgcm-v1"}
@@ -40,11 +41,17 @@ class MessageService:
     }
     ATTACHMENT_MESSAGE_TYPES = {"file", "image", "video", "voice"}
     CLIENT_MESSAGE_TYPES = {"text", *ATTACHMENT_MESSAGE_TYPES}
+    INTERNAL_ATTACHMENT_METADATA_KEYS = {
+        "checksum_sha256",
+        "storage_key",
+        "storage_provider",
+    }
     LOCAL_ONLY_MESSAGE_EXTRA_KEYS = {
         "content",
         "local_path",
         "uploading",
         "client_flags",
+        *INTERNAL_ATTACHMENT_METADATA_KEYS,
     }
     LOCAL_ONLY_ENCRYPTION_KEYS = {
         "local_plaintext",
@@ -58,6 +65,7 @@ class MessageService:
     }
     MUTABLE_MESSAGE_STATUSES = {"sent", "edited"}
     EDITABLE_MESSAGE_TYPES = {"text"}
+    RECALLABLE_MESSAGE_TYPES = CLIENT_MESSAGE_TYPES
     LOCAL_ONLY_ATTACHMENT_ENCRYPTION_KEYS = {
         "local_metadata",
         "local_plaintext_version",
@@ -82,10 +90,10 @@ class MessageService:
         current_user: User,
         session_id: str,
         limit: int = 50,
-        before: datetime | None = None,
+        before_seq: int | None = None,
     ) -> list[dict]:
         self._ensure_visible_session_membership(current_user.id, session_id)
-        items = self.messages.list_session_messages(session_id, limit=limit, before=before)
+        items = self.messages.list_session_messages(session_id, limit=limit, before_seq=before_seq)
         return self._serialize_messages(items, current_user.id)
 
     def send_message(
@@ -214,6 +222,7 @@ class MessageService:
         if message.sender_id != current_user.id:
             raise AppError(ErrorCode.FORBIDDEN, "cannot recall this message", 403)
         self._ensure_message_status_allows(message, "recall")
+        self._ensure_message_type_allows_recall(message)
         if message.created_at and utcnow() - ensure_utc(message.created_at) > self.RECALL_LIMIT:
             raise AppError(ErrorCode.FORBIDDEN, "recall time limit exceeded", 403)
 
@@ -424,6 +433,11 @@ class MessageService:
         if message_type not in self.EDITABLE_MESSAGE_TYPES:
             raise AppError(ErrorCode.INVALID_REQUEST, "message type does not support edit", 422)
 
+    def _ensure_message_type_allows_recall(self, message) -> None:
+        message_type = str(getattr(message, "type", "") or "").strip().lower()
+        if message_type not in self.RECALLABLE_MESSAGE_TYPES:
+            raise AppError(ErrorCode.INVALID_REQUEST, "message type does not support recall", 422)
+
     def _ensure_message_content(self, content: str) -> None:
         if not isinstance(content, str):
             raise AppError(ErrorCode.INVALID_REQUEST, "content must be a string", 422)
@@ -456,10 +470,17 @@ class MessageService:
             message_type=normalized_message_type,
             extra=normalized_extra,
         )
+        self._validate_attachment_payload(normalized_message_type, normalized_extra)
 
-        mentions = self._normalize_mentions(normalized_extra.get("mentions"), content=content)
-        if normalized_message_type != "text":
-            mentions = []
+        mentions = []
+        raw_mentions = normalized_extra.get("mentions")
+        if normalized_message_type == "text" and isinstance(raw_mentions, list):
+            session_member_ids = {
+                str(member_id or "").strip()
+                for member_id in self.sessions.list_member_ids(session_id)
+                if str(member_id or "").strip()
+            }
+            mentions = self._normalize_mentions(raw_mentions, content=content, member_ids=session_member_ids)
 
         if any(str(item.get("mention_type", "") or "") == "all" for item in mentions):
             self._ensure_can_mention_everyone(sender_id, session_id)
@@ -469,6 +490,32 @@ class MessageService:
         else:
             normalized_extra.pop("mentions", None)
         return normalized_extra or None
+
+    @classmethod
+    def _validate_attachment_payload(cls, message_type: str, extra: dict[str, Any]) -> None:
+        normalized_message_type = str(message_type or "").strip().lower()
+        if normalized_message_type not in cls.ATTACHMENT_MESSAGE_TYPES:
+            return
+
+        attachment_encryption = dict(extra.get("attachment_encryption") or {})
+        if attachment_encryption.get("enabled"):
+            return
+
+        media = dict(extra.get("media") or {})
+        url = str(extra.get("url") or media.get("url") or "").strip()
+        name = str(extra.get("name") or media.get("original_name") or media.get("file_name") or media.get("name") or "").strip()
+        mime_type = str(extra.get("file_type") or media.get("mime_type") or media.get("file_type") or "").strip()
+        try:
+            size = int(extra.get("size") or media.get("size_bytes") or media.get("size") or 0)
+        except (TypeError, ValueError):
+            size = 0
+
+        if not url or not name or not mime_type or size <= 0:
+            raise AppError(
+                ErrorCode.INVALID_REQUEST,
+                "attachment messages require url, name, file_type, and size metadata",
+                422,
+            )
 
     @classmethod
     def _sanitize_transport_extra(cls, extra: dict[str, Any] | None) -> dict[str, Any]:
@@ -499,6 +546,18 @@ class MessageService:
                 normalized.pop("media", None)
         else:
             normalized.pop("attachment_encryption", None)
+
+        media = normalized.get("media")
+        if isinstance(media, dict):
+            sanitized_media = dict(media)
+            for key in cls.INTERNAL_ATTACHMENT_METADATA_KEYS:
+                sanitized_media.pop(key, None)
+            if sanitized_media:
+                normalized["media"] = sanitized_media
+            else:
+                normalized.pop("media", None)
+        else:
+            normalized.pop("media", None)
 
         return normalized
 
@@ -663,7 +722,11 @@ class MessageService:
 
     @staticmethod
     def _require_envelope_fields(envelope: dict[str, Any], envelope_label: str, fields: tuple[str, ...]) -> None:
-        missing_fields = [field_name for field_name in fields if not str(envelope.get(field_name) or "").strip()]
+        missing_fields = []
+        for field_name in fields:
+            value = envelope.get(field_name)
+            if not isinstance(value, str) or not value.strip():
+                missing_fields.append(field_name)
         if missing_fields:
             raise AppError(
                 ErrorCode.INVALID_REQUEST,
@@ -745,7 +808,12 @@ class MessageService:
             raise AppError(ErrorCode.FORBIDDEN, "@all requires owner or admin privileges", 403)
 
     @staticmethod
-    def _normalize_mentions(raw_mentions: Any, *, content: str) -> list[dict[str, Any]]:
+    def _normalize_mentions(
+        raw_mentions: Any,
+        *,
+        content: str,
+        member_ids: set[str],
+    ) -> list[dict[str, Any]]:
         if not isinstance(raw_mentions, list):
             return []
 
@@ -785,10 +853,19 @@ class MessageService:
                 member_id = str(item.get("member_id", "") or "").strip()
                 if not member_id:
                     continue
+                if member_id not in member_ids:
+                    raise AppError(ErrorCode.INVALID_REQUEST, "mention member is not in session", 422)
                 payload["member_id"] = member_id
             normalized.append(payload)
 
         normalized.sort(key=lambda item: (int(item["start"]), int(item["end"])))
+        previous_end = -1
+        for item in normalized:
+            start = int(item["start"])
+            end = int(item["end"])
+            if start < previous_end:
+                raise AppError(ErrorCode.INVALID_REQUEST, "mention spans must not overlap", 422)
+            previous_end = end
         return normalized
 
     @staticmethod
@@ -847,7 +924,7 @@ class MessageService:
 
     def _serialize_message_content(self, message, current_user_id: str) -> str:
         if message.status == "recalled":
-            return ""
+            return self.RECALLED_MESSAGE_PLACEHOLDER
         return message.content
 
     def _serialize_messages(self, messages: list, current_user_id: str) -> list[dict]:
@@ -898,7 +975,7 @@ class MessageService:
                 session_members=session_members,
             )
         read_metadata = self._message_read_metadata(message, current_user_id, session_members)
-        extra = self._message_extra(message, read_metadata)
+        extra = self._message_extra(message)
         sender_profile = self._serialize_sender_profile(
             str(message.sender_id or ""),
             users_by_id=sender_users_by_id,
@@ -911,10 +988,8 @@ class MessageService:
             "message_type": message.type,
             "status": message.status,
             "created_at": isoformat_utc(message.created_at),
-            "timestamp": isoformat_utc(message.created_at),
             "updated_at": isoformat_utc(message.updated_at),
             "is_self": message.sender_id == current_user_id,
-            "is_ai": False,
             "session_type": session_metadata.get("session_type", ""),
             "session_name": session_metadata.get("session_name", ""),
             "session_avatar": session_metadata.get("session_avatar"),
@@ -985,10 +1060,8 @@ class MessageService:
             "gender": str(user.gender or ""),
         }
 
-    def _message_extra(self, message, read_metadata: dict[str, Any]) -> dict[str, Any]:
-        extra = self._sanitize_transport_extra(self.messages.load_extra(message))
-        extra.update(read_metadata)
-        return extra
+    def _message_extra(self, message) -> dict[str, Any]:
+        return self._sanitize_transport_extra(self.messages.load_extra(message))
 
     def serialize_session_event(self, event: SessionEvent) -> dict:
         try:

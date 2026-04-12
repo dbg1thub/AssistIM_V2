@@ -47,6 +47,12 @@ class UserService:
         response = await self._http.put("/users/me", json=payload)
         return dict(response or {})
 
+    async def close(self) -> None:
+        """Retire the user service without closing the shared HTTP transport."""
+        global _user_service
+        if _user_service is self:
+            _user_service = None
+
 
 _user_service: Optional[UserService] = None
 

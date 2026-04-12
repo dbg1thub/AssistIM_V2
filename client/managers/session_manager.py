@@ -137,6 +137,16 @@ class SessionManager:
         self._current_user_id = normalized_user_id
         self._schedule_identity_refresh()
 
+    def _capture_runtime_user_id(self) -> str:
+        """Capture the current authenticated user id for one mutating task."""
+        return str(self._current_user_id or "").strip()
+
+    def _ensure_runtime_user_id(self, expected_user_id: str) -> None:
+        """Reject late session mutations after logout or account switches."""
+        current_user_id = str(self._current_user_id or "").strip()
+        if expected_user_id and current_user_id != expected_user_id:
+            raise asyncio.CancelledError
+
 
 
     def _require_e2ee_service(self):
@@ -436,14 +446,19 @@ class SessionManager:
         self,
         session_id: str,
         message_recovery: dict[str, Any] | None,
+        *,
+        owner_user_id: str | None = None,
     ) -> None:
         normalized_session_id = str(session_id or "").strip()
         if not normalized_session_id:
             return
+        expected_user_id = str(owner_user_id or "").strip() or self._capture_runtime_user_id()
+        self._ensure_runtime_user_id(expected_user_id)
 
         summary = self._summarize_message_recovery(message_recovery)
         recorded_at = datetime.now().isoformat()
         async with self._lock:
+            self._ensure_runtime_user_id(expected_user_id)
             session = self._sessions.get(normalized_session_id)
             if session is None:
                 return
@@ -729,19 +744,23 @@ class SessionManager:
             logger.warning("Failed to load hidden sessions: %s", exc)
             self._hidden_sessions = {}
 
-    async def _save_hidden_sessions(self) -> None:
+    async def _save_hidden_sessions(self, *, owner_user_id: str | None = None) -> None:
         """Persist locally hidden-session tombstones."""
+        expected_user_id = str(owner_user_id or "").strip() or self._capture_runtime_user_id()
+        self._ensure_runtime_user_id(expected_user_id)
         db = get_database()
         if not db.is_connected:
             return
 
         if self._hidden_sessions:
+            self._ensure_runtime_user_id(expected_user_id)
             await db.set_app_state(
                 self.HIDDEN_SESSIONS_STATE_KEY,
                 json.dumps(self._hidden_sessions),
             )
             return
 
+        self._ensure_runtime_user_id(expected_user_id)
         await db.delete_app_state(self.HIDDEN_SESSIONS_STATE_KEY)
 
     @staticmethod
@@ -771,8 +790,10 @@ class SessionManager:
 
     async def _hide_session(self, session_id: str, hidden_at: Optional[float] = None) -> None:
         """Persist a local tombstone so remote refresh does not resurrect the session immediately."""
+        owner_user_id = self._capture_runtime_user_id()
         self._hidden_sessions[session_id] = max(float(hidden_at or 0.0), time.time())
-        await self._save_hidden_sessions()
+        self._ensure_runtime_user_id(owner_user_id)
+        await self._save_hidden_sessions(owner_user_id=owner_user_id)
 
     def _should_hide_session(self, session: Session) -> bool:
         """Return whether a remote session should stay hidden locally."""
@@ -1637,9 +1658,16 @@ class SessionManager:
         if hidden_changed:
             await self._save_hidden_sessions()
 
+        snapshot_sessions = list(self._sessions.values())
         db = get_database()
         if db.is_connected:
-            await db.replace_sessions(list(self._sessions.values()))
+            await db.replace_sessions(snapshot_sessions)
+
+        from client.managers.connection_manager import peek_connection_manager
+
+        conn_manager = peek_connection_manager()
+        if conn_manager is not None:
+            await conn_manager.prune_sync_state([session.session_id for session in snapshot_sessions])
 
         await self._event_bus.emit(SessionEvent.UPDATED, {
             "sessions": self.sessions,
@@ -1649,6 +1677,7 @@ class SessionManager:
         normalized_session_id = str(session_id or "").strip()
         if not normalized_session_id:
             raise RuntimeError("session id is required")
+        owner_user_id = self._capture_runtime_user_id()
 
         async with self._lock:
             session = self._sessions.get(normalized_session_id)
@@ -1664,7 +1693,8 @@ class SessionManager:
             return {"performed": False, "reason": recovery_action or "no_recovery_action"}
 
         response = await self._require_e2ee_service().reprovision_local_device()
-        await self._refresh_cached_session_crypto_state(after_recovery=True)
+        self._ensure_runtime_user_id(owner_user_id)
+        await self._refresh_cached_session_crypto_state(after_recovery=True, owner_user_id=owner_user_id)
         message_recovery: dict[str, Any] = {
             "session_id": normalized_session_id,
             "attempted": False,
@@ -1677,7 +1707,12 @@ class SessionManager:
         except Exception as exc:
             logger.warning("Failed to retry local message decryption for %s: %s", normalized_session_id, exc)
             message_recovery["error"] = str(exc)
-        await self._record_session_message_recovery(normalized_session_id, message_recovery)
+        self._ensure_runtime_user_id(owner_user_id)
+        await self._record_session_message_recovery(
+            normalized_session_id,
+            message_recovery,
+            owner_user_id=owner_user_id,
+        )
         return {
             "performed": True,
             "session_id": normalized_session_id,
@@ -1690,6 +1725,7 @@ class SessionManager:
         normalized_session_id = str(session_id or "").strip()
         if not normalized_session_id:
             raise RuntimeError("session id is required")
+        owner_user_id = self._capture_runtime_user_id()
 
         async with self._lock:
             session = self._sessions.get(normalized_session_id)
@@ -1705,11 +1741,14 @@ class SessionManager:
 
         previous_identity_status = str(session.extra.get("session_crypto_state", {}).get("identity_status") or "").strip()
         trust_summary = await self._require_e2ee_service().trust_peer_identities(counterpart_id)
+        self._ensure_runtime_user_id(owner_user_id)
         await self._annotate_session_crypto_state([session])
 
         db = get_database()
         if db.is_connected:
+            self._ensure_runtime_user_id(owner_user_id)
             await db.replace_sessions(list(self._sessions.values()))
+        self._ensure_runtime_user_id(owner_user_id)
         await self._event_bus.emit(SessionEvent.UPDATED, {"sessions": self.sessions})
         return {
             "performed": True,
@@ -1875,6 +1914,7 @@ class SessionManager:
             raise RuntimeError("session id is required")
         if not normalized_action_id:
             raise RuntimeError("action id is required")
+        owner_user_id = self._capture_runtime_user_id()
 
         async with self._lock:
             session = self._sessions.get(normalized_session_id)
@@ -1939,6 +1979,7 @@ class SessionManager:
         if "session_id" not in result:
             result["session_id"] = normalized_session_id
         result["action_id"] = normalized_action_id
+        self._ensure_runtime_user_id(owner_user_id)
         result["security_summary"] = await self.get_session_security_summary(normalized_session_id)
         return result
 
@@ -1948,7 +1989,14 @@ class SessionManager:
             raise RuntimeError("no current session selected")
         return await self.execute_session_security_action(session_id, action_id)
 
-    async def _refresh_cached_session_crypto_state(self, *, after_recovery: bool = False) -> None:
+    async def _refresh_cached_session_crypto_state(
+        self,
+        *,
+        after_recovery: bool = False,
+        owner_user_id: str | None = None,
+    ) -> None:
+        expected_user_id = str(owner_user_id or "").strip() or self._capture_runtime_user_id()
+        self._ensure_runtime_user_id(expected_user_id)
         async with self._lock:
             sessions = list(self._sessions.values())
 
@@ -1956,6 +2004,7 @@ class SessionManager:
             return
 
         await self._annotate_session_crypto_state(sessions)
+        self._ensure_runtime_user_id(expected_user_id)
         if after_recovery:
             recovered_at = datetime.now().isoformat()
             for session in sessions:
@@ -1973,7 +2022,9 @@ class SessionManager:
 
         db = get_database()
         if db.is_connected:
+            self._ensure_runtime_user_id(expected_user_id)
             await db.replace_sessions(sessions)
+        self._ensure_runtime_user_id(expected_user_id)
         await self._event_bus.emit(SessionEvent.UPDATED, {"sessions": self.sessions})
 
     async def refresh_remote_sessions(self) -> SessionRefreshResult:
@@ -2126,20 +2177,24 @@ class SessionManager:
 
     async def remove_session(self, session_id: str) -> None:
         """Hide a session locally without deleting the remote conversation."""
+        owner_user_id = self._capture_runtime_user_id()
         async with self._lock:
             session = self._sessions.pop(session_id, None)
 
+        self._ensure_runtime_user_id(owner_user_id)
         hidden_at = self._session_activity_timestamp(session) if session is not None else time.time()
         await self._hide_session(session_id, hidden_at=hidden_at)
 
         if session:
             db = get_database()
             if db.is_connected:
+                self._ensure_runtime_user_id(owner_user_id)
                 await db.delete_session(session_id)
 
             if self._current_session_id == session_id:
                 self._current_session_id = None
 
+            self._ensure_runtime_user_id(owner_user_id)
             await self._event_bus.emit(SessionEvent.DELETED, {
                 "session_id": session_id,
             })
@@ -2564,6 +2619,9 @@ class SessionManager:
         self._current_session_active = False
         self._current_user_id = ""
         self._initialized = False
+        global _session_manager
+        if _session_manager is self:
+            _session_manager = None
 
         logger.info("Session manager closed")
 

@@ -48,27 +48,15 @@ async def _broadcast_group_announcement_message(
     if message is None:
         return
 
-    sender_id = str(message.sender_id or "").strip()
-    recipient_ids = [user_id for user_id in normalized_participant_ids if user_id != sender_id]
-    if recipient_ids:
-        payload = service.serialize_message(message, recipient_ids[0])
+    for viewer_id in normalized_participant_ids:
+        payload = service.serialize_message(message, viewer_id)
         try:
             await connection_manager.send_json_to_users(
-                recipient_ids,
+                [viewer_id],
                 ws_message("chat_message", payload, msg_id=str(payload.get("message_id", "") or "")),
             )
         except Exception:
             logger.exception("Group announcement fanout failed after committed group profile mutation")
-
-    if sender_id and sender_id in normalized_participant_ids:
-        sender_payload = service.serialize_message(message, sender_id)
-        try:
-            await connection_manager.send_json_to_users(
-                [sender_id],
-                ws_message("chat_message", sender_payload, msg_id=str(sender_payload.get("message_id", "") or "")),
-            )
-        except Exception:
-            logger.exception("Group announcement sender echo failed after committed group profile mutation")
 
 
 async def _broadcast_group_profile_update(db: Session, group_id: str, *, actor_user_id: str) -> None:
@@ -148,7 +136,16 @@ async def update_group_profile(
     if result.announcement_message_id:
         await _broadcast_group_announcement_message(db, result.announcement_message_id, result.participant_ids)
     await _broadcast_group_profile_update(db, group_id, actor_user_id=current_user.id)
-    return success_response(result.group)
+    return success_response(
+        {
+            "group": result.group,
+            "announcement": {
+                "message_id": result.announcement_message_id or None,
+                "created": bool(result.announcement_message_id),
+                "participant_count": len(result.participant_ids),
+            },
+        }
+    )
 
 
 @router.patch("/{group_id}/me")
@@ -158,11 +155,10 @@ async def update_my_group_profile(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> dict:
-    data = GroupService(db).update_my_group_profile(current_user, group_id, payload.note, payload.my_group_nickname)
-    if payload.my_group_nickname is not None:
-        await _broadcast_group_profile_update(db, group_id, actor_user_id=current_user.id)
-    await _broadcast_group_self_profile_update(db, current_user, group_id)
-    return success_response(data)
+    result = GroupService(db).update_my_group_profile(current_user, group_id, payload.note, payload.my_group_nickname)
+    if result.changed:
+        await _broadcast_group_self_profile_update(db, current_user, group_id)
+    return success_response({**result.profile, "changed": result.changed})
 
 
 @router.delete("/{group_id}", status_code=status.HTTP_204_NO_CONTENT)

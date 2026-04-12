@@ -415,8 +415,21 @@ class SearchManager:
         self._current_results = []
         self._last_catalog_results = SearchCatalogResults(messages=[], contacts=[], groups=[], message_total=0, contact_total=0, group_total=0)
 
+    async def close(self) -> None:
+        """Drop cached account-scoped search results and retire the singleton."""
+        self.clear_results()
+        self._db = None
+        global _search_manager
+        if _search_manager is self:
+            _search_manager = None
+
 
 _search_manager: Optional[SearchManager] = None
+
+
+def peek_search_manager() -> Optional[SearchManager]:
+    """Return the existing search manager singleton if it was created."""
+    return _search_manager
 
 
 def get_search_manager() -> SearchManager:

@@ -1,4 +1,4 @@
-﻿"""Authentication dependencies."""
+"""Authentication dependencies."""
 
 from __future__ import annotations
 
@@ -35,9 +35,9 @@ def get_current_user(
     user = UserRepository(db).get_by_id(payload["sub"])
     if user is None:
         raise AppError(
-            code=ErrorCode.USER_NOT_FOUND,
-            message="user not found",
-            status_code=404,
+            code=ErrorCode.UNAUTHORIZED,
+            message="session expired",
+            status_code=401,
         )
     if token_session_version(payload) != int(getattr(user, "auth_session_version", 0) or 0):
         raise AppError(

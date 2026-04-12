@@ -222,6 +222,7 @@ class MessageManager:
         self._ack_check_task: Optional[asyncio.Task] = None
         self._running = False
         self._initialized = False
+        self._pending_sync_completion: Optional[dict[str, Any]] = None
 
         self._user_id: str = ""
         self._ack_timeout = 10.0
@@ -526,9 +527,10 @@ class MessageManager:
             return
 
         payload.setdefault("message_id", message_id)
-        payload.setdefault("timestamp", msg_data.get("timestamp") or data.get("timestamp") or time.time())
-        payload.setdefault("created_at", msg_data.get("created_at") or data.get("timestamp"))
-        payload.setdefault("updated_at", msg_data.get("updated_at") or msg_data.get("created_at") or data.get("timestamp"))
+        message_created_at = msg_data.get("created_at") or data.get("created_at")
+        payload.setdefault("timestamp", msg_data.get("timestamp") or message_created_at or data.get("timestamp") or time.time())
+        payload.setdefault("created_at", message_created_at or data.get("timestamp"))
+        payload.setdefault("updated_at", msg_data.get("updated_at") or message_created_at or data.get("updated_at") or data.get("timestamp"))
         payload.setdefault("status", msg_data.get("status") or MessageStatus.RECEIVED.value)
 
         message = self._normalize_loaded_message(
@@ -1373,9 +1375,11 @@ class MessageManager:
 
         if not messages_data:
             logger.info("History message processing finished in %.1fms (0 messages)", (time.perf_counter() - started) * 1000)
-            await self._event_bus.emit(MessageEvent.SYNC_COMPLETED, {
+            self._pending_sync_completion = {
                 "count": 0,
-            })
+                "messages": [],
+                "skipped": 0,
+            }
             return
 
         candidate_ids = [
@@ -1423,11 +1427,11 @@ class MessageManager:
             for message in saved_messages:
                 self._maybe_schedule_encrypted_media_prefetch(message)
 
-        await self._event_bus.emit(MessageEvent.SYNC_COMPLETED, {
+        self._pending_sync_completion = {
             "count": len(saved_messages),
             "messages": saved_messages,
             "skipped": skipped_count,
-        })
+        }
 
         logger.info(f"History messages synced: {len(saved_messages)} new, {skipped_count} skipped")
         logger.info("History message processing finished in %.1fms", (time.perf_counter() - started) * 1000)
@@ -1437,12 +1441,20 @@ class MessageManager:
         msg_data = data.get("data", {}) if isinstance(data.get("data"), dict) else {}
         events = msg_data.get("events", [])
         if not isinstance(events, list):
-            return
+            events = []
 
         for event_payload in events:
             if not isinstance(event_payload, dict):
                 continue
             await self._handle_ws_message(event_payload)
+
+        sync_summary = dict(self._pending_sync_completion or {})
+        sync_summary.setdefault("count", 0)
+        sync_summary.setdefault("messages", [])
+        sync_summary.setdefault("skipped", 0)
+        sync_summary["events_replayed"] = len(events)
+        self._pending_sync_completion = None
+        await self._event_bus.emit(MessageEvent.SYNC_COMPLETED, sync_summary)
 
     async def _process_typing(self, data: dict) -> None:
         """Process typing indicator."""
@@ -2348,13 +2360,13 @@ class MessageManager:
         self,
         session_id: str,
         limit: int,
-        before_timestamp: Optional[float] = None,
+        before_seq: Optional[int] = None,
     ) -> list[ChatMessage]:
         """Fetch one message page from the backend and persist it locally."""
         payload = await self._chat_service.fetch_messages(
             session_id,
             limit=limit,
-            before_timestamp=before_timestamp,
+            before_seq=before_seq,
         )
         remote_messages: list[ChatMessage] = []
 
@@ -2388,6 +2400,7 @@ class MessageManager:
         session_id: str,
         limit: int = 50,
         before_timestamp: Optional[float] = None,
+        before_seq: Optional[int] = None,
     ) -> list[ChatMessage]:
         """Get messages from local cache, backfilling from the backend when needed."""
         messages = await self._db.get_messages(
@@ -2402,7 +2415,7 @@ class MessageManager:
                 remote_messages = await self._fetch_remote_messages(
                     session_id,
                     limit=limit,
-                    before_timestamp=before_timestamp,
+                    before_seq=before_seq,
                 )
             except Exception as exc:
                 logger.warning("Remote history fetch failed for %s: %s", session_id, exc)
@@ -2521,15 +2534,14 @@ class MessageManager:
         remote_messages: list[ChatMessage] = []
         remote_error = ""
         remote_pages_fetched = 0
-        next_before_timestamp: float | None = None
-        previous_before_timestamp: float | None = None
+        next_before_seq: int | None = None
         remote_recovery_stats = self._empty_recovery_stats()
         try:
             for _ in range(effective_remote_pages):
                 page = await self._fetch_remote_messages(
                     normalized_session_id,
                     limit=effective_limit,
-                    before_timestamp=next_before_timestamp,
+                    before_seq=next_before_seq,
                 )
                 if not page:
                     break
@@ -2538,24 +2550,23 @@ class MessageManager:
                 for message in page:
                     self._accumulate_recovery_stats(remote_recovery_stats, message)
 
-                oldest_timestamp: float | None = None
+                oldest_session_seq: int | None = None
                 for message in page:
                     message_id = str(message.message_id or "")
                     if message_id and message_id not in recovered_seen:
                         recovered_ids.append(message_id)
                         recovered_seen.add(message_id)
-                    if message.timestamp is None:
+                    message_seq = self._coerce_read_int(dict(message.extra or {}).get("session_seq"))
+                    if message_seq <= 0:
                         continue
-                    candidate_timestamp = float(message.timestamp.timestamp())
-                    if oldest_timestamp is None or candidate_timestamp < oldest_timestamp:
-                        oldest_timestamp = candidate_timestamp
+                    if oldest_session_seq is None or message_seq < oldest_session_seq:
+                        oldest_session_seq = message_seq
 
-                if oldest_timestamp is None:
+                if oldest_session_seq is None:
                     break
-                if next_before_timestamp is not None and oldest_timestamp >= next_before_timestamp:
+                if next_before_seq is not None and oldest_session_seq >= next_before_seq:
                     break
-                previous_before_timestamp = next_before_timestamp
-                next_before_timestamp = oldest_timestamp
+                next_before_seq = oldest_session_seq
         except Exception as exc:
             remote_error = str(exc)
             logger.warning("Remote message recovery fetch failed for %s: %s", normalized_session_id, exc)
@@ -2623,6 +2634,9 @@ class MessageManager:
             self._incoming_message_inflight.clear()
             self._recent_incoming_message_ids.clear()
         self._initialized = False
+        global _message_manager
+        if _message_manager is self:
+            _message_manager = None
 
         logger.info("Message manager closed")
 

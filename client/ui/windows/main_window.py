@@ -113,6 +113,9 @@ class MainWindow(FluentWindow):
         self._contact_open_task: asyncio.Task | None = None
         self._event_bus = get_event_bus()
         self._event_subscriptions: list[tuple[str, object]] = []
+        self._teardown_started = False
+        self._shell_transition_active = False
+        self._close_reason = ""
         self._force_logout_pending = False
         self._force_logout_info_bar = None
         self._force_logout_timer = QTimer(self)
@@ -384,6 +387,8 @@ class MainWindow(FluentWindow):
             self._schedule_ui_single_shot(100, lambda: self.windowEffect.setMicaEffect(self.winId(), isDarkTheme()))
 
     def show_from_tray(self) -> None:
+        if self._shell_transition_active or self._teardown_started:
+            return
         self._dismiss_tray_attention(clear_entries=True)
         if self.isMinimized():
             self.showNormal()
@@ -434,9 +439,7 @@ class MainWindow(FluentWindow):
 
         if self._force_logout_timer.isActive():
             self._force_logout_timer.stop()
-        self._allow_exit = True
-        self.close()
-
+        self._request_close("app_exit")
 
     def request_exit(self) -> None:
         if cfg.get(cfg.exitConfirmEnabled):
@@ -446,6 +449,26 @@ class MainWindow(FluentWindow):
             if dialog.remember_check_box.isChecked():
                 cfg.set(cfg.exitConfirmEnabled, False)
 
+        self._request_close("app_exit")
+
+    def begin_runtime_transition(self) -> None:
+        """Freeze shell restore paths before authenticated runtime teardown starts."""
+        if self._shell_transition_active:
+            return
+        self._shell_transition_active = True
+        self.setEnabled(False)
+        self._dismiss_tray_attention(clear_entries=True)
+        self.user_profile.close_flyout()
+        if self._tray_icon and self._tray_icon.isVisible():
+            self._tray_icon.hide()
+
+    def close_for_runtime_transition(self) -> None:
+        """Close this authenticated shell without turning it into an application-exit signal."""
+        self.begin_runtime_transition()
+        self._request_close("runtime_transition")
+
+    def _request_close(self, reason: str) -> None:
+        self._close_reason = str(reason or "").strip() or "app_exit"
         self._allow_exit = True
         self.close()
 
@@ -453,13 +476,14 @@ class MainWindow(FluentWindow):
         self.user_profile.close_flyout()
         self.chat_interface.set_session_visibility_active(False)
         if self._allow_exit:
-            logger.info("MainWindow closeEvent, exiting application")
+            logger.info("MainWindow closeEvent, reason=%s", self._close_reason or "app_exit")
             self._invalidate_ui_callback_generation()
             if self._theme_poll_timer.isActive():
                 self._theme_poll_timer.stop()
             if self._tray_icon and self._tray_icon.isVisible():
                 self._tray_icon.hide()
-            self.closed.emit()
+            if self._close_reason != "runtime_transition":
+                self.closed.emit()
             super().closeEvent(event)
             return
 
@@ -491,15 +515,73 @@ class MainWindow(FluentWindow):
 
     def _on_destroyed(self, *_args) -> None:
         """Cancel outstanding UI tasks when the window is torn down."""
+        self.quiesce()
+
+    def quiesce(self) -> None:
+        """Stop shell-level UI work before authenticated runtime teardown."""
+        if self._teardown_started:
+            return
+        self._teardown_started = True
+        self.begin_runtime_transition()
         self._invalidate_ui_callback_generation()
         self._unsubscribe_from_events()
+        self._force_logout_timer.stop()
+        self._close_tray_alert_flyout()
         self._dismiss_tray_attention(clear_entries=True)
-        self.user_profile.close()
+        self.user_profile.quiesce()
+        self.chat_interface.quiesce()
+        self.contact_interface.quiesce()
+        self.discovery_interface.quiesce()
         self._cancel_pending_task(self._contact_open_task)
         self._contact_open_task = None
         for task in list(self._ui_tasks):
             if not task.done():
                 task.cancel()
+
+    async def quiesce_async(self) -> None:
+        """Cancel shell/page UI tasks and wait until their side effects are quiescent."""
+        self.quiesce()
+        tasks = self._collect_ui_tasks_for_teardown()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    def _collect_ui_tasks_for_teardown(self) -> list[asyncio.Task]:
+        """Collect all tracked shell tasks that may still complete after logout starts."""
+        owners = [
+            self,
+            self.user_profile,
+            self.chat_interface,
+            getattr(self.chat_interface, "session_panel", None),
+            self.contact_interface,
+            self.discovery_interface,
+        ]
+        tasks: list[asyncio.Task] = []
+        for owner in owners:
+            if owner is None:
+                continue
+            ui_tasks = getattr(owner, "_ui_tasks", None)
+            if isinstance(ui_tasks, set):
+                tasks.extend(task for task in list(ui_tasks) if not task.done())
+            keyed_tasks = getattr(owner, "_keyed_ui_tasks", None)
+            if isinstance(keyed_tasks, dict):
+                tasks.extend(task for task in list(keyed_tasks.values()) if not task.done())
+            for attr_name in (
+                "_contact_open_task",
+                "_load_task",
+                "_history_load_task",
+                "_startup_history_prefetch_task",
+                "_search_task",
+                "_save_task",
+                "_publish_task",
+                "_moment_load_task",
+            ):
+                task = getattr(owner, attr_name, None)
+                if isinstance(task, asyncio.Task) and not task.done():
+                    tasks.append(task)
+            history_page_tasks = getattr(owner, "_history_page_tasks", None)
+            if isinstance(history_page_tasks, dict):
+                tasks.extend(task for task in list(history_page_tasks.values()) if not task.done())
+        return list(dict.fromkeys(tasks))
 
     def _subscribe_to_events(self) -> None:
         """Subscribe to session updates relevant to tray alerts."""
@@ -590,6 +672,8 @@ class MainWindow(FluentWindow):
 
     def _can_display_tray_alert(self, session) -> bool:
         """Return whether one session can be shown inside tray-alert UI."""
+        if self._shell_transition_active or self._teardown_started:
+            return False
         if self._tray_icon is None or not self._tray_icon.isVisible():
             return False
         if session is None or getattr(session, "is_ai_session", False):
@@ -1029,4 +1113,3 @@ class MainWindow(FluentWindow):
                 parent=self,
                 duration=2200,
             )
-

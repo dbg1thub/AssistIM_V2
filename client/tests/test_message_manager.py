@@ -774,6 +774,14 @@ def test_message_manager_replays_history_events(monkeypatch) -> None:
         try:
             await manager._handle_ws_message(
                 {
+                    'type': 'history_messages',
+                    'data': {
+                        'messages': [],
+                    },
+                }
+            )
+            await manager._handle_ws_message(
+                {
                     'type': 'history_events',
                     'data': {
                         'events': [
@@ -810,6 +818,15 @@ def test_message_manager_replays_history_events(monkeypatch) -> None:
             assert 'recall_notice' in stored.extra
             assert any(event == message_manager_module.MessageEvent.EDITED for event, _ in fake_event_bus.events)
             assert any(event == message_manager_module.MessageEvent.RECALLED for event, _ in fake_event_bus.events)
+            assert fake_event_bus.events[-1] == (
+                message_manager_module.MessageEvent.SYNC_COMPLETED,
+                {
+                    'count': 0,
+                    'messages': [],
+                    'skipped': 0,
+                    'events_replayed': 2,
+                },
+            )
         finally:
             await manager.close()
 
@@ -1945,9 +1962,21 @@ def test_message_manager_history_messages_deduplicates_by_canonical_message_id(m
             )
 
             assert fake_db.saved_batches == []
+            assert fake_event_bus.events == []
+
+            await manager._handle_ws_message(
+                {
+                    'type': 'history_events',
+                    'data': {
+                        'events': [],
+                    },
+                }
+            )
+
             assert fake_event_bus.events[-1][0] == message_manager_module.MessageEvent.SYNC_COMPLETED
             assert fake_event_bus.events[-1][1]['count'] == 0
             assert fake_event_bus.events[-1][1]['skipped'] == 1
+            assert fake_event_bus.events[-1][1]['events_replayed'] == 0
         finally:
             await manager.close()
 
@@ -2055,6 +2084,7 @@ def test_message_manager_incoming_chat_message_derives_is_self_from_sender_id(mo
                         'content': 'hello from alice',
                         'message_type': 'text',
                         'status': 'sent',
+                        'created_at': '2026-04-12T01:02:03+00:00',
                         'is_self': True,
                     },
                 }
@@ -2064,6 +2094,8 @@ def test_message_manager_incoming_chat_message_derives_is_self_from_sender_id(mo
             assert stored is not None
             assert stored.sender_id == 'alice'
             assert stored.is_self is False
+            assert stored.timestamp is not None
+            assert stored.timestamp.isoformat().startswith('2026-04-12T10:02:03')
         finally:
             await manager.close()
 
@@ -2075,7 +2107,7 @@ def test_message_manager_remote_history_skips_payloads_without_canonical_message
     fake_db = FakeDatabase()
 
     class FakeChatService:
-        async def fetch_messages(self, session_id: str, limit: int, before_timestamp=None) -> list[dict]:
+        async def fetch_messages(self, session_id: str, limit: int, before_seq=None) -> list[dict]:
             return [
                 {
                     'session_id': session_id,
@@ -2278,13 +2310,13 @@ def test_session_manager_skips_fallback_session_without_authoritative_session_ty
     asyncio.run(scenario())
 
 
-def test_chat_controller_load_messages_forwards_before_timestamp(monkeypatch) -> None:
+def test_chat_controller_load_messages_forwards_history_cursors(monkeypatch) -> None:
     class FakeBoundaryMessageManager:
         def __init__(self) -> None:
-            self.calls: list[tuple[str, int, float | None]] = []
+            self.calls: list[tuple[str, int, float | None, int | None]] = []
 
-        async def get_messages(self, session_id: str, limit: int = 50, before_timestamp=None):
-            self.calls.append((session_id, limit, before_timestamp))
+        async def get_messages(self, session_id: str, limit: int = 50, before_timestamp=None, before_seq=None):
+            self.calls.append((session_id, limit, before_timestamp, before_seq))
             return ['page']
 
     fake_message_manager = FakeBoundaryMessageManager()
@@ -2295,10 +2327,10 @@ def test_chat_controller_load_messages_forwards_before_timestamp(monkeypatch) ->
 
     async def scenario() -> None:
         controller = chat_controller_module.ChatController()
-        messages = await controller.load_messages('session-1', limit=20, before_timestamp=123.45)
+        messages = await controller.load_messages('session-1', limit=20, before_timestamp=123.45, before_seq=42)
 
         assert messages == ['page']
-        assert fake_message_manager.calls == [('session-1', 20, 123.45)]
+        assert fake_message_manager.calls == [('session-1', 20, 123.45, 42)]
 
     asyncio.run(scenario())
 
@@ -2456,11 +2488,11 @@ def test_message_manager_recover_session_messages_retries_cached_e2ee_payloads(m
 
     class FakeChatService:
         def __init__(self) -> None:
-            self.fetch_calls: list[tuple[str, int, float | None]] = []
+            self.fetch_calls: list[tuple[str, int, int | None]] = []
 
-        async def fetch_messages(self, session_id: str, limit: int, before_timestamp=None) -> list[dict]:
-            self.fetch_calls.append((session_id, limit, before_timestamp))
-            if before_timestamp is None:
+        async def fetch_messages(self, session_id: str, limit: int, before_seq=None) -> list[dict]:
+            self.fetch_calls.append((session_id, limit, before_seq))
+            if before_seq is None:
                 return [
                     {
                         'message_id': 'm-remote-text',
@@ -2471,6 +2503,7 @@ def test_message_manager_recover_session_messages_retries_cached_e2ee_payloads(m
                         'status': 'received',
                         'timestamp': 1700000200.0,
                         'updated_at': 1700000200.0,
+                        'session_seq': 2,
                         'extra': {
                             'encryption': {
                                 'enabled': True,
@@ -2481,7 +2514,7 @@ def test_message_manager_recover_session_messages_retries_cached_e2ee_payloads(m
                         },
                     }
                 ]
-            if before_timestamp == 1700000200.0:
+            if before_seq == 2:
                 return [
                     {
                         'message_id': 'm-remote-older',
@@ -2492,6 +2525,7 @@ def test_message_manager_recover_session_messages_retries_cached_e2ee_payloads(m
                         'status': 'received',
                         'timestamp': 1699990000.0,
                         'updated_at': 1699990000.0,
+                        'session_seq': 1,
                         'extra': {
                             'encryption': {
                                 'enabled': True,
@@ -2596,7 +2630,7 @@ def test_message_manager_recover_session_messages_retries_cached_e2ee_payloads(m
                     },
                 },
             }
-            assert fake_chat_service.fetch_calls == [('session-1', 500, None), ('session-1', 500, 1700000200.0), ('session-1', 500, 1699990000.0)]
+            assert fake_chat_service.fetch_calls == [('session-1', 500, None), ('session-1', 500, 2), ('session-1', 500, 1)]
 
             stored_text = await fake_db.get_message('m-recover-text')
             assert stored_text is not None
@@ -2645,10 +2679,10 @@ def test_message_manager_recover_session_messages_reports_group_recovery_breakdo
     fake_e2ee_service = FakeE2EEService()
 
     class FakeChatService:
-        async def fetch_messages(self, session_id: str, limit: int, before_timestamp=None) -> list[dict]:
+        async def fetch_messages(self, session_id: str, limit: int, before_seq=None) -> list[dict]:
             assert session_id == 'session-group-1'
             assert limit == 500
-            assert before_timestamp is None
+            assert before_seq is None
             return []
 
     fake_db.messages['m-group-recover-text'] = ChatMessage(
@@ -2884,7 +2918,7 @@ def test_message_manager_close_clears_authenticated_user_context(monkeypatch) ->
     fake_db = FakeDatabase()
 
     class FakeChatService:
-        async def fetch_messages(self, session_id: str, limit: int = 50, before=None) -> list[dict]:
+        async def fetch_messages(self, session_id: str, limit: int = 50, before_seq=None) -> list[dict]:
             return []
 
     class FakeFileService:

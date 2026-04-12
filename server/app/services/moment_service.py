@@ -1,4 +1,4 @@
-﻿"""Moment service."""
+"""Moment service."""
 
 from __future__ import annotations
 
@@ -48,13 +48,15 @@ class MomentService:
             users_map={current_user.id: current_user},
         )
 
-    def like(self, current_user: User, moment_id: str) -> None:
+    def like(self, current_user: User, moment_id: str) -> dict:
         self._ensure_exists(moment_id)
-        self.moments.like(moment_id, current_user.id)
+        changed = self.moments.like(moment_id, current_user.id)
+        return {"liked": True, "changed": changed}
 
-    def unlike(self, current_user: User, moment_id: str) -> None:
+    def unlike(self, current_user: User, moment_id: str) -> dict:
         self._ensure_exists(moment_id)
-        self.moments.unlike(moment_id, current_user.id)
+        changed = self.moments.unlike(moment_id, current_user.id)
+        return {"liked": False, "changed": changed}
 
     def comment(self, current_user: User, moment_id: str, content: str) -> dict:
         self._ensure_exists(moment_id)
@@ -84,9 +86,6 @@ class MomentService:
             "user_id": moment.user_id,
             "content": moment.content,
             "created_at": moment.created_at.isoformat() if moment.created_at else None,
-            "username": author.username if author else None,
-            "nickname": author.nickname if author else None,
-            "avatar": author.avatar if author else None,
             "author": {
                 "id": author.id,
                 "username": author.username,
@@ -113,7 +112,12 @@ class MomentService:
             "user_id": comment.user_id,
             "content": comment.content,
             "created_at": comment.created_at.isoformat() if comment.created_at else None,
-            "username": user.username if user else None,
-            "nickname": user.nickname if user else None,
-            "avatar": user.avatar if user else None,
+            "author": {
+                "id": user.id,
+                "username": user.username,
+                "nickname": user.nickname,
+                "avatar": user.avatar,
+            }
+            if user
+            else None,
         }

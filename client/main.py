@@ -33,6 +33,8 @@ from client.managers.connection_manager import get_connection_manager, peek_conn
 from client.managers.message_manager import get_message_manager, peek_message_manager
 from client.managers.session_manager import get_session_manager, peek_session_manager
 from client.managers.sound_manager import get_sound_manager, peek_sound_manager
+from client.managers.search_manager import peek_search_manager
+from client.managers.call_manager import peek_call_manager
 
 from client.ui.controllers.auth_controller import get_auth_controller, peek_auth_controller
 from client.ui.controllers.chat_controller import get_chat_controller, peek_chat_controller
@@ -45,6 +47,14 @@ logger = logging.get_logger(__name__)
 EXIT_CODE_OK = 0
 EXIT_CODE_SINGLE_INSTANCE = 1
 EXIT_CODE_STARTUP_PREFLIGHT_BLOCKED = 2
+EXIT_CODE_STARTUP_RUNTIME_FAILED = 3
+
+
+def _peek_discovery_controller():
+    """Resolve the discovery controller singleton lazily to keep test stubs isolated."""
+    from client.ui.controllers.discovery_controller import peek_discovery_controller
+
+    return peek_discovery_controller()
 
 
 @dataclass(frozen=True)
@@ -120,6 +130,26 @@ def _show_startup_preflight_block_dialog(preflight: dict) -> None:
     )
 
 
+def _show_startup_runtime_failure_dialog(stage: str, detail: str = "") -> None:
+    """Show one user-facing dialog for a startup/runtime bootstrap failure before any live shell is ready."""
+    normalized_stage = str(stage or "startup").strip() or "startup"
+    normalized_detail = str(detail or "").strip()
+    body = tr(
+        "main.startup_runtime_failed.message",
+        "AssistIM could not finish startup because one runtime bootstrap step failed.",
+    )
+    if normalized_detail:
+        body = f"{body}\n\n[{normalized_stage}] {normalized_detail}"
+    else:
+        body = f"{body}\n\n[{normalized_stage}]"
+    message_box = getattr(QMessageBox, "critical", None) or getattr(QMessageBox, "information")
+    message_box(
+        None,
+        tr("main.startup_runtime_failed.title", "Startup failed"),
+        body,
+    )
+
+
 class Application:
     """
     Main application class that manages the client lifecycle.
@@ -146,6 +176,7 @@ class Application:
         self._active_auth_attempt_generation = 0
         self._runtime_generation = 0
         self._active_runtime_generation = 0
+        self._realtime_connection_state = "disconnected"
         self._startup_security_status = {
             "authenticated": False,
             "user_id": "",
@@ -225,9 +256,17 @@ class Application:
         self._active_auth_attempt_generation = self._auth_attempt_generation
         return self._active_auth_attempt_generation
 
+    def _can_continue_lifecycle_transition(self) -> bool:
+        """Return whether late auth/runtime success paths may still advance the app."""
+        return not self._quit_event.is_set() and self._lifecycle_state != "shutting_down"
+
     def _is_auth_attempt_current(self, attempt: int) -> bool:
         """Check whether one auth flow still belongs to the current auth attempt."""
-        return attempt > 0 and attempt == self._active_auth_attempt_generation
+        return (
+            self._can_continue_lifecycle_transition()
+            and attempt > 0
+            and attempt == self._active_auth_attempt_generation
+        )
 
     def _invalidate_auth_attempts(self) -> None:
         """Mark all in-flight auth attempts as stale."""
@@ -240,6 +279,14 @@ class Application:
             and self._is_auth_attempt_current(result.attempt_generation)
             and self._is_runtime_generation_current(result.runtime_generation)
         )
+
+    def _handle_connection_state_change(self, old_state, new_state) -> None:
+        """Track realtime transport state at the application lifecycle level."""
+        state_name = str(getattr(new_state, "name", new_state) or "").lower()
+        self._realtime_connection_state = state_name
+        logger.info("Realtime connection state changed: %s -> %s", old_state, new_state)
+        if state_name in {"disconnected", "reconnecting"} and self._lifecycle_state == "authenticated_ready":
+            self._set_lifecycle_state("authenticated_degraded")
 
     def _is_current_main_window(self, window: object, *, generation: int | None = None) -> bool:
         """Check whether one main-window callback still belongs to the live shell."""
@@ -293,6 +340,20 @@ class Application:
         """Drop warning-bar bookkeeping after the UI element closes itself."""
         self._runtime_warmup_warning_bar = None
 
+    def _startup_preflight_is_blocking(self) -> bool:
+        """Return whether the current startup/runtime safety gate blocks authenticated runtime entry."""
+        preflight = self.get_startup_preflight_result()
+        if not preflight.get("blocking"):
+            return False
+        self._exit_code = EXIT_CODE_STARTUP_PREFLIGHT_BLOCKED
+        logger.error(
+            "Startup preflight blocked authenticated runtime: %s (%s)",
+            preflight.get("state"),
+            preflight.get("message"),
+        )
+        _show_startup_preflight_block_dialog(preflight)
+        return True
+
     async def _quiesce_authenticated_runtime(self) -> None:
         """Stop authenticated runtime work before clearing persisted auth/chat state."""
         self._set_lifecycle_state("tearing_down_runtime")
@@ -300,6 +361,12 @@ class Application:
         self._active_runtime_generation = 0
         self._cancel_runtime_warmup()
         self._clear_runtime_warmup_warning()
+        if self.main_window:
+            quiesce_async = getattr(self.main_window, "quiesce_async", None)
+            if callable(quiesce_async):
+                await quiesce_async()
+            else:
+                self.main_window.quiesce()
         if self.auth_window:
             self.auth_window.close()
             self.auth_window.deleteLater()
@@ -350,6 +417,30 @@ class Application:
         """Expose the current application exit code for outer launchers and tests."""
         return int(self._exit_code)
 
+    def _reset_auth_runtime_snapshots(self) -> None:
+        """Clear account-scoped diagnostics while keeping the current DB security state."""
+        current_security = self.get_startup_security_status()
+        database_encryption = dict(current_security.get("database_encryption") or {})
+        self._startup_security_status = {
+            "authenticated": False,
+            "user_id": "",
+            "database_encryption": database_encryption,
+        }
+        runtime_security = self.get_startup_security_status()
+        self._e2ee_runtime_diagnostics = {
+            "authenticated": False,
+            "user_id": "",
+            "runtime_security": runtime_security,
+            "history_recovery": {
+                "available": False,
+                "source_device_count": 0,
+            },
+            "current_session_security": {
+                "available": False,
+                "reason": "authentication required",
+            },
+        }
+
     def _update_startup_security_status(self, *, db=None, auth_controller=None) -> dict:
         """Refresh the cached startup security status from the best available runtime source."""
         current = self.get_startup_security_status()
@@ -383,6 +474,10 @@ class Application:
         """Refresh the cached application-level E2EE diagnostics from the auth controller when available."""
         current = self.get_e2ee_runtime_diagnostics()
         if auth_controller is not None:
+            current_user = getattr(auth_controller, "current_user", None)
+            if not isinstance(current_user, dict) or not str(current_user.get("id", "") or "").strip():
+                self._reset_auth_runtime_snapshots()
+                return self.get_e2ee_runtime_diagnostics()
             diagnostics_getter = getattr(auth_controller, "get_e2ee_diagnostics", None)
             if callable(diagnostics_getter):
                 try:
@@ -481,6 +576,7 @@ class Application:
         conn_manager = get_connection_manager()
         await conn_manager.initialize()
         conn_manager.add_message_listener(self._handle_transport_message)
+        conn_manager.add_state_listener(self._handle_connection_state_change)
         if not self._is_runtime_generation_current(target_generation):
             logger.info("Authenticated runtime initialization stopped for stale generation %s", target_generation)
             return
@@ -510,6 +606,10 @@ class Application:
         Returns:
             One auth-attempt result including the committed runtime generation, if any.
         """
+        if not self._can_continue_lifecycle_transition():
+            logger.info("Skipping authentication because application lifecycle is no longer active")
+            return AuthAttemptResult(self._active_auth_attempt_generation, 0, False)
+
         auth_attempt = self._start_new_auth_attempt()
         self._set_lifecycle_state("restoring_auth")
         auth_controller = get_auth_controller()
@@ -547,6 +647,9 @@ class Application:
         def _on_closed() -> None:
             if not _is_current_auth_window():
                 return
+            committed_getter = getattr(auth_window, "has_committed_auth", None)
+            if callable(committed_getter) and committed_getter():
+                return
             if not auth_future.done():
                 auth_future.set_result(False)
 
@@ -557,17 +660,21 @@ class Application:
         auth_window.activateWindow()
 
         authenticated = await auth_future
-
-        if self.auth_window is auth_window:
-            self.auth_window = None
-            auth_window.deleteLater()
-            await self._yield_to_ui()
-
         if not self._is_auth_attempt_current(auth_attempt):
             logger.info("Ignoring stale auth-shell result for auth attempt %s", auth_attempt)
+            if self.auth_window is auth_window:
+                self.auth_window.close()
+                self.auth_window.deleteLater()
+                self.auth_window = None
+                await self._yield_to_ui()
             return AuthAttemptResult(auth_attempt, 0, False)
 
         if not authenticated:
+            if self.auth_window is auth_window:
+                self.auth_window.close()
+                self.auth_window.deleteLater()
+                self.auth_window = None
+                await self._yield_to_ui()
             logger.info("Authentication window closed before sign-in")
             self._set_lifecycle_state("unauthenticated")
             return AuthAttemptResult(auth_attempt, 0, False)
@@ -598,12 +705,20 @@ class Application:
 
     async def _warm_authenticated_runtime(self, generation: int) -> None:
         """Refresh authenticated runtime state after the main shell is already visible."""
+        if not self._can_continue_lifecycle_transition():
+            return
         previous_state = self._lifecycle_state
         try:
             await self._synchronize_authenticated_runtime(generation)
             if not self._is_runtime_generation_current(generation):
                 return
             await self.start_background_services(generation=generation)
+            if not self._is_runtime_generation_current(generation):
+                return
+            auth_controller = get_auth_controller()
+            refresh_profile = getattr(auth_controller, "refresh_current_user_profile_if_needed", None)
+            if callable(refresh_profile):
+                await refresh_profile()
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -680,6 +795,9 @@ class Application:
         if not self._is_auth_result_current(result):
             logger.info("Skipping stale authenticated flow for auth attempt %s", result.attempt_generation)
             return False
+        if self._startup_preflight_is_blocking():
+            self._quit_event.set()
+            return False
 
         await self.initialize_authenticated_runtime(generation=result.runtime_generation)
         if not self._is_auth_result_current(result):
@@ -703,6 +821,9 @@ class Application:
         Create and display the main application window.
         """
         target_generation = generation if generation is not None else self._active_runtime_generation
+        if not self._can_continue_lifecycle_transition():
+            logger.info("Skipping main window creation because application lifecycle is no longer active")
+            return
         if not self._is_runtime_generation_current(target_generation):
             logger.info("Skipping main window creation for inactive runtime generation %s", target_generation)
             return
@@ -731,6 +852,16 @@ class Application:
             self._make_generation_bound_main_window_callback(target_generation, main_window, "activateWindow"),
         )
         await self._yield_to_ui()
+        if not self._can_continue_lifecycle_transition() or not self._is_current_main_window(
+            main_window,
+            generation=target_generation,
+        ):
+            return
+        if self.auth_window is not None:
+            self.auth_window.close()
+            self.auth_window.deleteLater()
+            self.auth_window = None
+            await self._yield_to_ui()
         self._cancel_runtime_warmup()
         self._warm_runtime_task = self.create_task(self._warm_authenticated_runtime(target_generation))
         self._set_lifecycle_state("main_shell_visible")
@@ -779,6 +910,14 @@ class Application:
         if self._auth_loss_task is task:
             self._auth_loss_task = None
 
+    async def _close_auth_controller_after_auth_clear(self, auth_controller) -> None:
+        """Close the auth controller singleton after its auth state has been cleared."""
+        try:
+            await asyncio.wait_for(auth_controller.close(), timeout=2.0)
+        except asyncio.TimeoutError:
+            logger.warning("Auth controller close during reauth timed out")
+        except Exception:
+            logger.exception("Auth controller close during reauth failed")
     async def _handle_auth_lost(self, reason: str) -> None:
         """Handle HTTP/WS credential loss through one lifecycle path."""
         normalized_reason = str(reason or "").strip() or "auth_lost"
@@ -791,13 +930,14 @@ class Application:
         logger.warning("Authentication lost: %s", normalized_reason)
 
         if self.main_window:
-            self.main_window.setEnabled(False)
-            self.main_window.hide()
+            self.main_window.begin_runtime_transition()
 
         try:
             await self._quiesce_authenticated_runtime()
             auth_controller = get_auth_controller()
             await auth_controller.clear_session(clear_local_chat_state=False)
+            self._reset_auth_runtime_snapshots()
+            await self._close_auth_controller_after_auth_clear(auth_controller)
 
             auth_result = await self.authenticate()
             if not auth_result.authenticated:
@@ -874,8 +1014,13 @@ class Application:
         conn_manager = get_connection_manager()
         try:
             await conn_manager.connect()
+            if generation is not None and not self._is_runtime_generation_current(generation):
+                logger.info("Background services stopped before initial sync for stale runtime generation %s", generation)
+                return
+            await conn_manager.wait_for_initial_sync()
         except Exception:
             logger.exception("Initial websocket connect failed")
+            return
 
         if generation is not None and not self._is_runtime_generation_current(generation):
             logger.info("Background services completed for stale runtime generation %s", generation)
@@ -887,64 +1032,105 @@ class Application:
         logger.info("Starting logout flow")
         self._set_lifecycle_state("logout_requested")
 
-        if self.main_window:
-            self.main_window.setEnabled(False)
-            self.main_window.hide()
+        try:
+            if self.main_window:
+                self.main_window.begin_runtime_transition()
 
-        auth_controller = get_auth_controller()
-        await self._quiesce_authenticated_runtime()
-        await auth_controller.logout(clear_local_chat_state=True)
+            auth_controller = get_auth_controller()
+            await self._quiesce_authenticated_runtime()
+            await auth_controller.logout(clear_local_chat_state=True)
+            self._reset_auth_runtime_snapshots()
+            await self._close_auth_controller_after_auth_clear(auth_controller)
 
-        auth_result = await self.authenticate()
-        if not auth_result.authenticated:
-            if self._is_auth_attempt_current(auth_result.attempt_generation):
-                logger.info("Authentication cancelled after logout")
-                self._quit_event.set()
-            return
+            auth_result = await self.authenticate()
+            if not auth_result.authenticated:
+                if self._is_auth_attempt_current(auth_result.attempt_generation):
+                    logger.info("Authentication cancelled after logout")
+                    self._quit_event.set()
+                return
 
-        await self._continue_authenticated_runtime(auth_result)
+            await self._continue_authenticated_runtime(auth_result)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Logout/relogin flow failed")
+            self._pending_auth_success_message = ""
+            self._invalidate_auth_attempts()
+            self._active_runtime_generation = 0
+            if self._lifecycle_state != "shutting_down":
+                self._set_lifecycle_state("unauthenticated")
+            self._quit_event.set()
 
     async def _teardown_authenticated_runtime(self) -> None:
         """Reset UI and runtime services that are tied to one authenticated user session."""
         self._cancel_runtime_warmup()
+        close_failures: list[str] = []
         if self.main_window:
-            self.main_window.hide()
+            self.main_window.close_for_runtime_transition()
             self.main_window.deleteLater()
             self.main_window = None
+            await self._yield_to_ui()
 
-        await self._close_optional_component(
+        if not await self._close_optional_component(
             "Chat controller close during logout failed",
             peek_chat_controller,
-        )
-        await self._close_optional_component(
+        ):
+            close_failures.append("chat_controller")
+        if not await self._close_optional_component(
             "Message controller close during logout failed",
             peek_message_controller,
-        )
-        await self._close_optional_component(
+        ):
+            close_failures.append("message_controller")
+        if not await self._close_optional_component(
             "Session controller close during logout failed",
             peek_session_controller,
-        )
-        await self._close_optional_component(
+        ):
+            close_failures.append("session_controller")
+        if not await self._close_optional_component(
+            "Discovery controller close during logout failed",
+            _peek_discovery_controller,
+        ):
+            close_failures.append("discovery_controller")
+        if not await self._close_optional_component(
             "Message manager close during logout failed",
             peek_message_manager,
-        )
-        await self._close_optional_component(
+        ):
+            close_failures.append("message_manager")
+        if not await self._close_optional_component(
             "Session manager close during logout failed",
             peek_session_manager,
-        )
-        await self._close_optional_component(
+        ):
+            close_failures.append("session_manager")
+        if not await self._close_optional_component(
             "Connection manager close during logout failed",
             peek_connection_manager,
-        )
-        await self._close_optional_component(
+        ):
+            close_failures.append("connection_manager")
+        if not await self._close_optional_component(
             "WebSocket client close during logout failed",
             peek_websocket_client,
-            skip_if=peek_connection_manager,
-        )
-        await self._close_optional_component(
+        ):
+            close_failures.append("websocket_client")
+        if not await self._close_optional_component(
             "Sound manager close during logout failed",
             peek_sound_manager,
-        )
+        ):
+            close_failures.append("sound_manager")
+        if not await self._close_optional_component(
+            "Call manager close during logout failed",
+            peek_call_manager,
+        ):
+            close_failures.append("call_manager")
+        if not await self._close_optional_component(
+            "Search manager close during logout failed",
+            peek_search_manager,
+        ):
+            close_failures.append("search_manager")
+
+        if close_failures:
+            raise RuntimeError(
+                "authenticated runtime teardown incomplete: " + ", ".join(close_failures)
+            )
 
     async def _close_optional_component(
         self,
@@ -952,20 +1138,20 @@ class Application:
         getter,
         *,
         timeout: float = 2.0,
-        skip_if=None,
-    ) -> None:
+    ) -> bool:
         """Close one optional singleton component with a timeout guard."""
         try:
             component = getter()
             if component is None:
-                return
-            if skip_if is not None and skip_if() is not None:
-                return
+                return True
             await asyncio.wait_for(component.close(), timeout=timeout)
+            return True
         except asyncio.TimeoutError:
             logger.warning("%s (timed out after %.1fs)", failure_message, timeout)
+            return False
         except Exception:
             logger.exception(failure_message)
+            return False
 
     # =========================================================
     # Shutdown
@@ -1012,6 +1198,7 @@ class Application:
         await self._close_optional_component("Chat controller close failed", peek_chat_controller)
         await self._close_optional_component("Message controller close failed", peek_message_controller)
         await self._close_optional_component("Session controller close failed", peek_session_controller)
+        await self._close_optional_component("Discovery controller close failed", _peek_discovery_controller)
         await self._close_optional_component("Auth controller close failed", peek_auth_controller)
         await self._close_optional_component("Message manager close failed", peek_message_manager)
         await self._close_optional_component("Session manager close failed", peek_session_manager)
@@ -1019,9 +1206,10 @@ class Application:
         await self._close_optional_component(
             "WebSocket client close failed",
             peek_websocket_client,
-            skip_if=peek_connection_manager,
         )
         await self._close_optional_component("Sound manager close failed", peek_sound_manager)
+        await self._close_optional_component("Call manager close failed", peek_call_manager)
+        await self._close_optional_component("Search manager close failed", peek_search_manager)
 
         # Close HTTP client
         try:
@@ -1039,7 +1227,6 @@ class Application:
         except Exception:
             logger.exception("Database close failed")
 
-        self.qt_app.processEvents()
         self.qt_app.quit()
 
         logger.info("Shutdown complete")
@@ -1055,26 +1242,37 @@ class Application:
         Initializes components, displays main window, starts background
         services, and waits for shutdown signal.
         """
-
+        startup_stage = "initialize"
         try:
-            await self.initialize()
-            preflight = self.get_startup_preflight_result()
-            if preflight.get("blocking"):
-                self._exit_code = EXIT_CODE_STARTUP_PREFLIGHT_BLOCKED
-                logger.error(
-                    "Startup preflight blocked application launch: %s (%s)",
-                    preflight.get("state"),
-                    preflight.get("message"),
-                )
-                return
+            try:
+                await self.initialize()
+                if self._startup_preflight_is_blocking():
+                    return
 
-            auth_result = await self.authenticate()
-            if not auth_result.authenticated:
-                return
+                startup_stage = "authenticate"
+                auth_result = await self.authenticate()
+                if not auth_result.authenticated:
+                    return
 
-            if not await self._continue_authenticated_runtime(auth_result):
-                return
-            await self._quit_event.wait()
+                startup_stage = "authenticated_runtime"
+                if not await self._continue_authenticated_runtime(auth_result):
+                    return
+                startup_stage = "runloop"
+                await self._quit_event.wait()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.exception("Application runtime flow failed")
+                if startup_stage in {"authenticate", "authenticated_runtime"} and self.main_window is None:
+                    self._exit_code = EXIT_CODE_STARTUP_RUNTIME_FAILED
+                    _show_startup_runtime_failure_dialog(
+                        startup_stage,
+                        str(exc) or exc.__class__.__name__,
+                    )
+                self._pending_auth_success_message = ""
+                self._invalidate_auth_attempts()
+                self._active_runtime_generation = 0
+                self._quit_event.set()
         finally:
             await self.shutdown()
 
@@ -1141,9 +1339,6 @@ def main() -> int:
             loop.close()
 
         instance_lock.unlock()
-
-    if app.get_exit_code() == EXIT_CODE_STARTUP_PREFLIGHT_BLOCKED:
-        _show_startup_preflight_block_dialog(app.get_startup_preflight_result())
 
     logger.info("Application exited")
 

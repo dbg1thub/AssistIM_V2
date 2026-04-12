@@ -1,4 +1,4 @@
-﻿"""Moment routes."""
+"""Moment routes."""
 
 from __future__ import annotations
 
@@ -32,14 +32,12 @@ def create_moment(payload: MomentCreate, current_user: User = Depends(get_curren
 
 @router.post("/{moment_id}/likes")
 def like_moment(moment_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
-    MomentService(db).like(current_user, moment_id)
-    return success_response()
+    return success_response(MomentService(db).like(current_user, moment_id))
 
 
 @router.delete("/{moment_id}/likes")
 def unlike_moment(moment_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
-    MomentService(db).unlike(current_user, moment_id)
-    return success_response()
+    return success_response(MomentService(db).unlike(current_user, moment_id))
 
 
 @router.post("/{moment_id}/comments")

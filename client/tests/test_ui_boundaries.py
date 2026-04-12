@@ -207,6 +207,77 @@ def test_auth_success_feedback_moves_to_main_window() -> None:
     assert 'self._make_generation_bound_main_window_callback' in app_main
     assert 'main_window.closed.connect(lambda window=main_window: self._on_main_window_closed(window))' in app_main
     assert 'main_window.logoutRequested.connect(lambda window=main_window: self._on_logout_requested(window))' in app_main
+    assert 'self.main_window.quiesce()' in app_main
+    assert 'def quiesce(self) -> None:' in main_window
+
+
+def test_shell_transition_uses_formal_close_path_and_blocks_tray_restore() -> None:
+    auth_interface = Path('client/ui/windows/auth_interface.py').read_text(encoding='utf-8')
+    app_main = Path('client/main.py').read_text(encoding='utf-8')
+    main_window = Path('client/ui/windows/main_window.py').read_text(encoding='utf-8')
+
+    assert 'self.authenticated.emit(user)\n            self.close()' not in auth_interface
+    assert 'if not self._auth_committed:\n                self._set_busy(None)' in auth_interface
+    assert 'if self._shell_transition_active or self._teardown_started:' in main_window
+    assert 'def begin_runtime_transition(self) -> None:' in main_window
+    assert 'def close_for_runtime_transition(self) -> None:' in main_window
+    assert 'self._request_close("runtime_transition")' in main_window
+    assert 'if self._close_reason != "runtime_transition":\n                self.closed.emit()' in main_window
+    assert 'self.main_window.begin_runtime_transition()' in app_main
+    assert 'self.main_window.close_for_runtime_transition()' in app_main
+
+
+def test_auth_commit_is_two_phase_and_login_close_is_blocked_during_commit() -> None:
+    auth_interface = Path('client/ui/windows/auth_interface.py').read_text(encoding='utf-8')
+    auth_controller = Path('client/ui/controllers/auth_controller.py').read_text(encoding='utf-8')
+
+    assert 'self._submit_commit_in_progress = False' in auth_interface
+    assert 'payload = await self._auth_controller.request_login_payload(username, password, force=force)' in auth_interface
+    assert 'user = await self._auth_controller.commit_auth_payload(payload, reset_local_chat_state=True)' in auth_interface
+    assert 'payload = await self._auth_controller.request_register_payload(username, nickname, password)' in auth_interface
+    assert 'if self._submit_commit_in_progress:' in auth_interface
+    assert 'event.ignore()' in auth_interface
+    assert 'async def request_login_payload(self, username: str, password: str, *, force: bool = False) -> dict[str, Any]:' in auth_controller
+    assert 'async def request_register_payload(self, username: str, nickname: str, password: str) -> dict[str, Any]:' in auth_controller
+    assert 'async def commit_auth_payload(' in auth_controller
+
+
+def test_auth_commit_no_longer_pushes_user_id_into_closed_runtime_singletons() -> None:
+    auth_controller = Path('client/ui/controllers/auth_controller.py').read_text(encoding='utf-8')
+
+    apply_runtime_context = auth_controller.split('def _apply_runtime_context', 1)[1].split('def _notify_auth_state_changed', 1)[0]
+    assert 'self._set_runtime_user_id(user_id)' not in apply_runtime_context
+    assert 'def _set_runtime_user_id(user_id: str) -> None:' in auth_controller
+    assert 'self._set_runtime_user_id("")' in auth_controller
+
+
+def test_startup_runtime_failure_now_has_user_visible_dialog() -> None:
+    app_main = Path('client/main.py').read_text(encoding='utf-8')
+
+    assert 'EXIT_CODE_STARTUP_RUNTIME_FAILED = 3' in app_main
+    assert 'def _show_startup_runtime_failure_dialog(stage: str, detail: str = "") -> None:' in app_main
+    assert 'startup_stage in {"authenticate", "authenticated_runtime"} and self.main_window is None' in app_main
+    assert '_show_startup_runtime_failure_dialog(' in app_main
+
+
+def test_logout_quiesce_is_pushed_down_into_shell_widgets() -> None:
+    main_window = Path('client/ui/windows/main_window.py').read_text(encoding='utf-8')
+    chat_interface = Path('client/ui/windows/chat_interface.py').read_text(encoding='utf-8')
+    contact_interface = Path('client/ui/windows/contact_interface.py').read_text(encoding='utf-8')
+    discovery_interface = Path('client/ui/windows/discovery_interface.py').read_text(encoding='utf-8')
+    session_panel = Path('client/ui/widgets/session_panel.py').read_text(encoding='utf-8')
+    profile_flyout = Path('client/ui/widgets/user_profile_flyout.py').read_text(encoding='utf-8')
+
+    assert 'self.user_profile.quiesce()' in main_window
+    assert 'self.chat_interface.quiesce()' in main_window
+    assert 'self.contact_interface.quiesce()' in main_window
+    assert 'self.discovery_interface.quiesce()' in main_window
+    assert 'def quiesce(self) -> None:' in chat_interface
+    assert 'self.session_panel.quiesce()' in chat_interface
+    assert 'def quiesce(self) -> None:' in contact_interface
+    assert 'def quiesce(self) -> None:' in discovery_interface
+    assert 'def quiesce(self) -> None:' in session_panel
+    assert 'def quiesce(self) -> None:' in profile_flyout
 
 
 def test_user_profile_flyout_surfaces_degraded_session_snapshot_after_profile_save() -> None:

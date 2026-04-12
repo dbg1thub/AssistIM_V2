@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
 from typing import Any
 
 from sqlalchemy import and_, desc, func, or_, select, update
@@ -78,11 +77,11 @@ class MessageRepository:
         self,
         session_id: str,
         limit: int = 50,
-        before: datetime | None = None,
+        before_seq: int | None = None,
     ) -> list[Message]:
         stmt = select(Message).where(Message.session_id == session_id)
-        if before is not None:
-            stmt = stmt.where(Message.created_at < before)
+        if before_seq is not None:
+            stmt = stmt.where(Message.session_seq < int(before_seq))
         stmt = stmt.order_by(desc(Message.session_seq), desc(Message.created_at)).limit(limit)
         return list(reversed(self.db.execute(stmt).scalars().all()))
 
@@ -134,7 +133,7 @@ class MessageRepository:
         stmt = (
             select(Message)
             .where(or_(*conditions))
-            .order_by(Message.created_at.asc(), Message.session_id.asc(), Message.session_seq.asc(), Message.id.asc())
+            .order_by(Message.session_id.asc(), Message.session_seq.asc(), Message.created_at.asc(), Message.id.asc())
         )
         return list(self.db.execute(stmt).scalars().all())
 

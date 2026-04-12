@@ -139,10 +139,7 @@ class E2EEService:
         await self._http.delete(f"/devices/{device_id}")
 
     async def clear_local_bundle(self) -> None:
-        await self._db.delete_app_state(self.DEVICE_STATE_KEY)
-        await self._db.delete_app_state(self.GROUP_SESSION_STATE_KEY)
-        await self._db.delete_app_state(self.HISTORY_RECOVERY_STATE_KEY)
-        await self._db.delete_app_state(self.IDENTITY_TRUST_STATE_KEY)
+        await self._db.delete_app_states(self._local_e2ee_state_keys())
 
     async def reprovision_local_device(self, *, delete_remote: bool = True) -> dict[str, Any]:
         previous_bundle = await self._load_local_bundle()
@@ -153,10 +150,10 @@ class E2EEService:
             except Exception as exc:
                 logger.warning("Failed to delete previous remote E2EE device %s: %s", previous_device_id, exc)
 
-        await self.clear_local_bundle()
         new_bundle = self._generate_local_bundle()
-        await self._save_local_bundle(new_bundle)
-        return await self._register_bundle(new_bundle)
+        response = await self._register_bundle(new_bundle)
+        await self._replace_local_bundle(new_bundle)
+        return response
 
     async def fetch_prekey_bundle(self, user_id: str) -> list[dict[str, Any]]:
         bundle = await self.get_or_create_local_bundle()
@@ -1738,6 +1735,30 @@ class E2EEService:
             "target_device_id": recipient_device_id or local_device_id,
         }
 
+    def _local_e2ee_state_keys(self) -> list[str]:
+        """Return every app-state key owned by the local E2EE runtime bundle."""
+        return [
+            self.DEVICE_STATE_KEY,
+            self.GROUP_SESSION_STATE_KEY,
+            self.HISTORY_RECOVERY_STATE_KEY,
+            self.IDENTITY_TRUST_STATE_KEY,
+        ]
+
+    def _encrypt_state_payload(self, payload: dict[str, Any]) -> str:
+        serialized = json.dumps(payload, ensure_ascii=True, sort_keys=True)
+        return SecureStorage.encrypt_text(serialized)
+
+    async def _replace_local_bundle(self, bundle: dict[str, Any]) -> None:
+        normalized_bundle = self._normalize_loaded_bundle(bundle)
+        encrypted = self._encrypt_state_payload(normalized_bundle)
+        await self._db.replace_app_state(
+            {self.DEVICE_STATE_KEY: encrypted},
+            delete_keys=[
+                self.GROUP_SESSION_STATE_KEY,
+                self.HISTORY_RECOVERY_STATE_KEY,
+                self.IDENTITY_TRUST_STATE_KEY,
+            ],
+        )
     async def _load_local_bundle(self) -> dict[str, Any] | None:
         raw_value = await self._db.get_app_state(self.DEVICE_STATE_KEY)
         if not raw_value:
@@ -1754,9 +1775,7 @@ class E2EEService:
 
     async def _save_local_bundle(self, bundle: dict[str, Any]) -> None:
         normalized_bundle = self._normalize_loaded_bundle(bundle)
-        serialized = json.dumps(normalized_bundle, ensure_ascii=True, sort_keys=True)
-        encrypted = SecureStorage.encrypt_text(serialized)
-        await self._db.set_app_state(self.DEVICE_STATE_KEY, encrypted)
+        await self._db.set_app_state(self.DEVICE_STATE_KEY, self._encrypt_state_payload(normalized_bundle))
 
     async def _load_group_session_state(self) -> dict[str, Any]:
         raw_value = await self._db.get_app_state(self.GROUP_SESSION_STATE_KEY)
@@ -2185,6 +2204,7 @@ class E2EEService:
             record["last_trusted_at"] = str(observed_at or "")
             record["trust_source"] = "local_manual"
         return record
+
     def _generate_local_bundle(self) -> dict[str, Any]:
         x25519, ed25519, serialization = _load_crypto_primitives()
 
@@ -2791,6 +2811,14 @@ def _load_encryption_primitives():
     return _load_crypto_primitives() + (hashes, HKDF, AESGCM)
 
 
+    async def close(self) -> None:
+        """Retire the E2EE service without closing shared storage or HTTP transports."""
+        self._http = None
+        self._db = None
+        global _e2ee_service
+        if _e2ee_service is self:
+            _e2ee_service = None
+
 def _x25519_private_b64(private_key, serialization_module) -> str:
     return b64encode(
         private_key.private_bytes(
@@ -2829,6 +2857,8 @@ def _ed25519_public_b64(public_key, serialization_module) -> str:
     ).decode("ascii")
 
 
+
+
 _e2ee_service: Optional[E2EEService] = None
 
 
@@ -2838,13 +2868,3 @@ def get_e2ee_service() -> E2EEService:
     if _e2ee_service is None:
         _e2ee_service = E2EEService()
     return _e2ee_service
-
-
-
-
-
-
-
-
-
-

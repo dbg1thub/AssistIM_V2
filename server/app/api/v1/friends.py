@@ -73,7 +73,7 @@ async def send_request(
 ) -> dict:
     receiver_id = payload.target_user_id
     result = FriendService(db).create_request(current_user, receiver_id, payload.message)
-    reason = "friendship_created" if result.get("status") == "accepted" else "friend_request_created"
+    reason = "friendship_created" if result.get("action") == "friendship_created" or result.get("status") == "accepted" else "friend_request_created"
     await _broadcast_contact_refresh([current_user.id, receiver_id or ""], reason, result)
     return success_response(result)
 

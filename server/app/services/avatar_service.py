@@ -1,4 +1,4 @@
-﻿"""Avatar domain service."""
+"""Avatar domain service."""
 
 from __future__ import annotations
 
@@ -23,6 +23,7 @@ from app.repositories.file_repo import FileRepository
 from app.repositories.group_repo import GroupRepository
 from app.repositories.session_repo import SessionRepository
 from app.repositories.user_repo import UserRepository
+from app.services.file_service import FileService
 
 
 class AvatarService:
@@ -36,14 +37,14 @@ class AvatarService:
         self.groups = GroupRepository(db)
         self.sessions = SessionRepository(db)
 
-    def assign_default_user_avatar(self, user: User, *, seed: object = "", gender: object = "") -> User:
+    def assign_default_user_avatar(self, user: User, *, seed: object = "", gender: object = "", commit: bool = True) -> User:
         """Assign one persisted formal default avatar to a user."""
         default_key = choose_seeded_default_avatar_key(seed, gender=gender) or choose_random_default_avatar_key(gender)
         if not default_key:
             raise AppError(ErrorCode.SERVER_ERROR, "default avatar assets unavailable", 500)
         return self.set_user_default_avatar(user, default_key=default_key)
 
-    def backfill_user_avatar_state(self, user: User) -> User:
+    def backfill_user_avatar_state(self, user: User, *, commit: bool = True) -> User:
         """Normalize one legacy user row into the new avatar state model."""
         avatar_kind = str(getattr(user, "avatar_kind", "") or "").strip().lower()
         avatar_default_key = str(getattr(user, "avatar_default_key", "") or "").strip()
@@ -59,6 +60,7 @@ class AvatarService:
                     avatar_default_key=avatar_default_key or None,
                     avatar_file_id=stored.id,
                     avatar=stored.file_url,
+                    commit=commit,
                 )
 
         inferred_default_key = avatar_default_key or default_avatar_key_from_url(avatar_value)
@@ -84,9 +86,10 @@ class AvatarService:
             user,
             seed=getattr(user, "id", "") or getattr(user, "username", ""),
             gender=getattr(user, "gender", ""),
+            commit=commit,
         )
 
-    def set_user_default_avatar(self, user: User, *, default_key: str) -> User:
+    def set_user_default_avatar(self, user: User, *, default_key: str, commit: bool = True) -> User:
         """Switch one user back to the assigned default avatar."""
         avatar_url = default_avatar_url(self.settings, default_key)
         if not avatar_url:
@@ -97,6 +100,7 @@ class AvatarService:
             avatar_default_key=default_key,
             avatar_file_id=None,
             avatar=avatar_url,
+            commit=commit,
         )
         self._refresh_generated_group_avatars_for_user(updated.id)
         return updated
@@ -115,7 +119,7 @@ class AvatarService:
     def upload_user_avatar(self, user: User, file: UploadFile) -> User:
         """Persist one custom profile avatar and bind it to the user."""
         self._validate_avatar_upload(file)
-        stored = self.files.create_from_upload(user.id, file, settings=self.settings)
+        stored = FileService(self.db, self.settings).save_upload_record(user, file)
         updated = self.users.update_avatar_state(
             user,
             avatar_kind="custom",
@@ -192,7 +196,7 @@ class AvatarService:
             )
         return members
 
-    def _refresh_generated_group_avatars_for_user(self, user_id: str) -> None:
+    def _refresh_generated_group_avatars_for_user(self, user_id: str, *, commit: bool = True) -> None:
         normalized_user_id = str(user_id or "").strip()
         if not normalized_user_id:
             return
@@ -206,7 +210,7 @@ class AvatarService:
             self.ensure_group_avatar(group)
             touched = True
 
-        if touched:
+        if touched and commit:
             self.db.commit()
 
     @staticmethod

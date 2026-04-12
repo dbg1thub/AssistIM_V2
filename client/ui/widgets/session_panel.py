@@ -103,6 +103,7 @@ class SessionPanel(QWidget):
         self._sessions_snapshot: tuple | None = None
         self._event_subscriptions: list[tuple[str, object]] = []
         self._ui_tasks: set[asyncio.Task] = set()
+        self._teardown_started = False
         self._search_task: asyncio.Task | None = None
         self._search_flyout = None
         self._search_flyout_view: Optional[GlobalSearchPopupOverlay] = None
@@ -252,6 +253,13 @@ class SessionPanel(QWidget):
 
     def _on_destroyed(self, *_args) -> None:
         """Detach event listeners and cancel outstanding async actions."""
+        self.quiesce()
+
+    def quiesce(self) -> None:
+        """Stop sidebar async work before logout clears runtime state."""
+        if self._teardown_started:
+            return
+        self._teardown_started = True
         self._unsubscribe_from_events()
         self._search_timer.stop()
         self._cancel_pending_task(self._search_task)

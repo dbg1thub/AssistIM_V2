@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 from fastapi.testclient import TestClient
@@ -223,8 +225,13 @@ def test_group_profile_update_requires_owner_or_admin_and_persists_metadata(clie
     )
     assert update_response.status_code == 200
     payload = update_response.json()["data"]
-    assert payload["name"] == "Ops"
-    assert payload["announcement"] == "Deploy at 6"
+    assert set(payload) == {"group", "announcement"}
+    group_payload = payload["group"]
+    assert group_payload["name"] == "Ops"
+    assert group_payload["announcement"] == "Deploy at 6"
+    assert payload["announcement"]["created"] is True
+    assert payload["announcement"]["message_id"] == group_payload["announcement_message_id"]
+    assert payload["announcement"]["participant_count"] == 3
 
 
 def test_group_self_profile_update_persists_note_and_group_nickname(client: TestClient, user_factory, auth_header) -> None:
@@ -236,7 +243,8 @@ def test_group_self_profile_update_persists_note_and_group_nickname(client: Test
         json={"name": "Ops", "member_ids": [member["user"]["id"]]},
         headers=auth_header(owner["access_token"]),
     )
-    group_id = create_group_response.json()["data"]["id"]
+    group_payload = create_group_response.json()["data"]
+    group_id = group_payload["id"]
 
     update_response = client.patch(
         f"/api/v1/groups/{group_id}/me",
@@ -245,11 +253,30 @@ def test_group_self_profile_update_persists_note_and_group_nickname(client: Test
     )
     assert update_response.status_code == 200
     payload = update_response.json()["data"]
-    assert payload["group_note"] == "private note"
-    assert payload["my_group_nickname"] == "oncall"
-    updated_member = next(item for item in payload["members"] if item["id"] == member["user"]["id"])
-    assert updated_member["group_nickname"] == "oncall"
+    assert payload == {
+        "group_id": group_id,
+        "session_id": group_payload["session_id"],
+        "group_note": "private note",
+        "my_group_nickname": "oncall",
+        "changed": True,
+    }
 
+    unchanged_response = client.patch(
+        f"/api/v1/groups/{group_id}/me",
+        json={},
+        headers=auth_header(member["access_token"]),
+    )
+    assert unchanged_response.status_code == 200
+    unchanged_payload = unchanged_response.json()["data"]
+    assert unchanged_payload == {**payload, "changed": False}
+
+    group_response = client.get(
+        f"/api/v1/groups/{group_id}",
+        headers=auth_header(member["access_token"]),
+    )
+    assert group_response.status_code == 200
+    updated_member = next(item for item in group_response.json()["data"]["members"] if item["id"] == member["user"]["id"])
+    assert updated_member["group_nickname"] == "oncall"
 
 
 def test_group_profile_update_succeeds_when_realtime_fanout_fails(
@@ -283,7 +310,54 @@ def test_group_profile_update_succeeds_when_realtime_fanout_fails(
     )
 
     assert response.status_code == 200
-    assert response.json()["data"]["name"] == "Ops 2"
+    assert response.json()["data"]["group"]["name"] == "Ops 2"
+
+
+def test_group_announcement_message_fanout_serializes_each_viewer(monkeypatch) -> None:
+    from app.api.v1 import groups as group_routes
+
+    serialize_calls: list[str] = []
+    message = SimpleNamespace(id='message-1', sender_id='alice')
+
+    class _FakeMessageRepo:
+        def get_by_id(self, message_id: str):
+            assert message_id == 'message-1'
+            return message
+
+    class _FakeMessageService:
+        def __init__(self, db) -> None:
+            self.messages = _FakeMessageRepo()
+
+        def serialize_message(self, message_item, current_user_id: str) -> dict:
+            assert message_item is message
+            serialize_calls.append(current_user_id)
+            return {
+                'message_id': 'message-1',
+                'viewer_id': current_user_id,
+                'is_self': current_user_id == 'alice',
+            }
+
+    send_mock = AsyncMock(return_value={'delivered'})
+    monkeypatch.setattr(group_routes, 'MessageService', _FakeMessageService)
+    monkeypatch.setattr(group_routes.connection_manager, 'send_json_to_users', send_mock)
+
+    async def scenario() -> None:
+        await group_routes._broadcast_group_announcement_message(
+            db=None,
+            announcement_message_id=' message-1 ',
+            participant_ids=['alice', 'bob', 'carol', 'bob'],
+        )
+
+    asyncio.run(scenario())
+
+    assert serialize_calls == ['alice', 'bob', 'carol']
+    assert send_mock.await_count == 3
+    for await_call, expected_user_id in zip(send_mock.await_args_list, ['alice', 'bob', 'carol'], strict=True):
+        user_ids, payload = await_call.args[:2]
+        assert user_ids == [expected_user_id]
+        assert payload['type'] == 'chat_message'
+        assert payload['data']['viewer_id'] == expected_user_id
+        assert payload['data']['is_self'] is (expected_user_id == 'alice')
 
 
 def test_group_schema_rejects_conflicting_member_sources_and_extra_fields(client: TestClient, user_factory, auth_header) -> None:
@@ -393,6 +467,27 @@ def test_group_member_and_profile_schemas_reject_extra_fields(client: TestClient
         headers=auth_header(owner["access_token"]),
     )
     assert oversized_transfer.status_code == 422
+
+    extra_transfer = client.post(
+        f"/api/v1/groups/{group_id}/transfer",
+        json={"new_owner_id": member["user"]["id"], "extra": True},
+        headers=auth_header(owner["access_token"]),
+    )
+    assert extra_transfer.status_code == 422
+
+    extra_role = client.patch(
+        f"/api/v1/groups/{group_id}/members/{member['user']['id']}/role",
+        json={"role": "member", "extra": True},
+        headers=auth_header(owner["access_token"]),
+    )
+    assert extra_role.status_code == 422
+
+    extra_self_profile = client.patch(
+        f"/api/v1/groups/{group_id}/me",
+        json={"note": "ops", "extra": True},
+        headers=auth_header(member["access_token"]),
+    )
+    assert extra_self_profile.status_code == 422
 
     extra_profile = client.patch(
         f"/api/v1/groups/{group_id}",

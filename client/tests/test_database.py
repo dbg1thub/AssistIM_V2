@@ -175,10 +175,11 @@ def test_database_local_directory_cache_search_and_clear() -> None:
             database = Database(db_path=str(db_path))
             await database.connect()
             try:
+                await database.set_app_state("auth.user_id", "alice")
                 await database.replace_contacts_cache(
                     [
                         {
-                            "id": "user-1",
+                            "id": "shared-user",
                             "display_name": "Alice Core",
                             "username": "alice",
                             "nickname": "Alice",
@@ -197,12 +198,13 @@ def test_database_local_directory_cache_search_and_clear() -> None:
                             "region": "Seoul",
                             "signature": "",
                         },
-                    ]
+                    ],
+                    owner_user_id="alice",
                 )
                 await database.replace_groups_cache(
                     [
                         {
-                            "id": "group-1",
+                            "id": "shared-group",
                             "name": "Core Team",
                             "session_id": "session-group-1",
                             "member_count": 3,
@@ -214,17 +216,58 @@ def test_database_local_directory_cache_search_and_clear() -> None:
                             "session_id": "session-group-2",
                             "member_count": 5,
                         },
-                    ]
+                    ],
+                    owner_user_id="alice",
+                )
+                await database.replace_contacts_cache(
+                    [
+                        {
+                            "id": "shared-user",
+                            "display_name": "Bob Core",
+                            "username": "bob-core",
+                            "nickname": "Bobby",
+                            "remark": "Core operator",
+                            "assistim_id": "bobcore",
+                            "region": "Busan",
+                            "signature": "Run core ops",
+                        }
+                    ],
+                    owner_user_id="bob",
+                )
+                await database.replace_groups_cache(
+                    [
+                        {
+                            "id": "shared-group",
+                            "name": "Core Ops",
+                            "session_id": "session-group-3",
+                            "member_count": 4,
+                            "member_search_text": "Bobby Busan Dana",
+                        }
+                    ],
+                    owner_user_id="bob",
                 )
 
                 contacts = await database.search_contacts("core", limit=10)
                 groups = await database.search_groups("core", limit=10)
                 region_contacts = await database.search_contacts("shenzhen", limit=10)
                 member_groups = await database.search_groups("busan", limit=10)
-                assert [item["id"] for item in contacts] == ["user-1"]
-                assert [item["id"] for item in groups] == ["group-1"]
-                assert [item["id"] for item in region_contacts] == ["user-1"]
-                assert [item["id"] for item in member_groups] == ["group-1"]
+                assert [item["id"] for item in contacts] == ["shared-user"]
+                assert [item["display_name"] for item in contacts] == ["Alice Core"]
+                assert [item["id"] for item in groups] == ["shared-group"]
+                assert [item["name"] for item in groups] == ["Core Team"]
+                assert [item["id"] for item in region_contacts] == ["shared-user"]
+                assert [item["id"] for item in member_groups] == ["shared-group"]
+                assert await database.list_contacts_cache_by_ids(["shared-user"]) == {
+                    "shared-user": contacts[0]
+                }
+
+                await database.set_app_state("auth.user_id", "bob")
+                bob_contacts = await database.search_contacts("core", limit=10)
+                bob_groups = await database.search_groups("core", limit=10)
+                assert [item["id"] for item in bob_contacts] == ["shared-user"]
+                assert [item["display_name"] for item in bob_contacts] == ["Bob Core"]
+                assert [item["id"] for item in bob_groups] == ["shared-group"]
+                assert [item["name"] for item in bob_groups] == ["Core Ops"]
 
                 await database.clear_chat_state()
                 assert await database.search_contacts("core", limit=10) == []
@@ -294,6 +337,79 @@ def test_database_message_search_tracks_updates_and_deletes() -> None:
         shutil.rmtree(temp_root, ignore_errors=True)
 
 
+
+def test_database_replace_sessions_prunes_messages_and_read_cursors_outside_snapshot() -> None:
+    temp_root = (Path.cwd() / "client/tests/.pytest_tmp").resolve()
+    temp_root.mkdir(parents=True, exist_ok=True)
+    db_path = temp_root / "database-replace-sessions-prune.db"
+    try:
+        db_path.unlink(missing_ok=True)
+
+        async def scenario() -> None:
+            database = Database(str(db_path))
+            await database.connect()
+            try:
+                session_1 = Session(
+                    session_id="session-1",
+                    name="One",
+                    created_at=datetime.now(),
+                    updated_at=datetime.now(),
+                )
+                session_2 = Session(
+                    session_id="session-2",
+                    name="Two",
+                    created_at=datetime.now(),
+                    updated_at=datetime.now(),
+                )
+                await database.save_sessions_batch([session_1, session_2])
+                await database.save_message(
+                    ChatMessage(
+                        message_id="message-1",
+                        session_id="session-1",
+                        sender_id="alice",
+                        content="kept",
+                        message_type=MessageType.TEXT,
+                        status=MessageStatus.SENT,
+                        timestamp=datetime.now(),
+                        updated_at=datetime.now(),
+                        extra={"session_seq": 1},
+                    )
+                )
+                await database.save_message(
+                    ChatMessage(
+                        message_id="message-2",
+                        session_id="session-2",
+                        sender_id="alice",
+                        content="pruned",
+                        message_type=MessageType.TEXT,
+                        status=MessageStatus.SENT,
+                        timestamp=datetime.now(),
+                        updated_at=datetime.now(),
+                        extra={"session_seq": 1},
+                    )
+                )
+                await database.apply_read_receipt("session-2", "bob", "message-2", 1)
+
+                await database.replace_sessions([session_1])
+            finally:
+                await database.close()
+
+        asyncio.run(scenario())
+
+        with sqlite3.connect(str(db_path)) as connection:
+            message_rows = connection.execute("SELECT session_id FROM messages ORDER BY session_id").fetchall()
+            cursor_rows = connection.execute("SELECT session_id FROM session_read_cursors").fetchall()
+            session_rows = connection.execute("SELECT session_id FROM sessions ORDER BY session_id").fetchall()
+
+        assert message_rows == [("session-1",)]
+        assert cursor_rows == []
+        assert session_rows == [("session-1",)]
+    finally:
+        try:
+            db_path.unlink(missing_ok=True)
+        except PermissionError:
+            pass
+        shutil.rmtree(temp_root, ignore_errors=True)
 def test_database_connect_upgrades_local_search_cache_columns() -> None:
     temp_root = (Path.cwd() / "client/tests/.pytest_tmp").resolve()
     temp_root.mkdir(parents=True, exist_ok=True)
@@ -337,13 +453,29 @@ def test_database_connect_upgrades_local_search_cache_columns() -> None:
             await database.connect()
             try:
                 cursor = await database._db.execute("PRAGMA table_info(contacts_cache)")
-                contact_columns = {row["name"] for row in await cursor.fetchall()}
+                contact_rows = await cursor.fetchall()
+                contact_columns = {row["name"] for row in contact_rows}
                 cursor = await database._db.execute("PRAGMA table_info(groups_cache)")
-                group_columns = {row["name"] for row in await cursor.fetchall()}
+                group_rows = await cursor.fetchall()
+                group_columns = {row["name"] for row in group_rows}
                 cursor = await database._db.execute("PRAGMA table_info(messages)")
                 message_columns = {row["name"] for row in await cursor.fetchall()}
+                contact_primary_key = {
+                    row["name"]: int(row["pk"] or 0)
+                    for row in contact_rows
+                    if int(row["pk"] or 0) > 0
+                }
+                group_primary_key = {
+                    row["name"]: int(row["pk"] or 0)
+                    for row in group_rows
+                    if int(row["pk"] or 0) > 0
+                }
+                assert "owner_user_id" in contact_columns
                 assert "region" in contact_columns
+                assert contact_primary_key == {"owner_user_id": 1, "contact_id": 2}
+                assert "owner_user_id" in group_columns
                 assert "member_search_text" in group_columns
+                assert group_primary_key == {"owner_user_id": 1, "group_id": 2}
                 assert "is_encrypted" in message_columns
                 assert "encryption_scheme" in message_columns
             finally:
@@ -466,6 +598,112 @@ def test_database_read_cursor_overlay_updates_cached_self_messages_without_row_r
 
         assert cursor_seq == 2
         assert persisted_extra["read_by_user_ids"] == []
+    finally:
+        try:
+            db_path.unlink(missing_ok=True)
+        except PermissionError:
+            pass
+        shutil.rmtree(temp_root, ignore_errors=True)
+
+
+def test_database_directory_cache_replace_is_atomic_per_owner() -> None:
+    temp_root = (Path.cwd() / "client/tests/.pytest_tmp").resolve()
+    temp_root.mkdir(parents=True, exist_ok=True)
+    db_path = temp_root / "database-directory-cache-atomic.db"
+    try:
+        db_path.unlink(missing_ok=True)
+
+        async def scenario() -> None:
+            database = Database(db_path=str(db_path))
+            await database.connect()
+            try:
+                await database.set_app_state("auth.user_id", "alice")
+                await database.replace_contacts_cache(
+                    [
+                        {
+                            "id": "legacy-contact",
+                            "display_name": "Legacy Contact",
+                            "nickname": "Legacy",
+                            "assistim_id": "legacy-contact",
+                            "region": "Seoul",
+                        }
+                    ],
+                    owner_user_id="alice",
+                )
+                await database.replace_groups_cache(
+                    [
+                        {
+                            "id": "legacy-group",
+                            "name": "Legacy Group",
+                            "session_id": "session-legacy",
+                            "member_search_text": "Legacy Seoul",
+                        }
+                    ],
+                    owner_user_id="alice",
+                )
+
+                original_execute = database._db.execute
+                contact_insert_calls = 0
+
+                async def flaky_contact_execute(sql: str, params=()):
+                    nonlocal contact_insert_calls
+                    normalized_sql = " ".join(str(sql).split())
+                    if "INSERT OR REPLACE INTO contacts_cache" in normalized_sql:
+                        contact_insert_calls += 1
+                        if contact_insert_calls == 2:
+                            raise RuntimeError("inject contact replace failure")
+                    return await original_execute(sql, params)
+
+                database._db.execute = flaky_contact_execute
+                try:
+                    try:
+                        await database.replace_contacts_cache(
+                            [
+                                {"id": "new-contact-1", "display_name": "New Contact 1"},
+                                {"id": "new-contact-2", "display_name": "New Contact 2"},
+                            ],
+                            owner_user_id="alice",
+                        )
+                        raise AssertionError("replace_contacts_cache should have failed")
+                    except RuntimeError as exc:
+                        assert str(exc) == "inject contact replace failure"
+                finally:
+                    database._db.execute = original_execute
+
+                assert [item["id"] for item in await database.search_contacts("legacy", limit=10)] == ["legacy-contact"]
+
+                group_insert_calls = 0
+
+                async def flaky_group_execute(sql: str, params=()):
+                    nonlocal group_insert_calls
+                    normalized_sql = " ".join(str(sql).split())
+                    if "INSERT OR REPLACE INTO groups_cache" in normalized_sql:
+                        group_insert_calls += 1
+                        if group_insert_calls == 2:
+                            raise RuntimeError("inject group replace failure")
+                    return await original_execute(sql, params)
+
+                database._db.execute = flaky_group_execute
+                try:
+                    try:
+                        await database.replace_groups_cache(
+                            [
+                                {"id": "new-group-1", "name": "New Group 1"},
+                                {"id": "new-group-2", "name": "New Group 2"},
+                            ],
+                            owner_user_id="alice",
+                        )
+                        raise AssertionError("replace_groups_cache should have failed")
+                    except RuntimeError as exc:
+                        assert str(exc) == "inject group replace failure"
+                finally:
+                    database._db.execute = original_execute
+
+                assert [item["id"] for item in await database.search_groups("legacy", limit=10)] == ["legacy-group"]
+            finally:
+                await database.close()
+
+        asyncio.run(scenario())
     finally:
         try:
             db_path.unlink(missing_ok=True)

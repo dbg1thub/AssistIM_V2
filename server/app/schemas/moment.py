@@ -15,10 +15,18 @@ class MomentCommentCreate(BaseModel):
     content: str = Field(min_length=1)
 
 
+class MomentAuthorOut(ORMModel):
+    id: str
+    username: str
+    nickname: str | None = None
+    avatar: str | None = None
+
+
 class MomentOut(ORMModel):
     id: str
     user_id: str
     content: str
+    author: MomentAuthorOut | None = None
 
 
 class MomentCommentOut(ORMModel):
@@ -26,3 +34,4 @@ class MomentCommentOut(ORMModel):
     moment_id: str
     user_id: str
     content: str
+    author: MomentAuthorOut | None = None

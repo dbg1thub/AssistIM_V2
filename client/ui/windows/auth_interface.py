@@ -92,8 +92,10 @@ class AuthInterface(FluentWidget):
         self._submit_task: Optional[asyncio.Task] = None
         self._ui_tasks: set[asyncio.Task] = set()
         self._busy_mode: Optional[str] = None
+        self._submit_commit_in_progress = False
         self._centered_once = False
         self._transient_dialogs: set[QDialog] = set()
+        self._auth_committed = False
         self.last_success_message = ""
 
         self._setup_ui()
@@ -464,7 +466,9 @@ class AuthInterface(FluentWidget):
         retry_force_login = False
         self._set_busy("login")
         try:
-            user = await self._auth_controller.login(username, password, force=force)
+            payload = await self._auth_controller.request_login_payload(username, password, force=force)
+            self._submit_commit_in_progress = True
+            user = await self._auth_controller.commit_auth_payload(payload, reset_local_chat_state=True)
         except asyncio.CancelledError:
             raise
         except NetworkError as exc:
@@ -486,10 +490,12 @@ class AuthInterface(FluentWidget):
                 "Welcome back, {name}",
                 name=user.get("nickname") or user.get("username", ""),
             )
+            self._auth_committed = True
             self.authenticated.emit(user)
-            self.close()
         finally:
-            self._set_busy(None)
+            self._submit_commit_in_progress = False
+            if not self._auth_committed:
+                self._set_busy(None)
 
         if retry_force_login:
             self._set_submit_task(self._perform_login(username, password, force=True))
@@ -519,7 +525,9 @@ class AuthInterface(FluentWidget):
     async def _perform_register(self, username: str, nickname: str, password: str) -> None:
         self._set_busy("register")
         try:
-            user = await self._auth_controller.register(username, nickname, password)
+            payload = await self._auth_controller.request_register_payload(username, nickname, password)
+            self._submit_commit_in_progress = True
+            user = await self._auth_controller.commit_auth_payload(payload, reset_local_chat_state=True)
         except asyncio.CancelledError:
             raise
         except (APIError, NetworkError) as exc:
@@ -534,10 +542,12 @@ class AuthInterface(FluentWidget):
                 "Account created for {name}",
                 name=user.get("nickname") or user.get("username", ""),
             )
+            self._auth_committed = True
             self.authenticated.emit(user)
-            self.close()
         finally:
-            self._set_busy(None)
+            self._submit_commit_in_progress = False
+            if not self._auth_committed:
+                self._set_busy(None)
 
     def _show_error(self, message: str) -> None:
         InfoBar.error(tr("auth.feedback.title", "Authentication"), message, parent=self.form_card)
@@ -560,9 +570,17 @@ class AuthInterface(FluentWidget):
         )
 
     def closeEvent(self, event: QCloseEvent) -> None:
-        self._cancel_pending_task(self._submit_task)
-        self.closed.emit()
+        if self._submit_commit_in_progress:
+            event.ignore()
+            return
+        if not self._auth_committed:
+            self._cancel_pending_task(self._submit_task)
+            self.closed.emit()
         super().closeEvent(event)
+
+    def has_committed_auth(self) -> bool:
+        """Return whether this auth shell has already committed one login/register result."""
+        return self._auth_committed
 
     def _on_destroyed(self, *_args) -> None:
         """Cancel outstanding submit work when the widget is torn down."""

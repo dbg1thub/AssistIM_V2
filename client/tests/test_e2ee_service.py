@@ -18,15 +18,26 @@ pytest.importorskip("cryptography")
 class FakeDatabase:
     def __init__(self) -> None:
         self.state: dict[str, str] = {}
+        self.replace_calls: list[tuple[dict[str, str], list[str]]] = []
 
     async def get_app_state(self, key: str):
         return self.state.get(key)
 
+    async def replace_app_state(self, values: dict[str, str] | None = None, *, delete_keys=()) -> None:
+        self.replace_calls.append((dict(values or {}), [str(key) for key in list(delete_keys or [])]))
+        for key in list(delete_keys or []):
+            self.state.pop(str(key), None)
+        for key, value in dict(values or {}).items():
+            self.state[str(key)] = value
+
     async def set_app_state(self, key: str, value: str) -> None:
-        self.state[key] = value
+        await self.replace_app_state({key: value})
 
     async def delete_app_state(self, key: str) -> None:
-        self.state.pop(key, None)
+        await self.replace_app_state(delete_keys=[key])
+
+    async def delete_app_states(self, keys) -> None:
+        await self.replace_app_state(delete_keys=keys)
 
 
 class FakeHttpClient:
@@ -293,6 +304,17 @@ def test_e2ee_service_reprovisions_local_device_and_deletes_previous_remote_devi
         assert current_bundle["device_id"] != previous_bundle["device_id"]
         assert current_bundle["next_signed_prekey_id"] == 2
         assert current_bundle["next_prekey_id"] == 33
+        bundle_replace_calls = [
+            (values, delete_keys)
+            for values, delete_keys in fake_db.replace_calls
+            if set(values) == {service.DEVICE_STATE_KEY}
+            and set(delete_keys) == {
+                service.GROUP_SESSION_STATE_KEY,
+                service.HISTORY_RECOVERY_STATE_KEY,
+                service.IDENTITY_TRUST_STATE_KEY,
+            }
+        ]
+        assert bundle_replace_calls
 
     asyncio.run(scenario())
 
@@ -1282,4 +1304,3 @@ def test_e2ee_service_encrypts_group_attachment_with_sender_key_fanout(monkeypat
         asyncio.run(scenario())
     finally:
         shutil.rmtree(workspace_tmp, ignore_errors=True)
-

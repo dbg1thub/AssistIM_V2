@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.testclient import TestClient
 from fastapi.routing import APIRoute
 from starlette.routing import WebSocketRoute
@@ -17,7 +18,7 @@ from starlette.routing import WebSocketRoute
 from app.core.config import Settings, reload_settings
 from app.core.database import Base, SessionLocal, configure_database, get_engine, init_db
 from app.core.errors import ErrorCode
-from app.core.rate_limit import InMemoryRateLimitStore, RateLimiter, RateLimitStore
+from app.core.rate_limit import DatabaseRateLimitStore, InMemoryRateLimitStore, RateLimiter, RateLimitStore
 from app.core.security import create_access_token, decode_access_token
 from app.dependencies.settings_dependency import get_request_settings, get_websocket_settings
 from app.main import create_app
@@ -198,9 +199,11 @@ def test_api_schema_models_use_canonical_session_and_friend_request_fields() -> 
     assert "counterpart_avatar" in SessionOut.model_fields
     assert "counterpart_id" in SessionOut.model_fields
     assert "encryption_mode" in SessionOut.model_fields
-    assert "session_crypto_state" in SessionOut.model_fields
+    assert "session_crypto_state" not in SessionOut.model_fields
     assert "call_capabilities" in SessionOut.model_fields
+    assert "is_ai" not in MessageOut.model_fields
     assert "msg_id" not in MessageOut.model_fields
+    assert "timestamp" not in MessageOut.model_fields
     assert "type" not in MessageOut.model_fields
 
 
@@ -242,7 +245,7 @@ def test_rate_limiter_delegates_to_store_and_reset() -> None:
             await limiter.dependency("login", 3, window_seconds=30)(request)
 
         assert exc_info.value.code == ErrorCode.RATE_LIMITED
-        assert store.calls[0]["key"] == "login:127.0.0.1"
+        assert store.calls[0]["key"] == "login:127.0.0.1:anonymous"
         assert store.calls[0]["limit"] == 3
         assert store.calls[0]["window_seconds"] == 30
 
@@ -682,3 +685,52 @@ def test_schema_compatibility_backfills_avatar_columns_for_legacy_runtime_schema
     assert user_row["avatar_kind"] == "default"
     assert str(user_row["avatar_default_key"] or "") != ""
 
+
+
+def test_auth_schema_contracts_are_strict_and_match_runtime_payloads() -> None:
+    from app.schemas.auth import LoginRequest, RefreshTokenRequest, RegisterRequest, TokenPair
+
+    assert RegisterRequest.model_config.get("extra") == "forbid"
+    assert LoginRequest.model_config.get("extra") == "forbid"
+    assert RefreshTokenRequest.model_config.get("extra") == "forbid"
+    assert TokenPair.model_fields["token_type"].default == "Bearer"
+
+
+
+def test_rate_limiter_keys_login_attempts_by_canonical_subject() -> None:
+    store = FakeRateLimitStore(allow_result=True)
+    limiter = RateLimiter(store=store)
+
+    class LoginRequest:
+        client = SimpleNamespace(host="127.0.0.1")
+
+        async def json(self):
+            return {"username": " Alice "}
+
+    asyncio.run(limiter.dependency("login", 3, window_seconds=30)(LoginRequest()))
+
+    assert store.calls[0]["key"] == "login:127.0.0.1:alice"
+
+
+def test_create_app_disables_credentials_for_wildcard_cors() -> None:
+    wildcard_app = create_app(Settings(cors_origins=("*",)))
+    explicit_app = create_app(Settings(cors_origins=("http://localhost:5173",)))
+
+    wildcard_cors = next(item for item in wildcard_app.user_middleware if item.cls is CORSMiddleware)
+    explicit_cors = next(item for item in explicit_app.user_middleware if item.cls is CORSMiddleware)
+
+    assert wildcard_cors.kwargs["allow_credentials"] is False
+    assert explicit_cors.kwargs["allow_credentials"] is True
+
+
+
+
+def test_database_rate_limit_store_shares_counters_across_instances() -> None:
+    store_one = DatabaseRateLimitStore()
+    store_two = DatabaseRateLimitStore()
+    store_one.reset()
+
+    assert store_one.allow("login:127.0.0.1:alice", limit=1, window_seconds=60, now=100.0) is True
+    assert store_two.allow("login:127.0.0.1:alice", limit=1, window_seconds=60, now=101.0) is False
+
+    store_one.reset()

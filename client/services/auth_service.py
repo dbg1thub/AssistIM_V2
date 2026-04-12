@@ -50,6 +50,9 @@ class AuthService:
         """Clear in-memory auth tokens."""
         self._http.clear_tokens()
 
+    async def refresh_access_token(self) -> bool:
+        """Refresh the current access token if a refresh token is available."""
+        return await self._http.refresh_access_token()
     async def fetch_current_user(self) -> dict[str, Any]:
         """Fetch the current authenticated user."""
         payload = await self._http.get("/auth/me")
@@ -86,6 +89,12 @@ class AuthService:
     async def logout(self) -> None:
         """Best-effort backend logout."""
         await self._http.delete("/auth/session")
+
+    async def close(self) -> None:
+        """Retire the auth service without closing the shared HTTP transport."""
+        global _auth_service
+        if _auth_service is self:
+            _auth_service = None
 
 
 _auth_service: Optional[AuthService] = None

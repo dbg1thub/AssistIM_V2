@@ -38,6 +38,7 @@ class ConnectionManager:
     LAST_SYNC_SESSION_CURSORS = "last_sync_session_cursors"
     LAST_SYNC_EVENT_CURSORS = "last_sync_event_cursors"
     LEGACY_LAST_SYNC_TIMESTAMP = "last_sync_timestamp"
+    WS_AUTH_TIMEOUT_SECONDS = 10.0
 
     def __init__(self):
         self._ws_client: Optional[WebSocketClient] = None
@@ -45,8 +46,11 @@ class ConnectionManager:
         self._tasks: set[asyncio.Task] = set()
         self._thread_futures: set[Future] = set()
         self._state = ConnectionState.DISCONNECTED
+        self._message_dispatch_lock = asyncio.Lock()
         self._state_listeners: list[Callable[[ConnectionState, ConnectionState], None]] = []
         self._message_listeners: list[Callable[[dict], Any]] = []
+        self._auth_waiters: list[asyncio.Future[None]] = []
+        self._sync_waiters: list[asyncio.Future[None]] = []
         self._session_sync_cursors: dict[str, int] = {}
         self._event_sync_cursors: dict[str, int] = {}
         self._db = None
@@ -57,6 +61,9 @@ class ConnectionManager:
         self._auth_service.add_token_listener(self._on_tokens_changed)
         self._ws_authenticated = False
         self._ws_auth_in_flight = False
+        self._ws_auth_refresh_attempted = False
+        self._ws_auth_attempt_id = 0
+        self._sync_in_flight = False
         self._callback_generation = 0
         self._closing = False
 
@@ -68,7 +75,7 @@ class ConnectionManager:
     @property
     def is_connected(self) -> bool:
         """Check if connected."""
-        return self._state == ConnectionState.CONNECTED
+        return self._state == ConnectionState.CONNECTED and self._ws_authenticated
 
     @property
     def ws_client(self) -> Optional[WebSocketClient]:
@@ -88,6 +95,11 @@ class ConnectionManager:
     async def reload_sync_timestamp(self) -> None:
         """Reload the sync cursors from persisted local state."""
         await self._load_sync_state()
+
+    def clear_sync_state_memory(self) -> None:
+        """Clear in-memory reconnect cursors after durable chat state has already been reset."""
+        self._session_sync_cursors = {}
+        self._event_sync_cursors = {}
 
     async def reset_sync_state(self) -> None:
         """Reset in-memory and persisted sync cursors for a fresh account context."""
@@ -124,6 +136,11 @@ class ConnectionManager:
         if listener in self._message_listeners:
             self._message_listeners.remove(listener)
 
+    @property
+    def sync_in_flight(self) -> bool:
+        """Return whether one authenticated websocket sync request is still being processed."""
+        return bool(self._sync_in_flight)
+
     def _notify_state_change(
         self,
         old_state: ConnectionState,
@@ -138,15 +155,42 @@ class ConnectionManager:
             except Exception as e:
                 logger.error(f"State listener error: {e}")
 
-    def _notify_message(self, message: dict) -> None:
-        """Notify all listeners of new message."""
+    async def _notify_message(self, message: dict) -> None:
+        """Notify all listeners of one inbound transport payload in listener order."""
         for listener in list(self._message_listeners):
             try:
                 result = listener(message)
                 if inspect.isawaitable(result):
-                    self._schedule_message_coroutine(result)
+                    await result
             except Exception as e:
                 logger.error(f"Message listener error: {e}")
+
+    def _create_waiter(self, waiters: list[asyncio.Future[None]]) -> asyncio.Future[None]:
+        """Allocate one main-loop waiter for a connection sub-stage."""
+        loop = self._loop
+        if loop is None or not loop.is_running():
+            loop = asyncio.get_running_loop()
+            self._loop = loop
+        future: asyncio.Future[None] = loop.create_future()
+        waiters.append(future)
+        return future
+
+    @staticmethod
+    def _resolve_waiters(waiters: list[asyncio.Future[None]]) -> None:
+        """Resolve and clear a waiter list."""
+        for waiter in waiters:
+            if not waiter.done():
+                waiter.set_result(None)
+        waiters.clear()
+
+    @staticmethod
+    def _fail_waiters(waiters: list[asyncio.Future[None]], reason: str) -> None:
+        """Fail and clear a waiter list."""
+        error = RuntimeError(reason)
+        for waiter in waiters:
+            if not waiter.done():
+                waiter.set_exception(error)
+        waiters.clear()
 
     @staticmethod
     def _normalize_session_cursors(raw_cursors: Any) -> dict[str, int]:
@@ -322,26 +366,22 @@ class ConnectionManager:
             logger.warning(f"Failed to load sync state: {e}")
 
     async def _save_sync_state(self) -> None:
-        """Persist message and event reconnect cursors to local app state."""
+        """Persist message and event reconnect cursors as one local recovery point."""
         try:
             if self._db and self._db.is_connected:
+                values: dict[str, str] = {}
+                delete_keys: list[str] = [self.LEGACY_LAST_SYNC_TIMESTAMP]
                 if self._session_sync_cursors:
-                    await self._db.set_app_state(
-                        self.LAST_SYNC_SESSION_CURSORS,
-                        json.dumps(self._session_sync_cursors, sort_keys=True),
-                    )
+                    values[self.LAST_SYNC_SESSION_CURSORS] = json.dumps(self._session_sync_cursors, sort_keys=True)
                 else:
-                    await self._db.delete_app_state(self.LAST_SYNC_SESSION_CURSORS)
+                    delete_keys.append(self.LAST_SYNC_SESSION_CURSORS)
 
                 if self._event_sync_cursors:
-                    await self._db.set_app_state(
-                        self.LAST_SYNC_EVENT_CURSORS,
-                        json.dumps(self._event_sync_cursors, sort_keys=True),
-                    )
+                    values[self.LAST_SYNC_EVENT_CURSORS] = json.dumps(self._event_sync_cursors, sort_keys=True)
                 else:
-                    await self._db.delete_app_state(self.LAST_SYNC_EVENT_CURSORS)
+                    delete_keys.append(self.LAST_SYNC_EVENT_CURSORS)
 
-                await self._db.delete_app_state(self.LEGACY_LAST_SYNC_TIMESTAMP)
+                await self._db.replace_app_state(values, delete_keys=delete_keys)
                 logger.debug(
                     "Saved reconnect cursors for %d message sessions and %d event sessions",
                     len(self._session_sync_cursors),
@@ -350,7 +390,7 @@ class ConnectionManager:
         except Exception as e:
             logger.warning(f"Failed to save sync state: {e}")
 
-    def _create_task(self, coro) -> None:
+    def _create_task(self, coro) -> asyncio.Task:
         task = asyncio.create_task(coro)
         self._tasks.add(task)
 
@@ -364,6 +404,7 @@ class ConnectionManager:
                 logger.exception("Connection manager background task crashed")
 
         task.add_done_callback(_cleanup)
+        return task
 
     def _schedule_message_coroutine(self, coro) -> None:
         """Schedule websocket message processing back onto the main asyncio loop."""
@@ -409,6 +450,10 @@ class ConnectionManager:
             return
         self._ws_authenticated = False
         self._ws_auth_in_flight = False
+        self._sync_in_flight = False
+        self._ws_auth_attempt_id += 1
+        self._fail_waiters(self._auth_waiters, "WebSocket authentication was cancelled because credentials were cleared")
+        self._fail_waiters(self._sync_waiters, "WebSocket sync was cancelled because credentials were cleared")
         if self._closing or not self._ws_client or not self._ws_client.is_connected:
             return
         try:
@@ -430,7 +475,7 @@ class ConnectionManager:
     def _dispatch_message(self, generation: int, message: dict) -> None:
         if not self._is_callback_current(generation):
             return
-        self._on_message(message)
+        self._schedule_message_coroutine(self._handle_dispatched_message(message))
 
     def _dispatch_error(self, generation: int, error: str) -> None:
         if not self._is_callback_current(generation):
@@ -442,8 +487,11 @@ class ConnectionManager:
         self._connect_started_at = time.perf_counter()
         self._ws_authenticated = False
         self._ws_auth_in_flight = False
+        self._ws_auth_refresh_attempted = False
+        self._sync_in_flight = False
+        self._ws_auth_attempt_id += 1
         old_state = self._state
-        self._notify_state_change(old_state, ConnectionState.CONNECTED)
+        self._notify_state_change(old_state, ConnectionState.AUTHENTICATING)
 
         logger.info("Connection established")
         self._schedule_post_connect_handshake()
@@ -468,6 +516,7 @@ class ConnectionManager:
         if not access_token:
             logger.info("Skipping websocket auth: no access token present")
             self._ws_auth_in_flight = False
+            self._fail_waiters(self._auth_waiters, "WebSocket authentication requires an access token")
             return False
 
         auth_message = {
@@ -482,9 +531,12 @@ class ConnectionManager:
         success = await self.send(auth_message)
         if success:
             self._ws_auth_in_flight = True
+            self._schedule_ws_auth_timeout()
             logger.info("WebSocket auth message sent")
         else:
             self._ws_auth_in_flight = False
+            self._ws_auth_attempt_id += 1
+            self._fail_waiters(self._auth_waiters, "Failed to send websocket auth message")
             logger.warning("Failed to send websocket auth message")
         return success
 
@@ -495,6 +547,7 @@ class ConnectionManager:
         if not access_token:
             logger.info("Skipping websocket auth: no access token present")
             self._ws_auth_in_flight = False
+            self._fail_waiters(self._auth_waiters, "WebSocket authentication requires an access token")
             return False
 
         auth_message = {
@@ -509,17 +562,55 @@ class ConnectionManager:
         success = bool(self._ws_client and self._ws_client.send_nowait(auth_message))
         if success:
             self._ws_auth_in_flight = True
+            self._schedule_ws_auth_timeout()
             logger.info("WebSocket auth message sent")
         else:
             self._ws_auth_in_flight = False
+            self._ws_auth_attempt_id += 1
+            self._fail_waiters(self._auth_waiters, "Failed to send websocket auth message")
             logger.warning("Failed to send websocket auth message")
         return success
 
-    async def _send_sync_request(self) -> None:
+    def _schedule_ws_auth_timeout(self) -> None:
+        """Start one timeout guard for the current websocket auth attempt."""
+        self._ws_auth_attempt_id += 1
+        attempt_id = self._ws_auth_attempt_id
+        self._schedule_message_coroutine(self._handle_ws_auth_timeout(attempt_id))
+
+    async def _handle_ws_auth_timeout(self, attempt_id: int) -> None:
+        """Disconnect a websocket auth attempt that never receives a terminal ack/error."""
+        await asyncio.sleep(self.WS_AUTH_TIMEOUT_SECONDS)
+        if (
+            self._closing
+            or self._ws_auth_attempt_id != attempt_id
+            or not self._ws_auth_in_flight
+            or self._ws_authenticated
+        ):
+            return
+
+        self._ws_auth_in_flight = False
+        self._sync_in_flight = False
+        self._ws_auth_attempt_id += 1
+        logger.warning("WebSocket auth timed out after %.1fs", self.WS_AUTH_TIMEOUT_SECONDS)
+        self._fail_waiters(self._auth_waiters, "WebSocket authentication timed out")
+        self._fail_waiters(self._sync_waiters, "Initial websocket sync was cancelled because authentication timed out")
+        await self._notify_message(
+            {
+                "type": "error",
+                "data": {
+                    "code": 408,
+                    "reason": "ws_auth_timeout",
+                    "message": "WebSocket authentication timed out",
+                },
+            }
+        )
+        await self.disconnect()
+
+    async def _send_sync_request(self) -> bool:
         """Send sync request using per-session reconnect cursors."""
         if not self._ws_authenticated:
             logger.warning("Skipping sync request: websocket not authenticated")
-            return
+            return False
         sync_message = {
             "type": "sync_messages",
             "seq": 0,
@@ -536,12 +627,14 @@ class ConnectionManager:
             logger.info("Sync request sent for %d sessions", len(self._session_sync_cursors))
         else:
             logger.warning("Failed to send sync request")
+            self._fail_waiters(self._sync_waiters, "Failed to send initial websocket sync request")
+        return success
 
-    def _send_sync_request_nowait(self) -> None:
+    def _send_sync_request_nowait(self) -> bool:
         """Send sync request without awaiting worker send completion on the main loop."""
         if not self._ws_authenticated:
             logger.warning("Skipping sync request: websocket not authenticated")
-            return
+            return False
         sync_started = time.perf_counter()
         sync_message = {
             "type": "sync_messages",
@@ -559,12 +652,19 @@ class ConnectionManager:
             logger.info("Sync request sent for %d sessions", len(self._session_sync_cursors))
         else:
             logger.warning("Failed to send sync request")
+            self._fail_waiters(self._sync_waiters, "Failed to send initial websocket sync request")
         logger.info("Sync request dispatch finished in %.1fms", (time.perf_counter() - sync_started) * 1000)
+        return success
 
     def _on_disconnect(self) -> None:
         """Handle disconnection."""
         self._ws_authenticated = False
         self._ws_auth_in_flight = False
+        self._ws_auth_refresh_attempted = False
+        self._sync_in_flight = False
+        self._ws_auth_attempt_id += 1
+        self._fail_waiters(self._auth_waiters, "WebSocket disconnected before authentication completed")
+        self._fail_waiters(self._sync_waiters, "WebSocket disconnected before initial sync completed")
         old_state = self._state
 
         if old_state != ConnectionState.RECONNECTING:
@@ -574,17 +674,39 @@ class ConnectionManager:
 
     def _on_message(self, message: dict) -> None:
         """Handle incoming message."""
+        self._schedule_message_coroutine(self._handle_dispatched_message(message))
+
+    async def _handle_dispatched_message(self, message: dict) -> None:
+        """Serialize inbound message processing on the main loop."""
+        async with self._message_dispatch_lock:
+            await self._process_inbound_message(message)
+
+    async def _process_inbound_message(self, message: dict) -> None:
+        """Handle one inbound message and await listener-side processing before advancing sync stage."""
         msg_type = message.get("type")
         message_started = time.perf_counter()
         sync_state_changed = False
+        sync_completed = False
 
         if msg_type == "auth_ack":
             data = message.get("data", {})
-            was_authenticated = self._ws_authenticated
             self._ws_auth_in_flight = False
+            self._ws_auth_attempt_id += 1
             self._ws_authenticated = bool(isinstance(data, dict) and data.get("success"))
-            if self._ws_authenticated and not was_authenticated:
-                self._schedule_message_coroutine(self._send_sync_request())
+            if self._ws_authenticated:
+                self._ws_auth_refresh_attempted = False
+                old_state = self._state
+                self._notify_state_change(old_state, ConnectionState.CONNECTED)
+                self._sync_in_flight = True
+                if await self._send_sync_request():
+                    self._resolve_waiters(self._auth_waiters)
+                else:
+                    self._ws_authenticated = False
+                    self._sync_in_flight = False
+                    self._fail_waiters(self._auth_waiters, "Failed to dispatch initial websocket sync request")
+            else:
+                self._fail_waiters(self._auth_waiters, "WebSocket authentication rejected")
+                self._fail_waiters(self._sync_waiters, "Initial websocket sync was cancelled because authentication was rejected")
         elif msg_type == "history_messages":
             data = message.get("data", {})
             messages = data.get("messages", [])
@@ -599,6 +721,7 @@ class ConnectionManager:
             data = message.get("data", {})
             events = data.get("events", [])
             sync_state_changed = self._advance_event_cursors_from_history_payload(events)
+            sync_completed = self._sync_in_flight
         elif msg_type == "chat_message":
             sync_state_changed = self._advance_cursor_from_message_payload(message.get("data", {}))
         elif msg_type == "message_ack":
@@ -607,20 +730,58 @@ class ConnectionManager:
             )
         elif msg_type == "error" and self._ws_auth_in_flight:
             self._ws_auth_in_flight = False
+            self._ws_auth_attempt_id += 1
+            data = message.get("data", {}) if isinstance(message.get("data"), dict) else {}
+            try:
+                code = int(data.get("code", 0) or 0)
+            except (TypeError, ValueError):
+                code = 0
+            if code in {401, 40101, 403} and not self._ws_auth_refresh_attempted:
+                self._ws_auth_refresh_attempted = True
+                self._schedule_message_coroutine(self._refresh_and_reauthenticate_websocket(message))
+                return
+            self._fail_waiters(self._auth_waiters, "WebSocket authentication failed")
+            self._fail_waiters(self._sync_waiters, "Initial websocket sync was cancelled because authentication failed")
         elif msg_type in {"message_edit", "message_recall", "message_delete", "read", "group_profile_update", "group_self_profile_update"}:
             sync_state_changed = self._advance_event_cursor_from_event_payload(message.get("data", {}))
 
         if sync_state_changed:
-            self._schedule_message_coroutine(self._save_sync_state())
+            await self._save_sync_state()
 
-        self._notify_message(message)
+        await self._notify_message(message)
+        if sync_completed:
+            self._sync_in_flight = False
+            self._resolve_waiters(self._sync_waiters)
         if msg_type in {"history_messages", "history_events"}:
             logger.info(
-                "History dispatch scheduling took %.1fms for %s",
+                "History dispatch finished in %.1fms for %s",
                 (time.perf_counter() - message_started) * 1000,
                 msg_type,
             )
 
+    async def _refresh_and_reauthenticate_websocket(self, terminal_message: dict) -> None:
+        """Refresh an expired access token and retry websocket auth once before surfacing auth loss."""
+        refresh = getattr(self._auth_service, "refresh_access_token", None)
+        if not callable(refresh):
+            await self._notify_message(terminal_message)
+            return
+
+        try:
+            refreshed = await refresh()
+        except Exception:
+            logger.exception("WebSocket auth token refresh failed")
+            refreshed = False
+
+        if not refreshed:
+            await self._notify_message(terminal_message)
+            return
+
+        if self._closing or not self._ws_client or not self._ws_client.is_connected:
+            return
+
+        sent = await self._authenticate_websocket()
+        if not sent:
+            await self._notify_message(terminal_message)
     def _on_error(self, error: str) -> None:
         """Handle connection error."""
         logger.error(f"Connection error: {error}")
@@ -630,7 +791,7 @@ class ConnectionManager:
         Connect to WebSocket server.
 
         Returns:
-            True if connection started successfully
+            True when websocket authentication has completed successfully
         """
         if not self._ws_client:
             await self.initialize()
@@ -640,12 +801,35 @@ class ConnectionManager:
         except RuntimeError:
             pass
 
-        old_state = self._state
-        self._notify_state_change(old_state, ConnectionState.CONNECTING)
+        if self._ws_authenticated and self._state == ConnectionState.CONNECTED:
+            return True
 
-        await self._ws_client.connect()
+        auth_waiter = self._create_waiter(self._auth_waiters)
+        should_start_connect = not bool(self._ws_client and self._ws_client.is_connected)
 
+        if should_start_connect:
+            old_state = self._state
+            self._notify_state_change(old_state, ConnectionState.CONNECTING)
+            await self._ws_client.connect()
+        elif not self._ws_auth_in_flight:
+            old_state = self._state
+            self._notify_state_change(old_state, ConnectionState.AUTHENTICATING)
+            if not self._authenticate_websocket_nowait():
+                if auth_waiter in self._auth_waiters:
+                    self._auth_waiters.remove(auth_waiter)
+                raise RuntimeError("Failed to send websocket auth message")
+
+        await auth_waiter
         return True
+
+    async def wait_for_initial_sync(self) -> None:
+        """Wait until the current authenticated websocket sync batch has been fully replayed."""
+        if not self._ws_authenticated:
+            raise RuntimeError("Cannot wait for websocket sync before authentication succeeds")
+        if not self._sync_in_flight:
+            return
+        sync_waiter = self._create_waiter(self._sync_waiters)
+        await sync_waiter
 
     async def disconnect(self) -> None:
         """
@@ -658,6 +842,9 @@ class ConnectionManager:
 
         old_state = self._state
         self._notify_state_change(old_state, ConnectionState.DISCONNECTED)
+        self._fail_waiters(self._auth_waiters, "WebSocket connection was disconnected intentionally")
+        self._fail_waiters(self._sync_waiters, "WebSocket sync was interrupted by intentional disconnect")
+        self._sync_in_flight = False
 
         await self._ws_client.disconnect()
 
@@ -820,6 +1007,24 @@ class ConnectionManager:
         }
         return await self.send(message)
 
+    async def prune_sync_state(self, active_session_ids) -> None:
+        """Remove reconnect cursors for sessions outside the current authoritative snapshot."""
+        active_ids = {str(session_id or "").strip() for session_id in active_session_ids if str(session_id or "").strip()}
+        previous_session_cursors = dict(self._session_sync_cursors)
+        previous_event_cursors = dict(self._event_sync_cursors)
+        self._session_sync_cursors = {
+            session_id: cursor
+            for session_id, cursor in self._session_sync_cursors.items()
+            if session_id in active_ids
+        }
+        self._event_sync_cursors = {
+            session_id: cursor
+            for session_id, cursor in self._event_sync_cursors.items()
+            if session_id in active_ids
+        }
+        if self._session_sync_cursors != previous_session_cursors or self._event_sync_cursors != previous_event_cursors:
+            await self._save_sync_state()
+
     async def close(self) -> None:
         """Close connection manager and cleanup."""
         logger.info("Closing connection manager")
@@ -854,8 +1059,15 @@ class ConnectionManager:
         self._event_sync_cursors = {}
         self._ws_authenticated = False
         self._ws_auth_in_flight = False
+        self._sync_in_flight = False
+        self._ws_auth_attempt_id += 1
+        self._fail_waiters(self._auth_waiters, "Connection manager closed before websocket authentication completed")
+        self._fail_waiters(self._sync_waiters, "Connection manager closed before websocket sync completed")
         self._initialized = False
         self._closing = False
+        global _connection_manager
+        if _connection_manager is self:
+            _connection_manager = None
 
         logger.info("Connection manager closed")
 

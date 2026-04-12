@@ -791,6 +791,7 @@ class DiscoveryInterface(QWidget):
         self._ui_tasks: set[asyncio.Task] = set()
         self._dialog_refs: set[QDialog] = set()
         self._initial_load_done = False
+        self._teardown_started = False
 
         self._setup_ui()
         self._connect_signals()
@@ -898,6 +899,8 @@ class DiscoveryInterface(QWidget):
 
     def reload_data(self) -> None:
         """Refresh the feed from the backend."""
+        if self._teardown_started:
+            return
         self._set_load_task(self._reload_data_async())
 
     async def _reload_data_async(self) -> None:
@@ -989,6 +992,8 @@ class DiscoveryInterface(QWidget):
         dialog.activateWindow()
 
     def _create_moment(self, content: str) -> None:
+        if self._teardown_started:
+            return
         if self._publish_task is not None and not self._publish_task.done():
             return
         self._set_publish_task(self._create_moment_async(content))
@@ -1086,6 +1091,13 @@ class DiscoveryInterface(QWidget):
 
     def _on_destroyed(self, *_args) -> None:
         """Cancel outstanding async work when the page is torn down."""
+        self.quiesce()
+
+    def quiesce(self) -> None:
+        """Stop discovery tasks before logout tears down the runtime."""
+        if self._teardown_started:
+            return
+        self._teardown_started = True
         self._cancel_pending_task(self._load_task)
         self._load_task = None
         self._cancel_pending_task(self._publish_task)
@@ -1094,6 +1106,12 @@ class DiscoveryInterface(QWidget):
             if not task.done():
                 task.cancel()
         self._keyed_ui_tasks.clear()
+        for dialog in list(self._dialog_refs):
+            dialog.close()
+        self._dialog_refs.clear()
+        for dialog in list(self._image_dialogs):
+            dialog.close()
+        self._image_dialogs.clear()
         self._cancel_all_ui_tasks()
 
     def _cancel_pending_task(self, task: Optional[asyncio.Task]) -> None:

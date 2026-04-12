@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Annotated, Any, Literal
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StringConstraints, field_validator
 
@@ -62,7 +62,6 @@ class SessionOut(ORMModel):
     avatar: str | None = None
     is_ai_session: bool
     encryption_mode: str = 'plain'
-    session_crypto_state: dict[str, Any] = Field(default_factory=dict)
     call_capabilities: dict[str, bool] = Field(default_factory=dict)
     group_member_version: int = 0
     created_at: str | None = None

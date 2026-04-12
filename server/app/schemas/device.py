@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class SignedPreKeyIn(BaseModel):
@@ -36,6 +36,12 @@ class DeviceKeysRefreshRequest(BaseModel):
 
     signed_prekey: SignedPreKeyIn | None = None
     prekeys: list[OneTimePreKeyIn] = Field(default_factory=list, max_length=100)
+
+    @model_validator(mode="after")
+    def _require_key_material(self) -> "DeviceKeysRefreshRequest":
+        if self.signed_prekey is None and not self.prekeys:
+            raise ValueError("signed_prekey or prekeys is required")
+        return self
 
 
 class DeviceOut(BaseModel):

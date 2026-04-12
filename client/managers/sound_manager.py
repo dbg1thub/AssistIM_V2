@@ -224,7 +224,10 @@ class SoundManager:
         return True
 
     async def close(self) -> None:
+        global _sound_manager
         if not self._initialized:
+            if _sound_manager is self:
+                _sound_manager = None
             return
 
         while self._event_subscriptions:
@@ -246,6 +249,8 @@ class SoundManager:
         if self._fade_timer is not None and hasattr(self._fade_timer, "stop"):
             self._fade_timer.stop()
         self._initialized = False
+        if _sound_manager is self:
+            _sound_manager = None
 
     async def _on_message_received(self, payload: dict) -> None:
         message = payload.get("message")

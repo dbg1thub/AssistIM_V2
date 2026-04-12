@@ -396,12 +396,14 @@ class ChatController:
         session_id: str,
         limit: int = 50,
         before_timestamp: Optional[float] = None,
+        before_seq: Optional[int] = None,
     ) -> list[ChatMessage]:
         """Load messages for a session."""
         return await self._msg_manager.get_messages(
             session_id=session_id,
             limit=limit,
             before_timestamp=before_timestamp,
+            before_seq=before_seq,
         )
 
     async def load_cached_messages(
@@ -527,12 +529,17 @@ class ChatController:
         return self._session_manager.get_total_unread_count()
 
     async def close(self) -> None:
-        """Close chat controller."""
+        """Close chat controller and discard account-scoped call runtime cache."""
         logger.info("Closing chat controller")
         await self._call_manager.close()
+        self._call_service = None
+        self._call_ice_servers = self._clone_ice_servers(self._fallback_call_ice_servers)
+        self._call_ice_servers_loaded = False
         self._initialized = False
+        global _chat_controller
+        if _chat_controller is self:
+            _chat_controller = None
         logger.info("Chat controller closed")
-
 
 _chat_controller: Optional[ChatController] = None
 

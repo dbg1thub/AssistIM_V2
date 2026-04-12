@@ -1458,6 +1458,7 @@ class ContactInterface(QWidget):
         self._current_user_id = ""
         self._initial_load_done = False
         self._destroyed = False
+        self._teardown_started = False
         self._event_bus = get_event_bus()
         self._friend_section_headers: dict[str, QWidget] = {}
         self._friend_section_widgets: dict[str, QWidget] = {}
@@ -2634,6 +2635,13 @@ class ContactInterface(QWidget):
 
     def _on_destroyed(self, *_args) -> None:
         """Cancel outstanding async work when the contact page is torn down."""
+        self.quiesce()
+
+    def quiesce(self) -> None:
+        """Stop contact-page tasks before logout clears account state."""
+        if self._teardown_started:
+            return
+        self._teardown_started = True
         self._destroyed = True
         self._event_bus.unsubscribe_sync(ContactEvent.SYNC_REQUIRED, self._on_contact_sync_required)
         self._search_timer.stop()
@@ -2648,6 +2656,9 @@ class ContactInterface(QWidget):
             if not task.done():
                 task.cancel()
         self._keyed_ui_tasks.clear()
+        for dialog in list(self._dialog_refs):
+            dialog.close()
+        self._dialog_refs.clear()
         self._cancel_all_ui_tasks()
 
     def _cancel_pending_task(self, task: Optional[asyncio.Task]) -> None:

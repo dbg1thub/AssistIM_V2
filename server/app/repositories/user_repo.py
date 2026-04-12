@@ -1,10 +1,11 @@
-﻿"""User repository."""
+"""User repository."""
 
 from __future__ import annotations
 
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
+from app.core.auth_contract import canonicalize_username
 from app.models.user import User
 
 
@@ -16,7 +17,8 @@ class UserRepository:
         return self.db.get(User, user_id)
 
     def get_by_username(self, username: str) -> User | None:
-        stmt = select(User).where(User.username == username)
+        canonical_username = canonicalize_username(username)
+        stmt = select(User).where(func.lower(User.username) == canonical_username)
         return self.db.execute(stmt).scalar_one_or_none()
 
     def list_users_by_ids(self, user_ids: list[str]) -> dict[str, User]:
@@ -54,6 +56,7 @@ class UserRepository:
         avatar_kind: str = "default",
         avatar_default_key: str | None = None,
         avatar_file_id: str | None = None,
+        commit: bool = True,
     ) -> User:
         user = User(
             username=username,
@@ -66,17 +69,21 @@ class UserRepository:
             status="online",
         )
         self.db.add(user)
-        self.db.commit()
-        self.db.refresh(user)
+        self.db.flush()
+        if commit:
+            self.db.commit()
+            self.db.refresh(user)
         return user
 
-    def update(self, user: User, **fields: object) -> User:
+    def update(self, user: User, *, commit: bool = True, **fields: object) -> User:
         for key, value in fields.items():
             if hasattr(user, key):
                 setattr(user, key, value)
         self.db.add(user)
-        self.db.commit()
-        self.db.refresh(user)
+        self.db.flush()
+        if commit:
+            self.db.commit()
+            self.db.refresh(user)
         return user
 
     def update_avatar_state(
@@ -87,6 +94,7 @@ class UserRepository:
         avatar_default_key: str | None,
         avatar_file_id: str | None,
         avatar: str | None,
+        commit: bool = True,
     ) -> User:
         return self.update(
             user,
@@ -94,8 +102,9 @@ class UserRepository:
             avatar_default_key=avatar_default_key,
             avatar_file_id=avatar_file_id,
             avatar=avatar,
+            commit=commit,
         )
 
-    def advance_auth_session_version(self, user: User) -> User:
+    def advance_auth_session_version(self, user: User, *, commit: bool = True) -> User:
         current_version = int(getattr(user, "auth_session_version", 0) or 0)
-        return self.update(user, auth_session_version=current_version + 1)
+        return self.update(user, auth_session_version=current_version + 1, commit=commit)
