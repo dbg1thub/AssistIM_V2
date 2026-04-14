@@ -35,10 +35,14 @@ class ChatService:
             params["before_seq"] = int(before_seq)
 
         payload = await self._http.get(f"/sessions/{session_id}/messages", params=params)
-        if not isinstance(payload, list):
+        if not isinstance(payload, dict):
             logger.warning("Unexpected messages payload for %s: %r", session_id, payload)
             return []
-        return [dict(item) for item in payload if isinstance(item, dict)]
+        items = payload.get("messages")
+        if not isinstance(items, list):
+            logger.warning("Unexpected messages payload for %s: %r", session_id, payload)
+            return []
+        return [dict(item) for item in items if isinstance(item, dict)]
 
     async def persist_read_receipt(self, session_id: str, message_id: str) -> None:
         """Persist one cumulative read receipt via HTTP."""

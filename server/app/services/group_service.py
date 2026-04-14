@@ -71,7 +71,7 @@ class GroupService:
 
     def list_groups(self, current_user: User) -> list[dict]:
         groups = self.groups.list_user_groups(current_user.id)
-        return [self.serialize_group(item, include_members=True, current_user_id=current_user.id) for item in groups]
+        return [self.serialize_group(item, include_members=False, include_self_fields=False, current_user_id=current_user.id) for item in groups]
 
     def create_group(
         self,
@@ -106,13 +106,13 @@ class GroupService:
             return group
 
         group = self._run_transaction(action)
-        group_payload = self.serialize_group(group, include_members=True, current_user_id=None)
+        group_payload = self.serialize_group(group, include_members=True, include_self_fields=False, current_user_id=None)
         return self.group_mutation_result("created", group_payload)
 
     def get_group(self, current_user: User, group_id: str) -> dict:
         group = self._get_group_or_404(group_id)
         self._ensure_group_member(group, current_user.id)
-        return self.serialize_group(group, include_members=True, current_user_id=current_user.id)
+        return self.serialize_group(group, include_members=True, include_self_fields=True, current_user_id=current_user.id)
 
     def update_group_profile(self, current_user: User, group_id: str, name: str | None, announcement: str | None) -> GroupProfileUpdateResult:
         group = self._get_group_or_404(group_id)
@@ -235,7 +235,7 @@ class GroupService:
         if not participant_ids:
             return None
 
-        payload = self.serialize_group(group, include_members=True, current_user_id=None)
+        payload = self.serialize_group(group, include_members=True, include_self_fields=False, current_user_id=None)
         payload["group_id"] = group.id
         payload["session_id"] = group.session_id
         payload.pop("group_note", None)
@@ -307,7 +307,7 @@ class GroupService:
             self.sessions.touch_without_commit(group.session_id)
 
         self._run_transaction(action)
-        group_payload = self.serialize_group(group, include_members=True, current_user_id=None)
+        group_payload = self.serialize_group(group, include_members=True, include_self_fields=False, current_user_id=None)
         return self.group_mutation_result(
             "member_added",
             group_payload,
@@ -337,7 +337,7 @@ class GroupService:
         self._run_transaction(action)
         group_payload = None
         if current_user.id != normalized_user_id:
-            group_payload = self.serialize_group(group, include_members=True, current_user_id=None)
+            group_payload = self.serialize_group(group, include_members=True, include_self_fields=False, current_user_id=None)
         return self.group_mutation_result(
             "member_removed",
             group_payload,
@@ -367,7 +367,7 @@ class GroupService:
             self.sessions.touch_without_commit(group.session_id)
 
         self._run_transaction(action)
-        group_payload = self.serialize_group(group, include_members=True, current_user_id=None)
+        group_payload = self.serialize_group(group, include_members=True, include_self_fields=False, current_user_id=None)
         return self.group_mutation_result(
             "member_role_updated",
             group_payload,
@@ -440,7 +440,7 @@ class GroupService:
             self.sessions.touch_without_commit(group.session_id)
 
         self._run_transaction(action)
-        group_payload = self.serialize_group(group, include_members=True, current_user_id=None)
+        group_payload = self.serialize_group(group, include_members=True, include_self_fields=False, current_user_id=None)
         return self.group_mutation_result(
             "ownership_transferred",
             group_payload,
@@ -448,7 +448,14 @@ class GroupService:
             new_owner_id=normalized_new_owner_id,
         )
 
-    def serialize_group(self, group, include_members: bool = True, *, current_user_id: str | None = None) -> dict:
+    def serialize_group(
+        self,
+        group,
+        include_members: bool = False,
+        *,
+        include_self_fields: bool = False,
+        current_user_id: str | None = None,
+    ) -> dict:
         avatar = self.avatars.resolve_group_avatar_url(group)
         group_members = self.groups.list_members(group.id)
         role_by_user_id = {item.user_id: item.role for item in group_members}
@@ -476,11 +483,11 @@ class GroupService:
             "session_id": group.session_id,
             "member_count": len(group_members),
             "member_version": self._group_member_version_from_members(group_members, owner_id=group.owner_id),
-            "group_member_version": self._group_member_version_from_members(group_members, owner_id=group.owner_id),
             "created_at": group.created_at.isoformat() if group.created_at else None,
-            "group_note": str(current_member_meta.get("note", "") or ""),
-            "my_group_nickname": str(current_member_meta.get("group_nickname", "") or ""),
         }
+        if include_self_fields:
+            data["group_note"] = str(current_member_meta.get("note", "") or "")
+            data["my_group_nickname"] = str(current_member_meta.get("group_nickname", "") or "")
         if include_members:
             members = []
             for item in group_members:
@@ -489,21 +496,33 @@ class GroupService:
                     continue
                 member_meta = member_meta_by_user_id.get(str(item.user_id or ""), {})
                 members.append(
-                    {
-                        "user_id": item.user_id,
-                        "id": user.id,
-                        "username": user.username,
-                        "nickname": user.nickname,
-                        "group_nickname": str(member_meta.get("group_nickname", "") or "") if str(current_user_id or "") == str(item.user_id or "") else "",
-                        "avatar": self.avatars.resolve_user_avatar_url(user),
-                        "gender": user.gender,
-                        "region": user.region,
-                        "role": role_by_user_id.get(item.user_id, "owner" if item.user_id == group.owner_id else "member"),
-                        "joined_at": item.joined_at.isoformat() if item.joined_at else None,
-                    }
+                    self._serialize_member_summary(
+                        user,
+                        joined_at=item.joined_at,
+                        role=role_by_user_id.get(item.user_id, "owner" if item.user_id == group.owner_id else "member"),
+                        group_nickname=str(member_meta.get("group_nickname", "") or "") if str(current_user_id or "") == str(item.user_id or "") else "",
+                    )
                 )
             data["members"] = members
         return data
+
+    def _serialize_member_summary(
+        self,
+        user,
+        *,
+        joined_at=None,
+        role: str = "",
+        group_nickname: str = "",
+    ) -> dict[str, str | None]:
+        return {
+            "id": str(user.id or ""),
+            "username": str(user.username or ""),
+            "nickname": str(user.nickname or ""),
+            "avatar": self.avatars.resolve_user_avatar_url(user),
+            "group_nickname": str(group_nickname or ""),
+            "role": str(role or "member"),
+            "joined_at": joined_at.isoformat() if joined_at else None,
+        }
 
     @staticmethod
     def _group_member_version(member_ids: list[str]) -> int:

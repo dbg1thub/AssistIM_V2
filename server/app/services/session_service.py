@@ -89,7 +89,8 @@ class SessionService:
             payload.append(
                 self.serialize_session(
                     item,
-                    include_members=True,
+                    include_members=False,
+                    include_self_fields=False,
                     participant_ids=member_ids,
                     last_message=last_messages_by_session.get(item.id),
                     session_members=session_members,
@@ -128,7 +129,8 @@ class SessionService:
             unread_count = self._unread_counts_by_session(current_user.id).get(str(existing.id or ""), 0)
             payload = self.serialize_session(
                 existing,
-                include_members=True,
+                include_members=False,
+                include_self_fields=False,
                 participant_ids=existing_member_ids,
                 current_user_id=current_user.id,
                 unread_count=unread_count,
@@ -162,7 +164,8 @@ class SessionService:
         existing_member_ids = self.sessions.list_member_ids(str(session.id or ""))
         payload = self.serialize_session(
             session,
-            include_members=True,
+            include_members=False,
+            include_self_fields=False,
             participant_ids=existing_member_ids,
             current_user_id=current_user.id,
             unread_count=unread_count,
@@ -182,9 +185,11 @@ class SessionService:
         if not self._is_visible_private_session(session, member_ids):
             raise AppError(ErrorCode.RESOURCE_NOT_FOUND, "session not found", 404)
         unread_count = self._unread_counts_by_session(current_user.id).get(str(session.id or ""), 0)
+        session_type = "direct" if session.type == "private" else session.type
         return self.serialize_session(
             session,
-            include_members=True,
+            include_members=session_type == "group",
+            include_self_fields=session_type == "group",
             participant_ids=member_ids,
             current_user_id=current_user.id,
             unread_count=unread_count,
@@ -197,7 +202,8 @@ class SessionService:
         self,
         session,
         *,
-        include_members: bool = True,
+        include_members: bool = False,
+        include_self_fields: bool = False,
         participant_ids: list[str] | None = None,
         last_message=None,
         session_members: list | None = None,
@@ -265,7 +271,6 @@ class SessionService:
 
         data = {
             "id": session.id,
-            "session_id": session.id,
             "session_type": normalized_session_type,
             "name": session.name,
             "participant_ids": member_ids,
@@ -296,8 +301,6 @@ class SessionService:
             "announcement_message_id": announcement_message_id or None,
             "announcement_author_id": announcement_author_id or None,
             "announcement_published_at": announcement_published_at.isoformat() if announcement_published_at else None,
-            "group_note": group_note,
-            "my_group_nickname": my_group_nickname,
             "counterpart_id": counterpart.get("id") or None,
             "counterpart_name": counterpart.get("display_name") or None,
             "counterpart_username": counterpart.get("username") or None,
@@ -305,26 +308,43 @@ class SessionService:
             "counterpart_gender": counterpart.get("gender") or None,
         }
         if normalized_session_type == "group":
-            data["group_member_version"] = self._group_member_version(member_ids)
-        if include_members:
+            data["member_version"] = self._group_member_version(member_ids)
+            if include_self_fields:
+                data["group_note"] = group_note
+                data["my_group_nickname"] = my_group_nickname
+        if include_members and normalized_session_type == "group":
             members = []
             for member in member_rows or []:
                 user = user_map.get(str(member.user_id or ""))
                 if user is not None:
                     members.append(
-                        {
-                            "id": user.id,
-                            "nickname": user.nickname,
-                            "username": user.username,
-                            "avatar": self.avatars.resolve_user_avatar_url(user),
-                            "gender": user.gender,
-                            "group_nickname": member_profile_by_user_id.get(str(user.id or ""), {}).get("group_nickname", ""),
-                            "role": role_by_user_id.get(str(user.id or ""), "owner" if str(user.id or "") == owner_id else "member"),
-                            "joined_at": isoformat_utc(member.joined_at),
-                        }
+                        self._serialize_member_summary(
+                            user,
+                            joined_at=member.joined_at,
+                            role=role_by_user_id.get(str(user.id or ""), "owner" if str(user.id or "") == owner_id else "member"),
+                            group_nickname=member_profile_by_user_id.get(str(user.id or ""), {}).get("group_nickname", ""),
+                        )
                     )
             data["members"] = members
         return data
+
+    def _serialize_member_summary(
+        self,
+        user: User,
+        *,
+        joined_at=None,
+        role: str = "",
+        group_nickname: str = "",
+    ) -> dict[str, str | None]:
+        return {
+            "id": str(user.id or ""),
+            "username": str(user.username or ""),
+            "nickname": str(user.nickname or ""),
+            "avatar": self.avatars.resolve_user_avatar_url(user),
+            "group_nickname": str(group_nickname or ""),
+            "role": str(role or "member"),
+            "joined_at": isoformat_utc(joined_at),
+        }
 
     def _serialize_counterpart_profile(
         self,

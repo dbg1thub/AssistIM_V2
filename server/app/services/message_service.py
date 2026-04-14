@@ -95,10 +95,27 @@ class MessageService:
         session_id: str,
         limit: int = 50,
         before_seq: int | None = None,
-    ) -> list[dict]:
-        self._ensure_visible_session_membership(current_user.id, session_id)
+    ) -> dict[str, Any]:
+        session, session_members = self._load_visible_session_membership(current_user.id, session_id)
         items = self.messages.list_session_messages(session_id, limit=limit, before_seq=before_seq)
-        return self._serialize_messages(items, current_user.id)
+        session_metadata = self._serialize_session_metadata(
+            session,
+            session_members,
+            current_user_id=current_user.id,
+        )
+        return {
+            "session": self._serialize_message_page_session(session_id, session_metadata),
+            "messages": [
+                self.serialize_message(
+                    item,
+                    current_user.id,
+                    session_members=session_members,
+                    session_metadata=session_metadata,
+                    include_session_context=False,
+                )
+                for item in items
+            ],
+        }
 
     def send_message(
         self,
@@ -1143,6 +1160,7 @@ class MessageService:
         session_members: list | None = None,
         session_metadata: dict[str, Any] | None = None,
         sender_users_by_id: dict[str, User] | None = None,
+        include_session_context: bool = True,
     ) -> dict:
         if session_members is None:
             session_members = self._load_session_members(message.session_id)
@@ -1158,20 +1176,21 @@ class MessageService:
             str(message.sender_id or ""),
             users_by_id=sender_users_by_id,
         )
-        for key in (
-            "session_created_at",
-            "session_updated_at",
-            "session_encryption_mode",
-            "session_call_capabilities",
-            "counterpart_id",
-            "counterpart_name",
-            "counterpart_username",
-            "counterpart_avatar",
-            "counterpart_gender",
-        ):
-            if key in session_metadata and key not in extra:
-                extra[key] = session_metadata.get(key)
-        return {
+        if include_session_context:
+            for key in (
+                "session_created_at",
+                "session_updated_at",
+                "session_encryption_mode",
+                "session_call_capabilities",
+                "counterpart_id",
+                "counterpart_name",
+                "counterpart_username",
+                "counterpart_avatar",
+                "counterpart_gender",
+            ):
+                if key in session_metadata and key not in extra:
+                    extra[key] = session_metadata.get(key)
+        payload = {
             "message_id": message.id,
             "session_id": message.session_id,
             "sender_id": message.sender_id,
@@ -1181,11 +1200,6 @@ class MessageService:
             "created_at": isoformat_utc(message.created_at),
             "updated_at": isoformat_utc(message.updated_at),
             "is_self": message.sender_id == current_user_id,
-            "session_type": session_metadata.get("session_type", ""),
-            "session_name": session_metadata.get("session_name", ""),
-            "session_avatar": session_metadata.get("session_avatar"),
-            "participant_ids": session_metadata.get("participant_ids", []),
-            "is_ai_session": session_metadata.get("is_ai_session", False),
             "sender_profile": sender_profile,
             "session_seq": read_metadata["session_seq"],
             "read_count": read_metadata["read_count"],
@@ -1194,6 +1208,36 @@ class MessageService:
             "is_read_by_me": read_metadata["is_read_by_me"],
             "extra": extra,
         }
+        if include_session_context:
+            payload["session_type"] = session_metadata.get("session_type", "")
+            payload["participant_ids"] = session_metadata.get("participant_ids", [])
+            payload["is_ai_session"] = session_metadata.get("is_ai_session", False)
+            if session_metadata.get("session_type") != "direct":
+                payload["session_name"] = session_metadata.get("session_name", "")
+                payload["session_avatar"] = session_metadata.get("session_avatar")
+        return payload
+
+    @staticmethod
+    def _serialize_message_page_session(session_id: str, session_metadata: dict[str, Any]) -> dict[str, Any]:
+        payload = {
+            "id": str(session_id or ""),
+            "session_type": str(session_metadata.get("session_type", "") or ""),
+            "participant_ids": list(session_metadata.get("participant_ids", []) or []),
+            "is_ai_session": bool(session_metadata.get("is_ai_session", False)),
+        }
+        if payload["session_type"] == "direct":
+            for key in (
+                "counterpart_id",
+                "counterpart_name",
+                "counterpart_username",
+                "counterpart_avatar",
+                "counterpart_gender",
+            ):
+                payload[key] = session_metadata.get(key)
+        else:
+            payload["name"] = str(session_metadata.get("session_name", "") or "")
+            payload["avatar"] = session_metadata.get("session_avatar")
+        return payload
 
     def _load_session_metadata(
         self,

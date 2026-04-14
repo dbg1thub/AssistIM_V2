@@ -7,6 +7,7 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationInfo, field_validator, model_validator
 
 from app.schemas.common import ORMModel
+from app.schemas.session import SessionMemberOut
 
 
 MAX_GROUP_IDENTIFIER_LENGTH = 128
@@ -128,4 +129,8 @@ class GroupOut(ORMModel):
     owner_id: str
     session_id: str
     member_version: int = 0
-    group_member_version: int = 0
+    member_count: int = 0
+    created_at: str | None = None
+    group_note: str = ""
+    my_group_nickname: str = ""
+    members: list[SessionMemberOut] = Field(default_factory=list)

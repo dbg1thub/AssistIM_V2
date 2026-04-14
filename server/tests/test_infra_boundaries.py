@@ -148,6 +148,9 @@ def test_api_schema_models_use_canonical_session_and_friend_request_fields() -> 
     assert "id" not in FriendRequestOut.model_fields
     assert "session_type" in SessionOut.model_fields
     assert "type" not in SessionOut.model_fields
+    assert "session_id" not in SessionOut.model_fields
+    assert "member_version" in SessionOut.model_fields
+    assert "group_member_version" not in SessionOut.model_fields
     assert "session_type" in MessageOut.model_fields
     assert "participant_ids" in MessageOut.model_fields
     assert "sender_profile" in MessageOut.model_fields

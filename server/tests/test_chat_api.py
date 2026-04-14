@@ -48,10 +48,10 @@ def test_friend_request_private_session_and_message_flow(
     )
     assert send_request_response.status_code == 200
     send_request_payload = send_request_response.json()["data"]
-    request_id = send_request_payload["request_id"]
-    assert send_request_payload["action"] == "request_created"
-    assert send_request_payload["created"] is True
-    assert send_request_payload["changed"] is True
+    request_id = send_request_payload["request"]["request_id"]
+    assert send_request_payload["mutation"]["action"] == "request_created"
+    assert send_request_payload["mutation"]["created"] is True
+    assert send_request_payload["mutation"]["changed"] is True
     assert "id" not in send_request_payload
 
     list_requests_response = client.get(
@@ -68,14 +68,14 @@ def test_friend_request_private_session_and_message_flow(
         headers=auth_header(bob["access_token"]),
     )
     assert accept_response.status_code == 200
-    assert accept_response.json()["data"]["status"] == "accepted"
+    assert accept_response.json()["data"]["request"]["status"] == "accepted"
 
     friendship_check_response = client.get(
         f"/api/v1/friends/check/{bob['user']['id']}",
         headers=auth_header(alice["access_token"]),
     )
     assert friendship_check_response.status_code == 200
-    assert friendship_check_response.json()["data"]["is_friend"] is True
+    assert friendship_check_response.json()["data"]["friendship"]["is_friend"] is True
 
     update_profile_response = client.put(
         "/api/v1/users/me",
@@ -99,14 +99,14 @@ def test_friend_request_private_session_and_message_flow(
     assert friends_response.status_code == 200
     friend_payload = friends_response.json()["data"]
     assert len(friend_payload) == 1
-    assert friend_payload[0]["gender"] == "male"
-    assert friend_payload[0]["display_name"] == "Bob"
-    assert "email" not in friend_payload[0]
-    assert "phone" not in friend_payload[0]
-    assert "birthday" not in friend_payload[0]
-    assert "region" not in friend_payload[0]
-    assert "signature" not in friend_payload[0]
-    assert "status" not in friend_payload[0]
+    assert friend_payload[0]["user"]["gender"] == "male"
+    assert friend_payload[0]["user"]["display_name"] == "Bob"
+    assert "email" not in friend_payload[0]["user"]
+    assert "phone" not in friend_payload[0]["user"]
+    assert "birthday" not in friend_payload[0]["user"]
+    assert "region" not in friend_payload[0]["user"]
+    assert "signature" not in friend_payload[0]["user"]
+    assert "status" not in friend_payload[0]["user"]
 
     create_session_response = client.post(
         "/api/v1/sessions/direct",
@@ -140,7 +140,7 @@ def test_friend_request_private_session_and_message_flow(
     assert datetime.fromisoformat(message_payload["updated_at"])
     assert message_payload["session_type"] == "direct"
     assert sorted(message_payload["participant_ids"]) == sorted([alice["user"]["id"], bob["user"]["id"]])
-    assert message_payload["session_name"] == "Private Chat"
+    assert "session_name" not in message_payload
     assert message_payload["sender_profile"]["id"] == alice["user"]["id"]
     assert message_payload["sender_profile"]["username"] == alice["user"]["username"]
     assert message_payload["sender_profile"]["avatar"] == alice["user"]["avatar"]
@@ -151,18 +151,20 @@ def test_friend_request_private_session_and_message_flow(
     )
     assert history_response.status_code == 200
     history_payload = history_response.json()["data"]
-    assert history_payload[0]["message_id"] == message_payload["message_id"]
-    assert history_payload[0]["message_type"] == "text"
-    assert "id" not in history_payload[0]
-    assert "msg_id" not in history_payload[0]
-    assert "type" not in history_payload[0]
-    assert datetime.fromisoformat(history_payload[0]["created_at"])
-    assert "timestamp" not in history_payload[0]
-    assert history_payload[0]["created_at"] == message_payload["created_at"]
-    assert history_payload[0]["session_type"] == "direct"
-    assert sorted(history_payload[0]["participant_ids"]) == sorted([alice["user"]["id"], bob["user"]["id"]])
-    assert history_payload[0]["sender_profile"]["id"] == alice["user"]["id"]
-    assert history_payload[0]["sender_profile"]["avatar"] == alice["user"]["avatar"]
+    assert history_payload["session"]["id"] == session_id
+    assert history_payload["session"]["session_type"] == "direct"
+    assert history_payload["session"]["counterpart_id"] == bob["user"]["id"]
+    assert history_payload["messages"][0]["message_id"] == message_payload["message_id"]
+    assert history_payload["messages"][0]["message_type"] == "text"
+    assert "id" not in history_payload["messages"][0]
+    assert "msg_id" not in history_payload["messages"][0]
+    assert "type" not in history_payload["messages"][0]
+    assert datetime.fromisoformat(history_payload["messages"][0]["created_at"])
+    assert "timestamp" not in history_payload["messages"][0]
+    assert history_payload["messages"][0]["created_at"] == message_payload["created_at"]
+    assert "session_type" not in history_payload["messages"][0]
+    assert history_payload["messages"][0]["sender_profile"]["id"] == alice["user"]["id"]
+    assert history_payload["messages"][0]["sender_profile"]["avatar"] == alice["user"]["avatar"]
 
     sessions_response = client.get(
         "/api/v1/sessions",
@@ -190,7 +192,7 @@ def test_remove_friend_returns_changed_flag_and_skips_noop_fanout(
         json={"target_user_id": bob["user"]["id"], "message": "hello"},
         headers=auth_header(alice["access_token"]),
     )
-    request_id = request_response.json()["data"]["request_id"]
+    request_id = request_response.json()["data"]["request"]["request_id"]
 
     accept_response = client.post(
         f"/api/v1/friends/requests/{request_id}/accept",
@@ -207,9 +209,9 @@ def test_remove_friend_returns_changed_flag_and_skips_noop_fanout(
     )
     assert removed_response.status_code == 200
     removed_payload = removed_response.json()["data"]
-    assert removed_payload["changed"] is True
-    assert removed_payload["action"] == "friendship_removed"
-    assert removed_payload["friendship"] == {"is_friend": False, "friend_id": bob["user"]["id"]}
+    assert removed_payload["mutation"]["changed"] is True
+    assert removed_payload["mutation"]["action"] == "friendship_removed"
+    assert removed_payload["relationship"]["friendship"] == {"is_friend": False, "friend_id": None}
     assert send_json.await_count == 1
 
     missing_response = client.delete(
@@ -218,8 +220,8 @@ def test_remove_friend_returns_changed_flag_and_skips_noop_fanout(
     )
     assert missing_response.status_code == 200
     missing_payload = missing_response.json()["data"]
-    assert missing_payload["changed"] is False
-    assert missing_payload["action"] == "friendship_missing"
+    assert missing_payload["mutation"]["changed"] is False
+    assert missing_payload["mutation"]["action"] == "friendship_missing"
     assert send_json.await_count == 1
 
 
@@ -239,9 +241,9 @@ def test_friend_request_create_echoes_reused_and_auto_accept_actions(
     )
     assert first_request.status_code == 200
     first_payload = first_request.json()["data"]
-    assert first_payload["action"] == "request_created"
-    assert first_payload["created"] is True
-    assert first_payload["changed"] is True
+    assert first_payload["mutation"]["action"] == "request_created"
+    assert first_payload["mutation"]["created"] is True
+    assert first_payload["mutation"]["changed"] is True
 
     reused_request = client.post(
         "/api/v1/friends/requests",
@@ -250,10 +252,10 @@ def test_friend_request_create_echoes_reused_and_auto_accept_actions(
     )
     assert reused_request.status_code == 200
     reused_payload = reused_request.json()["data"]
-    assert reused_payload["request_id"] == first_payload["request_id"]
-    assert reused_payload["action"] == "request_reused"
-    assert reused_payload["created"] is False
-    assert reused_payload["changed"] is False
+    assert reused_payload["request"]["request_id"] == first_payload["request"]["request_id"]
+    assert reused_payload["mutation"]["action"] == "request_reused"
+    assert reused_payload["mutation"]["created"] is False
+    assert reused_payload["mutation"]["changed"] is False
 
     incoming_request = client.post(
         "/api/v1/friends/requests",
@@ -269,17 +271,17 @@ def test_friend_request_create_echoes_reused_and_auto_accept_actions(
     )
     assert auto_accept.status_code == 200
     auto_payload = auto_accept.json()["data"]
-    assert auto_payload["status"] == "accepted"
-    assert auto_payload["action"] == "friendship_created"
-    assert auto_payload["changed"] is True
-    assert auto_payload["friendship"] == {"is_friend": True, "friend_id": charlie["user"]["id"]}
+    assert auto_payload["request"]["status"] == "accepted"
+    assert auto_payload["mutation"]["action"] == "friendship_created"
+    assert auto_payload["mutation"]["changed"] is True
+    assert auto_payload["relationship"]["friendship"] == {"is_friend": True, "friend_id": charlie["user"]["id"]}
 
     friendship_check = client.get(
         f"/api/v1/friends/check/{charlie['user']['id']}",
         headers=auth_header(alice["access_token"]),
     )
     assert friendship_check.status_code == 200
-    assert friendship_check.json()["data"]["is_friend"] is True
+    assert friendship_check.json()["data"]["friendship"]["is_friend"] is True
 
 
 def test_create_direct_session_is_idempotent_and_reuses_same_session(
@@ -520,7 +522,7 @@ def test_websocket_chat_message_rejects_system_type(
         headers=auth_header(alice["access_token"]),
     )
     assert history_response.status_code == 200
-    assert history_response.json()["data"] == []
+    assert history_response.json()["data"]["messages"] == []
 
 
 def test_websocket_chat_message_rejects_blank_content(
@@ -561,7 +563,7 @@ def test_websocket_chat_message_rejects_blank_content(
         headers=auth_header(alice["access_token"]),
     )
     assert history_response.status_code == 200
-    assert history_response.json()["data"] == []
+    assert history_response.json()["data"]["messages"] == []
 
 
 def test_invalid_read_ack_does_not_disconnect_websocket(
@@ -765,7 +767,7 @@ def test_private_websocket_delivers_multiple_messages_after_explicit_auth(
             assert received["data"]["content"] == content
             assert received["data"]["session_id"] == session_id
             assert received["data"]["session_type"] == "direct"
-            assert received["data"]["session_name"] == "Private Chat"
+            assert "session_name" not in received["data"]
             assert received["data"]["sender_profile"]["id"] == alice["user"]["id"]
             assert received["data"]["sender_profile"]["avatar"] == alice["user"]["avatar"]
 
@@ -1068,10 +1070,10 @@ def test_websocket_message_mutations_require_message_owner(
     )
     assert history_response.status_code == 200
     history_payload = history_response.json()["data"]
-    assert len(history_payload) == 1
-    assert history_payload[0]["message_id"] == message_id
-    assert history_payload[0]["status"] == "sent"
-    assert history_payload[0]["content"] == "hello bob"
+    assert len(history_payload["messages"]) == 1
+    assert history_payload["messages"][0]["message_id"] == message_id
+    assert history_payload["messages"][0]["status"] == "sent"
+    assert history_payload["messages"][0]["content"] == "hello bob"
 
 def test_edit_message_rejects_messages_older_than_two_minutes(
     client: TestClient,
@@ -1126,9 +1128,9 @@ def test_edit_message_rejects_messages_older_than_two_minutes(
     )
     assert history_response.status_code == 200
     history_payload = history_response.json()["data"]
-    assert history_payload[0]["message_id"] == message_id
-    assert history_payload[0]["content"] == "original content"
-    assert history_payload[0]["status"] == "sent"
+    assert history_payload["messages"][0]["message_id"] == message_id
+    assert history_payload["messages"][0]["content"] == "original content"
+    assert history_payload["messages"][0]["status"] == "sent"
 
 
 def test_edit_message_rejects_unknown_fields_and_blank_content(client: TestClient, user_factory, auth_header) -> None:
@@ -1270,7 +1272,7 @@ def test_group_read_receipts_are_tracked_per_member(
         headers=auth_header(alice["access_token"]),
     )
     assert alice_history_before.status_code == 200
-    before_payload = alice_history_before.json()["data"][0]
+    before_payload = alice_history_before.json()["data"]["messages"][0]
     read_metadata_keys = {"session_seq", "read_count", "read_target_count", "read_by_user_ids", "is_read_by_me"}
     assert before_payload["status"] == "sent"
     assert "timestamp" not in before_payload
@@ -1314,7 +1316,7 @@ def test_group_read_receipts_are_tracked_per_member(
         headers=auth_header(alice["access_token"]),
     )
     assert alice_history_after.status_code == 200
-    after_payload = alice_history_after.json()["data"][0]
+    after_payload = alice_history_after.json()["data"]["messages"][0]
     assert after_payload["message_id"] == message_id
     assert after_payload["status"] == "sent"
     assert "timestamp" not in after_payload
@@ -1328,7 +1330,7 @@ def test_group_read_receipts_are_tracked_per_member(
         headers=auth_header(charlie["access_token"]),
     )
     assert charlie_history.status_code == 200
-    charlie_payload = charlie_history.json()["data"][0]
+    charlie_payload = charlie_history.json()["data"]["messages"][0]
     assert charlie_payload["is_read_by_me"] is False
 
 
@@ -1570,9 +1572,9 @@ def test_websocket_duplicate_message_id_is_idempotent_and_ack_returns_canonical_
     )
     assert history_response.status_code == 200
     history_payload = history_response.json()["data"]
-    assert len(history_payload) == 1
-    assert history_payload[0]["message_id"] == payload["msg_id"]
-    assert history_payload[0]["session_seq"] == 1
+    assert len(history_payload["messages"]) == 1
+    assert history_payload["messages"][0]["message_id"] == payload["msg_id"]
+    assert history_payload["messages"][0]["session_seq"] == 1
 
 def test_list_messages_uses_session_seq_cursor(
     client: TestClient,
@@ -1610,8 +1612,8 @@ def test_list_messages_uses_session_seq_cursor(
     )
     assert page_response.status_code == 200
     page_payload = page_response.json()["data"]
-    assert [message["session_seq"] for message in page_payload] == [1, 2]
-    assert [message["content"] for message in page_payload] == ["history seq 1", "history seq 2"]
+    assert [message["session_seq"] for message in page_payload["messages"]] == [1, 2]
+    assert [message["content"] for message in page_payload["messages"]] == ["history seq 1", "history seq 2"]
 
     oldest_response = client.get(
         f"/api/v1/sessions/{session_id}/messages",
@@ -1620,7 +1622,7 @@ def test_list_messages_uses_session_seq_cursor(
     )
     assert oldest_response.status_code == 200
     oldest_payload = oldest_response.json()["data"]
-    assert [message["session_seq"] for message in oldest_payload] == [1]
+    assert [message["session_seq"] for message in oldest_payload["messages"]] == [1]
 
 
 def test_websocket_rejects_conflicting_duplicate_message_id(
@@ -1683,9 +1685,9 @@ def test_websocket_rejects_conflicting_duplicate_message_id(
     )
     assert history_response.status_code == 200
     history_payload = history_response.json()["data"]
-    assert len(history_payload) == 1
-    assert history_payload[0]["message_id"] == message_id
-    assert history_payload[0]["content"] == "first body"
+    assert len(history_payload["messages"]) == 1
+    assert history_payload["messages"][0]["message_id"] == message_id
+    assert history_payload["messages"][0]["content"] == "first body"
 
 
 
@@ -2024,11 +2026,11 @@ def test_attachment_message_extra_roundtrips_through_history_and_sync_messages(
     )
     assert history_response.status_code == 200
     history_payload = history_response.json()["data"]
-    assert len(history_payload) == 1
-    assert history_payload[0]["message_id"] == created_payload["message_id"]
-    assert history_payload[0]["extra"]["url"] == attachment_extra["url"]
-    assert history_payload[0]["extra"]["media"]["mime_type"] == "image/png"
-    assert "checksum_sha256" not in history_payload[0]["extra"]["media"]
+    assert len(history_payload["messages"]) == 1
+    assert history_payload["messages"][0]["message_id"] == created_payload["message_id"]
+    assert history_payload["messages"][0]["extra"]["url"] == attachment_extra["url"]
+    assert history_payload["messages"][0]["extra"]["media"]["mime_type"] == "image/png"
+    assert "checksum_sha256" not in history_payload["messages"][0]["extra"]["media"]
 
     def receive_until(ws, expected_type: str):
         while True:
@@ -2836,7 +2838,7 @@ def test_accept_friend_request_succeeds_when_contact_refresh_fails(
         json={"target_user_id": bob["user"]["id"], "message": "ping"},
         headers=auth_header(alice["access_token"]),
     )
-    request_id = request_response.json()["data"]["request_id"]
+    request_id = request_response.json()["data"]["request"]["request_id"]
 
     monkeypatch.setattr(
         friend_routes.connection_manager,
@@ -2850,7 +2852,7 @@ def test_accept_friend_request_succeeds_when_contact_refresh_fails(
     )
 
     assert response.status_code == 200
-    assert response.json()["data"]["status"] == "accepted"
+    assert response.json()["data"]["request"]["status"] == "accepted"
 
 
 def test_create_direct_session_requires_exactly_one_normalized_participant(client: TestClient, user_factory, auth_header) -> None:
@@ -2960,10 +2962,10 @@ def test_friend_request_requires_canonical_target_field(client: TestClient, user
     )
     assert normalized_target.status_code == 200
     request_payload = normalized_target.json()["data"]
-    assert request_payload["receiver"]["id"] == bob["user"]["id"]
-    assert request_payload["sender"]["id"] == alice["user"]["id"]
-    assert request_payload["message"] == "hi"
-    assert "sender_id" not in request_payload
-    assert "receiver_id" not in request_payload
-    assert "from_user" not in request_payload
-    assert "to_user" not in request_payload
+    assert request_payload["request"]["receiver"]["id"] == bob["user"]["id"]
+    assert request_payload["request"]["sender"]["id"] == alice["user"]["id"]
+    assert request_payload["request"]["message"] == "hi"
+    assert "sender_id" not in request_payload["request"]
+    assert "receiver_id" not in request_payload["request"]
+    assert "from_user" not in request_payload["request"]
+    assert "to_user" not in request_payload["request"]

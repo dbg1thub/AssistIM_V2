@@ -174,7 +174,7 @@ def test_session_service_list_sessions_uses_batch_repository_loaders() -> None:
 
     payload = service.list_sessions(SimpleNamespace(id='alice'))
 
-    assert [item['session_id'] for item in payload] == ['session-1', 'session-2']
+    assert [item['id'] for item in payload] == ['session-1', 'session-2']
     assert payload[0]['session_type'] == 'direct'
     assert payload[0]['encryption_mode'] == 'plain'
     assert payload[0]['unread_count'] == 3
@@ -187,17 +187,17 @@ def test_session_service_list_sessions_uses_batch_repository_loaders() -> None:
     assert payload[0]['counterpart_avatar'] == '/uploads/bob.png'
     assert payload[0]['counterpart_gender'] == 'male'
     assert payload[0]['last_message'] == 'hello bob'
-    assert [member['id'] for member in payload[0]['members']] == ['alice', 'bob']
+    assert 'members' not in payload[0]
     assert payload[1]['session_type'] == 'group'
     assert payload[1]['encryption_mode'] == 'plain'
     assert payload[1]['unread_count'] == 1
     assert payload[1]['call_capabilities'] == {'voice': False, 'video': False}
     assert payload[1]['group_id'] == 'group-1'
-    assert payload[1]['group_member_version'] == service._group_member_version(['alice', 'bob', 'charlie'])
+    assert payload[1]['member_version'] == service._group_member_version(['alice', 'bob', 'charlie'])
     assert payload[1]['participant_ids'] == ['alice', 'bob', 'charlie']
     assert payload[1]['last_message'] == 'hello team'
     assert payload[1]['counterpart_id'] is None
-    assert [member['id'] for member in payload[1]['members']] == ['alice', 'bob', 'charlie']
+    assert 'members' not in payload[1]
 
     assert fake_sessions.list_members_for_sessions_calls == [['session-1', 'session-2']]
     assert fake_messages.list_last_messages_for_sessions_calls == [['session-1', 'session-2']]

@@ -113,6 +113,7 @@
 - `F-702` 到 `F-707` 已把 moment/comment 输入 schema、moments feed 分页 envelope、summary/detail 边界和 liker roster 可见性收口到正式 contract
 - `F-748` 已为 direct session create 回显 created/reused，区分新建和复用旧私聊
 - `F-749` / `F-750` 已为好友请求创建回显 request_created/request_reused/friendship_created，区分 no-op 和自动接受
+- `F-766` 已把 friend route 家族统一到 `relationship/request/mutation` contract：`GET /friends` 返回 relationship summary，`/friends/check`、request mutation 和 remove-friend 共用同一套关系快照与 mutation 语义
 - `F-745` / `F-746` 已把 moment/comment 作者 payload 收口为统一 author 子结构
 - `F-569` / `F-570` 已把建私聊“恰好一个参与者”和 extra forbid 收口到 schema
 - `F-571` / `F-572` 曾把 HTTP typing 请求收口到 `SessionTypingRequest` / `StrictBool` schema；后续 `R-005` 已进一步删除 HTTP typing 入口，typing 只保留聊天 WS 正式入口
@@ -137,6 +138,10 @@
 - `F-786` / `F-787` 已把 recalled session preview / message content 从空字符串收口为稳定 formal 占位
 - `F-565` / `F-566` 已把 session `last_message` preview 收口为 formal 输出，加密文本返回密文占位，附件返回类型化占位
 - `F-788` 已把单会话历史分页从 `created_at` cursor 收口为 `before_seq` / `session_seq` cursor，并同步客户端远端回拉与恢复补偿
+- `F-770` / `F-771` / `F-772` 已把 session family 拆成 summary/detail：`GET /sessions` 不再复用 detail roster，也不再混入 self-scoped `group_note/my_group_nickname`；session payload 只保留 canonical `id`
+- `F-780` / `F-847` 已把单会话历史页改成 `{session, messages}` page envelope，并移除 direct 消息里的 shared `session_name/session_avatar` 双重身份
+- `F-782` 已把 direct session payload 从成员明细中拆开，只保留 counterpart 摘要，不再和完整 `members[]` 并存
+- `F-854` 已把 `SessionOut / SessionMemberOut` 对齐到当前 session summary/detail contract，移除过期别名字段并补齐 member/self/detail 字段集
 - `F-789` 已把缺失消息补偿排序改为同一会话内 `session_seq` 优先
 - `F-793` 到 `F-797` 已把公开用户摘要、avatar 字段语义、friend request participant contract 和 `user_profile_update` user-scoped realtime payload 收口
 - `F-765` 已把 user route 家族拆成 collection envelope、public user detail 和 `/auth/me` self detail 三套正式 contract
@@ -236,8 +241,14 @@
 - `F-764`
 - `F-848`
 - `F-765`
+- `F-766`
 - `F-767`
+- `F-770` 到 `F-772`
 - `F-783` 到 `F-789`
+- `F-780`
+- `F-782`
+- `F-847`
+- `F-854`
 - `F-793` 到 `F-797`
 - `F-702` 到 `F-707`
 - `F-564`
@@ -659,6 +670,9 @@
 - 建群 schema 改为非空群名、至少一名显式成员；两个桌面建群入口都提交冻结后的成员集和同一套默认群名，不再把空 name 交给服务端兜底。
 - 群成员 mutation 的 no-op / drift 语义改为显式错误：重复加人、移除不存在成员、self-transfer、缺失 `GroupMember` 的角色/资料更新不再静默成功或自动补建。
 - 群成员 shared payload 改按 `GroupMember` authoritative roster 计算 `member_count` / `group_member_version`，版本哈希纳入 role、owner 和 joined_at；shared 成员切片不再广播其它成员的私有 `group_nickname`。
+- `F-773` / `F-776` 已把 group family 拆成 summary/detail：`GET /groups` 不再复用 detail roster，也不再混入 self-scoped `group_note/my_group_nickname`
+- `F-774` 已移除 group payload 的 `group_member_version` 同义别名，只保留 canonical `member_version`
+- `F-775` / `F-781` / `F-845` 已为 shared group/session `members[]` 收口出统一 member-summary contract，只保留 `id/username/nickname/avatar/group_nickname/role/joined_at`
 - 群 lifecycle 写路径会推进 `session.updated_at`；普通 group/session/message 序列化读路径改为只解析当前 avatar URL，不再生成群头像或回写 `session.avatar`。
 - generated group avatar 改为临时文件 + 原子替换，生成新版本后清理旧版本，删群时清理 generated avatar 资产；`create_group/add_member/leave_group` 返回序列化阶段不再二次触发 avatar 生成。
 - 群资料更新无实际 shared 变化时不再写 event / fanout；公告更新先发送 `group_profile_update` 再发送公告消息，让 session 侧公告 metadata 先到达。
@@ -715,6 +729,9 @@
 - `F-842`
 - `F-843`
 - `F-846`
+- `F-773` 到 `F-776`
+- `F-781`
+- `F-845`
 - `F-637` 到 `F-650`
 - `F-599`
 - `F-600`

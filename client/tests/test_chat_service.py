@@ -54,7 +54,7 @@ class FakeHTTPClient:
 
     async def get(self, path: str, params=None):
         self.get_calls.append({"path": path, "params": params})
-        return [{"message_id": "m-1"}]
+        return {"session": {"id": "session-1", "session_type": "direct"}, "messages": [{"message_id": "m-1"}]}
 
     async def post(self, path: str, json=None):
         self.post_calls.append({"path": path, "json": json})

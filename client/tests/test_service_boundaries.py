@@ -829,13 +829,13 @@ class FakeContactService:
             'id': group_id,
             'name': self.group_name,
             'announcement': self.group_announcement,
-            'note': self.group_note,
-            'my_group_nickname': self.group_my_nickname,
             'session_id': 'session-group-1',
             'owner_id': next(
                 (str(member.get('id', '') or '').strip() for member in self.group_members if str(member.get('role', '') or '').strip() == 'owner'),
                 'user-1',
             ),
+            'member_count': len(self.group_members),
+            'member_version': 42,
             'members': [dict(member) for member in self.group_members],
         }
 
@@ -857,7 +857,11 @@ class FakeContactService:
 
     async def send_friend_request(self, user_id: str, message: str = '') -> dict:
         self.send_friend_request_calls.append((user_id, message))
-        return {'status': 'pending'}
+        return {
+            'mutation': {'action': 'request_created', 'changed': True, 'created': True},
+            'relationship': {'user': {'id': user_id}, 'friendship': {'is_friend': False, 'friend_id': None}},
+            'request': {'request_id': 'req-created', 'status': 'pending'},
+        }
 
     async def create_group(self, name: str, member_ids: list[str]) -> dict:
         self.create_group_calls.append((name, list(member_ids)))
@@ -936,11 +940,19 @@ class FakeContactService:
 
     async def accept_friend_request(self, request_id: str) -> dict:
         self.accept_calls.append(request_id)
-        return {'status': 'accepted'}
+        return {
+            'mutation': {'action': 'friendship_created', 'changed': True, 'created': False},
+            'relationship': {'user': {'id': 'user-2'}, 'friendship': {'is_friend': True, 'friend_id': 'user-2'}},
+            'request': {'request_id': request_id, 'status': 'accepted'},
+        }
 
     async def reject_friend_request(self, request_id: str) -> dict:
         self.reject_calls.append(request_id)
-        return {'status': 'rejected'}
+        return {
+            'mutation': {'action': 'request_rejected', 'changed': True, 'created': False},
+            'relationship': {'user': {'id': 'user-2'}, 'friendship': {'is_friend': False, 'friend_id': None}},
+            'request': {'request_id': request_id, 'status': 'rejected'},
+        }
 
     async def remove_friend(self, friend_id: str) -> None:
         self.remove_calls.append(friend_id)
@@ -1199,7 +1211,7 @@ class FakeSessionService:
             'group_id': 'group-1',
             'participant_ids': ['alice', 'bob'],
             'avatar': 'https://cdn.example/groups/core.png',
-            'group_member_version': 42,
+            'member_version': 42,
         }
         self.unread_payload = [
             {'session_id': 'session-1', 'unread': 4},
@@ -2284,8 +2296,8 @@ def test_contact_controller_load_contacts_and_search_users_use_services(monkeypa
     fake_user_service = FakeUserService()
     fake_auth_context = FakeAuthContext()
     fake_contact_service.friends_payload = [
-        {'id': 'user-2', 'username': 'zoe', 'nickname': 'Zoe', 'remark': '', 'avatar': ''},
-        {'id': 'user-1', 'username': 'alice', 'nickname': 'Alice', 'remark': 'A Friend', 'avatar': ''},
+        {'user': {'id': 'user-2', 'username': 'zoe', 'nickname': 'Zoe', 'remark': '', 'avatar': ''}, 'friendship': {'is_friend': True, 'friend_id': 'user-2'}},
+        {'user': {'id': 'user-1', 'username': 'alice', 'nickname': 'Alice', 'remark': 'A Friend', 'avatar': ''}, 'friendship': {'is_friend': True, 'friend_id': 'user-1'}},
     ]
     fake_user_service.search_payload = {
         'items': [
@@ -2371,8 +2383,8 @@ def test_contact_controller_load_contacts_and_groups_persist_local_search_cache(
     fake_db = FakeDatabase()
     fake_db.is_connected = True
     fake_contact_service.friends_payload = [
-        {'id': 'user-2', 'username': 'zoe', 'nickname': 'Zoe', 'remark': '', 'avatar': '', 'region': 'Seoul'},
-        {'id': 'user-1', 'username': 'alice', 'nickname': 'Alice', 'remark': 'A Friend', 'avatar': '', 'region': 'Shenzhen'},
+        {'user': {'id': 'user-2', 'username': 'zoe', 'nickname': 'Zoe', 'remark': '', 'avatar': '', 'region': 'Seoul'}, 'friendship': {'is_friend': True, 'friend_id': 'user-2'}},
+        {'user': {'id': 'user-1', 'username': 'alice', 'nickname': 'Alice', 'remark': 'A Friend', 'avatar': '', 'region': 'Shenzhen'}, 'friendship': {'is_friend': True, 'friend_id': 'user-1'}},
     ]
     fake_contact_service.groups_payload = [
         {'id': 'group-2', 'name': 'Zeta Squad', 'member_count': 8, 'session_id': 'session-group-2'},
@@ -2550,7 +2562,7 @@ def test_contact_controller_mutations_use_contact_service(monkeypatch) -> None:
         rejected = await controller.reject_request('req-2')
         await controller.remove_friend('user-2')
 
-        assert request_payload['status'] == 'pending'
+        assert request_payload['request']['status'] == 'pending'
         assert fake_contact_service.send_friend_request_calls == [('user-2', 'hello')]
         assert fake_contact_service.create_group_calls == [('Core Team', ['user-2', 'user-3'])]
         assert group.session_id == 'session-group-1'
@@ -2574,8 +2586,8 @@ def test_contact_controller_mutations_use_contact_service(monkeypatch) -> None:
         assert fake_contact_service.remove_group_member_calls == [('group-1', 'user-4')]
         assert fake_contact_service.transfer_group_ownership_calls == [('group-1', 'user-2')]
         assert fake_contact_service.leave_group_calls == ['group-1']
-        assert accepted['status'] == 'accepted'
-        assert rejected['status'] == 'rejected'
+        assert accepted['request']['status'] == 'accepted'
+        assert rejected['request']['status'] == 'rejected'
         assert fake_contact_service.accept_calls == ['req-1']
         assert fake_contact_service.reject_calls == ['req-2']
         assert fake_contact_service.remove_calls == ['user-2']
@@ -4937,7 +4949,7 @@ def test_contact_controller_group_merge_helpers_preserve_extra_and_sort(monkeypa
 
 def test_contact_controller_skips_cache_writes_when_auth_context_changes(monkeypatch) -> None:
     fake_contact_service = FakeContactService()
-    fake_contact_service.friends_payload = [{'id': 'user-2', 'username': 'bob', 'nickname': 'Bob'}]
+    fake_contact_service.friends_payload = [{'user': {'id': 'user-2', 'username': 'bob', 'nickname': 'Bob'}, 'friendship': {'is_friend': True, 'friend_id': 'user-2'}}]
     fake_contact_service.groups_payload = [{'id': 'group-1', 'name': 'Core Team'}]
     fake_user_service = FakeUserService()
     fake_auth_context = FakeAuthContext()

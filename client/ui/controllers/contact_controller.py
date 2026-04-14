@@ -229,26 +229,28 @@ class ContactController:
         contacts: list[ContactRecord] = []
 
         for item in payload or []:
-            username = str(item.get("username", "") or "")
-            nickname = str(item.get("nickname", "") or "")
+            relationship = dict(item or {})
+            user = dict(relationship.get("user") or {})
+            username = str(user.get("username", "") or "")
+            nickname = str(user.get("nickname", "") or "")
             contacts.append(
                 ContactRecord(
-                    id=str(item.get("id", "") or ""),
+                    id=str(user.get("id", "") or ""),
                     name=username or nickname,
                     username=username,
                     nickname=nickname,
-                    avatar=str(item.get("avatar", "") or ""),
-                    remark=str(item.get("remark", "") or ""),
+                    avatar=str(user.get("avatar", "") or ""),
+                    remark=str(user.get("remark", "") or ""),
                     assistim_id=username,
-                    region=str(item.get("region", "") or ""),
-                    signature=str(item.get("signature", "") or ""),
-                    email=str(item.get("email", "") or ""),
-                    phone=str(item.get("phone", "") or ""),
-                    birthday=str(item.get("birthday", "") or ""),
-                    gender=str(item.get("gender", "") or ""),
-                    status=str(item.get("status", "") or ""),
+                    region=str(user.get("region", "") or ""),
+                    signature=str(user.get("signature", "") or ""),
+                    email=str(user.get("email", "") or ""),
+                    phone=str(user.get("phone", "") or ""),
+                    birthday=str(user.get("birthday", "") or ""),
+                    gender=str(user.get("gender", "") or ""),
+                    status=str(user.get("status", "") or ""),
                     category="friend",
-                    extra=dict(item or {}),
+                    extra=relationship,
                 )
             )
 

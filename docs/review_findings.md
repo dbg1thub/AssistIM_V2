@@ -1,4 +1,4 @@
-﻿# 当前 Review Findings
+# 当前 Review Findings
 
 ## 1. 说明
 
@@ -23481,7 +23481,7 @@
 
 ### F-766：好友 route 家族没有统一的 relationship contract，列表、检查、请求 mutation、删除现在是四种不同返回风格
 
-状态：已确认
+状态：已修复（2026-04-15）
 
 现状：
 
@@ -23597,7 +23597,7 @@
 
 ### F-770：`GET /sessions` 和 `GET /sessions/{id}` 现在复用同一份 full-detail payload，没有 summary/detail 分层
 
-状态：已确认
+状态：已修复（2026-04-15）
 
 现状：
 
@@ -23622,7 +23622,7 @@
 
 ### F-771：session payload 同时返回 `id` 和 `session_id`，两个字段实际是同一个值
 
-状态：已确认
+状态：已修复（2026-04-15）
 
 现状：
 
@@ -23646,7 +23646,7 @@
 
 ### F-772：会话列表 payload 仍直接带 self-scoped `group_note/my_group_nickname`，collection response 继续混入 viewer-specific detail
 
-状态：已确认
+状态：已修复（2026-04-15）
 
 现状：
 
@@ -23672,7 +23672,7 @@
 
 ### F-773：`GET /groups` 和 `GET /groups/{id}` 现在同样复用一份 full-detail payload，没有 summary/detail 分层
 
-状态：已确认
+状态：已修复（2026-04-15）
 
 现状：
 
@@ -23697,7 +23697,7 @@
 
 ### F-774：group payload 同时返回 `member_version` 和 `group_member_version`，两者当前其实是同一个值
 
-状态：已确认
+状态：已修复（2026-04-15）
 
 现状：
 
@@ -23722,7 +23722,7 @@
 
 ### F-775：group 成员 payload 同时返回 `user_id` 和 `id`，两个字段实际指向同一个用户
 
-状态：已确认
+状态：已修复（2026-04-15）
 
 现状：
 
@@ -23747,7 +23747,7 @@
 
 ### F-776：群列表 payload 也直接带 self-scoped `group_note/my_group_nickname`，collection response 混入 viewer-specific detail
 
-状态：已确认
+状态：已修复（2026-04-15）
 
 现状：
 
@@ -23866,7 +23866,7 @@
 
 ### F-780：`GET /sessions/{id}/messages` 在单会话分页里仍为每条消息重复塞入同一份 session metadata
 
-状态：已确认
+状态：已修复（2026-04-15）
 
 现状：
 
@@ -23896,7 +23896,7 @@
 
 ### F-781：group 成员 payload 和 session 成员 payload 仍不是同一套正式 contract
 
-状态：已确认
+状态：已修复（2026-04-15）
 
 现状：
 
@@ -23931,7 +23931,7 @@
 
 ### F-782：direct session payload 同时返回 `counterpart_*` 摘要和完整 `members[]`，同一对端信息有两套表示
 
-状态：已确认
+状态：已修复（2026-04-15）
 
 现状：
 
@@ -26340,7 +26340,7 @@
 
 ### F-845：shared group/session payload 的 `members[]` 继续直接内联成员 `gender/region` 等资料切片，但这条链没有独立的 member-summary contract
 
-状态：已确认
+状态：已修复（2026-04-15）
 
 现状：
 
@@ -26436,7 +26436,7 @@
 
 ### F-847：direct 消息 formal payload 仍直接下发 `session_name/session_avatar`，和 counterpart summary 并存成两套 direct 会话身份
 
-状态：已确认
+状态：已修复（2026-04-15）
 
 现状：
 
@@ -26760,7 +26760,7 @@
 
 ### F-854：`SessionOut / SessionMemberOut` 已经明显落后于当前 session payload，session family 的 formal output schema 继续漂移
 
-状态：已确认
+状态：已修复（2026-04-15）
 
 现状：
 
@@ -26866,3 +26866,4 @@
 1. 先把 `encryption_mode` 收敛成服务端权威属性，补齐服务端入站校验
 2. 尽快收口“删除会话”的正式语义，避免用户侧入口和服务端全局硬删除 API 并存
 3. 再收口发送、编辑、撤回、删除、已读、typing 与通话 signaling 的正式入口和幂等模型，消除 HTTP / WS 分叉与半实现状态
+

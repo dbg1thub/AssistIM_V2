@@ -41,11 +41,16 @@ class FriendService:
 
         outgoing_pending = self._find_pending_request(pair_requests, current_user.id, receiver_id)
         if outgoing_pending is not None:
-            payload = self._serialize_request(outgoing_pending, users_by_id)
-            payload["action"] = "request_reused"
-            payload["created"] = False
-            payload["changed"] = False
-            return payload
+            request_payload = self._serialize_request(outgoing_pending, users_by_id)
+            return self._serialize_relationship_mutation(
+                action="request_reused",
+                changed=False,
+                created=False,
+                user=receiver,
+                friendship_user_id=receiver_id,
+                is_friend=False,
+                request=request_payload,
+            )
 
         incoming_pending = self._find_pending_request(pair_requests, receiver_id, current_user.id)
         if incoming_pending is not None:
@@ -53,21 +58,30 @@ class FriendService:
             self.friends.create_friendship_pair(accepted_request.sender_id, accepted_request.receiver_id, commit=False)
             self.db.commit()
             self.db.refresh(accepted_request)
-            payload = self._serialize_request(accepted_request, users_by_id)
-            payload["action"] = "friendship_created"
-            payload["created"] = False
-            payload["changed"] = True
-            payload["friendship"] = {"is_friend": True, "friend_id": receiver_id}
-            return payload
+            request_payload = self._serialize_request(accepted_request, users_by_id)
+            return self._serialize_relationship_mutation(
+                action="friendship_created",
+                changed=True,
+                created=False,
+                user=receiver,
+                friendship_user_id=receiver_id,
+                is_friend=True,
+                request=request_payload,
+            )
 
         request = self.friends.create_request(current_user.id, receiver_id, message, commit=False)
         self.db.commit()
         self.db.refresh(request)
-        payload = self._serialize_request(request, users_by_id)
-        payload["action"] = "request_created"
-        payload["created"] = True
-        payload["changed"] = True
-        return payload
+        request_payload = self._serialize_request(request, users_by_id)
+        return self._serialize_relationship_mutation(
+            action="request_created",
+            changed=True,
+            created=True,
+            user=receiver,
+            friendship_user_id=receiver_id,
+            is_friend=False,
+            request=request_payload,
+        )
 
     def list_requests(self, current_user: User) -> list[dict]:
         requests = self.friends.list_requests_for_user(current_user.id)
@@ -93,7 +107,17 @@ class FriendService:
         self.db.commit()
         self.db.refresh(request)
         users_by_id = self.users.list_users_by_ids([request.sender_id, request.receiver_id])
-        return self._serialize_request(request, users_by_id)
+        request_payload = self._serialize_request(request, users_by_id)
+        sender = users_by_id.get(str(request.sender_id or ""))
+        return self._serialize_relationship_mutation(
+            action="friendship_created",
+            changed=True,
+            created=False,
+            user=sender,
+            friendship_user_id=str(request.sender_id or ""),
+            is_friend=True,
+            request=request_payload,
+        )
 
     def reject_request(self, current_user: User, request_id: str) -> dict:
         request = self.friends.get_request(request_id)
@@ -106,7 +130,17 @@ class FriendService:
         self.db.commit()
         self.db.refresh(request)
         users_by_id = self.users.list_users_by_ids([request.sender_id, request.receiver_id])
-        return self._serialize_request(request, users_by_id)
+        request_payload = self._serialize_request(request, users_by_id)
+        sender = users_by_id.get(str(request.sender_id or ""))
+        return self._serialize_relationship_mutation(
+            action="request_rejected",
+            changed=True,
+            created=False,
+            user=sender,
+            friendship_user_id=str(request.sender_id or ""),
+            is_friend=False,
+            request=request_payload,
+        )
 
     def list_friends(self, current_user: User) -> list[dict]:
         friendships = self.friends.list_friends(current_user.id)
@@ -115,28 +149,40 @@ class FriendService:
         for friendship in friendships:
             friend = users_by_id.get(str(friendship.friend_id or ""))
             if friend is not None:
-                items.append(self.user_payloads.serialize_public_user(friend))
+                items.append(
+                    self._serialize_relationship(
+                        user=friend,
+                        friendship_user_id=str(friend.id or ""),
+                        is_friend=True,
+                    )
+                )
         return items
 
     def remove_friend(self, current_user: User, friend_id: str) -> dict:
         changed = self.friends.remove_friendship(current_user.id, friend_id)
-        return {
-            "friend_id": str(friend_id or "").strip(),
-            "changed": bool(changed),
-            "action": "friendship_removed" if changed else "friendship_missing",
-            "friendship": {
-                "is_friend": False,
-                "friend_id": str(friend_id or "").strip(),
-            },
-        }
+        normalized_friend_id = str(friend_id or "").strip()
+        friend = self.users.get_by_id(normalized_friend_id)
+        return self._serialize_relationship_mutation(
+            action="friendship_removed" if changed else "friendship_missing",
+            changed=bool(changed),
+            created=False,
+            user=friend,
+            friendship_user_id=normalized_friend_id,
+            is_friend=False,
+            request=None,
+        )
 
     def check_relationship(self, current_user: User, user_id: str) -> dict:
         normalized_user_id = str(user_id or "").strip()
+        user = self.users.get_by_id(normalized_user_id)
+        if user is None:
+            raise AppError(ErrorCode.USER_NOT_FOUND, "user not found", 404)
         is_friend = self.friends.is_friend(current_user.id, normalized_user_id)
-        return {
-            "is_friend": is_friend,
-            "friend_id": normalized_user_id if is_friend else None,
-        }
+        return self._serialize_relationship(
+            user=user,
+            friendship_user_id=normalized_user_id,
+            is_friend=is_friend,
+        )
 
     def _persist_expired_requests(self, requests: list[FriendRequest]) -> None:
         touched = False
@@ -198,3 +244,39 @@ class FriendService:
         if user is None:
             return {}
         return self.user_payloads.serialize_public_user(user)
+
+    def _serialize_relationship(self, *, user: User | None, friendship_user_id: str, is_friend: bool) -> dict:
+        normalized_friendship_user_id = str(friendship_user_id or "").strip()
+        payload = self.user_payloads.serialize_public_user(user) if user is not None else {"id": normalized_friendship_user_id}
+        return {
+            "user": payload,
+            "friendship": {
+                "is_friend": bool(is_friend),
+                "friend_id": normalized_friendship_user_id if is_friend else None,
+            },
+        }
+
+    def _serialize_relationship_mutation(
+        self,
+        *,
+        action: str,
+        changed: bool,
+        created: bool,
+        user: User | None,
+        friendship_user_id: str,
+        is_friend: bool,
+        request: dict | None,
+    ) -> dict:
+        return {
+            "mutation": {
+                "action": str(action or ""),
+                "changed": bool(changed),
+                "created": bool(created),
+            },
+            "relationship": self._serialize_relationship(
+                user=user,
+                friendship_user_id=friendship_user_id,
+                is_friend=is_friend,
+            ),
+            "request": dict(request or {}) if request is not None else None,
+        }

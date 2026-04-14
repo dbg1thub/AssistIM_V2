@@ -1412,7 +1412,8 @@ class AddFriendDialog(FluentWidget):
             self._finalize_deferred_close_if_needed()
             return
 
-        status = str((payload or {}).get("status", "pending") or "pending")
+        request_payload = dict((payload or {}).get("request") or {})
+        status = str(request_payload.get("status", "pending") or "pending")
         success_message = (
             tr("contact.request.accepted", "Friend request accepted.")
             if status == "accepted"
@@ -2013,23 +2014,24 @@ class ContactInterface(QWidget):
 
     @staticmethod
     def _request_record_from_payload(payload: dict[str, object]) -> FriendRequestRecord:
-        from_user = dict(payload.get("from_user") or {}) if isinstance(payload.get("from_user"), dict) else {}
-        to_user = dict(payload.get("to_user") or {}) if isinstance(payload.get("to_user"), dict) else {}
+        request_payload = dict(payload.get("request") or {}) if isinstance(payload.get("request"), dict) else dict(payload or {})
+        from_user = dict(request_payload.get("sender") or {}) if isinstance(request_payload.get("sender"), dict) else {}
+        to_user = dict(request_payload.get("receiver") or {}) if isinstance(request_payload.get("receiver"), dict) else {}
         return FriendRequestRecord(
-            id=str(payload.get("request_id", "") or payload.get("id", "") or ""),
-            sender_id=str(payload.get("sender_id", "") or from_user.get("id", "") or ""),
-            receiver_id=str(payload.get("receiver_id", "") or to_user.get("id", "") or ""),
-            message=str(payload.get("message", "") or ""),
-            status=str(payload.get("status", "pending") or "pending"),
-            created_at=str(payload.get("created_at", "") or ""),
-            sender_name=str(from_user.get("nickname", "") or from_user.get("username", "") or payload.get("sender_name", "") or ""),
-            receiver_name=str(to_user.get("nickname", "") or to_user.get("username", "") or payload.get("receiver_name", "") or ""),
-            sender_username=str(from_user.get("username", "") or payload.get("sender_username", "") or ""),
-            receiver_username=str(to_user.get("username", "") or payload.get("receiver_username", "") or ""),
-            sender_avatar=str(from_user.get("avatar", "") or payload.get("sender_avatar", "") or ""),
-            receiver_avatar=str(to_user.get("avatar", "") or payload.get("receiver_avatar", "") or ""),
-            sender_gender=str(from_user.get("gender", "") or payload.get("sender_gender", "") or ""),
-            receiver_gender=str(to_user.get("gender", "") or payload.get("receiver_gender", "") or ""),
+            id=str(request_payload.get("request_id", "") or ""),
+            sender_id=str(from_user.get("id", "") or ""),
+            receiver_id=str(to_user.get("id", "") or ""),
+            message=str(request_payload.get("message", "") or ""),
+            status=str(request_payload.get("status", "pending") or "pending"),
+            created_at=str(request_payload.get("created_at", "") or ""),
+            sender_name=str(from_user.get("nickname", "") or from_user.get("username", "") or ""),
+            receiver_name=str(to_user.get("nickname", "") or to_user.get("username", "") or ""),
+            sender_username=str(from_user.get("username", "") or ""),
+            receiver_username=str(to_user.get("username", "") or ""),
+            sender_avatar=str(from_user.get("avatar", "") or ""),
+            receiver_avatar=str(to_user.get("avatar", "") or ""),
+            sender_gender=str(from_user.get("gender", "") or ""),
+            receiver_gender=str(to_user.get("gender", "") or ""),
         )
 
     def _upsert_request_record(self, request: FriendRequestRecord) -> None:

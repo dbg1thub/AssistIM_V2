@@ -82,7 +82,7 @@ class MessageOut(ORMModel):
     updated_at: str | None = None
     is_self: bool = False
     session_type: str = ""
-    session_name: str = ""
+    session_name: str | None = None
     session_avatar: str | None = None
     participant_ids: list[str] = Field(default_factory=list)
     is_ai_session: bool = False
@@ -93,3 +93,22 @@ class MessageOut(ORMModel):
     read_by_user_ids: list[str] = Field(default_factory=list)
     is_read_by_me: bool = False
     extra: dict[str, Any] = Field(default_factory=dict)
+
+
+class MessagePageSessionOut(ORMModel):
+    id: str
+    session_type: str = ""
+    participant_ids: list[str] = Field(default_factory=list)
+    is_ai_session: bool = False
+    name: str | None = None
+    avatar: str | None = None
+    counterpart_id: str | None = None
+    counterpart_name: str | None = None
+    counterpart_username: str | None = None
+    counterpart_avatar: str | None = None
+    counterpart_gender: str | None = None
+
+
+class MessagePageOut(ORMModel):
+    session: MessagePageSessionOut
+    messages: list[MessageOut] = Field(default_factory=list)

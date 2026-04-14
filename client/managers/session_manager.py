@@ -955,8 +955,8 @@ class SessionManager:
             session.extra["group_note"] = str(data.get("group_note", "") or "")
         if "my_group_nickname" in data:
             session.extra["my_group_nickname"] = str(data.get("my_group_nickname", "") or "")
-        if "group_member_version" in data or "member_version" in data:
-            session.extra["group_member_version"] = int(data.get("group_member_version", data.get("member_version", 0)) or 0)
+        if "member_version" in data:
+            session.extra["group_member_version"] = int(data.get("member_version", 0) or 0)
         if data.get("last_message_status"):
             session.extra["last_message_status"] = data.get("last_message_status")
         if data.get("last_message_id"):
@@ -1541,8 +1541,8 @@ class SessionManager:
             shared_mapping["owner_id"] = str(payload.get("owner_id", "") or "")
         if "member_count" in payload:
             shared_mapping["member_count"] = int(payload.get("member_count", 0) or 0)
-        if "group_member_version" in payload or "member_version" in payload:
-            shared_mapping["group_member_version"] = int(payload.get("group_member_version", payload.get("member_version", 0)) or 0)
+        if "member_version" in payload:
+            shared_mapping["group_member_version"] = int(payload.get("member_version", 0) or 0)
         for key, value in shared_mapping.items():
             if session.extra.get(key) != value:
                 session.extra[key] = value

@@ -42,3 +42,25 @@ class FriendOut(BaseModel):
     username: str
     nickname: str
     avatar: str | None = None
+
+
+class FriendshipOut(ORMModel):
+    is_friend: bool = False
+    friend_id: str | None = None
+
+
+class RelationshipOut(ORMModel):
+    user: dict
+    friendship: FriendshipOut
+
+
+class RelationshipMutationOut(ORMModel):
+    action: str
+    changed: bool = False
+    created: bool = False
+
+
+class RelationshipMutationResultOut(ORMModel):
+    mutation: RelationshipMutationOut
+    relationship: RelationshipOut
+    request: dict | None = None
