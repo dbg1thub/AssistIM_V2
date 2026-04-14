@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
 from collections import OrderedDict
 from datetime import datetime
 from typing import Optional
@@ -211,6 +212,8 @@ class ChatInterface(QWidget):
     TYPING_INDICATOR_HIDE_DELAY_MS = 1800
     CALL_RING_REPEAT_MS = 3000
     CALL_INCOMING_RING_RETRY_MS = 180
+    CALL_RESULT_DEDUPE_LIMIT = 256
+    CALL_RESULT_DEDUPE_TTL_SECONDS = 3600
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -230,7 +233,7 @@ class ChatInterface(QWidget):
         self._dialog_refs: set[QWidget] = set()
         self._incoming_call_toasts: dict[str, IncomingCallToast] = {}
         self._call_window: CallWindow | None = None
-        self._call_result_messages_sent: set[tuple[str, str]] = set()
+        self._call_result_messages_sent: OrderedDict[tuple[str, str], float] = OrderedDict()
         self._active_call_ring_sound: AppSound | None = None
         self._session_visibility_active = False
         self._current_session_active = False
@@ -242,6 +245,7 @@ class ChatInterface(QWidget):
         self._history_page_warm_keys: set[tuple[str, Optional[float], Optional[int], int]] = set()
         self._history_page_tasks: dict[tuple[str, Optional[float], Optional[int], int], asyncio.Task] = {}
         self._startup_history_prefetch_task: Optional[asyncio.Task] = None
+        self._startup_history_prefetch_session_ids: list[str] = []
         self._session_view_state: dict[str, dict] = {}
         self._last_read_receipts: dict[str, str] = {}
         self._pending_read_receipts: set[tuple[str, str]] = set()
@@ -543,6 +547,8 @@ class ChatInterface(QWidget):
             and "sessions" not in data
         )
         if is_delete_event:
+            deleted_session_id = str(data.get("session_id", "") or "")
+            self._purge_session_runtime_state(deleted_session_id)
             self._advance_session_focus_generation()
             self._current_session_id = None
             self._set_current_session_active(False)
@@ -555,6 +561,21 @@ class ChatInterface(QWidget):
 
         sessions = data.get("sessions")
         if isinstance(sessions, list):
+            current_session_ids = {
+                str(getattr(session, "session_id", "") or "")
+                for session in sessions
+                if str(getattr(session, "session_id", "") or "")
+            }
+            cached_session_ids = (
+                set(self._history_page_cache.keys())
+                | set(self._session_view_state.keys())
+                | set(self._composer_drafts.keys())
+                | set(self._last_read_receipts.keys())
+                | {session_id for session_id, _ in self._pending_read_receipts}
+            )
+            for removed_session_id in sorted(cached_session_ids - current_session_ids):
+                self._purge_session_runtime_state(removed_session_id)
+
             current_session = next(
                 (
                     session
@@ -755,9 +776,6 @@ class ChatInterface(QWidget):
 
     def _schedule_initial_history_prefetch(self, sessions: list) -> None:
         """Warm the first page for a small batch of recent sessions in the background."""
-        if self._startup_history_prefetch_task is not None and not self._startup_history_prefetch_task.done():
-            return
-
         session_ids = [
             str(getattr(session, "session_id", "") or "")
             for session in sessions[: self.INITIAL_HISTORY_WARM_SESSION_LIMIT]
@@ -765,6 +783,17 @@ class ChatInterface(QWidget):
         ]
         if not session_ids:
             return
+
+        if (
+            self._startup_history_prefetch_task is not None
+            and not self._startup_history_prefetch_task.done()
+        ):
+            if session_ids == self._startup_history_prefetch_session_ids:
+                return
+            self._cancel_pending_task(self._startup_history_prefetch_task)
+            self._startup_history_prefetch_task = None
+
+        self._startup_history_prefetch_session_ids = list(session_ids)
 
         self._startup_history_prefetch_task = self._create_ui_task(
             self._warm_history_pages(session_ids),
@@ -776,6 +805,7 @@ class ChatInterface(QWidget):
         """Drop the startup history warmup bookkeeping when the task finishes."""
         if self._startup_history_prefetch_task is task:
             self._startup_history_prefetch_task = None
+            self._startup_history_prefetch_session_ids = []
 
     def _on_session_selected(self, session_id: str) -> None:
         """Handle user selecting a conversation."""
@@ -1146,13 +1176,20 @@ class ChatInterface(QWidget):
 
         async def worker(session_id: str) -> None:
             async with semaphore:
-                await self._prime_history_page(session_id)
+                try:
+                    await self._prime_history_page(session_id)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    logger.debug("Startup history warmup skipped for %s: %s", session_id, exc)
                 await asyncio.sleep(0)
 
         await asyncio.gather(*(worker(session_id) for session_id in normalized_ids))
 
     async def _prime_history_page(self, session_id: str) -> None:
         """Seed the in-memory first page from local storage, then backfill it remotely."""
+        if self._get_session(session_id) is None:
+            return
         if self._peek_cached_history_page(session_id, before_timestamp=None, before_seq=None) is None:
             local_messages = await self._chat_controller.load_cached_messages(
                 session_id,
@@ -1168,6 +1205,8 @@ class ChatInterface(QWidget):
                     warm=False,
                 )
 
+        if self._get_session(session_id) is None:
+            return
         await self._load_history_page(session_id, before_timestamp=None, before_seq=None)
 
     def _invalidate_history_cache(self, session_id: Optional[str] = None) -> None:
@@ -1195,6 +1234,30 @@ class ChatInterface(QWidget):
             self._session_view_state.pop(session_id, None)
         else:
             self._session_view_state.clear()
+
+    def _purge_session_runtime_state(self, session_id: str) -> None:
+        """Drop all window-local runtime state for one removed session."""
+        normalized_session_id = str(session_id or "").strip()
+        if not normalized_session_id:
+            return
+
+        self._invalidate_session_caches(normalized_session_id)
+        self._composer_drafts.pop(normalized_session_id, None)
+        self._last_read_receipts.pop(normalized_session_id, None)
+        self._pending_read_receipts = {
+            key for key in self._pending_read_receipts if key[0] != normalized_session_id
+        }
+
+    def _ensure_session_visible_in_sidebar(self, session) -> None:
+        """Repair sidebar/model drift for one cached session before focusing it."""
+        if session is None:
+            return
+        session_id = str(getattr(session, "session_id", "") or "")
+        if not session_id:
+            return
+        if self.session_panel.get_session_model().get_session_by_id(session_id) is not None:
+            return
+        self.session_panel.add_session(session)
 
     def _remember_current_session_view_state(self) -> None:
         """Persist the current visible message slice and scroll gap for the active session."""
@@ -1922,13 +1985,27 @@ class ChatInterface(QWidget):
         if call.initiator_id and call.initiator_id != self._current_user_id():
             return
         dedupe_key = (call.call_id, outcome)
+        self._prune_call_result_messages_sent()
         if dedupe_key in self._call_result_messages_sent:
+            self._call_result_messages_sent.move_to_end(dedupe_key)
             return
-        self._call_result_messages_sent.add(dedupe_key)
+        self._call_result_messages_sent[dedupe_key] = time.monotonic()
         self._schedule_ui_task(
             self._send_call_result_message(call, outcome=outcome),
             f"call result message {call.call_id} {outcome}",
         )
+
+    def _prune_call_result_messages_sent(self) -> None:
+        cutoff = time.monotonic() - self.CALL_RESULT_DEDUPE_TTL_SECONDS
+        stale_keys = [
+            key
+            for key, timestamp in self._call_result_messages_sent.items()
+            if timestamp < cutoff
+        ]
+        for key in stale_keys:
+            self._call_result_messages_sent.pop(key, None)
+        while len(self._call_result_messages_sent) > self.CALL_RESULT_DEDUPE_LIMIT:
+            self._call_result_messages_sent.popitem(last=False)
 
     async def _send_call_result_message(self, call: ActiveCallState, *, outcome: str) -> None:
         duration_seconds = self._call_duration_seconds(call) if outcome == "completed" else 0
@@ -2726,8 +2803,9 @@ class ChatInterface(QWidget):
             return
 
         self._current_session_active = is_active
+        current_session_id = str(self._current_session_id or "")
         self._schedule_ui_task(
-            self._chat_controller.set_current_session_active(is_active),
+            self._chat_controller.set_current_session_active(is_active, session_id=current_session_id),
             f"set current session active {is_active}",
         )
         if is_active:
@@ -2779,6 +2857,9 @@ class ChatInterface(QWidget):
         if session_id == self._current_session_id and self._get_session(session_id):
             return True
 
+        existing_session = self._get_session(session_id)
+        if existing_session is not None:
+            self._ensure_session_visible_in_sidebar(existing_session)
         if self.focus_session(session_id):
             return True
 
@@ -2791,6 +2872,7 @@ class ChatInterface(QWidget):
         if not session:
             return False
 
+        self._ensure_session_visible_in_sidebar(session)
         return self.focus_session(session.session_id)
 
     async def open_group_session(self, session_id: str, *, generation: int | None = None) -> bool:
@@ -2811,6 +2893,7 @@ class ChatInterface(QWidget):
             return False
         session = self._chat_controller.find_direct_session(user_id)
         if session:
+            self._ensure_session_visible_in_sidebar(session)
             return self.focus_session(session.session_id)
 
         session = await self._chat_controller.ensure_direct_session(
@@ -2823,6 +2906,7 @@ class ChatInterface(QWidget):
         if not session:
             return False
 
+        self._ensure_session_visible_in_sidebar(session)
         return self.focus_session(session.session_id)
 
 

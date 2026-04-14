@@ -141,6 +141,33 @@ class E2EEService:
     async def clear_local_bundle(self) -> None:
         await self._db.delete_app_states(self._local_e2ee_state_keys())
 
+    async def remove_session_local_state(self, session_id: str) -> None:
+        """Drop local group-session and recovery state for one removed session."""
+        normalized_session_id = str(session_id or "").strip()
+        if not normalized_session_id:
+            return
+
+        group_state = await self._load_group_session_state()
+        if normalized_session_id in group_state:
+            group_state.pop(normalized_session_id, None)
+            await self._save_group_session_state(group_state)
+
+        history_state = await self._load_history_recovery_state()
+        devices = dict(history_state.get("devices") or {})
+        changed = False
+        for device_id, raw_record in devices.items():
+            device_record = dict(raw_record or {})
+            group_sessions = dict(device_record.get("group_sessions") or {})
+            if normalized_session_id not in group_sessions:
+                continue
+            group_sessions.pop(normalized_session_id, None)
+            device_record["group_sessions"] = group_sessions
+            devices[device_id] = device_record
+            changed = True
+        if changed:
+            history_state["devices"] = devices
+            await self._save_history_recovery_state(history_state)
+
     async def reprovision_local_device(self, *, delete_remote: bool = True) -> dict[str, Any]:
         previous_bundle = await self._load_local_bundle()
         previous_device_id = str((previous_bundle or {}).get("device_id") or "").strip()

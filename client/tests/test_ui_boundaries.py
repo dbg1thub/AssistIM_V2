@@ -85,6 +85,15 @@ def test_call_result_messages_are_sent_as_text_not_client_system_messages() -> N
     assert 'message_type=MessageType.SYSTEM' not in call_result_block
 
 
+def test_call_result_message_dedupe_cache_is_bounded() -> None:
+    chat_interface = Path('client/ui/windows/chat_interface.py').read_text(encoding='utf-8')
+
+    assert 'CALL_RESULT_DEDUPE_LIMIT = 256' in chat_interface
+    assert 'CALL_RESULT_DEDUPE_TTL_SECONDS = 3600' in chat_interface
+    assert 'def _prune_call_result_messages_sent(self) -> None:' in chat_interface
+    assert 'while len(self._call_result_messages_sent) > self.CALL_RESULT_DEDUPE_LIMIT:' in chat_interface
+
+
 def test_chat_interface_typing_indicator_ignores_self_and_hides_on_explicit_stop() -> None:
     chat_interface = Path('client/ui/windows/chat_interface.py').read_text(encoding='utf-8')
     typing_block = chat_interface.split('def _on_typing_event', 1)[1].split('def _on_read_event', 1)[0]

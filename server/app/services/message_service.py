@@ -136,7 +136,11 @@ class MessageService:
             message,
             current_user.id,
             session_members=session_members,
-            session_metadata=self._serialize_session_metadata(session, session_members),
+            session_metadata=self._serialize_session_metadata(
+                session,
+                session_members,
+                current_user_id=current_user.id,
+            ),
         ), created
 
     def send_websocket_message(
@@ -173,7 +177,11 @@ class MessageService:
         except MessageIdConflictError as exc:
             raise AppError(ErrorCode.INVALID_REQUEST, str(exc), 409) from exc
 
-        session_metadata = self._serialize_session_metadata(session, session_members)
+        session_metadata = self._serialize_session_metadata(
+            session,
+            session_members,
+            current_user_id=sender_id,
+        )
         sender_users_by_id = self.users.list_users_by_ids([sender_id]) if sender_id else {}
         ack_message = self.serialize_message(
             message,
@@ -321,7 +329,11 @@ class MessageService:
             message,
             current_user.id,
             session_members=session_members,
-            session_metadata=self._serialize_session_metadata(session, session_members),
+            session_metadata=self._serialize_session_metadata(
+                session,
+                session_members,
+                current_user_id=current_user.id,
+            ),
         )
         payload = {
             "session_id": serialized["session_id"],
@@ -487,6 +499,15 @@ class MessageService:
         if getattr(session, "type", "") != "private" or bool(getattr(session, "is_ai_session", False)):
             return True
         return len(set(str(member_id or "") for member_id in member_ids if str(member_id or ""))) >= 2
+
+    @staticmethod
+    def _call_capabilities(*, session_type: str, is_ai_session: bool) -> dict[str, bool]:
+        normalized_session_type = str(session_type or "").strip().lower()
+        supports_direct_call = normalized_session_type == "direct" and not is_ai_session
+        return {
+            "voice": supports_direct_call,
+            "video": supports_direct_call,
+        }
 
     def _ensure_message_status_allows(self, message, action: str) -> None:
         status = str(getattr(message, "status", "") or "").strip().lower()
@@ -1092,6 +1113,7 @@ class MessageService:
             session_id: self._load_session_metadata(
                 session_id,
                 session_members=session_members_by_session.get(session_id, []),
+                current_user_id=current_user_id,
             )
             for session_id in session_ids
         }
@@ -1128,6 +1150,7 @@ class MessageService:
             session_metadata = self._load_session_metadata(
                 message.session_id,
                 session_members=session_members,
+                current_user_id=current_user_id,
             )
         read_metadata = self._message_read_metadata(message, current_user_id, session_members)
         extra = self._message_extra(message)
@@ -1135,6 +1158,19 @@ class MessageService:
             str(message.sender_id or ""),
             users_by_id=sender_users_by_id,
         )
+        for key in (
+            "session_created_at",
+            "session_updated_at",
+            "session_encryption_mode",
+            "session_call_capabilities",
+            "counterpart_id",
+            "counterpart_name",
+            "counterpart_username",
+            "counterpart_avatar",
+            "counterpart_gender",
+        ):
+            if key in session_metadata and key not in extra:
+                extra[key] = session_metadata.get(key)
         return {
             "message_id": message.id,
             "session_id": message.session_id,
@@ -1164,6 +1200,7 @@ class MessageService:
         session_id: str,
         *,
         session_members: list | None = None,
+        current_user_id: str | None = None,
     ) -> dict[str, Any]:
         session = self.sessions.get_by_id(session_id)
         if session is None:
@@ -1173,25 +1210,97 @@ class MessageService:
                 "session_avatar": None,
                 "participant_ids": [],
                 "is_ai_session": False,
+                "session_created_at": None,
+                "session_updated_at": None,
+                "session_encryption_mode": self.ENCRYPTION_MODE_PLAIN,
+                "session_call_capabilities": {"voice": False, "video": False},
+                "counterpart_id": None,
+                "counterpart_name": None,
+                "counterpart_username": None,
+                "counterpart_avatar": None,
+                "counterpart_gender": None,
             }
 
         members = session_members if session_members is not None else self._load_session_members(session_id)
-        return self._serialize_session_metadata(session, members)
+        return self._serialize_session_metadata(session, members, current_user_id=current_user_id)
 
-    @staticmethod
-    def _serialize_session_metadata(session, session_members: list) -> dict[str, Any]:
+    def _serialize_session_metadata(
+        self,
+        session,
+        session_members: list,
+        *,
+        current_user_id: str | None = None,
+    ) -> dict[str, Any]:
         session_type = str(getattr(session, "type", "") or "")
         normalized_session_type = "direct" if session_type == "private" else session_type
         participant_ids = list(
             dict.fromkeys(str(member.user_id or "") for member in session_members if str(member.user_id or ""))
         )
+        users_by_id = self.users.list_users_by_ids(participant_ids) if participant_ids else {}
+        session_avatar = getattr(session, "avatar", None)
+        if normalized_session_type == "group":
+            group = self.groups.get_by_session_id(str(getattr(session, "id", "") or ""))
+            if group is not None:
+                session_avatar = self.avatars.ensure_group_avatar(group)
+        counterpart = self._serialize_counterpart_profile(
+            normalized_session_type,
+            session_members,
+            users_by_id,
+            current_user_id=current_user_id,
+        )
         return {
             "session_type": normalized_session_type,
             "session_name": str(getattr(session, "name", "") or ""),
-            "session_avatar": getattr(session, "avatar", None),
+            "session_avatar": session_avatar,
             "participant_ids": participant_ids,
             "is_ai_session": bool(getattr(session, "is_ai_session", False)),
+            "session_created_at": isoformat_utc(getattr(session, "created_at", None)),
+            "session_updated_at": isoformat_utc(getattr(session, "updated_at", None)),
+            "session_encryption_mode": self._resolve_session_encryption_mode(
+                encryption_mode=getattr(session, "encryption_mode", None),
+                session_type=normalized_session_type,
+                is_ai_session=bool(getattr(session, "is_ai_session", False)),
+            ),
+            "session_call_capabilities": self._call_capabilities(
+                session_type=normalized_session_type,
+                is_ai_session=bool(getattr(session, "is_ai_session", False)),
+            ),
+            "counterpart_id": counterpart.get("id") or None,
+            "counterpart_name": counterpart.get("display_name") or None,
+            "counterpart_username": counterpart.get("username") or None,
+            "counterpart_avatar": counterpart.get("avatar") or None,
+            "counterpart_gender": counterpart.get("gender") or None,
         }
+
+    def _serialize_counterpart_profile(
+        self,
+        session_type: str,
+        session_members: list,
+        users_by_id: dict[str, User],
+        *,
+        current_user_id: str | None = None,
+    ) -> dict[str, Any]:
+        if session_type != "direct":
+            return {}
+        normalized_current_user_id = str(current_user_id or "").strip()
+        for member in session_members:
+            member_user_id = str(getattr(member, "user_id", "") or "").strip()
+            if not member_user_id or member_user_id == normalized_current_user_id:
+                continue
+            user = users_by_id.get(member_user_id)
+            if user is None:
+                continue
+            user = self.avatars.backfill_user_avatar_state(user)
+            nickname = str(getattr(user, "nickname", "") or "")
+            username = str(getattr(user, "username", "") or "")
+            return {
+                "id": str(getattr(user, "id", "") or ""),
+                "display_name": nickname or username or member_user_id,
+                "username": username,
+                "avatar": self.avatars.resolve_user_avatar_url(user) or "",
+                "gender": str(getattr(user, "gender", "") or ""),
+            }
+        return {}
 
     def _serialize_sender_profile(
         self,

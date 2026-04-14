@@ -2097,7 +2097,7 @@ def test_file_upload_rejects_empty_files(
     assert upload_response.json()["message"] == "empty uploads are not allowed"
 
 
-def test_delete_private_session_removes_messages_reads_members_and_events(
+def test_delete_private_session_route_is_not_exposed(
     client: TestClient,
     user_factory,
     auth_header,
@@ -2139,14 +2139,17 @@ def test_delete_private_session_removes_messages_reads_members_and_events(
         f"/api/v1/sessions/{session_id}",
         headers=auth_header(alice["access_token"]),
     )
-    assert delete_response.status_code == 204
+    assert delete_response.status_code == 405
 
     with SessionLocal() as db:
-        assert db.get(ChatSession, session_id) is None
-        assert db.execute(select(Message.id).where(Message.session_id == session_id)).scalars().all() == []
+        assert db.get(ChatSession, session_id) is not None
+        assert db.execute(select(Message.id).where(Message.session_id == session_id)).scalars().all() == [message_id]
         assert db.execute(select(MessageRead.message_id).where(MessageRead.message_id == message_id)).scalars().all() == []
-        assert db.execute(select(SessionMember.user_id).where(SessionMember.session_id == session_id)).scalars().all() == []
-        assert db.execute(select(SessionEvent.id).where(SessionEvent.session_id == session_id)).scalars().all() == []
+        assert set(db.execute(select(SessionMember.user_id).where(SessionMember.session_id == session_id)).scalars().all()) == {
+            alice["user"]["id"],
+            bob["user"]["id"],
+        }
+        assert len(db.execute(select(SessionEvent.id).where(SessionEvent.session_id == session_id)).scalars().all()) == 1
 
 
 def test_delete_group_removes_group_session_messages_and_events(

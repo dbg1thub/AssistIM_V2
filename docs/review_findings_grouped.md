@@ -277,6 +277,22 @@
 
 ### G-02：会话删除 / 本地隐藏 / 全量刷新三套语义分裂
 
+状态：closed（2026-04-14）
+
+关闭说明：
+
+- 客户端已把 session tombstone、authoritative upgrade、startup history warmup、sidebar/search reopen、current-session active、删除后的消息/附件/E2EE/sync cursor/runtime cache 清理收口到同一套 contract
+- fallback session 现在可以被 authoritative snapshot 升级；self-sent direct fallback 不再退化成“只有自己”的 participant 集，也不会再把缺失 lifecycle 时间伪装成有效活动
+- 服务端已移除 `DELETE /api/v1/sessions/{session_id}` 硬删除入口；`create_private(existing)`、call signaling、message/sync visibility、session list group metadata 都改为复用统一的 authoritative visibility / membership / bulk-load contract
+- `ChatInterface` 的通话结果消息 dedupe 状态改成有 TTL 和容量上限的有界缓存，不再是进程级只增不减集合
+- 回归已覆盖：
+  - `client/tests/test_service_boundaries.py`
+  - `client/tests/test_ui_boundaries.py`
+  - `server/tests/test_session_service.py`
+  - `server/tests/test_call_api.py`
+  - `server/tests/test_message_service.py`
+  - `server/tests/test_chat_api.py`
+
 合并范围：
 
 - `F-012`

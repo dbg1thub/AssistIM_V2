@@ -119,23 +119,32 @@ class FakeUserRepo:
 
 
 class FakeGroupRepo:
-    def get_by_session_id(self, session_id: str):
-        if session_id != 'session-2':
-            return None
-        return SimpleNamespace(
+    def __init__(self) -> None:
+        self.group = SimpleNamespace(
             id='group-1',
             owner_id='alice',
             avatar='/uploads/group.png',
             announcement='',
+            session_id='session-2',
         )
-
-    def list_members(self, group_id: str):
-        assert group_id == 'group-1'
-        return [
+        self.group_members = [
             SimpleNamespace(group_id='group-1', user_id='alice', role='owner', group_nickname='', note=''),
             SimpleNamespace(group_id='group-1', user_id='bob', role='member', group_nickname='', note=''),
             SimpleNamespace(group_id='group-1', user_id='charlie', role='member', group_nickname='', note=''),
         ]
+
+    def get_by_session_id(self, session_id: str):
+        return self.group if session_id == 'session-2' else None
+
+    def list_by_session_ids(self, session_ids: list[str]):
+        return {'session-2': self.group} if 'session-2' in session_ids else {}
+
+    def list_members(self, group_id: str):
+        assert group_id == 'group-1'
+        return list(self.group_members)
+
+    def list_members_for_groups(self, group_ids: list[str]):
+        return {'group-1': list(self.group_members)} if 'group-1' in group_ids else {}
 
 class FakeAvatarService:
     def backfill_user_avatar_state(self, user):
@@ -258,7 +267,6 @@ class _HiddenPrivateSessionRepo:
             created_at=now,
             direct_key='alice|bob',
         )
-        self.deleted_session_id = None
 
     def build_private_direct_key(self, members: list[str]) -> str:
         return '|'.join(sorted(str(member) for member in members))
@@ -273,9 +281,6 @@ class _HiddenPrivateSessionRepo:
         if session_id != self.existing.id:
             return []
         return ['alice', 'alice']
-
-    def delete_session(self, session_id: str) -> None:
-        self.deleted_session_id = session_id
 
 
 class _NullGroupRepo:
@@ -363,14 +368,58 @@ def test_session_service_create_private_rejects_hidden_existing_direct_session()
     assert exc_info.value.status_code == 404
 
 
-def test_session_service_delete_session_rejects_hidden_existing_direct_session() -> None:
+def test_session_service_create_private_existing_session_uses_authoritative_member_ids() -> None:
+    now = datetime(2026, 3, 29, 12, 0, 0)
+
+    class _ExistingDirectRepo:
+        def __init__(self) -> None:
+            self.existing = SimpleNamespace(
+                id='session-existing',
+                type='private',
+                is_ai_session=False,
+                name='Alice & Bob',
+                avatar=None,
+                updated_at=now,
+                created_at=now,
+                direct_key='alice|bob',
+                encryption_mode='plain',
+            )
+
+        def build_private_direct_key(self, members: list[str]) -> str:
+            return '|'.join(sorted(str(member) for member in members))
+
+        def get_private_session_by_direct_key(self, direct_key: str):
+            return self.existing if direct_key == 'alice|bob' else None
+
+        def list_member_ids(self, session_id: str):
+            assert session_id == 'session-existing'
+            return ['bob', 'alice']
+
+        def list_members(self, session_id: str):
+            assert session_id == 'session-existing'
+            return [
+                SimpleNamespace(session_id='session-existing', user_id='bob', joined_at=now),
+                SimpleNamespace(session_id='session-existing', user_id='alice', joined_at=now),
+            ]
+
     service = SessionService(db=None)
-    fake_sessions = _HiddenPrivateSessionRepo()
-    service.sessions = fake_sessions
+    service.sessions = _ExistingDirectRepo()
     service.groups = _NullGroupRepo()
+    service.messages = SimpleNamespace(
+        list_session_messages=lambda session_id, limit=1: [],
+        unread_by_session_for_user=lambda user_id: [],
+    )
+    service.users = SimpleNamespace(
+        get_by_id=lambda user_id: SimpleNamespace(id=user_id),
+        list_users_by_ids=lambda user_ids: {
+            'alice': SimpleNamespace(id='alice', nickname='Alice', username='alice', avatar=None, gender='female'),
+            'bob': SimpleNamespace(id='bob', nickname='Bob', username='bob', avatar=None, gender='male'),
+        },
+    )
+    service.avatars = FakeAvatarService()
 
-    with pytest.raises(AppError) as exc_info:
-        service.delete_session(SimpleNamespace(id='alice'), 'session-hidden')
+    payload = service.create_private(SimpleNamespace(id='alice'), ['bob'])
 
-    assert exc_info.value.status_code == 404
-    assert fake_sessions.deleted_session_id is None
+    assert payload['participant_ids'] == ['bob', 'alice']
+    assert payload['created'] is False
+    assert payload['reused'] is True

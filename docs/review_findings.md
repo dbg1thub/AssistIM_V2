@@ -3343,7 +3343,12 @@
 
 ### R-010：通话结果消息去重集合 `_call_result_messages_sent` 是进程级只增不减的状态
 
-状态：风险
+状态：closed（2026-04-14）
+
+修复记录：
+
+- [chat_interface.py](/D:/AssistIM_V2/client/ui/windows/chat_interface.py) 已把 `_call_result_messages_sent` 改成带 TTL 和容量上限的 `OrderedDict`
+- `_schedule_call_result_message()` 发送前会先执行 `_prune_call_result_messages_sent()`，长期运行时不会再无限累积通话结果去重状态
 
 现状：
 
@@ -3367,7 +3372,12 @@
 
 ### R-011：入站消息去重缓存不按会话清理，删除后短时间回流的同一 `message_id` 可能被静默丢弃
 
-状态：风险
+状态：closed（2026-04-14）
+
+修复记录：
+
+- [message_manager.py](/D:/AssistIM_V2/client/managers/message_manager.py) 的 `_recent_incoming_message_ids` 已改成记录 `(timestamp, session_id)`
+- `remove_session_local_state(session_id)` 现在会按 `session_id` 清理 inflight/recent incoming dedupe、发送队列和附件预取状态
 
 现状：
 
@@ -3391,7 +3401,12 @@
 
 ### R-012：本地删除会话不会清理 E2EE group sender-key 状态，历史恢复导出仍可能携带已删会话的密钥材料
 
-状态：风险
+状态：closed（2026-04-14）
+
+修复记录：
+
+- [session_manager.py](/D:/AssistIM_V2/client/managers/session_manager.py) 删除会话时已联动调用 `E2EEService.remove_session_local_state(session_id)`
+- [e2ee_service.py](/D:/AssistIM_V2/client/services/e2ee_service.py) 会同步清理 `e2ee.group_session_state` 和 history recovery 中该 `session_id` 的 group sender-key 状态
 
 现状：
 
@@ -11460,7 +11475,12 @@
 
 ### F-354：`ensure_remote_session()` 发现缓存里已有 session 时会直接返回，消息侧 fallback session 永远得不到 authoritative canonicalize
 
-状态：已确认
+状态：closed（2026-04-14）
+
+修复记录：
+
+- [session_manager.py](/D:/AssistIM_V2/client/managers/session_manager.py) 的 `ensure_remote_session()` 不再把“本地已有同 id session”直接等同于 authoritative 命中
+- fallback session 现在通过 `authoritative_snapshot` / `_remember_session()` 显式建模升级关系，显式 open 会优先回源拿 authoritative payload 覆盖旧 fallback
 
 现状：
 
@@ -11896,7 +11916,12 @@
 
 ### R-049：消息侧 fallback session 一旦落进缓存，就缺少正式的 authoritative upgrade contract
 
-状态：已确认
+状态：closed（2026-04-14）
+
+修复记录：
+
+- fallback session 已显式区分 `authoritative_snapshot = False`
+- `ensure_remote_session()`、`ensure_direct_session()`、消息侧 `_ensure_session_exists()` 都会在远端 payload 可用时把 fallback session 升级成 authoritative session
 
 现状：
 
@@ -11920,7 +11945,12 @@
 
 ### R-050：startup history warmup 没有 per-session fault isolation，一条坏 session 会拖垮整批预热
 
-状态：已确认
+状态：closed（2026-04-14）
+
+修复记录：
+
+- [chat_interface.py](/D:/AssistIM_V2/client/ui/windows/chat_interface.py) 的 `_warm_history_pages()` 已按 session 隔离失败
+- startup warmup 现在绑定 authoritative session snapshot 批次；`_prime_history_page()` 在本地/远端预热前都会重查 session 是否仍存在，旧 prefetch task 不会再给已移除会话回填历史缓存
 
 现状：
 
@@ -11943,7 +11973,12 @@
 
 ### F-370：self-sent direct fallback session 在缺失 `participant_ids` 时只会把当前用户写进成员列表，后续根本无法按对端用户重新发现同一私聊
 
-状态：已确认
+状态：closed（2026-04-14）
+
+修复记录：
+
+- [session_manager.py](/D:/AssistIM_V2/client/managers/session_manager.py) 的 direct fallback 现在会优先吸收消息 payload 里的 `counterpart_*` authoritative metadata
+- self-sent direct fallback 不再退化成“participant_ids 里只有自己”，后续 direct reopen、E2EE 发送和通话入口都能继续解析对端
 
 现状：
 
@@ -18683,7 +18718,12 @@
 
 ### R-076：会话列表在 group session 分支上仍保留 per-session 群资料查询
 
-状态：已确认
+状态：closed（2026-04-14）
+
+修复记录：
+
+- [group_repo.py](/D:/AssistIM_V2/server/app/repositories/group_repo.py) 已补 `list_by_session_ids()` 和 `list_members_for_groups()`
+- [session_service.py](/D:/AssistIM_V2/server/app/services/session_service.py) 的 `list_sessions()` 现在会先批量取 group/group-members，再把结果传给 `serialize_session(...)`
 
 现状：
 
@@ -20321,7 +20361,12 @@
 
 ### F-659：`list_messages()` 仍会暴露“已被 direct 可见性模型隐藏”的私聊历史
 
-状态：已确认
+状态：closed（2026-04-14）
+
+修复记录：
+
+- [message_service.py](/D:/AssistIM_V2/server/app/services/message_service.py) 的 `list_messages()` 已统一走 `_ensure_visible_session_membership()`
+- hidden private session 现在不会再通过消息分页接口继续暴露历史
 
 现状：
 
@@ -20345,7 +20390,12 @@
 
 ### F-660：`sync_missing_messages()` / `sync_missing_events()` 也没有 direct 可见性 gate
 
-状态：已确认
+状态：closed（2026-04-14）
+
+修复记录：
+
+- [message_service.py](/D:/AssistIM_V2/server/app/services/message_service.py) 的 missing-messages / missing-events 已统一经过 `_filter_visible_session_items()`
+- reconnect/history 补偿现在不会再把 hidden private session 继续回放给当前用户
 
 现状：
 
@@ -20370,7 +20420,12 @@
 
 ### F-661：`create_private()` 命中已有 direct_key 时，会用请求侧成员集覆盖返回的 `participant_ids`
 
-状态：已确认
+状态：closed（2026-04-14）
+
+修复记录：
+
+- [session_service.py](/D:/AssistIM_V2/server/app/services/session_service.py) 命中既有 direct session 后，返回 payload 已改为读取 authoritative `existing_member_ids`
+- 对应单测已补，create-direct 返回值不再信任当前请求里的 participant 输入
 
 现状：
 
@@ -24293,7 +24348,12 @@
 
 ### F-808：会话全量刷新里的重复 crypto annotate 不是纯 CPU 重复，而是会把本地 E2EE 查询放大成 N+1
 
-状态：已确认
+状态：closed（2026-04-14）
+
+修复记录：
+
+- [session_manager.py](/D:/AssistIM_V2/client/managers/session_manager.py) 的 batch refresh 路径已把 `_build_session_from_payload()` 与 `_replace_sessions()` 的重复 runtime normalize/crypto annotate/call annotate 拆开
+- `_build_session_from_payload(..., normalize_runtime=False)` 在全量 refresh 中只负责构造基础对象，整批 annotate 改为后置一次性执行
 
 现状：
 
@@ -24327,7 +24387,12 @@
 
 ### F-809：`delete_session()` 没有复用 `_is_visible_private_session()`；同一条异常直聊会在 `GET` 上表现为 404，但在 `DELETE` 上仍允许继续 mutation
 
-状态：已确认
+状态：closed（2026-04-14）
+
+修复记录：
+
+- [sessions.py](/D:/AssistIM_V2/server/app/api/v1/sessions.py) 已移除 `DELETE /api/v1/sessions/{session_id}`
+- [session_service.py](/D:/AssistIM_V2/server/app/services/session_service.py) 也同步移除了 `delete_session()` 硬删除入口，delete mutation 不再绕开 private visibility contract
 
 现状：
 
@@ -24361,7 +24426,12 @@
 
 ### F-810：`create_private()` 命中已有直聊时也没有复用 `_is_visible_private_session()`；异常 private session 仍可被“建私聊”入口重新取回
 
-状态：已确认
+状态：closed（2026-04-14）
+
+修复记录：
+
+- [session_service.py](/D:/AssistIM_V2/server/app/services/session_service.py) 的 `create_private(existing)` 已复用 `_is_visible_private_session(...)`
+- 异常 hidden private session 现在不会再被 create-direct 入口重新返回
 
 现状：
 
@@ -25237,7 +25307,12 @@
 
 ### F-835：通话正式入口也没有复用 private-session visibility gate；已被 visibility 模型隐藏的异常直聊仍可继续发起/接受/挂断/信令
 
-状态：已确认
+状态：closed（2026-04-14）
+
+修复记录：
+
+- [call_service.py](/D:/AssistIM_V2/server/app/services/call_service.py) 的 `_require_private_session()` 已复用 private-session visibility gate
+- hidden private session 现在会在 invite/accept/reject/hangup/offer/answer/ice 全链路统一返回 `404`
 
 现状：
 

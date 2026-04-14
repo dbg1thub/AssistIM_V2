@@ -1289,6 +1289,33 @@ class Database:
         await self._db.execute("DELETE FROM sessions WHERE session_id = ?", (session_id,))
         await self._db.commit()
         logger.debug(f"Session deleted: {session_id}")
+
+    async def list_session_message_ids(self, session_id: str) -> list[str]:
+        """Return all persisted message ids for one session."""
+        cursor = await self._db.execute(
+            "SELECT message_id FROM messages WHERE session_id = ?",
+            (session_id,),
+        )
+        rows = await cursor.fetchall()
+        return [str(row["message_id"] or "") for row in rows if str(row["message_id"] or "")]
+
+    async def list_session_local_attachment_paths(self, session_id: str) -> list[str]:
+        """Return all cached local attachment paths referenced by one session."""
+        cursor = await self._db.execute(
+            "SELECT extra FROM messages WHERE session_id = ?",
+            (session_id,),
+        )
+        rows = await cursor.fetchall()
+        local_paths: list[str] = []
+        for row in rows:
+            try:
+                extra = json.loads(str(row["extra"] or "{}"))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                extra = {}
+            local_path = str(dict(extra or {}).get("local_path") or "").strip()
+            if local_path:
+                local_paths.append(local_path)
+        return local_paths
     
     async def update_session_unread(self, session_id: str, count: int) -> None:
         """

@@ -57,6 +57,19 @@ class SessionService:
         members_by_session = self.sessions.list_members_for_sessions(session_ids)
         last_messages_by_session = self.messages.list_last_messages_for_sessions(session_ids)
         unread_counts_by_session = self._unread_counts_by_session(current_user.id)
+        group_sessions = [
+            item
+            for item in session_items
+            if str(getattr(item, "type", "") or "").strip().lower() == "group"
+        ]
+        groups_by_session = self.groups.list_by_session_ids([item.id for item in group_sessions])
+        group_members_by_group = self.groups.list_members_for_groups(
+            [
+                str(group.id or "")
+                for group in groups_by_session.values()
+                if str(group.id or "")
+            ]
+        )
         user_ids = sorted(
             {
                 str(member.user_id or "")
@@ -80,6 +93,10 @@ class SessionService:
                     participant_ids=member_ids,
                     last_message=last_messages_by_session.get(item.id),
                     session_members=session_members,
+                    group=groups_by_session.get(str(item.id or "")),
+                    group_members=group_members_by_group.get(
+                        str(getattr(groups_by_session.get(str(item.id or "")), "id", "") or "")
+                    ),
                     users_by_id=users_by_id,
                     current_user_id=current_user.id,
                     unread_count=unread_counts_by_session.get(str(item.id or ""), 0),
@@ -112,7 +129,7 @@ class SessionService:
             payload = self.serialize_session(
                 existing,
                 include_members=True,
-                participant_ids=members,
+                participant_ids=existing_member_ids,
                 current_user_id=current_user.id,
                 unread_count=unread_count,
             )
@@ -142,10 +159,11 @@ class SessionService:
             session = existing
             created = False
         unread_count = self._unread_counts_by_session(current_user.id).get(str(session.id or ""), 0)
+        existing_member_ids = self.sessions.list_member_ids(str(session.id or ""))
         payload = self.serialize_session(
             session,
             include_members=True,
-            participant_ids=members,
+            participant_ids=existing_member_ids,
             current_user_id=current_user.id,
             unread_count=unread_count,
         )
@@ -172,19 +190,6 @@ class SessionService:
             unread_count=unread_count,
         )
 
-    def delete_session(self, current_user: User, session_id: str) -> None:
-        session = self.sessions.get_by_id(session_id)
-        if session is None:
-            raise AppError(ErrorCode.RESOURCE_NOT_FOUND, "session not found", 404)
-        member_ids = self.sessions.list_member_ids(session_id)
-        if current_user.id not in member_ids:
-            raise AppError(ErrorCode.FORBIDDEN, "not a session member", 403)
-        if not self._is_visible_private_session(session, member_ids):
-            raise AppError(ErrorCode.RESOURCE_NOT_FOUND, "session not found", 404)
-        if self.groups.get_by_session_id(session_id) is not None:
-            raise AppError(ErrorCode.FORBIDDEN, "group sessions must be deleted via groups API", 403)
-        self.sessions.delete_session(session_id)
-
     def list_member_ids(self, session_id: str) -> list[str]:
         return self.sessions.list_member_ids(session_id)
 
@@ -196,6 +201,8 @@ class SessionService:
         participant_ids: list[str] | None = None,
         last_message=None,
         session_members: list | None = None,
+        group=None,
+        group_members: list | None = None,
         users_by_id: dict[str, User] | None = None,
         current_user_id: str | None = None,
         unread_count: int = 0,
@@ -219,7 +226,7 @@ class SessionService:
         announcement_author_id = ""
         announcement_published_at = None
         if normalized_session_type == "group":
-            group = self.groups.get_by_session_id(session.id)
+            group = group if group is not None else self.groups.get_by_session_id(session.id)
             if group is not None:
                 avatar = self.avatars.ensure_group_avatar(group)
                 group_id = str(group.id or "")
@@ -228,7 +235,7 @@ class SessionService:
                 announcement_message_id = str(getattr(group, "announcement_message_id", "") or "")
                 announcement_author_id = str(getattr(group, "announcement_author_id", "") or "")
                 announcement_published_at = getattr(group, "announcement_published_at", None)
-                group_members = self.groups.list_members(group.id)
+                group_members = group_members if group_members is not None else self.groups.list_members(group.id)
                 role_by_user_id = {
                     str(item.user_id or ""): str(item.role or "member")
                     for item in group_members

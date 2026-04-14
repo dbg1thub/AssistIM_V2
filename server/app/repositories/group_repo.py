@@ -50,6 +50,21 @@ class GroupRepository:
         stmt = select(Group).where(Group.session_id == session_id)
         return self.db.execute(stmt).scalar_one_or_none()
 
+    def list_by_session_ids(self, session_ids: list[str]) -> dict[str, Group]:
+        normalized_session_ids = [
+            str(session_id or "").strip()
+            for session_id in session_ids
+            if str(session_id or "").strip()
+        ]
+        if not normalized_session_ids:
+            return {}
+        stmt = select(Group).where(Group.session_id.in_(normalized_session_ids))
+        return {
+            str(group.session_id or ""): group
+            for group in self.db.execute(stmt).scalars().all()
+            if str(group.session_id or "")
+        }
+
     def list_user_groups(self, user_id: str) -> list[Group]:
         stmt = (
             select(Group)
@@ -66,6 +81,27 @@ class GroupRepository:
             .order_by(GroupMember.joined_at.asc(), GroupMember.user_id.asc())
         )
         return list(self.db.execute(stmt).scalars().all())
+
+    def list_members_for_groups(self, group_ids: list[str]) -> dict[str, list[GroupMember]]:
+        normalized_group_ids = [
+            str(group_id or "").strip()
+            for group_id in group_ids
+            if str(group_id or "").strip()
+        ]
+        if not normalized_group_ids:
+            return {}
+        stmt = (
+            select(GroupMember)
+            .where(GroupMember.group_id.in_(normalized_group_ids))
+            .order_by(GroupMember.group_id.asc(), GroupMember.joined_at.asc(), GroupMember.user_id.asc())
+        )
+        members_by_group: dict[str, list[GroupMember]] = {group_id: [] for group_id in normalized_group_ids}
+        for member in self.db.execute(stmt).scalars().all():
+            group_id = str(member.group_id or "")
+            if not group_id:
+                continue
+            members_by_group.setdefault(group_id, []).append(member)
+        return members_by_group
 
     def get_member(self, group_id: str, user_id: str) -> GroupMember | None:
         return self.db.get(GroupMember, {"group_id": group_id, "user_id": user_id})

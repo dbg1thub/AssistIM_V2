@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Response, status
+from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
@@ -41,9 +41,3 @@ def create_direct_session(
 @router.get("/{session_id}")
 def get_session(session_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
     return success_response(SessionService(db).get_session(current_user, session_id))
-
-
-@router.delete("/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_session(session_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> Response:
-    SessionService(db).delete_session(current_user, session_id)
-    return Response(status_code=status.HTTP_204_NO_CONTENT)

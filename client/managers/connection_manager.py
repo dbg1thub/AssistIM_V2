@@ -1010,6 +1010,22 @@ class ConnectionManager:
         if self._session_sync_cursors != previous_session_cursors or self._event_sync_cursors != previous_event_cursors:
             await self._save_sync_state()
 
+    async def remove_session_sync_state(self, session_id: str) -> None:
+        """Drop reconnect cursors for one locally removed session."""
+        normalized_session_id = str(session_id or "").strip()
+        if not normalized_session_id:
+            return
+
+        removed = False
+        if normalized_session_id in self._session_sync_cursors:
+            self._session_sync_cursors.pop(normalized_session_id, None)
+            removed = True
+        if normalized_session_id in self._event_sync_cursors:
+            self._event_sync_cursors.pop(normalized_session_id, None)
+            removed = True
+        if removed:
+            await self._save_sync_state()
+
     async def close(self) -> None:
         """Close connection manager and cleanup."""
         logger.info("Closing connection manager")

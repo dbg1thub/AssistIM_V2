@@ -13,6 +13,7 @@ from app.core.config import Settings, get_settings
 from app.core.errors import AppError, ErrorCode
 from app.realtime.call_registry import ActiveCall, InMemoryCallRegistry, get_call_registry
 from app.repositories.session_repo import SessionRepository
+from app.services.session_service import SessionService
 from app.utils.time import isoformat_utc, utcnow
 
 
@@ -204,6 +205,8 @@ class CallService:
             raise AppError(ErrorCode.INVALID_REQUEST, "calls only support private non-AI sessions", 422)
         member_ids = self.sessions.list_member_ids(normalized_session_id)
         distinct_member_ids = list(dict.fromkeys(str(member_id or '').strip() for member_id in member_ids if str(member_id or '').strip()))
+        if not SessionService._is_visible_private_session(session, distinct_member_ids):
+            raise AppError(ErrorCode.RESOURCE_NOT_FOUND, "session not found", 404)
         if len(distinct_member_ids) != 2:
             raise AppError(ErrorCode.SESSION_CONFLICT, "private call requires exactly two session members", 409)
         return session, distinct_member_ids

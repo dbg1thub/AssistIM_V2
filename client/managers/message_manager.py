@@ -210,6 +210,24 @@ class MessageSendQueue:
             queued = self._queue.get_nowait()
             await self._on_send_result(queued, False)
 
+    async def drop_session(self, session_id: str) -> None:
+        """Fail queued transport attempts for one locally removed session."""
+        normalized_session_id = str(session_id or "").strip()
+        if not normalized_session_id:
+            return
+
+        if self._inflight is not None and self._inflight.session_id == normalized_session_id:
+            self._inflight = None
+
+        survivors: list[QueuedMessage] = []
+        while not self._queue.empty():
+            queued = self._queue.get_nowait()
+            if queued.session_id == normalized_session_id:
+                continue
+            survivors.append(queued)
+        for queued in survivors:
+            self._queue.put_nowait(queued)
+
 
 class MessageManager:
     """
@@ -238,7 +256,7 @@ class MessageManager:
         self._pending_lock = asyncio.Lock()
         self._incoming_message_guard = asyncio.Lock()
         self._incoming_message_inflight: set[str] = set()
-        self._recent_incoming_message_ids: dict[str, float] = {}
+        self._recent_incoming_message_ids: dict[str, tuple[float, str]] = {}
         self._incoming_message_dedupe_ttl = 300.0
         self._media_prefetch_tasks: dict[str, asyncio.Task] = {}
 
@@ -616,7 +634,11 @@ class MessageManager:
             processed = True
             logger.info(f"Message received: {message.message_id}")
         finally:
-            await self._release_incoming_message(message.message_id, processed=processed)
+            await self._release_incoming_message(
+                message.message_id,
+                processed=processed,
+                session_id=message.session_id,
+            )
 
     async def _reserve_incoming_message(self, message_id: str) -> bool:
         """Reserve one inbound message id so duplicate deliveries stay idempotent."""
@@ -627,8 +649,8 @@ class MessageManager:
         async with self._incoming_message_guard:
             expired_ids = [
                 existing_id
-                for existing_id, seen_at in self._recent_incoming_message_ids.items()
-                if now - seen_at > self._incoming_message_dedupe_ttl
+                for existing_id, seen_entry in self._recent_incoming_message_ids.items()
+                if now - float(seen_entry[0]) > self._incoming_message_dedupe_ttl
             ]
             for existing_id in expired_ids:
                 self._recent_incoming_message_ids.pop(existing_id, None)
@@ -641,7 +663,7 @@ class MessageManager:
             self._incoming_message_inflight.add(message_id)
             return True
 
-    async def _release_incoming_message(self, message_id: str, *, processed: bool) -> None:
+    async def _release_incoming_message(self, message_id: str, *, processed: bool, session_id: str = "") -> None:
         """Release one inbound message reservation after processing finishes."""
         if not message_id:
             return
@@ -649,7 +671,7 @@ class MessageManager:
         async with self._incoming_message_guard:
             self._incoming_message_inflight.discard(message_id)
             if processed:
-                self._recent_incoming_message_ids[message_id] = time.monotonic()
+                self._recent_incoming_message_ids[message_id] = (time.monotonic(), str(session_id or "").strip())
 
     @staticmethod
     def _coerce_read_int(value: Any) -> int:
@@ -2685,6 +2707,55 @@ class MessageManager:
             "result": dict(result),
         })
         return result
+
+    async def remove_session_local_state(self, session_id: str) -> None:
+        """Cancel message-side local state for one removed session."""
+        normalized_session_id = str(session_id or "").strip()
+        if not normalized_session_id:
+            return
+
+        message_ids = set(await self._db.list_session_message_ids(normalized_session_id))
+        local_paths = list(await self._db.list_session_local_attachment_paths(normalized_session_id))
+
+        async with self._pending_lock:
+            removed_pending_ids = [
+                message_id
+                for message_id, pending in self._pending_messages.items()
+                if pending.session_id == normalized_session_id
+            ]
+            for message_id in removed_pending_ids:
+                self._pending_messages.pop(message_id, None)
+
+        if self._send_queue is not None:
+            await self._send_queue.drop_session(normalized_session_id)
+
+        prefetch_tasks: list[asyncio.Task] = []
+        for message_id in list(message_ids):
+            task = self._media_prefetch_tasks.pop(message_id, None)
+            if task is not None and not task.done():
+                task.cancel()
+                prefetch_tasks.append(task)
+        for task in prefetch_tasks:
+            try:
+                await asyncio.wait_for(task, timeout=self._close_timeout)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                pass
+
+        async with self._incoming_message_guard:
+            self._incoming_message_inflight.difference_update(message_ids)
+            self._recent_incoming_message_ids = {
+                message_id: entry
+                for message_id, entry in self._recent_incoming_message_ids.items()
+                if str(entry[1] or "") != normalized_session_id
+            }
+
+        for local_path in local_paths:
+            try:
+                if local_path and os.path.exists(local_path):
+                    os.remove(local_path)
+            except OSError as exc:
+                logger.debug("Failed to remove cached attachment %s: %s", local_path, exc)
+
     async def close(self) -> None:
         """Close message manager."""
         logger.info("Closing message manager")

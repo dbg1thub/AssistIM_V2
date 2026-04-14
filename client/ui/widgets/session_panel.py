@@ -108,6 +108,7 @@ class SessionPanel(QWidget):
         self._search_flyout = None
         self._search_flyout_view: Optional[GlobalSearchPopupOverlay] = None
         self._pending_search_keyword = ''
+        self._search_generation = 0
         self._search_timer = QTimer(self)
         self._search_timer.setSingleShot(True)
         self._search_timer.setInterval(120)
@@ -284,17 +285,23 @@ class SessionPanel(QWidget):
         session = data.get("session")
         if session:
             self._update_session_safe(session)
+            if self.search_box.text().strip():
+                self._trigger_global_search()
             return
 
         sessions = data.get("sessions")
         if isinstance(sessions, list):
             self._load_all_sessions_safe(sessions)
+            if self.search_box.text().strip():
+                self._trigger_global_search()
 
     def _on_session_deleted(self, data: dict) -> None:
         """Handle deleted sessions."""
         session_id = data.get("session_id")
         if session_id:
             self._remove_session_safe(session_id)
+            if self.search_box.text().strip():
+                self._trigger_global_search()
 
     def _on_message_added(self, data: dict) -> None:
         """Update preview text when a message arrives."""
@@ -375,15 +382,17 @@ class SessionPanel(QWidget):
         keyword = self._pending_search_keyword
         if not keyword:
             return
+        self._search_generation += 1
+        generation = self._search_generation
         flyout_view = self._show_search_flyout()
         if flyout_view is not None:
             flyout_view.set_loading(keyword)
-        self._set_search_task(self._run_global_search(keyword))
+        self._set_search_task(self._run_global_search(keyword, generation))
 
-    async def _run_global_search(self, keyword: str) -> None:
+    async def _run_global_search(self, keyword: str, generation: int) -> None:
         """Populate grouped search results for the current keyword."""
         results = await search_all(keyword, message_limit=30, contact_limit=30, group_limit=30)
-        if self.search_box.text().strip() != keyword:
+        if self.search_box.text().strip() != keyword or generation != self._search_generation:
             return
         flyout_view = self._show_search_flyout()
         if flyout_view is not None:
@@ -634,6 +643,7 @@ class SessionPanel(QWidget):
                 bool(session.extra.get("last_message_mentions_current_user", False)),
                 bool(session.extra.get("is_muted", False)),
                 getattr(session, "draft_preview", None),
+                session.display_avatar(),
             )
             for session in sessions
         )

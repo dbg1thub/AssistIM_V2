@@ -91,7 +91,7 @@ def test_calls_ice_servers_signs_short_lived_turn_credentials(monkeypatch) -> No
 
 
 
-def test_call_service_rejects_private_session_with_duplicate_members() -> None:
+def test_call_service_rejects_hidden_private_session_before_entering_call_state_machine() -> None:
     from app.core.errors import AppError
     from app.services.call_service import CallService
 
@@ -104,6 +104,34 @@ def test_call_service_rejects_private_session_with_duplicate_members() -> None:
 
         def list_member_ids(self, session_id: str) -> list[str]:
             return ["alice", "alice"]
+
+    service = CallService(db=None)
+    service.sessions = _FakeSessionRepo()
+
+    with pytest.raises(AppError) as exc_info:
+        service.invite(
+            session_id="session-1",
+            call_id="call-1",
+            initiator_id="alice",
+            media_type="voice",
+        )
+
+    assert exc_info.value.status_code == 404
+
+
+def test_call_service_rejects_private_session_with_more_than_two_members() -> None:
+    from app.core.errors import AppError
+    from app.services.call_service import CallService
+
+    class _FakeSessionRepo:
+        def get_by_id(self, session_id: str):
+            return SimpleNamespace(id=session_id, type="private", is_ai_session=False)
+
+        def has_member(self, session_id: str, user_id: str) -> bool:
+            return True
+
+        def list_member_ids(self, session_id: str) -> list[str]:
+            return ["alice", "bob", "charlie"]
 
     service = CallService(db=None)
     service.sessions = _FakeSessionRepo()

@@ -429,9 +429,9 @@ class ChatController:
         """Clear current session selection."""
         await self._session_manager.clear_current_session()
 
-    async def set_current_session_active(self, active: bool) -> None:
+    async def set_current_session_active(self, active: bool, *, session_id: str | None = None) -> None:
         """Mark whether the selected session is currently foreground-readable."""
-        await self._session_manager.set_current_session_active(active)
+        await self._session_manager.set_current_session_active(active, session_id=session_id)
 
     def get_current_session_id(self) -> Optional[str]:
         """Get current session ID."""
