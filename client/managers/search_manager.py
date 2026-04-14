@@ -75,7 +75,7 @@ class SearchManager:
 
     def __init__(self):
         self._db = get_database()
-        self._current_results: list[SearchResult] = []
+        self._message_results: list[SearchResult] = []
         self._last_catalog_results = SearchCatalogResults(messages=[], contacts=[], groups=[])
 
     async def search(
@@ -86,39 +86,13 @@ class SearchManager:
     ) -> list[SearchResult]:
         """Search cached messages by keyword and aggregate hits by session."""
         if not keyword or not keyword.strip():
-            self._current_results = []
+            self._message_results = []
             return []
 
         normalized_keyword = keyword.strip()
         normalized_limit = max(1, int(limit or 0))
-        messages = await self._search_messages(normalized_keyword, session_id, normalized_limit)
-        session_metadata_cache = await self._resolve_message_session_metadata_bulk(
-            [message.session_id for message in messages]
-        )
-        grouped_results: dict[str, SearchResult] = {}
-        ordered_session_ids: list[str] = []
-
-        for message in messages:
-            metadata = session_metadata_cache.get(message.session_id, {})
-            result = self._highlight_message_matches(
-                message,
-                normalized_keyword,
-                session_name=metadata.get("session_name", ""),
-                session_avatar=metadata.get("session_avatar", ""),
-                session_type=metadata.get("session_type", ""),
-            )
-            if result is None:
-                continue
-
-            existing = grouped_results.get(message.session_id)
-            if existing is None:
-                grouped_results[message.session_id] = result
-                ordered_session_ids.append(message.session_id)
-            else:
-                existing.match_count += 1
-
-        results = [grouped_results[session] for session in ordered_session_ids[:normalized_limit]]
-        self._current_results = results
+        results = await self._search_message_sessions(normalized_keyword, session_id=session_id, limit=normalized_limit)
+        self._message_results = results
         logger.debug("Found %s message sessions", len(results))
         return results
 
@@ -168,7 +142,6 @@ class SearchManager:
         """Search messages, contacts, and groups from local cache."""
         if not keyword or not keyword.strip():
             empty = SearchCatalogResults(messages=[], contacts=[], groups=[], message_total=0, contact_total=0, group_total=0)
-            self._current_results = []
             self._last_catalog_results = empty
             return empty
 
@@ -178,7 +151,7 @@ class SearchManager:
         count_groups = getattr(self._db, "count_search_groups", None)
 
         messages, contacts, groups, message_total, contact_total, group_total = await asyncio.gather(
-            self.search(normalized_keyword, session_id=session_id, limit=message_limit),
+            self._search_message_sessions(normalized_keyword, session_id=session_id, limit=message_limit),
             self.search_contacts(normalized_keyword, limit=contact_limit),
             self.search_groups(normalized_keyword, limit=group_limit),
             count_messages(normalized_keyword, session_id=session_id) if callable(count_messages) else self._immediate_value(0),
@@ -205,6 +178,47 @@ class SearchManager:
         )
         return catalog
 
+    async def _search_message_sessions(
+        self,
+        keyword: str,
+        *,
+        session_id: Optional[str],
+        limit: int,
+    ) -> list[SearchResult]:
+        """Search message hits and aggregate them by session without mutating catalog state."""
+        normalized_limit = max(1, int(limit or 0))
+        messages = await self._search_messages_grouped(keyword, session_id=session_id, limit=normalized_limit)
+        session_metadata_cache = await self._resolve_message_session_metadata_bulk(
+            [message.session_id for message in messages]
+        )
+        grouped_results: dict[str, SearchResult] = {}
+        ordered_session_ids: list[str] = []
+
+        for message in messages:
+            metadata = session_metadata_cache.get(message.session_id, {})
+            result = self._highlight_message_matches(
+                message,
+                keyword,
+                session_name=metadata.get("session_name", ""),
+                session_avatar=metadata.get("session_avatar", ""),
+                session_type=metadata.get("session_type", ""),
+            )
+            if result is None:
+                continue
+
+            existing = grouped_results.get(message.session_id)
+            if existing is None:
+                grouped_results[message.session_id] = result
+                ordered_session_ids.append(message.session_id)
+                continue
+
+            existing.match_count += 1
+            if self._message_result_rank(result) > self._message_result_rank(existing):
+                result.match_count = existing.match_count
+                grouped_results[message.session_id] = result
+
+        return [grouped_results[session] for session in ordered_session_ids[:normalized_limit]]
+
     async def _search_messages(
         self,
         keyword: str,
@@ -217,6 +231,32 @@ class SearchManager:
         except Exception as exc:
             logger.error(f"Message search error: {exc}")
             return []
+
+    async def _search_messages_grouped(
+        self,
+        keyword: str,
+        *,
+        session_id: Optional[str],
+        limit: int,
+    ) -> list[ChatMessage]:
+        """Over-fetch raw hits so grouped message search can cover more unique sessions."""
+        unique_session_ids: set[str] = set()
+        collected: list[ChatMessage] = []
+        raw_limit = max(limit, min(400, limit * 4))
+
+        while True:
+            messages = await self._search_messages(keyword, session_id, raw_limit)
+            if not messages:
+                return []
+            collected = messages
+            unique_session_ids = {
+                str(message.session_id or "").strip()
+                for message in messages
+                if str(message.session_id or "").strip()
+            }
+            if len(unique_session_ids) >= limit or len(messages) < raw_limit or raw_limit >= 400:
+                return collected
+            raw_limit = min(400, raw_limit * 2)
 
     async def _search_contacts(
         self,
@@ -288,10 +328,11 @@ class SearchManager:
     ) -> Optional[ContactSearchResult]:
         """Highlight the first matching contact field."""
         for field_name, field_value in (
+            ("display_name", contact.get("display_name") or contact.get("name") or ""),
             ("nickname", contact.get("nickname") or ""),
+            ("remark", contact.get("remark") or ""),
             ("assistim_id", contact.get("assistim_id") or ""),
             ("region", contact.get("region") or ""),
-            ("remark", contact.get("remark") or ""),
         ):
             match = self._build_highlight_payload(str(field_value or ""), keyword)
             if match is None:
@@ -334,9 +375,10 @@ class SearchManager:
             )
 
         member_search_text = str(group.get("member_search_text") or "")
-        if member_search_text and self._find_highlight_ranges(member_search_text, keyword):
-            preview = tr("search.group.member.placeholder", "Group member match")
-            preview_match = self._build_highlight_payload(preview, keyword) or (preview, [])
+        if member_search_text:
+            preview_match = self._build_highlight_payload(member_search_text, keyword)
+            if preview_match is None:
+                return None
             matched_text, highlight_ranges = preview_match
             return GroupSearchResult(
                 group=group,
@@ -364,12 +406,25 @@ class SearchManager:
             return None
 
         first_match_start, first_match_end = ranges[0]
-        matched_text = content[max(0, first_match_start - 20):first_match_end + 20]
-        if first_match_start > 20:
+        snippet_start = max(0, first_match_start - 20)
+        snippet_end = min(len(content), first_match_end + 20)
+        matched_text = content[snippet_start:snippet_end]
+        if snippet_start > 0:
             matched_text = "..." + matched_text
-        if first_match_end < len(content) - 20:
+        if snippet_end < len(content):
             matched_text = matched_text + "..."
-        return matched_text, ranges
+        prefix_offset = 3 if snippet_start > 0 else 0
+        clipped_ranges: list[tuple[int, int]] = []
+        for start, end in ranges:
+            if end <= snippet_start or start >= snippet_end:
+                continue
+            clipped_ranges.append(
+                (
+                    max(start, snippet_start) - snippet_start + prefix_offset,
+                    min(end, snippet_end) - snippet_start + prefix_offset,
+                )
+            )
+        return matched_text, clipped_ranges
 
     @staticmethod
     def _find_highlight_ranges(content: str, keyword: str) -> list[tuple[int, int]]:
@@ -396,14 +451,14 @@ class SearchManager:
 
     def get_result_at(self, index: int) -> Optional[SearchResult]:
         """Get message search result at index."""
-        if 0 <= index < len(self._current_results):
-            return self._current_results[index]
+        if 0 <= index < len(self._message_results):
+            return self._message_results[index]
         return None
 
     @property
     def result_count(self) -> int:
         """Get number of aggregated message search results."""
-        return len(self._current_results)
+        return len(self._message_results)
 
     @property
     def last_catalog_results(self) -> SearchCatalogResults:
@@ -412,7 +467,7 @@ class SearchManager:
 
     def clear_results(self) -> None:
         """Clear cached search results."""
-        self._current_results = []
+        self._message_results = []
         self._last_catalog_results = SearchCatalogResults(messages=[], contacts=[], groups=[], message_total=0, contact_total=0, group_total=0)
 
     async def close(self) -> None:
@@ -422,6 +477,14 @@ class SearchManager:
         global _search_manager
         if _search_manager is self:
             _search_manager = None
+
+    @staticmethod
+    def _message_result_rank(result: SearchResult) -> tuple[int, int, int]:
+        """Prefer richer, tighter snippets when multiple hits map to one session."""
+        keyword_hits = len(result.highlight_ranges)
+        preview_length = len(str(result.matched_text or ""))
+        first_hit = result.highlight_ranges[0][0] if result.highlight_ranges else 10**9
+        return (keyword_hits, -first_hit, -preview_length)
 
 
 _search_manager: Optional[SearchManager] = None

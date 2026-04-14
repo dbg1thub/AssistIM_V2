@@ -2405,8 +2405,18 @@ def test_contact_controller_load_contacts_and_groups_persist_local_search_cache(
         assert [item['display_name'] for item in fake_db.replaced_contacts[0]] == ['A Friend', 'Zoe']
         assert [item['region'] for item in fake_db.replaced_contacts[0]] == ['Shenzhen', 'Seoul']
         assert [item['id'] for item in fake_db.replaced_groups[0]] == ['group-1', 'group-2']
-        assert fake_db.replaced_groups[0][0]['member_search_text'] == 'Alice(地区: Shenzhen)'
-        assert fake_db.replaced_groups[0][0]['extra']['member_previews'] == ['Alice(地区: Shenzhen)']
+        assert fake_db.replaced_groups[0][0]['member_search_text'] == 'Alice Shenzhen'
+        assert fake_db.replaced_groups[0][0]['extra']['member_previews'] == ['Alice Shenzhen']
+        assert fake_db.replaced_contacts[0][0]['extra'] == {
+            'id': 'user-1',
+            'display_name': 'A Friend',
+            'username': 'alice',
+            'nickname': 'Alice',
+            'avatar': '',
+            'gender': '',
+            'status': '',
+            'profile_event_id': '',
+        }
 
     asyncio.run(scenario())
 
@@ -2435,11 +2445,6 @@ def test_contact_controller_load_requests_resolves_counterpart_names(monkeypatch
             'receiver': {'id': 'user-1', 'nickname': 'Alice', 'username': 'alice'},
         },
     ]
-    fake_user_service.user_payloads = {
-        outgoing_target_id: {'id': outgoing_target_id, 'username': 'test2', 'nickname': 'Test 2'},
-        incoming_sender_id: {'id': incoming_sender_id, 'username': 'test3', 'nickname': 'Test 3'},
-    }
-
     monkeypatch.setattr(contact_controller_module, 'get_contact_service', lambda: fake_contact_service)
     monkeypatch.setattr(contact_controller_module, 'get_user_service', lambda: fake_user_service)
     monkeypatch.setattr(contact_controller_module, 'get_auth_controller', lambda: fake_auth_context)
@@ -2456,6 +2461,66 @@ def test_contact_controller_load_requests_resolves_counterpart_names(monkeypatch
         assert requests[1].counterpart_name('user-1') == 'Test 3'
         assert requests[1].counterpart_avatar('user-1') == '/uploads/test3.png'
         assert requests[1].counterpart_gender('user-1') == 'male'
+
+    asyncio.run(scenario())
+
+
+def test_contact_controller_persist_contacts_cache_uses_minimal_search_payload(monkeypatch) -> None:
+    fake_contact_service = FakeContactService()
+    fake_user_service = FakeUserService()
+    fake_auth_context = FakeAuthContext()
+    fake_db = FakeDatabase()
+    fake_db.is_connected = True
+
+    monkeypatch.setattr(contact_controller_module, 'get_contact_service', lambda: fake_contact_service)
+    monkeypatch.setattr(contact_controller_module, 'get_user_service', lambda: fake_user_service)
+    monkeypatch.setattr(contact_controller_module, 'get_auth_controller', lambda: fake_auth_context)
+    monkeypatch.setattr(contact_controller_module, 'get_database', lambda: fake_db)
+
+    async def scenario() -> None:
+        controller = contact_controller_module.ContactController()
+        await controller.persist_contacts_cache(
+            [
+                contact_controller_module.ContactRecord(
+                    id='user-2',
+                    name='bob',
+                    username='bob',
+                    nickname='Bobby',
+                    avatar='/avatars/bob.png',
+                    region='Busan',
+                    gender='male',
+                    status='busy',
+                    extra={'email': 'private@example.com', 'profile_event_id': 'evt-1'},
+                )
+            ]
+        )
+
+        assert fake_db.replaced_contacts == [[
+            {
+                'id': 'user-2',
+                'name': 'bob',
+                'display_name': 'Bobby',
+                'username': 'bob',
+                'nickname': 'Bobby',
+                'remark': '',
+                'assistim_id': '',
+                'region': 'Busan',
+                'avatar': '/avatars/bob.png',
+                'signature': '',
+                'category': 'friend',
+                'status': 'busy',
+                'extra': {
+                    'id': 'user-2',
+                    'display_name': 'Bobby',
+                    'username': 'bob',
+                    'nickname': 'Bobby',
+                    'avatar': '/avatars/bob.png',
+                    'gender': 'male',
+                    'status': 'busy',
+                    'profile_event_id': 'evt-1',
+                },
+            }
+        ]]
 
     asyncio.run(scenario())
 
@@ -2617,7 +2682,7 @@ def test_search_manager_uses_database_search_boundary(monkeypatch) -> None:
         manager = search_manager_module.SearchManager()
         results = await manager.search('100%_off', session_id='session-1', limit=5)
 
-        assert fake_db.search_calls == [('100%_off', 'session-1', 5)]
+        assert fake_db.search_calls == [('100%_off', 'session-1', 20)]
         assert len(results) == 1
         assert results[0].message.message_id == 'msg-1'
         assert results[0].matched_text == 'discount 100%_off now'
@@ -2667,7 +2732,7 @@ def test_search_manager_search_all_uses_storage_boundaries(monkeypatch) -> None:
                 'name': 'Core Team',
                 'session_id': 'session-group-1',
                 'member_search_text': 'Alice Shenzhen',
-                'extra': {'member_previews': ['Alice(地区: Shenzhen)']},
+                'extra': {'member_previews': ['Alice Shenzhen']},
             }
         ],
     )
@@ -2684,7 +2749,7 @@ def test_search_manager_search_all_uses_storage_boundaries(monkeypatch) -> None:
             group_limit=5,
         )
 
-        assert fake_db.search_calls == [('core', 'session-1', 3)]
+        assert fake_db.search_calls == [('core', 'session-1', 12)]
         assert fake_db.search_contact_calls == [('core', 4)]
         assert fake_db.search_group_calls == [('core', 5)]
         assert len(results.messages) == 1
@@ -2708,7 +2773,7 @@ def test_search_manager_group_member_match_uses_cached_member_previews(monkeypat
                 'name': 'Weekend Club',
                 'session_id': 'session-group-1',
                 'member_search_text': 'Alice Shenzhen',
-                'extra': {'member_previews': ['Alice(地区: Shenzhen)']},
+                'extra': {'member_previews': ['Alice Shenzhen']},
             }
         ],
     )
@@ -2723,6 +2788,49 @@ def test_search_manager_group_member_match_uses_cached_member_previews(monkeypat
         assert len(results) == 1
         assert results[0].matched_field == 'member'
         assert 'Shenzhen' in results[0].matched_text
+
+    asyncio.run(scenario())
+
+
+def test_search_manager_contact_display_name_and_message_catalog_state_are_isolated(monkeypatch) -> None:
+    fake_db = FakeSearchDatabase(
+        [
+            ChatMessage(
+                message_id='msg-1',
+                session_id='session-1',
+                sender_id='user-1',
+                content='roadmap update',
+                message_type=MessageType.TEXT,
+                status=MessageStatus.SENT,
+                is_self=True,
+            )
+        ],
+        contacts=[
+            {
+                'id': 'user-2',
+                'display_name': 'Alice Cooper',
+                'username': 'alice',
+                'nickname': '',
+                'remark': '',
+                'assistim_id': 'alice',
+                'region': '',
+                'signature': '',
+            }
+        ],
+    )
+
+    monkeypatch.setattr(search_manager_module, 'get_database', lambda: fake_db)
+
+    async def scenario() -> None:
+        manager = search_manager_module.SearchManager()
+        message_results = await manager.search('roadmap', session_id='session-1', limit=3)
+        catalog_results = await manager.search_all('cooper', contact_limit=5, group_limit=5, message_limit=2)
+
+        assert message_results[0].message.message_id == 'msg-1'
+        assert manager.get_result_at(0).message.message_id == 'msg-1'
+        assert catalog_results.contacts[0].matched_field == 'display_name'
+        assert catalog_results.contacts[0].contact['id'] == 'user-2'
+        assert manager.get_result_at(0).message.message_id == 'msg-1'
 
     asyncio.run(scenario())
 
@@ -4742,7 +4850,7 @@ def test_contact_controller_group_merge_helpers_preserve_extra_and_sort(monkeypa
 
         await controller.persist_groups_cache(final_groups)
         assert fake_db.replaced_groups[-1][0]['id'] == 'group-1'
-        assert fake_db.replaced_groups[-1][0]['extra']['member_previews'] == ['Alice(地区: Shenzhen)']
+        assert fake_db.replaced_groups[-1][0]['extra']['member_previews'] == ['Alice Shenzhen']
 
     asyncio.run(scenario())
 

@@ -425,7 +425,7 @@ class ContactController:
                 "signature": item.signature,
                 "category": item.category,
                 "status": item.status,
-                "extra": dict(item.extra),
+                "extra": self._contact_search_extra(item),
             }
             for item in contacts
         ]
@@ -433,6 +433,10 @@ class ContactController:
             await self._db.replace_contacts_cache(payload, owner_user_id=expected_user_id)
         except Exception:
             logger.debug("Failed to persist contacts cache", exc_info=True)
+
+    async def persist_contacts_cache(self, contacts: list[ContactRecord]) -> None:
+        """Persist one normalized contact snapshot after incremental updates."""
+        await self._persist_contacts_cache(contacts, owner_user_id=self._capture_runtime_user_id())
 
     async def persist_groups_cache(self, groups: list[GroupRecord]) -> None:
         """Persist one normalized group snapshot after incremental realtime updates."""
@@ -489,27 +493,23 @@ class ContactController:
         for item in list((extra or {}).get("members") or []):
             if not isinstance(item, dict):
                 continue
-            name = str(
-                item.get("display_name", "")
-                or item.get("nickname", "")
-                or item.get("remark", "")
-                or item.get("username", "")
-                or item.get("user_id", "")
-                or ""
-            ).strip()
-            region = str(item.get("region", "") or "").strip()
-            if not name:
+            parts: list[str] = []
+            for key in ("display_name", "remark", "group_nickname", "nickname", "username", "user_id", "region"):
+                value = str(item.get(key, "") or "").strip()
+                if value and value not in parts:
+                    parts.append(value)
+            if not parts:
                 continue
-            previews.append(f"{name}(地区: {region})" if region else name)
+            previews.append(" ".join(parts))
         return previews
 
     async def load_requests(self) -> list[FriendRequestRecord]:
         """Load pending friend requests."""
+        owner_user_id = self._capture_runtime_user_id()
         payload = await self._contact_service.fetch_friend_requests()
+        self._ensure_runtime_user_id(owner_user_id)
         requests: list[FriendRequestRecord] = []
-        pending_records: list[dict[str, str]] = []
-        user_ids_to_resolve: set[str] = set()
-        current_user_id = self.get_current_user_id()
+        current_user_id = owner_user_id
 
         for item in payload or []:
             sender = item.get("sender") or {}
@@ -524,72 +524,25 @@ class ContactController:
                 str(receiver.get("nickname", "") or "")
                 or str(receiver.get("username", "") or "")
             )
-            if sender_id and sender_id != current_user_id and not sender_name:
-                user_ids_to_resolve.add(sender_id)
-            if receiver_id and receiver_id != current_user_id and not receiver_name:
-                user_ids_to_resolve.add(receiver_id)
-
-            pending_records.append(
-                {
-                    "id": str(item.get("request_id", "") or ""),
-                    "sender_id": sender_id,
-                    "receiver_id": receiver_id,
-                    "message": str(item.get("message", "") or ""),
-                    "status": str(item.get("status", "pending") or "pending"),
-                    "created_at": str(item.get("created_at", "") or ""),
-                    "sender_name": sender_name,
-                    "receiver_name": receiver_name,
-                    "sender_avatar": str(sender.get("avatar", "") or ""),
-                    "receiver_avatar": str(receiver.get("avatar", "") or ""),
-                    "sender_gender": str(sender.get("gender", "") or ""),
-                    "receiver_gender": str(receiver.get("gender", "") or ""),
-                }
-            )
-
-        resolved_names = await self._load_request_user_names(user_ids_to_resolve)
-        for item in pending_records:
             requests.append(
                 FriendRequestRecord(
-                    id=item["id"],
-                    sender_id=item["sender_id"],
-                    receiver_id=item["receiver_id"],
-                    message=item["message"],
-                    status=item["status"],
-                    created_at=item["created_at"],
-                    sender_name=item["sender_name"] or resolved_names.get(item["sender_id"], ""),
-                    receiver_name=item["receiver_name"] or resolved_names.get(item["receiver_id"], ""),
-                    sender_avatar=item["sender_avatar"],
-                    receiver_avatar=item["receiver_avatar"],
-                    sender_gender=item["sender_gender"],
-                    receiver_gender=item["receiver_gender"],
+                    id=str(item.get("request_id", "") or ""),
+                    sender_id=sender_id,
+                    receiver_id=receiver_id,
+                    message=str(item.get("message", "") or ""),
+                    status=str(item.get("status", "pending") or "pending"),
+                    created_at=str(item.get("created_at", "") or ""),
+                    sender_name=sender_name,
+                    receiver_name=receiver_name,
+                    sender_avatar=str(sender.get("avatar", "") or ""),
+                    receiver_avatar=str(receiver.get("avatar", "") or ""),
+                    sender_gender=str(sender.get("gender", "") or ""),
+                    receiver_gender=str(receiver.get("gender", "") or ""),
                 )
             )
 
         requests.sort(key=lambda item: item.created_at, reverse=True)
         return requests
-
-    async def _load_request_user_names(self, user_ids: set[str]) -> dict[str, str]:
-        """Fetch missing user names for request rows in one concurrent pass."""
-        if not user_ids:
-            return {}
-
-        async def _fetch_name(user_id: str) -> tuple[str, str]:
-            try:
-                payload = await self._user_service.fetch_user(user_id)
-            except Exception:
-                logger.debug("Failed to resolve request user name for %s", user_id, exc_info=True)
-                return user_id, ""
-            return user_id, self._extract_user_display_name(payload)
-
-        results = await asyncio.gather(*(_fetch_name(user_id) for user_id in user_ids))
-        return {user_id: name for user_id, name in results if name}
-
-    @staticmethod
-    def _extract_user_display_name(payload: object) -> str:
-        """Extract a visible display name from a user payload."""
-        if not isinstance(payload, dict):
-            return ""
-        return str(payload.get("nickname", "") or "") or str(payload.get("username", "") or "")
 
     async def search_users(self, keyword: str, limit: int = 20) -> list[UserSearchRecord]:
         """Search users for the add-friend flow."""
@@ -606,6 +559,21 @@ class ContactController:
             )
             for item in items
         ]
+
+    @staticmethod
+    def _contact_search_extra(contact: ContactRecord) -> dict:
+        """Persist only the minimal summary fields needed by local contact search."""
+        extra = dict(contact.extra or {})
+        return {
+            "id": contact.id,
+            "display_name": contact.display_name,
+            "username": contact.username,
+            "nickname": contact.nickname,
+            "avatar": contact.avatar,
+            "gender": contact.gender,
+            "status": contact.status,
+            "profile_event_id": str(extra.get("profile_event_id", "") or ""),
+        }
 
     async def send_friend_request(self, user_id: str, message: str = "") -> dict:
         """Create a new friend request."""

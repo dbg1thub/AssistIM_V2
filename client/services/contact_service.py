@@ -51,7 +51,7 @@ class ContactService:
         payload = await self._http.post(
             "/friends/requests",
             json={
-                "receiver_id": user_id,
+                "target_user_id": user_id,
                 "message": message,
             },
         )

@@ -281,7 +281,7 @@ class MainWindow(FluentWindow):
         """Keep profile-dependent UI surfaces in sync after profile changes."""
         user = dict(payload or {})
         self._sync_user_card(user)
-        self.contact_interface.refresh_groups_after_profile_change()
+        self.contact_interface.refresh_profile_related_slices()
 
     def _on_avatar_ready(self, source: str) -> None:
         """Refresh the sidebar user avatar when a remote image finishes downloading."""

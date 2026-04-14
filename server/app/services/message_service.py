@@ -1290,7 +1290,6 @@ class MessageService:
             user = users_by_id.get(member_user_id)
             if user is None:
                 continue
-            user = self.avatars.backfill_user_avatar_state(user)
             nickname = str(getattr(user, "nickname", "") or "")
             username = str(getattr(user, "username", "") or "")
             return {

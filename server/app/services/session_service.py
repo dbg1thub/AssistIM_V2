@@ -311,7 +311,6 @@ class SessionService:
             for member in member_rows or []:
                 user = user_map.get(str(member.user_id or ""))
                 if user is not None:
-                    user = self.avatars.backfill_user_avatar_state(user)
                     members.append(
                         {
                             "id": user.id,
@@ -346,7 +345,6 @@ class SessionService:
             user = users_by_id.get(member_user_id)
             if user is None:
                 continue
-            user = self.avatars.backfill_user_avatar_state(user)
             nickname = str(user.nickname or "")
             username = str(user.username or "")
             return {

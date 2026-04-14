@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import time
 
-from fastapi import APIRouter, Depends, Request, Response, status
+from fastapi import APIRouter, Depends, Request
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
@@ -71,10 +71,10 @@ async def send_request(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> dict:
-    receiver_id = payload.target_user_id
-    result = FriendService(db).create_request(current_user, receiver_id, payload.message)
+    target_user_id = payload.target_user_id
+    result = FriendService(db).create_request(current_user, target_user_id, payload.message)
     reason = "friendship_created" if result.get("action") == "friendship_created" or result.get("status") == "accepted" else "friend_request_created"
-    await _broadcast_contact_refresh([current_user.id, receiver_id or ""], reason, result)
+    await _broadcast_contact_refresh([current_user.id, target_user_id], reason, result)
     return success_response(result)
 
 
@@ -86,27 +86,39 @@ def list_requests(current_user: User = Depends(get_current_user), db: Session = 
 @router.post("/requests/{request_id}/accept")
 async def accept_request(request_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
     result = FriendService(db).accept_request(current_user, request_id)
-    await _broadcast_contact_refresh([result.get("sender_id", ""), result.get("receiver_id", "")], "friendship_created", result)
+    await _broadcast_contact_refresh(
+        [
+            str((result.get("sender") or {}).get("id", "") or ""),
+            str((result.get("receiver") or {}).get("id", "") or ""),
+        ],
+        "friendship_created",
+        result,
+    )
     return success_response(result)
 
 
 @router.post("/requests/{request_id}/reject")
 async def reject_request(request_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
     result = FriendService(db).reject_request(current_user, request_id)
-    await _broadcast_contact_refresh([result.get("sender_id", ""), result.get("receiver_id", "")], "friend_request_updated", result)
+    await _broadcast_contact_refresh(
+        [
+            str((result.get("sender") or {}).get("id", "") or ""),
+            str((result.get("receiver") or {}).get("id", "") or ""),
+        ],
+        "friend_request_updated",
+        result,
+    )
     return success_response(result)
 
 
-@router.delete("/{friend_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def remove_friend(friend_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> Response:
-    FriendService(db).remove_friend(current_user, friend_id)
-    await _broadcast_contact_refresh(
-        [current_user.id, friend_id],
-        "friendship_removed",
-        {
-            "friend_id": friend_id,
-            "sender_id": current_user.id,
-        },
-    )
-    return Response(status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/{friend_id}")
+async def remove_friend(friend_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
+    result = FriendService(db).remove_friend(current_user, friend_id)
+    if result.get("changed"):
+        await _broadcast_contact_refresh(
+            [current_user.id, friend_id],
+            "friendship_removed",
+            result,
+        )
+    return success_response(result)
 

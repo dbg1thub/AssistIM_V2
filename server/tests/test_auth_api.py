@@ -693,6 +693,9 @@ def test_user_routes_use_collection_and_public_detail_contracts(client: TestClie
     assert "email" not in list_payload["items"][0]
     assert "created_at" not in list_payload["items"][0]
     assert "display_name" in list_payload["items"][0]
+    assert "region" not in list_payload["items"][0]
+    assert "signature" not in list_payload["items"][0]
+    assert "status" not in list_payload["items"][0]
 
     detail_response = client.get(
         f"/api/v1/users/{bob['user']['id']}",
@@ -705,6 +708,9 @@ def test_user_routes_use_collection_and_public_detail_contracts(client: TestClie
     assert "email" not in public_detail
     assert "phone" not in public_detail
     assert "created_at" not in public_detail
+    assert "region" not in public_detail
+    assert "signature" not in public_detail
+    assert "status" not in public_detail
 
     me_response = client.get("/api/v1/auth/me", headers=headers)
     assert me_response.status_code == 200
@@ -712,3 +718,47 @@ def test_user_routes_use_collection_and_public_detail_contracts(client: TestClie
     assert self_detail["id"] == alice["user"]["id"]
     assert "email" in self_detail
     assert "created_at" in self_detail
+
+
+def test_user_search_requires_non_blank_keyword_and_matches_public_fields_only(client: TestClient, user_factory, auth_header) -> None:
+    alice = user_factory("user_search_guard_alice", "User Search Guard Alice")
+    bob = user_factory("user_search_guard_bob", "User Search Guard Bob")
+
+    update_response = client.put(
+        "/api/v1/users/me",
+        json={
+            "email": "bob@example.com",
+            "phone": "+82-10-3333-4444",
+            "region": "Busan",
+            "signature": "Profile details should stay private",
+        },
+        headers=auth_header(bob["access_token"]),
+    )
+    assert update_response.status_code == 200
+
+    blank_response = client.get(
+        "/api/v1/users/search",
+        headers=auth_header(alice["access_token"]),
+        params={"keyword": "   "},
+    )
+    assert blank_response.status_code == 422
+
+    email_search = client.get(
+        "/api/v1/users/search",
+        headers=auth_header(alice["access_token"]),
+        params={"keyword": "bob@example.com"},
+    )
+    assert email_search.status_code == 200
+    assert email_search.json()["data"]["items"] == []
+
+    nickname_search = client.get(
+        "/api/v1/users/search",
+        headers=auth_header(alice["access_token"]),
+        params={"keyword": "User Search Guard Bob"},
+    )
+    assert nickname_search.status_code == 200
+    payload = nickname_search.json()["data"]["items"]
+    assert [item["id"] for item in payload] == [bob["user"]["id"]]
+    assert "email" not in payload[0]
+    assert "phone" not in payload[0]
+    assert "region" not in payload[0]

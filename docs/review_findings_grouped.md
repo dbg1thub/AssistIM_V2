@@ -458,6 +458,18 @@
 - 验证：`client/tests` 完整通过 `376 passed`；服务端 auth 相关尾部修复完成后 `server/tests` 通过 `155 passed`。
 ### G-04：联系人域与本地搜索缓存没有统一 authoritative cache contract
 
+状态：closed（2026-04-14）
+
+修复记录：
+
+- 客户端联系人域已收口到 controller authoritative cache：`ContactController` 新增 `persist_contacts_cache()`，联系人/请求/群三条 slice 的 realtime refresh 被拆成独立 authoritative refresh，self profile 变更会统一刷新 contacts/groups/requests。
+- `AddFriendDialog` 与两处 sidebar grouped search 已补 generation guard、空关键词/失败清空旧结果、overlay 与关键词生命周期解耦；联系人详情 moments 回填改为按当前选中记录重新解析，不再复用旧快照 payload。
+- 本地搜索 contract 已统一：contacts LIKE fallback 与 highlight 纳入 `display_name`，群成员预览索引改为 remark/group_nickname/username/user_id/region 的去重原始 token，不再把 `地区:` 本地化文案写入索引；message-only search 与 aggregate search 不再共享同一 mutable result 槽位。
+- SQLite 搜索层已补正式自愈边界：contacts/groups/message FTS 从“只看行数”改为 `row count + integrity-check`，message FTS 不再在每次连接初始化时整表 `delete-all + reinsert`。
+- 服务端联系人/用户正式入口已重构：friend request 只接受 canonical `target_user_id`，附言统一 strip，`DELETE /friends/{id}` 返回 committed payload + `changed` 语义；`GET /friends`、`GET /friends/requests`、`/users`、`/users/{id}`、`/users/search` 全部收口到 public summary contract。
+- 服务端批量/事务边界已补齐：friends/requests 列表改为 bulk user load，request expiry 不再发生在纯读路径，accept/reject/auto-accept 合并为单事务提交；`/users/search` 仅匹配 `username/nickname` 且拒绝空关键词。
+- avatar compat 已退出 user/friend/session/message 正式读路径；profile update route 增加 no-op 抑制，event generation 改为 bulk member lookup 后再写 session events。
+
 合并范围：
 
 - `F-057`
@@ -1327,8 +1339,7 @@
 
 ### P2：最后处理页内一致性和缓存体验
 
-7. `G-04` 联系人域 authoritative cache
-8. `G-06` 聊天页 / 联系人页 UI 状态机
+7. `G-06` 聊天页 / 联系人页 UI 状态机
 
 ## 5. 使用建议
 

@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, File, Query, UploadFile
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
+from app.core.errors import AppError, ErrorCode
 from app.dependencies.auth_dependency import get_current_user
 from app.models.user import User
 from app.schemas.user import UserUpdateRequest
@@ -51,13 +52,16 @@ async def _broadcast_profile_update_events(db: Session, user_id: str) -> None:
 
 @router.get("/search")
 def search_users(
-    keyword: str = Query(default=""),
+    keyword: str = Query(...),
     page: int = Query(default=1, ge=1),
     size: int = Query(default=20, ge=1, le=100),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> dict:
-    return success_response(UserService(db).search_users(keyword, page, size))
+    normalized_keyword = str(keyword or "").strip()
+    if not normalized_keyword:
+        raise AppError(ErrorCode.INVALID_REQUEST, "keyword is required", 422)
+    return success_response(UserService(db).search_users(normalized_keyword, page, size))
 
 
 @router.get("")
@@ -81,11 +85,12 @@ async def update_me(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> dict:
-    data = UserService(db).update_me(
+    data, changed = UserService(db).update_me(
         current_user,
         **payload.model_dump(exclude_unset=True),
     )
-    await _broadcast_profile_update_events(db, current_user.id)
+    if changed:
+        await _broadcast_profile_update_events(db, current_user.id)
     return success_response(data)
 
 

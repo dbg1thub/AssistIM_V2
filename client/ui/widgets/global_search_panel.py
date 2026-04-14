@@ -424,7 +424,7 @@ class GlobalSearchResultsPanel(QWidget):
         member_count = int(group.get("member_count", 0) or 0)
         subtitle = (
             result.matched_text
-            if result.matched_field == "member"
+            if result.matched_field in {"member", "name"}
             else tr("search.group.member_summary", "{count} 位成员", count=member_count)
         )
         payload = {"type": "group", "data": group}

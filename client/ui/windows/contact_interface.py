@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime
 from typing import Optional
 
 from PySide6.QtCore import QEvent, QPoint, QRect, Qt, QTimer, Signal
@@ -1197,8 +1198,10 @@ class AddFriendDialog(FluentWidget):
         self._existing_ids = set(existing_ids)
         self._search_task: Optional[asyncio.Task] = None
         self._action_task: Optional[asyncio.Task] = None
+        self._search_generation = 0
         self._ui_tasks: set[asyncio.Task] = set()
         self._close_cleanup_done = False
+        self._deferred_close_requested = False
 
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
         self.setWindowTitle("")
@@ -1273,31 +1276,49 @@ class AddFriendDialog(FluentWidget):
         self.search_edit.returnPressed.connect(self._trigger_search)
 
     def closeEvent(self, event) -> None:
+        if self._action_task is not None and not self._action_task.done():
+            self._deferred_close_requested = True
+            self.hide()
+            event.ignore()
+            return
         self._run_close_cleanup()
         super().closeEvent(event)
 
     def _trigger_search(self) -> None:
         keyword = self.search_edit.text().strip()
+        self._search_generation += 1
+        generation = self._search_generation
+        if self._search_task and not self._search_task.done():
+            self._search_task.cancel()
         if not keyword:
+            self._clear_search_results()
             self.summary_label.setText(tr("contact.add_friend.summary_empty_keyword", "Please enter a search keyword."))
             return
 
-        if self._search_task and not self._search_task.done():
-            self._search_task.cancel()
-        self._set_search_task(self._search_async(keyword))
+        self._clear_search_results()
+        self._set_search_task(self._search_async(keyword, generation))
 
-    async def _search_async(self, keyword: str) -> None:
+    async def _search_async(self, keyword: str, generation: int) -> None:
         self.summary_label.setText(tr("contact.add_friend.summary_searching", "Searching users..."))
         try:
             users = await self._controller.search_users(keyword)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            if generation != self._search_generation or self.search_edit.text().strip() != keyword:
+                return
+            self._clear_search_results()
             self.summary_label.setText(tr("contact.add_friend.summary_failed", "Search failed."))
             InfoBar.error(tr("contact.add_friend.title", "Add Friend"), str(exc), parent=self, duration=2200)
             return
 
-        filtered = [user for user in users if user.id and user.id != self._current_user_id]
+        if generation != self._search_generation or self.search_edit.text().strip() != keyword:
+            return
+        filtered = [
+            user
+            for user in users
+            if user.id and user.id != self._current_user_id and user.id not in self._existing_ids
+        ]
         self.summary_label.setText(
             tr("contact.add_friend.summary_count", "{count} users found", count=len(filtered))
         )
@@ -1313,11 +1334,14 @@ class AddFriendDialog(FluentWidget):
             return
 
         for user in users:
-            reason = tr("contact.user_search.already_friend", "Already Friends") if user.id in self._existing_ids else ""
-            item = UserSearchItem(user, reason, self.result_container)
-            if not reason:
-                item.add_clicked.connect(self._send_friend_request)
+            item = UserSearchItem(user, "", self.result_container)
+            item.add_clicked.connect(self._send_friend_request)
             self.result_layout.addWidget(item)
+        self.result_layout.addStretch(1)
+
+    def _clear_search_results(self) -> None:
+        """Clear stale add-friend search rows while the keyword changes."""
+        self._clear_layout(self.result_layout)
         self.result_layout.addStretch(1)
 
     def _send_friend_request(self, user_id: str) -> None:
@@ -1332,6 +1356,7 @@ class AddFriendDialog(FluentWidget):
             raise
         except Exception as exc:
             InfoBar.error(tr("contact.add_friend.title", "Add Friend"), str(exc), parent=self, duration=2200)
+            self._finalize_deferred_close_if_needed()
             return
 
         status = str((payload or {}).get("status", "pending") or "pending")
@@ -1348,34 +1373,45 @@ class AddFriendDialog(FluentWidget):
         )
         self.friend_request_sent.emit(dict(payload or {}))
         self.close()
+        self._finalize_deferred_close_if_needed()
 
-    def _on_finished(self, _result: int) -> None:
+    def _on_finished(self, _result: int, *, preserve_action_task: bool = False) -> None:
         """Stop outstanding work after the dialog closes."""
         self._cancel_pending_task(self._search_task)
         self._search_task = None
-        self._cancel_pending_task(self._action_task)
-        self._action_task = None
-        self._cancel_all_ui_tasks()
+        if not preserve_action_task:
+            self._cancel_pending_task(self._action_task)
+            self._action_task = None
+        self._cancel_all_ui_tasks(preserve_task=self._action_task if preserve_action_task else None)
 
     def _on_destroyed(self, *_args) -> None:
         """Mirror close cleanup when the dialog is destroyed by its parent."""
         self._run_close_cleanup()
 
-    def _run_close_cleanup(self) -> None:
+    def _run_close_cleanup(self, *, preserve_action_task: bool = False) -> None:
         """Run dialog cleanup only once across close and destroy paths."""
         if self._close_cleanup_done:
             return
         self._close_cleanup_done = True
-        self._on_finished(0)
+        self._on_finished(0, preserve_action_task=preserve_action_task)
+
+    def _finalize_deferred_close_if_needed(self) -> None:
+        """Destroy the hidden dialog after one deferred in-flight mutation settles."""
+        if not self._deferred_close_requested:
+            return
+        self._run_close_cleanup(preserve_action_task=True)
+        self.deleteLater()
 
     def _cancel_pending_task(self, task: Optional[asyncio.Task]) -> None:
         """Cancel a tracked task if it is still running."""
         if task is not None and not task.done():
             task.cancel()
 
-    def _cancel_all_ui_tasks(self) -> None:
+    def _cancel_all_ui_tasks(self, preserve_task: Optional[asyncio.Task] = None) -> None:
         """Cancel every task launched from this dialog."""
         for task in list(self._ui_tasks):
+            if preserve_task is not None and task is preserve_task:
+                continue
             if not task.done():
                 task.cancel()
 
@@ -1450,6 +1486,7 @@ class ContactInterface(QWidget):
         self._search_flyout = None
         self._search_flyout_view: Optional[GlobalSearchPopupOverlay] = None
         self._pending_search_keyword = ''
+        self._search_generation = 0
         self._search_timer = QTimer(self)
         self._search_timer.setSingleShot(True)
         self._search_timer.setInterval(120)
@@ -1624,6 +1661,20 @@ class ContactInterface(QWidget):
         if reason == "group_self_profile_update":
             self._apply_group_self_profile_update_payload(dict(event_payload.get("payload") or {}))
             return
+        if reason in {"friend_request_created", "friend_request_updated"}:
+            self._schedule_keyed_ui_task(
+                ("refresh_requests_slice", self._current_user_id or "self"),
+                self._refresh_requests_slice_async(),
+                f"refresh requests after {reason}",
+            )
+            return
+        if reason in {"friendship_created", "friendship_removed"}:
+            self._schedule_keyed_ui_task(
+                ("refresh_contacts_requests_slices", self._current_user_id or "self"),
+                self._refresh_contacts_and_requests_slices_async(),
+                f"refresh contacts and requests after {reason}",
+            )
+            return
         self.reload_data()
 
     def _on_connection_state_changed(self, old_state: ConnectionState, new_state: ConnectionState) -> None:
@@ -1641,24 +1692,55 @@ class ContactInterface(QWidget):
         summary_label = getattr(self, "summary_label", None)
         return summary_label is not None and is_valid_qt_object(summary_label)
 
-    def refresh_groups_after_profile_change(self) -> None:
-        """Refresh only the group slice after the current user changes their profile."""
-        if self._destroyed or not self._can_update_contact_ui():
-            return
-        self._schedule_keyed_ui_task(
-            ("refresh_groups_after_profile_change", self._current_user_id or "self"),
-            self._refresh_groups_only(),
-            "refresh groups after profile change",
-        )
-
-    async def _refresh_groups_only(self) -> None:
-        self._groups = await self._controller.load_groups()
+    async def _refresh_requests_slice_async(self) -> None:
+        self._requests = await self._controller.load_requests()
         if self._destroyed:
             return
         self._update_summary_counts()
-        self._build_groups_page()
-        if self._current_page == "groups":
+        self._build_requests_page()
+        if self._current_page == "requests":
             self._restore_selection(full_reload=False)
+
+    async def _refresh_contacts_and_requests_slices_async(self) -> None:
+        contacts, requests = await asyncio.gather(
+            self._controller.load_contacts(),
+            self._controller.load_requests(),
+        )
+        self._contacts = contacts
+        self._requests = requests
+        if self._destroyed:
+            return
+        self._update_summary_counts()
+        self._build_friends_page()
+        self._build_requests_page()
+        self._restore_selection(full_reload=False)
+
+    def refresh_profile_related_slices(self) -> None:
+        """Refresh self-facing contact slices after the current user changes their profile."""
+        if self._destroyed or not self._can_update_contact_ui():
+            return
+        self._schedule_keyed_ui_task(
+            ("refresh_profile_related_slices", self._current_user_id or "self"),
+            self._refresh_profile_related_slices_async(),
+            "refresh profile-related contact slices",
+        )
+
+    async def _refresh_profile_related_slices_async(self) -> None:
+        contacts, groups, requests = await asyncio.gather(
+            self._controller.load_contacts(),
+            self._controller.load_groups(),
+            self._controller.load_requests(),
+        )
+        self._contacts = contacts
+        self._groups = groups
+        self._requests = requests
+        if self._destroyed:
+            return
+        self._update_summary_counts()
+        self._build_friends_page()
+        self._build_groups_page()
+        self._build_requests_page()
+        self._restore_selection(full_reload=False)
 
     def _current_detail_moments(self) -> list[MomentRecord]:
         moments_panel = getattr(self.detail_panel, "moments_panel", None)
@@ -1774,10 +1856,27 @@ class ContactInterface(QWidget):
         item.update_request(request, self._current_user_id)
 
     def _ordered_requests(self) -> list[FriendRequestRecord]:
-        incoming = [item for item in self._requests if item.is_incoming(self._current_user_id)]
-        outgoing = [item for item in self._requests if item.is_outgoing(self._current_user_id)]
-        unknown = [item for item in self._requests if not item.is_incoming(self._current_user_id) and not item.is_outgoing(self._current_user_id)]
-        return incoming + outgoing + unknown
+        return sorted(self._requests, key=self._request_sort_key)
+
+    def _request_sort_key(self, request: FriendRequestRecord) -> tuple[int, float, str]:
+        """Keep request ordering stable across reload and realtime upsert paths."""
+        if request.is_incoming(self._current_user_id):
+            bucket = 0
+        elif request.is_outgoing(self._current_user_id):
+            bucket = 1
+        else:
+            bucket = 2
+        return (bucket, -self._request_sort_timestamp(request), request.id)
+
+    @staticmethod
+    def _request_sort_timestamp(request: FriendRequestRecord) -> float:
+        created_at = str(request.created_at or "").strip()
+        if not created_at:
+            return 0.0
+        try:
+            return datetime.fromisoformat(created_at.replace("Z", "+00:00")).timestamp()
+        except Exception:
+            return 0.0
 
     def _create_group_item(self, group: GroupRecord) -> ContactListItem:
         item = ContactListItem(
@@ -1866,19 +1965,25 @@ class ContactInterface(QWidget):
         )
 
     def _upsert_request_record(self, request: FriendRequestRecord) -> None:
+        previous_order = [item.id for item in self._ordered_requests()]
         for index, existing in enumerate(list(self._requests)):
             if existing.id != request.id:
                 continue
             self._requests[index] = request
-            self._update_request_item_view(request)
-            if self._selected_key == ("request", request.id):
-                self.detail_panel.set_request(request, self._current_user_id, self._current_detail_moments())
-            return
-        self._requests.insert(0, request)
-        if self._request_items or self._current_page == "requests":
-            self._insert_request_item_view(request)
+            break
+        else:
+            self._requests.append(request)
+        self._requests = self._ordered_requests()
+        self._update_summary_counts()
+        current_order = [item.id for item in self._requests]
+        if previous_order != current_order and (self._request_items or self._current_page == "requests"):
+            self._build_requests_page()
             if self._current_page == "requests" and request.id in self._request_items:
                 self._select_request(request.id, force=True)
+            return
+        self._update_request_item_view(request)
+        if self._selected_key == ("request", request.id):
+            self.detail_panel.set_request(request, self._current_user_id, self._current_detail_moments())
 
     def _contact_record_from_request(self, request: FriendRequestRecord) -> ContactRecord:
         counterpart_id = request.counterpart_id(self._current_user_id)
@@ -1960,6 +2065,7 @@ class ContactInterface(QWidget):
 
         if self._current_page == "friends":
             self._restore_selection(full_reload=False)
+        self._schedule_contacts_cache_persist()
 
     def _friend_sort_key(self, contact: ContactRecord) -> tuple[str, str]:
         """Return the sidebar ordering key for one friend entry."""
@@ -1972,6 +2078,14 @@ class ContactInterface(QWidget):
             ("persist_groups_cache", "groups"),
             self._controller.persist_groups_cache(list(self._groups)),
             "persist groups cache",
+        )
+
+    def _schedule_contacts_cache_persist(self) -> None:
+        """Persist the current normalized contact snapshot after local incremental mutations."""
+        self._schedule_keyed_ui_task(
+            ("persist_contacts_cache", "contacts"),
+            self._controller.persist_contacts_cache(list(self._contacts)),
+            "persist contacts cache",
         )
 
     def _sync_group_record_view(self, group: GroupRecord, *, rebuild: bool) -> None:
@@ -2125,6 +2239,10 @@ class ContactInterface(QWidget):
             self._update_request_item_view(updated_request)
             if self._selected_key == ("request", updated_request.id):
                 self.detail_panel.set_request(updated_request, self._current_user_id, current_moments)
+        if contacts_changed:
+            self._schedule_contacts_cache_persist()
+        if session_avatar:
+            self._schedule_groups_cache_persist()
 
     async def _reload_data_async(self) -> None:
         if not self._can_update_contact_ui():
@@ -2180,7 +2298,11 @@ class ContactInterface(QWidget):
         self._restore_selection(full_reload=True)
         keyword = self.search_box.text().strip()
         if keyword:
-            self._search_timer.start()
+            flyout_view = self._show_search_flyout()
+            if flyout_view is not None:
+                flyout_view.set_loading(keyword)
+            self._search_generation += 1
+            self._set_search_task(self._run_global_search(keyword, self._search_generation))
         logger.info("Contact interface reload finished")
 
     def _rebuild_current_page(self) -> None:
@@ -2224,15 +2346,17 @@ class ContactInterface(QWidget):
         keyword = self._pending_search_keyword
         if not keyword:
             return
+        self._search_generation += 1
+        generation = self._search_generation
         flyout_view = self._show_search_flyout()
         if flyout_view is not None:
             flyout_view.set_loading(keyword)
-        self._set_search_task(self._run_global_search(keyword))
+        self._set_search_task(self._run_global_search(keyword, generation))
 
-    async def _run_global_search(self, keyword: str) -> None:
+    async def _run_global_search(self, keyword: str, generation: int) -> None:
         """Populate grouped local-search results for the contact sidebar."""
         results = await search_all(keyword, message_limit=30, contact_limit=30, group_limit=30)
-        if self._destroyed or self.search_box.text().strip() != keyword:
+        if self._destroyed or self.search_box.text().strip() != keyword or generation != self._search_generation:
             return
         flyout_view = self._show_search_flyout()
         if flyout_view is not None:
@@ -2282,7 +2406,6 @@ class ContactInterface(QWidget):
     def _on_search_flyout_closed(self) -> None:
         """Reset search state when the overlay closes outside normal clear flow."""
         self._clear_search_flyout()
-        self.search_box.clear()
 
     @staticmethod
     def _friend_assistim_line(contact: ContactRecord) -> str:
@@ -2292,13 +2415,13 @@ class ContactInterface(QWidget):
         self._cancel_pending_task(self._moment_load_task)
         self._moment_load_task = None
 
-    def _load_detail_moments(self, user_id: str, kind: str, selection_id: str, payload: object) -> None:
+    def _load_detail_moments(self, user_id: str, kind: str, selection_id: str) -> None:
         self._cancel_moment_load()
         if not user_id:
             return
-        self._set_moment_load_task(self._load_detail_moments_async(user_id, kind, selection_id, payload))
+        self._set_moment_load_task(self._load_detail_moments_async(user_id, kind, selection_id))
 
-    async def _load_detail_moments_async(self, user_id: str, kind: str, selection_id: str, payload: object) -> None:
+    async def _load_detail_moments_async(self, user_id: str, kind: str, selection_id: str) -> None:
         try:
             moments = await self._discovery_controller.load_moments(user_id=user_id)
         except asyncio.CancelledError:
@@ -2310,10 +2433,21 @@ class ContactInterface(QWidget):
         if self._selected_key != (kind, selection_id):
             return
 
+        payload = self._resolve_detail_selection_payload(kind, selection_id)
+        if payload is None:
+            return
         if kind == "friend":
             self.detail_panel.set_contact(payload, moments)
         elif kind == "request":
             self.detail_panel.set_request(payload, self._current_user_id, moments)
+
+    def _resolve_detail_selection_payload(self, kind: str, selection_id: str) -> ContactRecord | FriendRequestRecord | None:
+        """Resolve the latest selected record before re-painting the detail panel."""
+        if kind == "friend":
+            return next((item for item in self._contacts if item.id == selection_id), None)
+        if kind == "request":
+            return next((item for item in self._requests if item.id == selection_id), None)
+        return None
 
     def _build_friends_page(self) -> None:
         self._clear_layout(self.friends_layout)
@@ -2421,7 +2555,7 @@ class ContactInterface(QWidget):
         self._friend_items[contact_id].set_selected(True)
         self.detail_panel.set_contact(selected, [])
         self._show_detail_panel()
-        self._load_detail_moments(contact_id, "friend", contact_id, selected)
+        self._load_detail_moments(contact_id, "friend", contact_id)
 
     def _select_group(self, group_id: str, force: bool = False) -> None:
         selected = next((item for item in self._groups if item.id == group_id), None)
@@ -2448,7 +2582,7 @@ class ContactInterface(QWidget):
         counterpart_id = selected.counterpart_id(self._current_user_id)
         self.detail_panel.set_request(selected, self._current_user_id, [])
         self._show_detail_panel()
-        self._load_detail_moments(counterpart_id, "request", request_id, selected)
+        self._load_detail_moments(counterpart_id, "request", request_id)
 
     def _accept_request(self, request_id: str) -> None:
         request = next((item for item in self._requests if item.id == request_id), None)

@@ -8978,7 +8978,12 @@
 
 ### R-028：`load_requests()` 对缺失请求方资料走逐用户 `fetch_user`，请求页 reload 是一条明显的 N+1 网络路径
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- `ContactController.load_requests()` 已删除缺名 fallback 网络补查，requests 正式入口直接消费服务端返回的 public summary。
+- 客户端不再为请求列表逐用户调用 `/users/{id}`。
 
 现状：
 
@@ -9119,7 +9124,12 @@
 
 ### R-029：联系人域的 `contact_refresh` 大多数 reason 都会退化成整页 full reload，好友/请求变更也会顺带重拉 groups 并整表重写缓存
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- `ContactInterface._on_contact_sync_required()` 已按 `friend_request_created/updated`、`friendship_created/removed` 拆成 requests slice 与 contacts+requests slice 的 authoritative refresh。
+- self profile 变更改为统一刷新 contacts/groups/requests，而不是只刷 groups 或直接整页 reload。
 
 现状：
 
@@ -10468,7 +10478,11 @@
 
 ### R-034：好友请求补名称仍是无上限并发的 `fetch_user` N+1
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- requests 列表不再走 `_load_request_user_names()` 并发补名，客户端已删除这条逐用户 `fetch_user` 路径。
 
 现状：
 
@@ -10780,7 +10794,11 @@
 
 ### F-336：`AddFriendDialog` 在发送好友请求过程中关闭窗口，也会丢掉本地 sidebar 更新
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- Add Friend 已改成 deferred close：action in-flight 时关闭窗口只会隐藏对话框，等待 committed 请求返回后再销毁窗口并发出本地 sidebar 更新信号。
 
 现状：
 
@@ -10900,7 +10918,12 @@
 
 ### R-036：联系人页的 full reload 和 incremental patch 没有 generation / sequencing 约束
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- 联系人页 grouped search 已补 generation guard，reload 后会以新的 generation 重新拉取当前关键词结果。
+- 详情页 moments 回填改为按当前选中记录重新解析，晚到任务不再拿旧 payload 覆盖当前详情。
 
 现状：
 
@@ -11398,7 +11421,12 @@
 
 ### R-044：联系人本地搜索在 FTS、LIKE fallback、highlight、render 四层使用的是四套不同字段合同
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- contacts LIKE fallback、count fallback 与 highlight 现在都纳入 `display_name/nickname/remark/assistim_id/region` 同一字段集。
+- 群搜索命中群名时卡片直接展示命中文本；命中成员时优先使用缓存 member preview，不再回退成占位文案。
 
 现状：
 
@@ -11450,7 +11478,12 @@
 
 ### R-046：联系人搜索的 section total、展开结果和实际可渲染条目没有单一真相
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- Add Friend 搜索现在会先剔除当前用户与已是好友的目标，再按最终可操作结果更新摘要和列表。
+- 请求列表 upsert 改为统一排序 contract，requests 页不会再因增量更新打乱顺序。
 
 现状：
 
@@ -11868,7 +11901,12 @@
 
 ### R-047：侧边栏 grouped search 缺少 generation guard，重复同关键词搜索的结果会互相覆盖
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- 联系人页 grouped search 已补 `_search_generation`，只有当前 generation 的结果才允许写回 overlay。
+- 会话侧边栏也同步解耦了 overlay close 与关键词生命周期。
 
 现状：
 
@@ -12307,7 +12345,12 @@
 
 ### R-051：本地群成员搜索索引把 `地区:` 这种中文展示字样直接写进缓存文本，搜索语义和当前 UI 语言绑定在一起
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- `ContactController._group_member_previews()` 已改成原始 token 拼接，只保留 `display_name/remark/group_nickname/nickname/username/user_id/region` 去重结果。
+- `member_search_text` 不再写入 `地区:` 这类本地化展示前缀。
 
 现状：
 
@@ -12330,7 +12373,11 @@
 
 ### R-052：由于 `地区:` 被硬编码进 `member_search_text`，像“地区”这类泛词会把大量本不应相关的群都一起命中
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- 群成员搜索索引已移除本地化标签字样，`member_search_text` 只保留成员自身字段 token。
 
 现状：
 
@@ -12354,7 +12401,12 @@
 
 ### R-053：contacts/groups FTS 的自愈条件只有“行数不相等”，同样行数下的脏索引会永久保留下来
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- 本地 FTS 自愈已从“只比 row count”升级为 `row count + integrity-check`。
+- contacts/groups/message 任一索引 integrity-check 失败都会触发正式 rebuild。
 
 现状：
 
@@ -12379,7 +12431,12 @@
 
 ### R-054：message 搜索 FTS 会在每次数据库连接初始化时整表 `delete-all + reinsert`，冷启动成本会随着消息量线性增长
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- message FTS 现在和 contacts/groups 一样只在 `force`、row count 漂移或 integrity-check 失败时 rebuild。
+- 连接初始化不再固定执行整表 `delete-all + reinsert`。
 
 现状：
 
@@ -15395,7 +15452,12 @@
 
 ### R-067：`SearchManager` 现在是共享可变 singleton，aggregate search 和 message-only search 会互相踩状态
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- `SearchManager` 已拆成 `_message_results` 与 `_last_catalog_results` 两套状态。
+- `search_all()` 改走不写 message-only 缓存的内部路径，aggregate search 不再覆盖 message-only consumer 的结果槽位。
 
 现状：
 
@@ -15443,7 +15505,11 @@
 
 ### F-493：AddFriendDialog 搜索失败时不会清掉旧结果，用户仍可点击上一轮 stale 用户项
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- Add Friend 搜索失败分支现在会先清空旧结果区，再更新错误提示。
 
 现状：
 
@@ -15470,7 +15536,11 @@
 
 ### F-494：AddFriendDialog 输入空关键词时只改提示文案，不会清掉上一轮搜索结果
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- 空关键词分支现在会取消在途搜索并清空结果区，不再保留旧查询残留项。
 
 现状：
 
@@ -15496,7 +15566,11 @@
 
 ### F-495：AddFriendDialog 发起新搜索时，上一轮结果会在“Searching users...”期间继续保持可点击
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- Add Friend 每次发起新搜索都会先清空旧结果区，loading 态不再保留可点击 stale 行。
 
 现状：
 
@@ -15522,7 +15596,11 @@
 
 ### F-496：AddFriendDialog 在空关键词触发搜索时不会取消已有 in-flight 搜索，晚到旧结果仍可能回填
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- Add Friend 已补 generation guard；空关键词和新关键词都会推进 generation 并取消旧 task，晚到旧结果不再允许回填。
 
 现状：
 
@@ -18650,7 +18728,11 @@
 
 ### R-073：好友列表接口存在稳定的 N+1 用户查询
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- `FriendService.list_friends()` 已改成 `list_friends() + list_users_by_ids()` 的 bulk 路径，不再逐条 `get_by_id()`。
 
 现状：
 
@@ -18673,7 +18755,11 @@
 
 ### R-074：好友请求列表序列化存在稳定的 `2N` 用户查询
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- requests 列表序列化已改成一次批量拉取 sender/receiver user map，再逐条序列化。
 
 现状：
 
@@ -18747,7 +18833,11 @@
 
 ### F-602：`/users/search` 会向任意已认证用户暴露完整私密资料字段
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- `/users/search` 已收口到 public summary，只返回 `id/username/nickname/display_name/avatar/avatar_kind/gender`。
 
 现状：
 
@@ -18773,7 +18863,11 @@
 
 ### F-603：`/users` 会向任意已认证用户暴露完整用户目录和私密资料
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- `/users` 已分页并统一返回 public summary contract，不再暴露 email/phone/birthday/region/signature/status。
 
 现状：
 
@@ -18798,7 +18892,11 @@
 
 ### F-604：`/users/{user_id}` 也会向普通用户返回完整私密 profile
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- `GET /users/{id}` 已收口到 public summary；完整 self profile 仍只保留在 `/auth/me`。
 
 现状：
 
@@ -18821,7 +18919,11 @@
 
 ### F-605：`/users/search` 的空关键词会直接退化成全量用户枚举
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- `/users/search` 入口现在会拒绝空白关键词，空查询不再退化成目录枚举。
 
 现状：
 
@@ -18847,7 +18949,11 @@
 
 ### F-606：用户搜索正式入口会按 `email/phone` 命中，而 UI 和文案只承诺 `username/nickname`
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- `UserRepository.search_users()` 已删除 `email/phone` 匹配，只保留 `username/nickname`。
 
 现状：
 
@@ -18922,7 +19028,11 @@
 
 ### R-080：用户目录读取存在按返回行数放大的写放大风险
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- `serialize_public_user()` 已退出 `backfill_user_avatar_state()` 写路径，`/users` 与 `/users/search` 不再按返回行数放大写库。
 
 现状：
 
@@ -18972,7 +19082,11 @@
 
 ### R-081：avatar 状态迁移没有单一 compat 边界，而是分散在多个运行时读路径
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- avatar compat 已从 user/friend/session/message 正式读路径移除，运行时只解析已有 avatar state，不再在读链路里隐式迁移。
 
 现状：
 
@@ -19018,7 +19132,11 @@
 
 ### R-082：用户资料更新事件会按 session 数量线性复制同一份 profile payload
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- `record_profile_update_events()` 已补 no-op 抑制和 bulk member lookup，profile update 不再在无变化时广播，也不再按 session 做 N+1 成员回查。
 
 现状：
 
@@ -19064,7 +19182,11 @@
 
 ### F-612：联系人缓存会把完整好友 payload 原样塞进本地 `extra`
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- contacts cache 落盘已改成最小搜索摘要，只保留 `id/display_name/username/nickname/avatar/gender/status/profile_event_id`。
 
 现状：
 
@@ -19088,7 +19210,11 @@
 
 ### F-613：好友请求补名会拉完整 `/users/{id}` profile，只为取一个显示名
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- requests 列表不再为补名调用 `/users/{id}`，客户端直接消费服务端返回的请求方/接收方 public summary。
 
 现状：
 
@@ -19112,7 +19238,11 @@
 
 ### R-083：好友请求补名会对所有缺名用户做无上限并发 `fetch_user`
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- `_load_request_user_names()` 与对应并发 `fetch_user` fan-out 已删除。
 
 现状：
 
@@ -21741,7 +21871,11 @@
 
 ### F-697：好友列表正式入口会把 email/phone/birthday/region/signature/status 一并暴露给所有好友
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- `GET /friends` 现已复用 public summary contract，不再暴露 email/phone/birthday/region/signature/status。
 
 现状：
 
@@ -21844,7 +21978,11 @@
 
 ### F-701：好友请求附言没有 strip 规则，纯空白 message 会被当成正式请求内容保存
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- friend request schema 已对 `message` 做 strip + empty-to-none 归一化。
 
 现状：
 

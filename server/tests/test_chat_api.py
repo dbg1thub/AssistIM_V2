@@ -43,7 +43,7 @@ def test_friend_request_private_session_and_message_flow(
 
     send_request_response = client.post(
         "/api/v1/friends/requests",
-        json={"receiver_id": bob["user"]["id"], "message": "let's connect"},
+        json={"target_user_id": bob["user"]["id"], "message": "let's connect"},
         headers=auth_header(alice["access_token"]),
     )
     assert send_request_response.status_code == 200
@@ -99,13 +99,14 @@ def test_friend_request_private_session_and_message_flow(
     assert friends_response.status_code == 200
     friend_payload = friends_response.json()["data"]
     assert len(friend_payload) == 1
-    assert friend_payload[0]["email"] == "bob@example.com"
-    assert friend_payload[0]["phone"] == "+82-10-0000-0002"
-    assert friend_payload[0]["birthday"] == "1992-08-04"
-    assert friend_payload[0]["region"] == "Busan"
-    assert friend_payload[0]["signature"] == "Backend and integration tests."
     assert friend_payload[0]["gender"] == "male"
-    assert friend_payload[0]["status"] == "busy"
+    assert friend_payload[0]["display_name"] == "Bob"
+    assert "email" not in friend_payload[0]
+    assert "phone" not in friend_payload[0]
+    assert "birthday" not in friend_payload[0]
+    assert "region" not in friend_payload[0]
+    assert "signature" not in friend_payload[0]
+    assert "status" not in friend_payload[0]
 
     create_session_response = client.post(
         "/api/v1/sessions/direct",
@@ -173,6 +174,55 @@ def test_friend_request_private_session_and_message_flow(
     assert session_payload[0]["last_message_time"] == message_payload["created_at"]
 
 
+def test_remove_friend_returns_changed_flag_and_skips_noop_fanout(
+    client: TestClient,
+    user_factory,
+    auth_header,
+    monkeypatch,
+) -> None:
+    from app.api.v1 import friends as friend_routes
+
+    alice = user_factory("alice_remove_friend", "Alice Remove Friend")
+    bob = user_factory("bob_remove_friend", "Bob Remove Friend")
+
+    request_response = client.post(
+        "/api/v1/friends/requests",
+        json={"target_user_id": bob["user"]["id"], "message": "hello"},
+        headers=auth_header(alice["access_token"]),
+    )
+    request_id = request_response.json()["data"]["request_id"]
+
+    accept_response = client.post(
+        f"/api/v1/friends/requests/{request_id}/accept",
+        headers=auth_header(bob["access_token"]),
+    )
+    assert accept_response.status_code == 200
+
+    send_json = AsyncMock()
+    monkeypatch.setattr(friend_routes.connection_manager, "send_json_to_users", send_json)
+
+    removed_response = client.delete(
+        f"/api/v1/friends/{bob['user']['id']}",
+        headers=auth_header(alice["access_token"]),
+    )
+    assert removed_response.status_code == 200
+    removed_payload = removed_response.json()["data"]
+    assert removed_payload["changed"] is True
+    assert removed_payload["action"] == "friendship_removed"
+    assert removed_payload["friendship"] == {"is_friend": False, "friend_id": bob["user"]["id"]}
+    assert send_json.await_count == 1
+
+    missing_response = client.delete(
+        f"/api/v1/friends/{bob['user']['id']}",
+        headers=auth_header(alice["access_token"]),
+    )
+    assert missing_response.status_code == 200
+    missing_payload = missing_response.json()["data"]
+    assert missing_payload["changed"] is False
+    assert missing_payload["action"] == "friendship_missing"
+    assert send_json.await_count == 1
+
+
 def test_friend_request_create_echoes_reused_and_auto_accept_actions(
     client: TestClient,
     user_factory,
@@ -184,7 +234,7 @@ def test_friend_request_create_echoes_reused_and_auto_accept_actions(
 
     first_request = client.post(
         "/api/v1/friends/requests",
-        json={"receiver_id": bob["user"]["id"], "message": "hello"},
+        json={"target_user_id": bob["user"]["id"], "message": "hello"},
         headers=auth_header(alice["access_token"]),
     )
     assert first_request.status_code == 200
@@ -195,7 +245,7 @@ def test_friend_request_create_echoes_reused_and_auto_accept_actions(
 
     reused_request = client.post(
         "/api/v1/friends/requests",
-        json={"receiver_id": bob["user"]["id"], "message": "hello again"},
+        json={"target_user_id": bob["user"]["id"], "message": "hello again"},
         headers=auth_header(alice["access_token"]),
     )
     assert reused_request.status_code == 200
@@ -207,14 +257,14 @@ def test_friend_request_create_echoes_reused_and_auto_accept_actions(
 
     incoming_request = client.post(
         "/api/v1/friends/requests",
-        json={"receiver_id": alice["user"]["id"], "message": "incoming"},
+        json={"target_user_id": alice["user"]["id"], "message": "incoming"},
         headers=auth_header(charlie["access_token"]),
     )
     assert incoming_request.status_code == 200
 
     auto_accept = client.post(
         "/api/v1/friends/requests",
-        json={"receiver_id": charlie["user"]["id"], "message": "accept by request"},
+        json={"target_user_id": charlie["user"]["id"], "message": "accept by request"},
         headers=auth_header(alice["access_token"]),
     )
     assert auto_accept.status_code == 200
@@ -2779,7 +2829,7 @@ def test_accept_friend_request_succeeds_when_contact_refresh_fails(
 
     request_response = client.post(
         "/api/v1/friends/requests",
-        json={"receiver_id": bob["user"]["id"], "message": "ping"},
+        json={"target_user_id": bob["user"]["id"], "message": "ping"},
         headers=auth_header(alice["access_token"]),
     )
     request_id = request_response.json()["data"]["request_id"]
@@ -2867,10 +2917,9 @@ def test_create_direct_session_requires_exactly_one_normalized_participant(clien
     assert duplicate_payload["participant_ids"].count(bob["user"]["id"]) == 1
 
 
-def test_friend_request_requires_one_consistent_target_field(client: TestClient, user_factory, auth_header) -> None:
+def test_friend_request_requires_canonical_target_field(client: TestClient, user_factory, auth_header) -> None:
     alice = user_factory("alice_friend_schema", "Alice")
     bob = user_factory("bob_friend_schema", "Bob")
-    charlie = user_factory("charlie_friend_schema", "Charlie")
 
     missing_target = client.post(
         "/api/v1/friends/requests",
@@ -2879,36 +2928,37 @@ def test_friend_request_requires_one_consistent_target_field(client: TestClient,
     )
     assert missing_target.status_code == 422
 
-    conflicting_target = client.post(
+    legacy_target = client.post(
         "/api/v1/friends/requests",
-        json={"receiver_id": bob["user"]["id"], "user_id": charlie["user"]["id"]},
+        json={"receiver_id": bob["user"]["id"]},
         headers=auth_header(alice["access_token"]),
     )
-    assert conflicting_target.status_code == 422
+    assert legacy_target.status_code == 422
 
     extra_field = client.post(
         "/api/v1/friends/requests",
-        json={"receiver_id": bob["user"]["id"], "extra": True},
+        json={"target_user_id": bob["user"]["id"], "extra": True},
         headers=auth_header(alice["access_token"]),
     )
     assert extra_field.status_code == 422
 
     oversized_message = client.post(
         "/api/v1/friends/requests",
-        json={"receiver_id": bob["user"]["id"], "message": "x" * 501},
+        json={"target_user_id": bob["user"]["id"], "message": "x" * 501},
         headers=auth_header(alice["access_token"]),
     )
     assert oversized_message.status_code == 422
 
     normalized_target = client.post(
         "/api/v1/friends/requests",
-        json={"user_id": f"  {bob['user']['id']}  ", "message": "  hi  "},
+        json={"target_user_id": f"  {bob['user']['id']}  ", "message": "  hi  "},
         headers=auth_header(alice["access_token"]),
     )
     assert normalized_target.status_code == 200
     request_payload = normalized_target.json()["data"]
     assert request_payload["receiver"]["id"] == bob["user"]["id"]
     assert request_payload["sender"]["id"] == alice["user"]["id"]
+    assert request_payload["message"] == "hi"
     assert "sender_id" not in request_payload
     assert "receiver_id" not in request_payload
     assert "from_user" not in request_payload

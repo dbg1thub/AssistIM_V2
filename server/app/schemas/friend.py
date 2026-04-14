@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.schemas.common import ORMModel
 
@@ -10,29 +10,22 @@ from app.schemas.common import ORMModel
 class FriendRequestCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    receiver_id: str | None = None
-    user_id: str | None = None
+    target_user_id: str = Field(min_length=1)
     message: str | None = Field(default=None, max_length=500)
 
-    @model_validator(mode="after")
-    def _normalize_targets(self) -> "FriendRequestCreate":
-        receiver_id = str(self.receiver_id or "").strip() or None
-        user_id = str(self.user_id or "").strip() or None
-        message = str(self.message or "").strip() or None
+    @field_validator("target_user_id", mode="before")
+    @classmethod
+    def _normalize_target_user_id(cls, value: object) -> str:
+        normalized = str(value or "").strip()
+        if not normalized:
+            raise ValueError("target_user_id is required")
+        return normalized
 
-        if not receiver_id and not user_id:
-            raise ValueError("receiver_id or user_id is required")
-        if receiver_id and user_id and receiver_id != user_id:
-            raise ValueError("receiver_id and user_id must match when both are provided")
-
-        self.receiver_id = receiver_id or user_id
-        self.user_id = user_id or receiver_id
-        self.message = message
-        return self
-
-    @property
-    def target_user_id(self) -> str:
-        return str(self.receiver_id or self.user_id or "")
+    @field_validator("message", mode="before")
+    @classmethod
+    def _normalize_message(cls, value: object) -> str | None:
+        normalized = str(value or "").strip()
+        return normalized or None
 
 
 class FriendRequestOut(ORMModel):

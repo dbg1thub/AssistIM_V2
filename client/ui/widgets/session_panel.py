@@ -442,7 +442,6 @@ class SessionPanel(QWidget):
     def _on_search_flyout_closed(self) -> None:
         """Reset search state when the overlay closes outside normal clear flow."""
         self._clear_search_flyout()
-        self.search_box.clear()
 
     def _on_session_clicked(self, index) -> None:
         """Emit selected session ID."""

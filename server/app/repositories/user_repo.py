@@ -28,18 +28,25 @@ class UserRepository:
         stmt = select(User).where(User.id.in_(normalized_user_ids))
         return {str(user.id or ""): user for user in self.db.execute(stmt).scalars().all()}
 
-    def list_users(self) -> list[User]:
-        stmt = select(User).order_by(User.created_at.desc())
-        return list(self.db.execute(stmt).scalars().all())
+    def list_users(self, page: int = 1, size: int = 20) -> tuple[int, list[User]]:
+        normalized_page = max(1, int(page or 1))
+        normalized_size = max(1, int(size or 20))
+        total = self.db.execute(select(func.count()).select_from(User)).scalar_one()
+        stmt = (
+            select(User)
+            .order_by(User.created_at.desc())
+            .offset((normalized_page - 1) * normalized_size)
+            .limit(normalized_size)
+        )
+        return int(total or 0), list(self.db.execute(stmt).scalars().all())
 
     def search_users(self, keyword: str, page: int = 1, size: int = 20) -> tuple[int, list[User]]:
-        pattern = f"%{keyword}%"
+        normalized_keyword = canonicalize_username(keyword) if "." in str(keyword or "") else str(keyword or "").strip().lower()
+        pattern = f"%{normalized_keyword}%"
         base_stmt = select(User).where(
             or_(
-                User.username.ilike(pattern),
-                User.nickname.ilike(pattern),
-                User.email.ilike(pattern),
-                User.phone.ilike(pattern),
+                func.lower(User.username).like(pattern),
+                func.lower(func.coalesce(User.nickname, "")).like(pattern),
             )
         )
         total = self.db.execute(select(func.count()).select_from(base_stmt.subquery())).scalar_one()

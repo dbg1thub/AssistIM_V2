@@ -110,7 +110,7 @@ class RateLimiter:
     _SUBJECT_FIELDS_BY_PREFIX = {
         "login": ("username",),
         "register": ("username",),
-        "friend-request": ("target_user_id", "receiver_id", "user_id"),
+        "friend-request": ("target_user_id",),
     }
 
     def __init__(self, store: RateLimitStore | None = None) -> None:

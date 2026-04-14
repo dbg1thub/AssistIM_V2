@@ -210,7 +210,7 @@ def test_auth_success_feedback_moves_to_main_window() -> None:
     assert 'lambda window=main_window: self.retry_authenticated_runtime(source_window=window)' in app_main
     assert 'InfoBar.success(' not in show_block
     assert 'self.contact_interface.reload_data()' not in main_window
-    assert 'self.contact_interface.refresh_groups_after_profile_change()' in main_window
+    assert 'self.contact_interface.refresh_profile_related_slices()' in main_window
     assert 'runtimeRefreshRequested = Signal()' in main_window
     assert 'Action(AppIcon.SYNC, tr("main_window.refresh_connection", "Refresh Connection"), self)' in main_window
     assert 'self._make_generation_bound_main_window_callback' in app_main
@@ -322,11 +322,15 @@ def test_contact_interface_handles_user_profile_update_incrementally() -> None:
     assert 'self._apply_profile_update_payload(dict(event_payload.get("payload") or {}))' in contact_interface
     assert 'self._apply_group_update_payload(dict(event_payload.get("payload") or {}))' in contact_interface
     assert 'self._apply_group_self_profile_update_payload(dict(event_payload.get("payload") or {}))' in contact_interface
-    assert 'def refresh_groups_after_profile_change(self) -> None:' in contact_interface
+    assert 'def refresh_profile_related_slices(self) -> None:' in contact_interface
     assert 'def _apply_profile_update_payload(self, payload: dict[str, object]) -> None:' in contact_interface
     assert 'def _apply_group_update_payload(self, payload: dict[str, object]) -> None:' in contact_interface
     assert 'def _apply_group_self_profile_update_payload(self, payload: dict[str, object]) -> None:' in contact_interface
+    assert 'async def _refresh_profile_related_slices_async(self) -> None:' in contact_interface
+    assert 'async def _refresh_contacts_and_requests_slices_async(self) -> None:' in contact_interface
+    assert 'async def _refresh_requests_slice_async(self) -> None:' in contact_interface
     assert 'def _schedule_groups_cache_persist(self) -> None:' in contact_interface
+    assert 'def _schedule_contacts_cache_persist(self) -> None:' in contact_interface
     assert 'self._controller.merge_group_record(self._groups, group_payload)' in contact_interface
     assert 'self._controller.apply_group_self_profile_update(self._groups, payload)' in contact_interface
 
@@ -358,6 +362,7 @@ def test_contact_interface_request_actions_update_locally() -> None:
     assert 'payload = await self._controller.reject_request(request_id)' in contact_interface
     assert 'await self._refresh_contacts_and_requests(focus_page="friends", focus_friend_id=counterpart_id)' not in contact_interface
     assert 'await self._refresh_requests_only()' not in contact_interface
+    assert 'self._requests = self._ordered_requests()' in contact_interface
 
 
 def test_contact_interface_reloads_contact_domain_after_reconnect() -> None:
@@ -368,6 +373,17 @@ def test_contact_interface_reloads_contact_domain_after_reconnect() -> None:
     assert 'if old_state == ConnectionState.CONNECTED or new_state != ConnectionState.CONNECTED:' in contact_interface
     assert 'self.reload_data()' in contact_interface.split('def _on_connection_state_changed', 1)[1].split('def _can_update_contact_ui', 1)[0]
     assert 'self._connection_manager.remove_state_listener(self._on_connection_state_changed)' in contact_interface
+
+
+def test_search_flyout_close_no_longer_clears_keywords() -> None:
+    contact_interface = Path('client/ui/windows/contact_interface.py').read_text(encoding='utf-8')
+    session_panel = Path('client/ui/widgets/session_panel.py').read_text(encoding='utf-8')
+
+    contact_close_block = contact_interface.split('def _on_search_flyout_closed', 1)[1].split('@staticmethod', 1)[0]
+    session_close_block = session_panel.split('def _on_search_flyout_closed', 1)[1].split('def _on_session_clicked', 1)[0]
+
+    assert 'self.search_box.clear()' not in contact_close_block
+    assert 'self.search_box.clear()' not in session_close_block
 
 
 def test_request_list_item_rebuilds_actions_on_status_change() -> None:
@@ -384,10 +400,21 @@ def test_contact_interface_add_friend_and_group_creation_insert_locally() -> Non
     assert 'def _insert_group_item_view(self, group: GroupRecord) -> None:' in contact_interface
     assert 'def _remove_group_item_view(self, group_id: str) -> None:' in contact_interface
     assert 'def _insert_request_item_view(self, request: FriendRequestRecord) -> None:' in contact_interface
-    assert 'self._insert_request_item_view(request)' in contact_interface
+    assert 'self._build_requests_page()' in contact_interface
     assert 'self._controller.merge_group_record(self._groups, group)' in contact_interface
     assert 'self._sync_group_record_view(created_group, rebuild=rebuild)' in contact_interface
     assert 'self._activate_page("requests")' in contact_interface
+
+
+def test_add_friend_dialog_defers_close_until_inflight_mutation_finishes() -> None:
+    contact_interface = Path('client/ui/windows/contact_interface.py').read_text(encoding='utf-8')
+
+    add_friend_block = contact_interface.split('class AddFriendDialog', 1)[1].split('class ContactSidebar', 1)[0]
+    assert 'self._deferred_close_requested = False' in add_friend_block
+    assert 'if self._action_task is not None and not self._action_task.done():' in add_friend_block
+    assert 'self.hide()' in add_friend_block
+    assert 'event.ignore()' in add_friend_block
+    assert 'def _finalize_deferred_close_if_needed(self) -> None:' in add_friend_block
     assert 'self._build_groups_page()' not in contact_interface.split('def _on_group_created(self, group: object) -> None:')[1]
 
 
@@ -801,6 +828,7 @@ def test_contact_controller_owns_group_record_merge_rules() -> None:
     assert 'def merge_group_record(' in contact_controller
     assert 'def apply_group_self_profile_update(' in contact_controller
     assert 'async def persist_groups_cache(self, groups: list[GroupRecord]) -> None:' in contact_controller
+    assert 'async def persist_contacts_cache(self, contacts: list[ContactRecord]) -> None:' in contact_controller
     assert 'def _group_record_from_payload(' not in contact_interface
     assert 'def _upsert_group_record(' not in contact_interface
     assert 'def _coerce_group_record(' not in contact_interface

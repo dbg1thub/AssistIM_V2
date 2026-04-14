@@ -1043,30 +1043,14 @@ class Database:
             return
 
         rebuild_specs = (
+            ("messages", "message_search_fts"),
             ("contacts_cache", "contact_search_fts"),
             ("groups_cache", "group_search_fts"),
         )
         rebuilt = False
 
-        await self._db.execute("INSERT INTO message_search_fts(message_search_fts) VALUES ('delete-all')")
-        await self._db.execute(
-            """
-            INSERT INTO message_search_fts(rowid, content)
-            SELECT
-                rowid,
-                CASE
-                    WHEN COALESCE(is_encrypted, 0) = 1 THEN ''
-                    ELSE content
-                END
-            FROM messages
-            """
-        )
-        rebuilt = True
-
         for base_table, fts_table in rebuild_specs:
-            base_count = await self._table_row_count(base_table)
-            fts_count = await self._table_row_count(fts_table)
-            if force or base_count != fts_count:
+            if force or await self._fts_table_requires_rebuild(base_table, fts_table):
                 await self._db.execute(
                     f"INSERT INTO {fts_table}({fts_table}) VALUES ('rebuild')"
                 )
@@ -1079,6 +1063,21 @@ class Database:
         cursor = await self._db.execute(f"SELECT COUNT(*) AS count FROM {table_name}")
         row = await cursor.fetchone()
         return int((row["count"] if row is not None else 0) or 0)
+
+    async def _fts_table_requires_rebuild(self, base_table: str, fts_table: str) -> bool:
+        """Return whether one FTS index drifted from its source table."""
+        base_count = await self._table_row_count(base_table)
+        fts_count = await self._table_row_count(fts_table)
+        if base_count != fts_count:
+            return True
+        try:
+            await self._db.execute(
+                f"INSERT INTO {fts_table}({fts_table}) VALUES ('integrity-check')"
+            )
+        except Exception as exc:
+            logger.debug("FTS integrity check failed for %s: %s", fts_table, exc)
+            return True
+        return False
 
     async def _normalize_cached_session_types(self) -> None:
         """Upgrade legacy cached one-to-one sessions to the canonical direct type."""
@@ -1866,7 +1865,8 @@ class Database:
             SELECT * FROM contacts_cache
             WHERE owner_user_id = ?
               AND (
-                   nickname LIKE ? ESCAPE '\\'
+                   display_name LIKE ? ESCAPE '\\'
+               OR nickname LIKE ? ESCAPE '\\'
                OR remark LIKE ? ESCAPE '\\'
                OR assistim_id LIKE ? ESCAPE '\\'
                OR region LIKE ? ESCAPE '\\'
@@ -1876,6 +1876,7 @@ class Database:
             """,
             (
                 normalized_owner,
+                like_pattern,
                 like_pattern,
                 like_pattern,
                 like_pattern,
@@ -1919,13 +1920,21 @@ class Database:
             FROM contacts_cache
             WHERE owner_user_id = ?
               AND (
-                   nickname LIKE ? ESCAPE '\\'
+                   display_name LIKE ? ESCAPE '\\'
+               OR nickname LIKE ? ESCAPE '\\'
                OR remark LIKE ? ESCAPE '\\'
                OR assistim_id LIKE ? ESCAPE '\\'
                OR region LIKE ? ESCAPE '\\'
               )
             """,
-            (normalized_owner, like_pattern, like_pattern, like_pattern, like_pattern),
+            (
+                normalized_owner,
+                like_pattern,
+                like_pattern,
+                like_pattern,
+                like_pattern,
+                like_pattern,
+            ),
         )
         row = await cursor.fetchone()
         return int((row["count"] if row is not None else 0) or 0)
