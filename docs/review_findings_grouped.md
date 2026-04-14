@@ -127,6 +127,7 @@
 - `F-759` 已把 `GroupCreate.member_ids/members` item 级 strip、非空、长度和去重下沉到 schema
 - `F-567` / `F-581` / `F-582` / `F-585` 已把 friend request target、extra forbid 和 message 长度约束收口到 schema
 - `F-764` 已把 `DeviceKeysRefreshRequest` 的 key material 必填约束下沉到 schema
+- `F-848` 已统一 session-bound message/read HTTP 路由的存在性与权限语义：缺失 session 返回 `404`，无 membership 返回 `403`
 - `F-767` 曾把 HTTP typing ack 对齐到 realtime canonical event payload；后续 `R-005` 已进一步删除 HTTP typing ack，typing 只保留聊天 WS 正式入口
 - `F-564` 已把群公告消息广播改为按每个 viewer 单独序列化，不再复用第一个收件人的 viewer-specific payload
 - `F-783` 已把 session `unread_count` 接到服务端权威未读计数
@@ -233,6 +234,7 @@
 - `F-753` 到 `F-758`
 - `F-760`
 - `F-764`
+- `F-848`
 - `F-765`
 - `F-767`
 - `F-783` 到 `F-789`
@@ -284,6 +286,7 @@
 - 客户端已把 session tombstone、authoritative upgrade、startup history warmup、sidebar/search reopen、current-session active、删除后的消息/附件/E2EE/sync cursor/runtime cache 清理收口到同一套 contract
 - fallback session 现在可以被 authoritative snapshot 升级；self-sent direct fallback 不再退化成“只有自己”的 participant 集，也不会再把缺失 lifecycle 时间伪装成有效活动
 - 服务端已移除 `DELETE /api/v1/sessions/{session_id}` 硬删除入口；`create_private(existing)`、call signaling、message/sync visibility、session list group metadata 都改为复用统一的 authoritative visibility / membership / bulk-load contract
+- create-direct schema 已移除 caller-supplied `name`，新建直聊固定使用 canonical direct naming，不再允许请求把 shared `session.name` 写成另一套真相
 - `ChatInterface` 的通话结果消息 dedupe 状态改成有 TTL 和容量上限的有界缓存，不再是进程级只增不减集合
 - 回归已覆盖：
   - `client/tests/test_service_boundaries.py`
@@ -334,6 +337,8 @@
 - `F-819`
 - `F-822`
 - `F-835`
+- `F-840`
+- `F-849`
 - `R-009`
 - `R-010`
 - `R-011`
@@ -469,6 +474,7 @@
 - 服务端联系人/用户正式入口已重构：friend request 只接受 canonical `target_user_id`，附言统一 strip，`DELETE /friends/{id}` 返回 committed payload + `changed` 语义；`GET /friends`、`GET /friends/requests`、`/users`、`/users/{id}`、`/users/search` 全部收口到 public summary contract。
 - 服务端批量/事务边界已补齐：friends/requests 列表改为 bulk user load，request expiry 不再发生在纯读路径，accept/reject/auto-accept 合并为单事务提交；`/users/search` 仅匹配 `username/nickname` 且拒绝空关键词。
 - avatar compat 已退出 user/friend/session/message 正式读路径；profile update route 增加 no-op 抑制，event generation 改为 bulk member lookup 后再写 session events。
+- `backfill_user_avatar_state()` 遇到缺文件的 custom avatar 时不再在 read path 自动改写正式头像状态；缺失资产改由显式修复流程处理。
 
 合并范围：
 
@@ -516,6 +522,7 @@
 - `F-589`
 - `F-598`
 - `F-602` 到 `F-613`
+- `F-616`
 - `F-671`
 - `F-672`
 - `F-684` 到 `F-687`
@@ -686,6 +693,7 @@
 - `F-759`
 - `F-614`
 - `F-615`
+- `F-574`
 - `F-653` 到 `F-658`
 - `F-662` 到 `F-666`
 - `F-798`
@@ -706,6 +714,7 @@
 - `F-838`
 - `F-842`
 - `F-843`
+- `F-846`
 - `F-637` 到 `F-650`
 - `F-599`
 - `F-600`
@@ -866,6 +875,7 @@
 - 联系人详情的语音/视频占位按钮、聊天页顶部 history 入口、聊天信息抽屉里的 search/clear 死入口都已下线；聊天输入区通话按钮只在 direct 且非 AI 会话里显示。
 - 会话侧边栏搜索重新接回 `SessionFilterProxyModel`，联系人页 requests tab 改成搜 pending 请求本身；搜索弹层关闭不再清关键词，资料增量更新会刷新当前可见搜索结果。
 - Add Friend、Create Group 和私聊发起建群入口都补了单实例/在途保护；两个建群弹窗和私聊建群选择器改为可刷新候选数据源，不再把好友快照冻在打开瞬间。
+- `AddFriendDialog` 用户搜索已补 keyword generation guard；latest-wins 不再依赖取消任务恰好及时生效。
 - 私聊发起建群时，当前对话对象改为固定成员；即使只有当前私聊对象也能进入建群流程，不会再把 counterpart 从候选和最终成员里排掉。
 - 联系人 requests 页改为 pending inbox 语义，summary 计数与列表范围收口到待处理请求；首条请求/首个 accepted 请求都能立即驱动本地列表与详情状态。
 - `search_all()` 改为单次本地结果快照，不再额外发 count 查询；消息结果卡片不再展示截断批次里的伪总数，非加密附件文件名/类型也进入本地消息搜索。
@@ -896,6 +906,7 @@
 - `R-037`
 - `R-039`
 - `R-063`
+- `R-069`
 
 共同根因：
 
@@ -944,6 +955,7 @@
 - 客户端 `CallManager` 已补严格 current-call / generation guard：空 `call_id/session_id` invite 不再 materialize ghost call，state/terminal/busy/signal 必须匹配当前 call，晚到或其它 `call_id` 的事件不能覆盖或清掉 `_active_call`。
 - accepted 多设备消费已拆分为“本设备媒体端点”和“被动镜像”：只有本机发起外呼或本机执行 accept 的设备会 `start_media()`、播放 connected UX；其它同账号设备收到 accepted 只关闭本地 toast/window，不再拉起媒体。
 - 来电侧不再在 invite 阶段强制刷新 ICE 或预热隐藏通话窗口；媒体启动推迟到 accepted 后，避免同一来电在被叫多设备上放大成 N 路 ICE refresh / hidden prewarm。
+- 来电 UI 预热已收口到窗口与信令缓冲，不会在 accept 前打开本地麦克风/摄像头；`call_ringing` 和 signaling canonical event 会镜像到参与者设备，发起侧不再只靠 optimistic 状态。
 - caller ringing/busy/terminal 已补幂等和 current-device 消费边界：重复 `call_ringing` 不再反复重放 UX，busy/terminal 只有本地当前 call 会消费；通话结果系统消息按 `call_id` 单一终态去重，并保留 TTL/容量淘汰。
 - `CallWindow` 已补窗口与媒体引擎生命周期 guard：End/close 只发一次 hangup，engine 只 close 一次，`start_media()` 失败不会提前烧掉 `_media_started`，窗口 re-show 不再强制反复居中，通话时长不再用首帧本地时间覆盖权威 `answered_at`。
 - aiortc 引擎已补预接听缓存上限、远端 ICE 缓冲上限、重复 remote track 去重、无 running loop close 兜底和 quiescent task cancel/gather，关闭后不再让旧任务继续回调窗口状态。
@@ -955,6 +967,7 @@
 - `F-019`
 - `F-166` 到 `F-169`
 - `F-171`
+- `F-172`
 - `F-174`
 - `F-179`
 - `F-180`
@@ -1043,6 +1056,8 @@
 - `F-597`
 - `F-651`
 - `F-652`
+- `F-768`
+- `F-769`
 - `R-006`
 - `R-010`
 - `R-032`
@@ -1184,6 +1199,7 @@
 - prekey bundle / claim 不再静默 partial-success：任意 active device 缺 signed prekey、claim 目标不存在/inactive、one-time prekey 耗尽都会返回明确错误；`exclude_device_id` 只会在查询当前账号设备时过滤当前用户自己的 active device。
 - device/prekey 查询放大已收口：`count_available_prekeys()` 改为数据库侧 `COUNT(*)`，设备列表、bundle 列表和 claim 返回改用批量 signed-prekey / prekey-count 查询。
 - history recovery 已限制为同账号设备迁移：导出要求 `target_user_id == source_user_id`，AuthController 禁止跨账号 target；导入校验当前账号、outer/inner source user、recipient user 与 sender identity，并把 `source_device_id` 绑定到 `sender_identity_key_public`，拒绝旧包回滚。
+- history recovery diagnostics 改为显式 `primary_source_device_id` 主来源选择；不再按时间戳排序猜“第一条设备”冒充 primary source。
 - 本地 E2EE 明文/metadata 缓存已降级为版本受控缓存：数据库加载只接受当前 `local_plaintext_version`，本地搜索会在不索引远端密文/URL 的前提下匹配已解密的本地 plaintext/metadata。
 - `security_pending` 已从最近 200 条扫描改成 DB authoritative FIFO 队列，release/discard 加入 session 级 in-progress guard；待确认消息使用独立 `MessageEvent.SECURITY_PENDING`，释放发送时才进入 `SENT` 生命周期，0 条 release/discard 会给 no-op 反馈。
 - group sender-key fanout 安装已收紧 inner/outer envelope 绑定：`session_id / owner_device_id / sender_key_id / member_version` 必须一致，`owner_user_id/sender_key/sender_key_id` 缺失会失败，晚到旧 `member_version` 不再覆盖较新的 inbound key。
@@ -1275,6 +1291,7 @@
 - `F-636`
 - `F-680` 到 `F-683`
 - `F-692` 到 `F-696`
+- `F-855`
 - `F-454`
 - `F-455`
 - `R-012`

@@ -62,6 +62,10 @@ class AvatarService:
                     avatar=stored.file_url,
                     commit=commit,
                 )
+            # Missing custom-avatar files are data-corruption cases. Keep the
+            # persisted avatar state stable on read paths and let explicit
+            # repair flows reconcile it later.
+            return user
 
         inferred_default_key = avatar_default_key or default_avatar_key_from_url(avatar_value)
         if inferred_default_key:
@@ -71,6 +75,7 @@ class AvatarService:
                 avatar_default_key=inferred_default_key,
                 avatar_file_id=None,
                 avatar=default_avatar_url(self.settings, inferred_default_key),
+                commit=commit,
             )
 
         if avatar_value:
@@ -80,6 +85,7 @@ class AvatarService:
                 avatar_default_key=avatar_default_key or None,
                 avatar_file_id=avatar_file_id or None,
                 avatar=avatar_value,
+                commit=commit,
             )
 
         return self.assign_default_user_avatar(

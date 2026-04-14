@@ -773,6 +773,53 @@ def test_e2ee_service_history_recovery_restores_group_sender_keys(monkeypatch) -
     asyncio.run(scenario())
 
 
+def test_e2ee_service_history_recovery_diagnostics_use_explicit_primary_source(monkeypatch) -> None:
+    fake_db = FakeDatabase()
+    monkeypatch.setattr(e2ee_service_module, "get_http_client", lambda: FakeHttpClient())
+
+    async def scenario() -> None:
+        fake_db.state[e2ee_service_module.E2EEService.HISTORY_RECOVERY_STATE_KEY] = (
+            e2ee_service_module.SecureStorage.encrypt_text(
+                e2ee_service_module.json.dumps(
+                    {
+                        "primary_source_device_id": "device-primary",
+                        "devices": {
+                            "device-primary": {
+                                "source_user_id": "alice",
+                                "sender_identity_key_public": "identity-primary",
+                                "imported_at": "2026-04-14T10:00:00+00:00",
+                                "exported_at": "2026-04-14T09:00:00+00:00",
+                                "signed_prekeys": {"1": {"key_id": 1, "private_key": "pk-primary"}},
+                                "one_time_prekeys": {},
+                                "group_sessions": {},
+                            },
+                            "device-newer": {
+                                "source_user_id": "alice",
+                                "sender_identity_key_public": "identity-newer",
+                                "imported_at": "2026-04-15T10:00:00+00:00",
+                                "exported_at": "2026-04-15T09:00:00+00:00",
+                                "signed_prekeys": {"2": {"key_id": 2, "private_key": "pk-newer"}},
+                                "one_time_prekeys": {},
+                                "group_sessions": {},
+                            },
+                        },
+                    }
+                )
+            )
+        )
+        monkeypatch.setattr(e2ee_service_module, "get_database", lambda: fake_db)
+        service = e2ee_service_module.E2EEService()
+
+        diagnostics = await service.get_history_recovery_diagnostics()
+
+        assert diagnostics["primary_source_device_id"] == "device-primary"
+        assert diagnostics["primary_source_user_id"] == "alice"
+        assert diagnostics["last_imported_at"] == "2026-04-14T10:00:00+00:00"
+        assert diagnostics["source_devices"][0]["source_device_id"] == "device-newer"
+
+    asyncio.run(scenario())
+
+
 def test_e2ee_service_history_recovery_rejects_cross_account_export(monkeypatch) -> None:
     fake_db = FakeDatabase()
     monkeypatch.setattr(e2ee_service_module, "get_http_client", lambda: FakeHttpClient())

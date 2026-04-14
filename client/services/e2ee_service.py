@@ -504,7 +504,18 @@ class E2EEService:
             reverse=True,
         )
         summary = await self.get_history_recovery_summary()
-        primary_source_device = dict(source_devices[0]) if source_devices else {}
+        source_devices_by_id = {
+            str(item.get("source_device_id") or "").strip(): dict(item)
+            for item in source_devices
+            if str(item.get("source_device_id") or "").strip()
+        }
+        primary_source_device_id = str(state.get("primary_source_device_id") or "").strip()
+        if primary_source_device_id and primary_source_device_id in source_devices_by_id:
+            primary_source_device = dict(source_devices_by_id[primary_source_device_id])
+        elif len(source_devices) == 1:
+            primary_source_device = dict(source_devices[0])
+        else:
+            primary_source_device = {}
         return {
             "local_device_id": local_device_id,
             "available": bool(source_devices),
@@ -825,6 +836,7 @@ class E2EEService:
 
         devices[source_device_id] = device_record
         state["devices"] = devices
+        state["primary_source_device_id"] = source_device_id
         await self._save_history_recovery_state(state)
 
         return {
@@ -2051,7 +2063,13 @@ class E2EEService:
                 normalized_device_id,
                 dict(record),
             )
-        return {"devices": normalized_devices}
+        primary_source_device_id = str(root.get("primary_source_device_id") or "").strip()
+        if primary_source_device_id and primary_source_device_id not in normalized_devices:
+            primary_source_device_id = ""
+        return {
+            "devices": normalized_devices,
+            "primary_source_device_id": primary_source_device_id,
+        }
 
     def _normalize_history_recovery_device_record(self, source_device_id: str, record: dict[str, Any]) -> dict[str, Any]:
         normalized_source_device_id = str(source_device_id or "").strip()

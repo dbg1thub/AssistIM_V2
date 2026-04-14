@@ -1506,16 +1506,26 @@ class MessageManager:
         if not isinstance(events, list):
             events = []
 
+        replayed_count = 0
+        failed_count = 0
         for event_payload in events:
             if not isinstance(event_payload, dict):
                 continue
-            await self._handle_ws_message(event_payload)
+            try:
+                await self._handle_ws_message(event_payload)
+            except Exception:
+                failed_count += 1
+                logger.exception("Failed to replay history event: %s", event_payload.get("type"))
+            else:
+                replayed_count += 1
 
         sync_summary = dict(self._pending_sync_completion or {})
         sync_summary.setdefault("count", 0)
         sync_summary.setdefault("messages", [])
         sync_summary.setdefault("skipped", 0)
-        sync_summary["events_replayed"] = len(events)
+        sync_summary["events_replayed"] = replayed_count
+        if failed_count:
+            sync_summary["events_failed"] = failed_count
         self._pending_sync_completion = None
         await self._event_bus.emit(MessageEvent.SYNC_COMPLETED, sync_summary)
 
