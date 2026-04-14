@@ -28,8 +28,10 @@ class CallStatus(StrEnum):
     INVITING = "inviting"
     RINGING = "ringing"
     ACCEPTED = "accepted"
+    CONNECTED = "connected"
     REJECTED = "rejected"
     ENDED = "ended"
+    TIMEOUT = "timeout"
     BUSY = "busy"
     FAILED = "failed"
 
@@ -46,6 +48,10 @@ class ActiveCallState:
     direction: str
     status: str
     actor_id: str = ""
+    actor_connection_id: str = ""
+    ringing_connection_id: str = ""
+    accepted_connection_id: str = ""
+    active_connection_id: str = ""
     reason: str = ""
     created_at: datetime | None = None
     answered_at: datetime | None = None
@@ -68,6 +74,10 @@ class ActiveCallState:
             direction=direction,
             status=str(payload.get("status") or fallback_status),
             actor_id=str(payload.get("actor_id") or ""),
+            actor_connection_id=str(payload.get("actor_connection_id") or ""),
+            ringing_connection_id=str(payload.get("ringing_connection_id") or ""),
+            accepted_connection_id=str(payload.get("accepted_connection_id") or ""),
+            active_connection_id=str(payload.get("active_connection_id") or ""),
             reason=str(payload.get("reason") or ""),
             created_at=_parse_datetime(payload.get("created_at")),
             answered_at=_parse_datetime(payload.get("answered_at")),

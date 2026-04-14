@@ -38,6 +38,13 @@ class CallManager:
     """Track one pending or active 1:1 call and relay websocket events."""
 
     UNANSWERED_TIMEOUT_SECONDS = 45
+    TERMINAL_STATUSES = {
+        CallStatus.ENDED.value,
+        CallStatus.REJECTED.value,
+        CallStatus.FAILED.value,
+        CallStatus.BUSY.value,
+        CallStatus.TIMEOUT.value,
+    }
 
     SIGNALING_EVENT_TYPES = {
         "call_invite",
@@ -60,6 +67,7 @@ class CallManager:
         self._unanswered_timeout_task: asyncio.Task | None = None
         self._initialized = False
         self._timing_origins: dict[str, float] = {}
+        self._local_accepting_call_ids: set[str] = set()
 
     @property
     def active_call(self) -> Optional[ActiveCallState]:
@@ -97,7 +105,7 @@ class CallManager:
         """Start one outbound voice or video call invite."""
         self._ensure_call_target(session)
         normalized_media_type = self._normalize_media_type(media_type)
-        if self._active_call is not None and self._active_call.status not in {CallStatus.ENDED.value, CallStatus.REJECTED.value, CallStatus.FAILED.value, CallStatus.BUSY.value}:
+        if self._active_call is not None and self._active_call.status not in self.TERMINAL_STATUSES:
             raise ValidationError("Another call is already active")
 
         peer_user_id = self._resolve_peer_user_id(session)
@@ -134,18 +142,32 @@ class CallManager:
         normalized_call_id = str(call_id or "").strip()
         if not normalized_call_id:
             raise ValidationError("call_id is required")
+        active_call = self._require_current_call(normalized_call_id)
+        if active_call.direction != CallDirection.INCOMING.value:
+            raise ValidationError("only incoming calls can be accepted")
+        if active_call.status not in {CallStatus.INVITING.value, "invited", CallStatus.RINGING.value}:
+            raise ValidationError("call is not waiting for acceptance")
         self._log_timing(normalized_call_id, "accept_requested")
-        return await self._conn_manager.send_call_event(
+        self._local_accepting_call_ids.add(normalized_call_id)
+        sent = await self._conn_manager.send_call_event(
             "call_accept",
             {"call_id": normalized_call_id},
             msg_id=normalized_call_id,
         )
+        if not sent:
+            self._local_accepting_call_ids.discard(normalized_call_id)
+        return sent
 
     async def reject_call(self, call_id: str) -> bool:
         """Reject one inbound call."""
         normalized_call_id = str(call_id or "").strip()
         if not normalized_call_id:
             raise ValidationError("call_id is required")
+        active_call = self._require_current_call(normalized_call_id)
+        if active_call.direction != CallDirection.INCOMING.value:
+            raise ValidationError("only incoming calls can be rejected")
+        if active_call.status not in {CallStatus.INVITING.value, "invited", CallStatus.RINGING.value}:
+            raise ValidationError("call is no longer rejectable")
         return await self._conn_manager.send_call_event(
             "call_reject",
             {"call_id": normalized_call_id},
@@ -157,6 +179,7 @@ class CallManager:
         normalized_call_id = str(call_id or "").strip()
         if not normalized_call_id:
             raise ValidationError("call_id is required")
+        self._require_current_call(normalized_call_id)
         payload = {"call_id": normalized_call_id}
         normalized_reason = str(reason or "").strip().lower()
         if normalized_reason:
@@ -172,6 +195,11 @@ class CallManager:
         normalized_call_id = str(call_id or "").strip()
         if not normalized_call_id:
             raise ValidationError("call_id is required")
+        active_call = self._require_current_call(normalized_call_id)
+        if active_call.direction != CallDirection.INCOMING.value:
+            raise ValidationError("only incoming calls can send ringing")
+        if active_call.status not in {CallStatus.INVITING.value, "invited", CallStatus.RINGING.value}:
+            raise ValidationError("call is no longer ringable")
         self._log_timing(normalized_call_id, "ringing_requested")
         return await self._conn_manager.send_call_event(
             "call_ringing",
@@ -181,20 +209,23 @@ class CallManager:
 
     async def send_offer(self, call_id: str, sdp: dict[str, Any]) -> bool:
         """Forward one WebRTC offer."""
-        return await self._send_signal_payload("call_offer", call_id, {"sdp": dict(sdp or {})})
+        return await self._send_signal_payload("call_offer", call_id, {"sdp": self._normalize_sdp_payload(sdp, expected_type="offer")})
 
     async def send_answer(self, call_id: str, sdp: dict[str, Any]) -> bool:
         """Forward one WebRTC answer."""
-        return await self._send_signal_payload("call_answer", call_id, {"sdp": dict(sdp or {})})
+        return await self._send_signal_payload("call_answer", call_id, {"sdp": self._normalize_sdp_payload(sdp, expected_type="answer")})
 
     async def send_ice_candidate(self, call_id: str, candidate: dict[str, Any]) -> bool:
         """Forward one ICE candidate."""
-        return await self._send_signal_payload("call_ice", call_id, {"candidate": dict(candidate or {})})
+        return await self._send_signal_payload("call_ice", call_id, {"candidate": self._normalize_ice_candidate(candidate)})
 
     async def _send_signal_payload(self, event_type: str, call_id: str, extra: dict[str, Any]) -> bool:
         normalized_call_id = str(call_id or "").strip()
         if not normalized_call_id:
             raise ValidationError("call_id is required")
+        active_call = self._require_current_call(normalized_call_id)
+        if active_call.status != CallStatus.ACCEPTED.value:
+            raise ValidationError("call signaling is only available after acceptance")
         payload = {"call_id": normalized_call_id}
         payload.update(extra)
         self._log_timing(normalized_call_id, f"{event_type}_send")
@@ -212,6 +243,8 @@ class CallManager:
 
         payload = message.get("data", {}) if isinstance(message.get("data"), dict) else {}
         call_id = str(payload.get("call_id") or "")
+        if not call_id:
+            return
         if call_id:
             self._log_timing(call_id, f"ws_{message_type}_received")
         if message_type == "call_invite":
@@ -232,12 +265,28 @@ class CallManager:
         if message_type == "call_busy":
             await self._handle_busy(payload)
             return
+        if not self._matches_current_call(payload):
+            return
+        if str(payload.get("actor_id") or "") == self._user_id:
+            return
+        if self._active_call is None or self._active_call.status != CallStatus.ACCEPTED.value:
+            return
         await self._event_bus.emit(CallEvent.SIGNAL, {"type": message_type, "data": payload})
 
     async def _handle_invite(self, payload: dict[str, Any]) -> None:
+        if not self._has_required_identity(payload, require_session=True):
+            return
         direction = CallDirection.INCOMING.value
         if str(payload.get("initiator_id") or "") == self._user_id:
             direction = CallDirection.OUTGOING.value
+        if direction == CallDirection.OUTGOING.value and self._active_call is None:
+            return
+        current_call = self._active_call
+        if current_call is not None:
+            if current_call.call_id != str(payload.get("call_id") or ""):
+                return
+            if current_call.status not in self.TERMINAL_STATUSES:
+                return
         self._active_call = ActiveCallState.from_payload(
             payload,
             direction=direction,
@@ -246,19 +295,39 @@ class CallManager:
         await self._event_bus.emit(CallEvent.INVITE_RECEIVED, {"call": self._active_call, "payload": payload})
 
     async def _handle_state_event(self, payload: dict[str, Any], status: CallStatus, event_type: str) -> None:
-        state = self._merge_state(payload, status=status.value)
+        if not self._matches_current_call(payload):
+            return
+        previous_status = str(self._active_call.status if self._active_call is not None else "")
+        if status == CallStatus.RINGING and previous_status == CallStatus.RINGING.value:
+            return
+        if status == CallStatus.ACCEPTED and previous_status == CallStatus.ACCEPTED.value:
+            return
         if status == CallStatus.ACCEPTED:
             self._cancel_unanswered_timeout()
-        await self._event_bus.emit(event_type, {"call": state, "payload": payload})
+        state = self._merge_state(payload, status=status.value)
+        local_media_endpoint = self._is_local_media_endpoint_for_accept(state)
+        if status == CallStatus.ACCEPTED and not local_media_endpoint:
+            self._active_call = None
+        await self._event_bus.emit(
+            event_type,
+            {"call": state, "payload": payload, "is_local_media_endpoint": local_media_endpoint},
+        )
+        if status == CallStatus.ACCEPTED:
+            self._local_accepting_call_ids.discard(state.call_id)
 
     async def _handle_terminal_event(self, payload: dict[str, Any], status: CallStatus, event_type: str) -> None:
+        if not self._matches_current_call(payload):
+            return
         state = self._merge_state(payload, status=status.value)
         self._cancel_unanswered_timeout()
         await self._event_bus.emit(event_type, {"call": state, "payload": payload})
         self._timing_origins.pop(state.call_id, None)
+        self._local_accepting_call_ids.discard(state.call_id)
         self._active_call = None
 
     async def _handle_busy(self, payload: dict[str, Any]) -> None:
+        if not self._matches_current_call(payload):
+            return
         state = self._merge_state(payload, status=CallStatus.BUSY.value)
         self._cancel_unanswered_timeout()
         await self._event_bus.emit(CallEvent.BUSY, {"call": state, "payload": payload})
@@ -268,15 +337,18 @@ class CallManager:
     async def _handle_error_message(self, message: dict[str, Any]) -> None:
         if self._active_call is None:
             return
-        if str(message.get("msg_id") or "") != self._active_call.call_id:
-            return
         payload = message.get("data", {}) if isinstance(message.get("data"), dict) else {}
+        payload_call_id = str(payload.get("call_id") or "").strip()
+        msg_id = str(message.get("msg_id") or "").strip()
+        if payload_call_id != self._active_call.call_id and msg_id != self._active_call.call_id:
+            return
         failed_call = self._active_call
         failed_call.status = CallStatus.FAILED.value
         failed_call.reason = str(payload.get("message") or "Call signaling failed")
         self._cancel_unanswered_timeout()
         await self._event_bus.emit(CallEvent.FAILED, {"call": failed_call, "payload": payload})
         self._timing_origins.pop(failed_call.call_id, None)
+        self._local_accepting_call_ids.discard(failed_call.call_id)
         self._active_call = None
 
     def _arm_unanswered_timeout(self, call_id: str) -> None:
@@ -305,7 +377,9 @@ class CallManager:
             return
 
         self._log_timing(call_id, "timeout_reached")
-        await self.hangup_call(call_id, reason="timeout")
+        sent = await self.hangup_call(call_id, reason="timeout")
+        if not sent:
+            return
 
     def _log_timing(self, call_id: str, stage: str, **extra: Any) -> None:
         """Log one call-timeline checkpoint with a stable relative timestamp."""
@@ -337,6 +411,63 @@ class CallManager:
         merged.status = status
         self._active_call = merged
         return merged
+
+    def _has_required_identity(self, payload: dict[str, Any], *, require_session: bool = False) -> bool:
+        call_id = str(payload.get("call_id") or "").strip()
+        if not call_id:
+            return False
+        if require_session and not str(payload.get("session_id") or "").strip():
+            return False
+        return True
+
+    def _matches_current_call(self, payload: dict[str, Any]) -> bool:
+        call_id = str(payload.get("call_id") or "").strip()
+        if not call_id or self._active_call is None:
+            return False
+        return self._active_call.call_id == call_id
+
+    def _require_current_call(self, call_id: str) -> ActiveCallState:
+        normalized_call_id = str(call_id or "").strip()
+        active_call = self._active_call
+        if active_call is None or active_call.call_id != normalized_call_id or active_call.status in self.TERMINAL_STATUSES:
+            raise ValidationError("call is no longer current")
+        return active_call
+
+    def _is_local_media_endpoint_for_accept(self, state: ActiveCallState) -> bool:
+        if state.direction == CallDirection.OUTGOING.value and state.initiator_id == self._user_id:
+            return True
+        if state.direction == CallDirection.INCOMING.value and state.call_id in self._local_accepting_call_ids:
+            return True
+        return False
+
+    @staticmethod
+    def _normalize_sdp_payload(sdp: dict[str, Any], *, expected_type: str) -> dict[str, Any]:
+        if not isinstance(sdp, dict):
+            raise ValidationError("sdp must be an object")
+        sdp_type = str(sdp.get("type") or "").strip().lower()
+        body = str(sdp.get("sdp") or "").strip()
+        if sdp_type != expected_type or not body:
+            raise ValidationError(f"sdp.type must be '{expected_type}' and sdp.sdp is required")
+        return {"type": sdp_type, "sdp": body}
+
+    @staticmethod
+    def _normalize_ice_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(candidate, dict):
+            raise ValidationError("candidate must be an object")
+        candidate_sdp = str(candidate.get("candidate") or "").strip()
+        if not candidate_sdp:
+            raise ValidationError("candidate.candidate is required")
+        normalized: dict[str, Any] = {"candidate": candidate_sdp}
+        if candidate.get("sdpMid") not in {None, ""}:
+            normalized["sdpMid"] = str(candidate.get("sdpMid"))
+        if candidate.get("sdpMLineIndex") not in {None, ""}:
+            try:
+                normalized["sdpMLineIndex"] = int(candidate.get("sdpMLineIndex"))
+            except (TypeError, ValueError) as exc:
+                raise ValidationError("candidate.sdpMLineIndex must be an integer") from exc
+        if candidate.get("usernameFragment") not in {None, ""}:
+            normalized["usernameFragment"] = str(candidate.get("usernameFragment"))
+        return normalized
 
     def _ensure_call_target(self, session: Session) -> None:
         if session.is_ai_session:

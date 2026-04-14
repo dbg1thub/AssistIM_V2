@@ -233,7 +233,7 @@ class ChatInterface(QWidget):
         self._dialog_refs: set[QWidget] = set()
         self._incoming_call_toasts: dict[str, IncomingCallToast] = {}
         self._call_window: CallWindow | None = None
-        self._call_result_messages_sent: OrderedDict[tuple[str, str], float] = OrderedDict()
+        self._call_result_messages_sent: OrderedDict[str, float] = OrderedDict()
         self._active_call_ring_sound: AppSound | None = None
         self._session_visibility_active = False
         self._current_session_active = False
@@ -1507,7 +1507,6 @@ class ChatInterface(QWidget):
             window.set_status_text("Waiting...")
             current_user_id = str((self._auth_controller.current_user or {}).get("id", "") or "")
             window.prepare_media(is_caller=current_user_id == call.initiator_id)
-            window.activate_signaling()
         self._start_call_ring_sound(AppSound.CALL_OUTGOING_RING)
         call_label = self._call_label(call.media_type)
         InfoBar.success(
@@ -1569,23 +1568,6 @@ class ChatInterface(QWidget):
         toast.rejected.connect(lambda cid=call.call_id, ref=toast: self._reject_incoming_call_from_toast(cid, ref))
         toast.show()
         self._start_call_ring_sound(AppSound.CALL_INCOMING_RING)
-        self._schedule_ui_single_shot(
-            0,
-            lambda active_call=call: self._schedule_ui_task(
-                self._prepare_incoming_call_window(active_call),
-                f"prepare incoming call window {active_call.call_id}",
-            ),
-        )
-
-    async def _prepare_incoming_call_window(self, call: ActiveCallState) -> None:
-        """Refresh runtime ICE config before prewarming one incoming call window."""
-        await self._chat_controller.refresh_call_ice_servers(force_refresh=True)
-        window = self._ensure_call_window(call, reveal=False)
-        if window is not None:
-            self._schedule_ui_single_shot(
-                0,
-                lambda current_window=window: self._prepare_current_call_window_media(current_window),
-            )
 
     async def _accept_incoming_call(self, call: ActiveCallState) -> None:
         """Accept one incoming call and optionally switch to the related chat."""
@@ -1628,7 +1610,6 @@ class ChatInterface(QWidget):
         window = self._ensure_call_window(call)
         if window is not None:
             window.set_status_text("Ringing...")
-            window.activate_signaling()
         InfoBar.info(
             self._call_label(call.media_type),
             tr("chat.call.ringing", "The other participant is being alerted."),
@@ -1641,8 +1622,13 @@ class ChatInterface(QWidget):
         call = self._event_call(event)
         if call is None:
             return
+        is_local_media_endpoint = self._event_bool(event, "is_local_media_endpoint", default=True)
         logger.info("[call-ui] call_id=%s stage=accepted_ui status=%s direction=%s", call.call_id, call.status, call.direction)
         self._close_incoming_call_toast(call.call_id)
+        if not is_local_media_endpoint:
+            self._close_call_window(call.call_id)
+            self._stop_call_ring_sounds()
+            return
         self._ensure_call_window(call, start_media=True)
         self._stop_call_ring_sounds()
         self._play_call_sound(AppSound.CALL_CONNECTED)
@@ -1728,6 +1714,8 @@ class ChatInterface(QWidget):
             return
         call_id = str(payload.get("call_id") or "")
         if not call_id:
+            return
+        if str(payload.get("actor_id") or "") == self._current_user_id():
             return
 
         window = self._call_window
@@ -1824,12 +1812,6 @@ class ChatInterface(QWidget):
         self._call_window = window
         return window
 
-    def _prepare_current_call_window_media(self, window: CallWindow) -> None:
-        """Prepare media only for the call window that is still active."""
-        if self._call_window is not window:
-            return
-        window.prepare_media(is_caller=False)
-
     def _close_call_window(self, call_id: str | None = None) -> None:
         """Close the active media window when the call finishes."""
         window = self._call_window
@@ -1850,6 +1832,8 @@ class ChatInterface(QWidget):
         """Relay user-triggered window close actions into websocket hangup."""
         if self._call_window is not source_window:
             return
+        if source_window.call_id != call_id:
+            return
         self._schedule_ui_task(
             self._chat_controller.hangup_call(call_id),
             f"hangup call window {call_id}",
@@ -1863,6 +1847,8 @@ class ChatInterface(QWidget):
             return
         call_id = str(payload.get("call_id") or "")
         if not call_id:
+            return
+        if source_window.call_id != call_id:
             return
         if event_type == "call_offer":
             self._schedule_ui_task(
@@ -1892,6 +1878,16 @@ class ChatInterface(QWidget):
         if isinstance(call, ActiveCallState):
             return call
         return None
+
+    @staticmethod
+    def _event_bool(event: object, key: str, *, default: bool = False) -> bool:
+        """Extract a boolean flag from an event-bus payload."""
+        if not isinstance(event, dict):
+            return default
+        value = event.get(key)
+        if isinstance(value, bool):
+            return value
+        return default
 
     def _call_session_name(self, call: ActiveCallState) -> str:
         """Resolve one readable name for the current call target."""
@@ -1984,7 +1980,7 @@ class ChatInterface(QWidget):
             return
         if call.initiator_id and call.initiator_id != self._current_user_id():
             return
-        dedupe_key = (call.call_id, outcome)
+        dedupe_key = call.call_id
         self._prune_call_result_messages_sent()
         if dedupe_key in self._call_result_messages_sent:
             self._call_result_messages_sent.move_to_end(dedupe_key)

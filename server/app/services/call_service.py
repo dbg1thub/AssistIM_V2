@@ -11,7 +11,17 @@ from sqlalchemy.orm import Session
 
 from app.core.config import Settings, get_settings
 from app.core.errors import AppError, ErrorCode
-from app.realtime.call_registry import ActiveCall, InMemoryCallRegistry, get_call_registry
+from app.realtime.call_registry import (
+    CALL_STATUS_ACCEPTED,
+    CALL_STATUS_ENDED,
+    CALL_STATUS_INVITED,
+    CALL_STATUS_REJECTED,
+    CALL_STATUS_RINGING,
+    CALL_STATUS_TIMEOUT,
+    ActiveCall,
+    InMemoryCallRegistry,
+    get_call_registry,
+)
 from app.repositories.session_repo import SessionRepository
 from app.services.session_service import SessionService
 from app.utils.time import isoformat_utc, utcnow
@@ -52,21 +62,32 @@ class CallService:
         recipient_call = self.registry.get_for_user(recipient_id)
         if initiator_call is not None or recipient_call is not None:
             busy_call = initiator_call or recipient_call
+            now = utcnow()
             return (
                 "call_busy",
                 [initiator_id],
                 {
                     "call_id": str(call_id or "").strip(),
                     "session_id": str(session.id or ""),
+                    "initiator_id": initiator_id,
+                    "recipient_id": recipient_id,
+                    "status": "busy",
                     "busy_user_id": recipient_id if recipient_call is not None else initiator_id,
                     "active_call_id": busy_call.call_id if busy_call is not None else "",
+                    "active_session_id": busy_call.session_id if busy_call is not None else "",
+                    "active_initiator_id": busy_call.initiator_id if busy_call is not None else "",
+                    "active_recipient_id": busy_call.recipient_id if busy_call is not None else "",
+                    "active_media_type": busy_call.media_type if busy_call is not None else "",
                     "media_type": normalized_media_type,
+                    "created_at": isoformat_utc(now),
+                    "answered_at": None,
+                    "ended_at": None,
                 },
             )
 
-        normalized_call_id = str(call_id or "").strip()
-        if not normalized_call_id:
-            raise AppError(ErrorCode.INVALID_REQUEST, "call_id is required", 422)
+        normalized_call_id = self._require_non_empty(call_id, "call_id")
+        if self.registry.get(normalized_call_id) is not None:
+            raise AppError(ErrorCode.SESSION_CONFLICT, "call_id already exists", 409)
 
         call = self.registry.create(
             call_id=normalized_call_id,
@@ -75,21 +96,27 @@ class CallService:
             recipient_id=recipient_id,
             media_type=normalized_media_type,
         )
-        return "call_invite", [recipient_id], self._call_payload(call)
+        return "call_invite", call.participant_ids(), self._call_payload(call)
 
     def ringing(self, *, call_id: str, user_id: str) -> tuple[str, list[str], dict[str, Any]]:
         """Relay one ringing state change to the caller."""
         call = self._require_participant_call(call_id, user_id)
         if user_id != call.recipient_id:
             raise AppError(ErrorCode.FORBIDDEN, "only the callee can mark the call as ringing", 403)
+        if call.status == CALL_STATUS_RINGING:
+            return "call_ringing", [user_id], self._call_payload(call, actor_id=user_id)
+        if call.status != CALL_STATUS_INVITED:
+            raise AppError(ErrorCode.SESSION_CONFLICT, "call can only ring before it is accepted", 409)
         call = self.registry.mark_ringing(call.call_id) or call
-        return "call_ringing", [call.initiator_id], self._call_payload(call, actor_id=user_id)
+        return "call_ringing", call.participant_ids(), self._call_payload(call, actor_id=user_id)
 
     def accept(self, *, call_id: str, user_id: str) -> tuple[str, list[str], dict[str, Any]]:
         """Accept one inbound call."""
         call = self._require_participant_call(call_id, user_id)
         if user_id != call.recipient_id:
             raise AppError(ErrorCode.FORBIDDEN, "only the callee can accept the call", 403)
+        if call.status not in {CALL_STATUS_INVITED, CALL_STATUS_RINGING}:
+            raise AppError(ErrorCode.SESSION_CONFLICT, "call can only be accepted once", 409)
         call = self.registry.mark_accepted(call.call_id) or call
         return "call_accept", call.participant_ids(), self._call_payload(call, actor_id=user_id)
 
@@ -98,30 +125,39 @@ class CallService:
         call = self._require_participant_call(call_id, user_id)
         if user_id != call.recipient_id:
             raise AppError(ErrorCode.FORBIDDEN, "only the callee can reject the call", 403)
-        ended_call = self.registry.end(call.call_id) or call
+        if call.status not in {CALL_STATUS_INVITED, CALL_STATUS_RINGING}:
+            raise AppError(ErrorCode.SESSION_CONFLICT, "accepted calls must be ended with hangup", 409)
+        ended_call = self.registry.end(call.call_id, status=CALL_STATUS_REJECTED, reason="rejected", actor_id=user_id) or call
         return "call_reject", ended_call.participant_ids(), self._call_payload(ended_call, actor_id=user_id, reason="rejected")
 
     def hangup(self, *, call_id: str, user_id: str, reason: str | None = None) -> tuple[str, list[str], dict[str, Any]]:
         """End one active or pending call."""
         call = self._require_participant_call(call_id, user_id)
-        ended_call = self.registry.end(call.call_id) or call
         normalized_reason = str(reason or "").strip().lower() or "hangup"
+        terminal_status = CALL_STATUS_TIMEOUT if normalized_reason == "timeout" else CALL_STATUS_ENDED
+        ended_call = self.registry.end(call.call_id, status=terminal_status, reason=normalized_reason, actor_id=user_id) or call
         return "call_hangup", ended_call.participant_ids(), self._call_payload(ended_call, actor_id=user_id, reason=normalized_reason)
 
     def relay_offer(self, *, call_id: str, user_id: str, sdp: dict[str, Any]) -> tuple[str, list[str], dict[str, Any]]:
         """Forward one WebRTC offer to the peer."""
         call = self._require_participant_call(call_id, user_id)
-        return "call_offer", [self._peer_id(call, user_id)], self._signal_payload(call, user_id, {"sdp": dict(sdp or {})})
+        self._require_accepted_call(call)
+        normalized_sdp = self._require_sdp_payload(sdp, expected_type="offer")
+        return "call_offer", call.participant_ids(), self._signal_payload(call, user_id, {"sdp": normalized_sdp})
 
     def relay_answer(self, *, call_id: str, user_id: str, sdp: dict[str, Any]) -> tuple[str, list[str], dict[str, Any]]:
         """Forward one WebRTC answer to the peer."""
         call = self._require_participant_call(call_id, user_id)
-        return "call_answer", [self._peer_id(call, user_id)], self._signal_payload(call, user_id, {"sdp": dict(sdp or {})})
+        self._require_accepted_call(call)
+        normalized_sdp = self._require_sdp_payload(sdp, expected_type="answer")
+        return "call_answer", call.participant_ids(), self._signal_payload(call, user_id, {"sdp": normalized_sdp})
 
     def relay_ice(self, *, call_id: str, user_id: str, candidate: dict[str, Any]) -> tuple[str, list[str], dict[str, Any]]:
         """Forward one ICE candidate to the peer."""
         call = self._require_participant_call(call_id, user_id)
-        return "call_ice", [self._peer_id(call, user_id)], self._signal_payload(call, user_id, {"candidate": dict(candidate or {})})
+        self._require_accepted_call(call)
+        normalized_candidate = self._require_ice_candidate_payload(candidate)
+        return "call_ice", call.participant_ids(), self._signal_payload(call, user_id, {"candidate": normalized_candidate})
 
     def get_ice_servers(self, *, user_id: str) -> dict[str, Any]:
         """Return one normalized ICE server payload for the authenticated user."""
@@ -246,7 +282,8 @@ class CallService:
     def _peer_id(call: ActiveCall, user_id: str) -> str:
         return call.recipient_id if user_id == call.initiator_id else call.initiator_id
 
-    def _call_payload(self, call: ActiveCall, *, actor_id: str | None = None, reason: str | None = None) -> dict[str, Any]:
+    @staticmethod
+    def _call_payload(call: ActiveCall, *, actor_id: str | None = None, reason: str | None = None) -> dict[str, Any]:
         payload = {
             "call_id": call.call_id,
             "session_id": call.session_id,
@@ -256,6 +293,7 @@ class CallService:
             "status": call.status,
             "created_at": isoformat_utc(call.created_at),
             "answered_at": isoformat_utc(call.answered_at),
+            "ended_at": isoformat_utc(call.ended_at),
         }
         if actor_id:
             payload["actor_id"] = actor_id
@@ -265,10 +303,49 @@ class CallService:
 
     def _signal_payload(self, call: ActiveCall, from_user_id: str, extra: dict[str, Any]) -> dict[str, Any]:
         payload = self._call_payload(call, actor_id=from_user_id)
-        payload["from_user_id"] = from_user_id
-        payload["to_user_id"] = self._peer_id(call, from_user_id)
         payload.update(extra)
         return payload
+
+    @staticmethod
+    def _require_non_empty(value: Any, field_name: str) -> str:
+        normalized = str(value or "").strip()
+        if not normalized:
+            raise AppError(ErrorCode.INVALID_REQUEST, f"{field_name} is required", 422)
+        return normalized
+
+    @staticmethod
+    def _require_accepted_call(call: ActiveCall) -> None:
+        if call.status != CALL_STATUS_ACCEPTED:
+            raise AppError(ErrorCode.SESSION_CONFLICT, "call signaling is only allowed after accept", 409)
+
+    @staticmethod
+    def _require_sdp_payload(sdp: dict[str, Any], *, expected_type: str) -> dict[str, Any]:
+        if not isinstance(sdp, dict):
+            raise AppError(ErrorCode.INVALID_REQUEST, "sdp must be an object", 422)
+        sdp_type = str(sdp.get("type") or "").strip().lower()
+        body = str(sdp.get("sdp") or "").strip()
+        if sdp_type != expected_type or not body:
+            raise AppError(ErrorCode.INVALID_REQUEST, f"sdp.type must be '{expected_type}' and sdp.sdp is required", 422)
+        return {"type": sdp_type, "sdp": body}
+
+    @staticmethod
+    def _require_ice_candidate_payload(candidate: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(candidate, dict):
+            raise AppError(ErrorCode.INVALID_REQUEST, "candidate must be an object", 422)
+        candidate_sdp = str(candidate.get("candidate") or "").strip()
+        if not candidate_sdp:
+            raise AppError(ErrorCode.INVALID_REQUEST, "candidate.candidate is required", 422)
+        normalized: dict[str, Any] = {"candidate": candidate_sdp}
+        if candidate.get("sdpMid") not in {None, ""}:
+            normalized["sdpMid"] = str(candidate.get("sdpMid"))
+        if candidate.get("sdpMLineIndex") not in {None, ""}:
+            try:
+                normalized["sdpMLineIndex"] = int(candidate.get("sdpMLineIndex"))
+            except (TypeError, ValueError) as exc:
+                raise AppError(ErrorCode.INVALID_REQUEST, "candidate.sdpMLineIndex must be an integer", 422) from exc
+        if candidate.get("usernameFragment") not in {None, ""}:
+            normalized["usernameFragment"] = str(candidate.get("usernameFragment"))
+        return normalized
 
 
 

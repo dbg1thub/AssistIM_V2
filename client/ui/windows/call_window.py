@@ -143,6 +143,9 @@ class CallWindow(FluentWidget):
         self._self_label = str(self_label or "").strip() or "Me"
         self._media_started = False
         self._closing_programmatically = False
+        self._engine_closed = False
+        self._hangup_emitted = False
+        self._has_been_shown = False
         self._call_started_at: datetime | None = call.answered_at
         self._call_connected = False
         self._has_audio_input = bool(QMediaDevices.audioInputs())
@@ -318,9 +321,13 @@ class CallWindow(FluentWidget):
     def start_media(self, *, is_caller: bool) -> None:
         if self._media_started:
             return
-        self._media_started = True
         self.set_status_text("Connecting...")
-        self._engine.start(is_caller=is_caller)
+        try:
+            self._engine.start(is_caller=is_caller)
+        except Exception:
+            self.set_status_text("Unable to start media")
+            raise
+        self._media_started = True
 
     def prepare_media(self, *, is_caller: bool) -> None:
         self._engine.prepare(is_caller=is_caller)
@@ -362,7 +369,7 @@ class CallWindow(FluentWidget):
     def end_call(self) -> None:
         self._closing_programmatically = True
         self._duration_timer.stop()
-        self._engine.close()
+        self._close_engine()
         self.close()
 
     def set_status_text(self, text: str) -> None:
@@ -376,12 +383,14 @@ class CallWindow(FluentWidget):
         if not self._closing_programmatically:
             self._emit_hangup()
         self._duration_timer.stop()
-        self._engine.close()
+        self._close_engine()
         super().closeEvent(event)
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
-        self._center_on_screen()
+        if not self._has_been_shown:
+            self._has_been_shown = True
+            self._center_on_screen()
         self._layout_video_overlays()
 
     def resizeEvent(self, event) -> None:
@@ -392,7 +401,19 @@ class CallWindow(FluentWidget):
     def _emit_hangup(self) -> None:
         if self._closing_programmatically:
             return
+        if self._hangup_emitted:
+            return
+        self._hangup_emitted = True
+        self.end_control.button.setEnabled(False)
+        self.set_status_text("Ending...")
         self.hangup_requested.emit(self._call.call_id)
+
+    def _close_engine(self) -> None:
+        """Close the media engine once across explicit and Qt close paths."""
+        if self._engine_closed:
+            return
+        self._engine_closed = True
+        self._engine.close()
 
     def _on_mic_toggled(self, checked: bool) -> None:
         self._engine.set_microphone_muted(bool(checked))
@@ -575,7 +596,8 @@ class CallWindow(FluentWidget):
         if self._call_connected and not force:
             return
         self._call_connected = True
-        self._call_started_at = datetime.now()
+        if self._call_started_at is None:
+            self._call_started_at = datetime.now()
         self._refresh_call_duration()
         if not self._duration_timer.isActive():
             self._duration_timer.start()

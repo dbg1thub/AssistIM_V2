@@ -275,6 +275,8 @@ class AiortcVoiceEngine(QObject):
     """Minimal aiortc boundary for 1:1 voice or video calls."""
 
     VIDEO_FRAME_INTERVAL_MS = 41
+    MAX_PENDING_SIGNALS = 32
+    MAX_PENDING_REMOTE_ICE = 128
 
     state_changed = Signal(str)
     signal_generated = Signal(str, object)
@@ -325,6 +327,7 @@ class AiortcVoiceEngine(QObject):
         self._offer_sent = False
         self._pending_signals: list[tuple[str, dict[str, Any]]] = []
         self._pending_remote_ice: list[Any] = []
+        self._remote_track_keys: set[tuple[str, str]] = set()
         self._tasks: set[asyncio.Task] = set()
         self._operation_lock: asyncio.Lock | None = None
         self._timing_origin = time.perf_counter()
@@ -410,7 +413,15 @@ class AiortcVoiceEngine(QObject):
     def close(self) -> None:
         """Stop capture and close the peer connection."""
         self._release_media_resources()
-        self._launch(self._close, "close aiortc voice engine")
+        try:
+            self._launch(self._close, "close aiortc voice engine")
+        except RuntimeError:
+            self._signaling_ready = False
+            self._offer_sent = False
+            self._pending_signals.clear()
+            self._pending_remote_ice.clear()
+            self._remote_track_keys.clear()
+            self.state_changed.emit("Call ended")
 
     def _launch(self, coroutine_factory: Callable[[], Coroutine[Any, Any, Any]], context: str) -> None:
         """Start one tracked asyncio task."""
@@ -581,7 +592,11 @@ class AiortcVoiceEngine(QObject):
             candidate_sdp = str(candidate_payload.get("candidate") or "").strip()
             if not candidate_sdp:
                 return
-            candidate = candidate_from_sdp(candidate_sdp.removeprefix("candidate:"))
+            try:
+                candidate = candidate_from_sdp(candidate_sdp.removeprefix("candidate:"))
+            except Exception:
+                self.error_reported.emit("Invalid ICE candidate")
+                return
             sdp_mid = candidate_payload.get("sdpMid")
             sdp_mline_index = candidate_payload.get("sdpMLineIndex")
             if sdp_mid not in {None, ""}:
@@ -598,6 +613,8 @@ class AiortcVoiceEngine(QObject):
                 candidate.usernameFragment = username_fragment
             remote_description = getattr(self._peer_connection, "remoteDescription", None)
             if remote_description is None:
+                if len(self._pending_remote_ice) >= self.MAX_PENDING_REMOTE_ICE:
+                    self._pending_remote_ice.pop(0)
                 self._pending_remote_ice.append(candidate)
                 if len(self._pending_remote_ice) <= 3:
                     self._log_timing("remote_ice_buffered", index=len(self._pending_remote_ice))
@@ -677,6 +694,10 @@ class AiortcVoiceEngine(QObject):
 
         @peer_connection.on("track")
         async def on_track(track) -> None:
+            track_key = (str(getattr(track, "kind", "") or ""), str(getattr(track, "id", "") or id(track)))
+            if track_key in self._remote_track_keys:
+                return
+            self._remote_track_keys.add(track_key)
             if track.kind == "audio":
                 self._log_timing("remote_audio_track")
                 if self._speaker_enabled:
@@ -1099,6 +1120,8 @@ class AiortcVoiceEngine(QObject):
                 self._offer_sent = True
             self.signal_generated.emit(event_type, payload)
             return
+        if len(self._pending_signals) >= self.MAX_PENDING_SIGNALS:
+            self._pending_signals.pop(0)
         self._pending_signals.append((event_type, payload))
 
     def _flush_pending_signals(self) -> None:
@@ -1143,15 +1166,19 @@ class AiortcVoiceEngine(QObject):
 
     async def _play_remote_audio(self, track) -> None:
         """Drain one inbound remote audio track into the Qt output device."""
-        if not self._remote_audio_output.is_available():
-            self.state_changed.emit("Remote audio received (no output device)")
-            return
-
+        missing_output_reported = False
         while True:
             try:
                 frame = await track.recv()
             except MediaStreamError:
                 break
+            if not self._remote_audio_output.is_available():
+                if not missing_output_reported:
+                    missing_output_reported = True
+                    self.state_changed.emit("Remote audio received (no output device)")
+                await asyncio.sleep(0.25)
+                continue
+            missing_output_reported = False
 
             wrote_audio = self._remote_audio_output.consume_frame(frame)
             if wrote_audio and self._speaker_enabled and not self._remote_audio_started:
@@ -1216,11 +1243,15 @@ class AiortcVoiceEngine(QObject):
     async def _close(self) -> None:
         """Release aiortc resources."""
         current_task = asyncio.current_task()
+        pending_tasks: list[asyncio.Task] = []
         for task in list(self._tasks):
             if task is current_task:
                 continue
             if not task.done():
                 task.cancel()
+                pending_tasks.append(task)
+        if pending_tasks:
+            await asyncio.gather(*pending_tasks, return_exceptions=True)
 
         if self._peer_connection is not None:
             await self._peer_connection.close()
@@ -1230,6 +1261,7 @@ class AiortcVoiceEngine(QObject):
         self._offer_sent = False
         self._pending_signals.clear()
         self._pending_remote_ice.clear()
+        self._remote_track_keys.clear()
 
         self.state_changed.emit("Call ended")
 

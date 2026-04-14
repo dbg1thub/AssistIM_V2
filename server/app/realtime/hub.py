@@ -54,6 +54,10 @@ class RealtimeHub(ABC):
         """Fan out one payload to all active connections of the target users."""
 
     @abstractmethod
+    async def send_json_to_one_user_connection(self, user_id: str, payload: dict) -> str | None:
+        """Send one payload to a single active connection for the target user."""
+
+    @abstractmethod
     async def broadcast_json(self, payload: dict, exclude_connection_id: str | None = None) -> None:
         """Broadcast one payload to all active connections."""
 
@@ -160,6 +164,14 @@ class InMemoryRealtimeHub(RealtimeHub):
             if delivered:
                 delivered_user_ids.add(user_id)
         return delivered_user_ids
+
+    async def send_json_to_one_user_connection(self, user_id: str, payload: dict) -> str | None:
+        """Send one payload to a deterministic single connection for a user."""
+        normalized_user_id = str(user_id or "").strip()
+        for connection_id in sorted(self._connections_by_user.get(normalized_user_id, set())):
+            if await self.send_json(connection_id, payload):
+                return connection_id
+        return None
 
     async def broadcast_json(self, payload: dict, exclude_connection_id: str | None = None) -> None:
         for connection_id in list(self._connections):

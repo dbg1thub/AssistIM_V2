@@ -145,3 +145,114 @@ def test_call_service_rejects_private_session_with_more_than_two_members() -> No
         )
 
     assert exc_info.value.status_code == 409
+
+
+class _FakePrivateSessionRepo:
+    def __init__(self, member_ids: list[str] | None = None) -> None:
+        self.member_ids = list(member_ids or ["alice", "bob"])
+
+    def get_by_id(self, session_id: str):
+        return SimpleNamespace(id=session_id, type="private", is_ai_session=False)
+
+    def has_member(self, session_id: str, user_id: str) -> bool:
+        return user_id in self.member_ids
+
+    def list_member_ids(self, session_id: str) -> list[str]:
+        return list(self.member_ids)
+
+
+def test_call_service_requires_accept_before_signaling_and_validates_payload() -> None:
+    from app.core.errors import AppError
+    from app.realtime.call_registry import InMemoryCallRegistry
+    from app.services.call_service import CallService
+
+    registry = InMemoryCallRegistry()
+    service = CallService(db=None, registry=registry)
+    service.sessions = _FakePrivateSessionRepo()
+
+    event_type, target_user_ids, invite = service.invite(
+        session_id="session-1",
+        call_id="call-1",
+        initiator_id="alice",
+        media_type="voice",
+    )
+
+    assert event_type == "call_invite"
+    assert target_user_ids == ["alice", "bob"]
+    assert invite["status"] == "invited"
+
+    with pytest.raises(AppError) as pre_accept_exc:
+        service.relay_offer(call_id="call-1", user_id="alice", sdp={"type": "offer", "sdp": "v=0"})
+    assert pre_accept_exc.value.status_code == 409
+
+    service.ringing(call_id="call-1", user_id="bob")
+    service.accept(call_id="call-1", user_id="bob")
+
+    with pytest.raises(AppError) as bad_sdp_exc:
+        service.relay_offer(call_id="call-1", user_id="alice", sdp={"type": "answer", "sdp": "v=0"})
+    assert bad_sdp_exc.value.status_code == 422
+
+    event_type, target_user_ids, offer = service.relay_offer(
+        call_id="call-1",
+        user_id="alice",
+        sdp={"type": "offer", "sdp": "v=0"},
+    )
+
+    assert event_type == "call_offer"
+    assert target_user_ids == ["alice", "bob"]
+    assert offer["actor_id"] == "alice"
+    assert "from_user_id" not in offer
+    assert "to_user_id" not in offer
+
+
+def test_call_service_rejects_duplicate_accept_and_post_accept_reject() -> None:
+    from app.core.errors import AppError
+    from app.realtime.call_registry import InMemoryCallRegistry
+    from app.services.call_service import CallService
+
+    registry = InMemoryCallRegistry()
+    service = CallService(db=None, registry=registry)
+    service.sessions = _FakePrivateSessionRepo()
+
+    service.invite(
+        session_id="session-1",
+        call_id="call-1",
+        initiator_id="alice",
+        media_type="voice",
+    )
+    service.accept(call_id="call-1", user_id="bob")
+
+    with pytest.raises(AppError) as second_accept_exc:
+        service.accept(call_id="call-1", user_id="bob")
+    assert second_accept_exc.value.status_code == 409
+
+    with pytest.raises(AppError) as reject_exc:
+        service.reject(call_id="call-1", user_id="bob")
+    assert reject_exc.value.status_code == 409
+
+
+def test_call_service_rejects_reused_call_id_before_registry_overwrite() -> None:
+    from app.core.errors import AppError
+    from app.realtime.call_registry import InMemoryCallRegistry
+    from app.services.call_service import CallService
+
+    registry = InMemoryCallRegistry()
+    registry.create(
+        call_id="call-1",
+        session_id="other-session",
+        initiator_id="carol",
+        recipient_id="dave",
+        media_type="voice",
+    )
+    service = CallService(db=None, registry=registry)
+    service.sessions = _FakePrivateSessionRepo()
+
+    with pytest.raises(AppError) as exc_info:
+        service.invite(
+            session_id="session-1",
+            call_id="call-1",
+            initiator_id="alice",
+            media_type="voice",
+        )
+
+    assert exc_info.value.status_code == 409

@@ -903,6 +903,21 @@
 
 ### G-07：通话 signaling、状态机、媒体时序仍不成熟
 
+状态：closed（2026-04-14）
+
+修复记录：
+
+- 服务端通话控制面已收口到显式状态机：`invite -> ringing -> accepted -> ended/rejected/timeout/failed`，`ringing/accept/reject/hangup/offer/answer/ice` 都必须命中当前 active call，并按阶段拒绝重复 accept、accepted 后 reject、pre-accept signaling、空 `call_id` 和重复 `call_id`。
+- `call_offer/call_answer/call_ice` 的正式 payload 已做最小 schema 校验：SDP 必须带正确 `type` 与非空 `sdp`，ICE 必须带非空 candidate，坏包在服务端返回 `INVALID_REQUEST`，客户端 aiortc 层也不再静默吞掉非法 ICE。
+- call payload 的 actor contract 已收敛：signaling payload 不再同时暴露 `from_user_id/to_user_id`，统一使用 canonical `actor_id`；服务端下行 call event envelope 使用独立 `msg_id`，不再把整场通话所有事件都复用成 `msg_id=call_id`。
+- 服务端 active call registry 增加 call-id 冲突保护、状态阶段保护、终态 snapshot、断连兜底释放；最后一条用户 WS 连接断开时会结束该用户仍占用的 active call，并向对端广播 `call_hangup(reason=disconnect)`。
+- 客户端 `CallManager` 已补严格 current-call / generation guard：空 `call_id/session_id` invite 不再 materialize ghost call，state/terminal/busy/signal 必须匹配当前 call，晚到或其它 `call_id` 的事件不能覆盖或清掉 `_active_call`。
+- accepted 多设备消费已拆分为“本设备媒体端点”和“被动镜像”：只有本机发起外呼或本机执行 accept 的设备会 `start_media()`、播放 connected UX；其它同账号设备收到 accepted 只关闭本地 toast/window，不再拉起媒体。
+- 来电侧不再在 invite 阶段强制刷新 ICE 或预热隐藏通话窗口；媒体启动推迟到 accepted 后，避免同一来电在被叫多设备上放大成 N 路 ICE refresh / hidden prewarm。
+- caller ringing/busy/terminal 已补幂等和 current-device 消费边界：重复 `call_ringing` 不再反复重放 UX，busy/terminal 只有本地当前 call 会消费；通话结果系统消息按 `call_id` 单一终态去重，并保留 TTL/容量淘汰。
+- `CallWindow` 已补窗口与媒体引擎生命周期 guard：End/close 只发一次 hangup，engine 只 close 一次，`start_media()` 失败不会提前烧掉 `_media_started`，窗口 re-show 不再强制反复居中，通话时长不再用首帧本地时间覆盖权威 `answered_at`。
+- aiortc 引擎已补预接听缓存上限、远端 ICE 缓冲上限、重复 remote track 去重、无 running loop close 兜底和 quiescent task cancel/gather，关闭后不再让旧任务继续回调窗口状态。
+
 合并范围：
 
 - `F-014`

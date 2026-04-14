@@ -11,6 +11,7 @@ from app.core.database import SessionLocal
 from app.core.errors import AppError, ErrorCode
 from app.dependencies.settings_dependency import get_websocket_settings
 from app.repositories.user_repo import UserRepository
+from app.realtime.call_registry import get_call_registry
 from app.services.call_service import CallService
 from app.services.message_service import MessageService
 from app.websocket.auth import require_websocket_user_id
@@ -342,10 +343,25 @@ async def _handle_chat_socket(websocket: WebSocket) -> None:
                     await _send_app_error(connection_id, msg_id, exc)
                     continue
 
-                await connection_manager.send_json_to_users(
-                    target_user_ids,
-                    ws_message(outbound_type, payload, msg_id=payload.get("call_id", "")),
-                )
+                payload["actor_connection_id"] = connection_id
+                if outbound_type == "call_ringing":
+                    payload["ringing_connection_id"] = connection_id
+                elif outbound_type == "call_accept":
+                    payload["accepted_connection_id"] = connection_id
+                    payload["active_connection_id"] = connection_id
+                elif outbound_type in {"call_offer", "call_answer", "call_ice"}:
+                    payload["active_connection_id"] = connection_id
+
+                outbound_message = ws_message(outbound_type, payload, msg_id=str(uuid.uuid4()))
+                if outbound_type == "call_invite":
+                    for target_user_id in target_user_ids:
+                        if target_user_id == current_user_id:
+                            await connection_manager.send_json(connection_id, outbound_message)
+                        else:
+                            await connection_manager.send_json_to_one_user_connection(target_user_id, outbound_message)
+                    continue
+
+                await connection_manager.send_json_to_users(target_user_ids, outbound_message)
                 continue
 
             await connection_manager.send_json(
@@ -362,7 +378,19 @@ async def _handle_chat_socket(websocket: WebSocket) -> None:
     except Exception:
         logger.exception("Chat websocket loop crashed for connection %s", connection_id)
     finally:
-        await connection_manager.disconnect(websocket)
+        disconnected_user_id, became_offline = await connection_manager.disconnect(websocket)
+        if disconnected_user_id and became_offline:
+            registry = get_call_registry()
+            for ended_call in registry.end_for_offline_user(disconnected_user_id, reason="disconnect"):
+                payload = CallService._call_payload(
+                    ended_call,
+                    actor_id=disconnected_user_id,
+                    reason="disconnect",
+                )
+                await connection_manager.send_json_to_users(
+                    ended_call.participant_ids(),
+                    ws_message("call_hangup", payload, msg_id=str(uuid.uuid4())),
+                )
 
 
 @websocket_router.websocket("/ws")

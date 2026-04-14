@@ -149,8 +149,8 @@ def test_chat_interface_call_dialog_and_menu_callbacks_are_instance_guarded() ->
     assert 'def _accept_incoming_call_from_toast(self, call: ActiveCallState, source_toast: IncomingCallToast) -> None:' in chat_interface
     assert 'def _reject_incoming_call_from_toast(self, call_id: str, source_toast: IncomingCallToast) -> None:' in chat_interface
     assert 'self._schedule_ui_single_shot(self.CALL_INCOMING_RING_RETRY_MS, self._retry_incoming_ring_sound)' in chat_interface
-    assert 'def _prepare_current_call_window_media(self, window: CallWindow) -> None:' in chat_interface
-    assert 'if self._call_window is not window:' in chat_interface
+    assert '_prepare_current_call_window_media' not in chat_interface
+    assert '_prepare_incoming_call_window' not in chat_interface
     assert 'window.hangup_requested.connect(lambda call_id, ref=window: self._on_call_window_hangup_requested(call_id, ref))' in chat_interface
     assert 'def _on_call_window_hangup_requested(self, call_id: str, source_window: CallWindow) -> None:' in chat_interface
     assert 'def _on_call_window_signal_generated(self, event_type: str, payload: object, source_window: CallWindow) -> None:' in chat_interface

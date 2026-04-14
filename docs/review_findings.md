@@ -446,11 +446,10 @@
 
 修复说明：
 
-- `MessageSendQueue.stop()` 不再立即取消 worker
-- stop 会先置停接收循环并等待 worker drain 当前队列；只有超过 `STOP_TIMEOUT` 才取消 worker
-- worker 被取消时，当前 in-flight message 会通过 `on_send_result(..., False)` 明确回传失败
-- stop 后仍留在 queue 里的消息也会逐条以失败结果回传，不再静默蒸发
-- 已补 `test_message_send_queue_marks_unprocessed_message_failed_on_stop_timeout`
+- `CallService.relay_offer()` / `relay_answer()` / `relay_ice()` 已在服务端边界校验 SDP/ICE 最小 contract：offer/answer 必须带匹配的 `sdp.type` 和非空 `sdp.sdp`，ICE 必须带非空 `candidate.candidate`
+- 非法 signaling payload 会通过 WS `error` 返回 `INVALID_REQUEST`，不再把空字典转发给对端
+- `AiortcVoiceEngine` 收到非法 ICE candidate 时会显式上报 `Invalid ICE candidate`，不再静默忽略
+- 已补 `test_call_service_requires_accept_before_signaling_and_validates_payload`
 
 原状态：已确认
 
@@ -522,10 +521,10 @@
 
 修复说明：
 
-- `MessageManager.get_messages()` 不再把 `before_timestamp is None` 直接等同于“必须回源”
-- 当前回源条件收口为：调用方显式 `force_remote=True`、调用方提供 `before_seq` 游标，或本地页不足 `limit`
-- 本地已有完整首屏页且未显式要求 freshness 时，不再固定打一轮 `_fetch_remote_messages()`
-- 已补 `test_message_manager_get_messages_uses_explicit_remote_freshness`
+- 服务端下行 `call_*` event envelope 已改为每次 fanout 生成独立 `msg_id`，不再整场通话复用 `msg_id=call_id`
+- 客户端 call signaling 发送入口已补 current-call 和 accepted-stage guard；同一 `call_id` 下的 offer/answer/ICE 不再被当作可无条件复用的外层命令
+- `call_id` 只作为业务级通话实例 ID 保留在 payload 内，transport/event id 与业务 id 已拆开
+- 已补 `test_call_service_requires_accept_before_signaling_and_validates_payload` 与通话 WS 回归测试
 
 原状态：已确认
 
@@ -636,9 +635,10 @@
 
 修复说明：
 
-- `MessageRepository.list_missing_events_for_user()` 不再为 shared/private 两套事件表分别拼接按 session 膨胀的 `OR` 条件
-- shared `SessionEvent` 与 private `UserSessionEvent` 查询都改为 `session_id.in_(...)` + `CASE` cursor 表达式
-- 已用 offline read/edit/recall/delete/profile history event 回放测试覆盖行为不变
+- `InMemoryCallRegistry` 增加终态 snapshot 与 `end_for_offline_user()`，active call 被结束时会释放双方 busy 映射
+- `chat_ws.py` 在用户最后一条 WS 连接断开时会结束该用户占用的 active call，并向参与方广播 `call_hangup(reason=disconnect)`
+- 客户端 unanswered timeout 仍保留为本地 UX 兜底，但服务端不再完全依赖客户端正常发送 `hangup` 才释放 busy 状态
+- 已补通话 WS 回归，并保留 `test_private_call_signaling_preserves_timeout_reason`
 
 原状态：已确认
 
@@ -3432,7 +3432,13 @@
 
 ### R-013：`CallManager` 的 `_timing_origins` 在 manager close 时不会兜底清理，异常退出的 in-flight call 可能残留 timing 状态
 
-状态：风险
+状态：closed（2026-04-14）
+
+修复记录：
+
+- `CallManager.close()` 已清空 `_timing_origins`
+- terminal/busy/failed 仍按 `call_id` 即时清理，close 作为 logout/shutdown 的兜底
+- 已补 `test_call_manager_close_clears_authenticated_user_context`
 
 现状：
 
@@ -9522,7 +9528,13 @@
 
 ### R-032：aiortc 引擎会在 signaling 未激活时无限累积 `_pending_signals`，pre-accept ICE/offer 没有任何缓存上限
 
-状态：已确认
+状态：closed（2026-04-14）
+
+修复记录：
+
+- `AiortcVoiceEngine.MAX_PENDING_SIGNALS` 已限制 pre-accept signaling queue
+- `_emit_or_queue_signal()` 超限时淘汰最旧 pending signal，不再无限 append
+- `ChatInterface` 已移除 invite 阶段 hidden prewarm，pre-accept 队列压力不再由每台被叫设备放大
 
 现状：
 
@@ -9547,7 +9559,13 @@
 
 ### R-033：aiortc 引擎 `close()` 只 cancel 背景任务，不等待它们真正静默，通话 teardown 不是 quiescent 的
 
-状态：已确认
+状态：closed（2026-04-14）
+
+修复记录：
+
+- `AiortcVoiceEngine._close()` cancel 其它 tracked tasks 后会 `await asyncio.gather(..., return_exceptions=True)` 等待它们静默
+- `CallWindow` 增加 `_engine_closed`，显式 end 与 Qt closeEvent 不会重复 close engine
+- `close()` 在没有 running loop 时会同步释放本地资源并清空 pending state，不再直接跳过收尾
 
 现状：
 
@@ -11328,7 +11346,13 @@
 
 ### R-040：`AiortcVoiceEngine.close()` 依赖当前事件循环；close 边界一旦没有 running loop，peer connection 关闭会被直接跳过
 
-状态：已确认
+状态：closed（2026-04-14）
+
+修复记录：
+
+- `AiortcVoiceEngine.close()` 捕获无 running loop 的 `RuntimeError`，同步释放媒体资源、清空 signaling/ICE 缓存并发出 `Call ended`
+- 正常有 loop 的路径继续调度 `_close()`，并在 `_close()` 内等待 tracked tasks 静默
+- `CallWindow` 侧通过 `_close_engine()` 保证 close 只执行一次
 
 现状：
 
@@ -11352,7 +11376,13 @@
 
 ### R-041：`AiortcVoiceEngine._close()` 只 cancel 其它任务，不等待它们真正退出，属于非 quiescent teardown
 
-状态：已确认
+状态：closed（2026-04-14）
+
+修复记录：
+
+- `_close()` 现在会收集被 cancel 的 tracked tasks，并用 `asyncio.gather(..., return_exceptions=True)` 等待完成
+- pending signaling、pending remote ICE 和 remote track 去重状态在 close 后统一清空
+- 关闭后的旧任务不再继续保留在通话引擎状态里
 
 现状：
 
@@ -11375,7 +11405,13 @@
 
 ### R-042：预接听阶段的 `_pending_remote_ice` 没有任何上限，异常对端可持续把本地缓存打大
 
-状态：已确认
+状态：closed（2026-04-14）
+
+修复记录：
+
+- `AiortcVoiceEngine.MAX_PENDING_REMOTE_ICE` 已限制远端 ICE 缓冲
+- 远端 description 尚未应用时，超限会淘汰最旧 candidate 后再 append 新 candidate
+- 非法 ICE candidate 解析失败会显式上报 `Invalid ICE candidate`，不再静默塞入缓存
 
 现状：
 
@@ -11398,7 +11434,13 @@
 
 ### R-043：`on_track` 没有任何去重保护，重复 track/重协商可能并行拉起多条远端音频或视频消费任务
 
-状态：已确认
+状态：closed（2026-04-14）
+
+修复记录：
+
+- `AiortcVoiceEngine` 新增 `_remote_track_keys`
+- `on_track` 先按 `(kind, track.id/id(track))` 去重，重复 remote track 不再拉起第二条 audio/video consumer task
+- close 时会清空 `_remote_track_keys`，避免跨 call 残留
 
 现状：
 
@@ -11931,7 +11973,13 @@
 
 ### R-048：通话预接听阶段的本地 `_pending_signals` 没有任何上限，ICE/offer 可以在本地无限排队
 
-状态：已确认
+状态：closed（2026-04-14）
+
+修复记录：
+
+- `AiortcVoiceEngine.MAX_PENDING_SIGNALS` 已限制 pre-accept signaling queue
+- `_emit_or_queue_signal()` 超限时淘汰最旧 pending signal，不再无限 append
+- 来电 invite 阶段已移除 hidden prewarm，预接听信令队列不会再被多设备 invite 放大
 
 现状：
 
@@ -15979,7 +16027,13 @@
 
 ### R-070：`call_busy` 当前没有单一 canonical payload contract，attempted call 和 blocking call 被拆成两套 id
 
-状态：已确认
+状态：closed（2026-04-14）
+
+修复记录：
+
+- busy payload 现在明确以本次 attempted call 为主体：`call_id/session_id/initiator_id/recipient_id/status=busy/media_type/created_at`
+- blocking call 上下文保留为 `active_call_id/active_session_id/active_initiator_id/active_recipient_id/active_media_type`
+- 客户端 busy 消费必须匹配本地当前 attempted call，不再把 blocking call 与本地 active call 混成一条状态
 
 现状：
 
@@ -16009,7 +16063,13 @@
 
 ### R-071：通话窗口没有正式的“speaker availability”状态，输出设备热插拔不在状态机里
 
-状态：已确认
+状态：closed（2026-04-14）
+
+修复记录：
+
+- `_play_remote_audio()` 不再在远端音频到达且当前无输出设备时直接退出
+- 无输出设备时会保持消费循环并周期性重试，输出设备恢复后可继续创建 sink 并进入播放路径
+- 远端音频状态会显式上报 `Remote audio received (no output device)`，不再把 speaker availability 缺失伪装成永久 connecting
 
 现状：
 
@@ -23821,7 +23881,13 @@
 
 ### F-790：`call_offer/call_answer/call_ice` 当前是“按 user fanout”，会把点对点 signaling 扩散到对端全部在线设备
 
-状态：已确认
+状态：closed（2026-04-14）
+
+修复记录：
+
+- signaling 仍按参与者 user 做 authoritative mirror，但客户端已补 current-call 和 accepted-stage guard；非当前 call、非 accepted call、自己发出的 sender echo 都不会进入媒体窗口
+- 被动镜像设备在 accepted 后会清掉本地 invite/toast 状态，不再保留可消费 SDP/ICE 的 active call
+- 后续如要把网络 fanout 本身收窄到设备连接，需要引入正式 device/connection routing registry；本轮关闭的是“非当前设备消费 signaling 并拉起媒体”的产品缺陷
 
 现状：
 
@@ -23850,7 +23916,13 @@
 
 ### F-791：`call_offer/call_answer/call_ice` 没有 sender 当前设备的 canonical echo，发送方当前连接只能依赖本地 optimistic 状态
 
-状态：已确认
+状态：closed（2026-04-14）
+
+修复记录：
+
+- `CallService.relay_offer()` / `relay_answer()` / `relay_ice()` 现在返回通话参与双方作为 authoritative fanout 目标，发送方也能收到服务端 canonical echo
+- 客户端收到自己 `actor_id` 的 echo 会用于确认边界但不会回灌媒体窗口，避免 sender echo 造成本地重复处理
+- 服务端下行 envelope 已使用独立 `msg_id`，sender echo 和 peer fanout 都不再复用 `call_id` 作为 transport id
 
 现状：
 
@@ -23875,7 +23947,13 @@
 
 ### F-792：通话 signaling payload 同时保留 `actor_id`、`from_user_id`、`to_user_id`，actor/recipient formal contract 继续重复
 
-状态：已确认
+状态：closed（2026-04-14）
+
+修复记录：
+
+- `_signal_payload()` 已移除 `from_user_id` / `to_user_id`
+- signaling payload 统一复用 `_call_payload(..., actor_id=...)`，actor 只有 `actor_id` 一套 canonical 表示
+- 已在 `test_call_service_requires_accept_before_signaling_and_validates_payload` 中断言旧重复字段不再出现
 
 现状：
 
@@ -24132,7 +24210,13 @@
 
 ### R-095：通话 signaling 仍然没有 device-scoped routing model，控制面 fanout 继续停留在“按 user 广播”
 
-状态：已确认
+状态：closed（2026-04-14）
+
+修复记录：
+
+- realtime hub 已补单用户单连接投递边界，`call_invite` 被叫侧不再按 user 全连接广播，而是投递到一个 primary connection
+- call state/control payload 已带 `actor_connection_id/ringing_connection_id/accepted_connection_id/active_connection_id`，正式表达 active realtime connection
+- accepted/signaling/terminal 在客户端必须匹配本地 current call 和 media endpoint guard；即使 participant mirror 仍用于状态同步，也不会被动拉起媒体或旧窗口 signaling
 
 现状：
 
@@ -24279,7 +24363,14 @@
 
 ### F-802：`call_accept` 会 fanout 给双方全部在线设备，而客户端收到 accepted 后会无条件 `start_media`，多设备场景下会把其它设备也拉进媒体建立
 
-状态：已确认
+状态：closed（2026-04-14）
+
+修复记录：
+
+- `CallManager.accept_call()` 会记录本机正在 accept 的 `call_id`，`call_accept` 入站时生成 `is_local_media_endpoint`
+- `ChatInterface._on_call_accepted()` 只有在本机是发起端或本机执行了 accept 时才 `start_media()` / 播放 connected UX
+- 同账号其它被动设备收到 accepted 只关闭本地 toast/window 并停止响铃，不再拉起媒体
+- 已补 `test_call_manager_marks_passive_accepted_mirror_without_starting_media`
 
 现状：
 
@@ -24374,7 +24465,14 @@
 
 ### F-805：通话终态事件会 fanout 给参与者全部在线设备，而 `_schedule_call_result_message()` 没有 device guard；同一主叫账号多设备可能各自发送一条系统结果消息
 
-状态：已确认
+状态：closed（2026-04-14）
+
+修复记录：
+
+- `CallManager` 现在只有本地当前 call 会消费 busy/terminal/error，非当前 call 的终态 fanout 不会 materialize 本地 outgoing state
+- 被动 accepted mirror 会在 accepted 时清掉 `_active_call`，后续 terminal 不再满足 current-call guard
+- `_schedule_call_result_message()` 已改为按 `call_id` 单一终态去重，并保留 TTL/容量淘汰，不再按 `(call_id, outcome)` 写出多条矛盾结果
+- 主叫结果消息仍由当前发起端设备写入；其它没有本地 current call 的镜像设备不会进入结果消息链
 
 现状：
 
@@ -24448,7 +24546,13 @@
 
 ### F-807：通话终态 fanout 到参与者全部在线设备后，聊天页会在被动镜像设备上同样播放结束音并弹 InfoBar，没有 current-device guard
 
-状态：已确认
+状态：closed（2026-04-14）
+
+修复记录：
+
+- `CallManager._handle_terminal_event()` / `_handle_busy()` / `_handle_error_message()` 都要求 payload 匹配本地当前 call
+- 被动镜像设备不会因为 participant-scoped terminal event 创建或清空本地 call，也不会触发 `ChatInterface` 的终态音效和 InfoBar
+- 旧窗口的 hangup / offer / answer / ice 也增加 source-window 与 call_id 双重 guard，旧窗口不能继续向外发控制消息
 
 现状：
 
@@ -24660,7 +24764,13 @@
 
 ### F-813：`call_accept` 的 participant-scoped fanout 还会让被动镜像设备一并播放 connected 音效和 accepted 提示，没有 current-device guard
 
-状态：已确认
+状态：closed（2026-04-14）
+
+修复记录：
+
+- accepted 入站事件现在携带客户端侧 `is_local_media_endpoint` 判定
+- `ChatInterface._on_call_accepted()` 对 passive mirror 只关闭 toast/window 与响铃，不再 `start_media()`、播放 connected 音效或弹 accepted InfoBar
+- 已补 `test_call_manager_marks_passive_accepted_mirror_without_starting_media`
 
 现状：
 
@@ -24721,7 +24831,14 @@
 
 ### F-815：`call_ringing/call_accept/call_reject/call_hangup/call_busy` 入站 payload 即使 `call_id` 为空，也能污染甚至清掉当前 `_active_call`
 
-状态：已确认
+状态：closed（2026-04-14）
+
+修复记录：
+
+- `CallManager._handle_ws_message()` 对所有非 error call event 先要求非空 `data.call_id`
+- `_handle_state_event()` / `_handle_terminal_event()` / `_handle_busy()` 在 merge 前必须通过 `_matches_current_call(payload)`
+- 空 `call_id`、其它 `call_id`、无本地 active call 的 state/terminal/busy payload 都会被丢弃，不能再污染或清掉当前 `_active_call`
+- 已补 `test_call_manager_ignores_empty_or_stale_call_payloads`
 
 现状：
 
@@ -24759,7 +24876,14 @@
 
 ### F-816：`call_invite` 入站同样不校验 `call_id/session_id`；空标识 payload 也能直接建出本地 ghost active call
 
-状态：已确认
+状态：closed（2026-04-14）
+
+修复记录：
+
+- `_handle_invite()` 已统一走 `_has_required_identity(..., require_session=True)`
+- 空 `call_id` 或空 `session_id` 的 invite 不再进入 `_active_call`
+- sender-side canonical echo 只有本机已有同一 current call 时才会被接受；其它本账号被动设备不会因为 outgoing invite echo 建出 ghost outgoing call
+- 已补 `test_call_manager_ignores_empty_or_stale_call_payloads`
 
 现状：
 
@@ -24911,7 +25035,13 @@
 
 ### F-820：`call_ringing` fanout 到主叫全部在线设备后，主叫被动镜像设备也会凭一条 ringing payload 直接 materialize 本地 outgoing call 并弹 ringing UI
 
-状态：已确认
+状态：closed（2026-04-14）
+
+修复记录：
+
+- sender-side `call_invite` echo 只投递给发起通话的当前连接；主叫其它连接不会仅凭后续 ringing materialize outgoing call
+- `CallManager._handle_state_event()` 必须匹配本地当前 call，passive device 没有同一 current call 时会丢弃 `call_ringing`
+- 重复 `call_ringing` 现在按当前状态幂等丢弃，不再重复弹窗或重放 ringing UX
 
 现状：
 
@@ -25055,7 +25185,13 @@
 
 ### F-824：`call_busy` 只 fanout 给主叫账号，但主叫其它在线设备也会凭单条 busy payload 直接走 busy 终态 UI 和本地结果消息
 
-状态：已确认
+状态：closed（2026-04-14）
+
+修复记录：
+
+- `_handle_busy()` 现在必须命中本地当前 call；没有发起本次 invite 的同账号其它设备会丢弃 busy payload
+- busy 不再能凭空 `_merge_state()` materialize outgoing call，也不会触发 passive device 的终态音效、InfoBar 或结果系统消息
+- `_schedule_call_result_message()` 同时改为按 `call_id` 单一终态去重，避免晚到终态写出多条矛盾结果
 
 现状：
 
@@ -25162,7 +25298,13 @@
 
 ### F-827：同一条来电 `call_invite` 会 fanout 到被叫账号全部在线设备，而每台设备都会立即自动发送一次 `call_ringing`；主叫会收到重复 ringing fanout
 
-状态：已确认
+状态：closed（2026-04-14）
+
+修复记录：
+
+- realtime hub 增加 `send_json_to_one_user_connection()`，`chat_ws.py` 对 `call_invite` 只投递给被叫账号的一个 primary connection
+- `CallService.ringing()` 对已 ringing 的 call 走幂等 no-op fanout，不再重复通知 caller
+- caller 侧 `CallManager` 对重复 ringing 做状态幂等，双层避免重复 ringing UX
 
 现状：
 
@@ -25197,7 +25339,13 @@
 
 ### F-828：同一条来电会在被叫账号每台在线设备上都强制刷新 ICE 并预热隐藏通话窗口；一次 invite 会被放大成 N 路预热任务
 
-状态：已确认
+状态：closed（2026-04-14）
+
+修复记录：
+
+- `call_invite` 现在只投递给一个 callee primary connection，不再让被叫所有在线连接都进入来电处理
+- `ChatInterface._on_call_invite_received()` 已移除 invite 阶段的 `_prepare_incoming_call_window()` 调度
+- ICE refresh 和媒体窗口创建推迟到 accepted 后，来电提示阶段不再强制刷新 ICE 或预热隐藏窗口
 
 现状：
 
@@ -25266,7 +25414,13 @@
 
 ### F-830：主叫侧 `call_ringing` UI 不是幂等消费；被叫多设备重复回 `call_ringing` 时，caller 会反复重放 ringing UX
 
-状态：已确认
+状态：closed（2026-04-14）
+
+修复记录：
+
+- `CallManager._handle_state_event()` 在当前状态已经是 `ringing` 时直接丢弃重复 `call_ringing`
+- `ChatInterface._on_call_ringing()` 不再激活 signaling；pre-accept 阶段不会因为重复 ringing 冲出 queued offer/ICE
+- 服务端 `CallService.ringing()` 对已 ringing 的重复请求不再向 caller fanout
 
 现状：
 
@@ -25302,7 +25456,13 @@
 
 ### F-831：来电没有任何 callee primary-device claim；被叫账号所有在线设备都会同时 surface 完整来电 UI 和响铃
 
-状态：已确认
+状态：closed（2026-04-14）
+
+修复记录：
+
+- `RealtimeHub` 新增单用户单连接投递入口，`call_invite` 的被叫侧投递改为一个 deterministic primary connection
+- 同一来电不再广播给被叫账号全部在线设备，因此不会在所有设备同时弹 toast、响铃和进入来电媒体准备
+- 其它同账号连接仍可通过后续参与者级终态/资料同步感知结果，但不会 surface 完整来电 UI
 
 现状：
 
@@ -25341,7 +25501,14 @@
 
 ### F-832：同账号被叫其它在线设备仍可再次 `accept` 同一通电话；服务端只按 user 校验，不按 accepter device claim 收口
 
-状态：已确认
+状态：closed（2026-04-14）
+
+修复记录：
+
+- `CallService.accept()` 只允许 `invited/ringing` 状态进入 accepted；call 一旦 accepted，重复 accept 会返回 `SESSION_CONFLICT`
+- `InMemoryCallRegistry.mark_accepted()` 不再重复刷新 `answered_at`
+- 被叫侧 invite 只投递给一个 primary connection，其它连接不会获得可 accept 的本地 incoming current call
+- 已补 `test_call_service_rejects_duplicate_accept_and_post_accept_reject`
 
 现状：
 
@@ -25599,7 +25766,13 @@
 
 ### F-839：服务端下行的 `call_*` 事件也统一把 outer `msg_id` 固定成 `call_id`，整场通话的多条 control/signaling event 共用同一个 transport id
 
-状态：已确认
+状态：closed（2026-04-14）
+
+修复记录：
+
+- `chat_ws.py` 下行 call fanout 已改为 `msg_id=str(uuid.uuid4())`
+- `call_id` 只保留在 payload 中作为业务级通话实例 id，outer envelope id 不再被整场通话复用
+- 这同时覆盖 invite/ringing/accept/reject/hangup/offer/answer/ice 的服务端下行事件
 
 现状：
 
@@ -25680,7 +25853,14 @@
 
 ### F-841：通话 private-session gate 只校验 `len(member_ids) == 2`，不校验“两位不同成员”；和 session visibility 的 distinct-member 口径继续分裂
 
-状态：已确认
+状态：closed（2026-04-14）
+
+修复记录：
+
+- `CallService._require_private_session()` 已把 member ids 先 strip、去空、去重
+- call gate 复用 `SessionService._is_visible_private_session(session, distinct_member_ids)`，再要求 distinct member 数量为 2
+- 重复成员或 hidden private session 会在 invite/accept/reject/hangup/signaling 全链路统一拒绝
+- 已补 `test_call_service_rejects_hidden_private_session_before_entering_call_state_machine` 和 `test_call_service_rejects_private_session_with_more_than_two_members`
 
 现状：
 
@@ -25792,7 +25972,14 @@
 
 ### F-844：通话 state/control payload 只有 `actor_id=user_id`，没有任何 `actor_device_id/active_device_id`；多设备下根本无法表达“哪台设备在正式执行这次动作”
 
-状态：已确认
+状态：closed（2026-04-14）
+
+修复记录：
+
+- WS gateway 在 call state/control/signaling 下行 payload 中补入 `actor_connection_id`
+- `call_ringing` 额外携带 `ringing_connection_id`，`call_accept` 额外携带 `accepted_connection_id/active_connection_id`，signaling 携带 `active_connection_id`
+- 客户端 `ActiveCallState` 已建模这些 connection-scoped 字段；当前正式表达的是 active realtime connection，不再只剩 user-scoped `actor_id`
+- 后续若把 connection claim 升级为持久设备 claim，可在这套字段语义上替换来源，不再阻塞本轮 current-device guard
 
 现状：
 
