@@ -1480,7 +1480,7 @@ def test_database_self_check_reports_sqlcipher_active(monkeypatch) -> None:
         shutil.rmtree(temp_root, ignore_errors=True)
 
 
-def test_database_persists_encrypted_message_ciphertext_and_excludes_it_from_search() -> None:
+def test_database_persists_encrypted_message_ciphertext_and_searches_versioned_local_plaintext() -> None:
     temp_root = (Path.cwd() / "client/tests/.pytest_tmp").resolve()
     temp_root.mkdir(parents=True, exist_ok=True)
     db_path = temp_root / "database-encrypted-message.db"
@@ -1529,10 +1529,12 @@ def test_database_persists_encrypted_message_ciphertext_and_excludes_it_from_sea
 
                 loaded = await database.get_message("m-e2ee-1")
                 search_results = await database.search_messages("classified", session_id="session-direct-1", limit=10)
+                search_count = await database.count_search_message_sessions("classified", session_id="session-direct-1")
 
                 assert loaded is not None
                 assert loaded.content == plaintext
-                assert search_results == []
+                assert [item.message_id for item in search_results] == ["m-e2ee-1"]
+                assert search_count == 1
             finally:
                 await database.close()
 
@@ -1555,7 +1557,7 @@ def test_database_persists_encrypted_message_ciphertext_and_excludes_it_from_sea
         shutil.rmtree(temp_root, ignore_errors=True)
 
 
-def test_database_marks_encrypted_attachments_and_excludes_them_from_search() -> None:
+def test_database_marks_encrypted_attachments_and_searches_versioned_local_metadata() -> None:
     temp_root = (Path.cwd() / "client/tests/.pytest_tmp").resolve()
     temp_root.mkdir(parents=True, exist_ok=True)
     db_path = temp_root / "database-encrypted-attachment.db"
@@ -1602,8 +1604,12 @@ def test_database_marks_encrypted_attachments_and_excludes_them_from_search() ->
                 )
                 await database.save_message(message)
 
-                search_results = await database.search_messages("cdn.example", session_id="session-group-1", limit=10)
-                assert search_results == []
+                url_results = await database.search_messages("cdn.example", session_id="session-group-1", limit=10)
+                metadata_results = await database.search_messages("secret.pdf", session_id="session-group-1", limit=10)
+                metadata_count = await database.count_search_message_sessions("secret.pdf", session_id="session-group-1")
+                assert url_results == []
+                assert [item.message_id for item in metadata_results] == ["m-e2ee-file-1"]
+                assert metadata_count == 1
             finally:
                 await database.close()
 

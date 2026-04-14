@@ -367,6 +367,16 @@ class FakeDatabase:
     async def get_messages(self, session_id: str, limit: int = 50, before_timestamp=None) -> list[ChatMessage]:
         return [message for message in self.messages.values() if message.session_id == session_id][:limit]
 
+    async def get_security_pending_messages(self, session_id: str) -> list[ChatMessage]:
+        messages = [
+            message
+            for message in self.messages.values()
+            if message.session_id == session_id
+            and message.is_self
+            and message.status == MessageStatus.AWAITING_SECURITY_CONFIRMATION
+        ]
+        return sorted(messages, key=lambda item: item.timestamp)
+
     async def get_session(self, session_id: str) -> Session | None:
         return self.sessions.get(session_id)
 
@@ -1673,13 +1683,13 @@ def test_message_manager_blocks_direct_sends_when_identity_review_is_required(mo
         assert dict(message.extra.get('security_pending') or {}).get('action_id') == 'trust_peer_identity'
         assert fake_e2ee_service.encrypt_calls == []
         assert fake_conn_manager.sent_payloads == []
-        sent_payloads = [
+        pending_payloads = [
             payload
             for event, payload in fake_event_bus.events
-            if event == message_manager_module.MessageEvent.SENT
+            if event == message_manager_module.MessageEvent.SECURITY_PENDING
         ]
-        assert sent_payloads
-        assert sent_payloads[0]['message'].status == MessageStatus.AWAITING_SECURITY_CONFIRMATION
+        assert pending_payloads
+        assert pending_payloads[0]['message'].status == MessageStatus.AWAITING_SECURITY_CONFIRMATION
 
     asyncio.run(scenario())
 
@@ -1742,6 +1752,77 @@ def test_message_manager_release_security_pending_messages_sends_after_confirmat
             assert len(fake_conn_manager.sent_payloads) == 1
             assert fake_conn_manager.sent_payloads[0]['msg_id'] == message.message_id
             assert fake_conn_manager.sent_payloads[0]['content'] == 'cipher:hold then send'
+        finally:
+            await manager.close()
+
+    asyncio.run(scenario())
+
+
+def test_message_manager_security_pending_release_uses_database_fifo_queue(monkeypatch) -> None:
+    fake_event_bus = FakeEventBus()
+    fake_conn_manager = FakeConnectionManager([True, True])
+    fake_db = FakeDatabase()
+    fake_e2ee_service = FakeE2EEService()
+    fake_db.sessions['session-1'] = Session(
+        session_id='session-1',
+        name='Bob',
+        session_type='direct',
+        participant_ids=['alice', 'bob'],
+        extra={
+            'encryption_mode': 'e2ee_private',
+            'session_crypto_state': {
+                'identity_status': 'verified',
+                'identity_review_blocking': False,
+            },
+        },
+    )
+    older = ChatMessage(
+        message_id='m-pending-older',
+        session_id='session-1',
+        sender_id='alice',
+        content='older',
+        message_type=MessageType.TEXT,
+        status=MessageStatus.AWAITING_SECURITY_CONFIRMATION,
+        timestamp=1.0,
+        is_self=True,
+        extra={'security_pending': {'action_id': 'trust_peer_identity'}},
+    )
+    newer = ChatMessage(
+        message_id='m-pending-newer',
+        session_id='session-1',
+        sender_id='alice',
+        content='newer',
+        message_type=MessageType.TEXT,
+        status=MessageStatus.AWAITING_SECURITY_CONFIRMATION,
+        timestamp=2.0,
+        is_self=True,
+        extra={'security_pending': {'action_id': 'trust_peer_identity'}},
+    )
+    fake_db.messages = {
+        newer.message_id: newer,
+        older.message_id: older,
+    }
+
+    monkeypatch.setattr(message_manager_module, 'get_event_bus', lambda: fake_event_bus)
+    monkeypatch.setattr(message_manager_module, 'get_connection_manager', lambda: fake_conn_manager)
+    monkeypatch.setattr(message_manager_module, 'get_database', lambda: fake_db)
+
+    async def scenario() -> None:
+        manager = message_manager_module.MessageManager()
+        manager.set_user_id('alice')
+        manager._e2ee_service = fake_e2ee_service
+        await manager.initialize()
+        try:
+            result = await manager.release_security_pending_messages('session-1')
+            await asyncio.sleep(0.05)
+
+            assert result['released'] == 2
+            assert result['message_ids'] == ['m-pending-older', 'm-pending-newer']
+            assert fake_e2ee_service.encrypt_calls == [('bob', 'older'), ('bob', 'newer')]
+            assert [payload['msg_id'] for payload in fake_conn_manager.sent_payloads] == [
+                'm-pending-older',
+                'm-pending-newer',
+            ]
         finally:
             await manager.close()
 

@@ -2,30 +2,74 @@
 
 from __future__ import annotations
 
+from base64 import b64encode
+
 from fastapi.testclient import TestClient
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import ed25519, x25519
+
+
+_SIGNING_PRIVATE_BY_DEVICE_ID: dict[str, ed25519.Ed25519PrivateKey] = {}
+
+
+def _b64(raw: bytes) -> str:
+    return b64encode(raw).decode("ascii")
+
+
+def _x25519_public() -> str:
+    private_key = x25519.X25519PrivateKey.generate()
+    return _b64(
+        private_key.public_key().public_bytes(
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PublicFormat.Raw,
+        )
+    )
 
 
 def _device_payload(device_id: str, *, offset: int = 0) -> dict:
+    signing_private = ed25519.Ed25519PrivateKey.generate()
+    _SIGNING_PRIVATE_BY_DEVICE_ID[device_id] = signing_private
+    signing_public = signing_private.public_key().public_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PublicFormat.Raw,
+    )
+    signed_prekey_public = x25519.X25519PrivateKey.generate().public_key().public_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PublicFormat.Raw,
+    )
     return {
         "device_id": device_id,
         "device_name": f"Desktop {device_id}",
-        "identity_key_public": f"identity-key-{device_id}-{'a' * 24}",
-        "signing_key_public": f"signing-key-{device_id}-{'b' * 24}",
+        "identity_key_public": _x25519_public(),
+        "signing_key_public": _b64(signing_public),
         "signed_prekey": {
             "key_id": 1 + offset,
-            "public_key": f"signed-prekey-{device_id}-{'c' * 24}",
-            "signature": f"signature-{device_id}-{'d' * 24}",
+            "public_key": _b64(signed_prekey_public),
+            "signature": _b64(signing_private.sign(signed_prekey_public)),
         },
         "prekeys": [
             {
                 "prekey_id": 1 + offset,
-                "public_key": f"prekey-one-{device_id}-{'e' * 24}",
+                "public_key": _x25519_public(),
             },
             {
                 "prekey_id": 2 + offset,
-                "public_key": f"prekey-two-{device_id}-{'f' * 24}",
+                "public_key": _x25519_public(),
             },
         ],
+    }
+
+
+def _signed_prekey_for_device(device_id: str, key_id: int) -> dict:
+    signing_private = _SIGNING_PRIVATE_BY_DEVICE_ID[device_id]
+    signed_prekey_public = x25519.X25519PrivateKey.generate().public_key().public_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PublicFormat.Raw,
+    )
+    return {
+        "key_id": key_id,
+        "public_key": _b64(signed_prekey_public),
+        "signature": _b64(signing_private.sign(signed_prekey_public)),
     }
 
 
@@ -61,13 +105,7 @@ def test_device_key_refresh_requires_signed_prekey_or_prekeys(
 
     signed_prekey_only = client.post(
         "/api/v1/devices/alice-refresh-schema-device/keys/refresh",
-        json={
-            "signed_prekey": {
-                "key_id": 50,
-                "public_key": "signed-prekey-only-" + ("s" * 24),
-                "signature": "signature-only-" + ("t" * 24),
-            }
-        },
+        json={"signed_prekey": _signed_prekey_for_device("alice-refresh-schema-device", 50)},
         headers=auth_header(alice["access_token"]),
     )
     assert signed_prekey_only.status_code == 200
@@ -79,7 +117,7 @@ def test_device_key_refresh_requires_signed_prekey_or_prekeys(
             "prekeys": [
                 {
                     "prekey_id": 200,
-                    "public_key": "refresh-prekey-only-" + ("u" * 24),
+                    "public_key": _x25519_public(),
                 }
             ]
         },
@@ -144,19 +182,15 @@ def test_device_registration_and_prekey_claim_flow(
     refresh_response = client.post(
         "/api/v1/devices/alice-device-1/keys/refresh",
         json={
-            "signed_prekey": {
-                "key_id": 99,
-                "public_key": "signed-prekey-rotated-" + ("x" * 24),
-                "signature": "signature-rotated-" + ("y" * 24),
-            },
+            "signed_prekey": _signed_prekey_for_device("alice-device-1", 99),
             "prekeys": [
                 {
                     "prekey_id": 100,
-                    "public_key": "refresh-prekey-one-" + ("z" * 24),
+                    "public_key": _x25519_public(),
                 },
                 {
                     "prekey_id": 101,
-                    "public_key": "refresh-prekey-two-" + ("w" * 24),
+                    "public_key": _x25519_public(),
                 },
             ],
         },
@@ -188,6 +222,31 @@ def test_device_registration_and_prekey_claim_flow(
     assert second_claim[0]["one_time_prekey"]["prekey_id"] == 2
     assert second_claim[0]["available_prekey_count"] == 2
 
+    duplicated_claim = client.post(
+        "/api/v1/keys/prekeys/claim",
+        json={"device_ids": [" alice-device-1 ", "alice-device-1", ""]},
+        headers=auth_header(bob["access_token"]),
+    )
+    assert duplicated_claim.status_code == 200
+    assert len(duplicated_claim.json()["data"]) == 1
+    assert duplicated_claim.json()["data"][0]["one_time_prekey"]["prekey_id"] == 100
+
+    exhausted_one_time_prekeys = client.post(
+        "/api/v1/keys/prekeys/claim",
+        json={"device_ids": ["alice-device-1"]},
+        headers=auth_header(bob["access_token"]),
+    )
+    assert exhausted_one_time_prekeys.status_code == 200
+    assert exhausted_one_time_prekeys.json()["data"][0]["one_time_prekey"]["prekey_id"] == 101
+
+    no_prekeys_left = client.post(
+        "/api/v1/keys/prekeys/claim",
+        json={"device_ids": ["alice-device-1"]},
+        headers=auth_header(bob["access_token"]),
+    )
+    assert no_prekeys_left.status_code == 409
+    assert "no available one-time prekey" in no_prekeys_left.json()["message"]
+
     delete_response = client.delete(
         "/api/v1/devices/alice-device-1",
         headers=auth_header(alice["access_token"]),
@@ -200,3 +259,22 @@ def test_device_registration_and_prekey_claim_flow(
     )
     assert list_after_delete.status_code == 200
     assert list_after_delete.json()["data"] == []
+
+
+def test_device_registration_rejects_invalid_signed_prekey_signature(
+    client: TestClient,
+    user_factory,
+    auth_header,
+) -> None:
+    alice = user_factory("alice_e2ee_invalid_signature", "Alice E2EE Invalid Signature")
+    payload = _device_payload("alice-invalid-signature-device")
+    payload["signed_prekey"]["signature"] = _b64(b"x" * 64)
+
+    response = client.post(
+        "/api/v1/devices/register",
+        json=payload,
+        headers=auth_header(alice["access_token"]),
+    )
+
+    assert response.status_code == 422
+    assert "signed_prekey signature is invalid" in response.json()["message"]

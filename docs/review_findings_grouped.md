@@ -1146,6 +1146,19 @@
 
 ### G-08：E2EE 设备恢复模型、本地缓存模型和多设备模型没有收口
 
+状态：closed（2026-04-14）
+
+本轮修复说明：
+
+- 服务端 device/prekey contract 已改成严格模型：设备 key material 有长度和 base64 结构约束，signed prekey 注册/刷新会验证 Ed25519 签名，`PreKeyClaimRequest.device_ids` 在 schema 边界去空白/去重。
+- prekey bundle / claim 不再静默 partial-success：任意 active device 缺 signed prekey、claim 目标不存在/inactive、one-time prekey 耗尽都会返回明确错误；`exclude_device_id` 只会在查询当前账号设备时过滤当前用户自己的 active device。
+- device/prekey 查询放大已收口：`count_available_prekeys()` 改为数据库侧 `COUNT(*)`，设备列表、bundle 列表和 claim 返回改用批量 signed-prekey / prekey-count 查询。
+- history recovery 已限制为同账号设备迁移：导出要求 `target_user_id == source_user_id`，AuthController 禁止跨账号 target；导入校验当前账号、outer/inner source user、recipient user 与 sender identity，并把 `source_device_id` 绑定到 `sender_identity_key_public`，拒绝旧包回滚。
+- 本地 E2EE 明文/metadata 缓存已降级为版本受控缓存：数据库加载只接受当前 `local_plaintext_version`，本地搜索会在不索引远端密文/URL 的前提下匹配已解密的本地 plaintext/metadata。
+- `security_pending` 已从最近 200 条扫描改成 DB authoritative FIFO 队列，release/discard 加入 session 级 in-progress guard；待确认消息使用独立 `MessageEvent.SECURITY_PENDING`，释放发送时才进入 `SENT` 生命周期，0 条 release/discard 会给 no-op 反馈。
+- group sender-key fanout 安装已收紧 inner/outer envelope 绑定：`session_id / owner_device_id / sender_key_id / member_version` 必须一致，`owner_user_id/sender_key/sender_key_id` 缺失会失败，晚到旧 `member_version` 不再覆盖较新的 inbound key。
+- 已补回归测试覆盖 signed prekey 验签、one-time prekey 耗尽错误、prekey claim schema 归一化、E2EE 本地缓存搜索、security pending FIFO/事件语义、history recovery 同账号和身份绑定、group fanout 安装 contract。
+
 合并范围：
 
 - `F-170`

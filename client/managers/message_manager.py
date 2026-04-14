@@ -54,6 +54,7 @@ class MessageEvent:
     MEDIA_READY = "message_media_ready"
     DECRYPTION_STATE_CHANGED = "message_decryption_state_changed"
     RECOVERED = "message_recovered"
+    SECURITY_PENDING = "message_security_pending"
 
 
 @dataclass
@@ -254,6 +255,7 @@ class MessageManager:
 
         self._pending_messages: dict[str, PendingMessage] = {}
         self._pending_lock = asyncio.Lock()
+        self._security_pending_sessions: set[str] = set()
         self._incoming_message_guard = asyncio.Lock()
         self._incoming_message_inflight: set[str] = set()
         self._recent_incoming_message_ids: dict[str, tuple[float, str]] = {}
@@ -1840,7 +1842,7 @@ class MessageManager:
                 )
                 await self._apply_current_user_sender_profile(message)
                 await self._db.save_message(message)
-                await self._event_bus.emit(MessageEvent.SENT, {"message": message})
+                await self._event_bus.emit(MessageEvent.SECURITY_PENDING, {"message": message})
                 logger.info("Queued local security-pending message: %s", message.message_id)
                 return message
 
@@ -1955,9 +1957,9 @@ class MessageManager:
 
         return message
 
-    async def _collect_security_pending_messages(self, session_id: str, *, limit: int = 200) -> list[ChatMessage]:
+    async def _collect_security_pending_messages(self, session_id: str) -> list[ChatMessage]:
         """Load local outbound messages that are waiting for security confirmation."""
-        messages = await self._db.get_messages(session_id, limit=limit)
+        messages = await self._db.get_security_pending_messages(session_id)
         return [
             message
             for message in messages
@@ -1969,24 +1971,30 @@ class MessageManager:
         normalized_session_id = str(session_id or "").strip()
         if not normalized_session_id:
             raise RuntimeError("session id is required")
+        if normalized_session_id in self._security_pending_sessions:
+            raise RuntimeError("security pending release is already in progress")
 
-        pending_messages = await self._collect_security_pending_messages(normalized_session_id)
-        released_ids: list[str] = []
-        failed_ids: list[str] = []
-        for message in pending_messages:
-            pending_extra = dict(message.extra or {})
-            pending_extra.pop("security_pending", None)
-            released = await self.send_message(
-                session_id=normalized_session_id,
-                content=message.content,
-                message_type=message.message_type,
-                existing_message=message,
-                extra=pending_extra,
-            )
-            if released.status == MessageStatus.FAILED:
-                failed_ids.append(released.message_id)
-            else:
-                released_ids.append(released.message_id)
+        self._security_pending_sessions.add(normalized_session_id)
+        try:
+            pending_messages = await self._collect_security_pending_messages(normalized_session_id)
+            released_ids: list[str] = []
+            failed_ids: list[str] = []
+            for message in pending_messages:
+                pending_extra = dict(message.extra or {})
+                pending_extra.pop("security_pending", None)
+                released = await self.send_message(
+                    session_id=normalized_session_id,
+                    content=message.content,
+                    message_type=message.message_type,
+                    existing_message=message,
+                    extra=pending_extra,
+                )
+                if released.status == MessageStatus.FAILED:
+                    failed_ids.append(released.message_id)
+                else:
+                    released_ids.append(released.message_id)
+        finally:
+            self._security_pending_sessions.discard(normalized_session_id)
 
         return {
             "session_id": normalized_session_id,
@@ -2001,19 +2009,25 @@ class MessageManager:
         normalized_session_id = str(session_id or "").strip()
         if not normalized_session_id:
             raise RuntimeError("session id is required")
+        if normalized_session_id in self._security_pending_sessions:
+            raise RuntimeError("security pending discard is already in progress")
 
-        pending_messages = await self._collect_security_pending_messages(normalized_session_id)
-        removed_ids: list[str] = []
-        for message in pending_messages:
-            await self._db.delete_message(message.message_id)
-            removed_ids.append(message.message_id)
-            await self._event_bus.emit(
-                MessageEvent.DELETED,
-                {
-                    "message_id": message.message_id,
-                    "session_id": normalized_session_id,
-                },
-            )
+        self._security_pending_sessions.add(normalized_session_id)
+        try:
+            pending_messages = await self._collect_security_pending_messages(normalized_session_id)
+            removed_ids: list[str] = []
+            for message in pending_messages:
+                await self._db.delete_message(message.message_id)
+                removed_ids.append(message.message_id)
+                await self._event_bus.emit(
+                    MessageEvent.DELETED,
+                    {
+                        "message_id": message.message_id,
+                        "session_id": normalized_session_id,
+                    },
+                )
+        finally:
+            self._security_pending_sessions.discard(normalized_session_id)
 
         return {
             "session_id": normalized_session_id,

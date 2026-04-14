@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.orm import Session
 
 from app.models.device import UserDevice, UserPreKey, UserSignedPreKey
@@ -45,6 +45,17 @@ class DeviceRepository:
         if exclude_device_id:
             stmt = stmt.where(UserDevice.device_id != str(exclude_device_id or "").strip())
         return list(self.db.execute(stmt).scalars().all())
+
+    def list_devices_by_ids(self, device_ids: list[str]) -> dict[str, UserDevice]:
+        normalized_device_ids = [
+            str(device_id or "").strip()
+            for device_id in dict.fromkeys(device_ids)
+            if str(device_id or "").strip()
+        ]
+        if not normalized_device_ids:
+            return {}
+        stmt = select(UserDevice).where(UserDevice.device_id.in_(normalized_device_ids))
+        return {str(item.device_id or ""): item for item in self.db.execute(stmt).scalars().all()}
 
     def upsert_device(
         self,
@@ -132,6 +143,29 @@ class DeviceRepository:
         )
         return self.db.execute(stmt).scalar_one_or_none()
 
+    def get_active_signed_prekeys(self, device_ids: list[str]) -> dict[str, UserSignedPreKey]:
+        normalized_device_ids = [
+            str(device_id or "").strip()
+            for device_id in dict.fromkeys(device_ids)
+            if str(device_id or "").strip()
+        ]
+        if not normalized_device_ids:
+            return {}
+        stmt = (
+            select(UserSignedPreKey)
+            .where(
+                UserSignedPreKey.device_id.in_(normalized_device_ids),
+                UserSignedPreKey.is_active.is_(True),
+            )
+            .order_by(UserSignedPreKey.updated_at.desc(), UserSignedPreKey.created_at.desc())
+        )
+        result: dict[str, UserSignedPreKey] = {}
+        for item in self.db.execute(stmt).scalars().all():
+            device_id = str(item.device_id or "")
+            if device_id and device_id not in result:
+                result[device_id] = item
+        return result
+
     def existing_prekey_ids(self, device_id: str, prekey_ids: list[int]) -> set[int]:
         normalized_device_id = str(device_id or "").strip()
         normalized_prekey_ids = [int(prekey_id) for prekey_id in prekey_ids]
@@ -175,11 +209,29 @@ class DeviceRepository:
         return items
 
     def count_available_prekeys(self, device_id: str) -> int:
-        stmt = select(UserPreKey).where(
+        stmt = select(func.count()).select_from(UserPreKey).where(
             UserPreKey.device_id == str(device_id or "").strip(),
             UserPreKey.is_consumed.is_(False),
         )
-        return len(list(self.db.execute(stmt).scalars().all()))
+        return int(self.db.execute(stmt).scalar_one() or 0)
+
+    def count_available_prekeys_by_device_ids(self, device_ids: list[str]) -> dict[str, int]:
+        normalized_device_ids = [
+            str(device_id or "").strip()
+            for device_id in dict.fromkeys(device_ids)
+            if str(device_id or "").strip()
+        ]
+        if not normalized_device_ids:
+            return {}
+        stmt = (
+            select(UserPreKey.device_id, func.count())
+            .where(
+                UserPreKey.device_id.in_(normalized_device_ids),
+                UserPreKey.is_consumed.is_(False),
+            )
+            .group_by(UserPreKey.device_id)
+        )
+        return {str(device_id or ""): int(count or 0) for device_id, count in self.db.execute(stmt).all()}
 
     def claim_one_time_prekey(self, device_id: str) -> UserPreKey | None:
         stmt = (

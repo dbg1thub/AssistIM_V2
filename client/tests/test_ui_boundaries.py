@@ -178,7 +178,9 @@ def test_chat_interface_async_message_action_results_are_session_generation_guar
     assert 'async def _confirm_security_pending_messages(self, session_id: str, action_id: str, generation: int) -> None:' in chat_interface
     assert 'async def _discard_security_pending_messages(self, session_id: str, generation: int) -> None:' in chat_interface
     assert chat_interface.count('if not self._is_current_session_context(session_id, generation):') >= 8
-    assert 'removed_count <= 0 or not self._is_current_session_context(session_id, generation)' in chat_interface
+    assert 'if not self._is_current_session_context(session_id, generation):' in chat_interface
+    assert 'chat.security_pending.discard_empty' in chat_interface
+    assert 'chat.security_pending.release_empty' in chat_interface
 
 
 def test_contact_interface_request_and_group_actions_avoid_full_reload() -> None:
@@ -589,6 +591,7 @@ def test_chat_file_open_flow_routes_downloads_through_controller_boundary() -> N
     assert 'async def download_message_attachment(self, message_id: str) -> str:' in chat_controller
     assert message_delegate.count('if attachment_encryption.get("enabled"):\n            return ""') >= 2
     assert 'self._subscribe_sync(MessageEvent.MEDIA_READY, self._on_media_ready)' in chat_interface
+    assert 'self._subscribe_sync(MessageEvent.SECURITY_PENDING, self._on_message_sent)' in chat_interface
     assert 'def _on_media_ready(self, data: dict) -> None:' in chat_interface
 
 

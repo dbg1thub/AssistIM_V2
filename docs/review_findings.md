@@ -5925,7 +5925,13 @@
 
 ### F-177：history recovery 导出目标没有被限制为当前账号，当前实现允许把恢复包导出给任意用户设备
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- [auth_controller.py](/D:/AssistIM_V2/client/ui/controllers/auth_controller.py) 现在在导出 recovery package 前强制 `target_user_id == current_user_id`。
+- [e2ee_service.py](/D:/AssistIM_V2/client/services/e2ee_service.py) 也要求 `target_user_id == source_user_id` 且 `source_user_id` 非空，history recovery package 不再能导出给其它账号设备。
+- 已补 `test_auth_controller_export_history_recovery_package_rejects_cross_account_target` 和 `test_e2ee_service_history_recovery_rejects_cross_account_export`。
 
 现状：
 
@@ -5955,7 +5961,13 @@
 
 ### F-178：history recovery 导入不校验 source_user，任意加密到当前设备的恢复包都会被本地持久化
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- [auth_controller.py](/D:/AssistIM_V2/client/ui/controllers/auth_controller.py) 调用导入时会把当前账号作为 `expected_source_user_id` 传入 E2EE service。
+- [e2ee_service.py](/D:/AssistIM_V2/client/services/e2ee_service.py) 会校验 inner/outer `source_user_id`、`recipient_user_id` 和当前账号一致，跨账号 package 会被拒绝。
+- 已补 `test_e2ee_service_history_recovery_rejects_cross_account_import` 覆盖 recipient/source user 不一致场景。
 
 现状：
 
@@ -9178,7 +9190,13 @@
 
 ### F-276：加密消息即使已经本地解密并缓存 plaintext，也完全不会进入本地消息搜索
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- [database.py](/D:/AssistIM_V2/client/storage/database.py) 的本地搜索现在会额外扫描 `is_encrypted=1` 且带当前 `local_plaintext_version` 的本地 plaintext / attachment metadata cache。
+- 搜索仍不会索引远端密文、附件 URL 或过期版本缓存，只匹配当前设备已成功解密并受版本约束的本地缓存。
+- 已补 `test_database_persists_encrypted_message_ciphertext_and_searches_versioned_local_plaintext` 和 `test_database_marks_encrypted_attachments_and_searches_versioned_local_metadata`。
 
 现状：
 
@@ -12612,7 +12630,13 @@
 
 ### F-384：`security_pending` 本地暂存消息会直接发 `MessageEvent.SENT`，事件语义早于真实发送
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- [message_manager.py](/D:/AssistIM_V2/client/managers/message_manager.py) 新增 `MessageEvent.SECURITY_PENDING`；命中本地安全确认时只发该事件，不再复用 `MessageEvent.SENT`。
+- [chat_interface.py](/D:/AssistIM_V2/client/ui/windows/chat_interface.py) 已订阅 `SECURITY_PENDING` 并复用当前消息插入逻辑，UI 仍能显示待确认消息，但 transport 生命周期不再被提前标成 sent。
+- 已更新 `test_message_manager_queues_security_pending_message_when_identity_review_required` 和 UI boundary 测试。
 
 现状：
 
@@ -12638,7 +12662,13 @@
 
 ### F-385：同一条 `security_pending` 消息在释放发送时会再次发 `MessageEvent.SENT`，单条消息出现双重 sent 生命周期
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- 待确认阶段现在只发 `MessageEvent.SECURITY_PENDING`，释放发送阶段才发 `MessageEvent.SENT`。
+- 同一条 pending message 不再经历两次 `SENT` 生命周期；`release_security_pending_messages()` 只负责把 DB 队列里的消息按 FIFO 重新送入正式发送链。
+- 已补 `test_message_manager_security_pending_release_uses_database_fifo_queue` 覆盖释放顺序和事件语义。
 
 现状：
 
@@ -12949,7 +12979,12 @@
 
 ### F-397：`send_message_to()` 会把 `security_pending` 和本地加密失败消息都直接推进成会话最新预览
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- [chat_controller.py](/D:/AssistIM_V2/client/ui/controllers/chat_controller.py) 现在只会把非 `AWAITING_SECURITY_CONFIRMATION`、非 `FAILED` 的新发送消息推进到 session preview。
+- 本地安全待确认和加密准备失败不再污染会话最新预览；释放后进入正式 `SENDING` 才会按正常发送链更新。
 
 现状：
 
@@ -13849,7 +13884,13 @@
 
 ### F-430：`security_pending` 的释放/丢弃只会扫描会话最近 200 条本地消息
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- [database.py](/D:/AssistIM_V2/client/storage/database.py) 新增 `get_security_pending_messages(session_id)`，直接按 DB 中 `AWAITING_SECURITY_CONFIRMATION` 状态查询整个 session 的本地队列。
+- [message_manager.py](/D:/AssistIM_V2/client/managers/message_manager.py) 的 release/discard 已改为使用该 DB authoritative 队列，不再依赖 `get_messages(limit=200)`。
+- 队列按 `timestamp ASC, rowid ASC` 释放，已补 FIFO 回归测试。
 
 现状：
 
@@ -13998,7 +14039,12 @@
 
 ### F-436：`security_pending` 的 session 级确认可能显示成功，但更早待确认消息会继续残留在会话里
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- session 级 release/discard 现在处理 DB 中该 session 的全部 `AWAITING_SECURITY_CONFIRMATION` 消息，不再受当前页或最近 200 条窗口限制。
+- [message_manager.py](/D:/AssistIM_V2/client/managers/message_manager.py) 同时加了 session 级 in-progress guard，避免同一会话并发消费 pending 队列。
 
 现状：
 
@@ -14460,7 +14506,11 @@
 
 ### F-454：聊天页确认 `security_pending` 后，即使实际释放了 0 条消息，也会弹成功提示
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- [chat_interface.py](/D:/AssistIM_V2/client/ui/windows/chat_interface.py) 现在把 `released_count <= 0` 建成独立 no-op 分支，提示没有待确认队列，而不是继续弹发送成功。
 
 现状：
 
@@ -14485,7 +14535,11 @@
 
 ### F-455：聊天页丢弃 `security_pending` 时，如果底层实际删除了 0 条消息，会直接静默返回
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- [chat_interface.py](/D:/AssistIM_V2/client/ui/windows/chat_interface.py) 现在会在 `removed_count <= 0` 时给出 no-op InfoBar，用户能区分“没有待处理项”和“已丢弃成功”。
 
 现状：
 
@@ -19795,7 +19849,12 @@
 
 ### F-633：设备 / 预密钥正式 schema 对大块 key material 没有上限
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- [device.py](/D:/AssistIM_V2/server/app/schemas/device.py) 已为 `identity_key_public`、`signing_key_public`、`signed_prekey.public_key`、`signed_prekey.signature`、`one_time_prekey.public_key` 增加明确 `max_length`。
+- [device_service.py](/D:/AssistIM_V2/server/app/services/device_service.py) 进一步要求这些字段是固定长度 base64 key/signature，而不是任意长字符串。
 
 现状：
 
@@ -19873,7 +19932,13 @@
 
 ### F-636：history recovery 导入只按 `source_device_id` 建索引，不绑定发送者身份
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- history recovery payload 的 inner/outer 层都会携带并校验 `sender_identity_key_public`。
+- [e2ee_service.py](/D:/AssistIM_V2/client/services/e2ee_service.py) 将 `source_device_id` 与 `sender_identity_key_public` 一起持久化；同一 `source_device_id` 后续若出现不同 sender identity 会拒绝导入。
+- 导入旧于当前 `exported_at` 的 package 也会被拒绝，避免旧包回滚同一 source device 的恢复状态。
 
 现状：
 
@@ -21033,7 +21098,12 @@
 
 ### F-681：`register_device()` 每次都会 destructive replace 全部 one-time prekeys
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- `register_device()` 仍作为设备身份全量注册入口，但 device/prekey contract 已重新定义：首次/重注册必须提交完整 signed prekey 与 one-time prekey 库存，并通过签名校验。
+- 增量补库存不再通过 register 旁路完成，而是由 `refresh_my_device_keys()` 追加新 prekey；重复 `prekey_id` 会显式拒绝，避免误把刷新建模成 destructive replace。
 
 现状：
 
@@ -21057,7 +21127,13 @@
 
 ### F-682：服务端从未验证 signed prekey 签名是否真的匹配 `signing_key_public`
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- [device_service.py](/D:/AssistIM_V2/server/app/services/device_service.py) 的注册和 signed-prekey 刷新现在都会用 `signing_key_public` 验证 `signed_prekey.signature` 是否签在 `signed_prekey.public_key` 上。
+- key material 同时要求 base64 解码后符合 Ed25519/X25519 固定长度。
+- 已补 `test_device_registration_rejects_invalid_signed_prekey_signature`。
 
 现状：
 
@@ -21206,7 +21282,12 @@
 
 ### R-089：`count_available_prekeys()` 通过全表加载再 `len()` 计数
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- [device_repo.py](/D:/AssistIM_V2/server/app/repositories/device_repo.py) 的 `count_available_prekeys()` 已改为数据库侧 `COUNT(*)`。
+- 同文件新增 `count_available_prekeys_by_device_ids()`，供设备列表和 prekey bundle/claim 批量复用。
 
 现状：
 
@@ -21229,7 +21310,12 @@
 
 ### R-090：device list / prekey bundle / claim 链路都有 per-device N+1 计数与 signed-prekey 查询
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- [device_repo.py](/D:/AssistIM_V2/server/app/repositories/device_repo.py) 新增 `list_devices_by_ids()`、`get_active_signed_prekeys()`、`count_available_prekeys_by_device_ids()`。
+- [device_service.py](/D:/AssistIM_V2/server/app/services/device_service.py) 的 `list_my_devices()`、`list_prekey_bundles()`、`claim_prekeys()` 已改为批量读取 signed-prekey 和 prekey count，不再逐 device 回查。
 
 现状：
 
@@ -21806,7 +21892,12 @@
 - 已新增 `test_auth_identity_inputs_are_canonicalized_and_validated` 覆盖空白昵称拒绝
 ### F-692：`exclude_device_id` 是调用方可控的任意过滤器，调用方可以把目标用户设备静默从 bundle 列表里剔掉
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- [device_service.py](/D:/AssistIM_V2/server/app/services/device_service.py) 现在只会在 `target_user_id == current_user.id` 时应用 `exclude_device_id`，并且要求该 device 是当前用户自己的 active device。
+- 查询其它用户 bundle 时，调用方传入的 `exclude_device_id` 不再能过滤目标用户设备。
 
 现状：
 
@@ -21833,7 +21924,11 @@
 
 ### F-693：`list_prekey_bundles()` 会静默跳过缺 active signed prekey 的设备，返回 partial bundle 但不显式报错
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- [device_service.py](/D:/AssistIM_V2/server/app/services/device_service.py) 已批量读取 active signed prekey；任一 active device 缺 signed prekey 会返回明确 `409`，不再静默跳过。
 
 现状：
 
@@ -21856,7 +21951,12 @@
 
 ### F-694：`claim_prekeys()` 会静默跳过不存在、inactive 或缺 active signed prekey 的设备
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- [device_service.py](/D:/AssistIM_V2/server/app/services/device_service.py) 的 `claim_prekeys()` 现在会先批量加载并校验所有目标 device。
+- 目标不存在或 inactive 返回 `404`，缺 active signed prekey 返回 `409`，不再把部分失败折叠进成功列表。
 
 现状：
 
@@ -21882,7 +21982,12 @@
 
 ### F-695：`claim_prekeys()` 在 one-time prekey 已耗尽时仍返回 `200`，并把 `one_time_prekey=None` 混进成功结果
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- `claim_prekeys()` 现在要求每个目标 device 都实际 claim 到 one-time prekey；库存耗尽返回明确 `409`。
+- 已补 `test_device_registration_and_prekey_claim_flow` 覆盖耗尽后不再返回 `one_time_prekey=None`。
 
 现状：
 
@@ -21907,7 +22012,12 @@
 
 ### F-696：`PreKeyClaimRequest.device_ids` 允许空白和重复项，服务端再静默归一化/去重
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- [device.py](/D:/AssistIM_V2/server/app/schemas/device.py) 的 `PreKeyClaimRequest.device_ids` 已在 schema validator 中 strip、去空和去重。
+- service 层保留同一 canonical 列表语义，正式 contract 不再把脏输入偷偷变成 partial result。
 
 现状：
 
@@ -26256,7 +26366,12 @@
 
 ### F-850：`import_history_recovery_package()` 的返回把“本次导入结果”和“导入后全局 diagnostics”直接混成一份对象，scope 不是同一批状态
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- [e2ee_service.py](/D:/AssistIM_V2/client/services/e2ee_service.py) 的 `import_history_recovery_package()` 现在只返回本次 import delta：source device/user 与 imported counts。
+- 全局 diagnostics 继续由 `get_history_recovery_diagnostics()` 单独提供，不再 merge 到 import result。
 
 现状：
 
@@ -26305,7 +26420,12 @@
 
 ### F-851：`export_history_recovery_package()` 里的 `source_user_id` 仍是调用方可传/可空的自报字段，不绑定本地真实身份
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- [e2ee_service.py](/D:/AssistIM_V2/client/services/e2ee_service.py) 现在拒绝空 `source_user_id`，并要求 `source_user_id == target_user_id`，service 层不再生产跨账号/缺来源的 recovery package。
+- [auth_controller.py](/D:/AssistIM_V2/client/ui/controllers/auth_controller.py) 从当前认证态传入 source user，并禁止 UI/controller 层覆盖为其它账号。
 
 现状：
 
@@ -26344,7 +26464,12 @@
 
 ### F-852：`AuthController.export_history_recovery_package()` 的返回同样把“本次导出结果”和全局 `history_recovery_diagnostics` 混成一份对象
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- [auth_controller.py](/D:/AssistIM_V2/client/ui/controllers/auth_controller.py) 的 export wrapper 只返回 `target_user_id`、`target_device_id` 和本次 `package`。
+- 全局 history recovery diagnostics 保持为独立查询，不再混入 export action result。
 
 现状：
 
@@ -26386,7 +26511,12 @@
 
 ### F-853：history recovery import 结果里同一份全局 diagnostics 被重复返回成两种 shape
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- [auth_controller.py](/D:/AssistIM_V2/client/ui/controllers/auth_controller.py) 的 import wrapper 现在直接返回 E2EE service 的 import delta。
+- 由于 service 不再平铺全局 diagnostics，controller 也不再追加嵌套 `history_recovery_diagnostics`，同一份全局状态不会以两种 shape 重复返回。
 
 现状：
 

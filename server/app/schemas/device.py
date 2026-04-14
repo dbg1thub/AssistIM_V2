@@ -2,22 +2,22 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class SignedPreKeyIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     key_id: int = Field(ge=1)
-    public_key: str = Field(min_length=8)
-    signature: str = Field(min_length=8)
+    public_key: str = Field(min_length=32, max_length=256)
+    signature: str = Field(min_length=64, max_length=512)
 
 
 class OneTimePreKeyIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     prekey_id: int = Field(ge=1)
-    public_key: str = Field(min_length=8)
+    public_key: str = Field(min_length=32, max_length=256)
 
 
 class DeviceRegisterRequest(BaseModel):
@@ -25,8 +25,8 @@ class DeviceRegisterRequest(BaseModel):
 
     device_id: str = Field(min_length=3, max_length=64)
     device_name: str = Field(default="AssistIM Desktop", min_length=1, max_length=128)
-    identity_key_public: str = Field(min_length=8)
-    signing_key_public: str = Field(min_length=8)
+    identity_key_public: str = Field(min_length=32, max_length=256)
+    signing_key_public: str = Field(min_length=32, max_length=256)
     signed_prekey: SignedPreKeyIn
     prekeys: list[OneTimePreKeyIn] = Field(min_length=1, max_length=100)
 
@@ -84,3 +84,15 @@ class PreKeyClaimRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     device_ids: list[str] = Field(min_length=1, max_length=50)
+
+    @field_validator("device_ids", mode="before")
+    @classmethod
+    def _normalize_device_ids(cls, value: object) -> list[str]:
+        if not isinstance(value, list):
+            return value
+        normalized: list[str] = []
+        for raw_item in value:
+            device_id = str(raw_item or "").strip()
+            if device_id and device_id not in normalized:
+                normalized.append(device_id)
+        return normalized

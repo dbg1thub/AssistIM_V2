@@ -665,6 +665,7 @@ def test_e2ee_service_exports_and_imports_direct_history_recovery_package(monkey
                 {
                     "source_device_id": bob_old_bundle["device_id"],
                     "source_user_id": "bob",
+                    "sender_identity_key_public": bob_old_bundle["identity_key_public"],
                     "imported_at": diagnostics["source_devices"][0]["imported_at"],
                     "exported_at": package["exported_at"],
                     "signed_prekey_count": diagnostics["source_devices"][0]["signed_prekey_count"],
@@ -768,6 +769,70 @@ def test_e2ee_service_history_recovery_restores_group_sender_keys(monkeypatch) -
         )
         assert recovered_key is not None
         assert recovered_key["owner_device_id"] == bob_bundle["device_id"]
+
+    asyncio.run(scenario())
+
+
+def test_e2ee_service_history_recovery_rejects_cross_account_export(monkeypatch) -> None:
+    fake_db = FakeDatabase()
+    monkeypatch.setattr(e2ee_service_module, "get_http_client", lambda: FakeHttpClient())
+
+    async def scenario() -> None:
+        monkeypatch.setattr(e2ee_service_module, "get_database", lambda: fake_db)
+        service = e2ee_service_module.E2EEService()
+        await service.get_or_create_local_bundle()
+
+        with pytest.raises(RuntimeError, match="same-account"):
+            await service.export_history_recovery_package(
+                "bob",
+                "device-bob-new",
+                source_user_id="alice",
+            )
+
+    asyncio.run(scenario())
+
+
+def test_e2ee_service_history_recovery_rejects_cross_account_import(monkeypatch) -> None:
+    alice_old_db = FakeDatabase()
+    alice_new_db = FakeDatabase()
+    monkeypatch.setattr(e2ee_service_module, "get_http_client", lambda: FakeHttpClient())
+
+    async def scenario() -> None:
+        monkeypatch.setattr(e2ee_service_module, "get_database", lambda: alice_old_db)
+        old_service = e2ee_service_module.E2EEService()
+        old_bundle = await old_service.get_or_create_local_bundle()
+
+        monkeypatch.setattr(e2ee_service_module, "get_database", lambda: alice_new_db)
+        new_service = e2ee_service_module.E2EEService()
+        new_bundle = await new_service.get_or_create_local_bundle()
+        new_remote_bundle = build_remote_bundle(new_bundle, user_id="alice")
+
+        async def old_fetch_prekey_bundle(user_id: str) -> list[dict]:
+            assert user_id == "alice"
+            return [dict(new_remote_bundle)]
+
+        async def old_claim_prekeys(device_ids: list[str]) -> list[dict]:
+            assert device_ids == [new_bundle["device_id"]]
+            return [dict(new_remote_bundle)]
+
+        old_service.fetch_prekey_bundle = old_fetch_prekey_bundle  # type: ignore[method-assign]
+        old_service.claim_prekeys = old_claim_prekeys  # type: ignore[method-assign]
+        package = await old_service.export_history_recovery_package(
+            "alice",
+            str(new_bundle["device_id"]),
+            source_user_id="alice",
+        )
+
+        package["recipient_user_id"] = "mallory"
+        with pytest.raises(RuntimeError, match="same-account"):
+            await new_service.import_history_recovery_package(package, expected_source_user_id="alice")
+
+        package["recipient_user_id"] = "alice"
+        package["source_user_id"] = "mallory"
+        with pytest.raises(RuntimeError, match="source user mismatch"):
+            await new_service.import_history_recovery_package(package, expected_source_user_id="alice")
+
+        assert old_bundle["device_id"]
 
     asyncio.run(scenario())
 
@@ -1118,6 +1183,7 @@ def test_e2ee_service_applies_group_session_fanout_for_recipient_device(monkeypa
             "sender_key_id": fanout["sender_key_id"],
             "member_version": 5,
             "owner_device_id": alice_bundle["device_id"],
+            "installed": True,
         }
         assert summary == {
             "session_id": "session-group-3",

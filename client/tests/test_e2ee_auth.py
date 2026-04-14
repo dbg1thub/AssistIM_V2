@@ -117,8 +117,11 @@ class FakeE2EEService:
         result.setdefault("recipient_device_id", target_device_id)
         return result
 
-    async def import_history_recovery_package(self, package: dict | None) -> dict:
-        self.import_history_recovery_package_calls.append(dict(package or {}))
+    async def import_history_recovery_package(self, package: dict | None, *, expected_source_user_id: str = "") -> dict:
+        payload = dict(package or {})
+        if expected_source_user_id:
+            payload["expected_source_user_id"] = expected_source_user_id
+        self.import_history_recovery_package_calls.append(payload)
         return dict(self.import_history_recovery_package_result)
 
 
@@ -1085,6 +1088,39 @@ def test_auth_controller_export_history_recovery_package_defaults_to_current_use
     asyncio.run(scenario())
 
 
+def test_auth_controller_export_history_recovery_package_rejects_cross_account_target(monkeypatch) -> None:
+    fake_auth_service = boundaries.FakeAuthService()
+    fake_user_service = boundaries.FakeUserService()
+    fake_db = boundaries.FakeDatabase()
+    fake_message_manager = boundaries.FakeMessageManager()
+    fake_chat_controller = boundaries.FakeChatControllerContext()
+    fake_file_service = boundaries.FakeFileService()
+    fake_e2ee_service = FakeE2EEService()
+
+    monkeypatch.setattr(auth_controller_module, 'get_auth_service', lambda: fake_auth_service)
+    monkeypatch.setattr(auth_controller_module, 'get_user_service', lambda: fake_user_service)
+    monkeypatch.setattr(auth_controller_module, 'get_database', lambda: fake_db)
+    monkeypatch.setattr(auth_controller_module, 'get_message_manager', lambda: fake_message_manager)
+    monkeypatch.setattr(auth_controller_module, 'get_chat_controller', lambda: fake_chat_controller)
+    monkeypatch.setattr(auth_controller_module, 'get_file_service', lambda: fake_file_service)
+    monkeypatch.setattr(auth_controller_module, 'get_e2ee_service', lambda: fake_e2ee_service)
+
+    async def scenario() -> None:
+        controller = auth_controller_module.AuthController()
+        await controller.login('alice', 'secret123')
+
+        try:
+            await controller.export_history_recovery_package('device-new-1', target_user_id='mallory')
+        except RuntimeError as exc:
+            assert 'same-account' in str(exc)
+        else:
+            raise AssertionError('cross-account history recovery export should fail')
+
+        assert fake_e2ee_service.export_history_recovery_package_calls == []
+
+    asyncio.run(scenario())
+
+
 def test_auth_controller_import_history_recovery_package_returns_import_result(monkeypatch) -> None:
     fake_auth_service = boundaries.FakeAuthService()
     fake_user_service = boundaries.FakeUserService()
@@ -1116,7 +1152,9 @@ def test_auth_controller_import_history_recovery_package_returns_import_result(m
         await controller.login('alice', 'secret123')
         result = await controller.import_history_recovery_package({'scheme': 'device-history-recovery-v1'})
 
-        assert fake_e2ee_service.import_history_recovery_package_calls == [{'scheme': 'device-history-recovery-v1'}]
+        assert fake_e2ee_service.import_history_recovery_package_calls == [
+            {'scheme': 'device-history-recovery-v1', 'expected_source_user_id': 'user-1'}
+        ]
         assert result == {
             'source_device_id': 'device-old-1',
             'available': True,

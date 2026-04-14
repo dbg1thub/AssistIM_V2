@@ -137,6 +137,8 @@ class AuthController:
         if not normalized_target_device_id:
             raise RuntimeError("target device id is required")
         normalized_target_user_id = str(target_user_id or current_user_id).strip()
+        if normalized_target_user_id != current_user_id:
+            raise RuntimeError("history recovery export is limited to same-account devices")
         package = dict(
             await self._e2ee_service.export_history_recovery_package(
                 normalized_target_user_id,
@@ -153,9 +155,16 @@ class AuthController:
 
     async def import_history_recovery_package(self, package: dict[str, Any] | None) -> dict[str, Any]:
         """Import one history-recovery package into the currently authenticated device."""
-        if not self._current_user or not self._current_user.get("id"):
+        current_user_id = str((self._current_user or {}).get("id", "") or "").strip()
+        if not current_user_id:
             raise RuntimeError("authentication required")
-        return dict(await self._e2ee_service.import_history_recovery_package(package) or {})
+        return dict(
+            await self._e2ee_service.import_history_recovery_package(
+                package,
+                expected_source_user_id=current_user_id,
+            )
+            or {}
+        )
 
     async def get_e2ee_diagnostics(self) -> dict[str, Any]:
         """Return one authenticated E2EE diagnostics snapshot for runtime, device recovery, and session state."""

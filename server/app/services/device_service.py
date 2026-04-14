@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from base64 import b64decode
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -14,6 +15,8 @@ from app.repositories.user_repo import UserRepository
 
 class DeviceService:
     MAX_PREKEYS_PER_REQUEST = 100
+    X25519_PUBLIC_KEY_BYTES = 32
+    ED25519_PUBLIC_KEY_BYTES = 32
 
     def __init__(self, db: Session) -> None:
         self.db = db
@@ -25,11 +28,14 @@ class DeviceService:
         identity_key_public = self._require_non_empty(payload.get("identity_key_public"), "identity_key_public")
         signing_key_public = self._require_non_empty(payload.get("signing_key_public"), "signing_key_public")
         device_name = str(payload.get("device_name") or "").strip() or "AssistIM Desktop"
+        self._require_public_key_bytes(identity_key_public, "identity_key_public", self.X25519_PUBLIC_KEY_BYTES)
+        self._require_public_key_bytes(signing_key_public, "signing_key_public", self.ED25519_PUBLIC_KEY_BYTES)
 
         signed_prekey_payload = payload.get("signed_prekey")
         if not isinstance(signed_prekey_payload, dict):
             raise AppError(ErrorCode.INVALID_REQUEST, "signed_prekey is required", 422)
         signed_prekey = self._normalize_signed_prekey(signed_prekey_payload)
+        self._verify_signed_prekey_signature(signing_key_public, signed_prekey)
 
         raw_prekeys = payload.get("prekeys")
         if not isinstance(raw_prekeys, list) or not raw_prekeys:
@@ -58,10 +64,11 @@ class DeviceService:
 
     def list_my_devices(self, current_user: User) -> list[dict[str, Any]]:
         items = self.devices.list_devices_for_user(current_user.id)
+        prekey_counts = self.devices.count_available_prekeys_by_device_ids([str(item.device_id or "") for item in items])
         return [
             self.serialize_device(
                 item,
-                available_prekey_count=self.devices.count_available_prekeys(item.device_id),
+                available_prekey_count=prekey_counts.get(str(item.device_id or ""), 0),
             )
             for item in items
         ]
@@ -77,6 +84,7 @@ class DeviceService:
             if not isinstance(signed_prekey_payload, dict):
                 raise AppError(ErrorCode.INVALID_REQUEST, "signed_prekey must be an object", 422)
             signed_prekey = self._normalize_signed_prekey(signed_prekey_payload)
+            self._verify_signed_prekey_signature(str(device.signing_key_public or ""), signed_prekey)
 
         raw_prekeys = payload.get("prekeys")
         prekeys: list[dict[str, object]] = []
@@ -125,43 +133,70 @@ class DeviceService:
         *,
         exclude_device_id: str | None = None,
     ) -> list[dict[str, Any]]:
-        del current_user
         self._require_existing_user(target_user_id)
-        items = self.devices.list_active_devices_for_user(target_user_id, exclude_device_id=exclude_device_id)
+        normalized_target_user_id = str(target_user_id or "").strip()
+        normalized_exclude_device_id = str(exclude_device_id or "").strip()
+        should_exclude = False
+        if normalized_exclude_device_id and normalized_target_user_id == str(current_user.id or ""):
+            excluded_device = self.devices.get_device_for_user(current_user.id, normalized_exclude_device_id)
+            if excluded_device is None or not excluded_device.is_active:
+                raise AppError(ErrorCode.INVALID_REQUEST, "exclude_device_id is not an active device for current user", 422)
+            should_exclude = True
+
+        items = self.devices.list_active_devices_for_user(
+            normalized_target_user_id,
+            exclude_device_id=normalized_exclude_device_id if should_exclude else None,
+        )
+        device_ids = [str(item.device_id or "") for item in items]
+        signed_prekeys = self.devices.get_active_signed_prekeys(device_ids)
+        prekey_counts = self.devices.count_available_prekeys_by_device_ids(device_ids)
+        missing_signed_prekey_ids = [device_id for device_id in device_ids if device_id not in signed_prekeys]
+        if missing_signed_prekey_ids:
+            raise AppError(ErrorCode.INVALID_REQUEST, "active device is missing signed prekey", 409)
+
         bundles: list[dict[str, Any]] = []
         for item in items:
-            signed_prekey = self.devices.get_active_signed_prekey(item.device_id)
-            if signed_prekey is None:
-                continue
             bundles.append(
                 self.serialize_prekey_bundle(
                     item,
-                    signed_prekey=signed_prekey,
+                    signed_prekey=signed_prekeys[str(item.device_id or "")],
                     claimed_prekey=None,
-                    available_prekey_count=self.devices.count_available_prekeys(item.device_id),
+                    available_prekey_count=prekey_counts.get(str(item.device_id or ""), 0),
                 )
             )
         return bundles
 
     def claim_prekeys(self, current_user: User, device_ids: list[str]) -> list[dict[str, Any]]:
         del current_user
-        normalized_device_ids = []
-        for raw_device_id in device_ids:
-            normalized_device_id = str(raw_device_id or "").strip()
-            if normalized_device_id and normalized_device_id not in normalized_device_ids:
-                normalized_device_ids.append(normalized_device_id)
+        normalized_device_ids = [
+            device_id
+            for device_id in dict.fromkeys(str(raw_device_id or "").strip() for raw_device_id in device_ids)
+            if device_id
+        ]
         if not normalized_device_ids:
             raise AppError(ErrorCode.INVALID_REQUEST, "device_ids must contain at least one item", 422)
 
+        devices_by_id = self.devices.list_devices_by_ids(normalized_device_ids)
+        missing_device_ids = [
+            device_id
+            for device_id in normalized_device_ids
+            if device_id not in devices_by_id or not bool(getattr(devices_by_id[device_id], "is_active", False))
+        ]
+        if missing_device_ids:
+            raise AppError(ErrorCode.RESOURCE_NOT_FOUND, "device not found", 404)
+
+        signed_prekeys = self.devices.get_active_signed_prekeys(normalized_device_ids)
+        missing_signed_prekey_ids = [device_id for device_id in normalized_device_ids if device_id not in signed_prekeys]
+        if missing_signed_prekey_ids:
+            raise AppError(ErrorCode.INVALID_REQUEST, "active device is missing signed prekey", 409)
+
         claimed: list[dict[str, Any]] = []
         for device_id in normalized_device_ids:
-            device = self.devices.get_device(device_id)
-            if device is None or not device.is_active:
-                continue
-            signed_prekey = self.devices.get_active_signed_prekey(device_id)
-            if signed_prekey is None:
-                continue
+            device = devices_by_id[device_id]
+            signed_prekey = signed_prekeys[device_id]
             claimed_prekey = self.devices.claim_one_time_prekey(device_id)
+            if claimed_prekey is None:
+                raise AppError(ErrorCode.INVALID_REQUEST, "device has no available one-time prekey", 409)
             claimed.append(
                 self.serialize_prekey_bundle(
                     device,
@@ -191,6 +226,8 @@ class DeviceService:
             raise AppError(ErrorCode.INVALID_REQUEST, "signed_prekey.key_id is required", 422) from None
         public_key = self._require_non_empty(payload.get("public_key"), "signed_prekey.public_key")
         signature = self._require_non_empty(payload.get("signature"), "signed_prekey.signature")
+        self._require_public_key_bytes(public_key, "signed_prekey.public_key", self.X25519_PUBLIC_KEY_BYTES)
+        self._require_signature_bytes(signature, "signed_prekey.signature")
         return {
             "key_id": key_id,
             "public_key": public_key,
@@ -211,6 +248,7 @@ class DeviceService:
                 raise AppError(ErrorCode.INVALID_REQUEST, "duplicate prekey_id in request", 422)
             seen_prekey_ids.add(prekey_id)
             public_key = self._require_non_empty(raw_item.get("public_key"), "prekey.public_key")
+            self._require_public_key_bytes(public_key, "prekey.public_key", self.X25519_PUBLIC_KEY_BYTES)
             normalized.append(
                 {
                     "prekey_id": prekey_id,
@@ -218,6 +256,50 @@ class DeviceService:
                 }
             )
         return normalized
+
+    @staticmethod
+    def _decode_b64(value: str, field_name: str) -> bytes:
+        try:
+            return b64decode(str(value or "").strip(), validate=True)
+        except Exception:
+            raise AppError(ErrorCode.INVALID_REQUEST, f"{field_name} must be base64 encoded", 422) from None
+
+    def _require_public_key_bytes(self, value: str, field_name: str, expected_size: int) -> bytes:
+        decoded = self._decode_b64(value, field_name)
+        if len(decoded) != expected_size:
+            raise AppError(ErrorCode.INVALID_REQUEST, f"{field_name} has invalid key length", 422)
+        return decoded
+
+    def _require_signature_bytes(self, value: str, field_name: str) -> bytes:
+        decoded = self._decode_b64(value, field_name)
+        if len(decoded) != 64:
+            raise AppError(ErrorCode.INVALID_REQUEST, f"{field_name} has invalid signature length", 422)
+        return decoded
+
+    def _verify_signed_prekey_signature(self, signing_key_public: str, signed_prekey: dict[str, Any]) -> None:
+        try:
+            from cryptography.hazmat.primitives.asymmetric import ed25519
+        except Exception as exc:
+            raise AppError(ErrorCode.INVALID_REQUEST, "signed prekey validation is unavailable", 422) from exc
+
+        signing_key_bytes = self._require_public_key_bytes(
+            signing_key_public,
+            "signing_key_public",
+            self.ED25519_PUBLIC_KEY_BYTES,
+        )
+        signed_prekey_public = self._require_public_key_bytes(
+            str(signed_prekey.get("public_key") or ""),
+            "signed_prekey.public_key",
+            self.X25519_PUBLIC_KEY_BYTES,
+        )
+        signature = self._require_signature_bytes(
+            str(signed_prekey.get("signature") or ""),
+            "signed_prekey.signature",
+        )
+        try:
+            ed25519.Ed25519PublicKey.from_public_bytes(signing_key_bytes).verify(signature, signed_prekey_public)
+        except Exception:
+            raise AppError(ErrorCode.INVALID_REQUEST, "signed_prekey signature is invalid", 422) from None
 
     @staticmethod
     def serialize_device(device, *, available_prekey_count: int) -> dict[str, Any]:

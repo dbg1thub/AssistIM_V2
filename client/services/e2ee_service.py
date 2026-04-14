@@ -484,6 +484,7 @@ class E2EEService:
                 {
                     "source_device_id": normalized_source_device_id,
                     "source_user_id": str(record.get("source_user_id") or "").strip(),
+                    "sender_identity_key_public": str(record.get("sender_identity_key_public") or "").strip(),
                     "imported_at": str(record.get("imported_at") or ""),
                     "exported_at": str(record.get("exported_at") or ""),
                     "signed_prekey_count": len(dict(record.get("signed_prekeys") or {})),
@@ -533,6 +534,11 @@ class E2EEService:
         normalized_target_device_id = str(target_device_id or "").strip()
         if not normalized_target_user_id or not normalized_target_device_id:
             raise RuntimeError("target user id and target device id are required")
+        normalized_source_user_id = str(source_user_id or "").strip()
+        if not normalized_source_user_id:
+            raise RuntimeError("source user id is required for history recovery export")
+        if normalized_target_user_id != normalized_source_user_id:
+            raise RuntimeError("history recovery export is limited to same-account devices")
 
         target_bundle = await self._claim_or_fetch_bundle_for_device(
             normalized_target_user_id,
@@ -631,8 +637,9 @@ class E2EEService:
 
         payload = {
             "scheme": self.DEVICE_HISTORY_RECOVERY_SCHEME,
-            "source_user_id": str(source_user_id or "").strip(),
+            "source_user_id": normalized_source_user_id,
             "source_device_id": str(local_bundle.get("device_id") or "").strip(),
+            "sender_identity_key_public": str(local_bundle.get("identity_key_public") or ""),
             "exported_at": exported_at,
             "signed_prekeys": signed_prekeys,
             "one_time_prekeys": one_time_prekeys,
@@ -648,7 +655,7 @@ class E2EEService:
         return {
             "enabled": True,
             "scheme": self.DEVICE_HISTORY_RECOVERY_SCHEME,
-            "source_user_id": str(source_user_id or "").strip(),
+            "source_user_id": normalized_source_user_id,
             "source_device_id": str(local_bundle.get("device_id") or "").strip(),
             "sender_device_id": str(local_bundle.get("device_id") or "").strip(),
             "sender_identity_key_public": str(local_bundle.get("identity_key_public") or ""),
@@ -667,7 +674,12 @@ class E2EEService:
             },
         }
 
-    async def import_history_recovery_package(self, package: dict[str, Any] | None) -> dict[str, Any]:
+    async def import_history_recovery_package(
+        self,
+        package: dict[str, Any] | None,
+        *,
+        expected_source_user_id: str = "",
+    ) -> dict[str, Any]:
         normalized = dict(package or {})
         if not normalized or not normalized.get("enabled"):
             raise RuntimeError("history recovery package is unavailable")
@@ -702,6 +714,21 @@ class E2EEService:
         source_device_id = str(payload.get("source_device_id") or normalized.get("source_device_id") or "").strip()
         if not source_device_id:
             raise RuntimeError("history recovery package is missing source device id")
+        source_user_id = str(payload.get("source_user_id") or normalized.get("source_user_id") or "").strip()
+        recipient_user_id = str(normalized.get("recipient_user_id") or "").strip()
+        expected_user_id = str(expected_source_user_id or "").strip()
+        if not source_user_id:
+            raise RuntimeError("history recovery package is missing source user id")
+        if expected_user_id and source_user_id != expected_user_id:
+            raise RuntimeError("history recovery package belongs to a different account")
+        if recipient_user_id and recipient_user_id != source_user_id:
+            raise RuntimeError("history recovery package is limited to same-account devices")
+        if str(normalized.get("source_user_id") or source_user_id).strip() != source_user_id:
+            raise RuntimeError("history recovery package source user mismatch")
+        sender_identity_key_public = str(normalized.get("sender_identity_key_public") or "").strip()
+        payload_sender_identity_key_public = str(payload.get("sender_identity_key_public") or "").strip()
+        if not sender_identity_key_public or payload_sender_identity_key_public != sender_identity_key_public:
+            raise RuntimeError("history recovery package source identity mismatch")
 
         state = await self._load_history_recovery_state()
         devices = dict(state.get("devices") or {})
@@ -709,11 +736,18 @@ class E2EEService:
             source_device_id,
             dict(devices.get(source_device_id) or {}),
         )
-        device_record["source_user_id"] = str(payload.get("source_user_id") or device_record.get("source_user_id") or "").strip()
+        previous_identity = str(device_record.get("sender_identity_key_public") or "").strip()
+        if previous_identity and previous_identity != sender_identity_key_public:
+            raise RuntimeError("history recovery source device identity changed")
+        previous_exported_at = str(device_record.get("exported_at") or "")
+        new_exported_at = str(payload.get("exported_at") or normalized.get("exported_at") or "")
+        if previous_exported_at and new_exported_at and new_exported_at < previous_exported_at:
+            raise RuntimeError("history recovery package is older than installed source state")
+
+        device_record["source_user_id"] = source_user_id
+        device_record["sender_identity_key_public"] = sender_identity_key_public
         device_record["imported_at"] = _utcnow().isoformat()
-        device_record["exported_at"] = str(
-            payload.get("exported_at") or normalized.get("exported_at") or device_record.get("exported_at") or ""
-        )
+        device_record["exported_at"] = new_exported_at or previous_exported_at
 
         imported_signed_prekeys = 0
         signed_prekeys = dict(device_record.get("signed_prekeys") or {})
@@ -1064,10 +1098,26 @@ class E2EEService:
         if not isinstance(payload, dict):
             raise RuntimeError("invalid group fanout payload")
 
-        normalized_session_id = str(payload.get("session_id") or normalized.get("session_id") or "").strip()
-        owner_device_id = str(payload.get("owner_device_id") or normalized.get("sender_device_id") or "").strip()
-        if not normalized_session_id or not owner_device_id:
+        normalized_session_id = str(normalized.get("session_id") or "").strip()
+        payload_session_id = str(payload.get("session_id") or "").strip()
+        owner_device_id = str(payload.get("owner_device_id") or "").strip()
+        outer_sender_device_id = str(normalized.get("sender_device_id") or "").strip()
+        sender_key_id = str(payload.get("sender_key_id") or "").strip()
+        outer_sender_key_id = str(normalized.get("sender_key_id") or "").strip()
+        sender_key = str(payload.get("sender_key") or "").strip()
+        owner_user_id = str(payload.get("owner_user_id") or "").strip()
+        member_version = int(payload.get("member_version") or 0)
+        outer_member_version = int(normalized.get("member_version") or 0)
+        if not normalized_session_id or not owner_device_id or not sender_key_id or not sender_key or not owner_user_id:
             raise RuntimeError("group fanout payload is incomplete")
+        if payload_session_id != normalized_session_id:
+            raise RuntimeError("group fanout session_id mismatch")
+        if owner_device_id != outer_sender_device_id:
+            raise RuntimeError("group fanout owner_device_id mismatch")
+        if outer_sender_key_id and sender_key_id != outer_sender_key_id:
+            raise RuntimeError("group fanout sender_key_id mismatch")
+        if outer_member_version and member_version != outer_member_version:
+            raise RuntimeError("group fanout member_version mismatch")
 
         group_state = await self._load_group_session_state()
         session_record = self._normalize_group_session_record(
@@ -1075,12 +1125,22 @@ class E2EEService:
             dict(group_state.get(normalized_session_id) or {}),
         )
         inbound_sender_keys = dict(session_record.get("inbound_sender_keys") or {})
+        existing_sender_key = dict(inbound_sender_keys.get(owner_device_id) or {})
+        existing_member_version = int(existing_sender_key.get("member_version") or -1)
+        if existing_sender_key and existing_member_version > member_version:
+            return {
+                "session_id": normalized_session_id,
+                "sender_key_id": str(existing_sender_key.get("key_id") or ""),
+                "member_version": existing_member_version,
+                "owner_device_id": owner_device_id,
+                "installed": False,
+            }
         inbound_sender_keys[owner_device_id] = {
-            "key_id": str(payload.get("sender_key_id") or normalized.get("sender_key_id") or ""),
-            "sender_key": str(payload.get("sender_key") or ""),
+            "key_id": sender_key_id,
+            "sender_key": sender_key,
             "sender_key_scheme": str(payload.get("sender_key_scheme") or self.GROUP_SENDER_KEY_SCHEME),
-            "member_version": int(payload.get("member_version") or normalized.get("member_version") or 0),
-            "owner_user_id": str(payload.get("owner_user_id") or normalized.get("recipient_user_id") or ""),
+            "member_version": member_version,
+            "owner_user_id": owner_user_id,
             "owner_device_id": owner_device_id,
             "sender_identity_key_public": str(normalized.get("sender_identity_key_public") or ""),
             "installed_at": _utcnow().isoformat(),
@@ -1095,6 +1155,7 @@ class E2EEService:
             "sender_key_id": str(inbound_sender_keys[owner_device_id].get("key_id") or ""),
             "member_version": int(inbound_sender_keys[owner_device_id].get("member_version") or 0),
             "owner_device_id": owner_device_id,
+            "installed": True,
         }
     async def describe_text_decryption_state(self, extra: dict[str, Any] | None) -> dict[str, Any]:
         encryption = dict((extra or {}).get("encryption") or {})
@@ -1997,6 +2058,7 @@ class E2EEService:
         normalized = dict(record or {})
         normalized["source_device_id"] = normalized_source_device_id
         normalized["source_user_id"] = str(normalized.get("source_user_id") or "").strip()
+        normalized["sender_identity_key_public"] = str(normalized.get("sender_identity_key_public") or "").strip()
         normalized["imported_at"] = str(normalized.get("imported_at") or "")
         normalized["exported_at"] = str(normalized.get("exported_at") or "")
 

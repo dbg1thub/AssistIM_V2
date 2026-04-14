@@ -17,7 +17,7 @@ from client.core.logging import setup_logging
 from client.managers.call_manager import get_call_manager
 from client.managers.message_manager import get_message_manager
 from client.managers.session_manager import SessionRefreshResult, get_session_manager
-from client.models.message import ChatMessage, MessageType, Session, build_attachment_extra, infer_message_type_from_path
+from client.models.message import ChatMessage, MessageStatus, MessageType, Session, build_attachment_extra, infer_message_type_from_path
 from client.services.call_service import get_call_service
 from client.services.file_service import get_file_service
 
@@ -183,10 +183,11 @@ class ChatController:
             extra=normalized_extra,
         )
 
-        await self._session_manager.add_message_to_session(
-            session_id=session_id,
-            message=message,
-        )
+        if message.status not in {MessageStatus.AWAITING_SECURITY_CONFIRMATION, MessageStatus.FAILED}:
+            await self._session_manager.add_message_to_session(
+                session_id=session_id,
+                message=message,
+            )
 
         logger.info("Message sent: %s", message.message_id)
         return message

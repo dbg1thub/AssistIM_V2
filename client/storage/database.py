@@ -42,6 +42,7 @@ class Database:
         "pysqlcipher3.dbapi2",
         "pysqlcipher3",
     )
+    LOCAL_PLAINTEXT_VERSION = "dpapi-text-v1"
 
     """
     SQLite database for local storage.
@@ -1511,6 +1512,22 @@ class Database:
         messages.reverse()
         return messages
 
+    async def get_security_pending_messages(self, session_id: str) -> list[ChatMessage]:
+        """Return all local outbound messages awaiting security confirmation in FIFO order."""
+        cursor = await self._db.execute(
+            """
+            SELECT * FROM messages
+            WHERE session_id = ?
+              AND is_self = 1
+              AND status = ?
+            ORDER BY timestamp ASC, rowid ASC
+            """,
+            (session_id, "awaiting_security_confirmation"),
+        )
+        rows = await cursor.fetchall()
+        read_cursors = await self._load_session_read_cursors(session_id)
+        return [self._overlay_read_cursors_on_message(self._row_to_message(row), read_cursors) for row in rows]
+
     @staticmethod
     def _escape_like_pattern(keyword: str) -> str:
         """Escape one keyword for literal SQLite LIKE matching."""
@@ -1547,9 +1564,15 @@ class Database:
             return []
 
         normalized_limit = max(1, int(limit or 0))
+        encrypted_matches = await self._search_encrypted_local_cache(
+            normalized_keyword,
+            session_id=session_id,
+            limit=normalized_limit,
+        )
         if self._should_use_search_fts(normalized_keyword):
             try:
-                return await self._search_messages_fts(normalized_keyword, session_id=session_id, limit=normalized_limit)
+                plain_matches = await self._search_messages_fts(normalized_keyword, session_id=session_id, limit=normalized_limit)
+                return self._merge_search_results(plain_matches, encrypted_matches, normalized_limit)
             except Exception as exc:
                 logger.debug("Message FTS search failed, falling back to LIKE: %s", exc)
         like_pattern = self._escape_like_pattern(normalized_keyword)
@@ -1579,7 +1602,8 @@ class Database:
             )
 
         rows = await cursor.fetchall()
-        return [self._row_to_message(row) for row in rows]
+        plain_matches = [self._row_to_message(row) for row in rows]
+        return self._merge_search_results(plain_matches, encrypted_matches, normalized_limit)
 
     async def count_search_message_sessions(
         self,
@@ -1593,7 +1617,15 @@ class Database:
 
         if self._should_use_search_fts(normalized_keyword):
             try:
-                return await self._count_search_message_sessions_fts(normalized_keyword, session_id=session_id)
+                plain_session_ids = await self._search_plain_message_session_ids_fts(
+                    normalized_keyword,
+                    session_id=session_id,
+                )
+                encrypted_session_ids = await self._search_encrypted_local_cache_session_ids(
+                    normalized_keyword,
+                    session_id=session_id,
+                )
+                return len(plain_session_ids | encrypted_session_ids)
             except Exception as exc:
                 logger.debug("Message FTS count failed, falling back to LIKE: %s", exc)
 
@@ -1601,7 +1633,7 @@ class Database:
         if session_id:
             cursor = await self._db.execute(
                 """
-                SELECT COUNT(DISTINCT session_id) AS count
+                SELECT DISTINCT session_id
                 FROM messages
                 WHERE session_id = ?
                   AND COALESCE(is_encrypted, 0) != 1
@@ -1612,15 +1644,20 @@ class Database:
         else:
             cursor = await self._db.execute(
                 """
-                SELECT COUNT(DISTINCT session_id) AS count
+                SELECT DISTINCT session_id
                 FROM messages
                 WHERE COALESCE(is_encrypted, 0) != 1
                   AND content LIKE ? ESCAPE '\\'
                 """,
                 (like_pattern,),
             )
-        row = await cursor.fetchone()
-        return int((row["count"] if row is not None else 0) or 0)
+        rows = await cursor.fetchall()
+        plain_session_ids = {str(row["session_id"] or "").strip() for row in rows if str(row["session_id"] or "").strip()}
+        encrypted_session_ids = await self._search_encrypted_local_cache_session_ids(
+            normalized_keyword,
+            session_id=session_id,
+        )
+        return len(plain_session_ids | encrypted_session_ids)
 
     async def _search_messages_fts(
         self,
@@ -1694,6 +1731,39 @@ class Database:
             )
         row = await cursor.fetchone()
         return int((row["count"] if row is not None else 0) or 0)
+
+    async def _search_plain_message_session_ids_fts(
+        self,
+        keyword: str,
+        *,
+        session_id: Optional[str],
+    ) -> set[str]:
+        match_query = self._build_fts_match_query(keyword)
+        if session_id:
+            cursor = await self._db.execute(
+                """
+                SELECT DISTINCT m.session_id AS session_id
+                FROM message_search_fts f
+                JOIN messages m ON m.rowid = f.rowid
+                WHERE message_search_fts MATCH ?
+                  AND m.session_id = ?
+                  AND COALESCE(m.is_encrypted, 0) != 1
+                """,
+                (match_query, session_id),
+            )
+        else:
+            cursor = await self._db.execute(
+                """
+                SELECT DISTINCT m.session_id AS session_id
+                FROM message_search_fts f
+                JOIN messages m ON m.rowid = f.rowid
+                WHERE message_search_fts MATCH ?
+                  AND COALESCE(m.is_encrypted, 0) != 1
+                """,
+                (match_query,),
+            )
+        rows = await cursor.fetchall()
+        return {str(row["session_id"] or "").strip() for row in rows if str(row["session_id"] or "").strip()}
 
     async def _resolve_directory_cache_owner_user_id(self, owner_user_id: str | None = None) -> str:
         """Return the authoritative owner for one directory-cache read or write."""
@@ -1938,6 +2008,135 @@ class Database:
         )
         row = await cursor.fetchone()
         return int((row["count"] if row is not None else 0) or 0)
+
+    @staticmethod
+    def _message_timestamp_sort_value(message: ChatMessage) -> float:
+        timestamp = message.timestamp
+        if hasattr(timestamp, "timestamp"):
+            return float(timestamp.timestamp())
+        try:
+            return float(timestamp or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    @classmethod
+    def _merge_search_results(
+        cls,
+        plain_matches: list[ChatMessage],
+        encrypted_matches: list[ChatMessage],
+        limit: int,
+    ) -> list[ChatMessage]:
+        merged: dict[str, ChatMessage] = {}
+        for message in [*plain_matches, *encrypted_matches]:
+            message_id = str(message.message_id or "").strip()
+            if not message_id or message_id in merged:
+                continue
+            merged[message_id] = message
+        items = list(merged.values())
+        items.sort(key=cls._message_timestamp_sort_value, reverse=True)
+        return items[: max(1, int(limit or 1))]
+
+    @classmethod
+    def _local_cache_version_matches(cls, envelope: dict[str, Any]) -> bool:
+        return str(envelope.get("local_plaintext_version") or "").strip() == cls.LOCAL_PLAINTEXT_VERSION
+
+    @classmethod
+    def _recover_local_cache_value(cls, envelope: dict[str, Any], key: str) -> str:
+        if not cls._local_cache_version_matches(envelope):
+            return ""
+        protected_value = str(envelope.get(key) or "").strip()
+        if not protected_value:
+            return ""
+        try:
+            return SecureStorage.decrypt_text(protected_value)
+        except Exception as exc:
+            logger.warning("Failed to decrypt locally protected search cache: %s", exc)
+            return ""
+
+    @classmethod
+    def _encrypted_search_text(cls, extra: dict[str, Any]) -> str:
+        chunks: list[str] = []
+        encryption = dict((extra or {}).get("encryption") or {})
+        if encryption.get("enabled"):
+            plaintext = cls._recover_local_cache_value(encryption, "local_plaintext")
+            if plaintext:
+                chunks.append(plaintext)
+
+        attachment_encryption = dict((extra or {}).get("attachment_encryption") or {})
+        if attachment_encryption.get("enabled"):
+            metadata_text = cls._recover_local_cache_value(attachment_encryption, "local_metadata")
+            if metadata_text:
+                chunks.append(metadata_text)
+                try:
+                    metadata = json.loads(metadata_text)
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    metadata = {}
+                if isinstance(metadata, dict):
+                    chunks.extend(
+                        str(metadata.get(key) or "")
+                        for key in ("name", "original_name", "file_name", "mime_type")
+                        if str(metadata.get(key) or "")
+                    )
+        return "\n".join(chunks)
+
+    async def _iter_encrypted_search_rows(self, session_id: Optional[str]) -> list[aiosqlite.Row]:
+        if session_id:
+            cursor = await self._db.execute(
+                """
+                SELECT * FROM messages
+                WHERE session_id = ?
+                  AND COALESCE(is_encrypted, 0) = 1
+                ORDER BY timestamp DESC
+                """,
+                (session_id,),
+            )
+        else:
+            cursor = await self._db.execute(
+                """
+                SELECT * FROM messages
+                WHERE COALESCE(is_encrypted, 0) = 1
+                ORDER BY timestamp DESC
+                """
+            )
+        return list(await cursor.fetchall())
+
+    async def _search_encrypted_local_cache(
+        self,
+        keyword: str,
+        *,
+        session_id: Optional[str],
+        limit: int,
+    ) -> list[ChatMessage]:
+        needle = str(keyword or "").casefold()
+        if not needle:
+            return []
+        matches: list[ChatMessage] = []
+        for row in await self._iter_encrypted_search_rows(session_id):
+            message = self._row_to_message(row)
+            if needle not in self._encrypted_search_text(message.extra).casefold():
+                continue
+            matches.append(message)
+            if len(matches) >= max(1, int(limit or 1)):
+                break
+        return matches
+
+    async def _search_encrypted_local_cache_session_ids(
+        self,
+        keyword: str,
+        *,
+        session_id: Optional[str],
+    ) -> set[str]:
+        needle = str(keyword or "").casefold()
+        if not needle:
+            return set()
+        session_ids: set[str] = set()
+        for row in await self._iter_encrypted_search_rows(session_id):
+            message = self._row_to_message(row)
+            if needle in self._encrypted_search_text(message.extra).casefold():
+                normalized_session_id = str(message.session_id or "").strip()
+                if normalized_session_id:
+                    session_ids.add(normalized_session_id)
+        return session_ids
 
     async def _search_contacts_fts(
         self,
@@ -2575,7 +2774,7 @@ class Database:
             return content
 
         protected_plaintext = str(encryption.get("local_plaintext") or "").strip()
-        if protected_plaintext:
+        if protected_plaintext and Database._local_cache_version_matches(encryption):
             try:
                 return SecureStorage.decrypt_text(protected_plaintext)
             except Exception as exc:

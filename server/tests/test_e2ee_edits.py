@@ -1,21 +1,49 @@
 from __future__ import annotations
 
+from base64 import b64encode
+
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import ed25519, x25519
+
+
+def _b64(raw: bytes) -> str:
+    return b64encode(raw).decode("ascii")
+
+
+def _x25519_public() -> str:
+    private_key = x25519.X25519PrivateKey.generate()
+    return _b64(
+        private_key.public_key().public_bytes(
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PublicFormat.Raw,
+        )
+    )
+
 
 def _device_payload(device_id: str, *, offset: int = 0) -> dict:
+    signing_private = ed25519.Ed25519PrivateKey.generate()
+    signing_public = signing_private.public_key().public_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PublicFormat.Raw,
+    )
+    signed_prekey_public = x25519.X25519PrivateKey.generate().public_key().public_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PublicFormat.Raw,
+    )
     return {
         "device_id": device_id,
         "device_name": f"Desktop {device_id}",
-        "identity_key_public": f"identity-key-{device_id}",
-        "signing_key_public": f"signing-key-{device_id}",
+        "identity_key_public": _x25519_public(),
+        "signing_key_public": _b64(signing_public),
         "signed_prekey": {
             "key_id": 1 + offset,
-            "public_key": f"signed-prekey-{device_id}",
-            "signature": f"signature-{device_id}",
+            "public_key": _b64(signed_prekey_public),
+            "signature": _b64(signing_private.sign(signed_prekey_public)),
         },
         "prekeys": [
             {
                 "prekey_id": 1 + offset,
-                "public_key": f"prekey-{device_id}",
+                "public_key": _x25519_public(),
             },
         ],
     }

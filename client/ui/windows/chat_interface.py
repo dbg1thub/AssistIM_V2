@@ -388,6 +388,7 @@ class ChatInterface(QWidget):
         self._subscribe_sync(SessionEvent.DELETED, self._on_session_event)
 
         self._subscribe_sync(MessageEvent.SENT, self._on_message_sent)
+        self._subscribe_sync(MessageEvent.SECURITY_PENDING, self._on_message_sent)
         self._subscribe_sync(MessageEvent.RECEIVED, self._on_message_received)
         self._subscribe_sync(MessageEvent.ACK, self._on_message_ack)
         self._subscribe_sync(MessageEvent.DELIVERED, self._on_delivered_event)
@@ -2630,6 +2631,14 @@ class ChatInterface(QWidget):
                 duration=2400,
             )
             return
+        if released_count <= 0:
+            InfoBar.info(
+                tr("chat.message.title", "Message"),
+                tr("chat.security_pending.release_empty", "No queued messages need security confirmation."),
+                parent=self.window(),
+                duration=1800,
+            )
+            return
         InfoBar.success(
             tr("chat.message.title", "Message"),
             tr(
@@ -2645,7 +2654,15 @@ class ChatInterface(QWidget):
         """Delete queued local messages that were never sent because security confirmation is missing."""
         result = await self._chat_controller.discard_session_security_pending_messages(session_id)
         removed_count = max(0, int(result.get("removed", 0) or 0))
-        if removed_count <= 0 or not self._is_current_session_context(session_id, generation):
+        if not self._is_current_session_context(session_id, generation):
+            return
+        if removed_count <= 0:
+            InfoBar.info(
+                tr("chat.message.title", "Message"),
+                tr("chat.security_pending.discard_empty", "No queued messages need security confirmation."),
+                parent=self.window(),
+                duration=1800,
+            )
             return
         InfoBar.info(
             tr("chat.message.title", "Message"),
