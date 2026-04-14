@@ -97,6 +97,8 @@ class FriendRequestRecord:
     created_at: str = ""
     sender_name: str = ""
     receiver_name: str = ""
+    sender_username: str = ""
+    receiver_username: str = ""
     sender_avatar: str = ""
     receiver_avatar: str = ""
     sender_gender: str = ""
@@ -534,6 +536,8 @@ class ContactController:
                     created_at=str(item.get("created_at", "") or ""),
                     sender_name=sender_name,
                     receiver_name=receiver_name,
+                    sender_username=str(sender.get("username", "") or ""),
+                    receiver_username=str(receiver.get("username", "") or ""),
                     sender_avatar=str(sender.get("avatar", "") or ""),
                     receiver_avatar=str(receiver.get("avatar", "") or ""),
                     sender_gender=str(sender.get("gender", "") or ""),

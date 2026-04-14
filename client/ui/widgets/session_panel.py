@@ -366,7 +366,7 @@ class SessionPanel(QWidget):
         keyword = str(text or "").strip()
         self._pending_search_keyword = keyword
         if self._proxy_model:
-            self._proxy_model.set_filter_text("")
+            self._proxy_model.set_filter_text(keyword)
 
         if not keyword:
             self._search_timer.stop()
@@ -392,7 +392,7 @@ class SessionPanel(QWidget):
     async def _run_global_search(self, keyword: str, generation: int) -> None:
         """Populate grouped search results for the current keyword."""
         results = await search_all(keyword, message_limit=30, contact_limit=30, group_limit=30)
-        if self.search_box.text().strip() != keyword or generation != self._search_generation:
+        if self._teardown_started or self.search_box.text().strip() != keyword or generation != self._search_generation:
             return
         flyout_view = self._show_search_flyout()
         if flyout_view is not None:
@@ -405,7 +405,6 @@ class SessionPanel(QWidget):
 
     def _on_search_result_activated(self, payload: object) -> None:
         """Forward one activated grouped-search result to the host chat window."""
-        self.clear_search()
         self.search_result_requested.emit(payload)
 
     def _show_search_flyout(self) -> Optional[GlobalSearchPopupOverlay]:

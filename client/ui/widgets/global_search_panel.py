@@ -456,7 +456,6 @@ class GlobalSearchResultsPanel(QWidget):
             payload=payload,
             title=title,
             subtitle=result.matched_text,
-            meta=tr("search.message.total", "共 {count} 条相关记录", count=result.match_count),
             keyword=self._keyword,
             avatar=result.session_avatar,
             seed=profile_avatar_seed(

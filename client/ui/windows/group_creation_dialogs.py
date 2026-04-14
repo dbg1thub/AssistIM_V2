@@ -100,16 +100,24 @@ class StartGroupChatDialog(MaskDialogBase):
         controller,
         contacts: list[ContactRecord],
         *,
-        excluded_contact_id: str,
+        fixed_contact: ContactRecord | None,
         parent=None,
     ) -> None:
         super().__init__(parent=parent)
         self._controller = controller
-        self._excluded_contact_id = str(excluded_contact_id or "")
-        self._contacts = [contact for contact in contacts if contact.id and contact.id != self._excluded_contact_id]
+        self._fixed_contact = fixed_contact if fixed_contact is not None and fixed_contact.id else None
+        fixed_contact_id = str(self._fixed_contact.id if self._fixed_contact is not None else "" or "")
+        deduped_contacts: dict[str, ContactRecord] = {}
+        if self._fixed_contact is not None:
+            deduped_contacts[fixed_contact_id] = self._fixed_contact
+        for contact in contacts:
+            if contact.id:
+                deduped_contacts[contact.id] = contact
+        self._contacts = list(deduped_contacts.values())
         self._selected_ids: set[str] = set()
         self._member_items: dict[str, SelectableContactListItem] = {}
         self._create_task: Optional[asyncio.Task] = None
+        self._refresh_task: Optional[asyncio.Task] = None
         self._ui_tasks: set[asyncio.Task] = set()
 
         self.setModal(True)
@@ -148,6 +156,9 @@ class StartGroupChatDialog(MaskDialogBase):
         self.search_edit.setPlaceholderText(tr("chat.group_picker.search_placeholder", "Search"))
         self.search_edit.setFixedHeight(36)
         search_row.addWidget(self.search_edit, 1)
+        self.refresh_button = PushButton(tr("common.refresh", "Refresh"), self.search_bar)
+        self.refresh_button.setFixedHeight(36)
+        search_row.addWidget(self.refresh_button, 0)
 
         self.list_area = SingleDirectionScrollArea(self.left_panel, orient=Qt.Orientation.Vertical)
         self.list_area.setWidgetResizable(True)
@@ -234,6 +245,7 @@ class StartGroupChatDialog(MaskDialogBase):
         layout.addWidget(self.body_splitter, 1)
 
         self.search_edit.textChanged.connect(self._rebuild_member_list)
+        self.refresh_button.clicked.connect(self._refresh_contacts)
         self.complete_button.clicked.connect(self._create_group)
         self.cancel_button.clicked.connect(self.close)
 
@@ -318,7 +330,11 @@ class StartGroupChatDialog(MaskDialogBase):
         for letter, contacts in grouped.items():
             self.list_layout.addWidget(ContactSectionHeader(letter, self.list_container))
             for contact in contacts:
-                item = SelectableContactListItem(contact, locked=False, parent=self.list_container)
+                item = SelectableContactListItem(
+                    contact,
+                    locked=self._fixed_contact is not None and contact.id == self._fixed_contact.id,
+                    parent=self.list_container,
+                )
                 item.set_selected(contact.id in self._selected_ids)
                 item.toggled.connect(self._toggle_member)
                 self.list_layout.addWidget(item)
@@ -348,7 +364,7 @@ class StartGroupChatDialog(MaskDialogBase):
         self._update_footer()
 
     def _update_footer(self) -> None:
-        selected_count = len(self._selected_ids)
+        selected_count = len(self._selected_contacts())
         if selected_count > 0:
             self.status_label.setText(
                 tr("chat.group_picker.status_selected", "{count} contacts selected", count=selected_count)
@@ -359,7 +375,9 @@ class StartGroupChatDialog(MaskDialogBase):
         self.complete_button.setEnabled(selected_count > 0)
 
     def _selected_contacts(self) -> list[ContactRecord]:
-        selected_ids = list(self._selected_ids)
+        selected_ids = set(self._selected_ids)
+        if self._fixed_contact is not None:
+            selected_ids.add(self._fixed_contact.id)
         selected_contacts = [contact for contact in self._contacts if contact.id in selected_ids]
         selected_contacts.sort(key=lambda item: item.display_name.lower())
         return selected_contacts
@@ -368,8 +386,10 @@ class StartGroupChatDialog(MaskDialogBase):
         self._clear_layout(self.selected_layout)
         contacts = self._selected_contacts()
         for index, contact in enumerate(contacts):
-            item = SelectedContactSummaryItem(contact, removable=True, parent=self.selected_container)
-            item.remove_requested.connect(self._remove_selected_member)
+            removable = not (self._fixed_contact is not None and contact.id == self._fixed_contact.id)
+            item = SelectedContactSummaryItem(contact, removable=removable, parent=self.selected_container)
+            if removable:
+                item.remove_requested.connect(self._remove_selected_member)
             self.selected_layout.addWidget(item)
             if index != len(contacts) - 1:
                 self.selected_layout.addWidget(
@@ -388,7 +408,7 @@ class StartGroupChatDialog(MaskDialogBase):
     def _create_group(self) -> None:
         if self._create_task and not self._create_task.done():
             return
-        if not self._selected_ids:
+        if not self._selected_contacts():
             InfoBar.warning(
                 tr("chat.group_picker.title", "Start Group Chat"),
                 tr("chat.group_picker.validation_members", "Select at least one contact."),
@@ -400,8 +420,52 @@ class StartGroupChatDialog(MaskDialogBase):
         name = self._default_group_name()
         self._set_create_task(self._create_group_async(name, member_ids))
 
+    def _refresh_contacts(self) -> None:
+        if self._refresh_task and not self._refresh_task.done():
+            return
+        if self._create_task and not self._create_task.done():
+            return
+        self._set_refresh_task(self._refresh_contacts_async())
+
+    async def _refresh_contacts_async(self) -> None:
+        self.refresh_button.setEnabled(False)
+        self.search_edit.setEnabled(False)
+        self.refresh_button.setText(tr("common.loading", "Loading..."))
+        try:
+            contacts = await self._controller.load_contacts()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            InfoBar.error(
+                tr("chat.group_picker.title", "Start Group Chat"),
+                str(exc),
+                parent=self,
+                duration=2200,
+            )
+            return
+        else:
+            current_fixed_id = str(self._fixed_contact.id if self._fixed_contact is not None else "" or "")
+            updated_fixed = next((contact for contact in contacts if contact.id == current_fixed_id), self._fixed_contact)
+            self._fixed_contact = updated_fixed if updated_fixed is not None and updated_fixed.id else self._fixed_contact
+            deduped_contacts: dict[str, ContactRecord] = {}
+            if self._fixed_contact is not None and self._fixed_contact.id:
+                deduped_contacts[self._fixed_contact.id] = self._fixed_contact
+            for contact in contacts:
+                if contact.id:
+                    deduped_contacts[contact.id] = contact
+            self._contacts = list(deduped_contacts.values())
+            valid_ids = {contact.id for contact in self._contacts if contact.id}
+            self._selected_ids.intersection_update(valid_ids)
+            self._rebuild_member_list()
+            self._update_footer()
+        finally:
+            self.refresh_button.setEnabled(True)
+            self.search_edit.setEnabled(True)
+            self.refresh_button.setText(tr("common.refresh", "Refresh"))
+
     async def _create_group_async(self, name: str, member_ids: list[str]) -> None:
         self.complete_button.setEnabled(False)
+        self.refresh_button.setEnabled(False)
         self.search_edit.setEnabled(False)
         self.complete_button.setText(tr("chat.group_picker.creating", "Creating..."))
         try:
@@ -422,12 +486,15 @@ class StartGroupChatDialog(MaskDialogBase):
             self.close()
         finally:
             self.complete_button.setEnabled(True)
+            self.refresh_button.setEnabled(True)
             self.search_edit.setEnabled(True)
             self.complete_button.setText(tr("chat.group_picker.complete", "Done"))
 
     def _on_finished(self, _result: int) -> None:
         self._cancel_pending_task(self._create_task)
         self._create_task = None
+        self._cancel_pending_task(self._refresh_task)
+        self._refresh_task = None
         self._cancel_all_ui_tasks()
 
     def _on_destroyed(self, *_args) -> None:
@@ -468,6 +535,14 @@ class StartGroupChatDialog(MaskDialogBase):
         if self._create_task is task:
             self._create_task = None
 
+    def _set_refresh_task(self, coro) -> None:
+        self._cancel_pending_task(self._refresh_task)
+        self._refresh_task = self._create_ui_task(coro, "refresh start group chat contacts", on_done=self._clear_refresh_task)
+
+    def _clear_refresh_task(self, task: asyncio.Task) -> None:
+        if self._refresh_task is task:
+            self._refresh_task = None
+
     def _clear_layout(self, layout: QVBoxLayout) -> None:
         while layout.count():
             item = layout.takeAt(0)
@@ -486,6 +561,7 @@ class CreateGroupDialog(QDialog):
         self._selected_ids: set[str] = set()
         self._member_items: dict[str, GroupMemberItem] = {}
         self._create_task: Optional[asyncio.Task] = None
+        self._refresh_task: Optional[asyncio.Task] = None
         self._ui_tasks: set[asyncio.Task] = set()
 
         self.setWindowTitle(tr("contact.create_group.window_title", "Create Group"))
@@ -522,7 +598,14 @@ class CreateGroupDialog(QDialog):
         self.search_edit = SearchLineEdit(self)
         self.search_edit.setPlaceholderText(tr("contact.create_group.search_placeholder", "Filter friends"))
         self.search_edit.setMinimumHeight(38)
-        layout.addWidget(self.search_edit)
+        search_row = QHBoxLayout()
+        search_row.setContentsMargins(0, 0, 0, 0)
+        search_row.setSpacing(10)
+        search_row.addWidget(self.search_edit, 1)
+        self.refresh_button = PushButton(tr("common.refresh", "Refresh"), self)
+        self.refresh_button.setMinimumHeight(38)
+        search_row.addWidget(self.refresh_button, 0)
+        layout.addLayout(search_row)
 
         self.summary_label = CaptionLabel(
             tr("contact.create_group.summary_minimum", "Select at least one friend."),
@@ -558,6 +641,7 @@ class CreateGroupDialog(QDialog):
         layout.addLayout(footer)
 
         self.search_edit.textChanged.connect(self._rebuild_member_list)
+        self.refresh_button.clicked.connect(self._refresh_contacts)
         self.cancel_button.clicked.connect(self.close)
         self.create_button.clicked.connect(self._create_group)
         self._update_name_placeholder()
@@ -627,6 +711,7 @@ class CreateGroupDialog(QDialog):
         self.name_edit.setPlaceholderText(
             generated_name or tr("contact.create_group.name_placeholder", "Enter group name")
         )
+
     def _create_group(self) -> None:
         if self._create_task and not self._create_task.done():
             return
@@ -647,6 +732,7 @@ class CreateGroupDialog(QDialog):
     async def _create_group_async(self, name: str, member_ids: list[str]) -> None:
         self.create_button.setEnabled(False)
         self.cancel_button.setEnabled(False)
+        self.refresh_button.setEnabled(False)
         self.search_edit.setEnabled(False)
         self.name_edit.setEnabled(False)
         self.create_button.setText(tr("contact.create_group.creating", "Creating..."))
@@ -668,6 +754,7 @@ class CreateGroupDialog(QDialog):
         finally:
             self.create_button.setEnabled(True)
             self.cancel_button.setEnabled(True)
+            self.refresh_button.setEnabled(True)
             self.search_edit.setEnabled(True)
             self.name_edit.setEnabled(True)
             self.create_button.setText(tr("contact.create_group.create", "Create Group"))
@@ -677,9 +764,40 @@ class CreateGroupDialog(QDialog):
         selected_contacts.sort(key=lambda item: item.display_name.lower())
         return selected_contacts
 
+    def _refresh_contacts(self) -> None:
+        if self._refresh_task and not self._refresh_task.done():
+            return
+        if self._create_task and not self._create_task.done():
+            return
+        self._set_refresh_task(self._refresh_contacts_async())
+
+    async def _refresh_contacts_async(self) -> None:
+        self.refresh_button.setEnabled(False)
+        self.search_edit.setEnabled(False)
+        self.refresh_button.setText(tr("common.loading", "Loading..."))
+        try:
+            contacts = await self._controller.load_contacts()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            InfoBar.error(tr("contact.create_group.title", "Create Group"), str(exc), parent=self, duration=2200)
+            return
+        else:
+            self._contacts = [contact for contact in contacts if contact.id]
+            valid_ids = {contact.id for contact in self._contacts}
+            self._selected_ids.intersection_update(valid_ids)
+            self._rebuild_member_list()
+            self._update_summary()
+        finally:
+            self.refresh_button.setEnabled(True)
+            self.search_edit.setEnabled(True)
+            self.refresh_button.setText(tr("common.refresh", "Refresh"))
+
     def _on_finished(self, _result: int) -> None:
         self._cancel_pending_task(self._create_task)
         self._create_task = None
+        self._cancel_pending_task(self._refresh_task)
+        self._refresh_task = None
         self._cancel_all_ui_tasks()
 
     def _on_destroyed(self, *_args) -> None:
@@ -719,6 +837,14 @@ class CreateGroupDialog(QDialog):
     def _clear_create_task(self, task: asyncio.Task) -> None:
         if self._create_task is task:
             self._create_task = None
+
+    def _set_refresh_task(self, coro) -> None:
+        self._cancel_pending_task(self._refresh_task)
+        self._refresh_task = self._create_ui_task(coro, "refresh create group contacts", on_done=self._clear_refresh_task)
+
+    def _clear_refresh_task(self, task: asyncio.Task) -> None:
+        if self._refresh_task is task:
+            self._refresh_task = None
 
     def _clear_layout(self, layout: QVBoxLayout) -> None:
         while layout.count():

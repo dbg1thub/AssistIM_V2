@@ -513,6 +513,8 @@ class ChatInfoPrivateContent(QWidget):
         self.mute_row.toggled.connect(self.muteToggled.emit)
         self.pin_row.toggled.connect(self.pinToggled.emit)
         self.clear_button.clicked.connect(self.clearRequested.emit)
+        self.search_row.hide()
+        self.clear_button.hide()
 
     def set_session(self, session: Session | None) -> None:
         self._session = session
@@ -809,6 +811,9 @@ class ChatInfoGroupContent(QWidget):
         self.view_more_button.clicked.connect(lambda: self._emit_member_management_request("browse"))
         self.clear_button.clicked.connect(self.clearRequested.emit)
         self.leave_button.clicked.connect(self.leaveRequested.emit)
+        self.search_row.hide()
+        self.search_divider.hide()
+        self.clear_button.hide()
         self.group_name_field.valueCommitted.connect(self._emit_group_name_update)
         self.note_field.valueCommitted.connect(self._emit_note_update)
         self.nickname_field.valueCommitted.connect(self._emit_nickname_update)

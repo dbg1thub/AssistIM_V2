@@ -534,6 +534,8 @@ class ContactDetailPanel(QWidget):
         self.message_button.clicked.connect(self._emit_message_request)
         self.voice_button.clicked.connect(self._show_unavailable)
         self.video_button.clicked.connect(self._show_unavailable)
+        self.voice_button.hide()
+        self.video_button.hide()
 
         layout.addLayout(header)
         layout.addWidget(self.info_container, 1)
@@ -587,8 +589,8 @@ class ContactDetailPanel(QWidget):
             (tr("contact.detail.label.status", "Status"), status_text or "-"),
         ])
         self.message_button.setEnabled(True)
-        self.voice_button.setEnabled(True)
-        self.video_button.setEnabled(True)
+        self.voice_button.setEnabled(False)
+        self.video_button.setEnabled(False)
         self.moments_panel.set_moments(moments or [])
 
     def set_group(self, group: GroupRecord, moments: Optional[list[MomentRecord]] = None) -> None:
@@ -608,14 +610,38 @@ class ContactDetailPanel(QWidget):
         self.moments_panel.set_moments(moments or [])
 
     def set_request(self, request: FriendRequestRecord, current_user_id: str = "", moments: Optional[list[MomentRecord]] = None) -> None:
-        self._entity = None
+        counterpart_id = request.counterpart_id(current_user_id)
         counterpart_name = request.counterpart_name(current_user_id)
-        self.avatar.set_avatar(fallback=counterpart_name)
+        counterpart_username = (
+            request.receiver_username if request.is_outgoing(current_user_id) else request.sender_username
+        )
+        self._entity = (
+            {
+                "type": "contact",
+                "data": {
+                    "id": counterpart_id,
+                    "display_name": counterpart_name,
+                    "name": counterpart_name,
+                    "username": counterpart_username,
+                    "assistim_id": counterpart_username,
+                    "avatar": request.counterpart_avatar(current_user_id),
+                },
+            }
+            if request.status == "accepted" and counterpart_id
+            else None
+        )
+        self.avatar.set_avatar(
+            request.counterpart_avatar(current_user_id),
+            fallback=counterpart_name,
+            gender=request.counterpart_gender(current_user_id),
+            seed=profile_avatar_seed(user_id=counterpart_id, username=counterpart_username, display_name=counterpart_name),
+        )
         self.title_label.setText(_request_title_text(request, current_user_id))
-        self.subtitle_label.setText(counterpart_name)
+        self.subtitle_label.setText(counterpart_username or counterpart_id or counterpart_name)
         self._set_rows([
             (tr("contact.detail.label.sender_id", "Sender ID"), request.sender_id or "-"),
             (tr("contact.detail.label.receiver_id", "Receiver ID"), request.receiver_id or "-"),
+            (tr("contact.detail.label.assistim_id", "AssistIM ID"), counterpart_username or counterpart_id or "-"),
             (tr("contact.detail.label.request_status", "Request Status"), _request_status_text(request.status)),
             (
                 tr("contact.detail.label.request_message", "Request Message"),
@@ -623,7 +649,7 @@ class ContactDetailPanel(QWidget):
             ),
             (tr("contact.detail.label.time", "Time"), request.created_at or "-"),
         ])
-        self.message_button.setEnabled(False)
+        self.message_button.setEnabled(self._entity is not None)
         self.voice_button.setEnabled(False)
         self.video_button.setEnabled(False)
         self.moments_panel.set_moments(moments or [])
@@ -896,6 +922,8 @@ class GalleryContactDetailPanel(QWidget):
         self.message_button.clicked.connect(self._emit_message_request)
         self.voice_button.clicked.connect(self._show_unavailable)
         self.video_button.clicked.connect(self._show_unavailable)
+        self.voice_button.hide()
+        self.video_button.hide()
 
         self.moments_panel = ContactMomentsFlowPanel(self)
 
@@ -946,8 +974,8 @@ class GalleryContactDetailPanel(QWidget):
             or tr("contact.relationship.established", "Friend relationship established")
         )
         self.message_button.setEnabled(True)
-        self.voice_button.setEnabled(True)
-        self.video_button.setEnabled(True)
+        self.voice_button.setEnabled(False)
+        self.video_button.setEnabled(False)
         self.moments_panel.set_moments(
             moments or [],
             tr("contact.moments.contact_empty", "This contact has no moments yet."),
@@ -979,11 +1007,36 @@ class GalleryContactDetailPanel(QWidget):
         )
 
     def set_request(self, request: FriendRequestRecord, current_user_id: str = "", moments: Optional[list[MomentRecord]] = None) -> None:
-        self._entity = None
+        counterpart_id = request.counterpart_id(current_user_id)
         counterpart_name = request.counterpart_name(current_user_id)
-        self.avatar.set_avatar(fallback=counterpart_name)
+        counterpart_username = (
+            request.receiver_username if request.is_outgoing(current_user_id) else request.sender_username
+        )
+        self._entity = (
+            {
+                "type": "contact",
+                "data": {
+                    "id": counterpart_id,
+                    "display_name": counterpart_name,
+                    "name": counterpart_name,
+                    "username": counterpart_username,
+                    "assistim_id": counterpart_username,
+                    "avatar": request.counterpart_avatar(current_user_id),
+                },
+            }
+            if request.status == "accepted" and counterpart_id
+            else None
+        )
+        self.avatar.set_avatar(
+            request.counterpart_avatar(current_user_id),
+            fallback=counterpart_name,
+            gender=request.counterpart_gender(current_user_id),
+            seed=profile_avatar_seed(user_id=counterpart_id, username=counterpart_username, display_name=counterpart_name),
+        )
         self.title_label.setText(_request_title_text(request, current_user_id))
-        self.subtitle_label.setText(f"{tr('contact.detail.label.assistim_id', 'AssistIM ID')} {counterpart_name}")
+        self.subtitle_label.setText(
+            f"{tr('contact.detail.label.assistim_id', 'AssistIM ID')} {counterpart_username or counterpart_id or '-'}"
+        )
         self.meta_primary_label.setText(
             " │ ".join(
                 filter(
@@ -996,7 +1049,7 @@ class GalleryContactDetailPanel(QWidget):
                 )
             )
         )
-        self.message_button.setEnabled(False)
+        self.message_button.setEnabled(self._entity is not None)
         self.voice_button.setEnabled(False)
         self.video_button.setEnabled(False)
         self.moments_panel.set_moments(
@@ -1494,6 +1547,8 @@ class ContactInterface(QWidget):
         self._keyed_ui_tasks: dict[tuple[str, str], asyncio.Task] = {}
         self._ui_tasks: set[asyncio.Task] = set()
         self._dialog_refs: set[QWidget] = set()
+        self._add_friend_dialog: AddFriendDialog | None = None
+        self._create_group_dialog: CreateGroupDialog | None = None
         self._current_user_id = ""
         self._initial_load_done = False
         self._destroyed = False
@@ -1530,7 +1585,6 @@ class ContactInterface(QWidget):
 
         self.summary_label = CaptionLabel(tr("contact.sidebar.loading", "Loading contacts..."), sidebar)
         self.summary_label.setObjectName("contactSummaryLabel")
-        self.summary_label.hide()
 
         self.search_bar = QWidget(sidebar)
         self.search_bar.setObjectName("sessionSearchBar")
@@ -1636,8 +1690,11 @@ class ContactInterface(QWidget):
         self.page_stack.setCurrentIndex({"friends": 0, "groups": 1, "requests": 2}[key])
 
     def _switch_page(self, key: str) -> None:
+        if key != self._current_page:
+            self._clear_active_selection()
         self._activate_page(key)
         self._rebuild_current_page()
+        self._refresh_search_surface()
 
     def reload_data(self) -> None:
         if self._destroyed or not is_valid_qt_object(self):
@@ -1654,12 +1711,15 @@ class ContactInterface(QWidget):
         reason = str(event_payload.get("reason", "") or "")
         if reason == "user_profile_update":
             self._apply_profile_update_payload(dict(event_payload.get("payload") or {}))
+            self._refresh_search_surface()
             return
         if reason == "group_profile_update":
             self._apply_group_update_payload(dict(event_payload.get("payload") or {}))
+            self._refresh_search_surface()
             return
         if reason == "group_self_profile_update":
             self._apply_group_self_profile_update_payload(dict(event_payload.get("payload") or {}))
+            self._refresh_search_surface()
             return
         if reason in {"friend_request_created", "friend_request_updated"}:
             self._schedule_keyed_ui_task(
@@ -1700,6 +1760,7 @@ class ContactInterface(QWidget):
         self._build_requests_page()
         if self._current_page == "requests":
             self._restore_selection(full_reload=False)
+        self._refresh_search_surface()
 
     async def _refresh_contacts_and_requests_slices_async(self) -> None:
         contacts, requests = await asyncio.gather(
@@ -1714,6 +1775,7 @@ class ContactInterface(QWidget):
         self._build_friends_page()
         self._build_requests_page()
         self._restore_selection(full_reload=False)
+        self._refresh_search_surface()
 
     def refresh_profile_related_slices(self) -> None:
         """Refresh self-facing contact slices after the current user changes their profile."""
@@ -1741,6 +1803,7 @@ class ContactInterface(QWidget):
         self._build_groups_page()
         self._build_requests_page()
         self._restore_selection(full_reload=False)
+        self._refresh_search_surface()
 
     def _current_detail_moments(self) -> list[MomentRecord]:
         moments_panel = getattr(self.detail_panel, "moments_panel", None)
@@ -1858,6 +1921,9 @@ class ContactInterface(QWidget):
     def _ordered_requests(self) -> list[FriendRequestRecord]:
         return sorted(self._requests, key=self._request_sort_key)
 
+    def _visible_requests(self) -> list[FriendRequestRecord]:
+        return [request for request in self._ordered_requests() if request.status == "pending"]
+
     def _request_sort_key(self, request: FriendRequestRecord) -> tuple[int, float, str]:
         """Keep request ordering stable across reload and realtime upsert paths."""
         if request.is_incoming(self._current_user_id):
@@ -1958,6 +2024,8 @@ class ContactInterface(QWidget):
             created_at=str(payload.get("created_at", "") or ""),
             sender_name=str(from_user.get("nickname", "") or from_user.get("username", "") or payload.get("sender_name", "") or ""),
             receiver_name=str(to_user.get("nickname", "") or to_user.get("username", "") or payload.get("receiver_name", "") or ""),
+            sender_username=str(from_user.get("username", "") or payload.get("sender_username", "") or ""),
+            receiver_username=str(to_user.get("username", "") or payload.get("receiver_username", "") or ""),
             sender_avatar=str(from_user.get("avatar", "") or payload.get("sender_avatar", "") or ""),
             receiver_avatar=str(to_user.get("avatar", "") or payload.get("receiver_avatar", "") or ""),
             sender_gender=str(from_user.get("gender", "") or payload.get("sender_gender", "") or ""),
@@ -1991,7 +2059,7 @@ class ContactInterface(QWidget):
         counterpart_avatar = request.counterpart_avatar(self._current_user_id)
         counterpart_gender = request.counterpart_gender(self._current_user_id)
         current_user_is_receiver = request.receiver_id == self._current_user_id
-        raw_username = request.sender_name if current_user_is_receiver else request.receiver_name
+        raw_username = request.sender_username if current_user_is_receiver else request.receiver_username
         username = str(raw_username or "").strip()
         nickname = counterpart_name if counterpart_name and counterpart_name != username else ""
         return ContactRecord(
@@ -2250,16 +2318,16 @@ class ContactInterface(QWidget):
         logger.info("Contact interface reload started")
         self.summary_label.setText(tr("contact.sidebar.syncing", "Syncing contact data..."))
         try:
-            self._contacts = await self._controller.load_contacts()
+            contacts = await self._controller.load_contacts()
             if self._destroyed:
                 return
             await asyncio.sleep(0)
-            self._groups = await self._controller.load_groups()
+            groups = await self._controller.load_groups()
             if self._destroyed:
                 return
             await asyncio.sleep(0)
-            self._requests = await self._controller.load_requests()
-            self._moments = []
+            requests = await self._controller.load_requests()
+            moments: list[MomentRecord] = []
         except asyncio.CancelledError:
             raise
         except (APIError, NetworkError) as exc:
@@ -2283,6 +2351,10 @@ class ContactInterface(QWidget):
 
         if not self._can_update_contact_ui():
             return
+        self._contacts = contacts
+        self._groups = groups
+        self._requests = requests
+        self._moments = moments
         logger.info(
             "Contact interface reload fetched %d friends, %d groups, %d requests",
             len(self._contacts),
@@ -2323,7 +2395,7 @@ class ContactInterface(QWidget):
                 "{friends} friends · {groups} groups · {requests} requests",
                 friends=len(self._contacts),
                 groups=len(self._groups),
-                requests=len(self._requests),
+                requests=len(self._visible_requests()),
             )
         )
 
@@ -2331,6 +2403,15 @@ class ContactInterface(QWidget):
         """Open or update the anchored search flyout for the current keyword."""
         keyword = str(text or "").strip()
         self._pending_search_keyword = keyword
+
+        if self._current_page == "requests":
+            self._search_timer.stop()
+            self._cancel_pending_task(self._search_task)
+            self._search_task = None
+            self._dismiss_search_flyout(clear_results=True)
+            self._build_requests_page()
+            self._restore_selection(full_reload=False)
+            return
 
         if not keyword:
             self._search_timer.stop()
@@ -2344,7 +2425,7 @@ class ContactInterface(QWidget):
     def _trigger_global_search(self) -> None:
         """Run the latest pending grouped sidebar search request."""
         keyword = self._pending_search_keyword
-        if not keyword:
+        if not keyword or self._current_page == "requests":
             return
         self._search_generation += 1
         generation = self._search_generation
@@ -2356,16 +2437,41 @@ class ContactInterface(QWidget):
     async def _run_global_search(self, keyword: str, generation: int) -> None:
         """Populate grouped local-search results for the contact sidebar."""
         results = await search_all(keyword, message_limit=30, contact_limit=30, group_limit=30)
-        if self._destroyed or self.search_box.text().strip() != keyword or generation != self._search_generation:
+        if (
+            self._destroyed
+            or self.search_box.text().strip() != keyword
+            or generation != self._search_generation
+            or self._current_page == "requests"
+        ):
             return
         flyout_view = self._show_search_flyout()
         if flyout_view is not None:
             flyout_view.set_results(keyword, results)
 
     def _on_search_result_activated(self, payload: object) -> None:
-        """Route one grouped-search result into the shared chat-opening flow."""
-        self.clear_search()
-        self.message_requested.emit(payload)
+        """Route one grouped-search result into local detail selection or chat open flow."""
+        if not isinstance(payload, dict):
+            return
+        target_type = str(payload.get("type", "") or "")
+        data = dict(payload.get("data") or {}) if isinstance(payload.get("data"), dict) else {}
+        if target_type == "contact":
+            contact_id = str(data.get("id", "") or data.get("user_id", "") or "").strip()
+            if contact_id and contact_id in self._friend_items:
+                self._activate_page("friends")
+                self._select_friend(contact_id, force=True)
+                self.clear_search()
+            return
+        if target_type == "group":
+            group_id = str(data.get("id", "") or data.get("group_id", "") or "").strip()
+            if group_id and group_id in self._group_items:
+                self._activate_page("groups")
+                self._select_group(group_id, force=True)
+                self.clear_search()
+            return
+
+        routed_payload = dict(payload)
+        routed_payload["_clear_contact_search"] = True
+        self.message_requested.emit(routed_payload)
 
     def clear_search(self) -> None:
         """Clear the shared sidebar search box and anchored results flyout."""
@@ -2407,6 +2513,22 @@ class ContactInterface(QWidget):
         """Reset search state when the overlay closes outside normal clear flow."""
         self._clear_search_flyout()
 
+    def _refresh_search_surface(self) -> None:
+        keyword = self.search_box.text().strip()
+        if self._current_page == "requests":
+            if keyword:
+                self._build_requests_page()
+                self._restore_selection(full_reload=False)
+            return
+        if not keyword or self._search_flyout_view is None:
+            return
+        self._search_generation += 1
+        generation = self._search_generation
+        flyout_view = self._show_search_flyout()
+        if flyout_view is not None:
+            flyout_view.set_loading(keyword)
+        self._set_search_task(self._run_global_search(keyword, generation))
+
     @staticmethod
     def _friend_assistim_line(contact: ContactRecord) -> str:
         return str(contact.assistim_id or contact.username or "").strip() or "-"
@@ -2414,6 +2536,13 @@ class ContactInterface(QWidget):
     def _cancel_moment_load(self) -> None:
         self._cancel_pending_task(self._moment_load_task)
         self._moment_load_task = None
+
+    def _clear_active_selection(self) -> None:
+        self._cancel_moment_load()
+        self._selected_key = None
+        self._clear_selection()
+        self.detail_panel.show_placeholder()
+        self._show_welcome_panel()
 
     def _load_detail_moments(self, user_id: str, kind: str, selection_id: str) -> None:
         self._cancel_moment_load()
@@ -2430,7 +2559,8 @@ class ContactInterface(QWidget):
             logger.debug("Contact detail moments load failed for %s", user_id, exc_info=True)
             moments = []
 
-        if self._selected_key != (kind, selection_id):
+        current_category = {"friends": "friend", "groups": "group", "requests": "request"}[self._current_page]
+        if self._selected_key != (kind, selection_id) or kind != current_category:
             return
 
         payload = self._resolve_detail_selection_payload(kind, selection_id)
@@ -2489,17 +2619,29 @@ class ContactInterface(QWidget):
     def _build_requests_page(self) -> None:
         self._clear_layout(self.requests_layout)
         self._request_items.clear()
-        if not self._requests:
+        requests = self._visible_requests()
+        keyword = self.search_box.text().strip().lower() if self._current_page == "requests" else ""
+        if keyword:
+            requests = [
+                item
+                for item in requests
+                if keyword in str(item.counterpart_name(self._current_user_id) or "").lower()
+                or keyword in str(item.counterpart_id(self._current_user_id) or "").lower()
+                or keyword in str(item.message or "").lower()
+            ]
+        if not requests:
             self._add_empty_state(
                 self.requests_layout,
                 AppIcon.ADD,
-                tr("contact.sidebar.empty_requests", "No new friend requests"),
+                tr("contact.sidebar.empty_requests", "No new friend requests")
+                if not keyword
+                else tr("contact.request.empty_results", "No matching friend requests."),
             )
             return
 
-        incoming = [item for item in self._requests if item.is_incoming(self._current_user_id)]
-        outgoing = [item for item in self._requests if item.is_outgoing(self._current_user_id)]
-        unknown = [item for item in self._requests if not item.is_incoming(self._current_user_id) and not item.is_outgoing(self._current_user_id)]
+        incoming = [item for item in requests if item.is_incoming(self._current_user_id)]
+        outgoing = [item for item in requests if item.is_outgoing(self._current_user_id)]
+        unknown = [item for item in requests if not item.is_incoming(self._current_user_id) and not item.is_outgoing(self._current_user_id)]
         ordered_requests = incoming + outgoing + unknown
         for request in ordered_requests:
             item = self._create_request_item(request)
@@ -2516,19 +2658,8 @@ class ContactInterface(QWidget):
         current_category = {"friends": "friend", "groups": "group", "requests": "request"}[self._current_page]
         if self._selected_key:
             category, item_id = self._selected_key
-            if not full_reload:
-                if category != current_category:
-                    self._clear_selection()
-                    self._show_welcome_panel()
-                    return
-                current_visible = current_map[self._current_page]
-                if item_id in current_visible:
-                    self._clear_selection()
-                    current_visible[item_id].set_selected(True)
-                    self._show_detail_panel()
-                else:
-                    self._clear_selection()
-                    self._show_welcome_panel()
+            if category != current_category:
+                self._clear_active_selection()
                 return
             if category == "friend" and item_id in self._friend_items:
                 self._select_friend(item_id, force=True)
@@ -2539,10 +2670,9 @@ class ContactInterface(QWidget):
             if category == "request" and item_id in self._request_items:
                 self._select_request(item_id, force=True)
                 return
-        self._cancel_moment_load()
-        self._clear_selection()
-        self.detail_panel.show_placeholder()
-        self._show_welcome_panel()
+            if not full_reload and item_id in current_map[self._current_page]:
+                return
+        self._clear_active_selection()
 
     def _select_friend(self, contact_id: str, force: bool = False) -> None:
         selected = next((item for item in self._contacts if item.id == contact_id), None)
@@ -2637,6 +2767,8 @@ class ContactInterface(QWidget):
 
     def _show_add_placeholder(self) -> None:
         if self._current_page == "friends":
+            if self._raise_existing_dialog(self._add_friend_dialog):
+                return
             dialog = AddFriendDialog(
                 self._controller,
                 {item.id for item in self._contacts},
@@ -2644,6 +2776,8 @@ class ContactInterface(QWidget):
                 self.window(),
             )
             dialog.friend_request_sent.connect(self._on_friend_request_sent)
+            self._add_friend_dialog = dialog
+            dialog.destroyed.connect(lambda *_args: setattr(self, "_add_friend_dialog", None))
             self._show_dialog(dialog)
             return
 
@@ -2656,8 +2790,12 @@ class ContactInterface(QWidget):
                     duration=2000,
                 )
                 return
+            if self._raise_existing_dialog(self._create_group_dialog):
+                return
             dialog = CreateGroupDialog(self._controller, self._contacts, self.window())
             dialog.group_created.connect(self._on_group_created)
+            self._create_group_dialog = dialog
+            dialog.destroyed.connect(lambda *_args: setattr(self, "_create_group_dialog", None))
             self._show_dialog(dialog)
             return
 
@@ -2679,6 +2817,14 @@ class ContactInterface(QWidget):
         dialog.show()
         dialog.raise_()
         dialog.activateWindow()
+
+    def _raise_existing_dialog(self, dialog: QWidget | None) -> bool:
+        if dialog is None or not is_valid_qt_object(dialog):
+            return False
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+        return True
 
     def _on_friend_request_sent(self, payload: object) -> None:
         """Refresh only the affected sidebar slices after a friend action dialog completes."""

@@ -856,6 +856,21 @@
 
 ### G-06：聊天页与联系人页的 UI 入口和本地状态机有大量页内一致性缺口
 
+状态：closed（2026-04-14）
+
+本轮修复说明：
+
+- 联系人页搜索结果按领域语义收口：命中联系人/群优先定位本页详情，只有消息结果才进入聊天跳转；聊天打开失败时不再先切走页面，也不会先清掉搜索状态。
+- 联系人页切 tab 会清掉隐藏选中态并取消旧详情加载；`restore_selection()` 改为重建 detail payload，full reload 改成局部临时变量全部成功后再原子替换，避免半刷新和旧详情回弹。
+- 好友请求详情改用请求自带 avatar/gender，补真实 `username/assistim_id` 字段；accepted 请求不再是死详情，当前设备可以直接从详情页发消息。
+- 联系人详情的语音/视频占位按钮、聊天页顶部 history 入口、聊天信息抽屉里的 search/clear 死入口都已下线；聊天输入区通话按钮只在 direct 且非 AI 会话里显示。
+- 会话侧边栏搜索重新接回 `SessionFilterProxyModel`，联系人页 requests tab 改成搜 pending 请求本身；搜索弹层关闭不再清关键词，资料增量更新会刷新当前可见搜索结果。
+- Add Friend、Create Group 和私聊发起建群入口都补了单实例/在途保护；两个建群弹窗和私聊建群选择器改为可刷新候选数据源，不再把好友快照冻在打开瞬间。
+- 私聊发起建群时，当前对话对象改为固定成员；即使只有当前私聊对象也能进入建群流程，不会再把 counterpart 从候选和最终成员里排掉。
+- 联系人 requests 页改为 pending inbox 语义，summary 计数与列表范围收口到待处理请求；首条请求/首个 accepted 请求都能立即驱动本地列表与详情状态。
+- `search_all()` 改为单次本地结果快照，不再额外发 count 查询；消息结果卡片不再展示截断批次里的伪总数，非加密附件文件名/类型也进入本地消息搜索。
+- 回归覆盖：`client/tests/test_ui_boundaries.py`、`client/tests/test_service_boundaries.py` 与客户端相关回归套件通过。
+
 合并范围：
 
 - `F-119` 到 `F-158`

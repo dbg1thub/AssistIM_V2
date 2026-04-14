@@ -1061,10 +1061,6 @@ class MainWindow(FluentWindow):
         """Route contact actions into the chat page."""
         if not self._is_ui_callback_generation_current(generation):
             return
-        if hasattr(self, "switchTo"):
-            self.switchTo(self.chat_interface)
-        else:
-            self.stackedWidget.setCurrentWidget(self.chat_interface)
 
         def _target_value(target: object, key: str, default: object = "") -> object:
             if isinstance(target, dict):
@@ -1113,3 +1109,12 @@ class MainWindow(FluentWindow):
                 parent=self,
                 duration=2200,
             )
+            return
+
+        if hasattr(self, "switchTo"):
+            self.switchTo(self.chat_interface)
+        else:
+            self.stackedWidget.setCurrentWidget(self.chat_interface)
+
+        if isinstance(payload, dict) and payload.get("_clear_contact_search"):
+            self.contact_interface.clear_search()

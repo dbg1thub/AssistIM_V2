@@ -2862,7 +2862,7 @@ def test_database_search_messages_escapes_like_wildcards() -> None:
 
         assert len(messages) == 1
         assert messages[0].content == 'literal 100%_off keyword'
-        assert len(fake_connection.execute_calls) == 2
+        assert len(fake_connection.execute_calls) == 3
 
         sql, params = fake_connection.execute_calls[-1]
         assert "content LIKE ? ESCAPE '\\'" in sql
@@ -2908,6 +2908,36 @@ def test_session_manager_refresh_remote_sessions_uses_session_service(monkeypatc
         }
         assert sessions[0].uses_e2ee() is False
         assert sessions[0].unread_count == 4
+
+    asyncio.run(scenario())
+
+
+def test_database_search_messages_matches_plain_attachment_names() -> None:
+    fake_connection = FakeSearchConnection(
+        [
+            {
+                'message_id': 'msg-attachment-1',
+                'session_id': 'session-1',
+                'sender_id': 'user-1',
+                'content': '',
+                'message_type': 'file',
+                'status': 'sent',
+                'timestamp': 1700000000,
+                'updated_at': 1700000001,
+                'is_self': 1,
+                'is_ai': 0,
+                'extra': json.dumps({'name': 'Quarterly Report.pdf', 'file_type': 'application/pdf'}),
+            }
+        ]
+    )
+
+    async def scenario() -> None:
+        db = database_module.Database(db_path='client/tests/.pytest_tmp/search-attachment-test.db')
+        db._db = fake_connection
+
+        messages = await db.search_messages('report', session_id='session-1', limit=10)
+
+        assert [message.message_id for message in messages] == ['msg-attachment-1']
 
     asyncio.run(scenario())
 

@@ -30,20 +30,26 @@ class ChatGroupFlowCoordinator:
         self._schedule_ui_task = schedule_ui_task
         self._close_chat_info_drawer = close_chat_info_drawer
         self._open_group_session = open_group_session
+        self._start_group_dialog: QDialog | None = None
+        self._dialog_loading = False
 
     async def show_start_group_dialog(self, session) -> None:
         """Load contacts and open the frameless modal used to start one new group chat."""
-        counterpart_id = self._resolve_counterpart_id(session)
-        if not counterpart_id:
-            InfoBar.warning(
-                tr("chat.group_picker.title", "Start Group Chat"),
-                tr("chat.group_picker.no_counterpart", "Unable to resolve the current private chat participant."),
-                parent=self._window_provider(),
-                duration=2200,
-            )
+        if self._raise_existing_dialog():
             return
-
+        if self._dialog_loading:
+            return
+        self._dialog_loading = True
         try:
+            counterpart_id = self._resolve_counterpart_id(session)
+            if not counterpart_id:
+                InfoBar.warning(
+                    tr("chat.group_picker.title", "Start Group Chat"),
+                    tr("chat.group_picker.no_counterpart", "Unable to resolve the current private chat participant."),
+                    parent=self._window_provider(),
+                    duration=2200,
+                )
+                return
             contacts = await self._contact_controller.load_contacts()
         except Exception as exc:
             InfoBar.error(
@@ -54,24 +60,29 @@ class ChatGroupFlowCoordinator:
             )
             return
 
-        contacts = self._merge_group_picker_contacts(contacts, counterpart_id)
-        if not contacts:
-            InfoBar.info(
-                tr("chat.group_picker.title", "Start Group Chat"),
-                tr("chat.group_picker.no_contacts", "There are no additional contacts available to add."),
-                parent=self._window_provider(),
-                duration=2200,
-            )
-            return
+        try:
+            fixed_contact = next((contact for contact in contacts if contact.id == counterpart_id), None)
+            if fixed_contact is None:
+                InfoBar.warning(
+                    tr("chat.group_picker.title", "Start Group Chat"),
+                    tr("chat.group_picker.no_counterpart", "Unable to resolve the current private chat participant."),
+                    parent=self._window_provider(),
+                    duration=2200,
+                )
+                return
 
-        dialog = StartGroupChatDialog(
-            self._contact_controller,
-            contacts,
-            excluded_contact_id=counterpart_id,
-            parent=self._window_provider(),
-        )
-        dialog.group_created.connect(self.handle_group_created)
-        self._show_dialog(dialog)
+            dialog = StartGroupChatDialog(
+                self._contact_controller,
+                self._merge_group_picker_contacts(contacts),
+                fixed_contact=fixed_contact,
+                parent=self._window_provider(),
+            )
+            dialog.group_created.connect(self.handle_group_created)
+            self._start_group_dialog = dialog
+            dialog.destroyed.connect(lambda *_args: setattr(self, "_start_group_dialog", None))
+            self._show_dialog(dialog)
+        finally:
+            self._dialog_loading = False
 
     def handle_group_created(self, group: object) -> None:
         """Jump from the current private chat into the newly created group."""
@@ -122,11 +133,11 @@ class ChatGroupFlowCoordinator:
         return ""
 
     @staticmethod
-    def _merge_group_picker_contacts(contacts, counterpart_id: str):
-        """Return deduplicated friends excluding the active private-chat participant."""
+    def _merge_group_picker_contacts(contacts):
+        """Return deduplicated friends including the active private-chat participant."""
         deduped = {}
         for contact in contacts:
-            if contact.id and contact.id != counterpart_id:
+            if contact.id:
                 deduped[contact.id] = contact
 
         return sorted(
@@ -142,3 +153,12 @@ class ChatGroupFlowCoordinator:
         dialog.open()
         dialog.raise_()
         dialog.activateWindow()
+
+    def _raise_existing_dialog(self) -> bool:
+        dialog = self._start_group_dialog
+        if dialog is None:
+            return False
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+        return True

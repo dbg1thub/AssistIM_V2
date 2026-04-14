@@ -70,6 +70,7 @@ class ChatHeader(QWidget):
         self.history_button = TransparentToolButton(CollectionIcon("history"), self)
         self.history_button.setFixedSize(36, 36)
         self.history_button.setToolTip(tr("chat_header.history_tooltip", "Chat History"))
+        self.history_button.hide()
 
         self.info_button = TransparentToolButton(AppIcon.INFO, self)
         self.info_button.setFixedSize(36, 36)
@@ -144,7 +145,7 @@ class ChatHeader(QWidget):
 
     def set_actions_enabled(self, enabled: bool) -> None:
         """Enable or disable the header action buttons together."""
-        self.history_button.setEnabled(enabled)
+        self.history_button.setEnabled(False)
         self.info_button.setEnabled(enabled)
 
     def set_security_badges(self, badges: list[dict[str, str]]) -> None:

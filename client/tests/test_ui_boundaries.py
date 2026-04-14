@@ -445,6 +445,80 @@ def test_contact_interface_removes_dead_search_helper_and_reuses_item_factories(
     assert 'item = self._create_request_item(request)' in contact_interface
 
 
+def test_contact_interface_search_and_tab_state_follow_local_domain_contracts() -> None:
+    contact_interface = Path('client/ui/windows/contact_interface.py').read_text(encoding='utf-8')
+    main_window = Path('client/ui/windows/main_window.py').read_text(encoding='utf-8')
+
+    assert 'if key != self._current_page:\n            self._clear_active_selection()' in contact_interface
+    assert 'def _clear_active_selection(self) -> None:' in contact_interface
+    assert 'self._contacts = await self._controller.load_contacts()' not in contact_interface.split('async def _reload_data_async', 1)[1].split('def _rebuild_current_page', 1)[0]
+    assert 'contacts = await self._controller.load_contacts()' in contact_interface
+    assert 'groups = await self._controller.load_groups()' in contact_interface
+    assert 'requests = await self._controller.load_requests()' in contact_interface
+    assert 'if self._current_page == "requests":' in contact_interface.split('def _on_search_text_changed', 1)[1].split('def _trigger_global_search', 1)[0]
+    assert 'self._build_requests_page()' in contact_interface.split('def _on_search_text_changed', 1)[1].split('def _trigger_global_search', 1)[0]
+    assert 'self._activate_page("friends")' in contact_interface.split('def _on_search_result_activated', 1)[1]
+    assert 'self._activate_page("groups")' in contact_interface.split('def _on_search_result_activated', 1)[1]
+    assert 'routed_payload["_clear_contact_search"] = True' in contact_interface
+    open_target_block = main_window.split('async def _open_contact_target', 1)[1].split('def _on_contact_message_requested', 1)[0]
+    assert 'if hasattr(self, "switchTo"):' in open_target_block
+    assert open_target_block.index('if not opened:') < open_target_block.index('if hasattr(self, "switchTo"):')
+    assert 'self.contact_interface.clear_search()' in open_target_block
+
+
+def test_request_detail_and_dialog_entry_points_use_authoritative_contact_semantics() -> None:
+    contact_interface = Path('client/ui/windows/contact_interface.py').read_text(encoding='utf-8')
+    contact_controller = Path('client/ui/controllers/contact_controller.py').read_text(encoding='utf-8')
+
+    assert 'sender_username: str = ""' in contact_controller
+    assert 'receiver_username: str = ""' in contact_controller
+    assert 'sender_username=str(sender.get("username", "") or "")' in contact_controller
+    assert 'receiver_username=str(receiver.get("username", "") or "")' in contact_controller
+    assert 'request.sender_username if current_user_is_receiver else request.receiver_username' in contact_interface
+    assert 'counterpart_username = (' in contact_interface
+    assert 'self.message_button.setEnabled(self._entity is not None)' in contact_interface
+    assert 'self._add_friend_dialog: AddFriendDialog | None = None' in contact_interface
+    assert 'self._create_group_dialog: CreateGroupDialog | None = None' in contact_interface
+    assert 'if self._raise_existing_dialog(self._add_friend_dialog):' in contact_interface
+    assert 'if self._raise_existing_dialog(self._create_group_dialog):' in contact_interface
+
+
+def test_chat_search_and_call_entry_points_hide_unwired_actions_and_keep_direct_context() -> None:
+    chat_header = Path('client/ui/widgets/chat_header.py').read_text(encoding='utf-8')
+    chat_info_drawer = Path('client/ui/widgets/chat_info_drawer.py').read_text(encoding='utf-8')
+    contact_interface = Path('client/ui/windows/contact_interface.py').read_text(encoding='utf-8')
+    message_input = Path('client/ui/widgets/message_input.py').read_text(encoding='utf-8')
+    group_dialogs = Path('client/ui/windows/group_creation_dialogs.py').read_text(encoding='utf-8')
+    group_flow = Path('client/ui/windows/chat_group_flow.py').read_text(encoding='utf-8')
+    search_manager = Path('client/managers/search_manager.py').read_text(encoding='utf-8')
+    search_panel = Path('client/ui/widgets/global_search_panel.py').read_text(encoding='utf-8')
+
+    assert 'self.history_button.hide()' in chat_header
+    assert 'self.search_row.hide()' in chat_info_drawer
+    assert 'self.clear_button.hide()' in chat_info_drawer
+    assert 'self.summary_label.hide()' not in contact_interface
+    assert 'def _update_call_buttons(self) -> None:' in message_input
+    assert 'session.session_type == "direct"' in message_input
+    assert 'not session.is_ai_session' in message_input
+    assert 'self.voice_button.setVisible(supports_call)' in message_input
+    assert 'self.video_button.setVisible(supports_call)' in message_input
+    assert 'fixed_contact: ContactRecord | None' in group_dialogs
+    assert 'self.refresh_button = PushButton(tr("common.refresh", "Refresh"), self.search_bar)' in group_dialogs
+    assert 'self.refresh_button = PushButton(tr("common.refresh", "Refresh"), self)' in group_dialogs
+    assert 'def _refresh_contacts_async(self) -> None:' in group_dialogs
+    assert 'selected_ids.add(self._fixed_contact.id)' in group_dialogs
+    assert 'removable = not (self._fixed_contact is not None and contact.id == self._fixed_contact.id)' in group_dialogs
+    assert 'self._dialog_loading = False' in group_flow
+    assert 'if self._raise_existing_dialog():' in group_flow
+    assert 'fixed_contact = next((contact for contact in contacts if contact.id == counterpart_id), None)' in group_flow
+    assert 'fixed_contact=fixed_contact' in group_flow
+    assert 'count_messages = getattr(self._db, "count_search_message_sessions", None)' not in search_manager
+    assert 'catalog.message_total = len(messages)' in search_manager
+    assert 'catalog.contact_total = len(contacts)' in search_manager
+    assert 'catalog.group_total = len(groups)' in search_manager
+    assert 'meta=tr("search.message.total"' not in search_panel
+
+
 def test_main_window_tray_alerts_respect_authoritative_mute_state() -> None:
     main_window = Path('client/ui/windows/main_window.py').read_text(encoding='utf-8')
 

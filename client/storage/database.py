@@ -1569,10 +1569,15 @@ class Database:
             session_id=session_id,
             limit=normalized_limit,
         )
+        attachment_matches = await self._search_plain_attachment_metadata(
+            normalized_keyword,
+            session_id=session_id,
+            limit=normalized_limit,
+        )
         if self._should_use_search_fts(normalized_keyword):
             try:
                 plain_matches = await self._search_messages_fts(normalized_keyword, session_id=session_id, limit=normalized_limit)
-                return self._merge_search_results(plain_matches, encrypted_matches, normalized_limit)
+                return self._merge_search_results(plain_matches, attachment_matches, encrypted_matches, limit=normalized_limit)
             except Exception as exc:
                 logger.debug("Message FTS search failed, falling back to LIKE: %s", exc)
         like_pattern = self._escape_like_pattern(normalized_keyword)
@@ -1603,7 +1608,7 @@ class Database:
 
         rows = await cursor.fetchall()
         plain_matches = [self._row_to_message(row) for row in rows]
-        return self._merge_search_results(plain_matches, encrypted_matches, normalized_limit)
+        return self._merge_search_results(plain_matches, attachment_matches, encrypted_matches, limit=normalized_limit)
 
     async def count_search_message_sessions(
         self,
@@ -1621,11 +1626,15 @@ class Database:
                     normalized_keyword,
                     session_id=session_id,
                 )
+                attachment_session_ids = await self._search_plain_attachment_metadata_session_ids(
+                    normalized_keyword,
+                    session_id=session_id,
+                )
                 encrypted_session_ids = await self._search_encrypted_local_cache_session_ids(
                     normalized_keyword,
                     session_id=session_id,
                 )
-                return len(plain_session_ids | encrypted_session_ids)
+                return len(plain_session_ids | attachment_session_ids | encrypted_session_ids)
             except Exception as exc:
                 logger.debug("Message FTS count failed, falling back to LIKE: %s", exc)
 
@@ -1653,11 +1662,15 @@ class Database:
             )
         rows = await cursor.fetchall()
         plain_session_ids = {str(row["session_id"] or "").strip() for row in rows if str(row["session_id"] or "").strip()}
+        attachment_session_ids = await self._search_plain_attachment_metadata_session_ids(
+            normalized_keyword,
+            session_id=session_id,
+        )
         encrypted_session_ids = await self._search_encrypted_local_cache_session_ids(
             normalized_keyword,
             session_id=session_id,
         )
-        return len(plain_session_ids | encrypted_session_ids)
+        return len(plain_session_ids | attachment_session_ids | encrypted_session_ids)
 
     async def _search_messages_fts(
         self,
@@ -2022,19 +2035,35 @@ class Database:
     @classmethod
     def _merge_search_results(
         cls,
-        plain_matches: list[ChatMessage],
-        encrypted_matches: list[ChatMessage],
+        *result_sets: list[ChatMessage],
         limit: int,
     ) -> list[ChatMessage]:
         merged: dict[str, ChatMessage] = {}
-        for message in [*plain_matches, *encrypted_matches]:
-            message_id = str(message.message_id or "").strip()
-            if not message_id or message_id in merged:
-                continue
-            merged[message_id] = message
+        for result_set in result_sets:
+            for message in result_set:
+                message_id = str(message.message_id or "").strip()
+                if not message_id or message_id in merged:
+                    continue
+                merged[message_id] = message
         items = list(merged.values())
         items.sort(key=cls._message_timestamp_sort_value, reverse=True)
         return items[: max(1, int(limit or 1))]
+
+    @staticmethod
+    def _plain_attachment_search_text(extra: dict[str, Any]) -> str:
+        metadata = dict(extra or {})
+        media = dict(metadata.get("media") or {})
+        chunks = [
+            str(metadata.get("name") or ""),
+            str(metadata.get("original_name") or ""),
+            str(metadata.get("file_name") or ""),
+            str(metadata.get("mime_type") or ""),
+            str(metadata.get("file_type") or ""),
+            str(media.get("original_name") or ""),
+            str(media.get("file_name") or ""),
+            str(media.get("mime_type") or ""),
+        ]
+        return "\n".join(chunk for chunk in chunks if chunk)
 
     @classmethod
     def _local_cache_version_matches(cls, envelope: dict[str, Any]) -> bool:
@@ -2137,6 +2166,66 @@ class Database:
                 if normalized_session_id:
                     session_ids.add(normalized_session_id)
         return session_ids
+
+    async def _search_plain_attachment_metadata(
+        self,
+        keyword: str,
+        *,
+        session_id: Optional[str],
+        limit: int,
+    ) -> list[ChatMessage]:
+        needle = str(keyword or "").casefold()
+        if not needle:
+            return []
+        matches: list[ChatMessage] = []
+        for row in await self._iter_plain_search_rows(session_id):
+            message = self._row_to_message(row)
+            if needle not in self._plain_attachment_search_text(message.extra).casefold():
+                continue
+            matches.append(message)
+            if len(matches) >= max(1, int(limit or 1)):
+                break
+        return matches
+
+    async def _search_plain_attachment_metadata_session_ids(
+        self,
+        keyword: str,
+        *,
+        session_id: Optional[str],
+    ) -> set[str]:
+        needle = str(keyword or "").casefold()
+        if not needle:
+            return set()
+        session_ids: set[str] = set()
+        for row in await self._iter_plain_search_rows(session_id):
+            message = self._row_to_message(row)
+            if needle not in self._plain_attachment_search_text(message.extra).casefold():
+                continue
+            normalized_session_id = str(message.session_id or "").strip()
+            if normalized_session_id:
+                session_ids.add(normalized_session_id)
+        return session_ids
+
+    async def _iter_plain_search_rows(self, session_id: Optional[str]) -> list[aiosqlite.Row]:
+        if session_id:
+            cursor = await self._db.execute(
+                """
+                SELECT * FROM messages
+                WHERE session_id = ?
+                  AND COALESCE(is_encrypted, 0) != 1
+                ORDER BY timestamp DESC
+                """,
+                (session_id,),
+            )
+        else:
+            cursor = await self._db.execute(
+                """
+                SELECT * FROM messages
+                WHERE COALESCE(is_encrypted, 0) != 1
+                ORDER BY timestamp DESC
+                """
+            )
+        return list(await cursor.fetchall())
 
     async def _search_contacts_fts(
         self,

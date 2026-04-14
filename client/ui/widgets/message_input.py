@@ -2737,6 +2737,7 @@ class MessageInput(QWidget):
             self.clear_draft()
 
         self._apply_editor_transparency()
+        self._update_call_buttons()
         self._update_send_button_state()
 
     def focus_editor(self) -> None:
@@ -2749,6 +2750,20 @@ class MessageInput(QWidget):
         self._current_session = session
         self._mention_candidates = self._build_mention_candidates(session)
         self._close_mention_flyout()
+        self._update_call_buttons()
+
+    def _update_call_buttons(self) -> None:
+        session = self._current_session
+        supports_call = bool(
+            self._session_active
+            and session is not None
+            and session.session_type == "direct"
+            and not session.is_ai_session
+        )
+        self.voice_button.setVisible(supports_call)
+        self.video_button.setVisible(supports_call)
+        self.voice_button.setEnabled(supports_call)
+        self.video_button.setEnabled(supports_call)
 
     @staticmethod
     def _build_mention_candidates(session: Session | None) -> list[MentionCandidate]:

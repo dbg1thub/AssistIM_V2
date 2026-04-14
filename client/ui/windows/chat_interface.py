@@ -380,6 +380,8 @@ class ChatInterface(QWidget):
                 parent=self.window(),
                 duration=2200,
             )
+            return
+        self.session_panel.clear_search()
 
     def _subscribe_to_events(self) -> None:
         """Subscribe to session and message events for real-time UI updates."""

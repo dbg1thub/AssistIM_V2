@@ -146,28 +146,15 @@ class SearchManager:
             return empty
 
         normalized_keyword = keyword.strip()
-        count_messages = getattr(self._db, "count_search_message_sessions", None)
-        count_contacts = getattr(self._db, "count_search_contacts", None)
-        count_groups = getattr(self._db, "count_search_groups", None)
-
-        messages, contacts, groups, message_total, contact_total, group_total = await asyncio.gather(
+        messages, contacts, groups = await asyncio.gather(
             self._search_message_sessions(normalized_keyword, session_id=session_id, limit=message_limit),
             self.search_contacts(normalized_keyword, limit=contact_limit),
             self.search_groups(normalized_keyword, limit=group_limit),
-            count_messages(normalized_keyword, session_id=session_id) if callable(count_messages) else self._immediate_value(0),
-            count_contacts(normalized_keyword) if callable(count_contacts) else self._immediate_value(0),
-            count_groups(normalized_keyword) if callable(count_groups) else self._immediate_value(0),
         )
-        if message_total <= 0:
-            message_total = len(messages)
-        if contact_total <= 0:
-            contact_total = len(contacts)
-        if group_total <= 0:
-            group_total = len(groups)
         catalog = SearchCatalogResults(messages=messages, contacts=contacts, groups=groups)
-        catalog.message_total = int(message_total)
-        catalog.contact_total = int(contact_total)
-        catalog.group_total = int(group_total)
+        catalog.message_total = len(messages)
+        catalog.contact_total = len(contacts)
+        catalog.group_total = len(groups)
         self._last_catalog_results = catalog
         logger.debug(
             "Found %s local search results (%s message sessions, %s contacts, %s groups)",
@@ -443,11 +430,6 @@ class SearchManager:
             ranges.append((pos, pos + len(keyword_lower)))
             start = pos + 1
         return ranges
-
-    @staticmethod
-    async def _immediate_value(value: int) -> int:
-        """Return one immediate value through an awaitable for gather compatibility."""
-        return int(value or 0)
 
     def get_result_at(self, index: int) -> Optional[SearchResult]:
         """Get message search result at index."""
