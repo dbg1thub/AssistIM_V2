@@ -130,9 +130,8 @@ class GroupRepository:
     def update_member_role(self, group_id: str, user_id: str, role: str, *, commit: bool = True) -> GroupMember:
         member = self.get_member(group_id, user_id)
         if member is None:
-            member = GroupMember(group_id=group_id, user_id=user_id, role=role)
-        else:
-            member.role = role
+            raise ValueError(f"group member not found: {group_id}/{user_id}")
+        member.role = role
         self.db.add(member)
         self.db.flush()
         if commit:
@@ -170,7 +169,7 @@ class GroupRepository:
     ) -> GroupMember:
         member = self.get_member(group_id, user_id)
         if member is None:
-            member = GroupMember(group_id=group_id, user_id=user_id)
+            raise ValueError(f"group member not found: {group_id}/{user_id}")
         if group_nickname is not None:
             member.group_nickname = str(group_nickname or "").strip()
         if note is not None:

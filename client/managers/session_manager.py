@@ -14,6 +14,7 @@ from client.core import logging
 from client.core.avatar_utils import profile_avatar_seed
 from client.core.i18n import tr
 from client.core.logging import setup_logging
+from client.events.contact_events import ContactEvent
 from client.events.event_bus import get_event_bus
 from client.managers.call_manager import CallEvent, get_call_manager
 from client.managers.message_manager import MessageEvent, get_message_manager
@@ -683,6 +684,7 @@ class SessionManager:
         await self._subscribe(MessageEvent.PROFILE_UPDATED, self._on_profile_updated)
         await self._subscribe(MessageEvent.GROUP_UPDATED, self._on_group_updated)
         await self._subscribe(MessageEvent.GROUP_SELF_UPDATED, self._on_group_self_updated)
+        await self._subscribe(ContactEvent.SYNC_REQUIRED, self._on_contact_sync_required)
         await self._subscribe(MessageEvent.DECRYPTION_STATE_CHANGED, self._on_message_decryption_state_changed)
         await self._subscribe(CallEvent.INVITE_SENT, self._apply_call_state_event)
         await self._subscribe(CallEvent.INVITE_RECEIVED, self._apply_call_state_event)
@@ -1629,7 +1631,10 @@ class SessionManager:
         payload = dict(data.get("group") or {}) if isinstance(data.get("group"), dict) else {}
         if not session_id or not payload:
             return
-        await self.apply_group_payload(session_id, payload, include_self_fields=False)
+        updated = await self.apply_group_payload(session_id, payload, include_self_fields=False)
+        if updated is not None:
+            return
+        await self._fetch_and_remember_session(session_id, fallback_name=str(payload.get("name", "") or "Group Chat"))
 
     async def _on_group_self_updated(self, data: dict) -> None:
         """Apply one self-scoped group-profile update to cached group sessions."""
@@ -1641,6 +1646,34 @@ class SessionManager:
             "my_group_nickname": str(data.get("my_group_nickname", "") or ""),
         }
         await self.apply_group_payload(session_id, payload, include_self_fields=True)
+
+    async def _on_contact_sync_required(self, data: dict) -> None:
+        """Refresh session truth when realtime only provides a lifecycle invalidation."""
+        payload = dict(data or {}) if isinstance(data, dict) else {}
+        reason = str(payload.get("reason", "") or "")
+        if reason not in {
+            "session_lifecycle_changed",
+            "group_deleted",
+            "group_left",
+            "group_member_removed",
+        }:
+            return
+        await self.refresh_remote_sessions()
+
+    async def _fetch_and_remember_session(self, session_id: str, *, fallback_name: str) -> Optional[Session]:
+        """Fetch one newly introduced session and publish it through the normal session cache path."""
+        normalized_session_id = str(session_id or "").strip()
+        if not normalized_session_id:
+            return None
+        try:
+            payload = await self._session_service.fetch_session(normalized_session_id)
+        except Exception as exc:
+            logger.warning("Fetch lifecycle session %s failed: %s", normalized_session_id, exc)
+            return None
+        session = await self._build_session_from_payload(payload, fallback_name=fallback_name or "Group Chat")
+        if session is None:
+            return None
+        return await self._remember_session(session)
 
     def _is_session_visible(self, session: Session, current_user: dict[str, Any]) -> bool:
         """Return whether a session has a valid visible counterpart for the current user."""

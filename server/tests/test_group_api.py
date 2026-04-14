@@ -72,6 +72,81 @@ def test_group_permissions_and_transfer_flow(client: TestClient, user_factory, a
     assert delete_as_old_owner_response.status_code == 403
 
 
+def test_group_member_mutations_emit_authoritative_group_events(
+    client: TestClient,
+    user_factory,
+    auth_header,
+    monkeypatch,
+) -> None:
+    from app.api.v1 import groups as group_routes
+
+    owner = user_factory("event-owner", "Owner")
+    member = user_factory("event-member", "Member")
+    outsider = user_factory("event-outsider", "Outsider")
+    send_mock = AsyncMock(return_value={"delivered"})
+    monkeypatch.setattr(group_routes.connection_manager, "send_json_to_users", send_mock)
+
+    create_group_response = client.post(
+        "/api/v1/groups",
+        json={"name": "Core Team", "member_ids": [member["user"]["id"]]},
+        headers=auth_header(owner["access_token"]),
+    )
+    assert create_group_response.status_code == 201
+    group_payload, _ = _group_mutation(create_group_response, "created")
+    group_id = group_payload["id"]
+    send_mock.reset_mock()
+
+    add_member_response = client.post(
+        f"/api/v1/groups/{group_id}/members",
+        json={"user_id": outsider["user"]["id"], "role": "member"},
+        headers=auth_header(owner["access_token"]),
+    )
+
+    assert add_member_response.status_code == 200
+    send_mock.assert_awaited()
+    recipients, message = send_mock.await_args.args[:2]
+    assert set(recipients) == {owner["user"]["id"], member["user"]["id"], outsider["user"]["id"]}
+    assert message["type"] == "group_profile_update"
+    assert message["data"]["group_id"] == group_id
+    assert message["data"]["mutation"]["action"] == "member_added"
+    assert message["data"]["mutation"]["target_user_id"] == outsider["user"]["id"]
+
+
+def test_group_delete_emits_contact_refresh_tombstone(
+    client: TestClient,
+    user_factory,
+    auth_header,
+    monkeypatch,
+) -> None:
+    from app.api.v1 import groups as group_routes
+
+    owner = user_factory("delete-event-owner", "Owner")
+    member = user_factory("delete-event-member", "Member")
+    send_mock = AsyncMock(return_value={"delivered"})
+    monkeypatch.setattr(group_routes.connection_manager, "send_json_to_users", send_mock)
+
+    create_group_response = client.post(
+        "/api/v1/groups",
+        json={"name": "Core Team", "member_ids": [member["user"]["id"]]},
+        headers=auth_header(owner["access_token"]),
+    )
+    assert create_group_response.status_code == 201
+    group_payload, _ = _group_mutation(create_group_response, "created")
+    send_mock.reset_mock()
+
+    delete_response = client.delete(
+        f"/api/v1/groups/{group_payload['id']}",
+        headers=auth_header(owner["access_token"]),
+    )
+
+    assert delete_response.status_code == 200
+    recipients, message = send_mock.await_args.args[:2]
+    assert set(recipients) == {owner["user"]["id"], member["user"]["id"]}
+    assert message["type"] == "contact_refresh"
+    assert message["data"]["reason"] == "group_deleted"
+    assert message["data"]["group_id"] == group_payload["id"]
+
+
 def test_group_owner_cannot_remove_self_without_transfer(client: TestClient, user_factory, auth_header) -> None:
     owner = user_factory("owner", "Owner")
     member = user_factory("member", "Member")
@@ -131,7 +206,7 @@ def test_create_group_generates_server_managed_group_avatar(client: TestClient, 
     assert payload["avatar"].startswith("/uploads/group_avatars/")
 
 
-def test_create_group_accepts_blank_name_for_default_naming(client: TestClient, user_factory, auth_header) -> None:
+def test_create_group_rejects_blank_name(client: TestClient, user_factory, auth_header) -> None:
     owner = user_factory("blank-group-owner", "Owner")
     member = user_factory("blank-group-member", "Member")
 
@@ -141,10 +216,7 @@ def test_create_group_accepts_blank_name_for_default_naming(client: TestClient, 
         headers=auth_header(owner["access_token"]),
     )
 
-    assert response.status_code == 201
-    payload, _ = _group_mutation(response, "created")
-    assert payload["name"] == ""
-    assert payload["member_count"] == 2
+    assert response.status_code == 422
 
 
 def test_group_owner_can_promote_and_demote_admin(client: TestClient, user_factory, auth_header) -> None:
@@ -233,6 +305,40 @@ def test_group_role_update_requires_owner_and_disallows_owner_role_change(client
     assert owner_change_response.status_code == 403
 
 
+def test_group_membership_noop_mutations_are_rejected(client: TestClient, user_factory, auth_header) -> None:
+    owner = user_factory("noop-owner", "Owner")
+    member = user_factory("noop-member", "Member")
+
+    create_group_response = client.post(
+        "/api/v1/groups",
+        json={"name": "Ops Team", "member_ids": [member["user"]["id"]]},
+        headers=auth_header(owner["access_token"]),
+    )
+    assert create_group_response.status_code == 201
+    group_payload, _ = _group_mutation(create_group_response, "created")
+    group_id = group_payload["id"]
+
+    duplicate_add = client.post(
+        f"/api/v1/groups/{group_id}/members",
+        json={"user_id": member["user"]["id"], "role": "member"},
+        headers=auth_header(owner["access_token"]),
+    )
+    assert duplicate_add.status_code == 409
+
+    remove_missing = client.delete(
+        f"/api/v1/groups/{group_id}/members/{owner['user']['id'].replace(owner['user']['id'][-1], '0')}",
+        headers=auth_header(owner["access_token"]),
+    )
+    assert remove_missing.status_code in {404, 422}
+
+    self_transfer = client.post(
+        f"/api/v1/groups/{group_id}/transfer",
+        json={"new_owner_id": owner["user"]["id"]},
+        headers=auth_header(owner["access_token"]),
+    )
+    assert self_transfer.status_code == 409
+
+
 def test_group_profile_update_requires_owner_or_admin_and_persists_metadata(client: TestClient, user_factory, auth_header) -> None:
     owner = user_factory("profile-owner", "Owner")
     admin = user_factory("profile-admin", "Admin")
@@ -240,7 +346,7 @@ def test_group_profile_update_requires_owner_or_admin_and_persists_metadata(clie
 
     create_group_response = client.post(
         "/api/v1/groups",
-        json={"name": "", "member_ids": [admin["user"]["id"], member["user"]["id"]]},
+        json={"name": "Ops Team", "member_ids": [admin["user"]["id"], member["user"]["id"]]},
         headers=auth_header(owner["access_token"]),
     )
     group_payload, _ = _group_mutation(create_group_response, "created")

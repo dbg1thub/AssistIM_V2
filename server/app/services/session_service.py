@@ -228,7 +228,7 @@ class SessionService:
         if normalized_session_type == "group":
             group = group if group is not None else self.groups.get_by_session_id(session.id)
             if group is not None:
-                avatar = self.avatars.ensure_group_avatar(group)
+                avatar = self.avatars.resolve_group_avatar_url(group)
                 group_id = str(group.id or "")
                 owner_id = str(group.owner_id or "")
                 group_announcement = str(getattr(group, "announcement", "") or "")

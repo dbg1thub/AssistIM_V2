@@ -15,7 +15,7 @@ from app.media.default_avatars import (
     default_avatar_key_from_url,
     default_avatar_url,
 )
-from app.media.group_avatars import build_group_avatar
+from app.media.group_avatars import build_group_avatar, group_avatar_public_url, group_avatar_storage_key
 from app.models.file import StoredFile
 from app.models.group import Group
 from app.models.user import User
@@ -161,7 +161,21 @@ class AvatarService:
                 members=members,
             )
         self.sessions.update_avatar(group.session_id, avatar_url, commit=False)
+        if avatar_kind != "custom":
+            self._prune_generated_group_avatar_versions(group)
         return avatar_url
+
+    def resolve_group_avatar_url(self, group: Group) -> str | None:
+        """Return the current group avatar URL without file I/O or DB writes."""
+        avatar_kind = str(getattr(group, "avatar_kind", "generated") or "generated").strip().lower()
+        if avatar_kind == "custom":
+            stored = self.files.get_by_id(str(getattr(group, "avatar_file_id", "") or ""))
+            return stored.file_url if stored is not None else None
+        return group_avatar_public_url(
+            self.settings,
+            str(getattr(group, "id", "") or ""),
+            int(getattr(group, "avatar_version", 1) or 1),
+        )
 
     def bump_group_avatar_version(self, group: Group) -> Group:
         """Bump one generated group avatar version after membership changes."""
@@ -212,6 +226,30 @@ class AvatarService:
 
         if touched and commit:
             self.db.commit()
+
+    def cleanup_group_avatar_assets(self, group: Group) -> None:
+        """Remove generated group avatar files owned by a deleted group."""
+        self._prune_generated_group_avatar_versions(group, keep_current=False)
+
+    def _prune_generated_group_avatar_versions(self, group: Group, *, keep_current: bool = True) -> None:
+        avatar_kind = str(getattr(group, "avatar_kind", "generated") or "generated").strip().lower()
+        if avatar_kind != "generated":
+            return
+        group_id = str(getattr(group, "id", "") or "").strip()
+        if not group_id:
+            return
+        current_version = max(1, int(getattr(group, "avatar_version", 1) or 1))
+        avatar_dir = Path(self.settings.upload_dir) / "group_avatars"
+        if not avatar_dir.exists():
+            return
+        keep_name = Path(group_avatar_storage_key(group_id, current_version)).name if keep_current else ""
+        for path in avatar_dir.glob(f"{group_id}_v*.png"):
+            if keep_name and path.name == keep_name:
+                continue
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                continue
 
     @staticmethod
     def _validate_avatar_upload(file: UploadFile) -> None:

@@ -156,6 +156,9 @@ class FakeAvatarService:
     def ensure_group_avatar(self, group):
         return getattr(group, 'avatar', None)
 
+    def resolve_group_avatar_url(self, group):
+        return getattr(group, 'avatar', None)
+
 
 def test_session_service_list_sessions_uses_batch_repository_loaders() -> None:
     service = SessionService(db=None)

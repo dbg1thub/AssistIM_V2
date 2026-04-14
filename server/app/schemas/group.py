@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationInfo, field_validator, model_validator
 
 from app.schemas.common import ORMModel
 
@@ -20,7 +20,7 @@ GroupMemberRole = Literal["member", "admin"]
 class GroupCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    name: str = Field(default="", max_length=128)
+    name: str = Field(..., max_length=128)
     member_ids: list[GroupIdentifier] = Field(default_factory=list)
     encryption_mode: Literal["plain", "e2ee_group"] = "plain"
     members: list[GroupIdentifier] = Field(default_factory=list)
@@ -28,7 +28,10 @@ class GroupCreate(BaseModel):
     @field_validator("name")
     @classmethod
     def _normalize_name(cls, value: str) -> str:
-        return str(value or "").strip()
+        normalized = str(value or "").strip()
+        if not normalized:
+            raise ValueError("group name is required")
+        return normalized
 
     @field_validator("member_ids", "members")
     @classmethod
@@ -39,6 +42,8 @@ class GroupCreate(BaseModel):
     def _validate_member_sources(self) -> "GroupCreate":
         if self.member_ids and self.members and self.member_ids != self.members:
             raise ValueError("member_ids and members must match when both are provided")
+        if not (self.member_ids or self.members):
+            raise ValueError("at least one group member is required")
         return self
 
     @property
@@ -87,10 +92,12 @@ class GroupProfileUpdate(BaseModel):
 
     @field_validator("name", "announcement")
     @classmethod
-    def _normalize_optional_text(cls, value: str | None) -> str | None:
+    def _normalize_optional_text(cls, value: str | None, info: ValidationInfo) -> str | None:
         if value is None:
             return None
         normalized = str(value).strip()
+        if not normalized and info.field_name == "name":
+            raise ValueError("field cannot be blank")
         return normalized or None
 
 

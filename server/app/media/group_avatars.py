@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from pathlib import Path
+import os
 from urllib.parse import urlsplit
 
 from PIL import Image, ImageDraw, ImageOps
@@ -75,7 +76,9 @@ def build_group_avatar(
             group_name=group_name,
         )
 
-    image.save(target_path, format="PNG")
+    temporary_path = target_path.with_name(f".{target_path.name}.tmp")
+    image.save(temporary_path, format="PNG")
+    os.replace(temporary_path, target_path)
     return group_avatar_public_url(settings, normalized_group_id, version)
 
 

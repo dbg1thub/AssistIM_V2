@@ -2862,9 +2862,9 @@ def test_database_search_messages_escapes_like_wildcards() -> None:
 
         assert len(messages) == 1
         assert messages[0].content == 'literal 100%_off keyword'
-        assert len(fake_connection.execute_calls) == 1
+        assert len(fake_connection.execute_calls) == 2
 
-        sql, params = fake_connection.execute_calls[0]
+        sql, params = fake_connection.execute_calls[-1]
         assert "content LIKE ? ESCAPE '\\'" in sql
         assert params == ('session-1', '%100\\%\\_off%', 25)
 
@@ -2908,6 +2908,56 @@ def test_session_manager_refresh_remote_sessions_uses_session_service(monkeypatc
         }
         assert sessions[0].uses_e2ee() is False
         assert sessions[0].unread_count == 4
+
+    asyncio.run(scenario())
+
+
+def test_session_manager_fetches_new_group_session_from_group_event(monkeypatch) -> None:
+    fake_session_service = FakeSessionService()
+    fake_event_bus = FakeEventBus()
+
+    monkeypatch.setattr(session_manager_module, 'get_session_service', lambda: fake_session_service)
+    monkeypatch.setattr(session_manager_module, 'get_e2ee_service', lambda: FakeE2EEService())
+    monkeypatch.setattr(session_manager_module, 'get_event_bus', lambda: fake_event_bus)
+    monkeypatch.setattr(session_manager_module, 'get_message_manager', lambda: FakeMessageManager())
+    monkeypatch.setattr(session_manager_module, 'get_database', lambda: FakeSessionStateDatabase())
+
+    async def scenario() -> None:
+        manager = session_manager_module.SessionManager()
+        await manager._on_group_updated(
+            {
+                'session_id': 'session-1',
+                'group_id': 'group-1',
+                'group': {
+                    'id': 'group-1',
+                    'session_id': 'session-1',
+                    'name': 'Core Team',
+                },
+            }
+        )
+
+        assert fake_session_service.fetch_session_calls == ['session-1']
+        assert manager.sessions[0].session_id == 'session-1'
+        assert any(event == session_manager_module.SessionEvent.ADDED for event, _ in fake_event_bus.events)
+
+    asyncio.run(scenario())
+
+
+def test_session_manager_lifecycle_contact_refresh_reloads_sessions(monkeypatch) -> None:
+    fake_session_service = FakeSessionService()
+
+    monkeypatch.setattr(session_manager_module, 'get_session_service', lambda: fake_session_service)
+    monkeypatch.setattr(session_manager_module, 'get_e2ee_service', lambda: FakeE2EEService())
+    monkeypatch.setattr(session_manager_module, 'get_event_bus', lambda: FakeEventBus())
+    monkeypatch.setattr(session_manager_module, 'get_message_manager', lambda: FakeMessageManager())
+    monkeypatch.setattr(session_manager_module, 'get_database', lambda: FakeSessionStateDatabase())
+
+    async def scenario() -> None:
+        manager = session_manager_module.SessionManager()
+        await manager._on_contact_sync_required({'reason': 'session_lifecycle_changed'})
+
+        assert fake_session_service.fetch_sessions_calls == 1
+        assert manager.sessions[0].session_id == 'session-1'
 
     asyncio.run(scenario())
 

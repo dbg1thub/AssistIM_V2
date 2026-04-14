@@ -2241,7 +2241,7 @@ def test_delete_group_removes_group_session_messages_and_events(
         headers=auth_header(bob["access_token"]),
     )
     assert read_response.status_code == 200
-    assert read_response.json()["data"]["event_seq"] == 1
+    assert read_response.json()["data"]["event_seq"] == 2
 
     delete_response = client.delete(
         f"/api/v1/groups/{group_id}",
@@ -2445,12 +2445,14 @@ def test_websocket_sync_messages_replays_offline_group_profile_update_events(
         receive_until(websocket, 'history_messages')
         events_payload = receive_until(websocket, 'history_events')
         events = events_payload['data']['events']
-        assert len(events) == 1
+        assert len(events) == 2
         assert events[0]['type'] == 'group_profile_update'
-        assert events[0]['data']['session_id'] == session_id
-        assert events[0]['data']['group_id'] == group_id
-        assert events[0]['data']['name'] == 'After'
-        assert events[0]['data']['announcement'] == 'Deploy tonight'
+        assert events[0]['data']['mutation']['action'] == 'created'
+        assert events[1]['type'] == 'group_profile_update'
+        assert events[1]['data']['session_id'] == session_id
+        assert events[1]['data']['group_id'] == group_id
+        assert events[1]['data']['name'] == 'After'
+        assert events[1]['data']['announcement'] == 'Deploy tonight'
 
 
 def test_websocket_sync_messages_replays_offline_group_self_profile_update_events(
@@ -2493,13 +2495,15 @@ def test_websocket_sync_messages_replays_offline_group_self_profile_update_event
         receive_until(websocket, 'history_messages')
         events_payload = receive_until(websocket, 'history_events')
         events = events_payload['data']['events']
-        assert len(events) == 1
-        assert events[0]['type'] == 'group_self_profile_update'
-        assert events[0]['data']['session_id'] == session_id
-        assert events[0]['data']['group_id'] == group_id
-        assert events[0]['data']['group_note'] == 'private note'
-        assert events[0]['data']['my_group_nickname'] == 'oncall'
-        assert int(events[0]['data']['event_seq']) > 0
+        assert len(events) == 2
+        assert events[0]['type'] == 'group_profile_update'
+        assert events[0]['data']['mutation']['action'] == 'created'
+        assert events[1]['type'] == 'group_self_profile_update'
+        assert events[1]['data']['session_id'] == session_id
+        assert events[1]['data']['group_id'] == group_id
+        assert events[1]['data']['group_note'] == 'private note'
+        assert events[1]['data']['my_group_nickname'] == 'oncall'
+        assert int(events[1]['data']['event_seq']) > 0
 
 def test_private_call_signaling_invite_accept_and_hangup(
     client: TestClient,

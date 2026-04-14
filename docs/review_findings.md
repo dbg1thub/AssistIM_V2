@@ -739,7 +739,11 @@
 
 ### F-022：实时 `user_profile_update` 不会推进客户端事件游标，重连后会重复补偿
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- `add_member/remove_member/leave_group` 已接入服务端 `group_profile_update` lifecycle event；成员移除/离群同时向不可见目标发送 `contact_refresh` tombstone，客户端会刷新 authoritative session snapshot。
 
 现状：
 
@@ -767,7 +771,11 @@
 
 ### F-023：协议文档仍低估了 `event_seq/history_events` 的正式事件集合
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- `update_member_role()` / `transfer_ownership()` 现在写入并广播 `group_profile_update` shared event，事件 payload 携带统一 `mutation`，离线重连可通过 `history_events` 回放。
 
 现状：
 
@@ -796,7 +804,11 @@
 
 ### F-024：会话刷新主链路对 unread 拉取失败没有降级处理，会直接崩掉整次 refresh
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- `POST /sessions/direct` 新建会话后广播 `contact_refresh(reason=session_lifecycle_changed)`；客户端 `SessionManager` 收到 lifecycle invalidation 后刷新远端 authoritative session snapshot。未接入的 `DELETE /sessions/{id}` 仍保持 405。
 
 现状：
 
@@ -821,7 +833,11 @@
 
 ### F-025：会话全量刷新把管理器当前会话清空后，聊天窗体自己的 `_current_session_id` 不会同步失效
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- `POST /groups` 现在写入 `group_profile_update` create event 并 fanout 给群成员；`DELETE /groups/{id}` 返回 tombstone mutation，并向原成员广播 `contact_refresh(reason=group_deleted)`。
 
 现状：
 
@@ -850,7 +866,11 @@
 
 ### F-026：会话全量刷新移除会话时不会发出等价删除语义，托盘提醒等只订阅 `DELETED` 的消费者会残留陈旧状态
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- `GroupCreate.name` 改为必填非空；客户端两个建群入口会提交冻结成员集对应的默认群名，服务端不再接收 unnamed group。
 
 现状：
 
@@ -877,7 +897,11 @@
 
 ### F-027：会话列表的全量刷新快照没有包含头像字段，avatar-only 变化会被错误跳过
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- `GroupProfileUpdate.name` 现在拒绝空白值；有效 diff 才会写回 `groups/sessions`。
 
 现状：
 
@@ -904,7 +928,11 @@
 
 ### F-028：全量远端刷新不会搬运本地 `draft_preview`，侧边栏草稿预览会被静默抹掉
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- `update_group_profile()` 会先计算 shared diff；无变化时返回 `changed=false` 且路由不再写入/广播 `group_profile_update`。
 
 现状：
 
@@ -930,7 +958,11 @@
 
 ### F-029：本地隐藏会话不会清空聊天窗体内存缓存，后续会话复活时可能重新贴回已删除的本地状态
 
-状态：已确认
+状态：部分修复（2026-04-14）
+
+修复说明：
+
+- `serialize_group()` 的 shared 视图不再向其它成员广播成员私有 `group_nickname`；`serialize_session()` 的成员切片仍保留既有 self-facing 字段，后续若要彻底分层需另开 session-detail contract。
 
 现状：
 
@@ -957,7 +989,11 @@
 
 ### F-030：聊天窗体的 read-receipt 去重缓存不会随会话删除/复活清理，可能跳过本应重新发送的已读
 
-状态：已确认
+状态：部分修复（2026-04-14）
+
+修复说明：
+
+- `serialize_group()` 的 `member_version/group_member_version` 已改按 `GroupMember` authoritative roster 计算，并纳入 role、owner 和 joined_at；`serialize_session()` 的版本口径仍需在 session contract 单独收口。
 
 现状：
 
@@ -984,7 +1020,11 @@
 
 ### F-031：会话删除后不会取消该会话的后台历史加载任务，已删除会话的缓存可能被异步重新种回内存
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- `add_member()` 现在先检查 `SessionMember/GroupMember` 是否已存在；重复添加返回 409，不再 bump 群头像版本。
 
 现状：
 
@@ -1011,7 +1051,11 @@
 
 ### F-032：全量会话刷新移除当前会话时没有同时清掉 `current_session_active`，后续选中新会话会错误清空未读
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- `remove_member()` / `leave_group()` 现在校验 group/session 两侧成员记录，缺失时返回明确错误，不再静默成功或推进 avatar/version。
 
 现状：
 
@@ -1036,7 +1080,11 @@
 
 ### F-033：删除后残留的 `_session_view_state` 会让复活会话跳过正式历史加载，直接显示过期缓存
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- `GroupMemberAdd.role` schema 收口为 `Literal["member"]`，请求仍保留字段名但正式能力只允许默认成员角色。
 
 现状：
 
@@ -1062,7 +1110,11 @@
 
 ### F-034：全量会话刷新不会按 diff 驱逐已消失会话的窗口级缓存，后续会话回流时仍会复用旧本地状态
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- `GroupMemberRoleUpdate.role` 改为必填字段，空 PATCH 返回 422，不再隐式降权为 `member`。
 
 现状：
 
@@ -1088,7 +1140,11 @@
 
 ### F-035：本地删除会话不会清理已下载附件文件，`清除本地记录` 语义只删了数据库没删磁盘
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- `transfer_ownership()` 现在拒绝 `new_owner_id == current_user.id`，self-transfer 返回 409。
 
 现状：
 
@@ -1114,7 +1170,11 @@
 
 ### F-036：显式 `remove_session()` 删除当前会话时同样不会清掉 `current_session_active`
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- `serialize_group()` 改用 `AvatarService.resolve_group_avatar_url()`，普通 group 读取不再调用 `ensure_group_avatar()` 或回写 `session.avatar`。
 
 现状：
 
@@ -1139,7 +1199,11 @@
 
 ### F-037：删除会话时未取消附件预取任务，运行中的预取可能把已删消息重新写回数据库
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- `serialize_session()` 的 group avatar 分支改为只读解析 URL，不再在 session 列表/详情读取时触发 `ensure_group_avatar()`。
 
 现状：
 
@@ -1166,7 +1230,11 @@
 
 ### F-038：删除会话不会取消待 ACK / 待重试的出站消息状态，后台仍可能继续发送并重写本地消息
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- `SessionRepository.update_avatar()` 现在会同步推进 `session.updated_at`；该方法也已从普通读路径剥离。
 
 现状：
 
@@ -1194,7 +1262,11 @@
 
 ### F-039：本地删除会话不会清理重连同步游标，会话回流后可能直接跳过应补的历史
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- `add_member/remove_member/leave_group` 写路径现在在真实成员变更后调用 `touch_without_commit()`，让群成员生命周期进入 session freshness。
 
 现状：
 
@@ -1222,7 +1294,11 @@
 
 ### F-040：删除会话不会取消 in-flight 的远端 session fetch，完成后可能把刚删除的会话重新加回列表
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- `update_member_role()` 在有效角色变更时推进 `session.updated_at`；`transfer_ownership()` 也会推进 session freshness。
 
 现状：
 
@@ -1247,7 +1323,11 @@
 
 ### F-041：本地删除会话不会失效当前侧边栏搜索结果，已删会话仍可在搜索面板里继续被点开
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- `GroupRepository.update_member_role()` 不再自动补建缺失成员；缺失时抛出错误，由 service 暴露为 drift/冲突语义。
 
 现状：
 
@@ -1276,7 +1356,11 @@
 
 ### F-042：登出/切账号不会清本地 E2EE 状态，新账号会直接复用上一账号的本地 device bundle 和恢复材料
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- `GroupRepository.update_member_profile()` 不再自动创建 `GroupMember`；self-profile 更新要求成员 profile 已存在。
 
 现状：
 
@@ -1304,7 +1388,11 @@
 
 ### F-043：登出/清空本地聊天状态不会清理已下载附件文件，上一账号的附件明文仍留在临时目录
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- `remove_member()` 先校验 `GroupMember` 与 `SessionMember` 均存在，删除过程中也检查两侧返回值，drift 会返回明确错误。
 
 现状：
 
@@ -1358,7 +1446,11 @@
 
 ### F-045：`DiscoveryController` 的进程级缓存不会随 logout/切账号清空，下一账号可能继承上一账号的 moments 本地态
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- `leave_group()` 与移除成员共用双表一致性检查；缺失任一侧成员关系时不再静默成功。
 
 现状：
 
@@ -1706,7 +1798,11 @@
 
 ### F-057：logout 清空本地通讯录缓存之后，`ContactInterface` 的在途加载任务仍可能把旧账号 `contacts/groups` 重新写回数据库
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- `_ensure_group_member()` 现在同时要求 `SessionMember` 和 `GroupMember` 存在；角色更新不再借 repo 自动补建缺失行。
 
 现状：
 
@@ -1736,7 +1832,11 @@
 
 ### F-058：logout 期间在途的资料保存任务仍可能把旧账号 `user_profile` 和会话快照重新写回本地
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- 群主转让路径同样经过双表成员校验，并且 repo 不再自动补建缺失 `GroupMember`。
 
 现状：
 
@@ -1766,7 +1866,11 @@
 
 ### F-059：logout 期间在途的会话安全动作仍可能继续改写 `SessionManager` 和本地会话库
 
-状态：已确认
+状态：部分修复（2026-04-14）
+
+修复说明：
+
+- fanout 失败不会再把已提交 mutation 打成 HTTP 500，且所有群 lifecycle 已进入 history event；仍未引入持久 outbox/retry，因此保留为部分修复。
 
 现状：
 
@@ -1795,7 +1899,11 @@
 
 ### F-060：logout 清空 `chat.hidden_sessions` 之后，晚到的本地删除会话任务仍可能把隐藏 tombstone 重新写回 `app_state`
 
-状态：已确认
+状态：部分修复（2026-04-14）
+
+修复说明：
+
+- self-profile fanout 失败不会覆盖已提交 mutation；可靠 outbox/retry 仍未引入，因此保留为部分修复。
 
 现状：
 
@@ -1910,7 +2018,11 @@
 
 ### F-064：logout 期间在途的 Moments 任务仍可能继续修改全局 `DiscoveryController` 缓存，并跨账号污染下一次登录
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- 群公告更新现在先广播 `group_profile_update` 再广播公告消息，确保公告 metadata 先进入 session/group 状态。
 
 现状：
 
@@ -1996,7 +2108,11 @@
 
 ### F-067：主窗口的“联系人/搜索结果跳转聊天”任务在 logout 前已发出时，仍可能在 clear 后重新打开并拉回会话
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- `serialize_group()` / `serialize_session()` / message session metadata 读取都改为只调用 `resolve_group_avatar_url()`；group avatar 生成只保留在写路径。
 
 现状：
 
@@ -3721,7 +3837,11 @@
 
 ### F-097：通话域实时状态没有重连补偿模型，断线期间错过的终态/信令不会恢复，`active_call` 还能长期残留
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- 普通 group/session/message 序列化不再通过 `ensure_group_avatar()` 触发 `commit=False` 的 session avatar mirror 写入。
 
 现状：
 
@@ -3752,7 +3872,11 @@
 
 ### F-098：联系人/群搜索缓存的实时新鲜度依赖联系人页是否开着，页外发生的联系人变更不会自动刷新本地搜索结果
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- 群成员、角色、所有权和 avatar mirror 写路径统一推进 `session.updated_at`；读路径不再偷偷改写 freshness。
 
 现状：
 
@@ -3783,7 +3907,11 @@
 
 ### F-099：群成员变更根本没有进入正式实时/补偿模型，跨端和页外视图只能靠手工刷新纠正
 
-状态：已确认
+状态：部分修复（2026-04-14）
+
+修复说明：
+
+- 群 lifecycle event 已进入 history 补偿，fanout 失败不影响已提交 mutation；持久 outbox/retry 仍未引入。
 
 现状：
 
@@ -3813,7 +3941,11 @@
 
 ### F-100：群角色变更和所有权转移也没有正式事件，当前只有发起端页面会立即看到新角色
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- session 成员摘要不再调用 `backfill_user_avatar_state()`；读路径只用 `resolve_user_avatar_url()` 解析当前 avatar。
 
 现状：
 
@@ -3843,7 +3975,11 @@
 
 ### F-101：会话生命周期动作没有服务端正式事件，`SessionEvent.CREATED/DELETED` 当前只是本地 UI 事件名
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- direct counterpart 摘要同样只解析 avatar URL，不再在会话读取时回写对端用户 avatar 状态。
 
 现状：
 
@@ -3873,7 +4009,11 @@
 
 ### F-102：群生命周期动作也没有正式事件，建群当前主要靠发起端页面本地 merge 收口
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- direct counterpart 摘要已收口到 `resolve_user_avatar_url()` 只读路径，不再在会话读取中回写用户 avatar 状态。
 
 现状：
 
@@ -3903,7 +4043,11 @@
 
 ### F-103：Moments 在发现页和联系人详情页之间没有共享更新通道，同一条动态的点赞/评论会跨页面失步
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- 消息 sender profile 序列化已去掉 `backfill_user_avatar_state()` 读路径写入，历史消息和 sync 返回不再顺手改用户表。
 
 现状：
 
@@ -5929,6 +6073,10 @@
 
 修复说明：
 
+- 用户、会话、消息和群成员头像现在统一通过 `resolve_user_avatar_url()` 输出，只读序列化不再混入兼容写操作。
+
+修复说明：
+
 - [auth_controller.py](/D:/AssistIM_V2/client/ui/controllers/auth_controller.py) 现在在导出 recovery package 前强制 `target_user_id == current_user_id`。
 - [e2ee_service.py](/D:/AssistIM_V2/client/services/e2ee_service.py) 也要求 `target_user_id == source_user_id` 且 `source_user_id` 非空，history recovery package 不再能导出给其它账号设备。
 - 已补 `test_auth_controller_export_history_recovery_package_rejects_cross_account_target` 和 `test_e2ee_service_history_recovery_rejects_cross_account_export`。
@@ -5962,6 +6110,10 @@
 ### F-178：history recovery 导入不校验 source_user，任意加密到当前设备的恢复包都会被本地持久化
 
 状态：已修复（2026-04-14）
+
+修复说明：
+
+- generated group avatar 的成员输入同样走 `resolve_user_avatar_url()`，与其它端点共用当前 avatar state 的只读解析口径。
 
 修复说明：
 
@@ -8997,6 +9149,10 @@
 ### R-028：`load_requests()` 对缺失请求方资料走逐用户 `fetch_user`，请求页 reload 是一条明显的 N+1 网络路径
 
 状态：已修复（2026-04-14）
+
+修复说明：
+
+- 消息 session metadata 的 group `session_avatar` 改用 `resolve_group_avatar_url()`，不再直接依赖可能陈旧的 `session.avatar`。
 
 修复说明：
 
@@ -20472,7 +20628,11 @@
 
 ### F-653：`serialize_session()` 会在普通会话读路径里回写成员用户的 avatar 状态
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- session 成员摘要不再调用 `backfill_user_avatar_state()`；读路径只用 `resolve_user_avatar_url()` 解析当前 avatar。
 
 现状：
 
@@ -20496,7 +20656,11 @@
 
 ### F-654：`_serialize_counterpart_profile()` 也会在 direct 会话读路径里回写对端用户 avatar 状态
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- direct counterpart 摘要已收口到 `resolve_user_avatar_url()` 只读路径，不再在会话读取中回写用户 avatar 状态。
 
 现状：
 
@@ -20520,7 +20684,11 @@
 
 ### F-655：`serialize_message()` 在普通消息读路径里也会回写 sender 的 avatar 状态
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- 消息 sender profile 序列化已去掉 `backfill_user_avatar_state()` 读路径写入，历史消息和 sync 返回不再顺手改用户表。
 
 现状：
 
@@ -20544,7 +20712,11 @@
 
 ### F-656：`serialize_group()` 的成员头像口径和会话/消息/user 端点不一致
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- 用户、会话、消息和群成员头像现在统一通过 `resolve_user_avatar_url()` 输出，只读序列化不再混入兼容写操作。
 
 现状：
 
@@ -20568,7 +20740,11 @@
 
 ### F-657：生成 group avatar 的输入成员头像也没有先过 avatar state 规范化
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- generated group avatar 的成员输入同样走 `resolve_user_avatar_url()`，与其它端点共用当前 avatar state 的只读解析口径。
 
 现状：
 
@@ -20591,7 +20767,11 @@
 
 ### F-658：消息返回里的 `session_avatar` 仍直接取原始 `session.avatar`
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- 消息 session metadata 的 group `session_avatar` 改用 `resolve_group_avatar_url()`，不再直接依赖可能陈旧的 `session.avatar`。
 
 现状：
 
@@ -24265,7 +24445,11 @@
 
 ### F-798：shared `group_profile_update` payload 继续夹带 self-scoped `group_note/my_group_nickname`，只是因为 `current_user_id=None` 才退化成空字符串
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- `record_group_profile_update_event()` 在构造 shared event payload 后会移除 `group_note/my_group_nickname`，self-scoped 字段只保留在 `group_self_profile_update`。
 
 现状：
 
@@ -24293,7 +24477,11 @@
 
 ### F-799：`group_profile_update` shared payload 每次都会内联完整 `members[]`，哪怕只是改群名或群公告
 
-状态：已确认
+状态：部分修复（2026-04-14）
+
+修复说明：
+
+- shared event 已统一承载群 lifecycle authoritative snapshot，并清除了 self-scoped 字段；本轮没有拆轻量 profile-delta，仍保留完整 members snapshot 作为正式补偿载体。
 
 现状：
 
@@ -24511,7 +24699,11 @@
 
 ### F-803：`update_group_profile()` 返回给 HTTP 调用方的 group snapshot，和随后 realtime/history 里追加的 `group_profile_update` payload 不是同一份快照
 
-状态：已确认
+状态：部分修复（2026-04-14）
+
+修复说明：
+
+- `update_group_profile()` 的 HTTP response 已改成 shared canonical 视角，和 `group_profile_update` event 不再 actor-view 分裂；事件仍在 route helper 中重新读取一次快照，未做同对象复用。
 
 现状：
 
@@ -24543,7 +24735,11 @@
 
 ### F-804：`update_my_group_profile()` 的 self-profile realtime/history payload 也是事后重建的，不保证和本次 self-scoped mutation 返回值描述同一状态
 
-状态：已确认
+状态：部分修复（2026-04-14）
+
+修复说明：
+
+- self-profile response 已收口为 self-only payload，空/no-op 不再写 event；event 仍由 route helper 在提交后重建，未完全复用同一 payload 对象。
 
 现状：
 
@@ -24622,7 +24818,11 @@
 
 ### F-806：`PATCH /groups/{group_id}` 是 shared mutation，但 HTTP 返回仍直接复用 viewer-scoped `serialize_group(..., current_user_id=current_user.id)`；调用方拿到的是 actor 视角而不是 shared canonical payload
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- shared group profile mutation 现在返回 `current_user_id=None` 的 canonical shared group payload，不再把 actor 的 `group_note/my_group_nickname` 混入正式 response。
 
 现状：
 

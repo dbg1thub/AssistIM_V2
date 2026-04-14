@@ -1241,7 +1241,7 @@ class MessageService:
         if normalized_session_type == "group":
             group = self.groups.get_by_session_id(str(getattr(session, "id", "") or ""))
             if group is not None:
-                session_avatar = self.avatars.ensure_group_avatar(group)
+                session_avatar = self.avatars.resolve_group_avatar_url(group)
         counterpart = self._serialize_counterpart_profile(
             normalized_session_type,
             session_members,

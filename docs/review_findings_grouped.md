@@ -643,6 +643,21 @@
 
 ### G-05：群/会话生命周期和成员变更没有进入正式实时/补偿模型
 
+状态：closed（2026-04-14）
+
+本轮修复说明：
+
+- 群创建、成员添加、成员移除、角色变更、群主转让和群资料修改统一进入 `group_profile_update` shared event；事件写入 `session_events`，在线 fanout 使用同一份 mutation payload，断线重连可通过 history event 补偿。
+- 删除群、离群、被移除成员和私聊创建这类无法用可见 group snapshot 表达的生命周期动作，改为明确的 `contact_refresh` tombstone / lifecycle invalidation；客户端 `SessionManager` 会据此刷新 authoritative session snapshot。
+- 建群 schema 改为非空群名、至少一名显式成员；两个桌面建群入口都提交冻结后的成员集和同一套默认群名，不再把空 name 交给服务端兜底。
+- 群成员 mutation 的 no-op / drift 语义改为显式错误：重复加人、移除不存在成员、self-transfer、缺失 `GroupMember` 的角色/资料更新不再静默成功或自动补建。
+- 群成员 shared payload 改按 `GroupMember` authoritative roster 计算 `member_count` / `group_member_version`，版本哈希纳入 role、owner 和 joined_at；shared 成员切片不再广播其它成员的私有 `group_nickname`。
+- 群 lifecycle 写路径会推进 `session.updated_at`；普通 group/session/message 序列化读路径改为只解析当前 avatar URL，不再生成群头像或回写 `session.avatar`。
+- generated group avatar 改为临时文件 + 原子替换，生成新版本后清理旧版本，删群时清理 generated avatar 资产；`create_group/add_member/leave_group` 返回序列化阶段不再二次触发 avatar 生成。
+- 群资料更新无实际 shared 变化时不再写 event / fanout；公告更新先发送 `group_profile_update` 再发送公告消息，让 session 侧公告 metadata 先到达。
+- 群成员管理弹窗 busy 期间不再取消上一条 mutation；添加成员候选每次打开都重新加载，加载失败给出用户反馈，picker 绑定到管理弹窗本身。
+- 回归覆盖：`server/tests` 全量通过；客户端 message/session/service/ui 相关测试通过，覆盖 group/session lifecycle fanout、history replay、session snapshot refresh 和 UI 边界。
+
 合并范围：
 
 - `F-099`

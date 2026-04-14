@@ -216,6 +216,7 @@ class SessionRepository:
         if session is None:
             return None
         session.avatar = str(avatar or "").strip() or None
+        session.updated_at = utcnow()
         self.db.add(session)
         self.db.flush()
         if commit:

@@ -27,6 +27,7 @@ class GroupProfileUpdateResult:
     group: dict[str, object]
     announcement_message_id: str = ""
     participant_ids: list[str] = field(default_factory=list)
+    changed: bool = False
 
 
 @dataclass(frozen=True)
@@ -100,12 +101,12 @@ class GroupService:
             group = self.groups.create(normalized_name, current_user.id, session.id, announcement="", commit=False)
             for member_id in members:
                 role = "owner" if member_id == current_user.id else "member"
-                self.groups.update_member_role(group.id, member_id, role, commit=False)
+                self.groups.add_member(group.id, member_id, role, commit=False)
             self.avatars.ensure_group_avatar(group)
             return group
 
         group = self._run_transaction(action)
-        group_payload = self.serialize_group(group, include_members=True, current_user_id=current_user.id)
+        group_payload = self.serialize_group(group, include_members=True, current_user_id=None)
         return self.group_mutation_result("created", group_payload)
 
     def get_group(self, current_user: User, group_id: str) -> dict:
@@ -126,17 +127,25 @@ class GroupService:
             if str(value or "").strip()
         ]
         previous_announcement = str(getattr(group, "announcement", "") or "")
+        previous_name = str(getattr(group, "name", "") or "")
         normalized_name = str(name or "").strip() if name is not None else None
         normalized_announcement = str(announcement or "").strip() if announcement is not None else None
+        name_changed = name is not None and normalized_name != previous_name
         announcement_changed = announcement is not None and normalized_announcement != previous_announcement
+        changed = name_changed or announcement_changed
+        if not changed:
+            return GroupProfileUpdateResult(
+                group=self.serialize_group(group, include_members=True, current_user_id=None),
+                changed=False,
+            )
 
         def action():
             announcement_message = None
-            if name is not None:
+            if name_changed:
                 group.name = normalized_name or ""
                 self.sessions.rename(group.session_id, group.name, commit=False)
 
-            if announcement is not None:
+            if announcement_changed:
                 group.announcement = normalized_announcement or ""
                 if group.announcement:
                     announcement_message = self.messages.create(
@@ -165,9 +174,10 @@ class GroupService:
 
         announcement_message = self._run_transaction(action)
         return GroupProfileUpdateResult(
-            group=self.serialize_group(group, include_members=True, current_user_id=current_user.id),
+            group=self.serialize_group(group, include_members=True, current_user_id=None),
             announcement_message_id=(str(getattr(announcement_message, "id", "") or "") if announcement_changed and announcement_message is not None else ""),
             participant_ids=participant_ids if announcement_changed and announcement_message is not None else [],
+            changed=True,
         )
 
     def update_my_group_profile(
@@ -208,7 +218,13 @@ class GroupService:
         normalized = str(announcement or "").strip()
         return f"群公告\n{normalized}" if normalized else "群公告"
 
-    def record_group_profile_update_event(self, group_id: str, *, actor_user_id: str) -> dict[str, object] | None:
+    def record_group_profile_update_event(
+        self,
+        group_id: str,
+        *,
+        actor_user_id: str,
+        mutation: dict[str, object] | None = None,
+    ) -> dict[str, object] | None:
         """Append one shared group-profile update event for offline sync and realtime fan-out."""
         group = self._get_group_or_404(group_id)
         participant_ids = [
@@ -222,6 +238,10 @@ class GroupService:
         payload = self.serialize_group(group, include_members=True, current_user_id=None)
         payload["group_id"] = group.id
         payload["session_id"] = group.session_id
+        payload.pop("group_note", None)
+        payload.pop("my_group_nickname", None)
+        if mutation:
+            payload["mutation"] = dict(mutation)
         event = self.messages.append_session_event(
             group.session_id,
             "group_profile_update",
@@ -276,15 +296,18 @@ class GroupService:
             raise AppError(ErrorCode.FORBIDDEN, "only owner can add members", 403)
         normalized_user_id = self._normalize_target_user_id(user_id)
         normalized_role = self._normalize_new_member_role(role)
+        if self.groups.get_member(group.id, normalized_user_id) is not None or self.sessions.has_member(group.session_id, normalized_user_id):
+            raise AppError(ErrorCode.SESSION_CONFLICT, "user is already a group member", 409)
 
         def action() -> None:
             self.sessions.add_member(group.session_id, normalized_user_id, commit=False)
-            self.groups.update_member_role(group.id, normalized_user_id, normalized_role, commit=False)
+            self.groups.add_member(group.id, normalized_user_id, normalized_role, commit=False)
             self.avatars.bump_group_avatar_version(group)
             self.avatars.ensure_group_avatar(group)
+            self.sessions.touch_without_commit(group.session_id)
 
         self._run_transaction(action)
-        group_payload = self.serialize_group(group, include_members=True, current_user_id=current_user.id)
+        group_payload = self.serialize_group(group, include_members=True, current_user_id=None)
         return self.group_mutation_result(
             "member_added",
             group_payload,
@@ -299,17 +322,22 @@ class GroupService:
             raise AppError(ErrorCode.FORBIDDEN, "owner must transfer ownership first", 403)
         if group.owner_id != current_user.id and current_user.id != normalized_user_id:
             raise AppError(ErrorCode.FORBIDDEN, "cannot remove member", 403)
+        if self.groups.get_member(group.id, normalized_user_id) is None or not self.sessions.has_member(group.session_id, normalized_user_id):
+            raise AppError(ErrorCode.RESOURCE_NOT_FOUND, "group member not found", 404)
 
         def action() -> None:
-            self.groups.remove_member(group.id, normalized_user_id, commit=False)
-            self.sessions.remove_member(group.session_id, normalized_user_id, commit=False)
+            removed_group_member = self.groups.remove_member(group.id, normalized_user_id, commit=False)
+            removed_session_member = self.sessions.remove_member(group.session_id, normalized_user_id, commit=False)
+            if not removed_group_member or not removed_session_member:
+                raise AppError(ErrorCode.SESSION_CONFLICT, "group membership drift detected", 409)
             self.avatars.bump_group_avatar_version(group)
             self.avatars.ensure_group_avatar(group)
+            self.sessions.touch_without_commit(group.session_id)
 
         self._run_transaction(action)
         group_payload = None
         if current_user.id != normalized_user_id:
-            group_payload = self.serialize_group(group, include_members=True, current_user_id=current_user.id)
+            group_payload = self.serialize_group(group, include_members=True, current_user_id=None)
         return self.group_mutation_result(
             "member_removed",
             group_payload,
@@ -329,15 +357,21 @@ class GroupService:
             raise AppError(ErrorCode.FORBIDDEN, "owner role can only be changed via transfer", 403)
 
         normalized_role = self._normalize_member_role_update(role)
+        current_role = self._member_role(group.id, normalized_user_id, owner_id=group.owner_id)
+        changed = current_role != normalized_role
 
         def action() -> None:
+            if not changed:
+                return
             self.groups.update_member_role(group.id, normalized_user_id, normalized_role, commit=False)
+            self.sessions.touch_without_commit(group.session_id)
 
         self._run_transaction(action)
-        group_payload = self.serialize_group(group, include_members=True, current_user_id=current_user.id)
+        group_payload = self.serialize_group(group, include_members=True, current_user_id=None)
         return self.group_mutation_result(
             "member_role_updated",
             group_payload,
+            changed=changed,
             target_user_id=normalized_user_id,
             role=normalized_role,
         )
@@ -347,8 +381,14 @@ class GroupService:
         if group.owner_id != current_user.id:
             raise AppError(ErrorCode.FORBIDDEN, "only owner can delete group", 403)
         session_id = group.session_id
+        participant_ids = [
+            value
+            for value in dict.fromkeys(self.sessions.list_member_ids(session_id))
+            if str(value or "").strip()
+        ]
 
         def action() -> None:
+            self.avatars.cleanup_group_avatar_assets(group)
             self.groups.delete_group(group, commit=False)
             self.sessions.delete_session(group.session_id, commit=False)
 
@@ -358,6 +398,7 @@ class GroupService:
             None,
             group_id=group_id,
             session_id=session_id,
+            participant_ids=participant_ids,
         )
 
     def leave_group(self, current_user: User, group_id: str) -> dict:
@@ -367,10 +408,13 @@ class GroupService:
         self._ensure_group_member(group, current_user.id)
 
         def action() -> None:
-            self.groups.remove_member(group.id, current_user.id, commit=False)
-            self.sessions.remove_member(group.session_id, current_user.id, commit=False)
+            removed_group_member = self.groups.remove_member(group.id, current_user.id, commit=False)
+            removed_session_member = self.sessions.remove_member(group.session_id, current_user.id, commit=False)
+            if not removed_group_member or not removed_session_member:
+                raise AppError(ErrorCode.SESSION_CONFLICT, "group membership drift detected", 409)
             self.avatars.bump_group_avatar_version(group)
             self.avatars.ensure_group_avatar(group)
+            self.sessions.touch_without_commit(group.session_id)
 
         self._run_transaction(action)
         return self.group_mutation_result(
@@ -385,15 +429,18 @@ class GroupService:
         if group.owner_id != current_user.id:
             raise AppError(ErrorCode.FORBIDDEN, "only owner can transfer ownership", 403)
         normalized_new_owner_id = self._normalize_target_user_id(new_owner_id)
+        if normalized_new_owner_id == current_user.id:
+            raise AppError(ErrorCode.SESSION_CONFLICT, "new owner must be a different group member", 409)
         self._ensure_group_member(group, normalized_new_owner_id)
 
         def action() -> None:
             self.groups.update_member_role(group.id, current_user.id, "member", commit=False)
             self.groups.update_member_role(group.id, normalized_new_owner_id, "owner", commit=False)
             self.groups.transfer_owner(group, normalized_new_owner_id, commit=False)
+            self.sessions.touch_without_commit(group.session_id)
 
         self._run_transaction(action)
-        group_payload = self.serialize_group(group, include_members=True, current_user_id=current_user.id)
+        group_payload = self.serialize_group(group, include_members=True, current_user_id=None)
         return self.group_mutation_result(
             "ownership_transferred",
             group_payload,
@@ -402,8 +449,7 @@ class GroupService:
         )
 
     def serialize_group(self, group, include_members: bool = True, *, current_user_id: str | None = None) -> dict:
-        avatar = self.avatars.ensure_group_avatar(group)
-        session_members = self.sessions.list_members(group.session_id)
+        avatar = self.avatars.resolve_group_avatar_url(group)
         group_members = self.groups.list_members(group.id)
         role_by_user_id = {item.user_id: item.role for item in group_members}
         member_meta_by_user_id = {
@@ -414,7 +460,7 @@ class GroupService:
             }
             for item in group_members
         }
-        user_ids = [str(item.user_id or "") for item in session_members if str(item.user_id or "")]
+        user_ids = [str(item.user_id or "") for item in group_members if str(item.user_id or "")]
         users_by_id = self.users.list_users_by_ids(user_ids)
         current_member_meta = member_meta_by_user_id.get(str(current_user_id or ""), {})
         data = {
@@ -428,16 +474,16 @@ class GroupService:
             "avatar_kind": str(getattr(group, "avatar_kind", "generated") or "generated"),
             "owner_id": group.owner_id,
             "session_id": group.session_id,
-            "member_count": len(session_members),
-            "member_version": self._group_member_version(user_ids),
-            "group_member_version": self._group_member_version(user_ids),
+            "member_count": len(group_members),
+            "member_version": self._group_member_version_from_members(group_members, owner_id=group.owner_id),
+            "group_member_version": self._group_member_version_from_members(group_members, owner_id=group.owner_id),
             "created_at": group.created_at.isoformat() if group.created_at else None,
             "group_note": str(current_member_meta.get("note", "") or ""),
             "my_group_nickname": str(current_member_meta.get("group_nickname", "") or ""),
         }
         if include_members:
             members = []
-            for item in session_members:
+            for item in group_members:
                 user = users_by_id.get(str(item.user_id or ""))
                 if user is None:
                     continue
@@ -448,7 +494,7 @@ class GroupService:
                         "id": user.id,
                         "username": user.username,
                         "nickname": user.nickname,
-                        "group_nickname": str(member_meta.get("group_nickname", "") or ""),
+                        "group_nickname": str(member_meta.get("group_nickname", "") or "") if str(current_user_id or "") == str(item.user_id or "") else "",
                         "avatar": self.avatars.resolve_user_avatar_url(user),
                         "gender": user.gender,
                         "region": user.region,
@@ -470,6 +516,25 @@ class GroupService:
         digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
         return int(digest[:16], 16)
 
+    @staticmethod
+    def _group_member_version_from_members(members: list, *, owner_id: str) -> int:
+        payload_items = []
+        for member in members or []:
+            user_id = str(getattr(member, "user_id", "") or "").strip()
+            if not user_id:
+                continue
+            payload_items.append(
+                {
+                    "user_id": user_id,
+                    "role": str(getattr(member, "role", "") or "member"),
+                    "owner": user_id == str(owner_id or ""),
+                    "joined_at": getattr(member, "joined_at", None).isoformat() if getattr(member, "joined_at", None) else "",
+                }
+            )
+        payload = json.dumps(sorted(payload_items, key=lambda item: item["user_id"]), ensure_ascii=True, separators=(",", ":"))
+        digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+        return int(digest[:16], 16)
+
     def _get_group_or_404(self, group_id: str):
         group = self.groups.get_by_id(group_id)
         if group is None:
@@ -479,6 +544,8 @@ class GroupService:
     def _ensure_group_member(self, group, user_id: str) -> None:
         if not self.sessions.has_member(group.session_id, user_id):
             raise AppError(ErrorCode.FORBIDDEN, "not a group member", 403)
+        if self.groups.get_member(group.id, user_id) is None:
+            raise AppError(ErrorCode.SESSION_CONFLICT, "group member profile missing", 409)
 
     def _normalize_target_user_id(self, user_id: str) -> str:
         normalized_user_id = str(user_id or "").strip()
@@ -500,7 +567,7 @@ class GroupService:
     def _member_role(self, group_id: str, user_id: str, *, owner_id: str) -> str:
         member = self.groups.get_member(group_id, user_id)
         if member is None:
-            return "owner" if str(user_id or "") == str(owner_id or "") else "member"
+            raise AppError(ErrorCode.SESSION_CONFLICT, "group member profile missing", 409)
         return str(member.role or "member")
 
     @staticmethod

@@ -691,17 +691,27 @@ class GroupMemberManagementDialog(QDialog):
         self._apply_group_record(record)
 
     async def _ensure_contacts_cache(self) -> list[ContactRecord]:
-        if self._contacts_cache is None:
-            self._contacts_cache = await self._controller.load_contacts()
+        self._contacts_cache = await self._controller.load_contacts()
         return list(self._contacts_cache)
 
     def _open_add_members_dialog(self) -> None:
+        if self._mutation_task and not self._mutation_task.done():
+            return
         if not self._permissions().can_add_members or self._group_record is None:
             return
         self._set_mutation_task(self._open_add_members_dialog_async())
 
     async def _open_add_members_dialog_async(self) -> None:
-        contacts = await self._ensure_contacts_cache()
+        try:
+            contacts = await self._ensure_contacts_cache()
+        except Exception as exc:
+            InfoBar.error(
+                tr("chat.group.manage.add.title", "Add Group Members"),
+                str(exc),
+                parent=self.window(),
+                duration=2400,
+            )
+            return
         existing_ids = {
             str(member.get("id", "") or member.get("user_id", "") or "").strip()
             for member in self._members()
@@ -716,7 +726,7 @@ class GroupMemberManagementDialog(QDialog):
             )
             return
 
-        dialog = GroupMemberPickerDialog(candidates, self.window())
+        dialog = GroupMemberPickerDialog(candidates, self)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         member_ids = dialog.selected_member_ids()
@@ -758,9 +768,13 @@ class GroupMemberManagementDialog(QDialog):
         return None
 
     def _promote_member(self, user_id: str) -> None:
+        if self._mutation_task and not self._mutation_task.done():
+            return
         self._set_mutation_task(self._update_member_role_async(user_id, role="admin"))
 
     def _demote_member(self, user_id: str) -> None:
+        if self._mutation_task and not self._mutation_task.done():
+            return
         self._set_mutation_task(self._update_member_role_async(user_id, role="member"))
 
     async def _update_member_role_async(self, user_id: str, *, role: str) -> None:
@@ -786,6 +800,8 @@ class GroupMemberManagementDialog(QDialog):
             self._set_busy(False)
 
     def _remove_member(self, user_id: str) -> None:
+        if self._mutation_task and not self._mutation_task.done():
+            return
         member = self._find_member(user_id)
         if member is None:
             return
@@ -826,6 +842,8 @@ class GroupMemberManagementDialog(QDialog):
             self._set_busy(False)
 
     def _transfer_owner(self, user_id: str) -> None:
+        if self._mutation_task and not self._mutation_task.done():
+            return
         member = self._find_member(user_id)
         if member is None:
             return
@@ -900,7 +918,8 @@ class GroupMemberManagementDialog(QDialog):
             self._load_task = None
 
     def _set_mutation_task(self, coro) -> None:
-        self._cancel_pending_task(self._mutation_task)
+        if self._mutation_task and not self._mutation_task.done():
+            return
         self._mutation_task = self._create_ui_task(coro, "mutate group members", on_done=self._clear_mutation_task)
 
     def _clear_mutation_task(self, task: asyncio.Task) -> None:

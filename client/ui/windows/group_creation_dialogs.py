@@ -328,6 +328,8 @@ class StartGroupChatDialog(MaskDialogBase):
         self._update_footer()
 
     def _toggle_member(self, contact_id: str, selected: bool) -> None:
+        if self._create_task and not self._create_task.done():
+            return
         if selected:
             self._selected_ids.add(contact_id)
         else:
@@ -335,6 +337,8 @@ class StartGroupChatDialog(MaskDialogBase):
         self._update_footer()
 
     def _remove_selected_member(self, contact_id: str) -> None:
+        if self._create_task and not self._create_task.done():
+            return
         if not contact_id:
             return
         self._selected_ids.discard(contact_id)
@@ -392,15 +396,16 @@ class StartGroupChatDialog(MaskDialogBase):
                 duration=1800,
             )
             return
-        self._set_create_task(self._create_group_async())
+        member_ids = [contact.id for contact in self._selected_contacts()]
+        name = self._default_group_name()
+        self._set_create_task(self._create_group_async(name, member_ids))
 
-    async def _create_group_async(self) -> None:
-        member_ids = list(dict.fromkeys(contact.id for contact in self._selected_contacts()))
-        name = ""
+    async def _create_group_async(self, name: str, member_ids: list[str]) -> None:
         self.complete_button.setEnabled(False)
+        self.search_edit.setEnabled(False)
         self.complete_button.setText(tr("chat.group_picker.creating", "Creating..."))
         try:
-            group = await self._controller.create_group(name, member_ids)
+            group = await self._controller.create_group(name, list(dict.fromkeys(member_ids)))
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -411,10 +416,13 @@ class StartGroupChatDialog(MaskDialogBase):
                 duration=2200,
             )
         else:
-            self.group_created.emit(enrich_created_group(group, self._selected_contacts()))
+            selected_contacts = [contact for contact in self._contacts if contact.id in set(member_ids)]
+            selected_contacts.sort(key=lambda item: item.display_name.lower())
+            self.group_created.emit(enrich_created_group(group, selected_contacts))
             self.close()
         finally:
             self.complete_button.setEnabled(True)
+            self.search_edit.setEnabled(True)
             self.complete_button.setText(tr("chat.group_picker.complete", "Done"))
 
     def _on_finished(self, _result: int) -> None:
@@ -574,6 +582,7 @@ class CreateGroupDialog(QDialog):
             if not keyword
             or keyword in contact.display_name.lower()
             or keyword in contact.username.lower()
+            or keyword in str(contact.assistim_id or "").lower()
             or keyword in contact.signature.lower()
         ]
 
@@ -596,6 +605,8 @@ class CreateGroupDialog(QDialog):
         self._update_summary()
 
     def _toggle_member(self, contact_id: str, selected: bool) -> None:
+        if self._create_task and not self._create_task.done():
+            return
         if selected:
             self._selected_ids.add(contact_id)
         else:
@@ -620,7 +631,7 @@ class CreateGroupDialog(QDialog):
         if self._create_task and not self._create_task.done():
             return
 
-        name = self.name_edit.text().strip()
+        name = self.name_edit.text().strip() or self._default_group_name() or tr("chat.group_picker.default_name", "Group Chat")
         if not self._selected_ids:
             InfoBar.warning(
                 tr("contact.create_group.title", "Create Group"),
@@ -630,13 +641,17 @@ class CreateGroupDialog(QDialog):
             )
             return
 
-        self._set_create_task(self._create_group_async(name))
+        member_ids = [contact.id for contact in self._selected_contacts()]
+        self._set_create_task(self._create_group_async(name, member_ids))
 
-    async def _create_group_async(self, name: str) -> None:
+    async def _create_group_async(self, name: str, member_ids: list[str]) -> None:
         self.create_button.setEnabled(False)
+        self.cancel_button.setEnabled(False)
+        self.search_edit.setEnabled(False)
+        self.name_edit.setEnabled(False)
         self.create_button.setText(tr("contact.create_group.creating", "Creating..."))
         try:
-            group = await self._controller.create_group(name, list(self._selected_ids))
+            group = await self._controller.create_group(name, list(dict.fromkeys(member_ids)))
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -652,6 +667,9 @@ class CreateGroupDialog(QDialog):
             self.close()
         finally:
             self.create_button.setEnabled(True)
+            self.cancel_button.setEnabled(True)
+            self.search_edit.setEnabled(True)
+            self.name_edit.setEnabled(True)
             self.create_button.setText(tr("contact.create_group.create", "Create Group"))
 
     def _selected_contacts(self) -> list[ContactRecord]:

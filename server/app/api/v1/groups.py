@@ -62,6 +62,26 @@ async def _broadcast_group_announcement_message(
 async def _broadcast_group_profile_update(db: Session, group_id: str, *, actor_user_id: str) -> None:
     service = GroupService(db)
     event_item = service.record_group_profile_update_event(group_id, actor_user_id=actor_user_id)
+    await _send_group_profile_event_item(event_item)
+
+
+async def _broadcast_group_lifecycle_update(
+    db: Session,
+    group_id: str,
+    *,
+    actor_user_id: str,
+    mutation: dict[str, object] | None = None,
+) -> None:
+    service = GroupService(db)
+    event_item = service.record_group_profile_update_event(
+        group_id,
+        actor_user_id=actor_user_id,
+        mutation=mutation,
+    )
+    await _send_group_profile_event_item(event_item)
+
+
+async def _send_group_profile_event_item(event_item: dict[str, object] | None) -> None:
     if not event_item:
         return
 
@@ -90,6 +110,29 @@ async def _broadcast_group_profile_update(db: Session, group_id: str, *, actor_u
         logger.exception("Group profile fanout failed after committed group profile mutation")
 
 
+async def _broadcast_contact_refresh(user_ids: list[str], reason: str, payload: dict | None = None) -> None:
+    normalized_user_ids = [
+        value
+        for value in dict.fromkeys(str(raw_id or "").strip() for raw_id in user_ids)
+        if value
+    ]
+    if not normalized_user_ids:
+        return
+    try:
+        await connection_manager.send_json_to_users(
+            normalized_user_ids,
+            ws_message(
+                "contact_refresh",
+                {
+                    "reason": reason,
+                    **(dict(payload or {})),
+                },
+            ),
+        )
+    except Exception:
+        logger.exception("Contact refresh fanout failed after committed group lifecycle mutation")
+
+
 async def _broadcast_group_self_profile_update(db: Session, current_user: User, group_id: str) -> None:
     service = GroupService(db)
     payload = service.record_group_self_profile_update_event(current_user, group_id)
@@ -115,9 +158,13 @@ def list_groups(current_user: User = Depends(get_current_user), db: Session = De
 
 
 @router.post("", status_code=status.HTTP_201_CREATED)
-def create_group(payload: GroupCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
+async def create_group(payload: GroupCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
     member_ids = payload.requested_member_ids
-    return success_response(GroupService(db).create_group(current_user, payload.name, member_ids, payload.encryption_mode))
+    result = GroupService(db).create_group(current_user, payload.name, member_ids, payload.encryption_mode)
+    mutation = dict(result.get("mutation") or {})
+    group = dict(result.get("group") or {})
+    await _broadcast_group_lifecycle_update(db, str(group.get("id", "") or ""), actor_user_id=current_user.id, mutation=mutation)
+    return success_response(result)
 
 
 @router.get("/{group_id}")
@@ -133,13 +180,28 @@ async def update_group_profile(
     db: Session = Depends(get_db),
 ) -> dict:
     result = GroupService(db).update_group_profile(current_user, group_id, payload.name, payload.announcement)
+    if result.changed:
+        await _broadcast_group_lifecycle_update(
+            db,
+            group_id,
+            actor_user_id=current_user.id,
+            mutation=GroupService.group_mutation_result(
+                "profile_updated",
+                result.group,
+                announcement={
+                    "message_id": result.announcement_message_id or None,
+                    "created": bool(result.announcement_message_id),
+                    "participant_count": len(result.participant_ids),
+                },
+            )["mutation"],
+        )
     if result.announcement_message_id:
         await _broadcast_group_announcement_message(db, result.announcement_message_id, result.participant_ids)
-    await _broadcast_group_profile_update(db, group_id, actor_user_id=current_user.id)
     return success_response(
         GroupService.group_mutation_result(
             "profile_updated",
             result.group,
+            changed=result.changed,
             announcement={
                 "message_id": result.announcement_message_id or None,
                 "created": bool(result.announcement_message_id),
@@ -163,46 +225,89 @@ async def update_my_group_profile(
 
 
 @router.delete("/{group_id}")
-def delete_group(group_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
-    return success_response(GroupService(db).delete_group(current_user, group_id))
+async def delete_group(group_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
+    result = GroupService(db).delete_group(current_user, group_id)
+    mutation = dict(result.get("mutation") or {})
+    participant_ids = [str(value or "").strip() for value in mutation.get("participant_ids", []) if str(value or "").strip()]
+    await _broadcast_contact_refresh(
+        participant_ids,
+        "group_deleted",
+        {
+            "group_id": group_id,
+            "session_id": str(mutation.get("session_id", "") or ""),
+            "mutation": mutation,
+        },
+    )
+    return success_response(result)
 
 
 @router.post("/{group_id}/members")
-def add_member(
+async def add_member(
     group_id: str,
     payload: GroupMemberAdd,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> dict:
-    return success_response(GroupService(db).add_member(current_user, group_id, payload.user_id, payload.role))
+    result = GroupService(db).add_member(current_user, group_id, payload.user_id, payload.role)
+    await _broadcast_group_lifecycle_update(db, group_id, actor_user_id=current_user.id, mutation=dict(result.get("mutation") or {}))
+    return success_response(result)
 
 
 @router.delete("/{group_id}/members/{user_id}")
-def remove_member(group_id: str, user_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
-    return success_response(GroupService(db).remove_member(current_user, group_id, user_id))
+async def remove_member(group_id: str, user_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
+    result = GroupService(db).remove_member(current_user, group_id, user_id)
+    mutation = dict(result.get("mutation") or {})
+    await _broadcast_group_lifecycle_update(db, group_id, actor_user_id=current_user.id, mutation=mutation)
+    await _broadcast_contact_refresh(
+        [str(mutation.get("target_user_id", "") or "")],
+        "group_member_removed",
+        {
+            "group_id": group_id,
+            "session_id": str(mutation.get("session_id", "") or ""),
+            "mutation": mutation,
+        },
+    )
+    return success_response(result)
 
 
 @router.patch("/{group_id}/members/{user_id}/role")
-def update_member_role(
+async def update_member_role(
     group_id: str,
     user_id: str,
     payload: GroupMemberRoleUpdate,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> dict:
-    return success_response(GroupService(db).update_member_role(current_user, group_id, user_id, payload.role))
+    result = GroupService(db).update_member_role(current_user, group_id, user_id, payload.role)
+    if dict(result.get("mutation") or {}).get("changed") is not False:
+        await _broadcast_group_lifecycle_update(db, group_id, actor_user_id=current_user.id, mutation=dict(result.get("mutation") or {}))
+    return success_response(result)
 
 
 @router.post("/{group_id}/leave")
-def leave_group(group_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
-    return success_response(GroupService(db).leave_group(current_user, group_id))
+async def leave_group(group_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
+    result = GroupService(db).leave_group(current_user, group_id)
+    mutation = dict(result.get("mutation") or {})
+    await _broadcast_group_lifecycle_update(db, group_id, actor_user_id=current_user.id, mutation=mutation)
+    await _broadcast_contact_refresh(
+        [current_user.id],
+        "group_left",
+        {
+            "group_id": group_id,
+            "session_id": str(mutation.get("session_id", "") or ""),
+            "mutation": mutation,
+        },
+    )
+    return success_response(result)
 
 
 @router.post("/{group_id}/transfer")
-def transfer_group(
+async def transfer_group(
     group_id: str,
     payload: GroupTransferOwner,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> dict:
-    return success_response(GroupService(db).transfer_ownership(current_user, group_id, payload.new_owner_id))
+    result = GroupService(db).transfer_ownership(current_user, group_id, payload.new_owner_id)
+    await _broadcast_group_lifecycle_update(db, group_id, actor_user_id=current_user.id, mutation=dict(result.get("mutation") or {}))
+    return success_response(result)
