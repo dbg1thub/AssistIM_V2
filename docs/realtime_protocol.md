@@ -43,14 +43,14 @@
 客户端发送：
 
 - `auth`
-- `ping`
-- `heartbeat`
 
 服务端返回：
 
 - `auth_ack`
-- `pong`
 - `error`
+- `force_logout`
+
+桌面端主链路使用 WebSocket transport ping frame 做保活，不使用 JSON `ping` / `heartbeat` / `pong` 作为应用层协议。
 
 `auth`：
 
@@ -76,14 +76,33 @@
 }
 ```
 
-### 3.2 在线状态
+`auth_ack` 只表示认证成功。认证失败、命令失败和未支持命令统一返回 `error`。
+
+`force_logout`：
+
+```json
+{
+  "type": "force_logout",
+  "data": {
+    "reason": "session_replaced"
+  }
+}
+```
+
+`force_logout.data.reason` 当前枚举：
+
+- `session_replaced`：同账号新登录已替换当前在线运行时
+- `logout`：同账号其它运行时已执行登出
+
+客户端收到后必须进入 auth-loss teardown / re-auth 流程，不进入 `history_events` 补偿模型。
+
+### 3.2 轻量实时状态
 
 服务端广播：
 
-- `online`
-- `offline`
-- `presence`
 - `typing`
+
+桌面端当前没有独立 presence socket，也没有 `online/offline/presence` 消费链路；服务端不再公开 `/ws/presence`。
 
 ### 3.3 消息同步
 
@@ -156,7 +175,6 @@
 
 客户端发送：
 
-- `read_ack` / `read`
 - `message_recall`
 - `message_edit`
 - `message_delete`
@@ -167,11 +185,77 @@
 - `message_recall`
 - `message_edit`
 - `message_delete`
+- `contact_refresh`
+- `user_profile_update`
+- `group_profile_update`
+- `group_self_profile_update`
 
 约束：
 
-- 这些事件属于 `event_seq` 语义
-- 服务端广播时外层 `seq` 与 `data.event_seq` 保持一致
+- `read/message_recall/message_edit/message_delete/group_profile_update/group_self_profile_update` 属于 `event_seq` / `history_events` 补偿语义
+- 已读状态的持久化入口是 HTTP `/messages/read/batch`；聊天 WebSocket 不接受 `read_ack/read` 命令
+- `user_profile_update` 使用 `profile_event_id` 做实时幂等标识，同时为受影响会话写入对应 history event
+- `contact_refresh` 是联系人域刷新提示，不写入 `history_events`；桌面端在线收到后触发联系人域权威 reload，重连成功后也会主动 reload 以补偿断线窗口
+- 服务端广播进入 `event_seq` 模型的事件时，外层 `seq` 与 `data.event_seq` 保持一致
+
+`contact_refresh.data`：
+
+```json
+{
+  "reason": "friend_request_created",
+  "request_id": "request_x",
+  "sender_id": "user_a",
+  "receiver_id": "user_b"
+}
+```
+
+`message_ack` 只表示服务端已提交消息并返回权威消息对象；发送失败统一返回同 `msg_id` 的 `error`，客户端不得依赖 `message_ack.success=false`。
+
+`user_profile_update.data`：
+
+```json
+{
+  "profile_event_id": "user-profile:user_x:uuid",
+  "user_id": "user_x",
+  "profile": {
+    "id": "user_x",
+    "username": "alice",
+    "nickname": "Alice",
+    "display_name": "Alice",
+    "avatar": "/uploads/default_avatars/avatar_default_female_02.svg",
+    "avatar_kind": "default",
+    "gender": "female",
+    "region": "Seoul",
+    "signature": "hello",
+    "status": "online"
+  }
+}
+```
+
+`group_profile_update.data`：
+
+```json
+{
+  "group_id": "group_x",
+  "session_id": "session_x",
+  "name": "Ops",
+  "announcement": "Deploy tonight",
+  "members": [],
+  "event_seq": 7
+}
+```
+
+`group_self_profile_update.data`：
+
+```json
+{
+  "group_id": "group_x",
+  "session_id": "session_x",
+  "group_note": "private note",
+  "my_group_nickname": "oncall",
+  "event_seq": 3
+}
+```
 
 ## 4. 权威消息对象
 
@@ -183,7 +267,6 @@
 - `content`
 - `message_type`
 - `status`
-- `timestamp`
 - `created_at`
 - `updated_at`
 - `session_type`

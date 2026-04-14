@@ -19,7 +19,7 @@ from app.services.auth_service import AuthService
 from app.services.user_service import UserService
 from app.utils.response import success_response
 from app.websocket.manager import connection_manager
-from app.websocket.presence_ws import event_payload
+from app.websocket.payloads import ws_message
 
 
 router = APIRouter()
@@ -38,9 +38,9 @@ def _login_limit(request: Request) -> int:
 
 async def _disconnect_auth_connections(user_id: str, *, reason: str, strict_disconnect: bool) -> None:
     """Disconnect existing realtime runtime for one committed or soon-to-be-committed auth change."""
-    payload = event_payload("force_logout", {"reason": reason})
+    payload = ws_message("force_logout", {"reason": reason})
     try:
-        became_offline = await connection_manager.disconnect_user_connections(
+        await connection_manager.disconnect_user_connections(
             user_id,
             close_code=4001,
             reason=reason,
@@ -51,13 +51,6 @@ async def _disconnect_auth_connections(user_id: str, *, reason: str, strict_disc
         if strict_disconnect:
             raise AppError(ErrorCode.INTERNAL_ERROR, "failed to replace existing session", 500)
         return
-
-    if not became_offline:
-        return
-    try:
-        await connection_manager.broadcast_json(event_payload("offline", {"user_id": user_id}))
-    except Exception:
-        logger.exception("Auth offline fanout failed after auth connection disconnect")
 
 
 @router.post("/register", dependencies=[Depends(rate_limiter.dynamic_dependency("register", _register_limit))])
@@ -111,4 +104,4 @@ async def logout(
 
 @router.get("/me")
 def me(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
-    return success_response(UserService(db).get_user(current_user.id))
+    return success_response(UserService(db).serialize_user(current_user))

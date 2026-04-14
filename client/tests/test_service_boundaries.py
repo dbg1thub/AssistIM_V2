@@ -866,7 +866,7 @@ class FakeContactService:
             {'id': item, 'username': item, 'nickname': item.title(), 'role': 'member'}
             for item in member_ids
         ]
-        return self._group_payload('group-1')
+        return {'group': self._group_payload('group-1'), 'mutation': {'action': 'created', 'changed': True}}
 
     async def update_group_profile(self, group_id: str, *, name: str | None = None, announcement: str | None = None) -> dict:
         self.update_group_profile_calls.append((group_id, name, announcement))
@@ -876,10 +876,14 @@ class FakeContactService:
             self.group_announcement = announcement
         return {
             'group': self._group_payload(group_id),
-            'announcement': {
-                'message_id': 'announcement-message-1' if announcement else None,
-                'created': bool(announcement),
-                'participant_count': len(self.group_members),
+            'mutation': {
+                'action': 'profile_updated',
+                'changed': True,
+                'announcement': {
+                    'message_id': 'announcement-message-1' if announcement else None,
+                    'created': bool(announcement),
+                    'participant_count': len(self.group_members),
+                },
             },
         }
 
@@ -899,17 +903,18 @@ class FakeContactService:
 
     async def leave_group(self, group_id: str) -> dict:
         self.leave_group_calls.append(group_id)
-        return {'status': 'left'}
+        return {'group': None, 'mutation': {'action': 'left', 'changed': True, 'group_id': group_id}}
 
     async def add_group_member(self, group_id: str, user_id: str, *, role: str = 'member') -> dict:
         self.add_group_member_calls.append((group_id, user_id, role))
         if not any(str(member.get('id', '') or '').strip() == user_id for member in self.group_members):
             self.group_members.append({'id': user_id, 'username': user_id, 'nickname': user_id.title(), 'role': role})
-        return {'group': self._group_payload(group_id)}
+        return {'group': self._group_payload(group_id), 'mutation': {'action': 'member_added', 'changed': True, 'target_user_id': user_id}}
 
-    async def remove_group_member(self, group_id: str, user_id: str) -> None:
+    async def remove_group_member(self, group_id: str, user_id: str) -> dict:
         self.remove_group_member_calls.append((group_id, user_id))
         self.group_members = [member for member in self.group_members if str(member.get('id', '') or '').strip() != user_id]
+        return {'group': self._group_payload(group_id), 'mutation': {'action': 'member_removed', 'changed': True, 'target_user_id': user_id}}
 
     async def update_group_member_role(self, group_id: str, user_id: str, *, role: str) -> dict:
         self.update_group_member_role_calls.append((group_id, user_id, role))
@@ -917,7 +922,7 @@ class FakeContactService:
             if str(member.get('id', '') or '').strip() == user_id:
                 member['role'] = role
                 break
-        return {'group': self._group_payload(group_id)}
+        return {'group': self._group_payload(group_id), 'mutation': {'action': 'member_role_updated', 'changed': True, 'target_user_id': user_id}}
 
     async def transfer_group_ownership(self, group_id: str, new_owner_id: str) -> dict:
         self.transfer_group_ownership_calls.append((group_id, new_owner_id))
@@ -927,7 +932,7 @@ class FakeContactService:
                 member['role'] = 'owner'
             elif str(member.get('role', '') or '').strip() == 'owner':
                 member['role'] = 'member'
-        return {'group': self._group_payload(group_id)}
+        return {'group': self._group_payload(group_id), 'mutation': {'action': 'ownership_transferred', 'changed': True, 'new_owner_id': new_owner_id}}
 
     async def accept_friend_request(self, request_id: str) -> dict:
         self.accept_calls.append(request_id)
@@ -1254,6 +1259,13 @@ class FakeMessageStoreDatabase:
             if message.message_id == message_id:
                 return message
         return None
+
+    async def get_messages_by_ids(self, message_ids: list[str]):
+        return {
+            message.message_id: message
+            for message in self.messages
+            if message.message_id in set(message_ids)
+        }
 
     async def save_messages_batch(self, messages: list[ChatMessage]) -> None:
         self.saved_batches.append([message for message in messages])
@@ -2408,21 +2420,19 @@ def test_contact_controller_load_requests_resolves_counterpart_names(monkeypatch
     fake_contact_service.requests_payload = [
         {
             'request_id': 'req-1',
-            'sender_id': 'user-1',
-            'receiver_id': outgoing_target_id,
             'message': 'hello',
             'status': 'accepted',
             'created_at': '2026-03-27T10:00:00Z',
-            'to_user': {'id': outgoing_target_id, 'nickname': 'Test 2', 'username': 'test2', 'avatar': '/uploads/test2.png', 'gender': 'female'},
+            'sender': {'id': 'user-1', 'nickname': 'Alice', 'username': 'alice'},
+            'receiver': {'id': outgoing_target_id, 'nickname': 'Test 2', 'username': 'test2', 'avatar': '/uploads/test2.png', 'gender': 'female'},
         },
         {
             'request_id': 'req-2',
-            'sender_id': incoming_sender_id,
-            'receiver_id': 'user-1',
             'message': 'hi',
             'status': 'pending',
             'created_at': '2026-03-26T09:00:00Z',
-            'from_user': {'id': incoming_sender_id, 'nickname': 'Test 3', 'username': 'test3', 'avatar': '/uploads/test3.png', 'gender': 'male'},
+            'sender': {'id': incoming_sender_id, 'nickname': 'Test 3', 'username': 'test3', 'avatar': '/uploads/test3.png', 'gender': 'male'},
+            'receiver': {'id': 'user-1', 'nickname': 'Alice', 'username': 'alice'},
         },
     ]
     fake_user_service.user_payloads = {
@@ -2490,8 +2500,8 @@ def test_contact_controller_mutations_use_contact_service(monkeypatch) -> None:
         assert any(member.get('id') == 'user-2' and member.get('role') == 'admin' for member in group_after_role.extra['members'])
         assert all(member.get('id') != 'user-4' for member in group_after_remove.extra['members'])
         assert group_after_transfer.owner_id == 'user-2'
-        assert leave_result['status'] == 'left'
-        assert fake_contact_service.fetch_group_calls == ['group-1', 'group-1']
+        assert leave_result['mutation']['action'] == 'left'
+        assert fake_contact_service.fetch_group_calls == ['group-1']
         assert fake_contact_service.update_group_profile_calls == [('group-1', 'Renamed Team', 'Ship tonight')]
         assert fake_contact_service.update_my_group_profile_calls == [('group-1', 'private note', 'lead')]
         assert fake_contact_service.add_group_member_calls == [('group-1', 'user-4', 'member')]

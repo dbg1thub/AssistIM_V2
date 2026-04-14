@@ -40,6 +40,9 @@ class _FakeSessionRepo:
     def list_member_ids(self, session_id: str):
         return ['alice'] if self._has_member else []
 
+    def list_members(self, session_id: str):
+        return [SimpleNamespace(user_id='alice')] if self._has_member else []
+
 
 
 class _HiddenPrivateSessionRepo:
@@ -72,6 +75,16 @@ class _HiddenPrivateSessionRepo:
         if session_id == 'visible-group':
             return ['alice', 'bob']
         return []
+
+    def list_members(self, session_id: str):
+        return [SimpleNamespace(user_id=user_id) for user_id in self.list_member_ids(session_id)]
+
+
+class _FakeDeviceRepo:
+    def get_device_for_user(self, user_id: str, device_id: str):
+        if (user_id, device_id) in {('alice', 'device-alice'), ('bob', 'device-bob')}:
+            return SimpleNamespace(user_id=user_id, device_id=device_id, is_active=True)
+        return None
 
 
 class _ForbiddenHiddenMessageRepo:
@@ -141,6 +154,20 @@ def _assert_hidden_private_404(action) -> None:
 def _alice():
     return SimpleNamespace(id='alice')
 
+
+def _fake_session(encryption_mode: str = 'plain'):
+    return SimpleNamespace(
+        id='session-1',
+        type='private',
+        is_ai_session=False,
+        encryption_mode=encryption_mode,
+    )
+
+
+def _fake_session_member_ids() -> list[str]:
+    return ['alice', 'bob']
+
+
 def test_message_service_list_messages_returns_404_for_missing_session() -> None:
     service = MessageService(db=None)
     service.sessions = _FakeSessionRepo(session_exists=False, has_member=False)
@@ -166,7 +193,7 @@ def test_message_service_hidden_private_session_blocks_session_scoped_entries() 
     _assert_hidden_private_404(lambda: service.list_messages(_alice(), 'hidden-direct'))
     _assert_hidden_private_404(lambda: service.send_message(_alice(), 'hidden-direct', 'hello'))
     _assert_hidden_private_404(
-        lambda: service.send_ws_message(
+        lambda: service.send_websocket_message(
             sender_id='alice',
             session_id='hidden-direct',
             content='hello',
@@ -320,7 +347,8 @@ def test_message_service_rejects_encrypted_payload_when_session_mode_plain() -> 
     with pytest.raises(AppError) as exc_info:
         service._normalize_message_extra(
             sender_id='alice',
-            session_id='session-1',
+            session=_fake_session(),
+            session_member_ids=_fake_session_member_ids(),
             content='hello',
             message_type='text',
             extra=_direct_text_encryption_extra(),
@@ -341,7 +369,8 @@ def test_message_service_rejects_plaintext_text_in_e2ee_private_session() -> Non
     with pytest.raises(AppError) as exc_info:
         service._normalize_message_extra(
             sender_id='alice',
-            session_id='session-1',
+            session=_fake_session(encryption_mode='e2ee_private'),
+            session_member_ids=_fake_session_member_ids(),
             content='hello',
             message_type='text',
             extra=None,
@@ -358,10 +387,12 @@ def test_message_service_accepts_encrypted_text_in_e2ee_private_session() -> Non
         has_member=True,
         encryption_mode='e2ee_private',
     )
+    service.devices = _FakeDeviceRepo()
 
     payload = service._normalize_message_extra(
         sender_id='alice',
-        session_id='session-1',
+        session=_fake_session(encryption_mode='e2ee_private'),
+        session_member_ids=_fake_session_member_ids(),
         content='hello',
         message_type='text',
         extra=_direct_text_encryption_extra(),

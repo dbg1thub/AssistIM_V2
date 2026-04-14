@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from sqlalchemy import and_, desc, func, or_, select, update
+from sqlalchemy import and_, case, desc, func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -112,72 +112,86 @@ class MessageRepository:
         return {str(message.session_id or ""): message for message in self.db.execute(stmt).scalars().all()}
 
     def list_missing_messages_for_user(self, session_cursors: dict[str, int], user_id: str) -> list[Message]:
-        session_ids = list(
-            self.db.execute(
+        session_ids = [
+            str(session_id or "").strip()
+            for session_id in self.db.execute(
                 select(SessionMember.session_id).where(SessionMember.user_id == user_id)
             ).scalars().all()
-        )
+            if str(session_id or "").strip()
+        ]
         if not session_ids:
             return []
 
-        conditions = [
-            and_(
-                Message.session_id == session_id,
-                Message.session_seq > max(0, int(session_cursors.get(session_id, 0) or 0)),
-            )
-            for session_id in session_ids
-        ]
-        if not conditions:
-            return []
+        session_cursor_expr = case(
+            *[
+                (Message.session_id == session_id, max(0, int(session_cursors.get(session_id, 0) or 0)))
+                for session_id in session_ids
+            ],
+            else_=0,
+        )
 
         stmt = (
             select(Message)
-            .where(or_(*conditions))
+            .where(
+                Message.session_id.in_(session_ids),
+                Message.session_seq > session_cursor_expr,
+            )
             .order_by(Message.session_id.asc(), Message.session_seq.asc(), Message.created_at.asc(), Message.id.asc())
         )
         return list(self.db.execute(stmt).scalars().all())
 
     def list_missing_events_for_user(self, event_cursors: dict[str, int], user_id: str) -> list[SessionEvent | UserSessionEvent]:
         normalized_user_id = str(user_id or '').strip()
-        session_ids = list(
-            self.db.execute(
+        session_ids = [
+            str(session_id or "").strip()
+            for session_id in self.db.execute(
                 select(SessionMember.session_id).where(SessionMember.user_id == normalized_user_id)
             ).scalars().all()
-        )
+            if str(session_id or "").strip()
+        ]
         if not session_ids:
             return []
 
-        shared_conditions = [
-            and_(
-                SessionEvent.session_id == str(session_id or "").strip(),
-                SessionEvent.event_seq > max(0, int(event_cursors.get(session_id, 0) or 0)),
-            )
+        session_cursor_by_id = {
+            session_id: max(0, int(event_cursors.get(session_id, 0) or 0))
             for session_id in session_ids
-        ]
-        private_conditions = [
-            and_(
-                UserSessionEvent.session_id == str(session_id or "").strip(),
-                UserSessionEvent.user_id == normalized_user_id,
-                UserSessionEvent.event_seq > max(0, int(event_cursors.get(session_id, 0) or 0)),
-            )
-            for session_id in session_ids
-        ]
+        }
+        shared_cursor_expr = case(
+            *[
+                (SessionEvent.session_id == session_id, cursor)
+                for session_id, cursor in session_cursor_by_id.items()
+            ],
+            else_=0,
+        )
+        private_cursor_expr = case(
+            *[
+                (UserSessionEvent.session_id == session_id, cursor)
+                for session_id, cursor in session_cursor_by_id.items()
+            ],
+            else_=0,
+        )
 
         shared_events: list[SessionEvent] = []
         private_events: list[UserSessionEvent] = []
-        if shared_conditions:
+        if session_cursor_by_id:
             shared_events = list(
                 self.db.execute(
                     select(SessionEvent)
-                    .where(or_(*shared_conditions))
+                    .where(
+                        SessionEvent.session_id.in_(list(session_cursor_by_id)),
+                        SessionEvent.event_seq > shared_cursor_expr,
+                    )
                     .order_by(SessionEvent.session_id.asc(), SessionEvent.event_seq.asc(), SessionEvent.created_at.asc(), SessionEvent.id.asc())
                 ).scalars().all()
             )
-        if private_conditions:
             private_events = list(
                 self.db.execute(
                     select(UserSessionEvent)
-                    .where(or_(*private_conditions))
+                    .where(
+                        UserSessionEvent.session_id.in_(list(session_cursor_by_id)),
+                        UserSessionEvent.user_id == normalized_user_id,
+                        UserSessionEvent.event_seq > private_cursor_expr,
+                    )
                     .order_by(UserSessionEvent.session_id.asc(), UserSessionEvent.event_seq.asc(), UserSessionEvent.created_at.asc(), UserSessionEvent.id.asc())
                 ).scalars().all()
             )

@@ -358,7 +358,17 @@
 
 ### F-012：服务端仍公开“全局硬删除 direct 会话”接口，但客户端与 UI 已把删除会话定义为本地隐藏
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- `MessageManager._fetch_remote_messages()` 现在先收集远端页里的 canonical `message_id`，再通过 `Database.get_messages_by_ids()` 批量读取本地已有消息
+- 远端页仍完整返回给调用方，避免破坏 recovery 翻页对整页消息和 `session_seq` 的依赖
+- 本地落盘改为 delta write：只保存新增消息或与本地缓存存在 authoritative 字段差异的消息
+- `Database.get_messages_by_ids()` 已补批量查询入口，避免 `_fetch_remote_messages()` 对每条远端消息逐个 `get_message()`
+- 已补 `test_message_manager_remote_history_uses_batch_existing_lookup_and_delta_write`
+
+原状态：已确认
 
 现状：
 
@@ -390,7 +400,19 @@
 
 ### F-013：typing 的 `typing=false` 停止语义在服务端已暴露，但桌面端既不会发送也不会消费
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- `MessageService` 已接入 `DeviceRepository`，E2EE envelope 不再只做 opaque 字段存在性校验
+- direct text / attachment envelope 的 `sender_device_id` 必须是当前 sender 用户的 active registered device
+- direct envelope 的 `recipient_user_id` 必须是当前会话内的另一名成员，`recipient_device_id` 必须是该成员的 active registered device
+- group text / attachment envelope 的顶层 `session_id` 必须匹配消息 session，`sender_device_id` 必须属于当前 sender 用户
+- group fanout item 的 `recipient_user_id/recipient_device_id` 必须绑定到其它会话成员的 active registered device，fanout 内的 `sender_device_id/sender_key_id` 必须与顶层 envelope 一致
+- 当前服务端尚无独立 sender-key 代际 registry；本次将 `sender_key_id` 收口为 sender-device scoped key id，并要求顶层 envelope 与 fanout item 一致，不再接受 fanout 自由自报另一套 sender key
+- 已补 `test_direct_text_encryption_requires_sender_device_belong_to_actor`
+
+原状态：已确认
 
 现状：
 
@@ -420,7 +442,17 @@
 
 ### F-014：通话 signaling 对非法 `sdp` / `candidate` 不做失败校验，而是静默转发空 payload
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- `MessageSendQueue.stop()` 不再立即取消 worker
+- stop 会先置停接收循环并等待 worker drain 当前队列；只有超过 `STOP_TIMEOUT` 才取消 worker
+- worker 被取消时，当前 in-flight message 会通过 `on_send_result(..., False)` 明确回传失败
+- stop 后仍留在 queue 里的消息也会逐条以失败结果回传，不再静默蒸发
+- 已补 `test_message_send_queue_marks_unprocessed_message_failed_on_stop_timeout`
+
+原状态：已确认
 
 现状：
 
@@ -449,7 +481,15 @@
 
 ### F-015：桌面端多个 WebSocket 命令仍发送空 `msg_id`，不符合正式幂等协议
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- 已随 `R-027` 一并修复
+- `_fetch_remote_messages()` 现在通过 `Database.get_messages_by_ids()` 批量读取本地已有消息，不再逐条 `get_message()`
+- 已补 `test_message_manager_remote_history_uses_batch_existing_lookup_and_delta_write`
+
+原状态：已确认
 
 现状：
 
@@ -478,7 +518,16 @@
 
 ### F-016：通话出站层把 `call_id` 复用为所有 signaling 命令的 `msg_id`
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- `MessageManager.get_messages()` 不再把 `before_timestamp is None` 直接等同于“必须回源”
+- 当前回源条件收口为：调用方显式 `force_remote=True`、调用方提供 `before_seq` 游标，或本地页不足 `limit`
+- 本地已有完整首屏页且未显式要求 freshness 时，不再固定打一轮 `_fetch_remote_messages()`
+- 已补 `test_message_manager_get_messages_uses_explicit_remote_freshness`
+
+原状态：已确认
 
 现状：
 
@@ -507,7 +556,17 @@
 
 ### F-017：客户端处理 `message_edit` 时会丢弃服务端返回的顶层 read/session 元数据
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- `get_messages()` 不再把“本地页已满”伪装成 freshness 判断
+- stale / authoritative refresh 由显式 `force_remote=True` 或 `before_seq` cursor 触发
+- 非满页仍会自动回源补足历史页
+- Chat/Message controller 已透传 `force_remote` 参数，避免上层只能借助页长旁路表达 freshness
+- 已补 `test_message_manager_get_messages_uses_explicit_remote_freshness`
+
+原状态：已确认
 
 现状：
 
@@ -535,7 +594,15 @@
 
 ### F-018：会话列表“标为未读/已读”只是本地临时值，会被后端 authoritative unread 重新覆盖
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- `MessageRepository.list_missing_messages_for_user()` 不再为每个 session 构造一支 `OR`
+- 当前查询改为先批量加载用户可见 `session_id`，再用 `Message.session_id.in_(...)` 限定范围，并通过 `CASE WHEN Message.session_id == ... THEN cursor ELSE 0 END` 表达每个 session 的 cursor
+- 已用 websocket sync cursor 回归测试覆盖查询行为不变
+
+原状态：已确认
 
 现状：
 
@@ -565,7 +632,15 @@
 
 ### F-019：服务端通话状态没有断连/超时清理，异常退出后可能长期卡成 busy
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- `MessageRepository.list_missing_events_for_user()` 不再为 shared/private 两套事件表分别拼接按 session 膨胀的 `OR` 条件
+- shared `SessionEvent` 与 private `UserSessionEvent` 查询都改为 `session_id.in_(...)` + `CASE` cursor 表达式
+- 已用 offline read/edit/recall/delete/profile history event 回放测试覆盖行为不变
+
+原状态：已确认
 
 现状：
 
@@ -595,7 +670,17 @@
 
 ### F-020：会话最后一条本地消息被删除后，预览时间仍保留旧值，列表排序会出现“空会话假活跃”
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- 该项已由 `F-783` / `F-784` / `F-785` 的代码修复共同关闭
+- session `unread_count` 已接入服务端权威未读计数，不再固定返回 dummy `0`
+- session `session_crypto_state` 已从服务端 session formal payload / `SessionOut` 移除
+- message `is_ai` 已从服务端 message formal payload / `MessageOut` 移除，AI 会话语义保留在已有 `is_ai_session`
+- 当前 G-01 文档补记该项关闭状态
+
+原状态：已确认
 
 现状：
 
@@ -619,7 +704,17 @@
 
 ### F-021：桌面端本地禁止二次编辑消息，但服务端规则并没有这条限制
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- 该项已由 `F-788` / `F-789` 以及 `R-078` 的代码修复共同关闭
+- 单会话历史分页入口已从时间戳 cursor 收口到 `before_seq`
+- `MessageRepository.list_session_messages()` 使用 `Message.session_seq < before_seq` 翻页，并按 `session_seq DESC, created_at DESC` 取页后反转
+- reconnect 缺失消息补偿已按 `session_id, session_seq, created_at, id` 输出，同一会话内以 `session_seq` 为 authoritative order
+- 当前 G-01 文档补记该项关闭状态
+
+原状态：已确认
 
 现状：
 
@@ -2595,7 +2690,13 @@
 
 ### F-087：协议已把 `online/offline/presence` 定义为当前事件，但桌面端主链路没有任何 consumer
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- 已选择收缩边界：桌面端不接入 presence consumer，协议文档不再把 `online/offline/presence` 列为当前正式事件
+- 服务端已移除主 `/ws` 的 `online/offline` fanout 和独立 `/ws/presence` 子协议
+- 架构文档已把该层改写为连接注册 / fanout 边界，而不是桌面端 presence 功能
 
 现状：
 
@@ -2627,7 +2728,13 @@
 
 ### F-088：协议文档把 `ping/heartbeat/pong` 列为当前聊天 WS 事件，但桌面端真实主链路并不使用这套 JSON 保活
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- 协议文档已明确桌面端主链路使用 WebSocket transport ping frame，不使用 JSON `ping/heartbeat/pong`
+- 服务端聊天 WS 已移除 JSON `ping/heartbeat` 的 `pong` 分支，未支持命令统一走 `error`
+- 已更新幂等消息测试，确认 `heartbeat` 不再被当作正式应用层保活事件
 
 现状：
 
@@ -2657,7 +2764,13 @@
 
 ### F-089：协议已把 `error` 列为正式返回事件，但桌面端除通话和 WS auth in-flight 外几乎没有任何 consumer
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- `MessageManager` 已增加正式 `error` consumer，按 `msg_id` 关联 pending outbound message
+- WS 命令失败会立即移除 pending、标记本地消息 `FAILED` 并发出 `MessageEvent.FAILED`，不再只依赖 ACK 超时
+- 已补 `test_message_manager_marks_pending_message_failed_on_ws_error`
 
 现状：
 
@@ -2689,7 +2802,13 @@
 
 ### F-090：协议和客户端保留了失败 ACK 语义，但服务端真实实现里 `auth_ack/message_ack` 只会发送成功分支
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- 协议文档已明确 `auth_ack/message_ack` 只表示成功提交，失败统一走同 `msg_id` 的 `error`
+- `MessageManager` 已移除 `message_ack(success=false)` 的失败处理语义，非成功 ACK 会被视为协议异常并忽略
+- 失败消息处理迁移到正式 `error` consumer，并由新测试覆盖
 
 现状：
 
@@ -2721,7 +2840,13 @@
 
 ### F-091：服务端维护了一条独立 `/ws/presence` 子协议，但桌面端根本不会连接这条通道
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- 已下线独立 `/ws/presence` 子协议并删除 `presence_ws.py`
+- app route 边界测试已改为断言 `/ws/presence` 不再公开
+- 架构文档已同步说明桌面端当前不公开独立 presence socket
 
 现状：
 
@@ -2750,7 +2875,13 @@
 
 ### F-092：服务端 `online` 广播按“每条新连接”触发，而 `offline` 只按“最后一条连接断开”触发，presence 语义前后不对称
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- 已移除 `online/offline` 用户级 presence fanout，不再保留前后不对称的半实现边沿语义
+- 登录替换 / logout 继续通过正式 `force_logout` 控制事件完成运行时切换，不再额外广播未消费的 offline 事件
+- 相关协议文档已从 presence 能力改为连接注册 / fanout 基础设施边界
 
 现状：
 
@@ -2779,7 +2910,13 @@
 
 ### F-093：`contact_refresh` 已经是正式实时事件，但协议文档完全没建模，且它走的是一套旁路语义
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- `contact_refresh` 已补入 `realtime_protocol.md` 当前事件清单和 payload contract
+- 文档明确它是联系人域刷新提示，不进入 `history_events`
+- `F-096` 同步补了 reconnect 后联系人域权威 reload，补齐断线窗口补偿策略
 
 现状：
 
@@ -2808,7 +2945,13 @@
 
 ### F-094：`force_logout` 已经是正式控制事件，但协议文档完全没建模，而应用顶层又明确依赖它
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- `force_logout` 已补入实时协议文档，包含 `session_replaced/logout` reason 枚举和客户端 auth-loss 行为
+- 服务端改为直接使用共享 `ws_message()` 构造控制事件，不再从 presence helper 旁路引入
+- 架构文档已把强制退出列为 WebSocket 控制事件
 
 现状：
 
@@ -2839,7 +2982,13 @@
 
 ### F-095：`user_profile_update / group_profile_update / group_self_profile_update` 已经是当前实时事件，但协议文档没有显式事件定义
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- 三类 profile update 已补入 `realtime_protocol.md` 当前事件清单和 payload 示例
+- 文档已区分 `user_profile_update` 的 `profile_event_id` 与 group profile event 的 `event_seq/history_events` 语义
+- 说明已与本轮 `F-793` 到 `F-797` 的 user-scoped profile payload 保持一致
 
 现状：
 
@@ -2869,7 +3018,13 @@
 
 ### F-096：联系人域实时刷新没有补偿模型，`contact_refresh` 在断线窗口里丢失后只能靠手动 reload 恢复
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- `ContactInterface` 已订阅 `ConnectionManager` 状态变化，连接从非 connected 回到 `CONNECTED` 后自动触发联系人域 `reload_data()`
+- 文档已明确 `contact_refresh` 不写入 `history_events`，断线窗口由 reconnect 后权威 reload 补偿
+- 已补 UI 边界测试覆盖联系人页 reconnect reload 绑定
 
 现状：
 
@@ -2902,7 +3057,16 @@
 
 ### R-001：设置快照边界仍然存在回退到全局 `get_settings()` 的口子
 
-状态：风险
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- `MessageService.send_websocket_message()` 已成为 WS `chat_message` 的单一发送编排入口
+- 该入口一次性完成 session 可见性校验、成员加载、message create、sender ACK 视图和 recipient 视图序列化
+- `chat_ws` 不再先查 `member_ids`、再调用发送 service、再按 `message_id` 回查消息
+- WS message payload 直接使用 service canonical `created_at/updated_at` 字段，不再由 gateway 补旧 `timestamp` 同义字段
+
+原状态：风险
 
 现状：
 
@@ -2931,7 +3095,16 @@
 
 ### R-002：断线补偿查询按会话逐个拼接 OR 条件，扩展性风险较高
 
-状态：风险
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- 客户端 `MessageManager._process_edit()` / `_process_recall()` 不再要求本地 DB 已经存在原消息
+- 当离线 `history_events` 只回放 mutation event、没有本地原消息缓存时，客户端会按 event 中的 `session_id/message_id/user_id/content/status/session_seq` 构造本地权威占位消息并继续落库
+- recall 事件会在缺失原消息时生成 viewer-specific recall notice，而不是直接 warning 后丢弃
+- 已补 `test_message_manager_replays_history_mutations_without_cached_message`
+
+原状态：风险
 
 现状：
 
@@ -2955,12 +3128,21 @@
 
 ### R-003：WebSocket 发送主链路存在重复查会话、重复校验成员和重复取消息的冗余查询
 
-状态：风险
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- HTTP edit / recall 成功后，发起端仍以 HTTP 响应作为本地权威更新来源
+- 服务端 `/messages/{message_id}` edit 与 `/messages/{message_id}/recall` fanout 已改为排除 actor 用户，只广播给其它成员
+- 这样发起者当前设备不会再收到同一 edit/recall 的完整回广播并重复走 `_process_edit()` / `_process_recall()`
+- 已补 `test_http_edit_and_recall_do_not_broadcast_back_to_actor_user`
+
+原状态：风险
 
 现状：
 
 - `chat_ws` 在处理 `chat_message` 时，会先调用一次 `get_session_member_ids()`
-- 随后 `MessageService.send_ws_message()` 又会检查 session 是否存在、再次校验 membership，并在 `_normalize_message_extra()` 中再次读取 session
+- 随后原 `MessageService.send_ws_message()` 又会检查 session 是否存在、再次校验 membership，并在 `_normalize_message_extra()` 中再次读取 session
 - 消息创建后，WebSocket 层又重新按 `message_id` 回查一次消息，再为每个接收者序列化视图
 
 证据：
@@ -2980,7 +3162,17 @@
 
 ### R-004：已读回执在客户端同时走 HTTP 持久化和 WS `read_ack`，实现重复且语义不统一
 
-状态：风险
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- 客户端 `MessageManager.send_read_receipt()` 已收敛为只调用 HTTP `/messages/read/batch`
+- `ConnectionManager.send_read_ack()` 已删除
+- 服务端聊天 WebSocket 不再接受 `read_ack/read`，这类消息统一返回 `unsupported message type`
+- `/messages/read/batch` 继续负责持久化 read cursor 并广播 canonical `read` event
+- `docs/realtime_protocol.md` 已明确“已读持久化只走 HTTP，聊天 WS 不接受 `read_ack/read`”
+
+原状态：风险
 
 现状：
 
@@ -3009,7 +3201,16 @@
 
 ### R-005：typing 入口仍存在 HTTP / WS 双实现，边界不统一
 
-状态：风险
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- 已删除 HTTP `POST /api/v1/sessions/{session_id}/typing`
+- 已删除 `SessionTypingRequest`，typing 正式入口收敛为聊天 WebSocket `typing`
+- 服务端 WS `typing` 仍由同一处负责成员解析和排除发送连接 fanout
+- `docs/realtime_protocol.md` 已明确 typing 只属于聊天 WebSocket 客户端发送命令
+
+原状态：风险
 
 现状：
 
@@ -17492,12 +17693,14 @@
 
 ### F-571：HTTP typing 入口仍使用裸 `dict`，没有正式请求 schema
 
-状态：已修复（2026-04-12）
+状态：已修复（2026-04-12；2026-04-14 被 R-005 重构移除 HTTP typing 入口）
 
 修复说明：
 
-- `POST /sessions/{session_id}/typing` 已使用 `SessionTypingRequest` 正式 schema
-- 相关行为已由 direct session schema 测试或 typing API 测试覆盖
+- 2026-04-12 曾把 `POST /sessions/{session_id}/typing` 收口到 `SessionTypingRequest` 正式 schema
+- 2026-04-14 按 `R-005` 继续重构，已删除 HTTP typing route 和 `SessionTypingRequest`
+- typing 现在只保留聊天 WebSocket `typing` 正式入口，避免 HTTP/WS 双实现
+- 相关行为已由 direct session schema 测试和 WS typing 边界测试覆盖
 
 原状态：已确认
 
@@ -17522,12 +17725,14 @@
 
 ### F-572：HTTP typing 会把任意非布尔 `typing` 值原样广播给其它成员
 
-状态：已修复（2026-04-12）
+状态：已修复（2026-04-12；2026-04-14 被 R-005 重构移除 HTTP typing 入口）
 
 修复说明：
 
-- `SessionTypingRequest.typing` 已使用 `StrictBool`，非布尔值会在 schema 层返回 422
-- 相关行为已由 direct session schema 测试或 typing API 测试覆盖
+- 2026-04-12 曾通过 `SessionTypingRequest.typing: StrictBool` 拒绝非布尔值
+- 2026-04-14 按 `R-005` 继续重构，已删除 HTTP typing route 和 `SessionTypingRequest`
+- typing 现在只保留聊天 WebSocket `typing` 正式入口；WS 入口继续要求 `typing` 为布尔值，否则返回 `422`
+- 相关行为已由 direct session schema 测试和 WS typing 边界测试覆盖
 
 原状态：已确认
 
@@ -21609,9 +21814,14 @@
 
 ### F-702：朋友圈发布内容没有 strip 规则，纯空白 moment 也会被当成合法内容创建
 
-状态：已确认
+状态：已修复（2026-04-14）
 
-现状：
+修复说明：
+
+- `MomentCreate.content` 已在 schema 入口 strip，并拒绝空白内容
+- 已增加 `test_moment_create_schema_strips_content_and_rejects_invalid_payloads` 覆盖 strip 后落库和空白拒绝
+
+原现状：
 
 - [moment.py](/D:/AssistIM_V2/server/app/schemas/moment.py) 的 `MomentCreate.content`
 - 只有 `min_length=1`
@@ -21635,9 +21845,14 @@
 
 ### F-703：朋友圈评论内容同样没有 strip 规则，纯空白 comment 会被写进正式评论流
 
-状态：已确认
+状态：已修复（2026-04-14）
 
-现状：
+修复说明：
+
+- `MomentCommentCreate.content` 已在 schema 入口 strip，并拒绝空白内容
+- 已增加 `test_moment_comment_schema_strips_content_and_rejects_invalid_payloads` 覆盖 strip 后落库和空白拒绝
+
+原现状：
 
 - [moment.py](/D:/AssistIM_V2/server/app/schemas/moment.py) 的 `MomentCommentCreate.content`
 - 只有 `min_length=1`
@@ -21661,9 +21876,15 @@
 
 ### F-704：`MomentCreate` 仍只有 `min_length`，没有 `max_length` 或 `extra=forbid`
 
-状态：已确认
+状态：已修复（2026-04-14）
 
-现状：
+修复说明：
+
+- `MomentCreate` 已补齐 `ConfigDict(extra="forbid")`
+- 已为 moment content 增加 `MAX_MOMENT_CONTENT_LENGTH = 2_000` 上限
+- 定向 API 测试已覆盖未知字段和超长内容返回 422
+
+原现状：
 
 - [moment.py](/D:/AssistIM_V2/server/app/schemas/moment.py) 的 `MomentCreate`
 - 只声明了 `content: str = Field(min_length=1)`
@@ -21684,9 +21905,15 @@
 
 ### F-705：`MomentCommentCreate` 同样没有长度上限或 `extra=forbid`
 
-状态：已确认
+状态：已修复（2026-04-14）
 
-现状：
+修复说明：
+
+- `MomentCommentCreate` 已补齐 `ConfigDict(extra="forbid")`
+- 已为 comment content 增加 `MAX_MOMENT_COMMENT_LENGTH = 1_000` 上限
+- 定向 API 测试已覆盖未知字段和超长内容返回 422
+
+原现状：
 
 - [moment.py](/D:/AssistIM_V2/server/app/schemas/moment.py) 的 `MomentCommentCreate`
 - 也只有 `content: str = Field(min_length=1)`
@@ -21706,9 +21933,17 @@
 
 ### F-706：`GET /moments` 没有分页或数量边界，而且会把每条动态的 comments/likes 一次性全部内联返回
 
-状态：已确认
+状态：已修复（2026-04-14）
 
-现状：
+修复说明：
+
+- `GET /moments` 已改为分页 envelope：`{total, page, size, items}`
+- 列表页只返回 comment preview、`comment_count`、`comments_truncated`、`like_count` 和 `is_liked`
+- 已新增 `GET /moments/{moment_id}` detail 入口承载完整 comments
+- 客户端 `DiscoveryService` 已直接按分页 envelope 读取，不再兼容旧 list payload
+- 已增加 `test_moment_list_returns_paged_summary_without_liker_roster` 和 `test_discovery_service_fetch_moments_requires_paged_envelope` 覆盖新 contract
+
+原现状：
 
 - [moments.py](/D:/AssistIM_V2/server/app/api/v1/moments.py) 的 `list_moments()`
 - 没有 `page/size`
@@ -21737,9 +21972,16 @@
 
 ### F-707：moment 列表会把每条动态的完整 `liked_user_ids` 原样返回给任意查看者
 
-状态：已确认
+状态：已修复（2026-04-14）
 
-现状：
+修复说明：
+
+- moment summary/detail payload 已移除 `liked_user_ids`
+- 点赞状态只通过 `like_count` 和当前查看者相关的 `is_liked` 返回
+- 客户端 discovery controller 已移除对旧 `liked_user_ids` / `likes` 字段的回退读取
+- 已增加 API 测试断言列表和详情均不返回 `liked_user_ids`
+
+原现状：
 
 - [moment_service.py](/D:/AssistIM_V2/server/app/services/moment_service.py) 的 `serialize_moment()`
 - 无论查看者是谁
@@ -22253,7 +22495,15 @@
 
 ### F-751：群 mutation 路由家族没有统一返回 contract，同一资源会返回四种不同成功 shape
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- 群 mutation 已统一返回 `{group, mutation}` contract，`mutation.action` 明确表达 `created/profile_updated/member_added/member_removed/member_role_updated/left/deleted/ownership_transferred`
+- `delete_group/remove_member/leave_group` 不再返回 `204` 或裸 `status`，删除/离群类动作以 `group: null` 或更新后的 group snapshot 搭配 mutation meta 表达 committed 结果
+- `update_group_profile()` 的公告 side-effect 元数据已纳入 `mutation.announcement`，不再作为另一套 top-level shape
+- 桌面端 contact controller 已改为只解析新的 group mutation result，移除删除后再回查的旧跟随逻辑
+- 已补 `test_group_remove_member_returns_canonical_mutation_result`，并更新 group/chat/client 边界测试覆盖新 contract
 
 现状：
 
@@ -22653,7 +22903,14 @@
 
 ### F-765：用户 route 家族没有统一的 collection/detail contract，`/users/search`、`/users`、`/users/{id}`、`/auth/me` 现在是四种不同组织方式
 
-状态：已确认
+状态：已修复（2026-04-14）
+
+修复说明：
+
+- `/users` 已改为与 `/users/search` 同类的 `{total,page,size,items}` collection envelope
+- `/users` 和 `/users/{id}` 使用 canonical public user summary，不再泄漏 `email/phone/created_at` 等 self detail 字段
+- `/auth/me` 明确保留 self detail contract，返回建立在 public summary 之上的当前用户详情
+- 已补 `test_user_routes_use_collection_and_public_detail_contracts` 覆盖 collection、public detail 和 self detail 三者边界
 
 现状：
 
@@ -22708,12 +22965,13 @@
 
 ### F-767：HTTP typing 的响应只回 `typing` 布尔值，不回 canonical event payload，和它实际广播出去的 realtime shape 分裂
 
-状态：已修复（2026-04-12）
+状态：已修复（2026-04-12；2026-04-14 被 R-005 重构移除 HTTP typing 入口）
 
 修复说明：
 
-- `typing_session()` 的 HTTP ack 已直接返回与 realtime fanout 同源的 canonical `typing_event`
-- 已有 `test_session_api.py` 覆盖 ack / fanout 都包含 `session_id/user_id/typing`
+- 2026-04-12 曾把 `typing_session()` 的 HTTP ack 对齐到与 realtime fanout 同源的 canonical `typing_event`
+- 2026-04-14 按 `R-005` 继续重构，已删除 HTTP typing route；typing 不再有 HTTP ack
+- typing 现在只保留聊天 WebSocket `typing` 正式入口，并由 realtime protocol 文档记录其 canonical payload
 
 原现状：
 
@@ -23449,9 +23707,15 @@
 
 ### F-793：同一个 `avatar` 字段在 REST / realtime / chat payload 上仍然没有单一语义，有的返回原始存储值，有的返回解析后的 URL
 
-状态：已确认
+状态：已修复（2026-04-14）
 
-现状：
+修复说明：
+
+- `UserService.serialize_public_user()` 已成为公开用户摘要的 canonical 入口，`avatar` 统一返回最终公开 URL
+- REST users、auth user detail、friend/friend request、moments author/comment author、message sender profile 和 realtime `user_profile_update.profile` 已统一使用这套 public user summary
+- 已增加/更新 profile、friend request、moment 和 message sender profile 相关回归测试
+
+原现状：
 
 - [user_service.py](D:\AssistIM_V2\server/app/services/user_service.py) 的 `serialize_user()`
 - [friend_service.py](D:\AssistIM_V2\server/app/services/friend_service.py) 的：
@@ -23485,9 +23749,16 @@
 
 ### F-794：好友请求 payload 继续同时返回 `sender_id/receiver_id` 和嵌套 `from_user/to_user`，relationship identity 在一条响应里重复两次
 
-状态：已确认
+状态：已修复（2026-04-14）
 
-现状：
+修复说明：
+
+- friend request payload 已收口为 `sender` / `receiver` 两个 canonical public user summary
+- 顶层 `sender_id` / `receiver_id` 与旧 `from_user` / `to_user` 已移除
+- 桌面端 `ContactController.load_requests()` 已直接按新 contract 读取，不保留旧字段回退
+- 已增加服务端断言确认旧镜像字段不再返回，并更新客户端 request normalization 测试
+
+原现状：
 
 - [friend_service.py](D:\AssistIM_V2\server/app/services/friend_service.py) 的 `serialize_request()`
 - 当前同时返回：
@@ -23511,9 +23782,15 @@
 
 ### F-795：REST user payload 和 realtime `user_profile_update` payload 仍不是同一套 canonical user summary contract
 
-状态：已确认
+状态：已修复（2026-04-14）
 
-现状：
+修复说明：
+
+- 已定义 canonical public user summary：`id/username/nickname/display_name/avatar/avatar_kind/gender/region/signature/status`
+- REST collection/search、friend request、moments、message sender profile 与 realtime `user_profile_update.profile` 已统一使用该 summary
+- `/auth/me` / user detail 仍可在 summary 基础上扩展私有/detail 字段，但不再另起一套 profile event shape
+
+原现状：
 
 - [user_service.py](D:\AssistIM_V2\server/app/services/user_service.py) 的 `serialize_user()`
 - REST 公开用户 payload 会返回：
@@ -23547,9 +23824,16 @@
 
 ### F-796：`user_profile_update` 仍被建模成“每个 session 一条事件”，而不是 user-scoped authoritative 资料变更事件
 
-状态：已确认
+状态：已修复（2026-04-14）
 
-现状：
+修复说明：
+
+- `user_profile_update` realtime fanout 已改为 user-scoped payload：`{profile_event_id, user_id, profile}`
+- 同一次资料变更只按受影响用户集合广播一次，不再按 session 逐条 fanout
+- session history 中仍保留补偿镜像事件，但 event data 保持 user-scoped；客户端收到无 `session_id` 的 profile update 会按 user_id 更新所有本地缓存
+- 已更新 realtime live 和 history replay 测试，确认 payload 不再携带 `session_id`
+
+原现状：
 
 - [user_service.py](D:\AssistIM_V2\server/app/services/user_service.py) 的 `record_profile_update_events()`
 - 当前会遍历该用户参与的每一个 session
@@ -23571,9 +23855,15 @@
 
 ### F-797：`user_profile_update` payload 仍夹带 `session_avatar`，同一次用户资料变更会因为 session 不同而得到不同 payload
 
-状态：已确认
+状态：已修复（2026-04-14）
 
-现状：
+修复说明：
+
+- `user_profile_update` realtime 与 history event payload 已移除 `session_avatar`
+- 客户端 profile update 处理链不再读取或转发 `session_avatar`
+- session/group 视图相关 avatar 仍保留在对应 session/message/group payload 中，不再混入 user profile event
+
+原现状：
 
 - [user_service.py](D:\AssistIM_V2\server/app/services/user_service.py) 的 `record_profile_update_events()`
 - 每个 event payload 当前除了 `profile` 外，还会写：

@@ -29,6 +29,10 @@ async def _broadcast_message_event(member_ids: list[str], payload: dict) -> None
         logger.exception("Message realtime fanout failed after committed mutation")
 
 
+def _recipient_member_ids(member_ids: list[str], current_user_id: str) -> list[str]:
+    return [member_id for member_id in member_ids if member_id != current_user_id]
+
+
 @router.get("/messages/unread")
 def unread_messages(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
     return success_response(MessageService(db).unread_summary(current_user))
@@ -111,7 +115,7 @@ async def edit_message(
     data = service.edit(current_user, message_id, payload.content, extra=payload.extra)
     member_ids = service.get_session_member_ids(data["session_id"], current_user.id)
     await _broadcast_message_event(
-        member_ids,
+        _recipient_member_ids(member_ids, current_user.id),
         ws_message(
             "message_edit",
             data,
@@ -128,7 +132,7 @@ async def recall_message(message_id: str, current_user: User = Depends(get_curre
     data = service.recall(current_user, message_id)
     member_ids = service.get_session_member_ids(data["session_id"], current_user.id)
     await _broadcast_message_event(
-        member_ids,
+        _recipient_member_ids(member_ids, current_user.id),
         ws_message(
             "message_recall",
             data,

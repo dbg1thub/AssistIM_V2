@@ -40,7 +40,9 @@ from client.core.profile_fields import format_profile_birthday, localize_profile
 from client.core.logging import setup_logging
 from client.events.contact_events import ContactEvent
 from client.events.event_bus import get_event_bus
+from client.managers.connection_manager import get_connection_manager
 from client.managers.search_manager import search_all
+from client.network.websocket_client import ConnectionState
 from client.ui.controllers.contact_controller import (
     ContactRecord,
     FriendRequestRecord,
@@ -1460,6 +1462,7 @@ class ContactInterface(QWidget):
         self._destroyed = False
         self._teardown_started = False
         self._event_bus = get_event_bus()
+        self._connection_manager = get_connection_manager()
         self._friend_section_headers: dict[str, QWidget] = {}
         self._friend_section_widgets: dict[str, QWidget] = {}
         self._friend_section_layouts: dict[str, QVBoxLayout] = {}
@@ -1565,6 +1568,7 @@ class ContactInterface(QWidget):
         self.search_box.textChanged.connect(self._on_search_text_changed)
         self.detail_panel.message_requested.connect(self.message_requested.emit)
         self._event_bus.subscribe_sync(ContactEvent.SYNC_REQUIRED, self._on_contact_sync_required)
+        self._connection_manager.add_state_listener(self._on_connection_state_changed)
         self.detail_panel.moments_panel.like_requested.connect(self._request_detail_like_toggle)
         self.detail_panel.moments_panel.comment_requested.connect(self._request_detail_comment_create)
 
@@ -1619,6 +1623,14 @@ class ContactInterface(QWidget):
             return
         if reason == "group_self_profile_update":
             self._apply_group_self_profile_update_payload(dict(event_payload.get("payload") or {}))
+            return
+        self.reload_data()
+
+    def _on_connection_state_changed(self, old_state: ConnectionState, new_state: ConnectionState) -> None:
+        """Refresh contact-domain truth after reconnect because contact_refresh is not replayed."""
+        if self._destroyed or not self._initial_load_done:
+            return
+        if old_state == ConnectionState.CONNECTED or new_state != ConnectionState.CONNECTED:
             return
         self.reload_data()
 
@@ -2644,6 +2656,7 @@ class ContactInterface(QWidget):
         self._teardown_started = True
         self._destroyed = True
         self._event_bus.unsubscribe_sync(ContactEvent.SYNC_REQUIRED, self._on_contact_sync_required)
+        self._connection_manager.remove_state_listener(self._on_connection_state_changed)
         self._search_timer.stop()
         self._cancel_pending_task(self._search_task)
         self._search_task = None

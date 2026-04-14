@@ -26,9 +26,10 @@ class DiscoveryService:
         """Fetch one discovery timeline snapshot."""
         params = {"user_id": user_id} if user_id else None
         payload = await self._http.get("/moments", params=params)
-        if not isinstance(payload, list):
+        if not isinstance(payload, dict) or not isinstance(payload.get("items"), list):
             logger.warning("Unexpected moments payload: %r", payload)
             return []
+        payload = payload["items"]
         return [dict(item) for item in payload if isinstance(item, dict)]
 
     async def create_moment(self, content: str) -> dict[str, Any]:

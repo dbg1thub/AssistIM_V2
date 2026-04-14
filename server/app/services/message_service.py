@@ -12,11 +12,13 @@ from sqlalchemy.orm import Session
 from app.core.errors import AppError, ErrorCode
 from app.models.session import SessionEvent
 from app.models.user import User
+from app.repositories.device_repo import DeviceRepository
 from app.repositories.group_repo import GroupRepository
 from app.repositories.message_repo import MessageIdConflictError, MessageRepository
 from app.repositories.session_repo import SessionRepository
 from app.repositories.user_repo import UserRepository
 from app.services.avatar_service import AvatarService
+from app.services.user_service import UserService
 from app.utils.time import ensure_utc, isoformat_utc, utcnow
 
 
@@ -81,9 +83,11 @@ class MessageService:
         self.db = db
         self.messages = MessageRepository(db)
         self.sessions = SessionRepository(db)
+        self.devices = DeviceRepository(db)
         self.groups = GroupRepository(db)
         self.users = UserRepository(db)
         self.avatars = AvatarService(db)
+        self.user_payloads = UserService(db)
 
     def list_messages(
         self,
@@ -105,12 +109,14 @@ class MessageService:
         message_id: str | None = None,
         extra: dict[str, Any] | None = None,
     ) -> tuple[dict, bool]:
-        self._ensure_visible_session_membership(current_user.id, session_id)
+        session, session_members = self._load_visible_session_membership(current_user.id, session_id)
+        member_ids = self._member_ids(session_members)
         normalized_message_type = self._normalize_client_message_type(message_type)
         self._ensure_message_content(content)
         normalized_extra = self._normalize_message_extra(
             sender_id=current_user.id,
-            session_id=session_id,
+            session=session,
+            session_member_ids=member_ids,
             content=content,
             message_type=normalized_message_type,
             extra=extra,
@@ -126,23 +132,31 @@ class MessageService:
             )
         except MessageIdConflictError as exc:
             raise AppError(ErrorCode.INVALID_REQUEST, str(exc), 409) from exc
-        return self.serialize_message(message, current_user.id), created
+        return self.serialize_message(
+            message,
+            current_user.id,
+            session_members=session_members,
+            session_metadata=self._serialize_session_metadata(session, session_members),
+        ), created
 
-    def send_ws_message(
+    def send_websocket_message(
         self,
+        *,
         sender_id: str,
         session_id: str,
         content: str,
         message_type: str = "text",
         message_id: str | None = None,
         extra: dict[str, Any] | None = None,
-    ) -> tuple[dict, bool]:
-        self._ensure_visible_session_membership(sender_id, session_id)
+    ) -> dict[str, Any]:
+        session, session_members = self._load_visible_session_membership(sender_id, session_id)
+        member_ids = self._member_ids(session_members)
         normalized_message_type = self._normalize_client_message_type(message_type)
         self._ensure_message_content(content)
         normalized_extra = self._normalize_message_extra(
             sender_id=sender_id,
-            session_id=session_id,
+            session=session,
+            session_member_ids=member_ids,
             content=content,
             message_type=normalized_message_type,
             extra=extra,
@@ -158,7 +172,34 @@ class MessageService:
             )
         except MessageIdConflictError as exc:
             raise AppError(ErrorCode.INVALID_REQUEST, str(exc), 409) from exc
-        return self.serialize_message(message, sender_id), created
+
+        session_metadata = self._serialize_session_metadata(session, session_members)
+        sender_users_by_id = self.users.list_users_by_ids([sender_id]) if sender_id else {}
+        ack_message = self.serialize_message(
+            message,
+            sender_id,
+            session_members=session_members,
+            session_metadata=session_metadata,
+            sender_users_by_id=sender_users_by_id,
+        )
+        recipient_ids = [member_id for member_id in member_ids if member_id != sender_id]
+        recipient_messages = {
+            recipient_id: self.serialize_message(
+                message,
+                recipient_id,
+                session_members=session_members,
+                session_metadata=session_metadata,
+                sender_users_by_id=sender_users_by_id,
+            )
+            for recipient_id in recipient_ids
+        }
+        return {
+            "created": created,
+            "message": ack_message,
+            "member_ids": member_ids,
+            "recipient_ids": recipient_ids,
+            "recipient_messages": recipient_messages,
+        }
 
     @classmethod
     def _normalize_client_message_type(cls, message_type: str) -> str:
@@ -256,7 +297,8 @@ class MessageService:
         message = self.messages.get_by_id(message_id)
         if message is None:
             raise AppError(ErrorCode.RESOURCE_NOT_FOUND, "message not found", 404)
-        self._ensure_visible_session_membership(current_user.id, message.session_id)
+        session, session_members = self._load_visible_session_membership(current_user.id, message.session_id)
+        member_ids = self._member_ids(session_members)
         if message.sender_id != current_user.id:
             raise AppError(ErrorCode.FORBIDDEN, "cannot edit this message", 403)
         self._ensure_message_status_allows(message, "edit")
@@ -267,14 +309,20 @@ class MessageService:
 
         normalized_extra = self._normalize_message_extra(
             sender_id=current_user.id,
-            session_id=message.session_id,
+            session=session,
+            session_member_ids=member_ids,
             content=content,
             message_type=str(message.type or "text"),
             extra=extra if extra is not None else self.messages.load_extra(message),
         )
         self.messages.update_content(message, content, extra=normalized_extra, commit=False)
         self.messages.update_status(message, "edited", commit=False)
-        serialized = self.serialize_message(message, current_user.id)
+        serialized = self.serialize_message(
+            message,
+            current_user.id,
+            session_members=session_members,
+            session_metadata=self._serialize_session_metadata(session, session_members),
+        )
         payload = {
             "session_id": serialized["session_id"],
             "message_id": serialized["message_id"],
@@ -373,6 +421,16 @@ class MessageService:
             raise AppError(ErrorCode.RESOURCE_NOT_FOUND, "session not found", 404)
         return member_ids
 
+    @staticmethod
+    def _member_ids(session_members: list) -> list[str]:
+        return list(
+            dict.fromkeys(
+                str(getattr(member, "user_id", "") or "").strip()
+                for member in session_members
+                if str(getattr(member, "user_id", "") or "").strip()
+            )
+        )
+
     def _ensure_session_exists(self, session_id: str):
         session = self.sessions.get_by_id(session_id)
         if session is None:
@@ -391,6 +449,17 @@ class MessageService:
         if not self._is_visible_private_session(session, member_ids):
             raise AppError(ErrorCode.RESOURCE_NOT_FOUND, "session not found", 404)
         return session, member_ids
+
+    def _load_visible_session_membership(self, user_id: str, session_id: str):
+        session = self._ensure_session_exists(session_id)
+        session_members = self.sessions.list_members(session_id)
+        member_ids = self._member_ids(session_members)
+        if user_id not in member_ids:
+            raise AppError(ErrorCode.FORBIDDEN, "not a session member", 403)
+
+        if not self._is_visible_private_session(session, member_ids):
+            raise AppError(ErrorCode.RESOURCE_NOT_FOUND, "session not found", 404)
+        return session, session_members
 
     def _is_visible_session_for_user(self, user_id: str, session_id: str) -> bool:
         try:
@@ -450,15 +519,13 @@ class MessageService:
         self,
         *,
         sender_id: str,
-        session_id: str,
+        session,
+        session_member_ids: list[str],
         content: str,
         message_type: str,
         extra: dict[str, Any] | None,
     ) -> dict[str, Any] | None:
-        session = self.sessions.get_by_id(session_id)
-        if session is None:
-            raise AppError(ErrorCode.RESOURCE_NOT_FOUND, "session not found", 404)
-
+        session_id = str(getattr(session, "id", "") or "")
         normalized_extra = self._sanitize_transport_extra(extra)
         normalized_message_type = str(message_type or "text").strip().lower()
         raw_session_type = str(getattr(session, "type", "") or "").strip().lower()
@@ -470,6 +537,13 @@ class MessageService:
             message_type=normalized_message_type,
             extra=normalized_extra,
         )
+        self._validate_e2ee_device_bindings(
+            sender_id=sender_id,
+            session_id=session_id,
+            session_type=normalized_session_type,
+            session_member_ids=set(session_member_ids),
+            extra=normalized_extra,
+        )
         self._validate_attachment_payload(normalized_message_type, normalized_extra)
 
         mentions = []
@@ -477,7 +551,7 @@ class MessageService:
         if normalized_message_type == "text" and isinstance(raw_mentions, list):
             session_member_ids = {
                 str(member_id or "").strip()
-                for member_id in self.sessions.list_member_ids(session_id)
+                for member_id in session_member_ids
                 if str(member_id or "").strip()
             }
             mentions = self._normalize_mentions(raw_mentions, content=content, member_ids=session_member_ids)
@@ -655,6 +729,87 @@ class MessageService:
                 cls._validate_direct_attachment_envelope(attachment_encryption)
             else:
                 cls._validate_group_attachment_envelope(attachment_encryption)
+
+    def _validate_e2ee_device_bindings(
+        self,
+        *,
+        sender_id: str,
+        session_id: str,
+        session_type: str,
+        session_member_ids: set[str],
+        extra: dict[str, Any],
+    ) -> None:
+        for envelope_key in ("encryption", "attachment_encryption"):
+            envelope = dict(extra.get(envelope_key) or {})
+            if not envelope.get("enabled"):
+                continue
+
+            normalized_session_type = str(session_type or "").strip().lower()
+            if normalized_session_type == "direct":
+                self._validate_direct_e2ee_device_binding(
+                    sender_id=sender_id,
+                    session_member_ids=session_member_ids,
+                    envelope=envelope,
+                )
+            elif normalized_session_type == "group":
+                self._validate_group_e2ee_device_binding(
+                    sender_id=sender_id,
+                    session_id=session_id,
+                    session_member_ids=session_member_ids,
+                    envelope=envelope,
+                )
+
+    def _require_active_device_for_user(self, user_id: str, device_id: str, field_name: str) -> None:
+        device = self.devices.get_device_for_user(user_id, device_id)
+        if device is None or not bool(getattr(device, "is_active", False)):
+            raise AppError(
+                ErrorCode.INVALID_REQUEST,
+                f"{field_name} is not an active registered device for user",
+                422,
+            )
+
+    def _validate_direct_e2ee_device_binding(
+        self,
+        *,
+        sender_id: str,
+        session_member_ids: set[str],
+        envelope: dict[str, Any],
+    ) -> None:
+        sender_device_id = str(envelope.get("sender_device_id") or "").strip()
+        recipient_user_id = str(envelope.get("recipient_user_id") or "").strip()
+        recipient_device_id = str(envelope.get("recipient_device_id") or "").strip()
+
+        self._require_active_device_for_user(sender_id, sender_device_id, "sender_device_id")
+        if recipient_user_id not in session_member_ids or recipient_user_id == sender_id:
+            raise AppError(ErrorCode.INVALID_REQUEST, "recipient_user_id is not another session member", 422)
+        self._require_active_device_for_user(recipient_user_id, recipient_device_id, "recipient_device_id")
+
+    def _validate_group_e2ee_device_binding(
+        self,
+        *,
+        sender_id: str,
+        session_id: str,
+        session_member_ids: set[str],
+        envelope: dict[str, Any],
+    ) -> None:
+        sender_device_id = str(envelope.get("sender_device_id") or "").strip()
+        sender_key_id = str(envelope.get("sender_key_id") or "").strip()
+        envelope_session_id = str(envelope.get("session_id") or "").strip()
+        if envelope_session_id != session_id:
+            raise AppError(ErrorCode.INVALID_REQUEST, "group encryption session_id does not match message session", 422)
+
+        self._require_active_device_for_user(sender_id, sender_device_id, "sender_device_id")
+        for item in list(envelope.get("fanout") or []):
+            fanout_item = dict(item or {})
+            recipient_user_id = str(fanout_item.get("recipient_user_id") or "").strip()
+            recipient_device_id = str(fanout_item.get("recipient_device_id") or "").strip()
+            if recipient_user_id not in session_member_ids or recipient_user_id == sender_id:
+                raise AppError(ErrorCode.INVALID_REQUEST, "fanout recipient_user_id is not another session member", 422)
+            if str(fanout_item.get("sender_device_id") or "").strip() != sender_device_id:
+                raise AppError(ErrorCode.INVALID_REQUEST, "fanout sender_device_id does not match envelope sender_device_id", 422)
+            if str(fanout_item.get("sender_key_id") or "").strip() != sender_key_id:
+                raise AppError(ErrorCode.INVALID_REQUEST, "fanout sender_key_id does not match envelope sender_key_id", 422)
+            self._require_active_device_for_user(recipient_user_id, recipient_device_id, "fanout recipient_device_id")
 
     @classmethod
     def _resolve_session_encryption_mode(
@@ -1021,14 +1176,21 @@ class MessageService:
             }
 
         members = session_members if session_members is not None else self._load_session_members(session_id)
-        normalized_session_type = "direct" if session.type == "private" else str(session.type or "")
-        participant_ids = list(dict.fromkeys(str(member.user_id or "") for member in members if str(member.user_id or "")))
+        return self._serialize_session_metadata(session, members)
+
+    @staticmethod
+    def _serialize_session_metadata(session, session_members: list) -> dict[str, Any]:
+        session_type = str(getattr(session, "type", "") or "")
+        normalized_session_type = "direct" if session_type == "private" else session_type
+        participant_ids = list(
+            dict.fromkeys(str(member.user_id or "") for member in session_members if str(member.user_id or ""))
+        )
         return {
             "session_type": normalized_session_type,
-            "session_name": str(session.name or ""),
-            "session_avatar": session.avatar,
+            "session_name": str(getattr(session, "name", "") or ""),
+            "session_avatar": getattr(session, "avatar", None),
             "participant_ids": participant_ids,
-            "is_ai_session": bool(session.is_ai_session),
+            "is_ai_session": bool(getattr(session, "is_ai_session", False)),
         }
 
     def _serialize_sender_profile(
@@ -1047,18 +1209,7 @@ class MessageService:
         if user is None:
             return None
 
-        user = self.avatars.backfill_user_avatar_state(user)
-        nickname = str(user.nickname or "")
-        username = str(user.username or "")
-        return {
-            "id": user.id,
-            "username": username,
-            "nickname": nickname,
-            "display_name": nickname or username or user.id,
-            "avatar": self.avatars.resolve_user_avatar_url(user),
-            "avatar_kind": str(getattr(user, "avatar_kind", "") or ""),
-            "gender": str(user.gender or ""),
-        }
+        return self.user_payloads.serialize_public_user(user)
 
     def _message_extra(self, message) -> dict[str, Any]:
         return self._sanitize_transport_extra(self.messages.load_extra(message))

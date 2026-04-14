@@ -108,6 +108,7 @@ class MessageSendQueue:
         self._queue: asyncio.Queue[QueuedMessage] = asyncio.Queue()
         self._running = False
         self._worker_task: Optional[asyncio.Task] = None
+        self._inflight: QueuedMessage | None = None
 
     async def start(self) -> None:
         """Start the queue worker."""
@@ -123,15 +124,20 @@ class MessageSendQueue:
         self._running = False
 
         if self._worker_task:
-            self._worker_task.cancel()
             try:
-                await asyncio.wait_for(self._worker_task, timeout=self.STOP_TIMEOUT)
+                await asyncio.wait_for(asyncio.shield(self._worker_task), timeout=self.STOP_TIMEOUT)
             except asyncio.TimeoutError:
                 logger.warning("Timed out waiting for message send queue worker to stop")
+                self._worker_task.cancel()
+                try:
+                    await self._worker_task
+                except asyncio.CancelledError:
+                    pass
             except asyncio.CancelledError:
                 pass
             self._worker_task = None
 
+        await self._fail_unprocessed_messages()
         logger.info("Message send queue stopped")
 
     async def enqueue(
@@ -158,10 +164,14 @@ class MessageSendQueue:
         """Background worker that processes queued transport attempts."""
         logger.debug("Message send queue worker started")
 
-        while self._running:
+        while self._running or not self._queue.empty():
             try:
                 queued = await asyncio.wait_for(self._queue.get(), timeout=1.0)
-                await self._send_message(queued)
+                self._inflight = queued
+                try:
+                    await self._send_message(queued)
+                finally:
+                    self._inflight = None
             except asyncio.TimeoutError:
                 continue
             except asyncio.CancelledError:
@@ -182,10 +192,23 @@ class MessageSendQueue:
                 message_type=queued.message_type,
                 extra=queued.extra,
             )
+        except asyncio.CancelledError:
+            await self._on_send_result(queued, False)
+            raise
         except Exception as e:
             logger.error(f"Send message error for {queued.message_id}: {e}")
 
         await self._on_send_result(queued, success)
+
+    async def _fail_unprocessed_messages(self) -> None:
+        if self._inflight is not None:
+            queued = self._inflight
+            self._inflight = None
+            await self._on_send_result(queued, False)
+
+        while not self._queue.empty():
+            queued = self._queue.get_nowait()
+            await self._on_send_result(queued, False)
 
 
 class MessageManager:
@@ -425,6 +448,9 @@ class MessageManager:
         if msg_type == "message_ack":
             await self._process_ack(data)
 
+        elif msg_type == "error":
+            await self._process_error(data)
+
         elif msg_type == "chat_message":
             await self._process_incoming_message(data)
 
@@ -471,7 +497,9 @@ class MessageManager:
         """Process message acknowledgment."""
         ack_data = data.get("data", {}) if isinstance(data.get("data"), dict) else {}
         msg_id = ack_data.get("msg_id") or data.get("msg_id", "")
-        success = bool(ack_data.get("success", False))
+        if ack_data.get("success") is not True:
+            logger.warning("Ignoring non-success message_ack for %s; websocket failures use error events", msg_id)
+            return
         ack_message_payload = ack_data.get("message")
 
         async with self._pending_lock:
@@ -479,41 +507,52 @@ class MessageManager:
 
         fallback_message = pending.message if pending is not None else await self._db.get_message(msg_id)
 
-        if success:
-            message = self._merge_ack_message(msg_id, ack_message_payload, fallback_message)
-            if message is None:
-                logger.warning("ACK received for unknown message: %s", msg_id)
-                return
-
-            message = await self._decrypt_message_for_display(message)
-
-
-            if message.status in {MessageStatus.PENDING, MessageStatus.SENDING, MessageStatus.FAILED}:
-                message.status = MessageStatus.SENT
-                message.updated_at = datetime.now()
-
-            await self._db.save_message(message)
-            self._maybe_schedule_encrypted_media_prefetch(message)
-            logger.info(f"Message ACK received: {msg_id}")
-
-            await self._event_bus.emit(MessageEvent.ACK, {
-                "message_id": msg_id,
-                "message": message,
-            })
+        message = self._merge_ack_message(msg_id, ack_message_payload, fallback_message)
+        if message is None:
+            logger.warning("ACK received for unknown message: %s", msg_id)
             return
 
+        message = await self._decrypt_message_for_display(message)
+
+        if message.status in {MessageStatus.PENDING, MessageStatus.SENDING, MessageStatus.FAILED}:
+            message.status = MessageStatus.SENT
+            message.updated_at = datetime.now()
+
+        await self._db.save_message(message)
+        self._maybe_schedule_encrypted_media_prefetch(message)
+        logger.info(f"Message ACK received: {msg_id}")
+
+        await self._event_bus.emit(MessageEvent.ACK, {
+            "message_id": msg_id,
+            "message": message,
+        })
+
+    async def _process_error(self, data: dict) -> None:
+        """Process one authoritative websocket error event."""
+        error_data = data.get("data", {}) if isinstance(data.get("data"), dict) else {}
+        msg_id = str(error_data.get("msg_id") or data.get("msg_id", "") or "")
+        reason = str(error_data.get("message") or error_data.get("reason") or "WebSocket command failed")
+        if not msg_id:
+            logger.warning("WebSocket error without msg_id: %s", reason)
+            return
+
+        async with self._pending_lock:
+            pending = self._pending_messages.pop(msg_id, None)
+
+        fallback_message = pending.message if pending is not None else await self._db.get_message(msg_id)
         if fallback_message is None:
-            logger.warning("Message rejection received for unknown message: %s", msg_id)
+            logger.warning("WebSocket error received for unknown command: %s (%s)", msg_id, reason)
             return
 
         fallback_message.status = MessageStatus.FAILED
         fallback_message.updated_at = datetime.now()
-        logger.warning(f"Message rejected: {msg_id}")
+        logger.warning("Message failed from websocket error: %s (%s)", msg_id, reason)
 
         await self._event_bus.emit(MessageEvent.FAILED, {
             "message_id": msg_id,
             "message": fallback_message,
-            "reason": ack_data.get("reason", "Unknown"),
+            "reason": reason,
+            "code": error_data.get("code"),
         })
         await self._db.save_message(fallback_message)
     
@@ -1517,6 +1556,14 @@ class MessageManager:
             "message": message,
         })
 
+    @staticmethod
+    def _mutation_event_extra(event_data: dict) -> dict[str, Any]:
+        extra = dict(event_data.get("extra") or {}) if isinstance(event_data.get("extra"), dict) else {}
+        for key in ("session_seq", "read_count", "read_target_count", "read_by_user_ids", "is_read_by_me"):
+            if key in event_data and key not in extra:
+                extra[key] = event_data[key]
+        return extra
+
     async def _process_recall(self, data: dict) -> None:
         """Process message recall."""
         recall_data = data.get("data", {})
@@ -1530,8 +1577,18 @@ class MessageManager:
 
         message = await self._db.get_message(message_id)
         if message is None:
-            logger.warning(f"Message not found for recall event: {message_id}")
-            return
+            message = ChatMessage(
+                message_id=message_id,
+                session_id=session_id,
+                sender_id=user_id,
+                content="",
+                message_type=MessageType.TEXT,
+                status=MessageStatus.SENT,
+                timestamp=recall_data.get("updated_at") or time.time(),
+                updated_at=recall_data.get("updated_at") or time.time(),
+                is_self=(user_id == self._user_id) if user_id else False,
+                extra=self._mutation_event_extra(recall_data),
+            )
 
         notice = await self._build_recall_notice(message, user_id)
         updated_extra = dict(message.extra or {})
@@ -1567,28 +1624,38 @@ class MessageManager:
             return
 
         message = await self._db.get_message(message_id)
-        if message is None:
-            logger.warning(f"Message not found for edit event: {message_id}")
-            return
+        source_message = message or ChatMessage(
+            message_id=message_id,
+            session_id=session_id,
+            sender_id=user_id,
+            content="",
+            message_type=MessageType.TEXT,
+            status=MessageStatus.SENT,
+            timestamp=edit_data.get("updated_at") or time.time(),
+            updated_at=edit_data.get("updated_at") or time.time(),
+            is_self=(user_id == self._user_id) if user_id else False,
+            extra=self._mutation_event_extra(edit_data),
+        )
 
         updated_message = ChatMessage(
-            message_id=message.message_id,
-            session_id=session_id or message.session_id,
-            sender_id=message.sender_id,
+            message_id=source_message.message_id,
+            session_id=session_id or source_message.session_id,
+            sender_id=source_message.sender_id,
             content=str(new_content or ""),
-            message_type=message.message_type,
+            message_type=source_message.message_type,
             status=MessageStatus.EDITED,
-            timestamp=message.timestamp,
+            timestamp=source_message.timestamp,
             updated_at=edit_data.get("updated_at") or datetime.now(),
-            is_self=message.is_self,
-            is_ai=message.is_ai,
-            extra=dict(message.extra or {}),
+            is_self=source_message.is_self,
+            is_ai=source_message.is_ai,
+            extra=dict(source_message.extra or {}),
         )
         incoming_extra = dict(edit_data.get("extra") or {}) if isinstance(edit_data.get("extra"), dict) else {}
         if incoming_extra:
             updated_message.extra.update(incoming_extra)
         updated_message = await self._decrypt_message_for_display(updated_message)
-        updated_message = self._merge_local_encryption_cache(message, updated_message)
+        if message is not None:
+            updated_message = self._merge_local_encryption_cache(message, updated_message)
         await self._db.save_message(updated_message)
 
         await self._event_bus.emit(MessageEvent.EDITED, {
@@ -1648,7 +1715,6 @@ class MessageManager:
             "session_id": session_id,
             "user_id": user_id,
             "profile": profile,
-            "session_avatar": str(payload.get("session_avatar", "") or ""),
             "event_seq": int(payload.get("event_seq", 0) or 0),
             "changed_message_ids": changed_message_ids,
         }
@@ -1981,15 +2047,12 @@ class MessageManager:
 
     async def send_read_receipt(self, session_id: str, message_id: str) -> bool:
         """Send read receipt."""
-        http_success = False
         try:
             await self._chat_service.persist_read_receipt(session_id, message_id)
-            http_success = True
         except Exception as exc:
             logger.warning("Failed to persist read receipt for %s/%s: %s", session_id, message_id, exc)
-
-        ws_success = await self._conn_manager.send_read_ack(session_id, message_id)
-        return http_success or ws_success
+            return False
+        return True
 
     async def _build_recall_notice(self, message: ChatMessage, actor_user_id: str | None = None) -> str:
         """Build a viewer-specific recall notice for a message."""
@@ -2356,6 +2419,19 @@ class MessageManager:
         content = (message.content or "").strip()
         return not content.startswith(("http://", "https://", "/uploads/"))
 
+    @staticmethod
+    def _message_needs_persist(existing: ChatMessage, incoming: ChatMessage) -> bool:
+        return (
+            existing.session_id != incoming.session_id
+            or existing.sender_id != incoming.sender_id
+            or existing.content != incoming.content
+            or existing.message_type != incoming.message_type
+            or existing.status != incoming.status
+            or existing.is_self != incoming.is_self
+            or existing.is_ai != incoming.is_ai
+            or dict(existing.extra or {}) != dict(incoming.extra or {})
+        )
+
     async def _fetch_remote_messages(
         self,
         session_id: str,
@@ -2369,6 +2445,8 @@ class MessageManager:
             before_seq=before_seq,
         )
         remote_messages: list[ChatMessage] = []
+        remote_items: list[dict] = []
+        message_ids: list[str] = []
 
         for item in payload:
             if not isinstance(item, dict):
@@ -2379,18 +2457,29 @@ class MessageManager:
                 logger.warning("Remote history message missing canonical message_id; ignored")
                 continue
 
-            existing_message = await self._db.get_message(message_id)
+            remote_items.append(item)
+            message_ids.append(message_id)
+
+        existing_messages = await self._db.get_messages_by_ids(message_ids)
+        messages_to_save: list[ChatMessage] = []
+
+        for item in remote_items:
+            message_id = str(item.get("message_id") or "")
+            existing_message = existing_messages.get(message_id)
             message = await self._decrypt_message_for_display(
                 self._normalize_loaded_message(
                     item,
                     default_session_id=session_id,
                 )
             )
-            remote_messages.append(self._merge_local_encryption_cache(existing_message, message))
+            message = self._merge_local_encryption_cache(existing_message, message)
+            remote_messages.append(message)
+            if existing_message is None or self._message_needs_persist(existing_message, message):
+                messages_to_save.append(message)
 
-        if remote_messages:
-            await self._db.save_messages_batch(remote_messages)
-            for message in remote_messages:
+        if messages_to_save:
+            await self._db.save_messages_batch(messages_to_save)
+            for message in messages_to_save:
                 self._maybe_schedule_encrypted_media_prefetch(message)
 
         return remote_messages
@@ -2401,6 +2490,7 @@ class MessageManager:
         limit: int = 50,
         before_timestamp: Optional[float] = None,
         before_seq: Optional[int] = None,
+        force_remote: bool = False,
     ) -> list[ChatMessage]:
         """Get messages from local cache, backfilling from the backend when needed."""
         messages = await self._db.get_messages(
@@ -2409,7 +2499,7 @@ class MessageManager:
             before_timestamp=before_timestamp,
         )
 
-        should_fetch_remote = before_timestamp is None or len(messages) < limit
+        should_fetch_remote = bool(force_remote) or before_seq is not None or len(messages) < limit
         if should_fetch_remote:
             try:
                 remote_messages = await self._fetch_remote_messages(

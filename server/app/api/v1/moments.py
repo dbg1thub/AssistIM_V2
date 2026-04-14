@@ -19,10 +19,24 @@ router = APIRouter()
 @router.get("")
 def list_moments(
     user_id: str | None = Query(default=None),
+    page: int = Query(default=1, ge=1),
+    size: int = Query(default=20, ge=1, le=50),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> dict:
-    return success_response(MomentService(db).list_moments(current_user, user_id=user_id))
+    return success_response(
+        MomentService(db).list_moments(
+            current_user,
+            user_id=user_id,
+            page=page,
+            size=size,
+        )
+    )
+
+
+@router.get("/{moment_id}")
+def get_moment(moment_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
+    return success_response(MomentService(db).get_moment(current_user, moment_id))
 
 
 @router.post("")

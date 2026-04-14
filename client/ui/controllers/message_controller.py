@@ -58,6 +58,7 @@ class MessageController:
         limit: int = 50,
         before_timestamp: Optional[float] = None,
         before_seq: Optional[int] = None,
+        force_remote: bool = False,
     ) -> list[ChatMessage]:
         """Load messages for a session."""
         return await self._msg_manager.get_messages(
@@ -65,6 +66,7 @@ class MessageController:
             limit=limit,
             before_timestamp=before_timestamp,
             before_seq=before_seq,
+            force_remote=force_remote,
         )
 
     async def retry_message(self, message_id: str) -> bool:

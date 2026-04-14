@@ -117,7 +117,7 @@
 ## ADR-017：实时连接与限流状态通过基础设施边界暴露
 
 - 状态：Accepted
-- 决策：Presence / fanout / 连接注册统一通过 `RealtimeHub` 暴露；HTTP 限流计数统一通过 `RateLimitStore` 暴露；当前默认实现仍可使用进程内内存结构。
+- 决策：连接注册 / fanout 统一通过 `RealtimeHub` 暴露；HTTP 限流计数统一通过 `RateLimitStore` 暴露；当前默认实现仍可使用进程内内存结构。桌面端不公开独立 `/ws/presence` 子协议。
 - 原因：项目当前允许单机基线，但不能让业务代码直接绑定到“只能单进程工作”的具体容器实现。
 - 结果：后续接入 Redis / PubSub / 共享限流存储时，Gateway 与 Router 只替换基础设施实现，不改业务规则与协议层。
 

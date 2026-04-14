@@ -15,17 +15,11 @@ from app.services.call_service import CallService
 from app.services.message_service import MessageService
 from app.websocket.auth import require_websocket_user_id
 from app.websocket.manager import connection_manager
-from app.websocket.payloads import read_broadcast_payload, ws_message
-from app.websocket.presence_ws import event_payload
+from app.websocket.payloads import ws_message
 
 
 websocket_router = APIRouter()
 logger = logging.getLogger(__name__)
-
-
-async def _broadcast_offline_if_needed(user_id: str | None, became_offline: bool) -> None:
-    if user_id and became_offline:
-        await connection_manager.broadcast_json(event_payload("offline", {"user_id": user_id}))
 
 
 async def _send_app_error(connection_id: str, msg_id: str, exc: AppError) -> None:
@@ -85,31 +79,6 @@ def _require_typing_state(data: dict) -> bool:
     return typing
 
 
-def _outbound_message_data(saved: dict, *, content_override: str | None = None, extra_override: dict | None = None) -> dict:
-    payload = dict(saved or {})
-    merged_extra = dict(payload.get("extra") or {})
-    if extra_override:
-        merged_extra.update(extra_override)
-    payload["content"] = payload.get("content") if content_override is None else content_override
-    payload["message_type"] = payload.get("message_type") or "text"
-    payload["status"] = payload.get("status", "sent")
-    payload["timestamp"] = payload.get("timestamp") or payload.get("created_at")
-    payload["created_at"] = payload.get("created_at")
-    payload["updated_at"] = payload.get("updated_at") or payload.get("created_at")
-    payload["session_type"] = payload.get("session_type") or ""
-    payload["session_name"] = payload.get("session_name") or ""
-    payload["session_avatar"] = payload.get("session_avatar")
-    payload["participant_ids"] = payload.get("participant_ids") or []
-    payload["is_ai_session"] = bool(payload.get("is_ai_session", False))
-    payload["session_seq"] = payload.get("session_seq", 0)
-    payload["read_count"] = payload.get("read_count", 0)
-    payload["read_target_count"] = payload.get("read_target_count", 0)
-    payload["read_by_user_ids"] = payload.get("read_by_user_ids", [])
-    payload["is_read_by_me"] = payload.get("is_read_by_me", False)
-    payload["extra"] = merged_extra
-    return payload
-
-
 async def _handle_chat_socket(websocket: WebSocket) -> None:
     ws_settings = get_websocket_settings(websocket)
     connection_id = await connection_manager.connect(websocket)
@@ -124,7 +93,6 @@ async def _handle_chat_socket(websocket: WebSocket) -> None:
 
             if msg_type == "auth":
                 try:
-                    was_authenticated = user_id is not None
                     user_id = _authenticate_connection(
                         connection_id,
                         user_id,
@@ -136,16 +104,10 @@ async def _handle_chat_socket(websocket: WebSocket) -> None:
                     await websocket.close(code=1008)
                     break
 
-                if not was_authenticated:
-                    await connection_manager.broadcast_json(event_payload("online", {"user_id": user_id}))
                 await connection_manager.send_json(
                     connection_id,
                     ws_message("auth_ack", {"success": True, "user_id": user_id}),
                 )
-                continue
-
-            if msg_type in {"heartbeat", "ping"}:
-                await connection_manager.send_json(connection_id, event_payload("pong", {}))
                 continue
 
             try:
@@ -182,9 +144,7 @@ async def _handle_chat_socket(websocket: WebSocket) -> None:
                 message_extra = data.get("extra", {}) if isinstance(data.get("extra"), dict) else {}
                 try:
                     with SessionLocal() as db:
-                        service = MessageService(db)
-                        member_ids = service.get_session_member_ids(session_id, current_user_id)
-                        saved, created = service.send_ws_message(
+                        dispatch = MessageService(db).send_websocket_message(
                             sender_id=current_user_id,
                             session_id=session_id,
                             content=content,
@@ -192,22 +152,13 @@ async def _handle_chat_socket(websocket: WebSocket) -> None:
                             message_id=msg_id,
                             extra=message_extra,
                         )
-                        stored_message = service.messages.get_by_id(saved["message_id"])
-                        recipient_payloads = {}
-                        if stored_message is not None:
-                            recipient_payloads = {
-                                member_id: _outbound_message_data(
-                                    service.serialize_message(stored_message, member_id)
-                                )
-                                for member_id in member_ids
-                                if member_id != current_user_id
-                            }
                 except AppError as exc:
                     await _send_app_error(connection_id, msg_id, exc)
                     continue
 
-                ack_message = _outbound_message_data(saved, content_override=content)
-                recipient_ids = [member_id for member_id in member_ids if member_id != current_user_id]
+                ack_message = dispatch["message"]
+                recipient_ids = dispatch["recipient_ids"]
+                recipient_payloads = dispatch["recipient_messages"]
                 await connection_manager.send_json(
                     connection_id,
                     ws_message(
@@ -216,19 +167,19 @@ async def _handle_chat_socket(websocket: WebSocket) -> None:
                         msg_id=msg_id,
                     ),
                 )
-                if not created:
+                if not dispatch["created"]:
                     logger.info("Idempotent websocket resend acknowledged without rebroadcast: %s", msg_id)
                     continue
 
                 delivered_user_ids: set[str] = set()
                 for recipient_id in recipient_ids:
-                    recipient_message = recipient_payloads.get(recipient_id, ack_message)
+                    recipient_message = recipient_payloads[recipient_id]
                     delivered = await connection_manager.send_json_to_users(
                         [recipient_id],
                         ws_message(
                             "chat_message",
                             recipient_message,
-                            msg_id=saved["message_id"],
+                            msg_id=ack_message["message_id"],
                         ),
                         exclude_connection_id=connection_id,
                     )
@@ -240,10 +191,10 @@ async def _handle_chat_socket(websocket: WebSocket) -> None:
                             "message_delivered",
                             {
                                 "session_id": session_id,
-                                "message_id": saved["message_id"],
+                                "message_id": ack_message["message_id"],
                                 "user_ids": sorted(delivered_user_ids),
                             },
-                            msg_id=saved["message_id"],
+                            msg_id=ack_message["message_id"],
                         ),
                     )
                 continue
@@ -260,34 +211,9 @@ async def _handle_chat_socket(websocket: WebSocket) -> None:
                 recipient_ids = [member_id for member_id in member_ids if member_id != current_user_id]
                 await connection_manager.send_json_to_users(
                     recipient_ids,
-                    event_payload("typing", {"session_id": session_id, "user_id": current_user_id, "typing": typing}),
+                    ws_message("typing", {"session_id": session_id, "user_id": current_user_id, "typing": typing}),
                     exclude_connection_id=connection_id,
                 )
-                continue
-
-            if msg_type in {"read_ack", "read"}:
-                session_id = data.get("session_id", "")
-                try:
-                    target_message_id = _require_target_message_id(data)
-                    with SessionLocal() as db:
-                        service = MessageService(db)
-                        current_user = _resolve_ws_user(db, current_user_id)
-                        read_state = service.batch_read(current_user, session_id, target_message_id)
-                        member_ids = service.get_session_member_ids(session_id, current_user_id)
-                except AppError as exc:
-                    await _send_app_error(connection_id, msg_id, exc)
-                    continue
-                if read_state.get("advanced"):
-                    await connection_manager.send_json_to_users(
-                        member_ids,
-                        ws_message(
-                            "read",
-                            read_broadcast_payload(read_state),
-                            msg_id=read_state.get("message_id", ""),
-                            seq=int(read_state.get("event_seq", 0) or 0),
-                        ),
-                        exclude_connection_id=connection_id,
-                    )
                 continue
 
             if msg_type == "message_recall":
@@ -436,8 +362,7 @@ async def _handle_chat_socket(websocket: WebSocket) -> None:
     except Exception:
         logger.exception("Chat websocket loop crashed for connection %s", connection_id)
     finally:
-        disconnected_user_id, became_offline = await connection_manager.disconnect(websocket)
-        await _broadcast_offline_if_needed(disconnected_user_id or user_id, became_offline)
+        await connection_manager.disconnect(websocket)
 
 
 @websocket_router.websocket("/ws")

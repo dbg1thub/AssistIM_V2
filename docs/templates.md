@@ -73,9 +73,9 @@ class MessageRepository:
 async def handle_chat_message(websocket: WebSocket, payload: dict) -> None:
     with SessionLocal() as db:
         service = MessageService(db)
-        saved, created = service.send_ws_message(...)
+        dispatch = service.send_websocket_message(...)
     await send_ack(...)
-    if created:
+    if dispatch["created"]:
         await broadcast(...)
 ```
 

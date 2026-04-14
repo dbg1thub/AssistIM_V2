@@ -313,7 +313,7 @@ def test_user_avatar_change_regenerates_generated_group_avatar(client: TestClien
         headers=auth_header(owner_token),
     )
     assert create_group_response.status_code == 201
-    initial_group = create_group_response.json()["data"]
+    initial_group = create_group_response.json()["data"]["group"]
     initial_avatar = initial_group["avatar"]
     assert initial_avatar.startswith("/uploads/group_avatars/")
 
@@ -671,3 +671,44 @@ def test_username_identity_is_case_canonical_across_register_login_and_search(cl
     assert search_response.status_code == 200
     search_payload = search_response.json()["data"]
     assert [item["username"] for item in search_payload["items"]] == ["case.user"]
+
+
+def test_user_routes_use_collection_and_public_detail_contracts(client: TestClient, user_factory, auth_header) -> None:
+    alice = user_factory("user_contract_alice", "User Contract Alice")
+    bob = user_factory("user_contract_bob", "User Contract Bob")
+    headers = auth_header(alice["access_token"])
+
+    list_response = client.get(
+        "/api/v1/users",
+        headers=headers,
+        params={"page": 1, "size": 1},
+    )
+    assert list_response.status_code == 200
+    list_payload = list_response.json()["data"]
+    assert set(list_payload) == {"total", "page", "size", "items"}
+    assert list_payload["total"] == 2
+    assert list_payload["page"] == 1
+    assert list_payload["size"] == 1
+    assert len(list_payload["items"]) == 1
+    assert "email" not in list_payload["items"][0]
+    assert "created_at" not in list_payload["items"][0]
+    assert "display_name" in list_payload["items"][0]
+
+    detail_response = client.get(
+        f"/api/v1/users/{bob['user']['id']}",
+        headers=headers,
+    )
+    assert detail_response.status_code == 200
+    public_detail = detail_response.json()["data"]
+    assert public_detail["id"] == bob["user"]["id"]
+    assert public_detail["display_name"] == "User Contract Bob"
+    assert "email" not in public_detail
+    assert "phone" not in public_detail
+    assert "created_at" not in public_detail
+
+    me_response = client.get("/api/v1/auth/me", headers=headers)
+    assert me_response.status_code == 200
+    self_detail = me_response.json()["data"]
+    assert self_detail["id"] == alice["user"]["id"]
+    assert "email" in self_detail
+    assert "created_at" in self_detail

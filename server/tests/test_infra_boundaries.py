@@ -23,7 +23,6 @@ from app.core.security import create_access_token, decode_access_token
 from app.dependencies.settings_dependency import get_request_settings, get_websocket_settings
 from app.main import create_app
 from app.realtime.hub import InMemoryRealtimeHub
-from app.websocket import presence_ws
 
 
 class FakeRateLimitStore(RateLimitStore):
@@ -113,50 +112,6 @@ def test_request_and_websocket_settings_resolve_app_snapshot() -> None:
 
     assert get_request_settings(SimpleNamespace(app=app)) is custom_settings
     assert get_websocket_settings(SimpleNamespace(app=app)) is custom_settings
-
-
-
-def test_bind_websocket_user_uses_websocket_app_settings_snapshot(monkeypatch: pytest.MonkeyPatch) -> None:
-    custom_settings = Settings(secret_key="runtime-ws-secret")
-    token = create_access_token("user-42", "alice", settings=custom_settings)
-    websocket = SimpleNamespace(
-        app=SimpleNamespace(state=SimpleNamespace(settings=custom_settings)),
-        query_params={"token": token},
-    )
-    bindings: list[tuple[str, str]] = []
-    captured: dict[str, object] = {}
-
-    def fake_require(token_value: str | None, *, settings: Settings) -> str:
-        captured["token"] = token_value
-        captured["settings"] = settings
-        return "user-42"
-
-    monkeypatch.setattr(
-        presence_ws.connection_manager,
-        "bind_user",
-        lambda connection_id, user_id: bindings.append((connection_id, user_id)),
-    )
-    monkeypatch.setattr(presence_ws, "require_websocket_user_id", fake_require)
-
-    user_id = presence_ws.bind_websocket_user(websocket, "conn-1")
-
-    assert user_id == "user-42"
-    assert captured == {"token": token, "settings": custom_settings}
-    assert bindings == [("conn-1", "user-42")]
-
-
-
-def test_presence_event_payload_uses_type_only() -> None:
-    payload = presence_ws.event_payload("online", {"user_id": "alice"}, msg_id="msg-1")
-
-    assert payload == {
-        "type": "online",
-        "seq": 0,
-        "msg_id": "msg-1",
-        "data": {"user_id": "alice"},
-        "timestamp": payload["timestamp"],
-    }
-    assert "event" not in payload
 
 
 
@@ -351,7 +306,7 @@ def test_create_app_only_mounts_canonical_chat_endpoints() -> None:
         assert "/api/upload" not in http_paths
         assert "/ws" in websocket_paths
         assert "/ws/chat" not in websocket_paths
-        assert "/ws/presence" in websocket_paths
+        assert "/ws/presence" not in websocket_paths
         assert not any(path.startswith("/api/chat") for path in http_paths)
     finally:
         restored_settings = reload_settings()
@@ -372,7 +327,7 @@ def test_create_app_only_mounts_canonical_chat_endpoints() -> None:
         assert "/api/upload" not in http_paths
         assert "/ws" in websocket_paths
         assert "/ws/chat" not in websocket_paths
-        assert "/ws/presence" in websocket_paths
+        assert "/ws/presence" not in websocket_paths
         assert not any(path.startswith("/api/chat") for path in http_paths)
     finally:
         restored_settings = reload_settings()

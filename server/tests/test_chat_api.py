@@ -565,7 +565,7 @@ def test_invalid_read_ack_does_not_disconnect_websocket(
             }
         )
         error_payload = receive_until(bob_ws, "error")
-        assert "session not found" in error_payload["data"]["message"]
+        assert error_payload["data"]["message"] == "unsupported message type: read_ack"
 
         alice_ws.send_json(
             {
@@ -607,7 +607,7 @@ def test_websocket_read_ack_requires_message_id_field(client: TestClient, user_f
             }
         )
         error_payload = receive_until(websocket, "error")
-        assert error_payload["data"]["message"] == "message_id is required"
+        assert error_payload["data"]["message"] == "unsupported message type: read_ack"
 
 
 def test_websocket_chat_message_uses_recipient_is_self_view(client: TestClient, user_factory, auth_header) -> None:
@@ -734,7 +734,7 @@ def test_group_websocket_delivers_multiple_messages_after_explicit_auth(
         headers=auth_header(alice["access_token"]),
     )
     assert group_response.status_code == 201
-    session_id = group_response.json()["data"]["session_id"]
+    session_id = group_response.json()["data"]["group"]["session_id"]
 
     def receive_until(ws, expected_type: str):
         while True:
@@ -785,7 +785,7 @@ def test_group_mention_all_requires_owner_or_admin(
         headers=auth_header(owner["access_token"]),
     )
     assert group_response.status_code == 201
-    group_payload = group_response.json()["data"]
+    group_payload = group_response.json()["data"]["group"]
     session_id = group_payload["session_id"]
     group_id = group_payload["id"]
 
@@ -841,7 +841,7 @@ def test_member_mentions_require_session_members_and_non_overlapping_spans(
         headers=auth_header(alice["access_token"]),
     )
     assert group_response.status_code == 201
-    session_id = group_response.json()["data"]["session_id"]
+    session_id = group_response.json()["data"]["group"]["session_id"]
 
     non_member_response = client.post(
         f"/api/v1/sessions/{session_id}/messages",
@@ -895,13 +895,6 @@ def test_member_mentions_require_session_members_and_non_overlapping_spans(
     )
     assert overlapping_span_response.status_code == 422
     assert overlapping_span_response.json()["message"] == "mention spans must not overlap"
-
-
-def test_presence_websocket_requires_valid_token(client: TestClient) -> None:
-    with pytest.raises(WebSocketDisconnect) as exc_info:
-        with client.websocket_connect("/ws/presence") as websocket:
-            websocket.receive_json()
-    assert exc_info.value.code == 1008
 
 
 def test_chat_websocket_rejects_user_id_only_auth_and_closes_socket(
@@ -1212,7 +1205,7 @@ def test_group_read_receipts_are_tracked_per_member(
         headers=auth_header(alice["access_token"]),
     )
     assert group_response.status_code == 201
-    session_id = group_response.json()["data"]["session_id"]
+    session_id = group_response.json()["data"]["group"]["session_id"]
 
     send_message_response = client.post(
         f"/api/v1/sessions/{session_id}/messages",
@@ -1415,7 +1408,7 @@ def test_read_batch_requires_canonical_message_id_field(
     assert oversized_message_id.status_code == 422
 
 
-def test_read_ack_websocket_broadcasts_read_cursor(
+def test_http_read_batch_broadcasts_read_cursor(
     client: TestClient,
     user_factory,
     auth_header,
@@ -1448,16 +1441,12 @@ def test_read_ack_websocket_broadcasts_read_cursor(
     with client.websocket_connect("/ws") as alice_ws, client.websocket_connect("/ws") as bob_ws:
         authenticate_ws(alice_ws, alice["access_token"], msg_id="ws-auth-read-broadcast-alice")
         authenticate_ws(bob_ws, bob["access_token"], msg_id="ws-auth-read-broadcast-bob")
-        bob_ws.send_json(
-            {
-                "type": "read_ack",
-                "msg_id": "93000000-0000-4000-8000-000000000001",
-                "data": {
-                    "session_id": session_id,
-                    "message_id": message_id,
-                },
-            }
+        read_response = client.post(
+            "/api/v1/messages/read/batch",
+            json={"session_id": session_id, "message_id": message_id},
+            headers=auth_header(bob["access_token"]),
         )
+        assert read_response.status_code == 200
 
         read_payload = receive_until(alice_ws, "read")
         assert read_payload["data"]["session_id"] == session_id
@@ -1521,7 +1510,9 @@ def test_websocket_duplicate_message_id_is_idempotent_and_ack_returns_canonical_
         assert second_ack["data"]["message"]["session_seq"] == 1
 
         bob_ws.send_json({"type": "heartbeat", "msg_id": "94000000-0000-4000-8000-000000000099", "data": {}})
-        receive_until(bob_ws, "pong", unexpected_type="chat_message")
+        heartbeat_error = receive_until(bob_ws, "error", unexpected_type="chat_message")
+        assert heartbeat_error["msg_id"] == "94000000-0000-4000-8000-000000000099"
+        assert heartbeat_error["data"]["message"] == "unsupported message type: heartbeat"
 
     history_response = client.get(
         f"/api/v1/sessions/{session_id}/messages",
@@ -2179,7 +2170,7 @@ def test_delete_group_removes_group_session_messages_and_events(
         headers=auth_header(alice["access_token"]),
     )
     assert create_group_response.status_code == 201
-    group_payload = create_group_response.json()["data"]
+    group_payload = create_group_response.json()["data"]["group"]
     group_id = group_payload["id"]
     session_id = group_payload["session_id"]
 
@@ -2203,7 +2194,10 @@ def test_delete_group_removes_group_session_messages_and_events(
         f"/api/v1/groups/{group_id}",
         headers=auth_header(alice["access_token"]),
     )
-    assert delete_response.status_code == 204
+    assert delete_response.status_code == 200
+    delete_payload = delete_response.json()["data"]
+    assert delete_payload["group"] is None
+    assert delete_payload["mutation"]["action"] == "deleted"
 
     with SessionLocal() as db:
         assert db.get(Group, group_id) is None
@@ -2253,11 +2247,15 @@ def test_websocket_receives_realtime_user_profile_update_events(
             if payload.get("type") == "user_profile_update":
                 break
 
-        assert payload["seq"] == 1
-        assert payload["data"]["session_id"] == session_id
+        assert payload["seq"] == 0
+        assert "session_id" not in payload["data"]
         assert payload["data"]["user_id"] == alice["user"]["id"]
+        assert "session_avatar" not in payload["data"]
+        assert payload["data"]["profile_event_id"].startswith(f"user-profile:{alice['user']['id']}:")
         assert payload["data"]["profile"]["avatar"] == updated_avatar
-        assert payload["data"]["event_seq"] == 1
+        assert payload["data"]["profile"]["display_name"] == "Alice"
+        assert payload["data"]["profile"]["avatar_kind"] == "custom"
+        assert "event_seq" not in payload["data"]
 
 
 def test_websocket_sync_messages_replays_offline_user_profile_update_events(
@@ -2310,8 +2308,11 @@ def test_websocket_sync_messages_replays_offline_user_profile_update_events(
         assert len(events) == 1
         assert events[0]["type"] == "user_profile_update"
         assert events[0]["seq"] == 1
-        assert events[0]["data"]["session_id"] == session_id
+        assert "session_id" not in events[0]["data"]
         assert events[0]["data"]["profile"]["nickname"] == "Alice Prime"
+        assert "session_avatar" not in events[0]["data"]
+        assert events[0]["data"]["profile_event_id"].startswith(f"user-profile:{alice['user']['id']}:")
+        assert events[0]["data"]["profile"]["display_name"] == "Alice Prime"
         assert events[0]["data"]["event_seq"] == 1
 
 
@@ -2329,7 +2330,7 @@ def test_websocket_receives_realtime_group_profile_update_events(
         headers=auth_header(owner['access_token']),
     )
     assert create_group_response.status_code == 201
-    group_payload = create_group_response.json()['data']
+    group_payload = create_group_response.json()['data']['group']
     group_id = group_payload['id']
     session_id = group_payload['session_id']
 
@@ -2365,7 +2366,7 @@ def test_websocket_sync_messages_replays_offline_group_profile_update_events(
         headers=auth_header(owner['access_token']),
     )
     assert create_group_response.status_code == 201
-    group_payload = create_group_response.json()['data']
+    group_payload = create_group_response.json()['data']['group']
     group_id = group_payload['id']
     session_id = group_payload['session_id']
 
@@ -2413,7 +2414,7 @@ def test_websocket_sync_messages_replays_offline_group_self_profile_update_event
         headers=auth_header(owner['access_token']),
     )
     assert create_group_response.status_code == 201
-    group_payload = create_group_response.json()['data']
+    group_payload = create_group_response.json()['data']['group']
     group_id = group_payload['id']
     session_id = group_payload['session_id']
 
@@ -2709,6 +2710,59 @@ def test_message_mutations_succeed_when_realtime_fanout_fails(
     assert read_response.json()["data"]["advanced"] is True
 
 
+def test_http_edit_and_recall_do_not_broadcast_back_to_actor_user(
+    client: TestClient,
+    user_factory,
+    auth_header,
+    monkeypatch,
+) -> None:
+    from app.api.v1 import messages as message_routes
+
+    alice = user_factory("alice_message_actor_echo", "Alice")
+    bob = user_factory("bob_message_actor_echo", "Bob")
+
+    session_response = client.post(
+        "/api/v1/sessions/direct",
+        json={"participant_ids": [bob["user"]["id"]]},
+        headers=auth_header(alice["access_token"]),
+    )
+    assert session_response.status_code == 200
+    session_id = session_response.json()["data"]["id"]
+
+    message_ids = []
+    for index, content in enumerate(["edit me", "recall me"], start=51):
+        send_response = client.post(
+            f"/api/v1/sessions/{session_id}/messages",
+            json={
+                "msg_id": f"11000000-0000-4000-8000-0000000000{index}",
+                "content": content,
+                "message_type": "text",
+            },
+            headers=auth_header(alice["access_token"]),
+        )
+        assert send_response.status_code == 200
+        message_ids.append(send_response.json()["data"]["message_id"])
+
+    send_json_to_users = AsyncMock(return_value=set())
+    monkeypatch.setattr(message_routes.connection_manager, "send_json_to_users", send_json_to_users)
+
+    edit_response = client.put(
+        f"/api/v1/messages/{message_ids[0]}",
+        json={"content": "edited"},
+        headers=auth_header(alice["access_token"]),
+    )
+    assert edit_response.status_code == 200
+
+    recall_response = client.post(
+        f"/api/v1/messages/{message_ids[1]}/recall",
+        headers=auth_header(alice["access_token"]),
+    )
+    assert recall_response.status_code == 200
+
+    called_user_lists = [call.args[0] for call in send_json_to_users.await_args_list]
+    assert called_user_lists == [[bob["user"]["id"]], [bob["user"]["id"]]]
+
+
 def test_accept_friend_request_succeeds_when_contact_refresh_fails(
     client: TestClient,
     user_factory,
@@ -2849,4 +2903,10 @@ def test_friend_request_requires_one_consistent_target_field(client: TestClient,
         headers=auth_header(alice["access_token"]),
     )
     assert normalized_target.status_code == 200
-    assert normalized_target.json()["data"]["receiver_id"] == bob["user"]["id"]
+    request_payload = normalized_target.json()["data"]
+    assert request_payload["receiver"]["id"] == bob["user"]["id"]
+    assert request_payload["sender"]["id"] == alice["user"]["id"]
+    assert "sender_id" not in request_payload
+    assert "receiver_id" not in request_payload
+    assert "from_user" not in request_payload
+    assert "to_user" not in request_payload

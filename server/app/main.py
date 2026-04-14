@@ -27,7 +27,6 @@ from app.models.user import User
 from app.repositories.file_repo import FileRepository
 from app.utils.response import error_response, success_response
 from app.websocket.chat_ws import websocket_router
-from app.websocket.presence_ws import presence_router
 
 
 configure_logging()
@@ -83,7 +82,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app.include_router(api_router, prefix=current_settings.api_v1_prefix)
     app.include_router(websocket_router)
-    app.include_router(presence_router)
     if current_settings.media_storage_backend == "local":
         media_mount_path = get_local_media_mount_path(current_settings)
 

@@ -167,7 +167,7 @@ Network -> EventBus -> UI（绕过 Manager）
 
 - 实时聊天消息
 - ACK / delivered / read 事件
-- typing、presence 等实时通知
+- typing、联系人刷新、资料更新与强制退出等实时通知 / 控制事件
 - 通话 signaling，例如来电、接听、拒绝、挂断、offer / answer / ICE
 - 断线重连后的补偿同步
 

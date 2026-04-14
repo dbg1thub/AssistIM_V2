@@ -175,7 +175,7 @@ def test_chat_interface_async_message_action_results_are_session_generation_guar
 def test_contact_interface_request_and_group_actions_avoid_full_reload() -> None:
     contact_interface = Path('client/ui/windows/contact_interface.py').read_text(encoding='utf-8')
 
-    assert contact_interface.count('self.reload_data()') == 1
+    assert contact_interface.count('self.reload_data()') == 2
     assert 'self._controller.merge_group_record(self._groups, group)' in contact_interface
     assert 'self._build_groups_page()' in contact_interface
     assert 'def _refresh_contacts_and_requests(' not in contact_interface
@@ -349,6 +349,16 @@ def test_contact_interface_request_actions_update_locally() -> None:
     assert 'payload = await self._controller.reject_request(request_id)' in contact_interface
     assert 'await self._refresh_contacts_and_requests(focus_page="friends", focus_friend_id=counterpart_id)' not in contact_interface
     assert 'await self._refresh_requests_only()' not in contact_interface
+
+
+def test_contact_interface_reloads_contact_domain_after_reconnect() -> None:
+    contact_interface = Path('client/ui/windows/contact_interface.py').read_text(encoding='utf-8')
+
+    assert 'self._connection_manager.add_state_listener(self._on_connection_state_changed)' in contact_interface
+    assert 'def _on_connection_state_changed(self, old_state: ConnectionState, new_state: ConnectionState) -> None:' in contact_interface
+    assert 'if old_state == ConnectionState.CONNECTED or new_state != ConnectionState.CONNECTED:' in contact_interface
+    assert 'self.reload_data()' in contact_interface.split('def _on_connection_state_changed', 1)[1].split('def _can_update_contact_ui', 1)[0]
+    assert 'self._connection_manager.remove_state_listener(self._on_connection_state_changed)' in contact_interface
 
 
 def test_request_list_item_rebuilds_actions_on_status_change() -> None:
@@ -692,10 +702,12 @@ def test_message_repo_event_sync_uses_uuid_column_comparisons() -> None:
     message_repo = Path('server/app/repositories/message_repo.py').read_text(encoding='utf-8')
     session_repo = Path('server/app/repositories/session_repo.py').read_text(encoding='utf-8')
 
-    assert 'from sqlalchemy import and_, desc, func, or_, select, update' in message_repo
+    assert 'from sqlalchemy import and_, case, desc, func, select, update' in message_repo
     assert 'cast(' not in message_repo
-    assert 'SessionEvent.session_id == str(session_id or "").strip()' in message_repo
-    assert 'UserSessionEvent.session_id == str(session_id or "").strip()' in message_repo
+    assert 'SessionEvent.session_id.in_(list(session_cursor_by_id))' in message_repo
+    assert 'UserSessionEvent.session_id.in_(list(session_cursor_by_id))' in message_repo
+    assert 'shared_cursor_expr = case(' in message_repo
+    assert 'private_cursor_expr = case(' in message_repo
     assert 'UserSessionEvent.user_id == normalized_user_id' in message_repo
     assert 'from sqlalchemy import delete, select' in session_repo
     assert 'from app.models.session import ChatSession, SessionEvent, SessionMember, UserSessionEvent' in session_repo

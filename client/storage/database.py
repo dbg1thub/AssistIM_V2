@@ -1415,6 +1415,31 @@ class Database:
         )
         rows = await cursor.fetchall()
         return {row["message_id"] for row in rows}
+
+    async def get_messages_by_ids(self, message_ids: list[str]) -> dict[str, ChatMessage]:
+        """Return cached messages keyed by id for one batch of candidate ids."""
+        ids = list(dict.fromkeys(message_id for message_id in message_ids if message_id))
+        if not ids:
+            return {}
+
+        placeholders = ", ".join("?" for _ in ids)
+        cursor = await self._db.execute(
+            f"SELECT * FROM messages WHERE message_id IN ({placeholders})",
+            ids,
+        )
+        rows = await cursor.fetchall()
+        messages = [self._row_to_message(row) for row in rows]
+        read_cursors_by_session = {
+            session_id: await self._load_session_read_cursors(session_id)
+            for session_id in {message.session_id for message in messages}
+        }
+        return {
+            message.message_id: self._overlay_read_cursors_on_message(
+                message,
+                read_cursors_by_session.get(message.session_id, {}),
+            )
+            for message in messages
+        }
     
     async def get_messages(
         self,

@@ -336,11 +336,11 @@ class ContactController:
         record.member_count = len(raw.get("members", []) or []) or int(raw.get("member_count", 0) or record.member_count or 0)
         return record
 
-    def _group_payload_from_service_result(self, payload: dict[str, object] | GroupRecord | object | None) -> dict[str, object] | GroupRecord | object | None:
-        """Extract one normalized group payload from mixed service mutation responses."""
-        if isinstance(payload, dict) and isinstance(payload.get("group"), dict):
-            return dict(payload.get("group") or {})
-        return payload
+    def _group_payload_from_mutation_result(self, payload: dict[str, object] | None) -> dict[str, object]:
+        """Extract the canonical group snapshot from one group mutation response."""
+        if not isinstance(payload, dict) or not isinstance(payload.get("group"), dict):
+            raise ValueError("group mutation response missing group snapshot")
+        return dict(payload["group"])
 
     def merge_group_record(
         self,
@@ -512,19 +512,17 @@ class ContactController:
         current_user_id = self.get_current_user_id()
 
         for item in payload or []:
-            from_user = item.get("from_user") or item.get("sender") or {}
-            to_user = item.get("to_user") or item.get("receiver") or {}
-            sender_id = str(item.get("sender_id", "") or from_user.get("id", "") or "")
-            receiver_id = str(item.get("receiver_id", "") or to_user.get("id", "") or "")
+            sender = item.get("sender") or {}
+            receiver = item.get("receiver") or {}
+            sender_id = str(sender.get("id", "") or "")
+            receiver_id = str(receiver.get("id", "") or "")
             sender_name = (
-                str(from_user.get("nickname", "") or "")
-                or str(from_user.get("username", "") or "")
-                or str(item.get("sender_name", "") or "")
+                str(sender.get("nickname", "") or "")
+                or str(sender.get("username", "") or "")
             )
             receiver_name = (
-                str(to_user.get("nickname", "") or "")
-                or str(to_user.get("username", "") or "")
-                or str(item.get("receiver_name", "") or "")
+                str(receiver.get("nickname", "") or "")
+                or str(receiver.get("username", "") or "")
             )
             if sender_id and sender_id != current_user_id and not sender_name:
                 user_ids_to_resolve.add(sender_id)
@@ -541,10 +539,10 @@ class ContactController:
                     "created_at": str(item.get("created_at", "") or ""),
                     "sender_name": sender_name,
                     "receiver_name": receiver_name,
-                    "sender_avatar": str(from_user.get("avatar", "") or item.get("sender_avatar", "") or ""),
-                    "receiver_avatar": str(to_user.get("avatar", "") or item.get("receiver_avatar", "") or ""),
-                    "sender_gender": str(from_user.get("gender", "") or item.get("sender_gender", "") or ""),
-                    "receiver_gender": str(to_user.get("gender", "") or item.get("receiver_gender", "") or ""),
+                    "sender_avatar": str(sender.get("avatar", "") or ""),
+                    "receiver_avatar": str(receiver.get("avatar", "") or ""),
+                    "sender_gender": str(sender.get("gender", "") or ""),
+                    "receiver_gender": str(receiver.get("gender", "") or ""),
                 }
             )
 
@@ -616,7 +614,7 @@ class ContactController:
     async def create_group(self, name: str, member_ids: list[str]) -> GroupRecord:
         """Create a new group from selected members."""
         payload = await self._contact_service.create_group(name, member_ids)
-        return self._service_group_record(payload, fallback_name=name)
+        return self._service_group_record(self._group_payload_from_mutation_result(payload), fallback_name=name)
 
     async def fetch_group(self, group_id: str) -> GroupRecord:
         """Fetch one authoritative group snapshot."""
@@ -632,7 +630,7 @@ class ContactController:
     ) -> GroupRecord:
         """Update shared group metadata."""
         data = await self._contact_service.update_group_profile(group_id, name=name, announcement=announcement)
-        return self._service_group_record(self._group_payload_from_service_result(data), fallback_id=group_id, fallback_name=str(name or ""))
+        return self._service_group_record(self._group_payload_from_mutation_result(data), fallback_id=group_id, fallback_name=str(name or ""))
 
     async def update_my_group_profile(
         self,
@@ -664,22 +662,22 @@ class ContactController:
     async def add_group_member(self, group_id: str, user_id: str, *, role: str = "member") -> GroupRecord:
         """Add one member to the group and return the updated snapshot."""
         payload = await self._contact_service.add_group_member(group_id, user_id, role=role)
-        return self._service_group_record(self._group_payload_from_service_result(payload), fallback_id=group_id)
+        return self._service_group_record(self._group_payload_from_mutation_result(payload), fallback_id=group_id)
 
     async def remove_group_member(self, group_id: str, user_id: str) -> GroupRecord:
         """Remove one member from the group and return a refreshed snapshot."""
-        await self._contact_service.remove_group_member(group_id, user_id)
-        return await self.fetch_group(group_id)
+        payload = await self._contact_service.remove_group_member(group_id, user_id)
+        return self._service_group_record(self._group_payload_from_mutation_result(payload), fallback_id=group_id)
 
     async def update_group_member_role(self, group_id: str, user_id: str, *, role: str) -> GroupRecord:
         """Update one member role and return the updated group snapshot."""
         payload = await self._contact_service.update_group_member_role(group_id, user_id, role=role)
-        return self._service_group_record(self._group_payload_from_service_result(payload), fallback_id=group_id)
+        return self._service_group_record(self._group_payload_from_mutation_result(payload), fallback_id=group_id)
 
     async def transfer_group_ownership(self, group_id: str, new_owner_id: str) -> GroupRecord:
         """Transfer group ownership and return the updated snapshot."""
         payload = await self._contact_service.transfer_group_ownership(group_id, new_owner_id)
-        return self._service_group_record(self._group_payload_from_service_result(payload), fallback_id=group_id)
+        return self._service_group_record(self._group_payload_from_mutation_result(payload), fallback_id=group_id)
 
     def group_contacts(self, contacts: list[ContactRecord]) -> dict[str, list[ContactRecord]]:
         """Group contacts by sort letter."""

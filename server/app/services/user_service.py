@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import uuid
+
 from sqlalchemy.orm import Session
 
 from app.core.errors import AppError, ErrorCode
@@ -22,15 +24,24 @@ class UserService:
         self.messages = MessageRepository(db)
         self.avatars = AvatarService(db)
 
-    def list_users(self) -> list[dict]:
-        return [self.serialize_user(self.avatars.backfill_user_avatar_state(user)) for user in self.users.list_users()]
+    def list_users(self, *, page: int = 1, size: int = 20) -> dict:
+        normalized_page = max(1, page)
+        normalized_size = max(1, size)
+        users = self.users.list_users()
+        start = (normalized_page - 1) * normalized_size
+        end = start + normalized_size
+        return {
+            "total": len(users),
+            "page": normalized_page,
+            "size": normalized_size,
+            "items": [self.serialize_public_user(user) for user in users[start:end]],
+        }
 
     def get_user(self, user_id: str) -> dict:
         user = self.users.get_by_id(user_id)
         if user is None:
             raise AppError(ErrorCode.USER_NOT_FOUND, "user not found", 404)
-        user = self.avatars.backfill_user_avatar_state(user)
-        return self.serialize_user(user)
+        return self.serialize_public_user(user)
 
     def search_users(self, keyword: str, page: int = 1, size: int = 20) -> dict:
         total, users = self.users.search_users(keyword, page, size)
@@ -38,7 +49,7 @@ class UserService:
             "total": total,
             "page": page,
             "size": size,
-            "items": [self.serialize_user(self.avatars.backfill_user_avatar_state(user)) for user in users],
+            "items": [self.serialize_public_user(user) for user in users],
         }
 
     def update_me(self, current_user: User, **fields: object) -> dict:
@@ -49,13 +60,19 @@ class UserService:
             else:
                 normalized_fields[key] = value
         user = self.users.update(current_user, **normalized_fields)
-        user = self.avatars.backfill_user_avatar_state(user)
         return self.serialize_user(user)
 
-    def record_profile_update_events(self, user: User) -> list[dict[str, object]]:
+    def record_profile_update_events(self, user: User) -> dict[str, object]:
         updated_user = self.avatars.backfill_user_avatar_state(user)
-        profile_payload = self.serialize_profile_event_user(updated_user)
-        events: list[dict[str, object]] = []
+        profile_payload = self.serialize_public_user(updated_user)
+        profile_event_id = f"user-profile:{updated_user.id}:{uuid.uuid4()}"
+        event_payload = {
+            "profile_event_id": profile_event_id,
+            "user_id": updated_user.id,
+            "profile": dict(profile_payload),
+        }
+        history_events: list[dict[str, object]] = []
+        participant_ids_by_user: dict[str, str] = {}
         for session in self.sessions.list_user_sessions(updated_user.id):
             participant_ids = [
                 value
@@ -64,12 +81,9 @@ class UserService:
             ]
             if session.type == "private" and not session.is_ai_session and len(set(participant_ids)) < 2:
                 continue
-            payload = {
-                "session_id": session.id,
-                "user_id": updated_user.id,
-                "profile": dict(profile_payload),
-                "session_avatar": session.avatar,
-            }
+            for participant_id in participant_ids:
+                participant_ids_by_user[str(participant_id)] = str(participant_id)
+            payload = dict(event_payload)
             event = self.messages.append_session_event(
                 session.id,
                 "user_profile_update",
@@ -78,19 +92,23 @@ class UserService:
                 commit=False,
             )
             payload["event_seq"] = int(event.event_seq or 0)
-            events.append(
+            history_events.append(
                 {
                     "session_id": session.id,
                     "participant_ids": participant_ids,
                     "payload": payload,
                 }
             )
-        if events:
+        if history_events:
             self.db.commit()
-        return events
+        return {
+            "payload": event_payload,
+            "participant_ids": sorted(participant_ids_by_user),
+            "history_events": history_events,
+        }
 
-    @staticmethod
-    def serialize_profile_event_user(user: User) -> dict[str, object]:
+    def serialize_public_user(self, user: User) -> dict[str, object]:
+        user = self.avatars.backfill_user_avatar_state(user)
         nickname = str(user.nickname or "")
         username = str(user.username or "")
         return {
@@ -98,21 +116,18 @@ class UserService:
             "username": username,
             "nickname": nickname,
             "display_name": nickname or username or user.id,
-            "avatar": user.avatar,
+            "avatar": self.avatars.resolve_user_avatar_url(user),
             "avatar_kind": str(getattr(user, "avatar_kind", "default") or "default"),
             "gender": str(user.gender or ""),
+            "region": str(user.region or ""),
             "signature": str(user.signature or ""),
             "status": str(user.status or ""),
         }
 
-    @staticmethod
-    def serialize_user(user: User) -> dict:
+    def serialize_user(self, user: User) -> dict:
+        summary = self.serialize_public_user(user)
         return {
-            "id": user.id,
-            "username": user.username,
-            "nickname": user.nickname,
-            "avatar": user.avatar,
-            "avatar_kind": str(getattr(user, "avatar_kind", "default") or "default"),
+            **summary,
             "email": user.email,
             "phone": user.phone,
             "birthday": user.birthday.isoformat() if user.birthday else None,

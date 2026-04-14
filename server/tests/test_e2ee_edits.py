@@ -1,6 +1,35 @@
 from __future__ import annotations
 
 
+def _device_payload(device_id: str, *, offset: int = 0) -> dict:
+    return {
+        "device_id": device_id,
+        "device_name": f"Desktop {device_id}",
+        "identity_key_public": f"identity-key-{device_id}",
+        "signing_key_public": f"signing-key-{device_id}",
+        "signed_prekey": {
+            "key_id": 1 + offset,
+            "public_key": f"signed-prekey-{device_id}",
+            "signature": f"signature-{device_id}",
+        },
+        "prekeys": [
+            {
+                "prekey_id": 1 + offset,
+                "public_key": f"prekey-{device_id}",
+            },
+        ],
+    }
+
+
+def _register_device(client, auth_header, user: dict, device_id: str, *, offset: int = 0) -> None:
+    response = client.post(
+        "/api/v1/devices/register",
+        json=_device_payload(device_id, offset=offset),
+        headers=auth_header(user["access_token"]),
+    )
+    assert response.status_code == 200
+
+
 def test_edit_message_preserves_encrypted_extra_payload(
     client,
     user_factory,
@@ -8,6 +37,8 @@ def test_edit_message_preserves_encrypted_extra_payload(
 ) -> None:
     alice = user_factory("alice", "Alice")
     bob = user_factory("bob", "Bob")
+    _register_device(client, auth_header, alice, "device-alice")
+    _register_device(client, auth_header, bob, "device-bob", offset=10)
 
     create_session_response = client.post(
         "/api/v1/sessions/direct",
@@ -121,6 +152,8 @@ def test_send_message_strips_local_only_encrypted_attachment_fields(
 ) -> None:
     alice = user_factory("alice_attachment", "Alice Attachment")
     bob = user_factory("bob_attachment", "Bob Attachment")
+    _register_device(client, auth_header, alice, "device-alice")
+    _register_device(client, auth_header, bob, "device-bob", offset=10)
 
     create_session_response = client.post(
         "/api/v1/sessions/direct",
@@ -277,7 +310,7 @@ def test_group_session_rejects_direct_attachment_encryption_scheme(
         headers=auth_header(alice["access_token"]),
     )
     assert create_group_response.status_code == 201
-    session_id = create_group_response.json()["data"]["session_id"]
+    session_id = create_group_response.json()["data"]["group"]["session_id"]
 
     response = client.post(
         f"/api/v1/sessions/{session_id}/messages",
@@ -349,6 +382,54 @@ def test_direct_text_encryption_requires_prekey_metadata(
     assert "recipient_prekey_id" in response.json()["message"]
 
 
+def test_direct_text_encryption_requires_sender_device_belong_to_actor(
+    client,
+    user_factory,
+    auth_header,
+) -> None:
+    alice = user_factory("alice_direct_device_binding", "Alice Direct Device Binding")
+    bob = user_factory("bob_direct_device_binding", "Bob Direct Device Binding")
+    _register_device(client, auth_header, bob, "device-bob", offset=10)
+
+    create_session_response = client.post(
+        "/api/v1/sessions/direct",
+        json={
+            "participant_ids": [bob["user"]["id"]],
+            "encryption_mode": "e2ee_private",
+        },
+        headers=auth_header(alice["access_token"]),
+    )
+    assert create_session_response.status_code == 200
+    session_id = create_session_response.json()["data"]["id"]
+
+    response = client.post(
+        f"/api/v1/sessions/{session_id}/messages",
+        json={
+            "msg_id": "10000000-0000-4000-8000-000000000037",
+            "content": "cipher-device-binding",
+            "message_type": "text",
+            "extra": {
+                "encryption": {
+                    "enabled": True,
+                    "scheme": "x25519-aesgcm-v1",
+                    "sender_device_id": "device-alice-unregistered",
+                    "sender_identity_key_public": "pub-alice",
+                    "recipient_user_id": bob["user"]["id"],
+                    "recipient_device_id": "device-bob",
+                    "recipient_prekey_type": "signed",
+                    "recipient_prekey_id": 1,
+                    "content_ciphertext": "cipher-device-binding",
+                    "nonce": "nonce-device-binding",
+                }
+            },
+        },
+        headers=auth_header(alice["access_token"]),
+    )
+
+    assert response.status_code == 422
+    assert "sender_device_id is not an active registered device for user" in response.json()["message"]
+
+
 def test_group_text_encryption_requires_fanout(
     client,
     user_factory,
@@ -368,7 +449,7 @@ def test_group_text_encryption_requires_fanout(
         headers=auth_header(alice["access_token"]),
     )
     assert create_group_response.status_code == 201
-    session_id = create_group_response.json()["data"]["session_id"]
+    session_id = create_group_response.json()["data"]["group"]["session_id"]
 
     response = client.post(
         f"/api/v1/sessions/{session_id}/messages",
@@ -461,7 +542,7 @@ def test_group_attachment_encryption_requires_fanout(
         headers=auth_header(alice["access_token"]),
     )
     assert create_group_response.status_code == 201
-    session_id = create_group_response.json()["data"]["session_id"]
+    session_id = create_group_response.json()["data"]["group"]["session_id"]
 
     response = client.post(
         f"/api/v1/sessions/{session_id}/messages",

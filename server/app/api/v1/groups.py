@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, Depends, Response, status
+from fastapi import APIRouter, Depends, status
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
@@ -137,14 +137,15 @@ async def update_group_profile(
         await _broadcast_group_announcement_message(db, result.announcement_message_id, result.participant_ids)
     await _broadcast_group_profile_update(db, group_id, actor_user_id=current_user.id)
     return success_response(
-        {
-            "group": result.group,
-            "announcement": {
+        GroupService.group_mutation_result(
+            "profile_updated",
+            result.group,
+            announcement={
                 "message_id": result.announcement_message_id or None,
                 "created": bool(result.announcement_message_id),
                 "participant_count": len(result.participant_ids),
             },
-        }
+        )
     )
 
 
@@ -161,10 +162,9 @@ async def update_my_group_profile(
     return success_response({**result.profile, "changed": result.changed})
 
 
-@router.delete("/{group_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_group(group_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> Response:
-    GroupService(db).delete_group(current_user, group_id)
-    return Response(status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/{group_id}")
+def delete_group(group_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
+    return success_response(GroupService(db).delete_group(current_user, group_id))
 
 
 @router.post("/{group_id}/members")
@@ -177,10 +177,9 @@ def add_member(
     return success_response(GroupService(db).add_member(current_user, group_id, payload.user_id, payload.role))
 
 
-@router.delete("/{group_id}/members/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
-def remove_member(group_id: str, user_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> Response:
-    GroupService(db).remove_member(current_user, group_id, user_id)
-    return Response(status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/{group_id}/members/{user_id}")
+def remove_member(group_id: str, user_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
+    return success_response(GroupService(db).remove_member(current_user, group_id, user_id))
 
 
 @router.patch("/{group_id}/members/{user_id}/role")

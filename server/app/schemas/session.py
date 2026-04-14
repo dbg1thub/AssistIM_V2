@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StrictBool, StringConstraints, field_validator
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
 
 from app.schemas.common import ORMModel
 
@@ -29,12 +29,6 @@ class CreateDirectSessionRequest(BaseModel):
         if len(normalized) != 1:
             raise ValueError("participant_ids must contain exactly one participant")
         return normalized
-
-
-class SessionTypingRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    typing: StrictBool = True
 
 
 class SessionMemberOut(ORMModel):

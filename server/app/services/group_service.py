@@ -44,6 +44,30 @@ class GroupService:
         self.users = UserRepository(db)
         self.avatars = AvatarService(db)
 
+    @staticmethod
+    def group_mutation_result(
+        action: str,
+        group: dict[str, object] | None,
+        *,
+        group_id: str = "",
+        session_id: str = "",
+        changed: bool = True,
+        **meta: object,
+    ) -> dict[str, object]:
+        resolved_group_id = str((group or {}).get("id", "") or group_id or "").strip()
+        resolved_session_id = str((group or {}).get("session_id", "") or session_id or "").strip()
+        mutation = {
+            "action": action,
+            "changed": bool(changed),
+            "group_id": resolved_group_id,
+            "session_id": resolved_session_id,
+        }
+        mutation.update(meta)
+        return {
+            "group": group,
+            "mutation": mutation,
+        }
+
     def list_groups(self, current_user: User) -> list[dict]:
         groups = self.groups.list_user_groups(current_user.id)
         return [self.serialize_group(item, include_members=True, current_user_id=current_user.id) for item in groups]
@@ -81,7 +105,8 @@ class GroupService:
             return group
 
         group = self._run_transaction(action)
-        return self.serialize_group(group, include_members=True, current_user_id=current_user.id)
+        group_payload = self.serialize_group(group, include_members=True, current_user_id=current_user.id)
+        return self.group_mutation_result("created", group_payload)
 
     def get_group(self, current_user: User, group_id: str) -> dict:
         group = self._get_group_or_404(group_id)
@@ -259,12 +284,15 @@ class GroupService:
             self.avatars.ensure_group_avatar(group)
 
         self._run_transaction(action)
-        return {
-            "status": "added",
-            "group": self.serialize_group(group, include_members=True, current_user_id=current_user.id),
-        }
+        group_payload = self.serialize_group(group, include_members=True, current_user_id=current_user.id)
+        return self.group_mutation_result(
+            "member_added",
+            group_payload,
+            target_user_id=normalized_user_id,
+            role=normalized_role,
+        )
 
-    def remove_member(self, current_user: User, group_id: str, user_id: str) -> None:
+    def remove_member(self, current_user: User, group_id: str, user_id: str) -> dict[str, object]:
         group = self._get_group_or_404(group_id)
         normalized_user_id = self._normalize_target_user_id(user_id)
         if group.owner_id == normalized_user_id:
@@ -279,6 +307,16 @@ class GroupService:
             self.avatars.ensure_group_avatar(group)
 
         self._run_transaction(action)
+        group_payload = None
+        if current_user.id != normalized_user_id:
+            group_payload = self.serialize_group(group, include_members=True, current_user_id=current_user.id)
+        return self.group_mutation_result(
+            "member_removed",
+            group_payload,
+            group_id=group.id,
+            session_id=group.session_id,
+            target_user_id=normalized_user_id,
+        )
 
     def update_member_role(self, current_user: User, group_id: str, user_id: str, role: str) -> dict:
         group = self._get_group_or_404(group_id)
@@ -296,21 +334,31 @@ class GroupService:
             self.groups.update_member_role(group.id, normalized_user_id, normalized_role, commit=False)
 
         self._run_transaction(action)
-        return {
-            "status": "role_updated",
-            "group": self.serialize_group(group, include_members=True, current_user_id=current_user.id),
-        }
+        group_payload = self.serialize_group(group, include_members=True, current_user_id=current_user.id)
+        return self.group_mutation_result(
+            "member_role_updated",
+            group_payload,
+            target_user_id=normalized_user_id,
+            role=normalized_role,
+        )
 
-    def delete_group(self, current_user: User, group_id: str) -> None:
+    def delete_group(self, current_user: User, group_id: str) -> dict[str, object]:
         group = self._get_group_or_404(group_id)
         if group.owner_id != current_user.id:
             raise AppError(ErrorCode.FORBIDDEN, "only owner can delete group", 403)
+        session_id = group.session_id
 
         def action() -> None:
             self.groups.delete_group(group, commit=False)
             self.sessions.delete_session(group.session_id, commit=False)
 
         self._run_transaction(action)
+        return self.group_mutation_result(
+            "deleted",
+            None,
+            group_id=group_id,
+            session_id=session_id,
+        )
 
     def leave_group(self, current_user: User, group_id: str) -> dict:
         group = self._get_group_or_404(group_id)
@@ -325,7 +373,12 @@ class GroupService:
             self.avatars.ensure_group_avatar(group)
 
         self._run_transaction(action)
-        return {"status": "left"}
+        return self.group_mutation_result(
+            "left",
+            None,
+            group_id=group.id,
+            session_id=group.session_id,
+        )
 
     def transfer_ownership(self, current_user: User, group_id: str, new_owner_id: str) -> dict:
         group = self._get_group_or_404(group_id)
@@ -340,7 +393,13 @@ class GroupService:
             self.groups.transfer_owner(group, normalized_new_owner_id, commit=False)
 
         self._run_transaction(action)
-        return self.serialize_group(group, include_members=True, current_user_id=current_user.id)
+        group_payload = self.serialize_group(group, include_members=True, current_user_id=current_user.id)
+        return self.group_mutation_result(
+            "ownership_transferred",
+            group_payload,
+            previous_owner_id=current_user.id,
+            new_owner_id=normalized_new_owner_id,
+        )
 
     def serialize_group(self, group, include_members: bool = True, *, current_user_id: str | None = None) -> dict:
         avatar = self.avatars.ensure_group_avatar(group)

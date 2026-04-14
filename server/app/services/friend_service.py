@@ -11,6 +11,7 @@ from app.models.user import FriendRequest, User
 from app.repositories.friend_repo import FriendRepository
 from app.repositories.user_repo import UserRepository
 from app.services.avatar_service import AvatarService
+from app.services.user_service import UserService
 
 
 class FriendService:
@@ -20,6 +21,7 @@ class FriendService:
         self.friends = FriendRepository(db)
         self.users = UserRepository(db)
         self.avatars = AvatarService(db)
+        self.user_payloads = UserService(db)
 
     def create_request(self, current_user: User, receiver_id: str | None, message: str | None = None) -> dict:
         if not receiver_id:
@@ -95,22 +97,7 @@ class FriendService:
             friend = self.users.get_by_id(friendship.friend_id)
             if friend is not None:
                 friend = self.avatars.backfill_user_avatar_state(friend)
-                items.append(
-                    {
-                        "id": friend.id,
-                        "username": friend.username,
-                        "nickname": friend.nickname,
-                        "avatar": friend.avatar,
-                        "avatar_kind": str(getattr(friend, "avatar_kind", "default") or "default"),
-                        "email": friend.email,
-                        "phone": friend.phone,
-                        "birthday": friend.birthday.isoformat() if friend.birthday else None,
-                        "region": friend.region,
-                        "signature": friend.signature,
-                        "gender": friend.gender,
-                        "status": friend.status,
-                    }
-                )
+                items.append(self.user_payloads.serialize_user(friend))
         return items
 
     def remove_friend(self, current_user: User, friend_id: str) -> None:
@@ -150,25 +137,14 @@ class FriendService:
             receiver = self.avatars.backfill_user_avatar_state(receiver)
         return {
             "request_id": request.id,
-            "sender_id": request.sender_id,
-            "receiver_id": request.receiver_id,
             "status": request.status,
             "message": request.message,
             "created_at": request.created_at.isoformat() if request.created_at else None,
-            "from_user": self._serialize_request_party(sender),
-            "to_user": self._serialize_request_party(receiver),
+            "sender": self._serialize_request_party(sender),
+            "receiver": self._serialize_request_party(receiver),
         }
 
-    @staticmethod
-    def _serialize_request_party(user: User | None) -> dict:
+    def _serialize_request_party(self, user: User | None) -> dict:
         if user is None:
             return {}
-        return {
-            "id": user.id,
-            "username": user.username,
-            "nickname": user.nickname,
-            "avatar": user.avatar,
-            "avatar_kind": str(getattr(user, "avatar_kind", "default") or "default"),
-            "gender": user.gender,
-            "region": user.region,
-        }
+        return self.user_payloads.serialize_public_user(user)

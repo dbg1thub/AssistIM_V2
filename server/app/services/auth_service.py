@@ -128,5 +128,5 @@ class AuthService:
             "token_type": TOKEN_TYPE_BEARER,
             "expires_in": self.settings.access_token_expire_minutes * 60,
             "refresh_expires_in": self.settings.refresh_token_expire_days * 24 * 60 * 60,
-            "user": UserService.serialize_user(user),
+            "user": UserService(self.db).serialize_user(user),
         }

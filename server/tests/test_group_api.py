@@ -9,6 +9,13 @@ from unittest.mock import AsyncMock
 from fastapi.testclient import TestClient
 
 
+def _group_mutation(response, action: str) -> tuple[dict, dict]:
+    payload = response.json()["data"]
+    assert set(payload) == {"group", "mutation"}
+    assert payload["mutation"]["action"] == action
+    return payload["group"], payload["mutation"]
+
+
 def test_group_permissions_and_transfer_flow(client: TestClient, user_factory, auth_header) -> None:
     owner = user_factory("owner", "Owner")
     member = user_factory("member", "Member")
@@ -20,7 +27,8 @@ def test_group_permissions_and_transfer_flow(client: TestClient, user_factory, a
         headers=auth_header(owner["access_token"]),
     )
     assert create_group_response.status_code == 201
-    group_payload = create_group_response.json()["data"]
+    group_payload, create_mutation = _group_mutation(create_group_response, "created")
+    assert create_mutation["changed"] is True
     group_id = group_payload["id"]
 
     forbidden_group_response = client.get(
@@ -35,7 +43,9 @@ def test_group_permissions_and_transfer_flow(client: TestClient, user_factory, a
         headers=auth_header(owner["access_token"]),
     )
     assert add_member_response.status_code == 200
-    assert add_member_response.json()["data"]["status"] == "added"
+    added_group, add_mutation = _group_mutation(add_member_response, "member_added")
+    assert add_mutation["target_user_id"] == outsider["user"]["id"]
+    assert any(item["id"] == outsider["user"]["id"] for item in added_group["members"])
 
     outsider_group_response = client.get(
         f"/api/v1/groups/{group_id}",
@@ -51,7 +61,9 @@ def test_group_permissions_and_transfer_flow(client: TestClient, user_factory, a
         headers=auth_header(owner["access_token"]),
     )
     assert transfer_response.status_code == 200
-    assert transfer_response.json()["data"]["owner_id"] == outsider["user"]["id"]
+    transferred_group, transfer_mutation = _group_mutation(transfer_response, "ownership_transferred")
+    assert transfer_mutation["new_owner_id"] == outsider["user"]["id"]
+    assert transferred_group["owner_id"] == outsider["user"]["id"]
 
     delete_as_old_owner_response = client.delete(
         f"/api/v1/groups/{group_id}",
@@ -70,13 +82,37 @@ def test_group_owner_cannot_remove_self_without_transfer(client: TestClient, use
         headers=auth_header(owner["access_token"]),
     )
     assert create_group_response.status_code == 201
-    group_id = create_group_response.json()["data"]["id"]
+    group_payload, _ = _group_mutation(create_group_response, "created")
+    group_id = group_payload["id"]
 
     remove_owner_response = client.delete(
         f"/api/v1/groups/{group_id}/members/{owner['user']['id']}",
         headers=auth_header(owner["access_token"]),
     )
     assert remove_owner_response.status_code == 403
+
+
+def test_group_remove_member_returns_canonical_mutation_result(client: TestClient, user_factory, auth_header) -> None:
+    owner = user_factory("remove-member-owner", "Owner")
+    member = user_factory("remove-member-member", "Member")
+
+    create_group_response = client.post(
+        "/api/v1/groups",
+        json={"name": "Core Team", "member_ids": [member["user"]["id"]]},
+        headers=auth_header(owner["access_token"]),
+    )
+    assert create_group_response.status_code == 201
+    group_payload, _ = _group_mutation(create_group_response, "created")
+    group_id = group_payload["id"]
+
+    remove_response = client.delete(
+        f"/api/v1/groups/{group_id}/members/{member['user']['id']}",
+        headers=auth_header(owner["access_token"]),
+    )
+    assert remove_response.status_code == 200
+    updated_group, mutation = _group_mutation(remove_response, "member_removed")
+    assert mutation["target_user_id"] == member["user"]["id"]
+    assert all(item["id"] != member["user"]["id"] for item in updated_group["members"])
 
 
 def test_create_group_generates_server_managed_group_avatar(client: TestClient, user_factory, auth_header) -> None:
@@ -89,7 +125,8 @@ def test_create_group_generates_server_managed_group_avatar(client: TestClient, 
         headers=auth_header(owner["access_token"]),
     )
     assert response.status_code == 201
-    payload = response.json()["data"]
+    payload, mutation = _group_mutation(response, "created")
+    assert mutation["changed"] is True
     assert payload["avatar_kind"] == "generated"
     assert payload["avatar"].startswith("/uploads/group_avatars/")
 
@@ -105,7 +142,7 @@ def test_create_group_accepts_blank_name_for_default_naming(client: TestClient, 
     )
 
     assert response.status_code == 201
-    payload = response.json()["data"]
+    payload, _ = _group_mutation(response, "created")
     assert payload["name"] == ""
     assert payload["member_count"] == 2
 
@@ -120,7 +157,8 @@ def test_group_owner_can_promote_and_demote_admin(client: TestClient, user_facto
         headers=auth_header(owner["access_token"]),
     )
     assert create_group_response.status_code == 201
-    group_id = create_group_response.json()["data"]["id"]
+    group_payload, _ = _group_mutation(create_group_response, "created")
+    group_id = group_payload["id"]
 
     promote_response = client.patch(
         f"/api/v1/groups/{group_id}/members/{member['user']['id']}/role",
@@ -128,9 +166,10 @@ def test_group_owner_can_promote_and_demote_admin(client: TestClient, user_facto
         headers=auth_header(owner["access_token"]),
     )
     assert promote_response.status_code == 200
-    promoted_group = promote_response.json()["data"]["group"]
+    promoted_group, promote_mutation = _group_mutation(promote_response, "member_role_updated")
     promoted_member = next(item for item in promoted_group["members"] if item["id"] == member["user"]["id"])
-    assert promote_response.json()["data"]["status"] == "role_updated"
+    assert promote_mutation["target_user_id"] == member["user"]["id"]
+    assert promote_mutation["role"] == "admin"
     assert promoted_member["role"] == "admin"
 
     demote_response = client.patch(
@@ -139,8 +178,9 @@ def test_group_owner_can_promote_and_demote_admin(client: TestClient, user_facto
         headers=auth_header(owner["access_token"]),
     )
     assert demote_response.status_code == 200
-    demoted_group = demote_response.json()["data"]["group"]
+    demoted_group, demote_mutation = _group_mutation(demote_response, "member_role_updated")
     demoted_member = next(item for item in demoted_group["members"] if item["id"] == member["user"]["id"])
+    assert demote_mutation["role"] == "member"
     assert demoted_member["role"] == "member"
 
 
@@ -154,7 +194,8 @@ def test_group_role_update_requires_owner_and_disallows_owner_role_change(client
         headers=auth_header(owner["access_token"]),
     )
     assert create_group_response.status_code == 201
-    group_id = create_group_response.json()["data"]["id"]
+    group_payload, _ = _group_mutation(create_group_response, "created")
+    group_id = group_payload["id"]
 
     forbidden_response = client.patch(
         f"/api/v1/groups/{group_id}/members/{member['user']['id']}/role",
@@ -202,7 +243,8 @@ def test_group_profile_update_requires_owner_or_admin_and_persists_metadata(clie
         json={"name": "", "member_ids": [admin["user"]["id"], member["user"]["id"]]},
         headers=auth_header(owner["access_token"]),
     )
-    group_id = create_group_response.json()["data"]["id"]
+    group_payload, _ = _group_mutation(create_group_response, "created")
+    group_id = group_payload["id"]
 
     promote_response = client.patch(
         f"/api/v1/groups/{group_id}/members/{admin['user']['id']}/role",
@@ -224,14 +266,12 @@ def test_group_profile_update_requires_owner_or_admin_and_persists_metadata(clie
         headers=auth_header(admin["access_token"]),
     )
     assert update_response.status_code == 200
-    payload = update_response.json()["data"]
-    assert set(payload) == {"group", "announcement"}
-    group_payload = payload["group"]
+    group_payload, mutation = _group_mutation(update_response, "profile_updated")
     assert group_payload["name"] == "Ops"
     assert group_payload["announcement"] == "Deploy at 6"
-    assert payload["announcement"]["created"] is True
-    assert payload["announcement"]["message_id"] == group_payload["announcement_message_id"]
-    assert payload["announcement"]["participant_count"] == 3
+    assert mutation["announcement"]["created"] is True
+    assert mutation["announcement"]["message_id"] == group_payload["announcement_message_id"]
+    assert mutation["announcement"]["participant_count"] == 3
 
 
 def test_group_self_profile_update_persists_note_and_group_nickname(client: TestClient, user_factory, auth_header) -> None:
@@ -243,7 +283,7 @@ def test_group_self_profile_update_persists_note_and_group_nickname(client: Test
         json={"name": "Ops", "member_ids": [member["user"]["id"]]},
         headers=auth_header(owner["access_token"]),
     )
-    group_payload = create_group_response.json()["data"]
+    group_payload, _ = _group_mutation(create_group_response, "created")
     group_id = group_payload["id"]
 
     update_response = client.patch(
@@ -295,7 +335,8 @@ def test_group_profile_update_succeeds_when_realtime_fanout_fails(
         json={"name": "Ops", "member_ids": [member["user"]["id"]]},
         headers=auth_header(owner["access_token"]),
     )
-    group_id = create_group_response.json()["data"]["id"]
+    group_payload, _ = _group_mutation(create_group_response, "created")
+    group_id = group_payload["id"]
 
     monkeypatch.setattr(
         group_routes.connection_manager,
@@ -310,7 +351,9 @@ def test_group_profile_update_succeeds_when_realtime_fanout_fails(
     )
 
     assert response.status_code == 200
-    assert response.json()["data"]["group"]["name"] == "Ops 2"
+    group_payload, mutation = _group_mutation(response, "profile_updated")
+    assert group_payload["name"] == "Ops 2"
+    assert mutation["changed"] is True
 
 
 def test_group_announcement_message_fanout_serializes_each_viewer(monkeypatch) -> None:
@@ -410,7 +453,8 @@ def test_group_schema_rejects_conflicting_member_sources_and_extra_fields(client
         headers=auth_header(owner["access_token"]),
     )
     assert normalized_duplicate.status_code == 201
-    normalized_members = normalized_duplicate.json()["data"]["members"]
+    normalized_group, _ = _group_mutation(normalized_duplicate, "created")
+    normalized_members = normalized_group["members"]
     normalized_member_ids = [item["id"] for item in normalized_members]
     assert normalized_member_ids.count(member["user"]["id"]) == 1
 
@@ -424,7 +468,8 @@ def test_group_member_and_profile_schemas_reject_extra_fields(client: TestClient
         json={"name": "Ops", "member_ids": [member["user"]["id"]]},
         headers=auth_header(owner["access_token"]),
     )
-    group_id = create_group_response.json()["data"]["id"]
+    group_payload, _ = _group_mutation(create_group_response, "created")
+    group_id = group_payload["id"]
 
     extra_add = client.post(
         f"/api/v1/groups/{group_id}/members",

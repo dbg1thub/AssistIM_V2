@@ -88,7 +88,7 @@
 
 ### G-01：服务端权威真相与正式协议边界没有收口
 
-状态：active_remediation（2026-04-12）
+状态：closed（2026-04-14）
 
 修复进展：
 
@@ -110,11 +110,12 @@
 - `F-740` / `F-741` / `F-742` 已把文件公开响应和 FileOut 收口为单一 canonical 字段集，并移除 media 嵌套镜像
 - `F-747` 已拆分文件列表 summary 与上传结果 output，list 不再复用 upload-result detail shape
 - `F-743` / `F-744` 已为 moments like/unlike 回显 liked/changed，明确 no-op 语义
+- `F-702` 到 `F-707` 已把 moment/comment 输入 schema、moments feed 分页 envelope、summary/detail 边界和 liker roster 可见性收口到正式 contract
 - `F-748` 已为 direct session create 回显 created/reused，区分新建和复用旧私聊
 - `F-749` / `F-750` 已为好友请求创建回显 request_created/request_reused/friendship_created，区分 no-op 和自动接受
 - `F-745` / `F-746` 已把 moment/comment 作者 payload 收口为统一 author 子结构
 - `F-569` / `F-570` 已把建私聊“恰好一个参与者”和 extra forbid 收口到 schema
-- `F-571` / `F-572` 已把 HTTP typing 请求收口到 `SessionTypingRequest` / `StrictBool` schema
+- `F-571` / `F-572` 曾把 HTTP typing 请求收口到 `SessionTypingRequest` / `StrictBool` schema；后续 `R-005` 已进一步删除 HTTP typing 入口，typing 只保留聊天 WS 正式入口
 - `F-760` 已把建私聊 `participant_ids` 的 item 级 strip / 非空 / 长度 / 去重和“恰好一个参与者”下沉到 schema
 - `F-761` / `F-762` / `F-763` 已把 group member id、transfer owner id 和成员角色枚举约束下沉到 schema
 - `F-573` / `F-575` 到 `F-580` 已把 group create/member/role/transfer/profile schema 的冲突字段和 extra forbid 收口
@@ -126,7 +127,7 @@
 - `F-759` 已把 `GroupCreate.member_ids/members` item 级 strip、非空、长度和去重下沉到 schema
 - `F-567` / `F-581` / `F-582` / `F-585` 已把 friend request target、extra forbid 和 message 长度约束收口到 schema
 - `F-764` 已把 `DeviceKeysRefreshRequest` 的 key material 必填约束下沉到 schema
-- `F-767` 已把 HTTP typing ack 对齐到 realtime canonical event payload
+- `F-767` 曾把 HTTP typing ack 对齐到 realtime canonical event payload；后续 `R-005` 已进一步删除 HTTP typing ack，typing 只保留聊天 WS 正式入口
 - `F-564` 已把群公告消息广播改为按每个 viewer 单独序列化，不再复用第一个收件人的 viewer-specific payload
 - `F-783` 已把 session `unread_count` 接到服务端权威未读计数
 - `F-784` / `F-785` 已移除服务端 session/message payload 中没有权威语义的 `session_crypto_state` / `is_ai` dummy 字段
@@ -136,7 +137,24 @@
 - `F-565` / `F-566` 已把 session `last_message` preview 收口为 formal 输出，加密文本返回密文占位，附件返回类型化占位
 - `F-788` 已把单会话历史分页从 `created_at` cursor 收口为 `before_seq` / `session_seq` cursor，并同步客户端远端回拉与恢复补偿
 - `F-789` 已把缺失消息补偿排序改为同一会话内 `session_seq` 优先
-- G-01 仍未关闭：HTTP/WS 正式入口、mutation output、E2EE envelope、文件/用户/relationship 等边界仍有未收口项
+- `F-793` 到 `F-797` 已把公开用户摘要、avatar 字段语义、friend request participant contract 和 `user_profile_update` user-scoped realtime payload 收口
+- `F-765` 已把 user route 家族拆成 collection envelope、public user detail 和 `/auth/me` self detail 三套正式 contract
+- `F-751` 已把群 mutation route 家族统一到 `{group, mutation}` contract，删除/离群/成员变更不再混用裸 group、`status` 或 `204`
+- `F-087` 到 `F-096` 已收缩 presence/JSON heartbeat 死路径，补齐 `error`、`force_logout`、`contact_refresh` 与 profile update 的正式实时协议文档，并为联系人域补 reconnect authoritative reload
+- `R-003` 已把 WS `chat_message` 主链路收敛到 `MessageService.send_websocket_message()` 单一编排入口，gateway 不再重复查 session/member/message
+- `R-004` 已把已读主路径收敛为 HTTP `/messages/read/batch`，删除客户端 WS `read_ack` 发送入口，服务端 WS 对 `read_ack/read` 统一返回 unsupported
+- `R-005` 已删除 HTTP typing route 和 `SessionTypingRequest`，typing 只保留聊天 WS 正式入口
+- `R-007` 已让离线 `history_events` 的 edit/recall 回放不再依赖本地已有原消息，缺失缓存时按 event 生成本地权威占位消息
+- `R-008` 已把 HTTP edit/recall 的 sender-side 边界收口为“HTTP 响应更新本地、realtime fanout 只发其它成员”，避免 actor 用户重复处理回广播
+- `R-027` 已把 `_fetch_remote_messages()` 从逐条 `get_message()` 改为批量 `get_messages_by_ids()`，并把整页重写收口为 delta write
+- `R-059` 已为 E2EE envelope 增加 sender/recipient active device 绑定校验，并要求 group fanout 的 sender device/key 与顶层 envelope 一致
+- `R-060` 已把 `MessageSendQueue.stop()` 从直接取消改为先 drain，超时取消时对 in-flight / queued 消息显式回传失败
+- `R-061` 已随 `R-027` 关闭：远端历史页本地 existing-message 查询改为批量 `get_messages_by_ids()`
+- `R-064` / `R-065` 已把 `get_messages()` 回源条件改为显式 freshness 策略：`force_remote` / `before_seq` / 本地不足页才回源，首屏满页不再固定请求远端
+- `R-078` / `R-079` 已把缺失消息和缺失事件补偿查询从按 session 拼 `OR` 改为 `session_id.in_(...)` + `CASE` cursor 表达式
+- `R-096` 已随 `F-783` / `F-784` / `F-785` 关闭：formal payload 不再暴露 `session_crypto_state` / message `is_ai` dummy，占位 `unread_count` 已替换为权威未读计数
+- `R-097` 已随 `F-788` / `F-789` / `R-078` 关闭：历史分页和 reconnect 缺失消息补偿收口到 `session_seq` authoritative order
+- G-01 已关闭：HTTP/WS 正式入口、mutation output、E2EE envelope、文件/用户/relationship 与 reconnect/history 边界已按本簇范围收口或补记为关闭
 
 合并范围：
 
@@ -248,8 +266,8 @@
 
 典型表现：
 
-- G-01 仍未关闭：HTTP / WS 正式入口、mutation output、E2EE envelope、文件/用户/relationship 等边界仍有未收口项。
-- 该问题簇继续保留在后续修复队列，本次 G-03 收口不改变 G-01 状态。
+- G-01 已关闭：HTTP / WS 正式入口、mutation output、E2EE envelope、文件/用户/relationship、reconnect/history 边界已按本簇范围收口。
+- 后续若引入服务端 sender-key registry 或设备级 signaling，会作为新的问题簇继续跟踪，不再阻塞本次 G-01 关闭。
 
 建议优先动作：
 
@@ -355,11 +373,11 @@
 - direct 可见性 contract 到消息链也还是分裂的：
   - `list_messages()` 只看 membership，不复用 `_is_visible_private_session()`
   - `sync_missing_messages()` / `sync_missing_events()` 也会继续把已被 direct 可见性模型隐藏的会话拉进补偿
-- HTTP typing 正式入口也仍然只看 membership，不复用 private-session visibility gate；异常直聊还能继续产出 ghost typing
-- 消息和已读 mutation 链也都还没复用同一套 visibility gate：
-  - `send_message()` / `send_ws_message()` 仍允许不可见直聊继续产出新消息和 realtime fanout
-  - `read_message_batch()` / WS `read_ack` 也仍允许不可见直聊继续推进 read cursor 并广播已读
-  - `edit()` / `recall()` / `delete()` 也仍允许不可见直聊继续广播 message mutation
+- HTTP typing 正式入口已在 `G-01` 收口时删除，typing 只保留聊天 WS 入口
+- 消息和已读 mutation 链的 private-session visibility gate 已在 `G-01` 收口：
+  - `send_message()` / `send_websocket_message()` 复用 visible session membership
+  - `read_message_batch()` 复用 visible session membership，WS `read_ack` 已删除
+  - `edit()` / `recall()` / `delete()` 复用 visible session membership
 - 通话 mutation / signaling 链也还没复用同一套 visibility gate：
   - `call_invite`
   - `accept/reject/hangup`

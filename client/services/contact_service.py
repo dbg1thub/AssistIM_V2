@@ -131,9 +131,10 @@ class ContactService:
         )
         return dict(payload or {})
 
-    async def remove_group_member(self, group_id: str, user_id: str) -> None:
+    async def remove_group_member(self, group_id: str, user_id: str) -> dict[str, Any]:
         """Remove one member from a group."""
-        await self._http.delete(f"/groups/{group_id}/members/{user_id}")
+        payload = await self._http.delete(f"/groups/{group_id}/members/{user_id}")
+        return dict(payload or {})
 
     async def update_group_member_role(self, group_id: str, user_id: str, *, role: str) -> dict[str, Any]:
         """Update one member role in a group."""

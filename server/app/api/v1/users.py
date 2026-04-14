@@ -27,29 +27,26 @@ async def _broadcast_profile_update_events(db: Session, user_id: str) -> None:
     user = service.users.get_by_id(user_id)
     if user is None:
         return
-    for item in service.record_profile_update_events(user):
-        payload = dict(item.get("payload") or {})
-        session_id = str(payload.get("session_id", "") or "")
-        event_seq = int(payload.get("event_seq", 0) or 0)
-        participant_ids = [
-            value
-            for value in dict.fromkeys(str(raw_id or "").strip() for raw_id in item.get("participant_ids", []))
-            if value
-        ]
-        if not participant_ids:
-            continue
-        try:
-            await connection_manager.send_json_to_users(
-                participant_ids,
-                ws_message(
-                    "user_profile_update",
-                    payload,
-                    msg_id=f"user-profile:{session_id}:{event_seq}",
-                    seq=event_seq,
-                ),
-            )
-        except Exception:
-            logger.exception("User profile fanout failed after committed profile mutation")
+    result = service.record_profile_update_events(user)
+    payload = dict(result.get("payload") or {})
+    participant_ids = [
+        value
+        for value in dict.fromkeys(str(raw_id or "").strip() for raw_id in result.get("participant_ids", []))
+        if value
+    ]
+    if not participant_ids:
+        return
+    try:
+        await connection_manager.send_json_to_users(
+            participant_ids,
+            ws_message(
+                "user_profile_update",
+                payload,
+                msg_id=str(payload.get("profile_event_id") or f"user-profile:{user_id}"),
+            ),
+        )
+    except Exception:
+        logger.exception("User profile fanout failed after committed profile mutation")
 
 
 @router.get("/search")
@@ -64,8 +61,13 @@ def search_users(
 
 
 @router.get("")
-def list_users(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
-    return success_response(UserService(db).list_users())
+def list_users(
+    page: int = Query(default=1, ge=1),
+    size: int = Query(default=20, ge=1, le=100),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    return success_response(UserService(db).list_users(page=page, size=size))
 
 
 @router.get("/{user_id}")
@@ -96,7 +98,7 @@ async def upload_me_avatar(
     avatar_service = AvatarService(db)
     updated_user = avatar_service.upload_user_avatar(current_user, file)
     await _broadcast_profile_update_events(db, current_user.id)
-    return success_response(UserService.serialize_user(updated_user))
+    return success_response(UserService(db).serialize_user(updated_user))
 
 
 @router.delete("/me/avatar")
@@ -107,4 +109,4 @@ async def reset_me_avatar(
     avatar_service = AvatarService(db)
     updated_user = avatar_service.reset_user_avatar(current_user)
     await _broadcast_profile_update_events(db, current_user.id)
-    return success_response(UserService.serialize_user(updated_user))
+    return success_response(UserService(db).serialize_user(updated_user))

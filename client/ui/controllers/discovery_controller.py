@@ -228,13 +228,10 @@ class DiscoveryController:
             )
 
         images = list(data.get("images") or data.get("media") or [])
-        like_count = int(data.get("like_count", len(data.get("likes", []) or [])) or 0)
+        like_count = int(data.get("like_count", 0) or 0)
         if moment_id in self._like_count_cache:
             like_count = self._like_count_cache[moment_id]
-        is_liked = bool(
-            data.get("is_liked", False)
-            or str(current_user.get("id", "") or "") in [str(value) for value in (data.get("liked_user_ids") or [])]
-        )
+        is_liked = bool(data.get("is_liked", False))
         if moment_id in self._like_state_cache:
             is_liked = self._like_state_cache[moment_id]
 

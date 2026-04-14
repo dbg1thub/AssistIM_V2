@@ -944,21 +944,6 @@ class ConnectionManager:
 
         return await self.send(message)
 
-    async def send_read_ack(self, session_id: str, message_id: str) -> bool:
-        """Send read acknowledgment."""
-        message = {
-            "type": "read_ack",
-            "seq": 0,
-            "msg_id": "",
-            "timestamp": int(time.time()),
-            "data": {
-                "session_id": session_id,
-                "message_id": message_id,
-            },
-        }
-
-        return await self.send(message)
-
     async def send_recall(self, session_id: str, message_id: str) -> bool:
         """Send message recall request."""
         message = {
