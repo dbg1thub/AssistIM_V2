@@ -16,7 +16,7 @@
 
 - 状态：Accepted
 - 决策：有现成 QFluentWidgets 组件时优先复用，不重复手写通用按钮、卡片、菜单、设置项和提示层。
-- 结果：具体规则见 [ui_guidelines.md](./ui_guidelines.md)。
+- 结果：具体规则见 [ui_guidelines.md]../ui_guidelines.md)。
 
 ## ADR-003：客户端采用 UI -> Controller -> Manager -> Service -> Network 主链路
 
@@ -34,7 +34,7 @@
 
 - 状态：Accepted
 - 决策：容器类业务组件统一收敛到 `CardWidget` 体系，Tooltip 使用 Acrylic 方案，QSS 组织方式参考 QFluentWidgets Gallery。
-- 结果：具体约束见 [ui_guidelines.md](./ui_guidelines.md)。
+- 结果：具体约束见 [ui_guidelines.md]../ui_guidelines.md)。
 
 ## ADR-020：`SessionManager` 通过 `SessionService` 访问远程会话 HTTP 能力
 
@@ -57,7 +57,7 @@
 ## ADR-023：本地搜索查询通过 Storage 公共 API 暴露
 
 - 状态：Accepted
-- 决策：消息搜索等本地缓存查询通过 `Database.search_messages()` 这类公共 storage API 暴露；Manager 不直接写 SQL，也不调用 storage 私有 helper。
+- 决策：消息搜索等本地缓存查询通过 `Database.search_messages.)` 这类公共 storage API 暴露；Manager 不直接写 SQL，也不调用 storage 私有 helper。
 - 结果：搜索语义、SQLite 兼容和结果解码统一留在 storage 层。
 
 ## B. 一致性、权限与领域真相
@@ -169,20 +169,20 @@
 ## ADR-027：配置读取使用运行时快照，不在类定义或路由装饰期冻结
 
 - 状态：Accepted
-- 决策：`Settings` 在实例化时读取环境变量；应用入口通过 `create_app(settings)` 使用显式配置快照；需要重载时通过 `reload_settings()` 清理缓存后重建。
+- 决策：`Settings` 在实例化时读取环境变量；应用入口通过 `create_app.settings)` 使用显式配置快照；需要重载时通过 `reload_settings.)` 清理缓存后重建。
 - 结果：配置边界变成“可重建的 settings snapshot + app factory + 动态依赖”。
 
 ## ADR-028：数据库 runtime 通过显式配置函数绑定，不在模块导入时冻结 engine
 
 - 状态：Accepted
-- 决策：数据库层通过 `configure_database(settings)` 与 `get_engine()` 绑定具体 engine；`SessionLocal` 保持为稳定 session factory。
+- 决策：数据库层通过 `configure_database.settings)` 与 `get_engine.)` 绑定具体 engine；`SessionLocal` 保持为稳定 session factory。
 - 结果：engine 生命周期与 app / config 生命周期对齐，而不是依赖模块导入副作用。
 
 ## ADR-029：认证、文件与限流依赖通过 app settings snapshot 读取配置
 
 - 状态：Accepted
 - 决策：HTTP Request 与 WebSocket 都通过 app state 中的 settings snapshot 读取配置；认证 token 解码、文件服务和动态限流优先消费这份显式 snapshot。
-- 结果：`create_app(settings)` 真正成为运行时配置边界，HTTP / WS / Service 共享同一份配置快照。
+- 结果：`create_app.settings)` 真正成为运行时配置边界，HTTP / WS / Service 共享同一份配置快照。
 
 ## ADR-030：文件与媒体存储通过显式 `MediaStorage` 边界与规范附件元数据建模
 

@@ -12,9 +12,9 @@
 
 架构边界、一致性模型和 E2EE / 通话设计取舍分别以以下文档为准：
 
-1. [design_decisions.md](./design_decisions.md)
-2. [architecture.md](./architecture.md)
-3. [backend_architecture.md](./backend_architecture.md)
+1. [design_decisions.md](../architecture/design_decisions.md)
+2. [architecture.md](../architecture/architecture.md)
+3. [backend_architecture.md](../architecture/backend_architecture.md)
 4. 本文档
 
 ## 2. 统一外层结构
@@ -318,9 +318,9 @@
 
 新增字段或事件时，必须同步更新：
 
-- [architecture.md](./architecture.md)
-- [backend_architecture.md](./backend_architecture.md)
-- [design_decisions.md](./design_decisions.md)
+- [architecture.md](../architecture/architecture.md)
+- [backend_architecture.md](../architecture/backend_architecture.md)
+- [design_decisions.md](../architecture/design_decisions.md)
 - 对应测试
 
 不允许通过“临时兼容字段”长期双写两套真相。

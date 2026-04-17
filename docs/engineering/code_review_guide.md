@@ -12,8 +12,8 @@
 
 本指南定义的是 review 方法，不记录具体问题。当前问题台账见：
 
-- [review_findings_grouped.md](./review_findings_grouped.md)
-- [review_findings.md](./review_findings.md)
+- [review_findings_grouped.md](../reviews/review_findings_grouped.md)
+- [review_findings.md](../reviews/review_findings.md)
 
 ## 2. Review 基本原则
 
@@ -25,11 +25,11 @@
 
 正式文档优先级：
 
-1. [design_decisions.md](./design_decisions.md)
-2. [architecture.md](./architecture.md)
-3. [backend_architecture.md](./backend_architecture.md)
-4. [realtime_protocol.md](./realtime_protocol.md)
-5. [ui_guidelines.md](./ui_guidelines.md)
+1. [design_decisions.md](../architecture/design_decisions.md)
+2. [architecture.md](../architecture/architecture.md)
+3. [backend_architecture.md](../architecture/backend_architecture.md)
+4. [realtime_protocol.md](../protocols/realtime_protocol.md)
+5. [ui_guidelines.md](../ui/ui_guidelines.md)
 6. [code_style.md](./code_style.md)
 7. [pitfalls.md](./pitfalls.md)
 

@@ -179,7 +179,7 @@ Network -> EventBus -> UI（绕过 Manager）
 
 ## 6. WebSocket 消息协议
 
-统一外层结构见 [realtime_protocol.md](./realtime_protocol.md)，此处只保留架构层约束。
+统一外层结构见 [realtime_protocol.md](../protocols/realtime_protocol.md)，此处只保留架构层约束。
 
 外层结构：
 
@@ -296,7 +296,7 @@ Network -> EventBus -> UI（绕过 Manager）
 - 非必要不使用 `beginResetModel()` / `modelReset()`
 - 长列表不能依赖全量重建刷新
 - AI 流式输出要做节流或批量刷新，不能每个 token 触发一次重绘
-- Tooltip、Flyout、菜单、卡片样式应通过统一设计系统实现，见 [ui_guidelines.md](./ui_guidelines.md)
+- Tooltip、Flyout、菜单、卡片样式应通过统一设计系统实现，见 [ui_guidelines.md](../ui/ui_guidelines.md)
 
 ## 10. AI 会话架构
 

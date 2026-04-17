@@ -2,17 +2,17 @@
 
 本文件只描述 AI 在 AssistIM 项目中改代码时必须额外遵守的执行规则。
 
-本文件不重新定义系统架构、UI 设计系统或代码风格；相关内容分别以 [architecture.md](./architecture.md)、[backend_architecture.md](./backend_architecture.md)、[ui_guidelines.md](./ui_guidelines.md)、[code_style.md](./code_style.md) 为准。
+本文件不重新定义系统架构、UI 设计系统或代码风格；相关内容分别以 [architecture.md](../architecture/architecture.md)、[backend_architecture.md](../architecture/backend_architecture.md)、[ui_guidelines.md](../ui/ui_guidelines.md)、[code_style.md](./code_style.md) 为准。
 
 ## 1. 文档优先级
 
 AI 修改代码前，必须遵守以下优先级：
 
-1. [design_decisions.md](./design_decisions.md)
-2. [architecture.md](./architecture.md)
-3. [backend_architecture.md](./backend_architecture.md)
-4. [realtime_protocol.md](./realtime_protocol.md)
-5. [ui_guidelines.md](./ui_guidelines.md)
+1. [design_decisions.md](../architecture/design_decisions.md)
+2. [architecture.md](../architecture/architecture.md)
+3. [backend_architecture.md](../architecture/backend_architecture.md)
+4. [realtime_protocol.md](../protocols/realtime_protocol.md)
+5. [ui_guidelines.md](../ui/ui_guidelines.md)
 6. [code_style.md](./code_style.md)
 7. [pitfalls.md](./pitfalls.md)
 

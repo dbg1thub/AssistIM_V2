@@ -2,7 +2,7 @@
 
 本文档只记录这个仓库里反复出现、且容易在重构或补功能时再次踩到的坑。
 
-它不是主规范来源；正式边界仍以 [design_decisions.md](./design_decisions.md)、[architecture.md](./architecture.md)、[backend_architecture.md](./backend_architecture.md) 和 [realtime_protocol.md](./realtime_protocol.md) 为准。
+它不是主规范来源；正式边界仍以 [design_decisions.md](../architecture/design_decisions.md)、[architecture.md](../architecture/architecture.md)、[backend_architecture.md](../architecture/backend_architecture.md) 和 [realtime_protocol.md](../protocols/realtime_protocol.md) 为准。
 
 ## 1. 在多个地方维护同一份业务真相
 

@@ -4,9 +4,9 @@
 
 本文档不重复定义系统架构边界。分层与设计边界请查看：
 
-- [architecture.md](./architecture.md)
-- [backend_architecture.md](./backend_architecture.md)
-- [ui_guidelines.md](./ui_guidelines.md)
+- [architecture.md](../architecture/architecture.md)
+- [backend_architecture.md](../architecture/backend_architecture.md)
+- [ui_guidelines.md](../ui/ui_guidelines.md)
 
 ## 1. 通用要求
 
@@ -118,7 +118,7 @@ async def send_message(self, session_id: str, content: str) -> ChatMessage:
 
 - UI 类只负责视图与交互，不写业务流程
 - Signal 使用清晰语义命名
-- Tooltip、容器、样式遵循 [ui_guidelines.md](./ui_guidelines.md)
+- Tooltip、容器、样式遵循 [ui_guidelines.md](../ui/ui_guidelines.md)
 - 不在 widget 内直接写 HTTP / WebSocket / SQLite 调用
 
 ## 9. Repository / Service / Manager 工程约束

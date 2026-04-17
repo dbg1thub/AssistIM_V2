@@ -176,7 +176,7 @@ Service 是真正的业务边界，HTTP 与 WebSocket 都必须复用同一套 S
 
 规则：
 
-- 不能再用 `max(session_seq) + 1` 这种并发不安全写法
+- 不能再用 `max.session_seq) + 1` 这种并发不安全写法
 - 正式设计应使用会话级高水位原子递增
 - `session_seq` 只表示会话内消息顺序，不表示全局事件顺序
 
@@ -221,7 +221,7 @@ Service 是真正的业务边界，HTTP 与 WebSocket 都必须复用同一套 S
 
 ## 6. WebSocket 实时链路
 
-字段级 payload 约束见 [realtime_protocol.md](./realtime_protocol.md)，本节只描述职责边界与一致性规则。
+字段级 payload 约束见 [realtime_protocol.md]../realtime_protocol.md)，本节只描述职责边界与一致性规则。
 
 ### 6.1 连接阶段
 
@@ -301,8 +301,8 @@ Service 是真正的业务边界，HTTP 与 WebSocket 都必须复用同一套 S
 ### 9.3 客户端职责边界
 
 - `FileService` 负责把上传响应归一化成稳定媒体描述，不把后端字段差异泄漏给 Controller / Manager
-- `build_attachment_extra()` 用于构建本地附件状态，可带 `local_path`、`uploading` 等仅客户端可见字段
-- `sanitize_outbound_message_extra()` 在真正发消息前移除本地临时字段，只把 shareable metadata 发给服务端
+- `build_attachment_extra.)` 用于构建本地附件状态，可带 `local_path`、`uploading` 等仅客户端可见字段
+- `sanitize_outbound_message_extra.)` 在真正发消息前移除本地临时字段，只把 shareable metadata 发给服务端
 - 重试时如果远端 URL 尚不存在，客户端先重传媒体，再复用同一 `msg_id` 发送消息
 
 ### 9.4 可扩展性要求
@@ -361,6 +361,6 @@ MVP 约束：
 ## 13. 配置加载策略
 
 - 服务端配置通过 `Settings` 运行时快照读取，不在 dataclass 类定义时冻结环境变量。
-- 应用入口通过 `create_app(settings)` 组装，兼容开关和部署参数由 app factory 显式决定。
-- 数据库 engine 通过 `configure_database(settings)` 在 runtime 绑定；`SessionLocal` 作为稳定工厂保留，但不在模块导入时提前冻结具体连接。
+- 应用入口通过 `create_app.settings)` 组装，兼容开关和部署参数由 app factory 显式决定。
+- 数据库 engine 通过 `configure_database.settings)` 在 runtime 绑定；`SessionLocal` 作为稳定工厂保留，但不在模块导入时提前冻结具体连接。
 - 需要读取当前限流阈值等运行时配置的依赖，应通过动态 dependency 获取，不在路由装饰期固化具体数值。

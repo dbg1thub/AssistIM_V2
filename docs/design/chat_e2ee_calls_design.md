@@ -12,10 +12,10 @@
 
 本文档不是正式协议，也不是正式架构说明。已经收口的内容应分别回填到：
 
-- [design_decisions.md](./design_decisions.md)
-- [architecture.md](./architecture.md)
-- [backend_architecture.md](./backend_architecture.md)
-- [realtime_protocol.md](./realtime_protocol.md)
+- [design_decisions.md](../architecture/design_decisions.md)
+- [architecture.md](../architecture/architecture.md)
+- [backend_architecture.md](../architecture/backend_architecture.md)
+- [realtime_protocol.md](../protocols/realtime_protocol.md)
 
 如果某条规则已经进入上述文档，本文档不再重复定义字段、表结构或 payload 细节。
 
@@ -70,10 +70,10 @@
 
 对应主文档：
 
-- [design_decisions.md](./design_decisions.md) 中的 `ADR-031`、`ADR-032`
-- [architecture.md](./architecture.md) 中的“1:1 通话”
-- [backend_architecture.md](./backend_architecture.md) 中的“通话 signaling”
-- [realtime_protocol.md](./realtime_protocol.md) 中的“新增通话 signaling”
+- [design_decisions.md](../architecture/design_decisions.md) 中的 `ADR-031`、`ADR-032`
+- [architecture.md](../architecture/architecture.md) 中的“1:1 通话”
+- [backend_architecture.md](../architecture/backend_architecture.md) 中的“通话 signaling”
+- [realtime_protocol.md](../protocols/realtime_protocol.md) 中的“新增通话 signaling”
 
 ### 4.2 私聊 E2EE 基线
 
@@ -85,10 +85,10 @@
 
 对应主文档：
 
-- [design_decisions.md](./design_decisions.md) 中的 `ADR-033`、`ADR-034`
-- [architecture.md](./architecture.md) 中的“1:1 私聊 E2EE”
-- [backend_architecture.md](./backend_architecture.md) 中的“端到端加密边界”
-- [realtime_protocol.md](./realtime_protocol.md) 中的“私聊 E2EE 消息 envelope”
+- [design_decisions.md](../architecture/design_decisions.md) 中的 `ADR-033`、`ADR-034`
+- [architecture.md](../architecture/architecture.md) 中的“1:1 私聊 E2EE”
+- [backend_architecture.md](../architecture/backend_architecture.md) 中的“端到端加密边界”
+- [realtime_protocol.md](../protocols/realtime_protocol.md) 中的“私聊 E2EE 消息 envelope”
 
 ## 5. 仍需收口的开放问题
 
@@ -239,10 +239,10 @@ E2EE 和通话都很容易变成“只能靠猜”的黑盒链路，因此必须
 
 为了避免本文件再次膨胀，后续实现落地时必须按以下规则回填：
 
-- 正式协议字段进入 [realtime_protocol.md](./realtime_protocol.md)
-- 正式客户端边界进入 [architecture.md](./architecture.md)
-- 正式服务端边界进入 [backend_architecture.md](./backend_architecture.md)
-- 已接受且长期有效的方向进入 [design_decisions.md](./design_decisions.md)
+- 正式协议字段进入 [realtime_protocol.md](../protocols/realtime_protocol.md)
+- 正式客户端边界进入 [architecture.md](../architecture/architecture.md)
+- 正式服务端边界进入 [backend_architecture.md](../architecture/backend_architecture.md)
+- 已接受且长期有效的方向进入 [design_decisions.md](../architecture/design_decisions.md)
 - 当前文件只保留尚未完全收口的取舍、风险和 rollout 计划
 
 不允许继续把这些内容长期留在“草案文档”里：

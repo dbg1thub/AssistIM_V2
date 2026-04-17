@@ -6,7 +6,7 @@
 
 - 审查时间：2026-04-06 至 2026-04-08
 - 结论类型分为：已确认问题、风险点
-- 本文档是 review 快照，不替代 [design_decisions.md](./design_decisions.md) 与架构文档
+- 本文档是 review 快照，不替代 [design_decisions.md](../architecture/design_decisions.md) 与架构文档
 - 本文档保留原始编号与时间顺序，用作追溯台账；合并去重后的整理版见 [review_findings_grouped.md](./review_findings_grouped.md)
 - 当前 review 状态：6 条主业务链路已完成尾扫，后续不建议继续散扫，应按问题簇进入修复阶段
 - 当前原始台账覆盖范围：
@@ -72,8 +72,8 @@
 
 对应文件：
 
-- [D:\AssistIM_V2\docs\realtime_protocol.md](D:\AssistIM_V2\docs\realtime_protocol.md)
-- [D:\AssistIM_V2\docs\chat_e2ee_calls_design.md](D:\AssistIM_V2\docs\chat_e2ee_calls_design.md)
+- [D:\AssistIM_V2\docs\protocols\realtime_protocol.md](D:\AssistIM_V2\docs\protocols\realtime_protocol.md)
+- [D:\AssistIM_V2\docs\design\chat_e2ee_calls_design.md](D:\AssistIM_V2\docs\design\chat_e2ee_calls_design.md)
 
 ### F-002：兼容入口文档与当前实现不一致
 
@@ -87,8 +87,8 @@
 
 对应文件：
 
-- [D:\AssistIM_V2\docs\backend_architecture.md](D:\AssistIM_V2\docs\backend_architecture.md)
-- [D:\AssistIM_V2\docs\design_decisions.md](D:\AssistIM_V2\docs\design_decisions.md)
+- [D:\AssistIM_V2\docs\architecture\backend_architecture.md](D:\AssistIM_V2\docs\architecture\backend_architecture.md)
+- [D:\AssistIM_V2\docs\architecture\design_decisions.md](D:\AssistIM_V2\docs\architecture\design_decisions.md)
 
 ### F-003：会话默认加密模式把所有 direct / group 会话都视为 E2EE
 
@@ -169,9 +169,9 @@
 
 证据：
 
-- [D:\AssistIM_V2\docs\architecture.md](D:\AssistIM_V2\docs\architecture.md)
-- [D:\AssistIM_V2\docs\design_decisions.md](D:\AssistIM_V2\docs\design_decisions.md)
-- [D:\AssistIM_V2\docs\realtime_protocol.md](D:\AssistIM_V2\docs\realtime_protocol.md)
+- [D:\AssistIM_V2\docs\architecture\architecture.md](D:\AssistIM_V2\docs\architecture\architecture.md)
+- [D:\AssistIM_V2\docs\architecture\design_decisions.md](D:\AssistIM_V2\docs\architecture\design_decisions.md)
+- [D:\AssistIM_V2\docs\protocols\realtime_protocol.md](D:\AssistIM_V2\docs\protocols\realtime_protocol.md)
 - [D:\AssistIM_V2\server\app\schemas\message.py](D:\AssistIM_V2\server\app\schemas\message.py)
 - [D:\AssistIM_V2\server\app\api\v1\messages.py](D:\AssistIM_V2\server\app\api\v1\messages.py)
 - [D:\AssistIM_V2\server\app\websocket\chat_ws.py](D:\AssistIM_V2\server\app\websocket\chat_ws.py)
@@ -239,7 +239,7 @@
 
 证据：
 
-- [D:\AssistIM_V2\docs\realtime_protocol.md](D:\AssistIM_V2\docs\realtime_protocol.md)
+- [D:\AssistIM_V2\docs\protocols\realtime_protocol.md](D:\AssistIM_V2\docs\protocols\realtime_protocol.md)
 - [D:\AssistIM_V2\client\managers\connection_manager.py](D:\AssistIM_V2\client\managers\connection_manager.py)
 - [D:\AssistIM_V2\client\managers\message_manager.py](D:\AssistIM_V2\client\managers\message_manager.py)
 - [D:\AssistIM_V2\client\services\chat_service.py](D:\AssistIM_V2\client\services\chat_service.py)
@@ -275,7 +275,7 @@
 
 证据：
 
-- [D:\AssistIM_V2\docs\realtime_protocol.md](D:\AssistIM_V2\docs\realtime_protocol.md)
+- [D:\AssistIM_V2\docs\protocols\realtime_protocol.md](D:\AssistIM_V2\docs\protocols\realtime_protocol.md)
 - [D:\AssistIM_V2\server\app\api\v1\messages.py](D:\AssistIM_V2\server\app\api\v1\messages.py)
 - [D:\AssistIM_V2\server\app\websocket\chat_ws.py](D:\AssistIM_V2\server\app\websocket\chat_ws.py)
 - [D:\AssistIM_V2\client\managers\message_manager.py](D:\AssistIM_V2\client\managers\message_manager.py)
@@ -313,8 +313,8 @@
 - [D:\AssistIM_V2\client\managers\call_manager.py](D:\AssistIM_V2\client\managers\call_manager.py)
 - [D:\AssistIM_V2\client\call\aiortc_voice_engine.py](D:\AssistIM_V2\client\call\aiortc_voice_engine.py)
 - [D:\AssistIM_V2\server\app\services\call_service.py](D:\AssistIM_V2\server\app\services\call_service.py)
-- [D:\AssistIM_V2\docs\realtime_protocol.md](D:\AssistIM_V2\docs\realtime_protocol.md)
-- [D:\AssistIM_V2\docs\chat_e2ee_calls_design.md](D:\AssistIM_V2\docs\chat_e2ee_calls_design.md)
+- [D:\AssistIM_V2\docs\protocols\realtime_protocol.md](D:\AssistIM_V2\docs\protocols\realtime_protocol.md)
+- [D:\AssistIM_V2\docs\design\chat_e2ee_calls_design.md](D:\AssistIM_V2\docs\design\chat_e2ee_calls_design.md)
 
 影响：
 
@@ -500,9 +500,9 @@
 证据：
 
 - [D:\AssistIM_V2\client\managers\connection_manager.py](D:\AssistIM_V2\client/managers/connection_manager.py)
-- [D:\AssistIM_V2\docs\architecture.md](D:\AssistIM_V2\docs/architecture.md)
-- [D:\AssistIM_V2\docs\design_decisions.md](D:\AssistIM_V2\docs/design_decisions.md)
-- [D:\AssistIM_V2\docs\realtime_protocol.md](D:\AssistIM_V2\docs/realtime_protocol.md)
+- [D:\AssistIM_V2\docs\architecture\architecture.md](D:\AssistIM_V2\docs/architecture/architecture.md)
+- [D:\AssistIM_V2\docs\architecture\design_decisions.md](D:\AssistIM_V2\docs/architecture/design_decisions.md)
+- [D:\AssistIM_V2\docs\protocols\realtime_protocol.md](D:\AssistIM_V2\docs/protocols/realtime_protocol.md)
 
 影响：
 
@@ -538,8 +538,8 @@
 证据：
 
 - [D:\AssistIM_V2\client\managers\call_manager.py](D:\AssistIM_V2\client\managers\call_manager.py)
-- [D:\AssistIM_V2\docs\architecture.md](D:\AssistIM_V2\docs/architecture.md)
-- [D:\AssistIM_V2\docs\realtime_protocol.md](D:\AssistIM_V2\docs/realtime_protocol.md)
+- [D:\AssistIM_V2\docs\architecture\architecture.md](D:\AssistIM_V2\docs/architecture/architecture.md)
+- [D:\AssistIM_V2\docs\protocols\realtime_protocol.md](D:\AssistIM_V2\docs/protocols/realtime_protocol.md)
 
 影响：
 
@@ -788,9 +788,9 @@
 - [D:\AssistIM_V2\server\app\api\v1\users.py](D:\AssistIM_V2\server\app\api\v1\users.py)
 - [D:\AssistIM_V2\server\app\services\user_service.py](D:\AssistIM_V2\server\app\services\user_service.py)
 - [D:\AssistIM_V2\server\tests\test_chat_api.py](D:\AssistIM_V2\server\tests\test_chat_api.py)
-- [D:\AssistIM_V2\docs\realtime_protocol.md](D:\AssistIM_V2\docs\realtime_protocol.md)
-- [D:\AssistIM_V2\docs\architecture.md](D:\AssistIM_V2\docs\architecture.md)
-- [D:\AssistIM_V2\docs\backend_architecture.md](D:\AssistIM_V2\docs\backend_architecture.md)
+- [D:\AssistIM_V2\docs\protocols\realtime_protocol.md](D:\AssistIM_V2\docs\protocols\realtime_protocol.md)
+- [D:\AssistIM_V2\docs\architecture\architecture.md](D:\AssistIM_V2\docs\architecture\architecture.md)
+- [D:\AssistIM_V2\docs\architecture\backend_architecture.md](D:\AssistIM_V2\docs\architecture\backend_architecture.md)
 
 影响：
 
@@ -2816,7 +2816,7 @@
 
 现状：
 
-- [realtime_protocol.md](/D:/AssistIM_V2/docs/realtime_protocol.md) 明确把 `online`、`offline`、`presence` 列为“当前已存在的事件”
+- [realtime_protocol.md](/D:/AssistIM_V2/docs/protocols/realtime_protocol.md) 明确把 `online`、`offline`、`presence` 列为“当前已存在的事件”
 - 服务端 [presence_ws.py](/D:/AssistIM_V2/server/app/websocket/presence_ws.py) 和 [chat_ws.py](/D:/AssistIM_V2/server/app/websocket/chat_ws.py) 也会实际发送 `online` / `offline` / `presence` / `pong`
 - 但客户端代码里没有任何 `/ws/presence`、`presence_query`、`online_users` 的使用入口，也没有任何针对 `online/offline/presence` 的消息消费分支
 - 应用顶层 [main.py](/D:/AssistIM_V2/client/main.py) 的 transport bypass 只处理 `force_logout`
@@ -2824,7 +2824,7 @@
 
 证据：
 
-- [D:\AssistIM_V2\docs\realtime_protocol.md](D:\AssistIM_V2/docs/realtime_protocol.md)
+- [D:\AssistIM_V2\docs\protocols\realtime_protocol.md](D:\AssistIM_V2/docs/protocols/realtime_protocol.md)
 - [D:\AssistIM_V2\server\app\websocket\presence_ws.py](D:\AssistIM_V2/server/app/websocket/presence_ws.py)
 - [D:\AssistIM_V2\server\app\websocket\chat_ws.py](D:\AssistIM_V2/server/app/websocket/chat_ws.py)
 - [D:\AssistIM_V2\client\main.py](D:\AssistIM_V2/client/main.py)
@@ -2854,14 +2854,14 @@
 
 现状：
 
-- [realtime_protocol.md](/D:/AssistIM_V2/docs/realtime_protocol.md) 在“3.1 连接与保活”里把 `auth`、`ping`、`heartbeat`、`pong` 列为当前聊天 WebSocket 协议的一部分
+- [realtime_protocol.md](/D:/AssistIM_V2/docs/protocols/realtime_protocol.md) 在“3.1 连接与保活”里把 `auth`、`ping`、`heartbeat`、`pong` 列为当前聊天 WebSocket 协议的一部分
 - 服务端 [chat_ws.py](/D:/AssistIM_V2/server/app/websocket/chat_ws.py) / [presence_ws.py](/D:/AssistIM_V2/server/app/websocket/presence_ws.py) 也确实保留了对 JSON `ping` / `heartbeat` 的处理，并返回应用层 `pong`
 - 但桌面端 [websocket_client.py](/D:/AssistIM_V2/client/network/websocket_client.py) 的保活实现用的是底层 websocket ping frame：`self._ws.ping()`
 - 客户端代码里也没有任何发送 JSON `ping` / `heartbeat` 的入口，更没有任何针对应用层 `pong` 的消费逻辑
 
 证据：
 
-- [D:\AssistIM_V2\docs\realtime_protocol.md](D:\AssistIM_V2/docs/realtime_protocol.md)
+- [D:\AssistIM_V2\docs\protocols\realtime_protocol.md](D:\AssistIM_V2/docs/protocols/realtime_protocol.md)
 - [D:\AssistIM_V2\server\app\websocket\chat_ws.py](D:\AssistIM_V2/server/app/websocket/chat_ws.py)
 - [D:\AssistIM_V2\server\app\websocket\presence_ws.py](D:\AssistIM_V2/server/app/websocket/presence_ws.py)
 - [D:\AssistIM_V2\client\network\websocket_client.py](D:\AssistIM_V2/client/network/websocket_client.py)
@@ -2890,7 +2890,7 @@
 
 现状：
 
-- [realtime_protocol.md](/D:/AssistIM_V2/docs/realtime_protocol.md) 在“3.1 连接与保活”里把 `error` 列为当前服务端返回事件
+- [realtime_protocol.md](/D:/AssistIM_V2/docs/protocols/realtime_protocol.md) 在“3.1 连接与保活”里把 `error` 列为当前服务端返回事件
 - 服务端 [chat_ws.py](/D:/AssistIM_V2/server/app/websocket/chat_ws.py) 也大量使用 `_send_app_error()` 返回应用层错误，覆盖 WS auth、sync、chat_message、typing、read、edit、recall、delete、通话 signaling 等多类命令失败
 - 但客户端 [message_manager.py](/D:/AssistIM_V2/client/managers/message_manager.py) 的 `_handle_ws_message()` 并没有 `error` 分支，最终只会把它当成 unknown message type
 - [connection_manager.py](/D:/AssistIM_V2/client/managers/connection_manager.py) 对 `error` 的唯一特殊处理，只是在 WS auth in-flight 时把 `_ws_auth_in_flight` 清掉
@@ -2898,7 +2898,7 @@
 
 证据：
 
-- [D:\AssistIM_V2\docs\realtime_protocol.md](D:\AssistIM_V2/docs/realtime_protocol.md)
+- [D:\AssistIM_V2\docs\protocols\realtime_protocol.md](D:\AssistIM_V2/docs/protocols/realtime_protocol.md)
 - [D:\AssistIM_V2\server\app\websocket\chat_ws.py](D:\AssistIM_V2/server/app/websocket/chat_ws.py)
 - [D:\AssistIM_V2\client\managers\message_manager.py](D:\AssistIM_V2/client/managers/message_manager.py)
 - [D:\AssistIM_V2\client\managers\connection_manager.py](D:\AssistIM_V2/client/managers/connection_manager.py)
@@ -2928,7 +2928,7 @@
 
 现状：
 
-- [realtime_protocol.md](/D:/AssistIM_V2/docs/realtime_protocol.md) 把 `auth_ack` 和 `message_ack` 都写成带 `success` 字段的正式返回事件
+- [realtime_protocol.md](/D:/AssistIM_V2/docs/protocols/realtime_protocol.md) 把 `auth_ack` 和 `message_ack` 都写成带 `success` 字段的正式返回事件
 - 客户端 [connection_manager.py](/D:/AssistIM_V2/client/managers/connection_manager.py) 会读取 `auth_ack.data.success`
 - 客户端 [message_manager.py](/D:/AssistIM_V2/client/managers/message_manager.py) 也明确实现了 `message_ack(success=false)` 的拒绝分支，会把消息标成 `FAILED`
 - 但服务端 [chat_ws.py](/D:/AssistIM_V2/server/app/websocket/chat_ws.py) 里，`auth_ack` 只在认证成功时发送 `{\"success\": true, \"user_id\": ...}`；认证失败统一走 `error`
@@ -2937,7 +2937,7 @@
 
 证据：
 
-- [D:\AssistIM_V2\docs\realtime_protocol.md](D:\AssistIM_V2/docs/realtime_protocol.md)
+- [D:\AssistIM_V2\docs\protocols\realtime_protocol.md](D:\AssistIM_V2/docs/protocols/realtime_protocol.md)
 - [D:\AssistIM_V2\client\managers\connection_manager.py](D:\AssistIM_V2/client/managers/connection_manager.py)
 - [D:\AssistIM_V2\client\managers\message_manager.py](D:\AssistIM_V2/client/managers/message_manager.py)
 - [D:\AssistIM_V2\server\app\websocket\chat_ws.py](D:\AssistIM_V2/server/app/websocket/chat_ws.py)
@@ -3038,14 +3038,14 @@
 
 - 服务端 [friends.py](/D:/AssistIM_V2/server/app/api/v1/friends.py) 会在好友申请创建、接受、拒绝、删除等动作后广播 `contact_refresh`
 - 桌面端 [message_manager.py](/D:/AssistIM_V2/client/managers/message_manager.py) 也有正式 consumer：收到后发出 `ContactEvent.SYNC_REQUIRED`
-- 但 [realtime_protocol.md](/D:/AssistIM_V2/docs/realtime_protocol.md) 完全没有列出 `contact_refresh`
+- 但 [realtime_protocol.md](/D:/AssistIM_V2/docs/protocols/realtime_protocol.md) 完全没有列出 `contact_refresh`
 - 这条事件使用的也不是文档当前强调的 `session_seq/event_seq` 模型，而是直接构造 `{\"type\": \"contact_refresh\", \"seq\": 0, ...}` 的旁路 payload
 
 证据：
 
 - [D:\AssistIM_V2\server\app\api\v1\friends.py](D:\AssistIM_V2/server/app/api/v1/friends.py)
 - [D:\AssistIM_V2\client\managers\message_manager.py](D:\AssistIM_V2/client/managers/message_manager.py)
-- [D:\AssistIM_V2\docs\realtime_protocol.md](D:\AssistIM_V2/docs/realtime_protocol.md)
+- [D:\AssistIM_V2\docs\protocols\realtime_protocol.md](D:\AssistIM_V2/docs/protocols/realtime_protocol.md)
 
 影响：
 
@@ -3073,16 +3073,16 @@
 
 - 服务端 [auth.py](/D:/AssistIM_V2/server/app/api/v1/auth.py) 会在 `session_replaced` 和 `logout` 两种场景下向在线连接发送 `force_logout`
 - 客户端应用顶层 [main.py](/D:/AssistIM_V2/client/main.py) 也专门旁路消费 `force_logout`，并把它当作会打断 authenticated runtime 的 transport control message
-- 但 [realtime_protocol.md](/D:/AssistIM_V2/docs/realtime_protocol.md) 完全没有列出 `force_logout`
-- [architecture.md](/D:/AssistIM_V2/docs/architecture.md) / [backend_architecture.md](/D:/AssistIM_V2/docs/backend_architecture.md) 也只泛泛提“实时通知”，没有把这类跨账号/跨会话的强制退出控制消息建成正式协议能力
+- 但 [realtime_protocol.md](/D:/AssistIM_V2/docs/protocols/realtime_protocol.md) 完全没有列出 `force_logout`
+- [architecture.md](/D:/AssistIM_V2/docs/architecture/architecture.md) / [backend_architecture.md](/D:/AssistIM_V2/docs/architecture/backend_architecture.md) 也只泛泛提“实时通知”，没有把这类跨账号/跨会话的强制退出控制消息建成正式协议能力
 
 证据：
 
 - [D:\AssistIM_V2\server\app\api\v1\auth.py](D:\AssistIM_V2/server/app/api/v1/auth.py)
 - [D:\AssistIM_V2\client\main.py](D:\AssistIM_V2/client/main.py)
-- [D:\AssistIM_V2\docs\realtime_protocol.md](D:\AssistIM_V2/docs/realtime_protocol.md)
-- [D:\AssistIM_V2\docs\architecture.md](D:\AssistIM_V2/docs/architecture.md)
-- [D:\AssistIM_V2\docs\backend_architecture.md](D:\AssistIM_V2/docs/backend_architecture.md)
+- [D:\AssistIM_V2\docs\protocols\realtime_protocol.md](D:\AssistIM_V2/docs/protocols/realtime_protocol.md)
+- [D:\AssistIM_V2\docs\architecture\architecture.md](D:\AssistIM_V2/docs/architecture/architecture.md)
+- [D:\AssistIM_V2\docs\architecture\backend_architecture.md](D:\AssistIM_V2/docs/architecture/backend_architecture.md)
 
 影响：
 
@@ -3111,14 +3111,14 @@
 - 服务端 [users.py](/D:/AssistIM_V2/server/app/api/v1/users.py) 会广播 `user_profile_update`
 - 服务端 [groups.py](/D:/AssistIM_V2/server/app/api/v1/groups.py) 会广播 `group_profile_update` 和 `group_self_profile_update`
 - 桌面端 [message_manager.py](/D:/AssistIM_V2/client/managers/message_manager.py) 已经把这三类事件作为正式输入处理，并继续桥接到会话 UI 和联系人 UI
-- 但 [realtime_protocol.md](/D:/AssistIM_V2/docs/realtime_protocol.md) 的“3.2 在线状态”和“3.5 状态事件”都没有把这三类类型列为当前事件，也没有给出 payload 结构
+- 但 [realtime_protocol.md](/D:/AssistIM_V2/docs/protocols/realtime_protocol.md) 的“3.2 在线状态”和“3.5 状态事件”都没有把这三类类型列为当前事件，也没有给出 payload 结构
 
 证据：
 
 - [D:\AssistIM_V2\server\app\api\v1\users.py](D:\AssistIM_V2/server/app/api/v1/users.py)
 - [D:\AssistIM_V2\server\app\api\v1\groups.py](D:\AssistIM_V2/server/app/api/v1/groups.py)
 - [D:\AssistIM_V2\client\managers\message_manager.py](D:\AssistIM_V2/client/managers/message_manager.py)
-- [D:\AssistIM_V2\docs\realtime_protocol.md](D:\AssistIM_V2/docs/realtime_protocol.md)
+- [D:\AssistIM_V2\docs\protocols\realtime_protocol.md](D:\AssistIM_V2/docs/protocols/realtime_protocol.md)
 
 影响：
 
@@ -3286,7 +3286,7 @@
 - `ConnectionManager.send_read_ack()` 已删除
 - 服务端聊天 WebSocket 不再接受 `read_ack/read`，这类消息统一返回 `unsupported message type`
 - `/messages/read/batch` 继续负责持久化 read cursor 并广播 canonical `read` event
-- `docs/realtime_protocol.md` 已明确“已读持久化只走 HTTP，聊天 WS 不接受 `read_ack/read`”
+- `docs/protocols/realtime_protocol.md` 已明确“已读持久化只走 HTTP，聊天 WS 不接受 `read_ack/read`”
 
 原状态：风险
 
@@ -3324,7 +3324,7 @@
 - 已删除 HTTP `POST /api/v1/sessions/{session_id}/typing`
 - 已删除 `SessionTypingRequest`，typing 正式入口收敛为聊天 WebSocket `typing`
 - 服务端 WS `typing` 仍由同一处负责成员解析和排除发送连接 fanout
-- `docs/realtime_protocol.md` 已明确 typing 只属于聊天 WebSocket 客户端发送命令
+- `docs/protocols/realtime_protocol.md` 已明确 typing 只属于聊天 WebSocket 客户端发送命令
 
 原状态：风险
 
@@ -3364,7 +3364,7 @@
 
 - [D:\AssistIM_V2\server\app\realtime\call_registry.py](D:\AssistIM_V2\server\app\realtime\call_registry.py)
 - [D:\AssistIM_V2\server\app\services\call_service.py](D:\AssistIM_V2\server\app\services\call_service.py)
-- [D:\AssistIM_V2\docs\backend_architecture.md](D:\AssistIM_V2\docs\backend_architecture.md)
+- [D:\AssistIM_V2\docs\architecture\backend_architecture.md](D:\AssistIM_V2\docs\architecture\backend_architecture.md)
 
 风险：
 
