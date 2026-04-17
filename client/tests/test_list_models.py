@@ -563,6 +563,22 @@ def test_message_model_refresh_recalled_message_without_full_reset() -> None:
     assert model.dataChanged.events
 
 
+def test_message_model_replace_message_updates_visible_message_payload() -> None:
+    model = MessageModel()
+    original = _message('m-1', 0)
+    model.add_message(original)
+
+    replacement = _message('m-1', 0)
+    replacement.content = '/uploads/encrypted.bin'
+    replacement.extra = {'local_path': r'C:\Temp\plain-image.jpg'}
+
+    model.replace_message(replacement)
+
+    display_item = model.data(model.index(1, 0), model.MessageRole)
+    assert display_item['local_path'] == r'C:\Temp\plain-image.jpg'
+    assert display_item['content'] == '/uploads/encrypted.bin'
+
+
 
 
 

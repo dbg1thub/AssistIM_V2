@@ -71,6 +71,11 @@ class MessageType(Enum):
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp"}
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v"}
+_ATTACHMENT_PREVIEW_PLACEHOLDERS = {
+    "[image]": ("preview.image", "[Image]"),
+    "[video]": ("preview.video", "[Video]"),
+    "[file]": ("preview.file", "[File]"),
+}
 
 
 def infer_message_type_from_path(path: str) -> MessageType:
@@ -305,6 +310,10 @@ def format_message_preview(content: str, message_type: MessageType | str | None 
     text = (content or "").strip()
     if not text:
         return ""
+
+    placeholder = _ATTACHMENT_PREVIEW_PLACEHOLDERS.get(text.casefold())
+    if placeholder is not None:
+        return _preview_token(placeholder[0], placeholder[1])
 
     inferred_type = infer_message_type_from_path(text) if text.startswith(("/", "http://", "https://")) or os.path.splitext(text)[1] else None
     if inferred_type == MessageType.IMAGE:

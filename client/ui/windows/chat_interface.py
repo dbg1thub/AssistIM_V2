@@ -909,6 +909,13 @@ class ChatInterface(QWidget):
         message = data.get("message")
         if not isinstance(message, ChatMessage):
             return
+        logger.info(
+            "[media-diag] media_ready_ui_apply message_id=%s session_id=%s visible=%s local_path=%s",
+            message.message_id,
+            session_id,
+            self.chat_panel.get_message_model().contains_message(message.message_id),
+            str((message.extra or {}).get("local_path") or ""),
+        )
         self.chat_panel.replace_message(message)
         self._schedule_ui_task(self._refresh_session_preview(session_id), f"refresh preview {session_id}")
 

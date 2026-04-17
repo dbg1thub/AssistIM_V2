@@ -539,6 +539,17 @@ class FakeE2EEService:
         }
         return b'plain-pdf', metadata
 
+    async def decrypt_attachment_metadata(self, attachment_encryption: dict | None) -> dict | None:
+        normalized = dict(attachment_encryption or {})
+        protected_metadata = str(normalized.get('local_metadata') or '')
+        if not protected_metadata:
+            return None
+        try:
+            payload = json.loads(self.recover_local_plaintext(protected_metadata))
+        except json.JSONDecodeError:
+            return None
+        return payload if isinstance(payload, dict) else None
+
     async def describe_text_decryption_state(self, extra: dict | None) -> dict:
         return dict(self.text_decryption_state)
 
@@ -2501,6 +2512,115 @@ def test_message_manager_remote_history_uses_batch_existing_lookup_and_delta_wri
     asyncio.run(scenario())
 
 
+def test_message_manager_remote_history_merges_local_attachment_cache_before_decrypt(monkeypatch) -> None:
+    fake_event_bus = FakeEventBus()
+    fake_conn_manager = FakeConnectionManager([])
+    fake_db = FakeDatabase()
+    fake_e2ee_service = FakeE2EEService()
+    fake_e2ee_service.attachment_decryption_state = {
+        'state': 'not_for_current_device',
+        'can_decrypt': False,
+        'reprovision_required': False,
+        'local_device_id': 'device-bob',
+        'target_device_id': 'device-alice',
+    }
+    fake_db.messages['m-self-file'] = ChatMessage(
+        message_id='m-self-file',
+        session_id='session-1',
+        sender_id='bob',
+        content='/uploads/secret.png',
+        message_type=MessageType.IMAGE,
+        status=MessageStatus.SENT,
+        is_self=True,
+        extra={
+            'attachment_encryption': {
+                'enabled': True,
+                'scheme': 'aesgcm-file+x25519-v1',
+                'sender_device_id': 'device-bob',
+                'recipient_device_id': 'device-alice',
+                'recipient_prekey_type': 'signed',
+                'recipient_prekey_id': 1,
+                'local_metadata': fake_e2ee_service.protect_local_plaintext(
+                    json.dumps(
+                        {
+                            'original_name': 'secret.png',
+                            'mime_type': 'image/png',
+                            'size_bytes': 12,
+                        },
+                        ensure_ascii=True,
+                        sort_keys=True,
+                    )
+                ),
+                'local_plaintext_version': fake_e2ee_service.LOCAL_PLAINTEXT_VERSION,
+            },
+        },
+    )
+
+    class FakeChatService:
+        async def fetch_messages(self, session_id: str, limit: int, before_seq=None) -> list[dict]:
+            return [
+                {
+                    'message_id': 'm-self-file',
+                    'session_id': session_id,
+                    'sender_id': 'bob',
+                    'content': '/uploads/secret.png',
+                    'message_type': 'image',
+                    'status': 'sent',
+                    'is_self': True,
+                    'extra': {
+                        'attachment_encryption': {
+                            'enabled': True,
+                            'scheme': 'aesgcm-file+x25519-v1',
+                            'sender_device_id': 'device-bob',
+                            'recipient_device_id': 'device-alice',
+                            'recipient_prekey_type': 'signed',
+                            'recipient_prekey_id': 1,
+                        },
+                    },
+                }
+            ]
+
+    monkeypatch.setattr(message_manager_module, 'get_event_bus', lambda: fake_event_bus)
+    monkeypatch.setattr(message_manager_module, 'get_connection_manager', lambda: fake_conn_manager)
+    monkeypatch.setattr(message_manager_module, 'get_database', lambda: fake_db)
+    monkeypatch.setattr(message_manager_module, 'get_chat_service', lambda: FakeChatService())
+    monkeypatch.setattr(message_manager_module, 'get_e2ee_service', lambda: fake_e2ee_service)
+
+    async def scenario() -> None:
+        manager = message_manager_module.MessageManager()
+        manager.set_user_id('bob')
+        await manager.initialize()
+        scheduled_prefetches: list[str] = []
+        manager._maybe_schedule_encrypted_media_prefetch = lambda message: scheduled_prefetches.append(message.message_id)  # type: ignore[method-assign]
+        try:
+            remote_messages = await manager._fetch_remote_messages('session-1', limit=10)
+
+            assert [message.message_id for message in remote_messages] == ['m-self-file']
+            assert remote_messages[0].extra['name'] == 'secret.png'
+            assert remote_messages[0].extra['file_type'] == 'image/png'
+            assert remote_messages[0].extra['size'] == 12
+            assert remote_messages[0].extra['url'] == '/uploads/secret.png'
+            assert 'decryption_state' not in remote_messages[0].extra['attachment_encryption']
+            assert scheduled_prefetches == ['m-self-file']
+
+            stored = await fake_db.get_message('m-self-file')
+            assert stored is not None
+            assert stored.extra['name'] == 'secret.png'
+            assert stored.extra['media']['url'] == '/uploads/secret.png'
+
+            decryption_events = [
+                payload
+                for event, payload in fake_event_bus.events
+                if event == message_manager_module.MessageEvent.DECRYPTION_STATE_CHANGED
+            ]
+            assert decryption_events
+            assert all(payload['decryption_state'] == 'ready' for payload in decryption_events)
+        finally:
+            await manager.close()
+
+    asyncio.run(scenario())
+
+
 def test_message_manager_get_messages_uses_explicit_remote_freshness(monkeypatch) -> None:
     fake_event_bus = FakeEventBus()
     fake_conn_manager = FakeConnectionManager([])
@@ -2551,6 +2671,163 @@ def test_message_manager_get_messages_uses_explicit_remote_freshness(monkeypatch
             ]
         finally:
             await manager.close()
+
+    asyncio.run(scenario())
+
+
+def test_message_manager_get_cached_messages_rehydrates_encrypted_attachment_metadata(monkeypatch) -> None:
+    fake_event_bus = FakeEventBus()
+    fake_conn_manager = FakeConnectionManager([])
+    fake_db = FakeDatabase()
+    fake_e2ee_service = FakeE2EEService()
+    fake_db.messages['m-cached-file'] = ChatMessage(
+        message_id='m-cached-file',
+        session_id='session-1',
+        sender_id='bob',
+        content='/uploads/cached.png',
+        message_type=MessageType.IMAGE,
+        status=MessageStatus.SENT,
+        is_self=True,
+        extra={
+            'attachment_encryption': {
+                'enabled': True,
+                'scheme': 'aesgcm-file+x25519-v1',
+                'sender_device_id': 'device-bob',
+                'recipient_device_id': 'device-alice',
+                'local_metadata': fake_e2ee_service.protect_local_plaintext(
+                    json.dumps(
+                        {
+                            'original_name': 'cached.png',
+                            'mime_type': 'image/png',
+                            'size_bytes': 21,
+                        },
+                        ensure_ascii=True,
+                        sort_keys=True,
+                    )
+                ),
+                'local_plaintext_version': fake_e2ee_service.LOCAL_PLAINTEXT_VERSION,
+            },
+        },
+    )
+
+    monkeypatch.setattr(message_manager_module, 'get_event_bus', lambda: fake_event_bus)
+    monkeypatch.setattr(message_manager_module, 'get_connection_manager', lambda: fake_conn_manager)
+    monkeypatch.setattr(message_manager_module, 'get_database', lambda: fake_db)
+    monkeypatch.setattr(message_manager_module, 'get_e2ee_service', lambda: fake_e2ee_service)
+
+    async def scenario() -> None:
+        manager = message_manager_module.MessageManager()
+        manager.set_user_id('bob')
+        await manager.initialize()
+        scheduled_prefetches: list[str] = []
+        manager._maybe_schedule_encrypted_media_prefetch = lambda message: scheduled_prefetches.append(message.message_id)  # type: ignore[method-assign]
+        try:
+            messages = await manager.get_cached_messages('session-1', limit=10)
+
+            assert [message.message_id for message in messages] == ['m-cached-file']
+            assert messages[0].extra['name'] == 'cached.png'
+            assert messages[0].extra['file_type'] == 'image/png'
+            assert messages[0].extra['size'] == 21
+            assert messages[0].extra['url'] == '/uploads/cached.png'
+            assert messages[0].extra['media'] == {
+                'url': '/uploads/cached.png',
+                'original_name': 'cached.png',
+                'mime_type': 'image/png',
+                'size_bytes': 21,
+            }
+            assert scheduled_prefetches == ['m-cached-file']
+            assert len(fake_db.saved_batches) == 1
+            assert fake_event_bus.events == []
+        finally:
+            await manager.close()
+
+    asyncio.run(scenario())
+
+
+def test_message_manager_remote_incoming_preserves_local_attachment_path_for_self_messages(monkeypatch) -> None:
+    fake_event_bus = FakeEventBus()
+    fake_conn_manager = FakeConnectionManager([])
+    fake_db = FakeDatabase()
+    fake_e2ee_service = FakeE2EEService()
+    workspace_tmp = Path('client/tests/.pytest_tmp')
+    workspace_tmp.mkdir(parents=True, exist_ok=True)
+    source_path = workspace_tmp / 'self-image.png'
+    source_path.write_bytes(b'png-data')
+    fake_db.messages['m-self-image'] = ChatMessage(
+        message_id='m-self-image',
+        session_id='session-1',
+        sender_id='alice',
+        content='/uploads/self-image.png',
+        message_type=MessageType.IMAGE,
+        status=MessageStatus.SENT,
+        is_self=True,
+        extra={
+            'local_path': str(source_path),
+            'attachment_encryption': {
+                'enabled': True,
+                'scheme': 'aesgcm-file+x25519-v1',
+                'sender_device_id': 'device-alice',
+                'recipient_device_id': 'device-bob',
+                'recipient_prekey_type': 'signed',
+                'recipient_prekey_id': 1,
+                'local_metadata': fake_e2ee_service.protect_local_plaintext(
+                    json.dumps(
+                        {
+                            'original_name': 'self-image.png',
+                            'mime_type': 'image/png',
+                            'size_bytes': 8,
+                        },
+                        ensure_ascii=True,
+                        sort_keys=True,
+                    )
+                ),
+                'local_plaintext_version': fake_e2ee_service.LOCAL_PLAINTEXT_VERSION,
+            },
+        },
+    )
+
+    monkeypatch.setattr(message_manager_module, 'get_event_bus', lambda: fake_event_bus)
+    monkeypatch.setattr(message_manager_module, 'get_connection_manager', lambda: fake_conn_manager)
+    monkeypatch.setattr(message_manager_module, 'get_database', lambda: fake_db)
+    monkeypatch.setattr(message_manager_module, 'get_e2ee_service', lambda: fake_e2ee_service)
+
+    async def scenario() -> None:
+        manager = message_manager_module.MessageManager()
+        manager.set_user_id('alice')
+        await manager.initialize()
+        try:
+            await manager._process_incoming_message(
+                {
+                    'type': 'chat_message',
+                    'data': {
+                        'message_id': 'm-self-image',
+                        'session_id': 'session-1',
+                        'sender_id': 'alice',
+                        'content': '/uploads/self-image.png',
+                        'message_type': 'image',
+                        'status': 'sent',
+                        'is_self': True,
+                        'extra': {
+                            'attachment_encryption': {
+                                'enabled': True,
+                                'scheme': 'aesgcm-file+x25519-v1',
+                                'sender_device_id': 'device-alice',
+                                'recipient_device_id': 'device-bob',
+                                'recipient_prekey_type': 'signed',
+                                'recipient_prekey_id': 1,
+                            },
+                        },
+                    },
+                }
+            )
+
+            stored = await fake_db.get_message('m-self-image')
+            assert stored is not None
+            assert stored.extra['local_path'] == str(source_path)
+            assert stored.extra['name'] == 'self-image.png'
+        finally:
+            await manager.close()
+            source_path.unlink(missing_ok=True)
 
     asyncio.run(scenario())
 

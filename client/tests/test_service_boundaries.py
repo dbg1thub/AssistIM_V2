@@ -3277,6 +3277,73 @@ def test_session_manager_refresh_remote_sessions_preserves_local_unread_when_unr
     asyncio.run(scenario())
 
 
+def test_session_manager_refresh_remote_sessions_rebuilds_restart_preview_from_cache(monkeypatch) -> None:
+    fake_session_service = FakeSessionService()
+    fake_session_service.session_payload = {
+        'id': 'session-1',
+        'name': 'Bob',
+        'session_type': 'direct',
+        'participant_ids': ['user-1', 'user-2'],
+        'members': [
+            {'id': 'user-1', 'username': 'alice', 'nickname': 'Alice'},
+            {'id': 'user-2', 'username': 'bob', 'nickname': 'Bob'},
+        ],
+        'last_message': 'old history',
+        'last_message_time': '2026-03-27T17:30:00',
+        'created_at': '2026-03-20T09:00:00',
+        'updated_at': '2026-03-27T17:30:00',
+        'unread_count': 0,
+    }
+    fake_session_service.unread_payload = [{'session_id': 'session-1', 'unread': 0}]
+    fake_event_bus = FakeEventBus()
+    fake_db = FakeSessionProfileDatabase()
+    fake_message_manager = FakeMessageManager()
+    hidden_at = datetime(2026, 3, 27, 18, 0, 0)
+    latest_at = datetime(2026, 3, 27, 18, 5, 0)
+    fake_message_manager.history_cutoffs['session-1'] = hidden_at.timestamp()
+    fake_message_manager.cached_messages_result = [
+        ChatMessage(
+            message_id='new-image-1',
+            session_id='session-1',
+            sender_id='user-1',
+            content='https://cdn.example/uploads/new-image.jpg',
+            message_type=MessageType.IMAGE,
+            status=MessageStatus.SENT,
+            timestamp=latest_at,
+            is_self=True,
+            extra={'sender_name': 'Alice'},
+        )
+    ]
+
+    monkeypatch.setattr(session_manager_module, 'get_session_service', lambda: fake_session_service)
+    monkeypatch.setattr(session_manager_module, 'get_e2ee_service', lambda: FakeE2EEService())
+    monkeypatch.setattr(session_manager_module, 'get_event_bus', lambda: fake_event_bus)
+    monkeypatch.setattr(session_manager_module, 'get_message_manager', lambda: fake_message_manager)
+    monkeypatch.setattr(session_manager_module, 'get_database', lambda: fake_db)
+
+    async def scenario() -> None:
+        manager = session_manager_module.SessionManager()
+
+        result = await manager.refresh_remote_sessions()
+
+        assert result.authoritative is True
+        assert len(result.sessions) == 1
+        session = result.sessions[0]
+        assert session.last_message == '[Image]'
+        assert session.last_message_time == latest_at
+        assert session.extra.get('history_restart_pending') is None
+        assert session.extra['last_message_id'] == 'new-image-1'
+        assert session.extra['last_message_type'] == MessageType.IMAGE.value
+        assert fake_message_manager.cached_messages_calls == [('session-1', 1, None)]
+        assert fake_db.saved_sessions[-1].last_message == '[Image]'
+        assert any(
+            event_type == session_manager_module.SessionEvent.UPDATED
+            and payload.get('sessions') == result.sessions
+            for event_type, payload in fake_event_bus.events
+        )
+
+    asyncio.run(scenario())
+
 
 def test_session_manager_call_events_update_runtime_call_state(monkeypatch) -> None:
     from client.models.call import ActiveCallState
@@ -3419,6 +3486,64 @@ def test_session_manager_message_decryption_state_updates_session_crypto_state(m
         assert 'recovery_action' not in session.extra['session_crypto_state']
         assert 'last_failure_message_id' not in session.extra['session_crypto_state']
         assert any(event == session_manager_module.SessionEvent.UPDATED for event, _ in fake_event_bus.events)
+
+    asyncio.run(scenario())
+
+
+def test_session_manager_ignores_self_direct_message_decryption_state(monkeypatch) -> None:
+    fake_event_bus = FakeEventBus()
+
+    monkeypatch.setattr(session_manager_module, 'get_session_service', lambda: FakeSessionService())
+    monkeypatch.setattr(session_manager_module, 'get_e2ee_service', lambda: FakeE2EEService({'device_id': 'device-local-1', 'has_local_bundle': True}))
+    monkeypatch.setattr(session_manager_module, 'get_event_bus', lambda: fake_event_bus)
+    monkeypatch.setattr(session_manager_module, 'get_message_manager', lambda: FakeMessageManager())
+    monkeypatch.setattr(session_manager_module, 'get_database', lambda: FakeSessionStateDatabase())
+
+    async def scenario() -> None:
+        manager = session_manager_module.SessionManager()
+        session = Session(
+            session_id='session-1',
+            name='Bob',
+            session_type='direct',
+            participant_ids=['user-1', 'user-2'],
+        )
+        session.extra['encryption_mode'] = 'e2ee_private'
+        session.extra['session_crypto_state'] = {
+            'enabled': True,
+            'ready': True,
+            'can_decrypt': True,
+            'device_registered': True,
+            'scheme': 'x25519-aesgcm-v1',
+            'attachment_scheme': 'aesgcm-file+x25519-v1',
+            'device_id': 'device-local-1',
+        }
+        manager._sessions[session.session_id] = session
+
+        await manager._on_message_decryption_state_changed(
+            {
+                'session_id': 'session-1',
+                'message_id': 'm-self-1',
+                'decryption_state': 'not_for_current_device',
+                'recovery_action': 'switch_device',
+                'can_decrypt': False,
+                'local_device_id': 'device-local-1',
+                'target_device_id': 'device-peer-1',
+                'message': ChatMessage(
+                    message_id='m-self-1',
+                    session_id='session-1',
+                    sender_id='user-1',
+                    content='/uploads/self.bin',
+                    message_type=MessageType.FILE,
+                    status=MessageStatus.SENT,
+                    is_self=True,
+                ),
+            }
+        )
+
+        assert session.extra['session_crypto_state']['ready'] is True
+        assert session.extra['session_crypto_state']['can_decrypt'] is True
+        assert 'decryption_state' not in session.extra['session_crypto_state']
+        assert fake_event_bus.events == []
 
     asyncio.run(scenario())
 

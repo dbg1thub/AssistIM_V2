@@ -21,6 +21,7 @@ from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequ
 from PySide6.QtWidgets import QStyledItemDelegate, QStyleOptionViewItem
 from qfluentwidgets import Theme, isDarkTheme, themeColor
 
+from client.core import logging
 from client.core.app_icons import AppIcon
 from client.core.avatar_rendering import get_avatar_image_store
 from client.core.avatar_utils import profile_avatar_seed
@@ -43,6 +44,8 @@ from client.ui.common.emoji_utils import (
     iter_text_and_emoji_clusters,
     load_emoji_pixmap,
 )
+
+logger = logging.get_logger(__name__)
 
 
 @dataclass
@@ -132,6 +135,7 @@ class MessageDelegate(QStyledItemDelegate):
         self._image_cache: dict[str, QPixmap] = {}
         self._loading_sources: set[str] = set()
         self._failed_image_sources: dict[str, float] = {}
+        self._local_image_failures_reported: set[str] = set()
         self._network_manager = QNetworkAccessManager(self)
         self._network_manager.finished.connect(self._on_image_reply_finished)
         self._selection_message_id: str | None = None
@@ -936,7 +940,7 @@ class MessageDelegate(QStyledItemDelegate):
         if pixmap.isNull():
             painter.fillPath(clip_path, QColor(52, 59, 66, 220) if isDarkTheme() else QColor("#EEF2F7"))
             painter.setPen(QColor(216, 216, 216) if isDarkTheme() else QColor("#7A7A7A"))
-            painter.drawText(draw_rect, Qt.AlignmentFlag.AlignCenter, "Image")
+            painter.drawText(draw_rect, Qt.AlignmentFlag.AlignCenter, tr("common.image", "Image"))
             self._draw_media_state_overlay(painter, draw_rect, message)
             return
 
@@ -1944,6 +1948,13 @@ class MessageDelegate(QStyledItemDelegate):
 
         image = reader.read()
         if image.isNull():
+            if source not in self._local_image_failures_reported:
+                self._local_image_failures_reported.add(source)
+                logger.warning(
+                    "[media-diag] local_image_decode_failed path=%s error=%s",
+                    source,
+                    reader.errorString(),
+                )
             return QPixmap()
 
         return QPixmap.fromImage(image)

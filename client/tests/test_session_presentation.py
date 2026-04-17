@@ -5,12 +5,13 @@ import asyncio
 from PySide6.QtCore import QRect, Qt
 from PySide6.QtWidgets import QApplication
 
+from client.core.config import Language
 from client.managers import session_manager as session_manager_module
 from client.delegates.session_delegate import SessionDelegate
 from client.delegates.message_delegate import MessageDelegate
 from client.models.message_model import MessageModel
-from client.models.message import ChatMessage, MessageStatus, MessageType, Session, resolve_recall_notice
-from client.core.i18n import tr
+from client.models.message import ChatMessage, MessageStatus, MessageType, Session, format_message_preview, resolve_recall_notice
+from client.core.i18n import initialize_i18n, tr
 
 
 class _FakeDatabase:
@@ -117,6 +118,16 @@ def test_group_session_preview_sender_name_uses_cached_sender_name_when_member_s
     )
 
     assert session.preview_sender_name() == 'test1'
+
+
+def test_format_message_preview_localizes_server_attachment_placeholders() -> None:
+    initialize_i18n(Language.CHINESE_SIMPLIFIED)
+    try:
+        assert format_message_preview('[image]') == '[图片]'
+        assert format_message_preview('[VIDEO]') == '[视频]'
+        assert format_message_preview('[file]') == '[文件]'
+    finally:
+        initialize_i18n(Language.ENGLISH)
 
 
 def test_session_delegate_group_preview_does_not_prefix_self_message() -> None:

@@ -698,19 +698,37 @@ class SessionManager:
         except Exception:
             logger.exception("Failed to refresh cached preview state after identity change")
 
-    async def _refresh_cached_preview_state_for_identity(self) -> None:
+    async def _refresh_cached_preview_state_for_identity(self, session_ids: list[str] | None = None) -> None:
         """Recompute preview sender/mention state for all cached sessions after login changes."""
         db = get_database()
         if not db.is_connected or not self._sessions:
             return
 
         current_user_id = self._current_user_id
-        async with self._lock:
-            session_ids = list(self._sessions.keys())
+        if session_ids is None:
+            async with self._lock:
+                session_ids = list(self._sessions.keys())
+        else:
+            session_ids = [
+                session_id
+                for session_id in dict.fromkeys(str(item or "").strip() for item in session_ids)
+                if session_id
+            ]
+            if not session_ids:
+                return
 
         changed_sessions: list[Session] = []
         for session_id in session_ids:
-            cached_messages = await self._msg_manager.get_cached_messages(session_id, limit=1)
+            cached_messages: list[ChatMessage] = []
+            cached_message_getter = getattr(self._msg_manager, "get_cached_messages", None)
+            if callable(cached_message_getter):
+                cached_messages = await cached_message_getter(session_id, limit=1)
+            else:
+                last_message_getter = getattr(db, "get_last_message", None)
+                if callable(last_message_getter):
+                    fallback_message = await last_message_getter(session_id)
+                    if isinstance(fallback_message, ChatMessage):
+                        cached_messages = [fallback_message]
             last_message = cached_messages[0] if cached_messages else None
             async with self._lock:
                 session = self._sessions.get(session_id)
@@ -744,6 +762,18 @@ class SessionManager:
             await self._event_bus.emit(SessionEvent.UPDATED, {
                 "sessions": self.sessions,
             })
+
+    async def _refresh_history_restart_previews_from_cache(self) -> None:
+        """Let post-delete local messages replace the temporary fresh-conversation preview."""
+        async with self._lock:
+            session_ids = [
+                session.session_id
+                for session in self._sessions.values()
+                if bool(session.extra.get("history_restart_pending"))
+            ]
+        if not session_ids:
+            return
+        await self._refresh_cached_preview_state_for_identity(session_ids)
 
     @property
     def current_session_id(self) -> Optional[str]:
@@ -1671,6 +1701,13 @@ class SessionManager:
             session = self._sessions.get(session_id)
             if session is None or not session.uses_e2ee():
                 return
+            message = data.get("message")
+            if (
+                session.session_type == "direct"
+                and isinstance(message, ChatMessage)
+                and bool(message.is_self)
+            ):
+                return
             changed = self._apply_message_crypto_state_to_session(session, data)
 
         if not changed:
@@ -2462,6 +2499,7 @@ class SessionManager:
             remote_sessions.append(session)
 
         await self._replace_sessions(remote_sessions)
+        await self._refresh_history_restart_previews_from_cache()
         refreshed_sessions = self.sessions
         logger.info(
             "Refreshed %d remote sessions (unread_synchronized=%s)",

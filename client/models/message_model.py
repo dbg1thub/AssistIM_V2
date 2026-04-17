@@ -151,6 +151,8 @@ class MessageModel(QAbstractListModel):
         if current_kind == desired_kind:
             if desired_kind == self.DISPLAY_RECALL_NOTICE:
                 self._display_items[row] = self._build_recall_notice_item(message)
+            else:
+                self._display_items[row] = message
             self._emit_display_row_changed(message_id, self._display_roles())
             return
 
