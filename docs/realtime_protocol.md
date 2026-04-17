@@ -1,13 +1,16 @@
 # 实时协议说明
 
-## 1. 适用范围
+## 1. 文档定位
 
-本文档描述 AssistIM 当前聊天 WebSocket 协议，以及下一阶段要补充的：
+本文档只定义聊天 WebSocket 的正式协议 contract，包括：
 
-- 1:1 通话 signaling
-- 私聊 E2EE 消息 envelope
+- 统一外层结构
+- 当前稳定事件类型
+- 通话 signaling payload
+- 私聊 E2EE envelope
+- 错误包与协议变更规则
 
-如果协议字段与其他文档冲突，优先级如下：
+架构边界、一致性模型和 E2EE / 通话设计取舍分别以以下文档为准：
 
 1. [design_decisions.md](./design_decisions.md)
 2. [architecture.md](./architecture.md)
@@ -31,26 +34,21 @@
 字段约束：
 
 - `type`：消息类型
-- `seq`：事件顺序号；普通聊天消息不以外层 `seq` 作为会话内顺序
+- `seq`：服务端顺序字段；状态事件可表达 `event_seq`，普通聊天消息不以外层 `seq` 作为会话内顺序
 - `msg_id`：客户端命令幂等键；对会改变状态的命令必须存在
 - `timestamp`：发送时间；不作为正式补偿依据
 - `data`：业务负载
 
-## 3. 当前已存在的事件
+## 3. 当前稳定事件类型
 
 ### 3.1 连接与保活
 
-客户端发送：
+事件：
 
-- `auth`
+- 客户端发送：`auth`
+- 服务端返回：`auth_ack`、`error`、`force_logout`
 
-服务端返回：
-
-- `auth_ack`
-- `error`
-- `force_logout`
-
-桌面端主链路使用 WebSocket transport ping frame 做保活，不使用 JSON `ping` / `heartbeat` / `pong` 作为应用层协议。
+桌面端保活使用 WebSocket transport ping frame，不使用应用层 `ping` / `heartbeat` / `pong` JSON 包。
 
 `auth`：
 
@@ -76,44 +74,35 @@
 }
 ```
 
-`auth_ack` 只表示认证成功。认证失败、命令失败和未支持命令统一返回 `error`。
-
-`force_logout`：
-
-```json
-{
-  "type": "force_logout",
-  "data": {
-    "reason": "session_replaced"
-  }
-}
-```
-
 `force_logout.data.reason` 当前枚举：
 
-- `session_replaced`：同账号新登录已替换当前在线运行时
-- `logout`：同账号其它运行时已执行登出
+- `session_replaced`
+- `logout`
 
-客户端收到后必须进入 auth-loss teardown / re-auth 流程，不进入 `history_events` 补偿模型。
+客户端收到 `force_logout` 后必须进入 auth-loss teardown / re-auth 流程，不进入 `history_events` 补偿模型。
 
 ### 3.2 轻量实时状态
 
-服务端广播：
+当前稳定广播事件：
 
 - `typing`
+- `contact_refresh`
+- `user_profile_update`
+- `group_profile_update`
+- `group_self_profile_update`
 
-桌面端当前没有独立 presence socket，也没有 `online/offline/presence` 消费链路；服务端不再公开 `/ws/presence`。
+约束：
+
+- `contact_refresh` 是联系人域刷新提示，不写入 `history_events`
+- `user_profile_update` 使用 `profile_event_id` 做实时幂等标识
+- `group_profile_update` 与 `group_self_profile_update` 属于 `event_seq` / `history_events` 语义
 
 ### 3.3 消息同步
 
-客户端发送：
+事件：
 
-- `sync_messages`
-
-服务端返回：
-
-- `history_messages`
-- `history_events`
+- 客户端发送：`sync_messages`
+- 服务端返回：`history_messages`、`history_events`
 
 `sync_messages`：
 
@@ -132,19 +121,20 @@
 }
 ```
 
-### 3.4 聊天消息
+约束：
 
-客户端发送：
+- `history_messages` 只补新消息
+- `history_events` 只补状态事件
+- `session_cursors` 与 `event_cursors` 不可混用
 
-- `chat_message`
+### 3.4 聊天消息与状态事件
 
-服务端返回 / 广播：
+聊天消息相关事件：
 
-- `message_ack`
-- `chat_message`
-- `message_delivered`
+- 客户端发送：`chat_message`
+- 服务端返回 / 广播：`message_ack`、`chat_message`、`message_delivered`
 
-当前 `chat_message.data` 结构：
+`chat_message.data`：
 
 ```json
 {
@@ -155,111 +145,22 @@
 }
 ```
 
-约束：
+状态事件：
 
-- `msg_id` 作为逻辑消息 ID
-- 重发必须复用同一个 `msg_id`
-- 服务端 ACK 中返回权威消息对象
-
-`message_ack.data`：
-
-```json
-{
-  "msg_id": "client-msg-id",
-  "success": true,
-  "message": {}
-}
-```
-
-### 3.5 状态事件
-
-客户端发送：
-
-- `message_recall`
-- `message_edit`
-- `message_delete`
-
-服务端广播：
-
-- `read`
-- `message_recall`
-- `message_edit`
-- `message_delete`
-- `contact_refresh`
-- `user_profile_update`
-- `group_profile_update`
-- `group_self_profile_update`
+- 客户端发送：`message_recall`、`message_edit`、`message_delete`
+- 服务端广播：`read`、`message_recall`、`message_edit`、`message_delete`
 
 约束：
 
-- `read/message_recall/message_edit/message_delete/group_profile_update/group_self_profile_update` 属于 `event_seq` / `history_events` 补偿语义
-- 已读状态的持久化入口是 HTTP `/messages/read/batch`；聊天 WebSocket 不接受 `read_ack/read` 命令
-- `user_profile_update` 使用 `profile_event_id` 做实时幂等标识，同时为受影响会话写入对应 history event
-- `contact_refresh` 是联系人域刷新提示，不写入 `history_events`；桌面端在线收到后触发联系人域权威 reload，重连成功后也会主动 reload 以补偿断线窗口
-- 服务端广播进入 `event_seq` 模型的事件时，外层 `seq` 与 `data.event_seq` 保持一致
+- `msg_id` 作为逻辑消息 ID；重发必须复用同一个 `msg_id`
+- `message_ack` 只表示服务端已提交消息并返回权威消息对象
+- 发送失败统一返回同 `msg_id` 的 `error`
+- `read` 的持久化正式入口是 HTTP `/messages/read/batch`；聊天 WebSocket 不接受 `read_ack/read` 命令
+- 广播进入 `event_seq` 模型的事件时，外层 `seq` 与 `data.event_seq` 保持一致
 
-`contact_refresh.data`：
+## 4. 稳定消息对象
 
-```json
-{
-  "reason": "friend_request_created",
-  "request_id": "request_x",
-  "sender_id": "user_a",
-  "receiver_id": "user_b"
-}
-```
-
-`message_ack` 只表示服务端已提交消息并返回权威消息对象；发送失败统一返回同 `msg_id` 的 `error`，客户端不得依赖 `message_ack.success=false`。
-
-`user_profile_update.data`：
-
-```json
-{
-  "profile_event_id": "user-profile:user_x:uuid",
-  "user_id": "user_x",
-  "profile": {
-    "id": "user_x",
-    "username": "alice",
-    "nickname": "Alice",
-    "display_name": "Alice",
-    "avatar": "/uploads/default_avatars/avatar_default_female_02.svg",
-    "avatar_kind": "default",
-    "gender": "female",
-    "region": "Seoul",
-    "signature": "hello",
-    "status": "online"
-  }
-}
-```
-
-`group_profile_update.data`：
-
-```json
-{
-  "group_id": "group_x",
-  "session_id": "session_x",
-  "name": "Ops",
-  "announcement": "Deploy tonight",
-  "members": [],
-  "event_seq": 7
-}
-```
-
-`group_self_profile_update.data`：
-
-```json
-{
-  "group_id": "group_x",
-  "session_id": "session_x",
-  "group_note": "private note",
-  "my_group_nickname": "oncall",
-  "event_seq": 3
-}
-```
-
-## 4. 权威消息对象
-
-当前聊天消息与 ACK 中的权威对象至少包含：
+聊天消息与 ACK 中返回的权威对象至少包含以下稳定核心字段：
 
 - `message_id`
 - `session_id`
@@ -285,13 +186,11 @@
 
 - 会话内排序使用 `session_seq`
 - `content` 在普通会话中是明文，在 E2EE 私聊中允许变为密文
-- `extra` 作为扩展字段容器，但不能替代正式的外层协议职责
+- `extra` 是扩展字段容器，不替代外层协议职责
 
-## 5. 新增通话 signaling
+## 5. 1:1 通话 signaling
 
-### 5.1 事件列表
-
-新增以下 `type`：
+新增 `type`：
 
 - `call_invite`
 - `call_ringing`
@@ -303,22 +202,30 @@
 - `call_ice`
 - `call_busy`
 
-### 5.2 共同字段
-
-服务端下发的通话相关 `data` 统一至少包含：
+共同字段：
 
 - `call_id`
 - `session_id`
 - `initiator_id`
 - `recipient_id`
 
-其中：
+事件附加字段：
 
-- `call_id`：一次通话的稳定 ID
-- `session_id`：必须是 `private` 会话
-- 客户端发起 `call_invite` 时仍可附带 `target_user_id` 作为目标用户提示
-
-### 5.3 邀请与状态类事件
+- `call_invite`
+  - `media_type`
+  - `created_at`
+  - 客户端发送时可附带 `target_user_id`
+- `call_ringing` / `call_accept` / `call_reject` / `call_hangup` / `call_busy`
+  - `actor_id`
+  - `reason`（仅需要时返回）
+- `call_offer` / `call_answer`
+  - `actor_id`
+  - `sdp`
+- `call_ice`
+  - `actor_id`
+  - `candidate`
+  - `sdp_mid`
+  - `sdp_mline_index`
 
 `call_invite.data`：
 
@@ -333,88 +240,25 @@
 }
 ```
 
-`call_ringing` / `call_accept` / `call_reject` / `call_hangup` / `call_busy.data`：
+约束：
 
-```json
-{
-  "call_id": "call_x",
-  "session_id": "session_x",
-  "initiator_id": "user_a",
-  "recipient_id": "user_b",
-  "actor_id": "user_b",
-  "reason": "busy"
-}
-```
-
-说明：
-
-- `reason` 仅在需要时返回，例如 `busy`、`declined`、`cancelled`
-- 这些事件不进入 `session_seq` / `event_seq` 补偿模型
-
-### 5.4 SDP 类事件
-
-`call_offer.data`：
-
-```json
-{
-  "call_id": "call_x",
-  "session_id": "session_x",
-  "initiator_id": "user_a",
-  "recipient_id": "user_b",
-  "actor_id": "user_a",
-  "sdp": "v=0..."
-}
-```
-
-`call_answer.data`：
-
-```json
-{
-  "call_id": "call_x",
-  "session_id": "session_x",
-  "initiator_id": "user_a",
-  "recipient_id": "user_b",
-  "actor_id": "user_b",
-  "sdp": "v=0..."
-}
-```
-
-### 5.5 ICE 类事件
-
-`call_ice.data`：
-
-```json
-{
-  "call_id": "call_x",
-  "session_id": "session_x",
-  "initiator_id": "user_a",
-  "recipient_id": "user_b",
-  "actor_id": "user_a",
-  "candidate": "candidate:...",
-  "sdp_mid": "0",
-  "sdp_mline_index": 0
-}
-```
+- 通话 signaling 不进入 `session_seq` / `event_seq` 补偿模型
+- `session_id` 必须是 `private` 会话
+- 错误继续复用统一 `error` 结构
 
 ## 6. 私聊 E2EE 消息 envelope
 
-### 6.1 外层兼容原则
+适用范围：
 
-E2EE 私聊不修改外层 WebSocket 结构，也不修改：
+- 仅 `private` 会话
 
-- `msg_id`
-- `session_seq`
-- `event_seq`
+外层兼容规则：
 
-MVP 只改变：
+- E2EE 不修改外层 WebSocket 结构
+- `msg_id`、`session_seq`、`event_seq` 规则保持不变
+- 只改变 `content`、`extra.encryption`、`extra.attachment_encryption`
 
-- `content`
-- `extra.encryption`
-- `extra.attachment_encryption`
-
-### 6.2 文本消息
-
-E2EE 私聊中的 `chat_message.data` 仍为：
+文本消息：
 
 ```json
 {
@@ -422,63 +266,36 @@ E2EE 私聊中的 `chat_message.data` 仍为：
   "content": "BASE64_CIPHERTEXT",
   "message_type": "text",
   "extra": {
-    "encryption": {}
+    "encryption": {
+      "enabled": true,
+      "scheme": "double-ratchet-v1",
+      "sender_device_id": "dev_a",
+      "recipient_device_id": "dev_b",
+      "nonce": "BASE64_NONCE",
+      "aad": "BASE64_AAD",
+      "ciphertext_version": 1
+    }
   }
 }
 ```
 
-`extra.encryption`：
+附件消息新增：
 
-```json
-{
-  "enabled": true,
-  "scheme": "double-ratchet-v1",
-  "sender_device_id": "dev_a",
-  "recipient_device_id": "dev_b",
-  "nonce": "BASE64_NONCE",
-  "aad": "BASE64_AAD",
-  "ciphertext_version": 1
-}
-```
+- `extra.attachment_encryption.scheme`
+- `extra.attachment_encryption.file_key_wrap`
+- `extra.attachment_encryption.file_nonce`
+- `extra.attachment_encryption.encrypted_size_bytes`
 
 约束：
 
-- `content` 为密文 base64
 - 服务端不依赖解密正文执行业务规则
-- 服务端不基于密文内容做预览、搜索或 AI 总结
-
-### 6.3 附件消息
-
-附件消息继续使用当前：
-
-- `message_type`
-- `content`
-- `extra.media`
-
-但 E2EE 私聊中新增：
-
-- `extra.attachment_encryption`
-
-`extra.attachment_encryption`：
-
-```json
-{
-  "scheme": "aes-gcm-file-v1",
-  "file_key_wrap": "BASE64_WRAPPED_KEY",
-  "file_nonce": "BASE64_NONCE",
-  "encrypted_size_bytes": 123456
-}
-```
-
-约束：
-
 - 服务端保存密文文件和密文附件元数据
 - 服务端不保存 `local_path`
-- 如果缩略图依赖明文，MVP 阶段应由客户端本地生成
+- 若缩略图依赖明文，MVP 阶段应由客户端本地生成
 
-## 7. 错误返回
+## 7. 错误包
 
-实时协议中的错误统一复用：
+实时错误统一复用：
 
 ```json
 {
@@ -494,23 +311,16 @@ E2EE 私聊中的 `chat_message.data` 仍为：
 约束：
 
 - `error` 不强制断开连接
-- 通话 signaling 错误继续复用同一 `error` 结构
+- 失败命令优先回原始 `msg_id`
+- 通话与 E2EE 相关实时错误不另起第二套错误包格式
 
-## 8. 命名与兼容规则
+## 8. 协议变更规则
 
-- 新增字段优先放到 `data` 或 `extra` 的清晰命名空间中
-- 不通过“临时兼容字段”长期双写两套真相
-- 如果字段进入正式协议，必须同步更新：
-  - [architecture.md](./architecture.md)
-  - [backend_architecture.md](./backend_architecture.md)
-  - [design_decisions.md](./design_decisions.md)
-  - 测试用例
+新增字段或事件时，必须同步更新：
 
-## 9. 下一步
+- [architecture.md](./architecture.md)
+- [backend_architecture.md](./backend_architecture.md)
+- [design_decisions.md](./design_decisions.md)
+- 对应测试
 
-后续实现时，建议优先保证以下顺序：
-
-1. 先补 `call_*` payload model 与 WS handler
-2. 再补 `ice-servers` HTTP 接口
-3. 然后实现 `CallManager`
-4. 最后再引入 E2EE 的设备、公钥与 prekey API
+不允许通过“临时兼容字段”长期双写两套真相。

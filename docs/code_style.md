@@ -1,6 +1,8 @@
-# 代码风格规范
+# 工程实践与代码风格规范
 
-本文档只描述代码形态、工程实践、async 规范、日志与异常规范，不重复定义架构分层。分层与设计边界请查看：
+本文档描述工程实践、代码风格、async / 异常 / 日志要求，以及与当前架构一致的推荐代码骨架。
+
+本文档不重复定义系统架构边界。分层与设计边界请查看：
 
 - [architecture.md](./architecture.md)
 - [backend_architecture.md](./backend_architecture.md)
@@ -12,6 +14,7 @@
 - 默认遵循 PEP 8、PEP 484、PEP 604、PEP 681 等常见工程实践
 - 内部业务对象优先使用 dataclass / typed model，而不是裸 dict
 - 模块职责单一，函数和类名表达真实语义
+- 示例代码只能作为推荐骨架，不能绕过主架构文档
 
 ## 2. 命名规范
 
@@ -90,7 +93,7 @@ async def send_message(self, session_id: str, content: str) -> ChatMessage:
 - 默认遵循 `let it crash`
 - 开发初期不要为了“看起来稳定”而随手加大面积 `try/except`
 - 如果错误意味着真实 bug、状态不一致、协议不满足预期，就应当直接暴露并尽快修复，而不是吞掉异常后继续运行
-- 只有在明确的边界层才适合做异常转换或兜底：例如进程入口、任务调度边界、HTTP / WebSocket 边界、面向用户的最终提示边界
+- 只有在明确的边界层才适合做异常转换或兜底，例如进程入口、任务调度边界、HTTP / WebSocket 边界、面向用户的最终提示边界
 - 项目进入稳定阶段后，才针对已经识别清楚的失败模式补充精确、收敛的 `try/except`，禁止用宽泛捕获掩盖未知错误
 
 ## 7. Logging 规范
@@ -118,7 +121,7 @@ async def send_message(self, session_id: str, content: str) -> ChatMessage:
 - Tooltip、容器、样式遵循 [ui_guidelines.md](./ui_guidelines.md)
 - 不在 widget 内直接写 HTTP / WebSocket / SQLite 调用
 
-## 9. Repository / Service / Manager 代码风格要求
+## 9. Repository / Service / Manager 工程约束
 
 ### 9.1 Repository
 
@@ -158,3 +161,146 @@ async def send_message(self, session_id: str, content: str) -> ChatMessage:
 - 关键设计决策
 - UI 设计系统规则
 - AI 生成约束
+
+## 12. 推荐代码骨架
+
+以下模板只提供推荐结构，不替代架构说明。
+
+### 12.1 Controller 模板
+
+```python
+class ChatController:
+    """Receive UI input and delegate business actions to managers."""
+
+    def __init__(self, message_manager: MessageManager):
+        self._message_manager = message_manager
+
+    async def send_text(self, session_id: str, content: str) -> ChatMessage:
+        return await self._message_manager.send_message(session_id, content)
+```
+
+### 12.2 Manager 模板
+
+```python
+class MessageManager:
+    """Own message state, orchestration and EventBus notifications."""
+
+    def __init__(
+        self,
+        conn_manager: ConnectionManager,
+        chat_service: ChatService,
+        database: Database,
+        event_bus: EventBus,
+    ) -> None:
+        self._conn_manager = conn_manager
+        self._chat_service = chat_service
+        self._db = database
+        self._event_bus = event_bus
+
+    async def send_message(self, session_id: str, content: str) -> ChatMessage:
+        ...
+```
+
+### 12.3 Service 模板
+
+```python
+class ChatService:
+    """Wrap backend HTTP APIs without owning UI state."""
+
+    def __init__(self, http_client: HTTPClient) -> None:
+        self._http = http_client
+
+    async def fetch_history(self, session_id: str, limit: int = 50) -> list[MessageDTO]:
+        payload = await self._http.get(
+            f"/sessions/{session_id}/messages",
+            params={"limit": limit},
+        )
+        return [MessageDTO.from_dict(item) for item in payload]
+```
+
+### 12.4 Repository 模板
+
+```python
+class MessageRepository:
+    """Persist and query messages; business policy stays in services."""
+
+    def __init__(self, db: Session) -> None:
+        self.db = db
+
+    def get_by_id(self, message_id: str) -> Message | None:
+        return self.db.get(Message, message_id)
+```
+
+### 12.5 WebSocket Gateway 模板
+
+```python
+async def handle_chat_message(websocket: WebSocket, payload: dict) -> None:
+    with SessionLocal() as db:
+        service = MessageService(db)
+        dispatch = service.send_websocket_message(...)
+    await send_ack(...)
+    if dispatch["created"]:
+        await broadcast(...)
+```
+
+要求：
+
+- Gateway 只做协议适配
+- 业务规则走 Service
+- ACK 与广播使用 Service 返回的权威结果
+
+### 12.6 QFluentWidgets 卡片模板
+
+```python
+class ProfileSummaryCard(CardWidget):
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("ProfileSummaryCard")
+
+        self.title_label = SubtitleLabel("Profile", self)
+        self.edit_button = TransparentToolButton(FluentIcon.EDIT, self)
+        self.edit_button.setToolTip("Edit profile")
+        self.edit_button.installEventFilter(
+            AcrylicToolTipFilter(self.edit_button)
+        )
+```
+
+要求：
+
+- 容器默认 `CardWidget`
+- Tooltip 优先 Acrylic 方案
+- 样式通过 objectName + 共享 QSS 管理
+
+### 12.7 同步游标模板
+
+```python
+sync_message = {
+    "type": "sync_messages",
+    "msg_id": f"sync_{int(time.time() * 1000)}",
+    "data": {
+        "session_cursors": session_cursors,
+        "event_cursors": event_cursors,
+    },
+}
+```
+
+规则：
+
+- 不用时间戳做正式补偿依据
+- `session_cursors` 只表示新消息高水位
+- `event_cursors` 只表示状态事件高水位
+- 服务端应分别返回 `history_messages` 与 `history_events`
+
+### 12.8 事件对象模板
+
+```python
+@dataclass(slots=True)
+class MessageReceivedEvent:
+    message: ChatMessage
+    session_id: str
+```
+
+推荐：
+
+- EventBus 传 typed event 或清晰结构化 payload
+- 不要在 UI 层到处猜 dict 里到底有哪些字段
