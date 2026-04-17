@@ -26,6 +26,23 @@ def _preview_token(key: str, default: str) -> str:
     return tr(key, default)
 
 
+def _security_action_label(action_id: str, default: str) -> str:
+    """Resolve localized security-action labels used by session summaries."""
+    normalized_action_id = str(action_id or "").strip()
+    if normalized_action_id == "trust_peer_identity":
+        return _preview_token("chat.security.action.trust_peer_identity", default)
+    if normalized_action_id == "reprovision_device":
+        return _preview_token("chat.security.action.reprovision_device", default)
+    if normalized_action_id == "switch_device":
+        return _preview_token("chat.security.action.switch_device", default)
+    return _preview_token("chat.security.action.generic", default)
+
+
+def _security_action_description(key: str, default: str) -> str:
+    """Resolve localized security-action descriptions without importing full UI state."""
+    return _preview_token(key, default)
+
+
 class MessageStatus(Enum):
     """Message sending status."""
 
@@ -707,8 +724,11 @@ class Session:
                     self._security_action(
                         action_id="trust_peer_identity",
                         kind="identity_review",
-                        label="Trust peer identity",
-                        description="Confirm the peer device identity before sending more encrypted messages.",
+                        label=_security_action_label("trust_peer_identity", "Trust peer identity"),
+                        description=_security_action_description(
+                            "chat.security.action.trust_peer_identity.blocking",
+                            "Confirm the peer device identity before sending more encrypted messages.",
+                        ),
                         blocking=True,
                         primary=True,
                     )
@@ -720,8 +740,11 @@ class Session:
                     self._security_action(
                         action_id="trust_peer_identity",
                         kind="identity_review",
-                        label="Trust peer identity",
-                        description="Verify and trust the peer device identity for this encrypted session.",
+                        label=_security_action_label("trust_peer_identity", "Trust peer identity"),
+                        description=_security_action_description(
+                            "chat.security.action.trust_peer_identity.description",
+                            "Verify and trust the peer device identity for this encrypted session.",
+                        ),
                         blocking=False,
                         primary=True,
                     )
@@ -735,8 +758,11 @@ class Session:
                             self._security_action(
                                 action_id="switch_device",
                                 kind="crypto_recovery",
-                                label="Switch device",
-                                description="Open the device that owns this encrypted history to continue recovery.",
+                                label=_security_action_label("switch_device", "Switch device"),
+                                description=_security_action_description(
+                                    "chat.security.action.switch_device.description",
+                                    "Open the device that owns this encrypted history to continue recovery.",
+                                ),
                                 blocking=True,
                                 primary=True,
                                 available=False,
@@ -752,8 +778,14 @@ class Session:
                             self._security_action(
                                 action_id=str(summary["recommended_action"]),
                                 kind="crypto_recovery",
-                                label=str(summary["recommended_action"]).replace("_", " "),
-                                description="Run the recommended encrypted-session recovery flow on this device.",
+                                label=_security_action_label(
+                                    str(summary["recommended_action"]),
+                                    str(summary["recommended_action"]).replace("_", " "),
+                                ),
+                                description=_security_action_description(
+                                    "chat.security.action.recovery_private.description",
+                                    "Run the recommended encrypted-session recovery flow on this device.",
+                                ),
                                 blocking=False,
                                 primary=True,
                             )
@@ -770,8 +802,14 @@ class Session:
                         self._security_action(
                             action_id=str(summary["recommended_action"]),
                             kind="crypto_recovery",
-                            label=str(summary["recommended_action"]).replace("_", " "),
-                            description="Run the recommended group encryption recovery flow on this device.",
+                            label=_security_action_label(
+                                str(summary["recommended_action"]),
+                                str(summary["recommended_action"]).replace("_", " "),
+                            ),
+                            description=_security_action_description(
+                                "chat.security.action.recovery_group.description",
+                                "Run the recommended group encryption recovery flow on this device.",
+                            ),
                             blocking=False,
                             primary=True,
                         )
@@ -984,6 +1022,9 @@ class Session:
             if str(member.get("id", "") or "").strip() != sender_id:
                 continue
             return self._preferred_member_name(member) or sender_id
+        fallback_sender_name = str(self.extra.get("last_message_sender_name", "") or "").strip()
+        if fallback_sender_name:
+            return fallback_sender_name
         return sender_id
 
     def preview_mentions_current_user(self) -> bool:

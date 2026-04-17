@@ -12,6 +12,7 @@ from PySide6.QtWidgets import QAbstractItemView, QFrame, QHBoxLayout, QListView,
 from qfluentwidgets import BodyLabel, CaptionLabel, IconWidget, PushButton, ScrollBarHandleDisplayMode
 from qfluentwidgets.components.widgets.scroll_bar import SmoothScrollDelegate
 
+from client.core import logging
 from client.core.app_icons import AppIcon
 from client.core.config_backend import get_config
 from client.core.i18n import tr
@@ -24,6 +25,8 @@ from client.ui.widgets.chat_info_drawer import ChatInfoDrawerOverlay
 from client.ui.widgets.fluent_splitter import FluentSplitter
 from client.ui.widgets.message_input import MessageInput
 from qfluentwidgets.multimedia import VideoWidget
+
+logger = logging.get_logger(__name__)
 
 
 def _session_status_text(session: Session | None) -> str:
@@ -255,6 +258,7 @@ class ChatPanel(QWidget):
     chat_history_requested = Signal()
     chat_info_search_requested = Signal()
     chat_info_add_requested = Signal()
+    chat_info_identity_review_requested = Signal()
     chat_info_clear_requested = Signal()
     chat_info_leave_requested = Signal()
     chat_info_mute_toggled = Signal(bool)
@@ -380,6 +384,7 @@ class ChatPanel(QWidget):
         self._chat_info_overlay = ChatInfoDrawerOverlay(self.chat_page)
         self._chat_info_overlay.searchRequested.connect(self.chat_info_search_requested.emit)
         self._chat_info_overlay.addRequested.connect(self.chat_info_add_requested.emit)
+        self._chat_info_overlay.identityReviewRequested.connect(self.chat_info_identity_review_requested.emit)
         self._chat_info_overlay.clearRequested.connect(self.chat_info_clear_requested.emit)
         self._chat_info_overlay.leaveRequested.connect(self.chat_info_leave_requested.emit)
         self._chat_info_overlay.muteToggled.connect(self.chat_info_mute_toggled.emit)
@@ -486,6 +491,13 @@ class ChatPanel(QWidget):
 
     def show_chat(self) -> None:
         """Show active chat page and enable input."""
+        session_id = str(getattr(self._current_session, "session_id", "") or "")
+        logger.info(
+            "[chat-nav] chat_panel.show_chat session_id=%s stack_before=%s history_pending=%s",
+            session_id,
+            "chat_page" if self.stack.currentWidget() is self.chat_page else "welcome_widget",
+            self._history_request_pending,
+        )
         self.stack.setCurrentWidget(self.chat_page)
         self.message_input.set_session_active(True)
         self.message_input.focus_editor()
@@ -496,18 +508,42 @@ class ChatPanel(QWidget):
     def set_session(self, session: Session) -> None:
         """Update header and switch to active chat page."""
         previous_session_id = getattr(self._current_session, "session_id", None)
+        should_show_chat = previous_session_id != session.session_id or self.stack.currentWidget() is not self.chat_page
         if self._chat_info_overlay and previous_session_id and previous_session_id != session.session_id:
             self._chat_info_overlay.close_drawer(immediate=True)
         self._current_session = session
         layout_changed = bool(self._message_delegate and self._message_delegate.set_session(session))
+        logger.info(
+            "[chat-nav] chat_panel.set_session session_id=%s previous_session_id=%s should_show_chat=%s "
+            "layout_changed=%s stack_before=%s",
+            session.session_id,
+            previous_session_id,
+            should_show_chat,
+            layout_changed,
+            "chat_page" if self.stack.currentWidget() is self.chat_page else "welcome_widget",
+        )
         show_group_announcement = session.group_announcement_needs_view()
+        security_summary = session.security_summary()
+        badges = _session_security_badges(session)
         self.chat_header.set_session_info(
             title=session.chat_title() or session.display_name(),
             status=_session_status_text(session),
             avatar=session.display_avatar(),
             is_ai=session.is_ai_session,
         )
-        self.chat_header.set_security_badges(_session_security_badges(session))
+        self.chat_header.set_security_badges(badges)
+        logger.info(
+            "[e2ee-diag] chat_panel.session_summary session_id=%s mode=%s uses_e2ee=%s headline=%s "
+            "crypto_ready=%s identity_status=%s decryption_state=%s badge_texts=%s",
+            session.session_id,
+            security_summary.get("encryption_mode"),
+            security_summary.get("uses_e2ee"),
+            security_summary.get("headline"),
+            security_summary.get("crypto_ready"),
+            security_summary.get("identity_status"),
+            security_summary.get("decryption_state"),
+            [str(badge.get("text", "") or "") for badge in badges],
+        )
         self.message_input.set_session(session)
         self.chat_header.set_group_announcement_session(session if show_group_announcement else None)
         if self._chat_info_overlay:
@@ -515,7 +551,8 @@ class ChatPanel(QWidget):
         if layout_changed and self._message_model:
             self._message_model.set_messages(list(self._message_model.get_messages()))
         self._refresh_security_pending_banner()
-        self.show_chat()
+        if should_show_chat:
+            self.show_chat()
 
     def clear_messages(self) -> None:
         """Clear visible messages from the model."""

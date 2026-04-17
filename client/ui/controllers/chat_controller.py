@@ -463,12 +463,14 @@ class ChatController:
         *,
         fallback_name: str = "Session",
         avatar: str = "",
+        allow_hidden: bool = False,
     ) -> Optional[Session]:
         """Ensure a remote session exists locally for the UI to open."""
         return await self._session_manager.ensure_remote_session(
             session_id,
             fallback_name=fallback_name,
             avatar=avatar,
+            allow_hidden=allow_hidden,
         )
 
     async def ensure_direct_session(
@@ -477,12 +479,14 @@ class ChatController:
         *,
         display_name: str = "",
         avatar: str = "",
+        allow_hidden: bool = False,
     ) -> Optional[Session]:
         """Ensure a direct session exists for the given contact."""
         return await self._session_manager.ensure_direct_session(
             user_id,
             display_name=display_name,
             avatar=avatar,
+            allow_hidden=allow_hidden,
         )
 
     async def refresh_session_preview(self, session_id: str) -> None:

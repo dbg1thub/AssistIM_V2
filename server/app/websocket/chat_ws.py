@@ -25,6 +25,13 @@ logger = logging.getLogger(__name__)
 
 async def _send_app_error(connection_id: str, msg_id: str, exc: AppError) -> None:
     """Return an application-level websocket error without tearing down the socket."""
+    logger.warning(
+        "[ws-diag] send_app_error connection_id=%s msg_id=%s code=%s message=%s",
+        connection_id,
+        msg_id,
+        exc.code,
+        exc.message,
+    )
     await connection_manager.send_json(
         connection_id,
         ws_message("error", {"message": exc.message, "code": exc.code}, msg_id=msg_id),
@@ -143,6 +150,19 @@ async def _handle_chat_socket(websocket: WebSocket) -> None:
                 content = data.get("content", "")
                 message_type = data.get("message_type") or "text"
                 message_extra = data.get("extra", {}) if isinstance(data.get("extra"), dict) else {}
+                logger.info(
+                    "[ws-diag] inbound_chat_message connection_id=%s user_id=%s session_id=%s msg_id=%s message_type=%s "
+                    "encrypted=%s attachment_encrypted=%s content_len=%s extra_keys=%s",
+                    connection_id,
+                    current_user_id,
+                    session_id,
+                    msg_id,
+                    message_type,
+                    bool(dict(message_extra).get("encryption")),
+                    bool(dict(message_extra).get("attachment_encryption")),
+                    len(str(content or "")),
+                    sorted(list(message_extra.keys())),
+                )
                 try:
                     with SessionLocal() as db:
                         dispatch = MessageService(db).send_websocket_message(
@@ -172,6 +192,14 @@ async def _handle_chat_socket(websocket: WebSocket) -> None:
                     logger.info("Idempotent websocket resend acknowledged without rebroadcast: %s", msg_id)
                     continue
 
+                logger.info(
+                    "[ws-diag] outbound_chat_dispatch session_id=%s msg_id=%s ack_message_id=%s recipient_count=%s created=%s",
+                    session_id,
+                    msg_id,
+                    ack_message.get("message_id"),
+                    len(recipient_ids),
+                    dispatch["created"],
+                )
                 delivered_user_ids: set[str] = set()
                 for recipient_id in recipient_ids:
                     recipient_message = recipient_payloads[recipient_id]
@@ -289,6 +317,16 @@ async def _handle_chat_socket(websocket: WebSocket) -> None:
                 continue
 
             if msg_type in {"call_invite", "call_ringing", "call_accept", "call_reject", "call_hangup", "call_offer", "call_answer", "call_ice"}:
+                logger.info(
+                    "[ws-diag] inbound_call_event connection_id=%s user_id=%s type=%s msg_id=%s call_id=%s session_id=%s payload_keys=%s",
+                    connection_id,
+                    current_user_id,
+                    msg_type,
+                    msg_id,
+                    str(data.get("call_id") or ""),
+                    str(data.get("session_id") or ""),
+                    sorted(list(data.keys())),
+                )
                 try:
                     with SessionLocal() as db:
                         service = CallService(db)
@@ -353,6 +391,13 @@ async def _handle_chat_socket(websocket: WebSocket) -> None:
                     payload["active_connection_id"] = connection_id
 
                 outbound_message = ws_message(outbound_type, payload, msg_id=str(uuid.uuid4()))
+                logger.info(
+                    "[ws-diag] outbound_call_event type=%s call_id=%s target_user_ids=%s payload_keys=%s",
+                    outbound_type,
+                    str(payload.get("call_id") or ""),
+                    list(target_user_ids),
+                    sorted(list(payload.keys())),
+                )
                 if outbound_type == "call_invite":
                     for target_user_id in target_user_ids:
                         if target_user_id == current_user_id:

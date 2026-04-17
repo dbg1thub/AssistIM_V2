@@ -102,6 +102,23 @@ def test_group_session_preview_sender_name_omits_current_user_prefix() -> None:
     assert session.preview_sender_name() == ''
 
 
+def test_group_session_preview_sender_name_uses_cached_sender_name_when_member_snapshot_missing() -> None:
+    session = Session(
+        session_id='group-1',
+        name='',
+        session_type='group',
+        participant_ids=['me', 'user-2'],
+        extra={
+            'current_user_id': 'me',
+            'last_message_sender_id': 'user-2',
+            'last_message_sender_name': 'test1',
+            'members': [],
+        },
+    )
+
+    assert session.preview_sender_name() == 'test1'
+
+
 def test_session_delegate_group_preview_does_not_prefix_self_message() -> None:
     delegate = SessionDelegate()
     session = Session(
@@ -209,6 +226,140 @@ def test_session_manager_decorates_members_with_contact_remarks(monkeypatch) -> 
         assert session.extra['members'][1]['remark'] == 'test1'
         assert session.extra['members'][1]['display_name'] == 'test1'
         assert session.extra['current_user_id'] == 'me'
+
+    asyncio.run(scenario())
+
+
+def test_session_manager_direct_session_prefers_counterpart_username_over_uuid_when_members_missing(monkeypatch) -> None:
+    fake_db = _FakeDatabase({})
+
+    monkeypatch.setattr(session_manager_module, 'get_database', lambda: fake_db)
+    monkeypatch.setattr(session_manager_module, 'get_session_service', lambda: object())
+    monkeypatch.setattr(session_manager_module, 'get_event_bus', lambda: object())
+    monkeypatch.setattr(session_manager_module, 'get_message_manager', lambda: object())
+
+    manager = session_manager_module.SessionManager()
+    session = Session(
+        session_id='session-1',
+        name='Private Chat',
+        session_type='direct',
+        participant_ids=['me', 'user-2'],
+        extra={
+            'members': [],
+            'counterpart_id': 'user-2',
+            'counterpart_username': 'test2',
+        },
+    )
+
+    manager._normalize_session_display(
+        session,
+        {
+            'id': 'me',
+            'username': 'me',
+            'nickname': 'Me',
+        },
+    )
+
+    assert session.name == 'test2'
+    assert session.extra.get('counterpart_name') == 'test2'
+
+
+def test_session_manager_last_message_preview_caches_sender_name_from_message_extra(monkeypatch) -> None:
+    fake_db = _FakeDatabase({})
+
+    monkeypatch.setattr(session_manager_module, 'get_database', lambda: fake_db)
+    monkeypatch.setattr(session_manager_module, 'get_session_service', lambda: object())
+    monkeypatch.setattr(session_manager_module, 'get_event_bus', lambda: object())
+    monkeypatch.setattr(session_manager_module, 'get_message_manager', lambda: object())
+
+    manager = session_manager_module.SessionManager()
+    session = Session(
+        session_id='group-1',
+        name='Core Team',
+        session_type='group',
+        participant_ids=['me', 'user-2'],
+    )
+    message = ChatMessage(
+        message_id='msg-1',
+        session_id='group-1',
+        sender_id='user-2',
+        content='hello',
+        message_type=MessageType.TEXT,
+        status=MessageStatus.SENT,
+        extra={'sender_name': 'test1'},
+    )
+
+    manager._apply_last_message_preview(session, message, current_user_id='me')
+
+    assert session.extra.get('last_message_sender_name') == 'test1'
+
+
+def test_session_manager_last_message_preview_infers_encryption_mode_from_session_metadata(monkeypatch) -> None:
+    fake_db = _FakeDatabase({})
+
+    monkeypatch.setattr(session_manager_module, 'get_database', lambda: fake_db)
+    monkeypatch.setattr(session_manager_module, 'get_session_service', lambda: object())
+    monkeypatch.setattr(session_manager_module, 'get_event_bus', lambda: object())
+    monkeypatch.setattr(session_manager_module, 'get_message_manager', lambda: object())
+
+    manager = session_manager_module.SessionManager()
+    session = Session(
+        session_id='direct-1',
+        name='test2',
+        session_type='direct',
+        participant_ids=['me', 'user-2'],
+    )
+    message = ChatMessage(
+        message_id='msg-1',
+        session_id='direct-1',
+        sender_id='user-2',
+        content='secret',
+        message_type=MessageType.TEXT,
+        status=MessageStatus.SENT,
+        extra={'session_encryption_mode': 'e2ee_private'},
+    )
+
+    manager._apply_last_message_preview(session, message, current_user_id='me')
+
+    assert session.extra.get('encryption_mode') == 'e2ee_private'
+
+
+def test_session_manager_add_message_to_session_skips_duplicate_preview_updates(monkeypatch) -> None:
+    fake_db = _FakeDatabase({})
+    fake_event_bus = _FakeEventBus()
+
+    monkeypatch.setattr(session_manager_module, 'get_database', lambda: fake_db)
+    monkeypatch.setattr(session_manager_module, 'get_session_service', lambda: object())
+    monkeypatch.setattr(session_manager_module, 'get_event_bus', lambda: fake_event_bus)
+    monkeypatch.setattr(session_manager_module, 'get_message_manager', lambda: object())
+
+    async def scenario() -> None:
+        manager = session_manager_module.SessionManager()
+        session = Session(
+            session_id='group-1',
+            name='Core Team',
+            session_type='group',
+            participant_ids=['me', 'user-2'],
+        )
+        manager._sessions[session.session_id] = session
+        message = ChatMessage(
+            message_id='msg-dup',
+            session_id='group-1',
+            sender_id='user-2',
+            content='hello',
+            message_type=MessageType.TEXT,
+            status=MessageStatus.SENT,
+            extra={'sender_name': 'test1'},
+        )
+
+        await manager.add_message_to_session(session.session_id, message)
+        await manager.add_message_to_session(session.session_id, message)
+
+        assert len(fake_db.saved_sessions) == 1
+        message_added_events = [event for event, _payload in fake_event_bus.emitted if event == session_manager_module.SessionEvent.MESSAGE_ADDED]
+        updated_events = [event for event, _payload in fake_event_bus.emitted if event == session_manager_module.SessionEvent.UPDATED]
+        assert len(message_added_events) == 1
+        assert len(updated_events) == 1
 
     asyncio.run(scenario())
 

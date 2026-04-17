@@ -687,6 +687,16 @@ class ConnectionManager:
         message_started = time.perf_counter()
         sync_state_changed = False
         sync_completed = False
+        if msg_type == "error":
+            data = message.get("data", {}) if isinstance(message.get("data"), dict) else {}
+            logger.warning(
+                "[send-diag] inbound_ws_error msg_id=%s code=%s reason=%s auth_in_flight=%s sync_in_flight=%s",
+                message.get("msg_id"),
+                data.get("code"),
+                data.get("message") or data.get("reason"),
+                self._ws_auth_in_flight,
+                self._sync_in_flight,
+            )
 
         if msg_type == "auth_ack":
             data = message.get("data", {})
@@ -876,15 +886,31 @@ class ConnectionManager:
             True if sent successfully
         """
         if not self._ws_client or not self._ws_client.is_connected:
-            logger.warning("Cannot send: not connected")
+            logger.warning(
+                "[send-diag] transport_blocked reason=not_connected type=%s state=%s ws_client=%s ws_authenticated=%s",
+                str(message.get("type") or ""),
+                self._state,
+                self._ws_client is not None,
+                self._ws_authenticated,
+            )
             return False
 
         msg_type = str(message.get("type") or "")
         if msg_type != "auth" and not self._auth_service.access_token:
-            logger.warning("Cannot send %s: no access token", msg_type or "<unknown>")
+            logger.warning(
+                "[send-diag] transport_blocked reason=no_access_token type=%s state=%s ws_authenticated=%s",
+                msg_type or "<unknown>",
+                self._state,
+                self._ws_authenticated,
+            )
             return False
         if msg_type != "auth" and not self._ws_authenticated:
-            logger.warning("Cannot send %s: websocket not authenticated", msg_type or "<unknown>")
+            logger.warning(
+                "[send-diag] transport_blocked reason=ws_not_authenticated type=%s state=%s ws_connected=%s",
+                msg_type or "<unknown>",
+                self._state,
+                bool(self._ws_client and self._ws_client.is_connected),
+            )
             return False
 
         return await self._ws_client.send(message, timeout)
@@ -919,6 +945,19 @@ class ConnectionManager:
         if extra:
             message_data["extra"] = extra
 
+        logger.info(
+            "[send-diag] send_chat_message session_id=%s msg_id=%s message_type=%s encrypted=%s attachment_encrypted=%s "
+            "security_pending=%s content_len=%s ws_state=%s ws_authenticated=%s",
+            session_id,
+            msg_id,
+            message_type,
+            bool(dict(extra or {}).get("encryption")),
+            bool(dict(extra or {}).get("attachment_encryption")),
+            bool(dict(extra or {}).get("security_pending")),
+            len(str(content or "")),
+            self._state,
+            self._ws_authenticated,
+        )
         message = {
             "type": "chat_message",
             "seq": 0,
@@ -983,6 +1022,16 @@ class ConnectionManager:
         msg_id: str = "",
     ) -> bool:
         """Send one call signaling event."""
+        logger.info(
+            "[call-diag] send_call_event type=%s msg_id=%s call_id=%s session_id=%s ws_state=%s ws_authenticated=%s payload_keys=%s",
+            event_type,
+            msg_id,
+            str(dict(data or {}).get("call_id") or ""),
+            str(dict(data or {}).get("session_id") or ""),
+            self._state,
+            self._ws_authenticated,
+            sorted(list(dict(data or {}).keys())),
+        )
         message = {
             "type": event_type,
             "seq": 0,

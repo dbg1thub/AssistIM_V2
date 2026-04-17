@@ -324,9 +324,22 @@ class FakeMessageManager:
         self.failed: list[tuple[str, str]] = []
         self.sent_messages: list[ChatMessage] = []
         self.cached_messages_calls: list[tuple[str, int, object]] = []
+        self.cached_messages_result: list[ChatMessage] = [
+            ChatMessage(
+                message_id='cached-1',
+                session_id='session-1',
+                sender_id='alice',
+                content='cached hello',
+                message_type=MessageType.TEXT,
+                status=MessageStatus.SENT,
+                is_self=True,
+            )
+        ]
         self.attachment_upload_preparations: list[tuple[str, str, MessageType, str, int]] = []
         self.download_attachment_calls: list[str] = []
         self.recover_session_messages_calls: list[str] = []
+        self.remove_session_local_state_calls: list[str] = []
+        self.history_cutoffs: dict[str, float] = {}
         self.recover_session_messages_result: dict[str, object] = {
             'session_id': 'session-1',
             'scanned': 0,
@@ -393,17 +406,15 @@ class FakeMessageManager:
 
     async def get_cached_messages(self, session_id: str, limit: int = 50, before_timestamp=None) -> list[ChatMessage]:
         self.cached_messages_calls.append((session_id, limit, before_timestamp))
-        return [
-            ChatMessage(
-                message_id='cached-1',
-                session_id=session_id,
-                sender_id='alice',
-                content='cached hello',
-                message_type=MessageType.TEXT,
-                status=MessageStatus.SENT,
-                is_self=True,
-            )
-        ]
+        messages: list[ChatMessage] = []
+        for message in self.cached_messages_result[:limit]:
+            cloned = ChatMessage.from_dict(message.to_dict())
+            cloned.session_id = session_id
+            messages.append(cloned)
+        return messages
+
+    async def get_session_history_cutoff(self, session_id: str):
+        return self.history_cutoffs.get(session_id)
 
     async def prepare_attachment_upload(
         self,
@@ -428,6 +439,9 @@ class FakeMessageManager:
         payload = dict(self.recover_session_messages_result)
         payload.setdefault('session_id', session_id)
         return payload
+
+    async def remove_session_local_state(self, session_id: str, history_cutoff=None) -> None:
+        self.remove_session_local_state_calls.append(session_id)
 
 
 class FakeSessionManager:
@@ -457,10 +471,10 @@ class FakeSessionManager:
     def find_direct_session(self, user_id: str):
         return None
 
-    async def ensure_remote_session(self, session_id: str, *, fallback_name: str = 'Session', avatar: str = ''):
+    async def ensure_remote_session(self, session_id: str, *, fallback_name: str = 'Session', avatar: str = '', allow_hidden: bool = False):
         return None
 
-    async def ensure_direct_session(self, user_id: str, *, display_name: str = '', avatar: str = ''):
+    async def ensure_direct_session(self, user_id: str, *, display_name: str = '', avatar: str = '', allow_hidden: bool = False):
         return None
 
     async def refresh_session_preview(self, session_id: str) -> None:
@@ -1108,6 +1122,7 @@ class FakeE2EEService:
         self.peer_identity_calls: list[str] = []
         self.trust_peer_identity_calls: list[str] = []
         self.reconcile_group_session_state_calls: list[tuple[str, int, list[str]]] = []
+        self.remove_session_local_state_calls: list[str] = []
         self.peer_identity_summary = dict(
             peer_identity_summary
             or {
@@ -1194,6 +1209,9 @@ class FakeE2EEService:
             'local_sender_key_cleared': False,
             'pruned_inbound_sender_devices': [],
         }
+
+    async def remove_session_local_state(self, session_id: str, history_cutoff=None) -> None:
+        self.remove_session_local_state_calls.append(session_id)
 
 
 class FakeSessionService:
@@ -1284,6 +1302,12 @@ class FakeMessageStoreDatabase:
 
     async def get_app_state(self, key: str):
         return self.app_state.get(key)
+
+    async def set_app_state(self, key: str, value: str) -> None:
+        self.app_state[key] = value
+
+    async def delete_app_state(self, key: str) -> None:
+        self.app_state.pop(key, None)
 
     async def get_session(self, session_id: str):
         if not self.session_payload or self.session_payload.get('session_id') != session_id:
@@ -1496,6 +1520,59 @@ def test_message_manager_get_messages_uses_server_sender_profiles(monkeypatch) -
         assert messages[1].extra['sender_gender'] == 'male'
         assert messages[1].extra['sender_username'] == 'bob'
         assert len(fake_db.saved_batches) == 1
+
+    asyncio.run(scenario())
+
+
+def test_message_manager_get_messages_hides_history_before_local_cutoff(monkeypatch) -> None:
+    class RemoteMessageStoreDatabase(FakeMessageStoreDatabase):
+        async def save_messages_batch(self, messages: list[ChatMessage]) -> None:
+            await super().save_messages_batch(messages)
+            self.messages = list(messages)
+
+    class CutoffChatService(FakeChatService):
+        async def fetch_messages(self, session_id: str, limit: int, before_seq=None) -> list[dict]:
+            await super().fetch_messages(session_id, limit, before_seq)
+            return [
+                {
+                    'message_id': 'm-old',
+                    'session_id': session_id,
+                    'sender_id': 'user-2',
+                    'content': 'old history',
+                    'message_type': 'text',
+                    'status': 'received',
+                    'timestamp': '2026-03-29T10:00:00',
+                },
+                {
+                    'message_id': 'm-new',
+                    'session_id': session_id,
+                    'sender_id': 'user-2',
+                    'content': 'new history',
+                    'message_type': 'text',
+                    'status': 'received',
+                    'timestamp': '2026-03-29T12:00:01',
+                },
+            ]
+
+    fake_db = RemoteMessageStoreDatabase([])
+    fake_db.app_state[message_manager_module.MessageManager.HISTORY_CUTOFFS_STATE_KEY] = json.dumps(
+        {'session-1': datetime(2026, 3, 29, 11, 0, 0).timestamp()}
+    )
+
+    monkeypatch.setattr(message_manager_module, 'get_event_bus', lambda: FakeEventBus())
+    monkeypatch.setattr(message_manager_module, 'get_connection_manager', lambda: FakeConnectionManager())
+    monkeypatch.setattr(message_manager_module, 'get_database', lambda: fake_db)
+    monkeypatch.setattr(message_manager_module, 'get_chat_service', lambda: CutoffChatService())
+    monkeypatch.setattr(message_manager_module, 'get_file_service', lambda: FakeNoopFileService())
+
+    async def scenario() -> None:
+        manager = message_manager_module.MessageManager()
+        manager.set_user_id('user-1')
+        messages = await manager.get_messages('session-1', limit=10)
+
+        assert [message.message_id for message in messages] == ['m-new']
+        assert len(fake_db.saved_batches) == 1
+        assert [message.message_id for message in fake_db.saved_batches[0]] == ['m-new']
 
     asyncio.run(scenario())
 
@@ -4256,6 +4333,35 @@ def test_session_manager_ensure_remote_session_does_not_revive_hidden_session(mo
     asyncio.run(scenario())
 
 
+def test_session_manager_ensure_remote_session_allow_hidden_restores_hidden_session(monkeypatch) -> None:
+    fake_session_service = FakeSessionService()
+    fake_event_bus = FakeEventBus()
+    fake_db = HiddenSessionRuntimeDatabase()
+
+    monkeypatch.setattr(session_manager_module, 'get_session_service', lambda: fake_session_service)
+    monkeypatch.setattr(session_manager_module, 'get_event_bus', lambda: fake_event_bus)
+    monkeypatch.setattr(session_manager_module, 'get_message_manager', lambda: FakeMessageManager())
+    monkeypatch.setattr(session_manager_module, 'get_database', lambda: fake_db)
+
+    async def scenario() -> None:
+        manager = session_manager_module.SessionManager()
+        manager._hidden_sessions['session-1'] = datetime(2026, 3, 27, 18, 0, 0).timestamp()
+
+        session = await manager.ensure_remote_session(
+            'session-1',
+            fallback_name='Core Team',
+            allow_hidden=True,
+        )
+
+        assert session is not None
+        assert session.session_id == 'session-1'
+        assert manager._hidden_sessions == {}
+        assert 'chat.hidden_sessions' not in fake_db.app_state
+        assert fake_db.saved_sessions[-1].session_id == 'session-1'
+
+    asyncio.run(scenario())
+
+
 def test_session_manager_ensure_direct_session_does_not_revive_hidden_session(monkeypatch) -> None:
     fake_session_service = FakeSessionService()
     fake_event_bus = FakeEventBus()
@@ -4276,6 +4382,35 @@ def test_session_manager_ensure_direct_session_does_not_revive_hidden_session(mo
         assert manager._sessions == {}
         assert fake_db.saved_sessions == []
         assert fake_event_bus.events == []
+
+    asyncio.run(scenario())
+
+
+def test_session_manager_ensure_direct_session_allow_hidden_restores_hidden_session(monkeypatch) -> None:
+    fake_session_service = FakeSessionService()
+    fake_event_bus = FakeEventBus()
+    fake_db = HiddenSessionRuntimeDatabase()
+
+    monkeypatch.setattr(session_manager_module, 'get_session_service', lambda: fake_session_service)
+    monkeypatch.setattr(session_manager_module, 'get_event_bus', lambda: fake_event_bus)
+    monkeypatch.setattr(session_manager_module, 'get_message_manager', lambda: FakeMessageManager())
+    monkeypatch.setattr(session_manager_module, 'get_database', lambda: fake_db)
+
+    async def scenario() -> None:
+        manager = session_manager_module.SessionManager()
+        manager._hidden_sessions['session-direct-1'] = datetime(2026, 3, 27, 18, 0, 0).timestamp()
+
+        session = await manager.ensure_direct_session(
+            'bob',
+            display_name='Bob',
+            allow_hidden=True,
+        )
+
+        assert session is not None
+        assert session.session_id == 'session-direct-1'
+        assert manager._hidden_sessions == {}
+        assert 'chat.hidden_sessions' not in fake_db.app_state
+        assert fake_db.saved_sessions[-1].session_id == 'session-direct-1'
 
     asyncio.run(scenario())
 
@@ -4368,13 +4503,12 @@ def test_session_manager_live_message_restores_hidden_session_only_after_new_act
 def test_session_manager_refresh_session_preview_preserves_last_message_time_without_local_message(monkeypatch) -> None:
     fake_session_service = FakeSessionService()
     fake_event_bus = FakeEventBus()
+    fake_message_manager = FakeMessageManager()
+    fake_message_manager.cached_messages_result = []
     saved_sessions = []
 
     class PreviewDatabase:
         is_connected = True
-
-        async def get_last_message(self, session_id: str):
-            return None
 
         async def save_session(self, session):
             saved_sessions.append(session)
@@ -4383,7 +4517,7 @@ def test_session_manager_refresh_session_preview_preserves_last_message_time_wit
 
     monkeypatch.setattr(session_manager_module, 'get_session_service', lambda: fake_session_service)
     monkeypatch.setattr(session_manager_module, 'get_event_bus', lambda: fake_event_bus)
-    monkeypatch.setattr(session_manager_module, 'get_message_manager', lambda: FakeMessageManager())
+    monkeypatch.setattr(session_manager_module, 'get_message_manager', lambda: fake_message_manager)
     monkeypatch.setattr(session_manager_module, 'get_database', lambda: fake_db)
 
     async def scenario() -> None:
@@ -5185,6 +5319,143 @@ def test_session_manager_execute_security_action_ignores_late_logout(monkeypatch
 
         assert fake_db.replaced_sessions == []
         assert fake_event_bus.events == []
+
+    asyncio.run(scenario())
+
+
+def test_session_manager_restored_hidden_direct_session_looks_new_locally(monkeypatch) -> None:
+    fake_session_service = FakeSessionService()
+    fake_session_service.direct_session_payload = {
+        **fake_session_service.direct_session_payload,
+        'last_message': 'old history',
+        'last_message_time': '2026-03-27T17:30:00',
+        'created_at': '2026-03-20T09:00:00',
+        'updated_at': '2026-03-27T17:30:00',
+        'unread_count': 4,
+    }
+    fake_event_bus = FakeEventBus()
+    fake_db = HiddenSessionRuntimeDatabase()
+    fake_message_manager = FakeMessageManager()
+    hidden_at = datetime(2026, 3, 27, 18, 0, 0)
+    fake_message_manager.history_cutoffs['session-direct-1'] = hidden_at.timestamp()
+
+    monkeypatch.setattr(session_manager_module, 'get_session_service', lambda: fake_session_service)
+    monkeypatch.setattr(session_manager_module, 'get_event_bus', lambda: fake_event_bus)
+    monkeypatch.setattr(session_manager_module, 'get_message_manager', lambda: fake_message_manager)
+    monkeypatch.setattr(session_manager_module, 'get_database', lambda: fake_db)
+
+    async def scenario() -> None:
+        manager = session_manager_module.SessionManager()
+        manager._hidden_sessions['session-direct-1'] = hidden_at.timestamp()
+
+        session = await manager.ensure_direct_session(
+            'bob',
+            display_name='Bob',
+            allow_hidden=True,
+        )
+
+        assert session is not None
+        assert session.session_id == 'session-direct-1'
+        assert session.last_message == ''
+        assert session.unread_count == 0
+        assert session.last_message_time == hidden_at
+        assert session.extra['history_restart_pending'] is True
+        assert fake_db.saved_sessions[-1].last_message == ''
+        assert fake_db.saved_sessions[-1].unread_count == 0
+
+    asyncio.run(scenario())
+
+
+def test_session_manager_refresh_session_preview_respects_local_history_cutoff(monkeypatch) -> None:
+    fake_session_service = FakeSessionService()
+    fake_event_bus = FakeEventBus()
+    fake_message_manager = FakeMessageManager()
+    fake_message_manager.cached_messages_result = []
+    hidden_at = datetime(2026, 3, 27, 18, 0, 0)
+    fake_message_manager.history_cutoffs['session-1'] = hidden_at.timestamp()
+    saved_sessions = []
+
+    class PreviewDatabase:
+        is_connected = True
+
+        async def save_session(self, session):
+            saved_sessions.append(session)
+
+    fake_db = PreviewDatabase()
+
+    monkeypatch.setattr(session_manager_module, 'get_session_service', lambda: fake_session_service)
+    monkeypatch.setattr(session_manager_module, 'get_event_bus', lambda: fake_event_bus)
+    monkeypatch.setattr(session_manager_module, 'get_message_manager', lambda: fake_message_manager)
+    monkeypatch.setattr(session_manager_module, 'get_database', lambda: fake_db)
+
+    async def scenario() -> None:
+        manager = session_manager_module.SessionManager()
+        session = Session(
+            session_id='session-1',
+            name='Bob',
+            last_message='old history',
+            last_message_time=datetime(2026, 3, 27, 17, 30, 0),
+            created_at=datetime(2026, 3, 20, 9, 0, 0),
+            updated_at=datetime(2026, 3, 27, 17, 30, 0),
+            extra={'authoritative_activity_timestamp': datetime(2026, 3, 27, 17, 30, 0).timestamp()},
+        )
+        manager._sessions[session.session_id] = session
+
+        await manager.refresh_session_preview(session.session_id)
+
+        assert session.last_message == ''
+        assert session.unread_count == 0
+        assert session.last_message_time == hidden_at
+        assert saved_sessions[-1].last_message == ''
+
+    asyncio.run(scenario())
+
+
+def test_session_manager_remove_session_stays_local_without_remote_delete(monkeypatch) -> None:
+    class LocalOnlySessionService(FakeSessionService):
+        async def delete_session(self, session_id: str) -> None:
+            raise AssertionError('remove_session must not call remote delete_session')
+
+    fake_event_bus = FakeEventBus()
+    fake_session_service = LocalOnlySessionService()
+    fake_message_manager = FakeMessageManager()
+    fake_e2ee_service = FakeE2EEService()
+
+    class LocalDeleteDatabase:
+        def __init__(self) -> None:
+            self.is_connected = True
+            self.app_state: dict[str, object] = {}
+            self.deleted_sessions: list[str] = []
+
+        async def set_app_state(self, key: str, value) -> None:
+            self.app_state[key] = value
+
+        async def delete_app_state(self, key: str) -> None:
+            self.app_state.pop(key, None)
+
+        async def delete_session(self, session_id: str) -> None:
+            self.deleted_sessions.append(session_id)
+
+    fake_db = LocalDeleteDatabase()
+
+    monkeypatch.setattr(session_manager_module, 'get_session_service', lambda: fake_session_service)
+    monkeypatch.setattr(session_manager_module, 'get_event_bus', lambda: fake_event_bus)
+    monkeypatch.setattr(session_manager_module, 'get_message_manager', lambda: fake_message_manager)
+    monkeypatch.setattr(session_manager_module, 'get_e2ee_service', lambda: fake_e2ee_service)
+    monkeypatch.setattr(session_manager_module, 'get_database', lambda: fake_db)
+
+    async def scenario() -> None:
+        manager = session_manager_module.SessionManager()
+        manager._current_user_id = 'user-1'
+        session = Session(session_id='session-1', name='Bob', session_type='direct')
+        manager._sessions[session.session_id] = session
+
+        await manager.remove_session('session-1')
+
+        assert fake_db.deleted_sessions == ['session-1']
+        assert fake_message_manager.remove_session_local_state_calls == ['session-1']
+        assert fake_e2ee_service.remove_session_local_state_calls == ['session-1']
+        assert manager._sessions == {}
 
     asyncio.run(scenario())
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import time
@@ -17,6 +18,7 @@ from PySide6.QtWidgets import QDialog, QFrame, QHBoxLayout, QLabel, QScrollArea,
 from qfluentwidgets import (
     Action,
     BodyLabel,
+    CaptionLabel,
     InfoBar,
     MessageBoxBase,
     PrimaryPushButton,
@@ -185,6 +187,211 @@ class LeaveGroupConfirmDialog(MessageBoxBase):
         self.widget.setMinimumWidth(380)
 
 
+class IdentityReviewDialog(QDialog):
+    """Desktop dialog that exposes one direct-session safety code and trust action."""
+
+    def __init__(self, session_name: str, parent=None) -> None:
+        super().__init__(parent)
+        self._details: dict[str, object] = {}
+        self._session_name = str(session_name or "").strip()
+        self.setWindowTitle(tr("chat.security.review.title", "Identity Verification"))
+        self.resize(440, 520)
+        _apply_themed_dialog_surface(self, "IdentityReviewDialog")
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(18, 18, 18, 18)
+        layout.setSpacing(12)
+
+        self.title_label = SubtitleLabel(tr("chat.security.review.title", "Identity Verification"), self)
+        self.subtitle_label = BodyLabel("", self)
+        self.subtitle_label.setWordWrap(True)
+        self.status_title = CaptionLabel(tr("chat.security.review.status", "Status"), self)
+        self.status_value = BodyLabel("", self)
+        self.status_value.setWordWrap(True)
+        self.summary_label = BodyLabel("", self)
+        self.summary_label.setWordWrap(True)
+        self.code_title = CaptionLabel(tr("chat.security.review.code", "Safety Code"), self)
+        self.code_value = QLabel(self)
+        self.code_value.setWordWrap(True)
+        self.code_value.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.fingerprint_title = CaptionLabel(tr("chat.security.review.fingerprint", "Fingerprint"), self)
+        self.fingerprint_value = QLabel(self)
+        self.fingerprint_value.setWordWrap(True)
+        self.fingerprint_value.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.device_title = CaptionLabel(tr("chat.security.review.device", "Peer Device"), self)
+        self.device_value = BodyLabel("", self)
+        self.device_value.setWordWrap(True)
+        self.timeline_title = CaptionLabel(tr("chat.security.review.timeline", "Timeline"), self)
+        self.timeline_container = QWidget(self)
+        self.timeline_layout = QVBoxLayout(self.timeline_container)
+        self.timeline_layout.setContentsMargins(0, 0, 0, 0)
+        self.timeline_layout.setSpacing(6)
+        self.close_button = PushButton(tr("common.close", "Close"), self)
+        self.trust_button = PrimaryPushButton(tr("chat.security.review.trust", "Trust This Device"), self)
+        self.close_button.clicked.connect(self.close)
+
+        button_row = QHBoxLayout()
+        button_row.addStretch(1)
+        button_row.addWidget(self.close_button)
+        button_row.addWidget(self.trust_button)
+
+        layout.addWidget(self.title_label)
+        layout.addWidget(self.subtitle_label)
+        layout.addSpacing(4)
+        layout.addWidget(self.status_title)
+        layout.addWidget(self.status_value)
+        layout.addWidget(self.summary_label)
+        layout.addSpacing(6)
+        layout.addWidget(self.code_title)
+        layout.addWidget(self.code_value)
+        layout.addSpacing(6)
+        layout.addWidget(self.fingerprint_title)
+        layout.addWidget(self.fingerprint_value)
+        layout.addSpacing(6)
+        layout.addWidget(self.device_title)
+        layout.addWidget(self.device_value)
+        layout.addSpacing(6)
+        layout.addWidget(self.timeline_title)
+        layout.addWidget(self.timeline_container, 1)
+        layout.addLayout(button_row)
+
+        monospace_style = "font-family: Consolas, 'Courier New', monospace; font-size: 12px;"
+        self.code_value.setStyleSheet(monospace_style)
+        self.fingerprint_value.setStyleSheet(monospace_style)
+        if self._session_name:
+            self.subtitle_label.setText(
+                tr(
+                    "chat.security.review.subtitle_named",
+                    "Review and trust the peer identity for {name}.",
+                    name=self._session_name,
+                )
+            )
+        else:
+            self.subtitle_label.setText(
+                tr("chat.security.review.subtitle", "Review and trust the peer identity for this conversation.")
+            )
+
+    def _clear_timeline(self) -> None:
+        while self.timeline_layout.count():
+            item = self.timeline_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+
+    @staticmethod
+    def _format_timeline_time(value: object) -> str:
+        moment = coerce_local_datetime(value)
+        if moment is None:
+            return ""
+        return moment.strftime("%Y-%m-%d %H:%M")
+
+    @staticmethod
+    def _status_text(status: str) -> str:
+        normalized_status = str(status or "").strip()
+        if normalized_status == "verified":
+            return tr("chat.security.review.status.verified", "Verified")
+        if normalized_status == "identity_changed":
+            return tr("chat.security.review.status.identity_changed", "Identity Changed")
+        if normalized_status == "unverified":
+            return tr("chat.security.review.status.unverified", "Unverified")
+        if normalized_status == "unavailable":
+            return tr("chat.security.review.status.unavailable", "Unavailable")
+        return tr("chat.security.review.status.unknown", "Unknown")
+
+    @staticmethod
+    def _status_description(details: dict[str, object]) -> str:
+        verification = dict(details.get("verification") or {})
+        status = str(verification.get("status") or "").strip()
+        if status == "verified":
+            return tr(
+                "chat.security.review.description.verified",
+                "This device already trusts the current peer identity.",
+            )
+        if status == "identity_changed":
+            return tr(
+                "chat.security.review.description.identity_changed",
+                "The peer identity changed. Compare the safety code again before trusting this device.",
+            )
+        if status == "unverified":
+            return tr(
+                "chat.security.review.description.unverified",
+                "Compare the safety code with the other participant, then trust this device if it matches.",
+            )
+        return tr(
+            "chat.security.review.description.unavailable",
+            "A verification code is not available for this session yet.",
+        )
+
+    def apply_details(self, details: dict[str, object]) -> None:
+        self._details = dict(details or {})
+        verification = dict(self._details.get("verification") or {})
+        primary_device = dict(self._details.get("primary_device") or {})
+        timeline = list(self._details.get("timeline") or [])
+        status = str(verification.get("status") or "").strip()
+        self.status_value.setText(self._status_text(status))
+        self.summary_label.setText(self._status_description(self._details))
+
+        verification_code = str(
+            primary_device.get("verification_code")
+            or verification.get("primary_verification_code")
+            or primary_device.get("verification_code_short")
+            or verification.get("primary_verification_code_short")
+            or tr("chat.security.review.empty_value", "Not available")
+        )
+        fingerprint = str(
+            primary_device.get("fingerprint")
+            or verification.get("primary_verification_fingerprint")
+            or primary_device.get("fingerprint_short")
+            or verification.get("primary_verification_fingerprint_short")
+            or tr("chat.security.review.empty_value", "Not available")
+        )
+        device_name = str(primary_device.get("device_name") or "").strip()
+        device_id = str(primary_device.get("device_id") or verification.get("primary_verification_device_id") or "").strip()
+        if device_name and device_id:
+            device_text = tr(
+                "chat.security.review.device_named",
+                "{name} ({device_id})",
+                name=device_name,
+                device_id=device_id,
+            )
+        else:
+            device_text = device_name or device_id or tr("chat.security.review.empty_value", "Not available")
+        self.code_value.setText(verification_code)
+        self.fingerprint_value.setText(fingerprint)
+        self.device_value.setText(device_text)
+
+        self._clear_timeline()
+        if timeline:
+            for item in timeline:
+                if not isinstance(item, dict):
+                    continue
+                label = str(item.get("label") or "").strip()
+                formatted_time = self._format_timeline_time(item.get("at"))
+                entry = BodyLabel(f"{label}  {formatted_time}".strip(), self.timeline_container)
+                entry.setWordWrap(True)
+                self.timeline_layout.addWidget(entry)
+        else:
+            empty_label = BodyLabel(
+                tr("chat.security.review.timeline_empty", "No local verification events have been recorded yet."),
+                self.timeline_container,
+            )
+            empty_label.setWordWrap(True)
+            self.timeline_layout.addWidget(empty_label)
+        self.timeline_layout.addStretch(1)
+
+        recommended_action = str(self._details.get("recommended_action") or "").strip()
+        self.trust_button.setVisible(recommended_action == "trust_peer_identity")
+
+    def changeEvent(self, event) -> None:
+        super().changeEvent(event)
+        if event.type() in {
+            QEvent.Type.PaletteChange,
+            QEvent.Type.ApplicationPaletteChange,
+            QEvent.Type.StyleChange,
+        }:
+            _apply_themed_dialog_surface(self, "IdentityReviewDialog")
+
+
 class IncomingCallDialog(MessageBoxBase):
     """Prompt the user to accept or reject one incoming call invite."""
 
@@ -237,6 +444,7 @@ class ChatInterface(QWidget):
         self._active_call_ring_sound: AppSound | None = None
         self._session_visibility_active = False
         self._current_session_active = False
+        self._chat_panel_session_signature: tuple | None = None
         self._oldest_loaded_timestamp: Optional[float] = None
         self._oldest_loaded_session_seq: Optional[int] = None
         self._has_more_history = True
@@ -320,6 +528,7 @@ class ChatInterface(QWidget):
         self.chat_panel.chat_history_requested.connect(self._on_chat_history_requested)
         self.chat_panel.chat_info_add_requested.connect(self._on_chat_info_add_requested)
         self.chat_panel.chat_info_search_requested.connect(self._on_chat_info_search_requested)
+        self.chat_panel.chat_info_identity_review_requested.connect(self._on_chat_info_identity_review_requested)
         self.chat_panel.chat_info_clear_requested.connect(self._on_chat_info_clear_requested)
         self.chat_panel.chat_info_leave_requested.connect(self._on_chat_info_leave_requested)
         self.chat_panel.chat_info_mute_toggled.connect(self._on_chat_info_mute_toggled)
@@ -557,6 +766,7 @@ class ChatInterface(QWidget):
             self._set_current_session_active(False)
             self.chat_panel.clear_messages()
             self.chat_panel.show_welcome()
+            self._chat_panel_session_signature = None
             return
 
         if not self._current_session_id:
@@ -593,13 +803,14 @@ class ChatInterface(QWidget):
                 self._set_current_session_active(False)
                 self.chat_panel.clear_messages()
                 self.chat_panel.show_welcome()
+                self._chat_panel_session_signature = None
                 return
-            self.chat_panel.set_session(current_session)
+            self._apply_current_session_to_chat_panel(current_session)
             return
 
         session = self._get_session(self._current_session_id)
         if session:
-            self.chat_panel.set_session(session)
+            self._apply_current_session_to_chat_panel(session)
     def _on_message_sent(self, data: dict) -> None:
         """Append sent message to the current conversation."""
         message = data.get("message")
@@ -774,6 +985,12 @@ class ChatInterface(QWidget):
     def load_sessions(self) -> None:
         """Load current sessions into the left panel."""
         sessions = list(self._chat_controller.get_sessions())
+        logger.info(
+            "[chat-nav] chat_interface.load_sessions count=%s current_session_id=%s session_ids=%s",
+            len(sessions),
+            self._current_session_id,
+            [str(getattr(session, "session_id", "") or "") for session in sessions[:8]],
+        )
         self.session_panel.load_sessions(sessions)
         self._schedule_initial_history_prefetch(sessions)
 
@@ -813,16 +1030,24 @@ class ChatInterface(QWidget):
     def _on_session_selected(self, session_id: str) -> None:
         """Handle user selecting a conversation."""
         if session_id == self._current_session_id:
+            logger.info("[chat-nav] chat_interface.session_selected_ignored session_id=%s reason=same_session", session_id)
             return
 
         generation = self._advance_session_focus_generation()
+        logger.info(
+            "[chat-nav] chat_interface.session_selected session_id=%s previous_session_id=%s generation=%s visibility_active=%s",
+            session_id,
+            self._current_session_id,
+            generation,
+            self._session_visibility_active,
+        )
         self._remember_current_session_view_state()
         self._remember_current_composer_draft()
 
         self._current_session_id = session_id
         session = self._get_session(session_id)
         if session:
-            self.chat_panel.set_session(session)
+            self._apply_current_session_to_chat_panel(session, force=True)
             self._set_session_draft_preview(session_id, [])
             self.chat_panel.clear_composer_draft()
             self.chat_panel.restore_composer_draft(self._composer_drafts.get(session_id, []))
@@ -830,6 +1055,7 @@ class ChatInterface(QWidget):
             self._current_session_id = None
             self._set_current_session_active(False)
             self.chat_panel.show_welcome()
+            self._chat_panel_session_signature = None
             return
 
         self.chat_panel.clear_messages()
@@ -1360,15 +1586,30 @@ class ChatInterface(QWidget):
         session_id = self._current_session_id
         if not session_id or not segments:
             return
+        logger.info(
+            "[send-diag] queue_segments session_id=%s segment_count=%s segment_types=%s",
+            session_id,
+            len(segments),
+            [str(segment.get("type") or "") for segment in segments],
+        )
         self._store_session_draft_segments(session_id, [])
         self._set_session_draft_preview(session_id, [])
         self._schedule_ui_task(self._send_segments_async(session_id, segments), f"send segments {session_id}")
 
     async def _send_segments_async(self, session_id: str, segments: list[dict]) -> None:
         """Send composed editor segments sequentially so mixed content keeps order."""
-        for segment in segments:
+        for index, segment in enumerate(segments):
             segment_type = segment.get("type")
             try:
+                logger.info(
+                    "[send-diag] send_segment session_id=%s index=%s type=%s has_content=%s has_file=%s extra_keys=%s",
+                    session_id,
+                    index,
+                    segment_type,
+                    bool(segment.get("content")),
+                    bool(segment.get("file_path")),
+                    sorted(list(dict(segment.get("extra") or {}).keys())),
+                )
                 if segment_type == MessageType.TEXT and segment.get("content"):
                     await self._chat_controller.send_message_to(
                         session_id=session_id,
@@ -1379,7 +1620,13 @@ class ChatInterface(QWidget):
                 elif segment_type in {MessageType.IMAGE, MessageType.VIDEO, MessageType.FILE} and segment.get("file_path"):
                     await self._chat_controller.send_file(segment["file_path"], session_id=session_id)
             except Exception as exc:
-                logger.error("Send composed segment error: %s", exc)
+                logger.error(
+                    "[send-diag] send_segment_failed session_id=%s index=%s type=%s error=%s",
+                    session_id,
+                    index,
+                    segment_type,
+                    exc,
+                )
 
     async def _send_image_message(self, session_id: str, file_path: str, generation: int) -> None:
         """Send an image using the optimistic media upload flow."""
@@ -1485,6 +1732,19 @@ class ChatInterface(QWidget):
             return
 
         active_call = self._chat_controller.get_active_call()
+        logger.info(
+            "[call-diag] start_call_requested session_id=%s media_type=%s session_type=%s supports_call=%s "
+            "voice_supported=%s video_supported=%s uses_e2ee=%s active_call_id=%s active_call_status=%s",
+            getattr(session, "session_id", ""),
+            media_type,
+            getattr(session, "session_type", ""),
+            session.supports_call() if hasattr(session, "supports_call") else None,
+            dict(session.call_capabilities() if hasattr(session, "call_capabilities") else {}).get("voice"),
+            dict(session.call_capabilities() if hasattr(session, "call_capabilities") else {}).get("video"),
+            session.uses_e2ee() if hasattr(session, "uses_e2ee") else None,
+            getattr(active_call, "call_id", None),
+            getattr(active_call, "status", None),
+        )
         if active_call is not None and active_call.session_id == session.session_id:
             await self._chat_controller.hangup_call(active_call.call_id)
             return
@@ -1492,6 +1752,12 @@ class ChatInterface(QWidget):
         try:
             await self._chat_controller.start_call(session, media_type)
         except AppError as exc:
+            logger.warning(
+                "[call-diag] start_call_failed session_id=%s media_type=%s error=%s",
+                getattr(session, "session_id", ""),
+                media_type,
+                exc,
+            )
             InfoBar.warning(
                 tr("chat.call.start_failed.title", "Call"),
                 str(exc),
@@ -2081,6 +2347,18 @@ class ChatInterface(QWidget):
             duration=1800,
         )
 
+    def _on_chat_info_identity_review_requested(self) -> None:
+        """Open one desktop identity-review dialog for the selected direct E2EE session."""
+        session = self._session_controller.get_current_session()
+        if session is None or session.is_ai_session or session.session_type != "direct":
+            return
+        if str(session.security_summary().get("encryption_mode") or "") != "e2ee_private":
+            return
+        self._schedule_ui_task(
+            self._open_identity_review_dialog(session.session_id),
+            f"open identity review dialog {session.session_id}",
+        )
+
     def _on_chat_info_clear_requested(self) -> None:
         """Keep the clear-history entry visible until durable sync-safe deletion is implemented."""
         InfoBar.info(
@@ -2108,6 +2386,53 @@ class ChatInterface(QWidget):
         dialog.show()
         dialog.raise_()
         dialog.activateWindow()
+
+    async def _open_identity_review_dialog(self, session_id: str) -> None:
+        """Load one direct-session identity snapshot and present it in a desktop dialog."""
+        session = self._get_session(session_id)
+        if session is None:
+            return
+        details = await self._chat_controller.get_session_identity_review_details(session_id)
+        dialog = IdentityReviewDialog(session.chat_title() or session.display_name(), parent=self.window())
+        dialog.apply_details(details)
+        dialog.trust_button.clicked.connect(
+            lambda _checked=False, sid=session_id, dlg=dialog: self._schedule_ui_task(
+                self._perform_identity_review_action(sid, "trust_peer_identity", dlg),
+                f"identity review action {sid}",
+            )
+        )
+        self._show_dialog(dialog)
+
+    async def _perform_identity_review_action(
+        self,
+        session_id: str,
+        action_id: str,
+        dialog: IdentityReviewDialog,
+    ) -> None:
+        """Execute one trust action from the identity-review dialog and refresh the snapshot."""
+        result = await self._chat_controller.execute_session_security_action(session_id, action_id)
+        if not bool(result.get("performed")):
+            explanation = dict(result.get("explanation") or {})
+            message = str(explanation.get("message") or result.get("reason") or "").strip()
+            if message:
+                InfoBar.warning(
+                    tr("chat.message.title", "Message"),
+                    message,
+                    parent=self.window(),
+                    duration=2400,
+                )
+            return
+
+        updated_details = await self._chat_controller.get_session_identity_review_details(session_id)
+        dialog.apply_details(updated_details)
+        if self._current_session_id == session_id:
+            self.chat_panel.refresh_chat_info_content()
+        InfoBar.success(
+            tr("chat.message.title", "Message"),
+            tr("chat.security.review.trust_success", "The peer identity is now trusted on this device."),
+            parent=self.window(),
+            duration=2000,
+        )
 
     def _on_chat_info_member_management_requested(self, payload: object) -> None:
         """Open the formal group-member management dialog from chat info entry points."""
@@ -2791,6 +3116,69 @@ class ChatInterface(QWidget):
         """Refresh session preview content from the latest local message."""
         await self._chat_controller.refresh_session_preview(session_id)
 
+    @staticmethod
+    def _session_member_signature(session) -> tuple[tuple[str, ...], ...]:
+        members_signature: list[tuple[str, ...]] = []
+        for raw_member in list(getattr(session, "extra", {}).get("members") or []):
+            member = dict(raw_member or {})
+            members_signature.append(
+                (
+                    str(member.get("id", "") or "").strip(),
+                    str(member.get("remark", "") or "").strip(),
+                    str(member.get("group_nickname", "") or "").strip(),
+                    str(member.get("nickname", "") or "").strip(),
+                    str(member.get("display_name", "") or "").strip(),
+                    str(member.get("username", "") or "").strip(),
+                    str(member.get("avatar", "") or "").strip(),
+                    str(member.get("gender", "") or "").strip(),
+                    str(member.get("role", "") or "").strip(),
+                )
+            )
+        return tuple(members_signature)
+
+    @staticmethod
+    def _stable_mapping_signature(payload: dict) -> str:
+        return json.dumps(payload or {}, ensure_ascii=True, sort_keys=True, default=str, separators=(",", ":"))
+
+    def _session_presentation_signature(self, session) -> tuple:
+        extra = dict(getattr(session, "extra", {}) or {})
+        return (
+            str(getattr(session, "session_id", "") or ""),
+            str(session.chat_title() or session.display_name() or ""),
+            str(session.display_avatar() or ""),
+            str(session.display_gender() or ""),
+            bool(getattr(session, "is_ai_session", False)),
+            bool(session.group_announcement_needs_view() if hasattr(session, "group_announcement_needs_view") else False),
+            str(session.group_announcement_message_id() if hasattr(session, "group_announcement_message_id") else ""),
+            str(session.group_announcement_text() if hasattr(session, "group_announcement_text") else ""),
+            str(extra.get("last_viewed_announcement_message_id", "") or ""),
+            str(session.encryption_mode() if hasattr(session, "encryption_mode") else ""),
+            self._stable_mapping_signature(session.session_crypto_state() if hasattr(session, "session_crypto_state") else {}),
+            self._stable_mapping_signature(session.call_capabilities() if hasattr(session, "call_capabilities") else {}),
+            bool(extra.get("show_member_nickname", True)),
+            self._session_member_signature(session),
+        )
+
+    def _apply_current_session_to_chat_panel(self, session, *, force: bool = False) -> None:
+        if session is None:
+            return
+        signature = self._session_presentation_signature(session)
+        if not force and signature == self._chat_panel_session_signature:
+            logger.info(
+                "[chat-nav] apply_session_to_chat_panel_skipped session_id=%s force=%s reason=signature_unchanged",
+                getattr(session, "session_id", ""),
+                force,
+            )
+            return
+        logger.info(
+            "[chat-nav] apply_session_to_chat_panel session_id=%s force=%s signature_changed=%s",
+            getattr(session, "session_id", ""),
+            force,
+            signature != self._chat_panel_session_signature,
+        )
+        self._chat_panel_session_signature = signature
+        self.chat_panel.set_session(session)
+
     def _get_session(self, session_id: str):
         """Find session object by ID."""
         return self._chat_controller.get_session(session_id)
@@ -2800,6 +3188,13 @@ class ChatInterface(QWidget):
         normalized = bool(active)
         if self._session_visibility_active == normalized:
             return
+        logger.info(
+            "[chat-nav] set_session_visibility_active old=%s new=%s current_session_id=%s current_session_active=%s",
+            self._session_visibility_active,
+            normalized,
+            self._current_session_id,
+            self._current_session_active,
+        )
         self._session_visibility_active = normalized
         self._set_current_session_active(normalized)
 
@@ -2815,10 +3210,22 @@ class ChatInterface(QWidget):
         if not active:
             is_active = False
         if self._current_session_active == is_active:
+            logger.info(
+                "[chat-nav] set_current_session_active_skipped requested=%s computed=%s current_session_id=%s",
+                active,
+                is_active,
+                self._current_session_id,
+            )
             return
 
         self._current_session_active = is_active
         current_session_id = str(self._current_session_id or "")
+        logger.info(
+            "[chat-nav] set_current_session_active requested=%s computed=%s current_session_id=%s",
+            active,
+            is_active,
+            current_session_id,
+        )
         self._schedule_ui_task(
             self._chat_controller.set_current_session_active(is_active, session_id=current_session_id),
             f"set current session active {is_active}",
@@ -2881,6 +3288,7 @@ class ChatInterface(QWidget):
         session = await self._chat_controller.ensure_session_loaded(
             session_id,
             fallback_name="Session",
+            allow_hidden=True,
         )
         if not self._is_session_focus_generation_current(open_generation):
             return False
@@ -2915,6 +3323,7 @@ class ChatInterface(QWidget):
             user_id,
             display_name=display_name,
             avatar=avatar,
+            allow_hidden=True,
         )
         if not self._is_session_focus_generation_current(open_generation):
             return False

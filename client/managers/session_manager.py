@@ -110,8 +110,13 @@ class SessionManager:
             session.extra.pop("last_message_id", None)
             session.extra.pop("last_message_type", None)
             session.extra.pop("last_message_sender_id", None)
+            session.extra.pop("last_message_sender_name", None)
             session.extra.pop("last_message_mentions_current_user", None)
             return
+
+        inferred_mode = self._infer_session_encryption_mode_from_message(session, message)
+        if inferred_mode:
+            session.extra["encryption_mode"] = inferred_mode
 
         preview = resolve_recall_notice(message) if message.status == MessageStatus.RECALLED else format_message_preview(
             message.content,
@@ -126,10 +131,55 @@ class SessionManager:
         session.extra["last_message_id"] = str(message.message_id or "")
         session.extra["last_message_type"] = message.message_type.value
         session.extra["last_message_sender_id"] = str(message.sender_id or "")
+        sender_name = (
+            str((message.extra or {}).get("sender_name", "") or "").strip()
+            or str((message.extra or {}).get("sender_nickname", "") or "").strip()
+            or str((message.extra or {}).get("sender_username", "") or "").strip()
+        )
+        if not sender_name:
+            sender_id = str(message.sender_id or "").strip()
+            if sender_id and session.session_type == "group":
+                for raw_member in list(session.extra.get("members") or []):
+                    member = dict(raw_member or {})
+                    if str(member.get("id", "") or "").strip() != sender_id:
+                        continue
+                    sender_name = self._member_display_name(member)
+                    break
+        if sender_name:
+            session.extra["last_message_sender_name"] = sender_name
+        else:
+            session.extra.pop("last_message_sender_name", None)
         mentions_current_user = self._message_mentions_current_user(message, current_user_id)
         if self._current_session_active and self._current_session_id == session.session_id:
             mentions_current_user = False
         session.extra["last_message_mentions_current_user"] = mentions_current_user
+        if session.session_type == "group" and not bool(session.is_ai_session):
+            sender_id = str(message.sender_id or "").strip()
+            logger.info(
+                "[preview-diag] preview_sender_resolved session_id=%s message_id=%s sender_id=%s sender_name=%s "
+                "resolved_from_member=%s member_count=%s preview=%s",
+                session.session_id,
+                message.message_id,
+                sender_id,
+                str(session.extra.get("last_message_sender_name", "") or ""),
+                bool(sender_name and sender_name != sender_id),
+                len(list(session.extra.get("members") or [])),
+                session.last_message,
+            )
+
+    def _preview_signature(self, session: Session) -> tuple:
+        """Return one compact signature for de-duplicating repeated preview writes."""
+        extra = dict(session.extra or {})
+        return (
+            str(session.last_message or ""),
+            self._session_timestamp_value(session.last_message_time),
+            str(extra.get("last_message_id", "") or ""),
+            str(extra.get("last_message_type", "") or ""),
+            str(extra.get("last_message_sender_id", "") or ""),
+            str(extra.get("last_message_sender_name", "") or ""),
+            bool(extra.get("last_message_mentions_current_user", False)),
+            str(extra.get("encryption_mode", "") or ""),
+        )
 
     @property
     def sessions(self) -> list[Session]:
@@ -512,6 +562,22 @@ class SessionManager:
                 group_summary=group_summary,
                 peer_identity_summary=peer_identity_summary,
             )
+            if session.encryption_mode():
+                crypto_state = dict(session.extra.get("session_crypto_state") or {})
+                logger.info(
+                    "[e2ee-diag] annotate_session_crypto session_id=%s session_type=%s mode=%s ready=%s "
+                    "device_registered=%s identity_status=%s decryption_state=%s group_member_version=%s "
+                    "inbound_sender_key_count=%s",
+                    session.session_id,
+                    session.session_type,
+                    session.encryption_mode(),
+                    crypto_state.get("ready"),
+                    crypto_state.get("device_registered"),
+                    crypto_state.get("identity_status"),
+                    crypto_state.get("decryption_state"),
+                    crypto_state.get("group_member_version"),
+                    crypto_state.get("inbound_sender_key_count"),
+                )
         await self._annotate_session_call_state(sessions)
 
     @staticmethod
@@ -526,6 +592,30 @@ class SessionManager:
             if normalized_participant_id and normalized_participant_id not in member_ids:
                 member_ids.append(normalized_participant_id)
         return member_ids
+
+    @classmethod
+    def _infer_session_encryption_mode_from_message(cls, session: Session, message: ChatMessage) -> str:
+        """Infer one session encryption mode from message envelopes when session metadata lags."""
+        if session.is_ai_session:
+            return ""
+        extra = dict(message.extra or {})
+        declared_mode = str(extra.get("session_encryption_mode") or "").strip().lower()
+        if declared_mode in {
+            cls.ENCRYPTION_MODE_E2EE_PRIVATE,
+            cls.ENCRYPTION_MODE_E2EE_GROUP,
+            cls.ENCRYPTION_MODE_PLAIN,
+            cls.ENCRYPTION_MODE_SERVER_VISIBLE_AI,
+        }:
+            return declared_mode
+        has_text_encryption = bool(dict(extra.get("encryption") or {}).get("enabled"))
+        has_attachment_encryption = bool(dict(extra.get("attachment_encryption") or {}).get("enabled"))
+        if not (has_text_encryption or has_attachment_encryption):
+            return ""
+        if session.session_type == "direct":
+            return cls.ENCRYPTION_MODE_E2EE_PRIVATE
+        if session.session_type == "group":
+            return cls.ENCRYPTION_MODE_E2EE_GROUP
+        return ""
 
     async def _reconcile_group_sender_key_state(self, session: Session) -> dict[str, Any] | None:
         if session.session_type != "group" or bool(session.is_ai_session):
@@ -620,24 +710,30 @@ class SessionManager:
 
         changed_sessions: list[Session] = []
         for session_id in session_ids:
-            last_message = await db.get_last_message(session_id)
+            cached_messages = await self._msg_manager.get_cached_messages(session_id, limit=1)
+            last_message = cached_messages[0] if cached_messages else None
             async with self._lock:
                 session = self._sessions.get(session_id)
                 if session is None:
                     continue
 
                 previous_preview = str(session.last_message or "")
+                previous_time = self._session_timestamp_value(session.last_message_time)
                 previous_sender_id = str(session.extra.get("last_message_sender_id", "") or "")
                 previous_type = str(session.extra.get("last_message_type", "") or "")
                 previous_mentions = bool(session.extra.get("last_message_mentions_current_user", False))
+                previous_unread = int(session.unread_count or 0)
 
                 self._apply_last_message_preview(session, last_message, current_user_id=current_user_id)
+                await self._apply_local_history_cutoff_presentation(session)
 
                 if (
                     previous_preview != str(session.last_message or "")
+                    or previous_time != self._session_timestamp_value(session.last_message_time)
                     or previous_sender_id != str(session.extra.get("last_message_sender_id", "") or "")
                     or previous_type != str(session.extra.get("last_message_type", "") or "")
                     or previous_mentions != bool(session.extra.get("last_message_mentions_current_user", False))
+                    or previous_unread != int(session.unread_count or 0)
                 ):
                     changed_sessions.append(session)
 
@@ -677,6 +773,9 @@ class SessionManager:
             return
 
         await self._subscribe(MessageEvent.RECEIVED, self._on_message_received)
+        await self._subscribe(MessageEvent.SENT, self._on_message_sent)
+        await self._subscribe(MessageEvent.SECURITY_PENDING, self._on_message_sent)
+        await self._subscribe(MessageEvent.ACK, self._on_message_sent)
         await self._subscribe(MessageEvent.SYNC_COMPLETED, self._on_history_synced)
         await self._subscribe(MessageEvent.EDITED, self._on_message_mutated)
         await self._subscribe(MessageEvent.RECALLED, self._on_message_mutated)
@@ -787,6 +886,54 @@ class SessionManager:
             return float(value)
         except (TypeError, ValueError):
             return 0.0
+
+    async def _session_history_cutoff(self, session_id: str) -> float | None:
+        """Load one local history cutoff from MessageManager when available."""
+        getter = getattr(self._msg_manager, "get_session_history_cutoff", None)
+        if getter is None:
+            return None
+        try:
+            return await getter(session_id)
+        except Exception as exc:
+            logger.debug("Load session history cutoff failed for %s: %s", session_id, exc)
+            return None
+
+    async def _apply_local_history_cutoff_presentation(self, session: Session) -> None:
+        """Make one reopened hidden session look like a fresh local conversation until new activity arrives."""
+        cutoff = await self._session_history_cutoff(session.session_id)
+        if cutoff is None:
+            session.extra.pop("history_restart_at", None)
+            session.extra.pop("history_restart_pending", None)
+            return
+
+        session.extra["history_restart_at"] = float(cutoff)
+        if self._session_activity_timestamp(session) > cutoff:
+            session.extra.pop("history_restart_pending", None)
+            return
+
+        restart_at = datetime.fromtimestamp(float(cutoff))
+        if session.created_at is not None and restart_at < session.created_at:
+            restart_at = session.created_at
+
+        session.last_message = ""
+        session.last_message_time = restart_at
+        if session.updated_at is None or session.updated_at < restart_at:
+            session.updated_at = restart_at
+        session.unread_count = 0
+        session.extra["history_restart_pending"] = True
+        session.extra.pop("last_message_id", None)
+        session.extra.pop("last_message_type", None)
+        session.extra.pop("last_message_status", None)
+        session.extra.pop("last_message_sender_id", None)
+        session.extra.pop("last_message_sender_name", None)
+        session.extra.pop("last_message_mentions_current_user", None)
+
+        logger.info(
+            "[preview-diag] local_history_restart session_id=%s cutoff=%s authoritative_activity=%s",
+            session.session_id,
+            float(cutoff),
+            self._session_activity_timestamp(session),
+        )
 
     def _session_activity_timestamp(self, session: Session) -> float:
         """Return the best available activity timestamp for one session."""
@@ -911,6 +1058,7 @@ class SessionManager:
             )
 
         counterpart_name = str(data.get("counterpart_name", "") or "").strip()
+        counterpart_username = str(data.get("counterpart_username", "") or "").strip()
         if session_type == "direct" and not data.get("is_ai_session"):
             if counterpart_name:
                 data["name"] = counterpart_name
@@ -918,10 +1066,7 @@ class SessionManager:
                 fallback_counterpart_name = self._resolve_counterpart_name(
                     data.get("members") or [],
                     current_user_id,
-                ) or self._resolve_counterpart_id(
-                    data.get("participant_ids") or [],
-                    current_user_id,
-                )
+                ) or counterpart_username or self._resolve_counterpart_id(data.get("participant_ids") or [], current_user_id)
                 if fallback_counterpart_name:
                     data["name"] = fallback_counterpart_name
 
@@ -976,13 +1121,33 @@ class SessionManager:
             session_type=session.session_type,
             is_ai_session=bool(session.is_ai_session),
         )
+        await self._apply_local_history_cutoff_presentation(session)
+        if session.session_type == "group" and not bool(session.is_ai_session):
+            logger.info(
+                "[preview-diag] normalize_session_payload session_id=%s server_name=%s member_count=%s members=%s",
+                session.session_id,
+                session.extra.get("server_name"),
+                len(list(session.extra.get("members") or [])),
+                [
+                    {
+                        "id": str((member or {}).get("id") or ""),
+                        "nickname": str((member or {}).get("nickname") or ""),
+                        "group_nickname": str((member or {}).get("group_nickname") or ""),
+                        "display_name": str((member or {}).get("display_name") or ""),
+                        "username": str((member or {}).get("username") or ""),
+                    }
+                    for member in list(session.extra.get("members") or [])[:5]
+                    if isinstance(member, dict)
+                ],
+            )
         if session_type == "direct":
             counterpart_id = str(data.get("counterpart_id", "") or "").strip()
-            counterpart_username = str(data.get("counterpart_username", "") or "").strip()
             counterpart_avatar = str(data.get("counterpart_avatar", "") or "").strip()
             counterpart_gender = str(data.get("counterpart_gender", "") or "").strip()
             if counterpart_id:
                 session.extra["counterpart_id"] = counterpart_id
+            if counterpart_name:
+                session.extra["counterpart_name"] = counterpart_name
             if counterpart_username:
                 session.extra["counterpart_username"] = counterpart_username
             if counterpart_avatar:
@@ -1039,6 +1204,32 @@ class SessionManager:
         if existing is not None and self._is_authoritative_session(existing) and not self._is_authoritative_session(session):
             return existing
         return await self._cache_session(session)
+
+    async def _remember_explicitly_requested_session(
+        self,
+        session: Session,
+        *,
+        allow_hidden: bool = False,
+    ) -> Optional[Session]:
+        """Remember one user-requested session, optionally restoring a locally hidden tombstone."""
+        remembered = await self._remember_session(session)
+        if remembered is not None or not allow_hidden:
+            return remembered
+
+        owner_user_id = self._capture_runtime_user_id()
+        hidden_removed = False
+        async with self._lock:
+            if self._hidden_sessions.pop(session.session_id, None) is not None:
+                hidden_removed = True
+
+        if not hidden_removed:
+            return None
+
+        self._ensure_runtime_user_id(owner_user_id)
+        await self._save_hidden_sessions(owner_user_id=owner_user_id)
+        logger.info("Restoring hidden session from explicit user open: %s", session.session_id)
+        self._ensure_runtime_user_id(owner_user_id)
+        return await self._remember_session(session)
 
     async def _build_fallback_session(self, message: ChatMessage) -> Optional[Session]:
         """Build one session snapshot only from authoritative message metadata."""
@@ -1098,6 +1289,7 @@ class SessionManager:
             sender_is_counterpart = bool(message.sender_id and message.sender_id != current_user_id)
             display_name = (
                 counterpart_name
+                or counterpart_username
                 or (sender_name if sender_is_counterpart else "")
                 or counterpart_id
                 or session_name
@@ -1128,6 +1320,9 @@ class SessionManager:
             session_type=session.session_type,
             is_ai_session=bool(session.is_ai_session),
         )
+        inferred_fallback_mode = self._infer_session_encryption_mode_from_message(session, message)
+        if inferred_fallback_mode:
+            session.extra["encryption_mode"] = inferred_fallback_mode
         session.extra["session_crypto_state"] = dict(message.extra.get("session_crypto_state") or {})
         session.extra["call_capabilities"] = self._normalize_call_capabilities(
             message.extra.get("session_call_capabilities"),
@@ -1225,6 +1420,7 @@ class SessionManager:
 
         contacts_by_id = await self._load_contact_cache_map(user_ids)
         for session in sessions:
+            raw_members = [dict(item or {}) for item in list(session.extra.get("members") or []) if isinstance(item, dict)]
             members = []
             for raw_member in list(session.extra.get("members") or []):
                 member = dict(raw_member or {})
@@ -1247,6 +1443,30 @@ class SessionManager:
                     len(members),
                     int(session.extra.get("member_count", 0) or 0),
                 )
+                logger.info(
+                    "[preview-diag] decorate_session_members session_id=%s contact_hits=%s raw_members=%s decorated_members=%s",
+                    session.session_id,
+                    sum(1 for member in raw_members if contacts_by_id.get(str(member.get("id", "") or "").strip())),
+                    [
+                        {
+                            "id": str(member.get("id", "") or ""),
+                            "nickname": str(member.get("nickname", "") or ""),
+                            "group_nickname": str(member.get("group_nickname", "") or ""),
+                            "display_name": str(member.get("display_name", "") or ""),
+                        }
+                        for member in raw_members[:5]
+                    ],
+                    [
+                        {
+                            "id": str(member.get("id", "") or ""),
+                            "remark": str(member.get("remark", "") or ""),
+                            "nickname": str(member.get("nickname", "") or ""),
+                            "group_nickname": str(member.get("group_nickname", "") or ""),
+                            "display_name": str(member.get("display_name", "") or ""),
+                        }
+                        for member in members[:5]
+                    ],
+                )
 
     def _normalize_session_display(self, session: Session, current_user: dict[str, Any]) -> None:
         """Normalize direct-session display fields to the counterpart profile."""
@@ -1260,6 +1480,16 @@ class SessionManager:
                 len(list(session.extra.get("members") or [])),
                 int(session.extra.get("member_count", 0) or 0),
             )
+            sender_id = str(session.extra.get("last_message_sender_id", "") or "").strip()
+            if sender_id:
+                current_user_id = str(current_user.get("id", "") or "")
+                sender_name = ""
+                for member in list(session.extra.get("members") or []):
+                    if str((member or {}).get("id", "") or "").strip() == sender_id:
+                        sender_name = self._member_display_name(member)
+                        break
+                if sender_name and (not current_user_id or sender_id != current_user_id):
+                    session.extra["last_message_sender_name"] = sender_name
             return
 
         counterpart = self._resolve_counterpart_profile(
@@ -1267,11 +1497,17 @@ class SessionManager:
             session.participant_ids,
             current_user,
         )
-        counterpart_name = str(counterpart.get("display_name", "") or "")
+        counterpart_name = str(counterpart.get("display_name", "") or session.extra.get("counterpart_name", "") or "")
         counterpart_id = str(counterpart.get("id", "") or session.extra.get("counterpart_id", "") or "")
         counterpart_username = str(counterpart.get("username", "") or session.extra.get("counterpart_username", "") or "")
         counterpart_avatar = str(counterpart.get("avatar", "") or session.extra.get("counterpart_avatar", "") or "")
         counterpart_gender = str(counterpart.get("gender", "") or session.extra.get("counterpart_gender", "") or "")
+
+        # Keep a human-readable title when member snapshots are temporarily empty.
+        if counterpart_name and counterpart_id and counterpart_name == counterpart_id and counterpart_username:
+            counterpart_name = counterpart_username
+        if not counterpart_name and counterpart_username:
+            counterpart_name = counterpart_username
 
         if counterpart_name:
             session.name = counterpart_name
@@ -1281,11 +1517,13 @@ class SessionManager:
         current_nickname = str(current_user.get("nickname", "") or "")
         private_chat_label = tr("session.private_chat", "Private Chat")
         self_names = {value for value in {current_user_id, current_username, current_nickname, private_chat_label} if value}
-        if (not session.name or session.name in self_names) and counterpart_id:
-            session.name = counterpart_id
+        if not session.name or session.name in self_names:
+            session.name = counterpart_name or counterpart_username or counterpart_id
 
         if counterpart_id:
             session.extra["counterpart_id"] = counterpart_id
+        if counterpart_name:
+            session.extra["counterpart_name"] = counterpart_name
         if counterpart_username:
             session.extra["counterpart_username"] = counterpart_username
         if counterpart_avatar:
@@ -1371,6 +1609,17 @@ class SessionManager:
             and self._current_session_id == message.session_id
         ):
             await self.increment_unread(message.session_id)
+
+    async def _on_message_sent(self, data: dict) -> None:
+        """Project local outbound/ack payloads into session previews immediately."""
+        message = data.get("message")
+        if not isinstance(message, ChatMessage):
+            return
+        await self._ensure_session_exists(message)
+        await self.add_message_to_session(
+            session_id=message.session_id,
+            message=message,
+        )
 
     async def _on_history_synced(self, data: dict) -> None:
         """Apply a synced message batch without re-emitting per-message updates."""
@@ -1736,6 +1985,7 @@ class SessionManager:
         async with self._lock:
             self._sessions.clear()
             for session in sessions:
+                await self._apply_local_history_cutoff_presentation(session)
                 self._normalize_session_display(session, current_user)
                 if not self._is_session_visible(session, current_user):
                     continue
@@ -1948,19 +2198,35 @@ class SessionManager:
         checked_at = str(verification.get("checked_at") or "").strip()
         if first_seen_at:
             timeline.append(
-                {"kind": "first_seen", "at": first_seen_at, "label": "First observed on this device"}
+                {
+                    "kind": "first_seen",
+                    "at": first_seen_at,
+                    "label": tr("chat.security.timeline.first_seen", "First observed on this device"),
+                }
             )
         if last_changed_at:
             timeline.append(
-                {"kind": "identity_changed", "at": last_changed_at, "label": "Peer identity changed"}
+                {
+                    "kind": "identity_changed",
+                    "at": last_changed_at,
+                    "label": tr("chat.security.timeline.identity_changed", "Peer identity changed"),
+                }
             )
         if last_trusted_at:
             timeline.append(
-                {"kind": "trusted", "at": last_trusted_at, "label": "Peer identity trusted locally"}
+                {
+                    "kind": "trusted",
+                    "at": last_trusted_at,
+                    "label": tr("chat.security.timeline.trusted", "Peer identity trusted locally"),
+                }
             )
         if checked_at:
             timeline.append(
-                {"kind": "last_checked", "at": checked_at, "label": "Latest identity check"}
+                {
+                    "kind": "last_checked",
+                    "at": checked_at,
+                    "label": tr("chat.security.timeline.last_checked", "Latest identity check"),
+                }
             )
         return timeline
 
@@ -2054,7 +2320,10 @@ class SessionManager:
                 "reason": "action_not_available",
                 "explanation": {
                     "code": "action_not_available",
-                    "message": "The requested security action is not currently available for this session.",
+                    "message": tr(
+                        "chat.security.action.error.not_available",
+                        "The requested security action is not currently available for this session.",
+                    ),
                     "available_action_ids": sorted(allowed_action_ids),
                     "headline": str(security_summary.get("headline") or ""),
                 },
@@ -2074,7 +2343,10 @@ class SessionManager:
                 "target_device_id": str(crypto_state.get("target_device_id") or ""),
                 "explanation": {
                     "code": "switch_device_required",
-                    "message": "This encrypted content is addressed to a different device and cannot be recovered on the current device.",
+                    "message": tr(
+                        "chat.security.action.error.switch_device_required",
+                        "This encrypted content is addressed to a different device and cannot be recovered on the current device.",
+                    ),
                 },
                 "external_requirement": {
                     "kind": "switch_device",
@@ -2090,7 +2362,10 @@ class SessionManager:
                 "reason": "unsupported_action",
                 "explanation": {
                     "code": "unsupported_action",
-                    "message": "The requested security action is not supported by this client.",
+                    "message": tr(
+                        "chat.security.action.error.unsupported",
+                        "The requested security action is not supported by this client.",
+                    ),
                 },
             }
 
@@ -2270,7 +2545,10 @@ class SessionManager:
             session = self._sessions.pop(session_id, None)
 
         self._ensure_runtime_user_id(owner_user_id)
-        hidden_at = self._session_activity_timestamp(session) if session is not None else time.time()
+        hidden_at = max(
+            self._session_activity_timestamp(session) if session is not None else 0.0,
+            time.time(),
+        )
         await self._hide_session(session_id, hidden_at=hidden_at)
 
         fetch_task = self._session_fetch_tasks.pop(session_id, None)
@@ -2286,7 +2564,7 @@ class SessionManager:
                 await conn_manager.remove_session_sync_state(session_id)
 
             self._ensure_runtime_user_id(owner_user_id)
-            await self._msg_manager.remove_session_local_state(session_id)
+            await self._msg_manager.remove_session_local_state(session_id, history_cutoff=hidden_at)
             self._ensure_runtime_user_id(owner_user_id)
             await self._require_e2ee_service().remove_session_local_state(session_id)
 
@@ -2454,6 +2732,7 @@ class SessionManager:
         *,
         fallback_name: str = "Session",
         avatar: str = "",
+        allow_hidden: bool = False,
     ) -> Optional[Session]:
         """Fetch a session from the backend and cache it locally when needed."""
         existing = self._sessions.get(session_id)
@@ -2474,7 +2753,10 @@ class SessionManager:
                 )
                 if session is None:
                     return None
-                return await self._remember_session(session)
+                return await self._remember_explicitly_requested_session(
+                    session,
+                    allow_hidden=allow_hidden,
+                )
 
             fetch_task = asyncio.create_task(_load())
             self._session_fetch_tasks[session_id] = fetch_task
@@ -2492,6 +2774,7 @@ class SessionManager:
         *,
         display_name: str = "",
         avatar: str = "",
+        allow_hidden: bool = False,
     ) -> Optional[Session]:
         """Return an existing direct session or create one via the backend."""
         existing = self.find_direct_session(user_id)
@@ -2512,7 +2795,10 @@ class SessionManager:
                 )
                 if session is None:
                     return None
-                return await self._remember_session(session)
+                return await self._remember_explicitly_requested_session(
+                    session,
+                    allow_hidden=allow_hidden,
+                )
 
             fetch_task = asyncio.create_task(_load())
             self._direct_session_fetch_tasks[user_id] = fetch_task
@@ -2533,10 +2819,12 @@ class SessionManager:
         if not db.is_connected:
             return
 
-        last_message = await db.get_last_message(session_id)
-        preview_time = last_message.timestamp if last_message else (session.last_message_time or session.created_at)
+        cached_messages = await self._msg_manager.get_cached_messages(session_id, limit=1)
+        last_message = cached_messages[0] if cached_messages else None
         current_user_id = await self._get_current_user_id()
         self._apply_last_message_preview(session, last_message, current_user_id=current_user_id)
+        await self._apply_local_history_cutoff_presentation(session)
+        preview_time = session.last_message_time or session.created_at
 
         await self.update_session(
             session_id,
@@ -2556,7 +2844,7 @@ class SessionManager:
         self._current_session_id = session_id
 
         async with self._lock:
-            if self._current_session_active and bool(selected_session.extra.get("last_message_mentions_current_user", False)):
+            if bool(selected_session.extra.get("last_message_mentions_current_user", False)):
                 selected_session.extra["last_message_mentions_current_user"] = False
                 db = get_database()
                 if db.is_connected:
@@ -2616,24 +2904,35 @@ class SessionManager:
     ) -> None:
         """Add a message to session's last message."""
         current_user_id = await self._get_current_user_id()
+        changed = False
         async with self._lock:
             session = self._sessions.get(session_id)
 
             if session:
+                previous_signature = self._preview_signature(session)
                 self._apply_last_message_preview(session, message, current_user_id=current_user_id)
+                changed = self._preview_signature(session) != previous_signature
 
-                db = get_database()
-                if db.is_connected:
-                    await db.save_session(session)
+                if changed:
+                    db = get_database()
+                    if db.is_connected:
+                        await db.save_session(session)
 
+        if not session:
+            await self._event_bus.emit(SessionEvent.MESSAGE_ADDED, {
+                "session_id": session_id,
+                "message": message,
+            })
+            return
+        if not changed:
+            return
         await self._event_bus.emit(SessionEvent.MESSAGE_ADDED, {
             "session_id": session_id,
             "message": message,
         })
-        if session:
-            await self._event_bus.emit(SessionEvent.UPDATED, {
-                "session": session,
-            })
+        await self._event_bus.emit(SessionEvent.UPDATED, {
+            "session": session,
+        })
 
     async def increment_unread(self, session_id: str) -> None:
         """Increment unread count for a session."""

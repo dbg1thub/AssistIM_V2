@@ -99,3 +99,38 @@ def test_websocket_worker_loop_refuses_to_replace_stuck_thread() -> None:
 
     with pytest.raises(RuntimeError, match="did not stop cleanly"):
         client._ensure_worker_loop()
+
+
+def test_websocket_unexpected_disconnect_resets_state_before_reconnect() -> None:
+    disconnected_events: list[str] = []
+    reconnect_started = asyncio.Event()
+    allow_reconnect_exit = asyncio.Event()
+    cleanup_called = False
+
+    client = _client_without_init(_state=ConnectionState.CONNECTED)
+    client._on_disconnect = lambda: disconnected_events.append("disconnected")
+
+    async def fake_cleanup() -> None:
+        nonlocal cleanup_called
+        cleanup_called = True
+
+    async def fake_connect_loop() -> None:
+        reconnect_started.set()
+        await allow_reconnect_exit.wait()
+
+    client._cleanup = fake_cleanup
+    client._connect_loop = fake_connect_loop
+
+    async def scenario() -> None:
+        await client._handle_disconnect()
+        await asyncio.sleep(0)
+        assert cleanup_called is True
+        assert disconnected_events == ["disconnected"]
+        assert client.state == ConnectionState.RECONNECTING
+        assert reconnect_started.is_set() is True
+
+        allow_reconnect_exit.set()
+        if client._connect_task is not None:
+            await client._connect_task
+
+    asyncio.run(scenario())

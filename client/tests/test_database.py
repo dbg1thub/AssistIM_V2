@@ -410,6 +410,93 @@ def test_database_replace_sessions_prunes_messages_and_read_cursors_outside_snap
         except PermissionError:
             pass
         shutil.rmtree(temp_root, ignore_errors=True)
+
+
+def test_database_replace_sessions_uses_savepoint_inside_existing_transaction() -> None:
+    class FakeConnection:
+        def __init__(self) -> None:
+            self.in_transaction = True
+            self.executed: list[tuple[str, tuple[object, ...]]] = []
+            self.commit_calls = 0
+            self.rollback_calls = 0
+
+        async def execute(self, sql: str, parameters=()):
+            normalized_parameters = tuple(parameters) if isinstance(parameters, (list, tuple)) else (parameters,)
+            self.executed.append((sql, normalized_parameters))
+            return None
+
+        async def commit(self) -> None:
+            self.commit_calls += 1
+
+        async def rollback(self) -> None:
+            self.rollback_calls += 1
+
+    async def scenario() -> None:
+        database = Database()
+        connection = FakeConnection()
+        database._db = connection
+
+        session = Session(
+            session_id="session-1",
+            name="One",
+            created_at=datetime.now(),
+            updated_at=datetime.now(),
+        )
+        await database.replace_sessions([session])
+
+        executed_sql = [sql for sql, _params in connection.executed]
+        assert executed_sql[0].startswith("SAVEPOINT replace_sessions_")
+        assert any(sql.startswith("RELEASE SAVEPOINT replace_sessions_") for sql in executed_sql)
+        assert "BEGIN" not in executed_sql
+        assert connection.commit_calls == 0
+        assert connection.rollback_calls == 0
+
+    asyncio.run(scenario())
+
+
+def test_database_replace_sessions_rolls_back_started_transaction_with_connection_rollback() -> None:
+    class FakeConnection:
+        def __init__(self) -> None:
+            self.in_transaction = False
+            self.executed: list[str] = []
+            self.commit_calls = 0
+            self.rollback_calls = 0
+
+        async def execute(self, sql: str, parameters=()):
+            self.executed.append(sql)
+            if sql == "BEGIN":
+                self.in_transaction = True
+                return None
+            if sql == "DELETE FROM messages":
+                raise RuntimeError("boom")
+            return None
+
+        async def commit(self) -> None:
+            self.commit_calls += 1
+
+        async def rollback(self) -> None:
+            self.rollback_calls += 1
+            self.in_transaction = False
+
+    async def scenario() -> None:
+        database = Database()
+        connection = FakeConnection()
+        database._db = connection
+
+        try:
+            await database.replace_sessions([])
+        except RuntimeError as exc:
+            assert str(exc) == "boom"
+        else:
+            raise AssertionError("replace_sessions should re-raise write failures")
+
+        assert connection.executed == ["BEGIN", "DELETE FROM messages"]
+        assert connection.commit_calls == 0
+        assert connection.rollback_calls == 1
+
+    asyncio.run(scenario())
+
+
 def test_database_connect_upgrades_local_search_cache_columns() -> None:
     temp_root = (Path.cwd() / "client/tests/.pytest_tmp").resolve()
     temp_root.mkdir(parents=True, exist_ok=True)

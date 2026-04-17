@@ -170,6 +170,25 @@ def test_e2ee_device_model_matches_varchar_user_id_runtime_schema() -> None:
 
     user_id_column = UserDevice.__table__.c.user_id
     assert user_id_column.type.length == 36
+
+
+def test_user_session_event_model_matches_varchar_runtime_schema() -> None:
+    from sqlalchemy import String
+
+    from app.models.session import UserSessionEvent
+
+    session_id_column = UserSessionEvent.__table__.c.session_id
+    user_id_column = UserSessionEvent.__table__.c.user_id
+    actor_user_id_column = UserSessionEvent.__table__.c.actor_user_id
+
+    assert isinstance(session_id_column.type, String)
+    assert isinstance(user_id_column.type, String)
+    assert isinstance(actor_user_id_column.type, String)
+    assert session_id_column.type.length == 36
+    assert user_id_column.type.length == 36
+    assert actor_user_id_column.type.length == 36
+
+
 def test_configure_database_rebinds_engine_and_session_factory() -> None:
     baseline_engine = get_engine()
     custom_db_path = Path("server/.testdata/runtime-boundary.db")

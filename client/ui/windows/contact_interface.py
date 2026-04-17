@@ -1566,11 +1566,15 @@ class ContactInterface(QWidget):
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
+        self.ensure_initial_load()
+
+    def ensure_initial_load(self) -> None:
+        """Kick off the first contact snapshot load once per runtime."""
         if self._initial_load_done:
             return
         self._initial_load_done = True
-        logger.info("Contact interface first show; scheduling initial reload")
-        QTimer.singleShot(80, self.reload_data)
+        logger.info("Contact interface first load requested")
+        QTimer.singleShot(0, self.reload_data)
 
     def _setup_ui(self) -> None:
         splitter = QSplitter(Qt.Orientation.Horizontal, self)

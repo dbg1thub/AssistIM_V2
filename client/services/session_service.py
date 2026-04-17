@@ -49,6 +49,7 @@ class SessionService:
             "/sessions/direct",
             json={
                 "participant_ids": [user_id],
+                "encryption_mode": "e2ee_private",
             },
         )
         return dict(payload or {})

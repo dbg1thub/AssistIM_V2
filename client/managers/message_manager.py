@@ -242,6 +242,8 @@ class MessageManager:
         - Emit events to UI via EventBus
     """
 
+    HISTORY_CUTOFFS_STATE_KEY = "chat.session_history_cutoffs"
+
     def __init__(self):
         self._event_bus = get_event_bus()
         self._conn_manager = get_connection_manager()
@@ -266,6 +268,8 @@ class MessageManager:
         self._running = False
         self._initialized = False
         self._pending_sync_completion: Optional[dict[str, Any]] = None
+        self._session_history_cutoffs: dict[str, float] = {}
+        self._history_cutoffs_loaded = False
 
         self._user_id: str = ""
         self._ack_timeout = 10.0
@@ -552,6 +556,13 @@ class MessageManager:
         error_data = data.get("data", {}) if isinstance(data.get("data"), dict) else {}
         msg_id = str(error_data.get("msg_id") or data.get("msg_id", "") or "")
         reason = str(error_data.get("message") or error_data.get("reason") or "WebSocket command failed")
+        logger.warning(
+            "[send-diag] websocket_error msg_id=%s code=%s reason=%s raw_type=%s",
+            msg_id,
+            error_data.get("code"),
+            reason,
+            data.get("type"),
+        )
         if not msg_id:
             logger.warning("WebSocket error without msg_id: %s", reason)
             return
@@ -684,6 +695,23 @@ class MessageManager:
             return 0
 
     @staticmethod
+    def _message_timestamp_value(value: Any) -> float:
+        """Normalize message timestamp-like values into epoch seconds."""
+        if value is None:
+            return 0.0
+        if isinstance(value, datetime):
+            return value.timestamp()
+        if hasattr(value, "timestamp"):
+            try:
+                return float(value.timestamp())
+            except (TypeError, ValueError):
+                return 0.0
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return 0.0
+
+    @staticmethod
     def _normalize_read_user_ids(value: Any) -> list[str]:
         """Normalize reader id payloads into a stable unique list."""
         if not isinstance(value, (list, tuple, set)):
@@ -732,6 +760,80 @@ class MessageManager:
         except Exception:
             user_id = ""
         return {"id": user_id} if user_id else {}
+
+    async def _ensure_history_cutoffs_loaded(self) -> None:
+        """Load locally deleted-session history cutoffs once per process."""
+        if self._history_cutoffs_loaded or not self._db.is_connected:
+            self._history_cutoffs_loaded = True
+            return
+        if not hasattr(self._db, "get_app_state"):
+            self._history_cutoffs_loaded = True
+            return
+
+        try:
+            raw_value = await self._db.get_app_state(self.HISTORY_CUTOFFS_STATE_KEY)
+            parsed = json.loads(raw_value) if raw_value else {}
+        except Exception as exc:
+            logger.debug("Failed to load session history cutoffs: %s", exc)
+            parsed = {}
+
+        normalized: dict[str, float] = {}
+        if isinstance(parsed, dict):
+            for session_id, cutoff in parsed.items():
+                normalized_session_id = str(session_id or "").strip()
+                if not normalized_session_id:
+                    continue
+                try:
+                    normalized[normalized_session_id] = float(cutoff)
+                except (TypeError, ValueError):
+                    continue
+        self._session_history_cutoffs = normalized
+        self._history_cutoffs_loaded = True
+
+    async def _save_history_cutoffs(self) -> None:
+        """Persist locally deleted-session history cutoffs."""
+        if not self._db.is_connected:
+            return
+        if not hasattr(self._db, "set_app_state") or not hasattr(self._db, "delete_app_state"):
+            return
+        if self._session_history_cutoffs:
+            await self._db.set_app_state(
+                self.HISTORY_CUTOFFS_STATE_KEY,
+                json.dumps(self._session_history_cutoffs),
+            )
+            return
+        await self._db.delete_app_state(self.HISTORY_CUTOFFS_STATE_KEY)
+
+    async def _set_session_history_cutoff(self, session_id: str, cutoff: float) -> None:
+        """Remember one local history cutoff so deleted chats reopen empty."""
+        await self._ensure_history_cutoffs_loaded()
+        normalized_session_id = str(session_id or "").strip()
+        if not normalized_session_id:
+            return
+        self._session_history_cutoffs[normalized_session_id] = float(cutoff)
+        await self._save_history_cutoffs()
+
+    async def _history_cutoff_for_session(self, session_id: str) -> float | None:
+        await self._ensure_history_cutoffs_loaded()
+        normalized_session_id = str(session_id or "").strip()
+        if not normalized_session_id:
+            return None
+        return self._session_history_cutoffs.get(normalized_session_id)
+
+    async def get_session_history_cutoff(self, session_id: str) -> float | None:
+        """Expose one local history cutoff so session presentation can hide pre-delete previews."""
+        return await self._history_cutoff_for_session(session_id)
+
+    async def _filter_session_history(self, session_id: str, messages: list[ChatMessage]) -> list[ChatMessage]:
+        """Hide messages that belong to one locally deleted conversation history."""
+        cutoff = await self._history_cutoff_for_session(session_id)
+        if cutoff is None:
+            return messages
+        return [
+            message
+            for message in messages
+            if self._message_timestamp_value(getattr(message, "timestamp", None)) > cutoff
+        ]
 
     def _merge_sender_profile_into_extra(
         self,
@@ -917,6 +1019,15 @@ class MessageManager:
         normalized_extra = dict(extra or {})
         session = await self._load_session_context(session_id)
         if not self._should_encrypt_message(session, message_type):
+            logger.info(
+                "[e2ee-diag] outbound_plaintext session_id=%s message_type=%s session_found=%s session_type=%s encryption_mode=%s uses_e2ee=%s",
+                session_id,
+                getattr(message_type, "value", str(message_type)),
+                session is not None,
+                str(getattr(session, "session_type", "") or "") if session is not None else "",
+                str(session.encryption_mode() if session is not None and hasattr(session, "encryption_mode") else "") or "",
+                bool(session.uses_e2ee()) if session is not None and hasattr(session, "uses_e2ee") else False,
+            )
             return str(content or ""), normalized_extra
 
         session_type = str(getattr(session, "session_type", "") or "").strip()
@@ -928,6 +1039,13 @@ class MessageManager:
 
             ciphertext, encryption = await self._require_e2ee_service().encrypt_text_for_user(counterpart_id, str(content or ""))
             normalized_extra["encryption"] = encryption
+            logger.info(
+                "[e2ee-diag] outbound_direct_encrypted session_id=%s counterpart_id=%s scheme=%s ciphertext_len=%s",
+                session_id,
+                counterpart_id,
+                encryption.get("scheme"),
+                len(str(ciphertext or "")),
+            )
             return ciphertext, normalized_extra
 
         if session_type == "group":
@@ -945,8 +1063,22 @@ class MessageManager:
                 owner_user_id=self._user_id,
             )
             normalized_extra["encryption"] = encryption
+            logger.info(
+                "[e2ee-diag] outbound_group_encrypted session_id=%s member_count=%s recipient_bundle_count=%s member_version=%s scheme=%s ciphertext_len=%s",
+                session_id,
+                len(member_ids),
+                len(recipient_bundles),
+                encryption.get("member_version"),
+                encryption.get("scheme"),
+                len(str(ciphertext or "")),
+            )
             return ciphertext, normalized_extra
 
+        logger.info(
+            "[e2ee-diag] outbound_plaintext_unknown_session_type session_id=%s session_type=%s",
+            session_id,
+            session_type,
+        )
         return str(content or ""), normalized_extra
 
     async def _decrypt_message_for_display(self, message: ChatMessage) -> ChatMessage:
@@ -1119,6 +1251,16 @@ class MessageManager:
         """Prepare one attachment upload, optionally encrypting the file before transfer."""
         session = await self._load_session_context(session_id)
         if not self._should_encrypt_attachment(session, message_type):
+            logger.info(
+                "[e2ee-diag] attachment_plain_upload session_id=%s message_type=%s session_found=%s session_type=%s encryption_mode=%s uses_e2ee=%s file_name=%s",
+                session_id,
+                getattr(message_type, "value", str(message_type)),
+                session is not None,
+                str(getattr(session, "session_type", "") or "") if session is not None else "",
+                str(session.encryption_mode() if session is not None and hasattr(session, "encryption_mode") else "") or "",
+                bool(session.uses_e2ee()) if session is not None and hasattr(session, "uses_e2ee") else False,
+                fallback_name,
+            )
             return file_path, {}, None
 
         session_type = str(getattr(session, "session_type", "") or "").strip()
@@ -1133,6 +1275,13 @@ class MessageManager:
                 file_path,
                 fallback_name=fallback_name,
                 size_bytes=fallback_size,
+            )
+            logger.info(
+                "[e2ee-diag] attachment_direct_encrypted session_id=%s counterpart_id=%s scheme=%s file_name=%s",
+                session_id,
+                counterpart_id,
+                dict(encrypted_upload.attachment_encryption).get("scheme"),
+                fallback_name,
             )
         elif session_type == "group":
             member_ids = self._resolve_group_member_ids(session, self._user_id)
@@ -1149,6 +1298,14 @@ class MessageManager:
                 size_bytes=fallback_size,
                 member_version=self._resolve_group_member_version(session, member_ids),
                 owner_user_id=self._user_id,
+            )
+            logger.info(
+                "[e2ee-diag] attachment_group_encrypted session_id=%s member_count=%s recipient_bundle_count=%s scheme=%s file_name=%s",
+                session_id,
+                len(member_ids),
+                len(recipient_bundles),
+                dict(encrypted_upload.attachment_encryption).get("scheme"),
+                fallback_name,
             )
         else:
             return file_path, {}, None
@@ -1476,14 +1633,17 @@ class MessageManager:
                 skipped_count += 1
                 continue
 
-            saved_messages.append(
-                await self._decrypt_message_for_display(
-                    self._normalize_loaded_message(
-                        msg_item,
-                        default_session_id=str(msg_item.get("session_id", "") or ""),
-                    )
+            message = await self._decrypt_message_for_display(
+                self._normalize_loaded_message(
+                    msg_item,
+                    default_session_id=str(msg_item.get("session_id", "") or ""),
                 )
             )
+            filtered_messages = await self._filter_session_history(message.session_id, [message])
+            if not filtered_messages:
+                skipped_count += 1
+                continue
+            saved_messages.append(filtered_messages[0])
 
         if saved_messages:
             await self._db.save_messages_batch(saved_messages)
@@ -1837,8 +1997,28 @@ class MessageManager:
         security_pending: dict[str, str] | None = None
         if existing_message is None:
             session = await self._load_session_context(session_id)
+            logger.info(
+                "[send-diag] send_message_requested session_id=%s message_type=%s existing=%s session_found=%s "
+                "session_type=%s encryption_mode=%s uses_e2ee=%s content_len=%s extra_keys=%s",
+                session_id,
+                getattr(message_type, "value", str(message_type)),
+                False,
+                session is not None,
+                str(getattr(session, "session_type", "") or "") if session is not None else "",
+                str(session.encryption_mode() if session is not None and hasattr(session, "encryption_mode") else "") or "",
+                bool(session.uses_e2ee()) if session is not None and hasattr(session, "uses_e2ee") else False,
+                len(str(content or "")),
+                sorted(list(merged_extra.keys())),
+            )
             security_pending = self._pending_outbound_security_review(session, message_type)
             if security_pending:
+                logger.info(
+                    "[send-diag] send_message_security_pending session_id=%s reason=%s action_id=%s headline=%s",
+                    session_id,
+                    security_pending.get("reason"),
+                    security_pending.get("action_id"),
+                    security_pending.get("headline"),
+                )
                 message = ChatMessage(
                     message_id=msg_id or str(uuid.uuid4()),
                     session_id=session_id,
@@ -1865,7 +2045,12 @@ class MessageManager:
                 extra=merged_extra,
             )
         except Exception as exc:
-            logger.warning("Failed to prepare outbound encryption for %s: %s", session_id, exc)
+            logger.warning(
+                "[send-diag] outbound_prepare_failed session_id=%s message_type=%s error=%s",
+                session_id,
+                getattr(message_type, "value", str(message_type)),
+                exc,
+            )
             if existing_message is None:
                 failed_message = ChatMessage(
                     message_id=msg_id or str(uuid.uuid4()),
@@ -1963,7 +2148,15 @@ class MessageManager:
             logger.error("Failed to enqueue outbound message %s: %s", msg_id, exc)
             await self._finalize_pending_failure(pending, "Transport queue failure")
 
-        logger.info(f"Message enqueued: {msg_id}")
+        logger.info(
+            "[send-diag] message_enqueued msg_id=%s session_id=%s message_type=%s transport_len=%s encrypted=%s security_pending=%s",
+            msg_id,
+            session_id,
+            message_type.value,
+            len(str(transport_content or "")),
+            bool(dict(message.extra or {}).get("encryption")),
+            bool(dict(message.extra or {}).get("security_pending")),
+        )
 
         return message
 
@@ -2519,6 +2712,10 @@ class MessageManager:
                 )
             )
             message = self._merge_local_encryption_cache(existing_message, message)
+            filtered_messages = await self._filter_session_history(session_id, [message])
+            if not filtered_messages:
+                continue
+            message = filtered_messages[0]
             remote_messages.append(message)
             if existing_message is None or self._message_needs_persist(existing_message, message):
                 messages_to_save.append(message)
@@ -2544,6 +2741,7 @@ class MessageManager:
             limit=limit,
             before_timestamp=before_timestamp,
         )
+        messages = await self._filter_session_history(session_id, messages)
 
         should_fetch_remote = bool(force_remote) or before_seq is not None or len(messages) < limit
         if should_fetch_remote:
@@ -2562,6 +2760,7 @@ class MessageManager:
                         limit=limit,
                         before_timestamp=before_timestamp,
                     )
+                    messages = await self._filter_session_history(session_id, messages)
 
         return messages
 
@@ -2577,7 +2776,7 @@ class MessageManager:
             limit=limit,
             before_timestamp=before_timestamp,
         )
-        return messages
+        return await self._filter_session_history(session_id, messages)
 
     @staticmethod
     def _empty_recovery_stats() -> dict[str, int]:
@@ -2732,7 +2931,7 @@ class MessageManager:
         })
         return result
 
-    async def remove_session_local_state(self, session_id: str) -> None:
+    async def remove_session_local_state(self, session_id: str, history_cutoff: Optional[float] = None) -> None:
         """Cancel message-side local state for one removed session."""
         normalized_session_id = str(session_id or "").strip()
         if not normalized_session_id:
@@ -2779,6 +2978,9 @@ class MessageManager:
                     os.remove(local_path)
             except OSError as exc:
                 logger.debug("Failed to remove cached attachment %s: %s", local_path, exc)
+
+        if history_cutoff is not None:
+            await self._set_session_history_cutoff(normalized_session_id, float(history_cutoff))
 
     async def close(self) -> None:
         """Close message manager."""

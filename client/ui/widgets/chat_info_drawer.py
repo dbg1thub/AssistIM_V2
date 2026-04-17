@@ -469,6 +469,7 @@ class ChatInfoPrivateContent(QWidget):
 
     searchRequested = Signal()
     addRequested = Signal()
+    identityReviewRequested = Signal()
     clearRequested = Signal()
     muteToggled = Signal(bool)
     pinToggled = Signal(bool)
@@ -491,6 +492,7 @@ class ChatInfoPrivateContent(QWidget):
         members_layout.addStretch(1)
 
         self.search_row = ChatInfoActionRow(tr("chat.info.search", "Find Chat Content"), parent=self)
+        self.identity_row = ChatInfoActionRow(tr("chat.info.security", "Identity Verification"), parent=self)
         self.mute_row = ChatInfoActionRow(tr("chat.info.mute", "Mute Notifications"), switch=True, parent=self)
         self.pin_row = ChatInfoActionRow(tr("chat.info.pin", "Pin Chat"), switch=True, parent=self)
         self.clear_button = StaticHyperlinkButton(parent=self)
@@ -500,6 +502,7 @@ class ChatInfoPrivateContent(QWidget):
         layout.addLayout(members_layout)
         layout.addWidget(FluentDivider(self, variant=FluentDivider.INSET, inset=12))
         layout.addWidget(self.search_row)
+        layout.addWidget(self.identity_row)
         layout.addWidget(FluentDivider(self, variant=FluentDivider.INSET, inset=12))
         layout.addWidget(self.mute_row)
         layout.addWidget(self.pin_row)
@@ -510,10 +513,12 @@ class ChatInfoPrivateContent(QWidget):
 
         self.search_row.activated.connect(self.searchRequested.emit)
         self.add_tile.clicked.connect(self.addRequested.emit)
+        self.identity_row.activated.connect(self.identityReviewRequested.emit)
         self.mute_row.toggled.connect(self.muteToggled.emit)
         self.pin_row.toggled.connect(self.pinToggled.emit)
         self.clear_button.clicked.connect(self.clearRequested.emit)
         self.search_row.hide()
+        self.identity_row.hide()
         self.clear_button.hide()
 
     def set_session(self, session: Session | None) -> None:
@@ -522,6 +527,7 @@ class ChatInfoPrivateContent(QWidget):
             self.counterpart_tile.set_participant(title=tr("session.unnamed", "Untitled Session"))
             self.mute_row.set_checked(False)
             self.pin_row.set_checked(False)
+            self.identity_row.hide()
             self.setEnabled(False)
             return
 
@@ -537,6 +543,8 @@ class ChatInfoPrivateContent(QWidget):
         )
         self.mute_row.set_checked(bool(extra.get("is_muted", False)))
         self.pin_row.set_checked(bool(getattr(session, "is_pinned", False) or extra.get("is_pinned", False)))
+        security_summary = session.security_summary()
+        self.identity_row.setVisible(str(security_summary.get("encryption_mode") or "") == "e2ee_private")
 
 
 class ChatInfoDetailField(QWidget):
@@ -1156,6 +1164,7 @@ class ChatInfoDrawerContent(QWidget):
 
     searchRequested = Signal()
     addRequested = Signal()
+    identityReviewRequested = Signal()
     clearRequested = Signal()
     leaveRequested = Signal()
     muteToggled = Signal(bool)
@@ -1184,6 +1193,7 @@ class ChatInfoDrawerContent(QWidget):
 
         self.private_content.searchRequested.connect(self.searchRequested.emit)
         self.private_content.addRequested.connect(self.addRequested.emit)
+        self.private_content.identityReviewRequested.connect(self.identityReviewRequested.emit)
         self.private_content.clearRequested.connect(self.clearRequested.emit)
         self.private_content.muteToggled.connect(self.muteToggled.emit)
         self.private_content.pinToggled.connect(self.pinToggled.emit)
@@ -1345,6 +1355,7 @@ class ChatInfoDrawerOverlay(QWidget):
 
     searchRequested = Signal()
     addRequested = Signal()
+    identityReviewRequested = Signal()
     clearRequested = Signal()
     leaveRequested = Signal()
     muteToggled = Signal(bool)
@@ -1399,6 +1410,7 @@ class ChatInfoDrawerOverlay(QWidget):
 
         self.content_widget.searchRequested.connect(self.searchRequested.emit)
         self.content_widget.addRequested.connect(self.addRequested.emit)
+        self.content_widget.identityReviewRequested.connect(self.identityReviewRequested.emit)
         self.content_widget.clearRequested.connect(self.clearRequested.emit)
         self.content_widget.leaveRequested.connect(self.leaveRequested.emit)
         self.content_widget.muteToggled.connect(self.muteToggled.emit)
@@ -1434,10 +1446,18 @@ class ChatInfoDrawerOverlay(QWidget):
         self._set_scrollbar_visible(drawer_rect.contains(cursor_pos))
 
     def set_session(self, session: Session | None) -> None:
+        previous_session_id = str(getattr(self._session, "session_id", "") or "").strip()
+        current_session_id = str(getattr(session, "session_id", "") or "").strip()
         self._session = session
-        self.content_widget.set_session(session)
-        if session is None and self.isVisible():
-            self.close_drawer()
+        if session is None:
+            self.content_widget.set_session(None)
+            if self.isVisible():
+                self.close_drawer()
+            return
+        # Rebuild detail content only when switching sessions or when the drawer is open.
+        # When closed, keep only the latest session reference to avoid expensive hidden relayout churn.
+        if current_session_id != previous_session_id or self.is_open():
+            self.content_widget.set_session(session)
 
     def set_content_geometry(self, rect: QRect) -> None:
         self.setGeometry(rect)
@@ -1455,6 +1475,7 @@ class ChatInfoDrawerOverlay(QWidget):
     def open_drawer(self) -> None:
         if self._session is None:
             return
+        self.content_widget.set_session(self._session)
 
         self._open = True
         self.setEnabled(True)

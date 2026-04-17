@@ -783,6 +783,7 @@ def test_chat_info_action_rows_and_search_overlay_follow_drawer_rules() -> None:
     assert 'self.content_stack.setCurrentWidget(self.search_page)' in drawer
     assert 'self.content_widget.refresh_visual_styles()' not in drawer
     assert 'self.search_row = ChatInfoActionRow(tr("chat.info.search", "Find Chat Content"), parent=self)' in drawer
+    assert 'self.identity_row = ChatInfoActionRow(tr("chat.info.security", "Identity Verification"), parent=self)' in drawer
     assert 'self.clear_button.setText(tr("chat.info.clear", "Clear Chat History"))' in drawer
     assert 'self.show_nickname_row = ChatInfoActionRow(' in drawer
     assert 'self.view_more_button.setText(tr("chat.info.group.view_more", "View More Members"))' in drawer
@@ -860,6 +861,7 @@ def test_chat_info_member_management_uses_formal_dialog_boundary() -> None:
 
     assert 'from client.ui.windows.group_member_management_dialogs import GroupMemberManagementDialog' in chat_interface
     assert 'self.chat_panel.chat_info_search_requested.connect(self._on_chat_info_search_requested)' in chat_interface
+    assert 'self.chat_panel.chat_info_identity_review_requested.connect(self._on_chat_info_identity_review_requested)' in chat_interface
     assert 'self.chat_panel.chat_info_clear_requested.connect(self._on_chat_info_clear_requested)' in chat_interface
     assert 'self.chat_panel.chat_info_show_nickname_toggled.connect(self._on_chat_info_show_nickname_toggled)' in chat_interface
     assert 'self.chat_panel.chat_info_member_management_requested.connect(self._on_chat_info_member_management_requested)' in chat_interface
@@ -884,9 +886,12 @@ def test_chat_info_member_management_uses_formal_dialog_boundary() -> None:
     assert 'action_font.setUnderline(' not in message_delegate
     assert 'def _group_sender_label_text(self, message: ChatMessage) -> str:' in message_delegate
     assert 'chat_info_search_requested = Signal()' in chat_panel
+    assert 'chat_info_identity_review_requested = Signal()' in chat_panel
     assert 'chat_info_clear_requested = Signal()' in chat_panel
     assert 'chat_info_show_nickname_toggled = Signal(bool)' in chat_panel
     assert 'chat_info_member_management_requested = Signal(object)' in chat_panel
+    assert 'class IdentityReviewDialog(QDialog):' in chat_interface
+    assert 'self.identity_row.setVisible(str(security_summary.get("encryption_mode") or "") == "e2ee_private")' in drawer
     assert 'def restore_recalled_message_to_composer(self, message_id: str) -> bool:' in chat_panel
     assert 'def replace_message(self, message: ChatMessage) -> None:' in chat_panel
     assert 'self._message_delegate.set_session(None)' in chat_panel

@@ -799,6 +799,10 @@ class DiscoveryInterface(QWidget):
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
+        self.ensure_initial_load()
+
+    def ensure_initial_load(self) -> None:
+        """Kick off the first moments load once per runtime."""
         if self._initial_load_done:
             return
         self._initial_load_done = True

@@ -86,10 +86,11 @@ class SessionService:
             member_ids = [str(member.user_id or "") for member in session_members if str(member.user_id or "")]
             if not self._is_visible_private_session(item, member_ids):
                 continue
+            normalized_session_type = str(getattr(item, "type", "") or "").strip().lower()
             payload.append(
                 self.serialize_session(
                     item,
-                    include_members=False,
+                    include_members=normalized_session_type == "group",
                     include_self_fields=False,
                     participant_ids=member_ids,
                     last_message=last_messages_by_session.get(item.id),

@@ -110,6 +110,15 @@ class CallManager:
 
         peer_user_id = self._resolve_peer_user_id(session)
         call_id = str(uuid.uuid4())
+        logger.info(
+            "[call-diag] start_call session_id=%s call_id=%s media_type=%s peer_user_id=%s current_user_id=%s supports_call=%s",
+            session.session_id,
+            call_id,
+            normalized_media_type,
+            peer_user_id,
+            self._user_id,
+            session.supports_call() if hasattr(session, "supports_call") else None,
+        )
         sent = await self._conn_manager.send_call_event(
             "call_invite",
             {
@@ -121,6 +130,12 @@ class CallManager:
             msg_id=call_id,
         )
         if not sent:
+            logger.warning(
+                "[call-diag] start_call_transport_failed session_id=%s call_id=%s media_type=%s",
+                session.session_id,
+                call_id,
+                normalized_media_type,
+            )
             raise ValidationError("Unable to send call invite")
 
         self._active_call = ActiveCallState(
@@ -229,6 +244,14 @@ class CallManager:
         payload = {"call_id": normalized_call_id}
         payload.update(extra)
         self._log_timing(normalized_call_id, f"{event_type}_send")
+        logger.info(
+            "[call-diag] send_signal_payload type=%s call_id=%s session_id=%s status=%s payload_keys=%s",
+            event_type,
+            normalized_call_id,
+            active_call.session_id,
+            active_call.status,
+            sorted(list(payload.keys())),
+        )
         return await self._conn_manager.send_call_event(event_type, payload, msg_id=normalized_call_id)
 
     async def _handle_ws_message(self, message: dict[str, Any]) -> None:
@@ -345,6 +368,14 @@ class CallManager:
         failed_call = self._active_call
         failed_call.status = CallStatus.FAILED.value
         failed_call.reason = str(payload.get("message") or "Call signaling failed")
+        logger.warning(
+            "[call-diag] inbound_call_error call_id=%s msg_id=%s code=%s reason=%s payload=%s",
+            payload_call_id or failed_call.call_id,
+            msg_id,
+            payload.get("code"),
+            failed_call.reason,
+            payload,
+        )
         self._cancel_unanswered_timeout()
         await self._event_bus.emit(CallEvent.FAILED, {"call": failed_call, "payload": payload})
         self._timing_origins.pop(failed_call.call_id, None)

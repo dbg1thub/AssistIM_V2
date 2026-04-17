@@ -3,13 +3,26 @@
 from __future__ import annotations
 
 from base64 import b64encode
+from sqlalchemy import String
 
 from fastapi.testclient import TestClient
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ed25519, x25519
 
+from app.models.device import UserPreKey, UserSignedPreKey
+
 
 _SIGNING_PRIVATE_BY_DEVICE_ID: dict[str, ed25519.Ed25519PrivateKey] = {}
+
+
+def test_prekey_models_keep_string_primary_keys_for_existing_schema() -> None:
+    signed_prekey_id_type = UserSignedPreKey.__table__.c.id.type
+    one_time_prekey_id_type = UserPreKey.__table__.c.id.type
+
+    assert isinstance(signed_prekey_id_type, String)
+    assert isinstance(one_time_prekey_id_type, String)
+    assert signed_prekey_id_type.length == 36
+    assert one_time_prekey_id_type.length == 36
 
 
 def _b64(raw: bytes) -> str:

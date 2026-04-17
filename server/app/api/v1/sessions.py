@@ -22,6 +22,23 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 
+async def _broadcast_session_lifecycle_refresh(user_ids: list[str], payload: dict) -> None:
+    recipients = [
+        value
+        for value in dict.fromkeys(str(raw_id or "").strip() for raw_id in user_ids)
+        if value
+    ]
+    if not recipients:
+        return
+    await connection_manager.send_json_to_users(
+        recipients,
+        ws_message(
+            "contact_refresh",
+            payload,
+        ),
+    )
+
+
 @router.get("/unread")
 def session_unread(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
     return success_response(MessageService(db).session_unread_counts(current_user))
@@ -46,16 +63,13 @@ async def create_direct_session(
     ]
     if result.get("created") is True and participant_ids:
         try:
-            await connection_manager.send_json_to_users(
+            await _broadcast_session_lifecycle_refresh(
                 participant_ids,
-                ws_message(
-                    "contact_refresh",
-                    {
-                        "reason": "session_lifecycle_changed",
-                        "session_id": str(result.get("session_id", "") or result.get("id", "") or ""),
-                        "session": dict(result),
-                    },
-                ),
+                {
+                    "reason": "session_lifecycle_changed",
+                    "session_id": str(result.get("session_id", "") or result.get("id", "") or ""),
+                    "session": dict(result),
+                },
             )
         except Exception:
             logger.exception("Session lifecycle fanout failed after committed direct-session mutation")

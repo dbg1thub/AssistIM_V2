@@ -6,6 +6,7 @@ automatic token management, and error handling.
 """
 import asyncio
 from typing import Any, AsyncIterator, Callable, Optional
+from urllib.parse import urlsplit
 
 import aiohttp
 
@@ -40,6 +41,12 @@ class HTTPClient:
         """
         config = get_config()
         self._base_url = base_url or config.server.api_base_url
+        split_result = urlsplit(self._base_url)
+        self._origin_url = (
+            f"{split_result.scheme}://{split_result.netloc}"
+            if split_result.scheme and split_result.netloc
+            else config.server.origin_url
+        )
         self._timeout = aiohttp.ClientTimeout(total=timeout)
         self._session: Optional[aiohttp.ClientSession] = None
         self._access_token: Optional[str] = None
@@ -144,6 +151,18 @@ class HTTPClient:
         normalized_base = self._base_url.rstrip("/")
         normalized_path = path if path.startswith("/") else f"/{path}"
         return f"{normalized_base}{normalized_path}"
+
+    def _resolve_binary_url(self, path: str) -> str:
+        """Resolve one binary download target, preserving server-root media paths."""
+        if self._is_absolute_url(path):
+            return path
+
+        normalized_path = path if path.startswith("/") else f"/{path}"
+        if normalized_path.startswith("/api/"):
+            return f"{self._origin_url.rstrip('/')}{normalized_path}"
+        if normalized_path.startswith("/uploads/"):
+            return f"{self._origin_url.rstrip('/')}{normalized_path}"
+        return f"{self._base_url.rstrip('/')}{normalized_path}"
 
     def _should_use_app_auth(self, path: str, use_auth: Optional[bool]) -> bool:
         """Decide whether one request should inherit the app auth state."""
@@ -661,7 +680,7 @@ class HTTPClient:
             use_auth: Optional[bool] = None,
     ) -> bytes:
         """Download one binary payload from an internal or absolute URL."""
-        url = self._resolve_url(path)
+        url = self._resolve_binary_url(path)
         apply_auth = self._should_use_app_auth(path, use_auth)
         request_headers = {"Accept": "*/*"}
         if apply_auth and self._access_token:

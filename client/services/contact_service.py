@@ -64,6 +64,7 @@ class ContactService:
             json={
                 "name": name,
                 "member_ids": member_ids,
+                "encryption_mode": "e2ee_group",
             },
         )
         return dict(payload or {})

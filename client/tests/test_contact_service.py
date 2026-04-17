@@ -20,7 +20,7 @@ if "aiohttp" not in sys.modules:
             self.fields = []
 
         def add_field(self, name, value, **kwargs):
-            self.fields.append({'name': name, 'value': value, **kwargs})
+            self.fields.append({"name": name, "value": value, **kwargs})
 
     class _DummyClientSession:
         def __init__(self, *args, **kwargs):
@@ -45,7 +45,7 @@ if "aiohttp" not in sys.modules:
     aiohttp.ClientResponse = _DummyClientResponse
     sys.modules["aiohttp"] = aiohttp
 
-from client.services import session_service as session_service_module
+from client.services import contact_service as contact_service_module
 
 
 class FakeHTTPClient:
@@ -54,24 +54,25 @@ class FakeHTTPClient:
 
     async def post(self, path: str, json=None):
         self.post_calls.append({"path": path, "json": json})
-        return {"id": "session-direct-1", "name": "Bob"}
+        return {"group": {"id": "group-1", "name": "Core Team"}}
 
 
-def test_session_service_create_direct_session_uses_direct_endpoint(monkeypatch) -> None:
+def test_contact_service_create_group_defaults_to_e2ee_group(monkeypatch) -> None:
     async def scenario() -> None:
         fake_http = FakeHTTPClient()
-        monkeypatch.setattr(session_service_module, "get_http_client", lambda: fake_http)
+        monkeypatch.setattr(contact_service_module, "get_http_client", lambda: fake_http)
 
-        service = session_service_module.SessionService()
-        payload = await service.create_direct_session("bob")
+        service = contact_service_module.ContactService()
+        payload = await service.create_group("Core Team", ["bob", "charlie"])
 
-        assert payload == {"id": "session-direct-1", "name": "Bob"}
+        assert payload == {"group": {"id": "group-1", "name": "Core Team"}}
         assert fake_http.post_calls == [
             {
-                "path": "/sessions/direct",
+                "path": "/groups",
                 "json": {
-                    "participant_ids": ["bob"],
-                    "encryption_mode": "e2ee_private",
+                    "name": "Core Team",
+                    "member_ids": ["bob", "charlie"],
+                    "encryption_mode": "e2ee_group",
                 },
             }
         ]

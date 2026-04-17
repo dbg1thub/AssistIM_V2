@@ -157,6 +157,8 @@ class MainWindow(FluentWindow):
 
         self.restore_default_geometry()
         self._schedule_ui_single_shot(0, self.chat_interface.load_sessions)
+        self._schedule_ui_single_shot(0, self.contact_interface.ensure_initial_load)
+        self._schedule_ui_single_shot(0, self.discovery_interface.ensure_initial_load)
         self._schedule_ui_single_shot(0, self._sync_chat_session_activity)
 
     def restore_default_geometry(self) -> None:
@@ -188,12 +190,25 @@ class MainWindow(FluentWindow):
         if not hasattr(self, "stackedWidget"):
             return
         current_widget = self.stackedWidget.widget(index)
+        logger.info(
+            "[chat-nav] main_window.current_changed index=%s widget=%s is_chat=%s current_session_id=%s",
+            index,
+            type(current_widget).__name__ if current_widget is not None else "",
+            current_widget is self.chat_interface,
+            getattr(self.chat_interface, "_current_session_id", None),
+        )
         if current_widget is not self.chat_interface:
             self.chat_interface.close_transient_panels()
         self._sync_chat_session_activity()
 
     def switchTo(self, interface):
         """Close chat overlays before switching to another top-level page."""
+        logger.info(
+            "[chat-nav] main_window.switch_to target=%s from=%s current_session_id=%s",
+            type(interface).__name__ if interface is not None else "",
+            type(self.stackedWidget.currentWidget()).__name__ if hasattr(self, "stackedWidget") and self.stackedWidget.currentWidget() is not None else "",
+            getattr(self.chat_interface, "_current_session_id", None),
+        )
         if interface is not self.chat_interface:
             self.chat_interface.close_transient_panels()
         result = super().switchTo(interface)
@@ -225,7 +240,17 @@ class MainWindow(FluentWindow):
         """Propagate current page/window visibility into chat read-state handling."""
         if not hasattr(self, "chat_interface"):
             return
-        self.chat_interface.set_session_visibility_active(self._is_chat_session_active())
+        active = self._is_chat_session_active()
+        logger.info(
+            "[chat-nav] main_window.sync_chat_activity active=%s current_widget=%s visible=%s minimized=%s active_window=%s current_session_id=%s",
+            active,
+            type(self.stackedWidget.currentWidget()).__name__ if hasattr(self, "stackedWidget") and self.stackedWidget.currentWidget() is not None else "",
+            self.isVisible(),
+            self.isMinimized(),
+            self.isActiveWindow(),
+            getattr(self.chat_interface, "_current_session_id", None),
+        )
+        self.chat_interface.set_session_visibility_active(active)
 
     def _invalidate_ui_callback_generation(self) -> None:
         """Drop delayed callbacks that belong to an older window UI lifetime."""

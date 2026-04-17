@@ -56,11 +56,12 @@ class UserSessionEvent(IdMixin, Base):
         Index("idx_user_session_events_type", "type"),
     )
 
-    session_id: Mapped[str] = mapped_column(Uuid(as_uuid=False), ForeignKey("sessions.id"), nullable=False)
-    user_id: Mapped[str] = mapped_column(Uuid(as_uuid=False), ForeignKey("users.id"), nullable=False)
+    # Keep this table aligned with migration/runtime compat contract (VARCHAR(36)).
+    session_id: Mapped[str] = mapped_column(String(36), ForeignKey("sessions.id"), nullable=False)
+    user_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id"), nullable=False)
     event_seq: Mapped[int] = mapped_column(nullable=False, default=0)
     type: Mapped[str] = mapped_column(nullable=False)
-    actor_user_id: Mapped[str | None] = mapped_column(Uuid(as_uuid=False), nullable=True)
+    actor_user_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     payload: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
     created_at: Mapped[datetime] = mapped_column(default=utcnow)
 

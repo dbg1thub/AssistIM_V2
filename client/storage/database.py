@@ -3,6 +3,7 @@ Database Module
 
 SQLite database using aiosqlite for async operations.
 """
+import asyncio
 import aiosqlite
 import base64
 import hashlib
@@ -10,6 +11,7 @@ import importlib
 import json
 import os
 import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
@@ -68,6 +70,8 @@ class Database:
         self._db: Optional[aiosqlite.Connection] = None
         self._search_fts_tokenizer: Optional[str] = None
         self._active_dbapi_module_name = self.DB_ENCRYPTION_PROVIDER_SQLITE_MODULE
+        self._write_transaction_lock = asyncio.Lock()
+        self._savepoint_counter = 0
         self._requested_db_encryption_mode = self._normalize_db_encryption_mode(
             getattr(config.storage, "db_encryption_mode", self.DB_ENCRYPTION_MODE_PLAIN)
         )
@@ -101,6 +105,45 @@ class Database:
     @staticmethod
     def _sql_literal(value: str) -> str:
         return "'" + str(value or "").replace("'", "''") + "'"
+
+    def _next_savepoint_name(self, prefix: str) -> str:
+        normalized_prefix = "".join(
+            ch if ch.isalnum() or ch == "_" else "_"
+            for ch in str(prefix or "db_write")
+        ).strip("_") or "db_write"
+        self._savepoint_counter += 1
+        return f"{normalized_prefix}_{self._savepoint_counter}"
+
+    @asynccontextmanager
+    async def _write_transaction(self, prefix: str):
+        """Run one multi-statement write block without colliding with nested transactions."""
+        if self._db is None:
+            raise RuntimeError("database is not connected")
+
+        async with self._write_transaction_lock:
+            savepoint_name = ""
+            started_transaction = False
+            if bool(getattr(self._db, "in_transaction", False)):
+                savepoint_name = self._next_savepoint_name(prefix)
+                await self._db.execute(f"SAVEPOINT {savepoint_name}")
+            else:
+                await self._db.execute("BEGIN")
+                started_transaction = True
+
+            try:
+                yield
+            except Exception:
+                if savepoint_name:
+                    await self._db.execute(f"ROLLBACK TO SAVEPOINT {savepoint_name}")
+                    await self._db.execute(f"RELEASE SAVEPOINT {savepoint_name}")
+                elif started_transaction and bool(getattr(self._db, "in_transaction", False)):
+                    await self._db.rollback()
+                raise
+            else:
+                if savepoint_name:
+                    await self._db.execute(f"RELEASE SAVEPOINT {savepoint_name}")
+                elif started_transaction:
+                    await self._db.commit()
 
     async def _open_connection(self) -> aiosqlite.Connection:
         metadata = self._load_db_crypto_metadata()
@@ -1134,39 +1177,37 @@ class Database:
         if not sessions:
             return
 
-        for session in sessions:
-            await self._db.execute(
-                """
-                INSERT OR REPLACE INTO sessions
-                (session_id, name, session_type, participant_ids, last_message,
-                 last_message_time, unread_count, avatar, is_ai_session, extra,
-                 created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    session.session_id,
-                    session.name,
-                    session.session_type,
-                    json.dumps(session.participant_ids),
-                    session.last_message,
-                    session.last_message_time.timestamp() if session.last_message_time else None,
-                    session.unread_count,
-                    session.avatar,
-                    1 if session.is_ai_session else 0,
-                    json.dumps(session.extra),
-                    session.created_at.timestamp() if session.created_at else None,
-                    session.updated_at.timestamp() if session.updated_at else None,
-                ),
-            )
-
-        await self._db.commit()
+        async with self._write_transaction("save_sessions_batch"):
+            for session in sessions:
+                await self._db.execute(
+                    """
+                    INSERT OR REPLACE INTO sessions
+                    (session_id, name, session_type, participant_ids, last_message,
+                     last_message_time, unread_count, avatar, is_ai_session, extra,
+                     created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        session.session_id,
+                        session.name,
+                        session.session_type,
+                        json.dumps(session.participant_ids),
+                        session.last_message,
+                        session.last_message_time.timestamp() if session.last_message_time else None,
+                        session.unread_count,
+                        session.avatar,
+                        1 if session.is_ai_session else 0,
+                        json.dumps(session.extra),
+                        session.created_at.timestamp() if session.created_at else None,
+                        session.updated_at.timestamp() if session.updated_at else None,
+                    ),
+                )
         logger.debug(f"Batch saved {len(sessions)} sessions")
 
     async def replace_sessions(self, sessions: list[Session]) -> None:
         """Replace the cached session list and prune state for sessions outside the snapshot."""
         snapshot_ids = [str(session.session_id or "").strip() for session in sessions if str(session.session_id or "").strip()]
-        try:
-            await self._db.execute("BEGIN")
+        async with self._write_transaction("replace_sessions"):
             if snapshot_ids:
                 placeholders = ", ".join("?" for _ in snapshot_ids)
                 await self._db.execute(
@@ -1206,10 +1247,6 @@ class Database:
                         session.updated_at.timestamp() if session.updated_at else None,
                     ),
                 )
-            await self._db.commit()
-        except Exception:
-            await self._db.execute("ROLLBACK")
-            raise
         logger.debug(f"Replaced session cache with {len(sessions)} sessions")
     async def get_session(self, session_id: str) -> Optional[Session]:
         """
@@ -1798,8 +1835,7 @@ class Database:
             return
 
         updated_at = int(time.time())
-        try:
-            await self._db.execute("BEGIN")
+        async with self._write_transaction("replace_contacts_cache"):
             await self._db.execute(
                 "DELETE FROM contacts_cache WHERE owner_user_id = ?",
                 (normalized_owner,),
@@ -1831,11 +1867,6 @@ class Database:
                         updated_at,
                     ),
                 )
-
-            await self._db.commit()
-        except Exception:
-            await self._db.execute("ROLLBACK")
-            raise
         logger.debug(f"Replaced contact cache with {len(contacts)} contacts for owner {normalized_owner}")
 
     async def replace_groups_cache(
@@ -1851,8 +1882,7 @@ class Database:
             return
 
         updated_at = int(time.time())
-        try:
-            await self._db.execute("BEGIN")
+        async with self._write_transaction("replace_groups_cache"):
             await self._db.execute(
                 "DELETE FROM groups_cache WHERE owner_user_id = ?",
                 (normalized_owner,),
@@ -1880,11 +1910,6 @@ class Database:
                         updated_at,
                     ),
                 )
-
-            await self._db.commit()
-        except Exception:
-            await self._db.execute("ROLLBACK")
-            raise
         logger.debug(f"Replaced group cache with {len(groups)} groups for owner {normalized_owner}")
 
     async def list_contacts_cache_by_ids(
@@ -2597,8 +2622,14 @@ class Database:
         await self._db.execute("DELETE FROM contacts_cache")
         await self._db.execute("DELETE FROM groups_cache")
         await self._db.execute(
-            "DELETE FROM app_state WHERE key IN (?, ?, ?, ?)",
-            ("last_sync_session_cursors", "last_sync_event_cursors", "last_sync_timestamp", "chat.hidden_sessions"),
+            "DELETE FROM app_state WHERE key IN (?, ?, ?, ?, ?)",
+            (
+                "last_sync_session_cursors",
+                "last_sync_event_cursors",
+                "last_sync_timestamp",
+                "chat.hidden_sessions",
+                "chat.session_history_cutoffs",
+            ),
         )
         await self._db.commit()
         logger.info("Local chat state cleared")
@@ -2896,8 +2927,7 @@ class Database:
         if not normalized_values and not normalized_delete_keys:
             return
 
-        try:
-            await self._db.execute("BEGIN")
+        async with self._write_transaction("replace_app_state"):
             if normalized_delete_keys:
                 placeholders = ", ".join("?" for _ in normalized_delete_keys)
                 await self._db.execute(
@@ -2909,10 +2939,6 @@ class Database:
                     "INSERT OR REPLACE INTO app_state (key, value) VALUES (?, ?)",
                     (key, value),
                 )
-            await self._db.commit()
-        except Exception:
-            await self._db.execute("ROLLBACK")
-            raise
 
     async def set_app_state(self, key: str, value: str) -> None:
         """

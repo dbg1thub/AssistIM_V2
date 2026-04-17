@@ -250,6 +250,36 @@ def test_http_client_download_bytes_uses_absolute_url_without_app_auth() -> None
     asyncio.run(scenario())
 
 
+def test_http_client_download_bytes_uses_origin_url_for_root_relative_media() -> None:
+    async def scenario() -> None:
+        client = HTTPClient(base_url="http://app.local/api/v1")
+        client.set_tokens("app-access", "refresh-token")
+        fake_session = FakeSession(
+            request_handler=lambda **_kwargs: FakeResponse(200, body=b"cipher-bytes"),
+        )
+        client._session = fake_session
+
+        payload = await client.download_bytes("/uploads/2026/04/17/secret.bin")
+
+        assert payload == b"cipher-bytes"
+        assert fake_session.request_calls == [
+            {
+                "method": "GET",
+                "url": "http://app.local/uploads/2026/04/17/secret.bin",
+                "params": None,
+                "json": None,
+                "headers": {
+                    "Accept": "*/*",
+                    "Authorization": "Bearer app-access",
+                },
+            }
+        ]
+
+        await client.close()
+
+    asyncio.run(scenario())
+
+
 def test_http_client_internal_401_refresh_is_singleflight() -> None:
     async def scenario() -> None:
         client = HTTPClient(base_url="http://app.local/api/v1")

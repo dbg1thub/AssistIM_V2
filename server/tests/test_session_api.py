@@ -54,7 +54,7 @@ def test_create_direct_session_emits_lifecycle_refresh_once(
     assert set(recipients) == {alice["user"]["id"], bob["user"]["id"]}
     assert message["type"] == "contact_refresh"
     assert message["data"]["reason"] == "session_lifecycle_changed"
-    assert message["data"]["session_id"] == first_response.json()["data"]["session_id"]
+    assert message["data"]["session_id"] == first_response.json()["data"]["id"]
 
     send_mock.reset_mock()
     second_response = client.post(

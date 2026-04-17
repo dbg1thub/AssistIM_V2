@@ -467,6 +467,9 @@ class WebSocketClient:
         if self._intentional_disconnect:
             return
 
+        # Mark transport as disconnected first so upper layers can tear down
+        # authenticated runtime state before any immediate reconnect succeeds.
+        self._set_state(ConnectionState.DISCONNECTED)
         await self._cleanup()
 
         if not self._intentional_disconnect:
@@ -480,6 +483,7 @@ class WebSocketClient:
             if self._connect_task is not None and not self._connect_task.done():
                 return
 
+            self._set_state(ConnectionState.RECONNECTING)
             self._connect_task = loop.create_task(self._connect_loop())
 
     async def _cleanup(self) -> None:

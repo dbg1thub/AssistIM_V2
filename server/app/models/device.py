@@ -7,7 +7,7 @@ from datetime import datetime
 from sqlalchemy import Boolean, ForeignKey, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.models.base import Base, IdMixin, TimestampMixin
+from app.models.base import Base, TimestampMixin, generate_id
 from app.utils.time import utcnow
 
 
@@ -27,7 +27,7 @@ class UserDevice(TimestampMixin, Base):
     last_seen_at: Mapped[datetime] = mapped_column(nullable=False, default=utcnow)
 
 
-class UserSignedPreKey(IdMixin, TimestampMixin, Base):
+class UserSignedPreKey(TimestampMixin, Base):
     __tablename__ = "user_signed_prekeys"
     __table_args__ = (
         UniqueConstraint("device_id", "key_id", name="uq_user_signed_prekeys_device_key"),
@@ -35,6 +35,7 @@ class UserSignedPreKey(IdMixin, TimestampMixin, Base):
         Index("idx_user_signed_prekeys_is_active", "is_active"),
     )
 
+    id: Mapped[str] = mapped_column(String(length=36), primary_key=True, default=generate_id)
     device_id: Mapped[str] = mapped_column(String(length=64), ForeignKey("user_devices.device_id"), nullable=False)
     key_id: Mapped[int] = mapped_column(Integer, nullable=False)
     public_key: Mapped[str] = mapped_column(Text, nullable=False)
@@ -42,7 +43,7 @@ class UserSignedPreKey(IdMixin, TimestampMixin, Base):
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
 
 
-class UserPreKey(IdMixin, Base):
+class UserPreKey(Base):
     __tablename__ = "user_prekeys"
     __table_args__ = (
         UniqueConstraint("device_id", "prekey_id", name="uq_user_prekeys_device_key"),
@@ -50,6 +51,7 @@ class UserPreKey(IdMixin, Base):
         Index("idx_user_prekeys_claim_state", "device_id", "is_consumed"),
     )
 
+    id: Mapped[str] = mapped_column(String(length=36), primary_key=True, default=generate_id)
     device_id: Mapped[str] = mapped_column(String(length=64), ForeignKey("user_devices.device_id"), nullable=False)
     prekey_id: Mapped[int] = mapped_column(Integer, nullable=False)
     public_key: Mapped[str] = mapped_column(Text, nullable=False)

@@ -197,7 +197,35 @@ def test_session_service_list_sessions_uses_batch_repository_loaders() -> None:
     assert payload[1]['participant_ids'] == ['alice', 'bob', 'charlie']
     assert payload[1]['last_message'] == 'hello team'
     assert payload[1]['counterpart_id'] is None
-    assert 'members' not in payload[1]
+    assert payload[1]['members'] == [
+        {
+            'id': 'alice',
+            'username': 'alice',
+            'nickname': 'Alice',
+            'avatar': '/uploads/alice.png',
+            'group_nickname': '',
+            'role': 'owner',
+            'joined_at': '2026-03-29T12:00:00',
+        },
+        {
+            'id': 'bob',
+            'username': 'bob',
+            'nickname': 'Bob',
+            'avatar': '/uploads/bob.png',
+            'group_nickname': '',
+            'role': 'member',
+            'joined_at': '2026-03-29T12:00:00',
+        },
+        {
+            'id': 'charlie',
+            'username': 'charlie',
+            'nickname': 'Charlie',
+            'avatar': '/uploads/charlie.png',
+            'group_nickname': '',
+            'role': 'member',
+            'joined_at': '2026-03-29T12:00:00',
+        },
+    ]
 
     assert fake_sessions.list_members_for_sessions_calls == [['session-1', 'session-2']]
     assert fake_messages.list_last_messages_for_sessions_calls == [['session-1', 'session-2']]
