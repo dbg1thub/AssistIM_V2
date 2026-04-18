@@ -51,6 +51,20 @@ def test_ai_status_infobar_and_background_generation_boundaries() -> None:
     assert refresh_start < load_gate < generation_call
 
 
+def test_summary_infobar_only_targets_current_active_session() -> None:
+    chat_interface = Path("client/ui/windows/chat_interface.py").read_text(encoding="utf-8")
+
+    assert "ConversationSummaryEvent.READY" in chat_interface
+    assert "self._subscribe_sync(ConversationSummaryEvent.READY, self._on_conversation_summary_ready)" in chat_interface
+    assert "def _on_conversation_summary_ready(self, data: dict) -> None:" in chat_interface
+    assert 'if session_id != str(self._current_session_id or "").strip():' in chat_interface
+    assert "if not self._can_mark_session_read():" in chat_interface
+    assert "self._summary_notified_buckets" in chat_interface
+    assert "self._summary_info_bar_last_shown_at" in chat_interface
+    assert '"chat.summary.updated"' in chat_interface
+    assert '"chat.summary.completed"' in chat_interface
+
+
 def test_ai_ui_i18n_resources_are_registered() -> None:
     required_keys = {
         "composer.ai.title",
@@ -76,6 +90,8 @@ def test_ai_ui_i18n_resources_are_registered() -> None:
         "composer.ai.error.context_too_long",
         "composer.ai.error.output_invalid",
         "composer.ai.failed",
+        "chat.summary.updated",
+        "chat.summary.completed",
     }
 
     for language in ("zh-CN", "en-US", "ko-KR"):

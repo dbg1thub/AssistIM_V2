@@ -1717,3 +1717,122 @@ def test_database_marks_encrypted_attachments_and_searches_versioned_local_metad
         except PermissionError:
             pass
         shutil.rmtree(temp_root, ignore_errors=True)
+
+
+def test_database_summary_tables_follow_session_delete_and_clear_chat_state() -> None:
+    temp_root = (Path.cwd() / "client/tests/.pytest_tmp").resolve()
+    temp_root.mkdir(parents=True, exist_ok=True)
+    db_path = temp_root / "database-summary-cleanup.db"
+    now = int(time.time())
+    try:
+        db_path.unlink(missing_ok=True)
+
+        async def scenario() -> None:
+            database = Database(db_path=str(db_path))
+            await database.connect()
+            try:
+                session = Session(session_id="session-1", name="Bob", session_type="direct")
+                await database.save_session(session)
+                await database.upsert_conversation_summary_bucket(
+                    {
+                        "session_id": "session-1",
+                        "bucket_start_ts": now,
+                        "bucket_end_ts": now,
+                        "bucket_rule_version": 1,
+                        "is_open": True,
+                        "anchor_message_id": "m-1",
+                        "last_message_id": "m-1",
+                        "last_message_ts": now,
+                        "message_count": 1,
+                        "summary_status": "ready",
+                        "summary_text_ciphertext": "enc:summary-1",
+                        "summary_json_ciphertext": "",
+                        "summary_version": 1,
+                        "media_item_count": 0,
+                        "error_code": "",
+                        "notified_at": None,
+                        "created_at": now,
+                        "updated_at": now,
+                    }
+                )
+                await database._db.execute(
+                    """
+                    INSERT INTO conversation_summary_media_cache
+                    (session_id, message_id, bucket_start_ts, media_kind, source_fingerprint,
+                     summary_status, summary_text_ciphertext, detail_json_ciphertext,
+                     model_name, runtime_kind, attempt_count, error_code, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        "session-1",
+                        "msg-image-1",
+                        now,
+                        "image",
+                        "sha256:demo",
+                        "ready",
+                        "enc:media-summary",
+                        "",
+                        "qwen",
+                        "multimodal_sidecar",
+                        1,
+                        "",
+                        now,
+                        now,
+                    ),
+                )
+                await database._db.commit()
+
+                assert await database.get_open_conversation_summary_bucket("session-1") is not None
+
+                await database.delete_session("session-1")
+
+                assert await database.get_open_conversation_summary_bucket("session-1") is None
+                media_rows = await (await database._db.execute(
+                    "SELECT COUNT(*) AS count FROM conversation_summary_media_cache WHERE session_id = ?",
+                    ("session-1",),
+                )).fetchone()
+                assert media_rows["count"] == 0
+
+                await database.save_session(session)
+                await database.upsert_conversation_summary_bucket(
+                    {
+                        "session_id": "session-1",
+                        "bucket_start_ts": now + 1,
+                        "bucket_end_ts": now + 1,
+                        "bucket_rule_version": 1,
+                        "is_open": True,
+                        "anchor_message_id": "m-2",
+                        "last_message_id": "m-2",
+                        "last_message_ts": now + 1,
+                        "message_count": 1,
+                        "summary_status": "ready",
+                        "summary_text_ciphertext": "enc:summary-2",
+                        "summary_json_ciphertext": "",
+                        "summary_version": 1,
+                        "media_item_count": 0,
+                        "error_code": "",
+                        "notified_at": None,
+                        "created_at": now + 1,
+                        "updated_at": now + 1,
+                    }
+                )
+                await database.clear_chat_state()
+
+                bucket_rows = await (await database._db.execute(
+                    "SELECT COUNT(*) AS count FROM conversation_summary_buckets"
+                )).fetchone()
+                media_rows_after_clear = await (await database._db.execute(
+                    "SELECT COUNT(*) AS count FROM conversation_summary_media_cache"
+                )).fetchone()
+                assert bucket_rows["count"] == 0
+                assert media_rows_after_clear["count"] == 0
+            finally:
+                await database.close()
+
+        asyncio.run(scenario())
+    finally:
+        try:
+            db_path.unlink(missing_ok=True)
+        except PermissionError:
+            pass
+        shutil.rmtree(temp_root, ignore_errors=True)

@@ -11,12 +11,19 @@ from typing import Optional, Sequence
 from client.managers.ai_prompt_builder import (
     AIAssistAction,
     AIPromptBuilder,
+    ReplySummaryContext,
     coerce_assist_action,
     latest_peer_text_message,
 )
 from client.managers.ai_task_manager import AITaskManager, AITaskSnapshot, AITaskState, get_ai_task_manager
 from client.models.message import ChatMessage, MessageType, Session
+from client.core import logging
+from client.core.secure_storage import SecureStorage
 from client.services.ai_service import AIErrorCode
+from client.storage.database import Database, get_database
+
+
+logger = logging.get_logger(__name__)
 
 
 class AIReplySuggestionStatus(Enum):
@@ -95,9 +102,11 @@ class AIAssistManager:
         self,
         task_manager: AITaskManager | None = None,
         prompt_builder: AIPromptBuilder | None = None,
+        db: Database | None = None,
     ) -> None:
         self._task_manager = task_manager or get_ai_task_manager()
         self._prompt_builder = prompt_builder or AIPromptBuilder()
+        self._db = db or get_database()
         self._reply_suggestions: dict[str, AIReplySuggestionState] = {}
 
     async def assist_draft(
@@ -161,11 +170,13 @@ class AIAssistManager:
                 reason=reason,
             )
 
+        summary_context = await self._load_reply_summary_context(session.session_id)
         built = self._prompt_builder.build_reply_suggestion_request(
             session,
             messages,
             task_id=self._task_id(AIAssistAction.REPLY_SUGGESTION.value),
             current_user_id=current_user_id,
+            summary_context=summary_context,
         )
         running = AIReplySuggestionState(
             session_id=session.session_id,
@@ -290,6 +301,53 @@ class AIAssistManager:
             task_id=snapshot.task_id,
             reason=snapshot.finish_reason,
         )
+
+    async def _load_reply_summary_context(self, session_id: str) -> ReplySummaryContext:
+        """Load and decrypt recent local bucket summaries for one session."""
+        normalized_session_id = str(session_id or "").strip()
+        if not normalized_session_id or not self._db.is_connected:
+            return ReplySummaryContext()
+
+        open_bucket_summary = self._decrypt_bucket_summary(
+            await self._db.get_open_conversation_summary_bucket(normalized_session_id)
+        )
+        closed_buckets = await self._db.list_recent_conversation_summary_buckets(
+            normalized_session_id,
+            limit=2,
+            is_open=False,
+            ready_only=True,
+        )
+        history_summaries: list[str] = []
+        for bucket in closed_buckets:
+            summary_text = self._decrypt_bucket_summary(bucket)
+            if not summary_text or summary_text == open_bucket_summary:
+                continue
+            history_summaries.append(summary_text)
+
+        return ReplySummaryContext(
+            open_bucket_summary=open_bucket_summary,
+            recent_bucket_summaries=tuple(history_summaries),
+        )
+
+    def _decrypt_bucket_summary(self, bucket: dict | None) -> str:
+        """Return one decrypted bucket summary or an empty string when unavailable."""
+        if not isinstance(bucket, dict):
+            return ""
+        if str(bucket.get("summary_status") or "").strip() != "ready":
+            return ""
+        ciphertext = str(bucket.get("summary_text_ciphertext") or "").strip()
+        if not ciphertext:
+            return ""
+        try:
+            return str(SecureStorage.decrypt_text(ciphertext) or "").strip()
+        except Exception:
+            logger.warning(
+                "Failed to decrypt local conversation summary session_id=%s bucket_start_ts=%s",
+                str(bucket.get("session_id") or ""),
+                str(bucket.get("bucket_start_ts") or ""),
+                exc_info=True,
+            )
+            return ""
 
     @staticmethod
     def _assist_result(action: AIAssistAction, snapshot: AITaskSnapshot) -> AIAssistResult:

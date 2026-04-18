@@ -313,6 +313,48 @@ class Database:
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS conversation_summary_buckets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                bucket_start_ts INTEGER NOT NULL,
+                bucket_end_ts INTEGER NOT NULL DEFAULT 0,
+                bucket_rule_version INTEGER NOT NULL DEFAULT 1,
+                is_open INTEGER NOT NULL DEFAULT 1,
+                anchor_message_id TEXT NOT NULL DEFAULT '',
+                last_message_id TEXT NOT NULL DEFAULT '',
+                last_message_ts INTEGER NOT NULL DEFAULT 0,
+                message_count INTEGER NOT NULL DEFAULT 0,
+                summary_status TEXT NOT NULL DEFAULT 'pending',
+                summary_text_ciphertext TEXT NOT NULL DEFAULT '',
+                summary_json_ciphertext TEXT NOT NULL DEFAULT '',
+                summary_version INTEGER NOT NULL DEFAULT 1,
+                media_item_count INTEGER NOT NULL DEFAULT 0,
+                error_code TEXT NOT NULL DEFAULT '',
+                notified_at INTEGER,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                UNIQUE(session_id, bucket_start_ts, bucket_rule_version)
+            );
+
+            CREATE TABLE IF NOT EXISTS conversation_summary_media_cache (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                message_id TEXT NOT NULL,
+                bucket_start_ts INTEGER NOT NULL DEFAULT 0,
+                media_kind TEXT NOT NULL DEFAULT '',
+                source_fingerprint TEXT NOT NULL DEFAULT '',
+                summary_status TEXT NOT NULL DEFAULT 'pending',
+                summary_text_ciphertext TEXT NOT NULL DEFAULT '',
+                detail_json_ciphertext TEXT NOT NULL DEFAULT '',
+                model_name TEXT NOT NULL DEFAULT '',
+                runtime_kind TEXT NOT NULL DEFAULT '',
+                attempt_count INTEGER NOT NULL DEFAULT 0,
+                error_code TEXT NOT NULL DEFAULT '',
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                UNIQUE(message_id)
+            );
             
             CREATE INDEX IF NOT EXISTS idx_messages_session 
                 ON messages(session_id, timestamp DESC);
@@ -328,6 +370,12 @@ class Database:
 
             CREATE INDEX IF NOT EXISTS idx_groups_cache_updated
                 ON groups_cache(updated_at DESC);
+
+            CREATE INDEX IF NOT EXISTS idx_summary_buckets_session_open
+                ON conversation_summary_buckets(session_id, is_open, bucket_start_ts DESC);
+
+            CREATE INDEX IF NOT EXISTS idx_summary_media_session_bucket
+                ON conversation_summary_media_cache(session_id, bucket_start_ts DESC, updated_at DESC);
         """)
         await self._db.commit()
 
@@ -1323,9 +1371,222 @@ class Database:
         """
         await self._db.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
         await self._db.execute("DELETE FROM session_read_cursors WHERE session_id = ?", (session_id,))
+        await self._db.execute("DELETE FROM conversation_summary_buckets WHERE session_id = ?", (session_id,))
+        await self._db.execute("DELETE FROM conversation_summary_media_cache WHERE session_id = ?", (session_id,))
         await self._db.execute("DELETE FROM sessions WHERE session_id = ?", (session_id,))
         await self._db.commit()
         logger.debug(f"Session deleted: {session_id}")
+
+    async def get_open_conversation_summary_bucket(self, session_id: str) -> dict[str, Any] | None:
+        """Return the latest open summary bucket for one session."""
+        cursor = await self._db.execute(
+            """
+            SELECT *
+            FROM conversation_summary_buckets
+            WHERE session_id = ?
+              AND is_open = 1
+            ORDER BY bucket_start_ts DESC
+            LIMIT 1
+            """,
+            (session_id,),
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row is not None else None
+
+    async def get_conversation_summary_bucket(
+        self,
+        session_id: str,
+        bucket_start_ts: float,
+        *,
+        bucket_rule_version: int = 1,
+    ) -> dict[str, Any] | None:
+        """Return one summary bucket by its session and bucket start."""
+        cursor = await self._db.execute(
+            """
+            SELECT *
+            FROM conversation_summary_buckets
+            WHERE session_id = ?
+              AND bucket_start_ts = ?
+              AND bucket_rule_version = ?
+            LIMIT 1
+            """,
+            (session_id, int(bucket_start_ts or 0), int(bucket_rule_version or 1)),
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row is not None else None
+
+    async def list_recent_conversation_summary_buckets(
+        self,
+        session_id: str,
+        *,
+        limit: int = 3,
+        is_open: bool | None = None,
+        ready_only: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Return recent summary buckets for one session ordered by newest bucket first."""
+        normalized_limit = max(1, int(limit or 1))
+        clauses = ["session_id = ?"]
+        params: list[Any] = [session_id]
+
+        if is_open is not None:
+            clauses.append("is_open = ?")
+            params.append(1 if is_open else 0)
+        if ready_only:
+            clauses.append("summary_status = ?")
+            params.append("ready")
+
+        where_clause = " AND ".join(clauses)
+        cursor = await self._db.execute(
+            f"""
+            SELECT *
+            FROM conversation_summary_buckets
+            WHERE {where_clause}
+            ORDER BY bucket_start_ts DESC
+            LIMIT ?
+            """,
+            (*params, normalized_limit),
+        )
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+    async def upsert_conversation_summary_bucket(self, payload: dict[str, Any]) -> None:
+        """Insert or update one conversation summary bucket."""
+        session_id = str(payload.get("session_id") or "").strip()
+        if not session_id:
+            raise ValueError("session_id is required")
+
+        bucket_start_ts = int(payload.get("bucket_start_ts") or 0)
+        bucket_rule_version = max(1, int(payload.get("bucket_rule_version") or 1))
+        now_ts = int(payload.get("updated_at") or time.time())
+        created_at = int(payload.get("created_at") or now_ts)
+
+        await self._db.execute(
+            """
+            INSERT INTO conversation_summary_buckets (
+                session_id,
+                bucket_start_ts,
+                bucket_end_ts,
+                bucket_rule_version,
+                is_open,
+                anchor_message_id,
+                last_message_id,
+                last_message_ts,
+                message_count,
+                summary_status,
+                summary_text_ciphertext,
+                summary_json_ciphertext,
+                summary_version,
+                media_item_count,
+                error_code,
+                notified_at,
+                created_at,
+                updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(session_id, bucket_start_ts, bucket_rule_version)
+            DO UPDATE SET
+                bucket_end_ts = excluded.bucket_end_ts,
+                is_open = excluded.is_open,
+                anchor_message_id = excluded.anchor_message_id,
+                last_message_id = excluded.last_message_id,
+                last_message_ts = excluded.last_message_ts,
+                message_count = excluded.message_count,
+                summary_status = excluded.summary_status,
+                summary_text_ciphertext = excluded.summary_text_ciphertext,
+                summary_json_ciphertext = excluded.summary_json_ciphertext,
+                summary_version = excluded.summary_version,
+                media_item_count = excluded.media_item_count,
+                error_code = excluded.error_code,
+                notified_at = excluded.notified_at,
+                updated_at = excluded.updated_at
+            """,
+            (
+                session_id,
+                bucket_start_ts,
+                int(payload.get("bucket_end_ts") or bucket_start_ts),
+                bucket_rule_version,
+                1 if bool(payload.get("is_open", True)) else 0,
+                str(payload.get("anchor_message_id") or ""),
+                str(payload.get("last_message_id") or ""),
+                int(payload.get("last_message_ts") or bucket_start_ts),
+                max(0, int(payload.get("message_count") or 0)),
+                str(payload.get("summary_status") or "pending"),
+                str(payload.get("summary_text_ciphertext") or ""),
+                str(payload.get("summary_json_ciphertext") or ""),
+                max(1, int(payload.get("summary_version") or 1)),
+                max(0, int(payload.get("media_item_count") or 0)),
+                str(payload.get("error_code") or ""),
+                int(payload["notified_at"]) if payload.get("notified_at") is not None else None,
+                created_at,
+                now_ts,
+            ),
+        )
+        await self._db.commit()
+
+    async def close_conversation_summary_bucket(
+        self,
+        session_id: str,
+        bucket_start_ts: float,
+        *,
+        bucket_end_ts: float | None = None,
+    ) -> None:
+        """Mark one conversation summary bucket as closed."""
+        normalized_end_ts = int(bucket_end_ts or bucket_start_ts or 0)
+        await self._db.execute(
+            """
+            UPDATE conversation_summary_buckets
+            SET
+                is_open = 0,
+                bucket_end_ts = CASE
+                    WHEN bucket_end_ts > ? THEN bucket_end_ts
+                    ELSE ?
+                END,
+                updated_at = ?
+            WHERE session_id = ?
+              AND bucket_start_ts = ?
+            """,
+            (
+                normalized_end_ts,
+                normalized_end_ts,
+                int(time.time()),
+                session_id,
+                int(bucket_start_ts or 0),
+            ),
+        )
+        await self._db.commit()
+
+    async def list_conversation_summary_bucket_messages(
+        self,
+        session_id: str,
+        bucket_start_ts: float,
+        bucket_end_ts: float,
+        *,
+        limit: int = 24,
+    ) -> list[ChatMessage]:
+        """Return the newest messages inside one summary bucket in ascending order."""
+        normalized_limit = max(1, int(limit or 1))
+        cursor = await self._db.execute(
+            """
+            SELECT *
+            FROM messages
+            WHERE session_id = ?
+              AND timestamp >= ?
+              AND timestamp <= ?
+            ORDER BY timestamp DESC
+            LIMIT ?
+            """,
+            (
+                session_id,
+                int(bucket_start_ts or 0),
+                int(bucket_end_ts or bucket_start_ts or 0),
+                normalized_limit,
+            ),
+        )
+        rows = await cursor.fetchall()
+        read_cursors = await self._load_session_read_cursors(session_id)
+        messages = [self._overlay_read_cursors_on_message(self._row_to_message(row), read_cursors) for row in rows]
+        messages.reverse()
+        return messages
 
     async def list_session_message_ids(self, session_id: str) -> list[str]:
         """Return all persisted message ids for one session."""
@@ -2619,6 +2880,8 @@ class Database:
         await self._db.execute("DELETE FROM messages")
         await self._db.execute("DELETE FROM session_read_cursors")
         await self._db.execute("DELETE FROM sessions")
+        await self._db.execute("DELETE FROM conversation_summary_buckets")
+        await self._db.execute("DELETE FROM conversation_summary_media_cache")
         await self._db.execute("DELETE FROM contacts_cache")
         await self._db.execute("DELETE FROM groups_cache")
         await self._db.execute(

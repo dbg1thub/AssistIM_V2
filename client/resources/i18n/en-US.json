@@ -143,6 +143,8 @@
   "composer.ai.error.context_too_long": "The AI context is too long. Try a shorter draft or fewer messages.",
   "composer.ai.error.output_invalid": "AI returned an unusable response. Try again.",
   "composer.ai.failed": "AI could not complete this request.",
+  "chat.summary.updated": "Local conversation summary was updated.",
+  "chat.summary.completed": "Local conversation summary is ready.",
   "composer.placeholder.inactive": "Select a session to start chatting",
   "composer.placeholder.active": "Enter to send, Shift+Enter for new line",
   "composer.button.send": "Send",

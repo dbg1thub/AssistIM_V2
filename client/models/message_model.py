@@ -8,6 +8,7 @@ from datetime import datetime
 
 from PySide6.QtCore import QAbstractListModel, QModelIndex, Qt
 
+from client.core.chat_time_buckets import is_chat_time_break
 from client.core.datetime_utils import coerce_local_datetime
 from client.models.message import ChatMessage, MessageStatus, MessageType, resolve_recall_notice
 
@@ -656,10 +657,4 @@ class MessageModel(QAbstractListModel):
 
     def _is_time_break(self, current: ChatMessage, next_message: ChatMessage) -> bool:
         """Return whether adjacent messages belong to different visible time groups."""
-        current_time = self._normalize_timestamp(current.timestamp)
-        next_time = self._normalize_timestamp(next_message.timestamp)
-        if current_time is None or next_time is None:
-            return False
-        if current_time.date() != next_time.date():
-            return True
-        return abs((next_time - current_time).total_seconds()) >= 5 * 60
+        return is_chat_time_break(current.timestamp, next_message.timestamp)

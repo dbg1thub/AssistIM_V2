@@ -37,6 +37,7 @@ from client.events.contact_events import ContactEvent
 from client.core.message_actions import should_offer_delete, should_offer_recall
 from client.events.event_bus import get_event_bus
 from client.managers.call_manager import CallEvent
+from client.managers.conversation_summary_manager import ConversationSummaryEvent
 from client.managers.message_manager import MessageEvent
 from client.managers.session_manager import SessionEvent
 from client.managers.sound_manager import AppSound, get_sound_manager
@@ -423,6 +424,7 @@ class ChatInterface(QWidget):
     CALL_RESULT_DEDUPE_LIMIT = 256
     CALL_RESULT_DEDUPE_TTL_SECONDS = 3600
     AI_STARTUP_WARMUP_DELAY_MS = 800
+    SUMMARY_INFOBAR_THROTTLE_SECONDS = 300.0
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -462,6 +464,8 @@ class ChatInterface(QWidget):
         self._session_view_state: dict[str, dict] = {}
         self._last_read_receipts: dict[str, str] = {}
         self._pending_read_receipts: set[tuple[str, str]] = set()
+        self._summary_notified_buckets: set[tuple[str, int]] = set()
+        self._summary_info_bar_last_shown_at: dict[str, float] = {}
         self._composer_drafts: dict[str, list[dict]] = {}
         self._ui_tasks: set[asyncio.Task] = set()
         self._message_context_menu: RoundMenu | None = None
@@ -619,6 +623,7 @@ class ChatInterface(QWidget):
         self._subscribe_sync(MessageEvent.MEDIA_READY, self._on_media_ready)
         self._subscribe_sync(MessageEvent.SYNC_COMPLETED, self._on_sync_completed)
         self._subscribe_sync(MessageEvent.PROFILE_UPDATED, self._on_profile_updated)
+        self._subscribe_sync(ConversationSummaryEvent.READY, self._on_conversation_summary_ready)
         self._subscribe_sync(CallEvent.INVITE_SENT, self._on_call_invite_sent)
         self._subscribe_sync(CallEvent.INVITE_RECEIVED, self._on_call_invite_received)
         self._subscribe_sync(CallEvent.RINGING, self._on_call_ringing)
@@ -989,6 +994,45 @@ class ChatInterface(QWidget):
             should_scroll = self.chat_panel.is_near_bottom()
             self.chat_panel.add_messages(current_session_messages, scroll_to_bottom=should_scroll)
             self._schedule_read_receipt()
+
+    def _on_conversation_summary_ready(self, data: dict) -> None:
+        """Show a summary-ready InfoBar only for the current visible session."""
+        payload = dict(data or {})
+        session_id = str(payload.get("session_id") or "").strip()
+        if session_id != str(self._current_session_id or "").strip():
+            return
+        if not self._can_mark_session_read():
+            return
+
+        try:
+            bucket_start_ts = int(payload.get("bucket_start_ts") or 0)
+        except (TypeError, ValueError):
+            bucket_start_ts = 0
+        if bucket_start_ts <= 0:
+            return
+
+        bucket_key = (session_id, bucket_start_ts)
+        if bucket_key in self._summary_notified_buckets:
+            return
+
+        now = time.time()
+        last_shown_at = float(self._summary_info_bar_last_shown_at.get(session_id, 0.0) or 0.0)
+        if now - last_shown_at < self.SUMMARY_INFOBAR_THROTTLE_SECONDS:
+            return
+
+        is_open = bool(payload.get("is_open", False))
+        title = tr("composer.ai.title", "AI 助手")
+        message = tr(
+            "chat.summary.updated" if is_open else "chat.summary.completed",
+            "本地会话摘要已更新" if is_open else "本地会话摘要已完成",
+        )
+        if is_open:
+            InfoBar.info(title, message, parent=self.window(), duration=1800)
+        else:
+            InfoBar.success(title, message, parent=self.window(), duration=1800)
+
+        self._summary_notified_buckets.add(bucket_key)
+        self._summary_info_bar_last_shown_at[session_id] = now
 
     def _on_profile_updated(self, data: dict) -> None:
         """Refresh visible sender avatars/names after one participant profile change."""
@@ -1496,6 +1540,10 @@ class ChatInterface(QWidget):
         self._invalidate_session_caches(normalized_session_id)
         self._composer_drafts.pop(normalized_session_id, None)
         self._last_read_receipts.pop(normalized_session_id, None)
+        self._summary_info_bar_last_shown_at.pop(normalized_session_id, None)
+        self._summary_notified_buckets = {
+            key for key in self._summary_notified_buckets if key[0] != normalized_session_id
+        }
         self._pending_read_receipts = {
             key for key in self._pending_read_receipts if key[0] != normalized_session_id
         }

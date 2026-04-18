@@ -15,6 +15,7 @@ from client.core.config_backend import get_config
 from client.core.exceptions import AppError
 from client.core.logging import setup_logging
 from client.managers.call_manager import get_call_manager
+from client.managers.conversation_summary_manager import get_conversation_summary_manager
 from client.managers.message_manager import get_message_manager
 from client.managers.session_manager import SessionRefreshResult, get_session_manager
 from client.models.message import ChatMessage, MessageStatus, MessageType, Session, build_attachment_extra, infer_message_type_from_path
@@ -41,6 +42,7 @@ class ChatController:
         self._msg_manager = get_message_manager()
         self._session_manager = get_session_manager()
         self._call_manager = get_call_manager()
+        self._summary_manager = get_conversation_summary_manager()
         self._call_service = None
         self._file_service = get_file_service()
         self._call_ice_servers = self._clone_ice_servers(get_config().webrtc.ice_servers)
@@ -79,6 +81,7 @@ class ChatController:
         await self._msg_manager.initialize()
         await self._session_manager.initialize()
         await self._call_manager.initialize()
+        await self._summary_manager.initialize()
 
         self._initialized = True
         logger.info("Chat controller initialized")

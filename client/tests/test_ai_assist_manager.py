@@ -41,6 +41,7 @@ if "aiohttp" not in sys.modules:
 from client.managers.ai_assist_manager import AIAssistManager, AIReplySuggestionStatus
 from client.managers.ai_prompt_builder import AIAssistAction
 from client.managers.ai_task_manager import AITaskSnapshot, AITaskState
+from client.core.secure_storage import SecureStorage
 from client.models.message import ChatMessage, MessageStatus, MessageType, Session
 from client.services.ai_service import AIErrorCode, AIPrivacyScope, AITaskType
 
@@ -63,6 +64,33 @@ class FakeTaskManager:
             error_code=self.error_code,
             finish_reason="stop",
         )
+
+
+class FakeSummaryDatabase:
+    def __init__(self, *, open_bucket: dict | None = None, closed_buckets: list[dict] | None = None) -> None:
+        self.is_connected = True
+        self.open_bucket = dict(open_bucket or {}) if open_bucket is not None else None
+        self.closed_buckets = [dict(item) for item in list(closed_buckets or [])]
+
+    async def get_open_conversation_summary_bucket(self, session_id: str):
+        return dict(self.open_bucket) if self.open_bucket is not None else None
+
+    async def list_recent_conversation_summary_buckets(
+        self,
+        session_id: str,
+        *,
+        limit: int = 3,
+        is_open: bool | None = None,
+        ready_only: bool = False,
+    ):
+        buckets = list(self.closed_buckets)
+        if is_open is True:
+            buckets = [dict(self.open_bucket)] if self.open_bucket is not None else []
+        elif is_open is False:
+            buckets = list(self.closed_buckets)
+        if ready_only:
+            buckets = [item for item in buckets if str(item.get("summary_status") or "") == "ready"]
+        return [dict(item) for item in buckets[:limit]]
 
 
 def _session(**kwargs) -> Session:
@@ -120,6 +148,85 @@ def test_suggest_replies_generates_ready_state_without_persistence() -> None:
         assert state.anchor_message_id == "m1"
         assert manager.get_suggestions("s1") is not state
         assert fake.requests[0].task_type == AITaskType.REPLY_SUGGESTION
+
+    asyncio.run(scenario())
+
+
+def test_suggest_replies_includes_local_bucket_summaries_when_available(monkeypatch) -> None:
+    async def scenario() -> None:
+        monkeypatch.setattr(
+            SecureStorage,
+            "decrypt_text",
+            classmethod(lambda cls, value: {"enc:open": "当前主要在确认周日下午见面。", "enc:closed": "之前已经确认了见面地点。"}[value]),
+        )
+        fake = FakeTaskManager(
+            content="好的，我看一下。\n明白，我现在处理。\n这边先不方便。\n我晚点再回复。"
+        )
+        db = FakeSummaryDatabase(
+            open_bucket={
+                "session_id": "s1",
+                "bucket_start_ts": 1,
+                "summary_status": "ready",
+                "summary_text_ciphertext": "enc:open",
+            },
+            closed_buckets=[
+                {
+                    "session_id": "s1",
+                    "bucket_start_ts": 0,
+                    "summary_status": "ready",
+                    "summary_text_ciphertext": "enc:closed",
+                }
+            ],
+        )
+        manager = AIAssistManager(task_manager=fake, db=db)
+
+        state = await manager.suggest_replies(_session(), [_peer_message()], current_user_id="me")
+
+        assert state.status == AIReplySuggestionStatus.READY
+        prompt = fake.requests[0].messages[0]["content"]
+        assert "当前时间段摘要：" in prompt
+        assert "最近历史摘要：" in prompt
+        assert "当前主要在确认周日下午见面。" in prompt
+        assert "之前已经确认了见面地点。" in prompt
+    asyncio.run(scenario())
+
+
+def test_suggest_replies_skips_bucket_summary_when_decrypt_fails(monkeypatch) -> None:
+    async def scenario() -> None:
+        def _decrypt(_cls, value: str) -> str:
+            if value == "enc:bad":
+                raise RuntimeError("bad ciphertext")
+            return "之前已经确认了见面地点。"
+
+        monkeypatch.setattr(SecureStorage, "decrypt_text", classmethod(_decrypt))
+        fake = FakeTaskManager(
+            content="好的，我看一下。\n明白，我现在处理。\n这边先不方便。\n我晚点再回复。"
+        )
+        db = FakeSummaryDatabase(
+            open_bucket={
+                "session_id": "s1",
+                "bucket_start_ts": 1,
+                "summary_status": "ready",
+                "summary_text_ciphertext": "enc:bad",
+            },
+            closed_buckets=[
+                {
+                    "session_id": "s1",
+                    "bucket_start_ts": 0,
+                    "summary_status": "ready",
+                    "summary_text_ciphertext": "enc:closed",
+                }
+            ],
+        )
+        manager = AIAssistManager(task_manager=fake, db=db)
+
+        state = await manager.suggest_replies(_session(), [_peer_message()], current_user_id="me")
+
+        assert state.status == AIReplySuggestionStatus.READY
+        prompt = fake.requests[0].messages[0]["content"]
+        assert "当前时间段摘要：" not in prompt
+        assert "最近历史摘要：" in prompt
+        assert "之前已经确认了见面地点。" in prompt
 
     asyncio.run(scenario())
 

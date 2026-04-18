@@ -37,7 +37,7 @@ if "aiohttp" not in sys.modules:
     aiohttp.ClientResponse = _DummyClientResponse
     sys.modules["aiohttp"] = aiohttp
 
-from client.managers.ai_prompt_builder import AIAssistAction, AIPromptBuilder
+from client.managers.ai_prompt_builder import AIAssistAction, AIPromptBuilder, ReplySummaryContext
 from client.models.message import ChatMessage, MessageStatus, Session
 from client.services.ai_service import AIPrivacyScope, AITaskType
 
@@ -78,6 +78,32 @@ def test_reply_suggestion_prompt_anchors_latest_peer_text() -> None:
     assert "前 2 条为积极推进型" in built.request.messages[0]["content"]
     assert "后 2 条为保守婉拒型" in built.request.messages[0]["content"]
     assert "对方: can you check this?" in built.request.messages[0]["content"]
+
+
+def test_reply_suggestion_prompt_includes_local_summary_context_when_available() -> None:
+    builder = AIPromptBuilder()
+    session = Session(session_id="s1", name="Alice", session_type="direct")
+    messages = [
+        ChatMessage("m1", "s1", "peer", "周日下午可以见面。", status=MessageStatus.RECEIVED),
+    ]
+
+    built = builder.build_reply_suggestion_request(
+        session,
+        messages,
+        summary_context=ReplySummaryContext(
+            open_bucket_summary="当前主要在确认周日下午是否见面。",
+            recent_bucket_summaries=("之前已经确认了见面地点。", "还没有最终敲定具体时间。"),
+        ),
+    )
+
+    prompt = built.request.messages[0]["content"]
+    assert "聊天上下文：" in prompt
+    assert "当前时间段摘要：" in prompt
+    assert "最近历史摘要：" in prompt
+    assert "当前主要在确认周日下午是否见面。" in prompt
+    assert "之前已经确认了见面地点。" in prompt
+    assert built.request.metadata["has_open_bucket_summary"] is True
+    assert built.request.metadata["history_summary_count"] == 2
 
 
 def test_parse_reply_suggestions_cleans_markers_and_limits() -> None:

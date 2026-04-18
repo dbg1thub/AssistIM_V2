@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Sequence
 
@@ -27,6 +27,14 @@ class ReplySuggestionRequest:
 
     request: AIRequest
     anchor_message: ChatMessage
+
+
+@dataclass(frozen=True, slots=True)
+class ReplySummaryContext:
+    """Optional summary context prepended to reply-suggestion prompts."""
+
+    open_bucket_summary: str = ""
+    recent_bucket_summaries: tuple[str, ...] = field(default_factory=tuple)
 
 
 class AIPromptBuilder:
@@ -101,6 +109,7 @@ class AIPromptBuilder:
         task_id: str = "",
         current_user_id: str = "",
         max_context_messages: int | None = None,
+        summary_context: ReplySummaryContext | None = None,
     ) -> ReplySuggestionRequest:
         """Build an AI request for private reply suggestions."""
         anchor = latest_peer_text_message(messages, current_user_id=current_user_id)
@@ -109,6 +118,21 @@ class AIPromptBuilder:
 
         context_limit = max(1, int(max_context_messages or self.MAX_CONTEXT_MESSAGES))
         context = self._format_context(messages[-context_limit:])
+        normalized_summary_context = summary_context or ReplySummaryContext()
+        prompt_sections = [f"聊天上下文：\n{context}"]
+        open_bucket_summary = _normalize_text(
+            normalized_summary_context.open_bucket_summary,
+            max_chars=self.MAX_MESSAGE_CHARS,
+        )
+        if open_bucket_summary:
+            prompt_sections.append(f"当前时间段摘要：\n- {open_bucket_summary}")
+        history_lines = [
+            _normalize_text(item, max_chars=self.MAX_MESSAGE_CHARS)
+            for item in normalized_summary_context.recent_bucket_summaries
+        ]
+        history_lines = [item for item in history_lines if item]
+        if history_lines:
+            prompt_sections.append("最近历史摘要：\n" + "\n".join(f"- {item}" for item in history_lines))
         privacy_scope = privacy_scope_for_session(session)
         must_be_local = session.uses_e2ee()
         prompt = (
@@ -116,7 +140,7 @@ class AIPromptBuilder:
             f"风格要求：前 {self.REPLY_POSITIVE_COUNT} 条为积极推进型；"
             f"后 {self.REPLY_RESERVED_COUNT} 条为保守婉拒型（偏消极，但保持礼貌、克制，不要攻击或辱骂）。\n"
             "约束：每行一条；不要编号；不要解释；不要替我发送。\n\n"
-            f"聊天上下文：\n{context}"
+            + "\n\n".join(prompt_sections)
         )
 
         request = AIRequest(
@@ -134,6 +158,8 @@ class AIPromptBuilder:
                 "assist_action": AIAssistAction.REPLY_SUGGESTION.value,
                 "anchor_message_id": anchor.message_id,
                 "session_type": session.session_type,
+                "has_open_bucket_summary": bool(open_bucket_summary),
+                "history_summary_count": len(history_lines),
             },
         )
         return ReplySuggestionRequest(request=request, anchor_message=anchor)

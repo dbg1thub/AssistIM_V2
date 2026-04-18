@@ -158,6 +158,8 @@
   "composer.ai.error.context_too_long": "AI 上下文太长，请缩短草稿或减少消息数量。",
   "composer.ai.error.output_invalid": "AI 返回了无法使用的内容，请重试。",
   "composer.ai.failed": "AI 无法完成这次请求。",
+  "chat.summary.updated": "本地会话摘要已更新",
+  "chat.summary.completed": "本地会话摘要已完成",
   "composer.placeholder.inactive": "选择一个会话开始聊天",
   "composer.placeholder.active": "回车发送，Shift+回车换行",
   "composer.button.send": "发送",
