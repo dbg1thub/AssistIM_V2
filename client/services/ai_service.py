@@ -1,527 +1,736 @@
-"""
-AI Service Module
+"""AI service contracts and provider adapters."""
 
-Service for AI chat with streaming support.
-"""
-import asyncio
+from __future__ import annotations
+
 import json
+import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, AsyncIterator, Callable, Optional
+from typing import Any, AsyncIterator, Optional
 
 from client.core import logging
 from client.core.logging import setup_logging
-from client.models.message import ChatMessage
 from client.network.http_client import get_http_client
-
 
 setup_logging()
 logger = logging.get_logger(__name__)
 
 
 class AIProviderType(Enum):
-    """AI provider types."""
-    
+    """Supported AI provider families."""
+
     OPENAI = "openai"
     OLLAMA = "ollama"
-    LOCAL = "local"
     HTTP = "http"
+    LOCAL = "local"
 
 
-@dataclass
+class AITaskType(Enum):
+    """AI task categories used for routing, diagnostics, and policy checks."""
+
+    CHAT = "chat"
+    REPLY_SUGGESTION = "reply_suggestion"
+    INPUT_REWRITE = "input_rewrite"
+    INPUT_POLISH = "input_polish"
+    INPUT_SHORTEN = "input_shorten"
+    TRANSLATE = "translate"
+    SUMMARY = "summary"
+
+
+class AIPrivacyScope(Enum):
+    """Privacy scope declared by the caller for one AI request."""
+
+    GENERAL = "general"
+    DIRECT_CONTEXT = "direct_context"
+    E2EE_PLAINTEXT = "e2ee_plaintext"
+    SERVER_VISIBLE_AI = "server_visible_ai"
+
+
+class AIStreamEventType(Enum):
+    """Stream event types emitted by providers."""
+
+    STARTED = "started"
+    DELTA = "delta"
+    DONE = "done"
+    ERROR = "error"
+
+
+class AIErrorCode(Enum):
+    """Stable AI error codes surfaced by service and provider boundaries."""
+
+    AI_MODEL_NOT_FOUND = "AI_MODEL_NOT_FOUND"
+    AI_MODEL_LOAD_FAILED = "AI_MODEL_LOAD_FAILED"
+    AI_MODEL_UNAVAILABLE = "AI_MODEL_UNAVAILABLE"
+    AI_RUNTIME_BUSY = "AI_RUNTIME_BUSY"
+    AI_CONTEXT_TOO_LONG = "AI_CONTEXT_TOO_LONG"
+    AI_STREAM_INTERRUPTED = "AI_STREAM_INTERRUPTED"
+    AI_USER_CANCELLED = "AI_USER_CANCELLED"
+    AI_TIMEOUT = "AI_TIMEOUT"
+    AI_PROVIDER_UNAVAILABLE = "AI_PROVIDER_UNAVAILABLE"
+    AI_OUTPUT_INVALID = "AI_OUTPUT_INVALID"
+    AI_PRIVACY_DENIED = "AI_PRIVACY_DENIED"
+    AI_LOCAL_REQUIRED_UNAVAILABLE = "AI_LOCAL_REQUIRED_UNAVAILABLE"
+    AI_RESOURCE_EXHAUSTED = "AI_RESOURCE_EXHAUSTED"
+    AI_OUTPUT_TRUNCATED = "AI_OUTPUT_TRUNCATED"
+    AI_MODEL_DOWNLOAD_FAILED = "AI_MODEL_DOWNLOAD_FAILED"
+    AI_MODEL_CHECKSUM_FAILED = "AI_MODEL_CHECKSUM_FAILED"
+
+    @classmethod
+    def coerce(cls, value: object, *, default: "AIErrorCode") -> "AIErrorCode":
+        """Return a known error code from an arbitrary value."""
+        if isinstance(value, cls):
+            return value
+        normalized = str(value or "").strip()
+        for code in cls:
+            if normalized in {code.name, code.value}:
+                return code
+        return default
+
+
+class AIServiceError(RuntimeError):
+    """AI boundary error with a stable user-facing code."""
+
+    def __init__(self, code: AIErrorCode, message: str = "") -> None:
+        self.code = code
+        super().__init__(message or code.value)
+
+
+@dataclass(slots=True)
 class AIRequest:
-    """AI chat request."""
-    
+    """Provider-independent AI generation request."""
+
     messages: list[dict[str, str]]
-    model: str = "gpt-3.5-turbo"
+    model: str = ""
     temperature: float = 0.7
     max_tokens: int = 2048
     stream: bool = True
     session_id: str = ""
     system_prompt: Optional[str] = None
+    task_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    task_type: AITaskType | str = AITaskType.CHAT
+    must_be_local: bool = False
+    privacy_scope: AIPrivacyScope | str = AIPrivacyScope.GENERAL
+    max_output_chars: int = 0
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not str(self.task_id or "").strip():
+            self.task_id = str(uuid.uuid4())
+        self.task_type = _coerce_task_type(self.task_type)
+        self.privacy_scope = _coerce_privacy_scope(self.privacy_scope)
+        self.max_tokens = max(1, int(self.max_tokens or 1))
+        self.max_output_chars = max(0, int(self.max_output_chars or 0))
 
 
-@dataclass
+@dataclass(slots=True)
 class AIResponse:
-    """AI chat response."""
-    
+    """Final AI generation result."""
+
     content: str
     model: str
+    task_id: str = ""
+    provider: str = ""
     finish_reason: Optional[str] = None
     usage: dict[str, int] = field(default_factory=dict)
+    truncated: bool = False
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
-async def _stream_openai_compatible_chunks(
-    http_client,
-    url: str,
-    payload: dict[str, Any],
-    headers: dict[str, str],
-    on_chunk: Callable[[str], Any],
-) -> tuple[str, Optional[str], dict[str, int]]:
-    """Stream one OpenAI-compatible SSE response."""
-    content_parts: list[str] = []
+@dataclass(slots=True)
+class AIStreamEvent:
+    """One normalized provider stream event."""
+
+    task_id: str
+    event_type: AIStreamEventType | str
+    session_id: str = ""
+    content: str = ""
     finish_reason: Optional[str] = None
-    usage: dict[str, int] = {}
+    response: Optional[AIResponse] = None
+    error_code: Optional[AIErrorCode] = None
+    metadata: dict[str, Any] = field(default_factory=dict)
 
-    async for line in http_client.stream_lines(
-        "POST",
-        url,
-        json=payload,
-        headers=headers,
-        use_auth=False,
-    ):
-        if not line.startswith("data: "):
-            continue
-
-        if line == "data: [DONE]":
-            finish_reason = finish_reason or "stop"
-            break
-
-        try:
-            chunk = json.loads(line[6:])
-        except Exception as exc:
-            logger.warning(f"Failed to parse stream chunk: {exc}")
-            continue
-
-        choice = (chunk.get("choices") or [{}])[0]
-        delta = choice.get("delta") or {}
-        content = delta.get("content", "")
-        if content:
-            content_parts.append(content)
-            on_chunk(content)
-
-        finish_reason = choice.get("finish_reason") or finish_reason
-        chunk_usage = chunk.get("usage")
-        if isinstance(chunk_usage, dict):
-            usage = chunk_usage
-
-    return "".join(content_parts), finish_reason, usage
+    def __post_init__(self) -> None:
+        if isinstance(self.event_type, str):
+            self.event_type = AIStreamEventType(self.event_type)
 
 
-async def _stream_ndjson_chunks(
-    http_client,
-    url: str,
-    payload: dict[str, Any],
-    on_chunk: Callable[[str], Any],
-) -> tuple[str, Optional[str]]:
-    """Stream one newline-delimited JSON response."""
-    content_parts: list[str] = []
-    finish_reason: Optional[str] = None
+@dataclass(slots=True)
+class AIModelInfo:
+    """Provider model and runtime summary."""
 
-    async for line in http_client.stream_lines(
-        "POST",
-        url,
-        json=payload,
-        use_auth=False,
-    ):
-        try:
-            chunk = json.loads(line)
-        except Exception as exc:
-            logger.warning(f"Failed to parse stream chunk: {exc}")
-            continue
+    provider: str
+    model: str
+    local: bool = False
+    loaded: bool = False
+    loading: bool = False
+    runtime: str = ""
+    model_path: str = ""
+    context_size: int = 0
+    max_output_tokens: int = 0
+    gpu_layers: Optional[int] = None
+    supports_streaming: bool = True
+    metadata: dict[str, Any] = field(default_factory=dict)
 
-        content = chunk.get("message", {}).get("content", "")
-        if content:
-            content_parts.append(content)
-            on_chunk(content)
 
-        if chunk.get("done"):
-            finish_reason = "stop"
-            break
+def _coerce_task_type(value: AITaskType | str) -> AITaskType:
+    if isinstance(value, AITaskType):
+        return value
+    normalized = str(value or "").strip()
+    try:
+        return AITaskType(normalized)
+    except ValueError:
+        return AITaskType.CHAT
 
-    return "".join(content_parts), finish_reason
+
+def _coerce_privacy_scope(value: AIPrivacyScope | str) -> AIPrivacyScope:
+    if isinstance(value, AIPrivacyScope):
+        return value
+    normalized = str(value or "").strip()
+    try:
+        return AIPrivacyScope(normalized)
+    except ValueError:
+        return AIPrivacyScope.GENERAL
+
+
+def _messages_for_request(request: AIRequest) -> list[dict[str, str]]:
+    """Return OpenAI-style messages with an optional system prompt prepended."""
+    messages: list[dict[str, str]] = []
+    if request.system_prompt:
+        messages.append({"role": "system", "content": str(request.system_prompt)})
+    messages.extend(dict(message) for message in request.messages)
+    return messages
+
+
+def _truncate_response_if_needed(response: AIResponse, max_output_chars: int) -> AIResponse:
+    """Apply a caller-level hard character cap."""
+    if max_output_chars <= 0 or len(response.content) <= max_output_chars:
+        return response
+    return AIResponse(
+        content=response.content[:max_output_chars],
+        model=response.model,
+        task_id=response.task_id,
+        provider=response.provider,
+        finish_reason=AIErrorCode.AI_OUTPUT_TRUNCATED.value,
+        usage=dict(response.usage),
+        truncated=True,
+        metadata=dict(response.metadata),
+    )
+
+
+def _extract_openai_message_content(data: dict[str, Any]) -> tuple[str, Optional[str], dict[str, int]]:
+    choice = (data.get("choices") or [{}])[0]
+    message = choice.get("message") or {}
+    return (
+        str(message.get("content", "") or ""),
+        choice.get("finish_reason"),
+        dict(data.get("usage") or {}),
+    )
+
+
+def _extract_stream_delta(chunk: dict[str, Any]) -> tuple[str, Optional[str], dict[str, int]]:
+    choice = (chunk.get("choices") or [{}])[0]
+    delta = choice.get("delta") or {}
+    content = str(delta.get("content", "") or "")
+    finish_reason = choice.get("finish_reason")
+    usage = dict(chunk.get("usage") or {})
+    return content, finish_reason, usage
 
 
 class AIProvider(ABC):
     """Abstract base class for AI providers."""
-    
+
     @property
     @abstractmethod
     def provider_type(self) -> AIProviderType:
         """Return provider type."""
-        pass
-    
+
     @abstractmethod
-    async def chat(self, request: AIRequest) -> AIResponse:
-        """Send non-streaming chat request."""
-        pass
-    
+    async def generate_once(self, request: AIRequest) -> AIResponse:
+        """Generate a complete non-streaming response."""
+
     @abstractmethod
-    async def stream_chat(
-        self,
-        request: AIRequest,
-        on_chunk: Callable[[str], Any],
-    ) -> AIResponse:
-        """
-        Send streaming chat request.
-        
-        Args:
-            request: Chat request
-            on_chunk: Callback for each chunk
-        
-        Returns:
-            Final AI response
-        """
-        pass
-    
+    async def stream_chat(self, request: AIRequest) -> AsyncIterator[AIStreamEvent]:
+        """Stream one response as normalized events."""
+        if False:
+            yield AIStreamEvent(task_id=request.task_id, event_type=AIStreamEventType.DONE)
+
+    @abstractmethod
+    async def cancel(self, task_id: str) -> None:
+        """Cancel a provider task when supported."""
+
+    @abstractmethod
+    async def get_model_info(self) -> AIModelInfo:
+        """Return provider model/runtime summary."""
+
+    async def warmup(self) -> None:
+        """Prepare provider runtime state for a future request."""
+        return None
+
     @abstractmethod
     async def close(self) -> None:
         """Clean up resources."""
-        pass
 
 
 class OpenAIProvider(AIProvider):
-    """OpenAI API provider."""
-    
+    """OpenAI-compatible hosted provider."""
+
     def __init__(self, api_key: Optional[str] = None, base_url: Optional[str] = None):
         self._api_key = api_key
         self._base_url = base_url or "https://api.openai.com/v1"
         self._http = get_http_client()
-    
+        self._default_model = "gpt-3.5-turbo"
+
     @property
     def provider_type(self) -> AIProviderType:
         return AIProviderType.OPENAI
-    
-    async def chat(self, request: AIRequest) -> AIResponse:
-        headers = {
-            "Authorization": f"Bearer {self._api_key}",
-            "Content-Type": "application/json",
-        }
-        
+
+    def _headers(self) -> dict[str, str]:
+        headers = {"Content-Type": "application/json"}
+        if self._api_key:
+            headers["Authorization"] = f"Bearer {self._api_key}"
+        return headers
+
+    async def generate_once(self, request: AIRequest) -> AIResponse:
         payload = {
-            "model": request.model,
-            "messages": request.messages,
+            "model": request.model or self._default_model,
+            "messages": _messages_for_request(request),
             "temperature": request.temperature,
             "max_tokens": request.max_tokens,
+            "stream": False,
         }
-        
         data = await self._http.post(
             f"{self._base_url}/chat/completions",
             json=payload,
-            headers=headers,
+            headers=self._headers(),
+            use_auth=False,
         )
-        
-        choice = data["choices"][0]
-        return AIResponse(
-            content=choice["message"]["content"],
-            model=data.get("model", request.model),
-            finish_reason=choice.get("finish_reason"),
-            usage=data.get("usage", {}),
+        content, finish_reason, usage = _extract_openai_message_content(dict(data or {}))
+        response = AIResponse(
+            content=content,
+            model=str((data or {}).get("model") or request.model or self._default_model),
+            task_id=request.task_id,
+            provider=self.provider_type.value,
+            finish_reason=finish_reason,
+            usage=usage,
         )
-    
-    async def stream_chat(
-        self,
-        request: AIRequest,
-        on_chunk: Callable[[str], Any],
-    ) -> AIResponse:
-        headers = {
-            "Authorization": f"Bearer {self._api_key}",
-            "Content-Type": "application/json",
-        }
+        return _truncate_response_if_needed(response, request.max_output_chars)
 
+    async def stream_chat(self, request: AIRequest) -> AsyncIterator[AIStreamEvent]:
         payload = {
-            "model": request.model,
-            "messages": request.messages,
+            "model": request.model or self._default_model,
+            "messages": _messages_for_request(request),
             "temperature": request.temperature,
             "max_tokens": request.max_tokens,
             "stream": True,
         }
+        yield AIStreamEvent(
+            task_id=request.task_id,
+            session_id=request.session_id,
+            event_type=AIStreamEventType.STARTED,
+        )
 
-        content, finish_reason, usage = await _stream_openai_compatible_chunks(
-            self._http,
+        content_parts: list[str] = []
+        finish_reason: Optional[str] = None
+        usage: dict[str, int] = {}
+        async for line in self._http.stream_lines(
+            "POST",
             f"{self._base_url}/chat/completions",
-            payload,
-            headers,
-            on_chunk,
+            json=payload,
+            headers=self._headers(),
+            use_auth=False,
+        ):
+            if not line.startswith("data: "):
+                continue
+            if line == "data: [DONE]":
+                finish_reason = finish_reason or "stop"
+                break
+            try:
+                chunk = json.loads(line[6:])
+            except json.JSONDecodeError as exc:
+                logger.warning("Failed to parse OpenAI stream chunk: %s", exc)
+                continue
+            content, chunk_finish_reason, chunk_usage = _extract_stream_delta(chunk)
+            if chunk_finish_reason:
+                finish_reason = chunk_finish_reason
+            if chunk_usage:
+                usage = chunk_usage
+            if not content:
+                continue
+            content_parts.append(content)
+            yield AIStreamEvent(
+                task_id=request.task_id,
+                session_id=request.session_id,
+                event_type=AIStreamEventType.DELTA,
+                content=content,
+            )
+
+        response = _truncate_response_if_needed(
+            AIResponse(
+                content="".join(content_parts),
+                model=request.model or self._default_model,
+                task_id=request.task_id,
+                provider=self.provider_type.value,
+                finish_reason=finish_reason,
+                usage=usage,
+            ),
+            request.max_output_chars,
+        )
+        yield AIStreamEvent(
+            task_id=request.task_id,
+            session_id=request.session_id,
+            event_type=AIStreamEventType.DONE,
+            finish_reason=response.finish_reason,
+            response=response,
         )
 
-        return AIResponse(
-            content=content,
-            model=request.model,
-            finish_reason=finish_reason,
-            usage=usage,
+    async def cancel(self, task_id: str) -> None:
+        return None
+
+    async def get_model_info(self) -> AIModelInfo:
+        return AIModelInfo(
+            provider=self.provider_type.value,
+            model=self._default_model,
+            local=False,
+            loaded=True,
+            loading=False,
+            runtime="openai_compatible_http",
         )
-    
+
     async def close(self) -> None:
-        pass
+        return None
 
 
 class OllamaProvider(AIProvider):
-    """Ollama local provider."""
-    
+    """Ollama local HTTP provider."""
+
     def __init__(self, base_url: str = "http://localhost:11434"):
         self._base_url = base_url
         self._http = get_http_client()
-    
+        self._default_model = "qwen2.5"
+
     @property
     def provider_type(self) -> AIProviderType:
         return AIProviderType.OLLAMA
-    
-    async def chat(self, request: AIRequest) -> AIResponse:
+
+    async def generate_once(self, request: AIRequest) -> AIResponse:
         payload = {
-            "model": request.model,
-            "messages": request.messages,
+            "model": request.model or self._default_model,
+            "messages": _messages_for_request(request),
             "stream": False,
             "options": {
                 "temperature": request.temperature,
                 "num_predict": request.max_tokens,
             },
         }
-        
         data = await self._http.post(
             f"{self._base_url}/api/chat",
             json=payload,
+            use_auth=False,
         )
-        
-        return AIResponse(
-            content=data["message"]["content"],
-            model=request.model,
-            finish_reason="stop" if data.get("done") else None,
+        message = dict((data or {}).get("message") or {})
+        response = AIResponse(
+            content=str(message.get("content", "") or ""),
+            model=request.model or self._default_model,
+            task_id=request.task_id,
+            provider=self.provider_type.value,
+            finish_reason="stop" if (data or {}).get("done") else None,
         )
-    
-    async def stream_chat(
-        self,
-        request: AIRequest,
-        on_chunk: Callable[[str], Any],
-    ) -> AIResponse:
+        return _truncate_response_if_needed(response, request.max_output_chars)
+
+    async def stream_chat(self, request: AIRequest) -> AsyncIterator[AIStreamEvent]:
         payload = {
-            "model": request.model,
-            "messages": request.messages,
+            "model": request.model or self._default_model,
+            "messages": _messages_for_request(request),
             "stream": True,
             "options": {
                 "temperature": request.temperature,
                 "num_predict": request.max_tokens,
             },
         }
+        yield AIStreamEvent(
+            task_id=request.task_id,
+            session_id=request.session_id,
+            event_type=AIStreamEventType.STARTED,
+        )
 
-        content, finish_reason = await _stream_ndjson_chunks(
-            self._http,
+        content_parts: list[str] = []
+        finish_reason: Optional[str] = None
+        async for line in self._http.stream_lines(
+            "POST",
             f"{self._base_url}/api/chat",
-            payload,
-            on_chunk,
+            json=payload,
+            use_auth=False,
+        ):
+            try:
+                chunk = json.loads(line)
+            except json.JSONDecodeError as exc:
+                logger.warning("Failed to parse Ollama stream chunk: %s", exc)
+                continue
+            content = str((chunk.get("message") or {}).get("content", "") or "")
+            if chunk.get("done"):
+                finish_reason = "stop"
+            if not content:
+                continue
+            content_parts.append(content)
+            yield AIStreamEvent(
+                task_id=request.task_id,
+                session_id=request.session_id,
+                event_type=AIStreamEventType.DELTA,
+                content=content,
+            )
+
+        response = _truncate_response_if_needed(
+            AIResponse(
+                content="".join(content_parts),
+                model=request.model or self._default_model,
+                task_id=request.task_id,
+                provider=self.provider_type.value,
+                finish_reason=finish_reason,
+            ),
+            request.max_output_chars,
+        )
+        yield AIStreamEvent(
+            task_id=request.task_id,
+            session_id=request.session_id,
+            event_type=AIStreamEventType.DONE,
+            finish_reason=response.finish_reason,
+            response=response,
         )
 
-        return AIResponse(
-            content=content,
-            model=request.model,
-            finish_reason=finish_reason,
+    async def cancel(self, task_id: str) -> None:
+        return None
+
+    async def get_model_info(self) -> AIModelInfo:
+        return AIModelInfo(
+            provider=self.provider_type.value,
+            model=self._default_model,
+            local=True,
+            loaded=True,
+            loading=False,
+            runtime="ollama_http",
         )
-    
+
     async def close(self) -> None:
-        pass
+        return None
 
 
-class HTTPProvider(AIProvider):
-    """Custom HTTP API provider."""
-    
+class HTTPProvider(OpenAIProvider):
+    """Custom OpenAI-compatible HTTP provider."""
+
     def __init__(
         self,
         base_url: str,
         api_key: Optional[str] = None,
         headers: Optional[dict[str, str]] = None,
     ):
-        self._base_url = base_url
-        self._api_key = api_key
+        super().__init__(api_key=api_key, base_url=base_url)
         self._custom_headers = headers or {}
-        self._http = get_http_client()
-    
+
     @property
     def provider_type(self) -> AIProviderType:
         return AIProviderType.HTTP
-    
-    async def chat(self, request: AIRequest) -> AIResponse:
+
+    def _headers(self) -> dict[str, str]:
         headers = dict(self._custom_headers)
+        headers.setdefault("Content-Type", "application/json")
         if self._api_key:
             headers["Authorization"] = f"Bearer {self._api_key}"
-        
-        payload = {
-            "model": request.model,
-            "messages": request.messages,
-            "temperature": request.temperature,
-            "max_tokens": request.max_tokens,
-        }
-        
-        data = await self._http.post(
-            f"{self._base_url}/chat/completions",
-            json=payload,
-            headers=headers,
-        )
-        
-        choice = data["choices"][0]
-        return AIResponse(
-            content=choice["message"]["content"],
-            model=data.get("model", request.model),
-            finish_reason=choice.get("finish_reason"),
-        )
-    
-    async def stream_chat(
-        self,
-        request: AIRequest,
-        on_chunk: Callable[[str], Any],
-    ) -> AIResponse:
-        headers = dict(self._custom_headers)
-        if self._api_key:
-            headers["Authorization"] = f"Bearer {self._api_key}"
+        return headers
 
-        payload = {
-            "model": request.model,
-            "messages": request.messages,
-            "temperature": request.temperature,
-            "max_tokens": request.max_tokens,
-            "stream": True,
-        }
 
-        content, finish_reason, _usage = await _stream_openai_compatible_chunks(
-            self._http,
-            f"{self._base_url}/chat/completions",
-            payload,
-            headers,
-            on_chunk,
+class LocalGGUFProvider(AIProvider):
+    """Local GGUF provider backed by llama-cpp-python runtime."""
+
+    def __init__(self, runtime=None):
+        if runtime is None:
+            from client.services.local_gguf_runtime import LocalGGUFRuntime
+
+            runtime = LocalGGUFRuntime()
+        self._runtime = runtime
+
+    @property
+    def provider_type(self) -> AIProviderType:
+        return AIProviderType.LOCAL
+
+    async def generate_once(self, request: AIRequest) -> AIResponse:
+        try:
+            result = await self._runtime.generate_once(
+                task_id=request.task_id,
+                messages=_messages_for_request(request),
+                model=request.model,
+                temperature=request.temperature,
+                max_tokens=request.max_tokens,
+            )
+        except Exception as exc:
+            raise self._convert_runtime_error(exc) from exc
+        response = AIResponse(
+            content=str(result.get("content", "") or ""),
+            model=str(result.get("model") or request.model or ""),
+            task_id=request.task_id,
+            provider="local_gguf",
+            finish_reason=result.get("finish_reason"),
+            usage=dict(result.get("usage") or {}),
+            metadata=dict(result.get("metadata") or {}),
         )
+        return _truncate_response_if_needed(response, request.max_output_chars)
 
-        return AIResponse(
-            content=content,
+    async def stream_chat(self, request: AIRequest) -> AsyncIterator[AIStreamEvent]:
+        yield AIStreamEvent(
+            task_id=request.task_id,
+            session_id=request.session_id,
+            event_type=AIStreamEventType.STARTED,
+        )
+        content_parts: list[str] = []
+        truncated = False
+        try:
+            async for chunk in self._runtime.stream_chat(
+                task_id=request.task_id,
+                messages=_messages_for_request(request),
+                model=request.model,
+                temperature=request.temperature,
+                max_tokens=request.max_tokens,
+            ):
+                content = str(getattr(chunk, "content", "") or "")
+                if not content:
+                    continue
+                if request.max_output_chars > 0:
+                    remaining = request.max_output_chars - sum(len(part) for part in content_parts)
+                    if remaining <= 0:
+                        truncated = True
+                        await self.cancel(request.task_id)
+                        break
+                    if len(content) > remaining:
+                        content = content[:remaining]
+                        truncated = True
+                content_parts.append(content)
+                yield AIStreamEvent(
+                    task_id=request.task_id,
+                    session_id=request.session_id,
+                    event_type=AIStreamEventType.DELTA,
+                    content=content,
+                    metadata=dict(getattr(chunk, "metadata", {}) or {}),
+                )
+                if truncated:
+                    await self.cancel(request.task_id)
+                    break
+        except Exception as exc:
+            raise self._convert_runtime_error(exc) from exc
+
+        finish_reason = AIErrorCode.AI_OUTPUT_TRUNCATED.value if truncated else "stop"
+        response = AIResponse(
+            content="".join(content_parts),
             model=request.model,
+            task_id=request.task_id,
+            provider="local_gguf",
             finish_reason=finish_reason,
+            truncated=truncated,
         )
-    
+        yield AIStreamEvent(
+            task_id=request.task_id,
+            session_id=request.session_id,
+            event_type=AIStreamEventType.DONE,
+            finish_reason=finish_reason,
+            response=response,
+        )
+
+    async def cancel(self, task_id: str) -> None:
+        await self._runtime.cancel(task_id)
+
+    async def get_model_info(self) -> AIModelInfo:
+        info = await self._runtime.get_model_info()
+        return AIModelInfo(
+            provider="local_gguf",
+            model=str(getattr(info, "model", "") or ""),
+            local=True,
+            loaded=bool(getattr(info, "loaded", False)),
+            loading=bool(getattr(info, "loading", False)),
+            runtime=str(getattr(info, "runtime", "llama-cpp-python") or "llama-cpp-python"),
+            model_path=str(getattr(info, "model_path", "") or ""),
+            context_size=int(getattr(info, "context_size", 0) or 0),
+            max_output_tokens=int(getattr(info, "max_output_tokens", 0) or 0),
+            gpu_layers=getattr(info, "gpu_layers", None),
+            supports_streaming=True,
+            metadata=dict(getattr(info, "metadata", {}) or {}),
+        )
+
+    async def warmup(self) -> None:
+        try:
+            warmup = getattr(self._runtime, "warmup", None)
+            if callable(warmup):
+                await warmup()
+                return
+            await self._runtime.load()
+        except Exception as exc:
+            raise self._convert_runtime_error(exc) from exc
+
     async def close(self) -> None:
-        pass
+        await self._runtime.close()
+
+    @staticmethod
+    def _convert_runtime_error(exc: Exception) -> AIServiceError:
+        code = AIErrorCode.coerce(
+            getattr(exc, "code", ""),
+            default=AIErrorCode.AI_MODEL_UNAVAILABLE,
+        )
+        return AIServiceError(code, str(exc) or code.value)
 
 
 class AIService:
-    """
-    Service for AI chat with streaming support.
-    
-    Responsibilities:
-        - Manage AI providers
-        - Stream AI responses
-        - Handle message history
-    """
-    
-    def __init__(self):
-        self._provider: Optional[AIProvider] = None
-        self._default_model = "gpt-3.5-turbo"
-        self._default_temperature = 0.7
-        self._default_max_tokens = 2048
-    
-    def set_provider(self, provider: AIProvider) -> None:
-        """Set AI provider."""
+    """Provider boundary for AI generation requests."""
+
+    def __init__(self, provider: Optional[AIProvider] = None):
         self._provider = provider
-        logger.info(f"AI provider set: {provider.provider_type.value}")
-    
-    def set_default_model(self, model: str) -> None:
-        """Set default model."""
-        self._default_model = model
-    
-    def set_default_params(self, temperature: float = None, max_tokens: int = None) -> None:
-        """Set default parameters."""
-        if temperature is not None:
-            self._default_temperature = temperature
-        if max_tokens is not None:
-            self._default_max_tokens = max_tokens
-    
+
     @property
     def provider(self) -> Optional[AIProvider]:
-        """Get current provider."""
+        """Return the configured provider."""
         return self._provider
-    
-    def _build_messages(
-        self,
-        history: list[ChatMessage],
-        system_prompt: Optional[str] = None,
-    ) -> list[dict[str, str]]:
-        """Build messages list for API."""
-        messages = []
-        
-        if system_prompt:
-            messages.append({"role": "system", "content": system_prompt})
-        
-        for msg in history:
-            role = "assistant" if msg.is_ai else "user"
-            messages.append({"role": role, "content": msg.content})
-        
-        return messages
-    
-    async def stream_chat(
-        self,
-        messages: list[ChatMessage],
-        on_chunk: Callable[[str], Any],
-        model: Optional[str] = None,
-        temperature: Optional[float] = None,
-        max_tokens: Optional[int] = None,
-        system_prompt: Optional[str] = None,
-        session_id: str = "",
-    ) -> AIResponse:
-        """
-        Stream chat with AI.
-        
-        Args:
-            messages: Conversation history
-            on_chunk: Callback for each chunk (throttled to ~30ms)
-            model: Model name
-            temperature: Sampling temperature
-            max_tokens: Max tokens
-            system_prompt: System prompt
-            session_id: Session ID
-        
-        Returns:
-            Final AI response
-        """
-        if not self._provider:
-            raise RuntimeError("AI provider not set")
-        
-        request = AIRequest(
-            messages=self._build_messages(messages, system_prompt),
-            model=model or self._default_model,
-            temperature=temperature or self._default_temperature,
-            max_tokens=max_tokens or self._default_max_tokens,
-            stream=True,
-            session_id=session_id,
-            system_prompt=system_prompt,
-        )
-        
-        return await self._provider.stream_chat(request, on_chunk)
-    
-    async def chat(
-        self,
-        messages: list[ChatMessage],
-        model: Optional[str] = None,
-        temperature: Optional[float] = None,
-        max_tokens: Optional[int] = None,
-        system_prompt: Optional[str] = None,
-    ) -> AIResponse:
-        """
-        Non-streaming chat with AI.
-        
-        Args:
-            messages: Conversation history
-            model: Model name
-            temperature: Sampling temperature
-            max_tokens: Max tokens
-            system_prompt: System prompt
-        
-        Returns:
-            AI response
-        """
-        if not self._provider:
-            raise RuntimeError("AI provider not set")
-        
-        request = AIRequest(
-            messages=self._build_messages(messages, system_prompt),
-            model=model or self._default_model,
-            temperature=temperature or self._default_temperature,
-            max_tokens=max_tokens or self._default_max_tokens,
-            stream=False,
-            system_prompt=system_prompt,
-        )
-        
-        return await self._provider.chat(request)
-    
+
+    def set_provider(self, provider: AIProvider) -> None:
+        """Set the active provider."""
+        self._provider = provider
+        logger.info("AI provider set: %s", provider.provider_type.value)
+
+    def _require_provider(self, request: AIRequest | None = None) -> AIProvider:
+        if self._provider is None:
+            raise AIServiceError(AIErrorCode.AI_PROVIDER_UNAVAILABLE, "AI provider not set")
+        if request is not None and request.must_be_local and self._provider.provider_type != AIProviderType.LOCAL:
+            raise AIServiceError(
+                AIErrorCode.AI_LOCAL_REQUIRED_UNAVAILABLE,
+                "Local AI is required but the active provider is not local",
+            )
+        return self._provider
+
+    async def generate_once(self, request: AIRequest) -> AIResponse:
+        """Generate a complete response with the active provider."""
+        provider = self._require_provider(request)
+        return await provider.generate_once(request)
+
+    async def stream_chat(self, request: AIRequest) -> AsyncIterator[AIStreamEvent]:
+        """Stream a response with the active provider."""
+        provider = self._require_provider(request)
+        async for event in provider.stream_chat(request):
+            yield event
+
+    async def cancel(self, task_id: str) -> None:
+        """Cancel an active provider task when supported."""
+        provider = self._require_provider()
+        await provider.cancel(task_id)
+
+    async def get_model_info(self) -> AIModelInfo:
+        """Return the active provider model summary."""
+        provider = self._require_provider()
+        return await provider.get_model_info()
+
+    async def warmup(self) -> None:
+        """Warm up the active provider for future requests."""
+        provider = self._require_provider()
+        await provider.warmup()
+
     async def close(self) -> None:
-        """Close provider."""
-        if self._provider:
+        """Close the active provider."""
+        if self._provider is not None:
             await self._provider.close()
             self._provider = None
 
@@ -529,42 +738,14 @@ class AIService:
 _ai_service: Optional[AIService] = None
 
 
+def peek_ai_service() -> Optional[AIService]:
+    """Return the existing AI service singleton when present."""
+    return _ai_service
+
+
 def get_ai_service() -> AIService:
-    """Get the global AI service instance."""
+    """Return the global AI service singleton."""
     global _ai_service
     if _ai_service is None:
         _ai_service = AIService()
     return _ai_service
-
-
-def create_provider(
-    provider_type: AIProviderType,
-    **kwargs,
-) -> AIProvider:
-    """
-    Factory function to create AI provider.
-    
-    Args:
-        provider_type: Type of provider
-        **kwargs: Provider-specific arguments
-    
-    Returns:
-        AIProvider instance
-    """
-    if provider_type == AIProviderType.OPENAI:
-        return OpenAIProvider(
-            api_key=kwargs.get("api_key"),
-            base_url=kwargs.get("base_url"),
-        )
-    elif provider_type == AIProviderType.OLLAMA:
-        return OllamaProvider(
-            base_url=kwargs.get("base_url", "http://localhost:11434"),
-        )
-    elif provider_type == AIProviderType.HTTP:
-        return HTTPProvider(
-            base_url=kwargs["base_url"],
-            api_key=kwargs.get("api_key"),
-            headers=kwargs.get("headers"),
-        )
-    else:
-        raise ValueError(f"Unknown provider type: {provider_type}")

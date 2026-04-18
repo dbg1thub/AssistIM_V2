@@ -1,17 +1,31 @@
-"""UI controllers module."""
+"""UI controllers module with lazy exports."""
 
-from client.ui.controllers.auth_controller import AuthController, get_auth_controller
-from client.ui.controllers.chat_controller import ChatController, get_chat_controller
-from client.ui.controllers.contact_controller import ContactController, get_contact_controller
-from client.ui.controllers.discovery_controller import DiscoveryController, get_discovery_controller
+from __future__ import annotations
 
-__all__ = [
-    "AuthController",
-    "ChatController",
-    "ContactController",
-    "DiscoveryController",
-    "get_auth_controller",
-    "get_chat_controller",
-    "get_contact_controller",
-    "get_discovery_controller",
-]
+from importlib import import_module
+from typing import Any
+
+_EXPORTS = {
+    "AIController": ("client.ui.controllers.ai_controller", "AIController"),
+    "AuthController": ("client.ui.controllers.auth_controller", "AuthController"),
+    "ChatController": ("client.ui.controllers.chat_controller", "ChatController"),
+    "ContactController": ("client.ui.controllers.contact_controller", "ContactController"),
+    "DiscoveryController": ("client.ui.controllers.discovery_controller", "DiscoveryController"),
+    "get_ai_controller": ("client.ui.controllers.ai_controller", "get_ai_controller"),
+    "get_auth_controller": ("client.ui.controllers.auth_controller", "get_auth_controller"),
+    "get_chat_controller": ("client.ui.controllers.chat_controller", "get_chat_controller"),
+    "get_contact_controller": ("client.ui.controllers.contact_controller", "get_contact_controller"),
+    "get_discovery_controller": ("client.ui.controllers.discovery_controller", "get_discovery_controller"),
+}
+
+__all__ = list(_EXPORTS)
+
+
+def __getattr__(name: str) -> Any:
+    """Resolve controller exports lazily so importing one controller stays isolated."""
+    if name not in _EXPORTS:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    module_name, attribute_name = _EXPORTS[name]
+    value = getattr(import_module(module_name), attribute_name)
+    globals()[name] = value
+    return value

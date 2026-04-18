@@ -1288,6 +1288,70 @@ def test_application_show_main_window_ignores_stale_window_signals_and_delayed_c
     asyncio.run(scenario())
 
 
+def test_application_show_main_window_triggers_startup_ai_status_and_warmup(monkeypatch) -> None:
+    main_module = _load_main_module()
+
+    class _FakeChatInterface:
+        def __init__(self) -> None:
+            self.status_calls = 0
+            self.warmup_calls = 0
+
+        def show_startup_ai_status(self) -> None:
+            self.status_calls += 1
+
+        def warmup_startup_ai(self) -> None:
+            self.warmup_calls += 1
+
+    class _FakeMainWindow:
+        def __init__(self) -> None:
+            self.closed = _FakeSignal()
+            self.logoutRequested = _FakeSignal()
+            self.runtimeRefreshRequested = _FakeSignal()
+            self.chat_interface = _FakeChatInterface()
+
+        def restore_default_geometry(self) -> None:
+            return None
+
+        def show(self) -> None:
+            return None
+
+        def showNormal(self) -> None:
+            return None
+
+        def raise_(self) -> None:
+            return None
+
+        def activateWindow(self) -> None:
+            return None
+
+    class _FakeQTimer:
+        @staticmethod
+        def singleShot(_delay: int, callback) -> None:
+            callback()
+
+    fake_main_window_module = types.ModuleType("client.ui.windows.main_window")
+    fake_main_window_module.MainWindow = _FakeMainWindow
+
+    monkeypatch.setitem(sys.modules, "client.ui.windows.main_window", fake_main_window_module)
+    monkeypatch.setattr(main_module, "QTimer", _FakeQTimer)
+
+    async def scenario() -> None:
+        app = main_module.Application(_FakeQtApp())
+        generation = app._start_new_runtime_generation()
+
+        def fake_create_task(coro):
+            coro.close()
+            return "warm-task"
+
+        app.create_task = fake_create_task  # type: ignore[method-assign]
+        await app.show_main_window(generation=generation)
+
+        assert app.main_window.chat_interface.status_calls == 1
+        assert app.main_window.chat_interface.warmup_calls == 1
+
+    asyncio.run(scenario())
+
+
 def test_application_warm_authenticated_runtime_promotes_ready_and_defers_auth_success_feedback(monkeypatch) -> None:
     main_module = _load_main_module()
     recorded: list[tuple[str, str, str, int]] = []

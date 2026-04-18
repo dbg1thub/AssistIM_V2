@@ -35,6 +35,9 @@ from client.managers.session_manager import get_session_manager, peek_session_ma
 from client.managers.sound_manager import get_sound_manager, peek_sound_manager
 from client.managers.search_manager import peek_search_manager
 from client.managers.call_manager import peek_call_manager
+from client.managers.ai_task_manager import peek_ai_task_manager
+from client.services.ai_bootstrap import configure_default_ai_provider
+from client.services.ai_service import peek_ai_service
 
 from client.ui.controllers.auth_controller import get_auth_controller, peek_auth_controller
 from client.ui.controllers.chat_controller import get_chat_controller, peek_chat_controller
@@ -55,6 +58,16 @@ def _peek_discovery_controller():
     from client.ui.controllers.discovery_controller import peek_discovery_controller
 
     return peek_discovery_controller()
+
+
+def _peek_ai_controller():
+    """Resolve the AI controller singleton lazily to keep test stubs isolated."""
+    try:
+        from client.ui.controllers.ai_controller import peek_ai_controller
+    except ImportError:
+        return None
+
+    return peek_ai_controller()
 
 
 @dataclass(frozen=True)
@@ -555,6 +568,12 @@ class Application:
         if callable(auth_loss_subscribe):
             auth_loss_subscribe(self._on_auth_loss)
 
+        logger.info("Configuring AI provider...")
+        try:
+            configure_default_ai_provider()
+        except Exception:
+            logger.exception("AI provider configuration failed; AI features will report provider errors on use")
+
         logger.info("Pre-auth application runtime initialized")
 
     async def initialize_authenticated_runtime(self, *, generation: int | None = None) -> None:
@@ -865,6 +884,13 @@ class Application:
         self._cancel_runtime_warmup()
         self._warm_runtime_task = self.create_task(self._warm_authenticated_runtime(target_generation))
         self._set_lifecycle_state("main_shell_visible")
+        chat_interface = getattr(main_window, "chat_interface", None)
+        show_ai_status = getattr(chat_interface, "show_startup_ai_status", None)
+        if callable(show_ai_status):
+            show_ai_status()
+        warmup_ai = getattr(chat_interface, "warmup_startup_ai", None)
+        if callable(warmup_ai):
+            warmup_ai()
 
         logger.info("Main window displayed")
 
@@ -1092,6 +1118,11 @@ class Application:
         ):
             close_failures.append("discovery_controller")
         if not await self._close_optional_component(
+            "AI controller close during logout failed",
+            _peek_ai_controller,
+        ):
+            close_failures.append("ai_controller")
+        if not await self._close_optional_component(
             "Message manager close during logout failed",
             peek_message_manager,
         ):
@@ -1199,6 +1230,7 @@ class Application:
         await self._close_optional_component("Message controller close failed", peek_message_controller)
         await self._close_optional_component("Session controller close failed", peek_session_controller)
         await self._close_optional_component("Discovery controller close failed", _peek_discovery_controller)
+        await self._close_optional_component("AI controller close failed", _peek_ai_controller)
         await self._close_optional_component("Auth controller close failed", peek_auth_controller)
         await self._close_optional_component("Message manager close failed", peek_message_manager)
         await self._close_optional_component("Session manager close failed", peek_session_manager)
@@ -1210,6 +1242,8 @@ class Application:
         await self._close_optional_component("Sound manager close failed", peek_sound_manager)
         await self._close_optional_component("Call manager close failed", peek_call_manager)
         await self._close_optional_component("Search manager close failed", peek_search_manager)
+        await self._close_optional_component("AI task manager close failed", peek_ai_task_manager)
+        await self._close_optional_component("AI service close failed", peek_ai_service)
 
         # Close HTTP client
         try:

@@ -22,3 +22,6 @@ sqlcipher3==0.6.2; platform_system == "Windows"
 keyring>=23.0.0
 appdirs>=2.0.0
 cryptography>=43.0.0
+
+# Local AI
+llama-cpp-python>=0.3.0

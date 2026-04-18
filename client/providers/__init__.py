@@ -6,22 +6,32 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from client.services.ai_service import (
+        AIErrorCode,
         AIProvider,
         AIProviderType,
         AIService,
         AIRequest,
         AIResponse,
-        create_provider,
+        AIServiceError,
+        AIStreamEvent,
+        AIStreamEventType,
+        AITaskType,
+        AIPrivacyScope,
         get_ai_service,
     )
 
 __all__ = [
+    "AIErrorCode",
     "AIProvider",
     "AIProviderType",
     "AIService",
     "AIRequest",
     "AIResponse",
-    "create_provider",
+    "AIServiceError",
+    "AIStreamEvent",
+    "AIStreamEventType",
+    "AITaskType",
+    "AIPrivacyScope",
     "get_ai_service",
 ]
 

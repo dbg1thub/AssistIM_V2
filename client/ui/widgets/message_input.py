@@ -42,6 +42,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 from qfluentwidgets import (
+    Action,
     BodyLabel,
     CaptionLabel,
     Flyout,
@@ -50,6 +51,7 @@ from qfluentwidgets import (
     InfoBar,
     IconWidget,
     PushButton,
+    RoundMenu,
     ScrollArea,
     SegmentedWidget,
     TransparentToolButton,
@@ -2316,6 +2318,8 @@ class MessageInput(QWidget):
     screenshot_requested = Signal()
     voice_call_requested = Signal()
     video_call_requested = Signal()
+    ai_action_requested = Signal(str)
+    ai_reply_suggestion_selected = Signal(str)
     typing_signal = Signal()
 
     IMAGE_FILTER = "Images (*.png *.jpg *.jpeg *.gif *.bmp *.webp)"
@@ -2336,6 +2340,8 @@ class MessageInput(QWidget):
         self._mention_range: tuple[int, int] | None = None
         self._draft_emit_pending = False
         self._programmatic_edit_depth = 0
+        self._ai_busy = False
+        self._reply_suggestion_buttons: list[PushButton] = []
         self._setup_ui()
         self._connect_signals()
         qconfig.themeChanged.connect(lambda *_args: (self._apply_editor_transparency(), self.text_input._refresh_mention_selections()))
@@ -2398,7 +2404,7 @@ class MessageInput(QWidget):
 
         self.ai_button = TransparentToolButton(AppIcon.ROBOT, self.composer_widget)
         self.ai_button.setFixedSize(28, 28)
-        self.ai_button.setToolTip(tr("composer.toolbar.ai", "AI Assistant"))
+        self.ai_button.setToolTip(tr("composer.toolbar.ai", "AI 助手"))
 
         self._apply_safe_button_font(
             self.emoji_button,
@@ -2428,6 +2434,16 @@ class MessageInput(QWidget):
         self.toolbar_layout.addWidget(self.ai_button)
         self.toolbar_layout.addStretch(1)
 
+        self.reply_suggestion_widget = QWidget(self.composer_widget)
+        self.reply_suggestion_widget.setObjectName("aiReplySuggestionBar")
+        self.reply_suggestion_layout = QHBoxLayout(self.reply_suggestion_widget)
+        self.reply_suggestion_layout.setContentsMargins(10, 0, 10, 4)
+        self.reply_suggestion_layout.setSpacing(6)
+        self.reply_suggestion_label = CaptionLabel(tr("composer.ai.reply_suggestions", "AI 回复"), self.reply_suggestion_widget)
+        self.reply_suggestion_layout.addWidget(self.reply_suggestion_label, 0, Qt.AlignmentFlag.AlignVCenter)
+        self.reply_suggestion_layout.addStretch(1)
+        self.reply_suggestion_widget.hide()
+
         self.text_input = ChatTextEdit(self.composer_widget)
         self.text_input.setObjectName("chatMessageEdit")
         self.text_input.viewport().setObjectName("chatMessageViewport")
@@ -2444,6 +2460,7 @@ class MessageInput(QWidget):
         self.toolbar_widget.setLayout(self.toolbar_layout)
 
         self.composer_layout.addWidget(self.toolbar_widget, 0)
+        self.composer_layout.addWidget(self.reply_suggestion_widget, 0)
         self.composer_layout.addWidget(self.text_input, 1)
         self.card_layout.addWidget(self.composer_widget, 1)
         self.main_layout.addWidget(self.editor_card, 1)
@@ -2548,7 +2565,7 @@ class MessageInput(QWidget):
         self.cut_button.clicked.connect(self.screenshot_requested.emit)
         self.voice_button.clicked.connect(self.voice_call_requested.emit)
         self.video_button.clicked.connect(self.video_call_requested.emit)
-        self.ai_button.clicked.connect(self._on_placeholder_action)
+        self.ai_button.clicked.connect(self._on_ai_clicked)
         self.text_input.textChanged.connect(self._on_text_changed)
         self.text_input.textChanged.connect(self._update_send_button_state)
         self.text_input.textChanged.connect(self._schedule_draft_changed_emit)
@@ -2705,14 +2722,33 @@ class MessageInput(QWidget):
             self.text_input.insert_local_attachment(file_path, blockify=False)
         self.text_input.setFocus()
 
-    def _on_placeholder_action(self) -> None:
-        """Show temporary placeholder hint for unsupported toolbar actions."""
-        InfoBar.info(
-            tr("composer.action.title", "Notice"),
-            tr("composer.action.unavailable", "This toolbar action is not connected yet."),
-            parent=self.window(),
-            duration=1800,
-        )
+    def _on_ai_clicked(self) -> None:
+        """Show draft-assist actions for the current composer text."""
+        if not self._session_active or self._ai_busy:
+            return
+
+        draft_text = self.current_plain_text().strip()
+        if not draft_text:
+            InfoBar.info(
+                tr("composer.ai.title", "AI 助手"),
+                tr("composer.ai.empty_draft", "请先输入草稿，再选择 AI 操作。"),
+                parent=self.window(),
+                duration=1800,
+            )
+            return
+
+        menu = RoundMenu(parent=self)
+        actions = [
+            ("polish", tr("composer.ai.polish", "润色")),
+            ("shorten", tr("composer.ai.shorten", "缩短")),
+            ("translate", tr("composer.ai.translate", "翻译成中文")),
+            ("rewrite", tr("composer.ai.rewrite", "重写")),
+        ]
+        for action_id, label in actions:
+            action = Action(label, self)
+            action.triggered.connect(lambda _checked=False, value=action_id: self.ai_action_requested.emit(value))
+            menu.addAction(action)
+        menu.exec(self.ai_button.mapToGlobal(QPoint(0, self.ai_button.height())))
 
     def set_session_active(self, active: bool) -> None:
         """Enable or disable the editor depending on session selection."""
@@ -2724,7 +2760,7 @@ class MessageInput(QWidget):
         self.cut_button.setEnabled(active)
         self.voice_button.setEnabled(active)
         self.video_button.setEnabled(active)
-        self.ai_button.setEnabled(active)
+        self.ai_button.setEnabled(active and not self._ai_busy)
         self.text_input.setEnabled(active)
 
         if active:
@@ -2734,6 +2770,7 @@ class MessageInput(QWidget):
             self._current_session = None
             self._mention_candidates = []
             self._close_mention_flyout()
+            self.clear_reply_suggestions()
             self.clear_draft()
 
         self._apply_editor_transparency()
@@ -2750,6 +2787,7 @@ class MessageInput(QWidget):
         self._current_session = session
         self._mention_candidates = self._build_mention_candidates(session)
         self._close_mention_flyout()
+        self.clear_reply_suggestions()
         self._update_call_buttons()
 
     def _update_call_buttons(self) -> None:
@@ -2988,6 +3026,78 @@ class MessageInput(QWidget):
         self._run_programmatic_edit(lambda: self.text_input.restore_composed_segments(segments or []))
         self._update_send_button_state()
         self._schedule_draft_changed_emit()
+
+    def current_plain_text(self) -> str:
+        """Return the current text-only draft content."""
+        text_parts: list[str] = []
+        for segment in self.capture_draft_segments():
+            segment_type = segment.get("type")
+            if isinstance(segment_type, str):
+                try:
+                    segment_type = MessageType(segment_type)
+                except ValueError:
+                    segment_type = None
+            if segment_type == MessageType.TEXT:
+                content = str(segment.get("content", "") or "")
+                if content:
+                    text_parts.append(content)
+        return "\n".join(text_parts).strip()
+
+    def replace_plain_text_draft(self, text: str) -> None:
+        """Replace the composer content with one plain text draft."""
+        normalized = str(text or "").strip()
+        if not normalized:
+            return
+        self.restore_draft_segments([{"type": MessageType.TEXT, "content": normalized}])
+        self.focus_editor()
+
+    def set_ai_busy(self, busy: bool) -> None:
+        """Reflect whether an explicit draft AI action is running."""
+        self._ai_busy = bool(busy)
+        self.ai_button.setEnabled(self._session_active and not self._ai_busy)
+        if self._ai_busy:
+            self.ai_button.setToolTip(tr("composer.ai.running", "AI 正在处理..."))
+        else:
+            self.ai_button.setToolTip(tr("composer.toolbar.ai", "AI 助手"))
+
+    def set_reply_suggestions(self, suggestions: list[str]) -> None:
+        """Render ephemeral AI reply candidates above the composer."""
+        self.clear_reply_suggestions()
+        normalized = [str(item or "").strip() for item in suggestions or [] if str(item or "").strip()]
+        if not normalized:
+            return
+
+        insert_index = max(1, self.reply_suggestion_layout.count() - 1)
+        for text in normalized[:3]:
+            button = PushButton(self._elide_suggestion_text(text), self.reply_suggestion_widget)
+            button.setFixedHeight(30)
+            button.setMaximumWidth(220)
+            button.setToolTip(text)
+            button.clicked.connect(lambda _checked=False, value=text: self._apply_reply_suggestion(value))
+            self.reply_suggestion_layout.insertWidget(insert_index, button, 0, Qt.AlignmentFlag.AlignVCenter)
+            self._reply_suggestion_buttons.append(button)
+            insert_index += 1
+        self.reply_suggestion_widget.show()
+        self._update_overlay_positions()
+
+    def clear_reply_suggestions(self) -> None:
+        """Remove visible AI reply candidates."""
+        for button in self._reply_suggestion_buttons:
+            self.reply_suggestion_layout.removeWidget(button)
+            button.deleteLater()
+        self._reply_suggestion_buttons.clear()
+        self.reply_suggestion_widget.hide()
+        self._update_overlay_positions()
+
+    def _apply_reply_suggestion(self, text: str) -> None:
+        """Fill the composer with a candidate reply without sending it."""
+        self.replace_plain_text_draft(text)
+        self.clear_reply_suggestions()
+        self.ai_reply_suggestion_selected.emit(text)
+
+    def _elide_suggestion_text(self, text: str) -> str:
+        metrics = self.fontMetrics()
+        return metrics.elidedText(str(text or ""), Qt.TextElideMode.ElideRight, 180)
 
     def clear_draft(self) -> None:
         """Clear the current composer draft explicitly."""

@@ -29,3 +29,25 @@ def test_webrtc_config_builds_structured_ice_servers(monkeypatch) -> None:
             "credential": "secret",
         },
     ]
+
+
+def test_ai_config_reads_local_gguf_environment(monkeypatch) -> None:
+    monkeypatch.setenv("ASSISTIM_AI_PROVIDER", "LOCAL_GGUF")
+    monkeypatch.setenv("ASSISTIM_AI_MODEL_PATH", "D:/models/demo.gguf")
+    monkeypatch.setenv("ASSISTIM_AI_MODEL_ID", "demo-model")
+    monkeypatch.setenv("ASSISTIM_AI_CONTEXT_SIZE", "8192")
+    monkeypatch.setenv("ASSISTIM_AI_MAX_OUTPUT_TOKENS", "1024")
+    monkeypatch.setenv("ASSISTIM_AI_TEMPERATURE", "0.2")
+    monkeypatch.setenv("ASSISTIM_AI_GPU_LAYERS", "auto")
+    monkeypatch.setenv("ASSISTIM_AI_VERBOSE", "yes")
+
+    config = reload_config()
+
+    assert config.ai.provider == "local_gguf"
+    assert config.ai.model_path == "D:/models/demo.gguf"
+    assert config.ai.model_id == "demo-model"
+    assert config.ai.context_size == 8192
+    assert config.ai.max_output_tokens == 1024
+    assert config.ai.temperature == 0.2
+    assert config.ai.gpu_layers == -1
+    assert config.ai.verbose is True

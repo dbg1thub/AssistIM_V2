@@ -270,6 +270,8 @@ class ChatPanel(QWidget):
     group_announcement_requested = Signal()
     security_pending_confirm_requested = Signal(str, str)
     security_pending_discard_requested = Signal(str)
+    ai_draft_action_requested = Signal(str)
+    ai_reply_suggestion_selected = Signal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -351,6 +353,8 @@ class ChatPanel(QWidget):
         self.message_input.screenshot_requested.connect(self.screenshot_requested.emit)
         self.message_input.voice_call_requested.connect(self.voice_call_requested.emit)
         self.message_input.video_call_requested.connect(self.video_call_requested.emit)
+        self.message_input.ai_action_requested.connect(self.ai_draft_action_requested.emit)
+        self.message_input.ai_reply_suggestion_selected.connect(self.ai_reply_suggestion_selected.emit)
         self.message_input.typing_signal.connect(self._on_typing)
         self.message_input.draft_changed.connect(self.composer_draft_changed.emit)
 
@@ -531,7 +535,7 @@ class ChatPanel(QWidget):
             avatar=session.display_avatar(),
             is_ai=session.is_ai_session,
         )
-        self.chat_header.set_security_badges(badges)
+        self.chat_header.set_security_badges(_session_security_badges(session))
         logger.info(
             "[e2ee-diag] chat_panel.session_summary session_id=%s mode=%s uses_e2ee=%s headline=%s "
             "crypto_ready=%s identity_status=%s decryption_state=%s badge_texts=%s",
@@ -635,13 +639,33 @@ class ChatPanel(QWidget):
         """Return the current message composer draft without clearing it."""
         return self.message_input.capture_draft_segments()
 
+    def current_composer_plain_text(self) -> str:
+        """Return the text-only composer draft."""
+        return self.message_input.current_plain_text()
+
     def restore_composer_draft(self, segments: list[dict]) -> None:
         """Restore a previously captured composer draft."""
         self.message_input.restore_draft_segments(segments)
 
+    def replace_composer_text(self, text: str) -> None:
+        """Replace the composer with one plain text draft."""
+        self.message_input.replace_plain_text_draft(text)
+
     def clear_composer_draft(self) -> None:
         """Clear the current composer draft."""
         self.message_input.clear_draft()
+
+    def set_ai_assist_busy(self, busy: bool) -> None:
+        """Reflect explicit draft AI work in the composer."""
+        self.message_input.set_ai_busy(busy)
+
+    def set_ai_reply_suggestions(self, suggestions: list[str]) -> None:
+        """Show ephemeral AI reply candidates in the composer."""
+        self.message_input.set_reply_suggestions(suggestions)
+
+    def clear_ai_reply_suggestions(self) -> None:
+        """Clear ephemeral AI reply candidates from the composer."""
+        self.message_input.clear_reply_suggestions()
 
     def restore_recalled_message_to_composer(self, message_id: str) -> bool:
         """Load recalled text back into the composer for inline direct editing."""

@@ -43,6 +43,7 @@ from client.managers.sound_manager import AppSound, get_sound_manager
 from client.models.call import ActiveCallState, CallMediaType
 from client.models.message import ChatMessage, MessageStatus, MessageType, format_message_preview
 from client.ui.controllers.auth_controller import get_auth_controller
+from client.ui.controllers.ai_controller import AIHealthState, AIHealthStatus, get_ai_controller
 from client.ui.controllers.chat_controller import get_chat_controller
 from client.ui.controllers.contact_controller import get_contact_controller
 from client.ui.controllers.session_controller import get_session_controller
@@ -421,11 +422,13 @@ class ChatInterface(QWidget):
     CALL_INCOMING_RING_RETRY_MS = 180
     CALL_RESULT_DEDUPE_LIMIT = 256
     CALL_RESULT_DEDUPE_TTL_SECONDS = 3600
+    AI_STARTUP_WARMUP_DELAY_MS = 800
 
     def __init__(self, parent=None):
         super().__init__(parent)
 
         self._chat_controller = get_chat_controller()
+        self._ai_controller = get_ai_controller()
         self._contact_controller = get_contact_controller()
         self._auth_controller = get_auth_controller()
         self._session_controller = get_session_controller()
@@ -454,6 +457,8 @@ class ChatInterface(QWidget):
         self._history_page_tasks: dict[tuple[str, Optional[float], Optional[int], int], asyncio.Task] = {}
         self._startup_history_prefetch_task: Optional[asyncio.Task] = None
         self._startup_history_prefetch_session_ids: list[str] = []
+        self._startup_ai_warmup_requested = False
+        self._startup_ai_warmup_task: Optional[asyncio.Task] = None
         self._session_view_state: dict[str, dict] = {}
         self._last_read_receipts: dict[str, str] = {}
         self._pending_read_receipts: set[tuple[str, str]] = set()
@@ -524,6 +529,8 @@ class ChatInterface(QWidget):
         self.chat_panel.screenshot_requested.connect(self._on_screenshot_requested)
         self.chat_panel.voice_call_requested.connect(self._on_voice_call_requested)
         self.chat_panel.video_call_requested.connect(self._on_video_call_requested)
+        self.chat_panel.ai_draft_action_requested.connect(self._on_ai_draft_action_requested)
+        self.chat_panel.ai_reply_suggestion_selected.connect(self._on_ai_reply_suggestion_selected)
         self.chat_panel.older_messages_requested.connect(self._on_older_messages_requested)
         self.chat_panel.chat_history_requested.connect(self._on_chat_history_requested)
         self.chat_panel.chat_info_add_requested.connect(self._on_chat_info_add_requested)
@@ -816,7 +823,9 @@ class ChatInterface(QWidget):
         message = data.get("message")
         if message:
             self._invalidate_session_caches(message.session_id)
+            self._ai_controller.invalidate_for_sent_message(message.session_id)
         if message and message.session_id == self._current_session_id:
+            self.chat_panel.clear_ai_reply_suggestions()
             self.chat_panel.add_message(message, scroll_to_bottom=True)
 
     def _on_message_received(self, data: dict) -> None:
@@ -824,12 +833,19 @@ class ChatInterface(QWidget):
         message = data.get("message")
         if message:
             self._invalidate_session_caches(message.session_id)
+            self._ai_controller.invalidate_for_new_message(message.session_id, message)
         if message and message.session_id == self._current_session_id:
             self._typing_indicator_timer.stop()
             self.chat_panel.hide_typing_indicator()
+            self.chat_panel.clear_ai_reply_suggestions()
             should_scroll = self.chat_panel.is_near_bottom()
             self.chat_panel.add_message(message, scroll_to_bottom=should_scroll)
             self._schedule_read_receipt()
+            generation = self._session_focus_generation
+            self._schedule_ui_task(
+                self._refresh_ai_reply_suggestions(message.session_id, generation),
+                f"ai reply suggestions {message.session_id}",
+            )
 
     def _on_message_ack(self, data: dict) -> None:
         """Update message status after server acknowledgment."""
@@ -1599,9 +1615,318 @@ class ChatInterface(QWidget):
             len(segments),
             [str(segment.get("type") or "") for segment in segments],
         )
+        self._ai_controller.invalidate_for_sent_message(session_id)
+        self.chat_panel.clear_ai_reply_suggestions()
         self._store_session_draft_segments(session_id, [])
         self._set_session_draft_preview(session_id, [])
         self._schedule_ui_task(self._send_segments_async(session_id, segments), f"send segments {session_id}")
+
+    def show_startup_ai_status(self) -> None:
+        """Show the lightweight startup AI status without loading the model."""
+        self._schedule_ui_task(self._show_startup_ai_status_async(), "ai startup status")
+
+    async def _show_startup_ai_status_async(self) -> None:
+        status = await self._ai_controller.get_health_status()
+        if status.state == AIHealthState.READY_NOT_LOADED:
+            return
+        self._show_ai_health_status_info_bar(status, explicit_use=False)
+
+    def warmup_startup_ai(self) -> None:
+        """Warm up local AI in the background after the main shell becomes visible."""
+        if self._startup_ai_warmup_requested:
+            return
+        self._startup_ai_warmup_requested = True
+        self._schedule_ui_single_shot(
+            self.AI_STARTUP_WARMUP_DELAY_MS,
+            self._begin_startup_ai_warmup,
+        )
+
+    def _begin_startup_ai_warmup(self) -> None:
+        """Start one tracked startup AI warmup task."""
+        if self._startup_ai_warmup_task is not None and not self._startup_ai_warmup_task.done():
+            return
+        self._startup_ai_warmup_task = self._create_ui_task(
+            self._warmup_startup_ai_async(),
+            "ai startup warmup",
+            on_done=self._clear_startup_ai_warmup_task,
+        )
+
+    def _clear_startup_ai_warmup_task(self, task: asyncio.Task) -> None:
+        """Clear the tracked startup AI warmup task when it finishes."""
+        if self._startup_ai_warmup_task is task:
+            self._startup_ai_warmup_task = None
+
+    async def _warmup_startup_ai_async(self) -> None:
+        """Warm up local AI once in the background without blocking the shell."""
+        status = await self._ai_controller.get_health_status()
+        if status.state == AIHealthState.READY_LOADED:
+            return
+        if status.state != AIHealthState.READY_NOT_LOADED:
+            return
+
+        self._show_ai_health_status_info_bar(
+            AIHealthStatus(
+                state=AIHealthState.LOADING,
+                provider=status.provider,
+                model=status.model,
+                model_path=status.model_path,
+                runtime=status.runtime,
+                local=status.local,
+                loaded=status.loaded,
+                loading=True,
+                detail=status.detail,
+            ),
+            explicit_use=False,
+        )
+
+        try:
+            await self._ai_controller.warmup()
+        except Exception as exc:
+            logger.exception("Startup AI warmup failed")
+            InfoBar.warning(
+                tr("composer.ai.title", "AI 助手"),
+                self._message_for_ai_error(
+                    getattr(exc, "code", ""),
+                    detail=str(exc),
+                ),
+                parent=self.window(),
+                duration=5000,
+            )
+            return
+
+        status = await self._ai_controller.get_health_status()
+        if status.state == AIHealthState.READY_LOADED:
+            self._show_ai_health_status_info_bar(status, explicit_use=False)
+        elif status.state in {
+            AIHealthState.MODEL_MISSING,
+            AIHealthState.DEPENDENCY_MISSING,
+            AIHealthState.PROVIDER_UNAVAILABLE,
+        }:
+            self._show_ai_health_status_info_bar(status, explicit_use=False)
+
+    def _show_ai_health_status_info_bar(self, status, *, explicit_use: bool = False) -> None:
+        """Display one AI health status prompt with the right severity."""
+        message = self._message_for_ai_health_status(status, explicit_use=explicit_use)
+        if not message:
+            return
+        title = tr("composer.ai.title", "AI 助手")
+        if status.state == AIHealthState.READY_LOADED:
+            InfoBar.success(title, message, parent=self.window(), duration=1800)
+            return
+        if status.state in {
+            AIHealthState.MODEL_MISSING,
+            AIHealthState.DEPENDENCY_MISSING,
+            AIHealthState.PROVIDER_UNAVAILABLE,
+        }:
+            InfoBar.warning(title, message, parent=self.window(), duration=5000)
+            return
+        InfoBar.info(title, message, parent=self.window(), duration=3500 if explicit_use else 4500)
+
+    def _message_for_ai_health_status(self, status, *, explicit_use: bool = False) -> str:
+        """Return localized UI text for one lightweight AI health state."""
+        if status.state == AIHealthState.LOADING:
+            if explicit_use:
+                return tr(
+                    "composer.ai.status.loading_in_progress",
+                    "本地 AI 正在加载，请稍候。",
+                )
+            return tr(
+                "composer.ai.status.background_loading",
+                "本地 AI 正在后台加载，首次启动可能需要几秒。",
+            )
+        if status.state == AIHealthState.READY_NOT_LOADED:
+            if explicit_use:
+                return tr(
+                    "composer.ai.status.loading_first_use",
+                    "正在加载本地 AI，首次使用可能需要几秒。",
+                )
+            return tr(
+                "composer.ai.status.configured_not_loaded",
+                "本地 AI 已配置，首次使用会加载模型，可能需要几秒。",
+            )
+        if status.state == AIHealthState.READY_LOADED:
+            return tr("composer.ai.status.ready", "本地 AI 已就绪。")
+        if status.state == AIHealthState.MODEL_MISSING:
+            return tr(
+                "composer.ai.error.model_missing",
+                "本地 AI 模型文件不存在，请检查 ASSISTIM_AI_MODEL_PATH。",
+            )
+        if status.state == AIHealthState.DEPENDENCY_MISSING:
+            return tr(
+                "composer.ai.error.runtime_missing",
+                "缺少 llama-cpp-python，本地 AI 不可用。",
+            )
+        if status.state == AIHealthState.DISABLED:
+            return tr("composer.ai.status.disabled", "AI 未启用。")
+        return tr(
+            "composer.ai.error.provider_unavailable",
+            "AI 提供方未配置，请检查本地 AI 设置。",
+        )
+
+    def _message_for_ai_error(self, error_code, *, detail: str = "") -> str:
+        """Return localized UI text for a stable AI error code."""
+        code = str(getattr(error_code, "value", error_code) or "")
+        if "." in code:
+            code = code.rsplit(".", 1)[-1]
+        normalized_detail = str(detail or "")
+        if code == "AI_PROVIDER_UNAVAILABLE":
+            if "llama-cpp-python" in normalized_detail:
+                return tr(
+                    "composer.ai.error.runtime_missing",
+                    "缺少 llama-cpp-python，本地 AI 不可用。",
+                )
+            return tr(
+                "composer.ai.error.provider_unavailable",
+                "AI 提供方未配置，请检查本地 AI 设置。",
+            )
+        if code == "AI_MODEL_NOT_FOUND":
+            return tr(
+                "composer.ai.error.model_missing",
+                "本地 AI 模型文件不存在，请检查 ASSISTIM_AI_MODEL_PATH。",
+            )
+        if code == "AI_LOCAL_REQUIRED_UNAVAILABLE":
+            return tr(
+                "composer.ai.error.local_required",
+                "这个加密聊天只能使用本地 AI。请先启用本地 GGUF Provider。",
+            )
+        if code == "AI_MODEL_LOAD_FAILED":
+            return tr(
+                "composer.ai.error.model_load_failed",
+                "本地 AI 模型加载失败，请检查模型文件和运行时设置。",
+            )
+        if code == "AI_RESOURCE_EXHAUSTED":
+            return tr(
+                "composer.ai.error.resource_exhausted",
+                "本地 AI 内存不足，请尝试更小的模型或降低上下文长度。",
+            )
+        if code == "AI_CONTEXT_TOO_LONG":
+            return tr(
+                "composer.ai.error.context_too_long",
+                "AI 上下文太长，请缩短草稿或减少消息数量。",
+            )
+        if code == "AI_OUTPUT_INVALID":
+            return tr(
+                "composer.ai.error.output_invalid",
+                "AI 返回了无法使用的内容，请重试。",
+            )
+        return tr("composer.ai.failed", "AI 无法完成这次请求。")
+
+    def _on_ai_draft_action_requested(self, action: str) -> None:
+        """Run one explicit composer AI assist action."""
+        session_id = self._current_session_id
+        if not session_id:
+            return
+
+        draft_text = self.chat_panel.current_composer_plain_text()
+        if not draft_text.strip():
+            InfoBar.info(
+                tr("composer.ai.title", "AI 助手"),
+                tr("composer.ai.empty_draft", "请先输入草稿，再选择 AI 操作。"),
+                parent=self.window(),
+                duration=1800,
+            )
+            return
+
+        generation = self._session_focus_generation
+        self.chat_panel.set_ai_assist_busy(True)
+        self._schedule_ui_task(
+            self._run_ai_draft_action(session_id, action, draft_text, generation),
+            f"ai draft {session_id} {action}",
+        )
+
+    async def _run_ai_draft_action(
+        self,
+        session_id: str,
+        action: str,
+        draft_text: str,
+        generation: int,
+    ) -> None:
+        """Apply AI output to the composer without sending it."""
+        try:
+            session = self._get_session(session_id)
+            if session is None or not self._is_current_session_context(session_id, generation):
+                return
+
+            status = await self._ai_controller.get_health_status()
+            if not self._is_current_session_context(session_id, generation):
+                return
+            if status.state == AIHealthState.READY_NOT_LOADED:
+                self._show_ai_health_status_info_bar(status, explicit_use=True)
+            elif status.state == AIHealthState.LOADING:
+                self._show_ai_health_status_info_bar(status, explicit_use=True)
+            elif status.state != AIHealthState.READY_LOADED:
+                self._show_ai_health_status_info_bar(status, explicit_use=True)
+                return
+
+            result = await self._ai_controller.assist_draft(session, action, draft_text)
+            if not self._is_current_session_context(session_id, generation):
+                return
+            if result.text.strip():
+                self.chat_panel.replace_composer_text(result.text)
+                return
+
+            InfoBar.warning(
+                tr("composer.ai.title", "AI 助手"),
+                self._message_for_ai_error(
+                    result.error_code,
+                    detail=result.error_message,
+                ),
+                parent=self.window(),
+                duration=2200,
+            )
+        except Exception:
+            logger.exception("AI draft action failed: %s", action)
+            if self._is_current_session_context(session_id, generation):
+                InfoBar.warning(
+                    tr("composer.ai.title", "AI 助手"),
+                    tr("composer.ai.failed", "AI 无法完成这次请求。"),
+                    parent=self.window(),
+                    duration=2200,
+                )
+        finally:
+            if self._is_current_session_context(session_id, generation):
+                self.chat_panel.set_ai_assist_busy(False)
+
+    async def _refresh_ai_reply_suggestions(self, session_id: str, generation: int) -> None:
+        """Generate reply candidates for the current private conversation."""
+        if not self._is_current_session_context(session_id, generation):
+            return
+        session = self._get_session(session_id)
+        if session is None:
+            return
+
+        messages = self.chat_panel.get_visible_messages()
+        eligible, _reason = self._ai_controller.can_suggest_replies(
+            session,
+            messages,
+            current_user_id=self._current_user_id(),
+        )
+        if not eligible:
+            self.chat_panel.clear_ai_reply_suggestions()
+            return
+
+        if not await self._ai_controller.is_model_loaded():
+            self.chat_panel.clear_ai_reply_suggestions()
+            return
+
+        state = await self._ai_controller.suggest_replies(
+            session,
+            messages,
+            current_user_id=self._current_user_id(),
+        )
+        if not self._is_current_session_context(session_id, generation):
+            return
+        suggestions = [item.text for item in state.items]
+        if suggestions:
+            self.chat_panel.set_ai_reply_suggestions(suggestions)
+        else:
+            self.chat_panel.clear_ai_reply_suggestions()
+
+    def _on_ai_reply_suggestion_selected(self, _text: str) -> None:
+        """A selected candidate becomes a draft only; sending remains manual."""
+        if not self._current_session_id:
+            return
+        self._ai_controller.clear_suggestions(self._current_session_id)
 
     async def _send_segments_async(self, session_id: str, segments: list[dict]) -> None:
         """Send composed editor segments sequentially so mixed content keeps order."""
