@@ -245,8 +245,11 @@ class FakeLocalRuntime:
     def __init__(self) -> None:
         self.cancelled: list[str] = []
         self.warmup_calls = 0
+        self.last_generate_kwargs: dict | None = None
+        self.last_stream_kwargs: dict | None = None
 
     async def generate_once(self, **kwargs):
+        self.last_generate_kwargs = dict(kwargs)
         return {
             'content': 'local result',
             'model': kwargs.get('model') or 'local-model',
@@ -255,6 +258,7 @@ class FakeLocalRuntime:
         }
 
     async def stream_chat(self, **kwargs):
+        self.last_stream_kwargs = dict(kwargs)
         for content in ['lo', 'cal']:
             yield FakeLocalRuntimeChunk(content)
 
@@ -287,11 +291,14 @@ class FakeLocalRuntime:
 
 def test_local_gguf_provider_streams_fake_runtime_chunks() -> None:
     async def scenario() -> None:
-        provider = ai_service_module.LocalGGUFProvider(runtime=FakeLocalRuntime())
+        runtime = FakeLocalRuntime()
+        provider = ai_service_module.LocalGGUFProvider(runtime=runtime)
         request = ai_service_module.AIRequest(
             messages=[{'role': 'user', 'content': 'hello'}],
             task_id='local-task',
             must_be_local=True,
+            seed=13,
+            response_format={'type': 'json_object'},
         )
         events = [event async for event in provider.stream_chat(request)]
 
@@ -304,6 +311,31 @@ def test_local_gguf_provider_streams_fake_runtime_chunks() -> None:
         assert ''.join(event.content for event in events) == 'local'
         assert events[-1].response is not None
         assert events[-1].response.content == 'local'
+        assert runtime.last_stream_kwargs is not None
+        assert runtime.last_stream_kwargs['seed'] == 13
+        assert runtime.last_stream_kwargs['response_format'] == {'type': 'json_object'}
+
+    asyncio.run(scenario())
+
+
+def test_local_gguf_provider_forwards_seed_to_runtime_generate_once() -> None:
+    async def scenario() -> None:
+        runtime = FakeLocalRuntime()
+        provider = ai_service_module.LocalGGUFProvider(runtime=runtime)
+        request = ai_service_module.AIRequest(
+            messages=[{'role': 'user', 'content': 'hello'}],
+            task_id='local-task-generate',
+            must_be_local=True,
+            seed=23,
+            response_format={'type': 'json_object'},
+        )
+
+        response = await provider.generate_once(request)
+
+        assert response.content == 'local result'
+        assert runtime.last_generate_kwargs is not None
+        assert runtime.last_generate_kwargs['seed'] == 23
+        assert runtime.last_generate_kwargs['response_format'] == {'type': 'json_object'}
 
     asyncio.run(scenario())
 

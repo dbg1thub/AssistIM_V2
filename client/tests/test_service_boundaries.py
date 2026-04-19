@@ -401,8 +401,8 @@ class FakeMessageManager:
         self.sent_messages.append(message)
         return message
 
-    async def mark_message_failed(self, message: ChatMessage, reason: str = 'Send failed') -> None:
-        self.failed.append((message.message_id, reason))
+    async def mark_message_failed(self, message: ChatMessage, failure_code: str = 'send_failed') -> None:
+        self.failed.append((message.message_id, failure_code))
 
     async def get_cached_messages(self, session_id: str, limit: int = 50, before_timestamp=None) -> list[ChatMessage]:
         self.cached_messages_calls.append((session_id, limit, before_timestamp))
@@ -1795,12 +1795,12 @@ def test_chat_controller_send_file_marks_failed_on_upload_error(monkeypatch) -> 
 
     async def scenario() -> None:
         controller = chat_controller_module.ChatController()
-        message = await controller.send_file(str(file_path))
+        with pytest.raises(APIError, match='Upload rejected'):
+            await controller.send_file(str(file_path))
 
-        assert message is not None
-        assert message.message_id == 'local-1'
-        assert fake_message_manager.failed == [('local-1', 'Upload rejected')]
+        assert fake_message_manager.failed == [('local-1', controller.ATTACHMENT_UPLOAD_FAILED_CODE)]
         assert fake_message_manager.sent_messages == []
+        assert len(fake_session_manager.added) == 1
 
     asyncio.run(scenario())
 

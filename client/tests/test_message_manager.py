@@ -292,6 +292,7 @@ if 'qfluentwidgets' not in sys.modules:
     sys.modules['qfluentwidgets'] = qfluentwidgets
 
 from client.events.contact_events import ContactEvent
+from client.core.message_translation import AI_TRANSLATION_EXTRA_KEY
 from client.managers import message_manager as message_manager_module
 from client.managers import session_manager as session_manager_module
 from client.ui.controllers import chat_controller as chat_controller_module
@@ -669,6 +670,50 @@ def test_message_send_queue_marks_unprocessed_message_failed_on_stop_timeout() -
     assert results == [('m-queued', False)]
 
 
+def test_message_manager_update_message_translation_persists_extra_and_emits(monkeypatch) -> None:
+    fake_event_bus = FakeEventBus()
+    fake_conn_manager = FakeConnectionManager([])
+    fake_db = FakeDatabase()
+    fake_db.messages['m-translate'] = ChatMessage(
+        message_id='m-translate',
+        session_id='session-1',
+        sender_id='alice',
+        content='hello',
+        message_type=MessageType.TEXT,
+        status=MessageStatus.RECEIVED,
+        is_self=False,
+        extra={'keep': 'yes'},
+    )
+
+    monkeypatch.setattr(message_manager_module, 'get_event_bus', lambda: fake_event_bus)
+    monkeypatch.setattr(message_manager_module, 'get_connection_manager', lambda: fake_conn_manager)
+    monkeypatch.setattr(message_manager_module, 'get_database', lambda: fake_db)
+
+    async def scenario() -> None:
+        manager = message_manager_module.MessageManager()
+        await manager.initialize()
+        try:
+            updated = await manager.update_message_translation(
+                'm-translate',
+                {'target_language': 'zh-CN', 'status': 'ready', 'text': '你好'},
+            )
+
+            assert updated is not None
+            assert fake_db.messages['m-translate'].extra['keep'] == 'yes'
+            assert fake_db.messages['m-translate'].extra[AI_TRANSLATION_EXTRA_KEY] == {
+                'target_language': 'zh-CN',
+                'status': 'ready',
+                'text': '你好',
+            }
+            assert fake_event_bus.events[-1][0] == message_manager_module.MessageEvent.TRANSLATION_UPDATED
+            assert fake_event_bus.events[-1][1]['message_id'] == 'm-translate'
+            assert fake_event_bus.events[-1][1]['session_id'] == 'session-1'
+        finally:
+            await manager.close()
+
+    asyncio.run(scenario())
+
+
 def test_message_manager_retries_on_ack_timeout_and_merges_canonical_ack(monkeypatch) -> None:
     fake_event_bus = FakeEventBus()
     fake_conn_manager = FakeConnectionManager([True, True])
@@ -776,8 +821,48 @@ def test_message_manager_marks_pending_message_failed_on_ws_error(monkeypatch) -
                 for event, payload in fake_event_bus.events
                 if event == message_manager_module.MessageEvent.FAILED
             ]
-            assert failed_events[-1]['reason'] == 'content is required'
+            assert failed_events[-1]['failure_code'] == message_manager_module.MessageFailureCode.SERVER_REJECTED
             assert failed_events[-1]['code'] == 422
+            assert 'reason' not in failed_events[-1]
+        finally:
+            await manager.close()
+
+    asyncio.run(scenario())
+
+
+def test_message_manager_marks_message_failed_when_outbound_prepare_raises(monkeypatch) -> None:
+    fake_event_bus = FakeEventBus()
+    fake_conn_manager = FakeConnectionManager([])
+    fake_db = FakeDatabase()
+
+    monkeypatch.setattr(message_manager_module, 'get_event_bus', lambda: fake_event_bus)
+    monkeypatch.setattr(message_manager_module, 'get_connection_manager', lambda: fake_conn_manager)
+    monkeypatch.setattr(message_manager_module, 'get_database', lambda: fake_db)
+
+    async def scenario() -> None:
+        manager = message_manager_module.MessageManager()
+        manager.set_user_id('alice')
+        await manager.initialize()
+
+        async def fail_prepare(**kwargs):
+            raise RuntimeError('prepare failed')
+
+        manager._prepare_outbound_encryption = fail_prepare  # type: ignore[method-assign]
+        try:
+            message = await manager.send_message('session-1', 'hello world')
+
+            assert message.status == MessageStatus.FAILED
+            stored = await fake_db.get_message(message.message_id)
+            assert stored is not None
+            assert stored.status == MessageStatus.FAILED
+
+            failed_events = [
+                payload
+                for event, payload in fake_event_bus.events
+                if event == message_manager_module.MessageEvent.FAILED
+            ]
+            assert failed_events[-1]['failure_code'] == message_manager_module.MessageFailureCode.OUTBOUND_PREPARE_FAILED
+            assert 'reason' not in failed_events[-1]
         finally:
             await manager.close()
 

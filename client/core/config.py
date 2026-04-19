@@ -20,6 +20,8 @@ from qfluentwidgets import (
     qconfig,
 )
 
+from client.core.config_backend import DEFAULT_AI_MODEL_ID
+
 
 class Language(Enum):
     """Supported UI languages."""
@@ -111,6 +113,19 @@ class Config(QConfig):
         True,
         BoolValidator(),
     )
+    aiModelId = ConfigItem(
+        "AI",
+        "ModelId",
+        DEFAULT_AI_MODEL_ID,
+        restart=True,
+    )
+    aiGpuAccelerationEnabled = ConfigItem(
+        "AI",
+        "GpuAccelerationEnabled",
+        True,
+        BoolValidator(),
+        restart=True,
+    )
     soundVolume = ConfigItem(
         "Sound",
         "Volume",
@@ -127,7 +142,7 @@ class Config(QConfig):
 
 
 cfg = Config()
-qconfig.load(Path("data/config.json"), cfg)
+qconfig.load(Path(__file__).resolve().parents[2] / "data" / "config.json", cfg)
 
 
 def save_config() -> None:

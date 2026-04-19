@@ -52,9 +52,22 @@ class MessageEvent:
     GROUP_UPDATED = "message_group_updated"
     GROUP_SELF_UPDATED = "message_group_self_updated"
     MEDIA_READY = "message_media_ready"
+    TRANSLATION_UPDATED = "message_translation_updated"
     DECRYPTION_STATE_CHANGED = "message_decryption_state_changed"
     RECOVERED = "message_recovered"
     SECURITY_PENDING = "message_security_pending"
+
+
+class MessageFailureCode:
+    """Stable failure codes for outbound message failures."""
+
+    SEND_FAILED = "send_failed"
+    OUTBOUND_PREPARE_FAILED = "outbound_prepare_failed"
+    TRANSPORT_SEND_FAILED = "transport_send_failed"
+    TRANSPORT_QUEUE_FAILED = "transport_queue_failed"
+    ACK_TIMEOUT = "ack_timeout"
+    SERVER_REJECTED = "server_rejected"
+    ATTACHMENT_UPLOAD_FAILED = "attachment_upload_failed"
 
 
 @dataclass
@@ -397,18 +410,30 @@ class MessageManager:
 
         if failed_pending is not None:
             logger.error("Message send failed after %s attempts: %s", failed_pending.max_attempts, message_id)
-            await self._finalize_pending_failure(failed_pending, "Transport send failed")
+            await self._finalize_pending_failure(failed_pending, MessageFailureCode.TRANSPORT_SEND_FAILED)
 
-    async def _finalize_pending_failure(self, pending: PendingMessage, reason: str) -> None:
+    async def _emit_message_failed_event(
+        self,
+        message: ChatMessage,
+        *,
+        failure_code: str,
+        code: object | None = None,
+    ) -> None:
+        payload: dict[str, object] = {
+            "message_id": message.message_id,
+            "message": message,
+            "failure_code": str(failure_code or "").strip() or MessageFailureCode.SEND_FAILED,
+        }
+        if code is not None:
+            payload["code"] = code
+        await self._event_bus.emit(MessageEvent.FAILED, payload)
+
+    async def _finalize_pending_failure(self, pending: PendingMessage, failure_code: str) -> None:
         """Persist one terminal outbound failure and notify the UI."""
         pending.message.status = MessageStatus.FAILED
         pending.message.updated_at = datetime.now()
         await self._db.save_message(pending.message)
-        await self._event_bus.emit(MessageEvent.FAILED, {
-            "message_id": pending.message.message_id,
-            "message": pending.message,
-            "reason": reason,
-        })
+        await self._emit_message_failed_event(pending.message, failure_code=failure_code)
 
     def _merge_ack_message(
         self,
@@ -579,12 +604,11 @@ class MessageManager:
         fallback_message.updated_at = datetime.now()
         logger.warning("Message failed from websocket error: %s (%s)", msg_id, reason)
 
-        await self._event_bus.emit(MessageEvent.FAILED, {
-            "message_id": msg_id,
-            "message": fallback_message,
-            "reason": reason,
-            "code": error_data.get("code"),
-        })
+        await self._emit_message_failed_event(
+            fallback_message,
+            failure_code=MessageFailureCode.SERVER_REJECTED,
+            code=error_data.get("code"),
+        )
         await self._db.save_message(fallback_message)
     
     async def _process_incoming_message(self, data: dict) -> None:
@@ -2159,26 +2183,18 @@ class MessageManager:
                 await self._apply_current_user_sender_profile(failed_message)
                 await self._db.save_message(failed_message)
                 await self._event_bus.emit(MessageEvent.SENT, {"message": failed_message})
-                await self._event_bus.emit(
-                    MessageEvent.FAILED,
-                    {
-                        "message_id": failed_message.message_id,
-                        "message": failed_message,
-                        "reason": str(exc),
-                    },
+                await self._emit_message_failed_event(
+                    failed_message,
+                    failure_code=MessageFailureCode.OUTBOUND_PREPARE_FAILED,
                 )
                 return failed_message
 
             existing_message.status = MessageStatus.FAILED
             existing_message.updated_at = datetime.now()
             await self._db.save_message(existing_message)
-            await self._event_bus.emit(
-                MessageEvent.FAILED,
-                {
-                    "message_id": existing_message.message_id,
-                    "message": existing_message,
-                    "reason": str(exc),
-                },
+            await self._emit_message_failed_event(
+                existing_message,
+                failure_code=MessageFailureCode.OUTBOUND_PREPARE_FAILED,
             )
             return existing_message
 
@@ -2239,7 +2255,7 @@ class MessageManager:
             async with self._pending_lock:
                 self._pending_messages.pop(msg_id, None)
             logger.error("Failed to enqueue outbound message %s: %s", msg_id, exc)
-            await self._finalize_pending_failure(pending, "Transport queue failure")
+            await self._finalize_pending_failure(pending, MessageFailureCode.TRANSPORT_QUEUE_FAILED)
 
         logger.info(
             "[send-diag] message_enqueued msg_id=%s session_id=%s message_type=%s transport_len=%s encrypted=%s security_pending=%s",
@@ -2362,16 +2378,16 @@ class MessageManager:
         })
         return message
 
-    async def mark_message_failed(self, message: ChatMessage, reason: str = "Send failed") -> None:
+    async def mark_message_failed(
+        self,
+        message: ChatMessage,
+        failure_code: str = MessageFailureCode.SEND_FAILED,
+    ) -> None:
         """Mark a local message as failed and notify the UI."""
         message.status = MessageStatus.FAILED
         message.updated_at = datetime.now()
         await self._db.save_message(message)
-        await self._event_bus.emit(MessageEvent.FAILED, {
-            "message_id": message.message_id,
-            "message": message,
-            "reason": reason,
-        })
+        await self._emit_message_failed_event(message, failure_code=failure_code)
     
     async def send_typing(self, session_id: str, *, typing: bool = True) -> bool:
         """Send typing indicator."""
@@ -2627,7 +2643,7 @@ class MessageManager:
 
         for pending in to_fail:
             logger.warning(f"Message ACK timeout exhausted retries: {pending.message.message_id}")
-            await self._finalize_pending_failure(pending, "ACK timeout")
+            await self._finalize_pending_failure(pending, MessageFailureCode.ACK_TIMEOUT)
     
     async def retry_message(self, msg_id: str) -> bool:
         """
@@ -2722,7 +2738,7 @@ class MessageManager:
             async with self._pending_lock:
                 self._pending_messages.pop(msg_id, None)
             logger.error("Failed to enqueue retry message %s: %s", msg_id, exc)
-            await self._finalize_pending_failure(pending, "Transport queue failure")
+            await self._finalize_pending_failure(pending, MessageFailureCode.TRANSPORT_QUEUE_FAILED)
             return False
 
         await self._event_bus.emit(MessageEvent.SENT, {
@@ -2872,6 +2888,31 @@ class MessageManager:
         )
         messages = await self._filter_session_history(session_id, messages)
         return await self._rehydrate_cached_messages_for_display(messages)
+
+    async def update_message_translation(self, message_id: str, translation: dict[str, Any]) -> Optional[ChatMessage]:
+        """Persist one local AI translation payload on a message and notify visible views."""
+        normalized_message_id = str(message_id or "").strip()
+        if not normalized_message_id:
+            return None
+        message = await self._db.get_message(normalized_message_id)
+        if message is None:
+            return None
+
+        updated_extra = dict(message.extra or {})
+        updated_extra["ai_translation"] = dict(translation or {})
+        message.extra = updated_extra
+        message.updated_at = datetime.now()
+        await self._db.save_message(message)
+
+        await self._event_bus.emit(
+            MessageEvent.TRANSLATION_UPDATED,
+            {
+                "message_id": message.message_id,
+                "session_id": message.session_id,
+                "message": message,
+            },
+        )
+        return message
 
     @staticmethod
     def _empty_recovery_stats() -> dict[str, int]:

@@ -120,6 +120,22 @@ def test_group_session_preview_sender_name_uses_cached_sender_name_when_member_s
     assert session.preview_sender_name() == 'test1'
 
 
+def test_direct_session_preview_sender_name_uses_counterpart_name_for_incoming_message() -> None:
+    session = Session(
+        session_id='direct-1',
+        name='test2',
+        session_type='direct',
+        participant_ids=['me', 'user-2'],
+        extra={
+            'current_user_id': 'me',
+            'last_message_sender_id': 'user-2',
+            'counterpart_name': 'test2',
+        },
+    )
+
+    assert session.preview_sender_name() == 'test2'
+
+
 def test_format_message_preview_localizes_server_attachment_placeholders() -> None:
     initialize_i18n(Language.CHINESE_SIMPLIFIED)
     try:
@@ -150,6 +166,24 @@ def test_session_delegate_group_preview_does_not_prefix_self_message() -> None:
     )
 
     assert delegate._format_preview_text(session) == 'hello'
+
+
+def test_session_delegate_direct_preview_prefixes_counterpart_name() -> None:
+    delegate = SessionDelegate()
+    session = Session(
+        session_id='direct-1',
+        name='test2',
+        session_type='direct',
+        participant_ids=['me', 'user-2'],
+        last_message='hello',
+        extra={
+            'current_user_id': 'me',
+            'last_message_sender_id': 'user-2',
+            'counterpart_name': 'test2',
+        },
+    )
+
+    assert delegate._format_preview_text(session) == 'test2：hello'
 
 
 def test_group_recall_notice_uses_quoted_member_name_in_content_and_preview() -> None:
@@ -303,6 +337,31 @@ def test_session_manager_last_message_preview_caches_sender_name_from_message_ex
     manager._apply_last_message_preview(session, message, current_user_id='me')
 
     assert session.extra.get('last_message_sender_name') == 'test1'
+
+
+def test_session_manager_carry_local_session_state_preserves_ai_feature_flags() -> None:
+    source = Session(
+        session_id='direct-1',
+        name='test2',
+        session_type='direct',
+        participant_ids=['me', 'user-2'],
+        extra={
+            'ai_reply_suggestions_enabled': True,
+            'ai_auto_translate_enabled': False,
+        },
+    )
+    target = Session(
+        session_id='direct-1',
+        name='test2',
+        session_type='direct',
+        participant_ids=['me', 'user-2'],
+        extra={},
+    )
+
+    session_manager_module.SessionManager._carry_local_session_state(target, source)
+
+    assert target.extra['ai_reply_suggestions_enabled'] is True
+    assert target.extra['ai_auto_translate_enabled'] is False
 
 
 def test_session_manager_last_message_preview_infers_encryption_mode_from_session_metadata(monkeypatch) -> None:

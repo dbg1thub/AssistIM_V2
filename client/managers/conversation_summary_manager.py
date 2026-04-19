@@ -52,12 +52,17 @@ class ConversationSummaryManager:
         self._prompt_builder = prompt_builder or ConversationSummaryPromptBuilder()
         self._event_subscriptions: list[tuple[str, Any]] = []
         self._scheduled_refresh_tasks: dict[tuple[str, int], asyncio.Task] = {}
+        self._refresh_task_running_keys: set[tuple[str, int]] = set()
+        self._pending_refresh_delays: dict[tuple[str, int], float] = {}
+        self._deleted_session_ids: set[str] = set()
+        self._closing = False
         self._initialized = False
 
     async def initialize(self) -> None:
         """Subscribe to message/session events exactly once."""
         if self._initialized:
             return
+        self._closing = False
 
         await self._subscribe(MessageEvent.RECEIVED, self._on_message_event)
         await self._subscribe(MessageEvent.SENT, self._on_message_event)
@@ -70,14 +75,18 @@ class ConversationSummaryManager:
 
     async def close(self) -> None:
         """Cancel background tasks and remove event subscriptions."""
+        self._closing = True
         while self._event_subscriptions:
             event_type, handler = self._event_subscriptions.pop()
             await self._event_bus.unsubscribe(event_type, handler)
 
-        for task in list(self._scheduled_refresh_tasks.values()):
+        for key, task in list(self._scheduled_refresh_tasks.items()):
             if task.done():
                 continue
-            task.cancel()
+            if key not in self._refresh_task_running_keys:
+                task.cancel()
+        self._pending_refresh_delays.clear()
+        self._refresh_task_running_keys.clear()
         self._scheduled_refresh_tasks.clear()
         self._initialized = False
 
@@ -104,6 +113,7 @@ class ConversationSummaryManager:
         session_id = str(dict(payload or {}).get("session_id") or "").strip()
         if not session_id:
             return
+        self._deleted_session_ids.add(session_id)
         self._cancel_session_tasks(session_id)
 
     async def _process_message(self, session_id: str, message: ChatMessage) -> None:
@@ -178,12 +188,17 @@ class ConversationSummaryManager:
             return
         existing = self._scheduled_refresh_tasks.get(key)
         if existing is not None and not existing.done():
+            if key in self._refresh_task_running_keys:
+                self._merge_pending_refresh_delay(key, delay)
+                return
             existing.cancel()
 
         async def runner() -> None:
+            rerun_delay: float | None = None
             try:
                 if delay > 0:
                     await asyncio.sleep(delay)
+                self._refresh_task_running_keys.add(key)
                 await self._refresh_bucket_summary(key[0], key[1])
             except asyncio.CancelledError:
                 raise
@@ -194,19 +209,31 @@ class ConversationSummaryManager:
                     key[1],
                 )
             finally:
+                self._refresh_task_running_keys.discard(key)
+                rerun_delay = self._pending_refresh_delays.pop(key, None)
                 current = self._scheduled_refresh_tasks.get(key)
                 if current is asyncio.current_task():
                     self._scheduled_refresh_tasks.pop(key, None)
+                if (
+                    rerun_delay is not None
+                    and not self._closing
+                    and key[0] not in self._deleted_session_ids
+                ):
+                    self._schedule_refresh(key[0], key[1], delay=rerun_delay)
 
         self._scheduled_refresh_tasks[key] = asyncio.create_task(runner())
 
     async def _refresh_bucket_summary(self, session_id: str, bucket_start_ts: int) -> None:
+        if session_id in self._deleted_session_ids:
+            return
         bucket = await self._db.get_conversation_summary_bucket(session_id, bucket_start_ts)
         if bucket is None:
             return
 
         session = await self._db.get_session(session_id)
         if session is None or session.is_ai_session or session.session_type == "ai":
+            return
+        if self._closing or self._is_task_manager_closed():
             return
 
         bucket_end_ts = int(bucket.get("bucket_end_ts") or bucket.get("last_message_ts") or bucket_start_ts)
@@ -231,6 +258,8 @@ class ConversationSummaryManager:
         )
 
         if built is None:
+            if session_id in self._deleted_session_ids:
+                return
             await self._db.upsert_conversation_summary_bucket(
                 {
                     **working,
@@ -244,7 +273,20 @@ class ConversationSummaryManager:
             )
             return
 
-        snapshot = await self._task_manager.run_once(built.request)
+        if self._closing or self._is_task_manager_closed():
+            return
+        try:
+            snapshot = await self._task_manager.run_once(built.request)
+        except RuntimeError as exc:
+            if self._closing or self._is_task_manager_closed() or "closed" in str(exc).lower():
+                logger.info(
+                    "[ai-diag] conversation_summary_refresh_skipped session_id=%s bucket_start_ts=%s reason=%s",
+                    session_id,
+                    bucket_start_ts,
+                    "task_manager_closed",
+                )
+                return
+            raise
         await self._persist_summary_result(
             session_id=session_id,
             bucket_start_ts=bucket_start_ts,
@@ -266,6 +308,8 @@ class ConversationSummaryManager:
         existing: dict[str, Any],
         messages: list[ChatMessage],
     ) -> None:
+        if session_id in self._deleted_session_ids:
+            return
         last_message = messages[-1] if messages else None
         payload = {
             **existing,
@@ -283,6 +327,13 @@ class ConversationSummaryManager:
         }
 
         if snapshot.state != AITaskState.DONE:
+            if snapshot.state == AITaskState.CANCELLED:
+                payload["summary_status"] = "stale"
+                payload["error_code"] = ""
+                await self._db.upsert_conversation_summary_bucket(payload)
+                if not self._closing and session_id not in self._deleted_session_ids:
+                    self._schedule_refresh(session_id, bucket_start_ts, delay=self.DEBOUNCE_SECONDS)
+                return
             payload["summary_status"] = "failed"
             payload["error_code"] = str(
                 getattr(snapshot.error_code, "value", snapshot.error_code) or snapshot.finish_reason or "summary_failed"
@@ -324,12 +375,26 @@ class ConversationSummaryManager:
         normalized_session_id = str(session_id or "").strip()
         if not normalized_session_id:
             return
+        keys_to_clear: list[tuple[str, int]] = []
         for key, task in list(self._scheduled_refresh_tasks.items()):
             if key[0] != normalized_session_id:
                 continue
-            if not task.done():
+            keys_to_clear.append(key)
+            if not task.done() and key not in self._refresh_task_running_keys:
                 task.cancel()
-            self._scheduled_refresh_tasks.pop(key, None)
+        for key in keys_to_clear:
+            self._pending_refresh_delays.pop(key, None)
+
+    def _merge_pending_refresh_delay(self, key: tuple[str, int], delay: float) -> None:
+        normalized_delay = max(0.0, float(delay or 0.0))
+        current_delay = self._pending_refresh_delays.get(key)
+        if current_delay is None:
+            self._pending_refresh_delays[key] = normalized_delay
+            return
+        self._pending_refresh_delays[key] = min(current_delay, normalized_delay)
+
+    def _is_task_manager_closed(self) -> bool:
+        return bool(getattr(self._task_manager, "_closed", False))
 
     @staticmethod
     def _new_bucket_payload(session_id: str, message: ChatMessage, message_ts: int, *, is_open: bool) -> dict[str, Any]:

@@ -37,6 +37,7 @@ from PySide6.QtWidgets import (
     QStackedWidget,
     QStyle,
     QStyleOption,
+    QStyleOptionButton,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -45,13 +46,12 @@ from qfluentwidgets import (
     Action,
     BodyLabel,
     CaptionLabel,
+    CheckableMenu,
     Flyout,
     FlyoutAnimationType,
     FlyoutViewBase,
-    InfoBar,
     IconWidget,
     PushButton,
-    RoundMenu,
     ScrollArea,
     SegmentedWidget,
     TransparentToolButton,
@@ -61,6 +61,11 @@ from qfluentwidgets import (
 from qfluentwidgets.components.material import AcrylicToolTipFilter, AcrylicFlyoutViewBase, AcrylicFlyout
 
 from client.core.app_icons import AppIcon
+from client.core.ai_features import (
+    AI_FEATURE_AUTO_TRANSLATE,
+    AI_FEATURE_SMART_REPLY,
+    session_ai_feature_enabled,
+)
 from client.core.avatar_rendering import get_avatar_image_store
 from client.core.avatar_utils import profile_avatar_seed
 from client.core.i18n import tr
@@ -2309,6 +2314,125 @@ class GroupMentionPopupOverlay(QWidget):
             self._last_surface_rect = QRect(panel_rect)
 
 
+class MarqueeSuggestionButton(PushButton):
+    """Reply suggestion button that scrolls long text horizontally."""
+
+    _SCROLL_INTERVAL_MS = 60
+    _SCROLL_STEP_PX = 1
+    _TEXT_GAP_PX = 28
+    _TEXT_SIDE_PADDING_PX = 12
+
+    def __init__(self, text: str = "", parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._full_text = ""
+        self._scroll_enabled = False
+        self._scroll_offset_px = 0
+        self._scroll_cycle_width_px = 0
+        self._marquee_timer = QTimer(self)
+        self._marquee_timer.setInterval(self._SCROLL_INTERVAL_MS)
+        self._marquee_timer.timeout.connect(self._advance_marquee)
+        self.setText(text)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._update_scroll_state()
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        self._update_scroll_state()
+
+    def hideEvent(self, event) -> None:
+        self._marquee_timer.stop()
+        super().hideEvent(event)
+
+    def setText(self, text: str) -> None:
+        self._full_text = str(text or "").strip()
+        self.setToolTip(self._full_text)
+        self._scroll_offset_px = 0
+        self._update_scroll_state()
+        self.updateGeometry()
+        self.update()
+
+    def text(self) -> str:
+        return self._full_text
+
+    def sizeHint(self) -> QSize:
+        base = super().sizeHint()
+        text_width = self.fontMetrics().horizontalAdvance(self._full_text)
+        width = max(base.width(), text_width + self._TEXT_SIDE_PADDING_PX * 2 + 24)
+        max_width = self.maximumWidth()
+        if 0 < max_width < 16777215:
+            width = min(width, max_width)
+        return QSize(width, base.height())
+
+    def minimumSizeHint(self) -> QSize:
+        hint = self.sizeHint()
+        return QSize(hint.width(), hint.height())
+
+    def paintEvent(self, event) -> None:
+        option = QStyleOptionButton()
+        self.initStyleOption(option)
+        option.text = ""
+
+        painter = QPainter(self)
+        self.style().drawControl(QStyle.ControlElement.CE_PushButton, option, painter, self)
+
+        content_rect = self.style().subElementRect(QStyle.SubElement.SE_PushButtonContents, option, self)
+        if not content_rect.isValid():
+            return
+        text_rect = content_rect.adjusted(self._TEXT_SIDE_PADDING_PX, 0, -self._TEXT_SIDE_PADDING_PX, 0)
+        if text_rect.width() <= 0 or not self._full_text:
+            return
+
+        painter.save()
+        painter.setClipRect(text_rect)
+        painter.setFont(self.font())
+        if self.isEnabled():
+            painter.setPen(self.palette().color(QPalette.ColorRole.ButtonText))
+        else:
+            painter.setPen(self.palette().color(QPalette.ColorGroup.Disabled, QPalette.ColorRole.ButtonText))
+
+        metrics = painter.fontMetrics()
+        baseline_y = text_rect.y() + (text_rect.height() - metrics.height()) // 2 + metrics.ascent()
+        if self._scroll_enabled:
+            primary_x = text_rect.left() - self._scroll_offset_px
+            painter.drawText(primary_x, baseline_y, self._full_text)
+            painter.drawText(primary_x + self._scroll_cycle_width_px, baseline_y, self._full_text)
+        else:
+            visible_text = metrics.elidedText(
+                self._full_text,
+                Qt.TextElideMode.ElideRight,
+                text_rect.width(),
+            )
+            painter.drawText(text_rect, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, visible_text)
+        painter.restore()
+
+    def _update_scroll_state(self) -> None:
+        metrics = self.fontMetrics()
+        option = QStyleOptionButton()
+        self.initStyleOption(option)
+        content_rect = self.style().subElementRect(QStyle.SubElement.SE_PushButtonContents, option, self)
+        available_width = max(0, content_rect.width() - self._TEXT_SIDE_PADDING_PX * 2)
+        text_width = metrics.horizontalAdvance(self._full_text)
+
+        self._scroll_enabled = bool(self.isVisible() and available_width > 0 and text_width > available_width + 1)
+        self._scroll_cycle_width_px = text_width + self._TEXT_GAP_PX
+        if self._scroll_enabled:
+            if not self._marquee_timer.isActive():
+                self._marquee_timer.start()
+        else:
+            self._scroll_offset_px = 0
+            self._marquee_timer.stop()
+        self.update()
+
+    def _advance_marquee(self) -> None:
+        if not self._scroll_enabled or self._scroll_cycle_width_px <= 0:
+            self._marquee_timer.stop()
+            return
+        self._scroll_offset_px = (self._scroll_offset_px + self._SCROLL_STEP_PX) % self._scroll_cycle_width_px
+        self.update()
+
+
 class MessageInput(QWidget):
     """Integrated message input surface."""
 
@@ -2318,7 +2442,7 @@ class MessageInput(QWidget):
     screenshot_requested = Signal()
     voice_call_requested = Signal()
     video_call_requested = Signal()
-    ai_action_requested = Signal(str)
+    ai_feature_toggled = Signal(str, bool)
     ai_reply_suggestion_selected = Signal(str)
     typing_signal = Signal()
 
@@ -2341,7 +2465,12 @@ class MessageInput(QWidget):
         self._draft_emit_pending = False
         self._programmatic_edit_depth = 0
         self._ai_busy = False
+        self._ai_feature_states = {
+            AI_FEATURE_SMART_REPLY: False,
+            AI_FEATURE_AUTO_TRANSLATE: False,
+        }
         self._reply_suggestion_buttons: list[PushButton] = []
+        self._reply_suggestion_status_text = ""
         self._setup_ui()
         self._connect_signals()
         qconfig.themeChanged.connect(lambda *_args: (self._apply_editor_transparency(), self.text_input._refresh_mention_selections()))
@@ -2723,30 +2852,26 @@ class MessageInput(QWidget):
         self.text_input.setFocus()
 
     def _on_ai_clicked(self) -> None:
-        """Show draft-assist actions for the current composer text."""
+        """Show session-level AI feature toggles for the current conversation."""
         if not self._session_active or self._ai_busy:
             return
 
-        draft_text = self.current_plain_text().strip()
-        if not draft_text:
-            InfoBar.info(
-                tr("composer.ai.title", "AI 助手"),
-                tr("composer.ai.empty_draft", "请先输入草稿，再选择 AI 操作。"),
-                parent=self.window(),
-                duration=1800,
-            )
-            return
-
-        menu = RoundMenu(parent=self)
+        menu = CheckableMenu(parent=self)
         actions = [
-            ("polish", tr("composer.ai.polish", "润色")),
-            ("shorten", tr("composer.ai.shorten", "缩短")),
-            ("translate", tr("composer.ai.translate", "翻译成中文")),
-            ("rewrite", tr("composer.ai.rewrite", "重写")),
+            (AI_FEATURE_SMART_REPLY, tr("composer.ai.smart_reply", "智能回复")),
+            (AI_FEATURE_AUTO_TRANSLATE, tr("composer.ai.auto_translate", "来信翻译")),
         ]
-        for action_id, label in actions:
+        for feature_id, label in actions:
             action = Action(label, self)
-            action.triggered.connect(lambda _checked=False, value=action_id: self.ai_action_requested.emit(value))
+            action.setCheckable(True)
+            action.setChecked(self._ai_feature_states.get(feature_id, False))
+            action.triggered.connect(
+                lambda checked=False, value=feature_id, popup=menu: self._emit_ai_feature_toggled(
+                    value,
+                    bool(checked),
+                    popup,
+                )
+            )
             menu.addAction(action)
         menu.exec(self.ai_button.mapToGlobal(QPoint(0, self.ai_button.height())))
 
@@ -2785,6 +2910,7 @@ class MessageInput(QWidget):
     def set_session(self, session: Session | None) -> None:
         """Update the active session context used by composer-only features like @ mention."""
         self._current_session = session
+        self._sync_ai_feature_states(session)
         self._mention_candidates = self._build_mention_candidates(session)
         self._close_mention_flyout()
         self.clear_reply_suggestions()
@@ -3062,16 +3188,18 @@ class MessageInput(QWidget):
 
     def set_reply_suggestions(self, suggestions: list[str]) -> None:
         """Render ephemeral AI reply candidates above the composer."""
+        self.clear_reply_suggestion_status()
         self.clear_reply_suggestions()
         normalized = [str(item or "").strip() for item in suggestions or [] if str(item or "").strip()]
         if not normalized:
             return
 
+        self.reply_suggestion_label.setText(tr("composer.ai.reply_suggestions", "AI 回复"))
         insert_index = max(1, self.reply_suggestion_layout.count() - 1)
-        for text in normalized[:3]:
-            button = PushButton(self._elide_suggestion_text(text), self.reply_suggestion_widget)
+        for text in normalized[:4]:
+            button = MarqueeSuggestionButton(text, self.reply_suggestion_widget)
             button.setFixedHeight(30)
-            button.setMaximumWidth(220)
+            button.setFixedWidth(min(button.sizeHint().width(), 220))
             button.setToolTip(text)
             button.clicked.connect(lambda _checked=False, value=text: self._apply_reply_suggestion(value))
             self.reply_suggestion_layout.insertWidget(insert_index, button, 0, Qt.AlignmentFlag.AlignVCenter)
@@ -3086,18 +3214,50 @@ class MessageInput(QWidget):
             self.reply_suggestion_layout.removeWidget(button)
             button.deleteLater()
         self._reply_suggestion_buttons.clear()
-        self.reply_suggestion_widget.hide()
+        if not self._reply_suggestion_status_text:
+            self.reply_suggestion_widget.hide()
         self._update_overlay_positions()
+
+    def set_reply_suggestion_status(self, text: str) -> None:
+        """Show one inline status message above the composer instead of reply chips."""
+        self.clear_reply_suggestions()
+        normalized = str(text or "").strip()
+        self._reply_suggestion_status_text = normalized
+        if not normalized:
+            self.reply_suggestion_widget.hide()
+            self.reply_suggestion_label.setText(tr("composer.ai.reply_suggestions", "AI 回复"))
+            self._update_overlay_positions()
+            return
+        self.reply_suggestion_label.setText(normalized)
+        self.reply_suggestion_widget.show()
+        self._update_overlay_positions()
+
+    def clear_reply_suggestion_status(self) -> None:
+        """Clear the inline reply-status message and restore the default label."""
+        self._reply_suggestion_status_text = ""
+        if not self._reply_suggestion_buttons:
+            self.reply_suggestion_widget.hide()
+        self.reply_suggestion_label.setText(tr("composer.ai.reply_suggestions", "AI 回复"))
+        self._update_overlay_positions()
+
+    def _sync_ai_feature_states(self, session: Session | None) -> None:
+        """Reflect the persisted per-session AI feature toggles locally."""
+        self._ai_feature_states = {
+            AI_FEATURE_SMART_REPLY: session_ai_feature_enabled(session, AI_FEATURE_SMART_REPLY),
+            AI_FEATURE_AUTO_TRANSLATE: session_ai_feature_enabled(session, AI_FEATURE_AUTO_TRANSLATE),
+        }
+
+    def _emit_ai_feature_toggled(self, feature: str, enabled: bool, menu: CheckableMenu) -> None:
+        """Update local feature state immediately and forward the toggle to the chat panel."""
+        self._ai_feature_states[str(feature or "").strip()] = bool(enabled)
+        self.ai_feature_toggled.emit(str(feature or "").strip(), bool(enabled))
+        menu.close()
 
     def _apply_reply_suggestion(self, text: str) -> None:
         """Fill the composer with a candidate reply without sending it."""
         self.replace_plain_text_draft(text)
         self.clear_reply_suggestions()
         self.ai_reply_suggestion_selected.emit(text)
-
-    def _elide_suggestion_text(self, text: str) -> str:
-        metrics = self.fontMetrics()
-        return metrics.elidedText(str(text or ""), Qt.TextElideMode.ElideRight, 180)
 
     def clear_draft(self) -> None:
         """Clear the current composer draft explicitly."""

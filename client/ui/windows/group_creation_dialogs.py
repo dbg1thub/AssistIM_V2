@@ -433,17 +433,6 @@ class StartGroupChatDialog(MaskDialogBase):
         self.refresh_button.setText(tr("common.loading", "Loading..."))
         try:
             contacts = await self._controller.load_contacts()
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            InfoBar.error(
-                tr("chat.group_picker.title", "Start Group Chat"),
-                str(exc),
-                parent=self,
-                duration=2200,
-            )
-            return
-        else:
             current_fixed_id = str(self._fixed_contact.id if self._fixed_contact is not None else "" or "")
             updated_fixed = next((contact for contact in contacts if contact.id == current_fixed_id), self._fixed_contact)
             self._fixed_contact = updated_fixed if updated_fixed is not None and updated_fixed.id else self._fixed_contact
@@ -470,16 +459,6 @@ class StartGroupChatDialog(MaskDialogBase):
         self.complete_button.setText(tr("chat.group_picker.creating", "Creating..."))
         try:
             group = await self._controller.create_group(name, list(dict.fromkeys(member_ids)))
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            InfoBar.error(
-                tr("chat.group_picker.title", "Start Group Chat"),
-                str(exc),
-                parent=self,
-                duration=2200,
-            )
-        else:
             selected_contacts = [contact for contact in self._contacts if contact.id in set(member_ids)]
             selected_contacts.sort(key=lambda item: item.display_name.lower())
             self.group_created.emit(enrich_created_group(group, selected_contacts))
@@ -738,11 +717,6 @@ class CreateGroupDialog(QDialog):
         self.create_button.setText(tr("contact.create_group.creating", "Creating..."))
         try:
             group = await self._controller.create_group(name, list(dict.fromkeys(member_ids)))
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            InfoBar.error(tr("contact.create_group.title", "Create Group"), str(exc), parent=self, duration=2200)
-        else:
             InfoBar.success(
                 tr("contact.create_group.title", "Create Group"),
                 tr("contact.create_group.success", "Group created."),
@@ -777,12 +751,6 @@ class CreateGroupDialog(QDialog):
         self.refresh_button.setText(tr("common.loading", "Loading..."))
         try:
             contacts = await self._controller.load_contacts()
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            InfoBar.error(tr("contact.create_group.title", "Create Group"), str(exc), parent=self, duration=2200)
-            return
-        else:
             self._contacts = [contact for contact in contacts if contact.id]
             valid_ids = {contact.id for contact in self._contacts}
             self._selected_ids.intersection_update(valid_ids)

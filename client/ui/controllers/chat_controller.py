@@ -16,7 +16,7 @@ from client.core.exceptions import AppError
 from client.core.logging import setup_logging
 from client.managers.call_manager import get_call_manager
 from client.managers.conversation_summary_manager import get_conversation_summary_manager
-from client.managers.message_manager import get_message_manager
+from client.managers.message_manager import MessageFailureCode, get_message_manager
 from client.managers.session_manager import SessionRefreshResult, get_session_manager
 from client.models.message import ChatMessage, MessageStatus, MessageType, Session, build_attachment_extra, infer_message_type_from_path
 from client.services.call_service import get_call_service
@@ -49,6 +49,8 @@ class ChatController:
         self._fallback_call_ice_servers = self._clone_ice_servers(self._call_ice_servers)
         self._call_ice_servers_loaded = False
         self._initialized = False
+
+    ATTACHMENT_UPLOAD_FAILED_CODE = MessageFailureCode.ATTACHMENT_UPLOAD_FAILED
 
     @staticmethod
     def _clone_ice_servers(servers: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
@@ -254,15 +256,13 @@ class ChatController:
 
             upload_result = await self._file_service.upload_chat_attachment(upload_path)
         except AppError as exc:
-            reason = str(exc) or "Upload failed"
             logger.error("Failed to upload file %s: %s", file_path, exc)
-            await self._msg_manager.mark_message_failed(placeholder, reason)
-            return placeholder
+            await self._msg_manager.mark_message_failed(placeholder, self.ATTACHMENT_UPLOAD_FAILED_CODE)
+            raise
         except Exception as exc:
-            reason = str(exc) or "Upload failed"
             logger.error("Failed to prepare/upload encrypted file %s: %s", file_path, exc)
-            await self._msg_manager.mark_message_failed(placeholder, reason)
-            return placeholder
+            await self._msg_manager.mark_message_failed(placeholder, self.ATTACHMENT_UPLOAD_FAILED_CODE)
+            raise
         finally:
             if cleanup_upload_path:
                 try:
@@ -394,6 +394,10 @@ class ChatController:
     async def delete_message(self, message_id: str) -> bool:
         """Delete a previously sent message."""
         return await self._msg_manager.delete_message(message_id)
+
+    async def update_message_translation(self, message_id: str, translation: dict[str, Any]) -> Optional[ChatMessage]:
+        """Persist one local AI translation payload for a message."""
+        return await self._msg_manager.update_message_translation(message_id, translation)
 
     async def load_messages(
         self,

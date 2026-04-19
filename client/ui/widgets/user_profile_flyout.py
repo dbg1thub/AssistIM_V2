@@ -573,13 +573,14 @@ class UserProfileCoordinator(QWidget):
             )
         except asyncio.CancelledError:
             raise
-        except Exception as exc:
+        except Exception:
             InfoBar.error(
                 tr("profile.edit.title", "Edit Profile"),
-                str(exc),
+                tr("profile.edit.failed", "Unable to update profile right now."),
                 parent=self.window(),
                 duration=2400,
             )
+            raise
         else:
             user = dict(update_result.user or {})
             snapshot = update_result.session_snapshot

@@ -103,8 +103,10 @@ class AIRequest:
     messages: list[dict[str, str]]
     model: str = ""
     temperature: float = 0.7
+    seed: int | None = None
     max_tokens: int = 2048
     stream: bool = True
+    response_format: dict[str, Any] | None = None
     session_id: str = ""
     system_prompt: Optional[str] = None
     task_id: str = field(default_factory=lambda: str(uuid.uuid4()))
@@ -112,6 +114,7 @@ class AIRequest:
     must_be_local: bool = False
     privacy_scope: AIPrivacyScope | str = AIPrivacyScope.GENERAL
     max_output_chars: int = 0
+    priority: int | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -119,6 +122,11 @@ class AIRequest:
             self.task_id = str(uuid.uuid4())
         self.task_type = _coerce_task_type(self.task_type)
         self.privacy_scope = _coerce_privacy_scope(self.privacy_scope)
+        if self.seed is not None:
+            try:
+                self.seed = int(self.seed)
+            except (TypeError, ValueError):
+                self.seed = None
         self.max_tokens = max(1, int(self.max_tokens or 1))
         self.max_output_chars = max(0, int(self.max_output_chars or 0))
 
@@ -169,6 +177,7 @@ class AIModelInfo:
     context_size: int = 0
     max_output_tokens: int = 0
     gpu_layers: Optional[int] = None
+    cpu_threads: int = 0
     supports_streaming: bool = True
     metadata: dict[str, Any] = field(default_factory=dict)
 
@@ -299,6 +308,8 @@ class OpenAIProvider(AIProvider):
             "max_tokens": request.max_tokens,
             "stream": False,
         }
+        if request.response_format:
+            payload["response_format"] = dict(request.response_format)
         data = await self._http.post(
             f"{self._base_url}/chat/completions",
             json=payload,
@@ -324,6 +335,8 @@ class OpenAIProvider(AIProvider):
             "max_tokens": request.max_tokens,
             "stream": True,
         }
+        if request.response_format:
+            payload["response_format"] = dict(request.response_format)
         yield AIStreamEvent(
             task_id=request.task_id,
             session_id=request.session_id,
@@ -560,7 +573,10 @@ class LocalGGUFProvider(AIProvider):
                 messages=_messages_for_request(request),
                 model=request.model,
                 temperature=request.temperature,
+                seed=request.seed,
+                response_format=request.response_format,
                 max_tokens=request.max_tokens,
+                task_type=getattr(request.task_type, "value", str(request.task_type)),
             )
         except Exception as exc:
             raise self._convert_runtime_error(exc) from exc
@@ -589,7 +605,10 @@ class LocalGGUFProvider(AIProvider):
                 messages=_messages_for_request(request),
                 model=request.model,
                 temperature=request.temperature,
+                seed=request.seed,
+                response_format=request.response_format,
                 max_tokens=request.max_tokens,
+                task_type=getattr(request.task_type, "value", str(request.task_type)),
             ):
                 content = str(getattr(chunk, "content", "") or "")
                 if not content:
@@ -650,6 +669,7 @@ class LocalGGUFProvider(AIProvider):
             context_size=int(getattr(info, "context_size", 0) or 0),
             max_output_tokens=int(getattr(info, "max_output_tokens", 0) or 0),
             gpu_layers=getattr(info, "gpu_layers", None),
+            cpu_threads=int(getattr(info, "cpu_threads", 0) or 0),
             supports_streaming=True,
             metadata=dict(getattr(info, "metadata", {}) or {}),
         )

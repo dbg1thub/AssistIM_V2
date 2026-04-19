@@ -4,15 +4,21 @@ Configuration Module
 后端配置 - 通过环境变量配置，开发者使用
 """
 
+import json
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
 
-DEFAULT_AI_MODEL_FILE = "qwen3.5-omni-2B-Q4_K_M.gguf"
-DEFAULT_AI_MODEL_ID = "qwen3.5-omni-2B-Q4_K_M"
-DEFAULT_AI_MODEL_PATH = Path(__file__).resolve().parents[1] / "resources" / "models" / DEFAULT_AI_MODEL_FILE
+CLIENT_ROOT = Path(__file__).resolve().parents[1]
+APP_ROOT = CLIENT_ROOT.parent
+UI_CONFIG_PATH = APP_ROOT / "data" / "config.json"
+MODEL_MANIFEST_PATH = CLIENT_ROOT / "resources" / "models" / "manifest.json"
+
+DEFAULT_AI_MODEL_FILE = "gemma-4-E2B-it-Q4_K_M.gguf"
+DEFAULT_AI_MODEL_ID = "gemma-4-E2B-it-Q4_K_M"
+DEFAULT_AI_MODEL_PATH = CLIENT_ROOT / "resources" / "models" / DEFAULT_AI_MODEL_FILE
 
 
 def _parse_webrtc_ice_server_urls() -> list[str]:
@@ -41,6 +47,18 @@ def _parse_bool_env(name: str, default: bool = False) -> bool:
     if raw_value in {"0", "false", "no", "off"}:
         return False
     return default
+
+
+def _parse_optional_bool_env(name: str) -> Optional[bool]:
+    """Parse an optional boolean-like environment variable."""
+    raw_value = str(os.getenv(name, "") or "").strip().lower()
+    if not raw_value:
+        return None
+    if raw_value in {"1", "true", "yes", "on"}:
+        return True
+    if raw_value in {"0", "false", "no", "off"}:
+        return False
+    return None
 
 
 def _parse_int_env(name: str, default: int) -> int:
@@ -76,6 +94,104 @@ def _parse_gpu_layers_env(name: str, default: int) -> int:
         return int(raw_value)
     except ValueError:
         return default
+
+
+def _load_ui_config_payload() -> dict[str, Any]:
+    """Load the UI config file when it exists."""
+    try:
+        payload = json.loads(UI_CONFIG_PATH.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _ui_config_value(group: str, name: str, default: Any = None) -> Any:
+    payload = _load_ui_config_payload()
+    section = payload.get(group)
+    if not isinstance(section, dict):
+        return default
+    return section.get(name, default)
+
+
+def _ui_config_has_value(group: str, name: str) -> bool:
+    payload = _load_ui_config_payload()
+    section = payload.get(group)
+    return isinstance(section, dict) and name in section
+
+
+def _manifest_model_path_for_id(model_id: str) -> Optional[Path]:
+    normalized_model_id = str(model_id or "").strip()
+    if not normalized_model_id:
+        return None
+    try:
+        payload = json.loads(MODEL_MANIFEST_PATH.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return None
+    for item in list(payload.get("models") or []):
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("model_id") or "").strip() != normalized_model_id:
+            continue
+        file_name = str(item.get("file_name") or "").strip()
+        if not file_name:
+            return None
+        return CLIENT_ROOT / "resources" / "models" / file_name
+    return None
+
+
+def _resolve_ui_ai_model_id() -> str:
+    configured_model_id = str(_ui_config_value("AI", "ModelId", DEFAULT_AI_MODEL_ID) or "").strip()
+    if configured_model_id and _manifest_model_path_for_id(configured_model_id) is not None:
+        return configured_model_id
+    return DEFAULT_AI_MODEL_ID
+
+
+def _resolve_ai_model_id() -> str:
+    if _ui_config_has_value("AI", "ModelId"):
+        return _resolve_ui_ai_model_id()
+    explicit_model_id = str(os.getenv("ASSISTIM_AI_MODEL_ID", "") or "").strip()
+    if explicit_model_id:
+        return explicit_model_id
+    return _resolve_ui_ai_model_id()
+
+
+def _resolve_ai_model_path() -> str:
+    if _ui_config_has_value("AI", "ModelId"):
+        selected_model_path = _manifest_model_path_for_id(_resolve_ui_ai_model_id())
+        if selected_model_path is not None:
+            return str(selected_model_path)
+    explicit_model_path = str(os.getenv("ASSISTIM_AI_MODEL_PATH", "") or "").strip()
+    if explicit_model_path:
+        return explicit_model_path
+    explicit_model_id = str(os.getenv("ASSISTIM_AI_MODEL_ID", "") or "").strip()
+    explicit_selected_model_path = _manifest_model_path_for_id(explicit_model_id)
+    if explicit_selected_model_path is not None:
+        return str(explicit_selected_model_path)
+    selected_model_path = _manifest_model_path_for_id(_resolve_ui_ai_model_id())
+    if selected_model_path is not None:
+        return str(selected_model_path)
+    return str(DEFAULT_AI_MODEL_PATH)
+
+
+def _resolve_ai_gpu_enabled() -> bool:
+    if _ui_config_has_value("AI", "GpuAccelerationEnabled"):
+        return _parse_bool_ui_config_value("AI", "GpuAccelerationEnabled", True)
+    explicit_gpu_enabled = _parse_optional_bool_env("ASSISTIM_AI_GPU_ENABLED")
+    if explicit_gpu_enabled is not None:
+        return explicit_gpu_enabled
+    return _parse_bool_ui_config_value("AI", "GpuAccelerationEnabled", True)
+
+
+def _parse_bool_ui_config_value(group: str, name: str, default: bool) -> bool:
+    raw_value = _ui_config_value(group, name, default)
+    if isinstance(raw_value, bool):
+        return raw_value
+    normalized = str(raw_value or "").strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    return default
 
 
 @dataclass
@@ -173,12 +289,14 @@ class AIConfig:
     """Local AI runtime configuration."""
 
     provider: str = field(default_factory=lambda: str(os.getenv("ASSISTIM_AI_PROVIDER", "local_gguf") or "local_gguf").strip().lower())
-    model_path: str = field(default_factory=lambda: str(os.getenv("ASSISTIM_AI_MODEL_PATH", str(DEFAULT_AI_MODEL_PATH)) or str(DEFAULT_AI_MODEL_PATH)).strip())
-    model_id: str = field(default_factory=lambda: str(os.getenv("ASSISTIM_AI_MODEL_ID", DEFAULT_AI_MODEL_ID) or DEFAULT_AI_MODEL_ID).strip())
+    model_path: str = field(default_factory=_resolve_ai_model_path)
+    model_id: str = field(default_factory=_resolve_ai_model_id)
     context_size: int = field(default_factory=lambda: _parse_int_env("ASSISTIM_AI_CONTEXT_SIZE", 4096))
     max_output_tokens: int = field(default_factory=lambda: _parse_int_env("ASSISTIM_AI_MAX_OUTPUT_TOKENS", 512))
     temperature: float = field(default_factory=lambda: _parse_float_env("ASSISTIM_AI_TEMPERATURE", 0.4))
     gpu_layers: int = field(default_factory=lambda: _parse_gpu_layers_env("ASSISTIM_AI_GPU_LAYERS", 0))
+    gpu_enabled: bool = field(default_factory=_resolve_ai_gpu_enabled)
+    cpu_threads: int = field(default_factory=lambda: _parse_int_env("ASSISTIM_AI_CPU_THREADS", 0))
     verbose: bool = field(default_factory=lambda: _parse_bool_env("ASSISTIM_AI_VERBOSE", False))
 
 

@@ -80,6 +80,14 @@ class SessionController:
         """Persist the local group-member label visibility preference for a session."""
         await self._session_manager.set_group_member_nickname_visibility(session_id, enabled)
 
+    async def set_ai_reply_suggestions_enabled(self, session_id: str, enabled: bool) -> None:
+        """Persist the per-session smart-reply toggle locally."""
+        await self._session_manager.set_ai_reply_suggestions_enabled(session_id, enabled)
+
+    async def set_ai_auto_translate_enabled(self, session_id: str, enabled: bool) -> None:
+        """Persist the per-session incoming-translation toggle locally."""
+        await self._session_manager.set_ai_auto_translate_enabled(session_id, enabled)
+
     async def apply_group_payload(self, session_id: str, payload: dict[str, Any], *, include_self_fields: bool) -> Optional[Any]:
         """Apply one authoritative group payload to the cached session state."""
         return await self._session_manager.apply_group_payload(

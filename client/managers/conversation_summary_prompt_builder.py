@@ -41,6 +41,10 @@ class ConversationSummaryPromptBuilder:
             return None
 
         context = "\n".join(context_lines)
+        system_prompt = (
+            "你是 AssistIM 的会话摘要助手。\n"
+            "使用标准聊天角色，不要输出思考过程，不要解释，只输出摘要正文。"
+        )
         prompt = self._build_open_bucket_prompt(context) if is_open else self._build_closed_bucket_prompt(context)
 
         request = AIRequest(
@@ -53,6 +57,7 @@ class ConversationSummaryPromptBuilder:
             temperature=0.2,
             max_tokens=192,
             max_output_chars=self.MAX_OUTPUT_CHARS,
+            system_prompt=system_prompt,
             messages=[{"role": "user", "content": prompt}],
             metadata={
                 "summary_kind": "conversation_bucket",

@@ -270,7 +270,7 @@ class ChatPanel(QWidget):
     group_announcement_requested = Signal()
     security_pending_confirm_requested = Signal(str, str)
     security_pending_discard_requested = Signal(str)
-    ai_draft_action_requested = Signal(str)
+    ai_feature_toggled = Signal(str, bool)
     ai_reply_suggestion_selected = Signal(str)
 
     def __init__(self, parent=None):
@@ -353,7 +353,7 @@ class ChatPanel(QWidget):
         self.message_input.screenshot_requested.connect(self.screenshot_requested.emit)
         self.message_input.voice_call_requested.connect(self.voice_call_requested.emit)
         self.message_input.video_call_requested.connect(self.video_call_requested.emit)
-        self.message_input.ai_action_requested.connect(self.ai_draft_action_requested.emit)
+        self.message_input.ai_feature_toggled.connect(self.ai_feature_toggled.emit)
         self.message_input.ai_reply_suggestion_selected.connect(self.ai_reply_suggestion_selected.emit)
         self.message_input.typing_signal.connect(self._on_typing)
         self.message_input.draft_changed.connect(self.composer_draft_changed.emit)
@@ -666,6 +666,14 @@ class ChatPanel(QWidget):
     def clear_ai_reply_suggestions(self) -> None:
         """Clear ephemeral AI reply candidates from the composer."""
         self.message_input.clear_reply_suggestions()
+
+    def set_ai_reply_suggestion_status(self, text: str) -> None:
+        """Show one inline status above the composer for smart-reply generation."""
+        self.message_input.set_reply_suggestion_status(text)
+
+    def clear_ai_reply_suggestion_status(self) -> None:
+        """Clear the inline smart-reply status above the composer."""
+        self.message_input.clear_reply_suggestion_status()
 
     def restore_recalled_message_to_composer(self, message_id: str) -> bool:
         """Load recalled text back into the composer for inline direct editing."""

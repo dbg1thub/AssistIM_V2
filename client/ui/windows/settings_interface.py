@@ -3,15 +3,17 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QSignalBlocker, Qt, Signal
 from PySide6.QtWidgets import QWidget
 from qfluentwidgets import (
+    ComboBox,
     ComboBoxSettingCard,
     CustomColorSettingCard,
     ExpandLayout,
     InfoBar,
     OptionsSettingCard,
     ScrollArea,
+    SettingCard,
     SettingCardGroup,
     SwitchSettingCard,
     Theme,
@@ -22,7 +24,46 @@ from qfluentwidgets import (
 from client.core.app_icons import AppIcon, CollectionIcon
 from client.core.config import cfg, is_win11
 from client.core.i18n import tr
+from client.services.local_ai_selection import LocalAIModelSpec, detect_local_ai_capabilities, installed_local_ai_model_specs
 from client.ui.styles import StyleSheet
+
+
+class AIModelSettingCard(SettingCard):
+    """One dynamic model-selection setting card backed by the UI config."""
+
+    modelChanged = Signal(str)
+
+    def __init__(self, icon, title: str, content: str | None = None, parent=None) -> None:
+        super().__init__(icon, title, content, parent=parent)
+        self.combo_box = ComboBox(self)
+        self.combo_box.setMinimumWidth(280)
+        self.combo_box.currentIndexChanged.connect(self._emit_model_changed)
+        self.hBoxLayout.addWidget(self.combo_box, 0, Qt.AlignmentFlag.AlignRight)
+        self.hBoxLayout.addSpacing(16)
+
+    def set_options(self, options: list[tuple[str, str]], current_value: str) -> None:
+        blocker = QSignalBlocker(self.combo_box)
+        self.combo_box.clear()
+        current_index = -1
+        for index, (model_id, label) in enumerate(options):
+            self.combo_box.addItem(label, userData=model_id)
+            if model_id == current_value:
+                current_index = index
+        if current_index < 0 and options:
+            current_index = 0
+        if current_index >= 0:
+            self.combo_box.setCurrentIndex(current_index)
+        del blocker
+
+    def current_value(self) -> str:
+        return str(self.combo_box.currentData() or "").strip()
+
+    def _emit_model_changed(self, index: int) -> None:
+        if index < 0:
+            return
+        value = self.current_value()
+        if value:
+            self.modelChanged.emit(value)
 
 
 class SettingsInterface(ScrollArea):
@@ -39,8 +80,11 @@ class SettingsInterface(ScrollArea):
         self.expand_layout = ExpandLayout(self.scroll_widget)
 
         self.personal_group = SettingCardGroup(tr("settings.group.personalization", "Personalization"), self.scroll_widget)
+        self.ai_group = SettingCardGroup(tr("settings.group.ai", "AI"), self.scroll_widget)
         self.notification_group = SettingCardGroup(tr("settings.group.notifications", "Notifications"), self.scroll_widget)
         self.app_group = SettingCardGroup(tr("settings.group.application", "Application"), self.scroll_widget)
+        self._ai_capability = detect_local_ai_capabilities()
+        self._ai_model_specs = installed_local_ai_model_specs()
 
         self.mica_card = SwitchSettingCard(
             AppIcon.TRANSPARENT,
@@ -111,6 +155,19 @@ class SettingsInterface(ScrollArea):
             configItem=cfg.messageSoundEnabled,
             parent=self.notification_group,
         )
+        self.ai_model_card = AIModelSettingCard(
+            AppIcon.ROBOT,
+            tr("settings.card.ai_model.title", "Local AI Model"),
+            tr("settings.card.ai_model.content", "Choose which local GGUF model the desktop client should load after restart."),
+            parent=self.ai_group,
+        )
+        self.ai_gpu_card = SwitchSettingCard(
+            AppIcon.ROBOT,
+            tr("settings.card.ai_gpu.title", "GPU Acceleration"),
+            tr("settings.card.ai_gpu.content", "Enable GPU acceleration for the selected local AI model when the runtime and hardware support it."),
+            configItem=cfg.aiGpuAccelerationEnabled,
+            parent=self.ai_group,
+        )
 
         self._init_widget()
 
@@ -155,6 +212,9 @@ class SettingsInterface(ScrollArea):
         self.personal_group.addSettingCard(self.zoom_card)
         self.personal_group.addSettingCard(self.language_card)
 
+        self.ai_group.addSettingCard(self.ai_model_card)
+        self.ai_group.addSettingCard(self.ai_gpu_card)
+
         self.notification_group.addSettingCard(self.sound_enabled_card)
         self.notification_group.addSettingCard(self.message_sound_card)
 
@@ -163,6 +223,7 @@ class SettingsInterface(ScrollArea):
         self.expand_layout.setSpacing(28)
         self.expand_layout.setContentsMargins(36, 0, 36, 0)
         self.expand_layout.addWidget(self.personal_group)
+        self.expand_layout.addWidget(self.ai_group)
         self.expand_layout.addWidget(self.notification_group)
         self.expand_layout.addWidget(self.app_group)
 
@@ -172,11 +233,15 @@ class SettingsInterface(ScrollArea):
         cfg.appRestartSig.connect(self._show_restart_tooltip)
         self.mica_card.checkedChanged.connect(self.micaChanged.emit)
         self.sound_enabled_card.checkedChanged.connect(self.message_sound_card.setEnabled)
+        self.ai_model_card.modelChanged.connect(self._on_ai_model_changed)
+        self.ai_gpu_card.checkedChanged.connect(lambda _checked: self._refresh_ai_gpu_card_state())
 
     def _apply_initial_values(self) -> None:
         setTheme(cfg.get(cfg.themeMode), lazy=True)
         setThemeColor(cfg.get(cfg.themeColor))
         self.message_sound_card.setEnabled(bool(cfg.get(cfg.soundEnabled)))
+        self._sync_ai_model_card()
+        self._refresh_ai_gpu_card_state()
 
     def _on_theme_changed(self, theme: Theme) -> None:
         setTheme(theme, lazy=True)
@@ -186,8 +251,126 @@ class SettingsInterface(ScrollArea):
             tr("settings.restart.title", "Restart Required"),
             tr(
                 "settings.restart.content",
-                "Display scale and language changes will apply after restarting the app.",
+                "Display scale, language, and AI setting changes will apply after restarting the app.",
             ),
             parent=self.window(),
             duration=2500,
         )
+
+    def _on_ai_model_changed(self, model_id: str) -> None:
+        normalized_model_id = str(model_id or "").strip()
+        if not normalized_model_id:
+            return
+        if cfg.get(cfg.aiModelId) == normalized_model_id:
+            self._refresh_ai_gpu_card_state()
+            return
+        cfg.set(cfg.aiModelId, normalized_model_id)
+        self._refresh_ai_gpu_card_state()
+
+    def _sync_ai_model_card(self) -> None:
+        options = [(spec.model_id, self._format_ai_model_label(spec)) for spec in self._ai_model_specs]
+        if not options:
+            self.ai_model_card.setEnabled(False)
+            self.ai_model_card.setContent(
+                tr(
+                    "settings.card.ai_model.unavailable",
+                    "No installed local GGUF models were found in client/resources/models.",
+                )
+            )
+            return
+
+        selected_model_id = str(cfg.get(cfg.aiModelId) or "").strip()
+        if selected_model_id not in {model_id for model_id, _label in options}:
+            selected_model_id = options[0][0]
+        self.ai_model_card.setEnabled(True)
+        self.ai_model_card.setContent(
+            tr(
+                "settings.card.ai_model.content",
+                "Choose which local GGUF model the desktop client should load after restart.",
+            )
+        )
+        self.ai_model_card.set_options(options, selected_model_id)
+
+    def _refresh_ai_gpu_card_state(self) -> None:
+        selected_spec = self._selected_ai_model_spec()
+        if selected_spec is None:
+            self.ai_gpu_card.setEnabled(False)
+            self.ai_gpu_card.setContent(
+                tr(
+                    "settings.card.ai_gpu.unavailable_model",
+                    "Select one installed local AI model before enabling GPU acceleration.",
+                )
+            )
+            return
+
+        cache_clear = getattr(detect_local_ai_capabilities, "cache_clear", None)
+        if callable(cache_clear):
+            cache_clear()
+        capability = detect_local_ai_capabilities()
+        self._ai_capability = capability
+        available_vram_gb = capability.gpu_free_memory_gb if capability.gpu_free_memory_gb > 0 else capability.gpu_total_memory_gb
+        if not capability.runtime_supports_gpu_offload:
+            self.ai_gpu_card.setEnabled(False)
+            if capability.missing_cuda_dependencies:
+                deps = ", ".join(capability.missing_cuda_dependencies)
+                self.ai_gpu_card.setContent(
+                    tr(
+                        "settings.card.ai_gpu.unavailable_cuda",
+                        "GPU acceleration is unavailable because CUDA 12 runtime dependencies are missing: {deps}.",
+                        deps=deps,
+                    )
+                )
+            else:
+                self.ai_gpu_card.setContent(
+                    tr(
+                        "settings.card.ai_gpu.unavailable_runtime",
+                        "GPU acceleration is unavailable because the local runtime or GPU driver does not expose llama.cpp GPU offload support.",
+                    )
+                )
+            return
+
+        self.ai_gpu_card.setEnabled(True)
+        gpu_label = capability.gpu_name or tr("settings.card.ai_gpu.gpu_unknown", "当前 GPU")
+        if selected_spec.min_vram_gb > 0 and available_vram_gb > 0 and available_vram_gb < selected_spec.min_vram_gb:
+            self.ai_gpu_card.setContent(
+                tr(
+                    "settings.card.ai_gpu.content_warning_vram",
+                    "启动时会按 llama.cpp 尝试为 {model} 使用 GPU offload，并采用 RAM + VRAM 混合推理。当前 {gpu} 可用显存约 {available} GB，低于参考门槛 {required} GB，运行时可能回退到 CPU。",
+                    model=self._format_ai_model_label(selected_spec),
+                    gpu=gpu_label,
+                    required=f"{selected_spec.min_vram_gb:.1f}",
+                    available=f"{available_vram_gb:.2f}",
+                )
+            )
+            return
+
+        self.ai_gpu_card.setContent(
+            tr(
+                "settings.card.ai_gpu.content_ready",
+                "Use GPU acceleration for {model} on {gpu}. Disable this if you prefer CPU-only inference.",
+                model=self._format_ai_model_label(selected_spec),
+                gpu=gpu_label,
+            )
+        )
+
+    def _selected_ai_model_spec(self) -> LocalAIModelSpec | None:
+        selected_model_id = self.ai_model_card.current_value() if self._ai_model_specs else ""
+        if not selected_model_id:
+            selected_model_id = str(cfg.get(cfg.aiModelId) or "").strip()
+        for spec in self._ai_model_specs:
+            if spec.model_id == selected_model_id:
+                return spec
+        return None
+
+    @staticmethod
+    def _format_ai_model_label(spec: LocalAIModelSpec) -> str:
+        model_id = str(spec.model_id or "").strip()
+        normalized = model_id.lower()
+        if normalized.startswith("gemma-4-e2b-it-"):
+            suffix = model_id.split("gemma-4-E2B-it-", 1)[-1]
+            return f"Gemma 4 E2B-it ({suffix})"
+        if normalized.startswith("qwen3.5-"):
+            family = model_id.replace("-Q4_K_M", "").replace("-Q8_0", "")
+            suffix = model_id.split(family + "-", 1)[-1] if model_id.startswith(family + "-") else spec.quantization or ""
+            return f"{family} ({suffix})" if suffix else family
+        return model_id

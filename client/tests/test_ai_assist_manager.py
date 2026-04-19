@@ -47,20 +47,27 @@ from client.services.ai_service import AIErrorCode, AIPrivacyScope, AITaskType
 
 
 class FakeTaskManager:
-    def __init__(self, content: str = "好的，我来推进。\n可以，我现在处理。\n这边先不方便。\n我晚些再回复。") -> None:
-        self.content = content
+    def __init__(
+        self,
+        content: str | list[str] = "好的，我来推进。\n可以，我现在处理。\n这边先不方便。\n我晚些再回复。",
+    ) -> None:
+        if isinstance(content, list):
+            self.contents = list(content)
+        else:
+            self.contents = [content]
         self.requests = []
         self.state = AITaskState.DONE
         self.error_code = None
 
     async def run_once(self, request):
         self.requests.append(request)
+        index = min(len(self.requests) - 1, len(self.contents) - 1)
         return AITaskSnapshot(
             task_id=request.task_id,
             session_id=request.session_id,
             task_type=request.task_type.value,
             state=self.state,
-            content=self.content if self.state == AITaskState.DONE else "",
+            content=self.contents[index] if self.state == AITaskState.DONE else "",
             error_code=self.error_code,
             finish_reason="stop",
         )
@@ -128,10 +135,34 @@ def test_assist_draft_uses_task_manager_and_returns_text() -> None:
     asyncio.run(scenario())
 
 
+def test_translate_message_runs_local_translation_request() -> None:
+    async def scenario() -> None:
+        fake = FakeTaskManager(content="明天一起吃饭吗？")
+        manager = AIAssistManager(task_manager=fake)
+
+        result = await manager.translate_message(
+            "Would you like dinner tomorrow?",
+            session=_session(),
+            message_id="m1",
+            target_language_code="zh-CN",
+            mode="manual",
+        )
+
+        assert result.state == AITaskState.DONE
+        assert result.action == AIAssistAction.TRANSLATE
+        assert result.text == "明天一起吃饭吗？"
+        assert fake.requests[0].task_type == AITaskType.TRANSLATE
+        assert fake.requests[0].must_be_local is True
+        assert fake.requests[0].metadata["mode"] == "manual"
+        assert fake.requests[0].metadata["message_id"] == "m1"
+
+    asyncio.run(scenario())
+
+
 def test_suggest_replies_generates_ready_state_without_persistence() -> None:
     async def scenario() -> None:
         fake = FakeTaskManager(
-            content="1. 好的，我看一下。\n2. 明白，我现在处理。\n3. 这边先不方便。\n4. 我晚点再回复。"
+            content="好的，我看一下。\n明白，我现在处理。\n这边先不方便。\n我晚点再回复。"
         )
         manager = AIAssistManager(task_manager=fake)
         session = _session()
@@ -147,17 +178,23 @@ def test_suggest_replies_generates_ready_state_without_persistence() -> None:
         ]
         assert state.anchor_message_id == "m1"
         assert manager.get_suggestions("s1") is not state
+        assert len(fake.requests) == 1
         assert fake.requests[0].task_type == AITaskType.REPLY_SUGGESTION
+        assert fake.requests[0].metadata["reply_prompt_mode"] == "standard"
+        assert fake.requests[0].seed is None
+        assert fake.requests[0].response_format is None
+        assert fake.requests[0].system_prompt is not None
 
     asyncio.run(scenario())
 
 
 def test_suggest_replies_includes_local_bucket_summaries_when_available(monkeypatch) -> None:
     async def scenario() -> None:
+        monkeypatch.setattr("client.managers.ai_assist_manager.time.time", lambda: 1000)
         monkeypatch.setattr(
             SecureStorage,
             "decrypt_text",
-            classmethod(lambda cls, value: {"enc:open": "当前主要在确认周日下午见面。", "enc:closed": "之前已经确认了见面地点。"}[value]),
+            classmethod(lambda cls, value: {"enc:closed": "之前已经确认了见面地点。"}[value]),
         )
         fake = FakeTaskManager(
             content="好的，我看一下。\n明白，我现在处理。\n这边先不方便。\n我晚点再回复。"
@@ -166,13 +203,15 @@ def test_suggest_replies_includes_local_bucket_summaries_when_available(monkeypa
             open_bucket={
                 "session_id": "s1",
                 "bucket_start_ts": 1,
+                "bucket_end_ts": 1000,
                 "summary_status": "ready",
-                "summary_text_ciphertext": "enc:open",
+                "summary_text_ciphertext": "enc:closed",
             },
             closed_buckets=[
                 {
                     "session_id": "s1",
                     "bucket_start_ts": 0,
+                    "bucket_end_ts": 600,
                     "summary_status": "ready",
                     "summary_text_ciphertext": "enc:closed",
                 }
@@ -184,15 +223,17 @@ def test_suggest_replies_includes_local_bucket_summaries_when_available(monkeypa
 
         assert state.status == AIReplySuggestionStatus.READY
         prompt = fake.requests[0].messages[0]["content"]
-        assert "当前时间段摘要：" in prompt
+        assert "当前待回复消息组：" in prompt
+        assert "背景摘要（仅供参考，用来避免前后矛盾；不要优先复述已经确认过的话题）：" in prompt
         assert "最近历史摘要：" in prompt
-        assert "当前主要在确认周日下午见面。" in prompt
         assert "之前已经确认了见面地点。" in prompt
+        assert "你是 AssistIM 的私聊回复建议助手。" in fake.requests[0].system_prompt
     asyncio.run(scenario())
 
 
 def test_suggest_replies_skips_bucket_summary_when_decrypt_fails(monkeypatch) -> None:
     async def scenario() -> None:
+        monkeypatch.setattr("client.managers.ai_assist_manager.time.time", lambda: 1000)
         def _decrypt(_cls, value: str) -> str:
             if value == "enc:bad":
                 raise RuntimeError("bad ciphertext")
@@ -206,6 +247,7 @@ def test_suggest_replies_skips_bucket_summary_when_decrypt_fails(monkeypatch) ->
             open_bucket={
                 "session_id": "s1",
                 "bucket_start_ts": 1,
+                "bucket_end_ts": 1000,
                 "summary_status": "ready",
                 "summary_text_ciphertext": "enc:bad",
             },
@@ -213,6 +255,7 @@ def test_suggest_replies_skips_bucket_summary_when_decrypt_fails(monkeypatch) ->
                 {
                     "session_id": "s1",
                     "bucket_start_ts": 0,
+                    "bucket_end_ts": 600,
                     "summary_status": "ready",
                     "summary_text_ciphertext": "enc:closed",
                 }
@@ -224,9 +267,148 @@ def test_suggest_replies_skips_bucket_summary_when_decrypt_fails(monkeypatch) ->
 
         assert state.status == AIReplySuggestionStatus.READY
         prompt = fake.requests[0].messages[0]["content"]
-        assert "当前时间段摘要：" not in prompt
+        assert "背景摘要（仅供参考，用来避免前后矛盾；不要优先复述已经确认过的话题）：" in prompt
         assert "最近历史摘要：" in prompt
         assert "之前已经确认了见面地点。" in prompt
+
+    asyncio.run(scenario())
+
+
+def test_suggest_replies_ignores_recent_closed_bucket_summaries(monkeypatch) -> None:
+    async def scenario() -> None:
+        monkeypatch.setattr("client.managers.ai_assist_manager.time.time", lambda: 1000)
+        monkeypatch.setattr(
+            SecureStorage,
+            "decrypt_text",
+            classmethod(lambda cls, value: {"enc:recent": "最近五分钟内的摘要。", "enc:old": "五分钟前的历史摘要。"}[value]),
+        )
+        fake = FakeTaskManager(
+            content="好的，我看一下。\n明白，我现在处理。\n这边先不方便。\n我晚点再回复。"
+        )
+        db = FakeSummaryDatabase(
+            closed_buckets=[
+                {
+                    "session_id": "s1",
+                    "bucket_start_ts": 650,
+                    "bucket_end_ts": 760,
+                    "summary_status": "ready",
+                    "summary_text_ciphertext": "enc:recent",
+                },
+                {
+                    "session_id": "s1",
+                    "bucket_start_ts": 0,
+                    "bucket_end_ts": 600,
+                    "summary_status": "ready",
+                    "summary_text_ciphertext": "enc:old",
+                },
+            ]
+        )
+        manager = AIAssistManager(task_manager=fake, db=db)
+
+        state = await manager.suggest_replies(_session(), [_peer_message()], current_user_id="me")
+
+        assert state.status == AIReplySuggestionStatus.READY
+        prompt = fake.requests[0].messages[0]["content"]
+        assert "最近五分钟内的摘要。" not in prompt
+        assert "五分钟前的历史摘要。" in prompt
+
+    asyncio.run(scenario())
+
+
+def test_suggest_replies_skip_when_latest_text_is_self() -> None:
+    async def scenario() -> None:
+        fake = FakeTaskManager()
+        manager = AIAssistManager(task_manager=fake)
+        session = _session()
+        messages = [
+            _peer_message("m1", "周日去那家店吗？"),
+            ChatMessage("m2", "s1", "me", "我晚点确认。", is_self=True, status=MessageStatus.SENT),
+        ]
+
+        state = await manager.suggest_replies(session, messages, current_user_id="me")
+
+        assert state.status == AIReplySuggestionStatus.IDLE
+        assert state.reason == "latest_text_from_self"
+        assert fake.requests == []
+
+    asyncio.run(scenario())
+
+
+def test_suggest_replies_filters_old_topic_repeats_from_model_output() -> None:
+    async def scenario() -> None:
+        fake = FakeTaskManager(
+            content="明天去不去饭店吃饭？\n可以，你想吃辣一点还是清淡一点？\n我都行，你有没有特别想点的菜？\n这边先不太确定，晚点定菜也行。"
+        )
+        manager = AIAssistManager(task_manager=fake)
+        session = _session()
+        messages = [
+            _peer_message("m1", "明天去不去饭店吃饭？"),
+            ChatMessage("m2", "s1", "me", "可以，去。", is_self=True, status=MessageStatus.SENT),
+            _peer_message("m3", "那吃什么菜？"),
+        ]
+
+        state = await manager.suggest_replies(session, messages, current_user_id="me")
+
+        assert state.status == AIReplySuggestionStatus.READY
+        assert [item.text for item in state.items] == [
+            "可以，你想吃辣一点还是清淡一点？",
+            "我都行，你有没有特别想点的菜？",
+            "这边先不太确定，晚点定菜也行。",
+        ]
+
+    asyncio.run(scenario())
+
+
+def test_suggest_replies_retries_with_fallback_prompt_when_first_output_is_filtered() -> None:
+    class SequenceTaskManager:
+        def __init__(self) -> None:
+            self.requests = []
+            self.contents = [
+                "那吃什么菜？",
+                "你想吃辣一点还是清淡一点？\n我都行，你有没有特别想点的菜？\n这边先不太确定，晚点定菜也行。",
+            ]
+
+        async def run_once(self, request):
+            self.requests.append(request)
+            index = min(len(self.requests) - 1, len(self.contents) - 1)
+            return AITaskSnapshot(
+                task_id=request.task_id,
+                session_id=request.session_id,
+                task_type=request.task_type.value,
+                state=AITaskState.DONE,
+                content=self.contents[index],
+                error_code=None,
+                finish_reason="stop",
+            )
+
+    async def scenario() -> None:
+        fake = SequenceTaskManager()
+        manager = AIAssistManager(task_manager=fake)
+        session = _session()
+        messages = [
+            _peer_message("m1", "明天去不去饭店吃饭？"),
+            ChatMessage("m2", "s1", "me", "可以，去。", is_self=True, status=MessageStatus.SENT),
+            _peer_message("m3", "那吃什么菜？"),
+        ]
+
+        state = await manager.suggest_replies(session, messages, current_user_id="me")
+
+        assert state.status == AIReplySuggestionStatus.READY
+        assert [item.text for item in state.items] == [
+            "你想吃辣一点还是清淡一点？",
+            "我都行，你有没有特别想点的菜？",
+            "这边先不太确定，晚点定菜也行。",
+        ]
+        assert len(fake.requests) == 2
+        assert fake.requests[0].metadata["reply_prompt_mode"] == "standard"
+        assert fake.requests[1].metadata["reply_prompt_mode"] == "fallback"
+        assert fake.requests[1].metadata["has_summary"] is False
+        assert fake.requests[0].seed is None
+        assert fake.requests[1].seed is None
+        assert fake.requests[0].response_format is None
+        assert fake.requests[1].response_format is None
+        assert fake.requests[0].system_prompt is not None
+        assert fake.requests[1].system_prompt is not None
 
     asyncio.run(scenario())
 
@@ -256,7 +438,7 @@ def test_suggest_replies_skips_group_ai_and_self_latest_contexts() -> None:
     assert manager.can_suggest_replies(ai_session, [_peer_message()]) == (False, "ai_session")
     assert manager.can_suggest_replies(_session(), [self_message], current_user_id="me") == (
         False,
-        "no_peer_text_message",
+        "latest_text_from_self",
     )
 
 

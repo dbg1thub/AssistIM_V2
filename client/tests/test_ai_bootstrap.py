@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 import types
+from pathlib import Path
 
 if "aiohttp" not in sys.modules:
     aiohttp = types.ModuleType("aiohttp")
@@ -52,6 +53,7 @@ def test_local_gguf_config_from_ai_config_preserves_runtime_options(tmp_path) ->
         max_output_tokens=1024,
         temperature=0.2,
         gpu_layers=-1,
+        cpu_threads=6,
         verbose=True,
     )
 
@@ -63,6 +65,7 @@ def test_local_gguf_config_from_ai_config_preserves_runtime_options(tmp_path) ->
     assert runtime_config.max_output_tokens == 1024
     assert runtime_config.temperature == 0.2
     assert runtime_config.gpu_layers == -1
+    assert runtime_config.cpu_threads == 6
     assert runtime_config.verbose is True
 
 
@@ -107,3 +110,9 @@ def test_configure_default_ai_provider_rejects_unknown_provider() -> None:
         assert exc.code == AIErrorCode.AI_PROVIDER_UNAVAILABLE
     else:
         raise AssertionError("unknown provider should be rejected")
+
+
+def test_ai_bootstrap_logs_acceleration_profile_boundary() -> None:
+    bootstrap = (Path("client/services/ai_bootstrap.py")).read_text(encoding="utf-8")
+
+    assert "acceleration_profile=%s" in bootstrap

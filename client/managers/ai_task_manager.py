@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import heapq
 import time
 from dataclasses import dataclass, field
 from enum import Enum
@@ -111,51 +112,59 @@ class AITaskManager:
     ) -> None:
         self._service = service or get_ai_service()
         self._event_bus = event_bus or get_event_bus()
-        self._semaphore = asyncio.Semaphore(max(1, int(concurrency or 1)))
+        self._max_concurrency = max(1, int(concurrency or 1))
         self._lock = asyncio.Lock()
         self._tasks: dict[str, AITaskSnapshot] = {}
         self._cancel_requested: set[str] = set()
         self._runner_tasks: dict[str, asyncio.Task] = {}
+        self._scheduler_condition = asyncio.Condition()
+        self._queued_waiters: list[tuple[int, int, str]] = []
+        self._queued_waiter_lookup: dict[str, tuple[int, int, str]] = {}
+        self._scheduler_sequence = 0
+        self._running_count = 0
         self._closed = False
 
     async def run_once(self, request: AIRequest) -> AITaskSnapshot:
         """Run one non-streaming AI task to completion."""
         snapshot = await self._register_task(request)
+        await self._preempt_lower_priority_tasks(snapshot, request)
         await self._emit(AITaskEvent.UPDATED, snapshot)
         current_task = asyncio.current_task()
         if current_task is not None:
             self._runner_tasks[snapshot.task_id] = current_task
 
+        slot_acquired = False
         try:
-            async with self._semaphore:
-                if await self._is_cancelled_before_start(snapshot.task_id):
-                    return snapshot.copy()
-
-                await self._mark_running(snapshot)
-                response = await self._service.generate_once(request)
-                if self._is_cancel_requested(snapshot.task_id):
-                    await self._mark_cancelled(snapshot, finish_reason=AIErrorCode.AI_USER_CANCELLED.value)
-                    return snapshot.copy()
-
-                content = str(response.content or "")
-                truncated = False
-                if request.max_output_chars > 0 and len(content) > request.max_output_chars:
-                    content = content[: request.max_output_chars]
-                    truncated = True
-                snapshot.content = content
-                snapshot.provider = response.provider
-                snapshot.model = response.model
-                snapshot.finish_reason = (
-                    AIErrorCode.AI_OUTPUT_TRUNCATED.value
-                    if truncated
-                    else str(response.finish_reason or "")
-                )
-                snapshot.truncated = truncated
-                snapshot.chunk_count = 1 if content else 0
-                snapshot.metadata.update(response.metadata)
-                await self._mark_done(snapshot)
+            slot_acquired = await self._acquire_slot(snapshot, request)
+            if not slot_acquired or await self._is_cancelled_before_start(snapshot.task_id):
                 return snapshot.copy()
+
+            await self._mark_running(snapshot)
+            response = await self._service.generate_once(request)
+            if self._is_cancel_requested(snapshot.task_id):
+                await self._mark_cancelled(snapshot, finish_reason=AIErrorCode.AI_USER_CANCELLED.value)
+                return snapshot.copy()
+
+            content = str(response.content or "")
+            truncated = False
+            if request.max_output_chars > 0 and len(content) > request.max_output_chars:
+                content = content[: request.max_output_chars]
+                truncated = True
+            snapshot.content = content
+            snapshot.provider = response.provider
+            snapshot.model = response.model
+            snapshot.finish_reason = (
+                AIErrorCode.AI_OUTPUT_TRUNCATED.value
+                if truncated
+                else str(response.finish_reason or "")
+            )
+            snapshot.truncated = truncated
+            snapshot.chunk_count = 1 if content else 0
+            snapshot.metadata.update(response.metadata)
+            await self._mark_done(snapshot)
+            return snapshot.copy()
         except asyncio.CancelledError:
+            await self._cancel_provider_if_started(snapshot)
             await self._mark_cancelled(snapshot, finish_reason=AIErrorCode.AI_USER_CANCELLED.value)
             raise
         except AIServiceError as exc:
@@ -169,79 +178,84 @@ class AITaskManager:
             await self._mark_failed(snapshot, AIErrorCode.AI_MODEL_UNAVAILABLE, "Unexpected AI task failure")
             return snapshot.copy()
         finally:
+            if slot_acquired:
+                await self._release_slot(snapshot.task_id)
             self._runner_tasks.pop(snapshot.task_id, None)
             self._cancel_requested.discard(snapshot.task_id)
 
     async def stream(self, request: AIRequest) -> AITaskSnapshot:
         """Run one streaming AI task while coalescing provider chunks."""
         snapshot = await self._register_task(request)
+        await self._preempt_lower_priority_tasks(snapshot, request)
         await self._emit(AITaskEvent.UPDATED, snapshot)
         current_task = asyncio.current_task()
         if current_task is not None:
             self._runner_tasks[snapshot.task_id] = current_task
 
+        slot_acquired = False
         try:
-            async with self._semaphore:
-                if await self._is_cancelled_before_start(snapshot.task_id):
-                    return snapshot.copy()
+            slot_acquired = await self._acquire_slot(snapshot, request)
+            if not slot_acquired or await self._is_cancelled_before_start(snapshot.task_id):
+                return snapshot.copy()
 
-                await self._mark_running(snapshot)
-                pending_chars = 0
-                last_emit_at = time.monotonic()
+            await self._mark_running(snapshot)
+            pending_chars = 0
+            last_emit_at = time.monotonic()
 
-                async for event in self._service.stream_chat(request):
-                    if self._is_cancel_requested(snapshot.task_id):
-                        await self._service.cancel(snapshot.task_id)
-                        await self._mark_cancelled(snapshot, finish_reason=AIErrorCode.AI_USER_CANCELLED.value)
-                        return snapshot.copy()
-
-                    if event.event_type == AIStreamEventType.STARTED:
-                        continue
-
-                    if event.event_type == AIStreamEventType.DELTA:
-                        delta = str(event.content or "")
-                        if not delta:
-                            continue
-                        accepted, truncated = self._append_delta(snapshot, delta, request.max_output_chars)
-                        if accepted:
-                            pending_chars += len(accepted)
-                            snapshot.chunk_count += 1
-                        if truncated:
-                            await self._service.cancel(snapshot.task_id)
-                            snapshot.finish_reason = AIErrorCode.AI_OUTPUT_TRUNCATED.value
-                            await self._emit(AITaskEvent.UPDATED, snapshot)
-                            break
-                        now = time.monotonic()
-                        if (
-                            pending_chars >= self.FLUSH_CHARS
-                            or now - last_emit_at >= self.FLUSH_INTERVAL_SECONDS
-                        ):
-                            pending_chars = 0
-                            last_emit_at = now
-                            await self._emit(AITaskEvent.UPDATED, snapshot)
-                        continue
-
-                    if event.event_type == AIStreamEventType.DONE:
-                        self._merge_done_response(snapshot, event.response)
-                        if event.finish_reason:
-                            snapshot.finish_reason = str(event.finish_reason)
-                        break
-
-                    if event.event_type == AIStreamEventType.ERROR:
-                        code = event.error_code or AIErrorCode.AI_STREAM_INTERRUPTED
-                        raise AIServiceError(code, code.value)
-
+            async for event in self._service.stream_chat(request):
                 if self._is_cancel_requested(snapshot.task_id):
+                    await self._service.cancel(snapshot.task_id)
                     await self._mark_cancelled(snapshot, finish_reason=AIErrorCode.AI_USER_CANCELLED.value)
                     return snapshot.copy()
 
-                if snapshot.truncated:
-                    snapshot.finish_reason = AIErrorCode.AI_OUTPUT_TRUNCATED.value
-                elif not snapshot.finish_reason:
-                    snapshot.finish_reason = "stop"
-                await self._mark_done(snapshot)
+                if event.event_type == AIStreamEventType.STARTED:
+                    continue
+
+                if event.event_type == AIStreamEventType.DELTA:
+                    delta = str(event.content or "")
+                    if not delta:
+                        continue
+                    accepted, truncated = self._append_delta(snapshot, delta, request.max_output_chars)
+                    if accepted:
+                        pending_chars += len(accepted)
+                        snapshot.chunk_count += 1
+                    if truncated:
+                        await self._service.cancel(snapshot.task_id)
+                        snapshot.finish_reason = AIErrorCode.AI_OUTPUT_TRUNCATED.value
+                        await self._emit(AITaskEvent.UPDATED, snapshot)
+                        break
+                    now = time.monotonic()
+                    if (
+                        pending_chars >= self.FLUSH_CHARS
+                        or now - last_emit_at >= self.FLUSH_INTERVAL_SECONDS
+                    ):
+                        pending_chars = 0
+                        last_emit_at = now
+                        await self._emit(AITaskEvent.UPDATED, snapshot)
+                    continue
+
+                if event.event_type == AIStreamEventType.DONE:
+                    self._merge_done_response(snapshot, event.response)
+                    if event.finish_reason:
+                        snapshot.finish_reason = str(event.finish_reason)
+                    break
+
+                if event.event_type == AIStreamEventType.ERROR:
+                    code = event.error_code or AIErrorCode.AI_STREAM_INTERRUPTED
+                    raise AIServiceError(code, code.value)
+
+            if self._is_cancel_requested(snapshot.task_id):
+                await self._mark_cancelled(snapshot, finish_reason=AIErrorCode.AI_USER_CANCELLED.value)
                 return snapshot.copy()
+
+            if snapshot.truncated:
+                snapshot.finish_reason = AIErrorCode.AI_OUTPUT_TRUNCATED.value
+            elif not snapshot.finish_reason:
+                snapshot.finish_reason = "stop"
+            await self._mark_done(snapshot)
+            return snapshot.copy()
         except asyncio.CancelledError:
+            await self._cancel_provider_if_started(snapshot)
             await self._mark_cancelled(snapshot, finish_reason=AIErrorCode.AI_USER_CANCELLED.value)
             raise
         except AIServiceError as exc:
@@ -255,6 +269,8 @@ class AITaskManager:
             await self._mark_failed(snapshot, AIErrorCode.AI_STREAM_INTERRUPTED, "Unexpected AI stream failure")
             return snapshot.copy()
         finally:
+            if slot_acquired:
+                await self._release_slot(snapshot.task_id)
             self._runner_tasks.pop(snapshot.task_id, None)
             self._cancel_requested.discard(snapshot.task_id)
 
@@ -271,6 +287,7 @@ class AITaskManager:
         self._cancel_requested.add(normalized_task_id)
         if snapshot.state == AITaskState.QUEUED:
             await self._mark_cancelled(snapshot, finish_reason=AIErrorCode.AI_USER_CANCELLED.value)
+            await self._notify_scheduler()
             return
 
         snapshot.state = AITaskState.CANCELLING
@@ -285,6 +302,13 @@ class AITaskManager:
     def list_tasks(self) -> list[AITaskSnapshot]:
         """Return all known task snapshots."""
         return [snapshot.copy() for snapshot in self._tasks.values()]
+
+    def has_running_non_summary_task(self) -> bool:
+        """Return whether any non-summary AI task is actively running."""
+        return any(
+            snapshot.state == AITaskState.RUNNING and snapshot.task_type != "summary"
+            for snapshot in self._tasks.values()
+        )
 
     async def close(self) -> None:
         """Cancel pending AI work and release the singleton."""
@@ -321,9 +345,61 @@ class AITaskManager:
             task_type=getattr(request.task_type, "value", str(request.task_type)),
             model=request.model,
         )
+        snapshot.metadata["priority"] = self._priority_for_request(request)
+        snapshot.metadata["message_count"] = len(list(request.messages or []))
+        snapshot.metadata["prompt_chars"] = self._prompt_chars(request)
         async with self._lock:
             self._tasks[snapshot.task_id] = snapshot
+        logger.info(
+            "[ai-perf] task_queued task_id=%s session_id=%s task_type=%s priority=%s message_count=%s "
+            "prompt_chars=%s max_tokens=%s stream=%s",
+            snapshot.task_id,
+            snapshot.session_id,
+            snapshot.task_type,
+            snapshot.metadata.get("priority"),
+            snapshot.metadata.get("message_count"),
+            snapshot.metadata.get("prompt_chars"),
+            request.max_tokens,
+            bool(request.stream),
+        )
         return snapshot
+
+    async def _preempt_lower_priority_tasks(self, snapshot: AITaskSnapshot, request: AIRequest) -> None:
+        """Let foreground work clear only background summary work."""
+        task_type = getattr(request.task_type, "value", str(request.task_type))
+        if task_type not in {"reply_suggestion", "translate"}:
+            return
+        task_ids = [
+            task.task_id
+            for task in list(self._tasks.values())
+            if task.task_id != snapshot.task_id
+            and task.task_type == "summary"
+            and task.state not in TERMINAL_STATES
+        ]
+        for task_id in task_ids:
+            logger.info(
+                "[ai-perf] task_preempted preemptor_task_id=%s preempted_task_id=%s reason=%s",
+                snapshot.task_id,
+                task_id,
+                f"{task_type}_priority",
+            )
+            await self.cancel(task_id)
+
+    async def _cancel_provider_if_started(self, snapshot: AITaskSnapshot) -> None:
+        """Forward external task cancellation to the active provider when generation has started."""
+        if snapshot.state not in {AITaskState.RUNNING, AITaskState.CANCELLING}:
+            return
+        if snapshot.task_id in self._cancel_requested:
+            return
+        try:
+            await self._service.cancel(snapshot.task_id)
+        except Exception:
+            logger.warning(
+                "[ai-diag] task_provider_cancel_failed task_id=%s task_type=%s",
+                snapshot.task_id,
+                snapshot.task_type,
+                exc_info=True,
+            )
 
     async def _is_cancelled_before_start(self, task_id: str) -> bool:
         snapshot = self._tasks.get(task_id)
@@ -338,11 +414,23 @@ class AITaskManager:
         snapshot.state = AITaskState.RUNNING
         snapshot.started_at = time.time()
         logger.info(
-            "[ai-diag] task_started task_id=%s session_id=%s task_type=%s model=%s",
+            "[ai-diag] task_started task_id=%s session_id=%s task_type=%s model=%s priority=%s",
             snapshot.task_id,
             snapshot.session_id,
             snapshot.task_type,
             snapshot.model,
+            snapshot.metadata.get("priority"),
+        )
+        logger.info(
+            "[ai-perf] task_started task_id=%s session_id=%s task_type=%s priority=%s queue_wait_ms=%s "
+            "message_count=%s prompt_chars=%s",
+            snapshot.task_id,
+            snapshot.session_id,
+            snapshot.task_type,
+            snapshot.metadata.get("priority"),
+            self._queue_wait_ms(snapshot),
+            snapshot.metadata.get("message_count"),
+            snapshot.metadata.get("prompt_chars"),
         )
         await self._emit(AITaskEvent.STARTED, snapshot)
 
@@ -360,6 +448,21 @@ class AITaskManager:
             snapshot.state.value,
             self._duration_ms(snapshot),
             snapshot.chunk_count,
+            snapshot.truncated,
+        )
+        logger.info(
+            "[ai-perf] task_finished task_id=%s session_id=%s task_type=%s provider=%s model=%s priority=%s "
+            "queue_wait_ms=%s duration_ms=%s chunk_count=%s output_chars=%s truncated=%s error_code=None",
+            snapshot.task_id,
+            snapshot.session_id,
+            snapshot.task_type,
+            snapshot.provider,
+            snapshot.model,
+            snapshot.metadata.get("priority"),
+            self._queue_wait_ms(snapshot),
+            self._duration_ms(snapshot),
+            snapshot.chunk_count,
+            len(snapshot.content or ""),
             snapshot.truncated,
         )
         await self._emit(AITaskEvent.UPDATED, snapshot)
@@ -382,6 +485,22 @@ class AITaskManager:
             snapshot.chunk_count,
             error_code.value,
         )
+        logger.warning(
+            "[ai-perf] task_failed task_id=%s session_id=%s task_type=%s provider=%s model=%s priority=%s "
+            "queue_wait_ms=%s duration_ms=%s chunk_count=%s output_chars=%s truncated=%s error_code=%s",
+            snapshot.task_id,
+            snapshot.session_id,
+            snapshot.task_type,
+            snapshot.provider,
+            snapshot.model,
+            snapshot.metadata.get("priority"),
+            self._queue_wait_ms(snapshot),
+            self._duration_ms(snapshot),
+            snapshot.chunk_count,
+            len(snapshot.content or ""),
+            snapshot.truncated,
+            error_code.value,
+        )
         await self._emit(AITaskEvent.UPDATED, snapshot)
         await self._emit(AITaskEvent.FAILED, snapshot)
 
@@ -398,6 +517,20 @@ class AITaskManager:
             snapshot.task_type,
             self._duration_ms(snapshot),
             snapshot.chunk_count,
+        )
+        logger.info(
+            "[ai-perf] task_cancelled task_id=%s session_id=%s task_type=%s priority=%s queue_wait_ms=%s "
+            "duration_ms=%s chunk_count=%s output_chars=%s truncated=%s error_code=%s",
+            snapshot.task_id,
+            snapshot.session_id,
+            snapshot.task_type,
+            snapshot.metadata.get("priority"),
+            self._queue_wait_ms(snapshot),
+            self._duration_ms(snapshot),
+            snapshot.chunk_count,
+            len(snapshot.content or ""),
+            snapshot.truncated,
+            finish_reason,
         )
         await self._emit(AITaskEvent.UPDATED, snapshot)
         await self._emit(AITaskEvent.CANCELLED, snapshot)
@@ -430,6 +563,78 @@ class AITaskManager:
     def _is_cancel_requested(self, task_id: str) -> bool:
         return str(task_id or "").strip() in self._cancel_requested
 
+    async def _acquire_slot(self, snapshot: AITaskSnapshot, request: AIRequest) -> bool:
+        task_id = snapshot.task_id
+        entry = (
+            int(snapshot.metadata.get("priority", self._priority_for_request(request))),
+            self._scheduler_sequence,
+            task_id,
+        )
+        self._scheduler_sequence += 1
+        async with self._scheduler_condition:
+            self._queued_waiter_lookup[task_id] = entry
+            heapq.heappush(self._queued_waiters, entry)
+            self._scheduler_condition.notify_all()
+            while True:
+                self._discard_stale_waiters_locked()
+                if task_id not in self._queued_waiter_lookup:
+                    return False
+                if snapshot.state == AITaskState.CANCELLED or self._is_cancel_requested(task_id):
+                    self._queued_waiter_lookup.pop(task_id, None)
+                    self._discard_stale_waiters_locked()
+                    self._scheduler_condition.notify_all()
+                    return False
+                if (
+                    self._queued_waiters
+                    and self._queued_waiters[0] == entry
+                    and self._running_count < self._max_concurrency
+                ):
+                    heapq.heappop(self._queued_waiters)
+                    self._queued_waiter_lookup.pop(task_id, None)
+                    self._running_count += 1
+                    return True
+                await self._scheduler_condition.wait()
+
+    async def _release_slot(self, task_id: str) -> None:
+        async with self._scheduler_condition:
+            self._queued_waiter_lookup.pop(str(task_id or "").strip(), None)
+            if self._running_count > 0:
+                self._running_count -= 1
+            self._discard_stale_waiters_locked()
+            self._scheduler_condition.notify_all()
+
+    async def _notify_scheduler(self) -> None:
+        async with self._scheduler_condition:
+            self._discard_stale_waiters_locked()
+            self._scheduler_condition.notify_all()
+
+    def _discard_stale_waiters_locked(self) -> None:
+        while self._queued_waiters:
+            priority, sequence, task_id = self._queued_waiters[0]
+            if self._queued_waiter_lookup.get(task_id) == (priority, sequence, task_id):
+                return
+            heapq.heappop(self._queued_waiters)
+
+    @staticmethod
+    def _priority_for_request(request: AIRequest) -> int:
+        priority = getattr(request, "priority", None)
+        if priority is not None:
+            try:
+                return int(priority)
+            except (TypeError, ValueError):
+                pass
+        task_type = getattr(request.task_type, "value", str(request.task_type))
+        if task_type == "translate":
+            mode = str((request.metadata or {}).get("mode") or "").strip().lower()
+            return 0 if mode == "manual" else 1
+        if task_type == "reply_suggestion":
+            return 10
+        if task_type in {"input_rewrite", "input_polish", "input_shorten"}:
+            return 15
+        if task_type == "summary":
+            return 100
+        return 50
+
     async def _emit(self, event_name: str, snapshot: AITaskSnapshot) -> None:
         await self._event_bus.emit(
             event_name,
@@ -445,6 +650,22 @@ class AITaskManager:
         start = snapshot.started_at or snapshot.created_at
         end = snapshot.finished_at or time.time()
         return max(0, round((end - start) * 1000))
+
+    @staticmethod
+    def _queue_wait_ms(snapshot: AITaskSnapshot) -> int:
+        end = snapshot.started_at or snapshot.finished_at or time.time()
+        return max(0, round((end - snapshot.created_at) * 1000))
+
+    @staticmethod
+    def _prompt_chars(request: AIRequest) -> int:
+        total = 0
+        if request.system_prompt:
+            total += len(str(request.system_prompt))
+        for message in list(request.messages or []):
+            if not isinstance(message, dict):
+                continue
+            total += len(str(message.get("content") or ""))
+        return total
 
 
 _ai_task_manager: Optional[AITaskManager] = None

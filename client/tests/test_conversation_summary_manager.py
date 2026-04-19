@@ -262,3 +262,165 @@ def test_conversation_summary_manager_marks_bucket_failed_when_ai_fails(monkeypa
             await manager.close()
 
     asyncio.run(scenario())
+
+
+def test_conversation_summary_manager_reschedules_cancelled_summary(monkeypatch) -> None:
+    monkeypatch.setattr(SecureStorage, "encrypt_text", classmethod(lambda cls, value: f"enc:{value}"))
+    session = Session(session_id="session-1", name="Bob", session_type="direct")
+    fake_db = _FakeDatabase(session)
+    event_bus = EventBus()
+
+    class _CancelThenSucceedTaskManager:
+        def __init__(self) -> None:
+            self.requests = []
+
+        async def run_once(self, request):
+            self.requests.append(request)
+            if len(self.requests) == 1:
+                return AITaskSnapshot(
+                    task_id=request.task_id,
+                    session_id=request.session_id,
+                    task_type=getattr(request.task_type, "value", request.task_type),
+                    state=AITaskState.CANCELLED,
+                    finish_reason=AIErrorCode.AI_USER_CANCELLED.value,
+                )
+            return AITaskSnapshot(
+                task_id=request.task_id,
+                session_id=request.session_id,
+                task_type=getattr(request.task_type, "value", request.task_type),
+                state=AITaskState.DONE,
+                content="本段聊天主要在确认晚饭细节。",
+            )
+
+    fake_task_manager = _CancelThenSucceedTaskManager()
+
+    async def scenario() -> None:
+        manager = ConversationSummaryManager(
+            db=fake_db,
+            event_bus=event_bus,
+            task_manager=fake_task_manager,
+        )
+        manager.DEBOUNCE_SECONDS = 0.0
+        await manager.initialize()
+        try:
+            incoming = _message("m-1", datetime(2026, 4, 19, 10, 0, 0), content="晚饭吃什么？")
+            fake_db.messages_by_session["session-1"].append(incoming)
+            await event_bus.emit(MessageEvent.RECEIVED, {"message": incoming})
+            await _drain_summary_tasks(manager)
+
+            bucket = await fake_db.get_open_conversation_summary_bucket("session-1")
+            assert bucket is not None
+            assert bucket["summary_status"] == "ready"
+            assert bucket["summary_text_ciphertext"] == "enc:本段聊天主要在确认晚饭细节。"
+            assert len(fake_task_manager.requests) == 2
+        finally:
+            await manager.close()
+
+    asyncio.run(scenario())
+
+
+def test_conversation_summary_manager_reschedules_running_bucket_without_cancelling_it(monkeypatch) -> None:
+    monkeypatch.setattr(SecureStorage, "encrypt_text", classmethod(lambda cls, value: f"enc:{value}"))
+    session = Session(session_id="session-1", name="Bob", session_type="direct")
+    fake_db = _FakeDatabase(session)
+    event_bus = EventBus()
+
+    class _BlockingTaskManager:
+        def __init__(self) -> None:
+            self.requests = []
+            self.started = asyncio.Event()
+            self.allow_finish = asyncio.Event()
+            self.cancelled_runs = 0
+
+        async def run_once(self, request):
+            self.requests.append(request)
+            if len(self.requests) == 1:
+                self.started.set()
+                try:
+                    await self.allow_finish.wait()
+                except asyncio.CancelledError:
+                    self.cancelled_runs += 1
+                    raise
+            return AITaskSnapshot(
+                task_id=request.task_id,
+                session_id=request.session_id,
+                task_type=getattr(request.task_type, "value", request.task_type),
+                state=AITaskState.DONE,
+                content="本段聊天主要在确认细节安排。",
+            )
+
+    fake_task_manager = _BlockingTaskManager()
+
+    async def scenario() -> None:
+        manager = ConversationSummaryManager(
+            db=fake_db,
+            event_bus=event_bus,
+            task_manager=fake_task_manager,
+        )
+        manager.DEBOUNCE_SECONDS = 0.0
+        await manager.initialize()
+        try:
+            first = _message("m-1", datetime(2026, 4, 19, 10, 0, 0), content="明天去饭店吃饭吧。")
+            second = _message("m-2", datetime(2026, 4, 19, 10, 1, 0), content="那吃什么菜？")
+            fake_db.messages_by_session["session-1"].append(first)
+            await event_bus.emit(MessageEvent.RECEIVED, {"message": first})
+            await asyncio.wait_for(fake_task_manager.started.wait(), timeout=1)
+
+            fake_db.messages_by_session["session-1"].append(second)
+            await event_bus.emit(MessageEvent.RECEIVED, {"message": second})
+            await asyncio.sleep(0)
+
+            assert fake_task_manager.cancelled_runs == 0
+            assert len(fake_task_manager.requests) == 1
+
+            fake_task_manager.allow_finish.set()
+            await _drain_summary_tasks(manager)
+
+            assert fake_task_manager.cancelled_runs == 0
+            assert len(fake_task_manager.requests) == 2
+        finally:
+            await manager.close()
+
+    asyncio.run(scenario())
+
+
+def test_conversation_summary_manager_skips_closed_task_manager(monkeypatch) -> None:
+    monkeypatch.setattr(SecureStorage, "encrypt_text", classmethod(lambda cls, value: f"enc:{value}"))
+    session = Session(session_id="session-1", name="Bob", session_type="direct")
+    fake_db = _FakeDatabase(session)
+    event_bus = EventBus()
+
+    class _ClosedTaskManager:
+        def __init__(self) -> None:
+            self._closed = True
+            self.requests = []
+
+        async def run_once(self, request):
+            self.requests.append(request)
+            raise RuntimeError("AI task manager is closed")
+
+    fake_task_manager = _ClosedTaskManager()
+
+    async def scenario() -> None:
+        manager = ConversationSummaryManager(
+            db=fake_db,
+            event_bus=event_bus,
+            task_manager=fake_task_manager,
+        )
+        manager.DEBOUNCE_SECONDS = 0.0
+        await manager.initialize()
+        try:
+            incoming = _message("m-1", datetime(2026, 4, 19, 10, 0, 0), content="晚点再确认地点。")
+            fake_db.messages_by_session["session-1"].append(incoming)
+            await event_bus.emit(MessageEvent.RECEIVED, {"message": incoming})
+            await _drain_summary_tasks(manager)
+
+            bucket = await fake_db.get_open_conversation_summary_bucket("session-1")
+            assert bucket is not None
+            assert bucket["summary_status"] == "pending"
+            assert bucket["summary_text_ciphertext"] == ""
+            assert fake_task_manager.requests == []
+        finally:
+            await manager.close()
+
+    asyncio.run(scenario())

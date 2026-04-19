@@ -678,15 +678,15 @@ class GroupMemberManagementDialog(QDialog):
         self._set_busy(True, tr("chat.group.manage.loading", "Loading group members..."))
         try:
             record = await self._controller.fetch_group(self._group_id)
-        except Exception as exc:
+        except Exception:
             InfoBar.error(
                 tr("chat.group.manage.title", "Group Members"),
-                str(exc),
+                tr("chat.group.manage.load_failed", "Unable to load group members right now."),
                 parent=self.window(),
                 duration=2400,
             )
             self._set_busy(False, tr("chat.group.manage.load_failed", "Unable to load group members right now."))
-            return
+            raise
         self._set_busy(False)
         self._apply_group_record(record)
 
@@ -704,14 +704,14 @@ class GroupMemberManagementDialog(QDialog):
     async def _open_add_members_dialog_async(self) -> None:
         try:
             contacts = await self._ensure_contacts_cache()
-        except Exception as exc:
+        except Exception:
             InfoBar.error(
                 tr("chat.group.manage.add.title", "Add Group Members"),
-                str(exc),
+                tr("chat.group.manage.add.load_failed", "Unable to load contacts right now."),
                 parent=self.window(),
                 duration=2400,
             )
-            return
+            raise
         existing_ids = {
             str(member.get("id", "") or member.get("user_id", "") or "").strip()
             for member in self._members()
@@ -742,14 +742,6 @@ class GroupMemberManagementDialog(QDialog):
                 latest_record = await self._controller.add_group_member(self._group_id, member_id)
             if latest_record is None:
                 latest_record = await self._controller.fetch_group(self._group_id)
-        except Exception as exc:
-            InfoBar.error(
-                tr("chat.group.manage.add.title", "Add Group Members"),
-                str(exc),
-                parent=self.window(),
-                duration=2400,
-            )
-        else:
             self._apply_group_record(latest_record)
             InfoBar.success(
                 tr("chat.group.manage.add.title", "Add Group Members"),
@@ -781,14 +773,6 @@ class GroupMemberManagementDialog(QDialog):
         self._set_busy(True, tr("chat.group.manage.role.progress", "Updating member role..."))
         try:
             record = await self._controller.update_group_member_role(self._group_id, user_id, role=role)
-        except Exception as exc:
-            InfoBar.error(
-                tr("chat.group.manage.title", "Group Members"),
-                str(exc),
-                parent=self.window(),
-                duration=2400,
-            )
-        else:
             self._apply_group_record(record)
             InfoBar.success(
                 tr("chat.group.manage.title", "Group Members"),
@@ -823,14 +807,6 @@ class GroupMemberManagementDialog(QDialog):
         self._set_busy(True, tr("chat.group.manage.remove.progress", "Removing member..."))
         try:
             record = await self._controller.remove_group_member(self._group_id, user_id)
-        except Exception as exc:
-            InfoBar.error(
-                tr("chat.group.manage.remove.title", "Remove Member"),
-                str(exc),
-                parent=self.window(),
-                duration=2400,
-            )
-        else:
             self._apply_group_record(record)
             InfoBar.success(
                 tr("chat.group.manage.remove.title", "Remove Member"),
@@ -865,14 +841,6 @@ class GroupMemberManagementDialog(QDialog):
         self._set_busy(True, tr("chat.group.manage.transfer.progress", "Transferring ownership..."))
         try:
             record = await self._controller.transfer_group_ownership(self._group_id, user_id)
-        except Exception as exc:
-            InfoBar.error(
-                tr("chat.group.manage.transfer.title", "Transfer Ownership"),
-                str(exc),
-                parent=self.window(),
-                duration=2400,
-            )
-        else:
             self._apply_group_record(record)
             InfoBar.success(
                 tr("chat.group.manage.transfer.title", "Transfer Ownership"),

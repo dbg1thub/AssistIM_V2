@@ -7,13 +7,14 @@ import json
 import logging
 import os
 import time
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from datetime import datetime
 from typing import Optional
 
 from PySide6.QtCore import QEvent, Qt, QTimer
 from PySide6.QtGui import QColor, QGuiApplication, QPalette, QPixmap
 from PySide6.QtWidgets import QDialog, QFrame, QHBoxLayout, QLabel, QScrollArea, QVBoxLayout, QWidget
+from shiboken6 import isValid as is_valid_qt_object
 
 from qfluentwidgets import (
     Action,
@@ -29,15 +30,23 @@ from qfluentwidgets import (
 )
 from qfluentwidgets.components.widgets.menu import MenuAnimationType
 
+from client.core.ai_features import (
+    AI_FEATURE_AUTO_TRANSLATE,
+    AI_FEATURE_SMART_REPLY,
+    session_ai_feature_enabled,
+    session_ai_feature_key,
+)
 from client.core.avatar_utils import profile_avatar_seed
 from client.core.datetime_utils import coerce_local_datetime
 from client.core.exceptions import AppError
-from client.core.i18n import tr
+from client.core.i18n import current_language_code, tr
+from client.core.message_translation import AI_TRANSLATION_EXTRA_KEY, should_auto_translate_text
 from client.events.contact_events import ContactEvent
 from client.core.message_actions import should_offer_delete, should_offer_recall
 from client.events.event_bus import get_event_bus
 from client.managers.call_manager import CallEvent
 from client.managers.conversation_summary_manager import ConversationSummaryEvent
+from client.managers.ai_task_manager import AITaskEvent, AITaskState
 from client.managers.message_manager import MessageEvent
 from client.managers.session_manager import SessionEvent
 from client.managers.sound_manager import AppSound, get_sound_manager
@@ -424,6 +433,9 @@ class ChatInterface(QWidget):
     CALL_RESULT_DEDUPE_LIMIT = 256
     CALL_RESULT_DEDUPE_TTL_SECONDS = 3600
     AI_STARTUP_WARMUP_DELAY_MS = 800
+    AI_STATUS_INFOBAR_DEDUPE_SECONDS = 6.0
+    REPLY_SUGGESTION_DEBOUNCE_MS = 800
+    REPLY_SUGGESTION_WAITING_GROUP_MAX = 12
     SUMMARY_INFOBAR_THROTTLE_SECONDS = 300.0
 
     def __init__(self, parent=None):
@@ -461,6 +473,8 @@ class ChatInterface(QWidget):
         self._startup_history_prefetch_session_ids: list[str] = []
         self._startup_ai_warmup_requested = False
         self._startup_ai_warmup_task: Optional[asyncio.Task] = None
+        self._ai_status_last_state = ""
+        self._ai_status_last_shown_at = 0.0
         self._session_view_state: dict[str, dict] = {}
         self._last_read_receipts: dict[str, str] = {}
         self._pending_read_receipts: set[tuple[str, str]] = set()
@@ -469,9 +483,17 @@ class ChatInterface(QWidget):
         self._composer_drafts: dict[str, list[dict]] = {}
         self._ui_tasks: set[asyncio.Task] = set()
         self._message_context_menu: RoundMenu | None = None
+        self._reply_suggestion_version = 0
+        self._reply_suggestion_pending_context: tuple[str, int] | None = None
+        self._reply_suggestion_rerun_context: tuple[str, int] | None = None
+        self._reply_suggestion_waiting_group: dict[str, object] | None = None
+        self._reply_suggestion_refresh_task: Optional[asyncio.Task] = None
+        self._message_translation_tasks: dict[tuple[str, str], asyncio.Task] = {}
         self._teardown_started = False
         self._typing_indicator_timer = QTimer(self)
         self._typing_indicator_timer.setSingleShot(True)
+        self._reply_suggestion_timer = QTimer(self)
+        self._reply_suggestion_timer.setSingleShot(True)
         self._call_ring_timer = QTimer(self)
         self._call_ring_timer.setSingleShot(False)
 
@@ -486,6 +508,7 @@ class ChatInterface(QWidget):
             open_group_session=self.open_group_session,
         )
         self._typing_indicator_timer.timeout.connect(self.chat_panel.hide_typing_indicator)
+        self._reply_suggestion_timer.timeout.connect(self._on_reply_suggestion_timer_timeout)
         self._call_ring_timer.timeout.connect(self._on_call_ring_timer)
         self._connect_signals()
         self._subscribe_to_events()
@@ -533,7 +556,7 @@ class ChatInterface(QWidget):
         self.chat_panel.screenshot_requested.connect(self._on_screenshot_requested)
         self.chat_panel.voice_call_requested.connect(self._on_voice_call_requested)
         self.chat_panel.video_call_requested.connect(self._on_video_call_requested)
-        self.chat_panel.ai_draft_action_requested.connect(self._on_ai_draft_action_requested)
+        self.chat_panel.ai_feature_toggled.connect(self._on_ai_feature_toggled)
         self.chat_panel.ai_reply_suggestion_selected.connect(self._on_ai_reply_suggestion_selected)
         self.chat_panel.older_messages_requested.connect(self._on_older_messages_requested)
         self.chat_panel.chat_history_requested.connect(self._on_chat_history_requested)
@@ -621,8 +644,13 @@ class ChatInterface(QWidget):
         self._subscribe_sync(MessageEvent.RECALLED, self._on_recalled_event)
         self._subscribe_sync(MessageEvent.DELETED, self._on_deleted_event)
         self._subscribe_sync(MessageEvent.MEDIA_READY, self._on_media_ready)
+        self._subscribe_sync(MessageEvent.TRANSLATION_UPDATED, self._on_translation_updated)
         self._subscribe_sync(MessageEvent.SYNC_COMPLETED, self._on_sync_completed)
         self._subscribe_sync(MessageEvent.PROFILE_UPDATED, self._on_profile_updated)
+        self._subscribe_sync(AITaskEvent.STARTED, self._on_ai_task_started)
+        self._subscribe_sync(AITaskEvent.FINISHED, self._on_ai_task_finished)
+        self._subscribe_sync(AITaskEvent.FAILED, self._on_ai_task_finished)
+        self._subscribe_sync(AITaskEvent.CANCELLED, self._on_ai_task_finished)
         self._subscribe_sync(ConversationSummaryEvent.READY, self._on_conversation_summary_ready)
         self._subscribe_sync(CallEvent.INVITE_SENT, self._on_call_invite_sent)
         self._subscribe_sync(CallEvent.INVITE_RECEIVED, self._on_call_invite_received)
@@ -656,6 +684,8 @@ class ChatInterface(QWidget):
         self._teardown_started = True
         self._invalidate_ui_callback_generation()
         self._advance_session_focus_generation()
+        self._reset_reply_suggestion_flow(clear_ui=False)
+        self._safe_clear_reply_suggestion_feedback()
         self._unsubscribe_from_events()
         self.session_panel.quiesce()
         self._cancel_pending_task(self._load_task)
@@ -674,6 +704,11 @@ class ChatInterface(QWidget):
             toast.close()
         self._incoming_call_toasts.clear()
         self._close_call_window()
+        if self._is_reply_suggestion_timer_alive():
+            self._reply_suggestion_timer.stop()
+        for task in list(self._message_translation_tasks.values()):
+            self._cancel_pending_task(task)
+        self._message_translation_tasks.clear()
         self._cancel_all_ui_tasks()
 
     def _cancel_pending_task(self, task: Optional[asyncio.Task]) -> None:
@@ -697,7 +732,7 @@ class ChatInterface(QWidget):
     def _finalize_ui_task(self, task: asyncio.Task, context: str, on_done=None) -> None:
         """Drop tracked tasks, run completion hooks, and report failures."""
         self._ui_tasks.discard(task)
-        if on_done is not None:
+        if on_done is not None and not self._teardown_started:
             on_done(task)
         self._log_ui_task_result(task, context)
 
@@ -830,8 +865,12 @@ class ChatInterface(QWidget):
             self._invalidate_session_caches(message.session_id)
             self._ai_controller.invalidate_for_sent_message(message.session_id)
         if message and message.session_id == self._current_session_id:
-            self.chat_panel.clear_ai_reply_suggestions()
             self.chat_panel.add_message(message, scroll_to_bottom=True)
+            if self._is_reply_suggestion_task_running():
+                self._queue_reply_suggestion_group_update(message.session_id, message.message_id, trigger="self_update")
+                self.chat_panel.clear_ai_reply_suggestions()
+            else:
+                self._reset_reply_suggestion_flow(clear_ui=True)
 
     def _on_message_received(self, data: dict) -> None:
         """Append received message to the current conversation."""
@@ -842,15 +881,17 @@ class ChatInterface(QWidget):
         if message and message.session_id == self._current_session_id:
             self._typing_indicator_timer.stop()
             self.chat_panel.hide_typing_indicator()
-            self.chat_panel.clear_ai_reply_suggestions()
             should_scroll = self.chat_panel.is_near_bottom()
             self.chat_panel.add_message(message, scroll_to_bottom=should_scroll)
             self._schedule_read_receipt()
-            generation = self._session_focus_generation
-            self._schedule_ui_task(
-                self._refresh_ai_reply_suggestions(message.session_id, generation),
-                f"ai reply suggestions {message.session_id}",
-            )
+            if message.message_type == MessageType.TEXT and not message.is_self and not message.is_ai:
+                if self._is_reply_suggestion_task_running():
+                    self._queue_reply_suggestion_group_update(message.session_id, message.message_id, trigger="peer_update")
+                    self.chat_panel.clear_ai_reply_suggestions()
+                else:
+                    self._reset_reply_suggestion_flow(clear_ui=True)
+                    self._schedule_reply_suggestion_refresh(message.session_id)
+            self._schedule_auto_message_translation(message)
 
     def _on_message_ack(self, data: dict) -> None:
         """Update message status after server acknowledgment."""
@@ -887,6 +928,85 @@ class ChatInterface(QWidget):
         if message and message.session_id == self._current_session_id:
             self.chat_panel.add_message(message, scroll_to_bottom=True)
             self.chat_panel.update_message_status(message.message_id, MessageStatus.FAILED)
+
+    def _on_ai_task_started(self, data: dict) -> None:
+        """Reflect task-manager start events into chat composer loading state."""
+        task = data.get("task")
+        if task is None:
+            return
+        if str(getattr(task, "session_id", "") or "").strip() != str(self._current_session_id or "").strip():
+            return
+        if str(getattr(task, "task_type", "") or "").strip() != "reply_suggestion":
+            return
+        metadata = dict(getattr(task, "metadata", {}) or {})
+        round_index = metadata.get("reply_round")
+        if isinstance(round_index, int):
+            self._set_reply_suggestion_loading_status(waiting=False, round_index=round_index)
+            return
+        self._set_reply_suggestion_loading_status(waiting=False)
+
+    def _on_ai_task_finished(self, data: dict) -> None:
+        """Clear transient waiting text once the tracked reply task fully settles."""
+        task = data.get("task")
+        if task is None:
+            return
+        if str(getattr(task, "session_id", "") or "").strip() != str(self._current_session_id or "").strip():
+            return
+        if str(getattr(task, "task_type", "") or "").strip() != "reply_suggestion":
+            return
+        if self._teardown_started or not self._is_chat_panel_alive():
+            return
+        if self._reply_suggestion_waiting_group is None and not self._is_reply_suggestion_task_running():
+            self.chat_panel.clear_ai_reply_suggestion_status()
+
+    def _is_chat_panel_alive(self) -> bool:
+        """Return whether the chat panel can still receive UI updates."""
+        panel = getattr(self, "chat_panel", None)
+        return panel is not None and is_valid_qt_object(panel)
+
+    def _is_reply_suggestion_timer_alive(self) -> bool:
+        """Return whether the debounce timer still exists."""
+        timer = getattr(self, "_reply_suggestion_timer", None)
+        return timer is not None and is_valid_qt_object(timer)
+
+    def _safe_clear_reply_suggestion_feedback(self) -> None:
+        """Clear reply chips and loading text only while the composer still exists."""
+        if not self._is_chat_panel_alive():
+            return
+        self.chat_panel.clear_ai_reply_suggestions()
+        self.chat_panel.clear_ai_reply_suggestion_status()
+
+    def _safe_clear_reply_suggestion_status(self) -> None:
+        """Clear only the inline loading text and keep current suggestion chips intact."""
+        if not self._is_chat_panel_alive():
+            return
+        self.chat_panel.clear_ai_reply_suggestion_status()
+
+    def _restore_cached_reply_suggestions_if_available(self, session_id: str) -> bool:
+        """Reapply cached in-memory suggestions when the session becomes visible again."""
+        normalized_session_id = str(session_id or "").strip()
+        if not normalized_session_id or not self._is_chat_panel_alive():
+            return False
+        if self._is_reply_suggestion_task_running():
+            return False
+        state = self._ai_controller.get_suggestions(normalized_session_id)
+        if state is None:
+            return False
+        status_value = str(getattr(getattr(state, "status", None), "value", getattr(state, "status", "")) or "").strip()
+        if status_value != "ready":
+            return False
+        suggestions = [str(getattr(item, "text", "") or "").strip() for item in getattr(state, "items", [])]
+        suggestions = [item for item in suggestions if item]
+        if not suggestions:
+            return False
+        self.chat_panel.clear_ai_reply_suggestion_status()
+        self.chat_panel.set_ai_reply_suggestions(suggestions)
+        logger.info(
+            "[ai-perf] reply_suggestion_restored session_id=%s suggestion_count=%s reason=visibility_restored",
+            normalized_session_id,
+            len(suggestions),
+        )
+        return True
 
     def _on_typing_event(self, data: dict) -> None:
         """Show typing indicator for the active conversation only."""
@@ -963,6 +1083,19 @@ class ChatInterface(QWidget):
 
     def _on_media_ready(self, data: dict) -> None:
         """Refresh one visible message after its encrypted media finished downloading locally."""
+        session_id = str(data.get("session_id", "") or "")
+        if not session_id:
+            return
+        self._invalidate_session_caches(session_id)
+        if session_id != self._current_session_id:
+            return
+        message = data.get("message")
+        if not isinstance(message, ChatMessage):
+            return
+        self.chat_panel.replace_message(message)
+
+    def _on_translation_updated(self, data: dict) -> None:
+        """Refresh one visible message after local AI translation metadata changes."""
         session_id = str(data.get("session_id", "") or "")
         if not session_id:
             return
@@ -1108,6 +1241,7 @@ class ChatInterface(QWidget):
             generation,
             self._session_visibility_active,
         )
+        self._reset_reply_suggestion_flow(clear_ui=True)
         self._remember_current_session_view_state()
         self._remember_current_composer_draft()
 
@@ -1537,6 +1671,10 @@ class ChatInterface(QWidget):
         if not normalized_session_id:
             return
 
+        if normalized_session_id == str(self._current_session_id or "").strip():
+            self._reset_reply_suggestion_flow(session_id=normalized_session_id, clear_ui=True)
+        else:
+            self._ai_controller.clear_suggestions(normalized_session_id)
         self._invalidate_session_caches(normalized_session_id)
         self._composer_drafts.pop(normalized_session_id, None)
         self._last_read_receipts.pop(normalized_session_id, None)
@@ -1675,8 +1813,6 @@ class ChatInterface(QWidget):
 
     async def _show_startup_ai_status_async(self) -> None:
         status = await self._ai_controller.get_health_status()
-        if status.state == AIHealthState.READY_NOT_LOADED:
-            return
         self._show_ai_health_status_info_bar(status, explicit_use=False)
 
     def warmup_startup_ai(self) -> None:
@@ -1723,6 +1859,7 @@ class ChatInterface(QWidget):
                 loaded=status.loaded,
                 loading=True,
                 detail=status.detail,
+                metadata=dict(status.metadata or {}),
             ),
             explicit_use=False,
         )
@@ -1735,7 +1872,6 @@ class ChatInterface(QWidget):
                 tr("composer.ai.title", "AI 助手"),
                 self._message_for_ai_error(
                     getattr(exc, "code", ""),
-                    detail=str(exc),
                 ),
                 parent=self.window(),
                 duration=5000,
@@ -1757,6 +1893,9 @@ class ChatInterface(QWidget):
         message = self._message_for_ai_health_status(status, explicit_use=explicit_use)
         if not message:
             return
+        if self._should_skip_ai_status_info_bar(status, explicit_use=explicit_use):
+            return
+        self._record_ai_status_info_bar(status, explicit_use=explicit_use)
         title = tr("composer.ai.title", "AI 助手")
         if status.state == AIHealthState.READY_LOADED:
             InfoBar.success(title, message, parent=self.window(), duration=1800)
@@ -1769,6 +1908,33 @@ class ChatInterface(QWidget):
             InfoBar.warning(title, message, parent=self.window(), duration=5000)
             return
         InfoBar.info(title, message, parent=self.window(), duration=3500 if explicit_use else 4500)
+
+    def _should_skip_ai_status_info_bar(self, status, *, explicit_use: bool = False) -> bool:
+        """Suppress duplicate non-explicit startup AI prompts within one short window."""
+        if explicit_use:
+            return False
+        state_key = self._ai_status_dedupe_state(status)
+        if not state_key:
+            return False
+        return (
+            state_key == self._ai_status_last_state
+            and (time.monotonic() - self._ai_status_last_shown_at) < self.AI_STATUS_INFOBAR_DEDUPE_SECONDS
+        )
+
+    def _record_ai_status_info_bar(self, status, *, explicit_use: bool = False) -> None:
+        """Remember the last non-explicit AI status prompt for lightweight dedupe."""
+        if explicit_use:
+            return
+        self._ai_status_last_state = self._ai_status_dedupe_state(status)
+        self._ai_status_last_shown_at = time.monotonic()
+
+    @staticmethod
+    def _ai_status_dedupe_state(status) -> str:
+        """Collapse startup pending states so warmup does not immediately repeat the prompt."""
+        state = getattr(status, "state", None)
+        if state in {AIHealthState.READY_NOT_LOADED, AIHealthState.LOADING}:
+            return "startup_pending"
+        return str(getattr(state, "value", state) or "")
 
     def _message_for_ai_health_status(self, status, *, explicit_use: bool = False) -> str:
         """Return localized UI text for one lightweight AI health state."""
@@ -1790,16 +1956,28 @@ class ChatInterface(QWidget):
                 )
             return tr(
                 "composer.ai.status.configured_not_loaded",
-                "本地 AI 已配置，首次使用会加载模型，可能需要几秒。",
+                "本地 AI 已配置，将在后台加载模型，首次启动可能需要几秒。",
             )
         if status.state == AIHealthState.READY_LOADED:
-            return tr("composer.ai.status.ready", "本地 AI 已就绪。")
+            return self._ready_ai_status_message(status)
         if status.state == AIHealthState.MODEL_MISSING:
             return tr(
                 "composer.ai.error.model_missing",
                 "本地 AI 模型文件不存在，请检查 ASSISTIM_AI_MODEL_PATH。",
             )
         if status.state == AIHealthState.DEPENDENCY_MISSING:
+            if "cuda_dependencies_missing" in str(getattr(status, "detail", "") or ""):
+                missing = self._missing_cuda_deps_for_status(status)
+                if missing:
+                    return tr(
+                        "composer.ai.error.cuda_runtime_missing_with_deps",
+                        "缺少 CUDA 12 运行时依赖：{deps}。请安装 CUDA 12.x 后重启应用。",
+                        deps=missing,
+                    )
+                return tr(
+                    "composer.ai.error.cuda_runtime_missing",
+                    "缺少 CUDA 12 运行时依赖，GPU 版 llama-cpp-python 无法加载。请安装 CUDA 12.x 后重启应用。",
+                )
             return tr(
                 "composer.ai.error.runtime_missing",
                 "缺少 llama-cpp-python，本地 AI 不可用。",
@@ -1810,6 +1988,71 @@ class ChatInterface(QWidget):
             "composer.ai.error.provider_unavailable",
             "AI 提供方未配置，请检查本地 AI 设置。",
         )
+
+    def _ready_ai_status_message(self, status) -> str:
+        """Return one localized ready message that exposes model and acceleration mode."""
+        metadata = dict(getattr(status, "metadata", {}) or {})
+        model = str(metadata.get("selected_model") or getattr(status, "model", "") or "").strip()
+        acceleration = str(metadata.get("acceleration_mode") or "").strip().lower()
+        profile = str(metadata.get("acceleration_profile") or "").strip().lower()
+        reason = str(metadata.get("acceleration_reason") or "").strip()
+        gpu_name = str(metadata.get("gpu_name") or "").strip()
+        model_label = model or tr("composer.ai.status.unknown_model", "当前模型")
+        if acceleration == "gpu":
+            if profile != "gpu_only":
+                if gpu_name:
+                    return tr(
+                        "composer.ai.status.ready_gpu_hybrid_named",
+                        "本地 AI 已就绪：{model}，当前使用 GPU + 内存混合推理（{gpu}）。",
+                        model=model_label,
+                        gpu=gpu_name,
+                    )
+                return tr(
+                    "composer.ai.status.ready_gpu_hybrid",
+                    "本地 AI 已就绪：{model}，当前使用 GPU + 内存混合推理。",
+                    model=model_label,
+                )
+            if gpu_name:
+                return tr(
+                    "composer.ai.status.ready_gpu_named",
+                    "本地 AI 已就绪：{model}，当前使用纯 GPU（{gpu}）。",
+                    model=model_label,
+                    gpu=gpu_name,
+                )
+            return tr(
+                "composer.ai.status.ready_gpu",
+                "本地 AI 已就绪：{model}，当前使用纯 GPU。",
+                model=model_label,
+            )
+        if acceleration == "cpu_fallback":
+            return tr(
+                "composer.ai.status.ready_cpu_fallback",
+                "本地 AI 已就绪：{model}，GPU 加载失败，已回退 CPU。",
+                model=model_label,
+            )
+        if reason == "cuda_dependencies_missing":
+            return tr(
+                "composer.ai.status.ready_cpu_cuda_missing",
+                "本地 AI 已就绪：{model}，当前使用 CPU；CUDA 12 运行时依赖不完整。",
+                model=model_label,
+            )
+        return tr(
+            "composer.ai.status.ready_cpu",
+            "本地 AI 已就绪：{model}，当前使用 CPU。",
+            model=model_label,
+        )
+
+    @staticmethod
+    def _missing_cuda_deps_for_status(status) -> str:
+        metadata = dict(getattr(status, "metadata", {}) or {})
+        missing = str(metadata.get("missing_cuda_deps") or "").strip()
+        if missing:
+            return missing
+        detail = str(getattr(status, "detail", "") or "")
+        marker = "cuda_dependencies_missing:"
+        if marker in detail:
+            return detail.split(marker, 1)[-1].strip()
+        return ""
 
     def _message_for_ai_error(self, error_code, *, detail: str = "") -> str:
         """Return localized UI text for a stable AI error code."""
@@ -1822,6 +2065,11 @@ class ChatInterface(QWidget):
                 return tr(
                     "composer.ai.error.runtime_missing",
                     "缺少 llama-cpp-python，本地 AI 不可用。",
+                )
+            if self._looks_like_cuda_runtime_missing(normalized_detail):
+                return tr(
+                    "composer.ai.error.cuda_runtime_missing",
+                    "缺少 CUDA 12 运行时依赖，GPU 版 llama-cpp-python 无法加载。请安装 CUDA 12.x 后重启应用。",
                 )
             return tr(
                 "composer.ai.error.provider_unavailable",
@@ -1838,6 +2086,11 @@ class ChatInterface(QWidget):
                 "这个加密聊天只能使用本地 AI。请先启用本地 GGUF Provider。",
             )
         if code == "AI_MODEL_LOAD_FAILED":
+            if self._looks_like_cuda_runtime_missing(normalized_detail):
+                return tr(
+                    "composer.ai.error.cuda_runtime_missing",
+                    "缺少 CUDA 12 运行时依赖，GPU 版 llama-cpp-python 无法加载。请安装 CUDA 12.x 后重启应用。",
+                )
             return tr(
                 "composer.ai.error.model_load_failed",
                 "本地 AI 模型加载失败，请检查模型文件和运行时设置。",
@@ -1859,85 +2112,307 @@ class ChatInterface(QWidget):
             )
         return tr("composer.ai.failed", "AI 无法完成这次请求。")
 
-    def _on_ai_draft_action_requested(self, action: str) -> None:
-        """Run one explicit composer AI assist action."""
-        session_id = self._current_session_id
+    @staticmethod
+    def _looks_like_cuda_runtime_missing(detail: str) -> bool:
+        normalized = str(detail or "").lower()
+        return any(
+            marker in normalized
+            for marker in (
+                "cudart64_12.dll",
+                "cublas64_12.dll",
+                "cublaslt64_12.dll",
+                "cuda_dependencies_missing",
+                "llama.dll",
+                "shared library",
+            )
+        )
+
+    def _on_ai_feature_toggled(self, feature: str, enabled: bool) -> None:
+        """Persist and apply one AI feature toggle for the current session."""
+        session_id = str(self._current_session_id or "").strip()
         if not session_id:
             return
 
-        draft_text = self.chat_panel.current_composer_plain_text()
-        if not draft_text.strip():
-            InfoBar.info(
-                tr("composer.ai.title", "AI 助手"),
-                tr("composer.ai.empty_draft", "请先输入草稿，再选择 AI 操作。"),
-                parent=self.window(),
-                duration=1800,
+        normalized_feature = str(feature or "").strip()
+        if normalized_feature not in {AI_FEATURE_SMART_REPLY, AI_FEATURE_AUTO_TRANSLATE}:
+            return
+
+        self._apply_session_ai_feature_toggle_local(session_id, normalized_feature, enabled)
+        self._schedule_ui_task(
+            self._persist_ai_feature_toggle(session_id, normalized_feature, enabled),
+            f"persist ai feature {session_id} {normalized_feature}",
+        )
+
+        if normalized_feature == AI_FEATURE_SMART_REPLY:
+            self._reset_reply_suggestion_flow(session_id=session_id, clear_ui=True)
+            if enabled:
+                self._schedule_reply_suggestion_refresh(session_id, immediate=True)
+
+    async def _persist_ai_feature_toggle(self, session_id: str, feature: str, enabled: bool) -> None:
+        """Persist one AI feature toggle through the session controller."""
+        normalized_feature = str(feature or "").strip()
+        if normalized_feature == AI_FEATURE_SMART_REPLY:
+            await self._session_controller.set_ai_reply_suggestions_enabled(session_id, enabled)
+            return
+        if normalized_feature == AI_FEATURE_AUTO_TRANSLATE:
+            await self._session_controller.set_ai_auto_translate_enabled(session_id, enabled)
+
+    def _apply_session_ai_feature_toggle_local(self, session_id: str, feature: str, enabled: bool) -> None:
+        """Update the shared in-memory session object immediately after a menu toggle."""
+        session = self._get_session(session_id)
+        if session is None:
+            return
+        session.extra[session_ai_feature_key(feature)] = bool(enabled)
+
+    def _is_ai_feature_enabled(self, session, feature: str) -> bool:
+        return session_ai_feature_enabled(session, feature)
+
+    def _is_reply_suggestion_task_running(self) -> bool:
+        task = self._reply_suggestion_refresh_task
+        return task is not None and not task.done()
+
+    def _set_reply_suggestion_loading_status(self, *, waiting: bool, round_index: int | None = None) -> None:
+        if not self._is_chat_panel_alive():
+            return
+        if waiting:
+            self.chat_panel.set_ai_reply_suggestion_status(
+                tr("composer.ai.reply_waiting", "AI 正忙，等待当前任务完成...")
+            )
+            return
+        if isinstance(round_index, int) and round_index >= 0:
+            self.chat_panel.set_ai_reply_suggestion_status(
+                tr(
+                    "composer.ai.reply_generating_progress",
+                    "AI 正在生成回复中（{current}/{total}）...",
+                    current=round_index + 1,
+                    total=4,
+                )
+            )
+            return
+        self.chat_panel.set_ai_reply_suggestion_status(
+            tr("composer.ai.reply_generating", "AI 正在生成回复中...")
+        )
+
+    def _queue_reply_suggestion_group_update(self, session_id: str, message_id: str, *, trigger: str) -> None:
+        """Accumulate context changes while one reply task is already running."""
+        normalized_session_id = str(session_id or "").strip()
+        normalized_message_id = str(message_id or "").strip()
+        if not normalized_session_id or normalized_session_id != str(self._current_session_id or "").strip():
+            return
+
+        group = self._reply_suggestion_waiting_group
+        if (
+            group is None
+            or str(group.get("session_id") or "").strip() != normalized_session_id
+            or int(group.get("reply_version") or -1) != self._reply_suggestion_version
+        ):
+            group = {
+                "session_id": normalized_session_id,
+                "reply_version": self._reply_suggestion_version,
+                "generation": self._session_focus_generation,
+                "message_ids": deque(maxlen=self.REPLY_SUGGESTION_WAITING_GROUP_MAX),
+                "peer_update_count": 0,
+                "self_update_count": 0,
+                "overflowed": False,
+                "queued_at": time.time(),
+            }
+            self._reply_suggestion_waiting_group = group
+
+        tracked_ids = group["message_ids"]
+        if normalized_message_id:
+            if len(tracked_ids) >= tracked_ids.maxlen:
+                group["overflowed"] = True
+            tracked_ids.append(normalized_message_id)
+        if trigger == "peer_update":
+            group["peer_update_count"] = int(group.get("peer_update_count") or 0) + 1
+        elif trigger == "self_update":
+            group["self_update_count"] = int(group.get("self_update_count") or 0) + 1
+        self._reply_suggestion_rerun_context = (normalized_session_id, self._reply_suggestion_version)
+        logger.info(
+            "[ai-perf] reply_suggestion_grouped session_id=%s trigger=%s version=%s tracked_ids=%s "
+            "peer_updates=%s self_updates=%s overflowed=%s",
+            normalized_session_id,
+            trigger,
+            self._reply_suggestion_version,
+            len(tracked_ids),
+            group.get("peer_update_count"),
+            group.get("self_update_count"),
+            bool(group.get("overflowed", False)),
+        )
+        self._set_reply_suggestion_loading_status(waiting=False)
+
+    def _has_reply_suggestion_grouped_updates(self, session_id: str, reply_version: int) -> bool:
+        group = self._reply_suggestion_waiting_group
+        if group is None:
+            return False
+        return (
+            str(group.get("session_id") or "").strip() == str(session_id or "").strip()
+            and int(group.get("reply_version") or -1) == int(reply_version)
+        )
+
+    def _clear_reply_suggestion_waiting_group(self) -> None:
+        self._reply_suggestion_waiting_group = None
+
+    def _reset_reply_suggestion_flow(
+        self,
+        session_id: str | None = None,
+        *,
+        clear_ui: bool = True,
+    ) -> int:
+        """Invalidate pending/running reply-suggestion UI state so only newer context can win."""
+        normalized_session_id = str(session_id or self._current_session_id or "").strip()
+        self._reply_suggestion_version += 1
+        if self._is_reply_suggestion_timer_alive():
+            self._reply_suggestion_timer.stop()
+        self._reply_suggestion_pending_context = None
+        self._reply_suggestion_rerun_context = None
+        self._clear_reply_suggestion_waiting_group()
+        if self._reply_suggestion_refresh_task is not None and not self._reply_suggestion_refresh_task.done():
+            logger.info(
+                "[ai-perf] reply_suggestion_cancelled session_id=%s reason=context_invalidated version=%s",
+                normalized_session_id,
+                self._reply_suggestion_version,
+            )
+            self._reply_suggestion_refresh_task.cancel()
+        self._reply_suggestion_refresh_task = None
+        if normalized_session_id:
+            self._ai_controller.clear_suggestions(normalized_session_id)
+        if clear_ui:
+            self._safe_clear_reply_suggestion_feedback()
+        return self._reply_suggestion_version
+
+    def _schedule_reply_suggestion_refresh(self, session_id: str, *, immediate: bool = False) -> None:
+        """Debounce automatic smart-reply generation for the active session."""
+        skip_reason = self._auto_reply_trigger_skip_reason(session_id)
+        if skip_reason:
+            logger.info(
+                "[ai-perf] reply_suggestion_skip session_id=%s stage=schedule reason=%s",
+                str(session_id or "").strip(),
+                skip_reason,
+            )
+            return
+        self._reply_suggestion_pending_context = (str(session_id or "").strip(), self._reply_suggestion_version)
+        logger.info(
+            "[ai-perf] reply_suggestion_scheduled session_id=%s immediate=%s version=%s debounce_ms=%s",
+            str(session_id or "").strip(),
+            bool(immediate),
+            self._reply_suggestion_version,
+            0 if immediate else self.REPLY_SUGGESTION_DEBOUNCE_MS,
+        )
+        if immediate:
+            if self._is_reply_suggestion_timer_alive():
+                self._reply_suggestion_timer.stop()
+            self._on_reply_suggestion_timer_timeout()
+            return
+        if self._is_reply_suggestion_timer_alive():
+            self._reply_suggestion_timer.start(self.REPLY_SUGGESTION_DEBOUNCE_MS)
+
+    def _on_reply_suggestion_timer_timeout(self) -> None:
+        """Start or defer one automatic smart-reply refresh after the debounce window."""
+        context = self._reply_suggestion_pending_context
+        self._reply_suggestion_pending_context = None
+        if context is None:
+            return
+
+        session_id, reply_version = context
+        skip_reason = self._auto_reply_trigger_skip_reason(session_id)
+        if skip_reason:
+            logger.info(
+                "[ai-perf] reply_suggestion_skip session_id=%s stage=debounce reason=%s version=%s",
+                session_id,
+                skip_reason,
+                reply_version,
             )
             return
 
+        if self._reply_suggestion_refresh_task is not None and not self._reply_suggestion_refresh_task.done():
+            logger.info(
+                "[ai-perf] reply_suggestion_deferred session_id=%s reason=task_running version=%s",
+                session_id,
+                reply_version,
+            )
+            self._reply_suggestion_rerun_context = context
+            return
+
+        self._start_reply_suggestion_refresh(session_id, reply_version)
+
+    def _start_reply_suggestion_refresh(self, session_id: str, reply_version: int) -> None:
+        """Run one tracked smart-reply refresh for the active session."""
+        if not self._can_auto_trigger_reply_suggestions(session_id):
+            return
         generation = self._session_focus_generation
-        self.chat_panel.set_ai_assist_busy(True)
-        self._schedule_ui_task(
-            self._run_ai_draft_action(session_id, action, draft_text, generation),
-            f"ai draft {session_id} {action}",
+        self._reply_suggestion_rerun_context = None
+        self.chat_panel.clear_ai_reply_suggestions()
+        self._set_reply_suggestion_loading_status(
+            waiting=self._ai_controller.has_running_non_summary_task(),
+        )
+        self._reply_suggestion_refresh_task = self._create_ui_task(
+            self._refresh_ai_reply_suggestions(session_id, generation, reply_version),
+            f"ai reply suggestions {session_id}",
+            on_done=self._on_reply_suggestion_refresh_done,
         )
 
-    async def _run_ai_draft_action(
-        self,
-        session_id: str,
-        action: str,
-        draft_text: str,
-        generation: int,
-    ) -> None:
-        """Apply AI output to the composer without sending it."""
-        try:
-            session = self._get_session(session_id)
-            if session is None or not self._is_current_session_context(session_id, generation):
-                return
-
-            status = await self._ai_controller.get_health_status()
-            if not self._is_current_session_context(session_id, generation):
-                return
-            if status.state == AIHealthState.READY_NOT_LOADED:
-                self._show_ai_health_status_info_bar(status, explicit_use=True)
-            elif status.state == AIHealthState.LOADING:
-                self._show_ai_health_status_info_bar(status, explicit_use=True)
-            elif status.state != AIHealthState.READY_LOADED:
-                self._show_ai_health_status_info_bar(status, explicit_use=True)
-                return
-
-            result = await self._ai_controller.assist_draft(session, action, draft_text)
-            if not self._is_current_session_context(session_id, generation):
-                return
-            if result.text.strip():
-                self.chat_panel.replace_composer_text(result.text)
-                return
-
-            InfoBar.warning(
-                tr("composer.ai.title", "AI 助手"),
-                self._message_for_ai_error(
-                    result.error_code,
-                    detail=result.error_message,
-                ),
-                parent=self.window(),
-                duration=2200,
+    def _on_reply_suggestion_refresh_done(self, task: asyncio.Task) -> None:
+        """Chain at most one rerun after the current smart-reply refresh finishes."""
+        if self._reply_suggestion_refresh_task is task:
+            self._reply_suggestion_refresh_task = None
+        if self._teardown_started:
+            self._safe_clear_reply_suggestion_feedback()
+            return
+        if self._is_reply_suggestion_timer_alive() and self._reply_suggestion_timer.isActive():
+            return
+        rerun_context = self._reply_suggestion_rerun_context
+        self._reply_suggestion_rerun_context = None
+        if rerun_context is None:
+            if self._reply_suggestion_waiting_group is None:
+                self._safe_clear_reply_suggestion_status()
+            return
+        session_id, reply_version = rerun_context
+        if reply_version != self._reply_suggestion_version:
+            self._safe_clear_reply_suggestion_status()
+            return
+        waiting_group = self._reply_suggestion_waiting_group
+        if waiting_group is not None:
+            logger.info(
+                "[ai-perf] reply_suggestion_rerun_after_group session_id=%s version=%s tracked_ids=%s "
+                "peer_updates=%s self_updates=%s overflowed=%s",
+                session_id,
+                reply_version,
+                len(waiting_group.get("message_ids") or ()),
+                waiting_group.get("peer_update_count"),
+                waiting_group.get("self_update_count"),
+                bool(waiting_group.get("overflowed", False)),
             )
-        except Exception:
-            logger.exception("AI draft action failed: %s", action)
-            if self._is_current_session_context(session_id, generation):
-                InfoBar.warning(
-                    tr("composer.ai.title", "AI 助手"),
-                    tr("composer.ai.failed", "AI 无法完成这次请求。"),
-                    parent=self.window(),
-                    duration=2200,
-                )
-        finally:
-            if self._is_current_session_context(session_id, generation):
-                self.chat_panel.set_ai_assist_busy(False)
+        self._clear_reply_suggestion_waiting_group()
+        self._start_reply_suggestion_refresh(session_id, reply_version)
+        if not self._is_reply_suggestion_task_running():
+            self._safe_clear_reply_suggestion_status()
 
-    async def _refresh_ai_reply_suggestions(self, session_id: str, generation: int) -> None:
+    def _can_auto_trigger_reply_suggestions(self, session_id: str) -> bool:
+        """Return whether automatic smart replies should run for the active session right now."""
+        return self._auto_reply_trigger_skip_reason(session_id) == ""
+
+    def _auto_reply_trigger_skip_reason(self, session_id: str) -> str:
+        """Return an empty string when automatic smart replies can run, otherwise a stable reason."""
+        normalized_session_id = str(session_id or "").strip()
+        if normalized_session_id != str(self._current_session_id or "").strip():
+            return "not_current_session"
+        if not self._can_mark_session_read():
+            return "session_not_active"
+        session = self._get_session(normalized_session_id)
+        if session is None:
+            return "session_missing"
+        if not self._is_ai_feature_enabled(session, AI_FEATURE_SMART_REPLY):
+            return "feature_disabled"
+        return ""
+
+    async def _refresh_ai_reply_suggestions(self, session_id: str, generation: int, reply_version: int) -> None:
         """Generate reply candidates for the current private conversation."""
         if not self._is_current_session_context(session_id, generation):
+            return
+        if reply_version != self._reply_suggestion_version:
+            return
+        if not self._can_auto_trigger_reply_suggestions(session_id):
             return
         session = self._get_session(session_id)
         if session is None:
@@ -1950,13 +2425,35 @@ class ChatInterface(QWidget):
             current_user_id=self._current_user_id(),
         )
         if not eligible:
-            self.chat_panel.clear_ai_reply_suggestions()
+            logger.info(
+                "[ai-perf] reply_suggestion_skip session_id=%s stage=refresh reason=%s message_count=%s version=%s",
+                session_id,
+                _reason,
+                len(messages),
+                reply_version,
+            )
+            if reply_version == self._reply_suggestion_version:
+                self._safe_clear_reply_suggestion_feedback()
             return
 
         if not await self._ai_controller.is_model_loaded():
-            self.chat_panel.clear_ai_reply_suggestions()
+            logger.info(
+                "[ai-perf] reply_suggestion_skip session_id=%s stage=refresh reason=model_not_loaded "
+                "message_count=%s version=%s",
+                session_id,
+                len(messages),
+                reply_version,
+            )
+            if reply_version == self._reply_suggestion_version:
+                self._safe_clear_reply_suggestion_feedback()
             return
 
+        logger.info(
+            "[ai-perf] reply_suggestion_start session_id=%s message_count=%s version=%s",
+            session_id,
+            len(messages),
+            reply_version,
+        )
         state = await self._ai_controller.suggest_replies(
             session,
             messages,
@@ -1964,11 +2461,41 @@ class ChatInterface(QWidget):
         )
         if not self._is_current_session_context(session_id, generation):
             return
+        if reply_version != self._reply_suggestion_version:
+            return
+        if not self._can_auto_trigger_reply_suggestions(session_id):
+            return
+        if self._has_reply_suggestion_grouped_updates(session_id, reply_version):
+            logger.info(
+                "[ai-perf] reply_suggestion_result_skipped session_id=%s reason=grouped_context_dirty version=%s",
+                session_id,
+                reply_version,
+            )
+            return
         suggestions = [item.text for item in state.items]
+        skip_reason = self._auto_reply_trigger_skip_reason(session_id)
+        if skip_reason:
+            if skip_reason == "session_not_active" and suggestions and self._is_current_session_context(session_id, generation):
+                logger.info(
+                    "[ai-perf] reply_suggestion_deferred_visibility session_id=%s suggestion_count=%s version=%s",
+                    session_id,
+                    len(suggestions),
+                    reply_version,
+                )
+            return
         if suggestions:
-            self.chat_panel.set_ai_reply_suggestions(suggestions)
+            if self._is_chat_panel_alive():
+                self.chat_panel.clear_ai_reply_suggestion_status()
+                self.chat_panel.set_ai_reply_suggestions(suggestions)
         else:
-            self.chat_panel.clear_ai_reply_suggestions()
+            self._safe_clear_reply_suggestion_feedback()
+        logger.info(
+            "[ai-perf] reply_suggestion_applied session_id=%s suggestion_count=%s version=%s state=%s",
+            session_id,
+            len(suggestions),
+            reply_version,
+            getattr(getattr(state, "status", ""), "value", str(getattr(state, "status", ""))),
+        )
 
     def _on_ai_reply_suggestion_selected(self, _text: str) -> None:
         """A selected candidate becomes a draft only; sending remains manual."""
@@ -1976,46 +2503,348 @@ class ChatInterface(QWidget):
             return
         self._ai_controller.clear_suggestions(self._current_session_id)
 
+    def _schedule_auto_message_translation(self, message: ChatMessage) -> None:
+        """Queue auto-translation for one incoming peer text message when the session toggle allows it."""
+        skip_reason = self._auto_translation_skip_reason(message)
+        if skip_reason:
+            logger.info(
+                "[ai-perf] translation_skip session_id=%s message_id=%s mode=auto stage=schedule reason=%s",
+                getattr(message, "session_id", ""),
+                getattr(message, "message_id", ""),
+                skip_reason,
+            )
+            return
+        logger.info(
+            "[ai-perf] translation_scheduled session_id=%s message_id=%s mode=auto target_language=%s",
+            message.session_id,
+            message.message_id,
+            current_language_code(),
+        )
+        self._schedule_message_translation(
+            message,
+            mode="auto",
+            generation=self._session_focus_generation,
+        )
+
+    def _schedule_message_translation(self, message: ChatMessage, *, mode: str, generation: int) -> None:
+        """Run one local AI translation task for a message, deduplicated by target language."""
+        if not self._can_translate_message(message, manual=(mode == "manual")):
+            logger.info(
+                "[ai-perf] translation_skip session_id=%s message_id=%s mode=%s stage=schedule reason=not_eligible",
+                getattr(message, "session_id", ""),
+                getattr(message, "message_id", ""),
+                str(mode or ""),
+            )
+            return
+        target_language = current_language_code()
+        task_key = (message.message_id, target_language)
+        existing = self._message_translation_tasks.get(task_key)
+        if existing is not None and not existing.done():
+            logger.info(
+                "[ai-perf] translation_skip session_id=%s message_id=%s mode=%s stage=schedule reason=task_running "
+                "target_language=%s",
+                message.session_id,
+                message.message_id,
+                str(mode or ""),
+                target_language,
+            )
+            return
+
+        logger.info(
+            "[ai-perf] translation_start session_id=%s message_id=%s mode=%s target_language=%s source_chars=%s",
+            message.session_id,
+            message.message_id,
+            str(mode or ""),
+            target_language,
+            len(str(message.content or "")),
+        )
+        task = self._create_ui_task(
+            self._run_message_translation(message, mode=mode, generation=generation, target_language_code=target_language),
+            f"message translation {message.message_id} {mode}",
+            on_done=lambda finished, key=task_key: self._clear_message_translation_task(key, finished),
+        )
+        self._message_translation_tasks[task_key] = task
+
+    def _clear_message_translation_task(self, task_key: tuple[str, str], task: asyncio.Task) -> None:
+        if self._message_translation_tasks.get(task_key) is task:
+            self._message_translation_tasks.pop(task_key, None)
+
+    async def _run_message_translation(
+        self,
+        message: ChatMessage,
+        *,
+        mode: str,
+        generation: int,
+        target_language_code: str,
+    ) -> None:
+        """Translate one message and store the local result in message.extra."""
+        manual = str(mode or "").strip().lower() == "manual"
+        if not self._can_translate_message(message, manual=manual):
+            logger.info(
+                "[ai-perf] translation_skip session_id=%s message_id=%s mode=%s stage=run reason=not_eligible",
+                getattr(message, "session_id", ""),
+                getattr(message, "message_id", ""),
+                str(mode or ""),
+            )
+            return
+        if manual and not self._is_current_message_context(message, generation):
+            logger.info(
+                "[ai-perf] translation_skip session_id=%s message_id=%s mode=manual stage=run reason=stale_context",
+                message.session_id,
+                message.message_id,
+            )
+            return
+        if not manual:
+            skip_reason = self._auto_translation_skip_reason(message, target_language_code=target_language_code)
+            if skip_reason:
+                logger.info(
+                    "[ai-perf] translation_skip session_id=%s message_id=%s mode=auto stage=run reason=%s",
+                    message.session_id,
+                    message.message_id,
+                    skip_reason,
+                )
+                return
+
+        if not manual and not self._should_auto_translate_message(message, target_language_code=target_language_code):
+            return
+
+        session = self._get_session(message.session_id)
+        if session is None:
+            logger.info(
+                "[ai-perf] translation_skip session_id=%s message_id=%s mode=%s stage=run reason=session_missing",
+                message.session_id,
+                message.message_id,
+                str(mode or ""),
+            )
+            return
+
+        if manual:
+            status = await self._ai_controller.get_health_status()
+            if not self._is_current_message_context(message, generation):
+                return
+            if status.state in {AIHealthState.READY_NOT_LOADED, AIHealthState.LOADING}:
+                self._show_ai_health_status_info_bar(status, explicit_use=True)
+            elif status.state != AIHealthState.READY_LOADED:
+                self._show_ai_health_status_info_bar(status, explicit_use=True)
+                return
+        else:
+            loaded = await self._ai_controller.is_model_loaded()
+            if not loaded:
+                logger.info(
+                    "[ai-perf] translation_skip session_id=%s message_id=%s mode=auto stage=run reason=model_not_loaded "
+                    "loaded=%s",
+                    message.session_id,
+                    message.message_id,
+                    loaded,
+                )
+                return
+
+        queued_for_busy = self._ai_controller.has_running_non_summary_task()
+        if queued_for_busy:
+            logger.info(
+                "[ai-perf] translation_waiting session_id=%s message_id=%s mode=%s reason=ai_busy",
+                message.session_id,
+                message.message_id,
+                str(mode or ""),
+            )
+        await self._persist_message_translation(
+            message,
+            self._translation_payload(
+                target_language_code=target_language_code,
+                status="queued" if queued_for_busy else "pending",
+                mode=mode,
+            ),
+            generation=generation,
+        )
+
+        try:
+            result = await self._ai_controller.translate_message(
+                session,
+                message.content or "",
+                message_id=message.message_id,
+                target_language_code=target_language_code,
+                mode=mode,
+            )
+        except Exception:
+            logger.exception("Message translation failed message_id=%s mode=%s", message.message_id, mode)
+            result = None
+
+        if result is not None and result.state == AITaskState.DONE and result.text.strip():
+            await self._persist_message_translation(
+                message,
+                self._translation_payload(
+                    target_language_code=target_language_code,
+                    status="ready",
+                    mode=mode,
+                    text=result.text.strip(),
+                ),
+                generation=generation,
+            )
+            logger.info(
+                "[ai-perf] translation_applied session_id=%s message_id=%s mode=%s target_language=%s status=ready "
+                "output_chars=%s",
+                message.session_id,
+                message.message_id,
+                str(mode or ""),
+                target_language_code,
+                len(result.text.strip()),
+            )
+            return
+
+        status = "skipped" if result is not None and result.state == AITaskState.DONE else "failed"
+        await self._persist_message_translation(
+            message,
+            self._translation_payload(
+                target_language_code=target_language_code,
+                status=status,
+                mode=mode,
+                error_code=str(getattr(getattr(result, "error_code", None), "value", getattr(result, "error_code", "")) or ""),
+                error_message=str(getattr(result, "error_message", "") or ""),
+            ),
+            generation=generation,
+        )
+        logger.info(
+            "[ai-perf] translation_applied session_id=%s message_id=%s mode=%s target_language=%s status=%s "
+            "output_chars=0",
+            message.session_id,
+            message.message_id,
+            str(mode or ""),
+            target_language_code,
+            status,
+        )
+        if manual and status == "failed" and self._is_current_message_context(message, generation):
+            InfoBar.warning(
+                tr("composer.ai.title", "AI 助手"),
+                tr("chat.translation.failed", "翻译失败，请稍后重试。"),
+                parent=self.window(),
+                duration=2200,
+            )
+
+    async def _persist_message_translation(
+        self,
+        message: ChatMessage,
+        payload: dict,
+        *,
+        generation: int,
+    ) -> None:
+        """Persist translation payload and keep the visible row responsive."""
+        message.extra = dict(message.extra or {})
+        message.extra[AI_TRANSLATION_EXTRA_KEY] = dict(payload or {})
+        if self._is_current_message_context(message, generation):
+            self.chat_panel.replace_message(message)
+        await self._chat_controller.update_message_translation(message.message_id, payload)
+
+    def _should_auto_translate_message(
+        self,
+        message: ChatMessage,
+        *,
+        target_language_code: str | None = None,
+    ) -> bool:
+        return self._auto_translation_skip_reason(message, target_language_code=target_language_code) == ""
+
+    def _auto_translation_skip_reason(
+        self,
+        message: ChatMessage,
+        *,
+        target_language_code: str | None = None,
+    ) -> str:
+        if not self._can_translate_message(message, manual=False):
+            return "not_eligible"
+        if message.session_id != self._current_session_id:
+            return "not_current_session"
+        if not self._can_mark_session_read():
+            return "session_not_active"
+        session = self._get_session(message.session_id)
+        if session is None or not self._is_ai_feature_enabled(session, AI_FEATURE_AUTO_TRANSLATE):
+            return "feature_disabled" if session is not None else "session_missing"
+        target_language = target_language_code or current_language_code()
+        if self._has_message_translation_for_target(message, target_language, statuses={"ready", "pending", "queued", "skipped"}):
+            return "translation_exists"
+        if not should_auto_translate_text(message.content or "", target_language):
+            return "same_or_unknown_language"
+        return ""
+
+    def _can_translate_message(self, message: ChatMessage, *, manual: bool) -> bool:
+        if not isinstance(message, ChatMessage):
+            return False
+        if message.message_type != MessageType.TEXT:
+            return False
+        if message.status in {MessageStatus.FAILED, MessageStatus.RECALLED}:
+            return False
+        if message.is_ai:
+            return False
+        if not str(message.content or "").strip():
+            return False
+        if not manual and message.is_self:
+            return False
+        return True
+
+    def _can_translate_message_manually(self, message: ChatMessage) -> bool:
+        return self._can_translate_message(message, manual=True)
+
+    @staticmethod
+    def _translation_payload(
+        *,
+        target_language_code: str,
+        status: str,
+        mode: str,
+        text: str = "",
+        error_code: str = "",
+        error_message: str = "",
+    ) -> dict:
+        payload = {
+            "target_language": str(target_language_code or "").strip(),
+            "status": str(status or "").strip(),
+            "text": str(text or ""),
+            "mode": str(mode or "").strip().lower() or "manual",
+            "updated_at": time.time(),
+        }
+        if error_code:
+            payload["error_code"] = error_code
+        if error_message:
+            payload["error_message"] = error_message
+        return payload
+
+    @staticmethod
+    def _has_message_translation_for_target(
+        message: ChatMessage,
+        target_language_code: str,
+        *,
+        statuses: set[str],
+    ) -> bool:
+        translation = dict((message.extra or {}).get(AI_TRANSLATION_EXTRA_KEY) or {})
+        if str(translation.get("target_language") or "").strip() != str(target_language_code or "").strip():
+            return False
+        return str(translation.get("status") or "").strip() in statuses
+
     async def _send_segments_async(self, session_id: str, segments: list[dict]) -> None:
         """Send composed editor segments sequentially so mixed content keeps order."""
         for index, segment in enumerate(segments):
             segment_type = segment.get("type")
-            try:
-                logger.info(
-                    "[send-diag] send_segment session_id=%s index=%s type=%s has_content=%s has_file=%s extra_keys=%s",
-                    session_id,
-                    index,
-                    segment_type,
-                    bool(segment.get("content")),
-                    bool(segment.get("file_path")),
-                    sorted(list(dict(segment.get("extra") or {}).keys())),
+            logger.info(
+                "[send-diag] send_segment session_id=%s index=%s type=%s has_content=%s has_file=%s extra_keys=%s",
+                session_id,
+                index,
+                segment_type,
+                bool(segment.get("content")),
+                bool(segment.get("file_path")),
+                sorted(list(dict(segment.get("extra") or {}).keys())),
+            )
+            if segment_type == MessageType.TEXT and segment.get("content"):
+                await self._chat_controller.send_message_to(
+                    session_id=session_id,
+                    content=segment["content"],
+                    message_type=MessageType.TEXT,
+                    extra=segment.get("extra"),
                 )
-                if segment_type == MessageType.TEXT and segment.get("content"):
-                    await self._chat_controller.send_message_to(
-                        session_id=session_id,
-                        content=segment["content"],
-                        message_type=MessageType.TEXT,
-                        extra=segment.get("extra"),
-                    )
-                elif segment_type in {MessageType.IMAGE, MessageType.VIDEO, MessageType.FILE} and segment.get("file_path"):
-                    await self._chat_controller.send_file(segment["file_path"], session_id=session_id)
-            except Exception as exc:
-                logger.error(
-                    "[send-diag] send_segment_failed session_id=%s index=%s type=%s error=%s",
-                    session_id,
-                    index,
-                    segment_type,
-                    exc,
-                )
+            elif segment_type in {MessageType.IMAGE, MessageType.VIDEO, MessageType.FILE} and segment.get("file_path"):
+                await self._chat_controller.send_file(segment["file_path"], session_id=session_id)
 
     async def _send_image_message(self, session_id: str, file_path: str, generation: int) -> None:
         """Send an image using the optimistic media upload flow."""
-        try:
-            message = await self._chat_controller.send_file(file_path, session_id=session_id)
-            if message and self._is_current_session_context(session_id, generation):
-                self.chat_panel.get_message_list().viewport().update()
-        except Exception as exc:
-            logger.error("Send image message error: %s", exc)
+        message = await self._chat_controller.send_file(file_path, session_id=session_id)
+        if message and self._is_current_session_context(session_id, generation):
+            self.chat_panel.get_message_list().viewport().update()
 
     def _on_send_typing(self) -> None:
         """Send typing indicator in background."""
@@ -2140,7 +2969,7 @@ class ChatInterface(QWidget):
             )
             InfoBar.warning(
                 tr("chat.call.start_failed.title", "Call"),
-                str(exc),
+                tr("chat.call.start_failed.message", "Unable to start this call right now."),
                 parent=self.window(),
                 duration=2400,
             )
@@ -2345,7 +3174,7 @@ class ChatInterface(QWidget):
         self._close_call_window(call.call_id)
         self._play_call_terminal_sound()
         self._schedule_call_result_message(call, outcome="failed")
-        message = call.reason or tr("chat.call.failed", "Call signaling failed.")
+        message = self._call_failure_infobar_text(call)
         InfoBar.error(
             self._call_label(call.media_type),
             message,
@@ -2624,6 +3453,20 @@ class ChatInterface(QWidget):
             return "The call was canceled."
         return tr("chat.call.ended", "The call ended.")
 
+    def _call_failure_infobar_text(self, call: ActiveCallState) -> str:
+        """Return one stable call-failure prompt without surfacing raw backend reasons."""
+        reason = str(getattr(call, "reason", "") or "").strip()
+        if reason:
+            logger.warning(
+                "[call-ui] call_failed_reason_hidden call_id=%s reason=%s",
+                getattr(call, "call_id", ""),
+                reason,
+            )
+        return tr(
+            "chat.call.failed_generic",
+            "Call failed. Please try again.",
+        )
+
     def _schedule_call_result_message(self, call: ActiveCallState, *, outcome: str) -> None:
         if call.direction != "outgoing":
             return
@@ -2792,15 +3635,19 @@ class ChatInterface(QWidget):
         """Execute one trust action from the identity-review dialog and refresh the snapshot."""
         result = await self._chat_controller.execute_session_security_action(session_id, action_id)
         if not bool(result.get("performed")):
-            explanation = dict(result.get("explanation") or {})
-            message = str(explanation.get("message") or result.get("reason") or "").strip()
-            if message:
-                InfoBar.warning(
-                    tr("chat.message.title", "Message"),
-                    message,
-                    parent=self.window(),
-                    duration=2400,
-                )
+            reason_code = self._security_action_reason_code(result)
+            logger.warning(
+                "[security-ui] identity_review_action_hidden session_id=%s action_id=%s reason=%s",
+                session_id,
+                action_id,
+                reason_code,
+            )
+            InfoBar.warning(
+                tr("chat.message.title", "Message"),
+                self._security_action_failure_message(result),
+                parent=self.window(),
+                duration=2400,
+            )
             return
 
         updated_details = await self._chat_controller.get_session_identity_review_details(session_id)
@@ -2935,16 +3782,16 @@ class ChatInterface(QWidget):
                 name=request.name,
                 announcement=request.announcement,
             )
-        except Exception as exc:
+        except Exception:
             if self._current_session_id == request.session_id:
                 self.chat_panel.refresh_chat_info_content()
             InfoBar.error(
                 tr("chat.info.group.title", "Group Chat Info"),
-                str(exc),
+                tr("chat.info.group.update_failed", "Unable to update group info right now."),
                 parent=self.window(),
                 duration=2400,
             )
-            return
+            raise
         updated_session = await self._apply_group_record(request.session_id, record, include_self_fields=True)
         if mark_announcement_viewed and updated_session is not None:
             announcement_message_id = updated_session.group_announcement_message_id()
@@ -2961,16 +3808,16 @@ class ChatInterface(QWidget):
                 note=request.note,
                 my_group_nickname=request.my_group_nickname,
             )
-        except Exception as exc:
+        except Exception:
             if self._current_session_id == request.session_id:
                 self.chat_panel.refresh_chat_info_content()
             InfoBar.error(
                 tr("chat.info.group.title", "Group Chat Info"),
-                str(exc),
+                tr("chat.info.group.update_failed", "Unable to update group info right now."),
                 parent=self.window(),
                 duration=2400,
             )
-            return
+            raise
         await self._apply_group_record(request.session_id, record, include_self_fields=True)
 
     async def _apply_group_record(self, session_id: str, record, *, include_self_fields: bool):
@@ -3033,14 +3880,14 @@ class ChatInterface(QWidget):
             await self._contact_controller.leave_group(group_id)
             await self._session_controller.remove_session(session_id)
             await self._event_bus.emit(ContactEvent.SYNC_REQUIRED, {"reason": "group_membership_changed"})
-        except Exception as exc:
+        except Exception:
             InfoBar.error(
                 tr("chat.info.group.leave.title", "Leave Group Chat"),
-                str(exc),
+                tr("chat.info.group.leave.failed", "Unable to leave this group right now."),
                 parent=self.window(),
                 duration=2400,
             )
-            return
+            raise
 
         InfoBar.success(
             tr("chat.info.group.leave.title", "Leave Group Chat"),
@@ -3059,10 +3906,7 @@ class ChatInterface(QWidget):
 
     async def _send_file_message(self, session_id: str, file_path: str) -> None:
         """Upload and send a file via ChatController."""
-        try:
-            await self._chat_controller.send_file(file_path, session_id=session_id)
-        except Exception as exc:
-            logger.error("Send file message error: %s", exc)
+        await self._chat_controller.send_file(file_path, session_id=session_id)
 
     def _on_message_context_menu(self, position) -> None:
         """Show message actions for the clicked bubble."""
@@ -3101,10 +3945,9 @@ class ChatInterface(QWidget):
             open_action = Action(tr("chat.context.open_attachment", "Open"), self)
             basic_actions.append(open_action)
 
-        if message.message_type == MessageType.TEXT:
+        if self._can_translate_message_manually(message):
             translate_action = Action(tr("chat.context.translate", "Translate"), self)
-            translate_action.setEnabled(False)
-            placeholder_actions.append(translate_action)
+            basic_actions.append(translate_action)
 
         quote_action = Action(tr("chat.context.quote", "Quote"), self)
         quote_action.setEnabled(False)
@@ -3144,6 +3987,14 @@ class ChatInterface(QWidget):
                 lambda _checked=False, msg=message, current=self._session_focus_generation: self._schedule_ui_single_shot(
                     0,
                     lambda: self._open_message(msg, current),
+                )
+            )
+        if translate_action:
+            translate_action.triggered.connect(
+                lambda _checked=False, msg=message, current=self._session_focus_generation: self._schedule_message_translation(
+                    msg,
+                    mode="manual",
+                    generation=current,
                 )
             )
         if recall_action:
@@ -3236,16 +4087,16 @@ class ChatInterface(QWidget):
         """Download one file attachment when needed, then open the local file."""
         try:
             local_path = await self._chat_controller.download_message_attachment(message.message_id)
-        except Exception as exc:
+        except Exception:
             if not self._is_current_message_context(message, generation):
-                return
+                raise
             InfoBar.warning(
                 tr("chat.message.title", "Message"),
-                str(exc) or tr("chat.attachment.file_open_failed", "Unable to open this attachment."),
+                tr("chat.attachment.file_open_failed", "Unable to open this attachment."),
                 parent=self.window(),
                 duration=1800,
             )
-            return
+            raise
 
         if not self._is_current_message_context(message, generation):
             return
@@ -3297,24 +4148,30 @@ class ChatInterface(QWidget):
         """Run one security action and release the locally queued messages for the session."""
         try:
             action_result = await self._chat_controller.execute_session_security_action(session_id, action_id)
-        except Exception as exc:
+        except Exception:
             if not self._is_current_session_context(session_id, generation):
-                return
+                raise
             InfoBar.error(
                 tr("chat.message.title", "Message"),
-                str(exc) or tr("chat.security_pending.confirm_failed", "Unable to confirm the required security action."),
+                tr("chat.security_pending.confirm_failed", "Unable to confirm the required security action."),
                 parent=self.window(),
                 duration=2400,
             )
-            return
+            raise
 
         if not bool(action_result.get("performed")):
             if not self._is_current_session_context(session_id, generation):
                 return
-            message = str(action_result.get("explanation") or action_result.get("reason") or "").strip()
+            reason_code = self._security_action_reason_code(action_result)
+            logger.warning(
+                "[security-ui] pending_action_hidden session_id=%s action_id=%s reason=%s",
+                session_id,
+                action_id,
+                reason_code,
+            )
             InfoBar.warning(
                 tr("chat.message.title", "Message"),
-                message or tr("chat.security_pending.confirm_failed", "Unable to confirm the required security action."),
+                self._security_action_failure_message(action_result),
                 parent=self.window(),
                 duration=2400,
             )
@@ -3390,10 +4247,56 @@ class ChatInterface(QWidget):
         if not success:
             InfoBar.error(
                 tr("chat.message.title", "Message"),
-                reason or tr("chat.recall_failed", "Recall failed."),
+                self._recall_failure_message(reason),
                 parent=self.window(),
                 duration=2400,
             )
+
+    @staticmethod
+    def _security_action_reason_code(result: dict[str, object]) -> str:
+        """Extract one stable security-action reason code from one result payload."""
+        payload = dict(result or {})
+        explanation = dict(payload.get("explanation") or {})
+        return str(explanation.get("code") or payload.get("reason") or "").strip()
+
+    def _security_action_failure_message(self, result: dict[str, object]) -> str:
+        """Return one stable user-facing security-action failure message."""
+        reason_code = self._security_action_reason_code(result)
+        if reason_code in {
+            "action_not_available",
+            "session_not_direct_e2ee",
+            "session_not_e2ee",
+            "missing_counterpart_id",
+            "no_recovery_action",
+        }:
+            return tr(
+                "chat.security.action.error.not_available",
+                "The requested security action is not currently available for this session.",
+            )
+        if reason_code == "switch_device_required":
+            return tr(
+                "chat.security.action.error.switch_device_required",
+                "This encrypted content is addressed to a different device and cannot be recovered on the current device.",
+            )
+        if reason_code == "unsupported_action":
+            return tr(
+                "chat.security.action.error.unsupported",
+                "The requested security action is not supported by this client.",
+            )
+        return tr(
+            "chat.security.action.failed_generic",
+            "Unable to complete this security action right now.",
+        )
+
+    def _recall_failure_message(self, reason: str) -> str:
+        """Return one stable recall failure message without surfacing backend-provided reasons."""
+        normalized_reason = str(reason or "").strip()
+        if normalized_reason:
+            logger.warning("[message-ui] recall_failure_reason_hidden reason=%s", normalized_reason)
+        return tr(
+            "chat.recall_failed_generic",
+            "Unable to recall this message right now.",
+        )
 
     def _confirm_delete_message(self, message, generation: int) -> None:
         """Ask for confirmation before scheduling one local message delete."""
@@ -3536,6 +4439,8 @@ class ChatInterface(QWidget):
             self._stable_mapping_signature(session.session_crypto_state() if hasattr(session, "session_crypto_state") else {}),
             self._stable_mapping_signature(session.call_capabilities() if hasattr(session, "call_capabilities") else {}),
             bool(extra.get("show_member_nickname", True)),
+            bool(extra.get("ai_reply_suggestions_enabled", False)),
+            bool(extra.get("ai_auto_translate_enabled", False)),
             self._session_member_signature(session),
         )
 
@@ -3610,8 +4515,14 @@ class ChatInterface(QWidget):
             self._chat_controller.set_current_session_active(is_active, session_id=current_session_id),
             f"set current session active {is_active}",
         )
+        if not is_active:
+            if self._is_reply_suggestion_timer_alive():
+                self._reply_suggestion_timer.stop()
+            self._reply_suggestion_pending_context = None
+            self._reply_suggestion_rerun_context = None
         if is_active:
             self._schedule_read_receipt()
+            self._restore_cached_reply_suggestions_if_available(current_session_id)
 
     def _can_mark_session_read(self) -> bool:
         """Return whether the selected session is actively visible to the user."""

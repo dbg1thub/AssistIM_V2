@@ -1016,8 +1016,8 @@ class Session:
         return last_viewed_message_id != announcement_message_id
 
     def preview_sender_name(self) -> str:
-        """Return the sender name prefix for group-session preview rows."""
-        if self.session_type != "group" or self.is_ai_session:
+        """Return the sender name prefix for preview rows when the latest sender is the counterpart."""
+        if self.is_ai_session:
             return ""
 
         sender_id = str(self.extra.get("last_message_sender_id", "") or "").strip()
@@ -1027,10 +1027,20 @@ class Session:
         if current_user_id and sender_id == current_user_id:
             return ""
 
-        for member in list(self.extra.get("members") or []):
-            if str(member.get("id", "") or "").strip() != sender_id:
-                continue
-            return self._preferred_member_name(member) or sender_id
+        if self.session_type == "group":
+            for member in list(self.extra.get("members") or []):
+                if str(member.get("id", "") or "").strip() != sender_id:
+                    continue
+                return self._preferred_member_name(member) or sender_id
+
+        if self.session_type == "direct":
+            counterpart_name = str(self.extra.get("counterpart_name", "") or "").strip()
+            counterpart_username = str(self.extra.get("counterpart_username", "") or "").strip()
+            if counterpart_name:
+                return counterpart_name
+            if counterpart_username:
+                return counterpart_username
+
         fallback_sender_name = str(self.extra.get("last_message_sender_name", "") or "").strip()
         if fallback_sender_name:
             return fallback_sender_name

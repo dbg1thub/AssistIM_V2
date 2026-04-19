@@ -11,6 +11,7 @@ from typing import Optional, Sequence
 from client.managers.ai_prompt_builder import (
     AIAssistAction,
     AIPromptBuilder,
+    ReplySuggestionParseDiagnostics,
     ReplySummaryContext,
     coerce_assist_action,
     latest_peer_text_message,
@@ -98,6 +99,8 @@ class AIAssistResult:
 class AIAssistManager:
     """Coordinate prompt building, AI task execution, and ephemeral candidates."""
 
+    REPLY_SUMMARY_MIN_AGE_SECONDS = 300
+
     def __init__(
         self,
         task_manager: AITaskManager | None = None,
@@ -128,6 +131,39 @@ class AIAssistManager:
         )
         snapshot = await self._task_manager.run_once(request)
         return self._assist_result(normalized_action, snapshot)
+
+    async def translate_message(
+        self,
+        text: str,
+        *,
+        session: Session | None = None,
+        message_id: str = "",
+        target_language_code: str = "zh-CN",
+        mode: str = "manual",
+    ) -> AIAssistResult:
+        """Translate one persisted chat message using the local AI provider."""
+        normalized_mode = str(mode or "manual").strip().lower() or "manual"
+        request = self._prompt_builder.build_message_translation_request(
+            text,
+            session=session,
+            message_id=message_id,
+            target_language_code=target_language_code,
+            mode=normalized_mode,
+            task_id=self._task_id(AIAssistAction.TRANSLATE.value),
+        )
+        logger.info(
+            "[ai-perf] translation_request task_id=%s session_id=%s message_id=%s mode=%s target_language=%s "
+            "source_chars=%s prompt_chars=%s",
+            request.task_id,
+            request.session_id,
+            str(message_id or ""),
+            normalized_mode,
+            str(target_language_code or "").strip(),
+            request.metadata.get("source_chars"),
+            request.metadata.get("prompt_chars"),
+        )
+        snapshot = await self._task_manager.run_once(request)
+        return self._translation_result(snapshot, mode=normalized_mode)
 
     def can_suggest_replies(
         self,
@@ -171,23 +207,38 @@ class AIAssistManager:
             )
 
         summary_context = await self._load_reply_summary_context(session.session_id)
-        built = self._prompt_builder.build_reply_suggestion_request(
+        initial_built = self._prompt_builder.build_reply_suggestion_request(
             session,
             messages,
             task_id=self._task_id(AIAssistAction.REPLY_SUGGESTION.value),
             current_user_id=current_user_id,
             summary_context=summary_context,
         )
+        logger.info(
+            "[ai-perf] reply_suggestion_request task_id=%s session_id=%s anchor_message_id=%s "
+            "anchor_group_size=%s recent_context_count=%s has_summary=%s prompt_chars=%s",
+            initial_built.request.task_id,
+            initial_built.request.session_id,
+            initial_built.request.metadata.get("anchor_message_id"),
+            initial_built.request.metadata.get("anchor_group_size"),
+            initial_built.request.metadata.get("recent_context_count"),
+            initial_built.request.metadata.get("has_summary"),
+            initial_built.request.metadata.get("prompt_chars"),
+        )
         running = AIReplySuggestionState(
             session_id=session.session_id,
-            anchor_message_id=built.anchor_message.message_id,
+            anchor_message_id=initial_built.anchor_message.message_id,
             status=AIReplySuggestionStatus.RUNNING,
-            task_id=built.request.task_id,
+            task_id=initial_built.request.task_id,
         )
         self._reply_suggestions[session.session_id] = running
 
-        snapshot = await self._task_manager.run_once(built.request)
-        state = self._state_from_snapshot(session.session_id, built.anchor_message.message_id, snapshot)
+        state = await self._generate_reply_suggestions_once(
+            session,
+            messages,
+            current_user_id=current_user_id,
+            summary_context=summary_context,
+        )
         self._reply_suggestions[session.session_id] = state
         return state.copy()
 
@@ -199,6 +250,10 @@ class AIAssistManager:
     def clear_suggestions(self, session_id: str) -> None:
         """Clear reply candidates for a session."""
         self._reply_suggestions.pop(str(session_id or "").strip(), None)
+
+    def has_running_non_summary_task(self) -> bool:
+        """Return whether a non-summary AI task is currently running."""
+        return self._task_manager.has_running_non_summary_task()
 
     def invalidate_for_sent_message(self, session_id: str) -> None:
         """Discard reply candidates once the user sends a message."""
@@ -234,6 +289,24 @@ class AIAssistManager:
             return False, "ai_session", None
         if session.session_type not in {"direct", "private"}:
             return False, "unsupported_session_type", None
+        normalized_current_user_id = str(current_user_id or "").strip()
+        latest_visible_text = next(
+            (
+                message
+                for message in reversed(list(messages or []))
+                if message.message_type == MessageType.TEXT
+                and not message.is_ai
+                and str(getattr(message.status, "value", message.status)) not in {"failed", "recalled"}
+                and str(message.content or "").strip()
+            ),
+            None,
+        )
+        if latest_visible_text is not None:
+            latest_is_self = bool(latest_visible_text.is_self)
+            if normalized_current_user_id and str(latest_visible_text.sender_id or "").strip() == normalized_current_user_id:
+                latest_is_self = True
+            if latest_is_self:
+                return False, "latest_text_from_self", None
 
         anchor = latest_peer_text_message(messages, current_user_id=current_user_id)
         if anchor is None:
@@ -249,9 +322,12 @@ class AIAssistManager:
     def _state_from_snapshot(
         self,
         session_id: str,
-        anchor_message_id: str,
+        anchor_message: ChatMessage,
         snapshot: AITaskSnapshot,
-    ) -> AIReplySuggestionState:
+        *,
+        recent_messages: Sequence[ChatMessage],
+    ) -> tuple[AIReplySuggestionState, ReplySuggestionParseDiagnostics | None]:
+        anchor_message_id = anchor_message.message_id
         if snapshot.state == AITaskState.CANCELLED:
             return AIReplySuggestionState(
                 session_id=session_id,
@@ -260,7 +336,7 @@ class AIAssistManager:
                 task_id=snapshot.task_id,
                 error_code=AIErrorCode.AI_USER_CANCELLED,
                 reason=snapshot.finish_reason,
-            )
+            ), None
         if snapshot.state != AITaskState.DONE:
             return AIReplySuggestionState(
                 session_id=session_id,
@@ -269,14 +345,16 @@ class AIAssistManager:
                 task_id=snapshot.task_id,
                 error_code=snapshot.error_code or AIErrorCode.AI_MODEL_UNAVAILABLE,
                 reason=snapshot.error_message or snapshot.finish_reason,
-            )
+            ), None
 
-        parsed = self._prompt_builder.parse_reply_suggestions(
+        parsed, diagnostics = self._prompt_builder.parse_reply_suggestions_with_diagnostics(
             snapshot.content,
             limit=self._prompt_builder.REPLY_SUGGESTION_COUNT,
+            anchor_message=anchor_message,
+            recent_messages=recent_messages,
         )
         if not parsed:
-            return AIReplySuggestionState(
+            state = AIReplySuggestionState(
                 session_id=session_id,
                 anchor_message_id=anchor_message_id,
                 status=AIReplySuggestionStatus.FAILED,
@@ -284,6 +362,7 @@ class AIAssistManager:
                 error_code=AIErrorCode.AI_OUTPUT_INVALID,
                 reason=AIErrorCode.AI_OUTPUT_INVALID.value,
             )
+            return state, diagnostics
 
         return AIReplySuggestionState(
             session_id=session_id,
@@ -300,6 +379,126 @@ class AIAssistManager:
             ],
             task_id=snapshot.task_id,
             reason=snapshot.finish_reason,
+        ), diagnostics
+
+    async def _generate_reply_suggestions_once(
+        self,
+        session: Session,
+        messages: Sequence[ChatMessage],
+        *,
+        current_user_id: str,
+        summary_context: ReplySummaryContext,
+    ) -> AIReplySuggestionState:
+        anchor_message = latest_peer_text_message(messages, current_user_id=current_user_id)
+        if anchor_message is None:
+            return AIReplySuggestionState(
+                session_id=session.session_id,
+                status=AIReplySuggestionStatus.FAILED,
+                error_code=AIErrorCode.AI_OUTPUT_INVALID,
+                reason=AIErrorCode.AI_OUTPUT_INVALID.value,
+            )
+        standard_built = self._prompt_builder.build_reply_suggestion_request(
+            session,
+            messages,
+            task_id=self._task_id(AIAssistAction.REPLY_SUGGESTION.value),
+            current_user_id=current_user_id,
+            summary_context=summary_context,
+        )
+        snapshot = await self._task_manager.run_once(standard_built.request)
+        state, diagnostics = self._state_from_snapshot(
+            session.session_id,
+            standard_built.anchor_message,
+            snapshot,
+            recent_messages=messages,
+        )
+        if state.status == AIReplySuggestionStatus.CANCELLED:
+            return state
+        if not (
+            state.status == AIReplySuggestionStatus.FAILED
+            and state.error_code == AIErrorCode.AI_OUTPUT_INVALID
+            and snapshot.state == AITaskState.DONE
+        ):
+            return state
+
+        self._log_reply_suggestion_parse_failure(
+            task_id=snapshot.task_id,
+            session_id=session.session_id,
+            anchor_message_id=standard_built.anchor_message.message_id,
+            output=snapshot.content,
+            diagnostics=diagnostics,
+            prompt_mode=str(standard_built.request.metadata.get("reply_prompt_mode") or "standard"),
+        )
+
+        fallback_built = self._prompt_builder.build_reply_suggestion_request(
+            session,
+            messages,
+            task_id=self._task_id(AIAssistAction.REPLY_SUGGESTION.value),
+            current_user_id=current_user_id,
+            max_context_messages=min(4, self._prompt_builder.MAX_CONTEXT_MESSAGES),
+            summary_context=ReplySummaryContext(),
+            fallback_mode=True,
+        )
+        logger.info(
+            "[ai-perf] reply_suggestion_retry_request task_id=%s session_id=%s anchor_message_id=%s "
+            "anchor_group_size=%s recent_context_count=%s has_summary=%s prompt_chars=%s",
+            fallback_built.request.task_id,
+            fallback_built.request.session_id,
+            fallback_built.request.metadata.get("anchor_message_id"),
+            fallback_built.request.metadata.get("anchor_group_size"),
+            fallback_built.request.metadata.get("recent_context_count"),
+            fallback_built.request.metadata.get("has_summary"),
+            fallback_built.request.metadata.get("prompt_chars"),
+        )
+        fallback_snapshot = await self._task_manager.run_once(fallback_built.request)
+        fallback_state, fallback_diagnostics = self._state_from_snapshot(
+            session.session_id,
+            fallback_built.anchor_message,
+            fallback_snapshot,
+            recent_messages=messages,
+        )
+        if (
+            fallback_state.status == AIReplySuggestionStatus.FAILED
+            and fallback_state.error_code == AIErrorCode.AI_OUTPUT_INVALID
+            and fallback_snapshot.state == AITaskState.DONE
+        ):
+            self._log_reply_suggestion_parse_failure(
+                task_id=fallback_snapshot.task_id,
+                session_id=session.session_id,
+                anchor_message_id=fallback_built.anchor_message.message_id,
+                output=fallback_snapshot.content,
+                diagnostics=fallback_diagnostics,
+                prompt_mode=str(fallback_built.request.metadata.get("reply_prompt_mode") or "fallback"),
+            )
+        return fallback_state
+
+    @staticmethod
+    def _log_reply_suggestion_parse_failure(
+        *,
+        task_id: str,
+        session_id: str,
+        anchor_message_id: str,
+        output: str,
+        diagnostics: ReplySuggestionParseDiagnostics | None,
+        prompt_mode: str,
+    ) -> None:
+        parsed = diagnostics or ReplySuggestionParseDiagnostics(output_preview="")
+        logger.info(
+            "[ai-perf] reply_suggestion_parse_invalid task_id=%s session_id=%s anchor_message_id=%s "
+            "prompt_mode=%s output_chars=%s raw_segments=%s cleaned_candidates=%s empty=%s duplicates=%s "
+            "anchor_repeats=%s stale_topics=%s trimmed=%s output_preview=%s",
+            task_id,
+            session_id,
+            anchor_message_id,
+            prompt_mode,
+            len(str(output or "")),
+            parsed.raw_segment_count,
+            parsed.cleaned_candidate_count,
+            parsed.empty_count,
+            parsed.duplicate_count,
+            parsed.anchor_repeat_count,
+            parsed.stale_topic_count,
+            parsed.trimmed_count,
+            parsed.output_preview,
         )
 
     async def _load_reply_summary_context(self, session_id: str) -> ReplySummaryContext:
@@ -308,24 +507,28 @@ class AIAssistManager:
         if not normalized_session_id or not self._db.is_connected:
             return ReplySummaryContext()
 
-        open_bucket_summary = self._decrypt_bucket_summary(
-            await self._db.get_open_conversation_summary_bucket(normalized_session_id)
-        )
+        summary_limit = max(1, int(self._prompt_builder.REPLY_HISTORY_SUMMARY_LIMIT or 1))
         closed_buckets = await self._db.list_recent_conversation_summary_buckets(
             normalized_session_id,
-            limit=2,
+            limit=max(summary_limit * 3, summary_limit + 2),
             is_open=False,
             ready_only=True,
         )
+        now_ts = int(time.time())
+        min_allowed_end_ts = now_ts - self.REPLY_SUMMARY_MIN_AGE_SECONDS
         history_summaries: list[str] = []
         for bucket in closed_buckets:
+            if len(history_summaries) >= summary_limit:
+                break
+            bucket_end_ts = int(bucket.get("bucket_end_ts") or bucket.get("last_message_ts") or bucket.get("bucket_start_ts") or 0)
+            if bucket_end_ts <= 0 or bucket_end_ts > min_allowed_end_ts:
+                continue
             summary_text = self._decrypt_bucket_summary(bucket)
-            if not summary_text or summary_text == open_bucket_summary:
+            if not summary_text:
                 continue
             history_summaries.append(summary_text)
 
         return ReplySummaryContext(
-            open_bucket_summary=open_bucket_summary,
             recent_bucket_summaries=tuple(history_summaries),
         )
 
@@ -355,6 +558,21 @@ class AIAssistManager:
         return AIAssistResult(
             task_id=snapshot.task_id,
             action=action,
+            text=text,
+            state=snapshot.state,
+            error_code=snapshot.error_code,
+            error_message=snapshot.error_message,
+            truncated=snapshot.truncated,
+            finish_reason=snapshot.finish_reason,
+        )
+
+    def _translation_result(self, snapshot: AITaskSnapshot, *, mode: str) -> AIAssistResult:
+        text = ""
+        if snapshot.state == AITaskState.DONE:
+            text = self._prompt_builder.parse_message_translation(snapshot.content, mode=mode)
+        return AIAssistResult(
+            task_id=snapshot.task_id,
+            action=AIAssistAction.TRANSLATE,
             text=text,
             state=snapshot.state,
             error_code=snapshot.error_code,

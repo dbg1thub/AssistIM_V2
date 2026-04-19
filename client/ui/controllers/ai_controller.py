@@ -49,6 +49,7 @@ class AIHealthStatus:
     loaded: bool = False
     loading: bool = False
     detail: str = ""
+    metadata: dict[str, object] | None = None
 
 
 class AIController:
@@ -84,6 +85,24 @@ class AIController:
             draft_text,
             session=session,
             target_language=target_language,
+        )
+
+    async def translate_message(
+        self,
+        session: Session | None,
+        text: str,
+        *,
+        message_id: str = "",
+        target_language_code: str = "zh-CN",
+        mode: str = "manual",
+    ) -> AIAssistResult:
+        """Translate one persisted chat message without sending anything."""
+        return await self._assist_manager.translate_message(
+            text,
+            session=session,
+            message_id=message_id,
+            target_language_code=target_language_code,
+            mode=mode,
         )
 
     def can_suggest_replies(
@@ -122,6 +141,10 @@ class AIController:
         """Clear reply candidates for a session."""
         self._assist_manager.clear_suggestions(session_id)
 
+    def has_running_non_summary_task(self) -> bool:
+        """Return whether a non-summary AI task is currently running."""
+        return self._assist_manager.has_running_non_summary_task()
+
     async def get_health_status(self) -> AIHealthStatus:
         """Return AI provider/model status without loading the local model."""
         provider = self._ai_service.provider
@@ -131,21 +154,23 @@ class AIController:
         try:
             info = await self._ai_service.get_model_info()
         except AIServiceError as exc:
+            error_code = getattr(exc, "code", "")
+            stable_detail = str(getattr(error_code, "value", error_code) or "").strip()
             return AIHealthStatus(
                 state=AIHealthState.PROVIDER_UNAVAILABLE,
                 provider=_provider_name(provider),
-                detail=str(exc) or exc.code.value,
+                detail=stable_detail,
             )
         except Exception as exc:
             logger.warning("AI health status check failed: %s", exc)
             return AIHealthStatus(
                 state=AIHealthState.PROVIDER_UNAVAILABLE,
                 provider=_provider_name(provider),
-                detail=str(exc),
             )
 
         status = _health_status_from_model_info(info)
         if _is_local_gguf_info(info):
+            metadata = dict(getattr(info, "metadata", {}) or {})
             model_path = Path(info.model_path).expanduser() if info.model_path else None
             if model_path is not None and not model_path.is_file():
                 return _with_health_state(status, AIHealthState.MODEL_MISSING)
@@ -154,6 +179,13 @@ class AIController:
                     status,
                     AIHealthState.DEPENDENCY_MISSING,
                     detail="llama-cpp-python is not installed",
+                )
+            if _local_cuda_dependencies_missing(metadata):
+                missing = str(metadata.get("missing_cuda_deps") or "").strip()
+                return _with_health_state(
+                    status,
+                    AIHealthState.DEPENDENCY_MISSING,
+                    detail=f"cuda_dependencies_missing:{missing}",
                 )
         return status
 
@@ -229,6 +261,17 @@ def _is_local_gguf_info(info: AIModelInfo) -> bool:
     )
 
 
+def _local_cuda_dependencies_missing(metadata: dict[str, object]) -> bool:
+    missing_deps = str(metadata.get("missing_cuda_deps") or "").strip()
+    if not missing_deps:
+        return False
+    acceleration_reason = str(metadata.get("acceleration_reason") or "").strip()
+    runtime_probe_error = str(metadata.get("runtime_gpu_probe_error") or "").lower()
+    if acceleration_reason == "cuda_dependencies_missing":
+        return True
+    return bool("dll" in runtime_probe_error or "shared library" in runtime_probe_error)
+
+
 def _health_status_from_model_info(info: AIModelInfo) -> AIHealthStatus:
     if info.loading:
         state = AIHealthState.LOADING
@@ -243,6 +286,7 @@ def _health_status_from_model_info(info: AIModelInfo) -> AIHealthStatus:
         local=info.local,
         loaded=info.loaded,
         loading=info.loading,
+        metadata=dict(getattr(info, "metadata", {}) or {}),
     )
 
 
@@ -262,6 +306,7 @@ def _with_health_state(
         loaded=status.loaded,
         loading=status.loading,
         detail=detail or status.detail,
+        metadata=dict(status.metadata or {}),
     )
 
 
@@ -275,12 +320,16 @@ def user_message_for_ai_error(error_code: AIErrorCode | str | None, *, detail: s
     if code == AIErrorCode.AI_PROVIDER_UNAVAILABLE:
         if "llama-cpp-python" in normalized_detail:
             return "Local AI runtime is missing. Install llama-cpp-python and restart AssistIM."
+        if _looks_like_cuda_runtime_missing(normalized_detail):
+            return "CUDA 12 runtime dependencies are missing. Install CUDA 12.x and restart AssistIM."
         return "AI provider is not configured. Check the local AI settings."
     if code == AIErrorCode.AI_MODEL_NOT_FOUND:
         return "Local AI model file was not found. Check ASSISTIM_AI_MODEL_PATH."
     if code == AIErrorCode.AI_LOCAL_REQUIRED_UNAVAILABLE:
         return "This encrypted chat can only use local AI. Enable the local GGUF provider first."
     if code == AIErrorCode.AI_MODEL_LOAD_FAILED:
+        if _looks_like_cuda_runtime_missing(normalized_detail):
+            return "CUDA 12 runtime dependencies are missing. Install CUDA 12.x and restart AssistIM."
         return "Local AI model could not be loaded. Check the model file and runtime settings."
     if code == AIErrorCode.AI_RESOURCE_EXHAUSTED:
         return "Local AI does not have enough memory for this model. Try a smaller model or lower context size."
@@ -289,3 +338,18 @@ def user_message_for_ai_error(error_code: AIErrorCode | str | None, *, detail: s
     if code == AIErrorCode.AI_OUTPUT_INVALID:
         return "AI returned an unusable response. Try again."
     return "AI could not complete this request."
+
+
+def _looks_like_cuda_runtime_missing(detail: str) -> bool:
+    normalized = str(detail or "").lower()
+    return any(
+        marker in normalized
+        for marker in (
+            "cudart64_12.dll",
+            "cublas64_12.dll",
+            "cublaslt64_12.dll",
+            "cuda_dependencies_missing",
+            "llama.dll",
+            "shared library",
+        )
+    )

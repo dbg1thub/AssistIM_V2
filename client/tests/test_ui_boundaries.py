@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 
@@ -92,6 +93,8 @@ def test_call_result_message_dedupe_cache_is_bounded() -> None:
     assert 'CALL_RESULT_DEDUPE_TTL_SECONDS = 3600' in chat_interface
     assert 'def _prune_call_result_messages_sent(self) -> None:' in chat_interface
     assert 'while len(self._call_result_messages_sent) > self.CALL_RESULT_DEDUPE_LIMIT:' in chat_interface
+    assert 'def _call_failure_infobar_text(self, call: ActiveCallState) -> str:' in chat_interface
+    assert 'call.reason or tr(' not in chat_interface
 
 
 def test_chat_interface_typing_indicator_ignores_self_and_hides_on_explicit_stop() -> None:
@@ -160,11 +163,27 @@ def test_chat_interface_call_dialog_and_menu_callbacks_are_instance_guarded() ->
 
 def test_chat_interface_async_message_action_results_are_session_generation_guarded() -> None:
     chat_interface = Path('client/ui/windows/chat_interface.py').read_text(encoding='utf-8')
+    send_segments_block = chat_interface.split('async def _send_segments_async', 1)[1].split(
+        'async def _send_image_message',
+        1,
+    )[0]
+    send_image_block = chat_interface.split('async def _send_image_message', 1)[1].split(
+        'def _on_send_typing',
+        1,
+    )[0]
+    send_file_block = chat_interface.split('async def _send_file_message', 1)[1].split(
+        'def _on_message_context_menu',
+        1,
+    )[0]
 
     assert 'def _is_current_message_context(self, message, generation: int) -> bool:' in chat_interface
     assert 'async def _send_image_message(self, session_id: str, file_path: str, generation: int) -> None:' in chat_interface
     assert 'if message and self._is_current_session_context(session_id, generation):' in chat_interface
     assert 'self._send_image_message(self._current_session_id, file_path, generation)' in chat_interface
+    assert 'except Exception as exc:' not in send_segments_block
+    assert '[send-diag] send_segment_failed' not in send_segments_block
+    assert 'except Exception as exc:' not in send_image_block
+    assert 'logger.error("Send image message error: %s", exc)' not in send_image_block
     assert 'def _open_message(self, message, generation: int | None = None) -> None:' in chat_interface
     assert 'current_generation = self._session_focus_generation if generation is None else generation' in chat_interface
     assert 'if not self._is_current_message_context(message, current_generation):' in chat_interface
@@ -177,6 +196,8 @@ def test_chat_interface_async_message_action_results_are_session_generation_guar
     assert 'self._delete_message(message, generation)' in chat_interface
     assert 'async def _confirm_security_pending_messages(self, session_id: str, action_id: str, generation: int) -> None:' in chat_interface
     assert 'async def _discard_security_pending_messages(self, session_id: str, generation: int) -> None:' in chat_interface
+    assert 'except Exception as exc:' not in send_file_block
+    assert 'logger.error("Send file message error: %s", exc)' not in send_file_block
     assert chat_interface.count('if not self._is_current_session_context(session_id, generation):') >= 8
     assert 'if not self._is_current_session_context(session_id, generation):' in chat_interface
     assert 'chat.security_pending.discard_empty' in chat_interface
@@ -974,3 +995,33 @@ def test_chat_panel_security_pending_banner_is_wired_to_current_session_actions(
     assert 'self.chat_panel.security_pending_confirm_requested.connect(self._on_security_pending_confirm_requested)' in chat_interface
     assert 'async def _confirm_security_pending_messages(self, session_id: str, action_id: str, generation: int) -> None:' in chat_interface
     assert 'await self._chat_controller.release_session_security_pending_messages(session_id)' in chat_interface
+    assert 'def _security_action_reason_code(result: dict[str, object]) -> str:' in chat_interface
+    assert 'def _security_action_failure_message(self, result: dict[str, object]) -> str:' in chat_interface
+    assert 'message = str(explanation.get("message") or result.get("reason") or "").strip()' not in chat_interface
+    assert 'message = str(action_result.get("explanation") or action_result.get("reason") or "").strip()' not in chat_interface
+    assert 'def _recall_failure_message(self, reason: str) -> str:' in chat_interface
+    assert 'reason or tr("chat.recall_failed"' not in chat_interface
+
+
+def test_chat_error_i18n_keys_exist() -> None:
+    required_keys = {
+        "chat.call.failed_generic",
+        "chat.media.upload_failed",
+        "chat.media.uploading",
+        "chat.security.action.failed_generic",
+        "chat.recall_failed_generic",
+    }
+
+    for language in ("zh-CN", "en-US", "ko-KR"):
+        payload = json.loads(Path(f"client/resources/i18n/{language}.json").read_text(encoding="utf-8"))
+        missing = sorted(required_keys - set(payload))
+        assert missing == []
+
+
+def test_message_delegate_media_state_text_is_internationalized() -> None:
+    message_delegate = Path('client/delegates/message_delegate.py').read_text(encoding='utf-8')
+
+    assert 'return tr("chat.media.uploading", "Uploading...")' in message_delegate
+    assert 'return tr("chat.media.upload_failed", "Upload failed")' in message_delegate
+    assert 'return "Uploading..."' not in message_delegate
+    assert 'return "Upload failed"' not in message_delegate

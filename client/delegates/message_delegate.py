@@ -26,7 +26,8 @@ from client.core.app_icons import AppIcon
 from client.core.avatar_rendering import get_avatar_image_store
 from client.core.avatar_utils import profile_avatar_seed
 from client.core.config_backend import get_config
-from client.core.i18n import format_chat_timestamp, format_chat_timestamp_expanded, tr
+from client.core.i18n import current_language_code, format_chat_timestamp, format_chat_timestamp_expanded, tr
+from client.core.message_translation import AI_TRANSLATION_EXTRA_KEY
 from client.ui.controllers.auth_controller import peek_auth_controller
 from client.core.video_thumbnail_cache import (
     get_thumbnail as get_video_thumbnail,
@@ -127,6 +128,7 @@ class MessageDelegate(QStyledItemDelegate):
     EMOJI_TEXT_GAP = MIXED_EMOJI_TEXT_GAP
     GROUP_SENDER_LABEL_FONT_PIXEL_SIZE = 11
     GROUP_SENDER_LABEL_GAP = 2
+    TRANSLATION_TOP_GAP = 8
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -312,7 +314,8 @@ class MessageDelegate(QStyledItemDelegate):
             return False
 
         row_layout = self._layout_rects(row_rect, message)
-        text_rect, layout = self._text_layout(row_layout.content_rect, message.content or "")
+        primary_rect = self._primary_text_content_rect(row_layout.content_rect, message)
+        text_rect, layout = self._text_layout(primary_rect, message.content or "")
         return self._text_position_for_point(layout, text_rect, position, clamp=False) >= 0
 
     def begin_text_selection(self, view, index: QModelIndex, position: QPoint) -> bool:
@@ -330,7 +333,8 @@ class MessageDelegate(QStyledItemDelegate):
             return False
 
         row_layout = self._layout_rects(row_rect, message)
-        text_rect, layout = self._text_layout(row_layout.content_rect, message.content or "")
+        primary_rect = self._primary_text_content_rect(row_layout.content_rect, message)
+        text_rect, layout = self._text_layout(primary_rect, message.content or "")
         cursor_pos = self._text_position_for_point(layout, text_rect, position, clamp=False)
         if cursor_pos < 0:
             return False
@@ -367,7 +371,8 @@ class MessageDelegate(QStyledItemDelegate):
             return False
 
         row_layout = self._layout_rects(row_rect, message)
-        text_rect, layout = self._text_layout(row_layout.content_rect, message.content or "")
+        primary_rect = self._primary_text_content_rect(row_layout.content_rect, message)
+        text_rect, layout = self._text_layout(primary_rect, message.content or "")
         cursor_pos = self._text_position_for_point(layout, text_rect, position, clamp=True)
         if cursor_pos < 0:
             return False
@@ -516,7 +521,7 @@ class MessageDelegate(QStyledItemDelegate):
                 max_bubble_width - self.BUBBLE_PADDING_H * 2 - self.TAIL_SPACE,
             ),
         )
-        text_size = self._measure_text_content(message.content or "", text_content_width)
+        text_size = self._measure_message_text_content(message, text_content_width)
         bubble_width = min(
             text_content_width + self.BUBBLE_PADDING_H * 2 + self.TAIL_SPACE,
             max(36, text_size.width() + self.BUBBLE_PADDING_H * 2 + self.TAIL_SPACE),
@@ -827,6 +832,33 @@ class MessageDelegate(QStyledItemDelegate):
         painter.setPen(QColor("#DDE7F1") if dark else QColor("#425466"))
         painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, label)
 
+    def _draw_translation_content(self, painter: QPainter, rect: QRect, message: ChatMessage) -> None:
+        """Draw the local AI translation below the original text, when available."""
+        translation_text = self._translation_display_text(message)
+        if not translation_text:
+            return
+
+        primary_rect = self._primary_text_content_rect(rect, message)
+        translation_y = primary_rect.bottom() + 1 + self.TRANSLATION_TOP_GAP
+        translation_rect = QRect(
+            rect.x(),
+            translation_y,
+            rect.width(),
+            max(1, rect.bottom() - translation_y + 1),
+        )
+        text_rect, layout = self._text_layout(translation_rect, translation_text)
+        divider_y = primary_rect.bottom() + 1 + max(2, self.TRANSLATION_TOP_GAP // 2)
+
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setFont(self._text_font())
+        painter.setPen(QColor(255, 255, 255, 42) if isDarkTheme() else QColor(0, 0, 0, 30))
+        painter.drawLine(rect.x(), divider_y, rect.right(), divider_y)
+        text_color = QColor(222, 226, 232, 178) if isDarkTheme() else QColor("#707070")
+        self._draw_plain_text_layout(painter, text_rect, layout, text_color)
+        painter.restore()
+
     def _draw_bubble(self, painter: QPainter, rect: QRect, message: ChatMessage, avatar_rect: QRect) -> None:
         """Draw a regular bubble or bare media content."""
         if message.message_type in {MessageType.IMAGE, MessageType.VIDEO, MessageType.FILE}:
@@ -866,7 +898,8 @@ class MessageDelegate(QStyledItemDelegate):
         """Draw wrapped text content."""
         del background_fill
         content = message.content or ""
-        text_rect, layout = self._text_layout(rect, content)
+        primary_rect = self._primary_text_content_rect(rect, message)
+        text_rect, layout = self._text_layout(primary_rect, content)
         mention_ranges = self._message_mention_ranges(message)
         selection_range = (
             self._selection_index_bounds(content, self._selection_anchor, self._selection_position)
@@ -929,6 +962,7 @@ class MessageDelegate(QStyledItemDelegate):
                 )
 
         painter.restore()
+        self._draw_translation_content(painter, rect, message)
 
     def _draw_image_content(self, painter: QPainter, rect: QRect, message: ChatMessage) -> None:
         """Draw image preview without an outer bubble."""
@@ -1104,9 +1138,9 @@ class MessageDelegate(QStyledItemDelegate):
     def _media_state_text(self, message: ChatMessage) -> str:
         """Return image/video overlay text."""
         if self._is_uploading(message):
-            return "Uploading..."
+            return tr("chat.media.uploading", "Uploading...")
         if message.status == MessageStatus.FAILED:
-            return "Upload failed"
+            return tr("chat.media.upload_failed", "Upload failed")
         return ""
 
     def _group_sender_label_text(self, message: ChatMessage) -> str:
@@ -1468,6 +1502,39 @@ class MessageDelegate(QStyledItemDelegate):
         self._cache_put(self._text_measure_cache, cache_key, size, self.TEXT_MEASURE_CACHE_LIMIT)
         return size
 
+    def _measure_message_text_content(self, message: ChatMessage, max_width: int) -> QSize:
+        """Measure original message text plus optional local translation."""
+        primary = self._measure_text_content(message.content or "", max_width)
+        translation = self._translation_display_text(message)
+        if not translation:
+            return primary
+        translated = self._measure_text_content(translation, max_width)
+        return QSize(
+            max(primary.width(), translated.width()),
+            primary.height() + self.TRANSLATION_TOP_GAP + translated.height(),
+        )
+
+    def _primary_text_content_rect(self, content_rect: QRect, message: ChatMessage) -> QRect:
+        """Return the sub-rect used by selectable original message text."""
+        if not self._translation_display_text(message):
+            return content_rect
+        primary_size = self._measure_text_content(message.content or "", content_rect.width())
+        return QRect(content_rect.x(), content_rect.y(), content_rect.width(), primary_size.height())
+
+    def _translation_display_text(self, message: ChatMessage) -> str:
+        """Return the translation text/pending label that should be painted for the current UI language."""
+        payload = dict((message.extra or {}).get(AI_TRANSLATION_EXTRA_KEY) or {})
+        if str(payload.get("target_language") or "").strip() != current_language_code():
+            return ""
+        status = str(payload.get("status") or "").strip()
+        if status == "ready":
+            return str(payload.get("text") or "").strip()
+        if status == "queued":
+            return tr("chat.translation.queued", "AI 正忙，等待当前任务完成...")
+        if status == "pending":
+            return tr("chat.translation.pending", "正在翻译...")
+        return ""
+
     @staticmethod
     def _text_font() -> QFont:
         """Return the base font used for text messages."""
@@ -1529,6 +1596,36 @@ class MessageDelegate(QStyledItemDelegate):
             else:
                 painter.setPen(text_color)
             painter.drawText(QPoint(segment_x, baseline_y), text_slice)
+
+    def _draw_plain_text_layout(
+        self,
+        painter: QPainter,
+        text_rect: QRect,
+        layout: _RunTextLayout,
+        text_color: QColor,
+    ) -> None:
+        """Draw a non-selectable run layout, preserving emoji rendering."""
+        text_font = self._text_font()
+        emoji_target = BUBBLE_EMOJI_PIXEL_SIZE
+        painter.setFont(text_font)
+        painter.setPen(text_color)
+
+        for line in layout.lines:
+            line_top = text_rect.y() + line.y
+            baseline_y = line_top + line.baseline
+            for run in line.runs:
+                run_left = text_rect.x() + line.x + run.x
+                run_rect = QRect(run_left, line_top + run.y, run.width, run.height)
+                if run.kind == "emoji":
+                    pixmap = load_emoji_pixmap(run.text, emoji_target, emoji_target)
+                    if pixmap.isNull():
+                        painter.drawText(QPoint(run_left, baseline_y), run.text)
+                        continue
+                    draw_x = run_rect.x() + max(0, (run_rect.width() - pixmap.width()) // 2)
+                    draw_y = centered_emoji_top(run_rect.y(), run_rect.height(), pixmap.height(), vertical_nudge=1)
+                    painter.drawPixmap(draw_x, draw_y, pixmap)
+                    continue
+                painter.drawText(QPoint(run_left, baseline_y), run.text)
 
     @staticmethod
     def _text_run_segments(

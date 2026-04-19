@@ -48,12 +48,14 @@ from client.managers.ai_prompt_builder import AIAssistAction
 from client.managers.ai_task_manager import AITaskState
 from client.models.message import ChatMessage, MessageStatus, Session
 from client.services.ai_service import AIErrorCode, AIModelInfo, AIProviderType
+from client.services.ai_service import AIServiceError
 from client.ui.controllers.ai_controller import AIController, AIHealthState
 
 
 class FakeAssistManager:
     def __init__(self) -> None:
         self.draft_calls = []
+        self.translation_calls = []
         self.suggestion_calls = []
         self.cleared: list[str] = []
         self.sent_invalidations: list[str] = []
@@ -72,6 +74,31 @@ class FakeAssistManager:
             task_id="task-draft",
             action=AIAssistAction.POLISH,
             text="edited draft",
+            state=AITaskState.DONE,
+        )
+
+    async def translate_message(
+        self,
+        text,
+        *,
+        session=None,
+        message_id="",
+        target_language_code="zh-CN",
+        mode="manual",
+    ):
+        self.translation_calls.append(
+            {
+                "text": text,
+                "session_id": getattr(session, "session_id", ""),
+                "message_id": message_id,
+                "target_language_code": target_language_code,
+                "mode": mode,
+            }
+        )
+        return AIAssistResult(
+            task_id="task-translate",
+            action=AIAssistAction.TRANSLATE,
+            text="译文",
             state=AITaskState.DONE,
         )
 
@@ -139,6 +166,16 @@ class FakeAIService:
         self.warmup_calls += 1
 
 
+class FailingAIService(FakeAIService):
+    def __init__(self, exc: Exception, provider=None) -> None:
+        super().__init__(info=None, provider=provider or FakeProvider())
+        self.exc = exc
+
+    async def get_model_info(self) -> AIModelInfo:
+        self.info_calls += 1
+        raise self.exc
+
+
 def test_ai_controller_delegates_draft_assist() -> None:
     async def scenario() -> None:
         fake = FakeAssistManager()
@@ -154,6 +191,34 @@ def test_ai_controller_delegates_draft_assist() -> None:
                 "draft_text": "hello",
                 "session_id": "s1",
                 "target_language": "中文",
+            }
+        ]
+
+    asyncio.run(scenario())
+
+
+def test_ai_controller_delegates_message_translation() -> None:
+    async def scenario() -> None:
+        fake = FakeAssistManager()
+        controller = AIController(assist_manager=fake)
+        session = Session(session_id="s1", name="Alice")
+
+        result = await controller.translate_message(
+            session,
+            "hello",
+            message_id="m1",
+            target_language_code="ko-KR",
+            mode="manual",
+        )
+
+        assert result.text == "译文"
+        assert fake.translation_calls == [
+            {
+                "text": "hello",
+                "session_id": "s1",
+                "message_id": "m1",
+                "target_language_code": "ko-KR",
+                "mode": "manual",
             }
         ]
 
@@ -220,6 +285,41 @@ def test_ai_controller_loaded_local_model_allows_background_ai(tmp_path, monkeyp
         )
 
         assert await controller.is_model_loaded() is True
+
+    asyncio.run(scenario())
+
+
+def test_ai_controller_health_status_preserves_local_runtime_metadata(tmp_path, monkeypatch) -> None:
+    async def scenario() -> None:
+        model_path = tmp_path / "demo.gguf"
+        model_path.write_bytes(b"gguf")
+        info = AIModelInfo(
+            provider="local_gguf",
+            model="demo",
+            local=True,
+            loaded=True,
+            runtime="llama-cpp-python",
+            model_path=str(model_path),
+            metadata={
+                "selected_model": "demo-2b",
+                "acceleration_mode": "gpu",
+                "gpu_name": "NVIDIA RTX Test",
+            },
+        )
+        controller = AIController(assist_manager=FakeAssistManager(), ai_service=FakeAIService(info=info))
+        monkeypatch.setattr(
+            "client.ui.controllers.ai_controller._is_python_package_available",
+            lambda _module_name: True,
+        )
+
+        status = await controller.get_health_status()
+
+        assert status.state == AIHealthState.READY_LOADED
+        assert status.metadata == {
+            "selected_model": "demo-2b",
+            "acceleration_mode": "gpu",
+            "gpu_name": "NVIDIA RTX Test",
+        }
 
     asyncio.run(scenario())
 
@@ -297,6 +397,71 @@ def test_ai_controller_health_status_detects_missing_llama_cpp(tmp_path, monkeyp
 
         assert status.state == AIHealthState.DEPENDENCY_MISSING
         assert status.detail == "llama-cpp-python is not installed"
+
+    asyncio.run(scenario())
+
+
+def test_ai_controller_health_status_detects_missing_cuda_runtime(tmp_path, monkeypatch) -> None:
+    async def scenario() -> None:
+        model_path = tmp_path / "demo.gguf"
+        model_path.write_bytes(b"gguf")
+        info = AIModelInfo(
+            provider="local_gguf",
+            model="demo",
+            local=True,
+            loaded=False,
+            runtime="llama-cpp-python",
+            model_path=str(model_path),
+            metadata={
+                "missing_cuda_deps": "cudart64_12.dll,cublas64_12.dll",
+                "acceleration_reason": "cuda_dependencies_missing",
+                "runtime_gpu_probe_error": "RuntimeError: Failed to load shared library llama.dll",
+            },
+        )
+        controller = AIController(assist_manager=FakeAssistManager(), ai_service=FakeAIService(info=info))
+        monkeypatch.setattr(
+            "client.ui.controllers.ai_controller._is_python_package_available",
+            lambda _module_name: True,
+        )
+
+        status = await controller.get_health_status()
+
+        assert status.state == AIHealthState.DEPENDENCY_MISSING
+        assert status.detail == "cuda_dependencies_missing:cudart64_12.dll,cublas64_12.dll"
+        assert status.metadata is not None
+        assert status.metadata["missing_cuda_deps"] == "cudart64_12.dll,cublas64_12.dll"
+
+    asyncio.run(scenario())
+
+
+def test_ai_controller_health_status_hides_ai_service_error_text() -> None:
+    async def scenario() -> None:
+        controller = AIController(
+            assist_manager=FakeAssistManager(),
+            ai_service=FailingAIService(
+                AIServiceError(AIErrorCode.AI_PROVIDER_UNAVAILABLE, "shared library llama.dll failed"),
+            ),
+        )
+
+        status = await controller.get_health_status()
+
+        assert status.state == AIHealthState.PROVIDER_UNAVAILABLE
+        assert status.detail == AIErrorCode.AI_PROVIDER_UNAVAILABLE.value
+
+    asyncio.run(scenario())
+
+
+def test_ai_controller_health_status_hides_unexpected_exception_text() -> None:
+    async def scenario() -> None:
+        controller = AIController(
+            assist_manager=FakeAssistManager(),
+            ai_service=FailingAIService(RuntimeError("cuda dll missing from PATH")),
+        )
+
+        status = await controller.get_health_status()
+
+        assert status.state == AIHealthState.PROVIDER_UNAVAILABLE
+        assert status.detail == ""
 
     asyncio.run(scenario())
 

@@ -914,20 +914,9 @@ class DiscoveryInterface(QWidget):
             moments = await self._controller.load_moments()
         except asyncio.CancelledError:
             raise
-        except (APIError, NetworkError) as exc:
-            self.summary_label.setText(tr("discovery.feed.load_failed", "Failed to load moments."))
-            InfoBar.error(tr("discovery.feed.title", "Moments"), str(exc), parent=self.window(), duration=2400)
-            return
         except Exception:
-            logger.exception("Unexpected discovery load error")
             self.summary_label.setText(tr("discovery.feed.load_failed", "Failed to load moments."))
-            InfoBar.error(
-                tr("discovery.feed.title", "Moments"),
-                tr("discovery.feed.load_unknown_error", "Unexpected error while loading moments."),
-                parent=self.window(),
-                duration=2400,
-            )
-            return
+            raise
         finally:
             self.refresh_button.setEnabled(True)
 
@@ -1006,20 +995,6 @@ class DiscoveryInterface(QWidget):
         self.publish_button.setEnabled(False)
         try:
             moment = await self._controller.create_moment(content)
-        except asyncio.CancelledError:
-            raise
-        except (APIError, NetworkError) as exc:
-            InfoBar.error(tr("discovery.publish.title", "Publish Moment"), str(exc), parent=self.window(), duration=2400)
-            return
-        except Exception:
-            logger.exception("Unexpected moment publish error")
-            InfoBar.error(
-                tr("discovery.publish.title", "Publish Moment"),
-                tr("discovery.publish.failed", "Publish failed. Please try again later."),
-                parent=self.window(),
-                duration=2400,
-            )
-            return
         finally:
             self.publish_button.setEnabled(True)
 
@@ -1055,11 +1030,10 @@ class DiscoveryInterface(QWidget):
             await self._controller.set_liked(moment_id, liked, like_count)
         except asyncio.CancelledError:
             raise
-        except Exception as exc:
+        except Exception:
             if card is not None:
                 card.set_like_state(previous_liked, previous_count)
-            InfoBar.error(tr("discovery.feed.title", "Moments"), str(exc), parent=self.window(), duration=2200)
-            return
+            raise
 
         moment = next((item for item in self._moments if item.id == moment_id), None)
         if moment is not None:
@@ -1074,13 +1048,7 @@ class DiscoveryInterface(QWidget):
         )
 
     async def _request_comment_create_async(self, moment_id: str, content: str) -> None:
-        try:
-            comment = await self._controller.add_comment(moment_id, content)
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            InfoBar.error(tr("discovery.comment.title", "Post Comment"), str(exc), parent=self.window(), duration=2200)
-            return
+        comment = await self._controller.add_comment(moment_id, content)
 
         card = self._cards.get(moment_id)
         if card is not None:

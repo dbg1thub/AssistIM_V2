@@ -1357,13 +1357,12 @@ class AddFriendDialog(FluentWidget):
             users = await self._controller.search_users(keyword)
         except asyncio.CancelledError:
             raise
-        except Exception as exc:
+        except Exception:
             if generation != self._search_generation or self.search_edit.text().strip() != keyword:
                 return
             self._clear_search_results()
             self.summary_label.setText(tr("contact.add_friend.summary_failed", "Search failed."))
-            InfoBar.error(tr("contact.add_friend.title", "Add Friend"), str(exc), parent=self, duration=2200)
-            return
+            raise
 
         if generation != self._search_generation or self.search_edit.text().strip() != keyword:
             return
@@ -1407,10 +1406,9 @@ class AddFriendDialog(FluentWidget):
             payload = await self._controller.send_friend_request(user_id, self.message_edit.text().strip())
         except asyncio.CancelledError:
             raise
-        except Exception as exc:
-            InfoBar.error(tr("contact.add_friend.title", "Add Friend"), str(exc), parent=self, duration=2200)
+        except Exception:
             self._finalize_deferred_close_if_needed()
-            return
+            raise
 
         request_payload = dict((payload or {}).get("request") or {})
         status = str(request_payload.get("status", "pending") or "pending")
@@ -2336,24 +2334,11 @@ class ContactInterface(QWidget):
             moments: list[MomentRecord] = []
         except asyncio.CancelledError:
             raise
-        except (APIError, NetworkError) as exc:
-            if not self._can_update_contact_ui():
-                return
-            self.summary_label.setText(tr("contact.sidebar.load_failed", "Failed to load contacts."))
-            InfoBar.error(tr("common.contacts", "Contacts"), str(exc), parent=self.window(), duration=2400)
-            return
         except Exception:
-            logger.exception("Unexpected contact load error")
             if not self._can_update_contact_ui():
                 return
             self.summary_label.setText(tr("contact.sidebar.load_failed", "Failed to load contacts."))
-            InfoBar.error(
-                tr("common.contacts", "Contacts"),
-                tr("contact.sidebar.load_unknown_error", "Unexpected error while loading contacts."),
-                parent=self.window(),
-                duration=2400,
-            )
-            return
+            raise
 
         if not self._can_update_contact_ui():
             return
@@ -2731,11 +2716,7 @@ class ContactInterface(QWidget):
         )
 
     async def _accept_request_async(self, request_id: str) -> None:
-        try:
-            payload = await self._controller.accept_request(request_id)
-        except Exception as exc:
-            InfoBar.error(tr("contact.request.tab_title", "New Friends"), str(exc), parent=self.window(), duration=2200)
-            return
+        payload = await self._controller.accept_request(request_id)
         updated_request = self._request_record_from_payload(dict(payload or {}))
         self._upsert_request_record(updated_request)
         self._upsert_contact_record(self._contact_record_from_request(updated_request), select_after_upsert=True)
@@ -2757,11 +2738,7 @@ class ContactInterface(QWidget):
         )
 
     async def _reject_request_async(self, request_id: str) -> None:
-        try:
-            payload = await self._controller.reject_request(request_id)
-        except Exception as exc:
-            InfoBar.error(tr("contact.request.tab_title", "New Friends"), str(exc), parent=self.window(), duration=2200)
-            return
+        payload = await self._controller.reject_request(request_id)
         self._upsert_request_record(self._request_record_from_payload(dict(payload or {})))
         self._update_summary_counts()
         InfoBar.success(
@@ -2875,10 +2852,9 @@ class ContactInterface(QWidget):
         previous_count = like_count - 1 if liked else like_count + 1
         try:
             await self._discovery_controller.set_liked(moment_id, liked, like_count)
-        except Exception as exc:
+        except Exception:
             self.detail_panel.moments_panel.set_like_state(moment_id, previous_liked, previous_count)
-            InfoBar.error(tr("discovery.feed.title", "Moments"), str(exc), parent=self.window(), duration=2200)
-            return
+            raise
 
     def _request_detail_comment_create(self, moment_id: str, content: str) -> None:
         self._schedule_keyed_ui_task(
@@ -2888,11 +2864,7 @@ class ContactInterface(QWidget):
         )
 
     async def _request_detail_comment_create_async(self, moment_id: str, content: str) -> None:
-        try:
-            comment = await self._discovery_controller.add_comment(moment_id, content)
-        except Exception as exc:
-            InfoBar.error(tr("discovery.comment.title", "Post Comment"), str(exc), parent=self.window(), duration=2200)
-            return
+        comment = await self._discovery_controller.add_comment(moment_id, content)
 
         self.detail_panel.moments_panel.append_comment(moment_id, comment)
         InfoBar.success(

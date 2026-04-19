@@ -12,6 +12,10 @@ from typing import Any, Callable, Optional
 
 from client.core import logging
 from client.core.avatar_utils import profile_avatar_seed
+from client.core.ai_features import (
+    SESSION_AI_AUTO_TRANSLATE_ENABLED_KEY,
+    SESSION_AI_REPLY_SUGGESTIONS_ENABLED_KEY,
+)
 from client.core.i18n import tr
 from client.core.logging import setup_logging
 from client.events.contact_events import ContactEvent
@@ -1986,6 +1990,12 @@ class SessionManager:
             target.extra["is_muted"] = bool(source.extra.get("is_muted", False))
         if "show_member_nickname" in source.extra:
             target.extra["show_member_nickname"] = bool(source.extra.get("show_member_nickname", True))
+        for local_only_flag in (
+            SESSION_AI_REPLY_SUGGESTIONS_ENABLED_KEY,
+            SESSION_AI_AUTO_TRANSLATE_ENABLED_KEY,
+        ):
+            if local_only_flag in source.extra:
+                target.extra[local_only_flag] = bool(source.extra.get(local_only_flag, False))
         source_last_message_id = str(source.extra.get("last_message_id", "") or "")
         target_last_message_id = str(target.extra.get("last_message_id", "") or "")
         if source_last_message_id and source_last_message_id == target_last_message_id:
@@ -2694,6 +2704,22 @@ class SessionManager:
             },
         )
 
+    async def set_ai_reply_suggestions_enabled(self, session_id: str, enabled: bool) -> None:
+        """Persist the per-session smart-reply toggle locally."""
+        await self._set_session_extra_flag(
+            session_id,
+            SESSION_AI_REPLY_SUGGESTIONS_ENABLED_KEY,
+            enabled,
+        )
+
+    async def set_ai_auto_translate_enabled(self, session_id: str, enabled: bool) -> None:
+        """Persist the per-session incoming-translation toggle locally."""
+        await self._set_session_extra_flag(
+            session_id,
+            SESSION_AI_AUTO_TRANSLATE_ENABLED_KEY,
+            enabled,
+        )
+
     async def mark_group_announcement_viewed(self, session_id: str, announcement_message_id: str) -> Optional[Session]:
         """Persist that the current user has opened the latest group announcement."""
         normalized_session_id = str(session_id or "").strip()
@@ -3035,6 +3061,31 @@ class SessionManager:
                 await self._event_bus.emit(SessionEvent.UPDATED, {
                     "session": session,
                 })
+
+    async def _set_session_extra_flag(self, session_id: str, extra_key: str, enabled: bool) -> None:
+        """Persist one boolean flag under session.extra and emit one update when changed."""
+        async with self._lock:
+            session = self._sessions.get(session_id)
+            if not session:
+                return
+
+            normalized_enabled = bool(enabled)
+            current_enabled = bool(session.extra.get(extra_key, False))
+            if current_enabled == normalized_enabled:
+                return
+
+            session.extra[extra_key] = normalized_enabled
+
+            db = get_database()
+            if db.is_connected:
+                await db.save_session(session)
+
+        await self._event_bus.emit(
+            SessionEvent.UPDATED,
+            {
+                "session": session,
+            },
+        )
 
     def get_total_unread_count(self) -> int:
         """Get total unread count across all sessions."""

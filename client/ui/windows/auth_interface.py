@@ -473,14 +473,21 @@ class AuthInterface(FluentWidget):
             raise
         except NetworkError as exc:
             logger.warning("Login failed: %s", exc)
-            self._show_error(str(exc))
+            self._show_error(
+                tr("auth.error.network", "Unable to connect right now. Please try again later.")
+            )
         except APIError as exc:
             if not force and self._is_session_conflict_error(exc):
                 logger.info("Login conflict detected for %s", username)
                 retry_force_login = await self._prompt_force_login(username)
             else:
                 logger.warning("Login failed: %s", exc)
-                self._show_error(str(exc))
+                self._show_error(
+                    tr(
+                        "auth.error.sign_in_failed",
+                        "Unable to sign in with the current account information.",
+                    )
+                )
         except Exception:
             logger.exception("Unexpected login error")
             self._show_error(tr("auth.error.unexpected_sign_in", "Unexpected error while signing in."))
@@ -532,7 +539,17 @@ class AuthInterface(FluentWidget):
             raise
         except (APIError, NetworkError) as exc:
             logger.warning("Registration failed: %s", exc)
-            self._show_error(str(exc))
+            if isinstance(exc, NetworkError):
+                self._show_error(
+                    tr("auth.error.network", "Unable to connect right now. Please try again later.")
+                )
+            else:
+                self._show_error(
+                    tr(
+                        "auth.error.register_failed",
+                        "Unable to create the account right now. Please try again later.",
+                    )
+                )
         except Exception:
             logger.exception("Unexpected registration error")
             self._show_error(tr("auth.error.unexpected_register", "Unexpected error while creating account."))

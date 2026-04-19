@@ -50,17 +50,17 @@ class ChatGroupFlowCoordinator:
                     duration=2200,
                 )
                 return
-            contacts = await self._contact_controller.load_contacts()
-        except Exception as exc:
-            InfoBar.error(
-                tr("chat.group_picker.title", "Start Group Chat"),
-                str(exc) or tr("chat.group_picker.load_failed", "Unable to load contacts right now."),
-                parent=self._window_provider(),
-                duration=2200,
-            )
-            return
+            try:
+                contacts = await self._contact_controller.load_contacts()
+            except Exception:
+                InfoBar.error(
+                    tr("chat.group_picker.title", "Start Group Chat"),
+                    tr("chat.group_picker.load_failed", "Unable to load contacts right now."),
+                    parent=self._window_provider(),
+                    duration=2200,
+                )
+                raise
 
-        try:
             fixed_contact = next((contact for contact in contacts if contact.id == counterpart_id), None)
             if fixed_contact is None:
                 InfoBar.warning(
