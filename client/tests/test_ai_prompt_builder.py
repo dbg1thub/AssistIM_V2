@@ -44,6 +44,7 @@ from client.managers.ai_prompt_builder import (
     latest_peer_text_message_group,
 )
 from client.core.message_translation import AI_TRANSLATION_NOOP_MARKER
+from client.models.ai_assistant import AIMessage, AIMessageRole
 from client.models.message import ChatMessage, MessageStatus, Session
 from client.services.ai_service import AIPrivacyScope, AITaskType
 
@@ -63,6 +64,52 @@ def test_draft_prompt_marks_e2ee_requests_local() -> None:
     assert request.must_be_local is True
     assert request.privacy_scope == AIPrivacyScope.E2EE_PLAINTEXT
     assert "hello there" in request.messages[0]["content"]
+
+
+def test_ai_chat_request_uses_streaming_local_context() -> None:
+    builder = AIPromptBuilder()
+    messages = [
+        AIMessage("a1", "thread-1", AIMessageRole.ASSISTANT, "旧回答" * 4000),
+        AIMessage("u1", "thread-1", AIMessageRole.USER, "你好"),
+        AIMessage("a2", "thread-1", AIMessageRole.ASSISTANT, "你好，有什么可以帮你？"),
+        AIMessage("u2", "thread-1", AIMessageRole.USER, "帮我列一个测试计划"),
+    ]
+
+    request = builder.build_ai_chat_request("thread-1", messages, task_id="ai-chat-test")
+
+    assert request.task_id == "ai-chat-test"
+    assert request.task_type == AITaskType.CHAT
+    assert request.session_id == "thread-1"
+    assert request.must_be_local is True
+    assert request.stream is True
+    assert request.privacy_scope == AIPrivacyScope.GENERAL
+    assert request.temperature == 0.7
+    assert request.max_tokens == 2048
+    assert request.max_output_chars == 0
+    assert request.system_prompt is not None
+    assert "你是 AssistIM 的本地 AI 助手" in request.system_prompt
+    assert request.messages[-1] == {"role": "user", "content": "帮我列一个测试计划"}
+    assert request.messages[0]["content"] == "你好"
+    assert request.metadata["source"] == "ai_assistant"
+    assert request.metadata["thread_id"] == "thread-1"
+    assert request.metadata["stream_flush"] == "immediate"
+
+
+def test_ai_chat_request_trims_long_assistant_history() -> None:
+    builder = AIPromptBuilder()
+    messages = [
+        AIMessage("u1", "thread-1", AIMessageRole.USER, "先给我写一段长文本"),
+        AIMessage("a1", "thread-1", AIMessageRole.ASSISTANT, "长回复" * 1000),
+        AIMessage("u2", "thread-1", AIMessageRole.USER, "继续说明重点"),
+    ]
+
+    request = builder.build_ai_chat_request("thread-1", messages, task_id="ai-chat-trim")
+
+    assistant_context = [item["content"] for item in request.messages if item["role"] == "assistant"]
+    assert len(assistant_context) == 1
+    assert assistant_context[0].startswith("[上一轮 AI 回复过长，已截取结尾]")
+    assert len(assistant_context[0]) <= builder.AI_CHAT_ASSISTANT_MESSAGE_CHARS
+    assert request.metadata["prompt_chars"] <= builder.AI_CHAT_CONTEXT_CHARS
 
 
 def test_reply_suggestion_prompt_anchors_latest_peer_text() -> None:

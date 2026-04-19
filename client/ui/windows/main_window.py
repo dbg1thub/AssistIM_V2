@@ -30,6 +30,7 @@ from client.core.avatar_rendering import get_avatar_image_store
 from client.core.avatar_utils import avatar_seed, profile_avatar_seed
 from client.events.event_bus import get_event_bus
 from client.managers.session_manager import SessionEvent, peek_session_manager
+from client.ui.windows.ai_assistant_interface import AIAssistantInterface
 from client.ui.windows.chat_interface import ChatInterface
 from client.ui.windows.contact_interface import ContactInterface
 from client.ui.windows.discovery_interface import DiscoveryInterface
@@ -133,6 +134,7 @@ class MainWindow(FluentWindow):
         self._last_system_theme = ""
 
         self.chat_interface = ChatInterface(self)
+        self.ai_assistant_interface = AIAssistantInterface(self)
         self.contact_interface = ContactInterface(self)
         self.discovery_interface = DiscoveryInterface(self)
         self.user_profile = UserProfileCoordinator(self)
@@ -157,6 +159,7 @@ class MainWindow(FluentWindow):
 
         self.restore_default_geometry()
         self._schedule_ui_single_shot(0, self.chat_interface.load_sessions)
+        self._schedule_ui_single_shot(0, self.ai_assistant_interface.ensure_initial_load)
         self._schedule_ui_single_shot(0, self.contact_interface.ensure_initial_load)
         self._schedule_ui_single_shot(0, self.discovery_interface.ensure_initial_load)
         self._schedule_ui_single_shot(0, self._sync_chat_session_activity)
@@ -174,6 +177,7 @@ class MainWindow(FluentWindow):
         """Initialize left navigation."""
         self._init_user_card()
         self.addSubInterface(self.chat_interface, AppIcon.CHAT, tr("common.chat", "Chat"))
+        self.addSubInterface(self.ai_assistant_interface, AppIcon.ROBOT, tr("common.ai_assistant", "AI Assistant"))
         self.addSubInterface(self.contact_interface, AppIcon.PEOPLE, tr("common.contacts", "Contacts"))
         self.addSubInterface(self.discovery_interface, AppIcon.GLOBE, tr("common.moments", "Moments"))
         self.addSubInterface(
@@ -555,6 +559,7 @@ class MainWindow(FluentWindow):
         self._dismiss_tray_attention(clear_entries=True)
         self.user_profile.quiesce()
         self.chat_interface.quiesce()
+        self.ai_assistant_interface.quiesce()
         self.contact_interface.quiesce()
         self.discovery_interface.quiesce()
         self._cancel_pending_task(self._contact_open_task)

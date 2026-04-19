@@ -9,6 +9,7 @@ from enum import Enum
 from typing import Sequence
 
 from client.core.message_translation import AI_TRANSLATION_NOOP_MARKER, language_name_for_code
+from client.models.ai_assistant import AIMessage, AIMessageRole
 from client.models.message import ChatMessage, MessageType, Session
 from client.services.ai_service import AIPrivacyScope, AIRequest, AITaskType
 
@@ -68,6 +69,13 @@ class AIPromptBuilder:
     REPLY_HISTORY_SUMMARY_LIMIT = 1
     REPLY_SUGGESTION_TEMPERATURE = 1.0
     REPLY_SINGLE_TEMPERATURE = 0.35
+    AI_CHAT_CONTEXT_MESSAGES = 8
+    AI_CHAT_CONTEXT_CHARS = 2400
+    AI_CHAT_LATEST_USER_CHARS = 1800
+    AI_CHAT_USER_MESSAGE_CHARS = 900
+    AI_CHAT_ASSISTANT_MESSAGE_CHARS = 420
+    AI_CHAT_MAX_TOKENS = 2048
+    AI_CHAT_OUTPUT_CHARS = 0
 
     _DRAFT_TASK_TYPES = {
         AIAssistAction.POLISH: AITaskType.INPUT_POLISH,
@@ -120,6 +128,79 @@ class AIPromptBuilder:
                 "session_type": str(getattr(session, "session_type", "") or ""),
             },
         )
+
+    def build_ai_chat_request(
+        self,
+        thread_id: str,
+        messages: Sequence[AIMessage],
+        *,
+        task_id: str = "",
+    ) -> AIRequest:
+        """Build one streaming request for the standalone AI assistant page."""
+        normalized_thread_id = str(thread_id or "").strip()
+        context_messages = self._bounded_ai_chat_messages(messages)
+        if not context_messages or context_messages[-1]["role"] != "user":
+            raise ValueError("latest AI assistant message must be a user message")
+
+        system_prompt = (
+            "你是 AssistIM 的本地 AI 助手。\n"
+            "使用标准聊天角色，不要输出思考过程。\n"
+            "默认使用中文回答，除非用户明确要求其他语言。\n"
+            "直接回答用户问题；必要时给出清晰步骤、关键取舍和可执行建议。\n"
+            "如果信息不足，先说明缺口，再给出合理的下一步。"
+        )
+        return AIRequest(
+            task_id=task_id,
+            session_id=normalized_thread_id,
+            task_type=AITaskType.CHAT,
+            privacy_scope=AIPrivacyScope.GENERAL,
+            must_be_local=True,
+            stream=True,
+            temperature=0.7,
+            max_tokens=self.AI_CHAT_MAX_TOKENS,
+            max_output_chars=self.AI_CHAT_OUTPUT_CHARS,
+            system_prompt=system_prompt,
+            messages=context_messages,
+            metadata={
+                "source": "ai_assistant",
+                "thread_id": normalized_thread_id,
+                "stream_flush": "immediate",
+                "prompt_chars": sum(len(str(item.get("content") or "")) for item in context_messages),
+            },
+        )
+
+    def _bounded_ai_chat_messages(self, messages: Sequence[AIMessage]) -> list[dict[str, str]]:
+        """Return recent user/assistant messages bounded by count and characters."""
+        normalized: list[dict[str, str]] = []
+        total_chars = 0
+        for index, message in enumerate(reversed(list(messages or []))):
+            role = message.role.value if isinstance(message.role, AIMessageRole) else str(message.role or "")
+            if role not in {"user", "assistant"}:
+                continue
+            content = str(getattr(message, "content", "") or "").strip()
+            if not content:
+                continue
+            if role == "assistant":
+                content = _clip_ai_chat_context_text(
+                    content,
+                    self.AI_CHAT_ASSISTANT_MESSAGE_CHARS,
+                    keep_tail=True,
+                    label="上一轮 AI 回复过长，已截取结尾",
+                )
+            elif index == 0:
+                content = _clip_ai_chat_context_text(content, self.AI_CHAT_LATEST_USER_CHARS)
+            else:
+                content = _clip_ai_chat_context_text(content, self.AI_CHAT_USER_MESSAGE_CHARS)
+            if len(normalized) >= self.AI_CHAT_CONTEXT_MESSAGES:
+                break
+            if total_chars + len(content) > self.AI_CHAT_CONTEXT_CHARS and normalized:
+                break
+            normalized.append({"role": role, "content": content})
+            total_chars += len(content)
+        normalized.reverse()
+        while normalized and normalized[0]["role"] == "assistant":
+            normalized.pop(0)
+        return normalized
 
     def build_message_translation_request(
         self,
@@ -668,6 +749,23 @@ def _normalize_text(value: str, *, max_chars: int) -> str:
     if max_chars > 0 and len(text) > max_chars:
         return text[:max_chars].rstrip()
     return text
+
+
+def _clip_ai_chat_context_text(
+    value: str,
+    max_chars: int,
+    *,
+    keep_tail: bool = False,
+    label: str = "内容过长，已截断",
+) -> str:
+    text = re.sub(r"\s+", " ", str(value or "").strip())
+    if max_chars <= 0 or len(text) <= max_chars:
+        return text
+    marker = f"[{label}] "
+    budget = max(1, max_chars - len(marker) - 3)
+    if keep_tail:
+        return f"{marker}...{text[-budget:].lstrip()}"
+    return f"{text[:budget].rstrip()}..."
 
 
 def _extract_reply_candidates_from_json(output: str) -> list[str] | None:

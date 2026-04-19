@@ -7,6 +7,7 @@ local AI task actually needs the model.
 from __future__ import annotations
 
 import asyncio
+import ctypes
 import os
 import time
 from dataclasses import dataclass, field
@@ -141,6 +142,8 @@ class LocalGGUFRuntime:
         self._load_task: asyncio.Task | None = None
         self._cancelled_task_ids: set[str] = set()
         self._active_task_ids: set[str] = set()
+        self._current_generation_task_id = ""
+        self._abort_callback_ref = None
         self._closed = False
 
     @property
@@ -277,6 +280,7 @@ class LocalGGUFRuntime:
             await self._close_llm_instance(llm)
             raise LocalGGUFRuntimeError("AI_MODEL_UNAVAILABLE", "Local GGUF runtime is closed")
         self._llm = llm
+        self._install_abort_callback(llm)
         logger.info(
             "[ai-diag] local_model_load_done provider=local_gguf model=%s path=%s",
             self._config.model_id,
@@ -390,6 +394,28 @@ class LocalGGUFRuntime:
             kwargs["n_threads"] = self._config.cpu_threads
         return Llama(**kwargs)
 
+    def _install_abort_callback(self, llm) -> None:
+        """Install a llama.cpp abort hook so cancellation can interrupt decode."""
+        try:
+            from llama_cpp import llama_cpp as llama_cpp_module
+
+            def _should_abort(_user_data) -> bool:
+                task_id = self._current_generation_task_id
+                return bool(self._closed or (task_id and self._is_cancelled(task_id)))
+
+            callback = llama_cpp_module.ggml_abort_callback(_should_abort)
+            llama_cpp_module.llama_set_abort_callback(llm.ctx, callback, ctypes.c_void_p(0))
+            self._abort_callback_ref = callback
+        except Exception:
+            self._abort_callback_ref = None
+            logger.debug("Failed to install llama.cpp abort callback", exc_info=True)
+
+    def _is_cancelled_exception(self, task_id: str, exc: BaseException) -> bool:
+        if self._closed or self._is_cancelled(task_id):
+            return True
+        message = str(exc or "").lower()
+        return "aborted" in message and "decode" in message
+
     async def generate_once(
         self,
         *,
@@ -410,6 +436,7 @@ class LocalGGUFRuntime:
         try:
             async with self._generation_lock:
                 self._raise_if_cancelled(normalized_task_id)
+                self._current_generation_task_id = normalized_task_id
                 effective_temperature = temperature if temperature is not None else self._config.temperature
                 effective_max_tokens = max_tokens or self._config.max_output_tokens
                 started_at = time.perf_counter()
@@ -464,7 +491,10 @@ class LocalGGUFRuntime:
                                 )
                         put_from_thread(None)
                     except BaseException as exc:
-                        put_from_thread(exc)
+                        if self._is_cancelled_exception(normalized_task_id, exc):
+                            put_from_thread(LocalGGUFRuntimeError("AI_USER_CANCELLED", "Local generation cancelled"))
+                        else:
+                            put_from_thread(exc)
 
                 worker_task = asyncio.create_task(asyncio.to_thread(worker))
                 try:
@@ -561,6 +591,8 @@ class LocalGGUFRuntime:
                     if cancelled_while_waiting:
                         self._cancelled_task_ids.add(normalized_task_id)
         finally:
+            if self._current_generation_task_id == normalized_task_id:
+                self._current_generation_task_id = ""
             self._active_task_ids.discard(normalized_task_id)
             self._cancelled_task_ids.discard(normalized_task_id)
 
@@ -604,6 +636,8 @@ class LocalGGUFRuntime:
         self._active_task_ids.add(normalized_task_id)
         try:
             async with self._generation_lock:
+                self._raise_if_cancelled(normalized_task_id)
+                self._current_generation_task_id = normalized_task_id
                 queue: asyncio.Queue[LocalGGUFStreamChunk | BaseException | None] = asyncio.Queue()
                 loop = asyncio.get_running_loop()
                 effective_temperature = temperature if temperature is not None else self._config.temperature
@@ -656,7 +690,10 @@ class LocalGGUFRuntime:
                                 )
                         put_from_thread(None)
                     except BaseException as exc:
-                        put_from_thread(exc)
+                        if self._is_cancelled_exception(normalized_task_id, exc):
+                            put_from_thread(LocalGGUFRuntimeError("AI_USER_CANCELLED", "Local generation cancelled"))
+                        else:
+                            put_from_thread(exc)
 
                 worker_task = asyncio.create_task(asyncio.to_thread(worker))
                 try:
@@ -721,6 +758,8 @@ class LocalGGUFRuntime:
                             self._metadata_value("acceleration_profile"),
                         )
         finally:
+            if self._current_generation_task_id == normalized_task_id:
+                self._current_generation_task_id = ""
             self._active_task_ids.discard(normalized_task_id)
             self._cancelled_task_ids.discard(normalized_task_id)
 

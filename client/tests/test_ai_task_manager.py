@@ -199,6 +199,24 @@ def test_ai_task_manager_stream_coalesces_small_chunks() -> None:
     asyncio.run(scenario())
 
 
+def test_ai_task_manager_stream_can_flush_each_delta() -> None:
+    async def scenario() -> None:
+        event_bus = FakeEventBus()
+        service = FakeAIService(chunks=["a", "b", "c"])
+        manager = AITaskManager(service=service, event_bus=event_bus)
+        request = _request("task-stream-immediate")
+        request.metadata["stream_flush"] = "immediate"
+
+        snapshot = await manager.stream(request)
+
+        assert snapshot.state == AITaskState.DONE
+        assert snapshot.content == "abc"
+        streamed_contents = [item.content for item in event_bus.snapshots(AITaskEvent.UPDATED) if item.content]
+        assert streamed_contents[:3] == ["a", "ab", "abc"]
+
+    asyncio.run(scenario())
+
+
 def test_ai_task_manager_stream_hard_truncates_and_cancels_provider() -> None:
     async def scenario() -> None:
         event_bus = FakeEventBus()

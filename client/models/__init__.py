@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from client.models.ai_assistant import AIMessage, AIMessageRole, AIMessageStatus, AIThread, AIThreadStatus
 from client.models.message import ChatMessage, Session, AISession, MessageType
 
 if TYPE_CHECKING:
@@ -12,6 +13,11 @@ if TYPE_CHECKING:
 
 __all__ = [
     "ChatMessage",
+    "AIMessage",
+    "AIMessageRole",
+    "AIMessageStatus",
+    "AIThread",
+    "AIThreadStatus",
     "Session",
     "AISession",
     "MessageType",

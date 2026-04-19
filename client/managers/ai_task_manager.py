@@ -102,6 +102,7 @@ class AITaskManager:
 
     FLUSH_INTERVAL_SECONDS = 0.05
     FLUSH_CHARS = 24
+    CLOSE_WAIT_TIMEOUT_SECONDS = 2.0
 
     def __init__(
         self,
@@ -201,6 +202,7 @@ class AITaskManager:
             await self._mark_running(snapshot)
             pending_chars = 0
             last_emit_at = time.monotonic()
+            immediate_stream_flush = str(request.metadata.get("stream_flush") or "").strip().lower() == "immediate"
 
             async for event in self._service.stream_chat(request):
                 if self._is_cancel_requested(snapshot.task_id):
@@ -225,7 +227,11 @@ class AITaskManager:
                         await self._emit(AITaskEvent.UPDATED, snapshot)
                         break
                     now = time.monotonic()
-                    if (
+                    if immediate_stream_flush and accepted:
+                        pending_chars = 0
+                        last_emit_at = now
+                        await self._emit(AITaskEvent.UPDATED, snapshot)
+                    elif (
                         pending_chars >= self.FLUSH_CHARS
                         or now - last_emit_at >= self.FLUSH_INTERVAL_SECONDS
                     ):
@@ -330,7 +336,18 @@ class AITaskManager:
         for task in runner_tasks:
             task.cancel()
         if runner_tasks:
-            await asyncio.gather(*runner_tasks, return_exceptions=True)
+            done, pending = await asyncio.wait(runner_tasks, timeout=self.CLOSE_WAIT_TIMEOUT_SECONDS)
+            for task in done:
+                try:
+                    task.result()
+                except BaseException:
+                    pass
+            if pending:
+                logger.warning(
+                    "[ai-diag] task_manager_close_timeout pending_runner_count=%s timeout_s=%s",
+                    len(pending),
+                    self.CLOSE_WAIT_TIMEOUT_SECONDS,
+                )
 
         global _ai_task_manager
         if _ai_task_manager is self:
@@ -367,7 +384,7 @@ class AITaskManager:
     async def _preempt_lower_priority_tasks(self, snapshot: AITaskSnapshot, request: AIRequest) -> None:
         """Let foreground work clear only background summary work."""
         task_type = getattr(request.task_type, "value", str(request.task_type))
-        if task_type not in {"reply_suggestion", "translate"}:
+        if task_type not in {"chat", "reply_suggestion", "translate"}:
             return
         task_ids = [
             task.task_id
@@ -629,6 +646,8 @@ class AITaskManager:
             return 0 if mode == "manual" else 1
         if task_type == "reply_suggestion":
             return 10
+        if task_type == "chat":
+            return 5
         if task_type in {"input_rewrite", "input_polish", "input_shorten"}:
             return 15
         if task_type == "summary":
