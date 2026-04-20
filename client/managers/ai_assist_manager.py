@@ -101,6 +101,7 @@ class AIAssistResult:
 class AIAssistManager:
     """Coordinate prompt building, AI task execution, and ephemeral candidates."""
 
+    # Reply suggestions already include direct recent messages, so skip very recent closed summaries here only.
     REPLY_SUMMARY_MIN_AGE_SECONDS = 300
     REPLY_WEEKLY_HISTORY_MAX_AGE_SECONDS = 7 * 24 * 60 * 60
     REPLY_WEEKLY_HISTORY_BUCKET_LIMIT = 6

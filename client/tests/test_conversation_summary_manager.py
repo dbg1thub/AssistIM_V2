@@ -39,6 +39,8 @@ class _FakeDatabase:
         self._session = session
         self.messages_by_session: dict[str, list[ChatMessage]] = {session.session_id: []}
         self.buckets: dict[tuple[str, int], dict] = {}
+        self.memory_items: dict[tuple[str, str, str], dict] = {}
+        self.deleted_memory_sources: list[tuple[str, str, str]] = []
 
     async def get_session(self, session_id: str) -> Session | None:
         if session_id == self._session.session_id:
@@ -91,6 +93,45 @@ class _FakeDatabase:
         messages.sort(key=lambda item: item.timestamp)
         return messages[-max(1, int(limit or 1)) :]
 
+    async def get_conversation_summary_bucket_message_stats(
+        self,
+        session_id: str,
+        bucket_start_ts: int,
+        bucket_end_ts: int | None = None,
+    ) -> dict:
+        messages = [
+            message
+            for message in self.messages_by_session.get(session_id, [])
+            if message.message_type == MessageType.TEXT
+            and int(message.timestamp.timestamp()) >= int(bucket_start_ts or 0)
+            and (bucket_end_ts is None or int(message.timestamp.timestamp()) <= int(bucket_end_ts or 0))
+        ]
+        messages.sort(key=lambda item: item.timestamp)
+        latest = messages[-1] if messages else None
+        return {
+            "message_count": len(messages),
+            "last_message_id": latest.message_id if latest is not None else "",
+            "last_message_ts": int(latest.timestamp.timestamp()) if latest is not None else 0,
+        }
+
+    async def upsert_conversation_memory_item(self, payload: dict) -> None:
+        key = (
+            str(payload.get("session_id") or ""),
+            str(payload.get("source_type") or ""),
+            str(payload.get("source_id") or ""),
+        )
+        self.memory_items[key] = dict(payload)
+
+    async def delete_conversation_memory_items_for_source(self, session_id: str, source_type: str, source_id: str = "") -> None:
+        key = (str(session_id or ""), str(source_type or ""), str(source_id or ""))
+        self.deleted_memory_sources.append(key)
+        if source_id:
+            self.memory_items.pop(key, None)
+            return
+        for existing_key in list(self.memory_items):
+            if existing_key[0] == key[0] and existing_key[1] == key[1]:
+                self.memory_items.pop(existing_key, None)
+
 
 def _message(message_id: str, when: datetime, *, content: str, is_self: bool = False, message_type: MessageType = MessageType.TEXT):
     return ChatMessage(
@@ -141,8 +182,141 @@ def test_conversation_summary_manager_creates_ready_open_bucket(monkeypatch) -> 
             assert bucket["message_count"] == 1
             assert fake_task_manager.requests
             assert "周日下午可以见面" in fake_task_manager.requests[0].messages[0]["content"]
+            memory_key = ("session-1", "summary", f"summary:{int(incoming.timestamp.timestamp())}")
+            assert memory_key in fake_db.memory_items
+            assert fake_db.memory_items[memory_key]["text"] == "本段聊天主要在确认见面安排，语气自然。"
         finally:
             await manager.close()
+
+    asyncio.run(scenario())
+
+
+def test_conversation_summary_manager_defers_refresh_by_debounce(monkeypatch) -> None:
+    monkeypatch.setattr(SecureStorage, "encrypt_text", classmethod(lambda cls, value: f"enc:{value}"))
+    session = Session(session_id="session-1", name="Bob", session_type="direct")
+    fake_db = _FakeDatabase(session)
+    fake_task_manager = _FakeTaskManager()
+    event_bus = EventBus()
+
+    async def scenario() -> None:
+        manager = ConversationSummaryManager(
+            db=fake_db,
+            event_bus=event_bus,
+            task_manager=fake_task_manager,
+        )
+        manager.DEBOUNCE_SECONDS = 0.05
+        await manager.initialize()
+        try:
+            incoming = _message("m-1", datetime(2026, 4, 19, 10, 0, 0), content="刚刚发出的消息。")
+            fake_db.messages_by_session["session-1"].append(incoming)
+            await event_bus.emit(MessageEvent.RECEIVED, {"message": incoming})
+            await asyncio.sleep(0)
+
+            bucket = await fake_db.get_open_conversation_summary_bucket("session-1")
+            assert bucket is not None
+            assert bucket["summary_status"] == "pending"
+            assert fake_task_manager.requests == []
+            assert fake_db.memory_items == {}
+
+            await _drain_summary_tasks(manager)
+
+            bucket = await fake_db.get_open_conversation_summary_bucket("session-1")
+            assert bucket is not None
+            assert bucket["summary_status"] == "ready"
+            assert len(fake_task_manager.requests) == 1
+            memory_key = ("session-1", "summary", f"summary:{int(incoming.timestamp.timestamp())}")
+            assert memory_key in fake_db.memory_items
+        finally:
+            await manager.close()
+
+    asyncio.run(scenario())
+
+
+def test_conversation_summary_manager_idle_refresh_skips_ready_bucket_without_changes(monkeypatch) -> None:
+    monkeypatch.setattr(SecureStorage, "encrypt_text", classmethod(lambda cls, value: f"enc:{value}"))
+    session = Session(session_id="session-1", name="Bob", session_type="direct")
+    fake_db = _FakeDatabase(session)
+    fake_task_manager = _FakeTaskManager()
+    event_bus = EventBus()
+
+    async def scenario() -> None:
+        manager = ConversationSummaryManager(
+            db=fake_db,
+            event_bus=event_bus,
+            task_manager=fake_task_manager,
+        )
+        incoming = _message("m-1", datetime(2026, 4, 19, 10, 0, 0), content="刚才确认了地点。")
+        incoming_ts = int(incoming.timestamp.timestamp())
+        fake_db.messages_by_session["session-1"].append(incoming)
+        fake_db.buckets[("session-1", incoming_ts)] = {
+            "session_id": "session-1",
+            "bucket_start_ts": incoming_ts,
+            "bucket_end_ts": incoming_ts,
+            "bucket_rule_version": 1,
+            "is_open": True,
+            "last_message_id": "m-1",
+            "last_message_ts": incoming_ts,
+            "message_count": 1,
+            "summary_status": "ready",
+            "summary_text_ciphertext": "enc:已有摘要",
+            "summary_json_ciphertext": "",
+            "summary_version": 1,
+        }
+
+        scheduled = await manager.schedule_idle_refresh("session-1", reason="test")
+
+        assert scheduled is False
+        assert fake_task_manager.requests == []
+
+    asyncio.run(scenario())
+
+
+def test_conversation_summary_manager_idle_refresh_updates_ready_bucket_when_messages_changed(monkeypatch) -> None:
+    monkeypatch.setattr(SecureStorage, "encrypt_text", classmethod(lambda cls, value: f"enc:{value}"))
+    session = Session(session_id="session-1", name="Bob", session_type="direct")
+    fake_db = _FakeDatabase(session)
+    fake_task_manager = _FakeTaskManager()
+    event_bus = EventBus()
+
+    async def scenario() -> None:
+        manager = ConversationSummaryManager(
+            db=fake_db,
+            event_bus=event_bus,
+            task_manager=fake_task_manager,
+        )
+        first = _message("m-1", datetime(2026, 4, 19, 10, 0, 0), content="先确认地点。")
+        second = _message("m-2", datetime(2026, 4, 19, 10, 1, 0), content="再确认时间。")
+        first_ts = int(first.timestamp.timestamp())
+        second_ts = int(second.timestamp.timestamp())
+        fake_db.messages_by_session["session-1"].extend([first, second])
+        fake_db.buckets[("session-1", first_ts)] = {
+            "session_id": "session-1",
+            "bucket_start_ts": first_ts,
+            "bucket_end_ts": first_ts,
+            "bucket_rule_version": 1,
+            "is_open": True,
+            "last_message_id": "m-1",
+            "last_message_ts": first_ts,
+            "message_count": 1,
+            "summary_status": "ready",
+            "summary_text_ciphertext": "enc:旧摘要",
+            "summary_json_ciphertext": "",
+            "summary_version": 1,
+        }
+
+        scheduled = await manager.schedule_idle_refresh("session-1", reason="test")
+        await _drain_summary_tasks(manager)
+
+        assert scheduled is True
+        assert len(fake_task_manager.requests) == 1
+        assert "再确认时间" in fake_task_manager.requests[0].messages[0]["content"]
+        bucket = fake_db.buckets[("session-1", first_ts)]
+        assert bucket["summary_status"] == "ready"
+        assert bucket["last_message_id"] == "m-2"
+        assert bucket["last_message_ts"] == second_ts
+        assert bucket["message_count"] == 2
+        memory_key = ("session-1", "summary", f"summary:{first_ts}")
+        assert memory_key in fake_db.memory_items
 
     asyncio.run(scenario())
 

@@ -45,7 +45,7 @@ from client.events.contact_events import ContactEvent
 from client.core.message_actions import should_offer_delete, should_offer_recall
 from client.events.event_bus import get_event_bus
 from client.managers.call_manager import CallEvent
-from client.managers.conversation_summary_manager import ConversationSummaryEvent
+from client.managers.conversation_summary_manager import ConversationSummaryEvent, get_conversation_summary_manager
 from client.managers.ai_task_manager import AITaskEvent, AITaskState
 from client.managers.message_manager import MessageEvent
 from client.managers.session_manager import SessionEvent
@@ -1241,6 +1241,7 @@ class ChatInterface(QWidget):
             generation,
             self._session_visibility_active,
         )
+        self._schedule_idle_summary_refresh_for_session(self._current_session_id, reason="session_switch")
         self._reset_reply_suggestion_flow(clear_ui=True)
         self._remember_current_session_view_state()
         self._remember_current_composer_draft()
@@ -4468,7 +4469,7 @@ class ChatInterface(QWidget):
         """Find session object by ID."""
         return self._chat_controller.get_session(session_id)
 
-    def set_session_visibility_active(self, active: bool) -> None:
+    def set_session_visibility_active(self, active: bool, *, schedule_idle_summary: bool = True) -> None:
         """Toggle whether the current session is actually visible and foreground-readable."""
         normalized = bool(active)
         if self._session_visibility_active == normalized:
@@ -4480,8 +4481,21 @@ class ChatInterface(QWidget):
             self._current_session_id,
             self._current_session_active,
         )
+        if self._session_visibility_active and not normalized and schedule_idle_summary:
+            self._schedule_idle_summary_refresh_for_session(self._current_session_id, reason="chat_hidden")
         self._session_visibility_active = normalized
         self._set_current_session_active(normalized)
+
+    def _schedule_idle_summary_refresh_for_session(self, session_id: Optional[str], *, reason: str) -> None:
+        """Ask the summary manager to refresh one open bucket after the user leaves it."""
+        normalized_session_id = str(session_id or "").strip()
+        if not normalized_session_id or self._teardown_started:
+            return
+        manager = get_conversation_summary_manager()
+        self._schedule_ui_task(
+            manager.schedule_idle_refresh(normalized_session_id, reason=reason),
+            f"idle summary refresh {normalized_session_id} {reason}",
+        )
 
     def _activate_selected_session_if_visible(self, session_id: Optional[str]) -> None:
         """Promote the selected session into active/readable state when the page is visible."""

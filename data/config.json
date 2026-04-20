@@ -1,7 +1,11 @@
 {
+    "AI": {
+        "GpuAccelerationEnabled": true,
+        "ModelId": "gemma-4-E2B-it-Q4_K_M"
+    },
     "MainWindow": {
         "DpiScale": "Auto",
-        "Language": "zh_CN"
+        "Language": "en_US"
     },
     "App": {
         "ExitConfirmEnabled": false

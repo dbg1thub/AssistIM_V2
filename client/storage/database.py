@@ -19,7 +19,7 @@ from client.core import logging
 from client.core.config_backend import get_config
 from client.core.logging import setup_logging
 from client.core.secure_storage import SecureStorage
-from client.models.message import ChatMessage, Session, merge_sender_profile_extra
+from client.models.message import ChatMessage, MessageType, Session, merge_sender_profile_extra
 
 
 setup_logging()
@@ -355,6 +355,25 @@ class Database:
                 updated_at INTEGER NOT NULL,
                 UNIQUE(message_id)
             );
+
+            CREATE TABLE IF NOT EXISTS conversation_memory_index (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                source_type TEXT NOT NULL,
+                source_id TEXT NOT NULL,
+                source_version INTEGER NOT NULL DEFAULT 1,
+                start_ts INTEGER NOT NULL DEFAULT 0,
+                end_ts INTEGER NOT NULL DEFAULT 0,
+                title_ciphertext TEXT NOT NULL DEFAULT '',
+                text_ciphertext TEXT NOT NULL DEFAULT '',
+                keywords_json_ciphertext TEXT NOT NULL DEFAULT '',
+                participants_json_ciphertext TEXT NOT NULL DEFAULT '',
+                embedding_id TEXT NOT NULL DEFAULT '',
+                embedding_model TEXT NOT NULL DEFAULT '',
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                UNIQUE(session_id, source_type, source_id)
+            );
             
             CREATE INDEX IF NOT EXISTS idx_messages_session 
                 ON messages(session_id, timestamp DESC);
@@ -376,6 +395,12 @@ class Database:
 
             CREATE INDEX IF NOT EXISTS idx_summary_media_session_bucket
                 ON conversation_summary_media_cache(session_id, bucket_start_ts DESC, updated_at DESC);
+
+            CREATE INDEX IF NOT EXISTS idx_conversation_memory_session_time
+                ON conversation_memory_index(session_id, end_ts DESC, start_ts DESC);
+
+            CREATE INDEX IF NOT EXISTS idx_conversation_memory_time
+                ON conversation_memory_index(end_ts DESC, start_ts DESC);
         """)
         await self._db.commit()
 
@@ -1373,6 +1398,7 @@ class Database:
         await self._db.execute("DELETE FROM session_read_cursors WHERE session_id = ?", (session_id,))
         await self._db.execute("DELETE FROM conversation_summary_buckets WHERE session_id = ?", (session_id,))
         await self._db.execute("DELETE FROM conversation_summary_media_cache WHERE session_id = ?", (session_id,))
+        await self._db.execute("DELETE FROM conversation_memory_index WHERE session_id = ?", (session_id,))
         await self._db.execute("DELETE FROM sessions WHERE session_id = ?", (session_id,))
         await self._db.commit()
         logger.debug(f"Session deleted: {session_id}")
@@ -1587,6 +1613,240 @@ class Database:
         messages = [self._overlay_read_cursors_on_message(self._row_to_message(row), read_cursors) for row in rows]
         messages.reverse()
         return messages
+
+    async def get_conversation_summary_bucket_message_stats(
+        self,
+        session_id: str,
+        bucket_start_ts: float,
+        bucket_end_ts: float | None = None,
+    ) -> dict[str, Any]:
+        """Return cheap text-message stats for deciding whether one summary bucket is stale."""
+        normalized_start_ts = int(bucket_start_ts or 0)
+        clauses = [
+            "session_id = ?",
+            "message_type = ?",
+            "timestamp >= ?",
+        ]
+        params: list[Any] = [str(session_id or ""), MessageType.TEXT.value, normalized_start_ts]
+        if bucket_end_ts is not None:
+            clauses.append("timestamp <= ?")
+            params.append(int(bucket_end_ts or normalized_start_ts))
+        where_clause = " AND ".join(clauses)
+
+        count_cursor = await self._db.execute(
+            f"""
+            SELECT COUNT(*) AS message_count
+            FROM messages
+            WHERE {where_clause}
+            """,
+            tuple(params),
+        )
+        count_row = await count_cursor.fetchone()
+        latest_cursor = await self._db.execute(
+            f"""
+            SELECT message_id, timestamp
+            FROM messages
+            WHERE {where_clause}
+            ORDER BY timestamp DESC, updated_at DESC
+            LIMIT 1
+            """,
+            tuple(params),
+        )
+        latest_row = await latest_cursor.fetchone()
+        return {
+            "message_count": int(count_row["message_count"] if count_row is not None else 0),
+            "last_message_id": str(latest_row["message_id"] or "") if latest_row is not None else "",
+            "last_message_ts": int(latest_row["timestamp"] or 0) if latest_row is not None else 0,
+        }
+
+    async def upsert_conversation_memory_item(self, payload: dict[str, Any]) -> None:
+        """Insert or update one local encrypted memory-index item."""
+        session_id = str(payload.get("session_id") or "").strip()
+        source_type = str(payload.get("source_type") or "").strip()
+        source_id = str(payload.get("source_id") or "").strip()
+        if not session_id:
+            raise ValueError("session_id is required")
+        if not source_type:
+            raise ValueError("source_type is required")
+        if not source_id:
+            raise ValueError("source_id is required")
+
+        now_ts = int(payload.get("updated_at") or time.time())
+        created_at = int(payload.get("created_at") or now_ts)
+        title = str(payload.get("title") or "").strip()
+        text = str(payload.get("text") or "").strip()
+        keywords = [str(item or "").strip() for item in list(payload.get("keywords") or []) if str(item or "").strip()]
+        participants = [
+            str(item or "").strip()
+            for item in list(payload.get("participants") or [])
+            if str(item or "").strip()
+        ]
+
+        await self._db.execute(
+            """
+            INSERT INTO conversation_memory_index (
+                session_id,
+                source_type,
+                source_id,
+                source_version,
+                start_ts,
+                end_ts,
+                title_ciphertext,
+                text_ciphertext,
+                keywords_json_ciphertext,
+                participants_json_ciphertext,
+                embedding_id,
+                embedding_model,
+                created_at,
+                updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(session_id, source_type, source_id)
+            DO UPDATE SET
+                source_version = excluded.source_version,
+                start_ts = excluded.start_ts,
+                end_ts = excluded.end_ts,
+                title_ciphertext = excluded.title_ciphertext,
+                text_ciphertext = excluded.text_ciphertext,
+                keywords_json_ciphertext = excluded.keywords_json_ciphertext,
+                participants_json_ciphertext = excluded.participants_json_ciphertext,
+                embedding_id = excluded.embedding_id,
+                embedding_model = excluded.embedding_model,
+                updated_at = excluded.updated_at
+            """,
+            (
+                session_id,
+                source_type,
+                source_id,
+                max(1, int(payload.get("source_version") or 1)),
+                int(payload.get("start_ts") or 0),
+                int(payload.get("end_ts") or payload.get("start_ts") or 0),
+                SecureStorage.encrypt_text(title) if title else "",
+                SecureStorage.encrypt_text(text) if text else "",
+                SecureStorage.encrypt_text(json.dumps(keywords, ensure_ascii=False)) if keywords else "",
+                SecureStorage.encrypt_text(json.dumps(participants, ensure_ascii=False)) if participants else "",
+                str(payload.get("embedding_id") or ""),
+                str(payload.get("embedding_model") or ""),
+                created_at,
+                now_ts,
+            ),
+        )
+        await self._db.commit()
+
+    async def delete_conversation_memory_items_for_source(
+        self,
+        session_id: str,
+        source_type: str,
+        source_id: str = "",
+    ) -> None:
+        """Delete local memory-index items for one source."""
+        normalized_session_id = str(session_id or "").strip()
+        normalized_source_type = str(source_type or "").strip()
+        normalized_source_id = str(source_id or "").strip()
+        if not normalized_session_id or not normalized_source_type:
+            return
+        if normalized_source_id:
+            await self._db.execute(
+                """
+                DELETE FROM conversation_memory_index
+                WHERE session_id = ? AND source_type = ? AND source_id = ?
+                """,
+                (normalized_session_id, normalized_source_type, normalized_source_id),
+            )
+        else:
+            await self._db.execute(
+                """
+                DELETE FROM conversation_memory_index
+                WHERE session_id = ? AND source_type = ?
+                """,
+                (normalized_session_id, normalized_source_type),
+            )
+        await self._db.commit()
+
+    async def list_conversation_memory_items(
+        self,
+        *,
+        session_id: str = "",
+        source_type: str = "",
+        start_ts: int | None = None,
+        end_ts: int | None = None,
+        limit: int = 12,
+    ) -> list[dict[str, Any]]:
+        """Return decrypted local memory-index items matching structured bounds."""
+        clauses: list[str] = []
+        params: list[Any] = []
+        normalized_session_id = str(session_id or "").strip()
+        normalized_source_type = str(source_type or "").strip()
+        if normalized_session_id:
+            clauses.append("session_id = ?")
+            params.append(normalized_session_id)
+        if normalized_source_type:
+            clauses.append("source_type = ?")
+            params.append(normalized_source_type)
+        if start_ts is not None:
+            clauses.append("end_ts >= ?")
+            params.append(int(start_ts or 0))
+        if end_ts is not None:
+            clauses.append("start_ts <= ?")
+            params.append(int(end_ts or 0))
+        where_clause = "WHERE " + " AND ".join(clauses) if clauses else ""
+        normalized_limit = max(1, min(200, int(limit or 12)))
+        cursor = await self._db.execute(
+            f"""
+            SELECT *
+            FROM conversation_memory_index
+            {where_clause}
+            ORDER BY end_ts DESC, start_ts DESC, updated_at DESC
+            LIMIT ?
+            """,
+            (*params, normalized_limit),
+        )
+        rows = await cursor.fetchall()
+        return [self._row_to_conversation_memory_item(row) for row in rows]
+
+    @staticmethod
+    def _decrypt_memory_text(value: object) -> str:
+        raw = str(value or "").strip()
+        if not raw:
+            return ""
+        try:
+            return SecureStorage.decrypt_text(raw)
+        except Exception:
+            logger.warning("Failed to decrypt conversation memory item field", exc_info=True)
+            return ""
+
+    @classmethod
+    def _decrypt_memory_json_list(cls, value: object) -> list[str]:
+        text = cls._decrypt_memory_text(value)
+        if not text:
+            return []
+        try:
+            data = json.loads(text)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return []
+        if not isinstance(data, list):
+            return []
+        return [str(item or "").strip() for item in data if str(item or "").strip()]
+
+    @classmethod
+    def _row_to_conversation_memory_item(cls, row: aiosqlite.Row) -> dict[str, Any]:
+        return {
+            "id": int(row["id"]),
+            "session_id": str(row["session_id"] or ""),
+            "source_type": str(row["source_type"] or ""),
+            "source_id": str(row["source_id"] or ""),
+            "source_version": int(row["source_version"] or 1),
+            "start_ts": int(row["start_ts"] or 0),
+            "end_ts": int(row["end_ts"] or 0),
+            "title": cls._decrypt_memory_text(row["title_ciphertext"]),
+            "text": cls._decrypt_memory_text(row["text_ciphertext"]),
+            "keywords": cls._decrypt_memory_json_list(row["keywords_json_ciphertext"]),
+            "participants": cls._decrypt_memory_json_list(row["participants_json_ciphertext"]),
+            "embedding_id": str(row["embedding_id"] or ""),
+            "embedding_model": str(row["embedding_model"] or ""),
+            "created_at": int(row["created_at"] or 0),
+            "updated_at": int(row["updated_at"] or 0),
+        }
 
     async def list_session_message_ids(self, session_id: str) -> list[str]:
         """Return all persisted message ids for one session."""
@@ -2882,6 +3142,7 @@ class Database:
         await self._db.execute("DELETE FROM sessions")
         await self._db.execute("DELETE FROM conversation_summary_buckets")
         await self._db.execute("DELETE FROM conversation_summary_media_cache")
+        await self._db.execute("DELETE FROM conversation_memory_index")
         await self._db.execute("DELETE FROM contacts_cache")
         await self._db.execute("DELETE FROM groups_cache")
         await self._db.execute(

@@ -43,6 +43,7 @@ from client.core import logging
 from client.core.app_icons import AppIcon, CollectionIcon
 from client.core.i18n import tr
 from client.events.event_bus import get_event_bus
+from client.managers.conversation_memory_manager import ConversationMemoryManager
 from client.managers.ai_prompt_builder import AIPromptBuilder
 from client.managers.ai_task_manager import AITaskEvent, AITaskSnapshot, AITaskState, get_ai_task_manager
 from client.models.ai_assistant import AIMessage, AIMessageRole, AIMessageStatus, AIThread
@@ -530,6 +531,7 @@ class AIAssistantInterface(QWidget):
         self._store = get_ai_assistant_store()
         self._task_manager = get_ai_task_manager()
         self._prompt_builder = AIPromptBuilder()
+        self._memory_manager = ConversationMemoryManager()
         self._event_bus = get_event_bus()
         self._ui_tasks: set[asyncio.Task] = set()
         self._event_subscriptions: list[tuple[str, object]] = []
@@ -1001,6 +1003,26 @@ class AIAssistantInterface(QWidget):
         await self._store.maybe_title_from_first_user_message(thread_id, text)
         await self._reload_threads(select_thread_id=thread_id)
 
+        previous_messages = [message for message in self._messages if message.message_id != user_message.message_id]
+        memory_context_lines: tuple[str, ...] = ()
+        if not attachments:
+            memory_context = await self._memory_manager.build_ai_chat_memory_context(
+                text,
+                previous_messages=previous_messages,
+            )
+            if memory_context.requires_confirmation:
+                assistant_message = await self._store.create_message(
+                    thread_id=thread_id,
+                    role=AIMessageRole.ASSISTANT,
+                    content=memory_context.confirmation_prompt,
+                    status=AIMessageStatus.DONE,
+                    extra={"memory_confirmation": {"query": memory_context.pending_query_text}},
+                )
+                self._append_message(assistant_message)
+                await self._reload_threads(select_thread_id=thread_id)
+                return
+            memory_context_lines = memory_context.lines
+
         task_id = f"ai-chat-{uuid.uuid4()}"
         assistant_message = await self._store.create_message(
             thread_id=thread_id,
@@ -1016,6 +1038,7 @@ class AIAssistantInterface(QWidget):
             thread_id,
             context_messages,
             task_id=task_id,
+            memory_context_lines=memory_context_lines,
         )
         self._active_task_id = request.task_id
         self._active_assistant_message = assistant_message
@@ -1152,7 +1175,33 @@ class AIAssistantInterface(QWidget):
         )
         self._append_message(assistant_message)
         context_messages = [message for message in self._messages if message.message_id != assistant_message.message_id]
-        request = self._prompt_builder.build_ai_chat_request(self._current_thread_id, context_messages, task_id=task_id)
+        memory_context_lines: tuple[str, ...] = ()
+        if last_user is not None and not _first_image_attachment(last_user.extra):
+            previous_messages = [message for message in self._messages if message.message_id != last_user.message_id]
+            memory_context = await self._memory_manager.build_ai_chat_memory_context(
+                last_user.content,
+                previous_messages=previous_messages,
+            )
+            if memory_context.requires_confirmation:
+                await self._store.update_message(
+                    assistant_message,
+                    content=memory_context.confirmation_prompt,
+                    status=AIMessageStatus.DONE,
+                    extra={"memory_confirmation": {"query": memory_context.pending_query_text}},
+                )
+                assistant_message.content = memory_context.confirmation_prompt
+                assistant_message.status = AIMessageStatus.DONE
+                assistant_message.extra = {"memory_confirmation": {"query": memory_context.pending_query_text}}
+                self._render_messages()
+                await self._reload_threads(select_thread_id=self._current_thread_id)
+                return
+            memory_context_lines = memory_context.lines
+        request = self._prompt_builder.build_ai_chat_request(
+            self._current_thread_id,
+            context_messages,
+            task_id=task_id,
+            memory_context_lines=memory_context_lines,
+        )
         self._active_task_id = request.task_id
         self._active_assistant_message = assistant_message
         self._set_generating(True)

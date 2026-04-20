@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import re
 import time
 import uuid
+from datetime import datetime
 from typing import Any, Optional
 
 from client.core import logging
@@ -35,8 +38,11 @@ class ConversationSummaryEvent:
 class ConversationSummaryManager:
     """Maintain local per-session chat-bucket summaries in the background."""
 
+    # Debounce prevents every incoming message from immediately scheduling model work.
     DEBOUNCE_SECONDS = 20.0
     CLOSE_BUCKET_REFRESH_DELAY = 0.0
+    IDLE_REFRESH_THROTTLE_SECONDS = 5.0
+    MEMORY_SOURCE_TYPE_SUMMARY = "summary"
 
     def __init__(
         self,
@@ -54,6 +60,7 @@ class ConversationSummaryManager:
         self._scheduled_refresh_tasks: dict[tuple[str, int], asyncio.Task] = {}
         self._refresh_task_running_keys: set[tuple[str, int]] = set()
         self._pending_refresh_delays: dict[tuple[str, int], float] = {}
+        self._last_idle_refresh_requested_at: dict[tuple[str, int], float] = {}
         self._deleted_session_ids: set[str] = set()
         self._closing = False
         self._initialized = False
@@ -167,6 +174,7 @@ class ConversationSummaryManager:
         updated["summary_status"] = "stale"
         updated["updated_at"] = int(time.time())
         await self._db.upsert_conversation_summary_bucket(updated)
+        await self._delete_memory_item_for_bucket(session_id, bucket_start_ts)
         self._schedule_refresh(session_id, bucket_start_ts, delay=self.DEBOUNCE_SECONDS)
 
     async def _schedule_current_open_bucket_refresh(self, session_id: str, *, delay: float) -> None:
@@ -180,6 +188,7 @@ class ConversationSummaryManager:
         updated["summary_status"] = "stale"
         updated["updated_at"] = int(time.time())
         await self._db.upsert_conversation_summary_bucket(updated)
+        await self._delete_memory_item_for_bucket(session_id, bucket_start_ts)
         self._schedule_refresh(session_id, bucket_start_ts, delay=delay)
 
     def _schedule_refresh(self, session_id: str, bucket_start_ts: int, *, delay: float) -> None:
@@ -236,12 +245,13 @@ class ConversationSummaryManager:
         if self._closing or self._is_task_manager_closed():
             return
 
-        bucket_end_ts = int(bucket.get("bucket_end_ts") or bucket.get("last_message_ts") or bucket_start_ts)
         working = dict(bucket)
+        working["session_name"] = session.display_name() or session.name or session.session_id
         working["summary_status"] = "processing"
         working["updated_at"] = int(time.time())
         await self._db.upsert_conversation_summary_bucket(working)
 
+        bucket_end_ts = int(bucket.get("bucket_end_ts") or bucket.get("last_message_ts") or bucket_start_ts)
         messages = await self._db.list_conversation_summary_bucket_messages(
             session_id,
             bucket_start_ts,
@@ -271,6 +281,7 @@ class ConversationSummaryManager:
                     "updated_at": int(time.time()),
                 }
             )
+            await self._delete_memory_item_for_bucket(session_id, bucket_start_ts)
             return
 
         if self._closing or self._is_task_manager_closed():
@@ -342,8 +353,23 @@ class ConversationSummaryManager:
             return
 
         summary_text = self._prompt_builder.normalize_summary_output(snapshot.content)
+        participants = self._summary_participants(built.request.session_id, messages, existing=existing)
+        keywords = self._summary_keywords(summary_text)
+        message_ids = [str(message.message_id or "") for message in messages if str(message.message_id or "")]
+        summary_json = {
+            "source_type": self.MEMORY_SOURCE_TYPE_SUMMARY,
+            "bucket_start_ts": int(bucket_start_ts),
+            "bucket_end_ts": int(bucket_end_ts),
+            "message_ids": message_ids,
+            "participants": participants,
+            "keywords": keywords,
+            "message_count": int(built.message_count),
+        }
         try:
             summary_ciphertext = SecureStorage.encrypt_text(summary_text) if summary_text else ""
+            summary_json_ciphertext = SecureStorage.encrypt_text(
+                json.dumps(summary_json, ensure_ascii=False)
+            ) if summary_json else ""
         except Exception:
             logger.exception(
                 "Failed to encrypt conversation summary session_id=%s bucket_start_ts=%s",
@@ -357,8 +383,18 @@ class ConversationSummaryManager:
 
         payload["summary_status"] = "ready"
         payload["summary_text_ciphertext"] = summary_ciphertext
+        payload["summary_json_ciphertext"] = summary_json_ciphertext
         payload["error_code"] = ""
         await self._db.upsert_conversation_summary_bucket(payload)
+        await self._upsert_memory_item_for_summary(
+            session_id=session_id,
+            bucket_start_ts=bucket_start_ts,
+            bucket_end_ts=bucket_end_ts,
+            summary_text=summary_text,
+            participants=participants,
+            keywords=keywords,
+            existing=existing,
+        )
         await self._event_bus.emit(
             ConversationSummaryEvent.READY,
             {
@@ -384,6 +420,104 @@ class ConversationSummaryManager:
                 task.cancel()
         for key in keys_to_clear:
             self._pending_refresh_delays.pop(key, None)
+            self._last_idle_refresh_requested_at.pop(key, None)
+
+    async def schedule_idle_refresh(self, session_id: str, *, reason: str = "") -> bool:
+        """Schedule an immediate low-priority summary refresh when the user leaves a chat context."""
+        normalized_session_id = str(session_id or "").strip()
+        if not normalized_session_id or self._closing or self._is_task_manager_closed():
+            return False
+        if normalized_session_id in self._deleted_session_ids or not self._db.is_connected:
+            return False
+
+        session = await self._db.get_session(normalized_session_id)
+        if session is None or session.is_ai_session or session.session_type == "ai":
+            return False
+
+        bucket = await self._db.get_open_conversation_summary_bucket(normalized_session_id)
+        if bucket is None:
+            return False
+        bucket_start_ts = int(bucket.get("bucket_start_ts") or 0)
+        if bucket_start_ts <= 0:
+            return False
+
+        stats = await self._bucket_message_stats(normalized_session_id, bucket)
+        if not self._open_bucket_needs_refresh(bucket, stats):
+            return False
+
+        key = (normalized_session_id, bucket_start_ts)
+        now_monotonic = time.monotonic()
+        last_requested_at = float(self._last_idle_refresh_requested_at.get(key, 0.0) or 0.0)
+        if now_monotonic - last_requested_at < self.IDLE_REFRESH_THROTTLE_SECONDS:
+            return False
+        self._last_idle_refresh_requested_at[key] = now_monotonic
+
+        updated = dict(bucket)
+        updated["summary_status"] = "stale"
+        updated["updated_at"] = int(time.time())
+        updated["message_count"] = int(stats.get("message_count") or 0)
+        last_message_id = str(stats.get("last_message_id") or "").strip()
+        last_message_ts = int(stats.get("last_message_ts") or 0)
+        if last_message_id:
+            updated["last_message_id"] = last_message_id
+        if last_message_ts > 0:
+            updated["last_message_ts"] = last_message_ts
+            updated["bucket_end_ts"] = max(int(updated.get("bucket_end_ts") or bucket_start_ts), last_message_ts)
+        await self._db.upsert_conversation_summary_bucket(updated)
+        await self._delete_memory_item_for_bucket(normalized_session_id, bucket_start_ts)
+        self._schedule_refresh(normalized_session_id, bucket_start_ts, delay=0.0)
+        logger.info(
+            "[ai-perf] conversation_summary_idle_refresh_scheduled session_id=%s bucket_start_ts=%s reason=%s status=%s message_count=%s",
+            normalized_session_id,
+            bucket_start_ts,
+            str(reason or "idle"),
+            str(bucket.get("summary_status") or ""),
+            int(stats.get("message_count") or 0),
+        )
+        return True
+
+    async def _bucket_message_stats(self, session_id: str, bucket: dict[str, Any]) -> dict[str, Any]:
+        stats_loader = getattr(self._db, "get_conversation_summary_bucket_message_stats", None)
+        bucket_start_ts = int(bucket.get("bucket_start_ts") or 0)
+        if stats_loader is not None:
+            return dict(await stats_loader(session_id, bucket_start_ts, None))
+
+        bucket_end_ts = int(bucket.get("bucket_end_ts") or bucket.get("last_message_ts") or bucket_start_ts)
+        messages = await self._db.list_conversation_summary_bucket_messages(
+            session_id,
+            bucket_start_ts,
+            bucket_end_ts,
+            limit=max(1, int(self._prompt_builder.MAX_BUCKET_MESSAGES or 1)),
+        )
+        text_messages = [message for message in messages if message.message_type == MessageType.TEXT]
+        latest = text_messages[-1] if text_messages else None
+        return {
+            "message_count": len(text_messages),
+            "last_message_id": str(getattr(latest, "message_id", "") or "") if latest is not None else "",
+            "last_message_ts": int(to_epoch_seconds(getattr(latest, "timestamp", None)) or 0) if latest is not None else 0,
+        }
+
+    @staticmethod
+    def _open_bucket_needs_refresh(bucket: dict[str, Any], stats: dict[str, Any]) -> bool:
+        message_count = int(stats.get("message_count") or 0)
+        if message_count <= 0:
+            return False
+
+        status = str(bucket.get("summary_status") or "").strip().lower()
+        if status in {"pending", "stale", "failed"}:
+            return True
+
+        last_message_id = str(stats.get("last_message_id") or "").strip()
+        last_message_ts = int(stats.get("last_message_ts") or 0)
+        if str(bucket.get("last_message_id") or "").strip() != last_message_id:
+            return True
+        if int(bucket.get("last_message_ts") or 0) != last_message_ts:
+            return True
+        if int(bucket.get("message_count") or 0) != message_count:
+            return True
+        if status != "ready":
+            return True
+        return False
 
     def _merge_pending_refresh_delay(self, key: tuple[str, int], delay: float) -> None:
         normalized_delay = max(0.0, float(delay or 0.0))
@@ -395,6 +529,98 @@ class ConversationSummaryManager:
 
     def _is_task_manager_closed(self) -> bool:
         return bool(getattr(self._task_manager, "_closed", False))
+
+    async def _delete_memory_item_for_bucket(self, session_id: str, bucket_start_ts: int) -> None:
+        delete_source = getattr(self._db, "delete_conversation_memory_items_for_source", None)
+        if delete_source is None:
+            return
+        await delete_source(
+            session_id,
+            self.MEMORY_SOURCE_TYPE_SUMMARY,
+            self._memory_source_id(bucket_start_ts),
+        )
+
+    async def _upsert_memory_item_for_summary(
+        self,
+        *,
+        session_id: str,
+        bucket_start_ts: int,
+        bucket_end_ts: int,
+        summary_text: str,
+        participants: list[str],
+        keywords: list[str],
+        existing: dict[str, Any],
+    ) -> None:
+        if not str(summary_text or "").strip():
+            await self._delete_memory_item_for_bucket(session_id, bucket_start_ts)
+            return
+        upsert = getattr(self._db, "upsert_conversation_memory_item", None)
+        if upsert is None:
+            return
+        title = self._memory_title(
+            session_name=str(existing.get("session_name") or session_id),
+            bucket_start_ts=bucket_start_ts,
+            bucket_end_ts=bucket_end_ts,
+        )
+        await upsert(
+            {
+                "session_id": session_id,
+                "source_type": self.MEMORY_SOURCE_TYPE_SUMMARY,
+                "source_id": self._memory_source_id(bucket_start_ts),
+                "source_version": int(existing.get("summary_version") or 1),
+                "start_ts": int(bucket_start_ts),
+                "end_ts": int(bucket_end_ts),
+                "title": title,
+                "text": summary_text,
+                "keywords": keywords,
+                "participants": participants,
+                "embedding_id": "",
+                "embedding_model": "",
+                "updated_at": int(time.time()),
+            }
+        )
+
+    @staticmethod
+    def _summary_participants(session_id: str, messages: list[ChatMessage], *, existing: dict[str, Any]) -> list[str]:
+        del session_id
+        participants: list[str] = []
+        session_name = str(existing.get("session_name") or "").strip()
+        if session_name:
+            participants.append(session_name)
+        for message in messages:
+            label = "我" if message.is_self else str(message.sender_id or "").strip() or "对方"
+            if label and label not in participants:
+                participants.append(label)
+        return participants
+
+    @staticmethod
+    def _summary_keywords(summary_text: str) -> list[str]:
+        text = str(summary_text or "")
+        tokens = re.findall(r"[\w\u4e00-\u9fff]{2,}", text)
+        keywords: list[str] = []
+        for token in tokens:
+            normalized = token.strip()
+            if not normalized or normalized in keywords:
+                continue
+            keywords.append(normalized)
+            if len(keywords) >= 12:
+                break
+        return keywords
+
+    @staticmethod
+    def _memory_source_id(bucket_start_ts: int) -> str:
+        return f"summary:{int(bucket_start_ts or 0)}"
+
+    @staticmethod
+    def _memory_title(*, session_name: str, bucket_start_ts: int, bucket_end_ts: int) -> str:
+        name = str(session_name or "").strip() or "聊天"
+        try:
+            start_label = datetime.fromtimestamp(int(bucket_start_ts or 0)).strftime("%Y-%m-%d %H:%M")
+            end_label = datetime.fromtimestamp(int(bucket_end_ts or bucket_start_ts or 0)).strftime("%H:%M")
+        except (OSError, ValueError):
+            start_label = str(int(bucket_start_ts or 0))
+            end_label = str(int(bucket_end_ts or bucket_start_ts or 0))
+        return f"{name} {start_label}-{end_label}"
 
     @staticmethod
     def _new_bucket_payload(session_id: str, message: ChatMessage, message_ts: int, *, is_open: bool) -> dict[str, Any]:

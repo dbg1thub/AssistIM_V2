@@ -137,6 +137,7 @@ class AIPromptBuilder:
         messages: Sequence[AIMessage],
         *,
         task_id: str = "",
+        memory_context_lines: Sequence[str] | None = None,
     ) -> AIRequest:
         """Build one streaming request for the standalone AI assistant page."""
         normalized_thread_id = str(thread_id or "").strip()
@@ -153,9 +154,17 @@ class AIPromptBuilder:
             "使用标准聊天角色，不要输出思考过程。\n"
             "默认使用中文回答，除非用户明确要求其他语言。\n"
             "当用户发送图片时，先理解图片内容，再结合用户文字作答。\n"
+            "涉及本机聊天记录但范围或授权不明确时，先追问确认，不要自行判断或假装已查询。\n"
             "直接回答用户问题；必要时给出清晰步骤、关键取舍和可执行建议。\n"
             "如果信息不足，先说明缺口，再给出合理的下一步。"
         )
+        memory_lines = [str(item or "").strip() for item in list(memory_context_lines or []) if str(item or "").strip()]
+        if memory_lines:
+            system_prompt += (
+                "\n\n以下是本机检索到的聊天记录摘要，只能用于回答用户关于历史聊天的问题；"
+                "如果摘要不足以支持结论，请明确说明范围有限，不要编造。\n"
+                + "\n".join(f"- {line}" for line in memory_lines)
+            )
         return AIRequest(
             task_id=task_id,
             session_id=normalized_thread_id,
@@ -177,6 +186,8 @@ class AIPromptBuilder:
                 "has_image_attachment": bool(attachments),
                 "image_attachment_count": len(attachments),
                 "vision_minimal_context": bool(attachments),
+                "memory_context_count": len(memory_lines),
+                "has_memory_context": bool(memory_lines),
             },
         )
 

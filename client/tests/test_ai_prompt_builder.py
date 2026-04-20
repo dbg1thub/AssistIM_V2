@@ -170,6 +170,26 @@ def test_ai_chat_request_ignores_historical_image_attachment_after_latest_text()
     assert request.metadata["vision_minimal_context"] is False
 
 
+def test_ai_chat_request_injects_local_memory_context_into_system_prompt() -> None:
+    builder = AIPromptBuilder()
+    messages = [
+        AIMessage("u1", "thread-1", AIMessageRole.USER, "今天我和张三聊了什么？"),
+    ]
+
+    request = builder.build_ai_chat_request(
+        "thread-1",
+        messages,
+        task_id="ai-chat-memory",
+        memory_context_lines=("2026-04-21 10:00-10:05；参与者：张三；摘要：确认了周末见面。",),
+    )
+
+    assert request.metadata["has_memory_context"] is True
+    assert request.metadata["memory_context_count"] == 1
+    assert "本机检索到的聊天记录摘要" in request.system_prompt
+    assert "确认了周末见面" in request.system_prompt
+    assert request.messages[-1]["content"] == "今天我和张三聊了什么？"
+
+
 def test_reply_suggestion_prompt_anchors_latest_peer_text() -> None:
     builder = AIPromptBuilder()
     session = Session(session_id="s1", name="Alice", session_type="direct")

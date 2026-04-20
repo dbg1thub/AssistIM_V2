@@ -503,7 +503,7 @@ class MainWindow(FluentWindow):
 
     def closeEvent(self, event: QCloseEvent):
         self.user_profile.close_flyout()
-        self.chat_interface.set_session_visibility_active(False)
+        self.chat_interface.set_session_visibility_active(False, schedule_idle_summary=not self._allow_exit)
         if self._allow_exit:
             logger.info("MainWindow closeEvent, reason=%s", self._close_reason or "app_exit")
             self._invalidate_ui_callback_generation()
