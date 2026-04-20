@@ -6,7 +6,7 @@ import json
 import re
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Sequence
+from typing import Any, Sequence
 
 from client.core.message_translation import AI_TRANSLATION_NOOP_MARKER, language_name_for_code
 from client.models.ai_assistant import AIMessage, AIMessageRole
@@ -51,7 +51,9 @@ class ReplySummaryContext:
     """Optional summary context prepended to reply-suggestion prompts."""
 
     open_bucket_summary: str = ""
+    weekly_history_summary: str = ""
     recent_bucket_summaries: tuple[str, ...] = field(default_factory=tuple)
+    related_history_lines: tuple[str, ...] = field(default_factory=tuple)
 
 
 class AIPromptBuilder:
@@ -138,7 +140,11 @@ class AIPromptBuilder:
     ) -> AIRequest:
         """Build one streaming request for the standalone AI assistant page."""
         normalized_thread_id = str(thread_id or "").strip()
-        context_messages = self._bounded_ai_chat_messages(messages)
+        attachments = _latest_ai_chat_image_attachments(messages)
+        if attachments:
+            context_messages = self._minimal_ai_chat_image_messages(messages)
+        else:
+            context_messages = self._bounded_ai_chat_messages(messages)
         if not context_messages or context_messages[-1]["role"] != "user":
             raise ValueError("latest AI assistant message must be a user message")
 
@@ -146,6 +152,7 @@ class AIPromptBuilder:
             "你是 AssistIM 的本地 AI 助手。\n"
             "使用标准聊天角色，不要输出思考过程。\n"
             "默认使用中文回答，除非用户明确要求其他语言。\n"
+            "当用户发送图片时，先理解图片内容，再结合用户文字作答。\n"
             "直接回答用户问题；必要时给出清晰步骤、关键取舍和可执行建议。\n"
             "如果信息不足，先说明缺口，再给出合理的下一步。"
         )
@@ -161,13 +168,32 @@ class AIPromptBuilder:
             max_output_chars=self.AI_CHAT_OUTPUT_CHARS,
             system_prompt=system_prompt,
             messages=context_messages,
+            attachments=attachments,
             metadata={
                 "source": "ai_assistant",
                 "thread_id": normalized_thread_id,
                 "stream_flush": "immediate",
                 "prompt_chars": sum(len(str(item.get("content") or "")) for item in context_messages),
+                "has_image_attachment": bool(attachments),
+                "image_attachment_count": len(attachments),
+                "vision_minimal_context": bool(attachments),
             },
         )
+
+    def _minimal_ai_chat_image_messages(self, messages: Sequence[AIMessage]) -> list[dict[str, str]]:
+        """Return only the latest image user prompt for multimodal requests."""
+        for message in reversed(list(messages or [])):
+            role = message.role.value if isinstance(message.role, AIMessageRole) else str(message.role or "")
+            if role != AIMessageRole.USER.value:
+                continue
+            if not _message_image_attachments(message):
+                continue
+            content = str(getattr(message, "content", "") or "").strip()
+            if not content:
+                content = "请描述这张图片，并说明你能观察到的关键信息。"
+            content = _clip_ai_chat_context_text(content, self.AI_CHAT_LATEST_USER_CHARS)
+            return [{"role": "user", "content": content}]
+        return []
 
     def _bounded_ai_chat_messages(self, messages: Sequence[AIMessage]) -> list[dict[str, str]]:
         """Return recent user/assistant messages bounded by count and characters."""
@@ -178,6 +204,8 @@ class AIPromptBuilder:
             if role not in {"user", "assistant"}:
                 continue
             content = str(getattr(message, "content", "") or "").strip()
+            if not content and role == "user" and _message_image_attachments(message):
+                content = "请描述这张图片，并说明你能观察到的关键信息。"
             if not content:
                 continue
             if role == "assistant":
@@ -295,20 +323,38 @@ class AIPromptBuilder:
             normalized_summary_context.open_bucket_summary,
             max_chars=self.MAX_MESSAGE_CHARS,
         )
+        weekly_history_summary = _normalize_text(
+            normalized_summary_context.weekly_history_summary,
+            max_chars=self.MAX_MESSAGE_CHARS,
+        )
         background_lines: list[str] = []
         if open_bucket_summary:
             background_lines.append(f"- 当前时间段摘要：{open_bucket_summary}")
-        history_lines = [
+        history_lines: list[str] = []
+        if weekly_history_summary:
+            background_lines.append(f"- 一周历史摘要：{weekly_history_summary}")
+        else:
+            history_lines = [
+                _normalize_text(item, max_chars=self.MAX_MESSAGE_CHARS)
+                for item in normalized_summary_context.recent_bucket_summaries
+            ]
+            history_lines = [item for item in history_lines if item]
+        related_history_lines = [
             _normalize_text(item, max_chars=self.MAX_MESSAGE_CHARS)
-            for item in normalized_summary_context.recent_bucket_summaries
+            for item in normalized_summary_context.related_history_lines
         ]
-        history_lines = [item for item in history_lines if item]
+        related_history_lines = [item for item in related_history_lines if item]
         if history_lines:
             background_lines.extend(f"- 最近历史摘要：{item}" for item in history_lines)
         if background_lines:
             prompt_sections.append(
                 "背景摘要（仅供参考，用来避免前后矛盾；不要优先复述已经确认过的话题）：\n"
                 + "\n".join(background_lines)
+            )
+        if related_history_lines:
+            prompt_sections.append(
+                "相关旧消息（仅在和当前话题明显相关时参考，不要生硬照搬原话）：\n"
+                + "\n".join(f"- {item}" for item in related_history_lines)
             )
         privacy_scope = privacy_scope_for_session(session)
         must_be_local = session.uses_e2ee()
@@ -363,7 +409,9 @@ class AIPromptBuilder:
                 "anchor_group_size": len(anchor_group),
                 "session_type": session.session_type,
                 "has_open_bucket_summary": bool(open_bucket_summary),
+                "has_weekly_history_summary": bool(weekly_history_summary),
                 "history_summary_count": len(history_lines),
+                "history_recall_count": len(related_history_lines),
                 "has_summary": bool(background_lines),
                 "recent_context_count": recent_context_count,
                 "prompt_chars": len(prompt),
@@ -413,20 +461,38 @@ class AIPromptBuilder:
             normalized_summary_context.open_bucket_summary,
             max_chars=self.MAX_MESSAGE_CHARS,
         )
+        weekly_history_summary = _normalize_text(
+            normalized_summary_context.weekly_history_summary,
+            max_chars=self.MAX_MESSAGE_CHARS,
+        )
         background_lines: list[str] = []
         if open_bucket_summary:
             background_lines.append(f"- 当前时间段摘要：{open_bucket_summary}")
-        history_lines = [
+        history_lines: list[str] = []
+        if weekly_history_summary:
+            background_lines.append(f"- 一周历史摘要：{weekly_history_summary}")
+        else:
+            history_lines = [
+                _normalize_text(item, max_chars=self.MAX_MESSAGE_CHARS)
+                for item in normalized_summary_context.recent_bucket_summaries
+            ]
+            history_lines = [item for item in history_lines if item]
+        related_history_lines = [
             _normalize_text(item, max_chars=self.MAX_MESSAGE_CHARS)
-            for item in normalized_summary_context.recent_bucket_summaries
+            for item in normalized_summary_context.related_history_lines
         ]
-        history_lines = [item for item in history_lines if item]
+        related_history_lines = [item for item in related_history_lines if item]
         if history_lines:
             background_lines.extend(f"- 最近历史摘要：{item}" for item in history_lines)
         if background_lines:
             prompt_sections.append(
                 "背景摘要（仅供参考，用来避免前后矛盾；不要优先复述已经确认过的话题）：\n"
                 + "\n".join(background_lines)
+            )
+        if related_history_lines:
+            prompt_sections.append(
+                "相关旧消息（仅在和当前话题明显相关时参考，不要生硬照搬原话）：\n"
+                + "\n".join(f"- {item}" for item in related_history_lines)
             )
 
         normalized_existing = [
@@ -489,7 +555,9 @@ class AIPromptBuilder:
                 "anchor_group_size": len(anchor_group),
                 "session_type": session.session_type,
                 "has_open_bucket_summary": bool(open_bucket_summary),
+                "has_weekly_history_summary": bool(weekly_history_summary),
                 "history_summary_count": len(history_lines),
+                "history_recall_count": len(related_history_lines),
                 "has_summary": bool(background_lines),
                 "recent_context_count": recent_context_count,
                 "prompt_chars": len(prompt),
@@ -766,6 +834,29 @@ def _clip_ai_chat_context_text(
     if keep_tail:
         return f"{marker}...{text[-budget:].lstrip()}"
     return f"{text[:budget].rstrip()}..."
+
+
+def _latest_ai_chat_image_attachments(messages: Sequence[AIMessage]) -> list[dict[str, Any]]:
+    for message in reversed(list(messages or [])):
+        role = message.role.value if isinstance(message.role, AIMessageRole) else str(message.role or "")
+        if role == AIMessageRole.ASSISTANT.value:
+            continue
+        if role != AIMessageRole.USER.value:
+            continue
+        return _message_image_attachments(message)
+    return []
+
+
+def _message_image_attachments(message: AIMessage) -> list[dict[str, Any]]:
+    extra = dict(getattr(message, "extra", {}) or {})
+    attachments: list[dict[str, Any]] = []
+    for item in list(extra.get("attachments") or []):
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("type") or "").strip().lower() != "image":
+            continue
+        attachments.append(dict(item))
+    return attachments
 
 
 def _extract_reply_candidates_from_json(output: str) -> list[str] | None:

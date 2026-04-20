@@ -127,8 +127,23 @@ def _extract_chat_delta(data: dict[str, Any]) -> tuple[str, Optional[str], dict[
     )
 
 
-def _messages_prompt_chars(messages: list[dict[str, str]]) -> int:
-    return sum(len(str(message.get("content") or "")) for message in list(messages or []) if isinstance(message, dict))
+def _messages_prompt_chars(messages: list[dict[str, Any]]) -> int:
+    total = 0
+    for message in list(messages or []):
+        if not isinstance(message, dict):
+            continue
+        content = message.get("content") or ""
+        if isinstance(content, list):
+            for item in content:
+                if not isinstance(item, dict):
+                    continue
+                if str(item.get("type") or "") == "text":
+                    total += len(str(item.get("text") or ""))
+                elif str(item.get("type") or "") == "image_url":
+                    total += len("[image]")
+            continue
+        total += len(str(content))
+    return total
 
 
 class LocalGGUFRuntime:

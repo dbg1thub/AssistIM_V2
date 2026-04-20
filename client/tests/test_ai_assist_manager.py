@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import sys
 import types
+from datetime import datetime
 
 if "aiohttp" not in sys.modules:
     aiohttp = types.ModuleType("aiohttp")
@@ -74,10 +75,17 @@ class FakeTaskManager:
 
 
 class FakeSummaryDatabase:
-    def __init__(self, *, open_bucket: dict | None = None, closed_buckets: list[dict] | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        open_bucket: dict | None = None,
+        closed_buckets: list[dict] | None = None,
+        historical_messages: list[ChatMessage] | None = None,
+    ) -> None:
         self.is_connected = True
         self.open_bucket = dict(open_bucket or {}) if open_bucket is not None else None
         self.closed_buckets = [dict(item) for item in list(closed_buckets or [])]
+        self.historical_messages = list(historical_messages or [])
 
     async def get_open_conversation_summary_bucket(self, session_id: str):
         return dict(self.open_bucket) if self.open_bucket is not None else None
@@ -98,6 +106,16 @@ class FakeSummaryDatabase:
         if ready_only:
             buckets = [item for item in buckets if str(item.get("summary_status") or "") == "ready"]
         return [dict(item) for item in buckets[:limit]]
+
+    async def get_messages(self, session_id: str, limit: int = 50, before_timestamp: float | None = None):
+        messages = list(self.historical_messages)
+        if before_timestamp is not None:
+            messages = [
+                message
+                for message in messages
+                if message.timestamp is not None and message.timestamp.timestamp() < before_timestamp
+            ]
+        return messages[-limit:]
 
 
 def _session(**kwargs) -> Session:
@@ -225,8 +243,11 @@ def test_suggest_replies_includes_local_bucket_summaries_when_available(monkeypa
         prompt = fake.requests[0].messages[0]["content"]
         assert "当前待回复消息组：" in prompt
         assert "背景摘要（仅供参考，用来避免前后矛盾；不要优先复述已经确认过的话题）：" in prompt
-        assert "最近历史摘要：" in prompt
+        assert "当前时间段摘要：" in prompt
+        assert "一周历史摘要：" in prompt
         assert "之前已经确认了见面地点。" in prompt
+        assert fake.requests[0].metadata["has_open_bucket_summary"] is True
+        assert fake.requests[0].metadata["has_weekly_history_summary"] is True
         assert "你是 AssistIM 的私聊回复建议助手。" in fake.requests[0].system_prompt
     asyncio.run(scenario())
 
@@ -268,7 +289,7 @@ def test_suggest_replies_skips_bucket_summary_when_decrypt_fails(monkeypatch) ->
         assert state.status == AIReplySuggestionStatus.READY
         prompt = fake.requests[0].messages[0]["content"]
         assert "背景摘要（仅供参考，用来避免前后矛盾；不要优先复述已经确认过的话题）：" in prompt
-        assert "最近历史摘要：" in prompt
+        assert "一周历史摘要：" in prompt
         assert "之前已经确认了见面地点。" in prompt
 
     asyncio.run(scenario())
@@ -311,6 +332,56 @@ def test_suggest_replies_ignores_recent_closed_bucket_summaries(monkeypatch) -> 
         prompt = fake.requests[0].messages[0]["content"]
         assert "最近五分钟内的摘要。" not in prompt
         assert "五分钟前的历史摘要。" in prompt
+        assert "一周历史摘要：" in prompt
+
+    asyncio.run(scenario())
+
+
+def test_suggest_replies_includes_related_history_recall_when_topic_matches() -> None:
+    async def scenario() -> None:
+        fake = FakeTaskManager(
+            content="那就周日下午去吧。\n可以，我到时候提前联系你。\n这周我可能不太方便。\n我再看看时间安排。"
+        )
+        db = FakeSummaryDatabase(
+            historical_messages=[
+                ChatMessage(
+                    "m-old-1",
+                    "s1",
+                    "peer",
+                    "之前说过那家店周日人会少一点。",
+                    status=MessageStatus.RECEIVED,
+                    timestamp=datetime(2026, 4, 12, 18, 30, 0),
+                ),
+                ChatMessage(
+                    "m-old-2",
+                    "s1",
+                    "me",
+                    "明天公司那边还有个会。",
+                    is_self=True,
+                    status=MessageStatus.SENT,
+                    timestamp=datetime(2026, 4, 12, 18, 31, 0),
+                ),
+            ]
+        )
+        manager = AIAssistManager(task_manager=fake, db=db)
+        messages = [
+            ChatMessage(
+                "m-now-1",
+                "s1",
+                "peer",
+                "周日去那家店吗？",
+                status=MessageStatus.RECEIVED,
+                timestamp=datetime(2026, 4, 15, 19, 0, 0),
+            )
+        ]
+
+        state = await manager.suggest_replies(_session(), messages, current_user_id="me")
+
+        assert state.status == AIReplySuggestionStatus.READY
+        prompt = fake.requests[0].messages[0]["content"]
+        assert "相关旧消息（仅在和当前话题明显相关时参考，不要生硬照搬原话）：" in prompt
+        assert "2026-04-12 对方: 之前说过那家店周日人会少一点。" in prompt
+        assert fake.requests[0].metadata["history_recall_count"] == 1
 
     asyncio.run(scenario())
 

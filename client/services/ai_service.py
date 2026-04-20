@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -15,6 +16,17 @@ from client.network.http_client import get_http_client
 
 setup_logging()
 logger = logging.get_logger(__name__)
+
+
+def _optional_bool_env(name: str) -> bool | None:
+    raw_value = str(os.getenv(name, "") or "").strip().lower()
+    if not raw_value:
+        return None
+    if raw_value in {"1", "true", "yes", "on", "enabled"}:
+        return True
+    if raw_value in {"0", "false", "no", "off", "disabled"}:
+        return False
+    return None
 
 
 class AIProviderType(Enum):
@@ -75,6 +87,9 @@ class AIErrorCode(Enum):
     AI_OUTPUT_TRUNCATED = "AI_OUTPUT_TRUNCATED"
     AI_MODEL_DOWNLOAD_FAILED = "AI_MODEL_DOWNLOAD_FAILED"
     AI_MODEL_CHECKSUM_FAILED = "AI_MODEL_CHECKSUM_FAILED"
+    AI_MODEL_VISION_UNSUPPORTED = "AI_MODEL_VISION_UNSUPPORTED"
+    AI_VISION_PROJECTOR_NOT_FOUND = "AI_VISION_PROJECTOR_NOT_FOUND"
+    AI_VISION_RUNTIME_UNAVAILABLE = "AI_VISION_RUNTIME_UNAVAILABLE"
 
     @classmethod
     def coerce(cls, value: object, *, default: "AIErrorCode") -> "AIErrorCode":
@@ -100,7 +115,7 @@ class AIServiceError(RuntimeError):
 class AIRequest:
     """Provider-independent AI generation request."""
 
-    messages: list[dict[str, str]]
+    messages: list[dict[str, Any]]
     model: str = ""
     temperature: float = 0.7
     seed: int | None = None
@@ -115,6 +130,7 @@ class AIRequest:
     privacy_scope: AIPrivacyScope | str = AIPrivacyScope.GENERAL
     max_output_chars: int = 0
     priority: int | None = None
+    attachments: list[dict[str, Any]] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -129,6 +145,7 @@ class AIRequest:
                 self.seed = None
         self.max_tokens = max(1, int(self.max_tokens or 1))
         self.max_output_chars = max(0, int(self.max_output_chars or 0))
+        self.attachments = [dict(item) for item in list(self.attachments or []) if isinstance(item, dict)]
 
 
 @dataclass(slots=True)
@@ -202,13 +219,18 @@ def _coerce_privacy_scope(value: AIPrivacyScope | str) -> AIPrivacyScope:
         return AIPrivacyScope.GENERAL
 
 
-def _messages_for_request(request: AIRequest) -> list[dict[str, str]]:
+def _messages_for_request(request: AIRequest) -> list[dict[str, Any]]:
     """Return OpenAI-style messages with an optional system prompt prepended."""
-    messages: list[dict[str, str]] = []
+    messages: list[dict[str, Any]] = []
     if request.system_prompt:
         messages.append({"role": "system", "content": str(request.system_prompt)})
     messages.extend(dict(message) for message in request.messages)
     return messages
+
+
+def _request_has_image_attachments(request: AIRequest) -> bool:
+    """Return whether the request carries local image attachments."""
+    return any(str(item.get("type") or "").strip().lower() == "image" for item in list(request.attachments or []))
 
 
 def _truncate_response_if_needed(response: AIResponse, max_output_chars: int) -> AIResponse:
@@ -561,6 +583,7 @@ class LocalGGUFProvider(AIProvider):
 
             runtime = LocalGGUFRuntime()
         self._runtime = runtime
+        self._vision_runtime = None
 
     @property
     def provider_type(self) -> AIProviderType:
@@ -568,9 +591,10 @@ class LocalGGUFProvider(AIProvider):
 
     async def generate_once(self, request: AIRequest) -> AIResponse:
         try:
-            result = await self._runtime.generate_once(
+            runtime, messages = await self._runtime_and_messages_for_request(request)
+            result = await runtime.generate_once(
                 task_id=request.task_id,
-                messages=_messages_for_request(request),
+                messages=messages,
                 model=request.model,
                 temperature=request.temperature,
                 seed=request.seed,
@@ -600,9 +624,10 @@ class LocalGGUFProvider(AIProvider):
         content_parts: list[str] = []
         truncated = False
         try:
-            async for chunk in self._runtime.stream_chat(
+            runtime, messages = await self._runtime_and_messages_for_request(request)
+            async for chunk in runtime.stream_chat(
                 task_id=request.task_id,
-                messages=_messages_for_request(request),
+                messages=messages,
                 model=request.model,
                 temperature=request.temperature,
                 seed=request.seed,
@@ -655,9 +680,19 @@ class LocalGGUFProvider(AIProvider):
 
     async def cancel(self, task_id: str) -> None:
         await self._runtime.cancel(task_id)
+        if self._vision_runtime is not None:
+            await self._vision_runtime.cancel(task_id)
 
     async def get_model_info(self) -> AIModelInfo:
         info = await self._runtime.get_model_info()
+        metadata = dict(getattr(info, "metadata", {}) or {})
+        if self._vision_runtime is not None:
+            try:
+                vision_info = await self._vision_runtime.get_model_info()
+                metadata["vision_runtime_loaded"] = bool(getattr(vision_info, "loaded", False))
+                metadata["vision_runtime_loading"] = bool(getattr(vision_info, "loading", False))
+            except Exception:
+                metadata["vision_runtime_loaded"] = False
         return AIModelInfo(
             provider="local_gguf",
             model=str(getattr(info, "model", "") or ""),
@@ -671,7 +706,7 @@ class LocalGGUFProvider(AIProvider):
             gpu_layers=getattr(info, "gpu_layers", None),
             cpu_threads=int(getattr(info, "cpu_threads", 0) or 0),
             supports_streaming=True,
-            metadata=dict(getattr(info, "metadata", {}) or {}),
+            metadata=metadata,
         )
 
     async def warmup(self) -> None:
@@ -686,6 +721,65 @@ class LocalGGUFProvider(AIProvider):
 
     async def close(self) -> None:
         await self._runtime.close()
+        if self._vision_runtime is not None:
+            await self._vision_runtime.close()
+            self._vision_runtime = None
+
+    async def _runtime_and_messages_for_request(self, request: AIRequest):
+        messages = _messages_for_request(request)
+        if not _request_has_image_attachments(request):
+            runtime = await self._ensure_text_runtime()
+            return runtime, messages
+
+        vision_runtime = await self._ensure_vision_runtime()
+        return vision_runtime, vision_runtime.prepare_messages(messages, request.attachments)
+
+    async def _ensure_text_runtime(self):
+        if self._vision_runtime is not None and not self._should_keep_dual_runtime():
+            await self._vision_runtime.close()
+            self._vision_runtime = None
+        return self._runtime
+
+    async def _ensure_vision_runtime(self):
+        if self._vision_runtime is not None:
+            return self._vision_runtime
+
+        from client.services.local_vision_gguf_runtime import (
+            LocalVisionGGUFRuntime,
+            resolve_vision_projector_path,
+        )
+
+        config = getattr(self._runtime, "config", None)
+        if config is None:
+            raise AIServiceError(
+                AIErrorCode.AI_VISION_RUNTIME_UNAVAILABLE,
+                "Local GGUF runtime does not expose a reusable config for vision",
+            )
+        resolve_vision_projector_path(config)
+        if not self._should_keep_dual_runtime():
+            await self._runtime.close()
+            self._runtime = self._new_text_runtime(config)
+        self._vision_runtime = LocalVisionGGUFRuntime(config)
+        return self._vision_runtime
+
+    def _should_keep_dual_runtime(self) -> bool:
+        override = _optional_bool_env("ASSISTIM_AI_DUAL_RUNTIME")
+        if override is not None:
+            return override
+        config = getattr(self._runtime, "config", None)
+        metadata = dict(getattr(config, "metadata", {}) or {})
+        acceleration_mode = str(metadata.get("acceleration_mode") or "").strip().lower()
+        try:
+            vram_total_gb = float(metadata.get("vram_total_gb") or 0)
+        except (TypeError, ValueError):
+            vram_total_gb = 0.0
+        return acceleration_mode == "gpu" and vram_total_gb >= 8.0
+
+    @staticmethod
+    def _new_text_runtime(config):
+        from client.services.local_gguf_runtime import LocalGGUFRuntime
+
+        return LocalGGUFRuntime(config)
 
     @staticmethod
     def _convert_runtime_error(exc: Exception) -> AIServiceError:

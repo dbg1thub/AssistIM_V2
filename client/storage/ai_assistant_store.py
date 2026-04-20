@@ -44,6 +44,30 @@ def _preview_text(value: str, *, max_chars: int = 72) -> str:
     return text[:max_chars].rstrip() + "..."
 
 
+def _message_preview(content: str, *, role: str = "", status: str = "") -> str:
+    normalized_content = str(content or "").strip()
+    normalized_role = str(role or "").strip().lower()
+    normalized_status = str(status or "").strip().lower()
+    if normalized_role != AIMessageRole.ASSISTANT.value:
+        if normalized_content:
+            return _preview_text(normalized_content)
+        return ""
+    if normalized_status in {AIMessageStatus.PENDING.value, AIMessageStatus.STREAMING.value}:
+        return tr("ai_assistant.preview.generating", "正在生成...")
+    if (
+        normalized_status == AIMessageStatus.CANCELLED.value
+        and normalized_content == tr("ai_assistant.message.cancelled", "已停止生成。")
+    ):
+        return tr("ai_assistant.preview.cancelled", "已停止生成")
+    if normalized_content:
+        return _preview_text(normalized_content)
+    if normalized_status == AIMessageStatus.CANCELLED.value:
+        return tr("ai_assistant.preview.cancelled", "已停止生成")
+    if normalized_status == AIMessageStatus.FAILED.value:
+        return tr("ai_assistant.preview.failed", "生成失败")
+    return ""
+
+
 def _is_default_thread_title(value: str) -> bool:
     title = str(value or "").strip()
     if not title:
@@ -63,50 +87,53 @@ class AIAssistantStore:
     def __init__(self) -> None:
         self._db = get_database()
         self._schema_ready = False
+        self._startup_recovery_done = False
 
     async def initialize(self) -> None:
         """Ensure the shared local database and AI assistant tables exist."""
         if not self._db.is_connected:
             await self._db.connect()
-        if self._schema_ready:
-            return
-        connection = self._connection()
-        await connection.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS ai_threads (
-                thread_id TEXT PRIMARY KEY,
-                title TEXT NOT NULL,
-                model TEXT NOT NULL DEFAULT '',
-                last_message TEXT NOT NULL DEFAULT '',
-                last_message_time INTEGER NOT NULL,
-                status TEXT NOT NULL DEFAULT 'active',
-                extra TEXT NOT NULL DEFAULT '{}',
-                created_at INTEGER NOT NULL,
-                updated_at INTEGER NOT NULL
-            );
+        if not self._schema_ready:
+            connection = self._connection()
+            await connection.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS ai_threads (
+                    thread_id TEXT PRIMARY KEY,
+                    title TEXT NOT NULL,
+                    model TEXT NOT NULL DEFAULT '',
+                    last_message TEXT NOT NULL DEFAULT '',
+                    last_message_time INTEGER NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'active',
+                    extra TEXT NOT NULL DEFAULT '{}',
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL
+                );
 
-            CREATE TABLE IF NOT EXISTS ai_messages (
-                message_id TEXT PRIMARY KEY,
-                thread_id TEXT NOT NULL,
-                role TEXT NOT NULL,
-                content TEXT NOT NULL DEFAULT '',
-                status TEXT NOT NULL DEFAULT 'done',
-                task_id TEXT NOT NULL DEFAULT '',
-                model TEXT NOT NULL DEFAULT '',
-                extra TEXT NOT NULL DEFAULT '{}',
-                created_at INTEGER NOT NULL,
-                updated_at INTEGER NOT NULL,
-                FOREIGN KEY (thread_id) REFERENCES ai_threads(thread_id) ON DELETE CASCADE
-            );
+                CREATE TABLE IF NOT EXISTS ai_messages (
+                    message_id TEXT PRIMARY KEY,
+                    thread_id TEXT NOT NULL,
+                    role TEXT NOT NULL,
+                    content TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT 'done',
+                    task_id TEXT NOT NULL DEFAULT '',
+                    model TEXT NOT NULL DEFAULT '',
+                    extra TEXT NOT NULL DEFAULT '{}',
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL,
+                    FOREIGN KEY (thread_id) REFERENCES ai_threads(thread_id) ON DELETE CASCADE
+                );
 
-            CREATE INDEX IF NOT EXISTS idx_ai_threads_updated_at
-                ON ai_threads(updated_at DESC);
-            CREATE INDEX IF NOT EXISTS idx_ai_messages_thread_created
-                ON ai_messages(thread_id, created_at ASC);
-            """
-        )
-        await connection.commit()
-        self._schema_ready = True
+                CREATE INDEX IF NOT EXISTS idx_ai_threads_updated_at
+                    ON ai_threads(updated_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_ai_messages_thread_created
+                    ON ai_messages(thread_id, created_at ASC);
+                """
+            )
+            await connection.commit()
+            self._schema_ready = True
+        if not self._startup_recovery_done:
+            await self._recover_incomplete_messages()
+            self._startup_recovery_done = True
 
     async def list_threads(self) -> list[AIThread]:
         """Return active assistant threads ordered by recent activity."""
@@ -330,7 +357,11 @@ class AIAssistantStore:
         await self._connection().commit()
 
     async def _touch_thread_from_message(self, message: AIMessage) -> None:
-        preview = _preview_text(message.content)
+        preview = _message_preview(
+            message.content,
+            role=message.role.value if isinstance(message.role, AIMessageRole) else str(message.role or ""),
+            status=message.status.value if isinstance(message.status, AIMessageStatus) else str(message.status or ""),
+        )
         timestamp = _ts(message.updated_at)
         await self._connection().execute(
             """
@@ -345,7 +376,7 @@ class AIAssistantStore:
     async def _refresh_thread_preview(self, thread_id: str) -> None:
         cursor = await self._connection().execute(
             """
-            SELECT content, updated_at FROM ai_messages
+            SELECT role, content, status, updated_at FROM ai_messages
             WHERE thread_id = ?
             ORDER BY updated_at DESC, created_at DESC
             LIMIT 1
@@ -371,8 +402,65 @@ class AIAssistantStore:
             SET last_message = ?, last_message_time = ?, updated_at = ?
             WHERE thread_id = ?
             """,
-            (_preview_text(str(row["content"] or "")), updated_at, updated_at, thread_id),
+            (
+                _message_preview(
+                    str(row["content"] or ""),
+                    role=str(row["role"] or ""),
+                    status=str(row["status"] or ""),
+                ),
+                updated_at,
+                updated_at,
+                thread_id,
+            ),
         )
+
+    async def _recover_incomplete_messages(self) -> None:
+        connection = self._connection()
+        cursor = await connection.execute(
+            """
+            SELECT * FROM ai_messages
+            WHERE status IN (?, ?)
+            ORDER BY updated_at ASC, created_at ASC
+            """,
+            (AIMessageStatus.PENDING.value, AIMessageStatus.STREAMING.value),
+        )
+        rows = await cursor.fetchall()
+        if not rows:
+            return
+
+        now = datetime.now()
+        affected_thread_ids: set[str] = set()
+        for row in rows:
+            message = self._row_to_message(row)
+            message.status = AIMessageStatus.CANCELLED
+            message.task_id = ""
+            message.updated_at = now
+            if message.role == AIMessageRole.ASSISTANT and not str(message.content or "").strip():
+                message.content = tr("ai_assistant.message.cancelled", "已停止生成。")
+            await connection.execute(
+                """
+                INSERT OR REPLACE INTO ai_messages
+                (message_id, thread_id, role, content, status, task_id, model, extra, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    message.message_id,
+                    message.thread_id,
+                    message.role.value if isinstance(message.role, AIMessageRole) else str(message.role),
+                    message.content,
+                    message.status.value if isinstance(message.status, AIMessageStatus) else str(message.status),
+                    message.task_id,
+                    message.model,
+                    json.dumps(message.extra, ensure_ascii=False),
+                    _ts(message.created_at),
+                    _ts(message.updated_at),
+                ),
+            )
+            affected_thread_ids.add(message.thread_id)
+
+        for thread_id in affected_thread_ids:
+            await self._refresh_thread_preview(thread_id)
+        await connection.commit()
 
     @staticmethod
     def _row_to_thread(row) -> AIThread:

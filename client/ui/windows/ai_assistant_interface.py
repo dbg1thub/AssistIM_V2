@@ -3,15 +3,20 @@
 from __future__ import annotations
 
 import asyncio
+import mimetypes
 import time
 import uuid
+from pathlib import Path
 
-from PySide6.QtCore import QEvent, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QKeyEvent, QRegion
+from PySide6.QtCore import QEvent, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QKeyEvent, QPixmap, QRegion
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QDialog,
+    QFileDialog,
     QFrame,
     QHBoxLayout,
+    QLabel,
     QListWidget,
     QListWidgetItem,
     QScrollArea,
@@ -24,8 +29,10 @@ from qfluentwidgets import (
     BodyLabel,
     CaptionLabel,
     IconWidget,
+    MessageBoxBase,
     PrimaryPushButton,
     ScrollBarHandleDisplayMode,
+    SubtitleLabel,
     TransparentToolButton,
     isDarkTheme,
     themeColor,
@@ -44,10 +51,29 @@ from client.storage.ai_assistant_store import get_ai_assistant_store
 
 logger = logging.get_logger(__name__)
 
+SUPPORTED_IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
+
 
 def _qss_rgba(color: QColor, alpha: int | None = None) -> str:
     resolved_alpha = color.alpha() if alpha is None else max(0, min(255, int(alpha)))
     return f"rgba({color.red()}, {color.green()}, {color.blue()}, {resolved_alpha})"
+
+
+def _first_image_attachment(extra: dict | None) -> dict | None:
+    for attachment in list((extra or {}).get("attachments") or []):
+        if isinstance(attachment, dict) and str(attachment.get("type") or "").strip().lower() == "image":
+            return dict(attachment)
+    return None
+
+
+def _attachment_display_name(attachment: dict | None) -> str:
+    if not attachment:
+        return ""
+    name = str(attachment.get("name") or "").strip()
+    if name:
+        return name
+    path = str(attachment.get("local_path") or "").strip()
+    return Path(path).name if path else ""
 
 
 class AIAssistantPromptEdit(QTextEdit):
@@ -79,14 +105,29 @@ class AIAssistantMessageCard(QFrame):
 
         self.layout = QVBoxLayout(self)
         self.layout.setContentsMargins(14, 10, 14, 10)
-        self.layout.setSpacing(0)
+        self.layout.setSpacing(8)
+
+        self.image_label = QLabel(self)
+        self.image_label.setObjectName("aiAssistantMessageImage")
+        self.image_label.setFixedSize(220, 140)
+        self.image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.image_label.hide()
 
         self.content_label = BodyLabel(self)
         self.content_label.setWordWrap(True)
+        self.content_label.setMinimumWidth(0)
+        self.content_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.content_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self.content_label.setTextFormat(Qt.TextFormat.PlainText)
+        self.footer_label = CaptionLabel(self)
+        self.footer_label.setWordWrap(True)
+        self.footer_label.setMinimumWidth(0)
+        self.footer_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.footer_label.hide()
 
+        self.layout.addWidget(self.image_label)
         self.layout.addWidget(self.content_label)
+        self.layout.addWidget(self.footer_label)
         self.set_message(message)
 
     def set_fill_width(self, fill: bool) -> None:
@@ -97,14 +138,79 @@ class AIAssistantMessageCard(QFrame):
 
     def set_message(self, message: AIMessage) -> None:
         self.message = message
+        self._set_image_attachment(_first_image_attachment(message.extra))
         self.content_label.setText(message.content or tr("ai_assistant.message.empty", ""))
+        footer_text = ""
+        if bool((message.extra or {}).get("truncated")):
+            footer_text = tr(
+                "ai_assistant.message.truncated_hint",
+                "内容较长，已截断。继续提问可接着往下说。",
+            )
+        elif message.status == AIMessageStatus.FAILED:
+            footer_text = tr(
+                "ai_assistant.message.failed_hint",
+                "本次生成未完成。你可以继续追问，或稍后再试。",
+            )
+        self.footer_label.setText(footer_text)
+        self.footer_label.setVisible(bool(footer_text))
+        self._sync_text_metrics()
         self._apply_theme()
+
+    def _set_image_attachment(self, attachment: dict | None) -> None:
+        path = str((attachment or {}).get("local_path") or "").strip()
+        if not path or not Path(path).is_file():
+            self.image_label.clear()
+            self.image_label.hide()
+            return
+        pixmap = QPixmap(path)
+        if pixmap.isNull():
+            self.image_label.clear()
+            self.image_label.hide()
+            return
+        scaled = pixmap.scaled(
+            QSize(220, 140),
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        self.image_label.setPixmap(scaled)
+        self.image_label.setToolTip(_attachment_display_name(attachment))
+        self.image_label.show()
 
     def set_content(self, content: str, *, status: AIMessageStatus | None = None) -> None:
         if status is not None:
             self.message.status = status
         self.message.content = str(content or "")
         self.set_message(self.message)
+
+    def _sync_text_metrics(self) -> None:
+        self._sync_wrapped_label_height(self.content_label)
+        self._sync_wrapped_label_height(self.footer_label, visible=self.footer_label.isVisible())
+        self.layout.activate()
+        self.updateGeometry()
+
+    def _sync_wrapped_label_height(self, label: QLabel, *, visible: bool = True) -> None:
+        if not visible:
+            label.setFixedHeight(0)
+            return
+        available_width = label.width()
+        if available_width <= 0:
+            margins = self.layout.contentsMargins()
+            available_width = max(0, self.width() - margins.left() - margins.right())
+        if available_width <= 0:
+            return
+        metrics = label.fontMetrics()
+        text = label.text() or ""
+        bounding = metrics.boundingRect(
+            0,
+            0,
+            available_width,
+            0,
+            int(Qt.TextFlag.TextWordWrap | Qt.TextFlag.TextExpandTabs),
+            text,
+        )
+        target_height = max(metrics.height(), bounding.height())
+        if label.height() != target_height:
+            label.setFixedHeight(target_height)
 
     def _apply_theme(self) -> None:
         if self._applying_theme:
@@ -116,10 +222,16 @@ class AIAssistantMessageCard(QFrame):
                 user_bg = _qss_rgba(QColor(themeColor()), 58)
                 assistant_bg = "transparent"
                 text = "rgba(246, 248, 250, 235)" if role == AIMessageRole.USER.value else "rgba(236, 239, 243, 230)"
+                muted_text = "rgba(236, 239, 243, 166)"
+                image_border = "rgba(255,255,255,0.14)"
+                image_bg = "rgba(255,255,255,0.04)"
             else:
                 user_bg = _qss_rgba(QColor(themeColor()), 22)
                 assistant_bg = "transparent"
                 text = "rgb(26, 26, 26)"
+                muted_text = "rgba(26, 26, 26, 150)"
+                image_border = "rgba(15,23,42,0.12)"
+                image_bg = "rgba(255,255,255,0.62)"
             bg = user_bg if role == AIMessageRole.USER.value else assistant_bg
             self.setStyleSheet(
                 f"""
@@ -132,8 +244,20 @@ class AIAssistantMessageCard(QFrame):
                     color: {text};
                     background: transparent;
                 }}
+                QLabel[isFooter="true"] {{
+                    color: {muted_text};
+                    background: transparent;
+                }}
+                QLabel#aiAssistantMessageImage {{
+                    background: {image_bg};
+                    border: 1px solid {image_border};
+                    border-radius: 8px;
+                }}
                 """
             )
+            self.footer_label.setProperty("isFooter", True)
+            self.footer_label.style().unpolish(self.footer_label)
+            self.footer_label.style().polish(self.footer_label)
         finally:
             self._applying_theme = False
 
@@ -146,43 +270,96 @@ class AIAssistantMessageCard(QFrame):
         }:
             self._apply_theme()
 
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._sync_text_metrics()
+
 
 class AIAssistantMessageRow(QWidget):
-    """Message row that keeps assistant content growth anchored from the left."""
+    """Message row that aligns assistant/user content to the composer track."""
 
-    CONTENT_MAX_WIDTH = 1100
+    DEFAULT_CONTENT_WIDTH = 1100
+    MIN_CONTENT_WIDTH = 320
 
     def __init__(self, message: AIMessage, parent=None):
         super().__init__(parent)
         self.message = message
+        self._role = message.role.value if isinstance(message.role, AIMessageRole) else str(message.role or "")
+        self._content_width = self.DEFAULT_CONTENT_WIDTH
         self.card = AIAssistantMessageCard(message, self)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
         self.row_layout = QHBoxLayout(self)
         self.row_layout.setContentsMargins(0, 0, 0, 0)
         self.row_layout.setSpacing(0)
 
-        role = message.role.value if isinstance(message.role, AIMessageRole) else str(message.role or "")
-        self._assistant_lane: QWidget | None = None
-        if role == AIMessageRole.USER.value:
+        self._content_lane = QWidget(self)
+        self._content_lane.setObjectName("aiAssistantMessageLane")
+        self._content_lane.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self._content_lane_layout = QHBoxLayout(self._content_lane)
+        self._content_lane_layout.setContentsMargins(0, 0, 0, 0)
+        self._content_lane_layout.setSpacing(0)
+
+        self.row_layout.addStretch(1)
+        self.row_layout.addWidget(self._content_lane, 0)
+        self.row_layout.addStretch(1)
+
+        if self._role == AIMessageRole.USER.value:
             self.card.set_fill_width(False)
-            self.row_layout.addStretch(1)
-            self.row_layout.addWidget(self.card, 0)
+            self._content_lane_layout.addStretch(1)
+            self._content_lane_layout.addWidget(self.card, 0)
         else:
-            self._assistant_lane = QWidget(self)
-            self._assistant_lane.setObjectName("aiAssistantMessageLane")
             self.card.set_fill_width(True)
-            lane_layout = QHBoxLayout(self._assistant_lane)
-            lane_layout.setContentsMargins(0, 0, 0, 0)
-            lane_layout.setSpacing(0)
-            lane_layout.addWidget(self.card, 1)
-            self.row_layout.addStretch(1)
-            self.row_layout.addWidget(self._assistant_lane, 0)
-            self.row_layout.addStretch(1)
+            self._content_lane_layout.addWidget(self.card, 1)
+
+        self.set_content_width(self.DEFAULT_CONTENT_WIDTH)
+
+    def set_content_width(self, width: int) -> None:
+        capped_width = max(self.MIN_CONTENT_WIDTH, int(width or 0))
+        if (
+            capped_width == self._content_width
+            and self._content_lane.width() == capped_width
+            and self.width() == capped_width
+        ):
+            self.card._sync_text_metrics()
+            return
+        self._content_width = capped_width
+        self.setFixedWidth(capped_width)
+        self._content_lane.setFixedWidth(capped_width)
+        self.card.setMaximumWidth(capped_width)
+        self.row_layout.invalidate()
+        self._content_lane_layout.invalidate()
+        self.card._sync_text_metrics()
+        self._content_lane.updateGeometry()
+        self.updateGeometry()
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
-        if self._assistant_lane is not None:
-            self._assistant_lane.setFixedWidth(min(self.CONTENT_MAX_WIDTH, max(0, self.width())))
+        self.set_content_width(self._content_width)
+
+
+class DeleteAIThreadConfirmDialog(MessageBoxBase):
+    """Ask for confirmation before deleting one local AI assistant thread."""
+
+    def __init__(self, thread_title: str, parent=None):
+        super().__init__(parent=parent)
+        display_name = str(thread_title or "").strip() or tr("ai_assistant.thread.new", "New Chat")
+        title = SubtitleLabel(tr("ai_assistant.delete.confirm_title", "Delete Chat"), self.widget)
+        content = BodyLabel(
+            tr(
+                "ai_assistant.delete.confirm_content",
+                "Delete {name} and remove its local AI messages from this device?",
+                name=display_name,
+            ),
+            self.widget,
+        )
+        content.setWordWrap(True)
+        self.viewLayout.addWidget(title)
+        self.viewLayout.addWidget(content)
+        self.viewLayout.addStretch(1)
+        self.yesButton.setText(tr("ai_assistant.delete.confirm_action", "Delete"))
+        self.cancelButton.setText(tr("common.cancel", "Cancel"))
+        self.widget.setMinimumWidth(380)
 
 
 class AIAssistantComposerControlsOverlay(QWidget):
@@ -196,8 +373,8 @@ class AIAssistantComposerControlsOverlay(QWidget):
         self.attachment_button = TransparentToolButton(AppIcon.ADD, self)
         self.attachment_button.setObjectName("aiAssistantAttachmentButton")
         self.attachment_button.setFixedSize(32, 32)
-        self.attachment_button.setEnabled(False)
-        self.attachment_button.setToolTip(tr("ai_assistant.attachment.disabled", "Add attachment (coming soon)"))
+        self.attachment_button.setEnabled(True)
+        self.attachment_button.setToolTip(tr("ai_assistant.attachment.add", "Add image"))
 
         self.send_button = PrimaryPushButton(tr("common.send", "Send"), self)
         self.send_button.setObjectName("aiAssistantSendButton")
@@ -232,6 +409,64 @@ class AIAssistantComposerControlsOverlay(QWidget):
 
         region = QRegion(self.attachment_button.geometry()).united(QRegion(self.send_button.geometry()))
         self.setMask(region)
+
+
+class AIAssistantPendingAttachmentPreview(QFrame):
+    """Compact image preview shown above the assistant composer."""
+
+    removed = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("aiAssistantPendingAttachmentPreview")
+        self.setFixedHeight(58)
+
+        self.preview_layout = QHBoxLayout(self)
+        self.preview_layout.setContentsMargins(12, 7, 12, 7)
+        self.preview_layout.setSpacing(10)
+
+        self.thumbnail_label = QLabel(self)
+        self.thumbnail_label.setObjectName("aiAssistantPendingAttachmentThumbnail")
+        self.thumbnail_label.setFixedSize(44, 44)
+        self.thumbnail_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        self.name_label = CaptionLabel(self)
+        self.name_label.setObjectName("aiAssistantPendingAttachmentName")
+        self.name_label.setMinimumWidth(0)
+        self.name_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+
+        self.remove_button = TransparentToolButton(AppIcon.CLOSE, self)
+        self.remove_button.setObjectName("aiAssistantPendingAttachmentRemove")
+        self.remove_button.setFixedSize(28, 28)
+        self.remove_button.setToolTip(tr("ai_assistant.attachment.remove", "Remove image"))
+        self.remove_button.clicked.connect(self.removed.emit)
+
+        self.preview_layout.addWidget(self.thumbnail_label)
+        self.preview_layout.addWidget(self.name_label, 1)
+        self.preview_layout.addWidget(self.remove_button)
+        self.hide()
+
+    def set_attachment(self, attachment: dict | None) -> None:
+        if not attachment:
+            self.thumbnail_label.clear()
+            self.name_label.clear()
+            self.hide()
+            return
+
+        path = str(attachment.get("local_path") or "").strip()
+        pixmap = QPixmap(path)
+        if not pixmap.isNull():
+            self.thumbnail_label.setPixmap(
+                pixmap.scaled(
+                    QSize(44, 44),
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+            )
+        else:
+            self.thumbnail_label.clear()
+        self.name_label.setText(_attachment_display_name(attachment) or tr("ai_assistant.attachment.image", "Image"))
+        self.show()
 
 
 class AIAssistantFloatingComposerOverlay(QWidget):
@@ -311,6 +546,7 @@ class AIAssistantInterface(QWidget):
         self._applying_theme = False
         self._scroll_delegate: SmoothScrollDelegate | None = None
         self._is_generating = False
+        self._pending_image_attachment: dict | None = None
 
         self._setup_ui()
         self._subscribe_to_events()
@@ -400,7 +636,7 @@ class AIAssistantInterface(QWidget):
         self.message_layout = QVBoxLayout(self.message_container)
         self.message_layout.setContentsMargins(28, 26, 28, self.MESSAGE_BOTTOM_MARGIN)
         self.message_layout.setSpacing(14)
-        self.message_layout.addStretch(1)
+        self.message_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         self.scroll_area.setWidget(self.message_container)
         self.scroll_area.installEventFilter(self)
         self.scroll_area.viewport().installEventFilter(self)
@@ -444,6 +680,9 @@ class AIAssistantInterface(QWidget):
         self.composer_shell_layout.setContentsMargins(0, 0, 0, 0)
         self.composer_shell_layout.setSpacing(0)
 
+        self.pending_attachment_preview = AIAssistantPendingAttachmentPreview(self.composer_shell)
+        self.pending_attachment_preview.removed.connect(self._clear_pending_attachment)
+
         self.prompt_edit = AIAssistantPromptEdit(self.composer_shell)
         self.prompt_edit.setObjectName("aiAssistantPromptEdit")
         self.prompt_edit.viewport().setObjectName("aiAssistantPromptViewport")
@@ -454,7 +693,9 @@ class AIAssistantInterface(QWidget):
         self.composer_controls_overlay = AIAssistantComposerControlsOverlay(self.composer_shell)
         self.attachment_button = self.composer_controls_overlay.attachment_button
         self.send_button = self.composer_controls_overlay.send_button
+        self.attachment_button.clicked.connect(self._on_attachment_clicked)
         self.send_button.clicked.connect(self._on_send_clicked)
+        self.composer_shell_layout.addWidget(self.pending_attachment_preview)
         self.composer_shell_layout.addWidget(self.prompt_edit, 1)
         self.composer_overlay.set_composer(self.composer_shell)
         self.composer_shell.installEventFilter(self)
@@ -553,6 +794,38 @@ class AIAssistantInterface(QWidget):
         thread = await self._store.create_thread(model="")
         await self._reload_threads(select_thread_id=thread.thread_id)
 
+    def rename_current_thread(self, title: str) -> asyncio.Task | None:
+        """Schedule one rename for the current assistant thread without exposing a UI entry here."""
+        if not self._current_thread_id:
+            return None
+        return self._create_ui_task(
+            self.rename_thread(self._current_thread_id, title),
+            f"rename AI assistant thread {self._current_thread_id}",
+        )
+
+    async def rename_thread(self, thread_id: str, title: str) -> AIThread | None:
+        """Rename one assistant thread and refresh local thread/header state."""
+        normalized_thread_id = str(thread_id or "").strip()
+        if not normalized_thread_id:
+            return None
+        updated = await self._store.update_thread_title(normalized_thread_id, title)
+        if updated is None:
+            return None
+        self._threads = await self._store.list_threads()
+        if normalized_thread_id == self._current_thread_id:
+            self.title_label.setText(updated.title or tr("ai_assistant.thread.new", "New Chat"))
+        self._render_thread_list()
+        return updated
+
+    def regenerate_current_thread(self) -> asyncio.Task | None:
+        """Schedule one regenerate for the current assistant thread without exposing a UI entry here."""
+        if not self._current_thread_id:
+            return None
+        return self._create_ui_task(
+            self._regenerate_last(),
+            f"regenerate AI assistant thread {self._current_thread_id}",
+        )
+
     def _on_thread_item_clicked(self, item: QListWidgetItem) -> None:
         thread_id = str(item.data(Qt.ItemDataRole.UserRole) or "")
         if thread_id and thread_id != self._current_thread_id:
@@ -614,24 +887,18 @@ class AIAssistantInterface(QWidget):
         self.scroll_area.show()
         for message in self._messages:
             self._add_message_card(message)
-        self.message_layout.addStretch(1)
         QTimer.singleShot(0, self._update_input_overlay_positions)
         self._scroll_to_bottom()
 
     def _add_message_card(self, message: AIMessage) -> None:
         wrapper = AIAssistantMessageRow(message, self.message_container)
-        self.message_layout.insertWidget(self._message_insert_index(), wrapper)
+        wrapper.set_content_width(self._message_track_width())
+        self.message_layout.insertWidget(self._message_insert_index(), wrapper, 0, Qt.AlignmentFlag.AlignHCenter)
         self._message_cards[message.message_id] = wrapper.card
 
     def _message_insert_index(self) -> int:
-        """Return the message insertion point, before the bottom spacer only when it exists."""
-        count = self.message_layout.count()
-        if count <= 0:
-            return 0
-        last_item = self.message_layout.itemAt(count - 1)
-        if last_item is not None and last_item.spacerItem() is not None:
-            return count - 1
-        return count
+        """Return the message insertion point for a top-aligned list layout."""
+        return self.message_layout.count()
 
     def _append_message(self, message: AIMessage) -> None:
         self._messages.append(message)
@@ -643,7 +910,6 @@ class AIAssistantInterface(QWidget):
                 widget = item.widget()
                 if widget is not None:
                     widget.deleteLater()
-            self.message_layout.addStretch(1)
         self._add_message_card(message)
         self._scroll_to_bottom()
 
@@ -657,17 +923,66 @@ class AIAssistantInterface(QWidget):
         else:
             self._schedule_single_shot(self._sync_scroll_to_bottom_button)
 
+    def _on_attachment_clicked(self) -> None:
+        file_path, _selected_filter = QFileDialog.getOpenFileName(
+            self.window(),
+            tr("ai_assistant.attachment.open_title", "Select image"),
+            "",
+            tr("ai_assistant.attachment.open_filter", "Images (*.png *.jpg *.jpeg *.webp *.bmp)"),
+        )
+        if not file_path:
+            return
+        attachment = self._build_image_attachment(file_path)
+        if attachment is None:
+            return
+        self._pending_image_attachment = attachment
+        self._sync_pending_attachment_preview()
+
+    def _build_image_attachment(self, file_path: str) -> dict | None:
+        path = Path(file_path).expanduser().resolve()
+        if not path.is_file() or path.suffix.lower() not in SUPPORTED_IMAGE_SUFFIXES:
+            return None
+        mime_type = mimetypes.guess_type(str(path))[0] or "image/jpeg"
+        return {
+            "type": "image",
+            "local_path": str(path),
+            "mime_type": mime_type,
+            "name": path.name,
+            "size_bytes": path.stat().st_size,
+        }
+
+    def _clear_pending_attachment(self) -> None:
+        self._pending_image_attachment = None
+        self._sync_pending_attachment_preview()
+
+    def _sync_pending_attachment_preview(self) -> None:
+        attachment = self._pending_image_attachment
+        self.pending_attachment_preview.set_attachment(attachment)
+        extra_height = self.pending_attachment_preview.height() + 6 if attachment else 0
+        self.composer_shell.setFixedHeight(self.COMPOSER_HEIGHT + extra_height)
+        self.input_safe_area.setFixedHeight(self.INPUT_SAFE_AREA_HEIGHT + extra_height)
+        self._update_input_overlay_positions()
+
     def _on_send_clicked(self) -> None:
         if self._active_task_id:
             self._create_ui_task(self._stop_active_generation(), "stop AI assistant generation from send button")
             return
         text = self.prompt_edit.toPlainText().strip()
+        attachment = dict(self._pending_image_attachment or {})
+        if not text and attachment:
+            text = tr(
+                "ai_assistant.attachment.default_prompt",
+                "请描述这张图片，并说明你能观察到的关键信息。",
+            )
         if not text:
             return
         self.prompt_edit.clear()
-        self._create_ui_task(self._send_prompt(text), "send AI assistant prompt")
+        self._pending_image_attachment = None
+        self._sync_pending_attachment_preview()
+        attachments = [attachment] if attachment else []
+        self._create_ui_task(self._send_prompt(text, attachments=attachments), "send AI assistant prompt")
 
-    async def _send_prompt(self, text: str) -> None:
+    async def _send_prompt(self, text: str, *, attachments: list[dict] | None = None) -> None:
         if not self._current_thread_id:
             thread = await self._store.create_thread()
             await self._reload_threads(select_thread_id=thread.thread_id)
@@ -680,6 +995,7 @@ class AIAssistantInterface(QWidget):
             role=AIMessageRole.USER,
             content=text,
             status=AIMessageStatus.DONE,
+            extra={"attachments": list(attachments or [])} if attachments else None,
         )
         self._append_message(user_message)
         await self._store.maybe_title_from_first_user_message(thread_id, text)
@@ -761,15 +1077,23 @@ class AIAssistantInterface(QWidget):
             return
         status = AIMessageStatus.DONE
         content = str(snapshot.content or "")
+        message_extra = dict(self._active_assistant_message.extra or {})
         if snapshot.state == AITaskState.CANCELLED:
             status = AIMessageStatus.CANCELLED
+            if not content.strip():
+                content = tr("ai_assistant.message.cancelled", "已停止生成。")
         elif snapshot.state == AITaskState.FAILED:
             status = AIMessageStatus.FAILED
             if not content:
                 content = self._error_text(snapshot.error_code)
+        if bool(snapshot.truncated):
+            message_extra["truncated"] = True
+        else:
+            message_extra.pop("truncated", None)
         self._active_assistant_message.content = content
         self._active_assistant_message.status = status
         self._active_assistant_message.model = str(snapshot.model or "")
+        self._active_assistant_message.extra = message_extra
         await self._persist_assistant_message(self._active_assistant_message)
         self._update_message_card(self._active_assistant_message)
         self._active_task_id = ""
@@ -782,6 +1106,10 @@ class AIAssistantInterface(QWidget):
             return tr("ai_assistant.error.context_too_long", "The conversation is too long. Start a new chat or clear context.")
         if error_code == AIErrorCode.AI_MODEL_NOT_FOUND:
             return tr("ai_assistant.error.model_missing", "Local AI model was not found.")
+        if error_code == AIErrorCode.AI_VISION_PROJECTOR_NOT_FOUND:
+            return tr("ai_assistant.error.vision_projector_missing", "Vision projector file was not found.")
+        if error_code in {AIErrorCode.AI_MODEL_VISION_UNSUPPORTED, AIErrorCode.AI_VISION_RUNTIME_UNAVAILABLE}:
+            return tr("ai_assistant.error.vision_unavailable", "The current local AI model cannot read images.")
         return tr("ai_assistant.error.failed", "AI could not complete this request.")
 
     def _on_stop_clicked(self) -> None:
@@ -794,7 +1122,7 @@ class AIAssistantInterface(QWidget):
         await self._task_manager.cancel(task_id)
 
     def _on_regenerate_clicked(self) -> None:
-        self._create_ui_task(self._regenerate_last(), "regenerate AI assistant response")
+        self.regenerate_current_thread()
 
     async def _regenerate_last(self) -> None:
         if not self._current_thread_id:
@@ -844,6 +1172,15 @@ class AIAssistantInterface(QWidget):
         await self._reload_threads(select_thread_id=self._current_thread_id)
 
     def _on_delete_clicked(self) -> None:
+        if not self._current_thread_id:
+            return
+        current_thread = next((thread for thread in self._threads if thread.thread_id == self._current_thread_id), None)
+        dialog = DeleteAIThreadConfirmDialog(
+            current_thread.title if current_thread is not None else self.title_label.text(),
+            self.window(),
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
         self._create_ui_task(self._delete_current_thread(), "delete AI assistant thread")
 
     async def _delete_current_thread(self) -> None:
@@ -858,6 +1195,7 @@ class AIAssistantInterface(QWidget):
     def _set_generating(self, generating: bool) -> None:
         self._is_generating = bool(generating)
         self.send_button.setEnabled(True)
+        self.attachment_button.setEnabled(not generating)
         if generating:
             self.send_button.setText(tr("ai_assistant.stop", "Stop"))
             self.send_button.setIcon(CollectionIcon("stop").icon())
@@ -917,6 +1255,27 @@ class AIAssistantInterface(QWidget):
             return
         self._scroll_delegate.vScrollBar.setForceHidden(not visible)
 
+    def _message_track_width(self) -> int:
+        if hasattr(self, "composer_shell") and self.composer_shell.width() > 0:
+            return self.composer_shell.width()
+        if hasattr(self, "scroll_area"):
+            viewport_width = self.scroll_area.viewport().width()
+            if viewport_width > 0:
+                horizontal_margin = getattr(self.composer_overlay, "HORIZONTAL_MARGIN", 28)
+                return max(self.composer_shell.minimumWidth(), min(self.composer_shell.maximumWidth(), viewport_width - horizontal_margin * 2))
+        return self.composer_shell.maximumWidth()
+
+    def _sync_message_row_widths(self) -> None:
+        track_width = self._message_track_width()
+        for index in range(self.message_layout.count()):
+            item = self.message_layout.itemAt(index)
+            row = item.widget() if item is not None else None
+            if isinstance(row, AIAssistantMessageRow):
+                row.set_content_width(track_width)
+        self.message_layout.invalidate()
+        self.message_container.adjustSize()
+        self.message_container.updateGeometry()
+
     def _sync_message_scrollbar_hover(self) -> None:
         delegate_bar = self._scroll_delegate.vScrollBar if self._scroll_delegate is not None else None
         hovered = (
@@ -947,6 +1306,7 @@ class AIAssistantInterface(QWidget):
         self.composer_controls_overlay.setGeometry(self.composer_shell.rect())
         self.composer_controls_overlay.raise_()
         self.composer_controls_overlay.update_overlay_layout()
+        self._sync_message_row_widths()
         self._position_scroll_to_bottom_button()
         if self.scroll_to_bottom_button.isVisible():
             self.scroll_to_bottom_button.raise_()
@@ -973,6 +1333,7 @@ class AIAssistantInterface(QWidget):
             self.composer_overlay,
             self.composer_shell,
             self.composer_controls_overlay,
+            self.pending_attachment_preview,
             self.prompt_edit,
         }:
             if event.type() in {
@@ -1106,12 +1467,32 @@ class AIAssistantInterface(QWidget):
                     background: transparent;
                     border: none;
                 }}
+                QFrame#aiAssistantPendingAttachmentPreview {{
+                    background: {input_bg};
+                    border: 1px solid {border};
+                    border-bottom: none;
+                    border-top-left-radius: 8px;
+                    border-top-right-radius: 8px;
+                }}
+                QLabel#aiAssistantPendingAttachmentThumbnail {{
+                    background: transparent;
+                    border: 1px solid {border};
+                    border-radius: 6px;
+                }}
+                QLabel#aiAssistantPendingAttachmentName {{
+                    color: {muted_text};
+                    background: transparent;
+                }}
                 QTextEdit#aiAssistantPromptEdit {{
                     background: {input_bg};
                     color: {text};
                     border: 1px solid {border};
                     border-radius: 8px;
                     padding: 10px;
+                }}
+                QFrame#aiAssistantPendingAttachmentPreview + QTextEdit#aiAssistantPromptEdit {{
+                    border-top-left-radius: 0;
+                    border-top-right-radius: 0;
                 }}
                 QWidget#aiAssistantPromptViewport {{
                     background: transparent;
@@ -1126,6 +1507,15 @@ class AIAssistantInterface(QWidget):
                 TransparentToolButton#aiAssistantAttachmentButton:disabled {{
                     background: transparent;
                     color: {disabled_text};
+                }}
+                TransparentToolButton#aiAssistantPendingAttachmentRemove {{
+                    background: transparent;
+                    border: none;
+                    color: {muted_text};
+                    border-radius: 8px;
+                }}
+                TransparentToolButton#aiAssistantPendingAttachmentRemove:hover {{
+                    background: {hover_bg};
                 }}
                 TransparentToolButton#aiAssistantHeaderDeleteButton {{
                     background: transparent;

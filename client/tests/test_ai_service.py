@@ -39,6 +39,7 @@ if "aiohttp" not in sys.modules:
     sys.modules["aiohttp"] = aiohttp
 
 from client.services import ai_service as ai_service_module
+from client.services.local_gguf_runtime import LocalGGUFConfig
 
 
 class FakeStreamingHttpClient:
@@ -242,9 +243,11 @@ class FakeLocalRuntimeChunk:
 
 
 class FakeLocalRuntime:
-    def __init__(self) -> None:
+    def __init__(self, config: LocalGGUFConfig | None = None) -> None:
+        self.config = config or LocalGGUFConfig(metadata={"acceleration_mode": "gpu", "vram_total_gb": 2.0})
         self.cancelled: list[str] = []
         self.warmup_calls = 0
+        self.close_calls = 0
         self.last_generate_kwargs: dict | None = None
         self.last_stream_kwargs: dict | None = None
 
@@ -286,7 +289,7 @@ class FakeLocalRuntime:
         self.warmup_calls += 1
 
     async def close(self) -> None:
-        return None
+        self.close_calls += 1
 
 
 def test_local_gguf_provider_streams_fake_runtime_chunks() -> None:
@@ -337,6 +340,99 @@ def test_local_gguf_provider_forwards_seed_to_runtime_generate_once() -> None:
         assert runtime.last_generate_kwargs['seed'] == 23
         assert runtime.last_generate_kwargs['response_format'] == {'type': 'json_object'}
 
+    asyncio.run(scenario())
+
+
+def test_local_gguf_provider_releases_vision_runtime_on_low_vram_text_request() -> None:
+    async def scenario() -> None:
+        runtime = FakeLocalRuntime()
+        vision_runtime = FakeLocalRuntime()
+        provider = ai_service_module.LocalGGUFProvider(runtime=runtime)
+        provider._vision_runtime = vision_runtime
+        request = ai_service_module.AIRequest(
+            messages=[{'role': 'user', 'content': 'plain text'}],
+            task_id='local-text-after-vision',
+            must_be_local=True,
+        )
+
+        response = await provider.generate_once(request)
+
+        assert response.content == 'local result'
+        assert runtime.last_generate_kwargs is not None
+        assert runtime.last_generate_kwargs['messages'][-1]['content'] == 'plain text'
+        assert vision_runtime.close_calls == 1
+        assert vision_runtime.last_generate_kwargs is None
+        assert provider._vision_runtime is None
+
+    asyncio.run(scenario())
+
+
+def test_local_gguf_provider_keeps_dual_runtime_when_vram_allows_it() -> None:
+    async def scenario() -> None:
+        config = LocalGGUFConfig(metadata={"acceleration_mode": "gpu", "vram_total_gb": 8.0})
+        runtime = FakeLocalRuntime(config=config)
+        vision_runtime = FakeLocalRuntime(config=config)
+        provider = ai_service_module.LocalGGUFProvider(runtime=runtime)
+        provider._vision_runtime = vision_runtime
+        request = ai_service_module.AIRequest(
+            messages=[{'role': 'user', 'content': 'plain text'}],
+            task_id='local-text-after-vision-high-vram',
+            must_be_local=True,
+        )
+
+        response = await provider.generate_once(request)
+
+        assert response.content == 'local result'
+        assert runtime.last_generate_kwargs is not None
+        assert vision_runtime.close_calls == 0
+        assert vision_runtime.last_generate_kwargs is None
+        assert provider._vision_runtime is vision_runtime
+
+    asyncio.run(scenario())
+
+
+def test_local_gguf_provider_dual_runtime_env_override(monkeypatch) -> None:
+    async def scenario() -> None:
+        runtime = FakeLocalRuntime()
+        vision_runtime = FakeLocalRuntime()
+        provider = ai_service_module.LocalGGUFProvider(runtime=runtime)
+        provider._vision_runtime = vision_runtime
+        request = ai_service_module.AIRequest(
+            messages=[{'role': 'user', 'content': 'plain text'}],
+            task_id='local-text-after-vision-env',
+            must_be_local=True,
+        )
+
+        response = await provider.generate_once(request)
+
+        assert response.content == 'local result'
+        assert vision_runtime.close_calls == 0
+        assert provider._vision_runtime is vision_runtime
+
+    monkeypatch.setenv("ASSISTIM_AI_DUAL_RUNTIME", "true")
+    asyncio.run(scenario())
+
+
+def test_local_gguf_provider_disables_dual_runtime_with_env_override(monkeypatch) -> None:
+    async def scenario() -> None:
+        config = LocalGGUFConfig(metadata={"acceleration_mode": "gpu", "vram_total_gb": 12.0})
+        runtime = FakeLocalRuntime(config=config)
+        vision_runtime = FakeLocalRuntime(config=config)
+        provider = ai_service_module.LocalGGUFProvider(runtime=runtime)
+        provider._vision_runtime = vision_runtime
+        request = ai_service_module.AIRequest(
+            messages=[{'role': 'user', 'content': 'plain text'}],
+            task_id='local-text-after-vision-env-disabled',
+            must_be_local=True,
+        )
+
+        response = await provider.generate_once(request)
+
+        assert response.content == 'local result'
+        assert vision_runtime.close_calls == 1
+        assert provider._vision_runtime is None
+
+    monkeypatch.setenv("ASSISTIM_AI_DUAL_RUNTIME", "false")
     asyncio.run(scenario())
 
 

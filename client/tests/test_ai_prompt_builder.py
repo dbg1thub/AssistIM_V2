@@ -112,6 +112,64 @@ def test_ai_chat_request_trims_long_assistant_history() -> None:
     assert request.metadata["prompt_chars"] <= builder.AI_CHAT_CONTEXT_CHARS
 
 
+def test_ai_chat_request_carries_latest_user_image_attachment() -> None:
+    builder = AIPromptBuilder()
+    attachment = {
+        "type": "image",
+        "local_path": "C:/tmp/demo.png",
+        "mime_type": "image/png",
+        "name": "demo.png",
+    }
+    messages = [
+        AIMessage("u1", "thread-1", AIMessageRole.USER, "上一张图", extra={"attachments": [attachment]}),
+        AIMessage("a1", "thread-1", AIMessageRole.ASSISTANT, "已分析"),
+        AIMessage("u2", "thread-1", AIMessageRole.USER, "这张图里有什么？", extra={"attachments": [attachment]}),
+    ]
+
+    request = builder.build_ai_chat_request("thread-1", messages, task_id="ai-chat-image")
+
+    assert request.attachments == [attachment]
+    assert request.metadata["has_image_attachment"] is True
+    assert request.metadata["image_attachment_count"] == 1
+    assert request.metadata["vision_minimal_context"] is True
+    assert request.messages == [{"role": "user", "content": "这张图里有什么？"}]
+    assert "当用户发送图片时" in request.system_prompt
+
+
+def test_ai_chat_image_request_uses_default_prompt_without_history_when_text_empty() -> None:
+    builder = AIPromptBuilder()
+    attachment = {"type": "image", "local_path": "C:/tmp/demo.png", "mime_type": "image/png"}
+    messages = [
+        AIMessage("u1", "thread-1", AIMessageRole.USER, "先前问题"),
+        AIMessage("a1", "thread-1", AIMessageRole.ASSISTANT, "先前回答"),
+        AIMessage("u2", "thread-1", AIMessageRole.USER, "", extra={"attachments": [attachment]}),
+    ]
+
+    request = builder.build_ai_chat_request("thread-1", messages, task_id="ai-chat-image-default")
+
+    assert request.attachments == [attachment]
+    assert request.metadata["vision_minimal_context"] is True
+    assert len(request.messages) == 1
+    assert request.messages[0]["role"] == "user"
+    assert request.messages[0]["content"] == "请描述这张图片，并说明你能观察到的关键信息。"
+
+
+def test_ai_chat_request_ignores_historical_image_attachment_after_latest_text() -> None:
+    builder = AIPromptBuilder()
+    attachment = {"type": "image", "local_path": "C:/tmp/demo.png", "mime_type": "image/png"}
+    messages = [
+        AIMessage("u1", "thread-1", AIMessageRole.USER, "上一张图", extra={"attachments": [attachment]}),
+        AIMessage("a1", "thread-1", AIMessageRole.ASSISTANT, "已分析"),
+        AIMessage("u2", "thread-1", AIMessageRole.USER, "继续说文本问题"),
+    ]
+
+    request = builder.build_ai_chat_request("thread-1", messages, task_id="ai-chat-text")
+
+    assert request.attachments == []
+    assert request.metadata["has_image_attachment"] is False
+    assert request.metadata["vision_minimal_context"] is False
+
+
 def test_reply_suggestion_prompt_anchors_latest_peer_text() -> None:
     builder = AIPromptBuilder()
     session = Session(session_id="s1", name="Alice", session_type="direct")
@@ -227,20 +285,26 @@ def test_reply_suggestion_prompt_includes_local_summary_context_when_available()
         messages,
         summary_context=ReplySummaryContext(
             open_bucket_summary="当前主要在确认周日下午是否见面。",
+            weekly_history_summary="近一周主要在讨论周末见面安排，已经确认地点，具体时间还没最后敲定。",
             recent_bucket_summaries=("之前已经确认了见面地点。", "还没有最终敲定具体时间。"),
+            related_history_lines=("2026-04-12 对方: 之前提过那家店周日人会少一点。",),
         ),
     )
 
     prompt = built.request.messages[0]["content"]
     assert "最近直接上下文：" in prompt
     assert "背景摘要（仅供参考，用来避免前后矛盾；不要优先复述已经确认过的话题）：" in prompt
+    assert "相关旧消息（仅在和当前话题明显相关时参考，不要生硬照搬原话）：" in prompt
     assert "当前时间段摘要：" in prompt
-    assert "最近历史摘要：" in prompt
+    assert "一周历史摘要：" in prompt
     assert "当前主要在确认周日下午是否见面。" in prompt
-    assert "之前已经确认了见面地点。" in prompt
+    assert "近一周主要在讨论周末见面安排，已经确认地点，具体时间还没最后敲定。" in prompt
+    assert "2026-04-12 对方: 之前提过那家店周日人会少一点。" in prompt
     assert built.request.system_prompt is not None
     assert built.request.metadata["has_open_bucket_summary"] is True
-    assert built.request.metadata["history_summary_count"] == 2
+    assert built.request.metadata["has_weekly_history_summary"] is True
+    assert built.request.metadata["history_summary_count"] == 0
+    assert built.request.metadata["history_recall_count"] == 1
 
 
 def test_single_reply_suggestion_prompt_includes_existing_candidates_and_style() -> None:

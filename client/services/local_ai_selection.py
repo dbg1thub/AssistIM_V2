@@ -34,6 +34,11 @@ class LocalAIModelSpec:
     min_vram_gb: float = 0.0
     recommended_vram_gb: float = 0.0
     default_context_size: int = 4096
+    supports_vision: bool = False
+    vision_projector_file: str = ""
+    vision_projector_globs: tuple[str, ...] = field(default_factory=tuple)
+    vision_chat_handler: str = ""
+    vision_image_max_tokens: int = 0
 
     @property
     def model_path(self) -> Path:
@@ -122,6 +127,14 @@ def resolve_local_ai_selection(
                 if context_size <= 0:
                     context_size = selected_model.default_context_size
 
+    if selected_model is None and installed_specs:
+        selected_model = _configured_model_spec(
+            installed_specs,
+            model_id=model_id,
+            model_path=model_path,
+            models_dir=models_dir,
+        )
+
     cpu_threads = _resolve_cpu_threads(config, capability)
     gpu_layers, acceleration_mode, acceleration_reason = _resolve_gpu_layers(config, capability)
     metadata = {
@@ -148,6 +161,7 @@ def resolve_local_ai_selection(
         "missing_cuda_deps": ",".join(capability.missing_cuda_dependencies),
         "gpu_probe_error": capability.gpu_probe_error,
     }
+    metadata.update(_vision_metadata_for_spec(selected_model, models_dir=models_dir))
     if selected_model is not None:
         metadata.update(
             {
@@ -208,6 +222,11 @@ def load_local_ai_model_specs(
                 min_vram_gb=float(item.get("min_vram_gb") or 0.0),
                 recommended_vram_gb=float(item.get("recommended_vram_gb") or 0.0),
                 default_context_size=int(item.get("default_context_size") or 4096),
+                supports_vision=bool(item.get("supports_vision", False)),
+                vision_projector_file=str(item.get("vision_projector_file") or "").strip(),
+                vision_projector_globs=_parse_string_tuple(item.get("vision_projector_globs")),
+                vision_chat_handler=str(item.get("vision_chat_handler") or "").strip(),
+                vision_image_max_tokens=int(item.get("vision_image_max_tokens") or 0),
             )
         )
     return specs
@@ -257,6 +276,83 @@ def _preferred_default_model(installed_specs: list[LocalAIModelSpec]) -> LocalAI
         if spec.model_id == DEFAULT_AI_MODEL_ID:
             return spec
     return None
+
+
+def _configured_model_spec(
+    installed_specs: list[LocalAIModelSpec],
+    *,
+    model_id: str,
+    model_path: str,
+    models_dir: Path,
+) -> LocalAIModelSpec | None:
+    normalized_model_id = str(model_id or "").strip()
+    if normalized_model_id:
+        for spec in installed_specs:
+            if spec.model_id == normalized_model_id:
+                return spec
+    if model_path:
+        try:
+            normalized_path = Path(model_path).expanduser().resolve()
+        except Exception:
+            normalized_path = Path(model_path)
+        for spec in installed_specs:
+            try:
+                if (models_dir / spec.file_name).resolve() == normalized_path:
+                    return spec
+            except Exception:
+                continue
+    return None
+
+
+def _vision_metadata_for_spec(spec: LocalAIModelSpec | None, *, models_dir: Path) -> dict[str, Any]:
+    env_projector_path = str(os.getenv("ASSISTIM_AI_VISION_MMPROJ_PATH", "") or "").strip()
+    supports_vision = bool((spec and spec.supports_vision) or env_projector_path)
+    metadata: dict[str, Any] = {
+        "supports_vision": supports_vision,
+        "vision_chat_handler": str(getattr(spec, "vision_chat_handler", "") or "gemma4"),
+        "vision_mmproj_file": str(getattr(spec, "vision_projector_file", "") or ""),
+        "vision_mmproj_path": "",
+        "vision_mmproj_available": False,
+        "vision_image_max_tokens": int(getattr(spec, "vision_image_max_tokens", 0) or 0),
+    }
+    if not supports_vision:
+        return metadata
+
+    projector_path = _resolve_vision_projector_path_for_spec(spec, models_dir=models_dir)
+    if projector_path is not None:
+        metadata["vision_mmproj_path"] = str(projector_path)
+        metadata["vision_mmproj_available"] = projector_path.is_file()
+    if spec is not None and spec.vision_projector_globs:
+        metadata["vision_projector_globs"] = "|".join(spec.vision_projector_globs)
+    return metadata
+
+
+def _resolve_vision_projector_path_for_spec(
+    spec: LocalAIModelSpec | None,
+    *,
+    models_dir: Path,
+) -> Path | None:
+    env_projector_path = str(os.getenv("ASSISTIM_AI_VISION_MMPROJ_PATH", "") or "").strip()
+    if env_projector_path:
+        return Path(env_projector_path).expanduser().resolve()
+    if spec is None or not spec.supports_vision:
+        return None
+    if spec.vision_projector_file:
+        return (models_dir / spec.vision_projector_file).resolve()
+    for pattern in spec.vision_projector_globs:
+        matches = sorted(models_dir.glob(pattern))
+        for candidate in matches:
+            if candidate.is_file():
+                return candidate.resolve()
+    return None
+
+
+def _parse_string_tuple(value: object) -> tuple[str, ...]:
+    if isinstance(value, str):
+        values = [value]
+    else:
+        values = list(value or []) if isinstance(value, (list, tuple)) else []
+    return tuple(str(item or "").strip() for item in values if str(item or "").strip())
 
 
 @lru_cache(maxsize=1)

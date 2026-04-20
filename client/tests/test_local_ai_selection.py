@@ -35,6 +35,43 @@ def _capability(
     )
 
 
+def test_local_ai_manifest_parses_vision_projector_metadata(monkeypatch, tmp_path) -> None:
+    manifest_path, models_dir = _write_manifest(
+        tmp_path,
+        [
+            {
+                "model_id": "gemma-vision",
+                "file_name": "gemma-vision.gguf",
+                "parameter_billion": 2,
+                "supports_vision": True,
+                "vision_chat_handler": "gemma4",
+                "vision_projector_globs": ["mmproj-*.gguf"],
+                "vision_image_max_tokens": 768,
+            }
+        ],
+    )
+    (models_dir / "gemma-vision.gguf").write_bytes(b"model")
+    projector = models_dir / "mmproj-gemma-4-e2b-bf16.gguf"
+    projector.write_bytes(b"mmproj")
+    monkeypatch.setattr(selection_module, "detect_local_ai_capabilities", lambda: _capability())
+
+    specs = selection_module.load_local_ai_model_specs(manifest_path=manifest_path)
+    resolved = selection_module.resolve_local_ai_selection(
+        AIConfig(model_id="gemma-vision", model_path=str(models_dir / "gemma-vision.gguf")),
+        manifest_path=manifest_path,
+        models_dir=models_dir,
+    )
+
+    assert specs[0].supports_vision is True
+    assert specs[0].vision_chat_handler == "gemma4"
+    assert specs[0].vision_projector_globs == ("mmproj-*.gguf",)
+    assert resolved.selected_model is not None
+    assert resolved.runtime_config.metadata["supports_vision"] is True
+    assert resolved.runtime_config.metadata["vision_mmproj_available"] is True
+    assert resolved.runtime_config.metadata["vision_mmproj_path"] == str(projector.resolve())
+    assert resolved.runtime_config.metadata["vision_image_max_tokens"] == 768
+
+
 def test_resolve_local_ai_selection_auto_picks_largest_installed_model_that_fits(monkeypatch, tmp_path) -> None:
     manifest_path, models_dir = _write_manifest(
         tmp_path,

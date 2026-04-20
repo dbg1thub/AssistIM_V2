@@ -229,6 +229,20 @@ def test_ai_ui_i18n_resources_are_registered() -> None:
         "composer.ai.error.context_too_long",
         "composer.ai.error.output_invalid",
         "composer.ai.failed",
+        "ai_assistant.message.cancelled",
+        "ai_assistant.message.truncated_hint",
+        "ai_assistant.message.failed_hint",
+        "ai_assistant.attachment.add",
+        "ai_assistant.attachment.remove",
+        "ai_assistant.attachment.default_prompt",
+        "ai_assistant.error.vision_projector_missing",
+        "ai_assistant.error.vision_unavailable",
+        "ai_assistant.preview.generating",
+        "ai_assistant.preview.cancelled",
+        "ai_assistant.preview.failed",
+        "ai_assistant.delete.confirm_title",
+        "ai_assistant.delete.confirm_content",
+        "ai_assistant.delete.confirm_action",
         "settings.card.ai_gpu.gpu_unknown",
         "settings.card.ai_gpu.content_warning_vram",
         "chat.translation.pending",
@@ -242,3 +256,62 @@ def test_ai_ui_i18n_resources_are_registered() -> None:
         payload = json.loads(Path(f"client/resources/i18n/{language}.json").read_text(encoding="utf-8"))
         missing = sorted(required_keys - set(payload))
         assert missing == []
+
+
+def test_ai_assistant_rename_capability_exists_without_visible_entry() -> None:
+    assistant_interface = Path("client/ui/windows/ai_assistant_interface.py").read_text(encoding="utf-8")
+
+    assert "def rename_current_thread(self, title: str) -> asyncio.Task | None:" in assistant_interface
+    assert "async def rename_thread(self, thread_id: str, title: str) -> AIThread | None:" in assistant_interface
+    assert "await self._store.update_thread_title(normalized_thread_id, title)" in assistant_interface
+    assert "aiAssistantHeaderRenameButton" not in assistant_interface
+
+
+def test_ai_assistant_delete_uses_confirmation_dialog() -> None:
+    assistant_interface = Path("client/ui/windows/ai_assistant_interface.py").read_text(encoding="utf-8")
+
+    assert "class DeleteAIThreadConfirmDialog(MessageBoxBase):" in assistant_interface
+    assert 'tr("ai_assistant.delete.confirm_title", "Delete Chat")' in assistant_interface
+    assert 'tr("ai_assistant.delete.confirm_action", "Delete")' in assistant_interface
+    assert "dialog = DeleteAIThreadConfirmDialog(" in assistant_interface
+    assert "if dialog.exec() != QDialog.DialogCode.Accepted:" in assistant_interface
+
+
+def test_ai_assistant_regenerate_capability_exists_without_visible_entry() -> None:
+    assistant_interface = Path("client/ui/windows/ai_assistant_interface.py").read_text(encoding="utf-8")
+
+    assert "def regenerate_current_thread(self) -> asyncio.Task | None:" in assistant_interface
+    assert "self._regenerate_last()" in assistant_interface
+    assert 'f"regenerate AI assistant thread {self._current_thread_id}"' in assistant_interface
+    assert "self.regenerate_current_thread()" in assistant_interface
+
+
+def test_ai_assistant_truncation_is_marked_in_message_footer() -> None:
+    assistant_interface = Path("client/ui/windows/ai_assistant_interface.py").read_text(encoding="utf-8")
+
+    assert 'self.footer_label = CaptionLabel(self)' in assistant_interface
+    assert '"ai_assistant.message.truncated_hint"' in assistant_interface
+    assert 'if bool((message.extra or {}).get("truncated")):' in assistant_interface
+    assert '"ai_assistant.message.failed_hint"' in assistant_interface
+    assert 'elif message.status == AIMessageStatus.FAILED:' in assistant_interface
+    assert 'muted_text = "rgba(236, 239, 243, 166)"' in assistant_interface
+    assert 'muted_text = "rgba(26, 26, 26, 150)"' in assistant_interface
+    assert 'message_extra["truncated"] = True' in assistant_interface
+    assert 'message_extra.pop("truncated", None)' in assistant_interface
+
+
+def test_ai_assistant_image_attachment_flow_is_wired() -> None:
+    assistant_interface = Path("client/ui/windows/ai_assistant_interface.py").read_text(encoding="utf-8")
+    prompt_builder = Path("client/managers/ai_prompt_builder.py").read_text(encoding="utf-8")
+    ai_service = Path("client/services/ai_service.py").read_text(encoding="utf-8")
+
+    assert "class AIAssistantPendingAttachmentPreview(QFrame):" in assistant_interface
+    assert "self.attachment_button.setEnabled(True)" in assistant_interface
+    assert "self.attachment_button.clicked.connect(self._on_attachment_clicked)" in assistant_interface
+    assert "QFileDialog.getOpenFileName" in assistant_interface
+    assert '"type": "image"' in assistant_interface
+    assert "extra={\"attachments\": list(attachments or [])} if attachments else None" in assistant_interface
+    assert "self._pending_image_attachment = None" in assistant_interface
+    assert "request.attachments" in ai_service
+    assert "LocalVisionGGUFRuntime" in ai_service
+    assert "attachments=attachments" in prompt_builder

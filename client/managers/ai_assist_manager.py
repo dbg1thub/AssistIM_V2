@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Optional, Sequence
 
+from client.core.datetime_utils import to_epoch_seconds
 from client.managers.ai_prompt_builder import (
     AIAssistAction,
     AIPromptBuilder,
@@ -15,6 +16,7 @@ from client.managers.ai_prompt_builder import (
     ReplySummaryContext,
     coerce_assist_action,
     latest_peer_text_message,
+    latest_peer_text_message_group,
 )
 from client.managers.ai_task_manager import AITaskManager, AITaskSnapshot, AITaskState, get_ai_task_manager
 from client.models.message import ChatMessage, MessageType, Session
@@ -100,6 +102,13 @@ class AIAssistManager:
     """Coordinate prompt building, AI task execution, and ephemeral candidates."""
 
     REPLY_SUMMARY_MIN_AGE_SECONDS = 300
+    REPLY_WEEKLY_HISTORY_MAX_AGE_SECONDS = 7 * 24 * 60 * 60
+    REPLY_WEEKLY_HISTORY_BUCKET_LIMIT = 6
+    REPLY_WEEKLY_HISTORY_MAX_CHARS = 240
+    REPLY_HISTORY_RECALL_LIMIT = 3
+    REPLY_HISTORY_SCAN_LIMIT = 80
+    REPLY_HISTORY_MAX_AGE_SECONDS = 7 * 24 * 60 * 60
+    REPLY_HISTORY_MIN_SCORE = 0.18
 
     def __init__(
         self,
@@ -206,7 +215,11 @@ class AIAssistManager:
                 reason=reason,
             )
 
-        summary_context = await self._load_reply_summary_context(session.session_id)
+        summary_context = await self._load_reply_summary_context(
+            session.session_id,
+            messages,
+            current_user_id=current_user_id,
+        )
         initial_built = self._prompt_builder.build_reply_suggestion_request(
             session,
             messages,
@@ -216,13 +229,16 @@ class AIAssistManager:
         )
         logger.info(
             "[ai-perf] reply_suggestion_request task_id=%s session_id=%s anchor_message_id=%s "
-            "anchor_group_size=%s recent_context_count=%s has_summary=%s prompt_chars=%s",
+            "anchor_group_size=%s recent_context_count=%s has_summary=%s has_weekly_summary=%s "
+            "history_recall_count=%s prompt_chars=%s",
             initial_built.request.task_id,
             initial_built.request.session_id,
             initial_built.request.metadata.get("anchor_message_id"),
             initial_built.request.metadata.get("anchor_group_size"),
             initial_built.request.metadata.get("recent_context_count"),
             initial_built.request.metadata.get("has_summary"),
+            initial_built.request.metadata.get("has_weekly_history_summary"),
+            initial_built.request.metadata.get("history_recall_count"),
             initial_built.request.metadata.get("prompt_chars"),
         )
         running = AIReplySuggestionState(
@@ -440,13 +456,16 @@ class AIAssistManager:
         )
         logger.info(
             "[ai-perf] reply_suggestion_retry_request task_id=%s session_id=%s anchor_message_id=%s "
-            "anchor_group_size=%s recent_context_count=%s has_summary=%s prompt_chars=%s",
+            "anchor_group_size=%s recent_context_count=%s has_summary=%s has_weekly_summary=%s "
+            "history_recall_count=%s prompt_chars=%s",
             fallback_built.request.task_id,
             fallback_built.request.session_id,
             fallback_built.request.metadata.get("anchor_message_id"),
             fallback_built.request.metadata.get("anchor_group_size"),
             fallback_built.request.metadata.get("recent_context_count"),
             fallback_built.request.metadata.get("has_summary"),
+            fallback_built.request.metadata.get("has_weekly_history_summary"),
+            fallback_built.request.metadata.get("history_recall_count"),
             fallback_built.request.metadata.get("prompt_chars"),
         )
         fallback_snapshot = await self._task_manager.run_once(fallback_built.request)
@@ -501,16 +520,27 @@ class AIAssistManager:
             parsed.output_preview,
         )
 
-    async def _load_reply_summary_context(self, session_id: str) -> ReplySummaryContext:
+    async def _load_reply_summary_context(
+        self,
+        session_id: str,
+        messages: Sequence[ChatMessage],
+        *,
+        current_user_id: str = "",
+    ) -> ReplySummaryContext:
         """Load and decrypt recent local bucket summaries for one session."""
         normalized_session_id = str(session_id or "").strip()
         if not normalized_session_id or not self._db.is_connected:
             return ReplySummaryContext()
 
         summary_limit = max(1, int(self._prompt_builder.REPLY_HISTORY_SUMMARY_LIMIT or 1))
+        open_bucket_summary = ""
+        if hasattr(self._db, "get_open_conversation_summary_bucket"):
+            open_bucket = await self._db.get_open_conversation_summary_bucket(normalized_session_id)
+            open_bucket_summary = self._decrypt_bucket_summary(open_bucket)
+
         closed_buckets = await self._db.list_recent_conversation_summary_buckets(
             normalized_session_id,
-            limit=max(summary_limit * 3, summary_limit + 2),
+            limit=max(self.REPLY_WEEKLY_HISTORY_BUCKET_LIMIT * 2, summary_limit * 3, summary_limit + 2),
             is_open=False,
             ready_only=True,
         )
@@ -518,19 +548,179 @@ class AIAssistManager:
         min_allowed_end_ts = now_ts - self.REPLY_SUMMARY_MIN_AGE_SECONDS
         history_summaries: list[str] = []
         for bucket in closed_buckets:
-            if len(history_summaries) >= summary_limit:
-                break
             bucket_end_ts = int(bucket.get("bucket_end_ts") or bucket.get("last_message_ts") or bucket.get("bucket_start_ts") or 0)
             if bucket_end_ts <= 0 or bucket_end_ts > min_allowed_end_ts:
+                continue
+            if now_ts - bucket_end_ts > self.REPLY_WEEKLY_HISTORY_MAX_AGE_SECONDS:
                 continue
             summary_text = self._decrypt_bucket_summary(bucket)
             if not summary_text:
                 continue
             history_summaries.append(summary_text)
+            if len(history_summaries) >= self.REPLY_WEEKLY_HISTORY_BUCKET_LIMIT:
+                break
+
+        weekly_history_summary = self._compose_weekly_history_summary(history_summaries)
+
+        related_history_lines = await self._load_related_history_lines(
+            normalized_session_id,
+            messages,
+            current_user_id=current_user_id,
+        )
 
         return ReplySummaryContext(
-            recent_bucket_summaries=tuple(history_summaries),
+            open_bucket_summary=open_bucket_summary,
+            weekly_history_summary=weekly_history_summary,
+            recent_bucket_summaries=tuple(history_summaries[:summary_limit]),
+            related_history_lines=tuple(related_history_lines),
         )
+
+    def _compose_weekly_history_summary(self, summaries: Sequence[str]) -> str:
+        """Merge recent closed-bucket summaries into one bounded weekly summary."""
+        unique_items: list[str] = []
+        seen: set[str] = set()
+        for item in summaries:
+            normalized = _normalize_history_text(item)
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            unique_items.append(str(item).strip())
+        if not unique_items:
+            return ""
+
+        merged = "；".join(unique_items)
+        max_chars = max(1, int(self.REPLY_WEEKLY_HISTORY_MAX_CHARS or 1))
+        if len(merged) <= max_chars:
+            return merged
+
+        trimmed_parts: list[str] = []
+        total_chars = 0
+        for item in unique_items:
+            extra_chars = len(item) + (1 if trimmed_parts else 0)
+            if total_chars + extra_chars > max_chars:
+                break
+            trimmed_parts.append(item)
+            total_chars += extra_chars
+        if trimmed_parts:
+            return "；".join(trimmed_parts)
+        return merged[:max_chars].rstrip("；，, ")
+
+    async def _load_related_history_lines(
+        self,
+        session_id: str,
+        messages: Sequence[ChatMessage],
+        *,
+        current_user_id: str = "",
+    ) -> list[str]:
+        """Return a few older text messages that are related to the latest topic."""
+        normalized_session_id = str(session_id or "").strip()
+        if not normalized_session_id or not messages:
+            return []
+
+        context_limit = max(1, int(self._prompt_builder.MAX_CONTEXT_MESSAGES or 1))
+        direct_context_messages = list(messages[-context_limit:])
+        if not direct_context_messages:
+            return []
+
+        anchor_group = latest_peer_text_message_group(messages, current_user_id=current_user_id)
+        if not anchor_group:
+            return []
+
+        query_text = " ".join(
+            str(message.content or "").strip()
+            for message in anchor_group
+            if str(message.content or "").strip()
+        ).strip()
+        normalized_query = _normalize_history_text(query_text)
+        if len(normalized_query) < 4:
+            return []
+
+        query_grams = _history_char_ngrams(normalized_query)
+        if not query_grams:
+            return []
+
+        anchor_ts = max(
+            (float(to_epoch_seconds(getattr(message, "timestamp", None)) or 0.0) for message in anchor_group),
+            default=0.0,
+        )
+        oldest_direct_context_ts = min(
+            (
+                float(to_epoch_seconds(getattr(message, "timestamp", None)) or 0.0)
+                for message in direct_context_messages
+                if getattr(message, "timestamp", None) is not None
+            ),
+            default=0.0,
+        )
+        excluded_ids = {
+            str(message.message_id or "").strip()
+            for message in direct_context_messages
+            if str(message.message_id or "").strip()
+        }
+
+        candidate_messages: list[ChatMessage] = list(messages[:-context_limit])
+        if oldest_direct_context_ts > 0 and hasattr(self._db, "get_messages"):
+            try:
+                historical_page = await self._db.get_messages(
+                    normalized_session_id,
+                    limit=self.REPLY_HISTORY_SCAN_LIMIT,
+                    before_timestamp=oldest_direct_context_ts,
+                )
+            except Exception:
+                logger.warning(
+                    "Failed to load related reply-history recall session_id=%s",
+                    normalized_session_id,
+                    exc_info=True,
+                )
+                historical_page = []
+            candidate_messages.extend(historical_page)
+
+        scored_items: list[tuple[float, float, str]] = []
+        seen_ids: set[str] = set()
+        seen_lines: set[str] = set()
+        for message in candidate_messages:
+            message_id = str(getattr(message, "message_id", "") or "").strip()
+            if not message_id or message_id in seen_ids or message_id in excluded_ids:
+                continue
+            seen_ids.add(message_id)
+            if message.message_type != MessageType.TEXT or message.is_ai:
+                continue
+            status_value = str(getattr(message.status, "value", message.status) or "")
+            if status_value in {"failed", "recalled"}:
+                continue
+            content = str(message.content or "").strip()
+            normalized_content = _normalize_history_text(content)
+            if not normalized_content:
+                continue
+            message_ts = float(to_epoch_seconds(getattr(message, "timestamp", None)) or 0.0)
+            if anchor_ts > 0 and message_ts > 0:
+                age_seconds = max(0.0, anchor_ts - message_ts)
+                if age_seconds <= 0 or age_seconds > self.REPLY_HISTORY_MAX_AGE_SECONDS:
+                    continue
+            score = _history_similarity_score(query_grams, normalized_content)
+            if score < self.REPLY_HISTORY_MIN_SCORE:
+                continue
+            line = self._format_related_history_line(message)
+            if line in seen_lines:
+                continue
+            seen_lines.add(line)
+            scored_items.append((score, message_ts, line))
+
+        scored_items.sort(key=lambda item: (item[0], item[1]), reverse=True)
+        limit = max(1, int(self.REPLY_HISTORY_RECALL_LIMIT or 1))
+        return [item[2] for item in scored_items[:limit]]
+
+    def _format_related_history_line(self, message: ChatMessage) -> str:
+        """Format one historical text line for reply-suggestion prompts."""
+        timestamp = getattr(message, "timestamp", None)
+        date_label = timestamp.strftime("%Y-%m-%d") if timestamp is not None else ""
+        role = "我" if message.is_self else "对方"
+        content = str(message.content or "").strip()
+        max_chars = max(1, int(self._prompt_builder.MAX_MESSAGE_CHARS or 1))
+        if len(content) > max_chars:
+            content = content[:max_chars].rstrip()
+        if date_label:
+            return f"{date_label} {role}: {content}"
+        return f"{role}: {content}"
 
     def _decrypt_bucket_summary(self, bucket: dict | None) -> str:
         """Return one decrypted bucket summary or an empty string when unavailable."""
@@ -600,3 +790,30 @@ def get_ai_assist_manager() -> AIAssistManager:
     if _ai_assist_manager is None:
         _ai_assist_manager = AIAssistManager()
     return _ai_assist_manager
+
+
+def _normalize_history_text(value: str) -> str:
+    """Normalize one message string for lightweight history recall scoring."""
+    text = "".join(str(value or "").strip().split()).casefold()
+    return text
+
+
+def _history_char_ngrams(text: str, *, n: int = 2) -> set[str]:
+    """Return character n-grams for a short Chinese chat string."""
+    normalized = _normalize_history_text(text)
+    if not normalized:
+        return set()
+    if len(normalized) <= n:
+        return {normalized}
+    return {normalized[index : index + n] for index in range(len(normalized) - n + 1)}
+
+
+def _history_similarity_score(query_grams: set[str], candidate_text: str) -> float:
+    """Score one historical candidate by overlap with the latest-topic grams."""
+    if not query_grams:
+        return 0.0
+    candidate_grams = _history_char_ngrams(candidate_text)
+    if not candidate_grams:
+        return 0.0
+    overlap = len(query_grams & candidate_grams)
+    return overlap / max(1, len(query_grams))
