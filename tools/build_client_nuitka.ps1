@@ -9,6 +9,10 @@ param(
     [string]$OutputRoot = "dist\client",
     [string]$PythonExe = "python",
     [string]$ConfigTemplate = "deploy\client\config.test.json",
+    [ValidateSet("auto", "msvc", "mingw64", "clang")]
+    [string]$NuitkaCompiler = "auto",
+    [int]$NuitkaJobs = 0,
+    [switch]$AssumeYesForDownloads,
     [switch]$SkipNuitka
 )
 
@@ -131,7 +135,7 @@ if ([string]::IsNullOrWhiteSpace($Version)) {
 }
 $Version = $Version.TrimStart("v")
 $BuildTime = [System.DateTime]::UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ")
-$consoleMode = if ($EnableConsole) { "force" } else { "disable" }
+$consoleMode = if ($EnableConsole -or $Channel -eq "test") { "force" } else { "disable" }
 $Commit = "unknown"
 try {
     $Commit = (& git -C $RepoRoot rev-parse --short HEAD).Trim()
@@ -154,6 +158,23 @@ if (-not $SkipNuitka) {
         "--output-filename=AssistIM.exe",
         $entry
     )
+    if ($AssumeYesForDownloads) {
+        $nuitkaArgs += "--assume-yes-for-downloads"
+    }
+    switch ($NuitkaCompiler) {
+        "msvc" {
+            $nuitkaArgs += "--msvc=latest"
+        }
+        "mingw64" {
+            $nuitkaArgs += "--mingw64"
+        }
+        "clang" {
+            $nuitkaArgs += "--clang"
+        }
+    }
+    if ($NuitkaJobs -gt 0) {
+        $nuitkaArgs += "--jobs=$NuitkaJobs"
+    }
     & $PythonExe @nuitkaArgs
     if ($LASTEXITCODE -ne 0) {
         throw "Nuitka build failed with exit code $LASTEXITCODE"
@@ -269,3 +290,6 @@ Write-Host "Zip: $zipPath"
 Write-Host "Latest manifest: $(Join-Path $ReleaseRoot 'latest.json')"
 Write-Host "Console mode: $consoleMode"
 Write-Host "Runtime logs: $(Join-Path $PackageRoot 'logs\\assistim.log')"
+Write-Host "Nuitka compiler: $NuitkaCompiler"
+Write-Host "Nuitka jobs: $(if ($NuitkaJobs -gt 0) { $NuitkaJobs } else { 'default' })"
+Write-Host "Assume yes for downloads: $([bool]$AssumeYesForDownloads)"
