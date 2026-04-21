@@ -307,6 +307,8 @@ def test_ai_assistant_bypasses_action_workflow_and_uses_rag_before_ai_chat() -> 
     assert "_action_workflow.handle_user_turn" not in send_prompt
     assert "build_rag_context_for_ai_chat" in send_prompt
     assert "action_result.response_text" not in send_prompt
+    assert "rag_history_messages = [" in send_prompt
+    assert "if message.message_id != user_message.message_id" in send_prompt
     assert "memory_context_lines=memory_context.lines" in send_prompt
     assert "_prompt_builder.build_ai_chat_request" in send_prompt
     assert send_prompt.index("build_rag_context_for_ai_chat") < send_prompt.index(
@@ -316,6 +318,8 @@ def test_ai_assistant_bypasses_action_workflow_and_uses_rag_before_ai_chat() -> 
     assert "_action_workflow.handle_user_turn" not in regenerate
     assert "build_rag_context_for_ai_chat" in regenerate
     assert "action_result.response_text" not in regenerate
+    assert "rag_history_messages = [" in regenerate
+    assert "if message.message_id != last_user.message_id" in regenerate
     assert "memory_context_lines=memory_context.lines" in regenerate
     assert "_prompt_builder.build_ai_chat_request" in regenerate
     assert regenerate.index("build_rag_context_for_ai_chat") < regenerate.index(

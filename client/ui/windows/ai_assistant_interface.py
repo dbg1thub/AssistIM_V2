@@ -1045,12 +1045,17 @@ class AIAssistantInterface(QWidget):
         self._update_message_card(assistant_message)
 
         context_messages = [message for message in self._messages if message.message_id != assistant_message.message_id]
+        rag_history_messages = [
+            message
+            for message in context_messages
+            if message.message_id != user_message.message_id
+        ]
         memory_context = ConversationMemoryContext(lines=(), query_kind="")
         try:
             if not attachments:
                 memory_context = await self._memory_manager.build_rag_context_for_ai_chat(
                     text,
-                    previous_messages=context_messages,
+                    previous_messages=rag_history_messages,
                 )
         except Exception as exc:
             logger.exception("AI assistant failed to build local RAG context")
@@ -1203,13 +1208,18 @@ class AIAssistantInterface(QWidget):
         )
         self._append_message(assistant_message)
         context_messages = [message for message in self._messages if message.message_id != assistant_message.message_id]
+        rag_history_messages = [
+            message
+            for message in context_messages
+            if message.message_id != last_user.message_id
+        ]
         attachments = list((last_user.extra or {}).get("attachments") or []) if isinstance(last_user.extra, dict) else []
         memory_context = ConversationMemoryContext(lines=(), query_kind="")
         try:
             if not attachments:
                 memory_context = await self._memory_manager.build_rag_context_for_ai_chat(
                     str(last_user.content or ""),
-                    previous_messages=context_messages,
+                    previous_messages=rag_history_messages,
                 )
         except Exception as exc:
             logger.exception("AI assistant failed to rebuild local RAG context")

@@ -84,21 +84,7 @@ class ConversationRagPlanner:
             return None
 
         now = datetime.now()
-        history_lines: list[str] = []
-        total_chars = 0
-        for message in reversed(list(previous_messages or [])[-self.CONTEXT_MESSAGES :]):
-            role = self._message_role(message)
-            if role not in {"user", "assistant"}:
-                continue
-            content = " ".join(str(getattr(message, "content", "") or "").split())
-            if not content:
-                continue
-            line = f"{role}: {content}"
-            if total_chars + len(line) > self.MAX_CONTEXT_CHARS and history_lines:
-                break
-            history_lines.append(line)
-            total_chars += len(line)
-        history_lines.reverse()
+        history_lines = self._history_lines(previous_messages=previous_messages, current_query=query_text)
         history_block = "\n".join(history_lines) if history_lines else "无"
 
         system_prompt = (
@@ -107,7 +93,8 @@ class ConversationRagPlanner:
             "如果不需要检索，输出 needs_memory=false。\n"
             "如果需要检索，输出一个结构化检索计划。\n"
             "不要规划执行动作，不要调用任何 action workflow。\n"
-            "语义理解由你完成，系统只执行你给出的结构化检索信息。"
+            "语义理解由你完成，系统只执行你给出的结构化检索信息。\n"
+            "最近对话只用于补全指代、省略和追问；如果当前问题本身是新的独立问题，必须以当前问题为准。"
         )
         prompt = (
             f"当前本地时间：{now.strftime('%Y-%m-%d %H:%M:%S')}\n"
@@ -129,8 +116,16 @@ class ConversationRagPlanner:
             "6. 用户没说时间时，time_range.type=all_history，start_ts/end_ts 为 null；不要追问日期。\n"
             "7. 若用户说了明确时间范围，请输出绝对 Unix 秒级时间戳。\n"
             "8. 只有参与人关系会显著改变查询结果且你无法判断时，participant_relation 才输出 unknown。\n"
-            "9. 不要编造不存在的联系人或时间范围，不要输出多余字段。\n\n"
-            f"最近对话：\n{history_block}\n\n"
+            "9. 不要编造不存在的联系人或时间范围，不要输出多余字段。\n"
+            "10. 如果当前问题可以直接回答，例如自我介绍、闲聊、翻译、写作、代码、常识问答，即使上一轮在查聊天记录，也必须 needs_memory=false。\n"
+            "11. 只有当前问题明确依赖本机聊天历史，或者当前句是承接上一轮历史问题的追问时，才 needs_memory=true。\n"
+            "12. 不要把上一轮 AI 自己说过的“聊天记录”“未找到”等话术当成当前用户意图。\n\n"
+            "示例：\n"
+            "- 当前问题：请你自我介绍下 -> needs_memory=false\n"
+            "- 当前问题：帮我把这句话翻译成英文 -> needs_memory=false\n"
+            "- 当前问题：张三昨天聊了什么 -> needs_memory=true\n"
+            "- 最近用户问题：张三上次推荐的那家店是什么？ 当前问题：那家店在哪？ -> needs_memory=true，memory_query 应补全为张三上次推荐的那家店在哪\n\n"
+            f"最近用户消息（仅供补全指代；如果当前问题是新问题，应忽略这些历史）：\n{history_block}\n\n"
             f"当前用户问题：\n{query_text}"
         )
         request = AIRequest(
@@ -172,7 +167,7 @@ class ConversationRagPlanner:
                 return None
         if not isinstance(payload, dict):
             return None
-        needs_memory = bool(payload.get("needs_memory"))
+        needs_memory = ConversationRagPlanner._coerce_bool(payload.get("needs_memory"))
         user_goal = " ".join(str(payload.get("user_goal") or fallback_query).split())
         memory_query = " ".join(str(payload.get("memory_query") or user_goal or fallback_query).split())
         participants = ConversationRagPlanner._coerce_participants(payload.get("participants"))
@@ -249,3 +244,46 @@ class ConversationRagPlanner:
         role = getattr(message, "role", "")
         value = getattr(role, "value", role)
         return str(value or "").strip().lower()
+
+    def _history_lines(
+        self,
+        *,
+        previous_messages: Sequence[Any] | None,
+        current_query: str,
+    ) -> list[str]:
+        history_lines: list[str] = []
+        total_chars = 0
+        normalized_query = " ".join(str(current_query or "").split())
+        for message in reversed(list(previous_messages or [])):
+            role = self._message_role(message)
+            if role != "user":
+                continue
+            content = " ".join(str(getattr(message, "content", "") or "").split())
+            if not content or content == normalized_query:
+                continue
+            line = f"user: {content}"
+            if total_chars + len(line) > self.MAX_CONTEXT_CHARS and history_lines:
+                break
+            history_lines.append(line)
+            total_chars += len(line)
+            if len(history_lines) >= self.CONTEXT_MESSAGES:
+                break
+        history_lines.reverse()
+        return history_lines
+
+    @staticmethod
+    def _coerce_bool(value: Any) -> bool:
+        if isinstance(value, bool):
+            return value
+        if value is None:
+            return False
+        if isinstance(value, (int, float)):
+            return bool(value)
+        normalized = str(value or "").strip().lower()
+        if not normalized:
+            return False
+        if normalized in {"true", "1", "yes", "y", "是", "需要"}:
+            return True
+        if normalized in {"false", "0", "no", "n", "否", "不需要"}:
+            return False
+        return False
