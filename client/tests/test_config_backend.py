@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from client.core import config_backend as config_backend_module
-from client.core.config_backend import ServerConfig, reload_config
+from client.core.config_backend import ServerConfig, get_app_version, get_version_info, reload_config
 
 
 def test_server_config_uses_canonical_api_v1_base_url() -> None:
@@ -12,6 +12,61 @@ def test_server_config_uses_canonical_api_v1_base_url() -> None:
     assert config.origin_url == "https://example.test:8443"
     assert config.api_base_url == "https://example.test:8443/api/v1"
     assert config.ws_url == "wss://example.test:8443/ws"
+
+
+def test_server_config_reads_ui_settings_when_env_missing(monkeypatch, tmp_path: Path) -> None:
+    ui_config_path = tmp_path / "config.json"
+    ui_config_path.write_text(
+        """
+        {
+          "Server": {
+            "Host": "assistim.example.com",
+            "Port": 443,
+            "UseSsl": true
+          }
+        }
+        """,
+        encoding="utf-8",
+    )
+
+    for env_name in ("ASSISTIM_HOST", "ASSISTIM_PORT", "ASSISTIM_USE_SSL"):
+        monkeypatch.delenv(env_name, raising=False)
+    monkeypatch.setattr(config_backend_module, "UI_CONFIG_PATH", ui_config_path)
+
+    config = reload_config()
+
+    assert config.server.host == "assistim.example.com"
+    assert config.server.port == 443
+    assert config.server.use_ssl is True
+    assert config.server.api_base_url == "https://assistim.example.com:443/api/v1"
+
+
+def test_server_config_environment_overrides_ui_settings(monkeypatch, tmp_path: Path) -> None:
+    ui_config_path = tmp_path / "config.json"
+    ui_config_path.write_text(
+        """
+        {
+          "Server": {
+            "Host": "ui.example.com",
+            "Port": 443,
+            "UseSsl": true
+          }
+        }
+        """,
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(config_backend_module, "UI_CONFIG_PATH", ui_config_path)
+    monkeypatch.setenv("ASSISTIM_HOST", "env.example.com")
+    monkeypatch.setenv("ASSISTIM_PORT", "9000")
+    monkeypatch.setenv("ASSISTIM_USE_SSL", "false")
+
+    config = reload_config()
+
+    assert config.server.host == "env.example.com"
+    assert config.server.port == 9000
+    assert config.server.use_ssl is False
+    assert config.server.api_base_url == "http://env.example.com:9000/api/v1"
 
 
 def test_webrtc_config_builds_structured_ice_servers(monkeypatch) -> None:
@@ -96,3 +151,40 @@ def test_ai_config_reads_ui_settings_when_env_missing(monkeypatch, tmp_path: Pat
     assert config.ai.model_id == "qwen3.5-0.8B-Q4_K_M"
     assert config.ai.model_path.replace("\\", "/").endswith("/client/resources/models/qwen3.5-0.8B-Q4_K_M.gguf")
     assert config.ai.gpu_enabled is False
+
+
+def test_version_info_reads_version_file(monkeypatch, tmp_path: Path) -> None:
+    version_path = tmp_path / "version.json"
+    version_path.write_text(
+        """
+        {
+          "app": "AssistIM",
+          "version": "1.2.3",
+          "channel": "test",
+          "platform": "win64",
+          "build_time": "2026-04-22T00:00:00Z"
+        }
+        """,
+        encoding="utf-8",
+    )
+
+    monkeypatch.delenv("ASSISTIM_APP_VERSION", raising=False)
+    monkeypatch.setattr(config_backend_module, "VERSION_FILE_PATH", version_path)
+
+    info = get_version_info()
+
+    assert info["version"] == "1.2.3"
+    assert info["channel"] == "test"
+    assert info["platform"] == "win64"
+    assert info["build_time"] == "2026-04-22T00:00:00Z"
+    assert get_app_version() == "1.2.3"
+
+
+def test_version_info_environment_overrides_file(monkeypatch, tmp_path: Path) -> None:
+    version_path = tmp_path / "version.json"
+    version_path.write_text('{"version": "1.2.3"}', encoding="utf-8")
+
+    monkeypatch.setattr(config_backend_module, "VERSION_FILE_PATH", version_path)
+    monkeypatch.setenv("ASSISTIM_APP_VERSION", "v2.0.0")
+
+    assert get_app_version() == "2.0.0"

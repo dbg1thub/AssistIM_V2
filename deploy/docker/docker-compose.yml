@@ -1,0 +1,60 @@
+services:
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build:
+      context: ../../server
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      APP_NAME: ${APP_NAME}
+      APP_VERSION: ${APP_VERSION}
+      DEBUG: ${DEBUG}
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      SECRET_KEY: ${SECRET_KEY}
+      ACCESS_TOKEN_EXPIRE: ${ACCESS_TOKEN_EXPIRE}
+      REFRESH_TOKEN_EXPIRE_DAYS: ${REFRESH_TOKEN_EXPIRE_DAYS}
+      UPLOAD_DIR: /var/lib/assistim/uploads
+      MEDIA_STORAGE_BACKEND: ${MEDIA_STORAGE_BACKEND}
+      MEDIA_PUBLIC_BASE_URL: ${MEDIA_PUBLIC_BASE_URL}
+      MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES}
+      API_V1_PREFIX: ${API_V1_PREFIX}
+      CORS_ORIGINS: ${CORS_ORIGINS}
+      RATE_LIMIT_LOGIN: ${RATE_LIMIT_LOGIN}
+      RATE_LIMIT_REGISTER: ${RATE_LIMIT_REGISTER}
+      RATE_LIMIT_FRIEND_REQUEST: ${RATE_LIMIT_FRIEND_REQUEST}
+      RATE_LIMIT_STORE_BACKEND: ${RATE_LIMIT_STORE_BACKEND}
+      WEBRTC_ICE_SERVER_URLS: ${WEBRTC_ICE_SERVER_URLS}
+      WEBRTC_STUN_URLS: ${WEBRTC_STUN_URLS}
+      WEBRTC_TURN_URLS: ${WEBRTC_TURN_URLS}
+      WEBRTC_TURN_USERNAME: ${WEBRTC_TURN_USERNAME}
+      WEBRTC_TURN_CREDENTIAL: ${WEBRTC_TURN_CREDENTIAL}
+      WEBRTC_TURN_SHARED_SECRET: ${WEBRTC_TURN_SHARED_SECRET}
+      WEBRTC_TURN_CREDENTIAL_TTL_SECONDS: ${WEBRTC_TURN_CREDENTIAL_TTL_SECONDS}
+    ports:
+      - "127.0.0.1:${API_PORT}:8000"
+    volumes:
+      - uploads-data:/var/lib/assistim/uploads
+    command: >
+      sh -c "python -m alembic -c server/alembic.ini upgrade head &&
+             python -m uvicorn app.main:app --app-dir server --host 0.0.0.0 --port 8000"
+
+volumes:
+  postgres-data:
+  uploads-data:

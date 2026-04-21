@@ -1,0 +1,16 @@
+[Unit]
+Description=AssistIM FastAPI backend
+After=network.target postgresql.service
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/assistim/app
+EnvironmentFile=/etc/assistim/server.env
+ExecStart=/opt/assistim/venv/bin/python -m uvicorn app.main:app --app-dir server --host 127.0.0.1 --port 8000
+Restart=always
+RestartSec=3
+User=assistim
+Group=assistim
+
+[Install]
+WantedBy=multi-user.target

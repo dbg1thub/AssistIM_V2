@@ -1,0 +1,32 @@
+{
+  "AI": {
+    "GpuAccelerationEnabled": true,
+    "ModelId": "gemma-4-E2B-it-Q4_K_M"
+  },
+  "MainWindow": {
+    "DpiScale": "Auto",
+    "Language": "zh_CN"
+  },
+  "App": {
+    "ExitConfirmEnabled": false
+  },
+  "QFluentWidgets": {
+    "FontFamilies": [
+      "Segoe UI",
+      "Microsoft YaHei",
+      "PingFang SC"
+    ]
+  },
+  "Sound": {
+    "MessageEnabled": true,
+    "Enabled": true,
+    "Volume": 85
+  },
+  "Window": {
+    "MicaEnabled": true
+  },
+  "Theme": {
+    "ThemeColor": "#ff07c160",
+    "ThemeMode": "Dark"
+  }
+}

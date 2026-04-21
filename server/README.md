@@ -60,6 +60,21 @@ Invoke-RestMethod -Method Post `
 
 The scripts automatically prefer `server/.venv/Scripts/python.exe` when present.
 
+## Cloud test deployment
+
+For the first shared test build, deploy the backend on one cloud server and package the Windows client with the server address written into `data/config.json`.
+
+Use:
+
+- `server/Dockerfile`, `server/.dockerignore`, and `deploy/docker/docker-compose.yml` for the Docker Compose deployment path
+- `deploy/docker/server.env.example` as the Docker env template; set the database password by editing `POSTGRES_PASSWORD` in that file
+- `server/.env.production.example` as the production environment template
+- `docs/deployment/test_release_deploy.md` for Ubuntu + PostgreSQL + Nginx + systemd deployment steps
+- `deploy/server/assistim-api.service.example` and `deploy/server/nginx-assistim.conf.example` as server config templates
+- `tools/build_client_nuitka.ps1` for the Windows client package
+
+The client package intentionally excludes local model weight files such as `.gguf`; model files should be distributed separately when AI features need to be tested.
+
 ## Tests
 
 Run the backend integration tests with:

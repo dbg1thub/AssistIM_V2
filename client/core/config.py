@@ -20,7 +20,7 @@ from qfluentwidgets import (
     qconfig,
 )
 
-from client.core.config_backend import DEFAULT_AI_MODEL_ID
+from client.core.config_backend import APP_ROOT, DEFAULT_AI_MODEL_ID, get_app_version
 
 
 class Language(Enum):
@@ -134,7 +134,7 @@ class Config(QConfig):
 
     @property
     def appVersion(self) -> str:
-        return "v1.0.0"
+        return f"v{get_app_version()}"
 
     @property
     def appName(self) -> str:
@@ -142,7 +142,7 @@ class Config(QConfig):
 
 
 cfg = Config()
-qconfig.load(Path(__file__).resolve().parents[2] / "data" / "config.json", cfg)
+qconfig.load(APP_ROOT / "data" / "config.json", cfg)
 
 
 def save_config() -> None:
