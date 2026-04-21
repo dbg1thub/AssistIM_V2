@@ -51,9 +51,10 @@ services:
       - "127.0.0.1:${API_PORT}:8000"
     volumes:
       - uploads-data:/var/lib/assistim/uploads
+      - ../../client/resources/avatars:/app/client/resources/avatars:ro
     command: >
-      sh -c "python -m alembic -c server/alembic.ini upgrade head &&
-             python -m uvicorn app.main:app --app-dir server --host 0.0.0.0 --port 8000"
+      sh -c "python -m alembic -c alembic.ini upgrade head &&
+             python -m uvicorn app.main:app --host 0.0.0.0 --port 8000"
 
 volumes:
   postgres-data:

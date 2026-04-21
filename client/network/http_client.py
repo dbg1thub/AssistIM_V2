@@ -57,6 +57,7 @@ class HTTPClient:
         self._token_generation = 0
         self._token_listeners: list[Callable[[Optional[str], Optional[str]], None]] = []
         self._auth_loss_listeners: list[Callable[[str], None]] = []
+        logger.info("HTTP client configured base_url=%s origin_url=%s", self._base_url, self._origin_url)
 
     @property
     def is_connected(self) -> bool:

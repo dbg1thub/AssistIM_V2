@@ -30,18 +30,30 @@ class SafeRotatingFileHandler(RotatingFileHandler):
                 self.stream.flush()
 
 
+def _default_log_dir() -> Path:
+    """Resolve one stable log directory for dev and packaged runtimes."""
+    explicit_dir = os.getenv("ASSISTIM_LOG_DIR", "").strip()
+    if explicit_dir:
+        return Path(explicit_dir).expanduser().resolve()
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent / "logs"
+    return Path(__file__).resolve().parents[2] / "logs"
+
+
 def _default_log_path() -> str:
     """Resolve the default log file path, isolating profiles when requested."""
     explicit_path = os.getenv("ASSISTIM_LOG_FILE", "").strip()
     if explicit_path:
         return explicit_path
 
+    log_dir = _default_log_dir()
+
     profile = os.getenv("ASSISTIM_PROFILE", "").strip()
     if profile:
         safe_profile = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in profile) or "default"
-        return f"logs/assistim.{safe_profile}.log"
+        return str(log_dir / f"assistim.{safe_profile}.log")
 
-    return "logs/assistim.log"
+    return str(log_dir / "assistim.log")
 
 
 @dataclass

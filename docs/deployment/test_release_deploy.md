@@ -128,11 +128,26 @@ docker compose --env-file deploy/docker/server.env -f deploy/docker/docker-compo
 - PostgreSQL 会自动初始化
 - API 容器启动前会先执行 `alembic upgrade head`
 - 后端只暴露到 `127.0.0.1:8000`
+- Compose 会把仓库里的 `client/resources/avatars` 只读挂载到容器内，供默认头像分配使用
 
 另开终端验证：
 
 ```bash
 curl http://127.0.0.1:8000/
+```
+
+后续服务器增量更新不需要重新 clone，直接在仓库目录里执行：
+
+```bash
+cd /opt/assistim/app
+bash tools/deploy_server_update.sh
+```
+
+如果只是本地手改了服务器上的代码，或者已经手动 `git pull` 过，只重建 API：
+
+```bash
+cd /opt/assistim/app
+bash tools/rebuild_api.sh
 ```
 
 ## 五、Nginx 反向代理

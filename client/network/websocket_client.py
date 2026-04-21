@@ -131,6 +131,7 @@ class WebSocketClient:
         """Initialize WebSocket client."""
         config = get_config()
         self.url = self.url or config.server.ws_url
+        logger.info("WebSocket client configured url=%s", self.url)
         
         if _SIGNALS_AVAILABLE:
             self.signals = WebSocketSignals()

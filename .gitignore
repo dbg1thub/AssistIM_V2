@@ -69,4 +69,8 @@ server/.testdata_manual
 client/tests/.pytest_tmp
 client/data/screenshots
 
+# codex
+.codex
 
+# idea
+.idea

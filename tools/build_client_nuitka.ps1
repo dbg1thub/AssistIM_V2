@@ -5,6 +5,7 @@ param(
     [string]$ServerHost = "",
     [int]$ServerPort = 443,
     [switch]$UseSsl,
+    [switch]$EnableConsole,
     [string]$OutputRoot = "dist\client",
     [string]$PythonExe = "python",
     [string]$ConfigTemplate = "deploy\client\config.test.json",
@@ -130,6 +131,7 @@ if ([string]::IsNullOrWhiteSpace($Version)) {
 }
 $Version = $Version.TrimStart("v")
 $BuildTime = [System.DateTime]::UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ")
+$consoleMode = if ($EnableConsole) { "force" } else { "disable" }
 $Commit = "unknown"
 try {
     $Commit = (& git -C $RepoRoot rev-parse --short HEAD).Trim()
@@ -147,7 +149,7 @@ if (-not $SkipNuitka) {
         "-m", "nuitka",
         "--standalone",
         "--enable-plugin=pyside6",
-        "--windows-console-mode=disable",
+        "--windows-console-mode=$consoleMode",
         "--output-dir=$NuitkaOutputRoot",
         "--output-filename=AssistIM.exe",
         $entry
@@ -174,6 +176,14 @@ Copy-DirectoryFiltered `
     -Source $resourcesSource `
     -Destination $resourcesTarget `
     -ExcludedExtensions @(".gguf", ".bin", ".safetensors", ".pyc") `
+    -ExcludedDirectoryNames @("__pycache__")
+
+$stylesSource = Join-Path $RepoRoot "client\ui\styles\qss"
+$stylesTarget = Join-Path $PackageRoot "client\ui\styles\qss"
+Copy-DirectoryFiltered `
+    -Source $stylesSource `
+    -Destination $stylesTarget `
+    -ExcludedExtensions @(".pyc") `
     -ExcludedDirectoryNames @("__pycache__")
 
 $dataTarget = Join-Path $PackageRoot "data"
@@ -257,3 +267,5 @@ Write-JsonFileNoBom -Payload $latestPayload -Path (Join-Path $ReleaseRoot "lates
 Write-Host "Package root: $PackageRoot"
 Write-Host "Zip: $zipPath"
 Write-Host "Latest manifest: $(Join-Path $ReleaseRoot 'latest.json')"
+Write-Host "Console mode: $consoleMode"
+Write-Host "Runtime logs: $(Join-Path $PackageRoot 'logs\\assistim.log')"

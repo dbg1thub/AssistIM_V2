@@ -16,6 +16,10 @@ $LatestPath = Join-Path $ReleasePath "latest.json"
 $VersionPath = Join-Path $PackagePath "version.json"
 $ConfigPath = Join-Path $PackagePath "data\config.json"
 $ManifestPath = Join-Path $PackagePath "manifest.json"
+$RequiredQssPaths = @(
+    "client/ui/styles/qss/dark/chat_interface.qss",
+    "client/ui/styles/qss/light/chat_interface.qss"
+)
 
 function Assert-FileExists {
     param([string]$Path)
@@ -91,6 +95,14 @@ $manifestPaths = @($manifest.files | ForEach-Object { [string]$_.path })
 foreach ($requiredPath in @("version.json", "data/config.json")) {
     if ($manifestPaths -notcontains $requiredPath) {
         throw "Manifest missing required path: $requiredPath"
+    }
+}
+
+foreach ($requiredQssPath in $RequiredQssPaths) {
+    $fullPath = Join-Path $PackagePath $requiredQssPath.Replace("/", "\")
+    Assert-FileExists -Path $fullPath
+    if ($manifestPaths -notcontains $requiredQssPath) {
+        throw "Manifest missing required style resource: $requiredQssPath"
     }
 }
 

@@ -41,8 +41,8 @@ class AvatarService:
         """Assign one persisted formal default avatar to a user."""
         default_key = choose_seeded_default_avatar_key(seed, gender=gender) or choose_random_default_avatar_key(gender)
         if not default_key:
-            raise AppError(ErrorCode.SERVER_ERROR, "default avatar assets unavailable", 500)
-        return self.set_user_default_avatar(user, default_key=default_key)
+            raise AppError(ErrorCode.INTERNAL_ERROR, "default avatar assets unavailable", 500)
+        return self.set_user_default_avatar(user, default_key=default_key, commit=commit)
 
     def backfill_user_avatar_state(self, user: User, *, commit: bool = True) -> User:
         """Normalize one legacy user row into the new avatar state model."""
