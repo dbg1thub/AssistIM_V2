@@ -43,6 +43,7 @@ class ConversationSummaryManager:
     CLOSE_BUCKET_REFRESH_DELAY = 0.0
     IDLE_REFRESH_THROTTLE_SECONDS = 5.0
     MEMORY_SOURCE_TYPE_SUMMARY = "summary"
+    MEMORY_INDEX_VERSION = 2
 
     def __init__(
         self,
@@ -306,6 +307,7 @@ class ConversationSummaryManager:
             built=built,
             existing=working,
             messages=messages,
+            session=session,
         )
 
     async def _persist_summary_result(
@@ -318,6 +320,7 @@ class ConversationSummaryManager:
         built: ConversationSummaryRequest,
         existing: dict[str, Any],
         messages: list[ChatMessage],
+        session: Session,
     ) -> None:
         if session_id in self._deleted_session_ids:
             return
@@ -353,7 +356,7 @@ class ConversationSummaryManager:
             return
 
         summary_text = self._prompt_builder.normalize_summary_output(snapshot.content)
-        participants = self._summary_participants(built.request.session_id, messages, existing=existing)
+        participants = self._summary_participants(built.request.session_id, messages, existing=existing, session=session)
         keywords = self._summary_keywords(summary_text)
         message_ids = [str(message.message_id or "") for message in messages if str(message.message_id or "")]
         summary_json = {
@@ -443,6 +446,8 @@ class ConversationSummaryManager:
 
         stats = await self._bucket_message_stats(normalized_session_id, bucket)
         if not self._open_bucket_needs_refresh(bucket, stats):
+            if await self._memory_index_needs_rebuild(normalized_session_id, bucket):
+                return await self._rebuild_memory_item_for_ready_bucket(session, bucket, stats=stats)
             return False
 
         key = (normalized_session_id, bucket_start_ts)
@@ -530,6 +535,98 @@ class ConversationSummaryManager:
     def _is_task_manager_closed(self) -> bool:
         return bool(getattr(self._task_manager, "_closed", False))
 
+    async def _memory_index_needs_rebuild(self, session_id: str, bucket: dict[str, Any]) -> bool:
+        if str(bucket.get("summary_status") or "").strip().lower() != "ready":
+            return False
+        if not str(bucket.get("summary_text_ciphertext") or "").strip():
+            return False
+        list_items = getattr(self._db, "list_conversation_memory_items", None)
+        if list_items is None:
+            return False
+
+        bucket_start_ts = int(bucket.get("bucket_start_ts") or 0)
+        if bucket_start_ts <= 0:
+            return False
+        source_id = self._memory_source_id(bucket_start_ts)
+        try:
+            items = await list_items(
+                session_id=session_id,
+                source_type=self.MEMORY_SOURCE_TYPE_SUMMARY,
+                start_ts=bucket_start_ts,
+                end_ts=bucket_start_ts,
+                limit=50,
+            )
+        except Exception:
+            logger.exception(
+                "Failed to inspect conversation memory index session_id=%s bucket_start_ts=%s",
+                session_id,
+                bucket_start_ts,
+            )
+            return False
+
+        item = next((candidate for candidate in list(items or []) if str(candidate.get("source_id") or "") == source_id), None)
+        if item is None:
+            return True
+        return int(item.get("source_version") or 0) < self.MEMORY_INDEX_VERSION
+
+    async def _rebuild_memory_item_for_ready_bucket(
+        self,
+        session: Session,
+        bucket: dict[str, Any],
+        *,
+        stats: dict[str, Any],
+    ) -> bool:
+        session_id = str(session.session_id or bucket.get("session_id") or "").strip()
+        bucket_start_ts = int(bucket.get("bucket_start_ts") or 0)
+        if not session_id or bucket_start_ts <= 0:
+            return False
+
+        summary_text_ciphertext = str(bucket.get("summary_text_ciphertext") or "").strip()
+        if not summary_text_ciphertext:
+            await self._delete_memory_item_for_bucket(session_id, bucket_start_ts)
+            return True
+        try:
+            summary_text = SecureStorage.decrypt_text(summary_text_ciphertext)
+        except Exception:
+            logger.exception(
+                "Failed to decrypt ready conversation summary for memory reindex session_id=%s bucket_start_ts=%s",
+                session_id,
+                bucket_start_ts,
+            )
+            return False
+
+        last_message_ts = int(stats.get("last_message_ts") or 0)
+        bucket_end_ts = max(
+            int(bucket.get("bucket_end_ts") or bucket.get("last_message_ts") or bucket_start_ts),
+            last_message_ts,
+        )
+        messages = await self._db.list_conversation_summary_bucket_messages(
+            session_id,
+            bucket_start_ts,
+            bucket_end_ts,
+            limit=self._prompt_builder.MAX_BUCKET_MESSAGES,
+        )
+        existing = {
+            **bucket,
+            "session_name": session.display_name() or session.name or session.session_id,
+        }
+        await self._upsert_memory_item_for_summary(
+            session_id=session_id,
+            bucket_start_ts=bucket_start_ts,
+            bucket_end_ts=bucket_end_ts,
+            summary_text=summary_text,
+            participants=self._summary_participants(session_id, messages, existing=existing, session=session),
+            keywords=self._summary_keywords(summary_text),
+            existing=existing,
+        )
+        logger.info(
+            "[ai-perf] conversation_summary_memory_reindexed session_id=%s bucket_start_ts=%s source_version=%s",
+            session_id,
+            bucket_start_ts,
+            self.MEMORY_INDEX_VERSION,
+        )
+        return True
+
     async def _delete_memory_item_for_bucket(self, session_id: str, bucket_start_ts: int) -> None:
         delete_source = getattr(self._db, "delete_conversation_memory_items_for_source", None)
         if delete_source is None:
@@ -567,7 +664,7 @@ class ConversationSummaryManager:
                 "session_id": session_id,
                 "source_type": self.MEMORY_SOURCE_TYPE_SUMMARY,
                 "source_id": self._memory_source_id(bucket_start_ts),
-                "source_version": int(existing.get("summary_version") or 1),
+                "source_version": max(self.MEMORY_INDEX_VERSION, int(existing.get("summary_version") or 1)),
                 "start_ts": int(bucket_start_ts),
                 "end_ts": int(bucket_end_ts),
                 "title": title,
@@ -581,16 +678,56 @@ class ConversationSummaryManager:
         )
 
     @staticmethod
-    def _summary_participants(session_id: str, messages: list[ChatMessage], *, existing: dict[str, Any]) -> list[str]:
+    def _summary_participants(
+        session_id: str,
+        messages: list[ChatMessage],
+        *,
+        existing: dict[str, Any],
+        session: Session | None = None,
+    ) -> list[str]:
         del session_id
         participants: list[str] = []
-        session_name = str(existing.get("session_name") or "").strip()
-        if session_name:
-            participants.append(session_name)
+
+        def add(raw_value: Any) -> None:
+            value = str(raw_value or "").strip()
+            if value and value not in participants:
+                participants.append(value)
+
+        add(existing.get("session_name"))
+
+        if session is not None:
+            add(session.display_name())
+            add(session.name)
+            extra = session.extra if isinstance(session.extra, dict) else {}
+            if str(session.session_type or "").strip() == "direct":
+                for key in (
+                    "counterpart_name",
+                    "counterpart_nickname",
+                    "counterpart_username",
+                    "counterpart_id",
+                    "last_message_sender_name",
+                    "last_message_sender_id",
+                ):
+                    add(extra.get(key))
+            elif str(session.session_type or "").strip() == "group":
+                for member in list(extra.get("members") or []):
+                    if not isinstance(member, dict):
+                        continue
+                    for key in ("remark", "group_nickname", "nickname", "display_name", "username", "id"):
+                        add(member.get(key))
+            for participant_id in list(getattr(session, "participant_ids", []) or []):
+                add(participant_id)
+
         for message in messages:
-            label = "我" if message.is_self else str(message.sender_id or "").strip() or "对方"
-            if label and label not in participants:
-                participants.append(label)
+            if message.is_self:
+                add("我")
+                continue
+            extra = message.extra if isinstance(message.extra, dict) else {}
+            for key in ("sender_name", "sender_nickname", "sender_username", "sender_display_name"):
+                add(extra.get(key))
+            add(message.sender_id)
+            if not str(message.sender_id or "").strip():
+                add("对方")
         return participants
 
     @staticmethod

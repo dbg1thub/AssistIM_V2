@@ -2463,6 +2463,69 @@ class Database:
             if str(payload.get("id", "") or "").strip()
         }
 
+    async def resolve_contacts_cache_alias(
+        self,
+        alias: str,
+        limit: int = 20,
+        *,
+        owner_user_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Resolve one exact contact alias across names, username, and stable ids."""
+        normalized_alias = str(alias or "").strip()
+        if not normalized_alias:
+            return []
+        normalized_owner = await self._resolve_directory_cache_owner_user_id(owner_user_id)
+        if not normalized_owner:
+            return []
+
+        normalized_key = normalized_alias.lower()
+        normalized_limit = max(1, min(50, int(limit or 20)))
+        cursor = await self._db.execute(
+            """
+            SELECT *
+            FROM contacts_cache
+            WHERE owner_user_id = ?
+              AND (
+                   lower(contact_id) = ?
+                OR lower(username) = ?
+                OR lower(nickname) = ?
+                OR lower(remark) = ?
+                OR lower(display_name) = ?
+                OR lower(assistim_id) = ?
+              )
+            ORDER BY
+              CASE
+                WHEN lower(remark) = ? THEN 0
+                WHEN lower(display_name) = ? THEN 1
+                WHEN lower(nickname) = ? THEN 2
+                WHEN lower(username) = ? THEN 3
+                WHEN lower(assistim_id) = ? THEN 4
+                WHEN lower(contact_id) = ? THEN 5
+                ELSE 6
+              END,
+              updated_at DESC
+            LIMIT ?
+            """,
+            (
+                normalized_owner,
+                normalized_key,
+                normalized_key,
+                normalized_key,
+                normalized_key,
+                normalized_key,
+                normalized_key,
+                normalized_key,
+                normalized_key,
+                normalized_key,
+                normalized_key,
+                normalized_key,
+                normalized_key,
+                normalized_limit,
+            ),
+        )
+        rows = await cursor.fetchall()
+        return [self._row_to_contact_cache(row) for row in rows]
+
     async def search_contacts(
         self,
         keyword: str,

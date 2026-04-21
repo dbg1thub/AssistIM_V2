@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import ctypes
 import os
+import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -23,6 +24,8 @@ logger = logging.get_logger(__name__)
 
 DEFAULT_MODEL_FILE = "gemma-4-E2B-it-Q4_K_M.gguf"
 DEFAULT_MODEL_PATH = Path(__file__).resolve().parents[1] / "resources" / "models" / DEFAULT_MODEL_FILE
+_WINDOWS_DLL_DIR_KEYS: set[str] = set()
+_WINDOWS_DLL_DIR_HANDLES: list[Any] = []
 
 
 @dataclass(slots=True)
@@ -144,6 +147,64 @@ def _messages_prompt_chars(messages: list[dict[str, Any]]) -> int:
             continue
         total += len(str(content))
     return total
+
+
+def _candidate_windows_dependency_dirs() -> list[Path]:
+    candidates: list[Path] = []
+    seen: set[str] = set()
+    root_texts = [
+        str(getattr(sys, "prefix", "") or "").strip(),
+        str(os.getenv("VIRTUAL_ENV", "") or "").strip(),
+        str(os.getenv("CONDA_PREFIX", "") or "").strip(),
+        str(Path(getattr(sys, "executable", "")).resolve().parent if getattr(sys, "executable", "") else "").strip(),
+    ]
+    for root_text in root_texts:
+        if not root_text:
+            continue
+        root = Path(root_text).expanduser()
+        for candidate in (root, root / "bin", root / "Library" / "bin", root / "DLLs"):
+            try:
+                resolved = candidate.resolve()
+            except OSError:
+                continue
+            if not resolved.is_dir():
+                continue
+            key = os.path.normcase(str(resolved))
+            if key in seen:
+                continue
+            seen.add(key)
+            candidates.append(resolved)
+    return candidates
+
+
+def _ensure_windows_runtime_dependency_dirs() -> None:
+    if os.name != "nt":
+        return
+
+    path_entries = [entry for entry in str(os.environ.get("PATH", "") or "").split(os.pathsep) if entry]
+    path_keys = {os.path.normcase(entry) for entry in path_entries}
+    updated_entries = list(path_entries)
+
+    for directory in reversed(_candidate_windows_dependency_dirs()):
+        normalized = os.path.normcase(str(directory))
+        if normalized not in path_keys:
+            updated_entries.insert(0, str(directory))
+            path_keys.add(normalized)
+
+    if updated_entries:
+        os.environ["PATH"] = os.pathsep.join(updated_entries)
+
+    add_dll_directory = getattr(os, "add_dll_directory", None)
+    if not callable(add_dll_directory):
+        return
+
+    for directory in _candidate_windows_dependency_dirs():
+        key = os.path.normcase(str(directory))
+        if key in _WINDOWS_DLL_DIR_KEYS:
+            continue
+        handle = add_dll_directory(str(directory))
+        _WINDOWS_DLL_DIR_KEYS.add(key)
+        _WINDOWS_DLL_DIR_HANDLES.append(handle)
 
 
 class LocalGGUFRuntime:
@@ -323,6 +384,7 @@ class LocalGGUFRuntime:
         return llm
 
     def _load_sync(self, model_path: Path):
+        _ensure_windows_runtime_dependency_dirs()
         try:
             from llama_cpp import Llama
         except ImportError as exc:

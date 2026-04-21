@@ -43,6 +43,7 @@ from client.core import logging
 from client.core.app_icons import AppIcon, CollectionIcon
 from client.core.i18n import tr
 from client.events.event_bus import get_event_bus
+from client.managers.ai_action_workflow import AIActionPlanner, AIActionWorkflow
 from client.managers.conversation_memory_manager import ConversationMemoryManager
 from client.managers.ai_prompt_builder import AIPromptBuilder
 from client.managers.ai_task_manager import AITaskEvent, AITaskSnapshot, AITaskState, get_ai_task_manager
@@ -75,6 +76,25 @@ def _attachment_display_name(attachment: dict | None) -> str:
         return name
     path = str(attachment.get("local_path") or "").strip()
     return Path(path).name if path else ""
+
+
+def _ai_action_footer_text(extra: dict | None) -> str:
+    action = dict((extra or {}).get("ai_action") or {})
+    if not action:
+        return ""
+    state = str(action.get("state") or "").strip()
+    if state == "waiting_confirmation":
+        return "等待你确认后继续。"
+    if state == "waiting_clarification":
+        return "等待你补充信息后继续。"
+    steps = [item for item in list(action.get("steps") or []) if isinstance(item, dict)]
+    current_step_id = str(action.get("current_step_id") or "").strip()
+    current = next((item for item in steps if str(item.get("id") or "") == current_step_id), None)
+    if state == "running" and current is not None:
+        return str(current.get("display_text") or "正在执行操作...")
+    if state == "cancelled":
+        return "操作已取消。"
+    return ""
 
 
 class AIAssistantPromptEdit(QTextEdit):
@@ -152,6 +172,8 @@ class AIAssistantMessageCard(QFrame):
                 "ai_assistant.message.failed_hint",
                 "本次生成未完成。你可以继续追问，或稍后再试。",
             )
+        else:
+            footer_text = _ai_action_footer_text(message.extra)
         self.footer_label.setText(footer_text)
         self.footer_label.setVisible(bool(footer_text))
         self._sync_text_metrics()
@@ -532,6 +554,10 @@ class AIAssistantInterface(QWidget):
         self._task_manager = get_ai_task_manager()
         self._prompt_builder = AIPromptBuilder()
         self._memory_manager = ConversationMemoryManager()
+        self._action_workflow = AIActionWorkflow(
+            memory_manager=self._memory_manager,
+            planner=AIActionPlanner(self._task_manager),
+        )
         self._event_bus = get_event_bus()
         self._ui_tasks: set[asyncio.Task] = set()
         self._event_subscriptions: list[tuple[str, object]] = []
@@ -1003,35 +1029,52 @@ class AIAssistantInterface(QWidget):
         await self._store.maybe_title_from_first_user_message(thread_id, text)
         await self._reload_threads(select_thread_id=thread_id)
 
-        previous_messages = [message for message in self._messages if message.message_id != user_message.message_id]
-        memory_context_lines: tuple[str, ...] = ()
-        if not attachments:
-            memory_context = await self._memory_manager.build_ai_chat_memory_context(
-                text,
-                previous_messages=previous_messages,
-            )
-            if memory_context.requires_confirmation:
-                assistant_message = await self._store.create_message(
-                    thread_id=thread_id,
-                    role=AIMessageRole.ASSISTANT,
-                    content=memory_context.confirmation_prompt,
-                    status=AIMessageStatus.DONE,
-                    extra={"memory_confirmation": {"query": memory_context.pending_query_text}},
-                )
-                self._append_message(assistant_message)
-                await self._reload_threads(select_thread_id=thread_id)
-                return
-            memory_context_lines = memory_context.lines
-
-        task_id = f"ai-chat-{uuid.uuid4()}"
         assistant_message = await self._store.create_message(
             thread_id=thread_id,
             role=AIMessageRole.ASSISTANT,
             content="",
-            status=AIMessageStatus.STREAMING,
-            task_id=task_id,
+            status=AIMessageStatus.PENDING,
         )
         self._append_message(assistant_message)
+        self._set_generating(True)
+
+        memory_context_lines: tuple[str, ...] = ()
+        action_message_extra: dict | None = None
+        if not attachments:
+            action_result = await self._action_workflow.handle_user_turn(
+                thread_id=thread_id,
+                text=text,
+                has_attachments=False,
+            )
+            if action_result.handled and action_result.response_text:
+                await self._store.update_message(
+                    assistant_message,
+                    content=action_result.response_text,
+                    status=AIMessageStatus.DONE,
+                    extra=action_result.message_extra,
+                )
+                assistant_message.content = action_result.response_text
+                assistant_message.status = AIMessageStatus.DONE
+                assistant_message.extra = action_result.message_extra
+                self._update_message_card(assistant_message)
+                self._set_generating(False)
+                await self._reload_threads(select_thread_id=thread_id)
+                return
+            if action_result.handled:
+                memory_context_lines = action_result.memory_context_lines
+                action_message_extra = action_result.message_extra
+
+        task_id = f"ai-chat-{uuid.uuid4()}"
+        await self._store.update_message(
+            assistant_message,
+            status=AIMessageStatus.STREAMING,
+            task_id=task_id,
+            extra=action_message_extra,
+        )
+        assistant_message.status = AIMessageStatus.STREAMING
+        assistant_message.task_id = task_id
+        assistant_message.extra = dict(action_message_extra or {})
+        self._update_message_card(assistant_message)
 
         context_messages = [message for message in self._messages if message.message_id != assistant_message.message_id]
         request = self._prompt_builder.build_ai_chat_request(
@@ -1043,7 +1086,6 @@ class AIAssistantInterface(QWidget):
         self._active_task_id = request.task_id
         self._active_assistant_message = assistant_message
         self._last_persist_at = 0.0
-        self._set_generating(True)
         self._active_stream_task = self._create_ui_task(self._run_stream(request), f"AI assistant stream {request.task_id}")
 
     async def _run_stream(self, request) -> None:
@@ -1117,6 +1159,11 @@ class AIAssistantInterface(QWidget):
         self._active_assistant_message.status = status
         self._active_assistant_message.model = str(snapshot.model or "")
         self._active_assistant_message.extra = message_extra
+        await self._action_workflow.finish_streamed_action(
+            message_extra,
+            content=content,
+            status=status.value if isinstance(status, AIMessageStatus) else str(status),
+        )
         await self._persist_assistant_message(self._active_assistant_message)
         self._update_message_card(self._active_assistant_message)
         self._active_task_id = ""
@@ -1177,25 +1224,28 @@ class AIAssistantInterface(QWidget):
         context_messages = [message for message in self._messages if message.message_id != assistant_message.message_id]
         memory_context_lines: tuple[str, ...] = ()
         if last_user is not None and not _first_image_attachment(last_user.extra):
-            previous_messages = [message for message in self._messages if message.message_id != last_user.message_id]
-            memory_context = await self._memory_manager.build_ai_chat_memory_context(
-                last_user.content,
-                previous_messages=previous_messages,
+            action_result = await self._action_workflow.handle_user_turn(
+                thread_id=self._current_thread_id,
+                text=last_user.content,
+                has_attachments=False,
             )
-            if memory_context.requires_confirmation:
+            if action_result.handled and action_result.response_text:
                 await self._store.update_message(
                     assistant_message,
-                    content=memory_context.confirmation_prompt,
+                    content=action_result.response_text,
                     status=AIMessageStatus.DONE,
-                    extra={"memory_confirmation": {"query": memory_context.pending_query_text}},
+                    extra=action_result.message_extra,
                 )
-                assistant_message.content = memory_context.confirmation_prompt
+                assistant_message.content = action_result.response_text
                 assistant_message.status = AIMessageStatus.DONE
-                assistant_message.extra = {"memory_confirmation": {"query": memory_context.pending_query_text}}
+                assistant_message.extra = action_result.message_extra
                 self._render_messages()
                 await self._reload_threads(select_thread_id=self._current_thread_id)
                 return
-            memory_context_lines = memory_context.lines
+            if action_result.handled:
+                memory_context_lines = action_result.memory_context_lines
+                assistant_message.extra = action_result.message_extra
+                await self._store.update_message(assistant_message, extra=action_result.message_extra)
         request = self._prompt_builder.build_ai_chat_request(
             self._current_thread_id,
             context_messages,

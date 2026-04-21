@@ -42,8 +42,12 @@ class ConversationMemoryManager:
 
     DEFAULT_LOOKBACK_DAYS = 7
     SEARCH_CANDIDATE_LIMIT = 40
+    EXPANDED_SEARCH_CANDIDATE_LIMIT = 200
     CONTEXT_RESULT_LIMIT = 6
     CONTEXT_LINE_MAX_CHARS = 260
+    MESSAGE_FALLBACK_SESSION_LIMIT = 5
+    MESSAGE_FALLBACK_PER_SESSION_LIMIT = 40
+    MESSAGE_FALLBACK_RESULT_LIMIT = 8
 
     _HISTORY_INTENTS = (
         "聊了什么",
@@ -189,7 +193,78 @@ class ConversationMemoryManager:
             return ConversationMemoryContext(lines=(), query_kind=query.query_kind)
 
         ranked = self._rank_items(items, query)
+        if query.terms and not ranked and len(items) >= self.SEARCH_CANDIDATE_LIMIT:
+            try:
+                expanded_items = await list_items(
+                    source_type="summary",
+                    start_ts=query.start_ts,
+                    end_ts=query.end_ts,
+                    limit=self.EXPANDED_SEARCH_CANDIDATE_LIMIT,
+                )
+            except Exception:
+                logger.exception("Failed to query expanded local conversation memory")
+                expanded_items = []
+            if len(expanded_items) > len(items):
+                ranked = self._rank_items(expanded_items, query)
         lines = tuple(self._format_item(item) for _score, item in ranked[: self.CONTEXT_RESULT_LIMIT])
+        return ConversationMemoryContext(lines=lines, query_kind=query.query_kind)
+
+    async def build_context_for_structured_query(
+        self,
+        *,
+        query_text: str,
+        start_ts: int | None,
+        end_ts: int | None,
+        terms: Sequence[str] | None = None,
+        participant_ids: Sequence[str] | None = None,
+        participant_aliases: Sequence[str] | None = None,
+        query_kind: str = "history",
+    ) -> ConversationMemoryContext:
+        """Return memory context for an already validated action query."""
+        query = _MemoryQuery(
+            text=" ".join(str(query_text or "").split()),
+            start_ts=start_ts,
+            end_ts=end_ts,
+            terms=tuple(str(term or "").strip().lower() for term in list(terms or []) if str(term or "").strip()),
+            query_kind=str(query_kind or "history").strip() or "history",
+        )
+        list_items = getattr(self._db, "list_conversation_memory_items", None)
+        if list_items is None:
+            return ConversationMemoryContext(lines=(), query_kind=query.query_kind)
+        try:
+            items = await list_items(
+                source_type="summary",
+                start_ts=query.start_ts,
+                end_ts=query.end_ts,
+                limit=self.SEARCH_CANDIDATE_LIMIT,
+            )
+        except Exception:
+            logger.exception("Failed to query local conversation memory")
+            return ConversationMemoryContext(lines=(), query_kind=query.query_kind)
+
+        ranked = self._rank_items(items, query)
+        if query.terms and not ranked and len(items) >= self.SEARCH_CANDIDATE_LIMIT:
+            try:
+                expanded_items = await list_items(
+                    source_type="summary",
+                    start_ts=query.start_ts,
+                    end_ts=query.end_ts,
+                    limit=self.EXPANDED_SEARCH_CANDIDATE_LIMIT,
+                )
+            except Exception:
+                logger.exception("Failed to query expanded local conversation memory")
+                expanded_items = []
+            if len(expanded_items) > len(items):
+                ranked = self._rank_items(expanded_items, query)
+        lines = tuple(self._format_item(item) for _score, item in ranked[: self.CONTEXT_RESULT_LIMIT])
+        if not lines:
+            lines = tuple(
+                await self._message_fallback_lines(
+                    query,
+                    participant_ids=participant_ids,
+                    participant_aliases=participant_aliases,
+                )
+            )
         return ConversationMemoryContext(lines=lines, query_kind=query.query_kind)
 
     def _parse_query(self, query_text: str, *, confirmed: bool = False) -> _MemoryQuery:
@@ -335,6 +410,247 @@ class ConversationMemoryManager:
             " ".join(str(value or "") for value in list(item.get("participants") or [])),
         ]
         return " ".join(values).lower()
+
+    async def _message_fallback_lines(
+        self,
+        query: _MemoryQuery,
+        *,
+        participant_ids: Sequence[str] | None,
+        participant_aliases: Sequence[str] | None,
+    ) -> list[str]:
+        get_messages = getattr(self._db, "get_messages", None)
+        if not callable(get_messages):
+            return await self._search_message_lines(query)
+        sessions = await self._candidate_message_sessions(
+            query,
+            participant_ids=participant_ids,
+            participant_aliases=participant_aliases,
+        )
+        if not sessions:
+            return await self._search_message_lines(query)
+        lines: list[str] = []
+        normalized_participant_ids = {
+            str(participant_id or "").strip().casefold()
+            for participant_id in list(participant_ids or [])
+            if str(participant_id or "").strip()
+        }
+        normalized_participant_aliases = {
+            str(alias or "").strip().casefold()
+            for alias in list(participant_aliases or [])
+            if str(alias or "").strip()
+        }
+        has_participant_filter = bool(normalized_participant_ids or normalized_participant_aliases)
+        for session in sessions[: self.MESSAGE_FALLBACK_SESSION_LIMIT]:
+            session_id = str(getattr(session, "session_id", "") or "").strip()
+            if not session_id:
+                continue
+            is_direct_participant_session = has_participant_filter and self._is_direct_session(session)
+            try:
+                messages = list(await get_messages(session_id, limit=self.MESSAGE_FALLBACK_PER_SESSION_LIMIT))
+            except Exception:
+                logger.exception("Failed to query fallback local messages")
+                continue
+            for message in messages:
+                if not self._message_in_time_range(message, query):
+                    continue
+                if (
+                    has_participant_filter
+                    and not is_direct_participant_session
+                    and not self._message_matches_participants(
+                        message,
+                        participant_ids=normalized_participant_ids,
+                        participant_aliases=normalized_participant_aliases,
+                    )
+                ):
+                    continue
+                if not has_participant_filter and not self._message_matches_terms(message, query.terms):
+                    continue
+                line = self._format_message_line(message, session=session)
+                if line and line not in lines:
+                    lines.append(line)
+                if len(lines) >= self.MESSAGE_FALLBACK_RESULT_LIMIT:
+                    return lines
+        return lines
+
+    async def _candidate_message_sessions(
+        self,
+        query: _MemoryQuery,
+        *,
+        participant_ids: Sequence[str] | None,
+        participant_aliases: Sequence[str] | None,
+    ) -> list[Any]:
+        get_all_sessions = getattr(self._db, "get_all_sessions", None)
+        if not callable(get_all_sessions):
+            return []
+        try:
+            sessions = list(await get_all_sessions())
+        except Exception:
+            logger.exception("Failed to query fallback local sessions")
+            return []
+        normalized_participant_ids = {
+            str(participant_id or "").strip().casefold()
+            for participant_id in list(participant_ids or [])
+            if str(participant_id or "").strip()
+        }
+        normalized_participant_aliases = {
+            str(alias or "").strip().casefold()
+            for alias in list(participant_aliases or [])
+            if str(alias or "").strip()
+        }
+        terms = {str(term or "").strip().casefold() for term in query.terms if str(term or "").strip()}
+        candidates: list[Any] = []
+        for session in sessions:
+            session_values = self._session_identity_values(session)
+            if normalized_participant_ids and (normalized_participant_ids & session_values):
+                candidates.append(session)
+                continue
+            if normalized_participant_aliases and self._any_value_matches(session_values, normalized_participant_aliases):
+                candidates.append(session)
+                continue
+            if terms and any(term and any(term in value for value in session_values) for term in terms):
+                candidates.append(session)
+        candidates.sort(key=lambda item: getattr(item, "last_message_time", None) or getattr(item, "updated_at", None) or datetime.min, reverse=True)
+        return candidates
+
+    async def _search_message_lines(self, query: _MemoryQuery) -> list[str]:
+        search_messages = getattr(self._db, "search_messages", None)
+        if not callable(search_messages):
+            return []
+        lines: list[str] = []
+        for term in query.terms:
+            try:
+                messages = list(await search_messages(term, limit=self.MESSAGE_FALLBACK_RESULT_LIMIT))
+            except Exception:
+                logger.exception("Failed to search fallback local messages")
+                continue
+            for message in messages:
+                if not self._message_in_time_range(message, query):
+                    continue
+                line = self._format_message_line(message, session=None)
+                if line and line not in lines:
+                    lines.append(line)
+                if len(lines) >= self.MESSAGE_FALLBACK_RESULT_LIMIT:
+                    return lines
+        return lines
+
+    @staticmethod
+    def _message_in_time_range(message: Any, query: _MemoryQuery) -> bool:
+        timestamp = getattr(message, "timestamp", None)
+        if timestamp is None:
+            return True
+        try:
+            ts = int(timestamp.timestamp() if hasattr(timestamp, "timestamp") else float(timestamp))
+        except (TypeError, ValueError, OSError):
+            return True
+        if query.start_ts is not None and ts < int(query.start_ts):
+            return False
+        if query.end_ts is not None and ts > int(query.end_ts):
+            return False
+        return True
+
+    def _message_matches_participants(
+        self,
+        message: Any,
+        *,
+        participant_ids: set[str],
+        participant_aliases: set[str],
+    ) -> bool:
+        if bool(getattr(message, "is_self", False)):
+            return True
+        values = self._message_sender_identity_values(message)
+        return bool((participant_ids and participant_ids & values) or self._any_value_matches(values, participant_aliases))
+
+    @staticmethod
+    def _message_matches_terms(message: Any, terms: Sequence[str]) -> bool:
+        text = str(getattr(message, "content", "") or "").casefold()
+        return any(str(term or "").strip().casefold() in text for term in terms if str(term or "").strip())
+
+    @staticmethod
+    def _is_direct_session(session: Any) -> bool:
+        return str(getattr(session, "session_type", "") or "").strip().casefold() == "direct"
+
+    def _session_identity_values(self, session: Any) -> set[str]:
+        values: set[str] = set()
+
+        def add(value: object) -> None:
+            normalized = str(value or "").strip().casefold()
+            if normalized:
+                values.add(normalized)
+
+        add(getattr(session, "session_id", ""))
+        add(getattr(session, "name", ""))
+        display_name = getattr(session, "display_name", None)
+        if callable(display_name):
+            add(display_name())
+        for participant_id in list(getattr(session, "participant_ids", []) or []):
+            add(participant_id)
+
+        extra = getattr(session, "extra", {}) or {}
+        if isinstance(extra, dict):
+            for key in (
+                "counterpart_id",
+                "counterpart_name",
+                "counterpart_nickname",
+                "counterpart_username",
+                "counterpart_display_name",
+                "last_message_sender_id",
+                "last_message_sender_name",
+            ):
+                add(extra.get(key))
+            for member in list(extra.get("members") or []):
+                if not isinstance(member, dict):
+                    continue
+                for key in ("id", "user_id", "display_name", "remark", "group_nickname", "nickname", "username"):
+                    add(member.get(key))
+        return values
+
+    @staticmethod
+    def _message_sender_identity_values(message: Any) -> set[str]:
+        values: set[str] = set()
+
+        def add(value: object) -> None:
+            normalized = str(value or "").strip().casefold()
+            if normalized:
+                values.add(normalized)
+
+        add(getattr(message, "sender_id", ""))
+        extra = getattr(message, "extra", {}) or {}
+        if isinstance(extra, dict):
+            for key in ("sender_name", "sender_nickname", "sender_username", "sender_display_name"):
+                add(extra.get(key))
+        return values
+
+    @staticmethod
+    def _any_value_matches(values: set[str], aliases: set[str]) -> bool:
+        for alias in aliases:
+            if not alias:
+                continue
+            for value in values:
+                if alias == value or alias in value:
+                    return True
+        return False
+
+    def _format_message_line(self, message: Any, *, session: Any | None) -> str:
+        content = " ".join(str(getattr(message, "content", "") or "").split())
+        if not content:
+            return ""
+        timestamp = getattr(message, "timestamp", None)
+        if timestamp is not None and hasattr(timestamp, "strftime"):
+            time_text = timestamp.strftime("%Y-%m-%d %H:%M")
+        else:
+            time_text = ""
+        session_name = ""
+        if session is not None:
+            display_name = getattr(session, "display_name", None)
+            session_name = str(display_name() if callable(display_name) else getattr(session, "name", "") or "").strip()
+        speaker = "我" if bool(getattr(message, "is_self", False)) else str(getattr(message, "sender_id", "") or "对方")
+        parts = []
+        if time_text:
+            parts.append(f"[{time_text}]")
+        if session_name:
+            parts.append(f"会话：{session_name}")
+        parts.append(f"{speaker}：{self._clip(content, self.CONTEXT_LINE_MAX_CHARS)}")
+        return "；".join(parts)
 
     def _format_item(self, item: dict[str, Any]) -> str:
         start_label = self._format_ts(int(item.get("start_ts") or 0))
