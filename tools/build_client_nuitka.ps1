@@ -153,6 +153,7 @@ if (-not $SkipNuitka) {
         "-m", "nuitka",
         "--standalone",
         "--enable-plugin=pyside6",
+        "--include-package=websockets",
         "--windows-console-mode=$consoleMode",
         "--output-dir=$NuitkaOutputRoot",
         "--output-filename=AssistIM.exe",
