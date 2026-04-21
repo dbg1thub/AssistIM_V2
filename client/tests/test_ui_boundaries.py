@@ -1025,3 +1025,11 @@ def test_message_delegate_media_state_text_is_internationalized() -> None:
     assert 'return tr("chat.media.upload_failed", "Upload failed")' in message_delegate
     assert 'return "Uploading..."' not in message_delegate
     assert 'return "Upload failed"' not in message_delegate
+
+
+def test_discovery_interface_tracks_image_dialogs_for_runtime_teardown() -> None:
+    discovery_interface = Path('client/ui/windows/discovery_interface.py').read_text(encoding='utf-8')
+
+    assert 'self._image_dialogs: set[QDialog] = set()' in discovery_interface
+    assert 'for dialog in list(getattr(self, "_image_dialogs", ())):' in discovery_interface
+    assert 'self._image_dialogs.clear()' in discovery_interface

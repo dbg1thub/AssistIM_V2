@@ -1773,6 +1773,47 @@ def test_application_run_handles_authenticate_failure_without_propagating() -> N
     asyncio.run(scenario())
 
 
+def test_application_logout_returns_to_unauthenticated_state_without_forcing_exit(monkeypatch) -> None:
+    main_module = _load_main_module()
+    events: list[str] = []
+    fake_auth_controller = _FakeAuthControllerForLogout(events)
+
+    class _FakeMainWindow:
+        def begin_runtime_transition(self) -> None:
+            events.append("main_window.begin_runtime_transition")
+
+    monkeypatch.setattr(main_module, "get_auth_controller", lambda: fake_auth_controller)
+
+    async def scenario() -> None:
+        app = main_module.Application(_FakeQtApp())
+        app.main_window = _FakeMainWindow()
+
+        async def fake_quiesce() -> None:
+            events.append("quiesce")
+
+        async def fake_authenticate():
+            events.append("authenticate")
+            attempt = app._start_new_auth_attempt()
+            return _auth_result(main_module, attempt=attempt, authenticated=False)
+
+        app._quiesce_authenticated_runtime = fake_quiesce  # type: ignore[method-assign]
+        app.authenticate = fake_authenticate  # type: ignore[method-assign]
+        await app._perform_logout_flow()
+
+        assert events == [
+            "main_window.begin_runtime_transition",
+            "quiesce",
+            "logout(clear_local_chat_state=True)",
+            "auth_controller.close",
+            "authenticate",
+        ]
+        assert app._quit_event.is_set() is False
+        assert app._lifecycle_state == "unauthenticated"
+        assert app._pending_auth_success_message == ""
+
+    asyncio.run(scenario())
+
+
 def test_application_run_waits_for_newer_auth_recovery_after_stale_auth_attempt() -> None:
     main_module = _load_main_module()
     events: list[str] = []
@@ -2019,7 +2060,8 @@ def test_application_logout_quiesces_runtime_before_clearing_auth_state(monkeypa
             "auth_controller.close",
             "authenticate",
         ]
-        assert app._quit_event.is_set() is True
+        assert app._quit_event.is_set() is False
+        assert app._lifecycle_state == "unauthenticated"
 
     asyncio.run(scenario())
 

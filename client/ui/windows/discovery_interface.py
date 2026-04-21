@@ -790,6 +790,7 @@ class DiscoveryInterface(QWidget):
         self._keyed_ui_tasks: dict[tuple[str, str], asyncio.Task] = {}
         self._ui_tasks: set[asyncio.Task] = set()
         self._dialog_refs: set[QDialog] = set()
+        self._image_dialogs: set[QDialog] = set()
         self._initial_load_done = False
         self._teardown_started = False
 
@@ -1081,7 +1082,7 @@ class DiscoveryInterface(QWidget):
         for dialog in list(self._dialog_refs):
             dialog.close()
         self._dialog_refs.clear()
-        for dialog in list(self._image_dialogs):
+        for dialog in list(getattr(self, "_image_dialogs", ())):
             dialog.close()
         self._image_dialogs.clear()
         self._cancel_all_ui_tasks()
