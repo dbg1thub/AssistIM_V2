@@ -1072,10 +1072,12 @@ def ensure_schema_compatibility(engine: Engine) -> list[str]:
     applied: list[str] = []
 
     with engine.begin() as connection:
-        if _has_runtime_schema_migration(connection):
+        runtime_schema_migrated = _has_runtime_schema_migration(connection)
+        current_runtime_schema = _has_current_runtime_schema(connection)
+        if current_runtime_schema and runtime_schema_migrated:
             return applied
 
-        if _has_current_runtime_schema(connection):
+        if current_runtime_schema:
             return applied
 
         _ensure_columns(connection, "users", USER_PROFILE_COLUMN_DDL, applied)

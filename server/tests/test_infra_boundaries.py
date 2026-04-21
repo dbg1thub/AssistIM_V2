@@ -565,13 +565,16 @@ def test_sqlite_alembic_upgrade_head_succeeds() -> None:
 
 
 
-def test_schema_compatibility_skips_runtime_checks_when_runtime_migration_present(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_schema_compatibility_checks_runtime_schema_even_when_runtime_migration_present(monkeypatch: pytest.MonkeyPatch) -> None:
     from sqlalchemy import create_engine, text
 
     from app.core import schema_compat as schema_compat_module
 
-    def _unexpected_runtime_schema_check(*_args, **_kwargs):
-        raise AssertionError("runtime schema inspection should be skipped for migrated databases")
+    inspected = {"called": False}
+
+    def _record_runtime_schema_check(*_args, **_kwargs):
+        inspected["called"] = True
+        return True
 
     engine = create_engine("sqlite+pysqlite:///:memory:", future=True)
     with engine.begin() as connection:
@@ -581,10 +584,11 @@ def test_schema_compatibility_skips_runtime_checks_when_runtime_migration_presen
             {"revision": schema_compat_module.RUNTIME_SCHEMA_ALEMBIC_REVISION},
         )
 
-    monkeypatch.setattr(schema_compat_module, "_has_current_runtime_schema", _unexpected_runtime_schema_check)
+    monkeypatch.setattr(schema_compat_module, "_has_current_runtime_schema", _record_runtime_schema_check)
 
     try:
         assert schema_compat_module.ensure_schema_compatibility(engine) == []
+        assert inspected["called"] is True
     finally:
         engine.dispose()
 
@@ -661,6 +665,37 @@ def test_schema_compatibility_backfills_avatar_columns_for_legacy_runtime_schema
         user_row = connection.execute(text("SELECT avatar_kind, avatar_default_key FROM users WHERE id = 'user-1'")) .mappings().one()
     assert user_row["avatar_kind"] == "default"
     assert str(user_row["avatar_default_key"] or "") != ""
+
+
+def test_schema_compatibility_repairs_missing_group_announcement_columns_even_at_runtime_head() -> None:
+    from sqlalchemy import create_engine, inspect, text
+
+    from app.core import schema_compat as schema_compat_module
+
+    engine = create_engine("sqlite+pysqlite:///:memory:", future=True)
+    with engine.begin() as connection:
+        connection.execute(text("CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL)"))
+        connection.execute(
+            text("INSERT INTO alembic_version (version_num) VALUES (:revision)"),
+            {"revision": schema_compat_module.RUNTIME_SCHEMA_ALEMBIC_REVISION},
+        )
+        connection.execute(text("CREATE TABLE users (id VARCHAR(36) PRIMARY KEY, username VARCHAR(255), password_hash VARCHAR(255), nickname VARCHAR(255), avatar VARCHAR(255), avatar_kind VARCHAR(16), avatar_default_key VARCHAR(128), avatar_file_id VARCHAR(36), status VARCHAR(32), email VARCHAR(255), phone VARCHAR(32), birthday DATE, region VARCHAR(128), signature TEXT, gender VARCHAR(32), auth_session_version INTEGER NOT NULL DEFAULT 0, created_at TIMESTAMP, updated_at TIMESTAMP)"))
+        connection.execute(text("CREATE TABLE messages (id VARCHAR(36) PRIMARY KEY, session_id VARCHAR(36), sender_id VARCHAR(36), content TEXT, type VARCHAR(32), status VARCHAR(32), session_seq INTEGER NOT NULL DEFAULT 0, extra_json TEXT NOT NULL DEFAULT '{}', created_at TIMESTAMP, updated_at TIMESTAMP)"))
+        connection.execute(text("CREATE TABLE sessions (id VARCHAR(36) PRIMARY KEY, name VARCHAR(255), type VARCHAR(32), avatar VARCHAR(255), direct_key VARCHAR(255), is_ai_session BOOLEAN, encryption_mode VARCHAR(32) NOT NULL DEFAULT 'plain', last_message_seq INTEGER NOT NULL DEFAULT 0, last_event_seq INTEGER NOT NULL DEFAULT 0, created_at TIMESTAMP, updated_at TIMESTAMP)"))
+        connection.execute(text("CREATE TABLE session_members (session_id VARCHAR(36), user_id VARCHAR(36), joined_at TIMESTAMP, last_read_seq INTEGER NOT NULL DEFAULT 0, last_read_message_id VARCHAR(36), last_read_at TIMESTAMP)"))
+        connection.execute(text("CREATE TABLE files (id VARCHAR(36) PRIMARY KEY, user_id VARCHAR(36), storage_provider VARCHAR(32) NOT NULL DEFAULT 'local', storage_key VARCHAR(512) NOT NULL DEFAULT '', file_url VARCHAR(255), file_name VARCHAR(255), file_type VARCHAR(255), size_bytes INTEGER NOT NULL DEFAULT 0, checksum_sha256 VARCHAR(64) NOT NULL DEFAULT '', created_at TIMESTAMP, updated_at TIMESTAMP)"))
+        connection.execute(text("CREATE TABLE session_events (id VARCHAR(36) PRIMARY KEY, session_id VARCHAR(36), type VARCHAR(32), payload TEXT, event_seq INTEGER, created_at TIMESTAMP, updated_at TIMESTAMP)"))
+        connection.execute(text("CREATE TABLE groups (id VARCHAR(36) PRIMARY KEY, session_id VARCHAR(36), owner_id VARCHAR(36), name VARCHAR(255), announcement TEXT NOT NULL DEFAULT '', avatar_kind VARCHAR(16) NOT NULL DEFAULT 'generated', avatar_file_id VARCHAR(36), avatar_version INTEGER NOT NULL DEFAULT 1, created_at TIMESTAMP, updated_at TIMESTAMP)"))
+        connection.execute(text("CREATE TABLE group_members (group_id VARCHAR(36), user_id VARCHAR(36), role VARCHAR(32), group_nickname VARCHAR(64) NOT NULL DEFAULT '', note TEXT NOT NULL DEFAULT '', joined_at TIMESTAMP)"))
+        connection.execute(text("CREATE TABLE user_session_events (id VARCHAR(36) PRIMARY KEY, session_id VARCHAR(36), user_id VARCHAR(36), type VARCHAR(32), payload TEXT, event_seq INTEGER, created_at TIMESTAMP)"))
+
+    applied = schema_compat_module.ensure_schema_compatibility(engine)
+    group_columns = {column["name"] for column in inspect(engine).get_columns("groups")}
+
+    assert "groups.announcement_message_id" in applied
+    assert "groups.announcement_author_id" in applied
+    assert "groups.announcement_published_at" in applied
+    assert {"announcement_message_id", "announcement_author_id", "announcement_published_at"}.issubset(group_columns)
 
 
 
