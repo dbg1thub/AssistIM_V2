@@ -1773,6 +1773,43 @@ def test_application_run_handles_authenticate_failure_without_propagating() -> N
     asyncio.run(scenario())
 
 
+def test_application_run_waits_for_newer_auth_recovery_after_stale_auth_attempt() -> None:
+    main_module = _load_main_module()
+    events: list[str] = []
+
+    async def scenario() -> None:
+        app = main_module.Application(_FakeQtApp())
+
+        async def fake_initialize() -> None:
+            events.append("initialize")
+
+        async def fake_auth_loss_recovery() -> None:
+            events.append("auth_loss_recovery")
+            await asyncio.sleep(0)
+            app.main_window = object()
+            app._quit_event.set()
+
+        async def fake_authenticate():
+            events.append("authenticate")
+            app._active_auth_attempt_generation = 2
+            app._auth_loss_task = asyncio.create_task(fake_auth_loss_recovery())
+            return _auth_result(main_module, attempt=1, runtime_generation=0, authenticated=False)
+
+        async def fake_shutdown() -> None:
+            events.append("shutdown")
+
+        app.initialize = fake_initialize  # type: ignore[method-assign]
+        app.authenticate = fake_authenticate  # type: ignore[method-assign]
+        app.shutdown = fake_shutdown  # type: ignore[method-assign]
+
+        await app.run()
+
+        assert events == ["initialize", "authenticate", "auth_loss_recovery", "shutdown"]
+        assert app._quit_event.is_set() is True
+
+    asyncio.run(scenario())
+
+
 def test_application_run_surfaces_main_window_bootstrap_failure(monkeypatch) -> None:
     main_module = _load_main_module()
     events: list[str] = []

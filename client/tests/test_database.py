@@ -601,9 +601,6 @@ def test_database_replace_sessions_rolls_back_started_transaction_with_connectio
 
         async def execute(self, sql: str, parameters=()):
             self.executed.append(sql)
-            if sql == "BEGIN":
-                self.in_transaction = True
-                return None
             if sql == "DELETE FROM messages":
                 raise RuntimeError("boom")
             return None
@@ -627,9 +624,36 @@ def test_database_replace_sessions_rolls_back_started_transaction_with_connectio
         else:
             raise AssertionError("replace_sessions should re-raise write failures")
 
-        assert connection.executed == ["BEGIN", "DELETE FROM messages"]
+        assert connection.executed[0].startswith("SAVEPOINT replace_sessions_")
+        assert connection.executed[1] == "DELETE FROM messages"
+        assert any(sql.startswith("ROLLBACK TO SAVEPOINT replace_sessions_") for sql in connection.executed)
+        assert any(sql.startswith("RELEASE SAVEPOINT replace_sessions_") for sql in connection.executed)
         assert connection.commit_calls == 0
-        assert connection.rollback_calls == 1
+        assert connection.rollback_calls == 0
+
+    asyncio.run(scenario())
+
+
+def test_database_replace_sessions_uses_savepoint_even_when_connection_claims_no_transaction() -> None:
+    class FakeConnection:
+        def __init__(self) -> None:
+            self.in_transaction = False
+            self.executed: list[str] = []
+
+        async def execute(self, sql: str, parameters=()):
+            self.executed.append(sql)
+            return None
+
+    async def scenario() -> None:
+        database = Database()
+        connection = FakeConnection()
+        database._db = connection
+
+        await database.replace_sessions([])
+
+        assert connection.executed[0].startswith("SAVEPOINT replace_sessions_")
+        assert "BEGIN" not in connection.executed
+        assert any(sql.startswith("RELEASE SAVEPOINT replace_sessions_") for sql in connection.executed)
 
     asyncio.run(scenario())
 

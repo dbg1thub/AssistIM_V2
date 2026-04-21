@@ -1,7 +1,12 @@
 {
+    "Server": {
+        "Host": "47.83.139.108",
+        "Port": 80,
+        "UseSsl": false
+    },
     "AI": {
         "GpuAccelerationEnabled": true,
-        "ModelId": "qwen3.5-2B-Q4_K_M"
+        "ModelId": "gemma-4-E2B-it-Q4_K_M"
     },
     "MainWindow": {
         "DpiScale": "Auto",

@@ -1286,6 +1286,21 @@ class Application:
                 startup_stage = "authenticate"
                 auth_result = await self.authenticate()
                 if not auth_result.authenticated:
+                    if (
+                        auth_result.attempt_generation > 0
+                        and auth_result.attempt_generation != self._active_auth_attempt_generation
+                        and self._auth_loss_task is not None
+                        and not self._auth_loss_task.done()
+                    ):
+                        logger.info(
+                            "Waiting for newer auth recovery flow after stale auth attempt %s",
+                            auth_result.attempt_generation,
+                        )
+                        await self._auth_loss_task
+                        if self._quit_event.is_set():
+                            return
+                        startup_stage = "runloop"
+                        await self._quit_event.wait()
                     return
 
                 startup_stage = "authenticated_runtime"

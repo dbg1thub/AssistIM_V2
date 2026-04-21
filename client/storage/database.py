@@ -117,34 +117,22 @@ class Database:
 
     @asynccontextmanager
     async def _write_transaction(self, prefix: str):
-        """Run one multi-statement write block without colliding with nested transactions."""
+        """Run one multi-statement write block via one savepoint-backed transaction."""
         if self._db is None:
             raise RuntimeError("database is not connected")
 
         async with self._write_transaction_lock:
-            savepoint_name = ""
-            started_transaction = False
-            if bool(getattr(self._db, "in_transaction", False)):
-                savepoint_name = self._next_savepoint_name(prefix)
-                await self._db.execute(f"SAVEPOINT {savepoint_name}")
-            else:
-                await self._db.execute("BEGIN")
-                started_transaction = True
+            savepoint_name = self._next_savepoint_name(prefix)
+            await self._db.execute(f"SAVEPOINT {savepoint_name}")
 
             try:
                 yield
             except Exception:
-                if savepoint_name:
-                    await self._db.execute(f"ROLLBACK TO SAVEPOINT {savepoint_name}")
-                    await self._db.execute(f"RELEASE SAVEPOINT {savepoint_name}")
-                elif started_transaction and bool(getattr(self._db, "in_transaction", False)):
-                    await self._db.rollback()
+                await self._db.execute(f"ROLLBACK TO SAVEPOINT {savepoint_name}")
+                await self._db.execute(f"RELEASE SAVEPOINT {savepoint_name}")
                 raise
             else:
-                if savepoint_name:
-                    await self._db.execute(f"RELEASE SAVEPOINT {savepoint_name}")
-                elif started_transaction:
-                    await self._db.commit()
+                await self._db.execute(f"RELEASE SAVEPOINT {savepoint_name}")
 
     async def _open_connection(self) -> aiosqlite.Connection:
         metadata = self._load_db_crypto_metadata()
