@@ -16,7 +16,6 @@ from client.managers.ai_action_optimizer import AIPlanOptimizer
 from client.managers.ai_action_registry import AtomicActionRegistry
 from client.managers.ai_action_resource_manager import AIResourceManager
 from client.managers.ai_action_types import AIActionPlan, AIActionStep, AIActionTurnResult, ActionExecutionResult
-from client.managers.conversation_memory_manager import ConversationMemoryManager
 from client.storage.ai_action_plan_store import AIActionPlanRecord, AIActionPlanStore
 from client.storage.ai_action_store import AIActionStore, get_ai_action_store
 from client.storage.database import Database, get_database
@@ -302,14 +301,13 @@ class AIActionPlanner:
         return (
             common
             + "你的职责是判断用户是否需要 AssistIM 应用数据或本地应用能力，若是则拆成原子 steps。\n"
-            "已注册 action：contact.resolve, memory.search, memory.summarize, message.draft, user.confirm, message.send。\n"
+            "已注册 action：contact.resolve, message.draft, user.confirm, message.send。\n"
             "读取类任务不需要确认；产生外部副作用的任务必须包含 user.confirm，message.send 当前仍需要确认。\n"
             "只有用户明确要求发送、添加、发布、删除或修改时，才允许输出 user.confirm 或 message.send。\n"
-            "查询、总结、回顾、分析、检索、读取历史或询问“聊过什么”都是读取类任务，不要确认。\n"
-            "缺少时间范围不等于缺信息；只有 action 本身或资源限制要求范围时才追问。聊天历史查询可使用 all_history。\n"
-            "多个对象默认表示多对象操作或查询，不是歧义；只有单个名称对应多个本地实体时才由系统澄清。\n"
+            "查询、总结、回顾、分析、检索、读取历史或询问“聊过什么”都不属于 action workflow，统一输出 is_action=false 且 steps=[]。\n"
+            "多个对象默认表示多对象操作，不是歧义；只有单个名称对应多个本地实体时才由系统澄清。\n"
             "如果用户只是普通问答、写作、翻译或代码分析，输出 is_action=false 且 steps=[]。\n"
-            "用户不必说出“聊天记录”四个字，只要语义是在查本地对话历史，就规划读取 steps。"
+            "只有需要执行、确认、取消或补充高风险应用操作时，才输出 action plan。"
         )
 
     @staticmethod
@@ -347,7 +345,6 @@ class AIActionPlanner:
                 + "当前任务：判断用户是否补齐 pending 缺失信息。\n"
                 "如果补齐信息后能继续，输出修正后的结构化 plan；如果用户取消，输出 action=\"cancel_action\" 且 steps=[]。\n"
                 "如果仍无法补齐或输入无关，输出 is_action=false 且 steps=[]。\n"
-                "需要生成检索 plan 时使用 contact.resolve -> memory.search -> memory.summarize。\n"
                 "需要生成发送 plan 时使用 contact.resolve -> message.draft -> user.confirm -> message.send。\n"
                 f"用户输入：{str(user_text or '').strip()}"
                 f"{pending}"
@@ -356,13 +353,9 @@ class AIActionPlanner:
             header
             + "step 字段：id, action, depends_on, args, display_text, explanation。\n"
             "引用上游输出使用 $step_id.field 或 $step_id.field[0]。\n"
-            "聊天/记忆检索的通用组合是 contact.resolve -> memory.search -> memory.summarize。\n"
-            "memory.search.args 必须包含 participants, participant_match, time_scope, keywords, question。\n"
-            "memory.summarize.args 必须包含 source=\"$memory_search_step_id\" 和 question。\n"
-            "memory.search.time_scope 可为 {\"type\":\"all_history\"} 或 range；不要因为用户没给时间就追问。\n"
             "发送消息的组合是 contact.resolve -> message.draft -> user.confirm -> message.send。\n"
-            "发送组合必须同时有明确目标和明确消息内容；“聊过什么/说过什么/讨论过什么/沟通过什么/交流过什么”不是消息内容。\n"
-            "只有明确要求发送/发布/添加/删除/修改时才使用发送组合；询问历史、回顾、总结、检索内容时使用读取组合且不要 user.confirm。\n"
+            "发送组合必须同时有明确目标和明确消息内容。\n"
+            "只有明确要求发送/发布/添加/删除/修改时才使用发送组合；询问历史、回顾、总结、检索内容时输出 is_action=false 且不要生成 steps。\n"
             f"用户输入：{str(user_text or '').strip()}"
         )
 
@@ -388,12 +381,10 @@ class AIActionWorkflow:
     def __init__(
         self,
         *,
-        memory_manager: ConversationMemoryManager | None = None,
         action_store: AIActionStore | AIActionPlanStore | None = None,
         planner: AIActionPlanner | None = None,
         contact_alias_resolver: ContactAliasResolver | None = None,
     ) -> None:
-        self._memory_manager = memory_manager or ConversationMemoryManager()
         self._store = action_store or get_ai_action_store()
         self._planner = planner or AIActionPlanner()
         self._contact_alias_resolver = contact_alias_resolver or ContactAliasResolver()
@@ -401,7 +392,6 @@ class AIActionWorkflow:
         self._optimizer = AIPlanOptimizer()
         self._resource_manager = AIResourceManager()
         self._registry = AtomicActionRegistry(
-            memory_manager=self._memory_manager,
             contact_resolver=self._contact_alias_resolver,
         )
         self._executor = AIActionExecutor(registry=self._registry, store=self._store)
@@ -610,7 +600,6 @@ class AIActionWorkflow:
         plan_json = dict(pending.plan_json or {})
         compat = dict(plan_json.get("compat_slots") or {})
         compat["resolved_contacts"] = contacts
-        compat["query_terms"] = _terms_from_contacts(contacts, compat.get("keywords"))
         plan_json["compat_slots"] = compat
         updated = await self._store.update_plan(
             pending.id,
@@ -763,8 +752,6 @@ def _parse_planner_json(raw: str) -> AIActionPlan | None:
 def _clarification_question(plan: AIActionPlan) -> str:
     missing = set(plan.missing_slots)
     slots = dict(plan.slots or {})
-    if "query_terms" in missing:
-        return "你想查询或处理哪个对象，或者围绕哪个关键词？"
     if "target_user" in missing:
         return "你想把这句话发给谁？"
     if "message_text" in missing:
@@ -786,8 +773,6 @@ def _compat_action(plan: AIActionPlan) -> str:
     actions = [step.action for step in plan.steps]
     if "message.send" in actions:
         return "send_message"
-    if "memory.search" in actions or "memory.summarize" in actions:
-        return "memory_query"
     if actions:
         return actions[-1].replace(".", "_")
     return ""
@@ -824,29 +809,6 @@ def _select_contact_from_waiting(text: str, waiting: dict[str, Any]) -> dict[str
         if normalized_key in {_alias_key(value) for value in values}:
             return candidate
     return None
-
-
-def _terms_from_contacts(contacts: list[dict[str, Any]], keywords: object = None) -> list[str]:
-    terms: list[str] = []
-    for contact in contacts:
-        for value in [
-            contact.get("raw"),
-            contact.get("remark"),
-            contact.get("display_name"),
-            contact.get("nickname"),
-            contact.get("username"),
-            contact.get("assistim_id"),
-            contact.get("contact_id"),
-            *list(contact.get("aliases") or []),
-        ]:
-            text = _normalize_text(str(value or "")).strip(" ，,。")
-            if text and text not in terms:
-                terms.append(text)
-    for keyword in _clean_list(keywords):
-        if keyword not in terms:
-            terms.append(keyword)
-    return terms
-
 
 def _clean_list(value: object) -> list[str]:
     if value is None:

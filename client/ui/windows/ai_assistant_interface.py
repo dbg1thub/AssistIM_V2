@@ -43,12 +43,12 @@ from client.core import logging
 from client.core.app_icons import AppIcon, CollectionIcon
 from client.core.i18n import tr
 from client.events.event_bus import get_event_bus
-from client.managers.ai_action_workflow import AIActionPlanner, AIActionWorkflow
-from client.managers.conversation_memory_manager import ConversationMemoryManager
 from client.managers.ai_prompt_builder import AIPromptBuilder
 from client.managers.ai_task_manager import AITaskEvent, AITaskSnapshot, AITaskState, get_ai_task_manager
+from client.managers.conversation_memory_manager import ConversationMemoryContext, ConversationMemoryManager
 from client.models.ai_assistant import AIMessage, AIMessageRole, AIMessageStatus, AIThread
 from client.services.ai_service import AIErrorCode
+from client.services.local_embedding_gguf_runtime import LocalEmbeddingGGUFRuntimeError
 from client.storage.ai_assistant_store import get_ai_assistant_store
 
 logger = logging.get_logger(__name__)
@@ -554,10 +554,6 @@ class AIAssistantInterface(QWidget):
         self._task_manager = get_ai_task_manager()
         self._prompt_builder = AIPromptBuilder()
         self._memory_manager = ConversationMemoryManager()
-        self._action_workflow = AIActionWorkflow(
-            memory_manager=self._memory_manager,
-            planner=AIActionPlanner(self._task_manager),
-        )
         self._event_bus = get_event_bus()
         self._ui_tasks: set[asyncio.Task] = set()
         self._event_subscriptions: list[tuple[str, object]] = []
@@ -1038,50 +1034,40 @@ class AIAssistantInterface(QWidget):
         self._append_message(assistant_message)
         self._set_generating(True)
 
-        memory_context_lines: tuple[str, ...] = ()
-        action_message_extra: dict | None = None
-        if not attachments:
-            action_result = await self._action_workflow.handle_user_turn(
-                thread_id=thread_id,
-                text=text,
-                has_attachments=False,
-            )
-            if action_result.handled and action_result.response_text:
-                await self._store.update_message(
-                    assistant_message,
-                    content=action_result.response_text,
-                    status=AIMessageStatus.DONE,
-                    extra=action_result.message_extra,
-                )
-                assistant_message.content = action_result.response_text
-                assistant_message.status = AIMessageStatus.DONE
-                assistant_message.extra = action_result.message_extra
-                self._update_message_card(assistant_message)
-                self._set_generating(False)
-                await self._reload_threads(select_thread_id=thread_id)
-                return
-            if action_result.handled:
-                memory_context_lines = action_result.memory_context_lines
-                action_message_extra = action_result.message_extra
-
         task_id = f"ai-chat-{uuid.uuid4()}"
         await self._store.update_message(
             assistant_message,
             status=AIMessageStatus.STREAMING,
             task_id=task_id,
-            extra=action_message_extra,
         )
         assistant_message.status = AIMessageStatus.STREAMING
         assistant_message.task_id = task_id
-        assistant_message.extra = dict(action_message_extra or {})
         self._update_message_card(assistant_message)
 
         context_messages = [message for message in self._messages if message.message_id != assistant_message.message_id]
+        memory_context = ConversationMemoryContext(lines=(), query_kind="")
+        try:
+            if not attachments:
+                memory_context = await self._memory_manager.build_rag_context_for_ai_chat(
+                    text,
+                    previous_messages=context_messages,
+                )
+        except Exception as exc:
+            logger.exception("AI assistant failed to build local RAG context")
+            await self._fail_pending_assistant_message(assistant_message, self._rag_error_text(exc))
+            return
+        if memory_context.requires_confirmation:
+            await self._complete_pending_assistant_message(
+                assistant_message,
+                memory_context.confirmation_prompt,
+                extra={"memory_confirmation": {"query": memory_context.pending_query_text or text}},
+            )
+            return
         request = self._prompt_builder.build_ai_chat_request(
             thread_id,
             context_messages,
             task_id=task_id,
-            memory_context_lines=memory_context_lines,
+            memory_context_lines=memory_context.lines,
         )
         self._active_task_id = request.task_id
         self._active_assistant_message = assistant_message
@@ -1159,11 +1145,6 @@ class AIAssistantInterface(QWidget):
         self._active_assistant_message.status = status
         self._active_assistant_message.model = str(snapshot.model or "")
         self._active_assistant_message.extra = message_extra
-        await self._action_workflow.finish_streamed_action(
-            message_extra,
-            content=content,
-            status=status.value if isinstance(status, AIMessageStatus) else str(status),
-        )
         await self._persist_assistant_message(self._active_assistant_message)
         self._update_message_card(self._active_assistant_message)
         self._active_task_id = ""
@@ -1222,35 +1203,30 @@ class AIAssistantInterface(QWidget):
         )
         self._append_message(assistant_message)
         context_messages = [message for message in self._messages if message.message_id != assistant_message.message_id]
-        memory_context_lines: tuple[str, ...] = ()
-        if last_user is not None and not _first_image_attachment(last_user.extra):
-            action_result = await self._action_workflow.handle_user_turn(
-                thread_id=self._current_thread_id,
-                text=last_user.content,
-                has_attachments=False,
-            )
-            if action_result.handled and action_result.response_text:
-                await self._store.update_message(
-                    assistant_message,
-                    content=action_result.response_text,
-                    status=AIMessageStatus.DONE,
-                    extra=action_result.message_extra,
+        attachments = list((last_user.extra or {}).get("attachments") or []) if isinstance(last_user.extra, dict) else []
+        memory_context = ConversationMemoryContext(lines=(), query_kind="")
+        try:
+            if not attachments:
+                memory_context = await self._memory_manager.build_rag_context_for_ai_chat(
+                    str(last_user.content or ""),
+                    previous_messages=context_messages,
                 )
-                assistant_message.content = action_result.response_text
-                assistant_message.status = AIMessageStatus.DONE
-                assistant_message.extra = action_result.message_extra
-                self._render_messages()
-                await self._reload_threads(select_thread_id=self._current_thread_id)
-                return
-            if action_result.handled:
-                memory_context_lines = action_result.memory_context_lines
-                assistant_message.extra = action_result.message_extra
-                await self._store.update_message(assistant_message, extra=action_result.message_extra)
+        except Exception as exc:
+            logger.exception("AI assistant failed to rebuild local RAG context")
+            await self._fail_pending_assistant_message(assistant_message, self._rag_error_text(exc))
+            return
+        if memory_context.requires_confirmation:
+            await self._complete_pending_assistant_message(
+                assistant_message,
+                memory_context.confirmation_prompt,
+                extra={"memory_confirmation": {"query": memory_context.pending_query_text or str(last_user.content or "")}},
+            )
+            return
         request = self._prompt_builder.build_ai_chat_request(
             self._current_thread_id,
             context_messages,
             task_id=task_id,
-            memory_context_lines=memory_context_lines,
+            memory_context_lines=memory_context.lines,
         )
         self._active_task_id = request.task_id
         self._active_assistant_message = assistant_message
@@ -1409,6 +1385,51 @@ class AIAssistantInterface(QWidget):
         self._position_scroll_to_bottom_button()
         if self.scroll_to_bottom_button.isVisible():
             self.scroll_to_bottom_button.raise_()
+
+    async def _fail_pending_assistant_message(self, message: AIMessage, text: str) -> None:
+        message.content = str(text or "").strip() or tr("ai_assistant.error.failed", "AI could not complete this request.")
+        message.status = AIMessageStatus.FAILED
+        await self._persist_assistant_message(message)
+        self._update_message_card(message)
+        self._active_task_id = ""
+        self._active_assistant_message = None
+        self._active_stream_task = None
+        self._set_generating(False)
+
+    async def _complete_pending_assistant_message(
+        self,
+        message: AIMessage,
+        text: str,
+        *,
+        extra: dict | None = None,
+    ) -> None:
+        message.content = str(text or "").strip()
+        message.status = AIMessageStatus.DONE
+        message.task_id = ""
+        if extra is not None:
+            message.extra = dict(extra)
+        await self._persist_assistant_message(message)
+        self._update_message_card(message)
+        self._active_task_id = ""
+        self._active_assistant_message = None
+        self._active_stream_task = None
+        self._set_generating(False)
+
+    @staticmethod
+    def _rag_error_text(exc: Exception) -> str:
+        if isinstance(exc, LocalEmbeddingGGUFRuntimeError):
+            code = str(getattr(exc, "code", "") or "")
+            if code == "AI_EMBEDDING_MODEL_NOT_FOUND":
+                return "本地 embedding 模型文件不存在，请检查 ASSISTIM_AI_EMBEDDING_MODEL_PATH。"
+            if code in {
+                "AI_EMBEDDING_MODEL_LOAD_FAILED",
+                "AI_EMBEDDING_MODEL_UNAVAILABLE",
+                "AI_EMBEDDING_PROVIDER_UNAVAILABLE",
+            }:
+                return "本地 embedding 模型不可用，无法执行聊天记录检索。"
+            if code == "AI_EMBEDDING_GENERATION_FAILED":
+                return "本地 embedding 生成失败，无法执行聊天记录检索。"
+        return "本地聊天记录检索失败。"
 
     def eventFilter(self, watched, event) -> bool:
         watched_scrollbar = set()

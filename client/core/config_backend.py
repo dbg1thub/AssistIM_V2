@@ -6,19 +6,47 @@ Configuration Module
 
 import json
 import os
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
 
-CLIENT_ROOT = Path(__file__).resolve().parents[1]
-APP_ROOT = CLIENT_ROOT.parent
-UI_CONFIG_PATH = APP_ROOT / "data" / "config.json"
+def _runtime_app_root() -> Path:
+    explicit_root = str(os.getenv("ASSISTIM_APP_ROOT", "") or "").strip()
+    if explicit_root:
+        return Path(explicit_root).expanduser().resolve()
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parents[2]
+
+
+APP_ROOT = _runtime_app_root()
+CLIENT_ROOT = APP_ROOT / "client"
+UI_CONFIG_PATH = (
+    Path(str(os.getenv("ASSISTIM_CONFIG_PATH", "") or "")).expanduser().resolve()
+    if str(os.getenv("ASSISTIM_CONFIG_PATH", "") or "").strip()
+    else APP_ROOT / "data" / "config.json"
+)
 MODEL_MANIFEST_PATH = CLIENT_ROOT / "resources" / "models" / "manifest.json"
+VERSION_FILE_PATH = (
+    Path(str(os.getenv("ASSISTIM_VERSION_FILE", "") or "")).expanduser().resolve()
+    if str(os.getenv("ASSISTIM_VERSION_FILE", "") or "").strip()
+    else APP_ROOT / "version.json"
+)
 
 DEFAULT_AI_MODEL_FILE = "gemma-4-E2B-it-Q4_K_M.gguf"
 DEFAULT_AI_MODEL_ID = "gemma-4-E2B-it-Q4_K_M"
 DEFAULT_AI_MODEL_PATH = CLIENT_ROOT / "resources" / "models" / DEFAULT_AI_MODEL_FILE
+DEFAULT_AI_EMBEDDING_MODEL_FILE = "jina-embeddings-v3-Q4_K_M.gguf"
+DEFAULT_AI_EMBEDDING_MODEL_ID = "jina-embeddings-v3-Q4_K_M"
+DEFAULT_AI_EMBEDDING_MODEL_PATH = CLIENT_ROOT / "resources" / "models" / DEFAULT_AI_EMBEDDING_MODEL_FILE
+DEFAULT_VERSION_INFO: dict[str, str] = {
+    "app": "AssistIM",
+    "version": "0.1.0",
+    "channel": "test",
+    "platform": "win64",
+}
 
 
 def _parse_webrtc_ice_server_urls() -> list[str]:
@@ -68,6 +96,16 @@ def _parse_int_env(name: str, default: int) -> int:
         return default
     try:
         return int(raw_value)
+    except ValueError:
+        return default
+
+
+def _parse_int_value(raw_value: Any, default: int) -> int:
+    """Parse one integer-like value with fallback."""
+    if raw_value is None:
+        return default
+    try:
+        return int(str(raw_value).strip())
     except ValueError:
         return default
 
@@ -182,6 +220,30 @@ def _resolve_ai_gpu_enabled() -> bool:
     return _parse_bool_ui_config_value("AI", "GpuAccelerationEnabled", True)
 
 
+def _default_embedding_model_path_for_id(model_id: str) -> str:
+    normalized_model_id = str(model_id or "").strip()
+    if not normalized_model_id:
+        return str(DEFAULT_AI_EMBEDDING_MODEL_PATH)
+    return str(CLIENT_ROOT / "resources" / "models" / f"{normalized_model_id}.gguf")
+
+
+def _resolve_ai_embedding_model_id() -> str:
+    explicit_model_id = str(os.getenv("ASSISTIM_AI_EMBEDDING_MODEL_ID", "") or "").strip()
+    if explicit_model_id:
+        return explicit_model_id
+    return DEFAULT_AI_EMBEDDING_MODEL_ID
+
+
+def _resolve_ai_embedding_model_path() -> str:
+    explicit_model_path = str(os.getenv("ASSISTIM_AI_EMBEDDING_MODEL_PATH", "") or "").strip()
+    if explicit_model_path:
+        return explicit_model_path
+    explicit_model_id = str(os.getenv("ASSISTIM_AI_EMBEDDING_MODEL_ID", "") or "").strip()
+    if explicit_model_id:
+        return _default_embedding_model_path_for_id(explicit_model_id)
+    return str(DEFAULT_AI_EMBEDDING_MODEL_PATH)
+
+
 def _parse_bool_ui_config_value(group: str, name: str, default: bool) -> bool:
     raw_value = _ui_config_value(group, name, default)
     if isinstance(raw_value, bool):
@@ -194,13 +256,62 @@ def _parse_bool_ui_config_value(group: str, name: str, default: bool) -> bool:
     return default
 
 
+def _resolve_server_host() -> str:
+    explicit_host = str(os.getenv("ASSISTIM_HOST", "") or "").strip()
+    if explicit_host:
+        return explicit_host
+    configured_host = str(_ui_config_value("Server", "Host", "localhost") or "").strip()
+    return configured_host or "localhost"
+
+
+def _resolve_server_port() -> int:
+    explicit_port = str(os.getenv("ASSISTIM_PORT", "") or "").strip()
+    if explicit_port:
+        return _parse_int_env("ASSISTIM_PORT", 8000)
+    return _parse_int_value(_ui_config_value("Server", "Port", 8000), 8000)
+
+
+def _resolve_server_use_ssl() -> bool:
+    explicit_use_ssl = _parse_optional_bool_env("ASSISTIM_USE_SSL")
+    if explicit_use_ssl is not None:
+        return explicit_use_ssl
+    return _parse_bool_ui_config_value("Server", "UseSsl", False)
+
+
+def get_version_info() -> dict[str, str]:
+    """Load package version metadata for UI display and packaged releases."""
+    info = dict(DEFAULT_VERSION_INFO)
+    try:
+        payload = json.loads(VERSION_FILE_PATH.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        payload = {}
+    if isinstance(payload, dict):
+        for key in ("app", "version", "channel", "platform", "build_time", "commit"):
+            value = payload.get(key)
+            if value is None:
+                continue
+            normalized = str(value).strip()
+            if normalized:
+                info[key] = normalized
+    explicit_version = str(os.getenv("ASSISTIM_APP_VERSION", "") or "").strip()
+    if explicit_version:
+        info["version"] = explicit_version.lstrip("v")
+    return info
+
+
+def get_app_version() -> str:
+    """Return the app version without the UI 'v' prefix."""
+    version = str(get_version_info().get("version") or DEFAULT_VERSION_INFO["version"]).strip()
+    return version.lstrip("v") or DEFAULT_VERSION_INFO["version"]
+
+
 @dataclass
 class ServerConfig:
     """Server connection configuration."""
 
-    host: str = field(default_factory=lambda: os.getenv("ASSISTIM_HOST", "localhost"))
-    port: int = field(default_factory=lambda: int(os.getenv("ASSISTIM_PORT", "8000")))
-    use_ssl: bool = field(default_factory=lambda: os.getenv("ASSISTIM_USE_SSL", "false").lower() == "true")
+    host: str = field(default_factory=_resolve_server_host)
+    port: int = field(default_factory=_resolve_server_port)
+    use_ssl: bool = field(default_factory=_resolve_server_use_ssl)
 
     @property
     def origin_url(self) -> str:
@@ -298,6 +409,10 @@ class AIConfig:
     gpu_enabled: bool = field(default_factory=_resolve_ai_gpu_enabled)
     cpu_threads: int = field(default_factory=lambda: _parse_int_env("ASSISTIM_AI_CPU_THREADS", 0))
     verbose: bool = field(default_factory=lambda: _parse_bool_env("ASSISTIM_AI_VERBOSE", False))
+    embedding_model_path: str = field(default_factory=_resolve_ai_embedding_model_path)
+    embedding_model_id: str = field(default_factory=_resolve_ai_embedding_model_id)
+    embedding_context_size: int = field(default_factory=lambda: _parse_int_env("ASSISTIM_AI_EMBEDDING_CONTEXT_SIZE", 1024))
+    embedding_gpu_layers: int = field(default_factory=lambda: _parse_gpu_layers_env("ASSISTIM_AI_EMBEDDING_GPU_LAYERS", 0))
 
 
 @dataclass

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
 import threading
 import types
+from pathlib import Path
 
 from client.services import local_gguf_runtime as runtime_module
 
@@ -41,6 +43,43 @@ def test_local_gguf_runtime_lazily_reports_missing_llama_cpp(monkeypatch, tmp_pa
             raise AssertionError("missing llama-cpp-python should fail load")
 
     asyncio.run(scenario())
+
+
+def test_local_gguf_runtime_adds_current_env_dependency_dirs_before_llama_import(monkeypatch, tmp_path) -> None:
+    env_root = tmp_path / "env"
+    bin_dir = env_root / "bin"
+    library_bin_dir = env_root / "Library" / "bin"
+    dlls_dir = env_root / "DLLs"
+    executable_dir = env_root / "Scripts"
+    for directory in (bin_dir, library_bin_dir, dlls_dir, executable_dir):
+        directory.mkdir(parents=True)
+
+    recorded: list[str] = []
+    monkeypatch.setenv("PATH", r"C:\windows\system32")
+    monkeypatch.setenv("CONDA_PREFIX", r"D:\miniconda3")
+    monkeypatch.setenv("VIRTUAL_ENV", "")
+    monkeypatch.setattr(runtime_module.sys, "prefix", str(env_root))
+    monkeypatch.setattr(runtime_module.sys, "executable", str(executable_dir / "python.exe"))
+    monkeypatch.setattr(
+        runtime_module.os,
+        "add_dll_directory",
+        lambda path: recorded.append(path) or object(),
+        raising=False,
+    )
+    monkeypatch.setattr(runtime_module, "_WINDOWS_DLL_DIR_KEYS", set())
+    monkeypatch.setattr(runtime_module, "_WINDOWS_DLL_DIR_HANDLES", [])
+
+    runtime_module._ensure_windows_runtime_dependency_dirs()
+
+    path_entries = str(os.environ["PATH"]).split(os.pathsep)
+    assert path_entries[:4] == [
+        str(env_root.resolve()),
+        str(bin_dir.resolve()),
+        str(library_bin_dir.resolve()),
+        str(dlls_dir.resolve()),
+    ]
+    assert recorded[:4] == path_entries[:4]
+    assert str(Path(r"D:\miniconda3").resolve()) not in path_entries[:4]
 
 
 def test_local_gguf_runtime_streams_with_stub_llama_cpp(monkeypatch, tmp_path) -> None:

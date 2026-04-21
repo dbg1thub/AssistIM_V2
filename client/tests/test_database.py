@@ -260,6 +260,12 @@ def test_database_local_directory_cache_search_and_clear() -> None:
                 assert await database.list_contacts_cache_by_ids(["shared-user"]) == {
                     "shared-user": contacts[0]
                 }
+                username_matches = await database.resolve_contacts_cache_alias("alice", limit=10)
+                remark_matches = await database.resolve_contacts_cache_alias("Core teammate", limit=10)
+                id_matches = await database.resolve_contacts_cache_alias("shared-user", limit=10)
+                assert [item["id"] for item in username_matches] == ["shared-user"]
+                assert [item["id"] for item in remark_matches] == ["shared-user"]
+                assert [item["id"] for item in id_matches] == ["shared-user"]
 
                 await database.set_app_state("auth.user_id", "bob")
                 bob_contacts = await database.search_contacts("core", limit=10)
@@ -404,6 +410,137 @@ def test_database_replace_sessions_prunes_messages_and_read_cursors_outside_snap
         assert message_rows == [("session-1",)]
         assert cursor_rows == []
         assert session_rows == [("session-1",)]
+    finally:
+        try:
+            db_path.unlink(missing_ok=True)
+        except PermissionError:
+            pass
+        shutil.rmtree(temp_root, ignore_errors=True)
+
+
+def test_database_lists_conversation_memory_ann_candidates() -> None:
+    temp_root = (Path.cwd() / "client/tests/.pytest_tmp").resolve()
+    temp_root.mkdir(parents=True, exist_ok=True)
+    db_path = temp_root / "database-conversation-ann.db"
+    try:
+        try:
+            db_path.unlink(missing_ok=True)
+        except PermissionError:
+            pass
+        metadata_path = Path(f"{db_path}.crypto.json")
+        metadata_path.unlink(missing_ok=True)
+
+        async def scenario() -> None:
+            database = Database(str(db_path))
+            await database.connect()
+            try:
+                now = int(time.time())
+                await database.upsert_conversation_memory_item(
+                    {
+                        "session_id": "session-1",
+                        "source_type": "summary",
+                        "source_id": "summary:a",
+                        "source_version": 1,
+                        "start_ts": now - 60,
+                        "end_ts": now,
+                        "title": "张三摘要",
+                        "text": "讨论了周日咖啡店见面",
+                        "keywords": ["咖啡店"],
+                        "participants": ["张三", "我"],
+                        "embedding_id": "emb-a",
+                        "embedding_model": "fake-embedding-model",
+                        "created_at": now,
+                        "updated_at": now,
+                    }
+                )
+                await database.upsert_conversation_memory_embedding(
+                    {
+                        "embedding_id": "emb-a",
+                        "session_id": "session-1",
+                        "source_type": "summary",
+                        "source_id": "summary:a",
+                        "source_version": 1,
+                        "embedding_model": "fake-embedding-model",
+                        "content_hash": "hash-a",
+                        "embedding_vector": [1.0, 0.0, 0.0],
+                        "created_at": now,
+                        "updated_at": now,
+                    }
+                )
+                await database.replace_conversation_memory_ann_buckets(
+                    embedding_id="emb-a",
+                    session_id="session-1",
+                    source_type="summary",
+                    source_id="summary:a",
+                    ann_namespace="srp-lsh-v1:test:8x8",
+                    buckets=[(0, "0a"), (1, "1b"), (2, "2c")],
+                    created_at=now,
+                    updated_at=now,
+                )
+                await database.upsert_conversation_memory_item(
+                    {
+                        "session_id": "session-2",
+                        "source_type": "summary",
+                        "source_id": "summary:b",
+                        "source_version": 1,
+                        "start_ts": now - 120,
+                        "end_ts": now - 90,
+                        "title": "李四摘要",
+                        "text": "讨论了项目排期",
+                        "keywords": ["项目"],
+                        "participants": ["李四"],
+                        "embedding_id": "emb-b",
+                        "embedding_model": "fake-embedding-model",
+                        "created_at": now,
+                        "updated_at": now,
+                    }
+                )
+                await database.upsert_conversation_memory_embedding(
+                    {
+                        "embedding_id": "emb-b",
+                        "session_id": "session-2",
+                        "source_type": "summary",
+                        "source_id": "summary:b",
+                        "source_version": 1,
+                        "embedding_model": "fake-embedding-model",
+                        "content_hash": "hash-b",
+                        "embedding_vector": [0.0, 1.0, 0.0],
+                        "created_at": now,
+                        "updated_at": now,
+                    }
+                )
+                await database.replace_conversation_memory_ann_buckets(
+                    embedding_id="emb-b",
+                    session_id="session-2",
+                    source_type="summary",
+                    source_id="summary:b",
+                    ann_namespace="srp-lsh-v1:test:8x8",
+                    buckets=[(0, "ff"), (1, "ee")],
+                    created_at=now,
+                    updated_at=now,
+                )
+
+                items = await database.list_conversation_memory_ann_candidates(
+                    ann_namespace="srp-lsh-v1:test:8x8",
+                    source_type="summary",
+                    bucket_pairs=[(0, "0a"), (1, "1b"), (2, "2c")],
+                    limit=10,
+                )
+
+                assert len(items) == 1
+                assert items[0]["session_id"] == "session-1"
+                assert items[0]["source_id"] == "summary:a"
+                assert items[0]["ann_match_count"] == 3
+
+                stats = await database.get_conversation_rag_index_stats()
+                assert stats["memory_item_count"] == 2
+                assert stats["embedding_count"] == 2
+                assert stats["ann_indexed_embedding_count"] == 2
+                assert stats["ann_bucket_count"] == 5
+            finally:
+                await database.close()
+
+        asyncio.run(scenario())
     finally:
         try:
             db_path.unlink(missing_ok=True)
@@ -870,8 +1007,10 @@ def test_database_connect_prepares_sqlcipher_key_material(monkeypatch) -> None:
     temp_root = (Path.cwd() / "client/tests/.pytest_tmp").resolve()
     temp_root.mkdir(parents=True, exist_ok=True)
     db_path = temp_root / "database-encryption-sqlcipher.db"
+    metadata_path = Path(f"{db_path}.crypto.json")
     try:
         db_path.unlink(missing_ok=True)
+        metadata_path.unlink(missing_ok=True)
 
         fake_config = types.SimpleNamespace(
             storage=types.SimpleNamespace(
@@ -1015,8 +1154,10 @@ def test_database_migrates_legacy_db_key_material_out_of_app_state(monkeypatch) 
     temp_root = (Path.cwd() / "client/tests/.pytest_tmp").resolve()
     temp_root.mkdir(parents=True, exist_ok=True)
     db_path = temp_root / "database-encryption-legacy-key.db"
+    metadata_path = Path(f"{db_path}.crypto.json")
     try:
         db_path.unlink(missing_ok=True)
+        metadata_path.unlink(missing_ok=True)
 
         fake_config = types.SimpleNamespace(
             storage=types.SimpleNamespace(
@@ -1716,6 +1857,10 @@ def test_database_marks_encrypted_attachments_and_searches_versioned_local_metad
             db_path.unlink(missing_ok=True)
         except PermissionError:
             pass
+        try:
+            metadata_path.unlink(missing_ok=True)
+        except PermissionError:
+            pass
         shutil.rmtree(temp_root, ignore_errors=True)
 
 
@@ -1781,6 +1926,47 @@ def test_database_summary_tables_follow_session_delete_and_clear_chat_state() ->
                     ),
                 )
                 await database._db.commit()
+                await database.upsert_conversation_memory_item(
+                    {
+                        "session_id": "session-1",
+                        "source_type": "summary",
+                        "source_id": "summary:test",
+                        "source_version": 1,
+                        "start_ts": now,
+                        "end_ts": now,
+                        "title": "测试摘要",
+                        "text": "测试摘要正文",
+                        "keywords": ["测试"],
+                        "participants": ["Bob"],
+                        "embedding_id": "session-1|summary|summary:test",
+                        "embedding_model": "fake-embedding-model",
+                        "created_at": now,
+                        "updated_at": now,
+                    }
+                )
+                await database.upsert_conversation_memory_embedding(
+                    {
+                        "session_id": "session-1",
+                        "source_type": "summary",
+                        "source_id": "summary:test",
+                        "source_version": 1,
+                        "embedding_model": "fake-embedding-model",
+                        "content_hash": "hash-1",
+                        "embedding_vector": [1.0, 2.0, 3.0],
+                        "created_at": now,
+                        "updated_at": now,
+                    }
+                )
+                await database.replace_conversation_memory_ann_buckets(
+                    embedding_id="session-1|summary|summary:test",
+                    session_id="session-1",
+                    source_type="summary",
+                    source_id="summary:test",
+                    ann_namespace="srp-lsh-v1:test:8x8",
+                    buckets=[(0, "0a"), (1, "1b")],
+                    created_at=now,
+                    updated_at=now,
+                )
 
                 assert await database.get_open_conversation_summary_bucket("session-1") is not None
 
@@ -1791,7 +1977,17 @@ def test_database_summary_tables_follow_session_delete_and_clear_chat_state() ->
                     "SELECT COUNT(*) AS count FROM conversation_summary_media_cache WHERE session_id = ?",
                     ("session-1",),
                 )).fetchone()
+                embedding_rows = await (await database._db.execute(
+                    "SELECT COUNT(*) AS count FROM conversation_memory_embeddings WHERE session_id = ?",
+                    ("session-1",),
+                )).fetchone()
+                ann_rows = await (await database._db.execute(
+                    "SELECT COUNT(*) AS count FROM conversation_memory_ann_buckets WHERE session_id = ?",
+                    ("session-1",),
+                )).fetchone()
                 assert media_rows["count"] == 0
+                assert embedding_rows["count"] == 0
+                assert ann_rows["count"] == 0
 
                 await database.save_session(session)
                 await database.upsert_conversation_summary_bucket(
@@ -1824,8 +2020,141 @@ def test_database_summary_tables_follow_session_delete_and_clear_chat_state() ->
                 media_rows_after_clear = await (await database._db.execute(
                     "SELECT COUNT(*) AS count FROM conversation_summary_media_cache"
                 )).fetchone()
+                embedding_rows_after_clear = await (await database._db.execute(
+                    "SELECT COUNT(*) AS count FROM conversation_memory_embeddings"
+                )).fetchone()
+                ann_rows_after_clear = await (await database._db.execute(
+                    "SELECT COUNT(*) AS count FROM conversation_memory_ann_buckets"
+                )).fetchone()
                 assert bucket_rows["count"] == 0
                 assert media_rows_after_clear["count"] == 0
+                assert embedding_rows_after_clear["count"] == 0
+                assert ann_rows_after_clear["count"] == 0
+            finally:
+                await database.close()
+
+        asyncio.run(scenario())
+    finally:
+        try:
+            db_path.unlink(missing_ok=True)
+        except PermissionError:
+            pass
+        shutil.rmtree(temp_root, ignore_errors=True)
+
+
+def test_database_lists_summary_buckets_for_rebuild() -> None:
+    temp_root = (Path.cwd() / "client/tests/.pytest_tmp").resolve()
+    temp_root.mkdir(parents=True, exist_ok=True)
+    db_path = temp_root / "database-summary-rebuild-list.db"
+    now = int(time.time())
+    try:
+        db_path.unlink(missing_ok=True)
+
+        async def scenario() -> None:
+            database = Database(db_path=str(db_path))
+            await database.connect()
+            try:
+                for payload in (
+                    {
+                        "session_id": "session-1",
+                        "bucket_start_ts": now,
+                        "bucket_end_ts": now,
+                        "bucket_rule_version": 1,
+                        "is_open": False,
+                        "anchor_message_id": "m-1",
+                        "last_message_id": "m-1",
+                        "last_message_ts": now,
+                        "message_count": 1,
+                        "summary_status": "ready",
+                        "summary_text_ciphertext": "enc:summary-1",
+                        "summary_json_ciphertext": "",
+                        "summary_version": 1,
+                        "created_at": now,
+                        "updated_at": now,
+                    },
+                    {
+                        "session_id": "session-1",
+                        "bucket_start_ts": now + 1,
+                        "bucket_end_ts": now + 1,
+                        "bucket_rule_version": 1,
+                        "is_open": True,
+                        "anchor_message_id": "m-2",
+                        "last_message_id": "m-2",
+                        "last_message_ts": now + 1,
+                        "message_count": 1,
+                        "summary_status": "ready",
+                        "summary_text_ciphertext": "enc:summary-2",
+                        "summary_json_ciphertext": "",
+                        "summary_version": 1,
+                        "created_at": now + 1,
+                        "updated_at": now + 1,
+                    },
+                    {
+                        "session_id": "session-1",
+                        "bucket_start_ts": now + 2,
+                        "bucket_end_ts": now + 2,
+                        "bucket_rule_version": 1,
+                        "is_open": False,
+                        "anchor_message_id": "m-3",
+                        "last_message_id": "m-3",
+                        "last_message_ts": now + 2,
+                        "message_count": 1,
+                        "summary_status": "processing",
+                        "summary_text_ciphertext": "enc:summary-3",
+                        "summary_json_ciphertext": "",
+                        "summary_version": 1,
+                        "created_at": now + 2,
+                        "updated_at": now + 2,
+                    },
+                    {
+                        "session_id": "session-2",
+                        "bucket_start_ts": now + 3,
+                        "bucket_end_ts": now + 3,
+                        "bucket_rule_version": 1,
+                        "is_open": False,
+                        "anchor_message_id": "m-4",
+                        "last_message_id": "m-4",
+                        "last_message_ts": now + 3,
+                        "message_count": 1,
+                        "summary_status": "ready",
+                        "summary_text_ciphertext": "enc:summary-4",
+                        "summary_json_ciphertext": "",
+                        "summary_version": 1,
+                        "created_at": now + 3,
+                        "updated_at": now + 3,
+                    },
+                ):
+                    await database.upsert_conversation_summary_bucket(payload)
+
+                closed_only = await database.list_conversation_summary_buckets_for_rebuild(
+                    session_id="session-1",
+                    include_open=False,
+                    limit=10,
+                )
+                assert [row["bucket_start_ts"] for row in closed_only] == [now]
+
+                include_open = await database.list_conversation_summary_buckets_for_rebuild(
+                    session_id="session-1",
+                    include_open=True,
+                    limit=10,
+                )
+                assert [row["bucket_start_ts"] for row in include_open] == [now, now + 1]
+
+                second_page = await database.list_conversation_summary_buckets_for_rebuild(
+                    session_id="session-1",
+                    include_open=True,
+                    limit=1,
+                    offset=1,
+                )
+                assert [row["bucket_start_ts"] for row in second_page] == [now + 1]
+
+                after_first_id = await database.list_conversation_summary_buckets_for_rebuild(
+                    session_id="session-1",
+                    include_open=True,
+                    limit=10,
+                    after_id=int(include_open[0]["id"]),
+                )
+                assert [row["bucket_start_ts"] for row in after_first_id] == [now + 1]
             finally:
                 await database.close()
 

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import re
 import time
 import uuid
 from datetime import datetime
@@ -15,9 +14,12 @@ from client.core.logging import setup_logging
 from client.core.secure_storage import SecureStorage
 from client.events.event_bus import EventBus, get_event_bus
 from client.managers.ai_task_manager import AITaskManager, AITaskSnapshot, AITaskState, get_ai_task_manager
+from client.managers.conversation_ann_index import ConversationAnnIndex
+from client.managers.conversation_vector_index import ConversationVectorIndex
 from client.managers.conversation_summary_prompt_builder import (
     ConversationSummaryPromptBuilder,
     ConversationSummaryRequest,
+    StructuredConversationSummary,
 )
 from client.managers.message_manager import MessageEvent
 from client.managers.session_manager import SessionEvent
@@ -43,7 +45,8 @@ class ConversationSummaryManager:
     CLOSE_BUCKET_REFRESH_DELAY = 0.0
     IDLE_REFRESH_THROTTLE_SECONDS = 5.0
     MEMORY_SOURCE_TYPE_SUMMARY = "summary"
-    MEMORY_INDEX_VERSION = 2
+    MEMORY_INDEX_VERSION = 3
+    SUMMARY_SCHEMA_VERSION = 2
 
     def __init__(
         self,
@@ -52,11 +55,15 @@ class ConversationSummaryManager:
         event_bus: EventBus | None = None,
         task_manager: AITaskManager | None = None,
         prompt_builder: ConversationSummaryPromptBuilder | None = None,
+        vector_index: ConversationVectorIndex | None = None,
+        ann_index: ConversationAnnIndex | None = None,
     ) -> None:
         self._db = db or get_database()
         self._event_bus = event_bus or get_event_bus()
         self._task_manager = task_manager or get_ai_task_manager()
         self._prompt_builder = prompt_builder or ConversationSummaryPromptBuilder()
+        self._vector_index = vector_index or ConversationVectorIndex()
+        self._ann_index = ann_index or ConversationAnnIndex(model_id=self._vector_index.model_id)
         self._event_subscriptions: list[tuple[str, Any]] = []
         self._scheduled_refresh_tasks: dict[tuple[str, int], asyncio.Task] = {}
         self._refresh_task_running_keys: set[tuple[str, int]] = set()
@@ -275,8 +282,11 @@ class ConversationSummaryManager:
                 {
                     **working,
                     "summary_status": "ready",
-                    "summary_text_ciphertext": "",
-                    "summary_json_ciphertext": "",
+                    "display_summary_ciphertext": "",
+                    "retrieval_summary_ciphertext": "",
+                    "summary_structured_json_ciphertext": "",
+                    "summary_schema_version": self.SUMMARY_SCHEMA_VERSION,
+                    "summary_version": max(int(working.get("summary_version") or 1), self.SUMMARY_SCHEMA_VERSION),
                     "message_count": 0,
                     "error_code": "",
                     "updated_at": int(time.time()),
@@ -355,22 +365,55 @@ class ConversationSummaryManager:
             await self._db.upsert_conversation_summary_bucket(payload)
             return
 
-        summary_text = self._prompt_builder.normalize_summary_output(snapshot.content)
-        participants = self._summary_participants(built.request.session_id, messages, existing=existing, session=session)
-        keywords = self._summary_keywords(summary_text)
+        structured = self._prompt_builder.parse_summary_output(snapshot.content)
+        if structured is None:
+            payload["summary_status"] = "failed"
+            payload["error_code"] = "summary_parse_invalid"
+            await self._db.upsert_conversation_summary_bucket(payload)
+            return
+
+        participants = self._summary_participants(
+            built.request.session_id,
+            messages,
+            existing=existing,
+            session=session,
+            structured=structured,
+        )
+        structured = StructuredConversationSummary(
+            display_summary=structured.display_summary,
+            topics=structured.topics,
+            facts=structured.facts,
+            decisions=structured.decisions,
+            pending_items=structured.pending_items,
+            tone=structured.tone,
+            participants=tuple(participants),
+            keywords=self._summary_keywords(structured),
+        )
+        retrieval_summary = self._prompt_builder.build_retrieval_summary(
+            structured,
+            bucket_start_ts=bucket_start_ts,
+            bucket_end_ts=bucket_end_ts,
+        )
         message_ids = [str(message.message_id or "") for message in messages if str(message.message_id or "")]
         summary_json = {
             "source_type": self.MEMORY_SOURCE_TYPE_SUMMARY,
             "bucket_start_ts": int(bucket_start_ts),
             "bucket_end_ts": int(bucket_end_ts),
             "message_ids": message_ids,
-            "participants": participants,
-            "keywords": keywords,
+            "display_summary": structured.display_summary,
+            "topics": list(structured.topics),
+            "facts": list(structured.facts),
+            "decisions": list(structured.decisions),
+            "pending_items": list(structured.pending_items),
+            "tone": structured.tone,
+            "participants": list(structured.participants),
+            "keywords": list(structured.keywords),
             "message_count": int(built.message_count),
         }
         try:
-            summary_ciphertext = SecureStorage.encrypt_text(summary_text) if summary_text else ""
-            summary_json_ciphertext = SecureStorage.encrypt_text(
+            display_summary_ciphertext = SecureStorage.encrypt_text(structured.display_summary) if structured.display_summary else ""
+            retrieval_summary_ciphertext = SecureStorage.encrypt_text(retrieval_summary) if retrieval_summary else ""
+            summary_structured_json_ciphertext = SecureStorage.encrypt_text(
                 json.dumps(summary_json, ensure_ascii=False)
             ) if summary_json else ""
         except Exception:
@@ -385,17 +428,20 @@ class ConversationSummaryManager:
             return
 
         payload["summary_status"] = "ready"
-        payload["summary_text_ciphertext"] = summary_ciphertext
-        payload["summary_json_ciphertext"] = summary_json_ciphertext
+        payload["summary_version"] = max(int(existing.get("summary_version") or 1), self.SUMMARY_SCHEMA_VERSION)
+        payload["display_summary_ciphertext"] = display_summary_ciphertext
+        payload["retrieval_summary_ciphertext"] = retrieval_summary_ciphertext
+        payload["summary_structured_json_ciphertext"] = summary_structured_json_ciphertext
+        payload["summary_schema_version"] = self.SUMMARY_SCHEMA_VERSION
         payload["error_code"] = ""
         await self._db.upsert_conversation_summary_bucket(payload)
         await self._upsert_memory_item_for_summary(
             session_id=session_id,
             bucket_start_ts=bucket_start_ts,
             bucket_end_ts=bucket_end_ts,
-            summary_text=summary_text,
-            participants=participants,
-            keywords=keywords,
+            retrieval_summary=retrieval_summary,
+            participants=list(structured.participants),
+            keywords=list(structured.keywords),
             existing=existing,
         )
         await self._event_bus.emit(
@@ -446,6 +492,20 @@ class ConversationSummaryManager:
 
         stats = await self._bucket_message_stats(normalized_session_id, bucket)
         if not self._open_bucket_needs_refresh(bucket, stats):
+            if self._summary_bucket_needs_regeneration(bucket):
+                updated = dict(bucket)
+                updated["summary_status"] = "stale"
+                updated["updated_at"] = int(time.time())
+                await self._db.upsert_conversation_summary_bucket(updated)
+                await self._delete_memory_item_for_bucket(normalized_session_id, bucket_start_ts)
+                self._schedule_refresh(normalized_session_id, bucket_start_ts, delay=0.0)
+                logger.info(
+                    "[ai-perf] conversation_summary_schema_rebuild_scheduled session_id=%s bucket_start_ts=%s reason=%s",
+                    normalized_session_id,
+                    bucket_start_ts,
+                    "schema_upgrade",
+                )
+                return True
             if await self._memory_index_needs_rebuild(normalized_session_id, bucket):
                 return await self._rebuild_memory_item_for_ready_bucket(session, bucket, stats=stats)
             return False
@@ -535,10 +595,25 @@ class ConversationSummaryManager:
     def _is_task_manager_closed(self) -> bool:
         return bool(getattr(self._task_manager, "_closed", False))
 
+    def _summary_bucket_needs_regeneration(self, bucket: dict[str, Any]) -> bool:
+        if str(bucket.get("summary_status") or "").strip().lower() != "ready":
+            return False
+        if int(bucket.get("summary_schema_version") or 0) < self.SUMMARY_SCHEMA_VERSION:
+            return True
+        if not str(bucket.get("display_summary_ciphertext") or "").strip():
+            return True
+        if not str(bucket.get("retrieval_summary_ciphertext") or "").strip():
+            return True
+        if not str(bucket.get("summary_structured_json_ciphertext") or "").strip():
+            return True
+        return False
+
     async def _memory_index_needs_rebuild(self, session_id: str, bucket: dict[str, Any]) -> bool:
         if str(bucket.get("summary_status") or "").strip().lower() != "ready":
             return False
-        if not str(bucket.get("summary_text_ciphertext") or "").strip():
+        if self._summary_bucket_needs_regeneration(bucket):
+            return False
+        if not str(bucket.get("retrieval_summary_ciphertext") or "").strip():
             return False
         list_items = getattr(self._db, "list_conversation_memory_items", None)
         if list_items is None:
@@ -581,12 +656,14 @@ class ConversationSummaryManager:
         if not session_id or bucket_start_ts <= 0:
             return False
 
-        summary_text_ciphertext = str(bucket.get("summary_text_ciphertext") or "").strip()
-        if not summary_text_ciphertext:
+        retrieval_summary_ciphertext = str(bucket.get("retrieval_summary_ciphertext") or "").strip()
+        structured_ciphertext = str(bucket.get("summary_structured_json_ciphertext") or "").strip()
+        if not retrieval_summary_ciphertext or not structured_ciphertext:
             await self._delete_memory_item_for_bucket(session_id, bucket_start_ts)
             return True
         try:
-            summary_text = SecureStorage.decrypt_text(summary_text_ciphertext)
+            retrieval_summary = SecureStorage.decrypt_text(retrieval_summary_ciphertext)
+            structured_data = json.loads(SecureStorage.decrypt_text(structured_ciphertext))
         except Exception:
             logger.exception(
                 "Failed to decrypt ready conversation summary for memory reindex session_id=%s bucket_start_ts=%s",
@@ -594,6 +671,23 @@ class ConversationSummaryManager:
                 bucket_start_ts,
             )
             return False
+        structured = StructuredConversationSummary(
+            display_summary=str(structured_data.get("display_summary") or "").strip(),
+            topics=tuple(str(item or "").strip() for item in list(structured_data.get("topics") or []) if str(item or "").strip()),
+            facts=tuple(str(item or "").strip() for item in list(structured_data.get("facts") or []) if str(item or "").strip()),
+            decisions=tuple(str(item or "").strip() for item in list(structured_data.get("decisions") or []) if str(item or "").strip()),
+            pending_items=tuple(str(item or "").strip() for item in list(structured_data.get("pending_items") or []) if str(item or "").strip()),
+            tone=str(structured_data.get("tone") or "").strip(),
+            participants=tuple(
+                str(item or "").strip() for item in list(structured_data.get("participants") or []) if str(item or "").strip()
+            ),
+            keywords=tuple(str(item or "").strip() for item in list(structured_data.get("keywords") or []) if str(item or "").strip()),
+        )
+        keywords = [
+            str(item or "").strip()
+            for item in list(structured_data.get("keywords") or [])
+            if str(item or "").strip()
+        ]
 
         last_message_ts = int(stats.get("last_message_ts") or 0)
         bucket_end_ts = max(
@@ -610,13 +704,20 @@ class ConversationSummaryManager:
             **bucket,
             "session_name": session.display_name() or session.name or session.session_id,
         }
+        participants = self._summary_participants(
+            session_id,
+            messages,
+            existing=existing,
+            session=session,
+            structured=structured,
+        )
         await self._upsert_memory_item_for_summary(
             session_id=session_id,
             bucket_start_ts=bucket_start_ts,
             bucket_end_ts=bucket_end_ts,
-            summary_text=summary_text,
-            participants=self._summary_participants(session_id, messages, existing=existing, session=session),
-            keywords=self._summary_keywords(summary_text),
+            retrieval_summary=retrieval_summary,
+            participants=participants,
+            keywords=keywords,
             existing=existing,
         )
         logger.info(
@@ -643,12 +744,12 @@ class ConversationSummaryManager:
         session_id: str,
         bucket_start_ts: int,
         bucket_end_ts: int,
-        summary_text: str,
+        retrieval_summary: str,
         participants: list[str],
         keywords: list[str],
         existing: dict[str, Any],
     ) -> None:
-        if not str(summary_text or "").strip():
+        if not str(retrieval_summary or "").strip():
             await self._delete_memory_item_for_bucket(session_id, bucket_start_ts)
             return
         upsert = getattr(self._db, "upsert_conversation_memory_item", None)
@@ -659,6 +760,64 @@ class ConversationSummaryManager:
             bucket_start_ts=bucket_start_ts,
             bucket_end_ts=bucket_end_ts,
         )
+        embedding_id = ""
+        embedding_model = ""
+        upsert_embedding = getattr(self._db, "upsert_conversation_memory_embedding", None)
+        replace_ann_buckets = getattr(self._db, "replace_conversation_memory_ann_buckets", None)
+        if callable(upsert_embedding):
+            try:
+                vector = await self._vector_index.encode_item(
+                    title=title,
+                    text=retrieval_summary,
+                    keywords=keywords,
+                    participants=participants,
+                )
+                embedding_model = self._vector_index.model_id
+                embedding_id = await upsert_embedding(
+                    {
+                        "session_id": session_id,
+                        "source_type": self.MEMORY_SOURCE_TYPE_SUMMARY,
+                        "source_id": self._memory_source_id(bucket_start_ts),
+                        "source_version": max(self.MEMORY_INDEX_VERSION, int(existing.get("summary_version") or 1)),
+                        "embedding_model": embedding_model,
+                        "content_hash": self._vector_index.item_content_hash(
+                            title=title,
+                            text=retrieval_summary,
+                            keywords=keywords,
+                            participants=participants,
+                        ),
+                        "embedding_vector": list(vector.values),
+                        "updated_at": int(time.time()),
+                    }
+                )
+                if callable(replace_ann_buckets):
+                    await replace_ann_buckets(
+                        embedding_id=embedding_id,
+                        session_id=session_id,
+                        source_type=self.MEMORY_SOURCE_TYPE_SUMMARY,
+                        source_id=self._memory_source_id(bucket_start_ts),
+                        ann_namespace=self._ann_index.namespace,
+                        buckets=[
+                            (bucket.band_index, bucket.bucket_key)
+                            for bucket in self._ann_index.buckets_for_vector(vector)
+                        ],
+                        updated_at=int(time.time()),
+                    )
+            except Exception:
+                logger.exception(
+                    "Failed to upsert conversation memory embedding session_id=%s bucket_start_ts=%s",
+                    session_id,
+                    bucket_start_ts,
+                )
+                delete_embedding = getattr(self._db, "delete_conversation_memory_embeddings_for_source", None)
+                if callable(delete_embedding):
+                    await delete_embedding(
+                        session_id,
+                        self.MEMORY_SOURCE_TYPE_SUMMARY,
+                        self._memory_source_id(bucket_start_ts),
+                    )
+                embedding_id = ""
+                embedding_model = ""
         await upsert(
             {
                 "session_id": session_id,
@@ -668,11 +827,11 @@ class ConversationSummaryManager:
                 "start_ts": int(bucket_start_ts),
                 "end_ts": int(bucket_end_ts),
                 "title": title,
-                "text": summary_text,
+                "text": retrieval_summary,
                 "keywords": keywords,
                 "participants": participants,
-                "embedding_id": "",
-                "embedding_model": "",
+                "embedding_id": embedding_id,
+                "embedding_model": embedding_model,
                 "updated_at": int(time.time()),
             }
         )
@@ -684,6 +843,7 @@ class ConversationSummaryManager:
         *,
         existing: dict[str, Any],
         session: Session | None = None,
+        structured: StructuredConversationSummary | None = None,
     ) -> list[str]:
         del session_id
         participants: list[str] = []
@@ -692,6 +852,10 @@ class ConversationSummaryManager:
             value = str(raw_value or "").strip()
             if value and value not in participants:
                 participants.append(value)
+
+        if structured is not None:
+            for value in list(structured.participants or []):
+                add(value)
 
         add(existing.get("session_name"))
 
@@ -731,18 +895,22 @@ class ConversationSummaryManager:
         return participants
 
     @staticmethod
-    def _summary_keywords(summary_text: str) -> list[str]:
-        text = str(summary_text or "")
-        tokens = re.findall(r"[\w\u4e00-\u9fff]{2,}", text)
+    def _summary_keywords(structured: StructuredConversationSummary) -> tuple[str, ...]:
         keywords: list[str] = []
-        for token in tokens:
-            normalized = token.strip()
-            if not normalized or normalized in keywords:
-                continue
-            keywords.append(normalized)
-            if len(keywords) >= 12:
-                break
-        return keywords
+
+        def add(raw_value: Any) -> None:
+            value = str(raw_value or "").strip()
+            if not value or value in keywords:
+                return
+            keywords.append(value)
+
+        for value in list(structured.keywords or []):
+            add(value)
+        for value in list(structured.topics or []):
+            add(value)
+        for value in list(structured.decisions or []):
+            add(value)
+        return tuple(keywords[:12])
 
     @staticmethod
     def _memory_source_id(bucket_start_ts: int) -> str:
@@ -773,9 +941,11 @@ class ConversationSummaryManager:
             "last_message_ts": int(message_ts),
             "message_count": 0,
             "summary_status": "pending",
-            "summary_text_ciphertext": "",
-            "summary_json_ciphertext": "",
-            "summary_version": 1,
+            "display_summary_ciphertext": "",
+            "retrieval_summary_ciphertext": "",
+            "summary_structured_json_ciphertext": "",
+            "summary_schema_version": ConversationSummaryManager.SUMMARY_SCHEMA_VERSION,
+            "summary_version": ConversationSummaryManager.SUMMARY_SCHEMA_VERSION,
             "media_item_count": 0,
             "error_code": "",
             "notified_at": None,

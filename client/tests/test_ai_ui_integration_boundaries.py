@@ -277,6 +277,52 @@ def test_ai_assistant_delete_uses_confirmation_dialog() -> None:
     assert "if dialog.exec() != QDialog.DialogCode.Accepted:" in assistant_interface
 
 
+def test_ai_action_footer_does_not_repeat_pending_response_text() -> None:
+    assistant_interface = Path("client/ui/windows/ai_assistant_interface.py").read_text(encoding="utf-8")
+    footer_function = assistant_interface.split("def _ai_action_footer_text", 1)[1].split(
+        "\n\nclass AIAssistantPromptEdit",
+        1,
+    )[0]
+
+    assert 'if state == "waiting_confirmation":' in footer_function
+    assert 'return "等待你确认后继续。"' in footer_function
+    assert 'if state == "waiting_clarification":' in footer_function
+    assert 'return "等待你补充信息后继续。"' in footer_function
+    assert "response_text" not in footer_function
+
+
+def test_ai_assistant_bypasses_action_workflow_and_uses_rag_before_ai_chat() -> None:
+    assistant_interface = Path("client/ui/windows/ai_assistant_interface.py").read_text(encoding="utf-8")
+    send_prompt = assistant_interface.split("async def _send_prompt", 1)[1].split(
+        "\n    async def _run_stream",
+        1,
+    )[0]
+    regenerate = assistant_interface.split("async def _regenerate_last", 1)[1].split(
+        "\n    def _on_clear_clicked",
+        1,
+    )[0]
+
+    assert "AIActionWorkflow" not in assistant_interface
+    assert "AIActionPlanner" not in assistant_interface
+    assert "_action_workflow.handle_user_turn" not in send_prompt
+    assert "build_rag_context_for_ai_chat" in send_prompt
+    assert "action_result.response_text" not in send_prompt
+    assert "memory_context_lines=memory_context.lines" in send_prompt
+    assert "_prompt_builder.build_ai_chat_request" in send_prompt
+    assert send_prompt.index("build_rag_context_for_ai_chat") < send_prompt.index(
+        "_prompt_builder.build_ai_chat_request"
+    )
+
+    assert "_action_workflow.handle_user_turn" not in regenerate
+    assert "build_rag_context_for_ai_chat" in regenerate
+    assert "action_result.response_text" not in regenerate
+    assert "memory_context_lines=memory_context.lines" in regenerate
+    assert "_prompt_builder.build_ai_chat_request" in regenerate
+    assert regenerate.index("build_rag_context_for_ai_chat") < regenerate.index(
+        "_prompt_builder.build_ai_chat_request"
+    )
+
+
 def test_ai_assistant_regenerate_capability_exists_without_visible_entry() -> None:
     assistant_interface = Path("client/ui/windows/ai_assistant_interface.py").read_text(encoding="utf-8")
 

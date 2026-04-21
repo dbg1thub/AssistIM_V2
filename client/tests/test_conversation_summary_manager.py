@@ -13,7 +13,16 @@ from client.services.ai_service import AIErrorCode
 
 @dataclass
 class _FakeTaskManager:
-    content: str = "本段聊天主要在确认见面安排，语气自然。"
+    content: str = (
+        "DISPLAY_SUMMARY: 本段聊天主要在确认见面安排，语气自然。\n"
+        "TOPICS: 见面安排\n"
+        "FACTS: 双方在确认见面时间\n"
+        "DECISIONS: 暂定继续确认\n"
+        "PENDING_ITEMS: 具体地点待确认\n"
+        "TONE: 自然，推进中\n"
+        "PARTICIPANTS: 我 | Bob\n"
+        "KEYWORDS: 见面 | 时间 | 地点"
+    )
     state: AITaskState = AITaskState.DONE
     error_code: AIErrorCode | None = None
 
@@ -33,6 +42,31 @@ class _FakeTaskManager:
         )
 
 
+def _structured_output(
+    *,
+    display_summary: str,
+    topics: str = "见面安排",
+    facts: str = "双方在确认见面时间",
+    decisions: str = "暂定继续确认",
+    pending_items: str = "具体地点待确认",
+    tone: str = "自然，推进中",
+    participants: str = "我 | Bob",
+    keywords: str = "见面 | 时间 | 地点",
+) -> str:
+    return "\n".join(
+        [
+            f"DISPLAY_SUMMARY: {display_summary}",
+            f"TOPICS: {topics}",
+            f"FACTS: {facts}",
+            f"DECISIONS: {decisions}",
+            f"PENDING_ITEMS: {pending_items}",
+            f"TONE: {tone}",
+            f"PARTICIPANTS: {participants}",
+            f"KEYWORDS: {keywords}",
+        ]
+    )
+
+
 class _FakeDatabase:
     def __init__(self, session: Session) -> None:
         self.is_connected = True
@@ -40,6 +74,8 @@ class _FakeDatabase:
         self.messages_by_session: dict[str, list[ChatMessage]] = {session.session_id: []}
         self.buckets: dict[tuple[str, int], dict] = {}
         self.memory_items: dict[tuple[str, str, str], dict] = {}
+        self.memory_embeddings: dict[tuple[str, str, str], dict] = {}
+        self.memory_ann_buckets: dict[tuple[str, str, str], dict] = {}
         self.deleted_memory_sources: list[tuple[str, str, str]] = []
 
     async def get_session(self, session_id: str) -> Session | None:
@@ -122,18 +158,155 @@ class _FakeDatabase:
         )
         self.memory_items[key] = dict(payload)
 
+    async def upsert_conversation_memory_embedding(self, payload: dict) -> str:
+        key = (
+            str(payload.get("session_id") or ""),
+            str(payload.get("source_type") or ""),
+            str(payload.get("source_id") or ""),
+        )
+        stored = dict(payload)
+        stored["embedding_id"] = stored.get("embedding_id") or "|".join(key)
+        self.memory_embeddings[key] = stored
+        return str(stored["embedding_id"])
+
+    async def delete_conversation_memory_embeddings_for_source(
+        self,
+        session_id: str,
+        source_type: str,
+        source_id: str = "",
+    ) -> None:
+        key = (str(session_id or ""), str(source_type or ""), str(source_id or ""))
+        if source_id:
+            self.memory_embeddings.pop(key, None)
+            self.memory_ann_buckets.pop(key, None)
+            return
+        for existing_key in list(self.memory_embeddings):
+            if existing_key[0] == key[0] and existing_key[1] == key[1]:
+                self.memory_embeddings.pop(existing_key, None)
+        for existing_key in list(self.memory_ann_buckets):
+            if existing_key[0] == key[0] and existing_key[1] == key[1]:
+                self.memory_ann_buckets.pop(existing_key, None)
+
+    async def replace_conversation_memory_ann_buckets(
+        self,
+        *,
+        embedding_id: str,
+        session_id: str,
+        source_type: str,
+        source_id: str,
+        ann_namespace: str,
+        buckets,
+        created_at: int | None = None,
+        updated_at: int | None = None,
+    ) -> None:
+        del created_at
+        key = (str(session_id or ""), str(source_type or ""), str(source_id or ""))
+        self.memory_ann_buckets[key] = {
+            "embedding_id": embedding_id,
+            "ann_namespace": ann_namespace,
+            "buckets": list(buckets),
+            "updated_at": int(updated_at or 0),
+        }
+
     async def delete_conversation_memory_items_for_source(self, session_id: str, source_type: str, source_id: str = "") -> None:
         key = (str(session_id or ""), str(source_type or ""), str(source_id or ""))
         self.deleted_memory_sources.append(key)
         if source_id:
             self.memory_items.pop(key, None)
+            self.memory_embeddings.pop(key, None)
+            self.memory_ann_buckets.pop(key, None)
             return
         for existing_key in list(self.memory_items):
             if existing_key[0] == key[0] and existing_key[1] == key[1]:
                 self.memory_items.pop(existing_key, None)
+        for existing_key in list(self.memory_embeddings):
+            if existing_key[0] == key[0] and existing_key[1] == key[1]:
+                self.memory_embeddings.pop(existing_key, None)
+        for existing_key in list(self.memory_ann_buckets):
+            if existing_key[0] == key[0] and existing_key[1] == key[1]:
+                self.memory_ann_buckets.pop(existing_key, None)
+
+    async def list_conversation_memory_items(
+        self,
+        *,
+        session_id: str = "",
+        source_type: str = "",
+        start_ts: int | None = None,
+        end_ts: int | None = None,
+        limit: int = 12,
+    ) -> list[dict]:
+        items = []
+        for item in self.memory_items.values():
+            if session_id and str(item.get("session_id") or "") != session_id:
+                continue
+            if source_type and str(item.get("source_type") or "") != source_type:
+                continue
+            if start_ts is not None and int(item.get("end_ts") or 0) < int(start_ts or 0):
+                continue
+            if end_ts is not None and int(item.get("start_ts") or 0) > int(end_ts or 0):
+                continue
+            items.append(dict(item))
+        items.sort(key=lambda item: (int(item.get("end_ts") or 0), int(item.get("start_ts") or 0)), reverse=True)
+        return items[: max(1, int(limit or 1))]
 
 
-def _message(message_id: str, when: datetime, *, content: str, is_self: bool = False, message_type: MessageType = MessageType.TEXT):
+class _FakeDenseVector:
+    def __init__(self, values: list[float]) -> None:
+        self.values = tuple(values)
+
+
+class _FakeVectorIndex:
+    model_id = "fake-embedding-model"
+
+    async def encode_item(self, *, title: str, text: str, keywords=(), participants=()):
+        tokens = self._tokens([title, text, *list(keywords or []), *list(participants or [])])
+        return _FakeDenseVector(self._vector(tokens))
+
+    @classmethod
+    def item_content_hash(cls, *, title: str, text: str, keywords=(), participants=()) -> str:
+        tokens = cls._tokens([title, text, *list(keywords or []), *list(participants or [])])
+        return "|".join(sorted(tokens))
+
+    @staticmethod
+    def _tokens(values: list[str]) -> set[str]:
+        joined = " ".join(str(value or "").strip().casefold() for value in values if str(value or "").strip())
+        return {token for token in joined.replace("，", " ").replace("。", " ").replace("：", " ").split() if token}
+
+    @staticmethod
+    def _vector(tokens: set[str], dim: int = 16) -> list[float]:
+        vector = [0.0] * dim
+        for token in tokens:
+            vector[sum(ord(ch) for ch in token) % dim] += 1.0
+        return vector
+
+
+class _FakeAnnIndex:
+    namespace = "fake-ann:8x8"
+
+    def buckets_for_vector(self, vector: _FakeDenseVector):
+        bucket_value = int(sum(vector.values)) % 256
+        return [type("Bucket", (), {"band_index": 0, "bucket_key": f"{bucket_value:02x}"})()]
+
+
+def _make_manager(fake_db: _FakeDatabase, event_bus: EventBus, fake_task_manager: _FakeTaskManager) -> ConversationSummaryManager:
+    return ConversationSummaryManager(
+        db=fake_db,
+        event_bus=event_bus,
+        task_manager=fake_task_manager,
+        vector_index=_FakeVectorIndex(),
+        ann_index=_FakeAnnIndex(),
+    )
+
+
+def _message(
+    message_id: str,
+    when: datetime,
+    *,
+    content: str,
+    is_self: bool = False,
+    message_type: MessageType = MessageType.TEXT,
+    extra: dict | None = None,
+):
     return ChatMessage(
         message_id=message_id,
         session_id="session-1",
@@ -144,6 +317,7 @@ def _message(message_id: str, when: datetime, *, content: str, is_self: bool = F
         timestamp=when,
         updated_at=when,
         is_self=is_self,
+        extra=dict(extra or {}),
     )
 
 
@@ -162,11 +336,7 @@ def test_conversation_summary_manager_creates_ready_open_bucket(monkeypatch) -> 
     event_bus = EventBus()
 
     async def scenario() -> None:
-        manager = ConversationSummaryManager(
-            db=fake_db,
-            event_bus=event_bus,
-            task_manager=fake_task_manager,
-        )
+        manager = _make_manager(fake_db, event_bus, fake_task_manager)
         manager.DEBOUNCE_SECONDS = 0.0
         await manager.initialize()
         try:
@@ -178,13 +348,20 @@ def test_conversation_summary_manager_creates_ready_open_bucket(monkeypatch) -> 
             bucket = await fake_db.get_open_conversation_summary_bucket("session-1")
             assert bucket is not None
             assert bucket["summary_status"] == "ready"
-            assert bucket["summary_text_ciphertext"].startswith("enc:")
+            assert bucket["display_summary_ciphertext"].startswith("enc:")
+            assert bucket["retrieval_summary_ciphertext"].startswith("enc:")
+            assert bucket["summary_structured_json_ciphertext"].startswith("enc:")
+            assert bucket["summary_schema_version"] == ConversationSummaryManager.SUMMARY_SCHEMA_VERSION
             assert bucket["message_count"] == 1
             assert fake_task_manager.requests
             assert "周日下午可以见面" in fake_task_manager.requests[0].messages[0]["content"]
             memory_key = ("session-1", "summary", f"summary:{int(incoming.timestamp.timestamp())}")
             assert memory_key in fake_db.memory_items
-            assert fake_db.memory_items[memory_key]["text"] == "本段聊天主要在确认见面安排，语气自然。"
+            assert "会话对象：" in fake_db.memory_items[memory_key]["text"]
+            assert memory_key in fake_db.memory_embeddings
+            assert fake_db.memory_embeddings[memory_key]["embedding_model"] == "fake-embedding-model"
+            assert memory_key in fake_db.memory_ann_buckets
+            assert fake_db.memory_ann_buckets[memory_key]["ann_namespace"] == "fake-ann:8x8"
         finally:
             await manager.close()
 
@@ -199,11 +376,7 @@ def test_conversation_summary_manager_defers_refresh_by_debounce(monkeypatch) ->
     event_bus = EventBus()
 
     async def scenario() -> None:
-        manager = ConversationSummaryManager(
-            db=fake_db,
-            event_bus=event_bus,
-            task_manager=fake_task_manager,
-        )
+        manager = _make_manager(fake_db, event_bus, fake_task_manager)
         manager.DEBOUNCE_SECONDS = 0.05
         await manager.initialize()
         try:
@@ -232,6 +405,97 @@ def test_conversation_summary_manager_defers_refresh_by_debounce(monkeypatch) ->
     asyncio.run(scenario())
 
 
+def test_conversation_summary_manager_indexes_sender_username_for_memory_lookup(monkeypatch) -> None:
+    monkeypatch.setattr(SecureStorage, "encrypt_text", classmethod(lambda cls, value: f"enc:{value}"))
+    session = Session(session_id="session-1", name="user-bob", session_type="direct")
+    fake_db = _FakeDatabase(session)
+    fake_task_manager = _FakeTaskManager()
+    event_bus = EventBus()
+
+    async def scenario() -> None:
+        manager = _make_manager(fake_db, event_bus, fake_task_manager)
+        manager.DEBOUNCE_SECONDS = 0.0
+        await manager.initialize()
+        try:
+            incoming = _message(
+                "m-1",
+                datetime(2026, 4, 19, 10, 0, 0),
+                content="昨天那家店可以去。",
+                extra={"sender_username": "test3"},
+            )
+            fake_db.messages_by_session["session-1"].append(incoming)
+            await event_bus.emit(MessageEvent.RECEIVED, {"message": incoming})
+            await _drain_summary_tasks(manager)
+
+            memory_key = ("session-1", "summary", f"summary:{int(incoming.timestamp.timestamp())}")
+            participants = fake_db.memory_items[memory_key]["participants"]
+
+            assert "test3" in participants
+            assert "bob" in participants
+        finally:
+            await manager.close()
+
+    asyncio.run(scenario())
+
+
+def test_conversation_summary_manager_reindexes_ready_bucket_without_model_when_memory_index_is_old(monkeypatch) -> None:
+    monkeypatch.setattr(SecureStorage, "encrypt_text", classmethod(lambda cls, value: f"enc:{value}"))
+    monkeypatch.setattr(SecureStorage, "decrypt_text", classmethod(lambda cls, value: str(value).removeprefix("enc:")))
+    session = Session(session_id="session-1", name="user-bob", session_type="direct")
+    fake_db = _FakeDatabase(session)
+    fake_task_manager = _FakeTaskManager()
+    event_bus = EventBus()
+    incoming = _message(
+        "m-1",
+        datetime(2026, 4, 19, 10, 0, 0),
+        content="昨天那家店可以去。",
+        extra={"sender_username": "test3"},
+    )
+    incoming_ts = int(incoming.timestamp.timestamp())
+    fake_db.messages_by_session["session-1"].append(incoming)
+    fake_db.buckets[("session-1", incoming_ts)] = {
+        "session_id": "session-1",
+        "bucket_start_ts": incoming_ts,
+        "bucket_end_ts": incoming_ts,
+        "bucket_rule_version": 1,
+        "is_open": True,
+        "last_message_id": "m-1",
+        "last_message_ts": incoming_ts,
+        "message_count": 1,
+        "summary_status": "ready",
+        "display_summary_ciphertext": "enc:旧摘要",
+        "retrieval_summary_ciphertext": "enc:会话对象：我；Bob\n时间范围：2026-04-19 10:00-10:00\n主题：旧主题\n已确认：旧事实\n已决定：旧决定\n待跟进：旧待办\n整体语气：平稳",
+        "summary_structured_json_ciphertext": 'enc:{"display_summary":"旧摘要","topics":["旧主题"],"facts":["旧事实"],"decisions":["旧决定"],"pending_items":["旧待办"],"tone":"平稳","participants":["user-bob","bob"],"keywords":["旧主题"]}',
+        "summary_schema_version": ConversationSummaryManager.SUMMARY_SCHEMA_VERSION,
+        "summary_version": 1,
+    }
+    memory_key = ("session-1", "summary", f"summary:{incoming_ts}")
+    fake_db.memory_items[memory_key] = {
+        "session_id": "session-1",
+        "source_type": "summary",
+        "source_id": f"summary:{incoming_ts}",
+        "source_version": 1,
+        "start_ts": incoming_ts,
+        "end_ts": incoming_ts,
+        "title": "旧标题",
+        "text": "旧摘要",
+        "keywords": [],
+        "participants": ["user-bob", "bob"],
+    }
+
+    async def scenario() -> None:
+        manager = _make_manager(fake_db, event_bus, fake_task_manager)
+
+        scheduled = await manager.schedule_idle_refresh("session-1", reason="test")
+
+        assert scheduled is True
+        assert fake_task_manager.requests == []
+        assert fake_db.memory_items[memory_key]["source_version"] == ConversationSummaryManager.MEMORY_INDEX_VERSION
+        assert "test3" in fake_db.memory_items[memory_key]["participants"]
+
+    asyncio.run(scenario())
+
+
 def test_conversation_summary_manager_idle_refresh_skips_ready_bucket_without_changes(monkeypatch) -> None:
     monkeypatch.setattr(SecureStorage, "encrypt_text", classmethod(lambda cls, value: f"enc:{value}"))
     session = Session(session_id="session-1", name="Bob", session_type="direct")
@@ -240,11 +504,7 @@ def test_conversation_summary_manager_idle_refresh_skips_ready_bucket_without_ch
     event_bus = EventBus()
 
     async def scenario() -> None:
-        manager = ConversationSummaryManager(
-            db=fake_db,
-            event_bus=event_bus,
-            task_manager=fake_task_manager,
-        )
+        manager = _make_manager(fake_db, event_bus, fake_task_manager)
         incoming = _message("m-1", datetime(2026, 4, 19, 10, 0, 0), content="刚才确认了地点。")
         incoming_ts = int(incoming.timestamp.timestamp())
         fake_db.messages_by_session["session-1"].append(incoming)
@@ -258,9 +518,23 @@ def test_conversation_summary_manager_idle_refresh_skips_ready_bucket_without_ch
             "last_message_ts": incoming_ts,
             "message_count": 1,
             "summary_status": "ready",
-            "summary_text_ciphertext": "enc:已有摘要",
-            "summary_json_ciphertext": "",
+            "display_summary_ciphertext": "enc:已有摘要",
+            "retrieval_summary_ciphertext": "enc:会话对象：Bob；bob\n时间范围：2026-04-19 10:00-10:00\n主题：已有摘要\n已确认：已有摘要\n已决定：无\n待跟进：无\n整体语气：平稳",
+            "summary_structured_json_ciphertext": 'enc:{"display_summary":"已有摘要","topics":["已有摘要"],"facts":["已有摘要"],"decisions":[],"pending_items":[],"tone":"平稳","participants":["Bob","bob"],"keywords":["已有摘要"]}',
+            "summary_schema_version": ConversationSummaryManager.SUMMARY_SCHEMA_VERSION,
             "summary_version": 1,
+        }
+        fake_db.memory_items[("session-1", "summary", f"summary:{incoming_ts}")] = {
+            "session_id": "session-1",
+            "source_type": "summary",
+            "source_id": f"summary:{incoming_ts}",
+            "source_version": ConversationSummaryManager.MEMORY_INDEX_VERSION,
+            "start_ts": incoming_ts,
+            "end_ts": incoming_ts,
+            "title": "已有摘要",
+            "text": "已有摘要",
+            "keywords": [],
+            "participants": ["Bob", "bob"],
         }
 
         scheduled = await manager.schedule_idle_refresh("session-1", reason="test")
@@ -279,11 +553,7 @@ def test_conversation_summary_manager_idle_refresh_updates_ready_bucket_when_mes
     event_bus = EventBus()
 
     async def scenario() -> None:
-        manager = ConversationSummaryManager(
-            db=fake_db,
-            event_bus=event_bus,
-            task_manager=fake_task_manager,
-        )
+        manager = _make_manager(fake_db, event_bus, fake_task_manager)
         first = _message("m-1", datetime(2026, 4, 19, 10, 0, 0), content="先确认地点。")
         second = _message("m-2", datetime(2026, 4, 19, 10, 1, 0), content="再确认时间。")
         first_ts = int(first.timestamp.timestamp())
@@ -299,8 +569,10 @@ def test_conversation_summary_manager_idle_refresh_updates_ready_bucket_when_mes
             "last_message_ts": first_ts,
             "message_count": 1,
             "summary_status": "ready",
-            "summary_text_ciphertext": "enc:旧摘要",
-            "summary_json_ciphertext": "",
+            "display_summary_ciphertext": "enc:旧摘要",
+            "retrieval_summary_ciphertext": "enc:会话对象：Bob\n时间范围：2026-04-19 10:00-10:00\n主题：旧主题\n已确认：旧事实\n已决定：旧决定\n待跟进：旧待办\n整体语气：平稳",
+            "summary_structured_json_ciphertext": 'enc:{"display_summary":"旧摘要","topics":["旧主题"],"facts":["旧事实"],"decisions":["旧决定"],"pending_items":["旧待办"],"tone":"平稳","participants":["Bob"],"keywords":["旧主题"]}',
+            "summary_schema_version": ConversationSummaryManager.SUMMARY_SCHEMA_VERSION,
             "summary_version": 1,
         }
 
@@ -333,11 +605,7 @@ def test_conversation_summary_manager_emits_ready_event(monkeypatch) -> None:
         ready_events.append(dict(payload or {}))
 
     async def scenario() -> None:
-        manager = ConversationSummaryManager(
-            db=fake_db,
-            event_bus=event_bus,
-            task_manager=fake_task_manager,
-        )
+        manager = _make_manager(fake_db, event_bus, fake_task_manager)
         manager.DEBOUNCE_SECONDS = 0.0
         await event_bus.subscribe(ConversationSummaryEvent.READY, _capture_ready)
         await manager.initialize()
@@ -371,11 +639,7 @@ def test_conversation_summary_manager_closes_previous_bucket_on_time_break(monke
     event_bus = EventBus()
 
     async def scenario() -> None:
-        manager = ConversationSummaryManager(
-            db=fake_db,
-            event_bus=event_bus,
-            task_manager=fake_task_manager,
-        )
+        manager = _make_manager(fake_db, event_bus, fake_task_manager)
         manager.DEBOUNCE_SECONDS = 0.0
         await manager.initialize()
         try:
@@ -399,7 +663,7 @@ def test_conversation_summary_manager_closes_previous_bucket_on_time_break(monke
             assert "当前仍在继续的聊天时间段" in fake_task_manager.requests[0].messages[0]["content"]
             assert fake_task_manager.requests[1].metadata["is_open_bucket"] is False
             assert "稳定的最终总结" in fake_task_manager.requests[1].messages[0]["content"]
-            assert "不要使用“当前”“正在”“还在继续”等时间敏感措辞" in fake_task_manager.requests[1].messages[0]["content"]
+            assert "不要使用“当前”“正在”“还在继续”等进行时措辞" in fake_task_manager.requests[1].messages[0]["content"]
             assert fake_task_manager.requests[2].metadata["is_open_bucket"] is True
         finally:
             await manager.close()
@@ -415,11 +679,7 @@ def test_conversation_summary_manager_marks_bucket_failed_when_ai_fails(monkeypa
     event_bus = EventBus()
 
     async def scenario() -> None:
-        manager = ConversationSummaryManager(
-            db=fake_db,
-            event_bus=event_bus,
-            task_manager=fake_task_manager,
-        )
+        manager = _make_manager(fake_db, event_bus, fake_task_manager)
         manager.DEBOUNCE_SECONDS = 0.0
         await manager.initialize()
         try:
@@ -463,17 +723,13 @@ def test_conversation_summary_manager_reschedules_cancelled_summary(monkeypatch)
                 session_id=request.session_id,
                 task_type=getattr(request.task_type, "value", request.task_type),
                 state=AITaskState.DONE,
-                content="本段聊天主要在确认晚饭细节。",
+                content=_structured_output(display_summary="本段聊天主要在确认晚饭细节。"),
             )
 
     fake_task_manager = _CancelThenSucceedTaskManager()
 
     async def scenario() -> None:
-        manager = ConversationSummaryManager(
-            db=fake_db,
-            event_bus=event_bus,
-            task_manager=fake_task_manager,
-        )
+        manager = _make_manager(fake_db, event_bus, fake_task_manager)
         manager.DEBOUNCE_SECONDS = 0.0
         await manager.initialize()
         try:
@@ -485,7 +741,7 @@ def test_conversation_summary_manager_reschedules_cancelled_summary(monkeypatch)
             bucket = await fake_db.get_open_conversation_summary_bucket("session-1")
             assert bucket is not None
             assert bucket["summary_status"] == "ready"
-            assert bucket["summary_text_ciphertext"] == "enc:本段聊天主要在确认晚饭细节。"
+            assert bucket["display_summary_ciphertext"] == "enc:本段聊天主要在确认晚饭细节。"
             assert len(fake_task_manager.requests) == 2
         finally:
             await manager.close()
@@ -520,17 +776,13 @@ def test_conversation_summary_manager_reschedules_running_bucket_without_cancell
                 session_id=request.session_id,
                 task_type=getattr(request.task_type, "value", request.task_type),
                 state=AITaskState.DONE,
-                content="本段聊天主要在确认细节安排。",
+                content=_structured_output(display_summary="本段聊天主要在确认细节安排。"),
             )
 
     fake_task_manager = _BlockingTaskManager()
 
     async def scenario() -> None:
-        manager = ConversationSummaryManager(
-            db=fake_db,
-            event_bus=event_bus,
-            task_manager=fake_task_manager,
-        )
+        manager = _make_manager(fake_db, event_bus, fake_task_manager)
         manager.DEBOUNCE_SECONDS = 0.0
         await manager.initialize()
         try:
@@ -576,11 +828,7 @@ def test_conversation_summary_manager_skips_closed_task_manager(monkeypatch) -> 
     fake_task_manager = _ClosedTaskManager()
 
     async def scenario() -> None:
-        manager = ConversationSummaryManager(
-            db=fake_db,
-            event_bus=event_bus,
-            task_manager=fake_task_manager,
-        )
+        manager = _make_manager(fake_db, event_bus, fake_task_manager)
         manager.DEBOUNCE_SECONDS = 0.0
         await manager.initialize()
         try:
@@ -592,7 +840,7 @@ def test_conversation_summary_manager_skips_closed_task_manager(monkeypatch) -> 
             bucket = await fake_db.get_open_conversation_summary_bucket("session-1")
             assert bucket is not None
             assert bucket["summary_status"] == "pending"
-            assert bucket["summary_text_ciphertext"] == ""
+            assert bucket["display_summary_ciphertext"] == ""
             assert fake_task_manager.requests == []
         finally:
             await manager.close()

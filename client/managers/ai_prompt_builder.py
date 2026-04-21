@@ -365,7 +365,7 @@ class AIPromptBuilder:
             )
         if related_history_lines:
             prompt_sections.append(
-                "相关旧消息（仅在和当前话题明显相关时参考，不要生硬照搬原话）：\n"
+                "相关历史摘要（仅在和当前话题明显相关时参考；用于承接背景，不要复述旧内容）：\n"
                 + "\n".join(f"- {item}" for item in related_history_lines)
             )
         privacy_scope = privacy_scope_for_session(session)
@@ -424,7 +424,10 @@ class AIPromptBuilder:
                 "has_weekly_history_summary": bool(weekly_history_summary),
                 "history_summary_count": len(history_lines),
                 "history_recall_count": len(related_history_lines),
-                "has_summary": bool(background_lines),
+                "has_rag_history_context": bool(related_history_lines),
+                "rag_history_count": len(related_history_lines),
+                "rag_history_prompt_chars": sum(len(item) for item in related_history_lines),
+                "has_summary": bool(background_lines or related_history_lines),
                 "recent_context_count": recent_context_count,
                 "prompt_chars": len(prompt),
                 "reply_template_family": "gemma4_standard_roles",
@@ -503,7 +506,7 @@ class AIPromptBuilder:
             )
         if related_history_lines:
             prompt_sections.append(
-                "相关旧消息（仅在和当前话题明显相关时参考，不要生硬照搬原话）：\n"
+                "相关历史摘要（仅在和当前话题明显相关时参考；用于承接背景，不要复述旧内容）：\n"
                 + "\n".join(f"- {item}" for item in related_history_lines)
             )
 
@@ -570,7 +573,10 @@ class AIPromptBuilder:
                 "has_weekly_history_summary": bool(weekly_history_summary),
                 "history_summary_count": len(history_lines),
                 "history_recall_count": len(related_history_lines),
-                "has_summary": bool(background_lines),
+                "has_rag_history_context": bool(related_history_lines),
+                "rag_history_count": len(related_history_lines),
+                "rag_history_prompt_chars": sum(len(item) for item in related_history_lines),
+                "has_summary": bool(background_lines or related_history_lines),
                 "recent_context_count": recent_context_count,
                 "prompt_chars": len(prompt),
             },

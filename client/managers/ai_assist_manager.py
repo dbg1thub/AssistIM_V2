@@ -19,6 +19,7 @@ from client.managers.ai_prompt_builder import (
     latest_peer_text_message_group,
 )
 from client.managers.ai_task_manager import AITaskManager, AITaskSnapshot, AITaskState, get_ai_task_manager
+from client.managers.conversation_memory_manager import ConversationMemoryManager
 from client.models.message import ChatMessage, MessageType, Session
 from client.core import logging
 from client.core.secure_storage import SecureStorage
@@ -107,19 +108,20 @@ class AIAssistManager:
     REPLY_WEEKLY_HISTORY_BUCKET_LIMIT = 6
     REPLY_WEEKLY_HISTORY_MAX_CHARS = 240
     REPLY_HISTORY_RECALL_LIMIT = 3
-    REPLY_HISTORY_SCAN_LIMIT = 80
     REPLY_HISTORY_MAX_AGE_SECONDS = 7 * 24 * 60 * 60
-    REPLY_HISTORY_MIN_SCORE = 0.18
+    REPLY_HISTORY_RECALL_MAX_CHARS = 700
 
     def __init__(
         self,
         task_manager: AITaskManager | None = None,
         prompt_builder: AIPromptBuilder | None = None,
         db: Database | None = None,
+        memory_manager: ConversationMemoryManager | None = None,
     ) -> None:
         self._task_manager = task_manager or get_ai_task_manager()
         self._prompt_builder = prompt_builder or AIPromptBuilder()
         self._db = db or get_database()
+        self._memory_manager = memory_manager
         self._reply_suggestions: dict[str, AIReplySuggestionState] = {}
 
     async def assist_draft(
@@ -231,7 +233,7 @@ class AIAssistManager:
         logger.info(
             "[ai-perf] reply_suggestion_request task_id=%s session_id=%s anchor_message_id=%s "
             "anchor_group_size=%s recent_context_count=%s has_summary=%s has_weekly_summary=%s "
-            "history_recall_count=%s prompt_chars=%s",
+            "history_recall_count=%s has_rag_history_context=%s rag_history_count=%s prompt_chars=%s",
             initial_built.request.task_id,
             initial_built.request.session_id,
             initial_built.request.metadata.get("anchor_message_id"),
@@ -240,6 +242,8 @@ class AIAssistManager:
             initial_built.request.metadata.get("has_summary"),
             initial_built.request.metadata.get("has_weekly_history_summary"),
             initial_built.request.metadata.get("history_recall_count"),
+            initial_built.request.metadata.get("has_rag_history_context"),
+            initial_built.request.metadata.get("rag_history_count"),
             initial_built.request.metadata.get("prompt_chars"),
         )
         running = AIReplySuggestionState(
@@ -458,7 +462,7 @@ class AIAssistManager:
         logger.info(
             "[ai-perf] reply_suggestion_retry_request task_id=%s session_id=%s anchor_message_id=%s "
             "anchor_group_size=%s recent_context_count=%s has_summary=%s has_weekly_summary=%s "
-            "history_recall_count=%s prompt_chars=%s",
+            "history_recall_count=%s has_rag_history_context=%s rag_history_count=%s prompt_chars=%s",
             fallback_built.request.task_id,
             fallback_built.request.session_id,
             fallback_built.request.metadata.get("anchor_message_id"),
@@ -467,6 +471,8 @@ class AIAssistManager:
             fallback_built.request.metadata.get("has_summary"),
             fallback_built.request.metadata.get("has_weekly_history_summary"),
             fallback_built.request.metadata.get("history_recall_count"),
+            fallback_built.request.metadata.get("has_rag_history_context"),
+            fallback_built.request.metadata.get("rag_history_count"),
             fallback_built.request.metadata.get("prompt_chars"),
         )
         fallback_snapshot = await self._task_manager.run_once(fallback_built.request)
@@ -563,7 +569,7 @@ class AIAssistManager:
 
         weekly_history_summary = self._compose_weekly_history_summary(history_summaries)
 
-        related_history_lines = await self._load_related_history_lines(
+        related_history_lines = await self._load_related_summary_rag_lines(
             normalized_session_id,
             messages,
             current_user_id=current_user_id,
@@ -606,14 +612,14 @@ class AIAssistManager:
             return "；".join(trimmed_parts)
         return merged[:max_chars].rstrip("；，, ")
 
-    async def _load_related_history_lines(
+    async def _load_related_summary_rag_lines(
         self,
         session_id: str,
         messages: Sequence[ChatMessage],
         *,
         current_user_id: str = "",
     ) -> list[str]:
-        """Return a few older text messages that are related to the latest topic."""
+        """Return a few older summary lines related to the latest reply topic."""
         normalized_session_id = str(session_id or "").strip()
         if not normalized_session_id or not messages:
             return []
@@ -627,101 +633,112 @@ class AIAssistManager:
         if not anchor_group:
             return []
 
-        query_text = " ".join(
+        query_text = self._reply_rag_query_text(anchor_group, direct_context_messages)
+        if not query_text:
+            return []
+
+        list_ann_candidates = getattr(self._db, "list_conversation_memory_ann_candidates", None)
+        if self._memory_manager is None and not callable(list_ann_candidates):
+            return []
+
+        if self._memory_manager is None:
+            self._memory_manager = ConversationMemoryManager(db=self._db)
+        memory_manager = self._memory_manager
+        max_end_ts = self._reply_rag_max_end_ts(anchor_group, direct_context_messages)
+        min_start_ts = self._reply_rag_min_start_ts(anchor_group)
+        try:
+            context = await memory_manager.build_reply_suggestion_rag_context(
+                normalized_session_id,
+                query_text,
+                max_end_ts=max_end_ts,
+                min_start_ts=min_start_ts,
+                result_limit=self.REPLY_HISTORY_RECALL_LIMIT,
+            )
+        except Exception:
+            logger.exception("Failed to load reply-suggestion RAG context session_id=%s", normalized_session_id)
+            return []
+        return self._clip_related_summary_lines(context.lines)
+
+    def _reply_rag_query_text(
+        self,
+        anchor_group: Sequence[ChatMessage],
+        direct_context_messages: Sequence[ChatMessage],
+    ) -> str:
+        """Build a bounded semantic query from current visible context only."""
+        lines: list[str] = []
+        seen: set[str] = set()
+        for message in list(direct_context_messages or []):
+            content = _normalize_history_text(str(message.content or ""))
+            if not content or content in seen:
+                continue
+            seen.add(content)
+            role = "我" if bool(message.is_self) else "对方"
+            lines.append(f"{role}: {str(message.content or '').strip()}")
+        anchor_text = " ".join(
             str(message.content or "").strip()
-            for message in anchor_group
+            for message in list(anchor_group or [])
             if str(message.content or "").strip()
         ).strip()
-        normalized_query = _normalize_history_text(query_text)
-        if len(normalized_query) < 4:
-            return []
+        if anchor_text:
+            lines.append(f"当前待回复: {anchor_text}")
+        query = " ".join(" ".join(lines).split())
+        return _clip_text(query, max(1, self._prompt_builder.MAX_MESSAGE_CHARS))
 
-        query_grams = _history_char_ngrams(normalized_query)
-        if not query_grams:
-            return []
+    def _reply_rag_max_end_ts(
+        self,
+        anchor_group: Sequence[ChatMessage],
+        direct_context_messages: Sequence[ChatMessage],
+    ) -> int | None:
+        """Return the latest summary end timestamp allowed for related-history recall."""
+        timestamps = [
+            int(value)
+            for value in (
+                to_epoch_seconds(getattr(message, "timestamp", None))
+                for message in [*list(anchor_group or []), *list(direct_context_messages or [])]
+            )
+            if value is not None and int(value) > 0
+        ]
+        if not timestamps:
+            return None
+        latest_anchor_ts = max(timestamps)
+        oldest_context_ts = min(timestamps)
+        max_end_ts = min(latest_anchor_ts - self.REPLY_SUMMARY_MIN_AGE_SECONDS, oldest_context_ts - 1)
+        return max_end_ts if max_end_ts > 0 else None
 
-        anchor_ts = max(
-            (float(to_epoch_seconds(getattr(message, "timestamp", None)) or 0.0) for message in anchor_group),
-            default=0.0,
-        )
-        oldest_direct_context_ts = min(
-            (
-                float(to_epoch_seconds(getattr(message, "timestamp", None)) or 0.0)
-                for message in direct_context_messages
-                if getattr(message, "timestamp", None) is not None
-            ),
-            default=0.0,
-        )
-        excluded_ids = {
-            str(message.message_id or "").strip()
-            for message in direct_context_messages
-            if str(message.message_id or "").strip()
-        }
+    def _reply_rag_min_start_ts(self, anchor_group: Sequence[ChatMessage]) -> int | None:
+        """Bound reply recall to the recent-history window when timestamps are available."""
+        anchor_timestamps = [
+            int(value)
+            for value in (to_epoch_seconds(getattr(message, "timestamp", None)) for message in list(anchor_group or []))
+            if value is not None and int(value) > 0
+        ]
+        if not anchor_timestamps:
+            return None
+        return max(1, max(anchor_timestamps) - self.REPLY_HISTORY_MAX_AGE_SECONDS)
 
-        candidate_messages: list[ChatMessage] = list(messages[:-context_limit])
-        if oldest_direct_context_ts > 0 and hasattr(self._db, "get_messages"):
-            try:
-                historical_page = await self._db.get_messages(
-                    normalized_session_id,
-                    limit=self.REPLY_HISTORY_SCAN_LIMIT,
-                    before_timestamp=oldest_direct_context_ts,
-                )
-            except Exception:
-                logger.warning(
-                    "Failed to load related reply-history recall session_id=%s",
-                    normalized_session_id,
-                    exc_info=True,
-                )
-                historical_page = []
-            candidate_messages.extend(historical_page)
-
-        scored_items: list[tuple[float, float, str]] = []
-        seen_ids: set[str] = set()
-        seen_lines: set[str] = set()
-        for message in candidate_messages:
-            message_id = str(getattr(message, "message_id", "") or "").strip()
-            if not message_id or message_id in seen_ids or message_id in excluded_ids:
+    def _clip_related_summary_lines(self, lines: Sequence[str]) -> list[str]:
+        """Deduplicate and bound related summary lines before prompt insertion."""
+        max_total = max(1, int(self.REPLY_HISTORY_RECALL_MAX_CHARS or 1))
+        max_line = max(1, int(self._prompt_builder.MAX_MESSAGE_CHARS or 1))
+        clipped: list[str] = []
+        seen: set[str] = set()
+        total = 0
+        for line in list(lines or []):
+            text = _clip_text(" ".join(str(line or "").split()), max_line)
+            if not text:
                 continue
-            seen_ids.add(message_id)
-            if message.message_type != MessageType.TEXT or message.is_ai:
+            key = _normalize_history_text(text)
+            if key in seen:
                 continue
-            status_value = str(getattr(message.status, "value", message.status) or "")
-            if status_value in {"failed", "recalled"}:
-                continue
-            content = str(message.content or "").strip()
-            normalized_content = _normalize_history_text(content)
-            if not normalized_content:
-                continue
-            message_ts = float(to_epoch_seconds(getattr(message, "timestamp", None)) or 0.0)
-            if anchor_ts > 0 and message_ts > 0:
-                age_seconds = max(0.0, anchor_ts - message_ts)
-                if age_seconds <= 0 or age_seconds > self.REPLY_HISTORY_MAX_AGE_SECONDS:
-                    continue
-            score = _history_similarity_score(query_grams, normalized_content)
-            if score < self.REPLY_HISTORY_MIN_SCORE:
-                continue
-            line = self._format_related_history_line(message)
-            if line in seen_lines:
-                continue
-            seen_lines.add(line)
-            scored_items.append((score, message_ts, line))
-
-        scored_items.sort(key=lambda item: (item[0], item[1]), reverse=True)
-        limit = max(1, int(self.REPLY_HISTORY_RECALL_LIMIT or 1))
-        return [item[2] for item in scored_items[:limit]]
-
-    def _format_related_history_line(self, message: ChatMessage) -> str:
-        """Format one historical text line for reply-suggestion prompts."""
-        timestamp = getattr(message, "timestamp", None)
-        date_label = timestamp.strftime("%Y-%m-%d") if timestamp is not None else ""
-        role = "我" if message.is_self else "对方"
-        content = str(message.content or "").strip()
-        max_chars = max(1, int(self._prompt_builder.MAX_MESSAGE_CHARS or 1))
-        if len(content) > max_chars:
-            content = content[:max_chars].rstrip()
-        if date_label:
-            return f"{date_label} {role}: {content}"
-        return f"{role}: {content}"
+            extra = len(text) + (1 if clipped else 0)
+            if total + extra > max_total and clipped:
+                break
+            seen.add(key)
+            clipped.append(text)
+            total += extra
+            if len(clipped) >= max(1, int(self.REPLY_HISTORY_RECALL_LIMIT or 1)):
+                break
+        return clipped
 
     def _decrypt_bucket_summary(self, bucket: dict | None) -> str:
         """Return one decrypted bucket summary or an empty string when unavailable."""
@@ -729,7 +746,7 @@ class AIAssistManager:
             return ""
         if str(bucket.get("summary_status") or "").strip() != "ready":
             return ""
-        ciphertext = str(bucket.get("summary_text_ciphertext") or "").strip()
+        ciphertext = str(bucket.get("display_summary_ciphertext") or "").strip()
         if not ciphertext:
             return ""
         try:
@@ -794,27 +811,13 @@ def get_ai_assist_manager() -> AIAssistManager:
 
 
 def _normalize_history_text(value: str) -> str:
-    """Normalize one message string for lightweight history recall scoring."""
+    """Normalize one text fragment for lightweight duplicate detection."""
     text = "".join(str(value or "").strip().split()).casefold()
     return text
 
 
-def _history_char_ngrams(text: str, *, n: int = 2) -> set[str]:
-    """Return character n-grams for a short Chinese chat string."""
-    normalized = _normalize_history_text(text)
-    if not normalized:
-        return set()
-    if len(normalized) <= n:
-        return {normalized}
-    return {normalized[index : index + n] for index in range(len(normalized) - n + 1)}
-
-
-def _history_similarity_score(query_grams: set[str], candidate_text: str) -> float:
-    """Score one historical candidate by overlap with the latest-topic grams."""
-    if not query_grams:
-        return 0.0
-    candidate_grams = _history_char_ngrams(candidate_text)
-    if not candidate_grams:
-        return 0.0
-    overlap = len(query_grams & candidate_grams)
-    return overlap / max(1, len(query_grams))
+def _clip_text(value: str, max_chars: int) -> str:
+    text = " ".join(str(value or "").split())
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars].rstrip()

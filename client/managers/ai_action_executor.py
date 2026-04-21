@@ -321,17 +321,4 @@ def _update_compat_slots(plan_json: dict[str, Any], step_id: str, output: dict[s
         contacts = [item for item in output["contacts"] if isinstance(item, dict)]
         if contacts:
             compat["resolved_contacts"] = contacts
-            terms: list[str] = []
-            for contact in contacts:
-                for value in list(contact.get("aliases") or []):
-                    text = str(value or "").strip()
-                    if text and text not in terms:
-                        terms.append(text)
-            if terms:
-                compat["query_terms"] = terms
-    if step_id == "search_memory":
-        if isinstance(output.get("query_terms"), list):
-            compat["query_terms"] = list(output.get("query_terms") or [])
-        if isinstance(output.get("time_scope"), dict):
-            compat["time_scope"] = dict(output.get("time_scope") or {})
     plan_json["compat_slots"] = compat

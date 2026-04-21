@@ -314,7 +314,7 @@ def test_reply_suggestion_prompt_includes_local_summary_context_when_available()
     prompt = built.request.messages[0]["content"]
     assert "最近直接上下文：" in prompt
     assert "背景摘要（仅供参考，用来避免前后矛盾；不要优先复述已经确认过的话题）：" in prompt
-    assert "相关旧消息（仅在和当前话题明显相关时参考，不要生硬照搬原话）：" in prompt
+    assert "相关历史摘要（仅在和当前话题明显相关时参考；用于承接背景，不要复述旧内容）：" in prompt
     assert "当前时间段摘要：" in prompt
     assert "一周历史摘要：" in prompt
     assert "当前主要在确认周日下午是否见面。" in prompt
@@ -325,6 +325,9 @@ def test_reply_suggestion_prompt_includes_local_summary_context_when_available()
     assert built.request.metadata["has_weekly_history_summary"] is True
     assert built.request.metadata["history_summary_count"] == 0
     assert built.request.metadata["history_recall_count"] == 1
+    assert built.request.metadata["has_rag_history_context"] is True
+    assert built.request.metadata["rag_history_count"] == 1
+    assert built.request.metadata["rag_history_prompt_chars"] > 0
 
 
 def test_single_reply_suggestion_prompt_includes_existing_candidates_and_style() -> None:

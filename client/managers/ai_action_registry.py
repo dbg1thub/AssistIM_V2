@@ -8,9 +8,6 @@ from typing import Any
 
 from client.core import logging
 from client.managers.ai_action_types import ActionPause, AtomicActionSpec
-from client.managers.conversation_memory_manager import ConversationMemoryManager
-
-
 logger = logging.get_logger(__name__)
 
 
@@ -20,10 +17,8 @@ class AtomicActionRegistry:
     def __init__(
         self,
         *,
-        memory_manager: ConversationMemoryManager,
         contact_resolver: Any,
     ) -> None:
-        self._memory_manager = memory_manager
         self._contact_resolver = contact_resolver
         self._actions: dict[str, AtomicActionSpec] = {}
         self._register_defaults()
@@ -46,27 +41,6 @@ class AtomicActionRegistry:
                 handler=self._contact_resolve,
                 max_targets=5,
                 allow_batch=True,
-            )
-        )
-        self._register(
-            AtomicActionSpec(
-                name="memory.search",
-                kind="read",
-                risk_level="low",
-                handler=self._memory_search,
-                allow_all_history=True,
-                allow_cross_session=True,
-                max_output_json_bytes=65536,
-            )
-        )
-        self._register(
-            AtomicActionSpec(
-                name="memory.summarize",
-                kind="read",
-                risk_level="low",
-                handler=self._memory_summarize,
-                max_input_bytes=65536,
-                max_output_json_bytes=65536,
             )
         )
         self._register(
@@ -162,73 +136,6 @@ class AtomicActionRegistry:
             if bool(getattr(resolution, "is_ambiguous", False)):
                 return list(getattr(resolution, "candidates", ()) or ())
         return []
-
-    async def _memory_search(self, args: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
-        del context
-        participants = _coerce_contacts(args.get("participants"))
-        keywords = _clean_list(args.get("keywords"))
-        time_scope = args.get("time_scope") if isinstance(args.get("time_scope"), dict) else {"type": "all_history"}
-        start_ts: int | None = None
-        end_ts: int | None = None
-        if str(time_scope.get("type") or "") == "range":
-            start_ts = _coerce_int(time_scope.get("start_ts") or time_scope.get("start"))
-            end_ts = _coerce_int(time_scope.get("end_ts") or time_scope.get("end"))
-        terms = _query_terms(participants, keywords)
-        query_text = str(args.get("question") or "").strip()
-        context_result = await self._memory_manager.build_context_for_structured_query(
-            query_text=query_text,
-            start_ts=start_ts,
-            end_ts=end_ts,
-            terms=terms,
-            participant_ids=[
-                str(contact.get("contact_id") or "").strip()
-                for contact in participants
-                if str(contact.get("contact_id") or "").strip()
-            ],
-            participant_aliases=_participant_aliases(participants),
-            query_kind="history",
-        )
-        lines = list(context_result.lines or ())
-        return {
-            "results": lines,
-            "result_count": len(lines),
-            "truncated": False,
-            "query_terms": terms,
-            "participants": participants,
-            "participant_match": str(args.get("participant_match") or "any"),
-            "time_scope": dict(time_scope),
-            "question": query_text,
-        }
-
-    async def _memory_summarize(self, args: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
-        source = args.get("source")
-        if isinstance(source, dict) and isinstance(source.get("result_ref"), dict):
-            temp_store = context.get("store")
-            get_temp = getattr(temp_store, "get_temp_result", None)
-            if callable(get_temp):
-                temp = await get_temp(str(source["result_ref"].get("id") or ""))
-                source = dict(temp.payload if temp is not None else {})
-        results = []
-        if isinstance(source, dict):
-            results = [str(item or "").strip() for item in list(source.get("results") or []) if str(item or "").strip()]
-        elif isinstance(source, list):
-            results = [str(item or "").strip() for item in source if str(item or "").strip()]
-        question = str(args.get("question") or "").strip()
-        if not results:
-            return {
-                "text": "没有查到相关聊天摘要。你可以换一个时间范围、对象或关键词再试。",
-                "context_lines": [],
-                "result_count": 0,
-                "requires_responder": False,
-                "question": question,
-            }
-        return {
-            "text": "",
-            "context_lines": results,
-            "result_count": len(results),
-            "requires_responder": True,
-            "question": question,
-        }
 
     async def _message_draft(self, args: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
         del context
@@ -365,62 +272,6 @@ def _coerce_contact(value: object) -> dict[str, Any]:
         return payload
     text = " ".join(str(value or "").split())
     return _raw_contact(text) if text else {}
-
-
-def _query_terms(participants: list[dict[str, Any]], keywords: list[str]) -> list[str]:
-    terms: list[str] = []
-    for contact in participants:
-        aliases = contact.get("aliases") if isinstance(contact.get("aliases"), list) else []
-        values = [
-            contact.get("raw"),
-            contact.get("remark"),
-            contact.get("display_name"),
-            contact.get("nickname"),
-            contact.get("username"),
-            contact.get("assistim_id"),
-            contact.get("contact_id"),
-            *aliases,
-        ]
-        for value in values:
-            text = " ".join(str(value or "").split()).strip(" ，,。")
-            if text and text not in terms:
-                terms.append(text)
-    for keyword in keywords:
-        if keyword and keyword not in terms:
-            terms.append(keyword)
-    return terms[:20]
-
-
-def _participant_aliases(participants: list[dict[str, Any]]) -> list[str]:
-    aliases: list[str] = []
-    for contact in participants:
-        raw_aliases = contact.get("aliases") if isinstance(contact.get("aliases"), list) else []
-        values = [
-            contact.get("raw"),
-            contact.get("remark"),
-            contact.get("display_name"),
-            contact.get("nickname"),
-            contact.get("username"),
-            contact.get("assistim_id"),
-            contact.get("contact_id"),
-            *raw_aliases,
-        ]
-        for value in values:
-            text = " ".join(str(value or "").split()).strip(" ，,。")
-            if text and text not in aliases:
-                aliases.append(text)
-    return aliases[:20]
-
-
-def _coerce_int(value: object) -> int | None:
-    if isinstance(value, bool) or value is None:
-        return None
-    if isinstance(value, int):
-        return value
-    if isinstance(value, float):
-        return int(value)
-    text = str(value or "").strip()
-    return int(text) if text.isdigit() else None
 
 
 def _contact_label(contact: dict[str, Any]) -> str:

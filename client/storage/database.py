@@ -11,9 +11,10 @@ import importlib
 import json
 import os
 import time
+import types
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Iterable, Optional
+from typing import Any, Iterable, Optional, Sequence
 
 from client.core import logging
 from client.core.config_backend import get_config
@@ -184,6 +185,17 @@ class Database:
         if module_name in {"sqlite3", "_sqlite3"}:
             self._active_dbapi_module_name = self.DB_ENCRYPTION_PROVIDER_SQLITE_MODULE
             return await aiosqlite.connect(self._db_path)
+        proxy_dbapi_module = dbapi_module
+        if not hasattr(proxy_dbapi_module, "Connection") or not hasattr(proxy_dbapi_module, "Cursor"):
+            import sqlite3 as stdlib_sqlite3
+
+            proxy_dbapi_module = types.SimpleNamespace(
+                **dict(getattr(dbapi_module, "__dict__", {}))
+            )
+            if not hasattr(proxy_dbapi_module, "Connection"):
+                setattr(proxy_dbapi_module, "Connection", stdlib_sqlite3.Connection)
+            if not hasattr(proxy_dbapi_module, "Cursor"):
+                setattr(proxy_dbapi_module, "Cursor", stdlib_sqlite3.Cursor)
         original_aiosqlite_sqlite3 = getattr(aiosqlite, "sqlite3", None)
         core_module = getattr(aiosqlite, "core", None)
         original_core_sqlite3 = getattr(core_module, "sqlite3", None) if core_module is not None else None
@@ -192,9 +204,9 @@ class Database:
             return await aiosqlite.connect(self._db_path)
         try:
             if original_aiosqlite_sqlite3 is not None:
-                setattr(aiosqlite, "sqlite3", dbapi_module)
+                setattr(aiosqlite, "sqlite3", proxy_dbapi_module)
             if core_module is not None and original_core_sqlite3 is not None:
-                setattr(core_module, "sqlite3", dbapi_module)
+                setattr(core_module, "sqlite3", proxy_dbapi_module)
             self._active_dbapi_module_name = module_name
             return await aiosqlite.connect(self._db_path)
         finally:
@@ -231,6 +243,7 @@ class Database:
         await self._ensure_local_search_cache_schema()
         await self._ensure_directory_cache_owner_indexes()
         await self._ensure_message_crypto_schema()
+        await self._ensure_conversation_summary_schema()
         await self._ensure_search_fts_schema()
         await self._normalize_cached_session_types()
         logger.info(f"Database connected: {self._db_path}")
@@ -326,6 +339,10 @@ class Database:
                 last_message_ts INTEGER NOT NULL DEFAULT 0,
                 message_count INTEGER NOT NULL DEFAULT 0,
                 summary_status TEXT NOT NULL DEFAULT 'pending',
+                display_summary_ciphertext TEXT NOT NULL DEFAULT '',
+                retrieval_summary_ciphertext TEXT NOT NULL DEFAULT '',
+                summary_structured_json_ciphertext TEXT NOT NULL DEFAULT '',
+                summary_schema_version INTEGER NOT NULL DEFAULT 1,
                 summary_text_ciphertext TEXT NOT NULL DEFAULT '',
                 summary_json_ciphertext TEXT NOT NULL DEFAULT '',
                 summary_version INTEGER NOT NULL DEFAULT 1,
@@ -374,6 +391,35 @@ class Database:
                 updated_at INTEGER NOT NULL,
                 UNIQUE(session_id, source_type, source_id)
             );
+
+            CREATE TABLE IF NOT EXISTS conversation_memory_embeddings (
+                embedding_id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                source_type TEXT NOT NULL,
+                source_id TEXT NOT NULL,
+                source_version INTEGER NOT NULL DEFAULT 1,
+                embedding_model TEXT NOT NULL DEFAULT '',
+                content_hash TEXT NOT NULL DEFAULT '',
+                embedding_dim INTEGER NOT NULL DEFAULT 0,
+                embedding_vector_json TEXT NOT NULL DEFAULT '',
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                UNIQUE(session_id, source_type, source_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS conversation_memory_ann_buckets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                embedding_id TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                source_type TEXT NOT NULL,
+                source_id TEXT NOT NULL,
+                ann_namespace TEXT NOT NULL DEFAULT '',
+                band_index INTEGER NOT NULL DEFAULT 0,
+                bucket_key TEXT NOT NULL DEFAULT '',
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                UNIQUE(embedding_id, ann_namespace, band_index)
+            );
             
             CREATE INDEX IF NOT EXISTS idx_messages_session 
                 ON messages(session_id, timestamp DESC);
@@ -401,6 +447,15 @@ class Database:
 
             CREATE INDEX IF NOT EXISTS idx_conversation_memory_time
                 ON conversation_memory_index(end_ts DESC, start_ts DESC);
+
+            CREATE INDEX IF NOT EXISTS idx_conversation_memory_embeddings_source
+                ON conversation_memory_embeddings(session_id, source_type, source_id);
+
+            CREATE INDEX IF NOT EXISTS idx_conversation_memory_ann_lookup
+                ON conversation_memory_ann_buckets(ann_namespace, source_type, band_index, bucket_key);
+
+            CREATE INDEX IF NOT EXISTS idx_conversation_memory_ann_source
+                ON conversation_memory_ann_buckets(session_id, source_type, source_id);
         """)
         await self._db.commit()
 
@@ -551,6 +606,18 @@ class Database:
             """
         )
         await self._db.commit()
+
+    async def _ensure_conversation_summary_schema(self) -> None:
+        """Add structured summary columns introduced by the RAG-oriented summary redesign."""
+        await self._ensure_table_columns(
+            "conversation_summary_buckets",
+            {
+                "display_summary_ciphertext": "TEXT NOT NULL DEFAULT ''",
+                "retrieval_summary_ciphertext": "TEXT NOT NULL DEFAULT ''",
+                "summary_structured_json_ciphertext": "TEXT NOT NULL DEFAULT ''",
+                "summary_schema_version": "INTEGER NOT NULL DEFAULT 1",
+            },
+        )
 
     async def _ensure_table_columns(self, table_name: str, columns: dict[str, str]) -> None:
         """Ensure one table exposes every required column for lightweight upgrades."""
@@ -1399,6 +1466,8 @@ class Database:
         await self._db.execute("DELETE FROM conversation_summary_buckets WHERE session_id = ?", (session_id,))
         await self._db.execute("DELETE FROM conversation_summary_media_cache WHERE session_id = ?", (session_id,))
         await self._db.execute("DELETE FROM conversation_memory_index WHERE session_id = ?", (session_id,))
+        await self._db.execute("DELETE FROM conversation_memory_embeddings WHERE session_id = ?", (session_id,))
+        await self._db.execute("DELETE FROM conversation_memory_ann_buckets WHERE session_id = ?", (session_id,))
         await self._db.execute("DELETE FROM sessions WHERE session_id = ?", (session_id,))
         await self._db.commit()
         logger.debug(f"Session deleted: {session_id}")
@@ -1475,6 +1544,172 @@ class Database:
         rows = await cursor.fetchall()
         return [dict(row) for row in rows]
 
+    async def list_conversation_summary_buckets_for_rebuild(
+        self,
+        *,
+        session_id: str = "",
+        limit: int = 100,
+        offset: int = 0,
+        after_id: int = 0,
+        include_open: bool = True,
+    ) -> list[dict[str, Any]]:
+        """Return summary buckets for maintenance rebuild jobs in stable insertion order."""
+        normalized_limit = min(1000, max(1, int(limit or 1)))
+        normalized_offset = max(0, int(offset or 0))
+        clauses = ["summary_status != ?"]
+        params: list[Any] = ["processing"]
+
+        normalized_session_id = str(session_id or "").strip()
+        if normalized_session_id:
+            clauses.append("session_id = ?")
+            params.append(normalized_session_id)
+        normalized_after_id = max(0, int(after_id or 0))
+        if normalized_after_id > 0:
+            clauses.append("id > ?")
+            params.append(normalized_after_id)
+        if not include_open:
+            clauses.append("is_open = 0")
+
+        where_clause = " AND ".join(clauses)
+        cursor = await self._db.execute(
+            f"""
+            SELECT *
+            FROM conversation_summary_buckets
+            WHERE {where_clause}
+            ORDER BY id ASC
+            LIMIT ? OFFSET ?
+            """,
+            (*params, normalized_limit, normalized_offset),
+        )
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+    async def get_conversation_rag_index_stats(
+        self,
+        *,
+        session_id: str = "",
+        summary_schema_version: int = 2,
+        memory_index_version: int = 3,
+    ) -> dict[str, Any]:
+        """Return compact local RAG index health counters for diagnostics."""
+        normalized_session_id = str(session_id or "").strip()
+        summary_where = ""
+        summary_params: list[Any] = []
+        memory_where = "WHERE idx.source_type = ?"
+        memory_params: list[Any] = ["summary"]
+        embedding_where = "WHERE source_type = ?"
+        embedding_params: list[Any] = ["summary"]
+        ann_where = "WHERE source_type = ?"
+        ann_params: list[Any] = ["summary"]
+        if normalized_session_id:
+            summary_where = "WHERE session_id = ?"
+            summary_params.append(normalized_session_id)
+            memory_where += " AND idx.session_id = ?"
+            memory_params.append(normalized_session_id)
+            embedding_where += " AND session_id = ?"
+            embedding_params.append(normalized_session_id)
+            ann_where += " AND session_id = ?"
+            ann_params.append(normalized_session_id)
+
+        status_cursor = await self._db.execute(
+            f"""
+            SELECT summary_status, COUNT(*) AS count
+            FROM conversation_summary_buckets
+            {summary_where}
+            GROUP BY summary_status
+            """,
+            tuple(summary_params),
+        )
+        status_rows = await status_cursor.fetchall()
+        summary_status_counts = {
+            str(row["summary_status"] or ""): int(row["count"] or 0)
+            for row in status_rows
+        }
+
+        current_summary_cursor = await self._db.execute(
+            f"""
+            SELECT COUNT(*) AS count
+            FROM conversation_summary_buckets
+            {summary_where + " AND" if summary_where else "WHERE"}
+              summary_status = ?
+              AND summary_schema_version >= ?
+              AND display_summary_ciphertext != ''
+              AND retrieval_summary_ciphertext != ''
+              AND summary_structured_json_ciphertext != ''
+            """,
+            (*summary_params, "ready", max(1, int(summary_schema_version or 1))),
+        )
+        current_summary_row = await current_summary_cursor.fetchone()
+
+        old_summary_cursor = await self._db.execute(
+            f"""
+            SELECT COUNT(*) AS count
+            FROM conversation_summary_buckets
+            {summary_where + " AND" if summary_where else "WHERE"}
+              summary_status = ?
+              AND (
+                   summary_schema_version < ?
+                OR display_summary_ciphertext = ''
+                OR retrieval_summary_ciphertext = ''
+                OR summary_structured_json_ciphertext = ''
+              )
+            """,
+            (*summary_params, "ready", max(1, int(summary_schema_version or 1))),
+        )
+        old_summary_row = await old_summary_cursor.fetchone()
+
+        memory_cursor = await self._db.execute(
+            f"""
+            SELECT
+                COUNT(*) AS memory_item_count,
+                SUM(CASE WHEN idx.source_version < ? THEN 1 ELSE 0 END) AS old_memory_item_count,
+                SUM(CASE WHEN emb.embedding_id IS NULL THEN 1 ELSE 0 END) AS missing_embedding_count
+            FROM conversation_memory_index AS idx
+            LEFT JOIN conversation_memory_embeddings AS emb
+              ON emb.session_id = idx.session_id
+             AND emb.source_type = idx.source_type
+             AND emb.source_id = idx.source_id
+            {memory_where}
+            """,
+            (max(1, int(memory_index_version or 1)), *memory_params),
+        )
+        memory_row = await memory_cursor.fetchone()
+
+        embedding_cursor = await self._db.execute(
+            f"""
+            SELECT COUNT(*) AS count
+            FROM conversation_memory_embeddings
+            {embedding_where}
+            """,
+            tuple(embedding_params),
+        )
+        embedding_row = await embedding_cursor.fetchone()
+
+        ann_cursor = await self._db.execute(
+            f"""
+            SELECT COUNT(*) AS count, COUNT(DISTINCT embedding_id) AS embedding_count
+            FROM conversation_memory_ann_buckets
+            {ann_where}
+            """,
+            tuple(ann_params),
+        )
+        ann_row = await ann_cursor.fetchone()
+
+        total_summary_count = sum(summary_status_counts.values())
+        return {
+            "session_id": normalized_session_id,
+            "summary_bucket_count": total_summary_count,
+            "summary_status_counts": summary_status_counts,
+            "current_summary_bucket_count": int(current_summary_row["count"] if current_summary_row else 0),
+            "old_or_incomplete_summary_bucket_count": int(old_summary_row["count"] if old_summary_row else 0),
+            "memory_item_count": int(memory_row["memory_item_count"] if memory_row else 0),
+            "old_memory_item_count": int((memory_row["old_memory_item_count"] if memory_row else 0) or 0),
+            "missing_embedding_count": int((memory_row["missing_embedding_count"] if memory_row else 0) or 0),
+            "embedding_count": int(embedding_row["count"] if embedding_row else 0),
+            "ann_bucket_count": int(ann_row["count"] if ann_row else 0),
+            "ann_indexed_embedding_count": int(ann_row["embedding_count"] if ann_row else 0),
+        }
+
     async def upsert_conversation_summary_bucket(self, payload: dict[str, Any]) -> None:
         """Insert or update one conversation summary bucket."""
         session_id = str(payload.get("session_id") or "").strip()
@@ -1499,6 +1734,10 @@ class Database:
                 last_message_ts,
                 message_count,
                 summary_status,
+                display_summary_ciphertext,
+                retrieval_summary_ciphertext,
+                summary_structured_json_ciphertext,
+                summary_schema_version,
                 summary_text_ciphertext,
                 summary_json_ciphertext,
                 summary_version,
@@ -1508,7 +1747,7 @@ class Database:
                 created_at,
                 updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(session_id, bucket_start_ts, bucket_rule_version)
             DO UPDATE SET
                 bucket_end_ts = excluded.bucket_end_ts,
@@ -1518,6 +1757,10 @@ class Database:
                 last_message_ts = excluded.last_message_ts,
                 message_count = excluded.message_count,
                 summary_status = excluded.summary_status,
+                display_summary_ciphertext = excluded.display_summary_ciphertext,
+                retrieval_summary_ciphertext = excluded.retrieval_summary_ciphertext,
+                summary_structured_json_ciphertext = excluded.summary_structured_json_ciphertext,
+                summary_schema_version = excluded.summary_schema_version,
                 summary_text_ciphertext = excluded.summary_text_ciphertext,
                 summary_json_ciphertext = excluded.summary_json_ciphertext,
                 summary_version = excluded.summary_version,
@@ -1537,6 +1780,10 @@ class Database:
                 int(payload.get("last_message_ts") or bucket_start_ts),
                 max(0, int(payload.get("message_count") or 0)),
                 str(payload.get("summary_status") or "pending"),
+                str(payload.get("display_summary_ciphertext") or ""),
+                str(payload.get("retrieval_summary_ciphertext") or ""),
+                str(payload.get("summary_structured_json_ciphertext") or ""),
+                max(1, int(payload.get("summary_schema_version") or 1)),
                 str(payload.get("summary_text_ciphertext") or ""),
                 str(payload.get("summary_json_ciphertext") or ""),
                 max(1, int(payload.get("summary_version") or 1)),
@@ -1733,6 +1980,282 @@ class Database:
         )
         await self._db.commit()
 
+    @staticmethod
+    def _conversation_memory_embedding_id(session_id: str, source_type: str, source_id: str) -> str:
+        return "|".join(
+            [
+                str(session_id or "").strip(),
+                str(source_type or "").strip(),
+                str(source_id or "").strip(),
+            ]
+        )
+
+    @staticmethod
+    def _normalize_embedding_vector(values: Any) -> list[float]:
+        if not isinstance(values, (list, tuple)):
+            raise ValueError("embedding_vector must be a sequence of numbers")
+        normalized: list[float] = []
+        for value in values:
+            try:
+                normalized.append(float(value))
+            except (TypeError, ValueError) as exc:
+                raise ValueError("embedding_vector contains one invalid value") from exc
+        if not normalized:
+            raise ValueError("embedding_vector must not be empty")
+        return normalized
+
+    async def upsert_conversation_memory_embedding(self, payload: dict[str, Any]) -> str:
+        """Insert or update one local dense embedding payload for a memory item."""
+        session_id = str(payload.get("session_id") or "").strip()
+        source_type = str(payload.get("source_type") or "").strip()
+        source_id = str(payload.get("source_id") or "").strip()
+        embedding_model = str(payload.get("embedding_model") or "").strip()
+        content_hash = str(payload.get("content_hash") or "").strip()
+        if not session_id:
+            raise ValueError("session_id is required")
+        if not source_type:
+            raise ValueError("source_type is required")
+        if not source_id:
+            raise ValueError("source_id is required")
+        if not embedding_model:
+            raise ValueError("embedding_model is required")
+        if not content_hash:
+            raise ValueError("content_hash is required")
+        vector = self._normalize_embedding_vector(payload.get("embedding_vector"))
+        embedding_id = str(payload.get("embedding_id") or "").strip() or self._conversation_memory_embedding_id(
+            session_id,
+            source_type,
+            source_id,
+        )
+        now_ts = int(payload.get("updated_at") or time.time())
+        created_at = int(payload.get("created_at") or now_ts)
+        await self._db.execute(
+            """
+            INSERT INTO conversation_memory_embeddings (
+                embedding_id,
+                session_id,
+                source_type,
+                source_id,
+                source_version,
+                embedding_model,
+                content_hash,
+                embedding_dim,
+                embedding_vector_json,
+                created_at,
+                updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(session_id, source_type, source_id)
+            DO UPDATE SET
+                embedding_id = excluded.embedding_id,
+                source_version = excluded.source_version,
+                embedding_model = excluded.embedding_model,
+                content_hash = excluded.content_hash,
+                embedding_dim = excluded.embedding_dim,
+                embedding_vector_json = excluded.embedding_vector_json,
+                updated_at = excluded.updated_at
+            """,
+            (
+                embedding_id,
+                session_id,
+                source_type,
+                source_id,
+                max(1, int(payload.get("source_version") or 1)),
+                embedding_model,
+                content_hash,
+                len(vector),
+                json.dumps(vector, ensure_ascii=False),
+                created_at,
+                now_ts,
+            ),
+        )
+        await self._db.commit()
+        return embedding_id
+
+    async def update_conversation_memory_item_embedding_ref(
+        self,
+        *,
+        session_id: str,
+        source_type: str,
+        source_id: str,
+        embedding_id: str,
+        embedding_model: str,
+        updated_at: int | None = None,
+    ) -> None:
+        """Update one memory-index item's embedding reference metadata."""
+        normalized_session_id = str(session_id or "").strip()
+        normalized_source_type = str(source_type or "").strip()
+        normalized_source_id = str(source_id or "").strip()
+        if not normalized_session_id or not normalized_source_type or not normalized_source_id:
+            return
+        await self._db.execute(
+            """
+            UPDATE conversation_memory_index
+            SET embedding_id = ?, embedding_model = ?, updated_at = ?
+            WHERE session_id = ? AND source_type = ? AND source_id = ?
+            """,
+            (
+                str(embedding_id or ""),
+                str(embedding_model or ""),
+                int(updated_at or time.time()),
+                normalized_session_id,
+                normalized_source_type,
+                normalized_source_id,
+            ),
+        )
+        await self._db.commit()
+
+    async def replace_conversation_memory_ann_buckets(
+        self,
+        *,
+        embedding_id: str,
+        session_id: str,
+        source_type: str,
+        source_id: str,
+        ann_namespace: str,
+        buckets: Iterable[tuple[int, str]],
+        created_at: int | None = None,
+        updated_at: int | None = None,
+    ) -> None:
+        """Replace one memory embedding's ANN bucket rows."""
+        normalized_embedding_id = str(embedding_id or "").strip()
+        normalized_session_id = str(session_id or "").strip()
+        normalized_source_type = str(source_type or "").strip()
+        normalized_source_id = str(source_id or "").strip()
+        normalized_namespace = str(ann_namespace or "").strip()
+        if not normalized_embedding_id:
+            raise ValueError("embedding_id is required")
+        if not normalized_session_id:
+            raise ValueError("session_id is required")
+        if not normalized_source_type:
+            raise ValueError("source_type is required")
+        if not normalized_source_id:
+            raise ValueError("source_id is required")
+        if not normalized_namespace:
+            raise ValueError("ann_namespace is required")
+        normalized_buckets: list[tuple[int, str]] = []
+        for raw_band_index, raw_bucket_key in list(buckets or []):
+            bucket_key = str(raw_bucket_key or "").strip()
+            if not bucket_key:
+                continue
+            normalized_buckets.append((max(0, int(raw_band_index)), bucket_key))
+        if not normalized_buckets:
+            raise ValueError("buckets must not be empty")
+        now_ts = int(updated_at or time.time())
+        created_ts = int(created_at or now_ts)
+        async with self._write_transaction("conversation_memory_ann"):
+            await self._db.execute(
+                """
+                DELETE FROM conversation_memory_ann_buckets
+                WHERE embedding_id = ? AND ann_namespace = ?
+                """,
+                (normalized_embedding_id, normalized_namespace),
+            )
+            for band_index, bucket_key in normalized_buckets:
+                await self._db.execute(
+                    """
+                    INSERT INTO conversation_memory_ann_buckets (
+                        embedding_id,
+                        session_id,
+                        source_type,
+                        source_id,
+                        ann_namespace,
+                        band_index,
+                        bucket_key,
+                        created_at,
+                        updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        normalized_embedding_id,
+                        normalized_session_id,
+                        normalized_source_type,
+                        normalized_source_id,
+                        normalized_namespace,
+                        band_index,
+                        bucket_key,
+                        created_ts,
+                        now_ts,
+                    ),
+                )
+
+    async def delete_conversation_memory_ann_buckets_for_source(
+        self,
+        session_id: str,
+        source_type: str,
+        source_id: str = "",
+    ) -> None:
+        """Delete one or many conversation memory ANN bucket rows for a source."""
+        normalized_session_id = str(session_id or "").strip()
+        normalized_source_type = str(source_type or "").strip()
+        normalized_source_id = str(source_id or "").strip()
+        if not normalized_session_id or not normalized_source_type:
+            return
+        if normalized_source_id:
+            await self._db.execute(
+                """
+                DELETE FROM conversation_memory_ann_buckets
+                WHERE session_id = ? AND source_type = ? AND source_id = ?
+                """,
+                (normalized_session_id, normalized_source_type, normalized_source_id),
+            )
+        else:
+            await self._db.execute(
+                """
+                DELETE FROM conversation_memory_ann_buckets
+                WHERE session_id = ? AND source_type = ?
+                """,
+                (normalized_session_id, normalized_source_type),
+            )
+        await self._db.commit()
+
+    async def delete_conversation_memory_embeddings_for_source(
+        self,
+        session_id: str,
+        source_type: str,
+        source_id: str = "",
+    ) -> None:
+        """Delete one or many conversation memory embeddings for a source."""
+        normalized_session_id = str(session_id or "").strip()
+        normalized_source_type = str(source_type or "").strip()
+        normalized_source_id = str(source_id or "").strip()
+        if not normalized_session_id or not normalized_source_type:
+            return
+        if normalized_source_id:
+            await self._db.execute(
+                """
+                DELETE FROM conversation_memory_embeddings
+                WHERE session_id = ? AND source_type = ? AND source_id = ?
+                """,
+                (normalized_session_id, normalized_source_type, normalized_source_id),
+            )
+        else:
+            await self._db.execute(
+                """
+                DELETE FROM conversation_memory_embeddings
+                WHERE session_id = ? AND source_type = ?
+                """,
+                (normalized_session_id, normalized_source_type),
+            )
+        if normalized_source_id:
+            await self._db.execute(
+                """
+                DELETE FROM conversation_memory_ann_buckets
+                WHERE session_id = ? AND source_type = ? AND source_id = ?
+                """,
+                (normalized_session_id, normalized_source_type, normalized_source_id),
+            )
+        else:
+            await self._db.execute(
+                """
+                DELETE FROM conversation_memory_ann_buckets
+                WHERE session_id = ? AND source_type = ?
+                """,
+                (normalized_session_id, normalized_source_type),
+            )
+        await self._db.commit()
+
     async def delete_conversation_memory_items_for_source(
         self,
         session_id: str,
@@ -1761,7 +2284,55 @@ class Database:
                 """,
                 (normalized_session_id, normalized_source_type),
             )
+        if normalized_source_id:
+            await self._db.execute(
+                """
+                DELETE FROM conversation_memory_embeddings
+                WHERE session_id = ? AND source_type = ? AND source_id = ?
+                """,
+                (normalized_session_id, normalized_source_type, normalized_source_id),
+            )
+        else:
+            await self._db.execute(
+                """
+                DELETE FROM conversation_memory_embeddings
+                WHERE session_id = ? AND source_type = ?
+                """,
+                (normalized_session_id, normalized_source_type),
+            )
+        if normalized_source_id:
+            await self._db.execute(
+                """
+                DELETE FROM conversation_memory_ann_buckets
+                WHERE session_id = ? AND source_type = ? AND source_id = ?
+                """,
+                (normalized_session_id, normalized_source_type, normalized_source_id),
+            )
+        else:
+            await self._db.execute(
+                """
+                DELETE FROM conversation_memory_ann_buckets
+                WHERE session_id = ? AND source_type = ?
+                """,
+                (normalized_session_id, normalized_source_type),
+            )
         await self._db.commit()
+
+    def _conversation_memory_item_select_sql(self, where_clause: str) -> str:
+        return f"""
+            SELECT
+                idx.*,
+                emb.content_hash AS embedding_content_hash,
+                emb.embedding_dim AS embedding_dim,
+                emb.embedding_vector_json AS embedding_vector_json,
+                emb.updated_at AS embedding_updated_at
+            FROM conversation_memory_index AS idx
+            LEFT JOIN conversation_memory_embeddings AS emb
+              ON emb.session_id = idx.session_id
+             AND emb.source_type = idx.source_type
+             AND emb.source_id = idx.source_id
+            {where_clause}
+        """
 
     async def list_conversation_memory_items(
         self,
@@ -1778,25 +2349,128 @@ class Database:
         normalized_session_id = str(session_id or "").strip()
         normalized_source_type = str(source_type or "").strip()
         if normalized_session_id:
-            clauses.append("session_id = ?")
+            clauses.append("idx.session_id = ?")
             params.append(normalized_session_id)
         if normalized_source_type:
-            clauses.append("source_type = ?")
+            clauses.append("idx.source_type = ?")
             params.append(normalized_source_type)
         if start_ts is not None:
-            clauses.append("end_ts >= ?")
+            clauses.append("idx.end_ts >= ?")
             params.append(int(start_ts or 0))
         if end_ts is not None:
-            clauses.append("start_ts <= ?")
+            clauses.append("idx.start_ts <= ?")
             params.append(int(end_ts or 0))
         where_clause = "WHERE " + " AND ".join(clauses) if clauses else ""
         normalized_limit = max(1, min(200, int(limit or 12)))
         cursor = await self._db.execute(
-            f"""
-            SELECT *
-            FROM conversation_memory_index
-            {where_clause}
+            self._conversation_memory_item_select_sql(where_clause)
+            + """
             ORDER BY end_ts DESC, start_ts DESC, updated_at DESC
+            LIMIT ?
+            """,
+            (*params, normalized_limit),
+        )
+        rows = await cursor.fetchall()
+        return [self._row_to_conversation_memory_item(row) for row in rows]
+
+    async def list_all_conversation_memory_items(
+        self,
+        *,
+        session_id: str = "",
+        source_type: str = "",
+        limit: int = 200,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        """Return paged decrypted conversation memory items for rebuild/inspection tasks."""
+        clauses: list[str] = []
+        params: list[Any] = []
+        normalized_session_id = str(session_id or "").strip()
+        normalized_source_type = str(source_type or "").strip()
+        if normalized_session_id:
+            clauses.append("idx.session_id = ?")
+            params.append(normalized_session_id)
+        if normalized_source_type:
+            clauses.append("idx.source_type = ?")
+            params.append(normalized_source_type)
+        where_clause = "WHERE " + " AND ".join(clauses) if clauses else ""
+        normalized_limit = max(1, min(1000, int(limit or 200)))
+        normalized_offset = max(0, int(offset or 0))
+        cursor = await self._db.execute(
+            self._conversation_memory_item_select_sql(where_clause)
+            + """
+            ORDER BY idx.updated_at DESC, idx.id DESC
+            LIMIT ? OFFSET ?
+            """,
+            (*params, normalized_limit, normalized_offset),
+        )
+        rows = await cursor.fetchall()
+        return [self._row_to_conversation_memory_item(row) for row in rows]
+
+    async def list_conversation_memory_ann_candidates(
+        self,
+        *,
+        ann_namespace: str,
+        source_type: str = "",
+        bucket_pairs: Sequence[tuple[int, str]],
+        session_id: str = "",
+        start_ts: int | None = None,
+        end_ts: int | None = None,
+        limit: int = 120,
+    ) -> list[dict[str, Any]]:
+        """Return ANN-bucket matched memory items joined with embeddings."""
+        normalized_namespace = str(ann_namespace or "").strip()
+        normalized_source_type = str(source_type or "").strip()
+        normalized_session_id = str(session_id or "").strip()
+        normalized_pairs: list[tuple[int, str]] = []
+        for raw_band_index, raw_bucket_key in list(bucket_pairs or []):
+            bucket_key = str(raw_bucket_key or "").strip()
+            if not bucket_key:
+                continue
+            normalized_pairs.append((max(0, int(raw_band_index)), bucket_key))
+        if not normalized_namespace or not normalized_pairs:
+            return []
+
+        clauses: list[str] = ["ann.ann_namespace = ?"]
+        params: list[Any] = [normalized_namespace]
+        if normalized_source_type:
+            clauses.append("idx.source_type = ?")
+            params.append(normalized_source_type)
+        if normalized_session_id:
+            clauses.append("idx.session_id = ?")
+            params.append(normalized_session_id)
+        if start_ts is not None:
+            clauses.append("idx.end_ts >= ?")
+            params.append(int(start_ts or 0))
+        if end_ts is not None:
+            clauses.append("idx.start_ts <= ?")
+            params.append(int(end_ts or 0))
+        pair_clauses: list[str] = []
+        for band_index, bucket_key in normalized_pairs:
+            pair_clauses.append("(ann.band_index = ? AND ann.bucket_key = ?)")
+            params.extend((band_index, bucket_key))
+        clauses.append("(" + " OR ".join(pair_clauses) + ")")
+        normalized_limit = max(1, min(500, int(limit or 120)))
+        cursor = await self._db.execute(
+            """
+            SELECT
+                idx.*,
+                emb.content_hash AS embedding_content_hash,
+                emb.embedding_dim AS embedding_dim,
+                emb.embedding_vector_json AS embedding_vector_json,
+                emb.updated_at AS embedding_updated_at,
+                COUNT(*) AS ann_match_count
+            FROM conversation_memory_ann_buckets AS ann
+            INNER JOIN conversation_memory_embeddings AS emb
+              ON emb.embedding_id = ann.embedding_id
+            INNER JOIN conversation_memory_index AS idx
+              ON idx.session_id = emb.session_id
+             AND idx.source_type = emb.source_type
+             AND idx.source_id = emb.source_id
+            WHERE """
+            + " AND ".join(clauses)
+            + """
+            GROUP BY emb.embedding_id
+            ORDER BY ann_match_count DESC, idx.end_ts DESC, idx.updated_at DESC
             LIMIT ?
             """,
             (*params, normalized_limit),
@@ -1830,6 +2504,20 @@ class Database:
 
     @classmethod
     def _row_to_conversation_memory_item(cls, row: aiosqlite.Row) -> dict[str, Any]:
+        raw_embedding_vector = str(row["embedding_vector_json"] or "").strip()
+        embedding_vector: list[float] = []
+        if raw_embedding_vector:
+            try:
+                decoded_vector = json.loads(raw_embedding_vector)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                decoded_vector = []
+            if isinstance(decoded_vector, list):
+                for value in decoded_vector:
+                    try:
+                        embedding_vector.append(float(value))
+                    except (TypeError, ValueError):
+                        embedding_vector = []
+                        break
         return {
             "id": int(row["id"]),
             "session_id": str(row["session_id"] or ""),
@@ -1844,6 +2532,11 @@ class Database:
             "participants": cls._decrypt_memory_json_list(row["participants_json_ciphertext"]),
             "embedding_id": str(row["embedding_id"] or ""),
             "embedding_model": str(row["embedding_model"] or ""),
+            "embedding_content_hash": str(row["embedding_content_hash"] or ""),
+            "embedding_dim": int(row["embedding_dim"] or 0),
+            "embedding_vector": embedding_vector,
+            "embedding_updated_at": int(row["embedding_updated_at"] or 0),
+            "ann_match_count": int(row["ann_match_count"] or 0) if "ann_match_count" in row.keys() else 0,
             "created_at": int(row["created_at"] or 0),
             "updated_at": int(row["updated_at"] or 0),
         }
@@ -3206,6 +3899,8 @@ class Database:
         await self._db.execute("DELETE FROM conversation_summary_buckets")
         await self._db.execute("DELETE FROM conversation_summary_media_cache")
         await self._db.execute("DELETE FROM conversation_memory_index")
+        await self._db.execute("DELETE FROM conversation_memory_embeddings")
+        await self._db.execute("DELETE FROM conversation_memory_ann_buckets")
         await self._db.execute("DELETE FROM contacts_cache")
         await self._db.execute("DELETE FROM groups_cache")
         await self._db.execute(

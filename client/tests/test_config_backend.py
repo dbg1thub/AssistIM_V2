@@ -35,6 +35,7 @@ def test_webrtc_config_builds_structured_ice_servers(monkeypatch) -> None:
 
 
 def test_ai_config_reads_local_gguf_environment(monkeypatch) -> None:
+    monkeypatch.setattr(config_backend_module, "UI_CONFIG_PATH", Path("Z:/nonexistent/config.json"))
     monkeypatch.setenv("ASSISTIM_AI_PROVIDER", "LOCAL_GGUF")
     monkeypatch.setenv("ASSISTIM_AI_MODEL_PATH", "D:/models/demo.gguf")
     monkeypatch.setenv("ASSISTIM_AI_MODEL_ID", "demo-model")
@@ -44,6 +45,10 @@ def test_ai_config_reads_local_gguf_environment(monkeypatch) -> None:
     monkeypatch.setenv("ASSISTIM_AI_GPU_LAYERS", "auto")
     monkeypatch.setenv("ASSISTIM_AI_CPU_THREADS", "6")
     monkeypatch.setenv("ASSISTIM_AI_VERBOSE", "yes")
+    monkeypatch.setenv("ASSISTIM_AI_EMBEDDING_MODEL_PATH", "D:/models/jina-embeddings-v3-Q4_K_M.gguf")
+    monkeypatch.setenv("ASSISTIM_AI_EMBEDDING_MODEL_ID", "jina-embeddings-v3-Q4_K_M")
+    monkeypatch.setenv("ASSISTIM_AI_EMBEDDING_CONTEXT_SIZE", "2048")
+    monkeypatch.setenv("ASSISTIM_AI_EMBEDDING_GPU_LAYERS", "12")
 
     config = reload_config()
 
@@ -57,6 +62,10 @@ def test_ai_config_reads_local_gguf_environment(monkeypatch) -> None:
     assert config.ai.gpu_enabled is True
     assert config.ai.cpu_threads == 6
     assert config.ai.verbose is True
+    assert config.ai.embedding_model_path == "D:/models/jina-embeddings-v3-Q4_K_M.gguf"
+    assert config.ai.embedding_model_id == "jina-embeddings-v3-Q4_K_M"
+    assert config.ai.embedding_context_size == 2048
+    assert config.ai.embedding_gpu_layers == 12
 
 
 def test_ai_config_reads_ui_settings_when_env_missing(monkeypatch, tmp_path: Path) -> None:

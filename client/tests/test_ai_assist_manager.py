@@ -42,6 +42,7 @@ if "aiohttp" not in sys.modules:
 from client.managers.ai_assist_manager import AIAssistManager, AIReplySuggestionStatus
 from client.managers.ai_prompt_builder import AIAssistAction
 from client.managers.ai_task_manager import AITaskSnapshot, AITaskState
+from client.managers.conversation_memory_manager import ConversationMemoryContext
 from client.core.secure_storage import SecureStorage
 from client.models.message import ChatMessage, MessageStatus, MessageType, Session
 from client.services.ai_service import AIErrorCode, AIPrivacyScope, AITaskType
@@ -86,6 +87,7 @@ class FakeSummaryDatabase:
         self.open_bucket = dict(open_bucket or {}) if open_bucket is not None else None
         self.closed_buckets = [dict(item) for item in list(closed_buckets or [])]
         self.historical_messages = list(historical_messages or [])
+        self.get_messages_calls: list[dict] = []
 
     async def get_open_conversation_summary_bucket(self, session_id: str):
         return dict(self.open_bucket) if self.open_bucket is not None else None
@@ -108,6 +110,13 @@ class FakeSummaryDatabase:
         return [dict(item) for item in buckets[:limit]]
 
     async def get_messages(self, session_id: str, limit: int = 50, before_timestamp: float | None = None):
+        self.get_messages_calls.append(
+            {
+                "session_id": session_id,
+                "limit": limit,
+                "before_timestamp": before_timestamp,
+            }
+        )
         messages = list(self.historical_messages)
         if before_timestamp is not None:
             messages = [
@@ -116,6 +125,34 @@ class FakeSummaryDatabase:
                 if message.timestamp is not None and message.timestamp.timestamp() < before_timestamp
             ]
         return messages[-limit:]
+
+
+class FakeReplyMemoryManager:
+    def __init__(self, lines: tuple[str, ...]) -> None:
+        self.lines = tuple(lines)
+        self.calls: list[dict] = []
+
+    async def build_reply_suggestion_rag_context(
+        self,
+        session_id: str,
+        query_text: str,
+        *,
+        max_end_ts: int | None = None,
+        min_start_ts: int | None = None,
+        result_limit: int = 3,
+        candidate_limit: int = 80,
+    ) -> ConversationMemoryContext:
+        self.calls.append(
+            {
+                "session_id": session_id,
+                "query_text": query_text,
+                "max_end_ts": max_end_ts,
+                "min_start_ts": min_start_ts,
+                "result_limit": result_limit,
+                "candidate_limit": candidate_limit,
+            }
+        )
+        return ConversationMemoryContext(lines=self.lines, query_kind="reply_suggestion_rag")
 
 
 def _session(**kwargs) -> Session:
@@ -223,7 +260,7 @@ def test_suggest_replies_includes_local_bucket_summaries_when_available(monkeypa
                 "bucket_start_ts": 1,
                 "bucket_end_ts": 1000,
                 "summary_status": "ready",
-                "summary_text_ciphertext": "enc:closed",
+                "display_summary_ciphertext": "enc:closed",
             },
             closed_buckets=[
                 {
@@ -231,7 +268,7 @@ def test_suggest_replies_includes_local_bucket_summaries_when_available(monkeypa
                     "bucket_start_ts": 0,
                     "bucket_end_ts": 600,
                     "summary_status": "ready",
-                    "summary_text_ciphertext": "enc:closed",
+                    "display_summary_ciphertext": "enc:closed",
                 }
             ],
         )
@@ -270,7 +307,7 @@ def test_suggest_replies_skips_bucket_summary_when_decrypt_fails(monkeypatch) ->
                 "bucket_start_ts": 1,
                 "bucket_end_ts": 1000,
                 "summary_status": "ready",
-                "summary_text_ciphertext": "enc:bad",
+                "display_summary_ciphertext": "enc:bad",
             },
             closed_buckets=[
                 {
@@ -278,7 +315,7 @@ def test_suggest_replies_skips_bucket_summary_when_decrypt_fails(monkeypatch) ->
                     "bucket_start_ts": 0,
                     "bucket_end_ts": 600,
                     "summary_status": "ready",
-                    "summary_text_ciphertext": "enc:closed",
+                    "display_summary_ciphertext": "enc:closed",
                 }
             ],
         )
@@ -313,14 +350,14 @@ def test_suggest_replies_ignores_recent_closed_bucket_summaries(monkeypatch) -> 
                     "bucket_start_ts": 650,
                     "bucket_end_ts": 760,
                     "summary_status": "ready",
-                    "summary_text_ciphertext": "enc:recent",
+                    "display_summary_ciphertext": "enc:recent",
                 },
                 {
                     "session_id": "s1",
                     "bucket_start_ts": 0,
                     "bucket_end_ts": 600,
                     "summary_status": "ready",
-                    "summary_text_ciphertext": "enc:old",
+                    "display_summary_ciphertext": "enc:old",
                 },
             ]
         )
@@ -337,33 +374,16 @@ def test_suggest_replies_ignores_recent_closed_bucket_summaries(monkeypatch) -> 
     asyncio.run(scenario())
 
 
-def test_suggest_replies_includes_related_history_recall_when_topic_matches() -> None:
+def test_suggest_replies_includes_related_summary_rag_context() -> None:
     async def scenario() -> None:
         fake = FakeTaskManager(
             content="那就周日下午去吧。\n可以，我到时候提前联系你。\n这周我可能不太方便。\n我再看看时间安排。"
         )
-        db = FakeSummaryDatabase(
-            historical_messages=[
-                ChatMessage(
-                    "m-old-1",
-                    "s1",
-                    "peer",
-                    "之前说过那家店周日人会少一点。",
-                    status=MessageStatus.RECEIVED,
-                    timestamp=datetime(2026, 4, 12, 18, 30, 0),
-                ),
-                ChatMessage(
-                    "m-old-2",
-                    "s1",
-                    "me",
-                    "明天公司那边还有个会。",
-                    is_self=True,
-                    status=MessageStatus.SENT,
-                    timestamp=datetime(2026, 4, 12, 18, 31, 0),
-                ),
-            ]
+        db = FakeSummaryDatabase()
+        memory = FakeReplyMemoryManager(
+            lines=("2026-04-12 18:30-18:35；参与者：对方、我；摘要：之前确认那家店周日人会少一点。",)
         )
-        manager = AIAssistManager(task_manager=fake, db=db)
+        manager = AIAssistManager(task_manager=fake, db=db, memory_manager=memory)
         messages = [
             ChatMessage(
                 "m-now-1",
@@ -379,9 +399,17 @@ def test_suggest_replies_includes_related_history_recall_when_topic_matches() ->
 
         assert state.status == AIReplySuggestionStatus.READY
         prompt = fake.requests[0].messages[0]["content"]
-        assert "相关旧消息（仅在和当前话题明显相关时参考，不要生硬照搬原话）：" in prompt
-        assert "2026-04-12 对方: 之前说过那家店周日人会少一点。" in prompt
+        assert "相关历史摘要（仅在和当前话题明显相关时参考；用于承接背景，不要复述旧内容）：" in prompt
+        assert "之前确认那家店周日人会少一点。" in prompt
         assert fake.requests[0].metadata["history_recall_count"] == 1
+        assert fake.requests[0].metadata["has_rag_history_context"] is True
+        assert fake.requests[0].metadata["rag_history_count"] == 1
+        assert fake.requests[0].metadata["rag_history_prompt_chars"] > 0
+        assert len(memory.calls) == 1
+        assert memory.calls[0]["session_id"] == "s1"
+        assert "周日去那家店吗？" in memory.calls[0]["query_text"]
+        assert memory.calls[0]["max_end_ts"] is not None
+        assert db.get_messages_calls == []
 
     asyncio.run(scenario())
 
