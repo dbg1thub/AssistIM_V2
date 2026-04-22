@@ -414,9 +414,6 @@ class Database:
             CREATE INDEX IF NOT EXISTS idx_messages_session 
                 ON messages(session_id, timestamp DESC);
 
-            CREATE INDEX IF NOT EXISTS idx_messages_session_order
-                ON messages(session_id, order_ts DESC);
-
             CREATE INDEX IF NOT EXISTS idx_session_read_cursors_session
                 ON session_read_cursors(session_id, last_read_seq DESC);
             

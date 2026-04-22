@@ -738,6 +738,123 @@ def test_database_connect_upgrades_local_search_cache_columns() -> None:
         shutil.rmtree(temp_root, ignore_errors=True)
 
 
+def test_database_connect_upgrades_legacy_message_order_schema() -> None:
+    temp_root = (Path.cwd() / "client/tests/.pytest_tmp").resolve()
+    temp_root.mkdir(parents=True, exist_ok=True)
+    db_path = temp_root / "database-message-order-upgrade.db"
+    now = int(time.time())
+    try:
+        db_path.unlink(missing_ok=True)
+        with sqlite3.connect(str(db_path)) as connection:
+            connection.executescript(
+                """
+                CREATE TABLE sessions (
+                    session_id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    session_type TEXT NOT NULL DEFAULT 'direct',
+                    participant_ids TEXT NOT NULL DEFAULT '[]',
+                    last_message TEXT,
+                    last_message_time INTEGER,
+                    unread_count INTEGER NOT NULL DEFAULT 0,
+                    avatar TEXT,
+                    is_ai_session INTEGER NOT NULL DEFAULT 0,
+                    extra TEXT NOT NULL DEFAULT '{}',
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL
+                );
+
+                CREATE TABLE messages (
+                    message_id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL,
+                    sender_id TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    message_type TEXT NOT NULL DEFAULT 'text',
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    timestamp INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL,
+                    is_self INTEGER NOT NULL DEFAULT 0,
+                    is_ai INTEGER NOT NULL DEFAULT 0,
+                    extra TEXT NOT NULL DEFAULT '{}',
+                    FOREIGN KEY (session_id) REFERENCES sessions(session_id)
+                );
+                """
+            )
+            connection.execute(
+                """
+                INSERT INTO sessions
+                (session_id, name, session_type, participant_ids, last_message,
+                 last_message_time, unread_count, avatar, is_ai_session, extra,
+                 created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "session-legacy-order",
+                    "Legacy Order Chat",
+                    "direct",
+                    json.dumps(["alice", "bob"]),
+                    None,
+                    None,
+                    0,
+                    None,
+                    0,
+                    "{}",
+                    now,
+                    now,
+                ),
+            )
+            connection.execute(
+                """
+                INSERT INTO messages
+                (message_id, session_id, sender_id, content, message_type, status,
+                 timestamp, updated_at, is_self, is_ai, extra)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "message-legacy-order",
+                    "session-legacy-order",
+                    "alice",
+                    "legacy message",
+                    "text",
+                    "sent",
+                    123456,
+                    123457,
+                    1,
+                    0,
+                    "{}",
+                ),
+            )
+            connection.commit()
+
+        async def scenario() -> None:
+            database = Database(db_path=str(db_path))
+            await database.connect()
+            await database.close()
+
+        asyncio.run(scenario())
+
+        with sqlite3.connect(str(db_path)) as connection:
+            column_rows = connection.execute("PRAGMA table_info(messages)").fetchall()
+            columns = {row[1] for row in column_rows}
+            indexes = {
+                row[1]
+                for row in connection.execute("PRAGMA index_list(messages)").fetchall()
+            }
+            order_row = connection.execute(
+                "SELECT timestamp, order_ts FROM messages WHERE message_id = ?",
+                ("message-legacy-order",),
+            ).fetchone()
+
+        assert "order_ts" in columns
+        assert "idx_messages_session_order" in indexes
+        assert order_row == (123456, 123456)
+    finally:
+        try:
+            db_path.unlink(missing_ok=True)
+        except PermissionError:
+            pass
+        shutil.rmtree(temp_root, ignore_errors=True)
+
+
 def test_database_read_cursor_overlay_updates_cached_self_messages_without_row_rewrites() -> None:
     temp_root = (Path.cwd() / "client/tests/.pytest_tmp").resolve()
     temp_root.mkdir(parents=True, exist_ok=True)
@@ -1813,6 +1930,7 @@ def test_database_marks_encrypted_attachments_and_searches_versioned_local_metad
     temp_root = (Path.cwd() / "client/tests/.pytest_tmp").resolve()
     temp_root.mkdir(parents=True, exist_ok=True)
     db_path = temp_root / "database-encrypted-attachment.db"
+    metadata_path = Path(f"{db_path}.crypto.json")
     try:
         db_path.unlink(missing_ok=True)
 
