@@ -617,6 +617,12 @@ class UserProfileCoordinator(QWidget):
         self._close_flyout()
         self.profileChanged.emit(dict(payload or {}))
 
+    def _detach_auth_state_listener(self) -> None:
+        if not self._auth_listener_attached:
+            return
+        self._auth_controller.remove_auth_state_listener(self._handle_auth_state_changed)
+        self._auth_listener_attached = False
+
     def _close_flyout(self) -> None:
         if self._flyout is not None:
             self._flyout.close()
@@ -658,6 +664,7 @@ class UserProfileCoordinator(QWidget):
 
     def quiesce(self) -> None:
         """Cancel logout-sensitive UI work before the shell is destroyed."""
+        self._detach_auth_state_listener()
         self._cancel_pending_task(self._save_task)
         self._save_task = None
         self._close_flyout()
@@ -670,9 +677,7 @@ class UserProfileCoordinator(QWidget):
         super().closeEvent(event)
 
     def _on_destroyed(self, *_args) -> None:
-        if self._auth_listener_attached:
-            self._auth_controller.remove_auth_state_listener(self._handle_auth_state_changed)
-            self._auth_listener_attached = False
+        self._detach_auth_state_listener()
         self.quiesce()
 
 

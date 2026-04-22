@@ -67,16 +67,20 @@ def _create_sound_effect(path: Path, volume: float, *, loop: bool = False):
     except Exception:
         return None
 
-    effect = QSoundEffect()
-    effect.setSource(QUrl.fromLocalFile(str(path)))
-    infinite_loop_count = getattr(QSoundEffect, "Infinite", -2)
     try:
-        infinite_loop_count = int(infinite_loop_count)
-    except (TypeError, ValueError):
-        infinite_loop_count = -2
-    effect.setLoopCount(infinite_loop_count if loop else 1)
-    effect.setVolume(volume)
-    return effect
+        effect = QSoundEffect()
+        effect.setSource(QUrl.fromLocalFile(str(path)))
+        infinite_loop_count = getattr(QSoundEffect, "Infinite", -2)
+        try:
+            infinite_loop_count = int(infinite_loop_count)
+        except (TypeError, ValueError):
+            infinite_loop_count = -2
+        effect.setLoopCount(infinite_loop_count if loop else 1)
+        effect.setVolume(volume)
+        return effect
+    except Exception:
+        logger.warning("Failed to create sound effect for %s", path, exc_info=True)
+        return None
 
 
 def _normalize_sound_id(sound_id: AppSound | str) -> str:
@@ -106,7 +110,9 @@ class SoundManager:
             return
 
         self._load_manifest()
-        self._prime_effect_pool()
+        # Do not prime QSoundEffect objects during startup. Some Windows test
+        # machines hang or emit low-level audio backend failures while the main
+        # window is still being created. Effects are created lazily on first use.
         self._event_subscriptions.append((MessageEvent.RECEIVED, self._on_message_received))
         await self._event_bus.subscribe(MessageEvent.RECEIVED, self._on_message_received)
         self._initialized = True
@@ -296,19 +302,6 @@ class SoundManager:
             )
 
         self._assets = assets
-
-    def _prime_effect_pool(self) -> None:
-        """Preload one effect per variant so the first notification sound is ready to play."""
-        for asset in self._assets.values():
-            for variant_name, path in asset.variants.items():
-                pool_key = (asset.sound_id, variant_name)
-                pool = self._effect_pools.setdefault(pool_key, [])
-                if pool:
-                    continue
-
-                effect = _create_sound_effect(path, self._effective_volume(asset), loop=asset.loop)
-                if effect is not None:
-                    pool.append(effect)
 
     def _is_sound_enabled(self, asset: SoundAsset) -> bool:
         if not bool(cfg.get(cfg.soundEnabled)):

@@ -13,6 +13,7 @@ param(
     [string]$NuitkaCompiler = "auto",
     [int]$NuitkaJobs = 0,
     [switch]$AssumeYesForDownloads,
+    [switch]$SplitCudaRuntime,
     [switch]$SkipNuitka
 )
 
@@ -24,8 +25,11 @@ $RepoRoot = Resolve-Path (Join-Path $ScriptDir "..")
 $BuildRoot = Join-Path $RepoRoot $OutputRoot
 $NuitkaOutputRoot = Join-Path $BuildRoot "nuitka"
 $PackageRoot = Join-Path $BuildRoot "package\AssistIM"
+$CudaRuntimeStageRoot = Join-Path $BuildRoot "package-cuda-runtime\AssistIM"
 $ReleaseRoot = Join-Path $BuildRoot "release"
 $Platform = "win64"
+$CudaRuntimeDlls = @("cudart64_12.dll", "cublas64_12.dll", "cublaslt64_12.dll")
+$CudaRuntimeZipName = "AssistIM-cuda12-runtime-$Platform.zip"
 
 function Assert-PathInside {
     param(
@@ -88,6 +92,16 @@ function Copy-DirectoryFiltered {
     }
 }
 
+function Get-PySide6PluginsRoot {
+    param([string]$PythonExe)
+
+    $pluginRoot = & $PythonExe -c "from pathlib import Path; import PySide6; print((Path(PySide6.__file__).resolve().parent / 'plugins'))"
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($pluginRoot)) {
+        throw "Failed to resolve PySide6 plugins directory via $PythonExe"
+    }
+    return [string]$pluginRoot
+}
+
 function Set-JsonProperty {
     param(
         [object]$Object,
@@ -130,6 +144,70 @@ function Write-JsonFileNoBom {
     [System.IO.File]::WriteAllText($Path, $json + [System.Environment]::NewLine, $encoding)
 }
 
+function Remove-LlamaCppRootDuplicates {
+    param([string]$PackageRoot)
+
+    $llamaLibRoot = Join-Path $PackageRoot "llama_cpp\lib"
+    if (-not (Test-Path -LiteralPath $llamaLibRoot -PathType Container)) {
+        return @()
+    }
+
+    $removed = New-Object System.Collections.Generic.List[object]
+    foreach ($dll in Get-ChildItem -LiteralPath $llamaLibRoot -File -Filter *.dll) {
+        $rootCopy = Join-Path $PackageRoot $dll.Name
+        if (-not (Test-Path -LiteralPath $rootCopy -PathType Leaf)) {
+            continue
+        }
+
+        $packageHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $dll.FullName).Hash
+        $rootHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $rootCopy).Hash
+        if ($packageHash -ne $rootHash) {
+            continue
+        }
+
+        Remove-Item -LiteralPath $rootCopy -Force
+        $removed.Add([pscustomobject]@{
+            Name = $dll.Name
+            SizeMB = [math]::Round(($dll.Length / 1MB), 2)
+        }) | Out-Null
+    }
+
+    return @($removed.ToArray())
+}
+
+function Split-CudaRuntimeFromPackage {
+    param(
+        [string]$PackageRoot,
+        [string]$CudaRuntimeStageRoot,
+        [string[]]$RuntimeDllNames
+    )
+
+    if (-not $RuntimeDllNames -or $RuntimeDllNames.Count -eq 0) {
+        return @()
+    }
+
+    New-Item -ItemType Directory -Force -Path $CudaRuntimeStageRoot | Out-Null
+    $moved = New-Object System.Collections.Generic.List[object]
+
+    foreach ($dllName in $RuntimeDllNames) {
+        $sourcePath = Join-Path $PackageRoot $dllName
+        if (-not (Test-Path -LiteralPath $sourcePath -PathType Leaf)) {
+            continue
+        }
+
+        $targetPath = Join-Path $CudaRuntimeStageRoot $dllName
+        Copy-Item -LiteralPath $sourcePath -Destination $targetPath -Force
+        Remove-Item -LiteralPath $sourcePath -Force
+        $fileInfo = Get-Item -LiteralPath $targetPath
+        $moved.Add([pscustomobject]@{
+            Name = $dllName
+            SizeMB = [math]::Round(($fileInfo.Length / 1MB), 2)
+        }) | Out-Null
+    }
+
+    return @($moved.ToArray())
+}
+
 if ([string]::IsNullOrWhiteSpace($Version)) {
     $Version = Read-VersionFromFile
 }
@@ -143,9 +221,18 @@ try {
     $Commit = "unknown"
 }
 
+if ($Channel -eq "test" -and [string]::IsNullOrWhiteSpace($ServerHost)) {
+    throw "Test channel builds must specify -ServerHost so the packaged client does not fall back to localhost"
+}
+
 New-Item -ItemType Directory -Force -Path $BuildRoot, $NuitkaOutputRoot, $ReleaseRoot | Out-Null
 Remove-BuildPath -Path $PackageRoot
+Remove-BuildPath -Path $CudaRuntimeStageRoot
 New-Item -ItemType Directory -Force -Path $PackageRoot | Out-Null
+$staleCudaRuntimeZipPath = Join-Path $ReleaseRoot $CudaRuntimeZipName
+if (Test-Path -LiteralPath $staleCudaRuntimeZipPath) {
+    Remove-Item -LiteralPath $staleCudaRuntimeZipPath -Force
+}
 
 if (-not $SkipNuitka) {
     $entry = Join-Path $RepoRoot "client\main.py"
@@ -192,6 +279,15 @@ if ($null -ne $distDir) {
     throw "Nuitka output directory was not found under $NuitkaOutputRoot"
 }
 
+$removedLlamaDuplicates = Remove-LlamaCppRootDuplicates -PackageRoot $PackageRoot
+$splitCudaRuntimeFiles = @()
+if ($SplitCudaRuntime) {
+    $splitCudaRuntimeFiles = Split-CudaRuntimeFromPackage `
+        -PackageRoot $PackageRoot `
+        -CudaRuntimeStageRoot $CudaRuntimeStageRoot `
+        -RuntimeDllNames $CudaRuntimeDlls
+}
+
 $resourcesSource = Join-Path $RepoRoot "client\resources"
 $resourcesTarget = Join-Path $PackageRoot "client\resources"
 Copy-DirectoryFiltered `
@@ -205,6 +301,15 @@ $stylesTarget = Join-Path $PackageRoot "client\ui\styles\qss"
 Copy-DirectoryFiltered `
     -Source $stylesSource `
     -Destination $stylesTarget `
+    -ExcludedExtensions @(".pyc") `
+    -ExcludedDirectoryNames @("__pycache__")
+
+$pySide6PluginsRoot = Get-PySide6PluginsRoot -PythonExe $PythonExe
+$multimediaPluginsSource = Join-Path $pySide6PluginsRoot "multimedia"
+$multimediaPluginsTarget = Join-Path $PackageRoot "PySide6\qt-plugins\multimedia"
+Copy-DirectoryFiltered `
+    -Source $multimediaPluginsSource `
+    -Destination $multimediaPluginsTarget `
     -ExcludedExtensions @(".pyc") `
     -ExcludedDirectoryNames @("__pycache__")
 
@@ -273,6 +378,15 @@ if (Test-Path -LiteralPath $zipPath) {
 }
 Compress-Archive -Path (Join-Path $PackageRoot "*") -DestinationPath $zipPath -Force
 
+$cudaRuntimeZipPath = ""
+if ($SplitCudaRuntime -and $splitCudaRuntimeFiles.Count -gt 0) {
+    $cudaRuntimeZipPath = Join-Path $ReleaseRoot $cudaRuntimeZipName
+    if (Test-Path -LiteralPath $cudaRuntimeZipPath) {
+        Remove-Item -LiteralPath $cudaRuntimeZipPath -Force
+    }
+    Compress-Archive -Path (Join-Path $CudaRuntimeStageRoot "*") -DestinationPath $cudaRuntimeZipPath -Force
+}
+
 $latestPayload = [ordered]@{
     app = "AssistIM"
     version = $Version
@@ -284,6 +398,22 @@ $latestPayload = [ordered]@{
     required = $false
     published_at = $BuildTime
 }
+if ($SplitCudaRuntime -and $splitCudaRuntimeFiles.Count -gt 0) {
+    $latestPayload.optional_packages = @(
+        [ordered]@{
+            name = "cuda12-runtime"
+            package = $cudaRuntimeZipName
+            size_bytes = (Get-Item -LiteralPath $cudaRuntimeZipPath).Length
+            sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $cudaRuntimeZipPath).Hash.ToLowerInvariant()
+            required = $false
+            install_to = "."
+            provides = @(
+                "cuda12-runtime",
+                "local-gguf-gpu-acceleration"
+            )
+        }
+    )
+}
 Write-JsonFileNoBom -Payload $latestPayload -Path (Join-Path $ReleaseRoot "latest.json") -Depth 5
 
 Write-Host "Package root: $PackageRoot"
@@ -291,6 +421,25 @@ Write-Host "Zip: $zipPath"
 Write-Host "Latest manifest: $(Join-Path $ReleaseRoot 'latest.json')"
 Write-Host "Console mode: $consoleMode"
 Write-Host "Runtime logs: $(Join-Path $PackageRoot 'logs\\assistim.log')"
+if ($removedLlamaDuplicates.Count -gt 0) {
+    $removedSummary = ($removedLlamaDuplicates | ForEach-Object { "$($_.Name) ($($_.SizeMB) MB)" }) -join ", "
+    $removedTotal = [math]::Round((($removedLlamaDuplicates | Measure-Object SizeMB -Sum).Sum), 2)
+    Write-Host "Removed duplicate llama_cpp DLLs: $removedSummary"
+    Write-Host "Removed duplicate size: $removedTotal MB"
+}
+if ($SplitCudaRuntime) {
+    if ($splitCudaRuntimeFiles.Count -gt 0) {
+        $cudaSummary = ($splitCudaRuntimeFiles | ForEach-Object { "$($_.Name) ($($_.SizeMB) MB)" }) -join ", "
+        $cudaTotal = [math]::Round((($splitCudaRuntimeFiles | Measure-Object SizeMB -Sum).Sum), 2)
+        Write-Host "Split CUDA runtime DLLs: $cudaSummary"
+        Write-Host "Split CUDA runtime size: $cudaTotal MB"
+        Write-Host "CUDA runtime zip: $cudaRuntimeZipPath"
+        Write-Host "Main package now runs without bundled CUDA 12 DLLs and will fall back to CPU unless the sidecar runtime is unpacked."
+    } else {
+        Write-Host "Split CUDA runtime requested, but no CUDA runtime DLLs were found in package root."
+    }
+}
+Write-Host "Packaged server: $(if ([string]::IsNullOrWhiteSpace($ServerHost)) { 'config default' } else { "$ServerHost`:$ServerPort (ssl=$([bool]$UseSsl))" })"
 Write-Host "Nuitka compiler: $NuitkaCompiler"
 Write-Host "Nuitka jobs: $(if ($NuitkaJobs -gt 0) { $NuitkaJobs } else { 'default' })"
 Write-Host "Assume yes for downloads: $([bool]$AssumeYesForDownloads)"

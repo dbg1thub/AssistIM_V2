@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 from enum import Enum
 from pathlib import Path
@@ -20,7 +21,7 @@ from qfluentwidgets import (
     qconfig,
 )
 
-from client.core.config_backend import APP_ROOT, DEFAULT_AI_MODEL_ID, get_app_version
+from client.core.config_backend import DEFAULT_AI_MODEL_ID, UI_CONFIG_PATH, get_app_version
 
 
 class Language(Enum):
@@ -140,9 +141,39 @@ class Config(QConfig):
     def appName(self) -> str:
         return "AssistIM"
 
+    def save(self) -> None:
+        """Persist UI config while preserving non-UI sections in the same file."""
+        self._cfg.file.parent.mkdir(parents=True, exist_ok=True)
+        payload = _load_config_payload(self._cfg.file)
+        merged_payload = _merge_config_payload(payload, self._cfg.toDict())
+        self._cfg.file.write_text(
+            json.dumps(merged_payload, ensure_ascii=False, indent=4),
+            encoding="utf-8",
+        )
+
+
+def _load_config_payload(path: Path) -> dict:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _merge_config_payload(existing_payload: dict, updated_payload: dict) -> dict:
+    merged_payload = dict(existing_payload)
+    for key, value in updated_payload.items():
+        if isinstance(value, dict) and isinstance(merged_payload.get(key), dict):
+            merged_section = dict(merged_payload[key])
+            merged_section.update(value)
+            merged_payload[key] = merged_section
+        else:
+            merged_payload[key] = value
+    return merged_payload
+
 
 cfg = Config()
-qconfig.load(APP_ROOT / "data" / "config.json", cfg)
+qconfig.load(UI_CONFIG_PATH, cfg)
 
 
 def save_config() -> None:

@@ -312,6 +312,23 @@ def test_logout_quiesce_is_pushed_down_into_shell_widgets() -> None:
     assert 'def quiesce(self) -> None:' in profile_flyout
 
 
+def test_user_profile_flyout_quiesce_detaches_auth_listener_before_teardown() -> None:
+    flyout = Path('client/ui/widgets/user_profile_flyout.py').read_text(encoding='utf-8')
+    detach_block = flyout.split('def _detach_auth_state_listener', 1)[1].split('def _close_flyout', 1)[0]
+    quiesce_block = flyout.split('def quiesce', 1)[1].split('def closeEvent', 1)[0]
+    destroyed_block = flyout.split('def _on_destroyed', 1)[1]
+
+    assert 'if not self._auth_listener_attached:' in detach_block
+    assert 'self._auth_controller.remove_auth_state_listener(self._handle_auth_state_changed)' in detach_block
+    assert 'self._auth_listener_attached = False' in detach_block
+    assert 'self._detach_auth_state_listener()' in quiesce_block
+    assert quiesce_block.index('self._detach_auth_state_listener()') < quiesce_block.index(
+        'self._cancel_pending_task(self._save_task)'
+    )
+    assert 'self._detach_auth_state_listener()' in destroyed_block
+    assert 'remove_auth_state_listener' not in destroyed_block
+
+
 def test_user_profile_flyout_surfaces_degraded_session_snapshot_after_profile_save() -> None:
     flyout = Path('client/ui/widgets/user_profile_flyout.py').read_text(encoding='utf-8')
     save_block = flyout.split('async def _save_profile_async', 1)[1].split('def _emit_profile_changed', 1)[0]

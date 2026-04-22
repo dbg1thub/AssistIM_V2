@@ -20,6 +20,11 @@ $RequiredQssPaths = @(
     "client/ui/styles/qss/dark/chat_interface.qss",
     "client/ui/styles/qss/light/chat_interface.qss"
 )
+$RequiredMultimediaPluginPaths = @(
+    "PySide6/qt-plugins/multimedia/ffmpegmediaplugin.dll",
+    "PySide6/qt-plugins/multimedia/windowsmediaplugin.dll"
+)
+$CudaRuntimeDlls = @("cudart64_12.dll", "cublas64_12.dll", "cublaslt64_12.dll")
 
 function Assert-FileExists {
     param([string]$Path)
@@ -72,6 +77,24 @@ if ($zipHash -ne [string]$latest.sha256) {
     throw "Zip SHA256 mismatch"
 }
 
+$optionalPackages = @()
+if ($null -ne $latest.PSObject.Properties["optional_packages"]) {
+    $optionalPackages = @($latest.optional_packages)
+}
+foreach ($optionalPackage in $optionalPackages) {
+    if ($null -eq $optionalPackage.PSObject.Properties["package"]) {
+        throw "Optional package entry is missing package name"
+    }
+    $optionalZipPath = Join-Path $ReleasePath ([string]$optionalPackage.package)
+    Assert-FileExists -Path $optionalZipPath
+    if ($null -ne $optionalPackage.PSObject.Properties["sha256"]) {
+        $optionalZipHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $optionalZipPath).Hash.ToLowerInvariant()
+        if ($optionalZipHash -ne [string]$optionalPackage.sha256) {
+            throw "Optional package SHA256 mismatch for $($optionalPackage.package)"
+        }
+    }
+}
+
 $forbiddenExtensions = @(".gguf", ".bin", ".safetensors")
 $forbiddenFiles = @(Get-ChildItem -LiteralPath $PackagePath -Recurse -File |
     Where-Object { $forbiddenExtensions -contains $_.Extension.ToLowerInvariant() })
@@ -103,6 +126,36 @@ foreach ($requiredQssPath in $RequiredQssPaths) {
     Assert-FileExists -Path $fullPath
     if ($manifestPaths -notcontains $requiredQssPath) {
         throw "Manifest missing required style resource: $requiredQssPath"
+    }
+}
+
+foreach ($requiredPluginPath in $RequiredMultimediaPluginPaths) {
+    $fullPath = Join-Path $PackagePath $requiredPluginPath.Replace("/", "\")
+    Assert-FileExists -Path $fullPath
+    if ($manifestPaths -notcontains $requiredPluginPath) {
+        throw "Manifest missing required Qt multimedia plugin: $requiredPluginPath"
+    }
+}
+
+$llamaLibPath = Join-Path $PackagePath "llama_cpp\lib"
+if (Test-Path -LiteralPath $llamaLibPath -PathType Container) {
+    $duplicateLlamaDlls = @(Get-ChildItem -LiteralPath $llamaLibPath -File -Filter *.dll |
+        Where-Object { Test-Path -LiteralPath (Join-Path $PackagePath $_.Name) -PathType Leaf })
+    if ($duplicateLlamaDlls.Count -gt 0) {
+        $names = ($duplicateLlamaDlls | Select-Object -ExpandProperty Name) -join ", "
+        throw "Duplicate llama_cpp runtime DLLs are packaged twice at root and llama_cpp\\lib: $names"
+    }
+}
+
+$cudaRuntimePackage = $optionalPackages | Where-Object { [string]$_.name -eq "cuda12-runtime" } | Select-Object -First 1
+if ($null -ne $cudaRuntimePackage) {
+    $packagedCudaDlls = @(
+        Get-ChildItem -LiteralPath $PackagePath -File |
+            Where-Object { $CudaRuntimeDlls -contains $_.Name.ToLowerInvariant() }
+    )
+    if ($packagedCudaDlls.Count -gt 0) {
+        $names = ($packagedCudaDlls | Select-Object -ExpandProperty Name) -join ", "
+        throw "CUDA runtime sidecar is declared, but main package still contains CUDA DLLs at root: $names"
     }
 }
 

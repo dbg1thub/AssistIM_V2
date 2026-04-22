@@ -21,7 +21,7 @@ from qasync import QEventLoop
 from qfluentwidgets import InfoBar, setTheme, setThemeColor
 
 from client.core import logging
-from client.core.config_backend import get_config
+from client.core.config_backend import UI_CONFIG_PATH, get_config
 from client.core.config import cfg
 from client.core.i18n import initialize_i18n, tr
 from client.core.logging import setup_logging
@@ -563,6 +563,14 @@ class Application:
             return
 
         logger.info("Initializing HTTP client...")
+        config = get_config()
+        logger.info(
+            "Runtime config path=%s server=%s:%s use_ssl=%s",
+            UI_CONFIG_PATH,
+            config.server.host,
+            config.server.port,
+            config.server.use_ssl,
+        )
         http_client = get_http_client()
         auth_loss_subscribe = getattr(http_client, "add_auth_loss_listener", None)
         if callable(auth_loss_subscribe):
