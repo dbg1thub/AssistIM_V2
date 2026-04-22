@@ -30,7 +30,8 @@ class HTTPClient:
     def __init__(
             self,
             base_url: Optional[str] = None,
-            timeout: float = 30.0,
+            timeout: Optional[float] = None,
+            upload_timeout: Optional[float] = None,
     ):
         """
         Initialize HTTP client.
@@ -47,7 +48,10 @@ class HTTPClient:
             if split_result.scheme and split_result.netloc
             else config.server.origin_url
         )
-        self._timeout = aiohttp.ClientTimeout(total=timeout)
+        request_timeout = float(timeout if timeout is not None else config.network.request_timeout)
+        upload_timeout_value = float(upload_timeout if upload_timeout is not None else config.network.upload_timeout)
+        self._timeout = aiohttp.ClientTimeout(total=request_timeout)
+        self._upload_timeout = aiohttp.ClientTimeout(total=upload_timeout_value)
         self._session: Optional[aiohttp.ClientSession] = None
         self._access_token: Optional[str] = None
         self._refresh_token: Optional[str] = None
@@ -57,7 +61,13 @@ class HTTPClient:
         self._token_generation = 0
         self._token_listeners: list[Callable[[Optional[str], Optional[str]], None]] = []
         self._auth_loss_listeners: list[Callable[[str], None]] = []
-        logger.info("HTTP client configured base_url=%s origin_url=%s", self._base_url, self._origin_url)
+        logger.info(
+            "HTTP client configured base_url=%s origin_url=%s request_timeout=%ss upload_timeout=%ss",
+            self._base_url,
+            self._origin_url,
+            request_timeout,
+            upload_timeout_value,
+        )
 
     @property
     def is_connected(self) -> bool:
@@ -771,6 +781,7 @@ class HTTPClient:
                         url,
                         data=form,
                         headers=headers,
+                        timeout=self._upload_timeout,
                 ) as response:
                     return await self._handle_upload_response(
                         response,

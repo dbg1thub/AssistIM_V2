@@ -97,6 +97,17 @@ def test_call_result_message_dedupe_cache_is_bounded() -> None:
     assert 'call.reason or tr(' not in chat_interface
 
 
+def test_call_window_marks_connected_on_transport_connection() -> None:
+    call_window = Path('client/ui/windows/call_window.py').read_text(encoding='utf-8')
+    connected_block = call_window.split('if lowered == "connection connected":', 1)[1].split(
+        'if lowered == "connection new":',
+        1,
+    )[0]
+
+    assert 'self._mark_call_connected()' in connected_block
+    assert 'self.set_status_text("Connecting...")' not in connected_block
+
+
 def test_chat_interface_typing_indicator_ignores_self_and_hides_on_explicit_stop() -> None:
     chat_interface = Path('client/ui/windows/chat_interface.py').read_text(encoding='utf-8')
     typing_block = chat_interface.split('def _on_typing_event', 1)[1].split('def _on_read_event', 1)[0]

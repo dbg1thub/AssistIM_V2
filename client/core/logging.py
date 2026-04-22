@@ -86,7 +86,7 @@ def _setup_console_handler(level: int) -> logging.StreamHandler:
     return handler
 
 
-def _setup_file_handler(config: LogConfig) -> Optional[RotatingFileHandler]:
+def _setup_file_handler(config: LogConfig, level: int) -> Optional[RotatingFileHandler]:
     """Create rotating file handler."""
     if not config.enable_file:
         return None
@@ -100,7 +100,7 @@ def _setup_file_handler(config: LogConfig) -> Optional[RotatingFileHandler]:
         backupCount=config.backup_count,
         encoding="utf-8",
     )
-    handler.setLevel(logging.DEBUG)
+    handler.setLevel(level)
     formatter = logging.Formatter(DEFAULT_FORMAT, DATE_FORMAT)
     handler.setFormatter(formatter)
     return handler
@@ -142,7 +142,7 @@ def setup_logging(config: Optional[LogConfig] = None) -> None:
     level = _get_level_from_string(_config.level)
     
     root_logger = logging.getLogger()
-    root_logger.setLevel(logging.DEBUG)
+    root_logger.setLevel(level)
 
     for handler in list(root_logger.handlers):
         if getattr(handler, "_assistim_handler", False):
@@ -169,14 +169,14 @@ def setup_logging(config: Optional[LogConfig] = None) -> None:
         console_handler = _setup_console_handler(level)
         target_handlers.append(console_handler)
 
-    file_handler = _setup_file_handler(_config)
+    file_handler = _setup_file_handler(_config, level)
     if file_handler:
         target_handlers.append(file_handler)
 
     if target_handlers:
         _queue = Queue(-1)
         queue_handler = QueueHandler(_queue)
-        queue_handler.setLevel(logging.DEBUG)
+        queue_handler.setLevel(level)
         queue_handler._assistim_handler = True
         root_logger.addHandler(queue_handler)
 
@@ -186,6 +186,8 @@ def setup_logging(config: Optional[LogConfig] = None) -> None:
     
     logging.getLogger("asyncio").setLevel(logging.WARNING)
     logging.getLogger("websockets").setLevel(logging.WARNING)
+    logging.getLogger("qasync").setLevel(logging.WARNING)
+    logging.getLogger("aiosqlite").setLevel(logging.WARNING)
     _config_signature = signature
 
 

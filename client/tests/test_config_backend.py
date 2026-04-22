@@ -89,6 +89,16 @@ def test_webrtc_config_builds_structured_ice_servers(monkeypatch) -> None:
     ]
 
 
+def test_network_config_separates_request_and_upload_timeouts(monkeypatch) -> None:
+    monkeypatch.setenv("ASSISTIM_REQUEST_TIMEOUT", "12.5")
+    monkeypatch.setenv("ASSISTIM_UPLOAD_TIMEOUT", "180")
+
+    config = reload_config()
+
+    assert config.network.request_timeout == 12.5
+    assert config.network.upload_timeout == 180.0
+
+
 def test_ai_config_reads_local_gguf_environment(monkeypatch) -> None:
     monkeypatch.setattr(config_backend_module, "UI_CONFIG_PATH", Path("Z:/nonexistent/config.json"))
     monkeypatch.setenv("ASSISTIM_AI_PROVIDER", "LOCAL_GGUF")

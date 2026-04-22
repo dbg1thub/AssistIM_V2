@@ -110,12 +110,13 @@ class FakeSession:
         self.request_calls.append(call)
         return self._request_handler(**call)
 
-    def post(self, url: str, json=None, headers=None, data=None):
+    def post(self, url: str, json=None, headers=None, data=None, timeout=None):
         call = {
             "url": url,
             "json": json,
             "headers": dict(headers or {}),
             "data": data,
+            "timeout": timeout,
         }
         self.post_calls.append(call)
         return self._post_handler(**call)
@@ -432,6 +433,7 @@ def test_http_client_upload_file_defaults_to_files_upload_endpoint() -> None:
 
         assert payload["url"] == "/uploads/default.bin"
         assert fake_session.post_calls[0]["url"] == "http://app.local/api/v1/files/upload"
+        assert getattr(fake_session.post_calls[0]["timeout"], "total", None) == 300.0
 
         await client.close()
 

@@ -89,6 +89,24 @@ class DeviceRepository:
         self.db.flush()
         return device
 
+    def deactivate_other_devices_for_user(self, user_id: str, keep_device_id: str) -> int:
+        """Deactivate every other direct-message device for one account."""
+        normalized_user_id = str(user_id or "").strip()
+        normalized_keep_device_id = str(keep_device_id or "").strip()
+        if not normalized_user_id or not normalized_keep_device_id:
+            return 0
+        result = self.db.execute(
+            update(UserDevice)
+            .where(
+                UserDevice.user_id == normalized_user_id,
+                UserDevice.device_id != normalized_keep_device_id,
+                UserDevice.is_active.is_(True),
+            )
+            .values(is_active=False)
+        )
+        self.db.flush()
+        return int(result.rowcount or 0)
+
     def delete_device(self, device: UserDevice) -> None:
         self.db.execute(delete(UserPreKey).where(UserPreKey.device_id == device.device_id))
         self.db.execute(delete(UserSignedPreKey).where(UserSignedPreKey.device_id == device.device_id))

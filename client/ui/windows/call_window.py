@@ -552,7 +552,7 @@ class CallWindow(FluentWidget):
             self.set_status_text("Connecting...")
             return
         if lowered == "connection connected":
-            self.set_status_text("Connecting...")
+            self._mark_call_connected()
             return
         if lowered == "connection new":
             self.set_status_text(self._initial_status_text())

@@ -51,6 +51,7 @@ class DeviceService:
             signing_key_public=signing_key_public,
             device_name=device_name,
         )
+        self.devices.deactivate_other_devices_for_user(current_user.id, device.device_id)
         self.devices.upsert_signed_prekey(
             device_id=device.device_id,
             key_id=signed_prekey["key_id"],

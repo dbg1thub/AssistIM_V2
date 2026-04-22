@@ -350,6 +350,14 @@ class HeartbeatConfig:
 
 
 @dataclass
+class NetworkConfig:
+    """HTTP request timeout configuration."""
+
+    request_timeout: float = field(default_factory=lambda: float(os.getenv("ASSISTIM_REQUEST_TIMEOUT", "30.0")))
+    upload_timeout: float = field(default_factory=lambda: float(os.getenv("ASSISTIM_UPLOAD_TIMEOUT", "300.0")))
+
+
+@dataclass
 class StorageConfig:
     """Local storage configuration."""
 
@@ -422,6 +430,7 @@ class Config:
     server: ServerConfig = field(default_factory=ServerConfig)
     reconnect: ReconnectConfig = field(default_factory=ReconnectConfig)
     heartbeat: HeartbeatConfig = field(default_factory=HeartbeatConfig)
+    network: NetworkConfig = field(default_factory=NetworkConfig)
     storage: StorageConfig = field(default_factory=StorageConfig)
     webrtc: WebRTCConfig = field(default_factory=WebRTCConfig)
     ai: AIConfig = field(default_factory=AIConfig)

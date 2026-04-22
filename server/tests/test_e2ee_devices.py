@@ -274,6 +274,53 @@ def test_device_registration_and_prekey_claim_flow(
     assert list_after_delete.json()["data"] == []
 
 
+def test_registering_new_device_retires_previous_direct_device(
+    client: TestClient,
+    user_factory,
+    auth_header,
+) -> None:
+    alice = user_factory("alice_single_active_device", "Alice Single Active Device")
+    bob = user_factory("bob_single_active_device", "Bob Single Active Device")
+
+    first_response = client.post(
+        "/api/v1/devices/register",
+        json=_device_payload("alice-single-device-1"),
+        headers=auth_header(alice["access_token"]),
+    )
+    assert first_response.status_code == 200
+
+    second_response = client.post(
+        "/api/v1/devices/register",
+        json=_device_payload("alice-single-device-2", offset=10),
+        headers=auth_header(alice["access_token"]),
+    )
+    assert second_response.status_code == 200
+
+    list_response = client.get(
+        "/api/v1/devices",
+        headers=auth_header(alice["access_token"]),
+    )
+    assert list_response.status_code == 200
+    devices_by_id = {item["device_id"]: item for item in list_response.json()["data"]}
+    assert devices_by_id["alice-single-device-1"]["is_active"] is False
+    assert devices_by_id["alice-single-device-2"]["is_active"] is True
+
+    bundle_response = client.get(
+        f"/api/v1/keys/prekey-bundle/{alice['user']['id']}",
+        headers=auth_header(bob["access_token"]),
+    )
+    assert bundle_response.status_code == 200
+    bundles = bundle_response.json()["data"]
+    assert [item["device_id"] for item in bundles] == ["alice-single-device-2"]
+
+    stale_claim_response = client.post(
+        "/api/v1/keys/prekeys/claim",
+        json={"device_ids": ["alice-single-device-1"]},
+        headers=auth_header(bob["access_token"]),
+    )
+    assert stale_claim_response.status_code == 404
+
+
 def test_device_registration_rejects_invalid_signed_prekey_signature(
     client: TestClient,
     user_factory,
