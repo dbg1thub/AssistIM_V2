@@ -70,10 +70,10 @@ client/tests/.pytest_tmp
 client/data/screenshots
 
 # codex
-.codex
+/.codex/
 
 # idea
 .idea
 
 # 文档
-docs
+/docs/

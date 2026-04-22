@@ -3200,6 +3200,50 @@ def test_session_manager_refresh_remote_sessions_prefers_counterpart_profile(mon
     asyncio.run(scenario())
 
 
+def test_session_manager_refresh_remote_sessions_prefers_authoritative_counterpart_snapshot_without_members(monkeypatch) -> None:
+    fake_session_service = FakeSessionService()
+    fake_e2ee_service = FakeE2EEService({'device_id': 'device-local-1', 'has_local_bundle': True})
+    fake_db = FakeSessionProfileDatabase()
+    fake_session_service.session_payload = {
+        'id': 'session-1',
+        'name': 'Private Chat',
+        'session_type': 'direct',
+        'participant_ids': ['user-1', 'user-2'],
+        'members': [],
+        'counterpart_id': 'user-2',
+        'counterpart_name': 'Bobby',
+        'counterpart_username': 'bob',
+        'counterpart_avatar': '/uploads/bob.svg',
+        'counterpart_gender': 'male',
+    }
+
+    monkeypatch.setattr(session_manager_module, 'get_session_service', lambda: fake_session_service)
+    monkeypatch.setattr(session_manager_module, 'get_e2ee_service', lambda: fake_e2ee_service)
+    monkeypatch.setattr(session_manager_module, 'get_event_bus', lambda: FakeEventBus())
+    monkeypatch.setattr(session_manager_module, 'get_message_manager', lambda: FakeMessageManager())
+    monkeypatch.setattr(session_manager_module, 'get_database', lambda: fake_db)
+
+    async def scenario() -> None:
+        manager = session_manager_module.SessionManager()
+        result = await manager.refresh_remote_sessions()
+
+        assert result.authoritative is True
+        assert result.unread_synchronized is True
+        assert len(result.sessions) == 1
+        session = result.sessions[0]
+        assert session.name == 'Bobby'
+        assert session.extra['counterpart_id'] == 'user-2'
+        assert session.extra['counterpart_name'] == 'Bobby'
+        assert session.extra['counterpart_username'] == 'bob'
+        assert session.extra['avatar_seed'] == session_manager_module.profile_avatar_seed(
+            user_id='user-2',
+            username='bob',
+            display_name='Bobby',
+        )
+
+    asyncio.run(scenario())
+
+
 def test_session_manager_refresh_remote_sessions_reports_non_authoritative_failure(monkeypatch) -> None:
     fake_session_service = FakeSessionService()
     fake_session_service.fetch_sessions_error = RuntimeError('sessions unavailable')
@@ -5101,6 +5145,113 @@ def test_session_manager_profile_update_refreshes_direct_counterpart_presentatio
         assert session.extra['members'][1]['nickname'] == 'Bobby'
         assert fake_db.saved_sessions and fake_db.saved_sessions[-1].session_id == 'session-1'
         assert any(event == session_manager_module.SessionEvent.UPDATED for event, _ in fake_event_bus.events)
+
+    asyncio.run(scenario())
+
+
+def test_session_manager_profile_update_without_session_id_refreshes_all_user_projections(monkeypatch) -> None:
+    class FakeSessionDb:
+        is_connected = True
+
+        def __init__(self) -> None:
+            self.saved_batches: list[list[Session]] = []
+            self.app_state = {
+                'auth.user_profile': json.dumps({'id': 'alice', 'username': 'alice', 'nickname': 'Alice'}),
+                'auth.user_id': 'alice',
+            }
+
+        async def save_sessions_batch(self, sessions: list[Session]) -> None:
+            self.saved_batches.append(list(sessions))
+
+        async def get_app_state(self, key: str):
+            return self.app_state.get(key)
+
+    fake_db = FakeSessionDb()
+    fake_event_bus = FakeEventBus()
+
+    monkeypatch.setattr(session_manager_module, 'get_event_bus', lambda: fake_event_bus)
+    monkeypatch.setattr(session_manager_module, 'get_message_manager', lambda: object())
+    monkeypatch.setattr(session_manager_module, 'get_session_service', lambda: object())
+    monkeypatch.setattr(session_manager_module, 'get_database', lambda: fake_db)
+
+    async def scenario() -> None:
+        manager = session_manager_module.SessionManager()
+        direct_session = Session(
+            session_id='session-direct',
+            name='Bob',
+            session_type='direct',
+            participant_ids=['alice', 'bob'],
+            avatar=None,
+            extra={
+                'counterpart_id': 'bob',
+                'counterpart_name': 'Bob',
+                'counterpart_username': 'bob',
+                'counterpart_avatar': '/uploads/bob-old.png',
+                'counterpart_gender': 'male',
+                'members': [],
+            },
+        )
+        group_session = Session(
+            session_id='session-group',
+            name='Core Team',
+            session_type='group',
+            participant_ids=['alice', 'bob', 'charlie'],
+            avatar='/uploads/group.png',
+            extra={
+                'members': [
+                    {'id': 'alice', 'username': 'alice', 'nickname': 'Alice', 'avatar': '/uploads/alice.png', 'gender': 'female'},
+                    {'id': 'bob', 'username': 'bob', 'nickname': 'Bob', 'avatar': '/uploads/bob-old.png', 'gender': 'male'},
+                    {'id': 'charlie', 'username': 'charlie', 'nickname': 'Charlie', 'avatar': '/uploads/charlie.png', 'gender': 'male'},
+                ],
+                'last_message_sender_id': 'bob',
+                'last_message_sender_name': 'Bob',
+            },
+        )
+        unaffected_session = Session(
+            session_id='session-other',
+            name='Charlie',
+            session_type='direct',
+            participant_ids=['alice', 'charlie'],
+            avatar=None,
+            extra={
+                'counterpart_id': 'charlie',
+                'counterpart_name': 'Charlie',
+                'counterpart_username': 'charlie',
+                'counterpart_avatar': '/uploads/charlie.png',
+                'counterpart_gender': 'male',
+                'members': [],
+            },
+        )
+        manager._sessions = {
+            direct_session.session_id: direct_session,
+            group_session.session_id: group_session,
+            unaffected_session.session_id: unaffected_session,
+        }
+
+        await manager._on_profile_updated(
+            {
+                'user_id': 'bob',
+                'profile': {
+                    'id': 'bob',
+                    'username': 'bob',
+                    'nickname': 'Bobby',
+                    'display_name': 'Bobby',
+                    'avatar': '/uploads/bob-new.png',
+                    'gender': 'male',
+                },
+            }
+        )
+
+        assert direct_session.name == 'Bobby'
+        assert direct_session.extra['counterpart_name'] == 'Bobby'
+        assert direct_session.extra['counterpart_avatar'] == '/uploads/bob-new.png'
+        assert group_session.extra['members'][1]['nickname'] == 'Bobby'
+        assert group_session.extra['last_message_sender_name'] == 'Bobby'
+        assert unaffected_session.name == 'Charlie'
+        assert len(fake_db.saved_batches) == 1
+        assert {session.session_id for session in fake_db.saved_batches[0]} == {'session-direct', 'session-group'}
+        updated_events = [payload for event, payload in fake_event_bus.events if event == session_manager_module.SessionEvent.UPDATED]
+        assert updated_events and 'sessions' in updated_events[-1]
 
     asyncio.run(scenario())
 

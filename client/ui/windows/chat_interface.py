@@ -1169,16 +1169,24 @@ class ChatInterface(QWidget):
 
     def _on_profile_updated(self, data: dict) -> None:
         """Refresh visible sender avatars/names after one participant profile change."""
-        session_id = str(data.get("session_id", "") or "")
-        if not session_id:
+        session_id = str(data.get("session_id", "") or "").strip()
+        user_id = str(data.get("user_id", "") or "").strip()
+        profile = dict(data.get("profile") or {}) if isinstance(data.get("profile"), dict) else {}
+        if not user_id or not profile:
             return
-        self._invalidate_session_caches(session_id)
-        if session_id != self._current_session_id:
+
+        target_session_id = session_id or str(self._current_session_id or "")
+        if session_id:
+            self._invalidate_session_caches(session_id)
+        else:
+            self._invalidate_session_caches()
+
+        if not target_session_id or target_session_id != self._current_session_id:
             return
         self.chat_panel.apply_sender_profile_update(
-            session_id,
-            str(data.get("user_id", "") or ""),
-            dict(data.get("profile") or {}) if isinstance(data.get("profile"), dict) else {},
+            target_session_id,
+            user_id,
+            profile,
             changed_message_ids=list(data.get("changed_message_ids") or []),
         )
 

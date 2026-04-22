@@ -375,6 +375,20 @@ def test_contact_interface_handles_user_profile_update_incrementally() -> None:
     assert 'self._controller.apply_group_self_profile_update(self._groups, payload)' in contact_interface
 
 
+def test_contact_interface_profile_update_refreshes_group_member_projection_and_request_fields() -> None:
+    contact_interface = Path('client/ui/windows/contact_interface.py').read_text(encoding='utf-8')
+    apply_block = contact_interface.split('def _apply_profile_update_payload', 1)[1].split('async def _reload_data_async', 1)[0]
+
+    assert 'def _group_member_display_name(member: dict[str, object]) -> str:' in contact_interface
+    assert 'raw_members = [dict(item or {}) for item in list(merged_payload.get("members") or []) if isinstance(item, dict)]' in apply_block
+    assert 'member["display_name"] = next_display_name' in apply_block
+    assert 'groups_changed = False' in apply_block
+    assert 'if groups_changed:' in apply_block
+    assert 'self._schedule_groups_cache_persist()' in apply_block
+    assert 'sender_username=request.sender_username' in apply_block
+    assert 'receiver_username=request.receiver_username' in apply_block
+
+
 def test_contact_interface_profile_update_avoids_unneeded_page_rebuilds() -> None:
     contact_interface = Path('client/ui/windows/contact_interface.py').read_text(encoding='utf-8')
 
@@ -390,6 +404,17 @@ def test_contact_interface_profile_update_avoids_unneeded_page_rebuilds() -> Non
     assert 'self._insert_group_item_view(group)' in contact_interface
     assert 'if groups_changed and self._current_page == "groups":' not in contact_interface
     assert 'if requests_changed and self._current_page == "requests":' not in contact_interface
+
+
+def test_chat_interface_profile_update_without_session_id_refreshes_visible_messages() -> None:
+    chat_interface = Path('client/ui/windows/chat_interface.py').read_text(encoding='utf-8')
+    profile_block = chat_interface.split('def _on_profile_updated', 1)[1].split('def load_sessions', 1)[0]
+
+    assert 'target_session_id = session_id or str(self._current_session_id or "")' in profile_block
+    assert 'self._invalidate_session_caches()' in profile_block
+    assert 'self.chat_panel.apply_sender_profile_update(' in profile_block
+    assert 'target_session_id,' in profile_block
+    assert 'if not user_id or not profile:' in profile_block
 
 
 def test_contact_interface_request_actions_update_locally() -> None:

@@ -1418,6 +1418,147 @@ class SessionManager:
             or str(member.get("id", "") or "").strip()
         )
 
+    @staticmethod
+    def _member_authoritative_display_name(member: dict[str, Any]) -> str:
+        """Return one human-facing member name that should override session-level counterpart labels."""
+        remark = str(member.get("remark", "") or "").strip()
+        if remark:
+            return remark
+
+        group_nickname = str(member.get("group_nickname", "") or "").strip()
+        if group_nickname:
+            return group_nickname
+
+        nickname = str(member.get("nickname", "") or "").strip()
+        if nickname:
+            return nickname
+
+        display_name = str(member.get("display_name", "") or "").strip()
+        member_username = str(member.get("username", "") or "").strip()
+        member_id = str(member.get("id", "") or "").strip()
+        if display_name and display_name not in {member_username, member_id}:
+            return display_name
+
+        return ""
+
+    @staticmethod
+    def _profile_display_name(profile: dict[str, Any], *, fallback_user_id: str = "") -> str:
+        """Resolve one stable profile display name from an authoritative user payload."""
+        return (
+            str(profile.get("display_name", "") or "").strip()
+            or str(profile.get("nickname", "") or "").strip()
+            or str(profile.get("username", "") or "").strip()
+            or str(fallback_user_id or "").strip()
+        )
+
+    def _session_references_user_profile(self, session: Session, user_id: str, current_user_id: str) -> bool:
+        """Return whether one cached session projects presentation fields from the target user entity."""
+        normalized_user_id = str(user_id or "").strip()
+        if not normalized_user_id:
+            return False
+
+        if session.session_type == "direct":
+            counterpart_id = str(
+                session.extra.get("counterpart_id", "")
+                or self._resolve_counterpart_id(session.participant_ids, current_user_id)
+            ).strip()
+            if counterpart_id == normalized_user_id:
+                return True
+
+        for raw_member in list(session.extra.get("members") or []):
+            if not isinstance(raw_member, dict):
+                continue
+            member_id = str(raw_member.get("id", "") or raw_member.get("user_id", "") or "").strip()
+            if member_id == normalized_user_id:
+                return True
+
+        return normalized_user_id in {
+            str(participant_id or "").strip()
+            for participant_id in list(session.participant_ids or [])
+            if str(participant_id or "").strip()
+        }
+
+    async def _apply_profile_update_to_session(
+        self,
+        session: Session,
+        *,
+        user_id: str,
+        profile: dict[str, Any],
+        current_user: dict[str, Any],
+        session_avatar: str = "",
+    ) -> bool:
+        """Project one authoritative user-profile update into one cached session presentation snapshot."""
+        normalized_user_id = str(user_id or "").strip()
+        if not normalized_user_id:
+            return False
+
+        changed = False
+        normalized_session_avatar = str(session_avatar or "").strip()
+        if normalized_session_avatar and str(session.avatar or "") != normalized_session_avatar:
+            session.avatar = normalized_session_avatar
+            changed = True
+
+        profile_username = str(profile.get("username", "") or "").strip()
+        profile_nickname = str(profile.get("nickname", "") or "").strip()
+        profile_avatar = str(profile.get("avatar", "") or "").strip()
+        profile_gender = str(profile.get("gender", "") or "").strip()
+        profile_display_name = self._profile_display_name(profile, fallback_user_id=normalized_user_id)
+
+        members = list(session.extra.get("members") or [])
+        if members:
+            updated_members = []
+            for raw_member in members:
+                member = dict(raw_member or {})
+                member_id = str(member.get("id", "") or member.get("user_id", "") or "").strip()
+                if member_id == normalized_user_id:
+                    updated_values = {
+                        "username": profile_username,
+                        "nickname": profile_nickname,
+                        "avatar": profile_avatar,
+                        "gender": profile_gender,
+                    }
+                    for key, new_value in updated_values.items():
+                        if str(member.get(key, "") or "").strip() != new_value:
+                            member[key] = new_value
+                            changed = True
+                next_display_name = self._member_display_name(member)
+                if str(member.get("display_name", "") or "").strip() != next_display_name:
+                    member["display_name"] = next_display_name
+                    changed = True
+                updated_members.append(member)
+            session.extra["members"] = updated_members
+
+        current_user_id = str(current_user.get("id", "") or "").strip()
+        counterpart_id = str(
+            session.extra.get("counterpart_id", "")
+            or self._resolve_counterpart_id(session.participant_ids, current_user_id)
+        ).strip()
+        if session.session_type == "direct" and counterpart_id == normalized_user_id:
+            direct_mapping = {
+                "counterpart_name": profile_display_name,
+                "counterpart_username": profile_username,
+                "counterpart_avatar": profile_avatar,
+                "counterpart_gender": profile_gender,
+            }
+            for key, new_value in direct_mapping.items():
+                if str(session.extra.get(key, "") or "").strip() != new_value:
+                    session.extra[key] = new_value
+                    changed = True
+
+        previous_name = session.name
+        previous_seed = str(session.extra.get("avatar_seed", "") or "")
+        previous_sender_name = str(session.extra.get("last_message_sender_name", "") or "")
+        await self._decorate_session_members([session], current_user)
+        self._normalize_session_display(session, current_user)
+        if (
+            session.name != previous_name
+            or str(session.extra.get("avatar_seed", "") or "") != previous_seed
+            or str(session.extra.get("last_message_sender_name", "") or "") != previous_sender_name
+        ):
+            changed = True
+
+        return changed
+
     async def _load_contact_cache_map(self, user_ids: list[str]) -> dict[str, dict[str, Any]]:
         """Load one contact lookup map so session presentation can prefer remarks."""
         normalized_user_ids = [
@@ -1594,7 +1735,7 @@ class SessionManager:
                 "nickname": str(member.get("nickname", "") or ""),
                 "avatar": str(member.get("avatar", "") or ""),
                 "gender": str(member.get("gender", "") or ""),
-                "display_name": self._member_display_name(member) or member_username or member_id,
+                "display_name": self._member_authoritative_display_name(member),
             }
 
         counterpart_id = self._resolve_counterpart_id(participant_ids, current_user_id)
@@ -1604,7 +1745,7 @@ class SessionManager:
             "nickname": "",
             "avatar": "",
             "gender": "",
-            "display_name": counterpart_id,
+            "display_name": "",
         }
 
     def _resolve_counterpart_name(self, members: list[dict[str, Any]], current_user_id: str) -> str:
@@ -1725,69 +1866,60 @@ class SessionManager:
 
     async def _on_profile_updated(self, data: dict) -> None:
         """Apply one user-profile update to cached session presentation state."""
-        session_id = str(data.get("session_id", "") or "")
-        user_id = str(data.get("user_id", "") or "")
+        session_id = str(data.get("session_id", "") or "").strip()
+        user_id = str(data.get("user_id", "") or "").strip()
         profile = dict(data.get("profile") or {}) if isinstance(data.get("profile"), dict) else {}
-        if not session_id or not user_id or not profile:
+        if not user_id or not profile:
             return
 
         current_user = await self._get_current_user_context()
         db = get_database()
-        updated_session: Optional[Session] = None
+        session_avatar = str(data.get("session_avatar", "") or "").strip()
+        updated_sessions: list[Session] = []
 
         async with self._lock:
-            session = self._sessions.get(session_id)
-            if session is None:
-                return
+            if session_id:
+                candidate_sessions = []
+                session = self._sessions.get(session_id)
+                if session is not None:
+                    candidate_sessions.append(session)
+            else:
+                current_user_id = str(current_user.get("id", "") or "").strip()
+                candidate_sessions = [
+                    session
+                    for session in self._sessions.values()
+                    if self._session_references_user_profile(session, user_id, current_user_id)
+                ]
 
-            changed = False
-            session_avatar = str(data.get("session_avatar", "") or "").strip()
-            if session_avatar and session.avatar != session_avatar:
-                session.avatar = session_avatar
-                changed = True
+            for session in candidate_sessions:
+                if await self._apply_profile_update_to_session(
+                    session,
+                    user_id=user_id,
+                    profile=profile,
+                    current_user=current_user,
+                    session_avatar=session_avatar,
+                ):
+                    updated_sessions.append(session)
 
-            members = list(session.extra.get("members") or [])
-            if members:
-                updated_members = []
-                for raw_member in members:
-                    member = dict(raw_member or {})
-                    if str(member.get("id", "") or "").strip() == user_id:
-                        for key in ("username", "nickname", "avatar", "gender"):
-                            new_value = str(profile.get(key, "") or "")
-                            if str(member.get(key, "") or "") != new_value:
-                                member[key] = new_value
-                                changed = True
-                    member["display_name"] = self._member_display_name(member)
-                    updated_members.append(member)
-                session.extra["members"] = updated_members
+        if not updated_sessions:
+            return
 
-            counterpart_id = str(session.extra.get("counterpart_id", "") or self._resolve_counterpart_id(session.participant_ids, str(current_user.get("id", "") or "")))
-            if session.session_type == "direct" and counterpart_id == user_id:
-                mapping = {
-                    "counterpart_username": str(profile.get("username", "") or ""),
-                    "counterpart_avatar": str(profile.get("avatar", "") or ""),
-                    "counterpart_gender": str(profile.get("gender", "") or ""),
-                }
-                for key, value in mapping.items():
-                    if str(session.extra.get(key, "") or "") != value:
-                        session.extra[key] = value
-                        changed = True
+        if db.is_connected:
+            if len(updated_sessions) == 1:
+                await db.save_session(updated_sessions[0])
+            else:
+                save_batch = getattr(db, "save_sessions_batch", None)
+                if callable(save_batch):
+                    await save_batch(updated_sessions)
+                else:
+                    for session in updated_sessions:
+                        await db.save_session(session)
 
-            previous_name = session.name
-            previous_seed = str(session.extra.get("avatar_seed", "") or "")
-            self._normalize_session_display(session, current_user)
-            if session.name != previous_name or str(session.extra.get("avatar_seed", "") or "") != previous_seed:
-                changed = True
+        if len(updated_sessions) == 1 and session_id:
+            await self._event_bus.emit(SessionEvent.UPDATED, {"session": updated_sessions[0]})
+            return
 
-            if not changed:
-                return
-            updated_session = session
-
-        if updated_session is not None and db.is_connected:
-            await db.save_session(updated_session)
-
-        if updated_session is not None:
-            await self._event_bus.emit(SessionEvent.UPDATED, {"session": updated_session})
+        await self._event_bus.emit(SessionEvent.UPDATED, {"sessions": self.sessions})
 
     async def _merge_group_payload_into_session(
         self,

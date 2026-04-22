@@ -2144,6 +2144,19 @@ class ContactInterface(QWidget):
         display_name = contact.display_name
         return self._controller.sort_letter(display_name), display_name.lower()
 
+    @staticmethod
+    def _group_member_display_name(member: dict[str, object]) -> str:
+        """Resolve one stable group-member display name for contact-side caches and detail views."""
+        return (
+            str(member.get("remark", "") or "").strip()
+            or str(member.get("group_nickname", "") or "").strip()
+            or str(member.get("nickname", "") or "").strip()
+            or str(member.get("display_name", "") or "").strip()
+            or str(member.get("username", "") or "").strip()
+            or str(member.get("user_id", "") or "").strip()
+            or str(member.get("id", "") or "").strip()
+        )
+
     def _schedule_groups_cache_persist(self) -> None:
         """Persist the current normalized group snapshot after local incremental mutations."""
         self._schedule_keyed_ui_task(
@@ -2210,8 +2223,14 @@ class ContactInterface(QWidget):
         session_id = str(payload.get("session_id", "") or "").strip()
         session_avatar = str(payload.get("session_avatar", "") or "").strip()
         current_moments = self._current_detail_moments()
+        profile_display_name = (
+            str(profile.get("display_name", "") or "").strip()
+            or str(profile.get("nickname", "") or "").strip()
+            or str(profile.get("username", "") or "").strip()
+        )
 
         contacts_changed = False
+        groups_changed = False
 
         for index, contact in enumerate(list(self._contacts)):
             if contact.id != user_id:
@@ -2250,15 +2269,45 @@ class ContactInterface(QWidget):
             self._restore_selection(full_reload=False)
 
         for index, group in enumerate(list(self._groups)):
-            if session_id and group.session_id != session_id:
+            group_changed = False
+            avatar_changed = bool(session_id and group.session_id == session_id and session_avatar and group.avatar != session_avatar)
+            merged_payload = dict(group.extra or {})
+            raw_members = [dict(item or {}) for item in list(merged_payload.get("members") or []) if isinstance(item, dict)]
+            if raw_members:
+                updated_members = []
+                for raw_member in raw_members:
+                    member = dict(raw_member or {})
+                    member_id = str(member.get("id", "") or member.get("user_id", "") or "").strip()
+                    if member_id == user_id:
+                        updated_values = {
+                            "username": str(profile.get("username", "") or "").strip(),
+                            "nickname": str(profile.get("nickname", "") or "").strip(),
+                            "avatar": str(profile.get("avatar", "") or "").strip(),
+                            "gender": str(profile.get("gender", "") or "").strip(),
+                        }
+                        for key, value in updated_values.items():
+                            if str(member.get(key, "") or "").strip() != value:
+                                member[key] = value
+                                group_changed = True
+                    next_display_name = self._group_member_display_name(member)
+                    if str(member.get("display_name", "") or "").strip() != next_display_name:
+                        member["display_name"] = next_display_name
+                        group_changed = True
+                    updated_members.append(member)
+                if group_changed:
+                    merged_payload["members"] = updated_members
+            if avatar_changed:
+                merged_payload["avatar"] = session_avatar
+                group_changed = True
+            if not group_changed:
                 continue
-            if not session_avatar or group.avatar == session_avatar:
-                continue
-            updated = self._controller.normalize_group_record({"avatar": session_avatar}, existing=group, fallback_id=group.id)
+            updated = self._controller.normalize_group_record(merged_payload, existing=group, fallback_id=group.id)
             if updated is None:
                 continue
             self._groups[index] = updated
-            self._update_group_item_view(updated)
+            groups_changed = True
+            if avatar_changed:
+                self._update_group_item_view(updated)
             if self._selected_key == ("group", updated.id):
                 self.detail_panel.set_group(updated, current_moments)
 
@@ -2266,7 +2315,7 @@ class ContactInterface(QWidget):
             updated_request = request
             changed = False
             if request.sender_id == user_id:
-                sender_name = str(profile.get("nickname", "") or profile.get("username", "") or request.sender_name)
+                sender_name = str(profile_display_name or request.sender_name)
                 sender_avatar = str(profile.get("avatar", "") or request.sender_avatar)
                 sender_gender = str(profile.get("gender", "") or request.sender_gender)
                 if (sender_name, sender_avatar, sender_gender) != (request.sender_name, request.sender_avatar, request.sender_gender):
@@ -2279,6 +2328,8 @@ class ContactInterface(QWidget):
                         created_at=request.created_at,
                         sender_name=sender_name,
                         receiver_name=request.receiver_name,
+                        sender_username=request.sender_username,
+                        receiver_username=request.receiver_username,
                         sender_avatar=sender_avatar,
                         receiver_avatar=request.receiver_avatar,
                         sender_gender=sender_gender,
@@ -2286,7 +2337,7 @@ class ContactInterface(QWidget):
                     )
                     changed = True
             elif request.receiver_id == user_id:
-                receiver_name = str(profile.get("nickname", "") or profile.get("username", "") or request.receiver_name)
+                receiver_name = str(profile_display_name or request.receiver_name)
                 receiver_avatar = str(profile.get("avatar", "") or request.receiver_avatar)
                 receiver_gender = str(profile.get("gender", "") or request.receiver_gender)
                 if (receiver_name, receiver_avatar, receiver_gender) != (request.receiver_name, request.receiver_avatar, request.receiver_gender):
@@ -2299,6 +2350,8 @@ class ContactInterface(QWidget):
                         created_at=request.created_at,
                         sender_name=request.sender_name,
                         receiver_name=receiver_name,
+                        sender_username=request.sender_username,
+                        receiver_username=request.receiver_username,
                         sender_avatar=request.sender_avatar,
                         receiver_avatar=receiver_avatar,
                         sender_gender=request.sender_gender,
@@ -2313,7 +2366,7 @@ class ContactInterface(QWidget):
                 self.detail_panel.set_request(updated_request, self._current_user_id, current_moments)
         if contacts_changed:
             self._schedule_contacts_cache_persist()
-        if session_avatar:
+        if groups_changed:
             self._schedule_groups_cache_persist()
 
     async def _reload_data_async(self) -> None:
