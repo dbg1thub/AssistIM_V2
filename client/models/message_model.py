@@ -5,6 +5,7 @@ QAbstractListModel for chat message list.
 """
 
 from datetime import datetime
+from math import inf
 
 from PySide6.QtCore import QAbstractListModel, QModelIndex, Qt
 
@@ -39,6 +40,7 @@ class MessageModel(QAbstractListModel):
 
     DISPLAY_KIND_KEY = "_display_item_kind"
     SOURCE_MESSAGE_ID_KEY = "_source_message_id"
+    AUTHORITATIVE_ORDER_EPSILON = 1e-6
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -199,8 +201,7 @@ class MessageModel(QAbstractListModel):
 
     def set_messages(self, messages: list[ChatMessage]) -> None:
         """Replace all messages, using incremental updates for empty/non-empty edges."""
-        new_messages = list(messages)
-        new_messages.sort(key=self._message_sort_key)
+        new_messages = self._sort_message_list(messages)
         self._prune_expanded_time_separator_ids(new_messages)
         new_display_items = self._build_display_items(new_messages)
 
@@ -580,16 +581,46 @@ class MessageModel(QAbstractListModel):
             self.TimeExpandedRole,
         ]
 
-    def _message_sort_key(self, message: ChatMessage) -> tuple[float, int, str]:
-        """Return a stable ordering key for real chat messages."""
-        normalized = self._normalize_timestamp(message.order_ts or message.timestamp)
-        epoch_seconds = normalized.timestamp() if normalized is not None else 0.0
-        session_seq = self._coerce_extra_int(message, "session_seq")
-        return (epoch_seconds, session_seq, message.message_id)
-
     def _sort_messages(self) -> None:
-        """Keep the real message list sorted by message timestamp."""
-        self._messages.sort(key=self._message_sort_key)
+        """Keep the real message list sorted by the formal session ordering contract."""
+        self._messages = self._sort_message_list(self._messages)
+
+    def _sort_message_list(self, messages: list[ChatMessage]) -> list[ChatMessage]:
+        """Return messages sorted by authoritative session order plus local pending anchors."""
+        if len(messages) <= 1:
+            return list(messages)
+
+        authoritative: list[tuple[int, float, str]] = []
+        effective_ts_by_id: dict[str, float] = {}
+
+        for message in messages:
+            raw_ts = self._sort_timestamp_value(message.order_ts or message.timestamp)
+            session_seq = self._coerce_extra_int(message, "session_seq")
+            if session_seq > 0:
+                authoritative.append((session_seq, raw_ts, message.message_id))
+            else:
+                effective_ts_by_id[message.message_id] = raw_ts
+
+        authoritative.sort(key=lambda item: (item[0], item[1], item[2]))
+
+        previous_effective_ts = -inf
+        for session_seq, raw_ts, message_id in authoritative:
+            if previous_effective_ts == -inf:
+                effective_ts = raw_ts
+            else:
+                effective_ts = max(raw_ts, previous_effective_ts + self.AUTHORITATIVE_ORDER_EPSILON)
+            effective_ts_by_id[message_id] = effective_ts
+            previous_effective_ts = effective_ts
+
+        return sorted(
+            messages,
+            key=lambda message: (
+                effective_ts_by_id.get(message.message_id, self._sort_timestamp_value(message.order_ts or message.timestamp)),
+                0 if self._coerce_extra_int(message, "session_seq") > 0 else 1,
+                self._coerce_extra_int(message, "session_seq"),
+                message.message_id,
+            ),
+        )
 
     def _prune_expanded_time_separator_ids(self, messages: list[ChatMessage]) -> None:
         """Drop expanded-state entries for messages that are no longer loaded."""
@@ -597,8 +628,12 @@ class MessageModel(QAbstractListModel):
         self._expanded_time_separator_ids.intersection_update(loaded_ids)
 
     def _are_messages_non_decreasing(self, messages: list[ChatMessage]) -> bool:
-        """Return whether a message batch is already ordered by timestamp."""
-        return all(self._message_sort_key(messages[index - 1]) <= self._message_sort_key(messages[index]) for index in range(1, len(messages)))
+        """Return whether a message batch already follows the formal sort contract."""
+        if len(messages) <= 1:
+            return True
+        current_ids = [message.message_id for message in messages]
+        sorted_ids = [message.message_id for message in self._sort_message_list(messages)]
+        return current_ids == sorted_ids
 
     def _can_incrementally_append(self, messages: list[ChatMessage]) -> bool:
         """Return whether a batch can be appended without rebuilding the full list."""
@@ -608,7 +643,11 @@ class MessageModel(QAbstractListModel):
             return False
         if not self._messages:
             return True
-        return self._message_sort_key(self._messages[-1]) <= self._message_sort_key(messages[0])
+        sorted_messages = self._sort_message_list(messages)
+        combined = self._sort_message_list(list(self._messages) + sorted_messages)
+        expected_ids = [message.message_id for message in self._messages + sorted_messages]
+        combined_ids = [message.message_id for message in combined]
+        return combined_ids == expected_ids
 
     def _can_incrementally_prepend(self, messages: list[ChatMessage]) -> bool:
         """Return whether a batch can be prepended without rebuilding the full list."""
@@ -618,25 +657,30 @@ class MessageModel(QAbstractListModel):
             return False
         if not self._messages:
             return True
-        return self._message_sort_key(messages[-1]) <= self._message_sort_key(self._messages[0])
+        sorted_messages = self._sort_message_list(messages)
+        combined = self._sort_message_list(sorted_messages + list(self._messages))
+        expected_ids = [message.message_id for message in sorted_messages + self._messages]
+        combined_ids = [message.message_id for message in combined]
+        return combined_ids == expected_ids
 
     def _should_reorder_message(self, message_id: str) -> bool:
         """Return whether one updated message now falls outside its neighbor ordering."""
-        for index, message in enumerate(self._messages):
-            if message.message_id != message_id:
-                continue
-            current_key = self._message_sort_key(message)
-            if index > 0 and current_key < self._message_sort_key(self._messages[index - 1]):
-                return True
-            if index < len(self._messages) - 1 and current_key > self._message_sort_key(self._messages[index + 1]):
-                return True
+        current_ids = [message.message_id for message in self._messages]
+        if message_id not in current_ids:
             return False
-        return False
+        sorted_ids = [message.message_id for message in self._sort_message_list(self._messages)]
+        return current_ids.index(message_id) != sorted_ids.index(message_id)
 
     @staticmethod
     def _normalize_timestamp(value):
         """Normalize timestamps for time-break comparisons."""
         return coerce_local_datetime(value)
+
+    @classmethod
+    def _sort_timestamp_value(cls, value) -> float:
+        """Convert one message ordering timestamp into one sortable epoch value."""
+        normalized = cls._normalize_timestamp(value)
+        return normalized.timestamp() if normalized is not None else 0.0
 
     @staticmethod
     def _coerce_extra_int(message: ChatMessage, key: str) -> int:

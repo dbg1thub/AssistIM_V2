@@ -146,6 +146,7 @@ class Config(QConfig):
         self._cfg.file.parent.mkdir(parents=True, exist_ok=True)
         payload = _load_config_payload(self._cfg.file)
         merged_payload = _merge_config_payload(payload, self._cfg.toDict())
+        merged_payload = _ensure_runtime_server_payload(merged_payload)
         self._cfg.file.write_text(
             json.dumps(merged_payload, ensure_ascii=False, indent=4),
             encoding="utf-8",
@@ -170,6 +171,48 @@ def _merge_config_payload(existing_payload: dict, updated_payload: dict) -> dict
         else:
             merged_payload[key] = value
     return merged_payload
+
+
+def _ensure_runtime_server_payload(payload: dict) -> dict:
+    """Persist the active non-local server config when UI settings are saved first."""
+    server_payload = _runtime_server_payload()
+    if server_payload is None:
+        return payload
+
+    existing_server = payload.get("Server")
+    existing_host = ""
+    if isinstance(existing_server, dict):
+        existing_host = str(existing_server.get("Host") or "").strip().lower()
+    if existing_host and existing_host not in {"localhost", "127.0.0.1", "::1"}:
+        return payload
+
+    merged_payload = dict(payload)
+    merged_payload["Server"] = server_payload
+    return merged_payload
+
+
+def _runtime_server_payload() -> dict[str, object] | None:
+    try:
+        from client.core.config_backend import get_config
+
+        server = get_config().server
+    except Exception:
+        return None
+
+    host = str(getattr(server, "host", "") or "").strip()
+    if not host or host.lower() in {"localhost", "127.0.0.1", "::1"}:
+        return None
+
+    try:
+        port = int(getattr(server, "port", 0) or 0)
+    except (TypeError, ValueError):
+        port = 0
+
+    return {
+        "Host": host,
+        "Port": port,
+        "UseSsl": bool(getattr(server, "use_ssl", False)),
+    }
 
 
 cfg = Config()

@@ -83,3 +83,50 @@ def test_cfg_save_preserves_server_settings(monkeypatch, tmp_path: Path) -> None
         "GpuAccelerationEnabled": False,
     }
     assert payload["Theme"] == {"ThemeMode": "Dark"}
+
+
+def test_cfg_save_seeds_runtime_server_settings_when_missing(monkeypatch, tmp_path: Path) -> None:
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        """
+        {
+          "AI": {
+            "RuntimeProvider": "local_gguf"
+          }
+        }
+        """,
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(config_module.cfg, "file", config_path)
+    monkeypatch.setattr(
+        config_module.cfg,
+        "toDict",
+        lambda serialize=True: {
+            "AI": {
+                "GpuAccelerationEnabled": False,
+            }
+        },
+    )
+    monkeypatch.setattr(
+        config_module,
+        "_runtime_server_payload",
+        lambda: {
+            "Host": "47.83.139.108",
+            "Port": 80,
+            "UseSsl": False,
+        },
+    )
+
+    config_module.cfg.save()
+
+    payload = json.loads(config_path.read_text(encoding="utf-8"))
+    assert payload["Server"] == {
+        "Host": "47.83.139.108",
+        "Port": 80,
+        "UseSsl": False,
+    }
+    assert payload["AI"] == {
+        "RuntimeProvider": "local_gguf",
+        "GpuAccelerationEnabled": False,
+    }

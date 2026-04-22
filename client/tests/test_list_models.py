@@ -615,6 +615,32 @@ def test_message_model_uses_session_seq_before_message_id_for_same_order_time() 
     assert [message.message_id for message in model.get_messages()] == ['z-message', 'a-message']
 
 
+def test_message_model_uses_session_seq_before_conflicting_order_ts_for_authoritative_messages() -> None:
+    model = MessageModel()
+    self_message = _message('self-message', 10)
+    self_message.extra['session_seq'] = 11
+    peer_message = _message('peer-message', 0)
+    peer_message.is_self = False
+    peer_message.sender_id = 'bob'
+    peer_message.extra['session_seq'] = 12
+
+    model.set_messages([peer_message, self_message])
+
+    assert [message.message_id for message in model.get_messages()] == ['self-message', 'peer-message']
+
+
+def test_message_model_keeps_earlier_pending_message_before_later_authoritative_message() -> None:
+    model = MessageModel()
+    failed_pending = _message('failed-pending', 0)
+    failed_pending.status = MessageStatus.FAILED
+    successful_later = _message('successful-later', 10)
+    successful_later.extra['session_seq'] = 2
+
+    model.set_messages([successful_later, failed_pending])
+
+    assert [message.message_id for message in model.get_messages()] == ['failed-pending', 'successful-later']
+
+
 def test_message_model_refresh_message_reorders_when_timestamp_changes() -> None:
     model = MessageModel()
     first = _message('m-1', 0)
