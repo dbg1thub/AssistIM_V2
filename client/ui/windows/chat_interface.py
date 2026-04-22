@@ -1385,7 +1385,7 @@ class ChatInterface(QWidget):
         return sorted(
             merged_by_id.values(),
             key=lambda item: self._message_sort_key(
-                getattr(item, "timestamp", None),
+                getattr(item, "order_ts", None) or getattr(item, "timestamp", None),
                 getattr(item, "message_id", ""),
             ),
         )

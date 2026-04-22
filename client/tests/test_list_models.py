@@ -610,9 +610,22 @@ def test_message_model_refresh_message_reorders_when_timestamp_changes() -> None
     model.add_messages([first, second])
 
     first.timestamp = BASE_TIME + timedelta(minutes=15)
+    first.order_ts = BASE_TIME + timedelta(minutes=15)
     model.refresh_message('m-1', allow_reorder=True)
 
     assert [message.message_id for message in model.get_messages()] == ['m-2', 'm-1']
+
+
+def test_message_model_refresh_message_keeps_position_when_only_display_timestamp_changes() -> None:
+    model = MessageModel()
+    first = _message('m-1', 0)
+    second = _message('m-2', 1)
+    model.add_messages([first, second])
+
+    second.timestamp = BASE_TIME - timedelta(minutes=5)
+    model.refresh_message('m-2', allow_reorder=True)
+
+    assert [message.message_id for message in model.get_messages()] == ['m-1', 'm-2']
 
 
 def test_message_model_toggle_time_separator_expanded_updates_role() -> None:

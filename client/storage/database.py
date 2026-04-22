@@ -231,6 +231,7 @@ class Database:
         await self._ensure_local_search_cache_schema()
         await self._ensure_directory_cache_owner_indexes()
         await self._ensure_message_crypto_schema()
+        await self._ensure_message_order_schema()
         await self._ensure_conversation_summary_schema()
         await self._ensure_search_fts_schema()
         await self._normalize_cached_session_types()
@@ -262,6 +263,7 @@ class Database:
                 message_type TEXT NOT NULL DEFAULT 'text',
                 status TEXT NOT NULL DEFAULT 'pending',
                 timestamp INTEGER NOT NULL,
+                order_ts INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL,
                 is_self INTEGER NOT NULL DEFAULT 0,
                 is_ai INTEGER NOT NULL DEFAULT 0,
@@ -411,6 +413,9 @@ class Database:
             
             CREATE INDEX IF NOT EXISTS idx_messages_session 
                 ON messages(session_id, timestamp DESC);
+
+            CREATE INDEX IF NOT EXISTS idx_messages_session_order
+                ON messages(session_id, order_ts DESC);
 
             CREATE INDEX IF NOT EXISTS idx_session_read_cursors_session
                 ON session_read_cursors(session_id, last_read_seq DESC);
@@ -591,6 +596,29 @@ class Database:
                         THEN json_extract(extra, '$.attachment_encryption.scheme')
                     ELSE ''
                 END
+            """
+        )
+        await self._db.commit()
+
+    async def _ensure_message_order_schema(self) -> None:
+        """Add one immutable local ordering timestamp for message timeline sorting."""
+        await self._ensure_table_columns(
+            "messages",
+            {
+                "order_ts": "INTEGER NOT NULL DEFAULT 0",
+            },
+        )
+        await self._db.execute(
+            """
+            UPDATE messages
+            SET order_ts = timestamp
+            WHERE COALESCE(order_ts, 0) = 0
+            """
+        )
+        await self._db.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_messages_session_order
+            ON messages(session_id, order_ts DESC)
             """
         )
         await self._db.commit()
@@ -2615,8 +2643,8 @@ class Database:
             """
             INSERT OR REPLACE INTO messages
             (message_id, session_id, sender_id, content, message_type,
-             status, timestamp, updated_at, is_self, is_ai, is_encrypted, encryption_scheme, extra)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             status, timestamp, order_ts, updated_at, is_self, is_ai, is_encrypted, encryption_scheme, extra)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 message.message_id,
@@ -2626,6 +2654,7 @@ class Database:
                 message.message_type.value,
                 message.status.value,
                 message.timestamp.timestamp() if message.timestamp else None,
+                message.order_ts.timestamp() if message.order_ts else None,
                 message.updated_at.timestamp() if message.updated_at else None,
                 1 if message.is_self else 0,
                 1 if message.is_ai else 0,
@@ -2729,7 +2758,7 @@ class Database:
                 """
                 SELECT * FROM messages 
                 WHERE session_id = ? AND timestamp < ?
-                ORDER BY timestamp DESC
+                ORDER BY order_ts DESC, rowid DESC
                 LIMIT ?
                 """,
                 (session_id, before_timestamp, limit),
@@ -2739,7 +2768,7 @@ class Database:
                 """
                 SELECT * FROM messages 
                 WHERE session_id = ?
-                ORDER BY timestamp DESC
+                ORDER BY order_ts DESC, rowid DESC
                 LIMIT ?
                 """,
                 (session_id, limit),
@@ -2759,7 +2788,7 @@ class Database:
             WHERE session_id = ?
               AND is_self = 1
               AND status = ?
-            ORDER BY timestamp ASC, rowid ASC
+            ORDER BY order_ts ASC, rowid ASC
             """,
             (session_id, "awaiting_security_confirmation"),
         )
@@ -3314,7 +3343,7 @@ class Database:
 
     @staticmethod
     def _message_timestamp_sort_value(message: ChatMessage) -> float:
-        timestamp = message.timestamp
+        timestamp = message.order_ts or message.timestamp
         if hasattr(timestamp, "timestamp"):
             return float(timestamp.timestamp())
         try:
@@ -4034,8 +4063,8 @@ class Database:
                 """
                 INSERT OR REPLACE INTO messages
                 (message_id, session_id, sender_id, content, message_type,
-                 status, timestamp, updated_at, is_self, is_ai, is_encrypted, encryption_scheme, extra)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 status, timestamp, order_ts, updated_at, is_self, is_ai, is_encrypted, encryption_scheme, extra)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     message.message_id,
@@ -4045,6 +4074,7 @@ class Database:
                     message.message_type.value,
                     message.status.value,
                     message.timestamp.timestamp() if message.timestamp else None,
+                    message.order_ts.timestamp() if message.order_ts else None,
                     message.updated_at.timestamp() if message.updated_at else None,
                     1 if message.is_self else 0,
                     1 if message.is_ai else 0,
@@ -4112,6 +4142,10 @@ class Database:
         timestamp = row["timestamp"]
         if timestamp:
             timestamp = datetime.datetime.fromtimestamp(timestamp)
+
+        order_ts = row["order_ts"]
+        if order_ts:
+            order_ts = datetime.datetime.fromtimestamp(order_ts)
         
         updated_at = row["updated_at"]
         if updated_at:
@@ -4132,6 +4166,7 @@ class Database:
             message_type=MessageType(row["message_type"]),
             status=MessageStatus(row["status"]),
             timestamp=timestamp,
+            order_ts=order_ts,
             updated_at=updated_at,
             is_self=bool(row["is_self"]),
             is_ai=bool(row["is_ai"]),

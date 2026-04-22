@@ -582,7 +582,7 @@ class MessageModel(QAbstractListModel):
 
     def _message_sort_key(self, message: ChatMessage) -> tuple[float, str]:
         """Return a stable ordering key for real chat messages."""
-        normalized = self._normalize_timestamp(message.timestamp)
+        normalized = self._normalize_timestamp(message.order_ts or message.timestamp)
         epoch_seconds = normalized.timestamp() if normalized is not None else 0.0
         return (epoch_seconds, message.message_id)
 

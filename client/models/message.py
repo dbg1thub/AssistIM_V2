@@ -481,6 +481,7 @@ class ChatMessage:
         message_type: Type of message
         status: Sending status
         timestamp: Message timestamp
+        order_ts: Immutable local ordering timestamp
         updated_at: Updated timestamp
         is_self: Whether message is from current user
         is_ai: Whether message is from AI
@@ -494,6 +495,7 @@ class ChatMessage:
     message_type: MessageType = MessageType.TEXT
     status: MessageStatus = MessageStatus.PENDING
     timestamp: Optional[datetime] = None
+    order_ts: Optional[datetime] = None
     updated_at: Optional[datetime] = None
     is_self: bool = False
     is_ai: bool = False
@@ -502,9 +504,12 @@ class ChatMessage:
     def __post_init__(self) -> None:
         """Set default timestamps."""
         self.timestamp = _coerce_datetime(self.timestamp)
+        self.order_ts = _coerce_datetime(self.order_ts)
         self.updated_at = _coerce_datetime(self.updated_at)
         if self.timestamp is None:
             self.timestamp = datetime.now()
+        if self.order_ts is None:
+            self.order_ts = self.timestamp
         if self.updated_at is None:
             self.updated_at = self.timestamp
     
@@ -538,6 +543,7 @@ class ChatMessage:
             "message_type": self.message_type.value,
             "status": self.status.value,
             "timestamp": self.timestamp.isoformat() if self.timestamp else None,
+            "order_ts": self.order_ts.isoformat() if self.order_ts else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
             "is_self": self.is_self,
             "is_ai": self.is_ai,
@@ -551,11 +557,14 @@ class ChatMessage:
         status = MessageStatus(data.get("status", "pending"))
         extra_keys = {
             "message_id", "session_id", "sender_id", "content", "message_type",
-            "status", "timestamp", "updated_at", "is_self", "is_ai",
+            "status", "timestamp", "order_ts", "updated_at", "is_self", "is_ai",
         }
         
         timestamp = data.get("timestamp")
         timestamp = _coerce_datetime(timestamp)
+
+        order_ts = data.get("order_ts")
+        order_ts = _coerce_datetime(order_ts)
         
         updated_at = data.get("updated_at")
         updated_at = _coerce_datetime(updated_at)
@@ -568,6 +577,7 @@ class ChatMessage:
             message_type=msg_type,
             status=status,
             timestamp=timestamp,
+            order_ts=order_ts,
             updated_at=updated_at,
             is_self=data.get("is_self", False),
             is_ai=data.get("is_ai", False),

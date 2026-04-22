@@ -702,6 +702,7 @@ class ChatPanel(QWidget):
             existing.message_type = message.message_type
             existing.status = message.status
             existing.timestamp = message.timestamp
+            existing.order_ts = message.order_ts
             existing.updated_at = message.updated_at
             existing.is_self = message.is_self
             existing.is_ai = message.is_ai
@@ -732,6 +733,7 @@ class ChatPanel(QWidget):
                 existing.message_type = message.message_type
                 existing.status = message.status
                 existing.timestamp = message.timestamp
+                existing.order_ts = message.order_ts
                 existing.updated_at = message.updated_at
                 existing.is_self = message.is_self
                 existing.is_ai = message.is_ai

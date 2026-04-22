@@ -453,6 +453,7 @@ class MessageManager:
             normalized.setdefault("content", fallback_message.content)
             normalized.setdefault("status", fallback_message.status.value)
             normalized.setdefault("is_self", True)
+            normalized.setdefault("order_ts", fallback_message.order_ts or fallback_message.timestamp)
             merged_extra = self._merge_ack_extra(
                 dict(fallback_message.extra or {}),
                 dict(normalized.get("extra") or {}),
@@ -461,6 +462,7 @@ class MessageManager:
         else:
             normalized.setdefault("sender_id", self._user_id)
             normalized.setdefault("is_self", True)
+            normalized.setdefault("order_ts", normalized.get("timestamp") or normalized.get("created_at"))
 
         normalized.setdefault("message_id", msg_id)
         return self._normalize_loaded_message(
@@ -1520,6 +1522,8 @@ class MessageManager:
         if existing_message is None:
             return incoming_message
 
+        incoming_message.order_ts = existing_message.order_ts or incoming_message.order_ts or existing_message.timestamp
+
         existing_encryption = dict((existing_message.extra or {}).get("encryption") or {})
         incoming_encryption = dict((incoming_message.extra or {}).get("encryption") or {})
         local_plaintext = str(existing_encryption.get("local_plaintext") or "").strip()
@@ -1693,6 +1697,7 @@ class MessageManager:
             message_type=message_type,
             status=status,
             timestamp=data.get("timestamp") or data.get("created_at") or time.time(),
+            order_ts=data.get("order_ts") or data.get("timestamp") or data.get("created_at") or time.time(),
             updated_at=data.get("updated_at") or data.get("timestamp") or data.get("created_at") or time.time(),
             is_self=(sender_id == self._user_id) if sender_id else bool(data.get("is_self", False)),
             is_ai=bool(data.get("is_ai", False)),

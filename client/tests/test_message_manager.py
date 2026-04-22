@@ -733,6 +733,7 @@ def test_message_manager_retries_on_ack_timeout_and_merges_canonical_ack(monkeyp
         try:
             message = await manager.send_message('session-1', 'hello world')
             await _wait_until(lambda: len(fake_conn_manager.sent_payloads) == 1)
+            original_order_ts = message.order_ts
 
             pending = manager._pending_messages[message.message_id]
             assert pending.attempt_count == 1
@@ -756,6 +757,7 @@ def test_message_manager_retries_on_ack_timeout_and_merges_canonical_ack(monkeyp
                             'content': 'hello world',
                             'message_type': 'text',
                             'status': 'sent',
+                            'created_at': '2026-04-22T07:00:00+00:00',
                             'session_seq': 7,
                             'read_count': 0,
                             'read_target_count': 1,
@@ -771,6 +773,7 @@ def test_message_manager_retries_on_ack_timeout_and_merges_canonical_ack(monkeyp
             assert stored is not None
             assert stored.status == MessageStatus.SENT
             assert stored.extra['session_seq'] == 7
+            assert stored.order_ts == original_order_ts
             assert message.message_id not in manager._pending_messages
             assert len(fake_conn_manager.sent_payloads) == 2
             assert any(event == message_manager_module.MessageEvent.ACK for event, _ in fake_event_bus.events)
