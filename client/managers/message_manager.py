@@ -2988,6 +2988,7 @@ class MessageManager:
                 message_type=stored_message.message_type,
                 status=stored_message.status,
                 timestamp=stored_message.timestamp,
+                order_ts=stored_message.order_ts,
                 updated_at=stored_message.updated_at,
                 is_self=stored_message.is_self,
                 is_ai=stored_message.is_ai,

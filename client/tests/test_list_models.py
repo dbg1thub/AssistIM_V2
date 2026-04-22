@@ -603,6 +603,18 @@ def test_message_model_add_message_reorders_out_of_order_insert() -> None:
     assert model.data(model.index(2, 0), model.DisplayKindRole) == model.DISPLAY_TIME_SEPARATOR
 
 
+def test_message_model_uses_session_seq_before_message_id_for_same_order_time() -> None:
+    model = MessageModel()
+    first = _message('z-message', 0)
+    first.extra['session_seq'] = 1
+    second = _message('a-message', 0)
+    second.extra['session_seq'] = 2
+
+    model.set_messages([second, first])
+
+    assert [message.message_id for message in model.get_messages()] == ['z-message', 'a-message']
+
+
 def test_message_model_refresh_message_reorders_when_timestamp_changes() -> None:
     model = MessageModel()
     first = _message('m-1', 0)

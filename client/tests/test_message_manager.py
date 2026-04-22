@@ -3332,6 +3332,8 @@ def test_message_manager_recover_session_messages_retries_cached_e2ee_payloads(m
 
     fake_e2ee_service.decrypt_attachment_metadata = decrypted_attachment_metadata  # type: ignore[method-assign]
 
+    cached_text_order_ts = datetime(2026, 1, 1, 12, 0, 1)
+    cached_file_order_ts = datetime(2026, 1, 1, 12, 0, 2)
     fake_db.messages['m-recover-text'] = ChatMessage(
         message_id='m-recover-text',
         session_id='session-1',
@@ -3339,6 +3341,7 @@ def test_message_manager_recover_session_messages_retries_cached_e2ee_payloads(m
         content='cipher:restored secret',
         message_type=MessageType.TEXT,
         status=MessageStatus.RECEIVED,
+        order_ts=cached_text_order_ts,
         is_self=False,
         extra={
             'encryption': {
@@ -3358,6 +3361,7 @@ def test_message_manager_recover_session_messages_retries_cached_e2ee_payloads(m
         content='https://cdn.example/files/blob.bin',
         message_type=MessageType.FILE,
         status=MessageStatus.RECEIVED,
+        order_ts=cached_file_order_ts,
         is_self=False,
         extra={
             'attachment_encryption': {
@@ -3418,6 +3422,7 @@ def test_message_manager_recover_session_messages_retries_cached_e2ee_payloads(m
             stored_text = await fake_db.get_message('m-recover-text')
             assert stored_text is not None
             assert stored_text.content == 'restored secret'
+            assert stored_text.order_ts == cached_text_order_ts
             assert stored_text.extra['encryption']['local_plaintext'] == 'local:restored secret'
             assert 'decryption_state' not in stored_text.extra['encryption']
             assert 'recovery_action' not in stored_text.extra['encryption']
@@ -3427,6 +3432,7 @@ def test_message_manager_recover_session_messages_retries_cached_e2ee_payloads(m
             assert stored_file.extra['name'] == 'secret.pdf'
             assert stored_file.extra['file_type'] == 'application/pdf'
             assert stored_file.extra['size'] == 9
+            assert stored_file.order_ts == cached_file_order_ts
             assert stored_file.extra['attachment_encryption']['local_metadata'].startswith('local:')
             assert 'decryption_state' not in stored_file.extra['attachment_encryption']
             assert 'recovery_action' not in stored_file.extra['attachment_encryption']
