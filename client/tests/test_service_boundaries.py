@@ -3389,6 +3389,131 @@ def test_session_manager_refresh_remote_sessions_rebuilds_restart_preview_from_c
     asyncio.run(scenario())
 
 
+def test_session_manager_refresh_remote_sessions_reconciles_encrypted_preview_with_cached_plaintext(monkeypatch) -> None:
+    fake_session_service = FakeSessionService()
+    fake_session_service.session_payload = {
+        'id': 'session-1',
+        'name': 'Bob',
+        'session_type': 'direct',
+        'participant_ids': ['user-1', 'user-2'],
+        'members': [
+            {'id': 'user-1', 'username': 'alice', 'nickname': 'Alice'},
+            {'id': 'user-2', 'username': 'bob', 'nickname': 'Bob'},
+        ],
+        'counterpart_id': 'user-2',
+        'counterpart_name': 'Bob',
+        'counterpart_username': 'bob',
+        'last_message': '[Encrypted message]',
+        'last_message_id': 'msg-1',
+        'last_message_sender_id': 'user-2',
+        'last_message_time': '2026-03-27T17:30:00',
+        'created_at': '2026-03-20T09:00:00',
+        'updated_at': '2026-03-27T17:30:00',
+        'unread_count': 0,
+        'encryption_mode': 'e2ee_private',
+    }
+    fake_session_service.unread_payload = [{'session_id': 'session-1', 'unread': 0}]
+    fake_event_bus = FakeEventBus()
+    fake_db = FakeSessionProfileDatabase()
+    fake_message_manager = FakeMessageManager()
+    latest_at = datetime(2026, 3, 27, 17, 30, 0)
+    fake_message_manager.cached_messages_result = [
+        ChatMessage(
+            message_id='msg-1',
+            session_id='session-1',
+            sender_id='user-2',
+            content='decrypted hello',
+            message_type=MessageType.TEXT,
+            status=MessageStatus.SENT,
+            timestamp=latest_at,
+            is_self=False,
+            extra={
+                'encryption': {
+                    'enabled': True,
+                    'content_ciphertext': 'ciphertext-1',
+                },
+                'sender_name': 'Bob',
+            },
+        )
+    ]
+
+    monkeypatch.setattr(session_manager_module, 'get_session_service', lambda: fake_session_service)
+    monkeypatch.setattr(session_manager_module, 'get_e2ee_service', lambda: FakeE2EEService({'device_id': 'device-local-1', 'has_local_bundle': True}))
+    monkeypatch.setattr(session_manager_module, 'get_event_bus', lambda: fake_event_bus)
+    monkeypatch.setattr(session_manager_module, 'get_message_manager', lambda: fake_message_manager)
+    monkeypatch.setattr(session_manager_module, 'get_database', lambda: fake_db)
+
+    async def scenario() -> None:
+        manager = session_manager_module.SessionManager()
+
+        result = await manager.refresh_remote_sessions()
+
+        assert result.authoritative is True
+        assert len(result.sessions) == 1
+        session = result.sessions[0]
+        assert session.last_message == 'decrypted hello'
+        assert session.extra['last_message_id'] == 'msg-1'
+        assert fake_message_manager.cached_messages_calls == [('session-1', 1, None)]
+        assert fake_db.saved_sessions[-1].last_message == 'decrypted hello'
+        assert any(
+            event_type == session_manager_module.SessionEvent.UPDATED
+            and payload.get('sessions') == result.sessions
+            for event_type, payload in fake_event_bus.events
+        )
+
+    asyncio.run(scenario())
+
+
+def test_session_manager_refresh_remote_sessions_preserves_authoritative_preview_without_cached_match(monkeypatch) -> None:
+    fake_session_service = FakeSessionService()
+    fake_session_service.session_payload = {
+        'id': 'session-1',
+        'name': 'Bob',
+        'session_type': 'direct',
+        'participant_ids': ['user-1', 'user-2'],
+        'members': [
+            {'id': 'user-1', 'username': 'alice', 'nickname': 'Alice'},
+            {'id': 'user-2', 'username': 'bob', 'nickname': 'Bob'},
+        ],
+        'counterpart_id': 'user-2',
+        'counterpart_name': 'Bob',
+        'counterpart_username': 'bob',
+        'last_message': '[Encrypted message]',
+        'last_message_id': 'msg-1',
+        'last_message_sender_id': 'user-2',
+        'last_message_time': '2026-03-27T17:30:00',
+        'created_at': '2026-03-20T09:00:00',
+        'updated_at': '2026-03-27T17:30:00',
+        'unread_count': 0,
+        'encryption_mode': 'e2ee_private',
+    }
+    fake_session_service.unread_payload = [{'session_id': 'session-1', 'unread': 0}]
+    fake_event_bus = FakeEventBus()
+    fake_db = FakeSessionProfileDatabase()
+    fake_message_manager = FakeMessageManager()
+    fake_message_manager.cached_messages_result = []
+
+    monkeypatch.setattr(session_manager_module, 'get_session_service', lambda: fake_session_service)
+    monkeypatch.setattr(session_manager_module, 'get_e2ee_service', lambda: FakeE2EEService({'device_id': 'device-local-1', 'has_local_bundle': True}))
+    monkeypatch.setattr(session_manager_module, 'get_event_bus', lambda: fake_event_bus)
+    monkeypatch.setattr(session_manager_module, 'get_message_manager', lambda: fake_message_manager)
+    monkeypatch.setattr(session_manager_module, 'get_database', lambda: fake_db)
+
+    async def scenario() -> None:
+        manager = session_manager_module.SessionManager()
+
+        result = await manager.refresh_remote_sessions()
+
+        assert result.authoritative is True
+        assert len(result.sessions) == 1
+        session = result.sessions[0]
+        assert session.last_message == '[Encrypted message]'
+        assert fake_message_manager.cached_messages_calls == [('session-1', 1, None)]
+        assert fake_db.saved_sessions == []
+
+    asyncio.run(scenario())
+
+
 def test_session_manager_call_events_update_runtime_call_state(monkeypatch) -> None:
     from client.models.call import ActiveCallState
 
@@ -3529,6 +3654,81 @@ def test_session_manager_message_decryption_state_updates_session_crypto_state(m
         assert 'decryption_state' not in session.extra['session_crypto_state']
         assert 'recovery_action' not in session.extra['session_crypto_state']
         assert 'last_failure_message_id' not in session.extra['session_crypto_state']
+        assert any(event == session_manager_module.SessionEvent.UPDATED for event, _ in fake_event_bus.events)
+
+    asyncio.run(scenario())
+
+
+def test_session_manager_message_decryption_state_refreshes_last_message_preview(monkeypatch) -> None:
+    fake_event_bus = FakeEventBus()
+    fake_db = FakeSessionProfileDatabase()
+
+    monkeypatch.setattr(session_manager_module, 'get_session_service', lambda: FakeSessionService())
+    monkeypatch.setattr(session_manager_module, 'get_e2ee_service', lambda: FakeE2EEService({'device_id': 'device-local-1', 'has_local_bundle': True}))
+    monkeypatch.setattr(session_manager_module, 'get_event_bus', lambda: fake_event_bus)
+    monkeypatch.setattr(session_manager_module, 'get_message_manager', lambda: FakeMessageManager())
+    monkeypatch.setattr(session_manager_module, 'get_database', lambda: fake_db)
+
+    async def scenario() -> None:
+        manager = session_manager_module.SessionManager()
+        session = Session(
+            session_id='session-1',
+            name='Bob',
+            session_type='direct',
+            participant_ids=['user-1', 'user-2'],
+            last_message='[Encrypted message]',
+            last_message_time=datetime(2026, 3, 27, 17, 30, 0),
+            extra={
+                'authoritative_snapshot': True,
+                'encryption_mode': 'e2ee_private',
+                'last_message_id': 'm-1',
+                'last_message_type': MessageType.TEXT.value,
+                'last_message_sender_id': 'user-2',
+                'counterpart_id': 'user-2',
+                'counterpart_name': 'Bob',
+                'session_crypto_state': {
+                    'enabled': True,
+                    'ready': True,
+                    'can_decrypt': True,
+                    'device_registered': True,
+                    'scheme': 'x25519-aesgcm-v1',
+                    'attachment_scheme': 'aesgcm-file+x25519-v1',
+                    'device_id': 'device-local-1',
+                },
+            },
+        )
+        manager._sessions[session.session_id] = session
+
+        await manager._on_message_decryption_state_changed(
+            {
+                'session_id': 'session-1',
+                'message_id': 'm-1',
+                'decryption_state': 'ready',
+                'can_decrypt': True,
+                'local_device_id': 'device-local-1',
+                'target_device_id': 'device-local-1',
+                'message': ChatMessage(
+                    message_id='m-1',
+                    session_id='session-1',
+                    sender_id='user-2',
+                    content='hello plaintext',
+                    message_type=MessageType.TEXT,
+                    status=MessageStatus.SENT,
+                    timestamp=datetime(2026, 3, 27, 17, 30, 0),
+                    is_self=False,
+                    extra={
+                        'encryption': {
+                            'enabled': True,
+                            'content_ciphertext': 'ciphertext-1',
+                        },
+                        'sender_name': 'Bob',
+                    },
+                ),
+            }
+        )
+
+        assert session.last_message == 'hello plaintext'
+        assert fake_db.saved_sessions[-1].last_message == 'hello plaintext'
         assert any(event == session_manager_module.SessionEvent.UPDATED for event, _ in fake_event_bus.events)
 
     asyncio.run(scenario())

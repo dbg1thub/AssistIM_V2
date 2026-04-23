@@ -185,6 +185,32 @@ class SessionManager:
             str(extra.get("encryption_mode", "") or ""),
         )
 
+    def _should_project_cached_preview(
+        self,
+        session: Session,
+        message: ChatMessage | None,
+        *,
+        force: bool = False,
+    ) -> bool:
+        """Return whether one cached/local message should replace the current session preview."""
+        if force:
+            return True
+
+        if bool(session.extra.get("history_restart_pending")):
+            return True
+
+        if not self._is_authoritative_session(session):
+            return True
+
+        if message is None:
+            return False
+
+        authoritative_last_message_id = str(session.extra.get("last_message_id", "") or "").strip()
+        if not authoritative_last_message_id:
+            return False
+
+        return authoritative_last_message_id == str(message.message_id or "").strip()
+
     @property
     def sessions(self) -> list[Session]:
         """Get all sessions sorted by last message time."""
@@ -703,7 +729,7 @@ class SessionManager:
             logger.exception("Failed to refresh cached preview state after identity change")
 
     async def _refresh_cached_preview_state_for_identity(self, session_ids: list[str] | None = None) -> None:
-        """Recompute preview sender/mention state for all cached sessions after login changes."""
+        """Reconcile authoritative session previews with locally displayable last messages."""
         db = get_database()
         if not db.is_connected or not self._sessions:
             return
@@ -739,22 +765,15 @@ class SessionManager:
                 if session is None:
                     continue
 
-                previous_preview = str(session.last_message or "")
-                previous_time = self._session_timestamp_value(session.last_message_time)
-                previous_sender_id = str(session.extra.get("last_message_sender_id", "") or "")
-                previous_type = str(session.extra.get("last_message_type", "") or "")
-                previous_mentions = bool(session.extra.get("last_message_mentions_current_user", False))
+                previous_signature = self._preview_signature(session)
                 previous_unread = int(session.unread_count or 0)
 
-                self._apply_last_message_preview(session, last_message, current_user_id=current_user_id)
+                if self._should_project_cached_preview(session, last_message):
+                    self._apply_last_message_preview(session, last_message, current_user_id=current_user_id)
                 await self._apply_local_history_cutoff_presentation(session)
 
                 if (
-                    previous_preview != str(session.last_message or "")
-                    or previous_time != self._session_timestamp_value(session.last_message_time)
-                    or previous_sender_id != str(session.extra.get("last_message_sender_id", "") or "")
-                    or previous_type != str(session.extra.get("last_message_type", "") or "")
-                    or previous_mentions != bool(session.extra.get("last_message_mentions_current_user", False))
+                    previous_signature != self._preview_signature(session)
                     or previous_unread != int(session.unread_count or 0)
                 ):
                     changed_sessions.append(session)
@@ -1842,20 +1861,32 @@ class SessionManager:
             return
 
         db = get_database()
+        session: Session | None = None
+        preview_changed = False
+        crypto_state_changed = False
+        current_user_id = str(self._current_user_id or "").strip()
+        message = data.get("message")
         async with self._lock:
             session = self._sessions.get(session_id)
-            if session is None or not session.uses_e2ee():
+            if session is None:
                 return
-            message = data.get("message")
-            if (
+            is_self_direct_message = (
                 session.session_type == "direct"
                 and isinstance(message, ChatMessage)
                 and bool(message.is_self)
+            )
+            if session.uses_e2ee() and not is_self_direct_message:
+                crypto_state_changed = self._apply_message_crypto_state_to_session(session, data)
+            if (
+                not is_self_direct_message
+                and isinstance(message, ChatMessage)
+                and self._should_project_cached_preview(session, message)
             ):
-                return
-            changed = self._apply_message_crypto_state_to_session(session, data)
+                previous_signature = self._preview_signature(session)
+                self._apply_last_message_preview(session, message, current_user_id=current_user_id)
+                preview_changed = self._preview_signature(session) != previous_signature
 
-        if not changed:
+        if session is None or (not crypto_state_changed and not preview_changed):
             return
 
         if db.is_connected:
@@ -2641,7 +2672,7 @@ class SessionManager:
             remote_sessions.append(session)
 
         await self._replace_sessions(remote_sessions)
-        await self._refresh_history_restart_previews_from_cache()
+        await self._refresh_cached_preview_state_for_identity([session.session_id for session in remote_sessions])
         refreshed_sessions = self.sessions
         logger.info(
             "Refreshed %d remote sessions (unread_synchronized=%s)",
@@ -3018,7 +3049,8 @@ class SessionManager:
         cached_messages = await self._msg_manager.get_cached_messages(session_id, limit=1)
         last_message = cached_messages[0] if cached_messages else None
         current_user_id = await self._get_current_user_id()
-        self._apply_last_message_preview(session, last_message, current_user_id=current_user_id)
+        if self._should_project_cached_preview(session, last_message, force=True):
+            self._apply_last_message_preview(session, last_message, current_user_id=current_user_id)
         await self._apply_local_history_cutoff_presentation(session)
         preview_time = session.last_message_time or session.created_at
 
