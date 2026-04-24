@@ -658,6 +658,79 @@ def test_database_replace_sessions_uses_savepoint_even_when_connection_claims_no
     asyncio.run(scenario())
 
 
+def test_database_save_session_waits_for_replace_sessions_savepoint() -> None:
+    class FakeConnection:
+        def __init__(self) -> None:
+            self.executed: list[str] = []
+            self.active_savepoints: set[str] = set()
+            self.snapshot_insert_started = asyncio.Event()
+            self.allow_snapshot_release = asyncio.Event()
+
+        async def execute(self, sql: str, parameters=()):
+            normalized_sql = " ".join(str(sql or "").split())
+            self.executed.append(normalized_sql)
+            if normalized_sql.startswith("SAVEPOINT "):
+                self.active_savepoints.add(normalized_sql.split()[-1])
+                return None
+            if normalized_sql.startswith("RELEASE SAVEPOINT "):
+                savepoint_name = normalized_sql.split()[-1]
+                if savepoint_name not in self.active_savepoints:
+                    raise sqlite3.OperationalError(f"no such savepoint: {savepoint_name}")
+                self.active_savepoints.remove(savepoint_name)
+                return None
+            if normalized_sql.startswith("ROLLBACK TO SAVEPOINT "):
+                return None
+
+            first_parameter = ""
+            if isinstance(parameters, (list, tuple)) and parameters:
+                first_parameter = str(parameters[0] or "")
+            if normalized_sql.startswith("INSERT OR REPLACE INTO sessions") and first_parameter == "snapshot":
+                self.snapshot_insert_started.set()
+                await self.allow_snapshot_release.wait()
+            return None
+
+        async def commit(self) -> None:
+            self.executed.append("COMMIT")
+            self.active_savepoints.clear()
+
+    async def scenario() -> None:
+        database = Database()
+        connection = FakeConnection()
+        database._db = connection
+
+        snapshot = Session(
+            session_id="snapshot",
+            name="Snapshot",
+            created_at=datetime.now(),
+            updated_at=datetime.now(),
+        )
+        late = Session(
+            session_id="late",
+            name="Late",
+            created_at=datetime.now(),
+            updated_at=datetime.now(),
+        )
+
+        replace_task = asyncio.create_task(database.replace_sessions([snapshot]))
+        await asyncio.wait_for(connection.snapshot_insert_started.wait(), timeout=1)
+        save_task = asyncio.create_task(database.save_session(late))
+        await asyncio.sleep(0)
+
+        connection.allow_snapshot_release.set()
+        await replace_task
+        await save_task
+
+        release_index = next(index for index, sql in enumerate(connection.executed) if sql.startswith("RELEASE SAVEPOINT"))
+        late_insert_index = next(
+            index
+            for index, sql in enumerate(connection.executed)
+            if sql.startswith("INSERT OR REPLACE INTO sessions") and index > release_index
+        )
+        assert release_index < late_insert_index
+
+    asyncio.run(scenario())
+
+
 def test_database_connect_upgrades_local_search_cache_columns() -> None:
     temp_root = (Path.cwd() / "client/tests/.pytest_tmp").resolve()
     temp_root.mkdir(parents=True, exist_ok=True)

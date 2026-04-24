@@ -1286,14 +1286,8 @@ class Database:
             logger.info("Normalized %s cached sessions from private to direct", cursor.rowcount)
     
     # ============== Session Operations ==============
-    
-    async def save_session(self, session: Session) -> None:
-        """
-        Save or update a session.
-        
-        Args:
-            session: Session to save
-        """
+
+    async def _save_session_row(self, session: Session) -> None:
         await self._db.execute(
             """
             INSERT OR REPLACE INTO sessions 
@@ -1317,7 +1311,16 @@ class Database:
                 session.updated_at.timestamp() if session.updated_at else None,
             ),
         )
-        await self._db.commit()
+
+    async def save_session(self, session: Session) -> None:
+        """
+        Save or update a session.
+
+        Args:
+            session: Session to save
+        """
+        async with self._write_transaction("save_session"):
+            await self._save_session_row(session)
         logger.debug(f"Session saved: {session.session_id}")
 
     async def save_sessions_batch(self, sessions: list[Session]) -> None:
@@ -1332,29 +1335,7 @@ class Database:
 
         async with self._write_transaction("save_sessions_batch"):
             for session in sessions:
-                await self._db.execute(
-                    """
-                    INSERT OR REPLACE INTO sessions
-                    (session_id, name, session_type, participant_ids, last_message,
-                     last_message_time, unread_count, avatar, is_ai_session, extra,
-                     created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        session.session_id,
-                        session.name,
-                        session.session_type,
-                        json.dumps(session.participant_ids),
-                        session.last_message,
-                        session.last_message_time.timestamp() if session.last_message_time else None,
-                        session.unread_count,
-                        session.avatar,
-                        1 if session.is_ai_session else 0,
-                        json.dumps(session.extra),
-                        session.created_at.timestamp() if session.created_at else None,
-                        session.updated_at.timestamp() if session.updated_at else None,
-                    ),
-                )
+                await self._save_session_row(session)
         logger.debug(f"Batch saved {len(sessions)} sessions")
 
     async def replace_sessions(self, sessions: list[Session]) -> None:
@@ -1377,29 +1358,7 @@ class Database:
 
             await self._db.execute("DELETE FROM sessions")
             for session in sessions:
-                await self._db.execute(
-                    """
-                    INSERT OR REPLACE INTO sessions (
-                        session_id, name, session_type, participant_ids,
-                        last_message, last_message_time, unread_count,
-                        avatar, is_ai_session, extra, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        session.session_id,
-                        session.name,
-                        session.session_type,
-                        json.dumps(session.participant_ids),
-                        session.last_message,
-                        session.last_message_time.timestamp() if session.last_message_time else None,
-                        session.unread_count,
-                        session.avatar,
-                        1 if session.is_ai_session else 0,
-                        json.dumps(session.extra),
-                        session.created_at.timestamp() if session.created_at else None,
-                        session.updated_at.timestamp() if session.updated_at else None,
-                    ),
-                )
+                await self._save_session_row(session)
         logger.debug(f"Replaced session cache with {len(sessions)} sessions")
     async def get_session(self, session_id: str) -> Optional[Session]:
         """
@@ -1474,15 +1433,15 @@ class Database:
         Args:
             session_id: Session ID
         """
-        await self._db.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
-        await self._db.execute("DELETE FROM session_read_cursors WHERE session_id = ?", (session_id,))
-        await self._db.execute("DELETE FROM conversation_summary_buckets WHERE session_id = ?", (session_id,))
-        await self._db.execute("DELETE FROM conversation_summary_media_cache WHERE session_id = ?", (session_id,))
-        await self._db.execute("DELETE FROM conversation_memory_index WHERE session_id = ?", (session_id,))
-        await self._db.execute("DELETE FROM conversation_memory_embeddings WHERE session_id = ?", (session_id,))
-        await self._db.execute("DELETE FROM conversation_memory_ann_buckets WHERE session_id = ?", (session_id,))
-        await self._db.execute("DELETE FROM sessions WHERE session_id = ?", (session_id,))
-        await self._db.commit()
+        async with self._write_transaction("delete_session"):
+            await self._db.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
+            await self._db.execute("DELETE FROM session_read_cursors WHERE session_id = ?", (session_id,))
+            await self._db.execute("DELETE FROM conversation_summary_buckets WHERE session_id = ?", (session_id,))
+            await self._db.execute("DELETE FROM conversation_summary_media_cache WHERE session_id = ?", (session_id,))
+            await self._db.execute("DELETE FROM conversation_memory_index WHERE session_id = ?", (session_id,))
+            await self._db.execute("DELETE FROM conversation_memory_embeddings WHERE session_id = ?", (session_id,))
+            await self._db.execute("DELETE FROM conversation_memory_ann_buckets WHERE session_id = ?", (session_id,))
+            await self._db.execute("DELETE FROM sessions WHERE session_id = ?", (session_id,))
         logger.debug(f"Session deleted: {session_id}")
 
     async def get_open_conversation_summary_bucket(self, session_id: str) -> dict[str, Any] | None:
@@ -1734,80 +1693,80 @@ class Database:
         now_ts = int(payload.get("updated_at") or time.time())
         created_at = int(payload.get("created_at") or now_ts)
 
-        await self._db.execute(
-            """
-            INSERT INTO conversation_summary_buckets (
-                session_id,
-                bucket_start_ts,
-                bucket_end_ts,
-                bucket_rule_version,
-                is_open,
-                anchor_message_id,
-                last_message_id,
-                last_message_ts,
-                message_count,
-                summary_status,
-                display_summary_ciphertext,
-                retrieval_summary_ciphertext,
-                summary_structured_json_ciphertext,
-                summary_schema_version,
-                summary_text_ciphertext,
-                summary_json_ciphertext,
-                summary_version,
-                media_item_count,
-                error_code,
-                notified_at,
-                created_at,
-                updated_at
+        async with self._write_transaction("upsert_conversation_summary_bucket"):
+            await self._db.execute(
+                """
+                INSERT INTO conversation_summary_buckets (
+                    session_id,
+                    bucket_start_ts,
+                    bucket_end_ts,
+                    bucket_rule_version,
+                    is_open,
+                    anchor_message_id,
+                    last_message_id,
+                    last_message_ts,
+                    message_count,
+                    summary_status,
+                    display_summary_ciphertext,
+                    retrieval_summary_ciphertext,
+                    summary_structured_json_ciphertext,
+                    summary_schema_version,
+                    summary_text_ciphertext,
+                    summary_json_ciphertext,
+                    summary_version,
+                    media_item_count,
+                    error_code,
+                    notified_at,
+                    created_at,
+                    updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(session_id, bucket_start_ts, bucket_rule_version)
+                DO UPDATE SET
+                    bucket_end_ts = excluded.bucket_end_ts,
+                    is_open = excluded.is_open,
+                    anchor_message_id = excluded.anchor_message_id,
+                    last_message_id = excluded.last_message_id,
+                    last_message_ts = excluded.last_message_ts,
+                    message_count = excluded.message_count,
+                    summary_status = excluded.summary_status,
+                    display_summary_ciphertext = excluded.display_summary_ciphertext,
+                    retrieval_summary_ciphertext = excluded.retrieval_summary_ciphertext,
+                    summary_structured_json_ciphertext = excluded.summary_structured_json_ciphertext,
+                    summary_schema_version = excluded.summary_schema_version,
+                    summary_text_ciphertext = excluded.summary_text_ciphertext,
+                    summary_json_ciphertext = excluded.summary_json_ciphertext,
+                    summary_version = excluded.summary_version,
+                    media_item_count = excluded.media_item_count,
+                    error_code = excluded.error_code,
+                    notified_at = excluded.notified_at,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    session_id,
+                    bucket_start_ts,
+                    int(payload.get("bucket_end_ts") or bucket_start_ts),
+                    bucket_rule_version,
+                    1 if bool(payload.get("is_open", True)) else 0,
+                    str(payload.get("anchor_message_id") or ""),
+                    str(payload.get("last_message_id") or ""),
+                    int(payload.get("last_message_ts") or bucket_start_ts),
+                    max(0, int(payload.get("message_count") or 0)),
+                    str(payload.get("summary_status") or "pending"),
+                    str(payload.get("display_summary_ciphertext") or ""),
+                    str(payload.get("retrieval_summary_ciphertext") or ""),
+                    str(payload.get("summary_structured_json_ciphertext") or ""),
+                    max(1, int(payload.get("summary_schema_version") or 1)),
+                    str(payload.get("summary_text_ciphertext") or ""),
+                    str(payload.get("summary_json_ciphertext") or ""),
+                    max(1, int(payload.get("summary_version") or 1)),
+                    max(0, int(payload.get("media_item_count") or 0)),
+                    str(payload.get("error_code") or ""),
+                    int(payload["notified_at"]) if payload.get("notified_at") is not None else None,
+                    created_at,
+                    now_ts,
+                ),
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(session_id, bucket_start_ts, bucket_rule_version)
-            DO UPDATE SET
-                bucket_end_ts = excluded.bucket_end_ts,
-                is_open = excluded.is_open,
-                anchor_message_id = excluded.anchor_message_id,
-                last_message_id = excluded.last_message_id,
-                last_message_ts = excluded.last_message_ts,
-                message_count = excluded.message_count,
-                summary_status = excluded.summary_status,
-                display_summary_ciphertext = excluded.display_summary_ciphertext,
-                retrieval_summary_ciphertext = excluded.retrieval_summary_ciphertext,
-                summary_structured_json_ciphertext = excluded.summary_structured_json_ciphertext,
-                summary_schema_version = excluded.summary_schema_version,
-                summary_text_ciphertext = excluded.summary_text_ciphertext,
-                summary_json_ciphertext = excluded.summary_json_ciphertext,
-                summary_version = excluded.summary_version,
-                media_item_count = excluded.media_item_count,
-                error_code = excluded.error_code,
-                notified_at = excluded.notified_at,
-                updated_at = excluded.updated_at
-            """,
-            (
-                session_id,
-                bucket_start_ts,
-                int(payload.get("bucket_end_ts") or bucket_start_ts),
-                bucket_rule_version,
-                1 if bool(payload.get("is_open", True)) else 0,
-                str(payload.get("anchor_message_id") or ""),
-                str(payload.get("last_message_id") or ""),
-                int(payload.get("last_message_ts") or bucket_start_ts),
-                max(0, int(payload.get("message_count") or 0)),
-                str(payload.get("summary_status") or "pending"),
-                str(payload.get("display_summary_ciphertext") or ""),
-                str(payload.get("retrieval_summary_ciphertext") or ""),
-                str(payload.get("summary_structured_json_ciphertext") or ""),
-                max(1, int(payload.get("summary_schema_version") or 1)),
-                str(payload.get("summary_text_ciphertext") or ""),
-                str(payload.get("summary_json_ciphertext") or ""),
-                max(1, int(payload.get("summary_version") or 1)),
-                max(0, int(payload.get("media_item_count") or 0)),
-                str(payload.get("error_code") or ""),
-                int(payload["notified_at"]) if payload.get("notified_at") is not None else None,
-                created_at,
-                now_ts,
-            ),
-        )
-        await self._db.commit()
 
     async def close_conversation_summary_bucket(
         self,
@@ -1818,28 +1777,28 @@ class Database:
     ) -> None:
         """Mark one conversation summary bucket as closed."""
         normalized_end_ts = int(bucket_end_ts or bucket_start_ts or 0)
-        await self._db.execute(
-            """
-            UPDATE conversation_summary_buckets
-            SET
-                is_open = 0,
-                bucket_end_ts = CASE
-                    WHEN bucket_end_ts > ? THEN bucket_end_ts
-                    ELSE ?
-                END,
-                updated_at = ?
-            WHERE session_id = ?
-              AND bucket_start_ts = ?
-            """,
-            (
-                normalized_end_ts,
-                normalized_end_ts,
-                int(time.time()),
-                session_id,
-                int(bucket_start_ts or 0),
-            ),
-        )
-        await self._db.commit()
+        async with self._write_transaction("close_conversation_summary_bucket"):
+            await self._db.execute(
+                """
+                UPDATE conversation_summary_buckets
+                SET
+                    is_open = 0,
+                    bucket_end_ts = CASE
+                        WHEN bucket_end_ts > ? THEN bucket_end_ts
+                        ELSE ?
+                    END,
+                    updated_at = ?
+                WHERE session_id = ?
+                  AND bucket_start_ts = ?
+                """,
+                (
+                    normalized_end_ts,
+                    normalized_end_ts,
+                    int(time.time()),
+                    session_id,
+                    int(bucket_start_ts or 0),
+                ),
+            )
 
     async def list_conversation_summary_bucket_messages(
         self,
@@ -1942,56 +1901,56 @@ class Database:
             if str(item or "").strip()
         ]
 
-        await self._db.execute(
-            """
-            INSERT INTO conversation_memory_index (
-                session_id,
-                source_type,
-                source_id,
-                source_version,
-                start_ts,
-                end_ts,
-                title_ciphertext,
-                text_ciphertext,
-                keywords_json_ciphertext,
-                participants_json_ciphertext,
-                embedding_id,
-                embedding_model,
-                created_at,
-                updated_at
+        async with self._write_transaction("upsert_conversation_memory_item"):
+            await self._db.execute(
+                """
+                INSERT INTO conversation_memory_index (
+                    session_id,
+                    source_type,
+                    source_id,
+                    source_version,
+                    start_ts,
+                    end_ts,
+                    title_ciphertext,
+                    text_ciphertext,
+                    keywords_json_ciphertext,
+                    participants_json_ciphertext,
+                    embedding_id,
+                    embedding_model,
+                    created_at,
+                    updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(session_id, source_type, source_id)
+                DO UPDATE SET
+                    source_version = excluded.source_version,
+                    start_ts = excluded.start_ts,
+                    end_ts = excluded.end_ts,
+                    title_ciphertext = excluded.title_ciphertext,
+                    text_ciphertext = excluded.text_ciphertext,
+                    keywords_json_ciphertext = excluded.keywords_json_ciphertext,
+                    participants_json_ciphertext = excluded.participants_json_ciphertext,
+                    embedding_id = excluded.embedding_id,
+                    embedding_model = excluded.embedding_model,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    session_id,
+                    source_type,
+                    source_id,
+                    max(1, int(payload.get("source_version") or 1)),
+                    int(payload.get("start_ts") or 0),
+                    int(payload.get("end_ts") or payload.get("start_ts") or 0),
+                    SecureStorage.encrypt_text(title) if title else "",
+                    SecureStorage.encrypt_text(text) if text else "",
+                    SecureStorage.encrypt_text(json.dumps(keywords, ensure_ascii=False)) if keywords else "",
+                    SecureStorage.encrypt_text(json.dumps(participants, ensure_ascii=False)) if participants else "",
+                    str(payload.get("embedding_id") or ""),
+                    str(payload.get("embedding_model") or ""),
+                    created_at,
+                    now_ts,
+                ),
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(session_id, source_type, source_id)
-            DO UPDATE SET
-                source_version = excluded.source_version,
-                start_ts = excluded.start_ts,
-                end_ts = excluded.end_ts,
-                title_ciphertext = excluded.title_ciphertext,
-                text_ciphertext = excluded.text_ciphertext,
-                keywords_json_ciphertext = excluded.keywords_json_ciphertext,
-                participants_json_ciphertext = excluded.participants_json_ciphertext,
-                embedding_id = excluded.embedding_id,
-                embedding_model = excluded.embedding_model,
-                updated_at = excluded.updated_at
-            """,
-            (
-                session_id,
-                source_type,
-                source_id,
-                max(1, int(payload.get("source_version") or 1)),
-                int(payload.get("start_ts") or 0),
-                int(payload.get("end_ts") or payload.get("start_ts") or 0),
-                SecureStorage.encrypt_text(title) if title else "",
-                SecureStorage.encrypt_text(text) if text else "",
-                SecureStorage.encrypt_text(json.dumps(keywords, ensure_ascii=False)) if keywords else "",
-                SecureStorage.encrypt_text(json.dumps(participants, ensure_ascii=False)) if participants else "",
-                str(payload.get("embedding_id") or ""),
-                str(payload.get("embedding_model") or ""),
-                created_at,
-                now_ts,
-            ),
-        )
-        await self._db.commit()
 
     @staticmethod
     def _conversation_memory_embedding_id(session_id: str, source_type: str, source_id: str) -> str:
@@ -2042,47 +2001,47 @@ class Database:
         )
         now_ts = int(payload.get("updated_at") or time.time())
         created_at = int(payload.get("created_at") or now_ts)
-        await self._db.execute(
-            """
-            INSERT INTO conversation_memory_embeddings (
-                embedding_id,
-                session_id,
-                source_type,
-                source_id,
-                source_version,
-                embedding_model,
-                content_hash,
-                embedding_dim,
-                embedding_vector_json,
-                created_at,
-                updated_at
+        async with self._write_transaction("upsert_conversation_memory_embedding"):
+            await self._db.execute(
+                """
+                INSERT INTO conversation_memory_embeddings (
+                    embedding_id,
+                    session_id,
+                    source_type,
+                    source_id,
+                    source_version,
+                    embedding_model,
+                    content_hash,
+                    embedding_dim,
+                    embedding_vector_json,
+                    created_at,
+                    updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(session_id, source_type, source_id)
+                DO UPDATE SET
+                    embedding_id = excluded.embedding_id,
+                    source_version = excluded.source_version,
+                    embedding_model = excluded.embedding_model,
+                    content_hash = excluded.content_hash,
+                    embedding_dim = excluded.embedding_dim,
+                    embedding_vector_json = excluded.embedding_vector_json,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    embedding_id,
+                    session_id,
+                    source_type,
+                    source_id,
+                    max(1, int(payload.get("source_version") or 1)),
+                    embedding_model,
+                    content_hash,
+                    len(vector),
+                    json.dumps(vector, ensure_ascii=False),
+                    created_at,
+                    now_ts,
+                ),
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(session_id, source_type, source_id)
-            DO UPDATE SET
-                embedding_id = excluded.embedding_id,
-                source_version = excluded.source_version,
-                embedding_model = excluded.embedding_model,
-                content_hash = excluded.content_hash,
-                embedding_dim = excluded.embedding_dim,
-                embedding_vector_json = excluded.embedding_vector_json,
-                updated_at = excluded.updated_at
-            """,
-            (
-                embedding_id,
-                session_id,
-                source_type,
-                source_id,
-                max(1, int(payload.get("source_version") or 1)),
-                embedding_model,
-                content_hash,
-                len(vector),
-                json.dumps(vector, ensure_ascii=False),
-                created_at,
-                now_ts,
-            ),
-        )
-        await self._db.commit()
         return embedding_id
 
     async def update_conversation_memory_item_embedding_ref(
@@ -2101,22 +2060,22 @@ class Database:
         normalized_source_id = str(source_id or "").strip()
         if not normalized_session_id or not normalized_source_type or not normalized_source_id:
             return
-        await self._db.execute(
-            """
-            UPDATE conversation_memory_index
-            SET embedding_id = ?, embedding_model = ?, updated_at = ?
-            WHERE session_id = ? AND source_type = ? AND source_id = ?
-            """,
-            (
-                str(embedding_id or ""),
-                str(embedding_model or ""),
-                int(updated_at or time.time()),
-                normalized_session_id,
-                normalized_source_type,
-                normalized_source_id,
-            ),
-        )
-        await self._db.commit()
+        async with self._write_transaction("update_conversation_memory_item_embedding_ref"):
+            await self._db.execute(
+                """
+                UPDATE conversation_memory_index
+                SET embedding_id = ?, embedding_model = ?, updated_at = ?
+                WHERE session_id = ? AND source_type = ? AND source_id = ?
+                """,
+                (
+                    str(embedding_id or ""),
+                    str(embedding_model or ""),
+                    int(updated_at or time.time()),
+                    normalized_session_id,
+                    normalized_source_type,
+                    normalized_source_id,
+                ),
+            )
 
     async def replace_conversation_memory_ann_buckets(
         self,
@@ -2205,23 +2164,23 @@ class Database:
         normalized_source_id = str(source_id or "").strip()
         if not normalized_session_id or not normalized_source_type:
             return
-        if normalized_source_id:
-            await self._db.execute(
-                """
-                DELETE FROM conversation_memory_ann_buckets
-                WHERE session_id = ? AND source_type = ? AND source_id = ?
-                """,
-                (normalized_session_id, normalized_source_type, normalized_source_id),
-            )
-        else:
-            await self._db.execute(
-                """
-                DELETE FROM conversation_memory_ann_buckets
-                WHERE session_id = ? AND source_type = ?
-                """,
-                (normalized_session_id, normalized_source_type),
-            )
-        await self._db.commit()
+        async with self._write_transaction("delete_conversation_memory_ann_buckets"):
+            if normalized_source_id:
+                await self._db.execute(
+                    """
+                    DELETE FROM conversation_memory_ann_buckets
+                    WHERE session_id = ? AND source_type = ? AND source_id = ?
+                    """,
+                    (normalized_session_id, normalized_source_type, normalized_source_id),
+                )
+            else:
+                await self._db.execute(
+                    """
+                    DELETE FROM conversation_memory_ann_buckets
+                    WHERE session_id = ? AND source_type = ?
+                    """,
+                    (normalized_session_id, normalized_source_type),
+                )
 
     async def delete_conversation_memory_embeddings_for_source(
         self,
@@ -2235,39 +2194,39 @@ class Database:
         normalized_source_id = str(source_id or "").strip()
         if not normalized_session_id or not normalized_source_type:
             return
-        if normalized_source_id:
-            await self._db.execute(
-                """
-                DELETE FROM conversation_memory_embeddings
-                WHERE session_id = ? AND source_type = ? AND source_id = ?
-                """,
-                (normalized_session_id, normalized_source_type, normalized_source_id),
-            )
-        else:
-            await self._db.execute(
-                """
-                DELETE FROM conversation_memory_embeddings
-                WHERE session_id = ? AND source_type = ?
-                """,
-                (normalized_session_id, normalized_source_type),
-            )
-        if normalized_source_id:
-            await self._db.execute(
-                """
-                DELETE FROM conversation_memory_ann_buckets
-                WHERE session_id = ? AND source_type = ? AND source_id = ?
-                """,
-                (normalized_session_id, normalized_source_type, normalized_source_id),
-            )
-        else:
-            await self._db.execute(
-                """
-                DELETE FROM conversation_memory_ann_buckets
-                WHERE session_id = ? AND source_type = ?
-                """,
-                (normalized_session_id, normalized_source_type),
-            )
-        await self._db.commit()
+        async with self._write_transaction("delete_conversation_memory_embeddings"):
+            if normalized_source_id:
+                await self._db.execute(
+                    """
+                    DELETE FROM conversation_memory_embeddings
+                    WHERE session_id = ? AND source_type = ? AND source_id = ?
+                    """,
+                    (normalized_session_id, normalized_source_type, normalized_source_id),
+                )
+            else:
+                await self._db.execute(
+                    """
+                    DELETE FROM conversation_memory_embeddings
+                    WHERE session_id = ? AND source_type = ?
+                    """,
+                    (normalized_session_id, normalized_source_type),
+                )
+            if normalized_source_id:
+                await self._db.execute(
+                    """
+                    DELETE FROM conversation_memory_ann_buckets
+                    WHERE session_id = ? AND source_type = ? AND source_id = ?
+                    """,
+                    (normalized_session_id, normalized_source_type, normalized_source_id),
+                )
+            else:
+                await self._db.execute(
+                    """
+                    DELETE FROM conversation_memory_ann_buckets
+                    WHERE session_id = ? AND source_type = ?
+                    """,
+                    (normalized_session_id, normalized_source_type),
+                )
 
     async def delete_conversation_memory_items_for_source(
         self,
@@ -2281,55 +2240,55 @@ class Database:
         normalized_source_id = str(source_id or "").strip()
         if not normalized_session_id or not normalized_source_type:
             return
-        if normalized_source_id:
-            await self._db.execute(
-                """
-                DELETE FROM conversation_memory_index
-                WHERE session_id = ? AND source_type = ? AND source_id = ?
-                """,
-                (normalized_session_id, normalized_source_type, normalized_source_id),
-            )
-        else:
-            await self._db.execute(
-                """
-                DELETE FROM conversation_memory_index
-                WHERE session_id = ? AND source_type = ?
-                """,
-                (normalized_session_id, normalized_source_type),
-            )
-        if normalized_source_id:
-            await self._db.execute(
-                """
-                DELETE FROM conversation_memory_embeddings
-                WHERE session_id = ? AND source_type = ? AND source_id = ?
-                """,
-                (normalized_session_id, normalized_source_type, normalized_source_id),
-            )
-        else:
-            await self._db.execute(
-                """
-                DELETE FROM conversation_memory_embeddings
-                WHERE session_id = ? AND source_type = ?
-                """,
-                (normalized_session_id, normalized_source_type),
-            )
-        if normalized_source_id:
-            await self._db.execute(
-                """
-                DELETE FROM conversation_memory_ann_buckets
-                WHERE session_id = ? AND source_type = ? AND source_id = ?
-                """,
-                (normalized_session_id, normalized_source_type, normalized_source_id),
-            )
-        else:
-            await self._db.execute(
-                """
-                DELETE FROM conversation_memory_ann_buckets
-                WHERE session_id = ? AND source_type = ?
-                """,
-                (normalized_session_id, normalized_source_type),
-            )
-        await self._db.commit()
+        async with self._write_transaction("delete_conversation_memory_items"):
+            if normalized_source_id:
+                await self._db.execute(
+                    """
+                    DELETE FROM conversation_memory_index
+                    WHERE session_id = ? AND source_type = ? AND source_id = ?
+                    """,
+                    (normalized_session_id, normalized_source_type, normalized_source_id),
+                )
+            else:
+                await self._db.execute(
+                    """
+                    DELETE FROM conversation_memory_index
+                    WHERE session_id = ? AND source_type = ?
+                    """,
+                    (normalized_session_id, normalized_source_type),
+                )
+            if normalized_source_id:
+                await self._db.execute(
+                    """
+                    DELETE FROM conversation_memory_embeddings
+                    WHERE session_id = ? AND source_type = ? AND source_id = ?
+                    """,
+                    (normalized_session_id, normalized_source_type, normalized_source_id),
+                )
+            else:
+                await self._db.execute(
+                    """
+                    DELETE FROM conversation_memory_embeddings
+                    WHERE session_id = ? AND source_type = ?
+                    """,
+                    (normalized_session_id, normalized_source_type),
+                )
+            if normalized_source_id:
+                await self._db.execute(
+                    """
+                    DELETE FROM conversation_memory_ann_buckets
+                    WHERE session_id = ? AND source_type = ? AND source_id = ?
+                    """,
+                    (normalized_session_id, normalized_source_type, normalized_source_id),
+                )
+            else:
+                await self._db.execute(
+                    """
+                    DELETE FROM conversation_memory_ann_buckets
+                    WHERE session_id = ? AND source_type = ?
+                    """,
+                    (normalized_session_id, normalized_source_type),
+                )
 
     def _conversation_memory_item_select_sql(self, where_clause: str) -> str:
         return f"""
@@ -2589,11 +2548,11 @@ class Database:
             session_id: Session ID
             count: New unread count
         """
-        await self._db.execute(
-            "UPDATE sessions SET unread_count = ?, updated_at = ? WHERE session_id = ?",
-            (count, __import__("time").time(), session_id),
-        )
-        await self._db.commit()
+        async with self._write_transaction("update_session_unread"):
+            await self._db.execute(
+                "UPDATE sessions SET unread_count = ?, updated_at = ? WHERE session_id = ?",
+                (count, __import__("time").time(), session_id),
+            )
     
     def _row_to_session(self, row: aiosqlite.Row) -> Session:
         """Convert database row to Session."""
@@ -2636,31 +2595,31 @@ class Database:
             message: Message to save
         """
         is_encrypted, encryption_scheme = self._message_crypto_storage_fields(message)
-        await self._db.execute(
-            """
-            INSERT OR REPLACE INTO messages
-            (message_id, session_id, sender_id, content, message_type,
-             status, timestamp, order_ts, updated_at, is_self, is_ai, is_encrypted, encryption_scheme, extra)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                message.message_id,
-                message.session_id,
-                message.sender_id,
-                self._content_for_storage(message),
-                message.message_type.value,
-                message.status.value,
-                message.timestamp.timestamp() if message.timestamp else None,
-                message.order_ts.timestamp() if message.order_ts else None,
-                message.updated_at.timestamp() if message.updated_at else None,
-                1 if message.is_self else 0,
-                1 if message.is_ai else 0,
-                is_encrypted,
-                encryption_scheme,
-                json.dumps(message.extra),
-            ),
-        )
-        await self._db.commit()
+        async with self._write_transaction("save_message"):
+            await self._db.execute(
+                """
+                INSERT OR REPLACE INTO messages
+                (message_id, session_id, sender_id, content, message_type,
+                 status, timestamp, order_ts, updated_at, is_self, is_ai, is_encrypted, encryption_scheme, extra)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    message.message_id,
+                    message.session_id,
+                    message.sender_id,
+                    self._content_for_storage(message),
+                    message.message_type.value,
+                    message.status.value,
+                    message.timestamp.timestamp() if message.timestamp else None,
+                    message.order_ts.timestamp() if message.order_ts else None,
+                    message.updated_at.timestamp() if message.updated_at else None,
+                    1 if message.is_self else 0,
+                    1 if message.is_ai else 0,
+                    is_encrypted,
+                    encryption_scheme,
+                    json.dumps(message.extra),
+                ),
+            )
         logger.debug(f"Message saved: {message.message_id}")
     
     async def get_message(self, message_id: str) -> Optional[ChatMessage]:
@@ -3716,11 +3675,11 @@ class Database:
         Args:
             message_id: Message ID
         """
-        await self._db.execute(
-            "DELETE FROM messages WHERE message_id = ?",
-            (message_id,),
-        )
-        await self._db.commit()
+        async with self._write_transaction("delete_message"):
+            await self._db.execute(
+                "DELETE FROM messages WHERE message_id = ?",
+                (message_id,),
+            )
         logger.debug(f"Message deleted: {message_id}")
 
     async def update_message_status(self, message_id: str, status) -> None:
@@ -3735,11 +3694,11 @@ class Database:
 
         status_value = status.value if isinstance(status, MessageStatus) else status
 
-        await self._db.execute(
-            "UPDATE messages SET status = ? WHERE message_id = ?",
-            (status_value, message_id),
-        )
-        await self._db.commit()
+        async with self._write_transaction("update_message_status"):
+            await self._db.execute(
+                "UPDATE messages SET status = ? WHERE message_id = ?",
+                (status_value, message_id),
+            )
         logger.debug(f"Message status updated: {message_id} -> {status_value}")
 
     async def apply_read_receipt(
@@ -3766,23 +3725,23 @@ class Database:
         if current_seq >= last_read_seq:
             return []
 
-        await self._db.execute(
-            """
-            INSERT INTO session_read_cursors (session_id, reader_id, last_read_seq, updated_at)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT(session_id, reader_id) DO UPDATE SET
-                last_read_seq = CASE
-                    WHEN excluded.last_read_seq > session_read_cursors.last_read_seq THEN excluded.last_read_seq
-                    ELSE session_read_cursors.last_read_seq
-                END,
-                updated_at = CASE
-                    WHEN excluded.last_read_seq > session_read_cursors.last_read_seq THEN excluded.updated_at
-                    ELSE session_read_cursors.updated_at
-                END
-            """,
-            (session_id, reader_id, last_read_seq, time.time()),
-        )
-        await self._db.commit()
+        async with self._write_transaction("apply_read_receipt"):
+            await self._db.execute(
+                """
+                INSERT INTO session_read_cursors (session_id, reader_id, last_read_seq, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(session_id, reader_id) DO UPDATE SET
+                    last_read_seq = CASE
+                        WHEN excluded.last_read_seq > session_read_cursors.last_read_seq THEN excluded.last_read_seq
+                        ELSE session_read_cursors.last_read_seq
+                    END,
+                    updated_at = CASE
+                        WHEN excluded.last_read_seq > session_read_cursors.last_read_seq THEN excluded.updated_at
+                        ELSE session_read_cursors.updated_at
+                    END
+                """,
+                (session_id, reader_id, last_read_seq, time.time()),
+            )
 
         logger.debug(
             f"Applied read receipt cursor: session={session_id}, reader={reader_id}, message={message_id}, seq={last_read_seq}"
@@ -3880,11 +3839,11 @@ class Database:
             message_id: Message ID
             content: New message content
         """
-        await self._db.execute(
-            "UPDATE messages SET content = ? WHERE message_id = ?",
-            (content, message_id),
-        )
-        await self._db.commit()
+        async with self._write_transaction("update_message_content"):
+            await self._db.execute(
+                "UPDATE messages SET content = ? WHERE message_id = ?",
+                (content, message_id),
+            )
         logger.debug(f"Message content updated: {message_id}")
 
     async def delete_session_messages(self, session_id: str) -> None:
@@ -3894,40 +3853,40 @@ class Database:
         Args:
             session_id: Session ID
         """
-        await self._db.execute(
-            "DELETE FROM messages WHERE session_id = ?",
-            (session_id,),
-        )
-        await self._db.execute(
-            "DELETE FROM session_read_cursors WHERE session_id = ?",
-            (session_id,),
-        )
-        await self._db.commit()
+        async with self._write_transaction("delete_session_messages"):
+            await self._db.execute(
+                "DELETE FROM messages WHERE session_id = ?",
+                (session_id,),
+            )
+            await self._db.execute(
+                "DELETE FROM session_read_cursors WHERE session_id = ?",
+                (session_id,),
+            )
         logger.debug(f"Messages deleted for session: {session_id}")
 
     async def clear_chat_state(self) -> None:
         """Remove all locally cached sessions, messages, search caches, and sync markers."""
-        await self._db.execute("DELETE FROM messages")
-        await self._db.execute("DELETE FROM session_read_cursors")
-        await self._db.execute("DELETE FROM sessions")
-        await self._db.execute("DELETE FROM conversation_summary_buckets")
-        await self._db.execute("DELETE FROM conversation_summary_media_cache")
-        await self._db.execute("DELETE FROM conversation_memory_index")
-        await self._db.execute("DELETE FROM conversation_memory_embeddings")
-        await self._db.execute("DELETE FROM conversation_memory_ann_buckets")
-        await self._db.execute("DELETE FROM contacts_cache")
-        await self._db.execute("DELETE FROM groups_cache")
-        await self._db.execute(
-            "DELETE FROM app_state WHERE key IN (?, ?, ?, ?, ?)",
-            (
-                "last_sync_session_cursors",
-                "last_sync_event_cursors",
-                "last_sync_timestamp",
-                "chat.hidden_sessions",
-                "chat.session_history_cutoffs",
-            ),
-        )
-        await self._db.commit()
+        async with self._write_transaction("clear_chat_state"):
+            await self._db.execute("DELETE FROM messages")
+            await self._db.execute("DELETE FROM session_read_cursors")
+            await self._db.execute("DELETE FROM sessions")
+            await self._db.execute("DELETE FROM conversation_summary_buckets")
+            await self._db.execute("DELETE FROM conversation_summary_media_cache")
+            await self._db.execute("DELETE FROM conversation_memory_index")
+            await self._db.execute("DELETE FROM conversation_memory_embeddings")
+            await self._db.execute("DELETE FROM conversation_memory_ann_buckets")
+            await self._db.execute("DELETE FROM contacts_cache")
+            await self._db.execute("DELETE FROM groups_cache")
+            await self._db.execute(
+                "DELETE FROM app_state WHERE key IN (?, ?, ?, ?, ?)",
+                (
+                    "last_sync_session_cursors",
+                    "last_sync_event_cursors",
+                    "last_sync_timestamp",
+                    "chat.hidden_sessions",
+                    "chat.session_history_cutoffs",
+                ),
+            )
         logger.info("Local chat state cleared")
     
     async def get_last_message(self, session_id: str) -> Optional[ChatMessage]:
@@ -4054,34 +4013,33 @@ class Database:
         if not messages:
             return
         
-        for message in messages:
-            is_encrypted, encryption_scheme = self._message_crypto_storage_fields(message)
-            await self._db.execute(
-                """
-                INSERT OR REPLACE INTO messages
-                (message_id, session_id, sender_id, content, message_type,
-                 status, timestamp, order_ts, updated_at, is_self, is_ai, is_encrypted, encryption_scheme, extra)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    message.message_id,
-                    message.session_id,
-                    message.sender_id,
-                    self._content_for_storage(message),
-                    message.message_type.value,
-                    message.status.value,
-                    message.timestamp.timestamp() if message.timestamp else None,
-                    message.order_ts.timestamp() if message.order_ts else None,
-                    message.updated_at.timestamp() if message.updated_at else None,
-                    1 if message.is_self else 0,
-                    1 if message.is_ai else 0,
-                    is_encrypted,
-                    encryption_scheme,
-                    json.dumps(message.extra),
-                ),
-            )
-        
-        await self._db.commit()
+        async with self._write_transaction("save_messages_batch"):
+            for message in messages:
+                is_encrypted, encryption_scheme = self._message_crypto_storage_fields(message)
+                await self._db.execute(
+                    """
+                    INSERT OR REPLACE INTO messages
+                    (message_id, session_id, sender_id, content, message_type,
+                     status, timestamp, order_ts, updated_at, is_self, is_ai, is_encrypted, encryption_scheme, extra)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        message.message_id,
+                        message.session_id,
+                        message.sender_id,
+                        self._content_for_storage(message),
+                        message.message_type.value,
+                        message.status.value,
+                        message.timestamp.timestamp() if message.timestamp else None,
+                        message.order_ts.timestamp() if message.order_ts else None,
+                        message.updated_at.timestamp() if message.updated_at else None,
+                        1 if message.is_self else 0,
+                        1 if message.is_ai else 0,
+                        is_encrypted,
+                        encryption_scheme,
+                        json.dumps(message.extra),
+                    ),
+                )
         logger.debug(f"Batch saved {len(messages)} messages")
 
     async def apply_sender_profile_update(
@@ -4109,6 +4067,7 @@ class Database:
         rows = await cursor.fetchall()
 
         changed_message_ids: list[str] = []
+        updates: list[tuple[str, str]] = []
         for row in rows:
             try:
                 extra = json.loads(row["extra"] or "{}")
@@ -4121,14 +4080,17 @@ class Database:
             if merged_extra == extra:
                 continue
 
-            await self._db.execute(
-                "UPDATE messages SET extra = ? WHERE message_id = ?",
-                (json.dumps(merged_extra), row["message_id"]),
-            )
-            changed_message_ids.append(str(row["message_id"] or ""))
+            message_id = str(row["message_id"] or "")
+            updates.append((json.dumps(merged_extra), message_id))
+            changed_message_ids.append(message_id)
 
-        if changed_message_ids:
-            await self._db.commit()
+        if updates:
+            async with self._write_transaction("apply_sender_profile_update"):
+                for extra_json, message_id in updates:
+                    await self._db.execute(
+                        "UPDATE messages SET extra = ? WHERE message_id = ?",
+                        (extra_json, message_id),
+                    )
         return changed_message_ids
     
     def _row_to_message(self, row: aiosqlite.Row) -> ChatMessage:
@@ -4278,8 +4240,9 @@ class Database:
     
     async def vacuum(self) -> None:
         """Optimize database."""
-        await self._db.execute("VACUUM")
-        await self._db.commit()
+        async with self._write_transaction_lock:
+            await self._db.execute("VACUUM")
+            await self._db.commit()
         logger.info("Database vacuumed")
 
 
