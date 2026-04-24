@@ -4036,6 +4036,90 @@ def test_session_manager_trust_session_identities_updates_direct_session_crypto_
     asyncio.run(scenario())
 
 
+def test_session_manager_trust_session_identities_preserves_decryption_recovery_state(monkeypatch) -> None:
+    fake_event_bus = FakeEventBus()
+    fake_db = FakeSessionProfileDatabase()
+    fake_e2ee_service = FakeE2EEService(
+        {'device_id': 'device-local-1', 'has_local_bundle': True},
+        peer_identity_summary={
+            'local_device_id': 'device-local-1',
+            'local_fingerprint': 'LOCALFINGERPRINT1234567890',
+            'local_fingerprint_short': 'LOCALFINGERP',
+            'status': 'unverified',
+            'device_count': 1,
+            'trusted_device_count': 0,
+            'unverified_device_count': 1,
+            'changed_device_count': 0,
+            'unverified_device_ids': ['device-bob-1'],
+            'changed_device_ids': [],
+            'change_count': 0,
+            'last_changed_at': '',
+            'last_trusted_at': '',
+            'verification_available': True,
+            'primary_verification_device_id': 'device-bob-1',
+            'primary_verification_fingerprint': 'REMOTEFINGERPRINT1234567890',
+            'primary_verification_fingerprint_short': 'REMOTEFINGER',
+            'primary_verification_code': '12345 67890 11111 22222 33333 44444 55555 66666 77777 88888 99999 00000',
+            'primary_verification_code_short': '12345 67890 11111',
+            'checked_at': '2026-04-06T12:00:00+00:00',
+        },
+    )
+
+    monkeypatch.setattr(session_manager_module, 'get_session_service', lambda: FakeSessionService())
+    monkeypatch.setattr(session_manager_module, 'get_e2ee_service', lambda: fake_e2ee_service)
+    monkeypatch.setattr(session_manager_module, 'get_event_bus', lambda: fake_event_bus)
+    monkeypatch.setattr(session_manager_module, 'get_message_manager', lambda: FakeMessageManager())
+    monkeypatch.setattr(session_manager_module, 'get_database', lambda: fake_db)
+
+    async def scenario() -> None:
+        manager = session_manager_module.SessionManager()
+        session = Session(
+            session_id='session-1',
+            name='Bob',
+            session_type='direct',
+            participant_ids=['user-1', 'user-2'],
+        )
+        session.extra['counterpart_id'] = 'user-2'
+        session.extra['encryption_mode'] = 'e2ee_private'
+        session.extra['session_crypto_state'] = {
+            'enabled': True,
+            'ready': False,
+            'can_decrypt': False,
+            'device_registered': True,
+            'scheme': 'x25519-aesgcm-v1',
+            'attachment_scheme': 'aesgcm-file+x25519-v1',
+            'identity_status': 'unverified',
+            'identity_verified': False,
+            'identity_action_required': True,
+            'identity_review_action': 'trust_peer_identity',
+            'identity_review_blocking': False,
+            'identity_alert_severity': 'warning',
+            'decryption_state': 'not_for_current_device',
+            'recovery_action': 'switch_device',
+            'last_failure_message_id': 'message-1',
+            'target_device_id': 'device-old-1',
+            'device_id': 'device-local-1',
+        }
+        manager._sessions[session.session_id] = session
+
+        result = await manager.trust_session_identities('session-1')
+        summary = await manager.get_session_security_summary('session-1')
+
+        assert result['performed'] is True
+        assert session.extra['session_crypto_state']['identity_status'] == 'verified'
+        assert session.extra['session_crypto_state']['identity_action_required'] is False
+        assert session.extra['session_crypto_state']['ready'] is False
+        assert session.extra['session_crypto_state']['can_decrypt'] is False
+        assert session.extra['session_crypto_state']['decryption_state'] == 'not_for_current_device'
+        assert session.extra['session_crypto_state']['recovery_action'] == 'switch_device'
+        assert session.extra['session_crypto_state']['last_failure_message_id'] == 'message-1'
+        assert session.extra['session_crypto_state']['target_device_id'] == 'device-old-1'
+        assert summary['headline'] == 'decryption_recovery_required'
+        assert summary['recommended_action'] == 'switch_device'
+
+    asyncio.run(scenario())
+
+
 def test_session_manager_get_session_security_summary_returns_identity_review_headline(monkeypatch) -> None:
     monkeypatch.setattr(session_manager_module, 'get_session_service', lambda: FakeSessionService())
     monkeypatch.setattr(

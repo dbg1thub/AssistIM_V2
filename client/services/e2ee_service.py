@@ -35,10 +35,12 @@ class EncryptedAttachmentUpload:
 class E2EEService:
     """Manage the local device identity and E2EE bootstrap APIs."""
 
+    AUTH_USER_ID_KEY = "auth.user_id"
     DEVICE_STATE_KEY = "e2ee.device_state"
     GROUP_SESSION_STATE_KEY = "e2ee.group_session_state"
     HISTORY_RECOVERY_STATE_KEY = "e2ee.history_recovery_state"
     IDENTITY_TRUST_STATE_KEY = "e2ee.identity_trust_state"
+    USER_STATE_KEY_PREFIX = "e2ee.users"
     DEFAULT_PREKEY_COUNT = 32
     MIN_AVAILABLE_PREKEY_COUNT = 8
     SIGNED_PREKEY_ROTATION_INTERVAL = timedelta(days=14)
@@ -139,7 +141,7 @@ class E2EEService:
         await self._http.delete(f"/devices/{device_id}")
 
     async def clear_local_bundle(self) -> None:
-        await self._db.delete_app_states(self._local_e2ee_state_keys())
+        await self._db.delete_app_states(await self._local_e2ee_state_keys())
 
     async def remove_session_local_state(self, session_id: str) -> None:
         """Drop local group-session and recovery state for one removed session."""
@@ -1835,32 +1837,75 @@ class E2EEService:
             "target_device_id": recipient_device_id or local_device_id,
         }
 
-    def _local_e2ee_state_keys(self) -> list[str]:
+    async def _local_e2ee_state_keys(self) -> list[str]:
         """Return every app-state key owned by the local E2EE runtime bundle."""
+        return await self._state_keys(
+            [
+                self.DEVICE_STATE_KEY,
+                self.GROUP_SESSION_STATE_KEY,
+                self.HISTORY_RECOVERY_STATE_KEY,
+                self.IDENTITY_TRUST_STATE_KEY,
+            ]
+        )
+
+    async def _current_state_owner_user_id(self) -> str:
+        try:
+            return str(await self._db.get_app_state(self.AUTH_USER_ID_KEY) or "").strip()
+        except Exception as exc:
+            logger.debug("Failed to read E2EE state owner user id: %s", exc)
+            return ""
+
+    @classmethod
+    def _state_key_for_user(cls, base_key: str, user_id: str) -> str:
+        normalized_user_id = str(user_id or "").strip()
+        normalized_base_key = str(base_key or "").strip()
+        if not normalized_user_id:
+            return normalized_base_key
+        suffix = normalized_base_key.removeprefix("e2ee.")
+        return f"{cls.USER_STATE_KEY_PREFIX}.{normalized_user_id}.{suffix}"
+
+    async def _state_key(self, base_key: str) -> str:
+        return self._state_key_for_user(base_key, await self._current_state_owner_user_id())
+
+    async def _state_keys(self, base_keys: list[str]) -> list[str]:
+        owner_user_id = await self._current_state_owner_user_id()
         return [
-            self.DEVICE_STATE_KEY,
-            self.GROUP_SESSION_STATE_KEY,
-            self.HISTORY_RECOVERY_STATE_KEY,
-            self.IDENTITY_TRUST_STATE_KEY,
+            self._state_key_for_user(base_key, owner_user_id)
+            for base_key in list(base_keys or [])
         ]
+
+    async def _normalize_local_bundle_for_owner(self, payload: dict[str, Any]) -> dict[str, Any]:
+        normalized = self._normalize_loaded_bundle(payload)
+        owner_user_id = await self._current_state_owner_user_id()
+        if owner_user_id:
+            existing_owner_user_id = str(normalized.get("owner_user_id") or "").strip()
+            if existing_owner_user_id and existing_owner_user_id != owner_user_id:
+                raise RuntimeError("persisted E2EE device state belongs to another user")
+            normalized["owner_user_id"] = owner_user_id
+        return normalized
 
     def _encrypt_state_payload(self, payload: dict[str, Any]) -> str:
         serialized = json.dumps(payload, ensure_ascii=True, sort_keys=True)
         return SecureStorage.encrypt_text(serialized)
 
     async def _replace_local_bundle(self, bundle: dict[str, Any]) -> None:
-        normalized_bundle = self._normalize_loaded_bundle(bundle)
+        normalized_bundle = await self._normalize_local_bundle_for_owner(bundle)
         encrypted = self._encrypt_state_payload(normalized_bundle)
-        await self._db.replace_app_state(
-            {self.DEVICE_STATE_KEY: encrypted},
-            delete_keys=[
+        device_state_key = await self._state_key(self.DEVICE_STATE_KEY)
+        delete_keys = await self._state_keys(
+            [
                 self.GROUP_SESSION_STATE_KEY,
                 self.HISTORY_RECOVERY_STATE_KEY,
                 self.IDENTITY_TRUST_STATE_KEY,
-            ],
+            ]
         )
+        await self._db.replace_app_state(
+            {device_state_key: encrypted},
+            delete_keys=delete_keys,
+        )
+
     async def _load_local_bundle(self) -> dict[str, Any] | None:
-        raw_value = await self._db.get_app_state(self.DEVICE_STATE_KEY)
+        raw_value = await self._db.get_app_state(await self._state_key(self.DEVICE_STATE_KEY))
         if not raw_value:
             return None
         try:
@@ -1871,14 +1916,21 @@ class E2EEService:
             return None
         if not isinstance(payload, dict):
             return None
-        return self._normalize_loaded_bundle(payload)
+        try:
+            return await self._normalize_local_bundle_for_owner(payload)
+        except RuntimeError as exc:
+            logger.warning("Ignoring persisted E2EE device state: %s", exc)
+            return None
 
     async def _save_local_bundle(self, bundle: dict[str, Any]) -> None:
-        normalized_bundle = self._normalize_loaded_bundle(bundle)
-        await self._db.set_app_state(self.DEVICE_STATE_KEY, self._encrypt_state_payload(normalized_bundle))
+        normalized_bundle = await self._normalize_local_bundle_for_owner(bundle)
+        await self._db.set_app_state(
+            await self._state_key(self.DEVICE_STATE_KEY),
+            self._encrypt_state_payload(normalized_bundle),
+        )
 
     async def _load_group_session_state(self) -> dict[str, Any]:
-        raw_value = await self._db.get_app_state(self.GROUP_SESSION_STATE_KEY)
+        raw_value = await self._db.get_app_state(await self._state_key(self.GROUP_SESSION_STATE_KEY))
         if not raw_value:
             return {}
         try:
@@ -1912,10 +1964,10 @@ class E2EEService:
             )
         serialized = json.dumps(normalized_state, ensure_ascii=True, sort_keys=True)
         encrypted = SecureStorage.encrypt_text(serialized)
-        await self._db.set_app_state(self.GROUP_SESSION_STATE_KEY, encrypted)
+        await self._db.set_app_state(await self._state_key(self.GROUP_SESSION_STATE_KEY), encrypted)
 
     async def _load_history_recovery_state(self) -> dict[str, Any]:
-        raw_value = await self._db.get_app_state(self.HISTORY_RECOVERY_STATE_KEY)
+        raw_value = await self._db.get_app_state(await self._state_key(self.HISTORY_RECOVERY_STATE_KEY))
         if not raw_value:
             return {"devices": {}}
         try:
@@ -1930,10 +1982,10 @@ class E2EEService:
         normalized_state = self._normalize_history_recovery_state(state)
         serialized = json.dumps(normalized_state, ensure_ascii=True, sort_keys=True)
         encrypted = SecureStorage.encrypt_text(serialized)
-        await self._db.set_app_state(self.HISTORY_RECOVERY_STATE_KEY, encrypted)
+        await self._db.set_app_state(await self._state_key(self.HISTORY_RECOVERY_STATE_KEY), encrypted)
 
     async def _load_identity_trust_state(self) -> dict[str, Any]:
-        raw_value = await self._db.get_app_state(self.IDENTITY_TRUST_STATE_KEY)
+        raw_value = await self._db.get_app_state(await self._state_key(self.IDENTITY_TRUST_STATE_KEY))
         if not raw_value:
             return {"users": {}}
         try:
@@ -1948,7 +2000,7 @@ class E2EEService:
         normalized_state = self._normalize_identity_trust_state(state)
         serialized = json.dumps(normalized_state, ensure_ascii=True, sort_keys=True)
         encrypted = SecureStorage.encrypt_text(serialized)
-        await self._db.set_app_state(self.IDENTITY_TRUST_STATE_KEY, encrypted)
+        await self._db.set_app_state(await self._state_key(self.IDENTITY_TRUST_STATE_KEY), encrypted)
 
     def _normalize_group_session_record(self, session_id: str, record: dict[str, Any]) -> dict[str, Any]:
         normalized_session_id = str(session_id or "").strip()

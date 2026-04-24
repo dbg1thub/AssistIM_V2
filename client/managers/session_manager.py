@@ -499,6 +499,15 @@ class SessionManager:
             state["local_sender_key_id"] = str(group_key_summary.get("local_sender_key_id") or "")
             state["retired_local_key_count"] = len(list(group_key_summary.get("retired_local_sender_key_ids") or []))
             state["inbound_sender_key_count"] = len(list(group_key_summary.get("inbound_sender_devices") or []))
+        previous_decryption_state = str(previous_state.get("decryption_state") or "").strip()
+        if previous_decryption_state and previous_decryption_state != "ready":
+            state["ready"] = False
+            state["can_decrypt"] = bool(previous_state.get("can_decrypt", False))
+            state["decryption_state"] = previous_decryption_state
+            for key in ("recovery_action", "last_failure_message_id", "target_device_id"):
+                value = str(previous_state.get(key) or "").strip()
+                if value:
+                    state[key] = value
         if device_id:
             state["device_id"] = device_id
         return state

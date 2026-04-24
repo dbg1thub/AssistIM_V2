@@ -272,6 +272,63 @@ def test_auth_controller_login_commits_auth_before_destructive_chat_reset(monkey
     asyncio.run(scenario())
 
 
+def test_auth_controller_same_user_login_preserves_local_chat_state(monkeypatch) -> None:
+    events: list[str] = []
+    fake_auth_service = OrderedAuthService(events)
+    fake_db = OrderedAuthDatabase(events)
+    _wire_auth_controller(monkeypatch, fake_auth_service, fake_db)
+
+    async def scenario() -> None:
+        controller = auth_controller_module.AuthController()
+        await fake_db.set_app_states(
+            {
+                controller.USER_ID_KEY: "user-1",
+                controller.USER_PROFILE_KEY: json.dumps({"id": "user-1", "username": "alice"}),
+            }
+        )
+        events.clear()
+
+        user = await controller.login("alice", "secret123")
+        await asyncio.sleep(0)
+
+        assert user["id"] == "user-1"
+        assert events == [
+            "set_app_states(auth.access_token,auth.refresh_token,auth.user_id,auth.user_profile)",
+            "set_tokens",
+        ]
+
+    asyncio.run(scenario())
+
+
+def test_auth_controller_switch_user_login_clears_local_chat_state(monkeypatch) -> None:
+    events: list[str] = []
+    fake_auth_service = OrderedAuthService(events)
+    fake_db = OrderedAuthDatabase(events)
+    _wire_auth_controller(monkeypatch, fake_auth_service, fake_db)
+
+    async def scenario() -> None:
+        controller = auth_controller_module.AuthController()
+        await fake_db.set_app_states(
+            {
+                controller.USER_ID_KEY: "user-2",
+                controller.USER_PROFILE_KEY: json.dumps({"id": "user-2", "username": "bob"}),
+            }
+        )
+        events.clear()
+
+        user = await controller.login("alice", "secret123")
+        await asyncio.sleep(0)
+
+        assert user["id"] == "user-1"
+        assert events[:3] == [
+            "set_app_states(auth.access_token,auth.refresh_token,auth.user_id,auth.user_profile)",
+            "clear_chat_state",
+            "set_tokens",
+        ]
+
+    asyncio.run(scenario())
+
+
 def test_auth_controller_login_persist_failure_rolls_back_auth_runtime(monkeypatch) -> None:
     events: list[str] = []
     fake_auth_service = OrderedAuthService(events)

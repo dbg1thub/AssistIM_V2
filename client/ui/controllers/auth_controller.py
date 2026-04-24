@@ -628,16 +628,21 @@ class AuthController:
         refresh_token = payload.get("refresh_token", "")
         user = payload.get("user", {})
 
-        if not access_token or not refresh_token or not user.get("id"):
+        user_id = str(user.get("id") or "").strip()
+        if not access_token or not refresh_token or not user_id:
             raise APIError("Invalid authentication payload")
 
         self._cancel_pending_task(self._token_state_task)
         self._cancel_pending_task(self._e2ee_bootstrap_task)
         self._e2ee_bootstrap_task = None
+        previous_user_id = ""
+        if reset_local_chat_state:
+            previous_user_id = str(await self._db.get_app_state(self.USER_ID_KEY) or "").strip()
+        should_reset_local_chat_state = bool(reset_local_chat_state and previous_user_id != user_id)
 
         try:
             await self._persist_auth_state(access_token, refresh_token, user)
-            if reset_local_chat_state:
+            if should_reset_local_chat_state:
                 await self._reset_local_chat_state()
             self._set_http_tokens(access_token, refresh_token)
             self._apply_runtime_context(user)

@@ -274,6 +274,36 @@ def test_e2ee_service_ensure_registered_device_refreshes_low_prekey_inventory(mo
     asyncio.run(scenario())
 
 
+def test_e2ee_service_keeps_local_bundles_isolated_per_authenticated_user(monkeypatch) -> None:
+    fake_db = FakeDatabase()
+
+    monkeypatch.setattr(e2ee_service_module, "get_http_client", lambda: FakeHttpClient())
+
+    async def scenario() -> None:
+        monkeypatch.setattr(e2ee_service_module, "get_database", lambda: fake_db)
+        service = e2ee_service_module.E2EEService()
+
+        legacy_bundle = await service.get_or_create_local_bundle()
+
+        fake_db.state["auth.user_id"] = "alice"
+        alice_bundle = await service.get_or_create_local_bundle()
+
+        fake_db.state["auth.user_id"] = "bob"
+        bob_bundle = await service.get_or_create_local_bundle()
+
+        fake_db.state["auth.user_id"] = "alice"
+        alice_bundle_again = await service.get_or_create_local_bundle()
+
+        assert legacy_bundle["device_id"] != alice_bundle["device_id"]
+        assert bob_bundle["device_id"] != alice_bundle["device_id"]
+        assert alice_bundle_again["device_id"] == alice_bundle["device_id"]
+        assert service.DEVICE_STATE_KEY in fake_db.state
+        assert "e2ee.users.alice.device_state" in fake_db.state
+        assert "e2ee.users.bob.device_state" in fake_db.state
+
+    asyncio.run(scenario())
+
+
 def test_e2ee_service_reprovisions_local_device_and_deletes_previous_remote_device(monkeypatch) -> None:
     fake_db = FakeDatabase()
     fake_http = RecordingHttpClient()
