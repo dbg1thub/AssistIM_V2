@@ -1677,6 +1677,8 @@ class MessageDelegate(QStyledItemDelegate):
             return str(payload.get("text") or "").strip()
         if status == "pending":
             return tr("chat.voice_transcript.pending", "正在转文字...")
+        if status == "failed" and str(payload.get("reason") or "").strip() == "model_missing":
+            return tr("chat.voice_transcript.model_missing_short", "未找到语音转文字模型")
         if status == "failed":
             return tr("chat.voice_transcript.failed_short", "转文字失败")
         if status == "skipped" and str(payload.get("reason") or "").strip() == "audio_too_long":

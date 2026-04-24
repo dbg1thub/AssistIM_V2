@@ -2916,7 +2916,12 @@ class ChatInterface(QWidget):
             )
         except LocalVoiceTranscriptionRuntimeError as exc:
             status = "skipped" if exc.code == "VOICE_TRANSCRIPT_AUDIO_TOO_LONG" else "failed"
-            reason = "audio_too_long" if exc.code == "VOICE_TRANSCRIPT_AUDIO_TOO_LONG" else "runtime_error"
+            if exc.code == "VOICE_TRANSCRIPT_AUDIO_TOO_LONG":
+                reason = "audio_too_long"
+            elif exc.code == "VOICE_TRANSCRIPT_MODEL_NOT_FOUND":
+                reason = "model_missing"
+            else:
+                reason = "runtime_error"
             await self._persist_voice_transcript(
                 message,
                 self._voice_transcript_payload(
@@ -2929,9 +2934,14 @@ class ChatInterface(QWidget):
                 generation=generation,
             )
             if status == "failed" and self._is_current_message_context(message, generation):
+                warning_text = (
+                    tr("chat.voice_transcript.model_missing", "未找到语音转文字模型")
+                    if reason == "model_missing"
+                    else tr("chat.voice_transcript.failed", "转文字失败，请稍后重试。")
+                )
                 InfoBar.warning(
                     tr("chat.message.title", "Message"),
-                    tr("chat.voice_transcript.failed", "转文字失败，请稍后重试。"),
+                    warning_text,
                     parent=self.window(),
                     duration=2200,
                 )

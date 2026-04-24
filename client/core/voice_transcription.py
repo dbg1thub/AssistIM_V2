@@ -16,6 +16,8 @@ def voice_transcript_display_text(extra: dict[str, Any] | None) -> str:
         return str(payload.get("text") or "").strip()
     if status == "pending":
         return "正在转文字..."
+    if status == "failed" and str(payload.get("reason") or "").strip() == "model_missing":
+        return "未找到语音转文字模型"
     if status == "failed":
         return "转文字失败"
     if status == "skipped" and str(payload.get("reason") or "").strip() == "audio_too_long":

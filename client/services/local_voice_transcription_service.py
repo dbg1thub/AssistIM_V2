@@ -25,6 +25,17 @@ def _parse_int_env(name: str, default: int) -> int:
         return default
 
 
+def _parse_bool_env(name: str, default: bool = False) -> bool:
+    raw_value = str(os.getenv(name, "") or "").strip().lower()
+    if not raw_value:
+        return default
+    if raw_value in {"1", "true", "yes", "on"}:
+        return True
+    if raw_value in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
 def _default_cpu_threads() -> int:
     return max(1, min(8, os.cpu_count() or 1))
 
@@ -45,6 +56,7 @@ class LocalVoiceTranscriptionConfig:
     cpu_threads: int = field(default_factory=lambda: _parse_int_env("ASSISTIM_ASR_CPU_THREADS", _default_cpu_threads()))
     beam_size: int = field(default_factory=lambda: _parse_int_env("ASSISTIM_ASR_BEAM_SIZE", 1))
     language: str = field(default_factory=lambda: str(os.getenv("ASSISTIM_ASR_LANGUAGE", "") or "").strip())
+    allow_download: bool = field(default_factory=lambda: _parse_bool_env("ASSISTIM_ASR_ALLOW_DOWNLOAD", False))
     max_duration_seconds: int = field(
         default_factory=lambda: _parse_int_env("ASSISTIM_ASR_MAX_SECONDS", VOICE_TRANSCRIPT_MAX_SECONDS)
     )
@@ -127,6 +139,10 @@ class LocalVoiceTranscriptionRuntime:
                 ) from exc
 
     def _load_sync(self):
+        model_dir = Path(self._config.model_dir).expanduser().resolve()
+        model_dir.mkdir(parents=True, exist_ok=True)
+        model_size_or_path = self._model_size_or_path(model_dir)
+
         try:
             from faster_whisper import WhisperModel
         except ImportError as exc:
@@ -135,21 +151,20 @@ class LocalVoiceTranscriptionRuntime:
                 "faster-whisper is not installed",
             ) from exc
 
-        model_dir = Path(self._config.model_dir).expanduser().resolve()
-        model_dir.mkdir(parents=True, exist_ok=True)
-        model_size_or_path = self._model_size_or_path(model_dir)
         kwargs: dict[str, Any] = {
             "device": self._config.device or "cpu",
             "compute_type": self._config.compute_type or "int8",
             "cpu_threads": max(1, int(self._config.cpu_threads or _default_cpu_threads())),
             "download_root": str(model_dir),
+            "local_files_only": not bool(self._config.allow_download),
         }
         logger.info(
-            "[voice-asr] load_start provider=faster-whisper model=%s device=%s compute_type=%s cpu_threads=%s",
+            "[voice-asr] load_start provider=faster-whisper model=%s device=%s compute_type=%s cpu_threads=%s allow_download=%s",
             model_size_or_path,
             kwargs["device"],
             kwargs["compute_type"],
             kwargs["cpu_threads"],
+            bool(self._config.allow_download),
         )
         model = WhisperModel(model_size_or_path, **kwargs)
         logger.info("[voice-asr] load_done provider=faster-whisper model=%s", model_size_or_path)
@@ -183,13 +198,26 @@ class LocalVoiceTranscriptionRuntime:
     def _model_size_or_path(self, model_dir: Path) -> str:
         explicit_path = str(self._config.model_path or "").strip()
         if explicit_path:
-            return str(Path(explicit_path).expanduser().resolve())
+            resolved = Path(explicit_path).expanduser().resolve()
+            if not resolved.exists():
+                raise LocalVoiceTranscriptionRuntimeError(
+                    "VOICE_TRANSCRIPT_MODEL_NOT_FOUND",
+                    f"Configured voice transcription model path does not exist: {resolved}",
+                )
+            return str(resolved)
 
         model_id = str(self._config.model_id or "small").strip() or "small"
         local_dir = model_dir / model_id
         if local_dir.is_dir():
             return str(local_dir)
-        return model_id
+        if self._config.allow_download:
+            logger.info("[voice-asr] local_model_missing_download_allowed model=%s dir=%s", model_id, local_dir)
+            return model_id
+        raise LocalVoiceTranscriptionRuntimeError(
+            "VOICE_TRANSCRIPT_MODEL_NOT_FOUND",
+            "Local voice transcription model not found: "
+            f"{local_dir}. Place the faster-whisper model there or set ASSISTIM_ASR_ALLOW_DOWNLOAD=1 for development.",
+        )
 
     @staticmethod
     def _assert_audio_available(audio_path: str) -> Path:
