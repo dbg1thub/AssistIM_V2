@@ -46,6 +46,18 @@ class LocalEmbeddingGGUFRuntimeError(RuntimeError):
         super().__init__(message or code)
 
 
+def _effective_embedding_batch_size(config: LocalEmbeddingGGUFConfig) -> int:
+    try:
+        context_size = int(config.context_size or 0)
+    except (TypeError, ValueError):
+        context_size = 0
+    try:
+        configured_batch_size = int(config.batch_size or 0)
+    except (TypeError, ValueError):
+        configured_batch_size = 0
+    return max(32, context_size, configured_batch_size)
+
+
 class LocalEmbeddingGGUFRuntime:
     """llama-cpp-python embedding runtime wrapper for one local embedding model."""
 
@@ -133,11 +145,13 @@ class LocalEmbeddingGGUFRuntime:
             return self._load_task
 
     async def _load_async(self, model_path: Path):
+        batch_size = _effective_embedding_batch_size(self._config)
         logger.info(
-            "[ai-perf] local_embedding_model_load_start provider=local_gguf_embedding model=%s path=%s n_ctx=%s gpu_layers=%s cpu_threads=%s",
+            "[ai-perf] local_embedding_model_load_start provider=local_gguf_embedding model=%s path=%s n_ctx=%s n_batch=%s gpu_layers=%s cpu_threads=%s",
             self._config.model_id,
             model_path,
             self._config.context_size,
+            batch_size,
             self._config.gpu_layers,
             self._config.cpu_threads,
         )
@@ -157,10 +171,11 @@ class LocalEmbeddingGGUFRuntime:
             raise LocalEmbeddingGGUFRuntimeError("AI_EMBEDDING_MODEL_UNAVAILABLE", "Local embedding runtime is closed")
         self._embedder = embedder
         logger.info(
-            "[ai-perf] local_embedding_model_load_done provider=local_gguf_embedding model=%s path=%s n_ctx=%s gpu_layers=%s cpu_threads=%s",
+            "[ai-perf] local_embedding_model_load_done provider=local_gguf_embedding model=%s path=%s n_ctx=%s n_batch=%s gpu_layers=%s cpu_threads=%s",
             self._config.model_id,
             model_path,
             self._config.context_size,
+            batch_size,
             self._config.gpu_layers,
             self._config.cpu_threads,
         )
@@ -176,12 +191,13 @@ class LocalEmbeddingGGUFRuntime:
                 "llama-cpp-python embedding support is not installed",
             ) from exc
 
+        batch_size = _effective_embedding_batch_size(self._config)
         kwargs: dict[str, Any] = {
             "model_path": str(model_path),
             "n_ctx": self._config.context_size,
             "n_gpu_layers": self._config.gpu_layers,
-            "n_batch": self._config.batch_size,
-            "n_ubatch": self._config.batch_size,
+            "n_batch": batch_size,
+            "n_ubatch": batch_size,
             "verbose": self._config.verbose,
         }
         if self._config.cpu_threads > 0:

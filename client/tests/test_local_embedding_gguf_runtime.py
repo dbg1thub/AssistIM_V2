@@ -77,3 +77,39 @@ def test_local_embedding_gguf_runtime_embeds_with_stub_llama_cpp(monkeypatch, tm
         assert runtime._embedder.kwargs["n_threads"] == 2
 
     asyncio.run(scenario())
+
+
+def test_local_embedding_gguf_runtime_batch_size_covers_context_window(monkeypatch, tmp_path) -> None:
+    model_path = tmp_path / "embedding.gguf"
+    model_path.write_bytes(b"fake")
+    captured_kwargs = {}
+
+    class StubLlamaEmbedding:
+        def __init__(self, **kwargs) -> None:
+            captured_kwargs.update(kwargs)
+
+        def embed(self, texts):
+            return [[1.0] for _text in list(texts or [])]
+
+    llama_embedding_module = types.ModuleType("llama_cpp.llama_embedding")
+    llama_embedding_module.LlamaEmbedding = StubLlamaEmbedding
+    monkeypatch.setitem(sys.modules, "llama_cpp.llama_embedding", llama_embedding_module)
+
+    runtime = runtime_module.LocalEmbeddingGGUFRuntime(
+        runtime_module.LocalEmbeddingGGUFConfig(
+            model_path=str(model_path),
+            context_size=1024,
+            batch_size=256,
+            verbose=False,
+        )
+    )
+
+    async def scenario() -> None:
+        vectors = await runtime.embed_texts(["hello"])
+
+        assert vectors == [(1.0,)]
+        assert captured_kwargs["n_ctx"] == 1024
+        assert captured_kwargs["n_batch"] == 1024
+        assert captured_kwargs["n_ubatch"] == 1024
+
+    asyncio.run(scenario())
