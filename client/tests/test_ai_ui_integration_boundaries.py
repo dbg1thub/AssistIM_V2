@@ -219,6 +219,11 @@ def test_file_summary_right_click_flow_is_wired() -> None:
     assert "summarize_file_text" in chat_interface
     assert "FILE_SUMMARY_EXTRA_KEY" in message_delegate
     assert "def _file_summary_display_text(self, message: ChatMessage) -> str:" in message_delegate
+    assert "draw_attachment_card(\n            painter,\n            rect," in message_delegate
+    assert "card_rect = QRect(rect.x(), rect.y(), rect.width(), min(self.FILE_HEIGHT, rect.height()))" not in message_delegate
+    assert "def _draw_file_summary_content(self, painter: QPainter, rect: QRect, summary_text: str) -> None:" in message_delegate
+    assert "summary_rect = rect.adjusted(10, self.FILE_HEIGHT + self.TRANSLATION_TOP_GAP, -10, -8)" in message_delegate
+    assert "painter.drawLine(rect.x() + 10, divider_y, rect.right() - 10, divider_y)" in message_delegate
     assert "def build_file_summary_request(" in prompt_builder
 
 

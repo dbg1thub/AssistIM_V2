@@ -505,11 +505,11 @@ class MessageDelegate(QStyledItemDelegate):
                 return cached_size
             file_width = max(88, min(self.FILE_WIDTH, max_bubble_width))
             if summary_text:
-                summary_width = max(90, min(self.MAX_TEXT_WIDTH, max_bubble_width))
+                summary_width = max(90, min(self.MAX_TEXT_WIDTH, max_bubble_width - 20))
                 summary_size = self._measure_text_content(summary_text, summary_width)
                 size = QSize(
-                    min(max_bubble_width, max(file_width, summary_size.width())),
-                    self.FILE_HEIGHT + self.TRANSLATION_TOP_GAP + summary_size.height(),
+                    min(max_bubble_width, max(file_width, summary_size.width() + 20)),
+                    self.FILE_HEIGHT + self.TRANSLATION_TOP_GAP + summary_size.height() + 8,
                 )
             else:
                 size = QSize(file_width, self.FILE_HEIGHT)
@@ -1026,39 +1026,31 @@ class MessageDelegate(QStyledItemDelegate):
         file_path = message.extra.get("local_path") or (message.content or "")
         fallback_size = message.extra.get("size")
         summary_text = self._file_summary_display_text(message)
-        card_rect = rect
-        if summary_text:
-            card_rect = QRect(rect.x(), rect.y(), rect.width(), min(self.FILE_HEIGHT, rect.height()))
         draw_attachment_card(
             painter,
-            card_rect,
+            rect,
             message_type=MessageType.FILE,
             display_name=file_name,
             file_path=file_path,
             fallback_size=fallback_size,
             dark=isDarkTheme(),
+            header_height=self.FILE_HEIGHT if summary_text else None,
         )
         if summary_text:
-            self._draw_file_summary_content(painter, rect, card_rect, summary_text)
+            self._draw_file_summary_content(painter, rect, summary_text)
 
-    def _draw_file_summary_content(self, painter: QPainter, rect: QRect, card_rect: QRect, summary_text: str) -> None:
-        """Draw local file summary text below the file card."""
-        summary_y = card_rect.bottom() + 1 + self.TRANSLATION_TOP_GAP
-        summary_rect = QRect(
-            rect.x(),
-            summary_y,
-            rect.width(),
-            max(1, rect.bottom() - summary_y + 1),
-        )
+    def _draw_file_summary_content(self, painter: QPainter, rect: QRect, summary_text: str) -> None:
+        """Draw local file summary text inside the file card."""
+        summary_rect = rect.adjusted(10, self.FILE_HEIGHT + self.TRANSLATION_TOP_GAP, -10, -8)
         text_rect, layout = self._text_layout(summary_rect, summary_text)
-        divider_y = card_rect.bottom() + 1 + max(2, self.TRANSLATION_TOP_GAP // 2)
+        divider_y = rect.y() + self.FILE_HEIGHT + max(2, self.TRANSLATION_TOP_GAP // 2)
 
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.setFont(self._text_font())
         painter.setPen(QColor(255, 255, 255, 42) if isDarkTheme() else QColor(0, 0, 0, 30))
-        painter.drawLine(rect.x(), divider_y, rect.right(), divider_y)
+        painter.drawLine(rect.x() + 10, divider_y, rect.right() - 10, divider_y)
         text_color = QColor(222, 226, 232, 178) if isDarkTheme() else QColor("#707070")
         self._draw_plain_text_layout(painter, text_rect, layout, text_color)
         painter.restore()

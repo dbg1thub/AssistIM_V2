@@ -70,14 +70,19 @@ def draw_attachment_card(
     file_path: str = "",
     fallback_size=None,
     dark: bool,
+    header_height: int | None = None,
 ) -> None:
     """Draw the shared attachment preview card."""
     card_rect = QRectF(rect)
+    header_rect = card_rect
+    if header_height is not None:
+        normalized_height = max(1.0, min(float(header_height), card_rect.height()))
+        header_rect = QRectF(card_rect.left(), card_rect.top(), card_rect.width(), normalized_height)
     bg = QColor(255, 255, 255, 18) if dark else QColor(0, 0, 0, 10)
     fg = QColor(255, 255, 255, 225) if dark else QColor(20, 20, 20, 220)
     sub = QColor(255, 255, 255, 150) if dark else QColor(30, 30, 30, 150)
     accent = QColor(255, 255, 255, 36) if dark else QColor(0, 0, 0, 18)
-    content_rect = card_rect.adjusted(10, 8, -10, -8)
+    content_rect = header_rect.adjusted(10, 8, -10, -8)
 
     painter.setPen(Qt.PenStyle.NoPen)
     painter.setBrush(bg)
