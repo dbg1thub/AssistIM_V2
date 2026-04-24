@@ -1083,6 +1083,7 @@ class Application:
                     self._pending_auth_success_message = ""
                     if self._lifecycle_state != "shutting_down":
                         self._set_lifecycle_state("unauthenticated")
+                    self._quit_event.set()
                 return
 
             await self._continue_authenticated_runtime(auth_result)

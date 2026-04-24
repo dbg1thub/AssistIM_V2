@@ -1773,7 +1773,7 @@ def test_application_run_handles_authenticate_failure_without_propagating() -> N
     asyncio.run(scenario())
 
 
-def test_application_logout_returns_to_unauthenticated_state_without_forcing_exit(monkeypatch) -> None:
+def test_application_logout_cancelled_reauth_requests_exit(monkeypatch) -> None:
     main_module = _load_main_module()
     events: list[str] = []
     fake_auth_controller = _FakeAuthControllerForLogout(events)
@@ -1807,7 +1807,7 @@ def test_application_logout_returns_to_unauthenticated_state_without_forcing_exi
             "auth_controller.close",
             "authenticate",
         ]
-        assert app._quit_event.is_set() is False
+        assert app._quit_event.is_set() is True
         assert app._lifecycle_state == "unauthenticated"
         assert app._pending_auth_success_message == ""
 
@@ -2060,7 +2060,7 @@ def test_application_logout_quiesces_runtime_before_clearing_auth_state(monkeypa
             "auth_controller.close",
             "authenticate",
         ]
-        assert app._quit_event.is_set() is False
+        assert app._quit_event.is_set() is True
         assert app._lifecycle_state == "unauthenticated"
 
     asyncio.run(scenario())
