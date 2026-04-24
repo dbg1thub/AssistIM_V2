@@ -99,6 +99,19 @@ class AIAssistResult:
     finish_reason: str = ""
 
 
+@dataclass(frozen=True, slots=True)
+class AIFileSummaryResult:
+    """Result of one local file-summary request."""
+
+    task_id: str
+    text: str = ""
+    state: AITaskState = AITaskState.DONE
+    error_code: Optional[AIErrorCode] = None
+    error_message: str = ""
+    truncated: bool = False
+    finish_reason: str = ""
+
+
 class AIAssistManager:
     """Coordinate prompt building, AI task execution, and ephemeral candidates."""
 
@@ -176,6 +189,43 @@ class AIAssistManager:
         )
         snapshot = await self._task_manager.run_once(request)
         return self._translation_result(snapshot, mode=normalized_mode)
+
+    async def summarize_file_text(
+        self,
+        session: Session | None,
+        file_name: str,
+        text: str,
+        *,
+        message_id: str = "",
+    ) -> AIFileSummaryResult:
+        """Summarize extracted local file text without sending it to the server."""
+        request = self._prompt_builder.build_file_summary_request(
+            file_name,
+            text,
+            session=session,
+            message_id=message_id,
+            task_id=self._task_id("file-summary"),
+        )
+        logger.info(
+            "[ai-perf] file_summary_request task_id=%s session_id=%s message_id=%s file_name=%s source_chars=%s prompt_chars=%s",
+            request.task_id,
+            request.session_id,
+            str(message_id or ""),
+            str(request.metadata.get("file_name") or ""),
+            request.metadata.get("source_chars"),
+            request.metadata.get("prompt_chars"),
+        )
+        snapshot = await self._task_manager.run_once(request)
+        text_output = snapshot.content.strip() if snapshot.state == AITaskState.DONE else ""
+        return AIFileSummaryResult(
+            task_id=snapshot.task_id,
+            text=text_output,
+            state=snapshot.state,
+            error_code=snapshot.error_code,
+            error_message=snapshot.error_message,
+            truncated=snapshot.truncated,
+            finish_reason=snapshot.finish_reason,
+        )
 
     def can_suggest_replies(
         self,

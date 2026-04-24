@@ -10,6 +10,7 @@ from typing import Any, Optional
 from client.core import logging
 from client.core.chat_time_buckets import is_chat_time_break
 from client.core.datetime_utils import to_epoch_seconds
+from client.core.file_text_extraction import FILE_TEXT_EXTRACT_EXTRA_KEY, FileTextExtractionError
 from client.core.logging import setup_logging
 from client.core.secure_storage import SecureStorage
 from client.core.voice_transcription import VOICE_TRANSCRIPT_EXTRA_KEY, VOICE_TRANSCRIPT_MAX_SECONDS
@@ -61,6 +62,7 @@ class ConversationSummaryManager:
         ann_index: ConversationAnnIndex | None = None,
         message_manager: Any | None = None,
         voice_transcription_runtime: Any | None = None,
+        file_text_extractor: Any | None = None,
     ) -> None:
         self._db = db or get_database()
         self._event_bus = event_bus or get_event_bus()
@@ -70,7 +72,9 @@ class ConversationSummaryManager:
         self._ann_index = ann_index or ConversationAnnIndex(model_id=self._vector_index.model_id)
         self._message_manager = message_manager
         self._voice_transcription_runtime = voice_transcription_runtime
+        self._file_text_extractor = file_text_extractor
         self._voice_transcription_semaphore = asyncio.Semaphore(1)
+        self._file_text_extract_semaphore = asyncio.Semaphore(1)
         self._event_subscriptions: list[tuple[str, Any]] = []
         self._scheduled_refresh_tasks: dict[tuple[str, int], asyncio.Task] = {}
         self._refresh_task_running_keys: set[tuple[str, int]] = set()
@@ -139,7 +143,7 @@ class ConversationSummaryManager:
         self._cancel_session_tasks(session_id)
 
     async def _process_message(self, session_id: str, message: ChatMessage) -> None:
-        if message.message_type not in {MessageType.TEXT, MessageType.VOICE}:
+        if message.message_type not in {MessageType.TEXT, MessageType.VOICE, MessageType.FILE}:
             return
 
         session = await self._db.get_session(session_id)
@@ -274,6 +278,7 @@ class ConversationSummaryManager:
             limit=self._prompt_builder.MAX_BUCKET_MESSAGES,
         )
         messages = await self._prepare_voice_transcripts_for_summary(messages)
+        messages = await self._prepare_file_text_extracts_for_summary(messages)
         built = self._prompt_builder.build_bucket_summary_request(
             session,
             messages,
@@ -432,6 +437,82 @@ class ConversationSummaryManager:
         updated = await self._require_message_manager().update_message_voice_transcript(message.message_id, payload)
         return updated or message
 
+    async def _prepare_file_text_extracts_for_summary(self, messages: list[ChatMessage]) -> list[ChatMessage]:
+        """Add local file text extracts to summary input without showing a visible file summary."""
+        prepared: list[ChatMessage] = []
+        for message in list(messages or []):
+            if message.message_type != MessageType.FILE:
+                prepared.append(message)
+                continue
+            prepared.append(await self._prepare_file_text_extract_for_summary(message))
+        return prepared
+
+    async def _prepare_file_text_extract_for_summary(self, message: ChatMessage) -> ChatMessage:
+        extraction = dict((message.extra or {}).get(FILE_TEXT_EXTRACT_EXTRA_KEY) or {})
+        status = str(extraction.get("status") or "").strip()
+        if status == "ready" and str(extraction.get("text") or "").strip():
+            return message
+        if status in {"pending", "failed", "skipped"}:
+            return message
+
+        try:
+            local_path = await self._require_message_manager().download_attachment(message.message_id)
+            async with self._file_text_extract_semaphore:
+                result = await self._require_file_text_extractor().extract(
+                    local_path,
+                    display_name=self._file_display_name(message),
+                    mime_type=self._file_mime_type(message),
+                )
+        except FileTextExtractionError as exc:
+            payload = self._file_text_extract_error_payload(exc)
+            logger.info(
+                "[file-summary] summary_file_text_extract_skipped message_id=%s session_id=%s reason=%s error_code=%s",
+                message.message_id,
+                message.session_id,
+                str(payload.get("reason") or ""),
+                exc.code,
+            )
+            return await self._persist_summary_file_text_extract(message, payload)
+        except Exception as exc:
+            logger.warning(
+                "[file-summary] summary_file_text_extract_unavailable message_id=%s session_id=%s error=%s",
+                message.message_id,
+                message.session_id,
+                exc,
+            )
+            return await self._persist_summary_file_text_extract(
+                message,
+                self._file_text_extract_payload(
+                    status="failed",
+                    reason="file_unavailable",
+                    error_code=exc.__class__.__name__,
+                    error_message=str(exc),
+                ),
+            )
+
+        return await self._persist_summary_file_text_extract(
+            message,
+            self._file_text_extract_payload(
+                status="ready",
+                text=str(getattr(result, "text", "") or "").strip(),
+                file_name=str(getattr(result, "file_name", "") or self._file_display_name(message)),
+                file_ext=str(getattr(result, "file_ext", "") or ""),
+                size_bytes=int(getattr(result, "size_bytes", 0) or 0),
+                truncated=bool(getattr(result, "truncated", False)),
+                page_count=int(getattr(result, "page_count", 0) or 0),
+                metadata=dict(getattr(result, "metadata", {}) or {}),
+            ),
+        )
+
+    async def _persist_summary_file_text_extract(self, message: ChatMessage, payload: dict[str, Any]) -> ChatMessage:
+        message.extra = dict(message.extra or {})
+        message.extra[FILE_TEXT_EXTRACT_EXTRA_KEY] = dict(payload or {})
+        updated = await self._require_message_manager().update_message_file_analysis(
+            message.message_id,
+            text_extract=payload,
+        )
+        return updated or message
+
     def _require_message_manager(self) -> Any:
         if self._message_manager is None:
             from client.managers.message_manager import get_message_manager
@@ -445,6 +526,13 @@ class ConversationSummaryManager:
 
             self._voice_transcription_runtime = get_local_voice_transcription_runtime()
         return self._voice_transcription_runtime
+
+    def _require_file_text_extractor(self) -> Any:
+        if self._file_text_extractor is None:
+            from client.core.file_text_extraction import get_local_file_text_extractor
+
+            self._file_text_extractor = get_local_file_text_extractor()
+        return self._file_text_extractor
 
     async def _persist_summary_result(
         self,
@@ -680,7 +768,11 @@ class ConversationSummaryManager:
             bucket_end_ts,
             limit=max(1, int(self._prompt_builder.MAX_BUCKET_MESSAGES or 1)),
         )
-        summary_messages = [message for message in messages if message.message_type in {MessageType.TEXT, MessageType.VOICE}]
+        summary_messages = [
+            message
+            for message in messages
+            if message.message_type in {MessageType.TEXT, MessageType.VOICE, MessageType.FILE}
+        ]
         latest = summary_messages[-1] if summary_messages else None
         return {
             "message_count": len(summary_messages),
@@ -1079,6 +1171,96 @@ class ConversationSummaryManager:
         if error_message:
             payload["error_message"] = error_message
         return payload
+
+    @staticmethod
+    def _file_text_extract_payload(
+        *,
+        status: str,
+        text: str = "",
+        reason: str = "",
+        file_name: str = "",
+        file_ext: str = "",
+        size_bytes: int = 0,
+        truncated: bool = False,
+        page_count: int = 0,
+        metadata: dict | None = None,
+        error_code: str = "",
+        error_message: str = "",
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "status": str(status or "").strip(),
+            "engine": "local_file_text",
+            "updated_at": datetime.now().isoformat(timespec="seconds"),
+        }
+        if text:
+            payload["text"] = text
+        if reason:
+            payload["reason"] = reason
+        if file_name:
+            payload["file_name"] = file_name
+        if file_ext:
+            payload["file_ext"] = file_ext
+        if size_bytes:
+            payload["size_bytes"] = max(0, int(size_bytes or 0))
+        if truncated:
+            payload["truncated"] = True
+        if page_count:
+            payload["page_count"] = max(0, int(page_count or 0))
+        if metadata:
+            payload.update({key: value for key, value in dict(metadata).items() if value not in (None, "")})
+        if error_code:
+            payload["error_code"] = error_code
+        if error_message:
+            payload["error_message"] = error_message
+        return payload
+
+    @classmethod
+    def _file_text_extract_error_payload(cls, exc: FileTextExtractionError) -> dict[str, Any]:
+        status, reason = cls._file_text_error_status_reason(exc.code)
+        return cls._file_text_extract_payload(
+            status=status,
+            reason=reason,
+            error_code=exc.code,
+            error_message=str(exc),
+        )
+
+    @staticmethod
+    def _file_text_error_status_reason(code: str) -> tuple[str, str]:
+        normalized = str(code or "").strip()
+        if normalized == "FILE_TEXT_UNSUPPORTED_TYPE":
+            return "skipped", "unsupported_type"
+        if normalized == "FILE_TEXT_FILE_TOO_LARGE":
+            return "skipped", "file_too_large"
+        if normalized == "FILE_TEXT_TOO_MANY_PAGES":
+            return "skipped", "too_many_pages"
+        if normalized == "FILE_TEXT_EMPTY":
+            return "skipped", "empty"
+        if normalized == "FILE_TEXT_DEPENDENCY_MISSING":
+            return "failed", "dependency_missing"
+        if normalized == "FILE_TEXT_NOT_FOUND":
+            return "failed", "file_not_found"
+        return "failed", "runtime_error"
+
+    @staticmethod
+    def _file_display_name(message: ChatMessage) -> str:
+        extra = message.extra if isinstance(message.extra, dict) else {}
+        media = extra.get("media") if isinstance(extra.get("media"), dict) else {}
+        for key in ("name", "original_name", "file_name"):
+            value = str(extra.get(key) or media.get(key) or "").strip()
+            if value:
+                return value
+        content = str(message.content or "").replace("\\", "/").rstrip("/")
+        return content.rsplit("/", 1)[-1].strip()
+
+    @staticmethod
+    def _file_mime_type(message: ChatMessage) -> str:
+        extra = message.extra if isinstance(message.extra, dict) else {}
+        media = extra.get("media") if isinstance(extra.get("media"), dict) else {}
+        for key in ("mime_type", "mime", "content_type", "file_type"):
+            value = str(extra.get(key) or media.get(key) or "").strip()
+            if value:
+                return value
+        return ""
 
     @staticmethod
     def _memory_source_id(bucket_start_ts: int) -> str:

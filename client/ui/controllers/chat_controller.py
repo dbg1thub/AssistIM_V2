@@ -436,6 +436,20 @@ class ChatController:
         """Persist one local voice transcription payload for a message."""
         return await self._msg_manager.update_message_voice_transcript(message_id, transcript)
 
+    async def update_message_file_analysis(
+        self,
+        message_id: str,
+        *,
+        text_extract: dict[str, Any] | None = None,
+        summary: dict[str, Any] | None = None,
+    ) -> Optional[ChatMessage]:
+        """Persist local file text extraction/summary payloads for a message."""
+        return await self._msg_manager.update_message_file_analysis(
+            message_id,
+            text_extract=text_extract,
+            summary=summary,
+        )
+
     async def load_messages(
         self,
         session_id: str,

@@ -294,6 +294,7 @@ if 'qfluentwidgets' not in sys.modules:
 from client.events.contact_events import ContactEvent
 from client.core.message_translation import AI_TRANSLATION_EXTRA_KEY
 from client.core.voice_transcription import VOICE_TRANSCRIPT_EXTRA_KEY
+from client.core.file_text_extraction import FILE_SUMMARY_EXTRA_KEY, FILE_TEXT_EXTRACT_EXTRA_KEY
 from client.managers import message_manager as message_manager_module
 from client.managers import session_manager as session_manager_module
 from client.ui.controllers import chat_controller as chat_controller_module
@@ -760,6 +761,54 @@ def test_message_manager_update_voice_transcript_persists_local_extra_and_emits(
     asyncio.run(scenario())
 
 
+def test_message_manager_update_file_analysis_persists_local_extra_and_emits(monkeypatch) -> None:
+    fake_event_bus = FakeEventBus()
+    fake_conn_manager = FakeConnectionManager([])
+    fake_db = FakeDatabase()
+    fake_db.messages['m-file'] = ChatMessage(
+        message_id='m-file',
+        session_id='session-1',
+        sender_id='alice',
+        content='/uploads/report.pdf',
+        message_type=MessageType.FILE,
+        status=MessageStatus.RECEIVED,
+        is_self=False,
+        extra={'name': 'report.pdf', 'keep': 'yes'},
+    )
+
+    monkeypatch.setattr(message_manager_module, 'get_event_bus', lambda: fake_event_bus)
+    monkeypatch.setattr(message_manager_module, 'get_connection_manager', lambda: fake_conn_manager)
+    monkeypatch.setattr(message_manager_module, 'get_database', lambda: fake_db)
+
+    async def scenario() -> None:
+        manager = message_manager_module.MessageManager()
+        await manager.initialize()
+        try:
+            updated = await manager.update_message_file_analysis(
+                'm-file',
+                text_extract={'status': 'ready', 'text': '合同金额为 100 元'},
+                summary={'status': 'ready', 'text': '文件确认了合同金额。'},
+            )
+
+            assert updated is not None
+            assert fake_db.messages['m-file'].extra['keep'] == 'yes'
+            assert fake_db.messages['m-file'].extra[FILE_TEXT_EXTRACT_EXTRA_KEY] == {
+                'status': 'ready',
+                'text': '合同金额为 100 元',
+            }
+            assert fake_db.messages['m-file'].extra[FILE_SUMMARY_EXTRA_KEY] == {
+                'status': 'ready',
+                'text': '文件确认了合同金额。',
+            }
+            assert fake_event_bus.events[-1][0] == message_manager_module.MessageEvent.FILE_ANALYSIS_UPDATED
+            assert fake_event_bus.events[-1][1]['message_id'] == 'm-file'
+            assert fake_event_bus.events[-1][1]['session_id'] == 'session-1'
+        finally:
+            await manager.close()
+
+    asyncio.run(scenario())
+
+
 def test_voice_transcript_extra_is_stripped_from_outbound_payload() -> None:
     outbound = sanitize_outbound_message_extra(
         {
@@ -774,6 +823,24 @@ def test_voice_transcript_extra_is_stripped_from_outbound_payload() -> None:
     assert 'local_path' not in outbound
     assert outbound['duration'] == 6
     assert outbound['media'] == {'url': '/uploads/voice.m4a'}
+
+
+def test_file_analysis_extra_is_stripped_from_outbound_payload() -> None:
+    outbound = sanitize_outbound_message_extra(
+        {
+            'name': 'report.pdf',
+            FILE_TEXT_EXTRACT_EXTRA_KEY: {'status': 'ready', 'text': '不要发给服务端'},
+            FILE_SUMMARY_EXTRA_KEY: {'status': 'ready', 'text': '也不要发给服务端'},
+            'local_path': 'D:/local/report.pdf',
+            'media': {'url': '/uploads/report.pdf'},
+        }
+    )
+
+    assert FILE_TEXT_EXTRACT_EXTRA_KEY not in outbound
+    assert FILE_SUMMARY_EXTRA_KEY not in outbound
+    assert 'local_path' not in outbound
+    assert outbound['name'] == 'report.pdf'
+    assert outbound['media'] == {'url': '/uploads/report.pdf'}
 
 
 def test_message_manager_preserves_local_voice_transcript_during_remote_refresh() -> None:
@@ -803,6 +870,37 @@ def test_message_manager_preserves_local_voice_transcript_during_remote_refresh(
     merged = manager._merge_local_encryption_cache(existing, incoming)
 
     assert merged.extra[VOICE_TRANSCRIPT_EXTRA_KEY] == {'status': 'ready', 'text': '今晚八点开会'}
+
+
+def test_message_manager_preserves_local_file_analysis_during_remote_refresh() -> None:
+    manager = message_manager_module.MessageManager()
+    existing = ChatMessage(
+        message_id='m-file',
+        session_id='session-1',
+        sender_id='alice',
+        content='/uploads/report.pdf',
+        message_type=MessageType.FILE,
+        status=MessageStatus.RECEIVED,
+        extra={
+            'name': 'report.pdf',
+            FILE_TEXT_EXTRACT_EXTRA_KEY: {'status': 'ready', 'text': '合同金额为 100 元'},
+            FILE_SUMMARY_EXTRA_KEY: {'status': 'ready', 'text': '文件确认了合同金额。'},
+        },
+    )
+    incoming = ChatMessage(
+        message_id='m-file',
+        session_id='session-1',
+        sender_id='alice',
+        content='/uploads/report.pdf',
+        message_type=MessageType.FILE,
+        status=MessageStatus.RECEIVED,
+        extra={'name': 'report.pdf'},
+    )
+
+    merged = manager._merge_local_encryption_cache(existing, incoming)
+
+    assert merged.extra[FILE_TEXT_EXTRACT_EXTRA_KEY] == {'status': 'ready', 'text': '合同金额为 100 元'}
+    assert merged.extra[FILE_SUMMARY_EXTRA_KEY] == {'status': 'ready', 'text': '文件确认了合同金额。'}
 
 
 def test_message_manager_retries_on_ack_timeout_and_merges_canonical_ack(monkeypatch) -> None:

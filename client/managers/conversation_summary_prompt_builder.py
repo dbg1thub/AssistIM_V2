@@ -5,6 +5,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime
 from typing import Any, Sequence
 
+from client.core.file_text_extraction import extracted_file_context_text
 from client.core.voice_transcription import VOICE_TRANSCRIPT_EXTRA_KEY
 from client.managers.ai_prompt_builder import privacy_scope_for_session
 from client.models.message import ChatMessage, MessageType, Session
@@ -252,6 +253,9 @@ class ConversationSummaryPromptBuilder:
             return "[图片]"
         if message.message_type == MessageType.FILE:
             name = cls._attachment_name(message)
+            file_text = extracted_file_context_text(message.extra, max_chars=max_chars)
+            if file_text:
+                return f"[文件内容: {name}: {file_text}]" if name else f"[文件内容: {file_text}]"
             return f"[文件: {name}]" if name else "[文件]"
         if message.message_type == MessageType.VIDEO:
             return "[视频]"

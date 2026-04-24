@@ -26,6 +26,7 @@ from client.core.app_icons import AppIcon
 from client.core.avatar_rendering import get_avatar_image_store
 from client.core.avatar_utils import profile_avatar_seed
 from client.core.config_backend import get_config
+from client.core.file_text_extraction import FILE_SUMMARY_EXTRA_KEY, file_summary_display_text
 from client.core.i18n import current_language_code, format_chat_timestamp, format_chat_timestamp_expanded, tr
 from client.core.message_translation import AI_TRANSLATION_EXTRA_KEY
 from client.core.voice_transcription import VOICE_TRANSCRIPT_EXTRA_KEY
@@ -490,17 +491,28 @@ class MessageDelegate(QStyledItemDelegate):
             return size
 
         if message.message_type == MessageType.FILE:
+            summary_text = self._file_summary_display_text(message)
             cache_key = (
                 message.message_type.value,
                 message.message_id,
                 message.extra.get("name", ""),
                 message.extra.get("size"),
+                summary_text,
                 max_bubble_width,
             )
             cached_size = self._cache_get(self._media_size_cache, cache_key)
             if cached_size is not None:
                 return cached_size
-            size = QSize(max(88, min(self.FILE_WIDTH, max_bubble_width)), self.FILE_HEIGHT)
+            file_width = max(88, min(self.FILE_WIDTH, max_bubble_width))
+            if summary_text:
+                summary_width = max(90, min(self.MAX_TEXT_WIDTH, max_bubble_width))
+                summary_size = self._measure_text_content(summary_text, summary_width)
+                size = QSize(
+                    min(max_bubble_width, max(file_width, summary_size.width())),
+                    self.FILE_HEIGHT + self.TRANSLATION_TOP_GAP + summary_size.height(),
+                )
+            else:
+                size = QSize(file_width, self.FILE_HEIGHT)
             self._cache_put(self._media_size_cache, cache_key, size, self.MEDIA_SIZE_CACHE_LIMIT)
             return size
 
@@ -1013,15 +1025,43 @@ class MessageDelegate(QStyledItemDelegate):
         file_name = message.extra.get("name") or os.path.basename(message.content or "") or "File"
         file_path = message.extra.get("local_path") or (message.content or "")
         fallback_size = message.extra.get("size")
+        summary_text = self._file_summary_display_text(message)
+        card_rect = rect
+        if summary_text:
+            card_rect = QRect(rect.x(), rect.y(), rect.width(), min(self.FILE_HEIGHT, rect.height()))
         draw_attachment_card(
             painter,
-            rect,
+            card_rect,
             message_type=MessageType.FILE,
             display_name=file_name,
             file_path=file_path,
             fallback_size=fallback_size,
             dark=isDarkTheme(),
         )
+        if summary_text:
+            self._draw_file_summary_content(painter, rect, card_rect, summary_text)
+
+    def _draw_file_summary_content(self, painter: QPainter, rect: QRect, card_rect: QRect, summary_text: str) -> None:
+        """Draw local file summary text below the file card."""
+        summary_y = card_rect.bottom() + 1 + self.TRANSLATION_TOP_GAP
+        summary_rect = QRect(
+            rect.x(),
+            summary_y,
+            rect.width(),
+            max(1, rect.bottom() - summary_y + 1),
+        )
+        text_rect, layout = self._text_layout(summary_rect, summary_text)
+        divider_y = card_rect.bottom() + 1 + max(2, self.TRANSLATION_TOP_GAP // 2)
+
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setFont(self._text_font())
+        painter.setPen(QColor(255, 255, 255, 42) if isDarkTheme() else QColor(0, 0, 0, 30))
+        painter.drawLine(rect.x(), divider_y, rect.right(), divider_y)
+        text_color = QColor(222, 226, 232, 178) if isDarkTheme() else QColor("#707070")
+        self._draw_plain_text_layout(painter, text_rect, layout, text_color)
+        painter.restore()
 
     def _draw_video_content(self, painter: QPainter, rect: QRect, message: ChatMessage) -> None:
         """Draw a video cover with play button and duration overlay."""
@@ -1668,6 +1708,28 @@ class MessageDelegate(QStyledItemDelegate):
         if status == "pending":
             return tr("chat.translation.pending", "正在翻译...")
         return ""
+
+    def _file_summary_display_text(self, message: ChatMessage) -> str:
+        """Return local file summary or extraction status text for a file bubble."""
+        extra = dict(message.extra or {})
+        text = file_summary_display_text(extra)
+        if text == "正在总结文件内容...":
+            return tr("chat.file_summary.pending", "正在总结文件内容...")
+        if text == "正在读取文件内容...":
+            return tr("chat.file_summary.extracting", "正在读取文件内容...")
+        if text == "文件总结失败":
+            return tr("chat.file_summary.failed_short", "文件总结失败")
+        if text == "暂不支持总结该文件类型":
+            return tr("chat.file_summary.unsupported_type", "暂不支持总结该文件类型")
+        if text == "文件过大，暂不支持总结":
+            return tr("chat.file_summary.file_too_large", "文件过大，暂不支持总结")
+        if text == "PDF 页数过多，暂不支持总结":
+            return tr("chat.file_summary.too_many_pages", "PDF 页数过多，暂不支持总结")
+        if text == "缺少文件解析依赖":
+            return tr("chat.file_summary.dependency_missing", "缺少文件解析依赖")
+        if text == "文件内容读取失败":
+            return tr("chat.file_summary.extract_failed", "文件内容读取失败")
+        return text
 
     def _voice_transcript_display_text(self, message: ChatMessage) -> str:
         """Return the local voice transcription text/pending label for a voice bubble."""

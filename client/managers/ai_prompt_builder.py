@@ -8,7 +8,9 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Sequence
 
+from client.core.file_text_extraction import extracted_file_context_text
 from client.core.message_translation import AI_TRANSLATION_NOOP_MARKER, language_name_for_code
+from client.core.voice_transcription import VOICE_TRANSCRIPT_EXTRA_KEY
 from client.models.ai_assistant import AIMessage, AIMessageRole
 from client.models.message import ChatMessage, MessageType, Session
 from client.services.ai_service import AIPrivacyScope, AIRequest, AITaskType
@@ -78,6 +80,8 @@ class AIPromptBuilder:
     AI_CHAT_ASSISTANT_MESSAGE_CHARS = 420
     AI_CHAT_MAX_TOKENS = 2048
     AI_CHAT_OUTPUT_CHARS = 0
+    FILE_SUMMARY_INPUT_CHARS = 8000
+    FILE_SUMMARY_OUTPUT_CHARS = 720
 
     _DRAFT_TASK_TYPES = {
         AIAssistAction.POLISH: AITaskType.INPUT_POLISH,
@@ -297,6 +301,55 @@ class AIPromptBuilder:
             },
         )
 
+    def build_file_summary_request(
+        self,
+        file_name: str,
+        text: str,
+        *,
+        session: Session | None = None,
+        message_id: str = "",
+        task_id: str = "",
+    ) -> AIRequest:
+        """Build a local-only request for summarizing extracted file text."""
+        source = _normalize_text(text, max_chars=self.FILE_SUMMARY_INPUT_CHARS)
+        if not source:
+            raise ValueError("file text is required")
+        normalized_file_name = _normalize_text(file_name, max_chars=120) or "文件"
+        system_prompt = (
+            "你是 AssistIM 的文件内容总结助手。\n"
+            "使用标准聊天角色，不要输出思考过程，不要解释抽取过程。\n"
+            "只基于提供的文件文字总结，不能编造文件中没有的信息。"
+        )
+        prompt = (
+            "请总结下面这个聊天文件的内容。\n"
+            "要求：\n"
+            "1. 输出 2-5 条关键点，语言简洁。\n"
+            "2. 如有时间、金额、联系人、待办事项，优先保留。\n"
+            "3. 不要输出 Markdown 表格，不要添加文件外的信息。\n\n"
+            f"文件名：{normalized_file_name}\n"
+            f"文件文字：\n{source}"
+        )
+        return AIRequest(
+            task_id=task_id,
+            session_id=str(getattr(session, "session_id", "") or ""),
+            task_type=AITaskType.CHAT,
+            privacy_scope=privacy_scope_for_session(session),
+            must_be_local=True,
+            stream=False,
+            temperature=0.2,
+            max_tokens=256,
+            max_output_chars=self.FILE_SUMMARY_OUTPUT_CHARS,
+            system_prompt=system_prompt,
+            messages=[{"role": "user", "content": prompt}],
+            metadata={
+                "source": "file_summary",
+                "message_id": str(message_id or ""),
+                "file_name": normalized_file_name,
+                "source_chars": len(source),
+                "prompt_chars": len(prompt),
+            },
+        )
+
     def build_reply_suggestion_request(
         self,
         session: Session,
@@ -317,7 +370,7 @@ class AIPromptBuilder:
         context_limit = max(1, int(max_context_messages or self.MAX_CONTEXT_MESSAGES))
         direct_context_messages = list(messages[-context_limit:])
         direct_context = self._format_context(direct_context_messages)
-        recent_context_count = sum(1 for message in direct_context_messages if message.message_type == MessageType.TEXT)
+        recent_context_count = sum(1 for message in direct_context_messages if self._message_context_text(message))
         grouped_anchor_lines = [
             _normalize_text(message.content, max_chars=self.MAX_MESSAGE_CHARS)
             for message in anchor_group
@@ -458,7 +511,7 @@ class AIPromptBuilder:
         context_limit = max(1, int(max_context_messages or self.MAX_CONTEXT_MESSAGES))
         direct_context_messages = list(messages[-context_limit:])
         direct_context = self._format_context(direct_context_messages)
-        recent_context_count = sum(1 for message in direct_context_messages if message.message_type == MessageType.TEXT)
+        recent_context_count = sum(1 for message in direct_context_messages if self._message_context_text(message))
         grouped_anchor_lines = [
             _normalize_text(message.content, max_chars=self.MAX_MESSAGE_CHARS)
             for message in anchor_group
@@ -690,14 +743,39 @@ class AIPromptBuilder:
     def _format_context(self, messages: Sequence[ChatMessage]) -> str:
         lines: list[str] = []
         for message in messages:
-            if message.message_type != MessageType.TEXT:
-                continue
-            content = _normalize_text(message.content, max_chars=self.MAX_MESSAGE_CHARS)
+            content = self._message_context_text(message)
             if not content:
                 continue
             role = "我" if message.is_self else "对方"
             lines.append(f"{role}: {content}")
         return "\n".join(lines)
+
+    def _message_context_text(self, message: ChatMessage) -> str:
+        if message.message_type == MessageType.TEXT:
+            return _normalize_text(message.content, max_chars=self.MAX_MESSAGE_CHARS)
+        if message.message_type == MessageType.FILE:
+            file_text = extracted_file_context_text(message.extra, max_chars=self.MAX_MESSAGE_CHARS)
+            if not file_text:
+                return ""
+            name = self._attachment_name(message)
+            return f"[文件内容: {name}: {file_text}]" if name else f"[文件内容: {file_text}]"
+        if message.message_type == MessageType.VOICE:
+            transcript = dict((message.extra or {}).get(VOICE_TRANSCRIPT_EXTRA_KEY) or {})
+            if str(transcript.get("status") or "").strip() != "ready":
+                return ""
+            text = _normalize_text(transcript.get("text"), max_chars=self.MAX_MESSAGE_CHARS)
+            return f"[语音转文字: {text}]" if text else ""
+        return ""
+
+    @staticmethod
+    def _attachment_name(message: ChatMessage) -> str:
+        extra = message.extra if isinstance(message.extra, dict) else {}
+        media = extra.get("media") if isinstance(extra.get("media"), dict) else {}
+        for key in ("name", "original_name", "file_name"):
+            value = str(extra.get(key) or media.get(key) or "").strip()
+            if value:
+                return value
+        return ""
 
     def _reply_skip_reason(
         self,

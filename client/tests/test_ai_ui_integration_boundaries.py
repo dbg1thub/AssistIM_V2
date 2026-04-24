@@ -202,6 +202,26 @@ def test_voice_transcription_right_click_flow_is_wired() -> None:
     assert 'tr("chat.voice_transcript.pending", "正在转文字...")' in message_delegate
 
 
+def test_file_summary_right_click_flow_is_wired() -> None:
+    message_manager = Path("client/managers/message_manager.py").read_text(encoding="utf-8")
+    chat_controller = Path("client/ui/controllers/chat_controller.py").read_text(encoding="utf-8")
+    chat_interface = Path("client/ui/windows/chat_interface.py").read_text(encoding="utf-8")
+    message_delegate = Path("client/delegates/message_delegate.py").read_text(encoding="utf-8")
+    prompt_builder = Path("client/managers/ai_prompt_builder.py").read_text(encoding="utf-8")
+
+    assert 'FILE_ANALYSIS_UPDATED = "message_file_analysis_updated"' in message_manager
+    assert "async def update_message_file_analysis(" in message_manager
+    assert "async def update_message_file_analysis(" in chat_controller
+    assert "self._subscribe_sync(MessageEvent.FILE_ANALYSIS_UPDATED, self._on_file_analysis_updated)" in chat_interface
+    assert 'file_summary_action = Action(tr("chat.context.summarize_file", "总结文件内容"), self)' in chat_interface
+    assert "def _schedule_file_summary(self, message: ChatMessage, *, generation: int) -> None:" in chat_interface
+    assert "LocalFileTextExtractor" in chat_interface
+    assert "summarize_file_text" in chat_interface
+    assert "FILE_SUMMARY_EXTRA_KEY" in message_delegate
+    assert "def _file_summary_display_text(self, message: ChatMessage) -> str:" in message_delegate
+    assert "def build_file_summary_request(" in prompt_builder
+
+
 def test_summary_infobar_only_targets_current_active_session() -> None:
     chat_interface = Path("client/ui/windows/chat_interface.py").read_text(encoding="utf-8")
 

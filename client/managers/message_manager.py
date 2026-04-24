@@ -17,6 +17,7 @@ from typing import Any, Awaitable, Callable, Optional
 
 from client.core import logging
 from client.core.exceptions import AppError
+from client.core.file_text_extraction import FILE_SUMMARY_EXTRA_KEY, FILE_TEXT_EXTRACT_EXTRA_KEY
 from client.core.i18n import tr
 from client.core.logging import setup_logging
 from client.core.voice_transcription import VOICE_TRANSCRIPT_EXTRA_KEY
@@ -55,6 +56,7 @@ class MessageEvent:
     MEDIA_READY = "message_media_ready"
     TRANSLATION_UPDATED = "message_translation_updated"
     VOICE_TRANSCRIPT_UPDATED = "message_voice_transcript_updated"
+    FILE_ANALYSIS_UPDATED = "message_file_analysis_updated"
     DECRYPTION_STATE_CHANGED = "message_decryption_state_changed"
     RECOVERED = "message_recovered"
     SECURITY_PENDING = "message_security_pending"
@@ -1558,6 +1560,12 @@ class MessageManager:
         local_voice_transcript = dict((existing_message.extra or {}).get(VOICE_TRANSCRIPT_EXTRA_KEY) or {})
         if local_voice_transcript and VOICE_TRANSCRIPT_EXTRA_KEY not in incoming_message.extra:
             incoming_message.extra[VOICE_TRANSCRIPT_EXTRA_KEY] = local_voice_transcript
+        local_file_text_extract = dict((existing_message.extra or {}).get(FILE_TEXT_EXTRACT_EXTRA_KEY) or {})
+        if local_file_text_extract and FILE_TEXT_EXTRACT_EXTRA_KEY not in incoming_message.extra:
+            incoming_message.extra[FILE_TEXT_EXTRACT_EXTRA_KEY] = local_file_text_extract
+        local_file_summary = dict((existing_message.extra or {}).get(FILE_SUMMARY_EXTRA_KEY) or {})
+        if local_file_summary and FILE_SUMMARY_EXTRA_KEY not in incoming_message.extra:
+            incoming_message.extra[FILE_SUMMARY_EXTRA_KEY] = local_file_summary
         return incoming_message
 
     async def _hydrate_cached_attachment_metadata_for_display(self, message: ChatMessage) -> bool:
@@ -2942,6 +2950,40 @@ class MessageManager:
 
         await self._event_bus.emit(
             MessageEvent.VOICE_TRANSCRIPT_UPDATED,
+            {
+                "message_id": message.message_id,
+                "session_id": message.session_id,
+                "message": message,
+            },
+        )
+        return message
+
+    async def update_message_file_analysis(
+        self,
+        message_id: str,
+        *,
+        text_extract: dict[str, Any] | None = None,
+        summary: dict[str, Any] | None = None,
+    ) -> Optional[ChatMessage]:
+        """Persist local file text extraction/summary payloads on a message and notify visible views."""
+        normalized_message_id = str(message_id or "").strip()
+        if not normalized_message_id:
+            return None
+        message = await self._db.get_message(normalized_message_id)
+        if message is None:
+            return None
+
+        updated_extra = dict(message.extra or {})
+        if text_extract is not None:
+            updated_extra[FILE_TEXT_EXTRACT_EXTRA_KEY] = dict(text_extract or {})
+        if summary is not None:
+            updated_extra[FILE_SUMMARY_EXTRA_KEY] = dict(summary or {})
+        message.extra = updated_extra
+        message.updated_at = datetime.now()
+        await self._db.save_message(message)
+
+        await self._event_bus.emit(
+            MessageEvent.FILE_ANALYSIS_UPDATED,
             {
                 "message_id": message.message_id,
                 "session_id": message.session_id,

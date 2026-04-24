@@ -43,9 +43,10 @@ from client.managers.ai_prompt_builder import (
     ReplySummaryContext,
     latest_peer_text_message_group,
 )
+from client.core.file_text_extraction import FILE_TEXT_EXTRACT_EXTRA_KEY
 from client.core.message_translation import AI_TRANSLATION_NOOP_MARKER
 from client.models.ai_assistant import AIMessage, AIMessageRole
-from client.models.message import ChatMessage, MessageStatus, Session
+from client.models.message import ChatMessage, MessageStatus, MessageType, Session
 from client.services.ai_service import AIPrivacyScope, AITaskType
 
 
@@ -228,6 +229,56 @@ def test_reply_suggestion_prompt_anchors_latest_peer_text() -> None:
     assert "最新一句：the deadline is tomorrow" in built.request.messages[0]["content"]
     assert "对方: can you check this?" in built.request.messages[0]["content"]
     assert "对方: the deadline is tomorrow" in built.request.messages[0]["content"]
+
+
+def test_reply_suggestion_prompt_includes_ready_file_text_extract_in_context() -> None:
+    builder = AIPromptBuilder()
+    session = Session(session_id="s1", name="Alice", session_type="direct")
+    messages = [
+        ChatMessage(
+            "m-file",
+            "s1",
+            "peer",
+            "/uploads/report.pdf",
+            message_type=MessageType.FILE,
+            status=MessageStatus.RECEIVED,
+            extra={
+                "name": "report.pdf",
+                FILE_TEXT_EXTRACT_EXTRA_KEY: {"status": "ready", "text": "合同金额为 100 元，付款期限为周五。"},
+            },
+        ),
+        ChatMessage("m-text", "s1", "peer", "你看下这个文件", status=MessageStatus.RECEIVED),
+    ]
+
+    built = builder.build_reply_suggestion_request(session, messages, current_user_id="me")
+
+    prompt = built.request.messages[0]["content"]
+    assert "对方: [文件内容: report.pdf: 合同金额为 100 元，付款期限为周五。]" in prompt
+    assert built.request.metadata["recent_context_count"] == 2
+
+
+def test_file_summary_request_is_local_and_bounded() -> None:
+    builder = AIPromptBuilder()
+    session = Session(session_id="s1", name="Alice", session_type="direct")
+
+    request = builder.build_file_summary_request(
+        "合同.pdf",
+        "甲方同意周五前支付 100 元，乙方负责交付资料。",
+        session=session,
+        message_id="m-file",
+        task_id="file-summary-test",
+    )
+
+    prompt = request.messages[0]["content"]
+    assert request.task_id == "file-summary-test"
+    assert request.task_type == AITaskType.CHAT
+    assert request.must_be_local is True
+    assert request.stream is False
+    assert request.metadata["source"] == "file_summary"
+    assert request.metadata["message_id"] == "m-file"
+    assert request.metadata["file_name"] == "合同.pdf"
+    assert "请总结下面这个聊天文件的内容" in prompt
+    assert "甲方同意周五前支付 100 元" in prompt
 
 
 def test_message_translation_request_is_local_and_mode_aware() -> None:

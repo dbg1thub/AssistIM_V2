@@ -2,6 +2,11 @@ import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
+from client.core.file_text_extraction import (
+    FILE_TEXT_EXTRACT_EXTRA_KEY,
+    FileTextExtractionError,
+    FileTextExtractionResult,
+)
 from client.core.voice_transcription import VOICE_TRANSCRIPT_EXTRA_KEY
 from client.core.secure_storage import SecureStorage
 from client.events.event_bus import EventBus
@@ -143,7 +148,7 @@ class _FakeDatabase:
         messages = [
             message
             for message in self.messages_by_session.get(session_id, [])
-            if message.message_type in {MessageType.TEXT, MessageType.VOICE}
+            if message.message_type in {MessageType.TEXT, MessageType.VOICE, MessageType.FILE}
             and int(message.timestamp.timestamp()) >= int(bucket_start_ts or 0)
             and (bucket_end_ts is None or int(message.timestamp.timestamp()) <= int(bucket_end_ts or 0))
         ]
@@ -300,6 +305,7 @@ class _FakeMessageManager:
         self._download_error = download_error
         self.download_attachment_calls: list[str] = []
         self.update_voice_transcript_calls: list[tuple[str, dict]] = []
+        self.update_file_analysis_calls: list[tuple[str, dict | None, dict | None]] = []
 
     async def download_attachment(self, message_id: str) -> str:
         self.download_attachment_calls.append(message_id)
@@ -316,6 +322,29 @@ class _FakeMessageManager:
                     continue
                 updated_extra = dict(message.extra or {})
                 updated_extra[VOICE_TRANSCRIPT_EXTRA_KEY] = payload
+                message.extra = updated_extra
+                return message
+        return None
+
+    async def update_message_file_analysis(
+        self,
+        message_id: str,
+        *,
+        text_extract: dict | None = None,
+        summary: dict | None = None,
+    ) -> ChatMessage | None:
+        text_payload = dict(text_extract or {}) if text_extract is not None else None
+        summary_payload = dict(summary or {}) if summary is not None else None
+        self.update_file_analysis_calls.append((message_id, text_payload, summary_payload))
+        for messages in self._fake_db.messages_by_session.values():
+            for message in messages:
+                if message.message_id != message_id:
+                    continue
+                updated_extra = dict(message.extra or {})
+                if text_payload is not None:
+                    updated_extra[FILE_TEXT_EXTRACT_EXTRA_KEY] = text_payload
+                if summary_payload is not None:
+                    updated_extra["file_summary"] = summary_payload
                 message.extra = updated_extra
                 return message
         return None
@@ -345,6 +374,32 @@ class _FakeVoiceTranscriptionRuntime:
         return self._result
 
 
+class _FakeFileTextExtractor:
+    def __init__(
+        self,
+        *,
+        result: FileTextExtractionResult | None = None,
+        error: FileTextExtractionError | None = None,
+    ) -> None:
+        self._result = result or FileTextExtractionResult(
+            text="合同金额为 100 元，付款期限为周五。",
+            file_name="report.pdf",
+            file_ext=".pdf",
+            size_bytes=123,
+            truncated=False,
+            metadata={"engine": "local_file_text"},
+        )
+        self._error = error
+        self.calls: list[tuple[str, str]] = []
+
+    async def extract(self, file_path: str, *, display_name: str = "", mime_type: str = "") -> FileTextExtractionResult:
+        del mime_type
+        self.calls.append((file_path, display_name))
+        if self._error is not None:
+            raise self._error
+        return self._result
+
+
 def _make_manager(
     fake_db: _FakeDatabase,
     event_bus: EventBus,
@@ -352,6 +407,7 @@ def _make_manager(
     *,
     message_manager=None,
     voice_transcription_runtime=None,
+    file_text_extractor=None,
 ) -> ConversationSummaryManager:
     return ConversationSummaryManager(
         db=fake_db,
@@ -361,6 +417,7 @@ def _make_manager(
         ann_index=_FakeAnnIndex(),
         message_manager=message_manager,
         voice_transcription_runtime=voice_transcription_runtime,
+        file_text_extractor=file_text_extractor,
     )
 
 
@@ -618,6 +675,148 @@ def test_conversation_summary_manager_continues_when_voice_model_missing(monkeyp
             assert fake_task_manager.requests
             prompt = fake_task_manager.requests[0].messages[0]["content"]
             assert "对方: [语音]" in prompt
+            bucket = await fake_db.get_open_conversation_summary_bucket("session-1")
+            assert bucket is not None
+            assert bucket["summary_status"] == "ready"
+        finally:
+            await manager.close()
+
+    asyncio.run(scenario())
+
+
+def test_conversation_summary_manager_extracts_file_text_before_summary(monkeypatch) -> None:
+    monkeypatch.setattr(SecureStorage, "encrypt_text", classmethod(lambda cls, value: f"enc:{value}"))
+    session = Session(session_id="session-1", name="Bob", session_type="direct")
+    fake_db = _FakeDatabase(session)
+    fake_task_manager = _FakeTaskManager()
+    event_bus = EventBus()
+    fake_message_manager = _FakeMessageManager(fake_db, local_paths={"m-file": "D:/files/report.pdf"})
+    fake_file_extractor = _FakeFileTextExtractor()
+
+    async def scenario() -> None:
+        manager = _make_manager(
+            fake_db,
+            event_bus,
+            fake_task_manager,
+            message_manager=fake_message_manager,
+            file_text_extractor=fake_file_extractor,
+        )
+        manager.DEBOUNCE_SECONDS = 0.0
+        await manager.initialize()
+        try:
+            incoming = _message(
+                "m-file",
+                datetime(2026, 4, 19, 10, 0, 0),
+                content="/uploads/report.pdf",
+                message_type=MessageType.FILE,
+                extra={"name": "report.pdf", "size": 123},
+            )
+            fake_db.messages_by_session["session-1"].append(incoming)
+            await event_bus.emit(MessageEvent.RECEIVED, {"message": incoming})
+            await _drain_summary_tasks(manager)
+
+            assert fake_message_manager.download_attachment_calls == ["m-file"]
+            assert fake_file_extractor.calls == [("D:/files/report.pdf", "report.pdf")]
+            assert fake_message_manager.update_file_analysis_calls[0][0] == "m-file"
+            text_payload = fake_message_manager.update_file_analysis_calls[0][1]
+            assert text_payload is not None
+            assert text_payload["status"] == "ready"
+            assert text_payload["text"] == "合同金额为 100 元，付款期限为周五。"
+            assert fake_task_manager.requests
+            assert "合同金额为 100 元" in fake_task_manager.requests[0].messages[0]["content"]
+            bucket = await fake_db.get_open_conversation_summary_bucket("session-1")
+            assert bucket is not None
+            assert bucket["summary_status"] == "ready"
+            assert bucket["message_count"] == 1
+        finally:
+            await manager.close()
+
+    asyncio.run(scenario())
+
+
+def test_conversation_summary_manager_reuses_existing_file_text_extract_without_extracting(monkeypatch) -> None:
+    monkeypatch.setattr(SecureStorage, "encrypt_text", classmethod(lambda cls, value: f"enc:{value}"))
+    session = Session(session_id="session-1", name="Bob", session_type="direct")
+    fake_db = _FakeDatabase(session)
+    fake_task_manager = _FakeTaskManager()
+    event_bus = EventBus()
+    fake_message_manager = _FakeMessageManager(fake_db)
+    fake_file_extractor = _FakeFileTextExtractor()
+
+    async def scenario() -> None:
+        manager = _make_manager(
+            fake_db,
+            event_bus,
+            fake_task_manager,
+            message_manager=fake_message_manager,
+            file_text_extractor=fake_file_extractor,
+        )
+        manager.DEBOUNCE_SECONDS = 0.0
+        await manager.initialize()
+        try:
+            incoming = _message(
+                "m-file",
+                datetime(2026, 4, 19, 10, 0, 0),
+                content="/uploads/report.pdf",
+                message_type=MessageType.FILE,
+                extra={
+                    "name": "report.pdf",
+                    FILE_TEXT_EXTRACT_EXTRA_KEY: {"status": "ready", "text": "已有文件文字。"},
+                },
+            )
+            fake_db.messages_by_session["session-1"].append(incoming)
+            await event_bus.emit(MessageEvent.RECEIVED, {"message": incoming})
+            await _drain_summary_tasks(manager)
+
+            assert fake_message_manager.download_attachment_calls == []
+            assert fake_file_extractor.calls == []
+            assert fake_message_manager.update_file_analysis_calls == []
+            assert "已有文件文字" in fake_task_manager.requests[0].messages[0]["content"]
+        finally:
+            await manager.close()
+
+    asyncio.run(scenario())
+
+
+def test_conversation_summary_manager_continues_when_file_extract_unsupported(monkeypatch) -> None:
+    monkeypatch.setattr(SecureStorage, "encrypt_text", classmethod(lambda cls, value: f"enc:{value}"))
+    session = Session(session_id="session-1", name="Bob", session_type="direct")
+    fake_db = _FakeDatabase(session)
+    fake_task_manager = _FakeTaskManager()
+    event_bus = EventBus()
+    fake_message_manager = _FakeMessageManager(fake_db, local_paths={"m-file": "D:/files/archive.zip"})
+    fake_file_extractor = _FakeFileTextExtractor(
+        error=FileTextExtractionError("FILE_TEXT_UNSUPPORTED_TYPE", "unsupported")
+    )
+
+    async def scenario() -> None:
+        manager = _make_manager(
+            fake_db,
+            event_bus,
+            fake_task_manager,
+            message_manager=fake_message_manager,
+            file_text_extractor=fake_file_extractor,
+        )
+        manager.DEBOUNCE_SECONDS = 0.0
+        await manager.initialize()
+        try:
+            incoming = _message(
+                "m-file",
+                datetime(2026, 4, 19, 10, 0, 0),
+                content="/uploads/archive.zip",
+                message_type=MessageType.FILE,
+                extra={"name": "archive.zip"},
+            )
+            fake_db.messages_by_session["session-1"].append(incoming)
+            await event_bus.emit(MessageEvent.RECEIVED, {"message": incoming})
+            await _drain_summary_tasks(manager)
+
+            text_payload = fake_message_manager.update_file_analysis_calls[0][1]
+            assert text_payload is not None
+            assert text_payload["status"] == "skipped"
+            assert text_payload["reason"] == "unsupported_type"
+            prompt = fake_task_manager.requests[0].messages[0]["content"]
+            assert "对方: [文件: archive.zip]" in prompt
             bucket = await fake_db.get_open_conversation_summary_bucket("session-1")
             assert bucket is not None
             assert bucket["summary_status"] == "ready"

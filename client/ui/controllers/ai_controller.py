@@ -13,6 +13,7 @@ from client.core.logging import setup_logging
 from client.managers.ai_assist_manager import (
     AIAssistManager,
     AIAssistResult,
+    AIFileSummaryResult,
     AIReplySuggestionState,
     get_ai_assist_manager,
 )
@@ -103,6 +104,22 @@ class AIController:
             message_id=message_id,
             target_language_code=target_language_code,
             mode=mode,
+        )
+
+    async def summarize_file_text(
+        self,
+        session: Session | None,
+        file_name: str,
+        text: str,
+        *,
+        message_id: str = "",
+    ) -> AIFileSummaryResult:
+        """Summarize extracted local file text without sending anything."""
+        return await self._assist_manager.summarize_file_text(
+            session,
+            file_name,
+            text,
+            message_id=message_id,
         )
 
     def can_suggest_replies(

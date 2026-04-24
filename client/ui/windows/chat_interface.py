@@ -39,6 +39,13 @@ from client.core.ai_features import (
 from client.core.avatar_utils import profile_avatar_seed
 from client.core.datetime_utils import coerce_local_datetime
 from client.core.exceptions import AppError
+from client.core.file_text_extraction import (
+    FILE_SUMMARY_EXTRA_KEY,
+    FILE_TEXT_EXTRACT_EXTRA_KEY,
+    FileTextExtractionError,
+    LocalFileTextExtractor,
+    get_local_file_text_extractor,
+)
 from client.core.i18n import current_language_code, tr
 from client.core.message_translation import AI_TRANSLATION_EXTRA_KEY, should_auto_translate_text
 from client.core.voice_transcription import VOICE_TRANSCRIPT_EXTRA_KEY, VOICE_TRANSCRIPT_MAX_SECONDS
@@ -495,6 +502,7 @@ class ChatInterface(QWidget):
         self._reply_suggestion_refresh_task: Optional[asyncio.Task] = None
         self._message_translation_tasks: dict[tuple[str, str], asyncio.Task] = {}
         self._voice_transcription_tasks: dict[str, asyncio.Task] = {}
+        self._file_summary_tasks: dict[str, asyncio.Task] = {}
         self._teardown_started = False
         self._typing_indicator_timer = QTimer(self)
         self._typing_indicator_timer.setSingleShot(True)
@@ -653,6 +661,7 @@ class ChatInterface(QWidget):
         self._subscribe_sync(MessageEvent.MEDIA_READY, self._on_media_ready)
         self._subscribe_sync(MessageEvent.TRANSLATION_UPDATED, self._on_translation_updated)
         self._subscribe_sync(MessageEvent.VOICE_TRANSCRIPT_UPDATED, self._on_voice_transcript_updated)
+        self._subscribe_sync(MessageEvent.FILE_ANALYSIS_UPDATED, self._on_file_analysis_updated)
         self._subscribe_sync(MessageEvent.SYNC_COMPLETED, self._on_sync_completed)
         self._subscribe_sync(MessageEvent.PROFILE_UPDATED, self._on_profile_updated)
         self._subscribe_sync(AITaskEvent.STARTED, self._on_ai_task_started)
@@ -720,6 +729,9 @@ class ChatInterface(QWidget):
         for task in list(self._voice_transcription_tasks.values()):
             self._cancel_pending_task(task)
         self._voice_transcription_tasks.clear()
+        for task in list(self._file_summary_tasks.values()):
+            self._cancel_pending_task(task)
+        self._file_summary_tasks.clear()
         self._cancel_all_ui_tasks()
 
     def _cancel_pending_task(self, task: Optional[asyncio.Task]) -> None:
@@ -1120,6 +1132,19 @@ class ChatInterface(QWidget):
 
     def _on_voice_transcript_updated(self, data: dict) -> None:
         """Refresh one visible message after local voice transcription metadata changes."""
+        session_id = str(data.get("session_id", "") or "")
+        if not session_id:
+            return
+        self._invalidate_session_caches(session_id)
+        if session_id != self._current_session_id:
+            return
+        message = data.get("message")
+        if not isinstance(message, ChatMessage):
+            return
+        self.chat_panel.replace_message(message)
+
+    def _on_file_analysis_updated(self, data: dict) -> None:
+        """Refresh one visible message after local file extraction/summary metadata changes."""
         session_id = str(data.get("session_id", "") or "")
         if not session_id:
             return
@@ -3038,6 +3063,361 @@ class ChatInterface(QWidget):
             payload["error_message"] = error_message
         return payload
 
+    def _schedule_file_summary(self, message: ChatMessage, *, generation: int) -> None:
+        """Run one local file text extraction and summary task for a file message."""
+        if message.message_type != MessageType.FILE or not self._is_current_message_context(message, generation):
+            return
+
+        summary = dict((message.extra or {}).get(FILE_SUMMARY_EXTRA_KEY) or {})
+        if str(summary.get("status") or "").strip() == "ready" and str(summary.get("text") or "").strip():
+            self.chat_panel.replace_message(message)
+            return
+
+        message_id = str(message.message_id or "").strip()
+        if not message_id:
+            return
+        existing = self._file_summary_tasks.get(message_id)
+        if existing is not None and not existing.done():
+            InfoBar.info(
+                tr("chat.message.title", "Message"),
+                tr("chat.file_summary.pending", "正在总结文件内容..."),
+                parent=self.window(),
+                duration=1400,
+            )
+            return
+
+        task = self._create_ui_task(
+            self._run_file_summary(message, generation=generation),
+            f"file summary {message_id}",
+            on_done=lambda finished, mid=message_id: self._clear_file_summary_task(mid, finished),
+        )
+        self._file_summary_tasks[message_id] = task
+
+    def _clear_file_summary_task(self, message_id: str, task: asyncio.Task) -> None:
+        if self._file_summary_tasks.get(message_id) is task:
+            self._file_summary_tasks.pop(message_id, None)
+
+    async def _run_file_summary(self, message: ChatMessage, *, generation: int) -> None:
+        """Download/decrypt one file message locally, extract text, summarize it, and persist local metadata."""
+        if not self._is_current_message_context(message, generation):
+            return
+
+        session = self._get_session(message.session_id)
+        if session is None:
+            logger.info(
+                "[ai-perf] file_summary_skip session_id=%s message_id=%s reason=session_missing",
+                message.session_id,
+                message.message_id,
+            )
+            return
+
+        status = await self._ai_controller.get_health_status()
+        if not self._is_current_message_context(message, generation):
+            return
+        if status.state in {AIHealthState.READY_NOT_LOADED, AIHealthState.LOADING}:
+            self._show_ai_health_status_info_bar(status, explicit_use=True)
+        elif status.state != AIHealthState.READY_LOADED:
+            self._show_ai_health_status_info_bar(status, explicit_use=True)
+            return
+
+        text = self._ready_file_text_extract_text(message)
+        file_name = self._file_message_name(message)
+        if not text:
+            await self._persist_file_analysis(
+                message,
+                text_extract=self._file_text_extract_payload(status="pending", file_name=file_name),
+                summary=self._file_summary_payload(status="pending"),
+                generation=generation,
+            )
+            try:
+                local_path = await self._chat_controller.download_message_attachment(message.message_id)
+                extractor: LocalFileTextExtractor = get_local_file_text_extractor()
+                extract_result = await extractor.extract(
+                    local_path,
+                    display_name=file_name,
+                    mime_type=self._file_message_mime_type(message),
+                )
+            except FileTextExtractionError as exc:
+                text_extract = self._file_text_extract_error_payload(exc)
+                await self._persist_file_analysis(
+                    message,
+                    text_extract=text_extract,
+                    summary=self._file_summary_payload(status="skipped", reason=str(text_extract.get("reason") or "")),
+                    generation=generation,
+                )
+                if self._is_current_message_context(message, generation):
+                    InfoBar.info(
+                        tr("chat.message.title", "Message"),
+                        self._file_extract_user_message(text_extract),
+                        parent=self.window(),
+                        duration=2200,
+                    )
+                return
+            except Exception as exc:
+                logger.exception("File summary extraction failed message_id=%s", message.message_id)
+                await self._persist_file_analysis(
+                    message,
+                    text_extract=self._file_text_extract_payload(
+                        status="failed",
+                        reason="file_unavailable",
+                        error_code=exc.__class__.__name__,
+                        error_message=str(exc),
+                    ),
+                    summary=self._file_summary_payload(
+                        status="failed",
+                        reason="file_unavailable",
+                        error_code=exc.__class__.__name__,
+                        error_message=str(exc),
+                    ),
+                    generation=generation,
+                )
+                if self._is_current_message_context(message, generation):
+                    InfoBar.warning(
+                        tr("chat.message.title", "Message"),
+                        tr("chat.file_summary.extract_failed", "文件内容读取失败"),
+                        parent=self.window(),
+                        duration=2200,
+                    )
+                return
+
+            file_name = str(extract_result.file_name or file_name)
+            text = str(extract_result.text or "").strip()
+            await self._persist_file_analysis(
+                message,
+                text_extract=self._file_text_extract_payload(
+                    status="ready",
+                    text=text,
+                    file_name=file_name,
+                    file_ext=extract_result.file_ext,
+                    size_bytes=extract_result.size_bytes,
+                    truncated=extract_result.truncated,
+                    page_count=extract_result.page_count,
+                    metadata=extract_result.metadata,
+                ),
+                generation=generation,
+            )
+
+        queued_for_busy = self._ai_controller.has_running_non_summary_task()
+        if queued_for_busy:
+            logger.info(
+                "[ai-perf] file_summary_waiting session_id=%s message_id=%s reason=ai_busy",
+                message.session_id,
+                message.message_id,
+            )
+        await self._persist_file_analysis(
+            message,
+            summary=self._file_summary_payload(status="pending"),
+            generation=generation,
+        )
+
+        try:
+            result = await self._ai_controller.summarize_file_text(
+                session,
+                file_name,
+                text,
+                message_id=message.message_id,
+            )
+        except Exception as exc:
+            logger.exception("File summary generation failed message_id=%s", message.message_id)
+            result = None
+            error_code = exc.__class__.__name__
+            error_message = str(exc)
+        else:
+            error_code = str(getattr(getattr(result, "error_code", None), "value", getattr(result, "error_code", "")) or "")
+            error_message = str(getattr(result, "error_message", "") or "")
+
+        if result is not None and result.state == AITaskState.DONE and result.text.strip():
+            await self._persist_file_analysis(
+                message,
+                summary=self._file_summary_payload(status="ready", text=result.text.strip()),
+                generation=generation,
+            )
+            logger.info(
+                "[ai-perf] file_summary_applied session_id=%s message_id=%s status=ready output_chars=%s",
+                message.session_id,
+                message.message_id,
+                len(result.text.strip()),
+            )
+            return
+
+        await self._persist_file_analysis(
+            message,
+            summary=self._file_summary_payload(
+                status="failed",
+                reason="ai_failed",
+                error_code=error_code,
+                error_message=error_message,
+            ),
+            generation=generation,
+        )
+        if self._is_current_message_context(message, generation):
+            InfoBar.warning(
+                tr("composer.ai.title", "AI 助手"),
+                tr("chat.file_summary.failed", "文件总结失败，请稍后重试。"),
+                parent=self.window(),
+                duration=2200,
+            )
+
+    async def _persist_file_analysis(
+        self,
+        message: ChatMessage,
+        *,
+        text_extract: dict | None = None,
+        summary: dict | None = None,
+        generation: int,
+    ) -> None:
+        """Persist local file analysis payloads and keep the visible row responsive."""
+        message.extra = dict(message.extra or {})
+        if text_extract is not None:
+            message.extra[FILE_TEXT_EXTRACT_EXTRA_KEY] = dict(text_extract or {})
+        if summary is not None:
+            message.extra[FILE_SUMMARY_EXTRA_KEY] = dict(summary or {})
+        if self._is_current_message_context(message, generation):
+            self.chat_panel.replace_message(message)
+        updated = await self._chat_controller.update_message_file_analysis(
+            message.message_id,
+            text_extract=text_extract,
+            summary=summary,
+        )
+        if updated is not None and self._is_current_message_context(updated, generation):
+            self.chat_panel.replace_message(updated)
+
+    @staticmethod
+    def _file_text_extract_payload(
+        *,
+        status: str,
+        text: str = "",
+        reason: str = "",
+        file_name: str = "",
+        file_ext: str = "",
+        size_bytes: int = 0,
+        truncated: bool = False,
+        page_count: int = 0,
+        metadata: dict | None = None,
+        error_code: str = "",
+        error_message: str = "",
+    ) -> dict:
+        payload = {
+            "status": str(status or "").strip(),
+            "engine": "local_file_text",
+            "updated_at": datetime.now().isoformat(timespec="seconds"),
+        }
+        if text:
+            payload["text"] = text
+        if reason:
+            payload["reason"] = reason
+        if file_name:
+            payload["file_name"] = file_name
+        if file_ext:
+            payload["file_ext"] = file_ext
+        if size_bytes:
+            payload["size_bytes"] = max(0, int(size_bytes or 0))
+        if truncated:
+            payload["truncated"] = True
+        if page_count:
+            payload["page_count"] = max(0, int(page_count or 0))
+        if metadata:
+            payload.update({key: value for key, value in dict(metadata).items() if value not in (None, "")})
+        if error_code:
+            payload["error_code"] = error_code
+        if error_message:
+            payload["error_message"] = error_message
+        return payload
+
+    @classmethod
+    def _file_text_extract_error_payload(cls, exc: FileTextExtractionError) -> dict:
+        status, reason = cls._file_text_error_status_reason(exc.code)
+        return cls._file_text_extract_payload(
+            status=status,
+            reason=reason,
+            error_code=exc.code,
+            error_message=str(exc),
+        )
+
+    @staticmethod
+    def _file_summary_payload(
+        *,
+        status: str,
+        text: str = "",
+        reason: str = "",
+        error_code: str = "",
+        error_message: str = "",
+    ) -> dict:
+        payload = {
+            "status": str(status or "").strip(),
+            "engine": "local_gguf",
+            "updated_at": datetime.now().isoformat(timespec="seconds"),
+        }
+        if text:
+            payload["text"] = text
+        if reason:
+            payload["reason"] = reason
+        if error_code:
+            payload["error_code"] = error_code
+        if error_message:
+            payload["error_message"] = error_message
+        return payload
+
+    @staticmethod
+    def _file_text_error_status_reason(code: str) -> tuple[str, str]:
+        normalized = str(code or "").strip()
+        if normalized == "FILE_TEXT_UNSUPPORTED_TYPE":
+            return "skipped", "unsupported_type"
+        if normalized == "FILE_TEXT_FILE_TOO_LARGE":
+            return "skipped", "file_too_large"
+        if normalized == "FILE_TEXT_TOO_MANY_PAGES":
+            return "skipped", "too_many_pages"
+        if normalized == "FILE_TEXT_EMPTY":
+            return "skipped", "empty"
+        if normalized == "FILE_TEXT_DEPENDENCY_MISSING":
+            return "failed", "dependency_missing"
+        if normalized == "FILE_TEXT_NOT_FOUND":
+            return "failed", "file_not_found"
+        return "failed", "runtime_error"
+
+    @staticmethod
+    def _file_extract_user_message(payload: dict) -> str:
+        reason = str((payload or {}).get("reason") or "").strip()
+        if reason == "unsupported_type":
+            return tr("chat.file_summary.unsupported_type", "暂不支持总结该文件类型")
+        if reason == "file_too_large":
+            return tr("chat.file_summary.file_too_large", "文件过大，暂不支持总结")
+        if reason == "too_many_pages":
+            return tr("chat.file_summary.too_many_pages", "PDF 页数过多，暂不支持总结")
+        if reason == "empty":
+            return tr("chat.file_summary.empty", "没有读取到可总结的文字")
+        if reason == "dependency_missing":
+            return tr("chat.file_summary.dependency_missing", "缺少文件解析依赖")
+        return tr("chat.file_summary.extract_failed", "文件内容读取失败")
+
+    @staticmethod
+    def _ready_file_text_extract_text(message: ChatMessage) -> str:
+        payload = dict((message.extra or {}).get(FILE_TEXT_EXTRACT_EXTRA_KEY) or {})
+        if str(payload.get("status") or "").strip() != "ready":
+            return ""
+        return str(payload.get("text") or "").strip()
+
+    @staticmethod
+    def _file_message_name(message: ChatMessage) -> str:
+        extra = message.extra if isinstance(message.extra, dict) else {}
+        media = extra.get("media") if isinstance(extra.get("media"), dict) else {}
+        for key in ("name", "original_name", "file_name"):
+            value = str(extra.get(key) or media.get(key) or "").strip()
+            if value:
+                return value
+        content = str(message.content or "").replace("\\", "/").rstrip("/")
+        return content.rsplit("/", 1)[-1].strip() or tr("common.file", "File")
+
+    @staticmethod
+    def _file_message_mime_type(message: ChatMessage) -> str:
+        extra = message.extra if isinstance(message.extra, dict) else {}
+        media = extra.get("media") if isinstance(extra.get("media"), dict) else {}
+        for key in ("mime_type", "mime", "content_type", "file_type"):
+            value = str(extra.get(key) or media.get(key) or "").strip()
+            if value:
+                return value
+        return ""
+
     async def _send_segments_async(self, session_id: str, segments: list[dict]) -> None:
         """Send composed editor segments sequentially so mixed content keeps order."""
         for index, segment in enumerate(segments):
@@ -4165,6 +4545,7 @@ class ChatInterface(QWidget):
         copy_action = None
         open_action = None
         transcribe_action = None
+        file_summary_action = None
         translate_action = None
         quote_action = None
         multiselect_action = None
@@ -4191,6 +4572,10 @@ class ChatInterface(QWidget):
         if message.message_type == MessageType.VOICE:
             transcribe_action = Action(tr("chat.context.transcribe_voice", "转文字"), self)
             basic_actions.append(transcribe_action)
+
+        if message.message_type == MessageType.FILE:
+            file_summary_action = Action(tr("chat.context.summarize_file", "总结文件内容"), self)
+            basic_actions.append(file_summary_action)
 
         if self._can_translate_message_manually(message):
             translate_action = Action(tr("chat.context.translate", "Translate"), self)
@@ -4239,6 +4624,13 @@ class ChatInterface(QWidget):
         if transcribe_action:
             transcribe_action.triggered.connect(
                 lambda _checked=False, msg=message, current=self._session_focus_generation: self._schedule_voice_transcription(
+                    msg,
+                    generation=current,
+                )
+            )
+        if file_summary_action:
+            file_summary_action.triggered.connect(
+                lambda _checked=False, msg=message, current=self._session_focus_generation: self._schedule_file_summary(
                     msg,
                     generation=current,
                 )

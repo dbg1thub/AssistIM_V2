@@ -1,5 +1,6 @@
 from datetime import datetime
 
+from client.core.file_text_extraction import FILE_TEXT_EXTRACT_EXTRA_KEY
 from client.core.voice_transcription import VOICE_TRANSCRIPT_EXTRA_KEY
 from client.managers.conversation_summary_prompt_builder import (
     ConversationSummaryPromptBuilder,
@@ -191,3 +192,28 @@ def test_format_context_uses_ready_voice_transcript_for_voice_messages() -> None
     assert "对方: [语音转文字: 明天下午三点见。]" in prompt
     assert "我: [语音]" in prompt
     assert "pending" not in prompt
+
+
+def test_format_context_uses_ready_file_text_extract_for_file_messages() -> None:
+    session = Session(session_id="session-1", name="Bob", session_type="direct")
+    builder = ConversationSummaryPromptBuilder()
+    built = builder.build_bucket_summary_request(
+        session,
+        [
+            _message(
+                "m-file",
+                datetime(2026, 4, 19, 10, 0, 0),
+                content="/uploads/report.pdf",
+                message_type=MessageType.FILE,
+                extra={
+                    "name": "report.pdf",
+                    FILE_TEXT_EXTRACT_EXTRA_KEY: {"status": "ready", "text": "合同金额为 100 元，付款期限为周五。"},
+                },
+            ),
+        ],
+        is_open=True,
+    )
+
+    assert built is not None
+    prompt = built.request.messages[0]["content"]
+    assert "对方: [文件内容: report.pdf: 合同金额为 100 元，付款期限为周五。]" in prompt
