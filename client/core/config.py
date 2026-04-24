@@ -215,8 +215,13 @@ def _runtime_server_payload() -> dict[str, object] | None:
     }
 
 
+def _install_preserving_qconfig_save() -> None:
+    qconfig.save = cfg.save
+
+
 cfg = Config()
 qconfig.load(UI_CONFIG_PATH, cfg)
+_install_preserving_qconfig_save()
 
 
 def save_config() -> None:
