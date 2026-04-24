@@ -39,6 +39,7 @@ data
 client/resources/models/*.gguf
 client/resources/models/*.bin
 client/resources/models/*.safetensors
+client/resources/models/faster-whisper/
 
 # 环境变量
 .env

@@ -182,6 +182,26 @@ def test_message_translation_ui_boundaries_are_wired() -> None:
     assert 'tr("chat.translation.queued", "AI 正忙，等待当前任务完成...")' in message_delegate
 
 
+def test_voice_transcription_right_click_flow_is_wired() -> None:
+    message_manager = Path("client/managers/message_manager.py").read_text(encoding="utf-8")
+    chat_controller = Path("client/ui/controllers/chat_controller.py").read_text(encoding="utf-8")
+    chat_interface = Path("client/ui/windows/chat_interface.py").read_text(encoding="utf-8")
+    message_delegate = Path("client/delegates/message_delegate.py").read_text(encoding="utf-8")
+    requirements = Path("requirements.txt").read_text(encoding="utf-8")
+
+    assert "faster-whisper" in requirements
+    assert 'VOICE_TRANSCRIPT_UPDATED = "message_voice_transcript_updated"' in message_manager
+    assert "async def update_message_voice_transcript(self, message_id: str, transcript: dict[str, Any])" in message_manager
+    assert "async def update_message_voice_transcript(self, message_id: str, transcript: dict[str, Any])" in chat_controller
+    assert "self._subscribe_sync(MessageEvent.VOICE_TRANSCRIPT_UPDATED, self._on_voice_transcript_updated)" in chat_interface
+    assert 'transcribe_action = Action(tr("chat.context.transcribe_voice", "转文字"), self)' in chat_interface
+    assert "def _schedule_voice_transcription(self, message: ChatMessage, *, generation: int) -> None:" in chat_interface
+    assert "get_local_voice_transcription_runtime" in chat_interface
+    assert "VOICE_TRANSCRIPT_EXTRA_KEY" in message_delegate
+    assert "def _voice_transcript_display_text(self, message: ChatMessage) -> str:" in message_delegate
+    assert 'tr("chat.voice_transcript.pending", "正在转文字...")' in message_delegate
+
+
 def test_summary_infobar_only_targets_current_active_session() -> None:
     chat_interface = Path("client/ui/windows/chat_interface.py").read_text(encoding="utf-8")
 

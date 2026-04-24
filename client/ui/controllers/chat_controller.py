@@ -432,6 +432,10 @@ class ChatController:
         """Persist one local AI translation payload for a message."""
         return await self._msg_manager.update_message_translation(message_id, translation)
 
+    async def update_message_voice_transcript(self, message_id: str, transcript: dict[str, Any]) -> Optional[ChatMessage]:
+        """Persist one local voice transcription payload for a message."""
+        return await self._msg_manager.update_message_voice_transcript(message_id, transcript)
+
     async def load_messages(
         self,
         session_id: str,

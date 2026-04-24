@@ -293,10 +293,11 @@ if 'qfluentwidgets' not in sys.modules:
 
 from client.events.contact_events import ContactEvent
 from client.core.message_translation import AI_TRANSLATION_EXTRA_KEY
+from client.core.voice_transcription import VOICE_TRANSCRIPT_EXTRA_KEY
 from client.managers import message_manager as message_manager_module
 from client.managers import session_manager as session_manager_module
 from client.ui.controllers import chat_controller as chat_controller_module
-from client.models.message import ChatMessage, MessageStatus, MessageType, Session
+from client.models.message import ChatMessage, MessageStatus, MessageType, Session, sanitize_outbound_message_extra
 
 
 class FakeEventBus:
@@ -712,6 +713,96 @@ def test_message_manager_update_message_translation_persists_extra_and_emits(mon
             await manager.close()
 
     asyncio.run(scenario())
+
+
+def test_message_manager_update_voice_transcript_persists_local_extra_and_emits(monkeypatch) -> None:
+    fake_event_bus = FakeEventBus()
+    fake_conn_manager = FakeConnectionManager([])
+    fake_db = FakeDatabase()
+    fake_db.messages['m-voice'] = ChatMessage(
+        message_id='m-voice',
+        session_id='session-1',
+        sender_id='alice',
+        content='file:///voice.m4a',
+        message_type=MessageType.VOICE,
+        status=MessageStatus.RECEIVED,
+        is_self=False,
+        extra={'duration': 8, 'keep': 'yes'},
+    )
+
+    monkeypatch.setattr(message_manager_module, 'get_event_bus', lambda: fake_event_bus)
+    monkeypatch.setattr(message_manager_module, 'get_connection_manager', lambda: fake_conn_manager)
+    monkeypatch.setattr(message_manager_module, 'get_database', lambda: fake_db)
+
+    async def scenario() -> None:
+        manager = message_manager_module.MessageManager()
+        await manager.initialize()
+        try:
+            updated = await manager.update_message_voice_transcript(
+                'm-voice',
+                {'status': 'ready', 'text': '今晚八点开会', 'engine': 'faster-whisper'},
+            )
+
+            assert updated is not None
+            assert fake_db.messages['m-voice'].extra['duration'] == 8
+            assert fake_db.messages['m-voice'].extra['keep'] == 'yes'
+            assert fake_db.messages['m-voice'].extra[VOICE_TRANSCRIPT_EXTRA_KEY] == {
+                'status': 'ready',
+                'text': '今晚八点开会',
+                'engine': 'faster-whisper',
+            }
+            assert fake_event_bus.events[-1][0] == message_manager_module.MessageEvent.VOICE_TRANSCRIPT_UPDATED
+            assert fake_event_bus.events[-1][1]['message_id'] == 'm-voice'
+            assert fake_event_bus.events[-1][1]['session_id'] == 'session-1'
+        finally:
+            await manager.close()
+
+    asyncio.run(scenario())
+
+
+def test_voice_transcript_extra_is_stripped_from_outbound_payload() -> None:
+    outbound = sanitize_outbound_message_extra(
+        {
+            'duration': 6,
+            'voice_transcript': {'status': 'ready', 'text': '不要发给服务端'},
+            'local_path': 'D:/local/voice.m4a',
+            'media': {'url': '/uploads/voice.m4a'},
+        }
+    )
+
+    assert 'voice_transcript' not in outbound
+    assert 'local_path' not in outbound
+    assert outbound['duration'] == 6
+    assert outbound['media'] == {'url': '/uploads/voice.m4a'}
+
+
+def test_message_manager_preserves_local_voice_transcript_during_remote_refresh() -> None:
+    manager = message_manager_module.MessageManager()
+    existing = ChatMessage(
+        message_id='m-voice',
+        session_id='session-1',
+        sender_id='alice',
+        content='/uploads/voice.m4a',
+        message_type=MessageType.VOICE,
+        status=MessageStatus.RECEIVED,
+        extra={
+            'duration': 7,
+            VOICE_TRANSCRIPT_EXTRA_KEY: {'status': 'ready', 'text': '今晚八点开会'},
+        },
+    )
+    incoming = ChatMessage(
+        message_id='m-voice',
+        session_id='session-1',
+        sender_id='alice',
+        content='/uploads/voice.m4a',
+        message_type=MessageType.VOICE,
+        status=MessageStatus.RECEIVED,
+        extra={'duration': 7},
+    )
+
+    merged = manager._merge_local_encryption_cache(existing, incoming)
+
+    assert merged.extra[VOICE_TRANSCRIPT_EXTRA_KEY] == {'status': 'ready', 'text': '今晚八点开会'}
 
 
 def test_message_manager_retries_on_ack_timeout_and_merges_canonical_ack(monkeypatch) -> None:

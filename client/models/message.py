@@ -162,6 +162,7 @@ def sanitize_outbound_message_extra(extra: dict[str, Any] | None) -> dict[str, A
     normalized.pop("local_path", None)
     normalized.pop("uploading", None)
     normalized.pop("security_pending", None)
+    normalized.pop("voice_transcript", None)
 
     mentions = normalize_message_mentions(normalized.get("mentions"), content=str(normalized.get("content", "") or ""))
     if mentions:

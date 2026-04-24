@@ -41,6 +41,7 @@ from client.core.datetime_utils import coerce_local_datetime
 from client.core.exceptions import AppError
 from client.core.i18n import current_language_code, tr
 from client.core.message_translation import AI_TRANSLATION_EXTRA_KEY, should_auto_translate_text
+from client.core.voice_transcription import VOICE_TRANSCRIPT_EXTRA_KEY, VOICE_TRANSCRIPT_MAX_SECONDS
 from client.events.contact_events import ContactEvent
 from client.core.message_actions import should_offer_delete, should_offer_recall
 from client.events.event_bus import get_event_bus
@@ -52,6 +53,10 @@ from client.managers.session_manager import SessionEvent
 from client.managers.sound_manager import AppSound, get_sound_manager
 from client.models.call import ActiveCallState, CallMediaType
 from client.models.message import ChatMessage, MessageStatus, MessageType, format_message_preview
+from client.services.local_voice_transcription_service import (
+    LocalVoiceTranscriptionRuntimeError,
+    get_local_voice_transcription_runtime,
+)
 from client.ui.controllers.auth_controller import get_auth_controller
 from client.ui.controllers.ai_controller import AIHealthState, AIHealthStatus, get_ai_controller
 from client.ui.controllers.chat_controller import get_chat_controller
@@ -489,6 +494,7 @@ class ChatInterface(QWidget):
         self._reply_suggestion_waiting_group: dict[str, object] | None = None
         self._reply_suggestion_refresh_task: Optional[asyncio.Task] = None
         self._message_translation_tasks: dict[tuple[str, str], asyncio.Task] = {}
+        self._voice_transcription_tasks: dict[str, asyncio.Task] = {}
         self._teardown_started = False
         self._typing_indicator_timer = QTimer(self)
         self._typing_indicator_timer.setSingleShot(True)
@@ -646,6 +652,7 @@ class ChatInterface(QWidget):
         self._subscribe_sync(MessageEvent.DELETED, self._on_deleted_event)
         self._subscribe_sync(MessageEvent.MEDIA_READY, self._on_media_ready)
         self._subscribe_sync(MessageEvent.TRANSLATION_UPDATED, self._on_translation_updated)
+        self._subscribe_sync(MessageEvent.VOICE_TRANSCRIPT_UPDATED, self._on_voice_transcript_updated)
         self._subscribe_sync(MessageEvent.SYNC_COMPLETED, self._on_sync_completed)
         self._subscribe_sync(MessageEvent.PROFILE_UPDATED, self._on_profile_updated)
         self._subscribe_sync(AITaskEvent.STARTED, self._on_ai_task_started)
@@ -710,6 +717,9 @@ class ChatInterface(QWidget):
         for task in list(self._message_translation_tasks.values()):
             self._cancel_pending_task(task)
         self._message_translation_tasks.clear()
+        for task in list(self._voice_transcription_tasks.values()):
+            self._cancel_pending_task(task)
+        self._voice_transcription_tasks.clear()
         self._cancel_all_ui_tasks()
 
     def _cancel_pending_task(self, task: Optional[asyncio.Task]) -> None:
@@ -1097,6 +1107,19 @@ class ChatInterface(QWidget):
 
     def _on_translation_updated(self, data: dict) -> None:
         """Refresh one visible message after local AI translation metadata changes."""
+        session_id = str(data.get("session_id", "") or "")
+        if not session_id:
+            return
+        self._invalidate_session_caches(session_id)
+        if session_id != self._current_session_id:
+            return
+        message = data.get("message")
+        if not isinstance(message, ChatMessage):
+            return
+        self.chat_panel.replace_message(message)
+
+    def _on_voice_transcript_updated(self, data: dict) -> None:
+        """Refresh one visible message after local voice transcription metadata changes."""
         session_id = str(data.get("session_id", "") or "")
         if not session_id:
             return
@@ -2827,6 +2850,184 @@ class ChatInterface(QWidget):
             return False
         return str(translation.get("status") or "").strip() in statuses
 
+    def _schedule_voice_transcription(self, message: ChatMessage, *, generation: int) -> None:
+        """Run one local faster-whisper transcription task for a voice message."""
+        if message.message_type != MessageType.VOICE or not self._is_current_message_context(message, generation):
+            return
+
+        payload = dict((message.extra or {}).get(VOICE_TRANSCRIPT_EXTRA_KEY) or {})
+        if str(payload.get("status") or "").strip() == "ready" and str(payload.get("text") or "").strip():
+            self.chat_panel.replace_message(message)
+            return
+
+        message_id = str(message.message_id or "").strip()
+        if not message_id:
+            return
+        existing = self._voice_transcription_tasks.get(message_id)
+        if existing is not None and not existing.done():
+            InfoBar.info(
+                tr("chat.message.title", "Message"),
+                tr("chat.voice_transcript.pending", "正在转文字..."),
+                parent=self.window(),
+                duration=1400,
+            )
+            return
+
+        task = self._create_ui_task(
+            self._run_voice_transcription(message, generation=generation),
+            f"voice transcription {message_id}",
+            on_done=lambda finished, mid=message_id: self._clear_voice_transcription_task(mid, finished),
+        )
+        self._voice_transcription_tasks[message_id] = task
+
+    def _clear_voice_transcription_task(self, message_id: str, task: asyncio.Task) -> None:
+        if self._voice_transcription_tasks.get(message_id) is task:
+            self._voice_transcription_tasks.pop(message_id, None)
+
+    async def _run_voice_transcription(self, message: ChatMessage, *, generation: int) -> None:
+        """Download/decrypt one voice message locally, run ASR, and persist the local transcript."""
+        duration_seconds = self._voice_message_duration_seconds(message)
+        if duration_seconds > VOICE_TRANSCRIPT_MAX_SECONDS:
+            await self._persist_voice_transcript(
+                message,
+                self._voice_transcript_payload(status="skipped", reason="audio_too_long", duration_seconds=duration_seconds),
+                generation=generation,
+            )
+            if self._is_current_message_context(message, generation):
+                InfoBar.info(
+                    tr("chat.message.title", "Message"),
+                    tr("chat.voice_transcript.too_long", "语音超过 30 秒，暂不支持转文字"),
+                    parent=self.window(),
+                    duration=2200,
+                )
+            return
+
+        await self._persist_voice_transcript(
+            message,
+            self._voice_transcript_payload(status="pending", duration_seconds=duration_seconds),
+            generation=generation,
+        )
+
+        try:
+            local_path = await self._chat_controller.download_message_attachment(message.message_id)
+            result = await get_local_voice_transcription_runtime().transcribe(
+                local_path,
+                duration_seconds=duration_seconds or None,
+            )
+        except LocalVoiceTranscriptionRuntimeError as exc:
+            status = "skipped" if exc.code == "VOICE_TRANSCRIPT_AUDIO_TOO_LONG" else "failed"
+            reason = "audio_too_long" if exc.code == "VOICE_TRANSCRIPT_AUDIO_TOO_LONG" else "runtime_error"
+            await self._persist_voice_transcript(
+                message,
+                self._voice_transcript_payload(
+                    status=status,
+                    reason=reason,
+                    duration_seconds=duration_seconds,
+                    error_code=exc.code,
+                    error_message=str(exc),
+                ),
+                generation=generation,
+            )
+            if status == "failed" and self._is_current_message_context(message, generation):
+                InfoBar.warning(
+                    tr("chat.message.title", "Message"),
+                    tr("chat.voice_transcript.failed", "转文字失败，请稍后重试。"),
+                    parent=self.window(),
+                    duration=2200,
+                )
+            return
+        except Exception as exc:
+            logger.exception("Voice transcription failed message_id=%s", message.message_id)
+            await self._persist_voice_transcript(
+                message,
+                self._voice_transcript_payload(
+                    status="failed",
+                    reason="runtime_error",
+                    duration_seconds=duration_seconds,
+                    error_code=exc.__class__.__name__,
+                    error_message=str(exc),
+                ),
+                generation=generation,
+            )
+            if self._is_current_message_context(message, generation):
+                InfoBar.warning(
+                    tr("chat.message.title", "Message"),
+                    tr("chat.voice_transcript.failed", "转文字失败，请稍后重试。"),
+                    parent=self.window(),
+                    duration=2200,
+                )
+            return
+
+        text = str(result.text or "").strip()
+        if not text:
+            payload = self._voice_transcript_payload(
+                status="skipped",
+                reason="no_speech",
+                duration_seconds=duration_seconds,
+            )
+        else:
+            payload = self._voice_transcript_payload(
+                status="ready",
+                text=text,
+                duration_seconds=duration_seconds,
+                language=result.language,
+                language_probability=result.language_probability,
+                metadata=result.metadata,
+            )
+        await self._persist_voice_transcript(message, payload, generation=generation)
+
+    async def _persist_voice_transcript(self, message: ChatMessage, payload: dict, *, generation: int) -> None:
+        """Persist a local voice transcript and keep the visible row responsive."""
+        message.extra = dict(message.extra or {})
+        message.extra[VOICE_TRANSCRIPT_EXTRA_KEY] = dict(payload or {})
+        if self._is_current_message_context(message, generation):
+            self.chat_panel.replace_message(message)
+        updated = await self._chat_controller.update_message_voice_transcript(message.message_id, payload)
+        if updated is not None and self._is_current_message_context(updated, generation):
+            self.chat_panel.replace_message(updated)
+
+    @staticmethod
+    def _voice_message_duration_seconds(message: ChatMessage) -> int:
+        try:
+            return max(0, int(float((message.extra or {}).get("duration") or 0)))
+        except (TypeError, ValueError):
+            return 0
+
+    @staticmethod
+    def _voice_transcript_payload(
+        *,
+        status: str,
+        text: str = "",
+        reason: str = "",
+        duration_seconds: int = 0,
+        language: str = "",
+        language_probability: float = 0.0,
+        metadata: dict | None = None,
+        error_code: str = "",
+        error_message: str = "",
+    ) -> dict:
+        payload = {
+            "status": str(status or "").strip(),
+            "engine": "faster-whisper",
+            "duration_seconds": max(0, int(duration_seconds or 0)),
+            "updated_at": datetime.now().isoformat(timespec="seconds"),
+        }
+        if text:
+            payload["text"] = text
+        if reason:
+            payload["reason"] = reason
+        if language:
+            payload["language"] = language
+        if language_probability:
+            payload["language_probability"] = float(language_probability)
+        if metadata:
+            payload.update({key: value for key, value in dict(metadata).items() if value not in (None, "")})
+        if error_code:
+            payload["error_code"] = error_code
+        if error_message:
+            payload["error_message"] = error_message
+        return payload
+
     async def _send_segments_async(self, session_id: str, segments: list[dict]) -> None:
         """Send composed editor segments sequentially so mixed content keeps order."""
         for index, segment in enumerate(segments):
@@ -3953,6 +4154,7 @@ class ChatInterface(QWidget):
         menu = RoundMenu(parent=self)
         copy_action = None
         open_action = None
+        transcribe_action = None
         translate_action = None
         quote_action = None
         multiselect_action = None
@@ -3975,6 +4177,10 @@ class ChatInterface(QWidget):
         elif message.message_type in {MessageType.FILE, MessageType.VIDEO, MessageType.VOICE}:
             open_action = Action(tr("chat.context.open_attachment", "Open"), self)
             basic_actions.append(open_action)
+
+        if message.message_type == MessageType.VOICE:
+            transcribe_action = Action(tr("chat.context.transcribe_voice", "转文字"), self)
+            basic_actions.append(transcribe_action)
 
         if self._can_translate_message_manually(message):
             translate_action = Action(tr("chat.context.translate", "Translate"), self)
@@ -4018,6 +4224,13 @@ class ChatInterface(QWidget):
                 lambda _checked=False, msg=message, current=self._session_focus_generation: self._schedule_ui_single_shot(
                     0,
                     lambda: self._open_message(msg, current),
+                )
+            )
+        if transcribe_action:
+            transcribe_action.triggered.connect(
+                lambda _checked=False, msg=message, current=self._session_focus_generation: self._schedule_voice_transcription(
+                    msg,
+                    generation=current,
                 )
             )
         if translate_action:

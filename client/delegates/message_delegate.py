@@ -28,6 +28,7 @@ from client.core.avatar_utils import profile_avatar_seed
 from client.core.config_backend import get_config
 from client.core.i18n import current_language_code, format_chat_timestamp, format_chat_timestamp_expanded, tr
 from client.core.message_translation import AI_TRANSLATION_EXTRA_KEY
+from client.core.voice_transcription import VOICE_TRANSCRIPT_EXTRA_KEY
 from client.core.message_actions import should_offer_recalled_direct_edit
 from client.ui.controllers.auth_controller import peek_auth_controller
 from client.core.video_thumbnail_cache import (
@@ -524,7 +525,16 @@ class MessageDelegate(QStyledItemDelegate):
             duration = self._voice_duration_seconds(message)
             width_range = self.VOICE_MAX_WIDTH - self.VOICE_MIN_WIDTH
             width = self.VOICE_MIN_WIDTH + round(width_range * min(30, max(1, duration)) / 30)
-            return QSize(max(72, min(width, max_bubble_width)), self.VOICE_HEIGHT)
+            voice_width = max(72, min(width, max_bubble_width))
+            transcript = self._voice_transcript_display_text(message)
+            if not transcript:
+                return QSize(voice_width, self.VOICE_HEIGHT)
+            padding_width = self.BUBBLE_PADDING_H + self.TAIL_SPACE + 12
+            transcript_width = max(90, min(self.MAX_TEXT_WIDTH, max_bubble_width - padding_width))
+            transcript_size = self._measure_text_content(transcript, transcript_width)
+            bubble_width = min(max_bubble_width, max(voice_width, transcript_size.width() + padding_width))
+            bubble_height = self.VOICE_HEIGHT + self.TRANSLATION_TOP_GAP + transcript_size.height()
+            return QSize(bubble_width, bubble_height)
 
         text_content_width = max(
             24,
@@ -1043,6 +1053,10 @@ class MessageDelegate(QStyledItemDelegate):
     def _draw_voice_content(self, painter: QPainter, rect: QRect, message: ChatMessage) -> None:
         """Draw a compact WeChat-style voice bubble without a waveform."""
         duration = self._voice_duration_seconds(message)
+        transcript_text = self._voice_transcript_display_text(message)
+        voice_rect = rect
+        if transcript_text:
+            voice_rect = QRect(rect.x(), rect.y(), rect.width(), max(1, self.VOICE_HEIGHT - self.BUBBLE_PADDING_V * 2))
         text_color = self._text_color(message)
         sub_color = QColor(255, 255, 255, 170) if isDarkTheme() else QColor(32, 32, 32, 150)
         playing = bool((message.extra or {}).get("voice_playing"))
@@ -1052,18 +1066,18 @@ class MessageDelegate(QStyledItemDelegate):
         painter.setPen(text_color)
 
         icon_size = 18
-        icon_rect = QRect(rect.x(), rect.y() + max(0, (rect.height() - icon_size) // 2), icon_size, icon_size)
+        icon_rect = QRect(voice_rect.x(), voice_rect.y() + max(0, (voice_rect.height() - icon_size) // 2), icon_size, icon_size)
         duration_text = f'{duration}"'
         font = QFont()
         font.setPixelSize(14)
         painter.setFont(font)
         metrics = QFontMetrics(font)
         text_width = metrics.horizontalAdvance(duration_text)
-        text_rect = QRect(rect.right() - text_width + 1, rect.y(), text_width, rect.height())
+        text_rect = QRect(voice_rect.right() - text_width + 1, voice_rect.y(), text_width, voice_rect.height())
 
         if message.is_self:
-            text_rect.moveLeft(rect.x())
-            icon_rect.moveLeft(rect.right() - icon_size + 1)
+            text_rect.moveLeft(voice_rect.x())
+            icon_rect.moveLeft(voice_rect.right() - icon_size + 1)
 
         if playing:
             bar_width = 4
@@ -1097,7 +1111,7 @@ class MessageDelegate(QStyledItemDelegate):
             dot_size = 7
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(QColor("#E53935"))
-            painter.drawEllipse(QRect(rect.right() - dot_size, rect.y() + 3, dot_size, dot_size))
+            painter.drawEllipse(QRect(voice_rect.right() - dot_size, voice_rect.y() + 3, dot_size, dot_size))
 
         state_text = self._media_state_text(message)
         if state_text:
@@ -1105,8 +1119,33 @@ class MessageDelegate(QStyledItemDelegate):
             state_font.setPixelSize(10)
             painter.setFont(state_font)
             painter.setPen(sub_color)
-            painter.drawText(rect, Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignHCenter, state_text)
+            painter.drawText(voice_rect, Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignHCenter, state_text)
 
+        painter.restore()
+
+        if transcript_text:
+            self._draw_voice_transcript_content(painter, rect, voice_rect, transcript_text)
+
+    def _draw_voice_transcript_content(self, painter: QPainter, rect: QRect, voice_rect: QRect, transcript_text: str) -> None:
+        """Draw local voice transcription text below the voice row."""
+        transcript_y = voice_rect.bottom() + 1 + self.TRANSLATION_TOP_GAP
+        transcript_rect = QRect(
+            rect.x(),
+            transcript_y,
+            rect.width(),
+            max(1, rect.bottom() - transcript_y + 1),
+        )
+        text_rect, layout = self._text_layout(transcript_rect, transcript_text)
+        divider_y = voice_rect.bottom() + 1 + max(2, self.TRANSLATION_TOP_GAP // 2)
+
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setFont(self._text_font())
+        painter.setPen(QColor(255, 255, 255, 42) if isDarkTheme() else QColor(0, 0, 0, 30))
+        painter.drawLine(rect.x(), divider_y, rect.right(), divider_y)
+        text_color = QColor(222, 226, 232, 178) if isDarkTheme() else QColor("#707070")
+        self._draw_plain_text_layout(painter, text_rect, layout, text_color)
         painter.restore()
 
     def _status_badge_rect(self, bubble_rect: QRect, row_rect: QRect, message: ChatMessage) -> QRect:
@@ -1628,6 +1667,20 @@ class MessageDelegate(QStyledItemDelegate):
             return tr("chat.translation.queued", "AI 正忙，等待当前任务完成...")
         if status == "pending":
             return tr("chat.translation.pending", "正在翻译...")
+        return ""
+
+    def _voice_transcript_display_text(self, message: ChatMessage) -> str:
+        """Return the local voice transcription text/pending label for a voice bubble."""
+        payload = dict((message.extra or {}).get(VOICE_TRANSCRIPT_EXTRA_KEY) or {})
+        status = str(payload.get("status") or "").strip()
+        if status == "ready":
+            return str(payload.get("text") or "").strip()
+        if status == "pending":
+            return tr("chat.voice_transcript.pending", "正在转文字...")
+        if status == "failed":
+            return tr("chat.voice_transcript.failed_short", "转文字失败")
+        if status == "skipped" and str(payload.get("reason") or "").strip() == "audio_too_long":
+            return tr("chat.voice_transcript.too_long_short", "语音超过 30 秒，暂不支持转文字")
         return ""
 
     @staticmethod
