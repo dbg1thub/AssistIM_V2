@@ -815,12 +815,21 @@ class MessageService:
     ) -> None:
         sender_device_id = str(envelope.get("sender_device_id") or "").strip()
         recipient_user_id = str(envelope.get("recipient_user_id") or "").strip()
-        recipient_device_id = str(envelope.get("recipient_device_id") or "").strip()
 
         self._require_active_device_for_user(sender_id, sender_device_id, "sender_device_id")
         if recipient_user_id not in session_member_ids or recipient_user_id == sender_id:
             raise AppError(ErrorCode.INVALID_REQUEST, "recipient_user_id is not another session member", 422)
-        self._require_active_device_for_user(recipient_user_id, recipient_device_id, "recipient_device_id")
+        seen_device_ids: set[str] = set()
+        for item in list(envelope.get("recipients") or []):
+            recipient = dict(item or {})
+            item_recipient_user_id = str(recipient.get("recipient_user_id") or "").strip()
+            recipient_device_id = str(recipient.get("recipient_device_id") or "").strip()
+            if item_recipient_user_id != recipient_user_id:
+                raise AppError(ErrorCode.INVALID_REQUEST, "recipient user in recipients does not match envelope recipient_user_id", 422)
+            if recipient_device_id in seen_device_ids:
+                raise AppError(ErrorCode.INVALID_REQUEST, "duplicate recipient_device_id in recipients", 422)
+            seen_device_ids.add(recipient_device_id)
+            self._require_active_device_for_user(item_recipient_user_id, recipient_device_id, "recipient_device_id")
 
     def _validate_group_e2ee_device_binding(
         self,
@@ -870,15 +879,9 @@ class MessageService:
         cls._require_envelope_fields(
             envelope,
             "direct text",
-            ("sender_device_id", "sender_identity_key_public", "recipient_user_id", "recipient_device_id", "content_ciphertext", "nonce"),
+            ("sender_device_id", "sender_identity_key_public", "recipient_user_id"),
         )
-        cls._require_int_field(envelope, "recipient_prekey_id", "direct text")
-        cls._require_allowed_value(
-            envelope,
-            "recipient_prekey_type",
-            {"signed", "one_time"},
-            "direct text",
-        )
+        cls._require_direct_recipients(envelope.get("recipients"), "direct text", "content_ciphertext")
 
     @classmethod
     def _validate_group_text_envelope(cls, envelope: dict[str, Any]) -> None:
@@ -894,15 +897,9 @@ class MessageService:
         cls._require_envelope_fields(
             envelope,
             "direct attachment",
-            ("sender_device_id", "sender_identity_key_public", "recipient_user_id", "recipient_device_id", "metadata_ciphertext", "nonce"),
+            ("sender_device_id", "sender_identity_key_public", "recipient_user_id"),
         )
-        cls._require_int_field(envelope, "recipient_prekey_id", "direct attachment")
-        cls._require_allowed_value(
-            envelope,
-            "recipient_prekey_type",
-            {"signed", "one_time"},
-            "direct attachment",
-        )
+        cls._require_direct_recipients(envelope.get("recipients"), "direct attachment", "metadata_ciphertext")
 
     @classmethod
     def _validate_group_attachment_envelope(cls, envelope: dict[str, Any]) -> None:
@@ -954,6 +951,40 @@ class MessageService:
                 f"{envelope_label} encryption envelope has invalid field: {field_name}",
                 422,
             )
+
+    @classmethod
+    def _require_direct_recipients(cls, recipients: Any, envelope_label: str, payload_field: str) -> None:
+        if not isinstance(recipients, list) or not recipients:
+            raise AppError(
+                ErrorCode.INVALID_REQUEST,
+                f"{envelope_label} encryption envelope requires a non-empty recipients list",
+                422,
+            )
+        seen_device_ids: set[str] = set()
+        for item in recipients:
+            if not isinstance(item, dict):
+                raise AppError(
+                    ErrorCode.INVALID_REQUEST,
+                    f"{envelope_label} encryption envelope contains an invalid recipient item",
+                    422,
+                )
+            recipient = dict(item)
+            cls._require_envelope_fields(
+                recipient,
+                f"{envelope_label} recipient",
+                ("recipient_user_id", "recipient_device_id", payload_field, "nonce"),
+            )
+            cls._require_int_field(recipient, "recipient_prekey_id", f"{envelope_label} recipient")
+            cls._require_allowed_value(
+                recipient,
+                "recipient_prekey_type",
+                {"signed", "one_time"},
+                f"{envelope_label} recipient",
+            )
+            recipient_device_id = str(recipient.get("recipient_device_id") or "").strip()
+            if recipient_device_id in seen_device_ids:
+                raise AppError(ErrorCode.INVALID_REQUEST, "duplicate recipient_device_id in recipients", 422)
+            seen_device_ids.add(recipient_device_id)
 
     @classmethod
     def _require_group_fanout(cls, fanout: Any, envelope_label: str) -> None:

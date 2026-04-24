@@ -1204,35 +1204,48 @@ class E2EEService:
             raise RuntimeError("recipient user id is required for E2EE encryption")
 
         local_bundle = await self.get_or_create_local_bundle()
-        recipient_bundle = await self._claim_or_fetch_recipient_bundle(normalized_recipient_id)
-        if recipient_bundle is None:
+        recipient_bundles = await self._claim_or_fetch_recipient_bundles(normalized_recipient_id)
+        if not recipient_bundles:
             raise RuntimeError("recipient has no registered E2EE device")
 
-        self._verify_bundle_signature(recipient_bundle)
+        recipients: list[dict[str, Any]] = []
+        for recipient_bundle in recipient_bundles:
+            recipient_device_id = str(recipient_bundle.get("device_id") or "").strip()
+            if not recipient_device_id:
+                continue
+            self._verify_bundle_signature(recipient_bundle)
+            key_payload = self._resolve_recipient_key_material(recipient_bundle)
+            ciphertext_b64, nonce_b64 = self._encrypt_payload(
+                plaintext=str(plaintext or ""),
+                sender_identity_private_b64=str(local_bundle["identity_key_private"]),
+                recipient_public_key_b64=str(key_payload["public_key"]),
+                sender_device_id=str(local_bundle["device_id"]),
+                recipient_device_id=recipient_device_id,
+            )
+            recipients.append(
+                {
+                    "recipient_user_id": normalized_recipient_id,
+                    "recipient_device_id": recipient_device_id,
+                    "recipient_prekey_type": str(key_payload["prekey_type"]),
+                    "recipient_prekey_id": int(key_payload["key_id"]),
+                    "content_ciphertext": ciphertext_b64,
+                    "nonce": nonce_b64,
+                }
+            )
+        if not recipients:
+            raise RuntimeError("recipient has no usable E2EE device")
 
-        key_payload = self._resolve_recipient_key_material(recipient_bundle)
-        ciphertext_b64, nonce_b64 = self._encrypt_payload(
-            plaintext=str(plaintext or ""),
-            sender_identity_private_b64=str(local_bundle["identity_key_private"]),
-            recipient_public_key_b64=str(key_payload["public_key"]),
-            sender_device_id=str(local_bundle["device_id"]),
-            recipient_device_id=str(recipient_bundle["device_id"]),
-        )
         encryption = {
             "enabled": True,
             "scheme": self.ENVELOPE_SCHEME,
             "sender_device_id": str(local_bundle["device_id"]),
             "sender_identity_key_public": str(local_bundle["identity_key_public"]),
             "recipient_user_id": normalized_recipient_id,
-            "recipient_device_id": str(recipient_bundle["device_id"]),
-            "recipient_prekey_type": str(key_payload["prekey_type"]),
-            "recipient_prekey_id": int(key_payload["key_id"]),
-            "content_ciphertext": ciphertext_b64,
-            "nonce": nonce_b64,
+            "recipients": recipients,
             "local_plaintext": self.protect_local_plaintext(plaintext),
             "local_plaintext_version": self.LOCAL_PLAINTEXT_VERSION,
         }
-        return ciphertext_b64, encryption
+        return str(recipients[0]["content_ciphertext"]), encryption
 
     async def encrypt_text_for_group_session(
         self,
@@ -1303,6 +1316,19 @@ class E2EEService:
         local_bundle = await self._load_local_bundle()
         if not isinstance(local_bundle, dict):
             raise RuntimeError("local device bundle is unavailable")
+        direct_recipient = self._select_direct_recipient_envelope(
+            encryption.get("recipients"),
+            local_device_id=str(local_bundle.get("device_id") or "").strip(),
+        )
+        if self._has_direct_recipient_envelopes(encryption.get("recipients")):
+            if direct_recipient is None:
+                direct_recipient = await self._select_history_direct_recipient_envelope(
+                    local_bundle,
+                    encryption.get("recipients"),
+                )
+            if direct_recipient is None:
+                return None
+            encryption = self._merge_direct_recipient_envelope(encryption, direct_recipient)
         recipient_device_id = str(encryption.get("recipient_device_id") or "").strip()
 
         key_payload = await self._resolve_envelope_private_key(local_bundle, encryption)
@@ -1380,13 +1406,13 @@ class E2EEService:
         size_bytes: int | None = None,
         mime_type: str = "",
     ) -> EncryptedAttachmentUpload:
+        normalized_recipient_id = str(recipient_user_id or "").strip()
+        if not normalized_recipient_id:
+            raise RuntimeError("recipient user id is required for E2EE attachment encryption")
         local_bundle = await self.get_or_create_local_bundle()
-        recipient_bundle = await self._claim_or_fetch_recipient_bundle(str(recipient_user_id or "").strip())
-        if recipient_bundle is None:
+        recipient_bundles = await self._claim_or_fetch_recipient_bundles(normalized_recipient_id)
+        if not recipient_bundles:
             raise RuntimeError("recipient has no registered E2EE device")
-
-        self._verify_bundle_signature(recipient_bundle)
-        key_payload = self._resolve_recipient_key_material(recipient_bundle)
 
         with open(file_path, "rb") as file_handle:
             plaintext_bytes = file_handle.read()
@@ -1414,26 +1440,43 @@ class E2EEService:
             "size_bytes": int(size_bytes if size_bytes is not None else len(plaintext_bytes)),
             "mime_type": str(mime_type or mimetypes.guess_type(file_path)[0] or "application/octet-stream"),
         }
-        metadata_ciphertext_b64, metadata_nonce_b64 = self._encrypt_payload(
-            plaintext=json.dumps(metadata, ensure_ascii=True, sort_keys=True, separators=(",", ":")),
-            sender_identity_private_b64=str(local_bundle["identity_key_private"]),
-            recipient_public_key_b64=str(key_payload["public_key"]),
-            sender_device_id=str(local_bundle["device_id"]),
-            recipient_device_id=str(recipient_bundle["device_id"]),
-        )
+        serialized_metadata = json.dumps(metadata, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+        recipients: list[dict[str, Any]] = []
+        for recipient_bundle in recipient_bundles:
+            recipient_device_id = str(recipient_bundle.get("device_id") or "").strip()
+            if not recipient_device_id:
+                continue
+            self._verify_bundle_signature(recipient_bundle)
+            key_payload = self._resolve_recipient_key_material(recipient_bundle)
+            metadata_ciphertext_b64, metadata_nonce_b64 = self._encrypt_payload(
+                plaintext=serialized_metadata,
+                sender_identity_private_b64=str(local_bundle["identity_key_private"]),
+                recipient_public_key_b64=str(key_payload["public_key"]),
+                sender_device_id=str(local_bundle["device_id"]),
+                recipient_device_id=recipient_device_id,
+            )
+            recipients.append(
+                {
+                    "recipient_user_id": normalized_recipient_id,
+                    "recipient_device_id": recipient_device_id,
+                    "recipient_prekey_type": str(key_payload["prekey_type"]),
+                    "recipient_prekey_id": int(key_payload["key_id"]),
+                    "metadata_ciphertext": metadata_ciphertext_b64,
+                    "nonce": metadata_nonce_b64,
+                }
+            )
+        if not recipients:
+            raise RuntimeError("recipient has no usable E2EE device")
+
         attachment_encryption = {
             "enabled": True,
             "scheme": self.ATTACHMENT_SCHEME,
             "sender_device_id": str(local_bundle["device_id"]),
             "sender_identity_key_public": str(local_bundle["identity_key_public"]),
-            "recipient_user_id": str(recipient_user_id or ""),
-            "recipient_device_id": str(recipient_bundle["device_id"]),
-            "recipient_prekey_type": str(key_payload["prekey_type"]),
-            "recipient_prekey_id": int(key_payload["key_id"]),
-            "metadata_ciphertext": metadata_ciphertext_b64,
-            "nonce": metadata_nonce_b64,
+            "recipient_user_id": normalized_recipient_id,
+            "recipients": recipients,
             "local_metadata": self.protect_local_plaintext(
-                json.dumps(metadata, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+                serialized_metadata
             ),
             "local_plaintext_version": self.LOCAL_PLAINTEXT_VERSION,
         }
@@ -1547,6 +1590,19 @@ class E2EEService:
         local_bundle = await self._load_local_bundle()
         if not isinstance(local_bundle, dict):
             raise RuntimeError("local device bundle is unavailable")
+        direct_recipient = self._select_direct_recipient_envelope(
+            normalized.get("recipients"),
+            local_device_id=str(local_bundle.get("device_id") or "").strip(),
+        )
+        if self._has_direct_recipient_envelopes(normalized.get("recipients")):
+            if direct_recipient is None:
+                direct_recipient = await self._select_history_direct_recipient_envelope(
+                    local_bundle,
+                    normalized.get("recipients"),
+                )
+            if direct_recipient is None:
+                return None
+            normalized = self._merge_direct_recipient_envelope(normalized, direct_recipient)
         recipient_device_id = str(normalized.get("recipient_device_id") or "").strip()
 
         key_payload = await self._resolve_envelope_private_key(local_bundle, normalized)
@@ -1786,8 +1842,21 @@ class E2EEService:
         normalized = dict(envelope or {})
         local_bundle = await self._load_local_bundle()
         local_device_id = str((local_bundle or {}).get("device_id") or "").strip()
-        recipient_device_id = str(normalized.get("recipient_device_id") or "").strip()
         scheme = str(normalized.get("scheme") or "").strip()
+        has_recipients = self._has_direct_recipient_envelopes(normalized.get("recipients"))
+        if has_recipients:
+            matching_recipient = self._select_direct_recipient_envelope(
+                normalized.get("recipients"),
+                local_device_id=local_device_id,
+            )
+            if matching_recipient is None and isinstance(local_bundle, dict):
+                matching_recipient = await self._select_history_direct_recipient_envelope(
+                    local_bundle,
+                    normalized.get("recipients"),
+                )
+            if matching_recipient is not None:
+                normalized = self._merge_direct_recipient_envelope(normalized, matching_recipient)
+        recipient_device_id = str(normalized.get("recipient_device_id") or "").strip()
         if not normalized.get("enabled"):
             return {
                 "state": self.DECRYPTION_STATE_READY,
@@ -1811,6 +1880,15 @@ class E2EEService:
                 "reprovision_required": True,
                 "local_device_id": "",
                 "target_device_id": recipient_device_id,
+            }
+        if has_recipients and not recipient_device_id:
+            first_recipient = self._first_direct_recipient_envelope(normalized.get("recipients"))
+            return {
+                "state": self.DECRYPTION_STATE_NOT_FOR_CURRENT_DEVICE,
+                "can_decrypt": False,
+                "reprovision_required": False,
+                "local_device_id": local_device_id,
+                "target_device_id": str((first_recipient or {}).get("recipient_device_id") or ""),
             }
         key_payload = await self._resolve_envelope_private_key(local_bundle, normalized)
         if recipient_device_id and recipient_device_id != local_device_id and key_payload is None:
@@ -2568,16 +2646,53 @@ class E2EEService:
         return selected
 
     async def _claim_or_fetch_recipient_bundle(self, recipient_user_id: str) -> dict[str, Any] | None:
-        bundles = await self.fetch_prekey_bundle(recipient_user_id)
+        bundles = await self._claim_or_fetch_recipient_bundles(recipient_user_id)
         if not bundles:
             return None
+        return dict(bundles[0])
 
-        selected = dict(bundles[0])
-        selected_device_id = str(selected.get("device_id") or "").strip()
-        if not selected_device_id:
-            return selected
-        claimed_bundle = await self._claim_or_fetch_bundle_for_device(recipient_user_id, selected_device_id)
-        return claimed_bundle or selected
+    async def _claim_or_fetch_recipient_bundles(self, recipient_user_id: str) -> list[dict[str, Any]]:
+        bundles = await self.fetch_prekey_bundle(recipient_user_id)
+        normalized_bundles: list[dict[str, Any]] = []
+        seen_device_ids: set[str] = set()
+        for raw_bundle in list(bundles or []):
+            if not isinstance(raw_bundle, dict):
+                continue
+            bundle = dict(raw_bundle)
+            device_id = str(bundle.get("device_id") or "").strip()
+            if not device_id or device_id in seen_device_ids:
+                continue
+            seen_device_ids.add(device_id)
+            normalized_bundles.append(bundle)
+        if not normalized_bundles:
+            return []
+
+        claimable_device_ids: list[str] = []
+        for bundle in normalized_bundles:
+            try:
+                available_prekey_count = int(bundle.get("available_prekey_count") or 0)
+            except (TypeError, ValueError):
+                available_prekey_count = 0
+            if available_prekey_count > 0:
+                claimable_device_ids.append(str(bundle.get("device_id") or "").strip())
+        claimed_by_device_id: dict[str, dict[str, Any]] = {}
+        if claimable_device_ids:
+            try:
+                claimed_bundles = await self.claim_prekeys(claimable_device_ids)
+            except Exception as exc:
+                logger.warning("Failed to claim recipient prekeys for %s: %s", recipient_user_id, exc)
+                claimed_bundles = []
+            for claimed_bundle in list(claimed_bundles or []):
+                if not isinstance(claimed_bundle, dict):
+                    continue
+                device_id = str(claimed_bundle.get("device_id") or "").strip()
+                if device_id:
+                    claimed_by_device_id[device_id] = dict(claimed_bundle)
+
+        return [
+            dict(claimed_by_device_id.get(str(bundle.get("device_id") or "").strip()) or bundle)
+            for bundle in normalized_bundles
+        ]
 
     def _verify_bundle_signature(self, bundle: dict[str, Any]) -> None:
         _, ed25519, _ = _load_crypto_primitives()
@@ -2770,6 +2885,69 @@ class E2EEService:
             aad,
         )
         return plaintext.decode("utf-8")
+
+    @staticmethod
+    def _direct_recipient_envelopes(recipients: Any) -> list[dict[str, Any]]:
+        return [dict(item) for item in list(recipients or []) if isinstance(item, dict)]
+
+    @classmethod
+    def _has_direct_recipient_envelopes(cls, recipients: Any) -> bool:
+        return bool(cls._direct_recipient_envelopes(recipients))
+
+    @classmethod
+    def _first_direct_recipient_envelope(cls, recipients: Any) -> dict[str, Any] | None:
+        for item in cls._direct_recipient_envelopes(recipients):
+            return item
+        return None
+
+    @classmethod
+    def _select_direct_recipient_envelope(
+        cls,
+        recipients: Any,
+        *,
+        local_device_id: str,
+    ) -> dict[str, Any] | None:
+        normalized_local_device_id = str(local_device_id or "").strip()
+        if not normalized_local_device_id:
+            return None
+        for item in cls._direct_recipient_envelopes(recipients):
+            if str(item.get("recipient_device_id") or "").strip() == normalized_local_device_id:
+                return item
+        return None
+
+    @staticmethod
+    def _merge_direct_recipient_envelope(
+        envelope: dict[str, Any],
+        recipient: dict[str, Any],
+    ) -> dict[str, Any]:
+        merged = dict(envelope or {})
+        selected = dict(recipient or {})
+        for key in (
+            "recipient_user_id",
+            "recipient_device_id",
+            "recipient_prekey_type",
+            "recipient_prekey_id",
+            "content_ciphertext",
+            "metadata_ciphertext",
+            "nonce",
+        ):
+            if key in selected:
+                merged[key] = selected[key]
+        return merged
+
+    async def _select_history_direct_recipient_envelope(
+        self,
+        local_bundle: dict[str, Any],
+        recipients: Any,
+    ) -> dict[str, Any] | None:
+        local_device_id = str(local_bundle.get("device_id") or "").strip()
+        for recipient in self._direct_recipient_envelopes(recipients):
+            recipient_device_id = str(recipient.get("recipient_device_id") or "").strip()
+            if not recipient_device_id or recipient_device_id == local_device_id:
+                continue
+            if await self._resolve_envelope_private_key(local_bundle, recipient) is not None:
+                return recipient
+        return None
 
     @staticmethod
     def _select_group_fanout_envelope(

@@ -260,11 +260,16 @@ def _direct_text_encryption_extra() -> dict:
             'sender_device_id': 'device-alice',
             'sender_identity_key_public': 'identity-alice',
             'recipient_user_id': 'bob',
-            'recipient_device_id': 'device-bob',
-            'content_ciphertext': 'ciphertext',
-            'nonce': 'nonce',
-            'recipient_prekey_id': 1,
-            'recipient_prekey_type': 'signed',
+            'recipients': [
+                {
+                    'recipient_user_id': 'bob',
+                    'recipient_device_id': 'device-bob',
+                    'content_ciphertext': 'ciphertext',
+                    'nonce': 'nonce',
+                    'recipient_prekey_id': 1,
+                    'recipient_prekey_type': 'signed',
+                }
+            ],
             'local_plaintext': 'hello',
         },
     }
@@ -289,18 +294,24 @@ def test_message_service_rejects_structured_values_for_envelope_scalar_fields() 
         assert field_name in exc_info.value.message
 
     direct_text = dict(_direct_text_encryption_extra()['encryption'])
-    direct_text['recipient_device_id'] = {'device_id': 'device-bob'}
+    direct_text['recipients'] = [dict(direct_text['recipients'][0])]
+    direct_text['recipients'][0]['recipient_device_id'] = {'device_id': 'device-bob'}
     assert_invalid(lambda: MessageService._validate_direct_text_envelope(direct_text), 'recipient_device_id')
 
     direct_attachment = {
         'sender_device_id': 'device-alice',
         'sender_identity_key_public': 'identity-alice',
         'recipient_user_id': 'bob',
-        'recipient_device_id': 'device-bob',
-        'metadata_ciphertext': ['metadata-ciphertext'],
-        'nonce': 'nonce',
-        'recipient_prekey_id': 1,
-        'recipient_prekey_type': 'signed',
+        'recipients': [
+            {
+                'recipient_user_id': 'bob',
+                'recipient_device_id': 'device-bob',
+                'metadata_ciphertext': ['metadata-ciphertext'],
+                'nonce': 'nonce',
+                'recipient_prekey_id': 1,
+                'recipient_prekey_type': 'signed',
+            }
+        ],
     }
     assert_invalid(lambda: MessageService._validate_direct_attachment_envelope(direct_attachment), 'metadata_ciphertext')
 
@@ -339,6 +350,29 @@ def test_message_service_rejects_structured_values_for_envelope_scalar_fields() 
     group_text_with_invalid_fanout['sender_key_id'] = 'sender-key-1'
     group_text_with_invalid_fanout['fanout'] = [invalid_fanout]
     assert_invalid(lambda: MessageService._validate_group_text_envelope(group_text_with_invalid_fanout), 'ciphertext')
+
+
+def test_message_service_direct_encryption_requires_recipient_list() -> None:
+    direct_text = dict(_direct_text_encryption_extra()['encryption'])
+    direct_text.pop('recipients', None)
+
+    with pytest.raises(AppError) as text_exc:
+        MessageService._validate_direct_text_envelope(direct_text)
+
+    direct_attachment = {
+        'sender_device_id': 'device-alice',
+        'sender_identity_key_public': 'identity-alice',
+        'recipient_user_id': 'bob',
+    }
+
+    with pytest.raises(AppError) as attachment_exc:
+        MessageService._validate_direct_attachment_envelope(direct_attachment)
+
+    assert text_exc.value.status_code == 422
+    assert 'recipients list' in text_exc.value.message
+    assert attachment_exc.value.status_code == 422
+    assert 'recipients list' in attachment_exc.value.message
+
 
 def test_message_service_rejects_encrypted_payload_when_session_mode_plain() -> None:
     service = MessageService(db=None)
@@ -400,6 +434,7 @@ def test_message_service_accepts_encrypted_text_in_e2ee_private_session() -> Non
 
     assert payload is not None
     assert payload['encryption']['scheme'] == 'x25519-aesgcm-v1'
+    assert payload['encryption']['recipients'][0]['recipient_device_id'] == 'device-bob'
     assert 'local_plaintext' not in payload['encryption']
 
 

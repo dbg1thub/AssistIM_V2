@@ -83,14 +83,19 @@ def test_edit_message_preserves_encrypted_extra_payload(
         "encryption": {
             "enabled": True,
             "scheme": "x25519-aesgcm-v1",
-            "content_ciphertext": "cipher-original",
             "sender_device_id": "device-alice",
             "sender_identity_key_public": "pub-alice",
             "recipient_user_id": bob["user"]["id"],
-            "recipient_device_id": "device-bob",
-            "recipient_prekey_type": "signed",
-            "recipient_prekey_id": 1,
-            "nonce": "nonce-original",
+            "recipients": [
+                {
+                    "recipient_user_id": bob["user"]["id"],
+                    "recipient_device_id": "device-bob",
+                    "recipient_prekey_type": "signed",
+                    "recipient_prekey_id": 1,
+                    "content_ciphertext": "cipher-original",
+                    "nonce": "nonce-original",
+                }
+            ],
             "local_plaintext": "local:original",
             "local_plaintext_version": "v1",
             "decryption_state": "missing_private_key",
@@ -117,14 +122,19 @@ def test_edit_message_preserves_encrypted_extra_payload(
         "encryption": {
             "enabled": True,
             "scheme": "x25519-aesgcm-v1",
-            "content_ciphertext": "cipher-updated",
             "sender_device_id": "device-alice",
             "sender_identity_key_public": "pub-alice",
             "recipient_user_id": bob["user"]["id"],
-            "recipient_device_id": "device-bob",
-            "recipient_prekey_type": "signed",
-            "recipient_prekey_id": 1,
-            "nonce": "nonce-updated",
+            "recipients": [
+                {
+                    "recipient_user_id": bob["user"]["id"],
+                    "recipient_device_id": "device-bob",
+                    "recipient_prekey_type": "signed",
+                    "recipient_prekey_id": 1,
+                    "content_ciphertext": "cipher-updated",
+                    "nonce": "nonce-updated",
+                }
+            ],
             "local_plaintext": "local:updated",
             "decryption_state": "missing_private_key",
             "recovery_action": "reprovision_device",
@@ -145,8 +155,8 @@ def test_edit_message_preserves_encrypted_extra_payload(
     edit_payload = edit_response.json()["data"]
     assert edit_payload["content"] == "cipher-updated"
     assert edit_payload["status"] == "edited"
-    assert edit_payload["extra"]["encryption"]["content_ciphertext"] == "cipher-updated"
-    assert edit_payload["extra"]["encryption"]["recipient_prekey_type"] == "signed"
+    assert edit_payload["extra"]["encryption"]["recipients"][0]["content_ciphertext"] == "cipher-updated"
+    assert edit_payload["extra"]["encryption"]["recipients"][0]["recipient_prekey_type"] == "signed"
     assert "local_plaintext" not in edit_payload["extra"]["encryption"]
     assert "local_plaintext_version" not in edit_payload["extra"]["encryption"]
     assert "decryption_state" not in edit_payload["extra"]["encryption"]
@@ -163,7 +173,7 @@ def test_edit_message_preserves_encrypted_extra_payload(
     history_payload = history_response.json()["data"]
     assert history_payload[0]["message_id"] == message_id
     assert history_payload[0]["content"] == "cipher-updated"
-    assert history_payload[0]["extra"]["encryption"]["content_ciphertext"] == "cipher-updated"
+    assert history_payload[0]["extra"]["encryption"]["recipients"][0]["content_ciphertext"] == "cipher-updated"
     assert "local_plaintext" not in history_payload[0]["extra"]["encryption"]
     assert "local_plaintext_version" not in history_payload[0]["extra"]["encryption"]
     assert "decryption_state" not in history_payload[0]["extra"]["encryption"]
@@ -213,11 +223,16 @@ def test_send_message_strips_local_only_encrypted_attachment_fields(
                     "sender_device_id": "device-alice",
                     "sender_identity_key_public": "pub-alice",
                     "recipient_user_id": bob["user"]["id"],
-                    "recipient_device_id": "device-bob",
-                    "recipient_prekey_type": "signed",
-                    "recipient_prekey_id": 1,
-                    "metadata_ciphertext": "metadata-ciphertext",
-                    "nonce": "nonce-attachment",
+                    "recipients": [
+                        {
+                            "recipient_user_id": bob["user"]["id"],
+                            "recipient_device_id": "device-bob",
+                            "recipient_prekey_type": "signed",
+                            "recipient_prekey_id": 1,
+                            "metadata_ciphertext": "metadata-ciphertext",
+                            "nonce": "nonce-attachment",
+                        }
+                    ],
                     "encrypted_size_bytes": 256,
                     "local_metadata": "local:metadata",
                     "local_plaintext_version": "v1",
@@ -396,10 +411,15 @@ def test_direct_text_encryption_requires_prekey_metadata(
                     "sender_device_id": "device-alice",
                     "sender_identity_key_public": "pub-alice",
                     "recipient_user_id": bob["user"]["id"],
-                    "recipient_device_id": "device-bob",
-                    "recipient_prekey_type": "signed",
-                    "content_ciphertext": "cipher-required",
-                    "nonce": "nonce-required",
+                    "recipients": [
+                        {
+                            "recipient_user_id": bob["user"]["id"],
+                            "recipient_device_id": "device-bob",
+                            "recipient_prekey_type": "signed",
+                            "content_ciphertext": "cipher-required",
+                            "nonce": "nonce-required",
+                        }
+                    ],
                 }
             },
         },
@@ -443,11 +463,16 @@ def test_direct_text_encryption_requires_sender_device_belong_to_actor(
                     "sender_device_id": "device-alice-unregistered",
                     "sender_identity_key_public": "pub-alice",
                     "recipient_user_id": bob["user"]["id"],
-                    "recipient_device_id": "device-bob",
-                    "recipient_prekey_type": "signed",
-                    "recipient_prekey_id": 1,
-                    "content_ciphertext": "cipher-device-binding",
-                    "nonce": "nonce-device-binding",
+                    "recipients": [
+                        {
+                            "recipient_user_id": bob["user"]["id"],
+                            "recipient_device_id": "device-bob",
+                            "recipient_prekey_type": "signed",
+                            "recipient_prekey_id": 1,
+                            "content_ciphertext": "cipher-device-binding",
+                            "nonce": "nonce-device-binding",
+                        }
+                    ],
                 }
             },
         },
@@ -537,10 +562,15 @@ def test_direct_attachment_encryption_requires_metadata_ciphertext(
                     "sender_device_id": "device-alice",
                     "sender_identity_key_public": "pub-alice",
                     "recipient_user_id": bob["user"]["id"],
-                    "recipient_device_id": "device-bob",
-                    "recipient_prekey_type": "signed",
-                    "recipient_prekey_id": 7,
-                    "nonce": "nonce-required",
+                    "recipients": [
+                        {
+                            "recipient_user_id": bob["user"]["id"],
+                            "recipient_device_id": "device-bob",
+                            "recipient_prekey_type": "signed",
+                            "recipient_prekey_id": 7,
+                            "nonce": "nonce-required",
+                        }
+                    ],
                 }
             },
         },

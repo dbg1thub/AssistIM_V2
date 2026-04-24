@@ -147,7 +147,8 @@ def test_e2ee_service_encrypts_for_recipient_and_recipient_can_decrypt(monkeypat
 
         assert alice_bundle["device_id"] != bob_bundle["device_id"]
         assert ciphertext != "secret hello"
-        assert remote_extra["encryption"]["content_ciphertext"] == ciphertext
+        assert remote_extra["encryption"]["recipients"][0]["content_ciphertext"] == ciphertext
+        assert remote_extra["encryption"]["recipients"][0]["recipient_device_id"] == bob_bundle["device_id"]
         assert "local_plaintext" not in remote_extra["encryption"]
         assert "decryption_state" not in remote_extra["encryption"]
         assert "recovery_action" not in remote_extra["encryption"]
@@ -523,6 +524,131 @@ def test_e2ee_service_decrypts_attachment_bytes_for_recipient(monkeypatch) -> No
         assert metadata["original_name"] == "secret-photo.png"
         assert metadata["mime_type"] == "image/png"
         assert metadata["size_bytes"] == len(plaintext_bytes)
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        shutil.rmtree(workspace_tmp, ignore_errors=True)
+
+
+def test_e2ee_service_encrypts_direct_text_for_each_recipient_device(monkeypatch) -> None:
+    alice_db = FakeDatabase()
+    bob_phone_db = FakeDatabase()
+    bob_laptop_db = FakeDatabase()
+
+    monkeypatch.setattr(e2ee_service_module, "get_http_client", lambda: FakeHttpClient())
+
+    async def scenario() -> None:
+        monkeypatch.setattr(e2ee_service_module, "get_database", lambda: alice_db)
+        alice_service = e2ee_service_module.E2EEService()
+        await alice_service.get_or_create_local_bundle()
+
+        monkeypatch.setattr(e2ee_service_module, "get_database", lambda: bob_phone_db)
+        bob_phone_service = e2ee_service_module.E2EEService()
+        bob_phone_bundle = await bob_phone_service.get_or_create_local_bundle()
+
+        monkeypatch.setattr(e2ee_service_module, "get_database", lambda: bob_laptop_db)
+        bob_laptop_service = e2ee_service_module.E2EEService()
+        bob_laptop_bundle = await bob_laptop_service.get_or_create_local_bundle()
+
+        remote_bundles = [
+            build_remote_bundle(bob_phone_bundle, user_id="bob"),
+            build_remote_bundle(bob_laptop_bundle, user_id="bob"),
+        ]
+
+        async def fake_fetch_prekey_bundle(user_id: str) -> list[dict]:
+            assert user_id == "bob"
+            return [dict(item) for item in remote_bundles]
+
+        async def fake_claim_prekeys(device_ids: list[str]) -> list[dict]:
+            assert device_ids == [bob_phone_bundle["device_id"], bob_laptop_bundle["device_id"]]
+            return [dict(item) for item in remote_bundles]
+
+        alice_service.fetch_prekey_bundle = fake_fetch_prekey_bundle  # type: ignore[method-assign]
+        alice_service.claim_prekeys = fake_claim_prekeys  # type: ignore[method-assign]
+
+        ciphertext, encryption = await alice_service.encrypt_text_for_user("bob", "hello all bob devices")
+        remote_extra = sanitize_outbound_message_extra({"encryption": encryption})
+
+        phone_plaintext = await bob_phone_service.decrypt_text_content(ciphertext, remote_extra)
+        laptop_plaintext = await bob_laptop_service.decrypt_text_content(ciphertext, remote_extra)
+        recipient_ids = [
+            item["recipient_device_id"]
+            for item in remote_extra["encryption"]["recipients"]
+        ]
+
+        assert phone_plaintext == "hello all bob devices"
+        assert laptop_plaintext == "hello all bob devices"
+        assert recipient_ids == [bob_phone_bundle["device_id"], bob_laptop_bundle["device_id"]]
+        assert "local_plaintext" not in remote_extra["encryption"]
+
+    asyncio.run(scenario())
+
+
+def test_e2ee_service_encrypts_direct_attachment_for_each_recipient_device(monkeypatch) -> None:
+    alice_db = FakeDatabase()
+    bob_phone_db = FakeDatabase()
+    bob_laptop_db = FakeDatabase()
+
+    monkeypatch.setattr(e2ee_service_module, "get_http_client", lambda: FakeHttpClient())
+    workspace_tmp = (Path.cwd() / "client/tests/.pytest_tmp/e2ee-service-direct-attachment-multidevice").resolve()
+    workspace_tmp.mkdir(parents=True, exist_ok=True)
+
+    async def scenario() -> None:
+        monkeypatch.setattr(e2ee_service_module, "get_database", lambda: alice_db)
+        alice_service = e2ee_service_module.E2EEService()
+        await alice_service.get_or_create_local_bundle()
+
+        monkeypatch.setattr(e2ee_service_module, "get_database", lambda: bob_phone_db)
+        bob_phone_service = e2ee_service_module.E2EEService()
+        bob_phone_bundle = await bob_phone_service.get_or_create_local_bundle()
+
+        monkeypatch.setattr(e2ee_service_module, "get_database", lambda: bob_laptop_db)
+        bob_laptop_service = e2ee_service_module.E2EEService()
+        bob_laptop_bundle = await bob_laptop_service.get_or_create_local_bundle()
+
+        remote_bundles = [
+            build_remote_bundle(bob_phone_bundle, user_id="bob"),
+            build_remote_bundle(bob_laptop_bundle, user_id="bob"),
+        ]
+
+        async def fake_fetch_prekey_bundle(user_id: str) -> list[dict]:
+            assert user_id == "bob"
+            return [dict(item) for item in remote_bundles]
+
+        async def fake_claim_prekeys(device_ids: list[str]) -> list[dict]:
+            assert device_ids == [bob_phone_bundle["device_id"], bob_laptop_bundle["device_id"]]
+            return [dict(item) for item in remote_bundles]
+
+        alice_service.fetch_prekey_bundle = fake_fetch_prekey_bundle  # type: ignore[method-assign]
+        alice_service.claim_prekeys = fake_claim_prekeys  # type: ignore[method-assign]
+
+        source_path = workspace_tmp / "direct-secret-photo.png"
+        plaintext_bytes = b"direct-image-payload-for-all-devices"
+        source_path.write_bytes(plaintext_bytes)
+
+        encrypted = await alice_service.encrypt_attachment_for_user(
+            "bob",
+            str(source_path),
+            fallback_name="direct-secret-photo.png",
+            size_bytes=len(plaintext_bytes),
+            mime_type="image/png",
+        )
+        ciphertext_bytes = Path(encrypted.upload_file_path).read_bytes()
+        remote_metadata = sanitize_outbound_message_extra(
+            {"attachment_encryption": dict(encrypted.attachment_encryption)}
+        )["attachment_encryption"]
+
+        phone_bytes, phone_metadata = await bob_phone_service.decrypt_attachment_bytes(ciphertext_bytes, remote_metadata)
+        laptop_bytes, laptop_metadata = await bob_laptop_service.decrypt_attachment_bytes(ciphertext_bytes, remote_metadata)
+        recipient_ids = [item["recipient_device_id"] for item in remote_metadata["recipients"]]
+
+        assert phone_bytes == plaintext_bytes
+        assert laptop_bytes == plaintext_bytes
+        assert phone_metadata["original_name"] == "direct-secret-photo.png"
+        assert laptop_metadata["mime_type"] == "image/png"
+        assert recipient_ids == [bob_phone_bundle["device_id"], bob_laptop_bundle["device_id"]]
+        assert "local_metadata" not in remote_metadata
 
     try:
         asyncio.run(scenario())
