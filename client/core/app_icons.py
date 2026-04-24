@@ -297,6 +297,7 @@ class AppIcon(FluentIconBase, Enum):
     HOME = "home"
     INFO = "info"
     LANGUAGE = "local_language"
+    MIC_ON = "mic_on"
     PALETTE = "color"
     PEOPLE = "people"
     PHONE = "phone"

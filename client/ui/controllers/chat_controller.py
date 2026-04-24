@@ -203,6 +203,32 @@ class ChatController:
         session_id: Optional[str] = None,
     ) -> Optional[ChatMessage]:
         """Send an image, video, or file message in the current session."""
+        return await self._send_attachment(file_path, session_id=session_id)
+
+    async def send_voice(
+        self,
+        file_path: str,
+        duration_seconds: int,
+        session_id: Optional[str] = None,
+    ) -> Optional[ChatMessage]:
+        """Send a recorded voice message with the UI-measured duration."""
+        duration = max(1, min(30, int(duration_seconds or 0)))
+        return await self._send_attachment(
+            file_path,
+            session_id=session_id,
+            message_type=MessageType.VOICE,
+            duration=duration,
+        )
+
+    async def _send_attachment(
+        self,
+        file_path: str,
+        *,
+        session_id: Optional[str] = None,
+        message_type: MessageType | None = None,
+        duration: Optional[int] = None,
+    ) -> Optional[ChatMessage]:
+        """Send one local attachment using the optimistic media upload flow."""
         session_id = session_id or self._session_manager.current_session_id
 
         if not session_id:
@@ -215,12 +241,11 @@ class ChatController:
 
         file_name = os.path.basename(file_path)
         file_size = os.path.getsize(file_path)
-        message_type = infer_message_type_from_path(file_path)
-        duration = (
-            await asyncio.to_thread(self._probe_video_duration, file_path)
-            if message_type == MessageType.VIDEO
-            else None
-        )
+        message_type = message_type or infer_message_type_from_path(file_path)
+        if duration is None and message_type == MessageType.VIDEO:
+            duration = await asyncio.to_thread(self._probe_video_duration, file_path)
+        elif duration is None and message_type == MessageType.VOICE:
+            duration = await asyncio.to_thread(self._probe_audio_duration, file_path)
 
         placeholder = await self._msg_manager.create_local_message(
             session_id=session_id,
@@ -292,6 +317,14 @@ class ChatController:
 
     def _probe_video_duration(self, file_path: str) -> Optional[int]:
         """Probe local video duration in seconds using ffprobe when available."""
+        return self._probe_media_duration(file_path)
+
+    def _probe_audio_duration(self, file_path: str) -> Optional[int]:
+        """Probe local audio duration in seconds using ffprobe when available."""
+        return self._probe_media_duration(file_path)
+
+    def _probe_media_duration(self, file_path: str) -> Optional[int]:
+        """Probe local media duration in seconds using ffprobe when available."""
         try:
             result = subprocess.run(
                 [

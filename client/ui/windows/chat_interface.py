@@ -556,6 +556,7 @@ class ChatInterface(QWidget):
         self.chat_panel.screenshot_requested.connect(self._on_screenshot_requested)
         self.chat_panel.voice_call_requested.connect(self._on_voice_call_requested)
         self.chat_panel.video_call_requested.connect(self._on_video_call_requested)
+        self.chat_panel.voice_message_submitted.connect(self._on_voice_message_submitted)
         self.chat_panel.ai_feature_toggled.connect(self._on_ai_feature_toggled)
         self.chat_panel.ai_reply_suggestion_selected.connect(self._on_ai_reply_suggestion_selected)
         self.chat_panel.older_messages_requested.connect(self._on_older_messages_requested)
@@ -1770,7 +1771,7 @@ class ChatInterface(QWidget):
                     parts.append(text)
                 continue
 
-            if segment_type in {MessageType.IMAGE, MessageType.VIDEO, MessageType.FILE}:
+            if segment_type in {MessageType.IMAGE, MessageType.VIDEO, MessageType.FILE, MessageType.VOICE}:
                 parts.append(format_message_preview("", segment_type))
 
         return " ".join(part for part in parts if part).strip()
@@ -2846,7 +2847,7 @@ class ChatInterface(QWidget):
                     message_type=MessageType.TEXT,
                     extra=segment.get("extra"),
                 )
-            elif segment_type in {MessageType.IMAGE, MessageType.VIDEO, MessageType.FILE} and segment.get("file_path"):
+            elif segment_type in {MessageType.IMAGE, MessageType.VIDEO, MessageType.FILE, MessageType.VOICE} and segment.get("file_path"):
                 await self._chat_controller.send_file(segment["file_path"], session_id=session_id)
 
     async def _send_image_message(self, session_id: str, file_path: str, generation: int) -> None:
@@ -2866,6 +2867,27 @@ class ChatInterface(QWidget):
         if not session_id:
             return
         self._schedule_ui_task(self._send_file_message(session_id, file_path), f"send file {session_id}")
+
+    def _on_voice_message_submitted(self, file_path: str, duration_seconds: int) -> None:
+        """Send a recorded voice message in the current conversation."""
+        session_id = self._current_session_id
+        if not session_id:
+            return
+        generation = self._session_focus_generation
+        self._schedule_ui_task(
+            self._send_voice_message(session_id, file_path, duration_seconds, generation),
+            f"send voice {session_id}",
+        )
+
+    async def _send_voice_message(self, session_id: str, file_path: str, duration_seconds: int, generation: int) -> None:
+        """Send a recorded voice message and refresh the visible list if still current."""
+        message = await self._chat_controller.send_voice(
+            file_path,
+            duration_seconds,
+            session_id=session_id,
+        )
+        if message and self._is_current_session_context(session_id, generation):
+            self.chat_panel.get_message_list().viewport().update()
 
     def _on_screenshot_requested(self) -> None:
         """Open the screenshot overlay and send the result as an image."""
@@ -3950,7 +3972,7 @@ class ChatInterface(QWidget):
         if message.message_type == MessageType.IMAGE:
             open_action = Action(tr("chat.context.open_image", "View Image"), self)
             basic_actions.append(open_action)
-        elif message.message_type in {MessageType.FILE, MessageType.VIDEO}:
+        elif message.message_type in {MessageType.FILE, MessageType.VIDEO, MessageType.VOICE}:
             open_action = Action(tr("chat.context.open_attachment", "Open"), self)
             basic_actions.append(open_action)
 
@@ -4062,7 +4084,25 @@ class ChatInterface(QWidget):
             MessageType.IMAGE,
             MessageType.VIDEO,
             MessageType.FILE,
+            MessageType.VOICE,
         }:
+            self._schedule_ui_task(
+                self._open_file_attachment(message, current_generation),
+                f"open attachment {message.message_id}",
+            )
+            return
+
+        if message.message_type == MessageType.VOICE:
+            local_path = str((message.extra or {}).get("local_path") or "").strip()
+            if local_path and os.path.exists(local_path):
+                if not self.chat_panel.play_voice_message(message, local_path):
+                    InfoBar.warning(
+                        tr("chat.message.title", "Message"),
+                        tr("chat.attachment.voice_open_failed", "Unable to play this voice message."),
+                        parent=self.window(),
+                        duration=1800,
+                    )
+                return
             self._schedule_ui_task(
                 self._open_file_attachment(message, current_generation),
                 f"open attachment {message.message_id}",
@@ -4111,6 +4151,16 @@ class ChatInterface(QWidget):
             return
         if local_path:
             message.extra["local_path"] = local_path
+
+        if message.message_type == MessageType.VOICE:
+            if not self.chat_panel.play_voice_message(message, local_path):
+                InfoBar.warning(
+                    tr("chat.message.title", "Message"),
+                    tr("chat.attachment.voice_open_failed", "Unable to play this voice message."),
+                    parent=self.window(),
+                    duration=1800,
+                )
+            return
 
         if not self.chat_panel.open_local_attachment(local_path, message.message_type):
             InfoBar.warning(

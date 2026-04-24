@@ -1822,6 +1822,54 @@ def test_message_manager_prepare_attachment_upload_encrypts_direct_image_message
     asyncio.run(scenario())
 
 
+def test_message_manager_prepare_attachment_upload_encrypts_direct_voice_messages(monkeypatch) -> None:
+    fake_event_bus = FakeEventBus()
+    fake_conn_manager = FakeConnectionManager([])
+    fake_db = FakeDatabase()
+    fake_e2ee_service = FakeE2EEService()
+    workspace_tmp = Path('client/tests/.pytest_tmp')
+    workspace_tmp.mkdir(parents=True, exist_ok=True)
+    source_path = workspace_tmp / 'encrypted-voice.m4a'
+    source_path.write_bytes(b'voice-data')
+    fake_db.sessions['session-voice-1'] = Session(
+        session_id='session-voice-1',
+        name='Bob',
+        session_type='direct',
+        participant_ids=['alice', 'bob'],
+        extra={'encryption_mode': 'e2ee_private'},
+    )
+
+    monkeypatch.setattr(message_manager_module, 'get_event_bus', lambda: fake_event_bus)
+    monkeypatch.setattr(message_manager_module, 'get_connection_manager', lambda: fake_conn_manager)
+    monkeypatch.setattr(message_manager_module, 'get_database', lambda: fake_db)
+
+    async def scenario() -> None:
+        manager = message_manager_module.MessageManager()
+        manager.set_user_id('alice')
+        manager._e2ee_service = fake_e2ee_service
+        cleanup_path = ''
+        try:
+            upload_path, extra, cleanup_path = await manager.prepare_attachment_upload(
+                session_id='session-voice-1',
+                file_path=str(source_path),
+                message_type=MessageType.VOICE,
+                fallback_name='encrypted-voice.m4a',
+                fallback_size=10,
+            )
+
+            assert upload_path == cleanup_path
+            assert Path(upload_path).exists()
+            assert extra['attachment_encryption']['enabled'] is True
+            assert extra['attachment_encryption']['recipient_user_id'] == 'bob'
+            assert extra['attachment_encryption']['original_name'] == 'encrypted-voice.m4a'
+        finally:
+            if cleanup_path:
+                Path(cleanup_path).unlink(missing_ok=True)
+            source_path.unlink(missing_ok=True)
+
+    asyncio.run(scenario())
+
+
 def test_message_manager_blocks_direct_sends_when_identity_review_is_required(monkeypatch) -> None:
     fake_event_bus = FakeEventBus()
     fake_conn_manager = FakeConnectionManager([])
@@ -2171,6 +2219,70 @@ def test_message_manager_prepare_attachment_upload_encrypts_group_image_messages
             assert extra['attachment_encryption']['enabled'] is True
             assert extra['attachment_encryption']['scheme'] == 'aesgcm-file+group-sender-key-v1'
             assert extra['attachment_encryption']['sender_key_id'] == 'group-key-1'
+            assert len(extra['attachment_encryption']['fanout']) == 2
+        finally:
+            if cleanup_path:
+                Path(cleanup_path).unlink(missing_ok=True)
+            source_path.unlink(missing_ok=True)
+
+    asyncio.run(scenario())
+
+
+def test_message_manager_prepare_attachment_upload_encrypts_group_voice_messages(monkeypatch) -> None:
+    fake_event_bus = FakeEventBus()
+    fake_conn_manager = FakeConnectionManager([])
+    fake_db = FakeDatabase()
+    fake_e2ee_service = FakeE2EEService()
+    fake_e2ee_service.group_prekey_bundles = {
+        'bob': [{'device_id': 'device-bob'}],
+        'charlie': [{'device_id': 'device-charlie'}],
+    }
+    workspace_tmp = Path('client/tests/.pytest_tmp')
+    workspace_tmp.mkdir(parents=True, exist_ok=True)
+    source_path = workspace_tmp / 'group-voice.m4a'
+    source_path.write_bytes(b'group-voice')
+    fake_db.sessions['session-group-voice-1'] = Session(
+        session_id='session-group-voice-1',
+        name='Team',
+        session_type='group',
+        participant_ids=['alice', 'bob', 'charlie'],
+        extra={
+            'encryption_mode': 'e2ee_group',
+            'members': [
+                {'id': 'alice'},
+                {'id': 'bob'},
+                {'id': 'charlie'},
+            ],
+            'group_member_version': 7,
+        },
+    )
+
+    monkeypatch.setattr(message_manager_module, 'get_event_bus', lambda: fake_event_bus)
+    monkeypatch.setattr(message_manager_module, 'get_connection_manager', lambda: fake_conn_manager)
+    monkeypatch.setattr(message_manager_module, 'get_database', lambda: fake_db)
+
+    async def scenario() -> None:
+        manager = message_manager_module.MessageManager()
+        manager.set_user_id('alice')
+        manager._e2ee_service = fake_e2ee_service
+        cleanup_path = ''
+        try:
+            upload_path, extra, cleanup_path = await manager.prepare_attachment_upload(
+                session_id='session-group-voice-1',
+                file_path=str(source_path),
+                message_type=MessageType.VOICE,
+                fallback_name='group-voice.m4a',
+                fallback_size=11,
+            )
+
+            assert upload_path == cleanup_path
+            assert Path(upload_path).exists()
+            assert fake_e2ee_service.fetch_prekey_bundle_calls == ['bob', 'charlie']
+            assert fake_e2ee_service.group_attachment_encrypt_calls == [
+                ('session-group-voice-1', 'group-voice.m4a', 7, 'alice', 2, '', 11)
+            ]
+            assert extra['attachment_encryption']['enabled'] is True
+            assert extra['attachment_encryption']['scheme'] == 'aesgcm-file+group-sender-key-v1'
             assert len(extra['attachment_encryption']['fanout']) == 2
         finally:
             if cleanup_path:

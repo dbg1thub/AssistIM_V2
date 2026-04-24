@@ -1876,6 +1876,47 @@ def test_chat_controller_send_file_offloads_video_probe(monkeypatch) -> None:
         file_path.unlink(missing_ok=True)
 
 
+def test_chat_controller_send_file_sends_audio_as_voice_message(monkeypatch) -> None:
+    fake_message_manager = FakeMessageManager()
+    fake_session_manager = FakeSessionManager()
+    fake_file_service = FakeFileService({'url': 'https://cdn.example/files/voice.m4a', 'mime_type': 'audio/mp4'})
+    to_thread_calls: list[tuple[object, str]] = []
+
+    async def fake_to_thread(func, *args, **kwargs):
+        to_thread_calls.append((func, args[0]))
+        return 7
+
+    monkeypatch.setattr(chat_controller_module, 'get_message_manager', lambda: fake_message_manager)
+    monkeypatch.setattr(chat_controller_module, 'get_session_manager', lambda: fake_session_manager)
+    monkeypatch.setattr(chat_controller_module, 'get_file_service', lambda: fake_file_service)
+    monkeypatch.setattr(chat_controller_module.asyncio, 'to_thread', fake_to_thread)
+
+    workspace_tmp = Path('client/tests/.pytest_tmp')
+    workspace_tmp.mkdir(parents=True, exist_ok=True)
+    file_path = workspace_tmp / 'voice.m4a'
+    file_path.write_bytes(b'm4a-data')
+
+    async def scenario() -> None:
+        controller = chat_controller_module.ChatController()
+        message = await controller.send_file(str(file_path))
+
+        assert message is not None
+        assert message.message_type == MessageType.VOICE
+        assert fake_message_manager.attachment_upload_preparations == [
+            ('session-1', str(file_path), MessageType.VOICE, 'voice.m4a', len(b'm4a-data'))
+        ]
+        assert fake_file_service.chat_uploads == [str(file_path)]
+        assert to_thread_calls == [(controller._probe_audio_duration, str(file_path))]
+        assert fake_session_manager.added[0][1].message_type == MessageType.VOICE
+        assert fake_session_manager.added[0][1].extra['duration'] == 7
+        assert fake_message_manager.sent_messages[-1].extra['duration'] == 7
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        file_path.unlink(missing_ok=True)
+
+
 
 def test_chat_controller_recover_session_crypto_delegates_to_session_manager(monkeypatch) -> None:
     fake_message_manager = FakeMessageManager()

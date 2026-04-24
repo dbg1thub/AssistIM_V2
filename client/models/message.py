@@ -71,10 +71,12 @@ class MessageType(Enum):
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp"}
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v"}
+AUDIO_EXTENSIONS = {".m4a", ".mp3", ".ogg", ".wav"}
 _ATTACHMENT_PREVIEW_PLACEHOLDERS = {
     "[image]": ("preview.image", "[Image]"),
     "[video]": ("preview.video", "[Video]"),
     "[file]": ("preview.file", "[File]"),
+    "[voice]": ("preview.voice", "[Voice]"),
 }
 
 
@@ -85,6 +87,8 @@ def infer_message_type_from_path(path: str) -> MessageType:
         return MessageType.IMAGE
     if extension in VIDEO_EXTENSIONS:
         return MessageType.VIDEO
+    if extension in AUDIO_EXTENSIONS:
+        return MessageType.VOICE
     return MessageType.FILE
 
 
@@ -306,6 +310,8 @@ def format_message_preview(content: str, message_type: MessageType | str | None 
         return _preview_token("preview.video", "[Video]")
     if normalized_type == MessageType.FILE:
         return _preview_token("preview.file", "[File]")
+    if normalized_type == MessageType.VOICE:
+        return _preview_token("preview.voice", "[Voice]")
 
     text = (content or "").strip()
     if not text:
@@ -320,6 +326,8 @@ def format_message_preview(content: str, message_type: MessageType | str | None 
         return _preview_token("preview.image", "[Image]")
     if inferred_type == MessageType.VIDEO:
         return _preview_token("preview.video", "[Video]")
+    if inferred_type == MessageType.VOICE:
+        return _preview_token("preview.voice", "[Voice]")
     if inferred_type == MessageType.FILE and (text.startswith("/uploads/") or text.startswith("http://") or text.startswith("https://")):
         return _preview_token("preview.file", "[File]")
 
@@ -330,6 +338,8 @@ def format_message_preview(content: str, message_type: MessageType | str | None 
             return _preview_token("preview.image", "[Image]")
         if inferred_tail_type == MessageType.VIDEO:
             return _preview_token("preview.video", "[Video]")
+        if inferred_tail_type == MessageType.VOICE:
+            return _preview_token("preview.voice", "[Voice]")
         if inferred_tail_type == MessageType.FILE:
             return _preview_token("preview.file", "[File]")
 

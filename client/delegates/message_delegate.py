@@ -111,6 +111,9 @@ class MessageDelegate(QStyledItemDelegate):
     FILE_WIDTH, FILE_HEIGHT = attachment_card_size()
     VIDEO_WIDTH = 240
     VIDEO_HEIGHT = 136
+    VOICE_MIN_WIDTH = 96
+    VOICE_MAX_WIDTH = 220
+    VOICE_HEIGHT = 42
     LEFT_MARGIN = 18
     RIGHT_MARGIN = 18
     BUBBLE_GAP = 10
@@ -272,7 +275,7 @@ class MessageDelegate(QStyledItemDelegate):
         if (
             not message
             or self._display_kind(index, message) != MessageModel.DISPLAY_MESSAGE
-            or message.message_type not in {MessageType.IMAGE, MessageType.FILE, MessageType.VIDEO}
+            or message.message_type not in {MessageType.IMAGE, MessageType.FILE, MessageType.VIDEO, MessageType.VOICE}
         ):
             return False
 
@@ -281,6 +284,8 @@ class MessageDelegate(QStyledItemDelegate):
             return False
 
         row_layout = self._layout_rects(row_rect, message)
+        if message.message_type == MessageType.VOICE:
+            return row_layout.bubble_rect.contains(position)
         hit_rect = self._attachment_hit_rect(row_layout.content_rect, message)
         return hit_rect.contains(position)
 
@@ -514,6 +519,12 @@ class MessageDelegate(QStyledItemDelegate):
             size = QSize(video_width, video_height)
             self._cache_put(self._media_size_cache, cache_key, size, self.MEDIA_SIZE_CACHE_LIMIT)
             return size
+
+        if message.message_type == MessageType.VOICE:
+            duration = self._voice_duration_seconds(message)
+            width_range = self.VOICE_MAX_WIDTH - self.VOICE_MIN_WIDTH
+            width = self.VOICE_MIN_WIDTH + round(width_range * min(30, max(1, duration)) / 30)
+            return QSize(max(72, min(width, max_bubble_width)), self.VOICE_HEIGHT)
 
         text_content_width = max(
             24,
@@ -892,6 +903,8 @@ class MessageDelegate(QStyledItemDelegate):
             self._draw_file_content(painter, content_rect, message)
         elif message.message_type == MessageType.VIDEO:
             self._draw_video_content(painter, content_rect, message)
+        elif message.message_type == MessageType.VOICE:
+            self._draw_voice_content(painter, content_rect, message)
         else:
             self._draw_text_content(painter, content_rect, message, bubble_color)
 
@@ -1026,6 +1039,75 @@ class MessageDelegate(QStyledItemDelegate):
         self._draw_video_play_overlay(painter, cover_rect)
         self._draw_video_duration(painter, cover_rect, message)
         self._draw_media_state_overlay(painter, cover_rect, message)
+
+    def _draw_voice_content(self, painter: QPainter, rect: QRect, message: ChatMessage) -> None:
+        """Draw a compact WeChat-style voice bubble without a waveform."""
+        duration = self._voice_duration_seconds(message)
+        text_color = self._text_color(message)
+        sub_color = QColor(255, 255, 255, 170) if isDarkTheme() else QColor(32, 32, 32, 150)
+        playing = bool((message.extra or {}).get("voice_playing"))
+
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(text_color)
+
+        icon_size = 18
+        icon_rect = QRect(rect.x(), rect.y() + max(0, (rect.height() - icon_size) // 2), icon_size, icon_size)
+        duration_text = f'{duration}"'
+        font = QFont()
+        font.setPixelSize(14)
+        painter.setFont(font)
+        metrics = QFontMetrics(font)
+        text_width = metrics.horizontalAdvance(duration_text)
+        text_rect = QRect(rect.right() - text_width + 1, rect.y(), text_width, rect.height())
+
+        if message.is_self:
+            text_rect.moveLeft(rect.x())
+            icon_rect.moveLeft(rect.right() - icon_size + 1)
+
+        if playing:
+            bar_width = 4
+            bar_height = 14
+            left = icon_rect.center().x() - 5
+            top = icon_rect.center().y() - bar_height // 2
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(text_color)
+            painter.drawRoundedRect(QRect(left, top, bar_width, bar_height), 2, 2)
+            painter.drawRoundedRect(QRect(left + 8, top, bar_width, bar_height), 2, 2)
+        else:
+            path = QPainterPath()
+            if message.is_self:
+                path.moveTo(icon_rect.right(), icon_rect.top() + 1)
+                path.lineTo(icon_rect.left() + 2, icon_rect.center().y())
+                path.lineTo(icon_rect.right(), icon_rect.bottom() - 1)
+            else:
+                path.moveTo(icon_rect.left(), icon_rect.top() + 1)
+                path.lineTo(icon_rect.right() - 2, icon_rect.center().y())
+                path.lineTo(icon_rect.left(), icon_rect.bottom() - 1)
+            path.closeSubpath()
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(text_color)
+            painter.drawPath(path)
+
+        painter.setPen(text_color)
+        painter.setFont(font)
+        painter.drawText(text_rect, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, duration_text)
+
+        if not message.is_self and not bool((message.extra or {}).get("voice_played")):
+            dot_size = 7
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor("#E53935"))
+            painter.drawEllipse(QRect(rect.right() - dot_size, rect.y() + 3, dot_size, dot_size))
+
+        state_text = self._media_state_text(message)
+        if state_text:
+            state_font = QFont(font)
+            state_font.setPixelSize(10)
+            painter.setFont(state_font)
+            painter.setPen(sub_color)
+            painter.drawText(rect, Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignHCenter, state_text)
+
+        painter.restore()
 
     def _status_badge_rect(self, bubble_rect: QRect, row_rect: QRect, message: ChatMessage) -> QRect:
         """Return the rect for the self-message status badge."""
@@ -1317,6 +1399,8 @@ class MessageDelegate(QStyledItemDelegate):
             return self._image_draw_rect(content_rect, message)
         if message.message_type == MessageType.VIDEO:
             return content_rect
+        if message.message_type == MessageType.VOICE:
+            return content_rect
         return content_rect
 
     def _image_draw_rect(self, rect: QRect, message: ChatMessage) -> QRect:
@@ -1469,6 +1553,16 @@ class MessageDelegate(QStyledItemDelegate):
 
         source = self._resolve_video_source(message)
         return self._video_duration_cache.get(source, "") if source else ""
+
+    @staticmethod
+    def _voice_duration_seconds(message: ChatMessage) -> int:
+        """Return a bounded integer duration for one voice bubble."""
+        raw_duration = (message.extra or {}).get("duration")
+        try:
+            duration = int(float(raw_duration))
+        except (TypeError, ValueError):
+            duration = 1
+        return max(1, min(30, duration))
 
     @staticmethod
     def _seconds_to_duration_text(total_seconds: int) -> str:

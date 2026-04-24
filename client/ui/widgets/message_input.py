@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import os
+from pathlib import Path
 import time
 from typing import Any, Optional
 
-from PySide6.QtCore import QByteArray, QEvent, QMimeData, QPoint, QPointF, QRect, QRectF, QSize, QTimer, Qt, QUrl, Signal
+from PySide6.QtCore import QByteArray, QEvent, QMimeData, QObject, QPoint, QPointF, QRect, QRectF, QSize, QTimer, Qt, QUrl, Signal
 from PySide6.QtGui import (
     QColor,
     QDragEnterEvent,
@@ -33,6 +34,7 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
     QLabel,
+    QProgressBar,
     QSizePolicy,
     QStackedWidget,
     QStyle,
@@ -60,6 +62,7 @@ from qfluentwidgets import (
 )
 from qfluentwidgets.components.material import AcrylicToolTipFilter, AcrylicFlyoutViewBase, AcrylicFlyout
 
+from client.core import logging
 from client.core.app_icons import AppIcon
 from client.core.ai_features import (
     AI_FEATURE_AUTO_TRANSLATE,
@@ -69,6 +72,7 @@ from client.core.ai_features import (
 from client.core.avatar_rendering import get_avatar_image_store
 from client.core.avatar_utils import profile_avatar_seed
 from client.core.i18n import tr
+from client.core.config_backend import get_config
 from client.models.message import MessageType, Session, infer_message_type_from_path, normalize_message_mentions
 from client.ui.common.attachment_card import attachment_card_size, draw_attachment_card
 from client.ui.common.emoji_names import emoji_display_name
@@ -90,6 +94,17 @@ from client.ui.widgets.composer_clipboard import (
     serialize_clipboard_segments,
 )
 from client.ui.widgets.composer_layout import centered_inline_object_top, inline_object_line_metrics
+
+try:
+    from PySide6.QtMultimedia import QAudioInput, QMediaCaptureSession, QMediaDevices, QMediaFormat, QMediaRecorder
+except Exception:  # pragma: no cover - optional Qt Multimedia runtime
+    QAudioInput = None  # type: ignore[assignment]
+    QMediaCaptureSession = None  # type: ignore[assignment]
+    QMediaDevices = None  # type: ignore[assignment]
+    QMediaFormat = None  # type: ignore[assignment]
+    QMediaRecorder = None  # type: ignore[assignment]
+
+logger = logging.get_logger(__name__)
 
 ATTACHMENT_ID_PROP = int(QTextFormat.Property.UserProperty) + 1
 ATTACHMENT_PATH_PROP = int(QTextFormat.Property.UserProperty) + 2
@@ -279,8 +294,17 @@ class InlineAttachmentWidget(QWidget):
             )
         elif self._attachment.message_type == MessageType.IMAGE:
             self._draw_image_card(painter)
-        else:
+        elif self._attachment.message_type == MessageType.VIDEO:
             self._draw_video_card(painter)
+        else:
+            draw_attachment_card(
+                painter,
+                QRectF(self.rect()),
+                message_type=self._attachment.message_type,
+                display_name=self._attachment.display_name,
+                file_path=self._attachment.file_path,
+                dark=isDarkTheme(),
+            )
         painter.end()
 
     def _draw_image_card(self, painter: QPainter) -> None:
@@ -1651,7 +1675,7 @@ class ChatTextEdit(QTextEdit):
     def _normalize_attachment_boundary_newlines(segments: list[dict]) -> list[dict]:
         """Trim structural newlines around attachment segments so send/restore stay stable."""
         normalized = [dict(segment) for segment in segments]
-        attachment_types = {MessageType.IMAGE, MessageType.VIDEO, MessageType.FILE}
+        attachment_types = {MessageType.IMAGE, MessageType.VIDEO, MessageType.FILE, MessageType.VOICE}
 
         for index, segment in enumerate(normalized):
             if segment.get("type") not in attachment_types:
@@ -2433,6 +2457,107 @@ class MarqueeSuggestionButton(PushButton):
         self.update()
 
 
+class VoiceRecordingOverlay(QFrame):
+    """Floating recording affordance shown while the mic button is held."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("voiceRecordingOverlay")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setFixedWidth(286)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(18, 14, 18, 14)
+        layout.setSpacing(8)
+
+        self.status_label = BodyLabel(self)
+        self.status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.hint_label = CaptionLabel(self)
+        self.hint_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.progress = QProgressBar(self)
+        self.progress.setRange(0, MessageInputVoiceLimits.MAX_SECONDS)
+        self.progress.setTextVisible(False)
+        self.progress.setFixedHeight(4)
+
+        layout.addWidget(self.status_label)
+        layout.addWidget(self.hint_label)
+        layout.addWidget(self.progress)
+        self._apply_style(canceling=False, warning=False)
+
+    def update_state(self, elapsed_seconds: int, *, canceling: bool) -> None:
+        """Refresh visible recording state."""
+        elapsed_seconds = max(0, min(MessageInputVoiceLimits.MAX_SECONDS, int(elapsed_seconds or 0)))
+        remaining = max(0, MessageInputVoiceLimits.MAX_SECONDS - elapsed_seconds)
+        warning = remaining <= MessageInputVoiceLimits.WARNING_SECONDS and not canceling
+        self.progress.setValue(elapsed_seconds)
+        if canceling:
+            self.status_label.setText(tr("composer.voice.cancel_status", "Release to cancel"))
+            self.hint_label.setText(tr("composer.voice.cancel_hint", "Move down to keep recording"))
+        elif warning:
+            self.status_label.setText(
+                tr("composer.voice.countdown_status", "{seconds}s left", seconds=remaining)
+            )
+            self.hint_label.setText(tr("composer.voice.release_hint", "Release to send, slide up to cancel"))
+        else:
+            self.status_label.setText(tr("composer.voice.recording_status", "Recording {seconds}s", seconds=elapsed_seconds))
+            self.hint_label.setText(tr("composer.voice.release_hint", "Release to send, slide up to cancel"))
+        self._apply_style(canceling=canceling, warning=warning)
+
+    def show_notice(self, text: str) -> None:
+        """Show a short non-recording notice in the same overlay style."""
+        self.progress.setValue(0)
+        self.status_label.setText(text)
+        self.hint_label.setText("")
+        self._apply_style(canceling=True, warning=False)
+        self.show()
+        self.raise_()
+
+    def _apply_style(self, *, canceling: bool, warning: bool) -> None:
+        dark = isDarkTheme()
+        if canceling:
+            accent = "#E05252"
+        elif warning:
+            accent = "#D9822B"
+        else:
+            accent = "#2E7D32" if not dark else "#5CC06F"
+        background = "rgba(32, 32, 32, 232)" if dark else "rgba(255, 255, 255, 244)"
+        border = "rgba(255, 255, 255, 36)" if dark else "rgba(0, 0, 0, 24)"
+        text = "#F7F7F7" if dark else "#202020"
+        sub = "rgba(247, 247, 247, 166)" if dark else "rgba(32, 32, 32, 156)"
+        self.setStyleSheet(
+            "QFrame#voiceRecordingOverlay {"
+            f" background: {background};"
+            f" border: 1px solid {border};"
+            " border-radius: 10px;"
+            "}"
+            "QLabel {"
+            f" color: {text};"
+            "}"
+            "QLabel#captionLabel {"
+            f" color: {sub};"
+            "}"
+            "QProgressBar {"
+            " border: none;"
+            " background: rgba(128, 128, 128, 48);"
+            " border-radius: 2px;"
+            "}"
+            "QProgressBar::chunk {"
+            f" background: {accent};"
+            " border-radius: 2px;"
+            "}"
+        )
+
+
+class MessageInputVoiceLimits:
+    """Shared voice-message timing limits."""
+
+    MIN_SECONDS = 1
+    MAX_SECONDS = 30
+    WARNING_SECONDS = 5
+    CANCEL_DRAG_DISTANCE = 72
+
+
 class MessageInput(QWidget):
     """Integrated message input surface."""
 
@@ -2442,6 +2567,7 @@ class MessageInput(QWidget):
     screenshot_requested = Signal()
     voice_call_requested = Signal()
     video_call_requested = Signal()
+    voice_message_submitted = Signal(str, int)
     ai_feature_toggled = Signal(str, bool)
     ai_reply_suggestion_selected = Signal(str)
     typing_signal = Signal()
@@ -2469,6 +2595,21 @@ class MessageInput(QWidget):
             AI_FEATURE_SMART_REPLY: False,
             AI_FEATURE_AUTO_TRANSLATE: False,
         }
+        self._voice_recording_active = False
+        self._voice_recording_stopping = False
+        self._voice_recording_cancel_requested = False
+        self._voice_recording_started_at = 0.0
+        self._voice_recording_path = ""
+        self._voice_recording_duration_ms = 0
+        self._voice_recording_finish_notice = ""
+        self._voice_capture_session = None
+        self._voice_audio_input = None
+        self._voice_recorder = None
+        self._voice_recording_overlay: VoiceRecordingOverlay | None = None
+        self._voice_recording_timer = QTimer(self)
+        self._voice_recording_timer.setInterval(100)
+        self._voice_recording_timer.timeout.connect(self._on_voice_recording_tick)
+        self._voice_press_global_y: float | None = None
         self._reply_suggestion_buttons: list[PushButton] = []
         self._reply_suggestion_status_text = ""
         self._setup_ui()
@@ -2579,8 +2720,18 @@ class MessageInput(QWidget):
         self.text_input.setPlaceholderText(tr("composer.placeholder.inactive", "Select a session to start chatting"))
         self.text_input.setAcceptRichText(False)
         self.text_input.setMinimumHeight(128)
-        self.text_input.setViewportMargins(0, 0, 24, 52)
+        self.text_input.setViewportMargins(0, 0, 150, 52)
         self._apply_editor_transparency()
+
+        self.voice_message_button = TransparentToolButton(AppIcon.MIC_ON, self.composer_widget)
+        self.voice_message_button.setObjectName("composerVoiceMessageButton")
+        self.voice_message_button.setFixedSize(38, 34)
+        self.voice_message_button.setToolTip(tr("composer.voice.hold_to_talk", "Hold to talk"))
+        self.voice_message_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.voice_message_button.setMouseTracking(True)
+        self.voice_message_button.installEventFilter(self)
+        self._apply_safe_button_font(self.voice_message_button)
+        self._install_acrylic_tooltips(self.voice_message_button)
 
         self.send_button = PushButton(tr("composer.button.send", "Send"), self.composer_widget)
         self.send_button.setObjectName("composerSendButton")
@@ -2725,13 +2876,27 @@ class MessageInput(QWidget):
             QTimer.singleShot(0, self._update_overlay_positions)
             if self._mention_flyout is not None and self._mention_flyout.isVisible():
                 QTimer.singleShot(0, self._reposition_mention_flyout)
-        if watched is self.text_input:
-            if event.type() == QEvent.Type.KeyPress and self._handle_mention_key_event(event):
+        if watched is self.voice_message_button:
+            if event.type() == QEvent.Type.MouseButtonPress and self._handle_voice_button_press(event):
                 return True
+            if event.type() == QEvent.Type.MouseMove and self._handle_voice_button_move(event):
+                return True
+            if event.type() == QEvent.Type.MouseButtonRelease and self._handle_voice_button_release(event):
+                return True
+            if event.type() == QEvent.Type.Leave and self._voice_recording_active:
+                self._update_voice_recording_cancel_state(event)
+        if watched is self.text_input:
+            if event.type() == QEvent.Type.KeyPress:
+                if self._voice_recording_active and isinstance(event, QKeyEvent) and event.key() == Qt.Key.Key_Escape:
+                    self._finish_voice_recording(cancel=True)
+                    event.accept()
+                    return True
+                if self._handle_mention_key_event(event):
+                    return True
         return super().eventFilter(watched, event)
 
     def _update_overlay_positions(self) -> None:
-        """Place the send button inside the text input area."""
+        """Place the send and voice-message buttons inside the text input area."""
         if self.composer_layout is not None:
             self.composer_layout.activate()
         self.card_layout.activate()
@@ -2742,19 +2907,331 @@ class MessageInput(QWidget):
 
         button_margin_right = 14
         button_margin_bottom = 14
-        send_x = text_rect.x() + text_rect.width() - self.send_button.width() - button_margin_right
+        button_gap = 8
+        button_row_width = self.voice_message_button.width() + button_gap + self.send_button.width()
+        voice_x = text_rect.x() + text_rect.width() - button_row_width - button_margin_right
         send_y = text_rect.y() + text_rect.height() - self.send_button.height() - button_margin_bottom
         composer_rect = self.composer_widget.rect()
+        voice_x = max(composer_rect.left(), min(voice_x, composer_rect.right() - button_row_width))
+        send_x = voice_x + self.voice_message_button.width() + button_gap
         send_x = max(composer_rect.left(), min(send_x, composer_rect.right() - self.send_button.width()))
         send_y = max(composer_rect.top(), min(send_y, composer_rect.bottom() - self.send_button.height()))
+        voice_y = send_y + max(0, (self.send_button.height() - self.voice_message_button.height()) // 2)
+        self.voice_message_button.move(voice_x, voice_y)
         self.send_button.move(send_x, send_y)
 
+        self.voice_message_button.raise_()
         self.send_button.raise_()
 
     def _update_send_button_state(self) -> None:
         """Enable the send button only when the active session has draft content."""
         has_draft = self.text_input.has_meaningful_content()
         self.send_button.setEnabled(self._session_active and has_draft)
+        self._update_voice_message_button_state()
+
+    def _voice_messages_supported(self) -> bool:
+        """Return whether the current session can send voice messages."""
+        session = self._current_session
+        return bool(
+            self._session_active
+            and session is not None
+            and session.session_type in {"direct", "group"}
+            and not session.is_ai_session
+        )
+
+    def _update_voice_message_button_state(self) -> None:
+        """Enable the hold-to-talk entry point for supported chat sessions."""
+        supported = self._voice_messages_supported()
+        self.voice_message_button.setVisible(supported)
+        self.voice_message_button.setEnabled(supported and not self._voice_recording_active)
+
+    def _handle_voice_button_press(self, event) -> bool:
+        """Start hold-to-talk recording on left-button press."""
+        if not isinstance(event, QMouseEvent) or event.button() != Qt.MouseButton.LeftButton:
+            return False
+        if not self._voice_messages_supported() or self._voice_recording_active:
+            return False
+        self._voice_press_global_y = self._event_global_y(event)
+        self._start_voice_recording()
+        event.accept()
+        return True
+
+    def _handle_voice_button_move(self, event) -> bool:
+        """Update cancel state while the held mic button is dragged."""
+        if not self._voice_recording_active:
+            return False
+        self._update_voice_recording_cancel_state(event)
+        event.accept()
+        return True
+
+    def _handle_voice_button_release(self, event) -> bool:
+        """Send or cancel the voice message when the button is released."""
+        if not isinstance(event, QMouseEvent) or event.button() != Qt.MouseButton.LeftButton:
+            return False
+        if not self._voice_recording_active:
+            return False
+        self._update_voice_recording_cancel_state(event)
+        self._finish_voice_recording(cancel=self._voice_recording_cancel_requested)
+        event.accept()
+        return True
+
+    @staticmethod
+    def _event_global_y(event) -> float | None:
+        """Extract a global y coordinate from Qt5/Qt6 mouse events."""
+        global_position = getattr(event, "globalPosition", None)
+        if callable(global_position):
+            position = global_position()
+            return float(position.y())
+        global_pos = getattr(event, "globalPos", None)
+        if callable(global_pos):
+            position = global_pos()
+            return float(position.y())
+        return None
+
+    def _update_voice_recording_cancel_state(self, event) -> None:
+        """Switch overlay state when the cursor moves into the upward cancel zone."""
+        press_y = self._voice_press_global_y
+        current_y = self._event_global_y(event)
+        if press_y is None or current_y is None:
+            return
+        self._voice_recording_cancel_requested = (press_y - current_y) >= MessageInputVoiceLimits.CANCEL_DRAG_DISTANCE
+        self._refresh_voice_recording_overlay()
+
+    def _start_voice_recording(self) -> None:
+        """Create a short local audio recording using Qt Multimedia."""
+        if QMediaCaptureSession is None or QAudioInput is None or QMediaRecorder is None or QMediaDevices is None:
+            self._show_voice_recording_notice(tr("composer.voice.unavailable", "Voice recording is unavailable."))
+            return
+
+        audio_inputs = QMediaDevices.audioInputs()
+        if not audio_inputs:
+            self._show_voice_recording_notice(tr("composer.voice.no_microphone", "No microphone detected."))
+            return
+
+        media_format, extension = self._select_voice_recording_format()
+        if media_format is None:
+            self._show_voice_recording_notice(tr("composer.voice.no_format", "No supported audio recording format."))
+            return
+
+        recording_path = self._next_voice_recording_path(extension)
+        try:
+            audio_input = QAudioInput(QMediaDevices.defaultAudioInput(), self)
+            recorder = QMediaRecorder(self)
+            recorder.setMediaFormat(media_format)
+            recorder.setOutputLocation(QUrl.fromLocalFile(recording_path))
+            capture_session = QMediaCaptureSession(self)
+            capture_session.setAudioInput(audio_input)
+            capture_session.setRecorder(recorder)
+        except Exception as exc:
+            logger.warning("Failed to initialize voice recorder: %s", exc)
+            self._show_voice_recording_notice(tr("composer.voice.start_failed", "Unable to start recording."))
+            return
+
+        self._voice_audio_input = audio_input
+        self._voice_recorder = recorder
+        self._voice_capture_session = capture_session
+        self._voice_recording_path = recording_path
+        self._voice_recording_duration_ms = 0
+        self._voice_recording_started_at = time.monotonic()
+        self._voice_recording_cancel_requested = False
+        self._voice_recording_stopping = False
+        self._voice_recording_active = True
+        self._update_voice_message_button_state()
+
+        recorder.durationChanged.connect(self._on_voice_recorder_duration_changed)
+        recorder.recorderStateChanged.connect(self._on_voice_recorder_state_changed)
+        recorder.errorOccurred.connect(lambda *_args: self._on_voice_recording_error())
+        recorder.record()
+        self._voice_recording_timer.start()
+        self._show_voice_recording_overlay()
+        self._refresh_voice_recording_overlay()
+
+    def _select_voice_recording_format(self):
+        """Select the best supported short-audio recording container."""
+        if QMediaFormat is None:
+            return None, "m4a"
+
+        candidates = [
+            ("Mpeg4Audio", "AAC", "m4a"),
+            ("MP3", "MP3", "mp3"),
+            ("Ogg", "Vorbis", "ogg"),
+            ("Wave", "Wave", "wav"),
+        ]
+        for file_format_name, codec_name, extension in candidates:
+            file_format = getattr(QMediaFormat.FileFormat, file_format_name, None)
+            audio_codec = getattr(QMediaFormat.AudioCodec, codec_name, None)
+            if file_format is None or audio_codec is None:
+                continue
+            media_format = QMediaFormat()
+            media_format.setFileFormat(file_format)
+            media_format.setAudioCodec(audio_codec)
+            if media_format.isSupported(QMediaFormat.ConversionMode.Encode):
+                return media_format, extension
+        return None, "m4a"
+
+    def _next_voice_recording_path(self, extension: str) -> str:
+        """Return a durable local path for a newly recorded voice message."""
+        try:
+            base_dir = Path(get_config().storage.db_path).expanduser().resolve().parent
+        except Exception:
+            base_dir = Path.cwd() / "data"
+        voice_dir = base_dir / "voice_messages"
+        voice_dir.mkdir(parents=True, exist_ok=True)
+        suffix = str(extension or "m4a").lstrip(".")
+        return str(voice_dir / f"voice-{time.strftime('%Y%m%d-%H%M%S')}-{time.time_ns()}.{suffix}")
+
+    def _on_voice_recorder_duration_changed(self, duration_ms: int) -> None:
+        self._voice_recording_duration_ms = max(self._voice_recording_duration_ms, int(duration_ms or 0))
+        self._refresh_voice_recording_overlay()
+
+    def _on_voice_recorder_state_changed(self, state) -> None:
+        if not self._voice_recording_stopping or QMediaRecorder is None:
+            return
+        if state == QMediaRecorder.RecorderState.StoppedState:
+            self._complete_voice_recording(notice=self._voice_recording_finish_notice)
+
+    def _on_voice_recording_error(self) -> None:
+        recorder = self._voice_recorder
+        error_text = ""
+        if recorder is not None and hasattr(recorder, "errorString"):
+            error_text = str(recorder.errorString() or "")
+        if error_text:
+            logger.warning("Voice recording failed: %s", error_text)
+        self._finish_voice_recording(cancel=True, notice=tr("composer.voice.record_failed", "Recording failed."))
+
+    def _on_voice_recording_tick(self) -> None:
+        if not self._voice_recording_active:
+            return
+        elapsed_ms = self._voice_elapsed_ms()
+        self._voice_recording_duration_ms = max(self._voice_recording_duration_ms, elapsed_ms)
+        self._refresh_voice_recording_overlay()
+        if elapsed_ms >= MessageInputVoiceLimits.MAX_SECONDS * 1000:
+            self._finish_voice_recording(cancel=False)
+
+    def _voice_elapsed_ms(self) -> int:
+        if not self._voice_recording_started_at:
+            return 0
+        return max(0, int((time.monotonic() - self._voice_recording_started_at) * 1000))
+
+    def _finish_voice_recording(self, *, cancel: bool, notice: str = "") -> None:
+        """Stop the recorder and complete once Qt has finalized the file."""
+        if not self._voice_recording_active or self._voice_recording_stopping:
+            return
+        self._voice_recording_cancel_requested = bool(cancel)
+        self._voice_recording_finish_notice = str(notice or "")
+        self._voice_recording_stopping = True
+        self._voice_recording_timer.stop()
+        recorder = self._voice_recorder
+        if recorder is None:
+            self._complete_voice_recording(notice=notice)
+            return
+        try:
+            recorder.stop()
+        except Exception:
+            self._complete_voice_recording(notice=notice)
+            return
+        if QMediaRecorder is not None and recorder.recorderState() == QMediaRecorder.RecorderState.StoppedState:
+            QTimer.singleShot(0, lambda: self._complete_voice_recording(notice=notice))
+
+    def _complete_voice_recording(self, *, notice: str = "") -> None:
+        """Emit a finished voice-message file or discard a canceled/too-short recording."""
+        if not self._voice_recording_active:
+            return
+
+        file_path = self._voice_recording_path
+        duration_ms = max(self._voice_recording_duration_ms, self._voice_elapsed_ms())
+        cancel_requested = self._voice_recording_cancel_requested
+        self._cleanup_voice_recorder_objects()
+        self._hide_voice_recording_overlay()
+
+        if cancel_requested:
+            self._delete_voice_recording_file(file_path)
+            if notice:
+                self._show_voice_recording_notice(notice)
+            return
+
+        if duration_ms < MessageInputVoiceLimits.MIN_SECONDS * 1000:
+            self._delete_voice_recording_file(file_path)
+            self._show_voice_recording_notice(tr("composer.voice.too_short", "Hold a little longer."))
+            return
+
+        if not file_path or not os.path.exists(file_path):
+            self._show_voice_recording_notice(tr("composer.voice.record_failed", "Recording failed."))
+            return
+
+        duration_seconds = max(
+            MessageInputVoiceLimits.MIN_SECONDS,
+            min(MessageInputVoiceLimits.MAX_SECONDS, (duration_ms + 999) // 1000),
+        )
+        self.voice_message_submitted.emit(file_path, int(duration_seconds))
+
+    def _cleanup_voice_recorder_objects(self) -> None:
+        self._voice_recording_active = False
+        self._voice_recording_stopping = False
+        self._voice_recording_started_at = 0.0
+        self._voice_recording_duration_ms = 0
+        self._voice_recording_finish_notice = ""
+        self._voice_press_global_y = None
+        recorder = self._voice_recorder
+        capture_session = self._voice_capture_session
+        audio_input = self._voice_audio_input
+        self._voice_recorder = None
+        self._voice_capture_session = None
+        self._voice_audio_input = None
+        for item in (recorder, capture_session, audio_input):
+            if item is not None:
+                item.deleteLater()
+        self._update_voice_message_button_state()
+
+    def _delete_voice_recording_file(self, file_path: str) -> None:
+        try:
+            if file_path and os.path.exists(file_path):
+                os.unlink(file_path)
+        except OSError:
+            logger.debug("Failed to delete discarded voice recording", exc_info=True)
+
+    def _show_voice_recording_overlay(self) -> None:
+        overlay = self._ensure_voice_recording_overlay()
+        overlay.show()
+        self._position_voice_recording_overlay()
+        overlay.raise_()
+
+    def _hide_voice_recording_overlay(self) -> None:
+        if self._voice_recording_overlay is not None:
+            self._voice_recording_overlay.hide()
+
+    def _show_voice_recording_notice(self, text: str) -> None:
+        overlay = self._ensure_voice_recording_overlay()
+        overlay.show_notice(text)
+        self._position_voice_recording_overlay()
+        QTimer.singleShot(1400, lambda ref=overlay: ref.hide() if not self._voice_recording_active else None)
+
+    def _ensure_voice_recording_overlay(self) -> VoiceRecordingOverlay:
+        host = self.window() if isinstance(self.window(), QWidget) else self
+        if self._voice_recording_overlay is None or self._voice_recording_overlay.parentWidget() is not host:
+            if self._voice_recording_overlay is not None:
+                self._voice_recording_overlay.deleteLater()
+            self._voice_recording_overlay = VoiceRecordingOverlay(host)
+        return self._voice_recording_overlay
+
+    def _position_voice_recording_overlay(self) -> None:
+        overlay = self._voice_recording_overlay
+        host = overlay.parentWidget() if overlay is not None else None
+        if overlay is None or host is None:
+            return
+        host_rect = host.rect()
+        button_center = self.voice_message_button.mapTo(host, self.voice_message_button.rect().center())
+        x = max(12, min(button_center.x() - overlay.width() // 2, host_rect.width() - overlay.width() - 12))
+        y = max(12, button_center.y() - overlay.sizeHint().height() - 64)
+        overlay.move(x, y)
+
+    def _refresh_voice_recording_overlay(self) -> None:
+        overlay = self._voice_recording_overlay
+        if overlay is None or not overlay.isVisible():
+            return
+        elapsed_seconds = min(MessageInputVoiceLimits.MAX_SECONDS, max(0, (self._voice_recording_duration_ms + 999) // 1000))
+        overlay.update_state(elapsed_seconds, canceling=self._voice_recording_cancel_requested)
+        self._position_voice_recording_overlay()
 
     def _run_programmatic_edit(self, callback) -> None:
         """Suppress typing side effects while mutating the composer programmatically."""
@@ -2877,6 +3354,8 @@ class MessageInput(QWidget):
 
     def set_session_active(self, active: bool) -> None:
         """Enable or disable the editor depending on session selection."""
+        if not active and self._voice_recording_active:
+            self._finish_voice_recording(cancel=True)
         self._session_active = active
 
         self.emoji_button.setEnabled(active)
@@ -2901,6 +3380,7 @@ class MessageInput(QWidget):
         self._apply_editor_transparency()
         self._update_call_buttons()
         self._update_send_button_state()
+        self._update_voice_message_button_state()
 
     def focus_editor(self) -> None:
         """Focus the text editor."""
@@ -2909,12 +3389,15 @@ class MessageInput(QWidget):
 
     def set_session(self, session: Session | None) -> None:
         """Update the active session context used by composer-only features like @ mention."""
+        if session is not self._current_session and self._voice_recording_active:
+            self._finish_voice_recording(cancel=True)
         self._current_session = session
         self._sync_ai_feature_states(session)
         self._mention_candidates = self._build_mention_candidates(session)
         self._close_mention_flyout()
         self.clear_reply_suggestions()
         self._update_call_buttons()
+        self._update_voice_message_button_state()
 
     def _update_call_buttons(self) -> None:
         session = self._current_session

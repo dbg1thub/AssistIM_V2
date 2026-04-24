@@ -56,6 +56,8 @@ def attachment_icon_text(message_type: MessageType) -> str:
         return "P"
     if message_type == MessageType.VIDEO:
         return "V"
+    if message_type == MessageType.VOICE:
+        return "M"
     return "F"
 
 

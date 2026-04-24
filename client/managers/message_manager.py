@@ -960,7 +960,7 @@ class MessageManager:
             return False
         if not callable(getattr(session, "uses_e2ee", None)) or not session.uses_e2ee():
             return False
-        return message_type in {MessageType.FILE, MessageType.IMAGE, MessageType.VIDEO}
+        return message_type in {MessageType.FILE, MessageType.IMAGE, MessageType.VIDEO, MessageType.VOICE}
 
     def _resolve_direct_counterpart_id(self, session) -> str:
         """Resolve the other participant in one direct chat session."""
@@ -1351,7 +1351,7 @@ class MessageManager:
         message = await self._db.get_message(normalized_message_id)
         if message is None:
             raise RuntimeError("message not found")
-        if message.message_type not in {MessageType.FILE, MessageType.IMAGE, MessageType.VIDEO}:
+        if message.message_type not in {MessageType.FILE, MessageType.IMAGE, MessageType.VIDEO, MessageType.VOICE}:
             raise RuntimeError("message is not a downloadable attachment")
 
         local_path = str((message.extra or {}).get("local_path") or "").strip()
@@ -2757,7 +2757,7 @@ class MessageManager:
     @staticmethod
     def _needs_media_upload(message: ChatMessage) -> bool:
         """Return whether a failed media message still needs HTTP upload before send."""
-        if message.message_type not in {MessageType.IMAGE, MessageType.FILE, MessageType.VIDEO}:
+        if message.message_type not in {MessageType.IMAGE, MessageType.FILE, MessageType.VIDEO, MessageType.VOICE}:
             return False
 
         local_path = str(message.extra.get("local_path", "") or "")
@@ -2945,7 +2945,7 @@ class MessageManager:
                 stats["other"] += 1
             return
 
-        if message.message_type in {MessageType.FILE, MessageType.IMAGE, MessageType.VIDEO}:
+        if message.message_type in {MessageType.FILE, MessageType.IMAGE, MessageType.VIDEO, MessageType.VOICE}:
             stats["attachments"] += 1
             attachment_encryption = dict((message.extra or {}).get("attachment_encryption") or {})
             scheme = str(attachment_encryption.get("scheme") or "").strip()

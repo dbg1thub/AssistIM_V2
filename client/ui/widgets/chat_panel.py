@@ -11,6 +11,11 @@ from PySide6.QtWidgets import QAbstractItemView, QFrame, QHBoxLayout, QListView,
 
 from qfluentwidgets import BodyLabel, CaptionLabel, IconWidget, PushButton, ScrollBarHandleDisplayMode
 from qfluentwidgets.components.widgets.scroll_bar import SmoothScrollDelegate
+try:
+    from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
+except Exception:  # pragma: no cover - optional Qt Multimedia runtime
+    QAudioOutput = None  # type: ignore[assignment]
+    QMediaPlayer = None  # type: ignore[assignment]
 
 from client.core import logging
 from client.core.app_icons import AppIcon
@@ -254,6 +259,7 @@ class ChatPanel(QWidget):
     screenshot_requested = Signal()
     voice_call_requested = Signal()
     video_call_requested = Signal()
+    voice_message_submitted = Signal(str, int)
     older_messages_requested = Signal()
     composer_draft_changed = Signal(object)
     chat_history_requested = Signal()
@@ -287,6 +293,9 @@ class ChatPanel(QWidget):
         self._message_scroll_gap = 0
         self._restoring_message_view = False
         self._video_windows: list[VideoWidget] = []
+        self._voice_player = None
+        self._voice_audio_output = None
+        self._voice_playing_message_id = ""
         self._history_request_pending = False
         self._has_more_history = True
         self.message_input: Optional[MessageInput] = None
@@ -357,6 +366,7 @@ class ChatPanel(QWidget):
         self.message_input.screenshot_requested.connect(self.screenshot_requested.emit)
         self.message_input.voice_call_requested.connect(self.voice_call_requested.emit)
         self.message_input.video_call_requested.connect(self.video_call_requested.emit)
+        self.message_input.voice_message_submitted.connect(self.voice_message_submitted.emit)
         self.message_input.ai_feature_toggled.connect(self.ai_feature_toggled.emit)
         self.message_input.ai_reply_suggestion_selected.connect(self.ai_reply_suggestion_selected.emit)
         self.message_input.typing_signal.connect(self._on_typing)
@@ -591,6 +601,7 @@ class ChatPanel(QWidget):
 
     def clear_messages(self) -> None:
         """Clear visible messages from the model."""
+        self.stop_voice_playback()
         if self._message_model:
             self._message_model.clear()
         self._history_request_pending = False
@@ -603,6 +614,7 @@ class ChatPanel(QWidget):
         if not self._message_model:
             return
 
+        self.stop_voice_playback()
         self._message_model.set_messages(messages)
         self._history_request_pending = False
         self._history_indicator.hide()
@@ -1188,6 +1200,13 @@ class ChatPanel(QWidget):
             self.open_video_message(message)
             return
 
+        if message.message_type == MessageType.VOICE:
+            if self._attachment_open_callback is not None:
+                self._attachment_open_callback(message)
+                return
+            self.play_voice_message(message)
+            return
+
         if message.message_type == MessageType.FILE:
             if self._attachment_open_callback is not None:
                 self._attachment_open_callback(message)
@@ -1229,6 +1248,65 @@ class ChatPanel(QWidget):
         viewer.play()
         return True
 
+    def play_voice_message(self, message: ChatMessage, local_path: str = "") -> bool:
+        """Play one voice message in-place, stopping any previous voice playback."""
+        if QAudioOutput is None or QMediaPlayer is None:
+            return False
+
+        source = local_path or self._resolve_attachment_source(message)
+        if not source:
+            return False
+
+        if self._voice_player is None:
+            self._voice_audio_output = QAudioOutput(self)
+            self._voice_player = QMediaPlayer(self)
+            self._voice_player.setAudioOutput(self._voice_audio_output)
+            self._voice_player.playbackStateChanged.connect(self._on_voice_playback_state_changed)
+
+        if (
+            self._voice_playing_message_id == message.message_id
+            and self._voice_player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
+        ):
+            self.stop_voice_playback()
+            return True
+
+        self.stop_voice_playback(clear_source=False)
+        self._voice_playing_message_id = str(message.message_id or "")
+        message.extra["voice_playing"] = True
+        if not message.is_self:
+            message.extra["voice_played"] = True
+        self._refresh_voice_message(message.message_id)
+
+        url = QUrl(source) if source.startswith(("http://", "https://")) else QUrl.fromLocalFile(os.path.abspath(source))
+        self._voice_player.setSource(url)
+        self._voice_player.play()
+        return True
+
+    def stop_voice_playback(self, *, clear_source: bool = True) -> None:
+        """Stop the current voice playback and refresh its bubble state."""
+        player = self._voice_player
+        message_id = self._voice_playing_message_id
+        if player is not None:
+            player.stop()
+            if clear_source:
+                player.setSource(QUrl())
+        if message_id and self._message_model is not None:
+            message = self._message_model.get_message_by_id(message_id)
+            if message is not None and message.extra.pop("voice_playing", None) is not None:
+                self._message_model.refresh_message(message_id, allow_reorder=False)
+        self._voice_playing_message_id = ""
+
+    def _on_voice_playback_state_changed(self, state) -> None:
+        if QMediaPlayer is None:
+            return
+        if state != QMediaPlayer.PlaybackState.PlayingState:
+            self.stop_voice_playback(clear_source=False)
+
+    def _refresh_voice_message(self, message_id: str) -> None:
+        if self._message_model and message_id:
+            self._message_model.refresh_message(message_id, allow_reorder=False)
+            self.message_list.viewport().update()
+
     def open_local_attachment(self, file_path: str, message_type: MessageType) -> bool:
         """Open a local attachment from the composer preview/editor."""
         if not file_path:
@@ -1251,6 +1329,17 @@ class ChatPanel(QWidget):
                 extra={"local_path": file_path, "name": os.path.basename(file_path)},
             )
             return self.open_video_message(message)
+
+        if message_type == MessageType.VOICE:
+            message = ChatMessage(
+                message_id="preview-voice",
+                session_id="",
+                sender_id="",
+                content=file_path,
+                message_type=MessageType.VOICE,
+                extra={"local_path": file_path, "name": os.path.basename(file_path), "voice_played": True},
+            )
+            return self.play_voice_message(message, file_path)
 
         return QDesktopServices.openUrl(QUrl.fromLocalFile(file_path))
 

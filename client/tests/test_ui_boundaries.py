@@ -215,6 +215,33 @@ def test_chat_interface_async_message_action_results_are_session_generation_guar
     assert 'chat.security_pending.release_empty' in chat_interface
 
 
+def test_voice_messages_have_send_open_and_click_paths_without_alt_shortcut() -> None:
+    chat_interface = Path('client/ui/windows/chat_interface.py').read_text(encoding='utf-8')
+    chat_panel = Path('client/ui/widgets/chat_panel.py').read_text(encoding='utf-8')
+    message_input = Path('client/ui/widgets/message_input.py').read_text(encoding='utf-8')
+    message_manager = Path('client/managers/message_manager.py').read_text(encoding='utf-8')
+    message_delegate = Path('client/delegates/message_delegate.py').read_text(encoding='utf-8')
+
+    send_segments_block = chat_interface.split('async def _send_segments_async', 1)[1].split(
+        'async def _send_image_message',
+        1,
+    )[0]
+    open_message_block = chat_interface.split('def _open_message(self, message', 1)[1].split(
+        'async def _open_file_attachment',
+        1,
+    )[0]
+
+    assert 'MessageType.VOICE' in send_segments_block
+    assert 'MessageType.VOICE' in open_message_block
+    assert 'play_voice_message' in chat_panel
+    assert 'MessageType.VOICE' in chat_panel
+    assert 'voice_message_button' in message_input
+    assert 'voice_message_submitted = Signal(str, int)' in message_input
+    assert 'Key_Alt' not in message_input
+    assert 'MessageType.VOICE' in message_manager
+    assert 'MessageType.VOICE' in message_delegate
+
+
 def test_contact_interface_request_and_group_actions_avoid_full_reload() -> None:
     contact_interface = Path('client/ui/windows/contact_interface.py').read_text(encoding='utf-8')
 

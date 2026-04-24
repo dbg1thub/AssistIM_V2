@@ -11,7 +11,15 @@ from client.managers import session_manager as session_manager_module
 from client.delegates.session_delegate import SessionDelegate
 from client.delegates.message_delegate import MessageDelegate
 from client.models.message_model import MessageModel
-from client.models.message import ChatMessage, MessageStatus, MessageType, Session, format_message_preview, resolve_recall_notice
+from client.models.message import (
+    ChatMessage,
+    MessageStatus,
+    MessageType,
+    Session,
+    format_message_preview,
+    infer_message_type_from_path,
+    resolve_recall_notice,
+)
 from client.core.i18n import initialize_i18n, tr
 
 
@@ -143,8 +151,18 @@ def test_format_message_preview_localizes_server_attachment_placeholders() -> No
         assert format_message_preview('[image]') == '[图片]'
         assert format_message_preview('[VIDEO]') == '[视频]'
         assert format_message_preview('[file]') == '[文件]'
+        assert format_message_preview('[voice]') == '[语音]'
     finally:
         initialize_i18n(Language.ENGLISH)
+
+
+def test_audio_files_are_treated_as_voice_messages() -> None:
+    assert infer_message_type_from_path('recording.m4a') == MessageType.VOICE
+    assert infer_message_type_from_path('recording.mp3') == MessageType.VOICE
+    assert infer_message_type_from_path('recording.ogg') == MessageType.VOICE
+    assert infer_message_type_from_path('recording.wav') == MessageType.VOICE
+    initialize_i18n(Language.ENGLISH)
+    assert format_message_preview('', MessageType.VOICE) == '[Voice]'
 
 
 def test_session_delegate_group_preview_does_not_prefix_self_message() -> None:
