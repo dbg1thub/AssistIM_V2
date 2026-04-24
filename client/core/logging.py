@@ -31,19 +31,12 @@ class SafeRotatingFileHandler(RotatingFileHandler):
 
 
 class SafeConsoleStreamHandler(logging.StreamHandler):
-    """Console handler that disables itself when the console stream is unavailable."""
-
-    def __init__(self, stream=None) -> None:
-        super().__init__(stream)
-        self._assistim_console_disabled = False
+    """Console handler that drops a single failed console write without noisy stderr output."""
 
     def emit(self, record: logging.LogRecord) -> None:
-        if self._assistim_console_disabled:
-            return
         try:
             stream = self.stream
             if stream is None or bool(getattr(stream, "closed", False)):
-                self._assistim_console_disabled = True
                 return
             message = self.format(record)
             stream.write(message + self.terminator)
@@ -51,7 +44,7 @@ class SafeConsoleStreamHandler(logging.StreamHandler):
         except RecursionError:
             raise
         except Exception:
-            self._assistim_console_disabled = True
+            return
 
 
 def _default_log_dir() -> Path:

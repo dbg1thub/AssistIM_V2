@@ -13,18 +13,27 @@ def test_logging_respects_configured_level_and_suppresses_qasync_debug() -> None
     assert 'logging.getLogger("qasync").setLevel(logging.WARNING)' in logging_source
 
 
-def test_console_stream_write_failure_does_not_emit_logging_error(tmp_path, monkeypatch, capsys) -> None:
-    class BrokenConsoleStream:
+def test_console_stream_write_failure_does_not_disable_future_console_output(tmp_path, monkeypatch, capsys) -> None:
+    class FlakyConsoleStream:
         closed = False
 
+        def __init__(self) -> None:
+            self.fail_next_write = True
+            self.written: list[str] = []
+
         def write(self, value: str) -> int:
-            raise OSError("console stream is unavailable")
+            if self.fail_next_write:
+                self.fail_next_write = False
+                raise OSError("console stream is temporarily unavailable")
+            self.written.append(value)
+            return len(value)
 
         def flush(self) -> None:
             return None
 
     log_file = tmp_path / "assistim.log"
-    monkeypatch.setattr(sys, "stdout", BrokenConsoleStream())
+    flaky_stream = FlakyConsoleStream()
+    monkeypatch.setattr(sys, "stdout", flaky_stream)
     try:
         app_logging.setup_logging(
             app_logging.LogConfig(
@@ -38,12 +47,15 @@ def test_console_stream_write_failure_does_not_emit_logging_error(tmp_path, monk
         )
 
         logger = app_logging.get_logger("client.tests.logging")
-        logger.info("console failure should not break file logging")
+        logger.info("first console write may fail")
+        logger.info("second console write should be visible")
         app_logging._queue.join()
 
         captured = capsys.readouterr()
         assert "--- Logging error ---" not in captured.err
-        assert "console failure should not break file logging" in log_file.read_text(encoding="utf-8")
+        assert "first console write may fail" in log_file.read_text(encoding="utf-8")
+        assert "second console write should be visible" in log_file.read_text(encoding="utf-8")
+        assert any("second console write should be visible" in value for value in flaky_stream.written)
     finally:
         app_logging.setup_logging(
             app_logging.LogConfig(
