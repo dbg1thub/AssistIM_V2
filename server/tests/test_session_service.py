@@ -454,3 +454,128 @@ def test_session_service_create_private_existing_session_uses_authoritative_memb
     assert payload['participant_ids'] == ['bob', 'alice']
     assert payload['created'] is False
     assert payload['reused'] is True
+
+
+def test_session_service_create_private_upgrades_reused_plain_session_to_e2ee() -> None:
+    now = datetime(2026, 4, 24, 12, 0, 0)
+
+    class _ExistingPlainDirectRepo:
+        def __init__(self) -> None:
+            self.updates: list[tuple[str, str, bool]] = []
+            self.existing = SimpleNamespace(
+                id='session-existing',
+                type='private',
+                is_ai_session=False,
+                name='Alice & Bob',
+                avatar=None,
+                updated_at=now,
+                created_at=now,
+                direct_key='alice|bob',
+                encryption_mode='plain',
+            )
+
+        def build_private_direct_key(self, members: list[str]) -> str:
+            return '|'.join(sorted(str(member) for member in members))
+
+        def get_private_session_by_direct_key(self, direct_key: str):
+            return self.existing if direct_key == 'alice|bob' else None
+
+        def list_member_ids(self, session_id: str):
+            assert session_id == 'session-existing'
+            return ['bob', 'alice']
+
+        def list_members(self, session_id: str):
+            assert session_id == 'session-existing'
+            return [
+                SimpleNamespace(session_id='session-existing', user_id='bob', joined_at=now),
+                SimpleNamespace(session_id='session-existing', user_id='alice', joined_at=now),
+            ]
+
+        def set_encryption_mode(self, session_id: str, encryption_mode: str, *, commit: bool = True):
+            self.updates.append((session_id, encryption_mode, commit))
+            self.existing.encryption_mode = encryption_mode
+            return self.existing
+
+    fake_sessions = _ExistingPlainDirectRepo()
+    service = SessionService(db=None)
+    service.sessions = fake_sessions
+    service.groups = _NullGroupRepo()
+    service.messages = SimpleNamespace(
+        list_session_messages=lambda session_id, limit=1: [],
+        unread_by_session_for_user=lambda user_id: [],
+    )
+    service.users = SimpleNamespace(
+        get_by_id=lambda user_id: SimpleNamespace(id=user_id),
+        list_users_by_ids=lambda user_ids: {
+            'alice': SimpleNamespace(id='alice', nickname='Alice', username='alice', avatar=None, gender='female'),
+            'bob': SimpleNamespace(id='bob', nickname='Bob', username='bob', avatar=None, gender='male'),
+        },
+    )
+    service.avatars = FakeAvatarService()
+
+    payload = service.create_private(SimpleNamespace(id='alice'), ['bob'], encryption_mode='e2ee_private')
+
+    assert fake_sessions.updates == [('session-existing', 'e2ee_private', True)]
+    assert payload['encryption_mode'] == 'e2ee_private'
+    assert payload['created'] is False
+    assert payload['reused'] is True
+
+
+def test_session_service_create_private_does_not_downgrade_reused_e2ee_session() -> None:
+    now = datetime(2026, 4, 24, 12, 0, 0)
+
+    class _ExistingE2EEDirectRepo:
+        def __init__(self) -> None:
+            self.existing = SimpleNamespace(
+                id='session-existing',
+                type='private',
+                is_ai_session=False,
+                name='Alice & Bob',
+                avatar=None,
+                updated_at=now,
+                created_at=now,
+                direct_key='alice|bob',
+                encryption_mode='e2ee_private',
+            )
+
+        def build_private_direct_key(self, members: list[str]) -> str:
+            return '|'.join(sorted(str(member) for member in members))
+
+        def get_private_session_by_direct_key(self, direct_key: str):
+            return self.existing if direct_key == 'alice|bob' else None
+
+        def list_member_ids(self, session_id: str):
+            assert session_id == 'session-existing'
+            return ['bob', 'alice']
+
+        def list_members(self, session_id: str):
+            assert session_id == 'session-existing'
+            return [
+                SimpleNamespace(session_id='session-existing', user_id='bob', joined_at=now),
+                SimpleNamespace(session_id='session-existing', user_id='alice', joined_at=now),
+            ]
+
+        def set_encryption_mode(self, *_args, **_kwargs):
+            raise AssertionError('existing e2ee direct sessions must not be downgraded')
+
+    service = SessionService(db=None)
+    service.sessions = _ExistingE2EEDirectRepo()
+    service.groups = _NullGroupRepo()
+    service.messages = SimpleNamespace(
+        list_session_messages=lambda session_id, limit=1: [],
+        unread_by_session_for_user=lambda user_id: [],
+    )
+    service.users = SimpleNamespace(
+        get_by_id=lambda user_id: SimpleNamespace(id=user_id),
+        list_users_by_ids=lambda user_ids: {
+            'alice': SimpleNamespace(id='alice', nickname='Alice', username='alice', avatar=None, gender='female'),
+            'bob': SimpleNamespace(id='bob', nickname='Bob', username='bob', avatar=None, gender='male'),
+        },
+    )
+    service.avatars = FakeAvatarService()
+
+    payload = service.create_private(SimpleNamespace(id='alice'), ['bob'], encryption_mode='plain')
+
+    assert payload['encryption_mode'] == 'e2ee_private'
+    assert payload['created'] is False
+    assert payload['reused'] is True

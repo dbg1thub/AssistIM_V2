@@ -603,6 +603,66 @@ def test_private_session_direct_key_backfill_uses_boolean_safe_coalesce() -> Non
     assert 'COALESCE(is_ai_session, FALSE)' in migration
 
 
+def test_session_encryption_backfill_migration_upgrades_legacy_plain_sessions() -> None:
+    import importlib.util
+
+    from sqlalchemy import create_engine, text
+
+    migration_path = Path("server/alembic/versions/20260424_0014_backfill_default_e2ee_sessions.py")
+    spec = importlib.util.spec_from_file_location("backfill_default_e2ee_sessions", migration_path)
+    assert spec is not None and spec.loader is not None
+    migration = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(migration)
+
+    engine = create_engine("sqlite+pysqlite:///:memory:", future=True)
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                """
+                CREATE TABLE sessions (
+                    id VARCHAR(36) PRIMARY KEY,
+                    type VARCHAR(32),
+                    is_ai_session BOOLEAN,
+                    encryption_mode VARCHAR(32) NOT NULL DEFAULT 'plain'
+                )
+                """
+            )
+        )
+        connection.execute(
+            text(
+                """
+                INSERT INTO sessions (id, type, is_ai_session, encryption_mode)
+                VALUES
+                    ('private-plain', 'private', FALSE, 'plain'),
+                    ('group-plain', 'group', FALSE, 'plain'),
+                    ('private-e2ee', 'private', FALSE, 'e2ee_private'),
+                    ('ai-session', 'private', TRUE, 'plain')
+                """
+            )
+        )
+
+        original_op = migration.op
+        migration.op = SimpleNamespace(get_bind=lambda: connection)
+        try:
+            migration.upgrade()
+        finally:
+            migration.op = original_op
+
+        rows = {
+            row["id"]: row["encryption_mode"]
+            for row in connection.execute(text("SELECT id, encryption_mode FROM sessions")).mappings().all()
+        }
+
+    engine.dispose()
+
+    assert rows == {
+        "private-plain": "e2ee_private",
+        "group-plain": "e2ee_group",
+        "private-e2ee": "e2ee_private",
+        "ai-session": "plain",
+    }
+
+
 def test_svg_rasterizer_converts_default_avatar_to_png() -> None:
     from app.media.svg_rasterizer import ensure_rasterized_svg
 

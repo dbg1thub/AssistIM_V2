@@ -179,6 +179,18 @@ class SessionRepository:
     def find_private_session_by_members(self, user_ids: list[str]) -> ChatSession | None:
         return self.get_private_session_by_direct_key(self.build_private_direct_key(user_ids))
 
+    def set_encryption_mode(self, session_id: str, encryption_mode: str, *, commit: bool = True) -> ChatSession | None:
+        session = self.get_by_id(session_id)
+        if session is None:
+            return None
+        session.encryption_mode = encryption_mode
+        self.db.add(session)
+        self.db.flush()
+        if commit:
+            self.db.commit()
+            self.db.refresh(session)
+        return session
+
     def touch(self, session_id: str) -> ChatSession | None:
         session = self.get_by_id(session_id)
         if session is None:

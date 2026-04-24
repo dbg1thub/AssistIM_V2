@@ -127,6 +127,10 @@ class SessionService:
                 or set(existing_member_ids) != set(members)
             ):
                 raise AppError(ErrorCode.RESOURCE_NOT_FOUND, "session not found", 404)
+            existing = self._upgrade_reused_private_session_encryption(
+                existing,
+                requested_encryption_mode=normalized_encryption_mode,
+            )
             unread_count = self._unread_counts_by_session(current_user.id).get(str(existing.id or ""), 0)
             payload = self.serialize_session(
                 existing,
@@ -159,7 +163,10 @@ class SessionService:
             existing = self.sessions.get_private_session_by_direct_key(direct_key)
             if existing is None:
                 raise
-            session = existing
+            session = self._upgrade_reused_private_session_encryption(
+                existing,
+                requested_encryption_mode=normalized_encryption_mode,
+            )
             created = False
         unread_count = self._unread_counts_by_session(current_user.id).get(str(session.id or ""), 0)
         existing_member_ids = self.sessions.list_member_ids(str(session.id or ""))
@@ -459,6 +466,24 @@ class SessionService:
             for item in self.messages.unread_by_session_for_user(user_id)
             if str(item.get("session_id") or "")
         }
+
+    def _upgrade_reused_private_session_encryption(self, session, *, requested_encryption_mode: str):
+        if str(requested_encryption_mode or "").strip().lower() != self.ENCRYPTION_MODE_E2EE_PRIVATE:
+            return session
+        current_mode = self._resolve_encryption_mode(
+            encryption_mode=getattr(session, "encryption_mode", None),
+            session_type="direct",
+            is_ai_session=bool(getattr(session, "is_ai_session", False)),
+        )
+        if current_mode == self.ENCRYPTION_MODE_E2EE_PRIVATE:
+            return session
+        updated = self.sessions.set_encryption_mode(
+            str(session.id or ""),
+            self.ENCRYPTION_MODE_E2EE_PRIVATE,
+        )
+        if updated is None:
+            raise AppError(ErrorCode.RESOURCE_NOT_FOUND, "session not found", 404)
+        return updated
 
     def _run_transaction(self, action: Callable[[], T]) -> T:
         try:
