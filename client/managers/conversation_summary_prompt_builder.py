@@ -5,6 +5,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime
 from typing import Any, Sequence
 
+from client.core.voice_transcription import VOICE_TRANSCRIPT_EXTRA_KEY
 from client.managers.ai_prompt_builder import privacy_scope_for_session
 from client.models.message import ChatMessage, MessageType, Session
 from client.services.ai_service import AIRequest, AITaskType
@@ -255,6 +256,11 @@ class ConversationSummaryPromptBuilder:
         if message.message_type == MessageType.VIDEO:
             return "[视频]"
         if message.message_type == MessageType.VOICE:
+            transcript = dict((message.extra or {}).get(VOICE_TRANSCRIPT_EXTRA_KEY) or {})
+            if str(transcript.get("status") or "").strip() == "ready":
+                text = cls._normalize_scalar(transcript.get("text"), max_chars=max_chars)
+                if text:
+                    return f"[语音转文字: {text}]"
             return "[语音]"
         if message.message_type == MessageType.SYSTEM:
             return "[系统消息]"

@@ -1,5 +1,6 @@
 from datetime import datetime
 
+from client.core.voice_transcription import VOICE_TRANSCRIPT_EXTRA_KEY
 from client.managers.conversation_summary_prompt_builder import (
     ConversationSummaryPromptBuilder,
     StructuredConversationSummary,
@@ -158,3 +159,35 @@ def test_format_context_keeps_non_text_placeholders() -> None:
     prompt = built.request.messages[0]["content"]
     assert "对方: [图片]" in prompt
     assert "我: [文件: 合同.pdf]" in prompt
+
+
+def test_format_context_uses_ready_voice_transcript_for_voice_messages() -> None:
+    session = Session(session_id="session-1", name="Bob", session_type="direct")
+    builder = ConversationSummaryPromptBuilder()
+    built = builder.build_bucket_summary_request(
+        session,
+        [
+            _message(
+                "m-voice-1",
+                datetime(2026, 4, 19, 10, 0, 0),
+                content="voice-1.m4a",
+                message_type=MessageType.VOICE,
+                extra={VOICE_TRANSCRIPT_EXTRA_KEY: {"status": "ready", "text": "明天下午三点见。"}},
+            ),
+            _message(
+                "m-voice-2",
+                datetime(2026, 4, 19, 10, 1, 0),
+                content="voice-2.m4a",
+                is_self=True,
+                message_type=MessageType.VOICE,
+                extra={VOICE_TRANSCRIPT_EXTRA_KEY: {"status": "pending"}},
+            ),
+        ],
+        is_open=True,
+    )
+
+    assert built is not None
+    prompt = built.request.messages[0]["content"]
+    assert "对方: [语音转文字: 明天下午三点见。]" in prompt
+    assert "我: [语音]" in prompt
+    assert "pending" not in prompt

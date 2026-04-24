@@ -2,6 +2,7 @@ import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
+from client.core.voice_transcription import VOICE_TRANSCRIPT_EXTRA_KEY
 from client.core.secure_storage import SecureStorage
 from client.events.event_bus import EventBus
 from client.managers.ai_task_manager import AITaskSnapshot, AITaskState
@@ -9,6 +10,10 @@ from client.managers.conversation_summary_manager import ConversationSummaryEven
 from client.managers.message_manager import MessageEvent
 from client.models.message import ChatMessage, MessageStatus, MessageType, Session
 from client.services.ai_service import AIErrorCode
+from client.services.local_voice_transcription_service import (
+    LocalVoiceTranscriptionResult,
+    LocalVoiceTranscriptionRuntimeError,
+)
 
 
 @dataclass
@@ -138,7 +143,7 @@ class _FakeDatabase:
         messages = [
             message
             for message in self.messages_by_session.get(session_id, [])
-            if message.message_type == MessageType.TEXT
+            if message.message_type in {MessageType.TEXT, MessageType.VOICE}
             and int(message.timestamp.timestamp()) >= int(bucket_start_ts or 0)
             and (bucket_end_ts is None or int(message.timestamp.timestamp()) <= int(bucket_end_ts or 0))
         ]
@@ -288,13 +293,74 @@ class _FakeAnnIndex:
         return [type("Bucket", (), {"band_index": 0, "bucket_key": f"{bucket_value:02x}"})()]
 
 
-def _make_manager(fake_db: _FakeDatabase, event_bus: EventBus, fake_task_manager: _FakeTaskManager) -> ConversationSummaryManager:
+class _FakeMessageManager:
+    def __init__(self, fake_db: _FakeDatabase, *, local_paths: dict[str, str] | None = None, download_error: Exception | None = None) -> None:
+        self._fake_db = fake_db
+        self._local_paths = dict(local_paths or {})
+        self._download_error = download_error
+        self.download_attachment_calls: list[str] = []
+        self.update_voice_transcript_calls: list[tuple[str, dict]] = []
+
+    async def download_attachment(self, message_id: str) -> str:
+        self.download_attachment_calls.append(message_id)
+        if self._download_error is not None:
+            raise self._download_error
+        return self._local_paths.get(message_id, f"D:/voice/{message_id}.m4a")
+
+    async def update_message_voice_transcript(self, message_id: str, transcript: dict) -> ChatMessage | None:
+        payload = dict(transcript or {})
+        self.update_voice_transcript_calls.append((message_id, payload))
+        for messages in self._fake_db.messages_by_session.values():
+            for message in messages:
+                if message.message_id != message_id:
+                    continue
+                updated_extra = dict(message.extra or {})
+                updated_extra[VOICE_TRANSCRIPT_EXTRA_KEY] = payload
+                message.extra = updated_extra
+                return message
+        return None
+
+
+class _FakeVoiceTranscriptionRuntime:
+    def __init__(
+        self,
+        *,
+        result: LocalVoiceTranscriptionResult | None = None,
+        error: LocalVoiceTranscriptionRuntimeError | None = None,
+    ) -> None:
+        self._result = result or LocalVoiceTranscriptionResult(
+            text="语音里说周日下午三点见。",
+            language="zh",
+            language_probability=0.92,
+            duration_seconds=5,
+            metadata={"engine": "faster-whisper", "model_id": "small"},
+        )
+        self._error = error
+        self.calls: list[tuple[str, int | None]] = []
+
+    async def transcribe(self, local_path: str, *, duration_seconds: int | None = None) -> LocalVoiceTranscriptionResult:
+        self.calls.append((local_path, duration_seconds))
+        if self._error is not None:
+            raise self._error
+        return self._result
+
+
+def _make_manager(
+    fake_db: _FakeDatabase,
+    event_bus: EventBus,
+    fake_task_manager: _FakeTaskManager,
+    *,
+    message_manager=None,
+    voice_transcription_runtime=None,
+) -> ConversationSummaryManager:
     return ConversationSummaryManager(
         db=fake_db,
         event_bus=event_bus,
         task_manager=fake_task_manager,
         vector_index=_FakeVectorIndex(),
         ann_index=_FakeAnnIndex(),
+        message_manager=message_manager,
+        voice_transcription_runtime=voice_transcription_runtime,
     )
 
 
@@ -362,6 +428,199 @@ def test_conversation_summary_manager_creates_ready_open_bucket(monkeypatch) -> 
             assert fake_db.memory_embeddings[memory_key]["embedding_model"] == "fake-embedding-model"
             assert memory_key in fake_db.memory_ann_buckets
             assert fake_db.memory_ann_buckets[memory_key]["ann_namespace"] == "fake-ann:8x8"
+        finally:
+            await manager.close()
+
+    asyncio.run(scenario())
+
+
+def test_conversation_summary_manager_transcribes_voice_before_summary(monkeypatch) -> None:
+    monkeypatch.setattr(SecureStorage, "encrypt_text", classmethod(lambda cls, value: f"enc:{value}"))
+    session = Session(session_id="session-1", name="Bob", session_type="direct")
+    fake_db = _FakeDatabase(session)
+    fake_task_manager = _FakeTaskManager()
+    event_bus = EventBus()
+    fake_message_manager = _FakeMessageManager(fake_db, local_paths={"m-voice": "D:/voice/m-voice.m4a"})
+    fake_voice_runtime = _FakeVoiceTranscriptionRuntime()
+
+    async def scenario() -> None:
+        manager = _make_manager(
+            fake_db,
+            event_bus,
+            fake_task_manager,
+            message_manager=fake_message_manager,
+            voice_transcription_runtime=fake_voice_runtime,
+        )
+        manager.DEBOUNCE_SECONDS = 0.0
+        await manager.initialize()
+        try:
+            incoming = _message(
+                "m-voice",
+                datetime(2026, 4, 19, 10, 0, 0),
+                content="voice.m4a",
+                message_type=MessageType.VOICE,
+                extra={"duration": 5},
+            )
+            fake_db.messages_by_session["session-1"].append(incoming)
+            await event_bus.emit(MessageEvent.RECEIVED, {"message": incoming})
+            await _drain_summary_tasks(manager)
+
+            assert fake_message_manager.download_attachment_calls == ["m-voice"]
+            assert fake_voice_runtime.calls == [("D:/voice/m-voice.m4a", 5)]
+            assert fake_message_manager.update_voice_transcript_calls[0][0] == "m-voice"
+            transcript_payload = fake_message_manager.update_voice_transcript_calls[0][1]
+            assert transcript_payload["status"] == "ready"
+            assert transcript_payload["text"] == "语音里说周日下午三点见。"
+            assert incoming.extra[VOICE_TRANSCRIPT_EXTRA_KEY]["status"] == "ready"
+            assert fake_task_manager.requests
+            assert "语音里说周日下午三点见" in fake_task_manager.requests[0].messages[0]["content"]
+            bucket = await fake_db.get_open_conversation_summary_bucket("session-1")
+            assert bucket is not None
+            assert bucket["summary_status"] == "ready"
+            assert bucket["message_count"] == 1
+        finally:
+            await manager.close()
+
+    asyncio.run(scenario())
+
+
+def test_conversation_summary_manager_reuses_existing_voice_transcript_without_asr(monkeypatch) -> None:
+    monkeypatch.setattr(SecureStorage, "encrypt_text", classmethod(lambda cls, value: f"enc:{value}"))
+    session = Session(session_id="session-1", name="Bob", session_type="direct")
+    fake_db = _FakeDatabase(session)
+    fake_task_manager = _FakeTaskManager()
+    event_bus = EventBus()
+    fake_message_manager = _FakeMessageManager(fake_db)
+    fake_voice_runtime = _FakeVoiceTranscriptionRuntime()
+
+    async def scenario() -> None:
+        manager = _make_manager(
+            fake_db,
+            event_bus,
+            fake_task_manager,
+            message_manager=fake_message_manager,
+            voice_transcription_runtime=fake_voice_runtime,
+        )
+        manager.DEBOUNCE_SECONDS = 0.0
+        await manager.initialize()
+        try:
+            incoming = _message(
+                "m-voice",
+                datetime(2026, 4, 19, 10, 0, 0),
+                content="voice.m4a",
+                message_type=MessageType.VOICE,
+                extra={
+                    "duration": 5,
+                    VOICE_TRANSCRIPT_EXTRA_KEY: {"status": "ready", "text": "已有转写内容。"},
+                },
+            )
+            fake_db.messages_by_session["session-1"].append(incoming)
+            await event_bus.emit(MessageEvent.RECEIVED, {"message": incoming})
+            await _drain_summary_tasks(manager)
+
+            assert fake_message_manager.download_attachment_calls == []
+            assert fake_message_manager.update_voice_transcript_calls == []
+            assert fake_voice_runtime.calls == []
+            assert fake_task_manager.requests
+            assert "已有转写内容" in fake_task_manager.requests[0].messages[0]["content"]
+        finally:
+            await manager.close()
+
+    asyncio.run(scenario())
+
+
+def test_conversation_summary_manager_marks_overlong_voice_without_asr(monkeypatch) -> None:
+    monkeypatch.setattr(SecureStorage, "encrypt_text", classmethod(lambda cls, value: f"enc:{value}"))
+    session = Session(session_id="session-1", name="Bob", session_type="direct")
+    fake_db = _FakeDatabase(session)
+    fake_task_manager = _FakeTaskManager()
+    event_bus = EventBus()
+    fake_message_manager = _FakeMessageManager(fake_db)
+    fake_voice_runtime = _FakeVoiceTranscriptionRuntime()
+
+    async def scenario() -> None:
+        manager = _make_manager(
+            fake_db,
+            event_bus,
+            fake_task_manager,
+            message_manager=fake_message_manager,
+            voice_transcription_runtime=fake_voice_runtime,
+        )
+        manager.DEBOUNCE_SECONDS = 0.0
+        await manager.initialize()
+        try:
+            incoming = _message(
+                "m-voice",
+                datetime(2026, 4, 19, 10, 0, 0),
+                content="voice.m4a",
+                message_type=MessageType.VOICE,
+                extra={"duration": 31},
+            )
+            fake_db.messages_by_session["session-1"].append(incoming)
+            await event_bus.emit(MessageEvent.RECEIVED, {"message": incoming})
+            await _drain_summary_tasks(manager)
+
+            assert fake_message_manager.download_attachment_calls == []
+            assert fake_voice_runtime.calls == []
+            assert fake_message_manager.update_voice_transcript_calls[0][0] == "m-voice"
+            transcript_payload = fake_message_manager.update_voice_transcript_calls[0][1]
+            assert transcript_payload["status"] == "skipped"
+            assert transcript_payload["reason"] == "audio_too_long"
+            assert fake_task_manager.requests
+            prompt = fake_task_manager.requests[0].messages[0]["content"]
+            assert "对方: [语音]" in prompt
+            assert "语音转文字" not in prompt
+        finally:
+            await manager.close()
+
+    asyncio.run(scenario())
+
+
+def test_conversation_summary_manager_continues_when_voice_model_missing(monkeypatch) -> None:
+    monkeypatch.setattr(SecureStorage, "encrypt_text", classmethod(lambda cls, value: f"enc:{value}"))
+    session = Session(session_id="session-1", name="Bob", session_type="direct")
+    fake_db = _FakeDatabase(session)
+    fake_task_manager = _FakeTaskManager()
+    event_bus = EventBus()
+    fake_message_manager = _FakeMessageManager(fake_db, local_paths={"m-voice": "D:/voice/m-voice.m4a"})
+    fake_voice_runtime = _FakeVoiceTranscriptionRuntime(
+        error=LocalVoiceTranscriptionRuntimeError("VOICE_TRANSCRIPT_MODEL_NOT_FOUND", "missing")
+    )
+
+    async def scenario() -> None:
+        manager = _make_manager(
+            fake_db,
+            event_bus,
+            fake_task_manager,
+            message_manager=fake_message_manager,
+            voice_transcription_runtime=fake_voice_runtime,
+        )
+        manager.DEBOUNCE_SECONDS = 0.0
+        await manager.initialize()
+        try:
+            incoming = _message(
+                "m-voice",
+                datetime(2026, 4, 19, 10, 0, 0),
+                content="voice.m4a",
+                message_type=MessageType.VOICE,
+                extra={"duration": 5},
+            )
+            fake_db.messages_by_session["session-1"].append(incoming)
+            await event_bus.emit(MessageEvent.RECEIVED, {"message": incoming})
+            await _drain_summary_tasks(manager)
+
+            assert fake_message_manager.download_attachment_calls == ["m-voice"]
+            assert fake_voice_runtime.calls == [("D:/voice/m-voice.m4a", 5)]
+            assert fake_message_manager.update_voice_transcript_calls[0][0] == "m-voice"
+            transcript_payload = fake_message_manager.update_voice_transcript_calls[0][1]
+            assert transcript_payload["status"] == "failed"
+            assert transcript_payload["reason"] == "model_missing"
+            assert fake_task_manager.requests
+            prompt = fake_task_manager.requests[0].messages[0]["content"]
+            assert "对方: [语音]" in prompt
+            bucket = await fake_db.get_open_conversation_summary_bucket("session-1")
+            assert bucket is not None
+            assert bucket["summary_status"] == "ready"
         finally:
             await manager.close()
 

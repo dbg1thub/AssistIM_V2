@@ -12,6 +12,7 @@ from client.core.chat_time_buckets import is_chat_time_break
 from client.core.datetime_utils import to_epoch_seconds
 from client.core.logging import setup_logging
 from client.core.secure_storage import SecureStorage
+from client.core.voice_transcription import VOICE_TRANSCRIPT_EXTRA_KEY, VOICE_TRANSCRIPT_MAX_SECONDS
 from client.events.event_bus import EventBus, get_event_bus
 from client.managers.ai_task_manager import AITaskManager, AITaskSnapshot, AITaskState, get_ai_task_manager
 from client.managers.conversation_ann_index import ConversationAnnIndex
@@ -24,6 +25,7 @@ from client.managers.conversation_summary_prompt_builder import (
 from client.managers.message_manager import MessageEvent
 from client.managers.session_manager import SessionEvent
 from client.models.message import ChatMessage, MessageType, Session
+from client.services.local_voice_transcription_service import LocalVoiceTranscriptionRuntimeError
 from client.storage.database import Database, get_database
 
 
@@ -57,6 +59,8 @@ class ConversationSummaryManager:
         prompt_builder: ConversationSummaryPromptBuilder | None = None,
         vector_index: ConversationVectorIndex | None = None,
         ann_index: ConversationAnnIndex | None = None,
+        message_manager: Any | None = None,
+        voice_transcription_runtime: Any | None = None,
     ) -> None:
         self._db = db or get_database()
         self._event_bus = event_bus or get_event_bus()
@@ -64,6 +68,9 @@ class ConversationSummaryManager:
         self._prompt_builder = prompt_builder or ConversationSummaryPromptBuilder()
         self._vector_index = vector_index or ConversationVectorIndex()
         self._ann_index = ann_index or ConversationAnnIndex(model_id=self._vector_index.model_id)
+        self._message_manager = message_manager
+        self._voice_transcription_runtime = voice_transcription_runtime
+        self._voice_transcription_semaphore = asyncio.Semaphore(1)
         self._event_subscriptions: list[tuple[str, Any]] = []
         self._scheduled_refresh_tasks: dict[tuple[str, int], asyncio.Task] = {}
         self._refresh_task_running_keys: set[tuple[str, int]] = set()
@@ -132,7 +139,7 @@ class ConversationSummaryManager:
         self._cancel_session_tasks(session_id)
 
     async def _process_message(self, session_id: str, message: ChatMessage) -> None:
-        if message.message_type != MessageType.TEXT:
+        if message.message_type not in {MessageType.TEXT, MessageType.VOICE}:
             return
 
         session = await self._db.get_session(session_id)
@@ -266,6 +273,7 @@ class ConversationSummaryManager:
             bucket_end_ts,
             limit=self._prompt_builder.MAX_BUCKET_MESSAGES,
         )
+        messages = await self._prepare_voice_transcripts_for_summary(messages)
         built = self._prompt_builder.build_bucket_summary_request(
             session,
             messages,
@@ -319,6 +327,124 @@ class ConversationSummaryManager:
             messages=messages,
             session=session,
         )
+
+    async def _prepare_voice_transcripts_for_summary(self, messages: list[ChatMessage]) -> list[ChatMessage]:
+        """Add local voice transcripts to summary input without blocking summary on ASR failures."""
+        prepared: list[ChatMessage] = []
+        for message in list(messages or []):
+            if message.message_type != MessageType.VOICE:
+                prepared.append(message)
+                continue
+            prepared.append(await self._prepare_voice_transcript_for_summary(message))
+        return prepared
+
+    async def _prepare_voice_transcript_for_summary(self, message: ChatMessage) -> ChatMessage:
+        transcript = dict((message.extra or {}).get(VOICE_TRANSCRIPT_EXTRA_KEY) or {})
+        status = str(transcript.get("status") or "").strip()
+        if status == "ready" and str(transcript.get("text") or "").strip():
+            return message
+        if status in {"pending", "failed", "skipped"}:
+            return message
+
+        duration_seconds = self._voice_message_duration_seconds(message)
+        if duration_seconds > VOICE_TRANSCRIPT_MAX_SECONDS:
+            return await self._persist_summary_voice_transcript(
+                message,
+                self._voice_transcript_payload(
+                    status="skipped",
+                    reason="audio_too_long",
+                    duration_seconds=duration_seconds,
+                ),
+            )
+
+        try:
+            local_path = await self._require_message_manager().download_attachment(message.message_id)
+            async with self._voice_transcription_semaphore:
+                result = await self._require_voice_transcription_runtime().transcribe(
+                    local_path,
+                    duration_seconds=duration_seconds or None,
+                )
+        except LocalVoiceTranscriptionRuntimeError as exc:
+            if exc.code == "VOICE_TRANSCRIPT_AUDIO_TOO_LONG":
+                payload = self._voice_transcript_payload(
+                    status="skipped",
+                    reason="audio_too_long",
+                    duration_seconds=duration_seconds,
+                    error_code=exc.code,
+                    error_message=str(exc),
+                )
+            else:
+                reason = "model_missing" if exc.code == "VOICE_TRANSCRIPT_MODEL_NOT_FOUND" else "runtime_error"
+                payload = self._voice_transcript_payload(
+                    status="failed",
+                    reason=reason,
+                    duration_seconds=duration_seconds,
+                    error_code=exc.code,
+                    error_message=str(exc),
+                )
+            logger.info(
+                "[voice-asr] summary_voice_transcript_skipped message_id=%s session_id=%s reason=%s error_code=%s",
+                message.message_id,
+                message.session_id,
+                str(payload.get("reason") or ""),
+                exc.code,
+            )
+            return await self._persist_summary_voice_transcript(message, payload)
+        except Exception as exc:
+            logger.warning(
+                "[voice-asr] summary_voice_transcript_unavailable message_id=%s session_id=%s error=%s",
+                message.message_id,
+                message.session_id,
+                exc,
+            )
+            return await self._persist_summary_voice_transcript(
+                message,
+                self._voice_transcript_payload(
+                    status="failed",
+                    reason="audio_unavailable",
+                    duration_seconds=duration_seconds,
+                    error_code=exc.__class__.__name__,
+                    error_message=str(exc),
+                ),
+            )
+
+        text = " ".join(str(result.text or "").strip().split())
+        if not text:
+            payload = self._voice_transcript_payload(
+                status="skipped",
+                reason="no_speech",
+                duration_seconds=duration_seconds,
+            )
+        else:
+            payload = self._voice_transcript_payload(
+                status="ready",
+                text=text,
+                duration_seconds=duration_seconds,
+                language=str(result.language or ""),
+                language_probability=float(result.language_probability or 0.0),
+                metadata=dict(result.metadata or {}),
+            )
+        return await self._persist_summary_voice_transcript(message, payload)
+
+    async def _persist_summary_voice_transcript(self, message: ChatMessage, payload: dict[str, Any]) -> ChatMessage:
+        message.extra = dict(message.extra or {})
+        message.extra[VOICE_TRANSCRIPT_EXTRA_KEY] = dict(payload or {})
+        updated = await self._require_message_manager().update_message_voice_transcript(message.message_id, payload)
+        return updated or message
+
+    def _require_message_manager(self) -> Any:
+        if self._message_manager is None:
+            from client.managers.message_manager import get_message_manager
+
+            self._message_manager = get_message_manager()
+        return self._message_manager
+
+    def _require_voice_transcription_runtime(self) -> Any:
+        if self._voice_transcription_runtime is None:
+            from client.services.local_voice_transcription_service import get_local_voice_transcription_runtime
+
+            self._voice_transcription_runtime = get_local_voice_transcription_runtime()
+        return self._voice_transcription_runtime
 
     async def _persist_summary_result(
         self,
@@ -554,10 +680,10 @@ class ConversationSummaryManager:
             bucket_end_ts,
             limit=max(1, int(self._prompt_builder.MAX_BUCKET_MESSAGES or 1)),
         )
-        text_messages = [message for message in messages if message.message_type == MessageType.TEXT]
-        latest = text_messages[-1] if text_messages else None
+        summary_messages = [message for message in messages if message.message_type in {MessageType.TEXT, MessageType.VOICE}]
+        latest = summary_messages[-1] if summary_messages else None
         return {
-            "message_count": len(text_messages),
+            "message_count": len(summary_messages),
             "last_message_id": str(getattr(latest, "message_id", "") or "") if latest is not None else "",
             "last_message_ts": int(to_epoch_seconds(getattr(latest, "timestamp", None)) or 0) if latest is not None else 0,
         }
@@ -911,6 +1037,48 @@ class ConversationSummaryManager:
         for value in list(structured.decisions or []):
             add(value)
         return tuple(keywords[:12])
+
+    @staticmethod
+    def _voice_message_duration_seconds(message: ChatMessage) -> int:
+        try:
+            return max(0, int(float((message.extra or {}).get("duration") or 0)))
+        except (TypeError, ValueError):
+            return 0
+
+    @staticmethod
+    def _voice_transcript_payload(
+        *,
+        status: str,
+        text: str = "",
+        reason: str = "",
+        duration_seconds: int = 0,
+        language: str = "",
+        language_probability: float = 0.0,
+        metadata: dict | None = None,
+        error_code: str = "",
+        error_message: str = "",
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "status": str(status or "").strip(),
+            "engine": "faster-whisper",
+            "duration_seconds": max(0, int(duration_seconds or 0)),
+            "updated_at": datetime.now().isoformat(timespec="seconds"),
+        }
+        if text:
+            payload["text"] = text
+        if reason:
+            payload["reason"] = reason
+        if language:
+            payload["language"] = language
+        if language_probability:
+            payload["language_probability"] = float(language_probability)
+        if metadata:
+            payload.update({key: value for key, value in dict(metadata).items() if value not in (None, "")})
+        if error_code:
+            payload["error_code"] = error_code
+        if error_message:
+            payload["error_message"] = error_message
+        return payload
 
     @staticmethod
     def _memory_source_id(bucket_start_ts: int) -> str:

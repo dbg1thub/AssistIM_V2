@@ -1839,14 +1839,19 @@ class Database:
         bucket_start_ts: float,
         bucket_end_ts: float | None = None,
     ) -> dict[str, Any]:
-        """Return cheap text-message stats for deciding whether one summary bucket is stale."""
+        """Return cheap summary-message stats for deciding whether one summary bucket is stale."""
         normalized_start_ts = int(bucket_start_ts or 0)
         clauses = [
             "session_id = ?",
-            "message_type = ?",
+            "message_type IN (?, ?)",
             "timestamp >= ?",
         ]
-        params: list[Any] = [str(session_id or ""), MessageType.TEXT.value, normalized_start_ts]
+        params: list[Any] = [
+            str(session_id or ""),
+            MessageType.TEXT.value,
+            MessageType.VOICE.value,
+            normalized_start_ts,
+        ]
         if bucket_end_ts is not None:
             clauses.append("timestamp <= ?")
             params.append(int(bucket_end_ts or normalized_start_ts))
