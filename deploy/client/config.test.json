@@ -10,6 +10,11 @@
   "App": {
     "ExitConfirmEnabled": false
   },
+  "Storage": {
+    "DbPath": "data/assistim.db",
+    "DbEncryptionMode": "plain",
+    "DbEncryptionProvider": "auto"
+  },
   "QFluentWidgets": {
     "FontFamilies": [
       "Segoe UI",

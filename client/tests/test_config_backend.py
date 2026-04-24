@@ -184,6 +184,87 @@ def test_network_config_separates_request_and_upload_timeouts(monkeypatch) -> No
     assert config.network.upload_timeout == 180.0
 
 
+def test_storage_config_reads_ui_settings_when_env_missing(monkeypatch, tmp_path: Path) -> None:
+    ui_config_path = tmp_path / "config.json"
+    ui_config_path.write_text(
+        """
+        {
+          "Storage": {
+            "DbPath": "data/custom-assistim.db",
+            "DbEncryptionMode": "SQLCIPHER",
+            "DbEncryptionProvider": "sqlcipher-compatible"
+          }
+        }
+        """,
+        encoding="utf-8",
+    )
+
+    for env_name in (
+        "ASSISTIM_DB_PATH",
+        "ASSISTIM_DB_ENCRYPTION_MODE",
+        "ASSISTIM_DB_ENCRYPTION_PROVIDER",
+    ):
+        monkeypatch.delenv(env_name, raising=False)
+    monkeypatch.setattr(config_backend_module, "UI_CONFIG_PATH", ui_config_path)
+
+    config = reload_config()
+
+    assert config.storage.db_path == "data/custom-assistim.db"
+    assert config.storage.db_encryption_mode == "sqlcipher"
+    assert config.storage.db_encryption_provider == "sqlcipher-compatible"
+
+
+def test_storage_config_environment_overrides_ui_settings(monkeypatch, tmp_path: Path) -> None:
+    ui_config_path = tmp_path / "config.json"
+    ui_config_path.write_text(
+        """
+        {
+          "Storage": {
+            "DbPath": "data/ui-assistim.db",
+            "DbEncryptionMode": "plain",
+            "DbEncryptionProvider": "sqlite-default"
+          }
+        }
+        """,
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(config_backend_module, "UI_CONFIG_PATH", ui_config_path)
+    monkeypatch.setenv("ASSISTIM_DB_PATH", "data/env-assistim.db")
+    monkeypatch.setenv("ASSISTIM_DB_ENCRYPTION_MODE", "SQLCIPHER")
+    monkeypatch.setenv("ASSISTIM_DB_ENCRYPTION_PROVIDER", "auto")
+
+    config = reload_config()
+
+    assert config.storage.db_path == "data/env-assistim.db"
+    assert config.storage.db_encryption_mode == "sqlcipher"
+    assert config.storage.db_encryption_provider == "auto"
+
+
+def test_storage_config_rejects_internal_or_unknown_encryption_values(monkeypatch, tmp_path: Path) -> None:
+    ui_config_path = tmp_path / "config.json"
+    ui_config_path.write_text(
+        """
+        {
+          "Storage": {
+            "DbEncryptionMode": "sqlcipher_pending",
+            "DbEncryptionProvider": "unknown-provider"
+          }
+        }
+        """,
+        encoding="utf-8",
+    )
+
+    for env_name in ("ASSISTIM_DB_ENCRYPTION_MODE", "ASSISTIM_DB_ENCRYPTION_PROVIDER"):
+        monkeypatch.delenv(env_name, raising=False)
+    monkeypatch.setattr(config_backend_module, "UI_CONFIG_PATH", ui_config_path)
+
+    config = reload_config()
+
+    assert config.storage.db_encryption_mode == "plain"
+    assert config.storage.db_encryption_provider == "auto"
+
+
 def test_ai_config_reads_local_gguf_environment(monkeypatch) -> None:
     monkeypatch.setattr(config_backend_module, "UI_CONFIG_PATH", Path("Z:/nonexistent/config.json"))
     monkeypatch.setenv("ASSISTIM_AI_PROVIDER", "LOCAL_GGUF")

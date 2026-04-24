@@ -43,6 +43,11 @@ DEFAULT_AI_EMBEDDING_MODEL_ID = "jina-embeddings-v3-Q4_K_M"
 DEFAULT_AI_EMBEDDING_MODEL_PATH = CLIENT_ROOT / "resources" / "models" / DEFAULT_AI_EMBEDDING_MODEL_FILE
 DEFAULT_LOCAL_SERVER_HOST = "localhost"
 DEFAULT_LOCAL_SERVER_PORT = 8000
+DEFAULT_DB_PATH = "data/assistim.db"
+DEFAULT_DB_ENCRYPTION_MODE = "plain"
+DEFAULT_DB_ENCRYPTION_PROVIDER = "auto"
+SUPPORTED_DB_ENCRYPTION_MODES = {"plain", "sqlcipher"}
+SUPPORTED_DB_ENCRYPTION_PROVIDERS = {"auto", "sqlite-default", "sqlcipher-compatible"}
 DEFAULT_VERSION_INFO: dict[str, str] = {
     "app": "AssistIM",
     "version": "0.1.0",
@@ -300,6 +305,49 @@ def _resolve_server_use_ssl() -> bool:
     return _parse_bool_ui_config_value("Server", "UseSsl", False)
 
 
+def _normalize_config_choice(value: Any, supported_values: set[str], default: str) -> str:
+    normalized = str(value or "").strip().lower()
+    return normalized if normalized in supported_values else default
+
+
+def _resolve_storage_db_path() -> str:
+    explicit_path = str(os.getenv("ASSISTIM_DB_PATH", "") or "").strip()
+    if explicit_path:
+        return explicit_path
+    configured_path = str(_ui_config_value("Storage", "DbPath", DEFAULT_DB_PATH) or "").strip()
+    return configured_path or DEFAULT_DB_PATH
+
+
+def _resolve_storage_db_encryption_mode() -> str:
+    explicit_mode = str(os.getenv("ASSISTIM_DB_ENCRYPTION_MODE", "") or "").strip()
+    if explicit_mode:
+        return _normalize_config_choice(
+            explicit_mode,
+            SUPPORTED_DB_ENCRYPTION_MODES,
+            DEFAULT_DB_ENCRYPTION_MODE,
+        )
+    return _normalize_config_choice(
+        _ui_config_value("Storage", "DbEncryptionMode", DEFAULT_DB_ENCRYPTION_MODE),
+        SUPPORTED_DB_ENCRYPTION_MODES,
+        DEFAULT_DB_ENCRYPTION_MODE,
+    )
+
+
+def _resolve_storage_db_encryption_provider() -> str:
+    explicit_provider = str(os.getenv("ASSISTIM_DB_ENCRYPTION_PROVIDER", "") or "").strip()
+    if explicit_provider:
+        return _normalize_config_choice(
+            explicit_provider,
+            SUPPORTED_DB_ENCRYPTION_PROVIDERS,
+            DEFAULT_DB_ENCRYPTION_PROVIDER,
+        )
+    return _normalize_config_choice(
+        _ui_config_value("Storage", "DbEncryptionProvider", DEFAULT_DB_ENCRYPTION_PROVIDER),
+        SUPPORTED_DB_ENCRYPTION_PROVIDERS,
+        DEFAULT_DB_ENCRYPTION_PROVIDER,
+    )
+
+
 def get_version_info() -> dict[str, str]:
     """Load package version metadata for UI display and packaged releases."""
     info = dict(DEFAULT_VERSION_INFO)
@@ -383,9 +431,9 @@ class NetworkConfig:
 class StorageConfig:
     """Local storage configuration."""
 
-    db_path: str = field(default_factory=lambda: os.getenv("ASSISTIM_DB_PATH", "data/assistim.db"))
-    db_encryption_mode: str = field(default_factory=lambda: str(os.getenv("ASSISTIM_DB_ENCRYPTION_MODE", "plain") or "plain").strip().lower())
-    db_encryption_provider: str = field(default_factory=lambda: str(os.getenv("ASSISTIM_DB_ENCRYPTION_PROVIDER", "auto") or "auto").strip().lower())
+    db_path: str = field(default_factory=_resolve_storage_db_path)
+    db_encryption_mode: str = field(default_factory=_resolve_storage_db_encryption_mode)
+    db_encryption_provider: str = field(default_factory=_resolve_storage_db_encryption_provider)
 
 
 @dataclass
