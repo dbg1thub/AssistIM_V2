@@ -30,6 +30,30 @@ class SafeRotatingFileHandler(RotatingFileHandler):
                 self.stream.flush()
 
 
+class SafeConsoleStreamHandler(logging.StreamHandler):
+    """Console handler that disables itself when the console stream is unavailable."""
+
+    def __init__(self, stream=None) -> None:
+        super().__init__(stream)
+        self._assistim_console_disabled = False
+
+    def emit(self, record: logging.LogRecord) -> None:
+        if self._assistim_console_disabled:
+            return
+        try:
+            stream = self.stream
+            if stream is None or bool(getattr(stream, "closed", False)):
+                self._assistim_console_disabled = True
+                return
+            message = self.format(record)
+            stream.write(message + self.terminator)
+            self.flush()
+        except RecursionError:
+            raise
+        except Exception:
+            self._assistim_console_disabled = True
+
+
 def _default_log_dir() -> Path:
     """Resolve one stable log directory for dev and packaged runtimes."""
     explicit_dir = os.getenv("ASSISTIM_LOG_DIR", "").strip()
@@ -79,7 +103,7 @@ _active_handlers: list[logging.Handler] = []
 
 def _setup_console_handler(level: int) -> logging.StreamHandler:
     """Create console handler with specified level."""
-    handler = logging.StreamHandler(sys.stdout)
+    handler = SafeConsoleStreamHandler(sys.stdout)
     handler.setLevel(level)
     formatter = logging.Formatter(DEFAULT_FORMAT, DATE_FORMAT)
     handler.setFormatter(formatter)

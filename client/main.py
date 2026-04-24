@@ -297,7 +297,9 @@ class Application:
         """Track realtime transport state at the application lifecycle level."""
         state_name = str(getattr(new_state, "name", new_state) or "").lower()
         self._realtime_connection_state = state_name
-        logger.info("Realtime connection state changed: %s -> %s", old_state, new_state)
+        old_state_label = str(getattr(old_state, "name", old_state) or "")
+        new_state_label = str(getattr(new_state, "name", new_state) or "")
+        logger.info("Realtime connection state changed: %s -> %s", old_state_label, new_state_label)
         if state_name in {"disconnected", "reconnecting"} and self._lifecycle_state == "authenticated_ready":
             self._set_lifecycle_state("authenticated_degraded")
 
