@@ -16,6 +16,7 @@ from client.core import logging
 from client.core.app_icons import AppIcon
 from client.core.config_backend import get_config
 from client.core.i18n import tr
+from client.core.message_actions import RECALL_WINDOW_SECONDS, message_age_seconds, should_offer_recalled_direct_edit
 from client.delegates.message_delegate import MessageDelegate
 from client.models.message import ChatMessage, MessageStatus, MessageType, Session, merge_sender_profile_extra
 from client.models.message_model import MessageModel
@@ -292,6 +293,9 @@ class ChatPanel(QWidget):
         self.content_splitter: Optional[FluentSplitter] = None
         self._chat_info_overlay: Optional[ChatInfoDrawerOverlay] = None
         self._security_pending_banner: Optional[SecurityPendingBanner] = None
+        self._recall_action_refresh_timer = QTimer(self)
+        self._recall_action_refresh_timer.setSingleShot(True)
+        self._recall_action_refresh_timer.timeout.connect(self._on_recall_action_refresh_timeout)
 
         self._setup_ui()
 
@@ -437,6 +441,33 @@ class ChatPanel(QWidget):
             summary=summary,
         )
 
+    def _schedule_recall_action_refresh(self) -> None:
+        """Refresh recall direct-edit affordances when their two-minute window expires."""
+        if not self._message_model:
+            self._recall_action_refresh_timer.stop()
+            return
+
+        next_delay_ms: int | None = None
+        for message in self._message_model.get_messages():
+            if not should_offer_recalled_direct_edit(message):
+                continue
+            remaining_seconds = RECALL_WINDOW_SECONDS - message_age_seconds(message)
+            delay_ms = max(250, int(remaining_seconds * 1000) + 250)
+            next_delay_ms = delay_ms if next_delay_ms is None else min(next_delay_ms, delay_ms)
+
+        if next_delay_ms is None:
+            self._recall_action_refresh_timer.stop()
+            return
+        self._recall_action_refresh_timer.start(next_delay_ms)
+
+    def _on_recall_action_refresh_timeout(self) -> None:
+        """Repaint recall notices after the direct-edit action expires."""
+        if self._message_delegate:
+            self._message_delegate.clear_recall_notice_action_hover(self.message_list)
+        if self._message_model:
+            self.message_list.viewport().update()
+        self._schedule_recall_action_refresh()
+
     def _on_security_pending_confirm_requested(self, action_id: str) -> None:
         """Forward one inline security confirmation request for the active session."""
         if self._current_session is None:
@@ -564,6 +595,7 @@ class ChatPanel(QWidget):
             self._message_model.clear()
         self._history_request_pending = False
         self._has_more_history = True
+        self._recall_action_refresh_timer.stop()
         self._refresh_security_pending_banner()
 
     def set_messages(self, messages: list[ChatMessage], *, scroll_to_bottom: bool = True) -> None:
@@ -577,6 +609,7 @@ class ChatPanel(QWidget):
         if scroll_to_bottom:
             self.message_list.scrollToBottom()
             self._remember_message_scroll_gap()
+        self._schedule_recall_action_refresh()
         self._refresh_security_pending_banner()
 
     def _on_segments_submitted(self, segments: list[dict]) -> None:
@@ -682,6 +715,8 @@ class ChatPanel(QWidget):
         message = self._message_model.get_message_by_id(message_id)
         if message is None:
             return False
+        if not should_offer_recalled_direct_edit(message):
+            return False
         recalled_content = str((message.extra or {}).get("recalled_content", "") or "").strip()
         if not recalled_content:
             return False
@@ -709,6 +744,7 @@ class ChatPanel(QWidget):
             existing.extra = dict(message.extra)
             self._message_model.refresh_message(message.message_id, allow_reorder=True)
             self.message_list.viewport().update()
+            self._schedule_recall_action_refresh()
             self._refresh_security_pending_banner()
             return
 
@@ -716,6 +752,7 @@ class ChatPanel(QWidget):
         if scroll_to_bottom:
             self.message_list.scrollToBottom()
             self._remember_message_scroll_gap()
+        self._schedule_recall_action_refresh()
         self._refresh_security_pending_banner()
 
     def add_messages(self, messages: list[ChatMessage], *, scroll_to_bottom: bool = True) -> None:
@@ -748,6 +785,7 @@ class ChatPanel(QWidget):
         if scroll_to_bottom:
             self.message_list.scrollToBottom()
             self._remember_message_scroll_gap()
+        self._schedule_recall_action_refresh()
         self._refresh_security_pending_banner()
 
     def prepend_messages(self, messages: list[ChatMessage]) -> None:
@@ -784,12 +822,14 @@ class ChatPanel(QWidget):
                 self._history_indicator.hide()
 
         QTimer.singleShot(0, restore_position)
+        self._schedule_recall_action_refresh()
         self._refresh_security_pending_banner()
 
     def update_message_status(self, message_id: str, status) -> None:
         """Update message status in model."""
         if self._message_model:
             self._message_model.update_message_status(message_id, status)
+        self._schedule_recall_action_refresh()
         self._refresh_security_pending_banner()
 
     def apply_read_receipt(self, session_id: str, reader_id: str, last_read_seq: int) -> None:
@@ -802,17 +842,20 @@ class ChatPanel(QWidget):
         """Update message content in model."""
         if self._message_model:
             self._message_model.update_message_content(message_id, content)
+        self._schedule_recall_action_refresh()
 
     def replace_message(self, message: ChatMessage) -> None:
         """Replace one visible message with an authoritative snapshot."""
         if self._message_model and message:
             self._message_model.replace_message(message)
+        self._schedule_recall_action_refresh()
         self._refresh_security_pending_banner()
 
     def remove_message(self, message_id: str) -> None:
         """Remove a message from the model."""
         if self._message_model:
             self._message_model.remove_message(message_id)
+        self._schedule_recall_action_refresh()
         self._refresh_security_pending_banner()
 
     def apply_sender_profile_update(

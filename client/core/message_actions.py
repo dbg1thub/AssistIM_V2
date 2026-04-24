@@ -42,6 +42,16 @@ def should_offer_recall(message: ChatMessage, *, now: datetime | None = None) ->
     return message_age_seconds(message, now=now) <= RECALL_WINDOW_SECONDS
 
 
+def should_offer_recalled_direct_edit(message: ChatMessage, *, now: datetime | None = None) -> bool:
+    """Return whether a recalled self message may restore its original text for editing."""
+    if not message.is_self or message.status != MessageStatus.RECALLED:
+        return False
+    recalled_content = str((message.extra or {}).get("recalled_content", "") or "").strip()
+    if not recalled_content:
+        return False
+    return message_age_seconds(message, now=now) <= RECALL_WINDOW_SECONDS
+
+
 def should_offer_delete(message: ChatMessage, *, now: datetime | None = None) -> bool:
     """Return whether the context menu should offer local delete for this message."""
     if not message.is_self:

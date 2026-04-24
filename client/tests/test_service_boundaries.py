@@ -5188,6 +5188,40 @@ def test_message_actions_switch_self_message_to_delete_after_recall_window() -> 
     assert message_actions_module.should_offer_delete(message, now=now) is True
 
 
+def test_message_actions_offer_recalled_direct_edit_before_two_minute_limit() -> None:
+    now = datetime(2026, 3, 27, 14, 0, 0)
+    message = ChatMessage(
+        message_id='msg-3',
+        session_id='session-1',
+        sender_id='user-1',
+        content='你撤回了一条消息',
+        status=MessageStatus.RECALLED,
+        timestamp=now - timedelta(seconds=119),
+        updated_at=now,
+        is_self=True,
+        extra={'recalled_content': 'hello'},
+    )
+
+    assert message_actions_module.should_offer_recalled_direct_edit(message, now=now) is True
+
+
+def test_message_actions_hide_recalled_direct_edit_after_two_minute_limit() -> None:
+    now = datetime(2026, 3, 27, 14, 0, 0)
+    message = ChatMessage(
+        message_id='msg-4',
+        session_id='session-1',
+        sender_id='user-1',
+        content='你撤回了一条消息',
+        status=MessageStatus.RECALLED,
+        timestamp=now - timedelta(seconds=121),
+        updated_at=now,
+        is_self=True,
+        extra={'recalled_content': 'hello'},
+    )
+
+    assert message_actions_module.should_offer_recalled_direct_edit(message, now=now) is False
+
+
 def test_format_session_timestamp_uses_yesterday_with_time(monkeypatch) -> None:
     class FrozenDateTime(datetime):
         @classmethod

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timedelta
 
 from PySide6.QtCore import QRect, Qt
 from PySide6.QtWidgets import QApplication
@@ -566,6 +567,52 @@ def test_message_delegate_group_recall_notice_prefers_group_nickname_over_remark
         "{name} recalled a message",
         name='“群内名”',
     )
+
+
+def test_message_delegate_hides_recalled_direct_edit_after_two_minute_limit() -> None:
+    app = QApplication.instance() or QApplication([])
+    delegate = MessageDelegate()
+    message = ChatMessage(
+        message_id='msg-1',
+        session_id='session-1',
+        sender_id='me',
+        content='你撤回了一条消息',
+        message_type=MessageType.SYSTEM,
+        status=MessageStatus.RECALLED,
+        timestamp=datetime.now() - timedelta(seconds=121),
+        updated_at=datetime.now(),
+        is_self=True,
+        extra={'recalled_content': 'hello world', 'recall_notice': '你撤回了一条消息'},
+    )
+
+    _notice_text, action_text, _notice_rect, action_rect = delegate._recall_notice_layout(QRect(0, 0, 360, 28), message)
+
+    assert app is not None
+    assert action_text == ''
+    assert action_rect is None
+
+
+def test_message_delegate_shows_recalled_direct_edit_before_two_minute_limit() -> None:
+    app = QApplication.instance() or QApplication([])
+    delegate = MessageDelegate()
+    message = ChatMessage(
+        message_id='msg-1',
+        session_id='session-1',
+        sender_id='me',
+        content='你撤回了一条消息',
+        message_type=MessageType.SYSTEM,
+        status=MessageStatus.RECALLED,
+        timestamp=datetime.now() - timedelta(seconds=30),
+        updated_at=datetime.now(),
+        is_self=True,
+        extra={'recalled_content': 'hello world', 'recall_notice': '你撤回了一条消息'},
+    )
+
+    _notice_text, action_text, _notice_rect, action_rect = delegate._recall_notice_layout(QRect(0, 0, 360, 28), message)
+
+    assert app is not None
+    assert action_text == tr("message.recalled.edit_direct", "Direct Edit")
+    assert action_rect is not None
 
 
 def test_session_manager_self_group_profile_updates_current_member_nickname(monkeypatch) -> None:

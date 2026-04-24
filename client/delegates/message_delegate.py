@@ -28,6 +28,7 @@ from client.core.avatar_utils import profile_avatar_seed
 from client.core.config_backend import get_config
 from client.core.i18n import current_language_code, format_chat_timestamp, format_chat_timestamp_expanded, tr
 from client.core.message_translation import AI_TRANSLATION_EXTRA_KEY
+from client.core.message_actions import should_offer_recalled_direct_edit
 from client.ui.controllers.auth_controller import peek_auth_controller
 from client.core.video_thumbnail_cache import (
     get_thumbnail as get_video_thumbnail,
@@ -700,7 +701,7 @@ class MessageDelegate(QStyledItemDelegate):
         """Return notice/action text plus their draw rects for one recall notice row."""
         notice_text = self._recall_notice_text(message)
         action_text = ""
-        if message.is_self and str((message.extra or {}).get("recalled_content", "") or "").strip():
+        if should_offer_recalled_direct_edit(message):
             action_text = tr("message.recalled.edit_direct", "Direct Edit")
 
         notice_font = QFont()
