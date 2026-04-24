@@ -127,6 +127,13 @@ class Config(QConfig):
         BoolValidator(),
         restart=True,
     )
+    serverUseLocalhost = ConfigItem(
+        "Server",
+        "UseLocalhost",
+        False,
+        BoolValidator(),
+        restart=True,
+    )
     soundVolume = ConfigItem(
         "Sound",
         "Volume",
@@ -187,7 +194,9 @@ def _ensure_runtime_server_payload(payload: dict) -> dict:
         return payload
 
     merged_payload = dict(payload)
-    merged_payload["Server"] = server_payload
+    merged_server = dict(existing_server) if isinstance(existing_server, dict) else {}
+    merged_server.update(server_payload)
+    merged_payload["Server"] = merged_server
     return merged_payload
 
 

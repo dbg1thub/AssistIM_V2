@@ -52,6 +52,21 @@ def test_ai_settings_are_exposed_in_settings_interface() -> None:
     assert 'aiGpuAccelerationEnabled = ConfigItem(' in config_module
 
 
+def test_developer_server_switch_is_source_runtime_only() -> None:
+    settings_interface = Path("client/ui/windows/settings_interface.py").read_text(encoding="utf-8")
+    config_module = Path("client/core/config.py").read_text(encoding="utf-8")
+    config_backend_module = Path("client/core/config_backend.py").read_text(encoding="utf-8")
+
+    assert "def is_development_runtime() -> bool:" in config_backend_module
+    assert 'serverUseLocalhost = ConfigItem(' in config_module
+    assert '"Server",\n        "UseLocalhost",' in config_module
+    assert "is_development_runtime" in settings_interface
+    assert "self.developer_group = SettingCardGroup" in settings_interface
+    assert "self.server_localhost_card = SwitchSettingCard" in settings_interface
+    assert "cfg.serverUseLocalhost" in settings_interface
+    assert "if self._developer_settings_enabled:" in settings_interface
+
+
 def test_ai_reply_candidates_fill_draft_only() -> None:
     message_input = Path("client/ui/widgets/message_input.py").read_text(encoding="utf-8")
     chat_interface = Path("client/ui/windows/chat_interface.py").read_text(encoding="utf-8")

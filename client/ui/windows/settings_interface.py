@@ -23,6 +23,7 @@ from qfluentwidgets import (
 
 from client.core.app_icons import AppIcon, CollectionIcon
 from client.core.config import cfg, is_win11
+from client.core.config_backend import is_development_runtime
 from client.core.i18n import tr
 from client.services.local_ai_selection import LocalAIModelSpec, detect_local_ai_capabilities, installed_local_ai_model_specs
 from client.ui.styles import StyleSheet
@@ -83,6 +84,8 @@ class SettingsInterface(ScrollArea):
         self.ai_group = SettingCardGroup(tr("settings.group.ai", "AI"), self.scroll_widget)
         self.notification_group = SettingCardGroup(tr("settings.group.notifications", "Notifications"), self.scroll_widget)
         self.app_group = SettingCardGroup(tr("settings.group.application", "Application"), self.scroll_widget)
+        self.developer_group = SettingCardGroup(tr("settings.group.developer", "Developer"), self.scroll_widget)
+        self._developer_settings_enabled = is_development_runtime()
         self._ai_capability = detect_local_ai_capabilities()
         self._ai_model_specs = installed_local_ai_model_specs()
 
@@ -168,6 +171,16 @@ class SettingsInterface(ScrollArea):
             configItem=cfg.aiGpuAccelerationEnabled,
             parent=self.ai_group,
         )
+        self.server_localhost_card = SwitchSettingCard(
+            AppIcon.GLOBE,
+            tr("settings.card.dev_server_localhost.title", "Use Local Server"),
+            tr(
+                "settings.card.dev_server_localhost.content",
+                "Connect to localhost:8000 after restart while keeping the configured remote server address.",
+            ),
+            configItem=cfg.serverUseLocalhost,
+            parent=self.developer_group,
+        )
 
         self._init_widget()
 
@@ -220,12 +233,17 @@ class SettingsInterface(ScrollArea):
 
         self.app_group.addSettingCard(self.exit_confirm_card)
 
+        if self._developer_settings_enabled:
+            self.developer_group.addSettingCard(self.server_localhost_card)
+
         self.expand_layout.setSpacing(28)
         self.expand_layout.setContentsMargins(36, 0, 36, 0)
         self.expand_layout.addWidget(self.personal_group)
         self.expand_layout.addWidget(self.ai_group)
         self.expand_layout.addWidget(self.notification_group)
         self.expand_layout.addWidget(self.app_group)
+        if self._developer_settings_enabled:
+            self.expand_layout.addWidget(self.developer_group)
 
     def _connect_signals(self) -> None:
         cfg.themeChanged.connect(self._on_theme_changed)

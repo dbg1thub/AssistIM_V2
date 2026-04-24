@@ -29,9 +29,94 @@ def test_server_config_reads_ui_settings_when_env_missing(monkeypatch, tmp_path:
         encoding="utf-8",
     )
 
-    for env_name in ("ASSISTIM_HOST", "ASSISTIM_PORT", "ASSISTIM_USE_SSL"):
+    for env_name in ("ASSISTIM_HOST", "ASSISTIM_PORT", "ASSISTIM_USE_SSL", "ASSISTIM_DEVELOPER_SETTINGS"):
         monkeypatch.delenv(env_name, raising=False)
     monkeypatch.setattr(config_backend_module, "UI_CONFIG_PATH", ui_config_path)
+
+    config = reload_config()
+
+    assert config.server.host == "assistim.example.com"
+    assert config.server.port == 443
+    assert config.server.use_ssl is True
+    assert config.server.api_base_url == "https://assistim.example.com:443/api/v1"
+
+
+def test_server_config_uses_localhost_when_developer_switch_enabled(monkeypatch, tmp_path: Path) -> None:
+    ui_config_path = tmp_path / "config.json"
+    ui_config_path.write_text(
+        """
+        {
+          "Server": {
+            "Host": "assistim.example.com",
+            "Port": 443,
+            "UseSsl": true,
+            "UseLocalhost": true
+          }
+        }
+        """,
+        encoding="utf-8",
+    )
+
+    for env_name in ("ASSISTIM_HOST", "ASSISTIM_PORT", "ASSISTIM_USE_SSL", "ASSISTIM_DEVELOPER_SETTINGS"):
+        monkeypatch.delenv(env_name, raising=False)
+    monkeypatch.setattr(config_backend_module, "UI_CONFIG_PATH", ui_config_path)
+
+    config = reload_config()
+
+    assert config.server.host == "localhost"
+    assert config.server.port == 8000
+    assert config.server.use_ssl is False
+    assert config.server.api_base_url == "http://localhost:8000/api/v1"
+
+
+def test_server_config_keeps_remote_settings_when_developer_switch_disabled(monkeypatch, tmp_path: Path) -> None:
+    ui_config_path = tmp_path / "config.json"
+    ui_config_path.write_text(
+        """
+        {
+          "Server": {
+            "Host": "assistim.example.com",
+            "Port": 443,
+            "UseSsl": true,
+            "UseLocalhost": false
+          }
+        }
+        """,
+        encoding="utf-8",
+    )
+
+    for env_name in ("ASSISTIM_HOST", "ASSISTIM_PORT", "ASSISTIM_USE_SSL", "ASSISTIM_DEVELOPER_SETTINGS"):
+        monkeypatch.delenv(env_name, raising=False)
+    monkeypatch.setattr(config_backend_module, "UI_CONFIG_PATH", ui_config_path)
+
+    config = reload_config()
+
+    assert config.server.host == "assistim.example.com"
+    assert config.server.port == 443
+    assert config.server.use_ssl is True
+    assert config.server.api_base_url == "https://assistim.example.com:443/api/v1"
+
+
+def test_server_config_ignores_localhost_switch_in_packaged_runtime(monkeypatch, tmp_path: Path) -> None:
+    ui_config_path = tmp_path / "config.json"
+    ui_config_path.write_text(
+        """
+        {
+          "Server": {
+            "Host": "assistim.example.com",
+            "Port": 443,
+            "UseSsl": true,
+            "UseLocalhost": true
+          }
+        }
+        """,
+        encoding="utf-8",
+    )
+
+    for env_name in ("ASSISTIM_HOST", "ASSISTIM_PORT", "ASSISTIM_USE_SSL", "ASSISTIM_DEVELOPER_SETTINGS"):
+        monkeypatch.delenv(env_name, raising=False)
+    monkeypatch.setattr(config_backend_module, "UI_CONFIG_PATH", ui_config_path)
+    monkeypatch.setattr(config_backend_module.sys, "frozen", True, raising=False)
 
     config = reload_config()
 

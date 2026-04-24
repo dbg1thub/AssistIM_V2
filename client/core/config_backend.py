@@ -41,12 +41,22 @@ DEFAULT_AI_MODEL_PATH = CLIENT_ROOT / "resources" / "models" / DEFAULT_AI_MODEL_
 DEFAULT_AI_EMBEDDING_MODEL_FILE = "jina-embeddings-v3-Q4_K_M.gguf"
 DEFAULT_AI_EMBEDDING_MODEL_ID = "jina-embeddings-v3-Q4_K_M"
 DEFAULT_AI_EMBEDDING_MODEL_PATH = CLIENT_ROOT / "resources" / "models" / DEFAULT_AI_EMBEDDING_MODEL_FILE
+DEFAULT_LOCAL_SERVER_HOST = "localhost"
+DEFAULT_LOCAL_SERVER_PORT = 8000
 DEFAULT_VERSION_INFO: dict[str, str] = {
     "app": "AssistIM",
     "version": "0.1.0",
     "channel": "test",
     "platform": "win64",
 }
+
+
+def is_development_runtime() -> bool:
+    """Return whether developer-only runtime settings should be available."""
+    explicit_value = _parse_optional_bool_env("ASSISTIM_DEVELOPER_SETTINGS")
+    if explicit_value is not None:
+        return explicit_value
+    return not getattr(sys, "frozen", False)
 
 
 def _parse_webrtc_ice_server_urls() -> list[str]:
@@ -256,10 +266,18 @@ def _parse_bool_ui_config_value(group: str, name: str, default: bool) -> bool:
     return default
 
 
+def _resolve_server_use_localhost() -> bool:
+    if not is_development_runtime():
+        return False
+    return _parse_bool_ui_config_value("Server", "UseLocalhost", False)
+
+
 def _resolve_server_host() -> str:
     explicit_host = str(os.getenv("ASSISTIM_HOST", "") or "").strip()
     if explicit_host:
         return explicit_host
+    if _resolve_server_use_localhost():
+        return DEFAULT_LOCAL_SERVER_HOST
     configured_host = str(_ui_config_value("Server", "Host", "localhost") or "").strip()
     return configured_host or "localhost"
 
@@ -268,6 +286,8 @@ def _resolve_server_port() -> int:
     explicit_port = str(os.getenv("ASSISTIM_PORT", "") or "").strip()
     if explicit_port:
         return _parse_int_env("ASSISTIM_PORT", 8000)
+    if _resolve_server_use_localhost():
+        return DEFAULT_LOCAL_SERVER_PORT
     return _parse_int_value(_ui_config_value("Server", "Port", 8000), 8000)
 
 
@@ -275,6 +295,8 @@ def _resolve_server_use_ssl() -> bool:
     explicit_use_ssl = _parse_optional_bool_env("ASSISTIM_USE_SSL")
     if explicit_use_ssl is not None:
         return explicit_use_ssl
+    if _resolve_server_use_localhost():
+        return False
     return _parse_bool_ui_config_value("Server", "UseSsl", False)
 
 
