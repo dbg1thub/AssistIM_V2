@@ -213,8 +213,16 @@ def test_file_summary_right_click_flow_is_wired() -> None:
     assert "async def update_message_file_analysis(" in message_manager
     assert "async def update_message_file_analysis(" in chat_controller
     assert "self._subscribe_sync(MessageEvent.FILE_ANALYSIS_UPDATED, self._on_file_analysis_updated)" in chat_interface
-    assert 'file_summary_action = Action(tr("chat.context.summarize_file", "总结文件内容"), self)' in chat_interface
-    assert "def _schedule_file_summary(self, message: ChatMessage, *, generation: int) -> None:" in chat_interface
+    assert "file_summary_action_text = self._file_summary_action_text(message)" in chat_interface
+    assert "file_summary_action = Action(file_summary_action_text, self)" in chat_interface
+    assert 'copy_file_summary_action = Action(tr("chat.context.copy_file_summary", "复制总结内容"), self)' in chat_interface
+    assert "def _file_summary_action_text(self, message: ChatMessage) -> str:" in chat_interface
+    assert "def _has_ready_file_summary(message: ChatMessage) -> bool:" in chat_interface
+    assert "def _has_file_summary_terminal_state(message: ChatMessage) -> bool:" in chat_interface
+    assert "def _ready_file_summary_text(message: ChatMessage) -> str:" in chat_interface
+    assert "def _copy_file_summary_to_clipboard(self, message: ChatMessage) -> None:" in chat_interface
+    assert "def _schedule_file_summary(self, message: ChatMessage, *, generation: int, force: bool = False) -> None:" in chat_interface
+    assert "self._schedule_file_summary(\n                    msg,\n                    generation=current,\n                    force=self._has_file_summary_terminal_state(msg)," in chat_interface
     assert "LocalFileTextExtractor" in chat_interface
     assert "summarize_file_text" in chat_interface
     assert "FILE_SUMMARY_EXTRA_KEY" in message_delegate
@@ -308,6 +316,20 @@ def test_ai_ui_i18n_resources_are_registered() -> None:
         "chat.translation.pending",
         "chat.translation.queued",
         "chat.translation.failed",
+        "chat.context.summarize_file",
+        "chat.context.resummarize_file",
+        "chat.context.copy_file_summary",
+        "chat.file_summary.pending",
+        "chat.file_summary.extracting",
+        "chat.file_summary.failed",
+        "chat.file_summary.failed_short",
+        "chat.file_summary.extract_failed",
+        "chat.file_summary.unsupported_type",
+        "chat.file_summary.file_too_large",
+        "chat.file_summary.too_many_pages",
+        "chat.file_summary.empty",
+        "chat.file_summary.dependency_missing",
+        "chat.file_summary.copied",
         "chat.summary.updated",
         "chat.summary.completed",
     }

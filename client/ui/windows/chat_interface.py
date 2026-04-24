@@ -3063,13 +3063,13 @@ class ChatInterface(QWidget):
             payload["error_message"] = error_message
         return payload
 
-    def _schedule_file_summary(self, message: ChatMessage, *, generation: int) -> None:
+    def _schedule_file_summary(self, message: ChatMessage, *, generation: int, force: bool = False) -> None:
         """Run one local file text extraction and summary task for a file message."""
         if message.message_type != MessageType.FILE or not self._is_current_message_context(message, generation):
             return
 
         summary = dict((message.extra or {}).get(FILE_SUMMARY_EXTRA_KEY) or {})
-        if str(summary.get("status") or "").strip() == "ready" and str(summary.get("text") or "").strip():
+        if not force and str(summary.get("status") or "").strip() == "ready" and str(summary.get("text") or "").strip():
             self.chat_panel.replace_message(message)
             return
 
@@ -3087,7 +3087,7 @@ class ChatInterface(QWidget):
             return
 
         task = self._create_ui_task(
-            self._run_file_summary(message, generation=generation),
+            self._run_file_summary(message, generation=generation, force=force),
             f"file summary {message_id}",
             on_done=lambda finished, mid=message_id: self._clear_file_summary_task(mid, finished),
         )
@@ -3097,7 +3097,7 @@ class ChatInterface(QWidget):
         if self._file_summary_tasks.get(message_id) is task:
             self._file_summary_tasks.pop(message_id, None)
 
-    async def _run_file_summary(self, message: ChatMessage, *, generation: int) -> None:
+    async def _run_file_summary(self, message: ChatMessage, *, generation: int, force: bool = False) -> None:
         """Download/decrypt one file message locally, extract text, summarize it, and persist local metadata."""
         if not self._is_current_message_context(message, generation):
             return
@@ -3389,6 +3389,41 @@ class ChatInterface(QWidget):
         if reason == "dependency_missing":
             return tr("chat.file_summary.dependency_missing", "缺少文件解析依赖")
         return tr("chat.file_summary.extract_failed", "文件内容读取失败")
+
+    def _file_summary_action_text(self, message: ChatMessage) -> str:
+        """Return the primary file-summary context-menu action label."""
+        if self._has_file_summary_terminal_state(message):
+            return tr("chat.context.resummarize_file", "重新总结文件内容")
+        return tr("chat.context.summarize_file", "总结文件内容")
+
+    @staticmethod
+    def _has_ready_file_summary(message: ChatMessage) -> bool:
+        return bool(ChatInterface._ready_file_summary_text(message))
+
+    @staticmethod
+    def _has_file_summary_terminal_state(message: ChatMessage) -> bool:
+        summary = dict((message.extra or {}).get(FILE_SUMMARY_EXTRA_KEY) or {})
+        return str(summary.get("status") or "").strip() in {"ready", "failed", "skipped"}
+
+    @staticmethod
+    def _ready_file_summary_text(message: ChatMessage) -> str:
+        summary = dict((message.extra or {}).get(FILE_SUMMARY_EXTRA_KEY) or {})
+        if str(summary.get("status") or "").strip() != "ready":
+            return ""
+        return str(summary.get("text") or "").strip()
+
+    def _copy_file_summary_to_clipboard(self, message: ChatMessage) -> None:
+        """Copy a ready local file summary to the system clipboard."""
+        text = self._ready_file_summary_text(message)
+        if not text:
+            return
+        QGuiApplication.clipboard().setText(text)
+        InfoBar.success(
+            tr("chat.message.title", "Message"),
+            tr("chat.file_summary.copied", "已复制总结内容"),
+            parent=self.window(),
+            duration=1400,
+        )
 
     @staticmethod
     def _ready_file_text_extract_text(message: ChatMessage) -> str:
@@ -4546,6 +4581,7 @@ class ChatInterface(QWidget):
         open_action = None
         transcribe_action = None
         file_summary_action = None
+        copy_file_summary_action = None
         translate_action = None
         quote_action = None
         multiselect_action = None
@@ -4574,8 +4610,12 @@ class ChatInterface(QWidget):
             basic_actions.append(transcribe_action)
 
         if message.message_type == MessageType.FILE:
-            file_summary_action = Action(tr("chat.context.summarize_file", "总结文件内容"), self)
+            file_summary_action_text = self._file_summary_action_text(message)
+            file_summary_action = Action(file_summary_action_text, self)
             basic_actions.append(file_summary_action)
+            if self._has_ready_file_summary(message):
+                copy_file_summary_action = Action(tr("chat.context.copy_file_summary", "复制总结内容"), self)
+                basic_actions.append(copy_file_summary_action)
 
         if self._can_translate_message_manually(message):
             translate_action = Action(tr("chat.context.translate", "Translate"), self)
@@ -4633,7 +4673,12 @@ class ChatInterface(QWidget):
                 lambda _checked=False, msg=message, current=self._session_focus_generation: self._schedule_file_summary(
                     msg,
                     generation=current,
+                    force=self._has_file_summary_terminal_state(msg),
                 )
+            )
+        if copy_file_summary_action:
+            copy_file_summary_action.triggered.connect(
+                lambda _checked=False, msg=message: self._copy_file_summary_to_clipboard(msg)
             )
         if translate_action:
             translate_action.triggered.connect(
