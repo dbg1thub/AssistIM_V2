@@ -79,10 +79,17 @@ class _FakeMemoryDatabase:
 
 
 class _FakeContactDatabase:
-    def __init__(self, contacts: list[dict]) -> None:
+    def __init__(self, contacts: list[dict], *, contact_index_version: str = "contacts-v1") -> None:
         self.contacts = list(contacts)
+        self.contact_index_version = contact_index_version
+        self.contact_index_version_calls = 0
         self.calls: list[dict] = []
         self.resolve_calls: list[dict] = []
+
+    async def get_contacts_cache_index_version(self, **kwargs):
+        del kwargs
+        self.contact_index_version_calls += 1
+        return self.contact_index_version
 
     async def search_contacts(self, keyword: str, limit: int = 50, **kwargs):
         self.calls.append({"keyword": keyword, "limit": limit, **kwargs})
@@ -499,6 +506,242 @@ def test_ai_action_registry_clarifies_send_confirmation_without_preview() -> Non
 
         assert pause.state == "waiting_confirmation"
         assert "确认" in pause.response_text
+    asyncio.run(scenario())
+
+
+def test_ai_action_registry_contact_resolve_uses_versioned_cache() -> None:
+    async def scenario() -> None:
+        contact_db = _FakeContactDatabase(
+            [
+                {
+                    "id": "user-1",
+                    "display_name": "张三",
+                    "username": "zhangsan",
+                    "nickname": "张三",
+                    "remark": "张三",
+                    "assistim_id": "zhangsan",
+                }
+            ],
+            contact_index_version="contacts-v1",
+        )
+        registry = AtomicActionRegistry(
+            contact_resolver=ContactAliasResolver(db=contact_db),
+            action_cache=AIActionCache(),
+        )
+        spec = registry.get("contact.resolve")
+        assert spec is not None
+
+        first = await spec.handler(  # type: ignore[misc]
+            {"queries": ["张三"], "allow_multiple": False},
+            {"step_id": "resolve_a"},
+        )
+        second = await spec.handler(  # type: ignore[misc]
+            {"queries": ["张三"], "allow_multiple": False},
+            {"step_id": "resolve_b"},
+        )
+        second["contacts"].append({"contact_id": "polluted"})
+        third = await spec.handler(  # type: ignore[misc]
+            {"queries": ["张三"], "allow_multiple": False},
+            {"step_id": "resolve_c"},
+        )
+
+        assert first["cache_hit"] is False
+        assert second["cache_hit"] is True
+        assert third["cache_hit"] is True
+        assert third["contacts"] == first["contacts"]
+        assert third["cache_namespace"] == "contact.resolve"
+        assert third["cache_index_version"] == "contacts-v1"
+        assert len(contact_db.resolve_calls) == 1
+
+    asyncio.run(scenario())
+
+
+def test_ai_action_registry_contact_resolve_cache_misses_when_index_version_changes() -> None:
+    async def scenario() -> None:
+        contact_db = _FakeContactDatabase(
+            [
+                {
+                    "id": "user-1",
+                    "display_name": "张三",
+                    "username": "zhangsan",
+                    "nickname": "张三",
+                    "remark": "张三",
+                    "assistim_id": "zhangsan",
+                }
+            ],
+            contact_index_version="contacts-v1",
+        )
+        registry = AtomicActionRegistry(
+            contact_resolver=ContactAliasResolver(db=contact_db),
+            action_cache=AIActionCache(),
+        )
+        spec = registry.get("contact.resolve")
+        assert spec is not None
+
+        first = await spec.handler(  # type: ignore[misc]
+            {"queries": ["张三"], "allow_multiple": False},
+            {"step_id": "resolve_a"},
+        )
+        contact_db.contact_index_version = "contacts-v2"
+        second = await spec.handler(  # type: ignore[misc]
+            {"queries": ["张三"], "allow_multiple": False},
+            {"step_id": "resolve_b"},
+        )
+
+        assert first["cache_hit"] is False
+        assert second["cache_hit"] is False
+        assert second["cache_index_version"] == "contacts-v2"
+        assert len(contact_db.resolve_calls) == 2
+
+    asyncio.run(scenario())
+
+
+def test_ai_action_registry_contact_resolve_does_not_cache_without_index_version() -> None:
+    async def scenario() -> None:
+        contact_db = _FakeContactDatabase(
+            [
+                {
+                    "id": "user-1",
+                    "display_name": "张三",
+                    "username": "zhangsan",
+                    "nickname": "张三",
+                    "remark": "张三",
+                    "assistim_id": "zhangsan",
+                }
+            ],
+            contact_index_version="",
+        )
+        registry = AtomicActionRegistry(
+            contact_resolver=ContactAliasResolver(db=contact_db),
+            action_cache=AIActionCache(),
+        )
+        spec = registry.get("contact.resolve")
+        assert spec is not None
+
+        first = await spec.handler(  # type: ignore[misc]
+            {"queries": ["张三"], "allow_multiple": False},
+            {"step_id": "resolve_a"},
+        )
+        second = await spec.handler(  # type: ignore[misc]
+            {"queries": ["张三"], "allow_multiple": False},
+            {"step_id": "resolve_b"},
+        )
+
+        assert first["cache_hit"] is False
+        assert second["cache_hit"] is False
+        assert "cache_index_version" not in second
+        assert len(contact_db.resolve_calls) == 2
+
+    asyncio.run(scenario())
+
+
+def test_ai_action_registry_contact_resolve_does_not_cache_ambiguity_pause() -> None:
+    async def scenario() -> None:
+        contact_db = _FakeContactDatabase(
+            [
+                {
+                    "id": "user-1",
+                    "display_name": "张三",
+                    "username": "zhangsan-a",
+                    "nickname": "张三",
+                    "remark": "张三",
+                    "assistim_id": "zhangsan-a",
+                },
+                {
+                    "id": "user-2",
+                    "display_name": "张三",
+                    "username": "zhangsan-b",
+                    "nickname": "张三",
+                    "remark": "张三",
+                    "assistim_id": "zhangsan-b",
+                },
+            ],
+            contact_index_version="contacts-v1",
+        )
+        registry = AtomicActionRegistry(
+            contact_resolver=ContactAliasResolver(db=contact_db),
+            action_cache=AIActionCache(),
+        )
+        spec = registry.get("contact.resolve")
+        assert spec is not None
+
+        first = await spec.handler(  # type: ignore[misc]
+            {"queries": ["张三"], "allow_multiple": False},
+            {"step_id": "resolve_a"},
+        )
+        second = await spec.handler(  # type: ignore[misc]
+            {"queries": ["张三"], "allow_multiple": False},
+            {"step_id": "resolve_b"},
+        )
+
+        assert first.state == "waiting_clarification"
+        assert second.state == "waiting_clarification"
+        assert first.payload["step_id"] == "resolve_a"
+        assert second.payload["step_id"] == "resolve_b"
+        assert len(contact_db.resolve_calls) == 2
+
+    asyncio.run(scenario())
+
+
+def test_ai_action_executor_persists_contact_resolve_cache_hit_result(tmp_path, monkeypatch) -> None:
+    async def scenario() -> None:
+        db = Database(str(tmp_path / "actions.db"))
+        monkeypatch.setattr(action_store_module, "get_database", lambda: db)
+        store = AIActionStore()
+        contact_db = _FakeContactDatabase(
+            [
+                {
+                    "id": "user-1",
+                    "display_name": "张三",
+                    "username": "zhangsan",
+                    "nickname": "张三",
+                    "remark": "张三",
+                    "assistim_id": "zhangsan",
+                }
+            ],
+            contact_index_version="contacts-v1",
+        )
+        registry = AtomicActionRegistry(
+            contact_resolver=ContactAliasResolver(db=contact_db),
+            action_cache=AIActionCache(),
+        )
+        executor = AIActionExecutor(registry=registry, store=store)
+        plan = AIActionPlan(
+            is_action=True,
+            goal="解析联系人",
+            steps=(
+                AIActionStep(
+                    id="resolve_contact",
+                    action="contact.resolve",
+                    args={"queries": ["张三"], "allow_multiple": False},
+                ),
+            ),
+            final={"type": "answer", "source": "$resolve_contact"},
+        )
+        try:
+            first_record = await store.create_plan(
+                thread_id="thread-1",
+                goal=plan.goal,
+                plan_json=plan.to_dict(),
+                reason="test_contact_cache_miss",
+            )
+            await executor.execute(first_record)
+            second_record = await store.create_plan(
+                thread_id="thread-1",
+                goal=plan.goal,
+                plan_json=plan.to_dict(),
+                reason="test_contact_cache_hit",
+            )
+            await executor.execute(second_record)
+            updated = await store.get_plan(second_record.id)
+
+            assert updated is not None
+            assert updated.step_outputs["resolve_contact"]["cache_hit"] is True
+            assert updated.step_outputs["resolve_contact"]["cache_namespace"] == "contact.resolve"
+            assert updated.step_outputs["resolve_contact"]["cache_index_version"] == "contacts-v1"
+        finally:
+            await db.close()
+
     asyncio.run(scenario())
 
 

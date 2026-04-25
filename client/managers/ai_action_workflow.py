@@ -71,6 +71,16 @@ class ContactAliasResolver:
     def __init__(self, db: Database | None = None) -> None:
         self._db = db or get_database()
 
+    async def get_contact_index_version(self) -> str:
+        get_version = getattr(self._db, "get_contacts_cache_index_version", None)
+        if not callable(get_version):
+            return ""
+        try:
+            return str(await get_version() or "").strip()
+        except Exception:
+            logger.debug("Contact cache index version lookup failed", exc_info=True)
+            return ""
+
     async def expand_terms(self, participants: Sequence[str]) -> ContactAliasResolution:
         expanded_terms: list[str] = []
 

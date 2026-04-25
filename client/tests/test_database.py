@@ -418,6 +418,87 @@ def test_database_replace_sessions_prunes_messages_and_read_cursors_outside_snap
         shutil.rmtree(temp_root, ignore_errors=True)
 
 
+def test_database_contacts_cache_index_version_is_owner_scoped() -> None:
+    temp_root = (Path.cwd() / "client/tests/.pytest_tmp").resolve()
+    temp_root.mkdir(parents=True, exist_ok=True)
+    db_path = temp_root / "database-contacts-cache-version.db"
+    try:
+        db_path.unlink(missing_ok=True)
+
+        async def scenario() -> None:
+            database = Database(db_path=str(db_path))
+            await database.connect()
+            try:
+                await database.set_app_state("auth.user_id", "alice")
+                assert await database.get_contacts_cache_index_version() == ""
+
+                await database.replace_contacts_cache(
+                    [
+                        {
+                            "id": "shared-user",
+                            "display_name": "Alice Core",
+                            "username": "alice",
+                            "nickname": "Alice",
+                            "remark": "Core teammate",
+                            "assistim_id": "alice",
+                            "region": "Shenzhen",
+                            "signature": "Build core features",
+                        }
+                    ],
+                    owner_user_id="alice",
+                )
+                first_version = await database.get_contacts_cache_index_version()
+                same_version = await database.get_contacts_cache_index_version()
+                assert first_version
+                assert same_version == first_version
+
+                await database.replace_contacts_cache(
+                    [
+                        {
+                            "id": "shared-user",
+                            "display_name": "Bob Core",
+                            "username": "bob-core",
+                            "nickname": "Bobby",
+                            "remark": "Core operator",
+                            "assistim_id": "bobcore",
+                            "region": "Busan",
+                            "signature": "Run core ops",
+                        }
+                    ],
+                    owner_user_id="bob",
+                )
+                assert await database.get_contacts_cache_index_version() == first_version
+
+                await database.replace_contacts_cache(
+                    [
+                        {
+                            "id": "shared-user",
+                            "display_name": "Alice Core",
+                            "username": "alice-new",
+                            "nickname": "Alice",
+                            "remark": "Core teammate",
+                            "assistim_id": "alice",
+                            "region": "Shenzhen",
+                            "signature": "Build core features",
+                        }
+                    ],
+                    owner_user_id="alice",
+                )
+                changed_version = await database.get_contacts_cache_index_version()
+                assert changed_version
+                assert changed_version != first_version
+            finally:
+                await database.close()
+
+        asyncio.run(scenario())
+    finally:
+        try:
+            db_path.unlink(missing_ok=True)
+        except PermissionError:
+            pass
+        shutil.rmtree(temp_root, ignore_errors=True)
+
+
 def test_database_lists_conversation_memory_ann_candidates() -> None:
     temp_root = (Path.cwd() / "client/tests/.pytest_tmp").resolve()
     temp_root.mkdir(parents=True, exist_ok=True)

@@ -13,6 +13,8 @@ from client.managers.ai_action_types import ActionPause, AtomicActionSpec
 logger = logging.get_logger(__name__)
 
 
+CONTACT_RESOLVE_CACHE_NAMESPACE = "contact.resolve"
+CONTACT_RESOLVE_RESOLVER_VERSION = "contact_resolve:v1"
 MEMORY_SUMMARIZE_DIRECT_MAX_LINES = 6
 MEMORY_SUMMARIZE_DIRECT_MAX_CONTEXT_CHARS = 1200
 MEMORY_SUMMARIZE_CHUNK_SIZE = 4
@@ -215,6 +217,21 @@ class AtomicActionRegistry:
     async def _contact_resolve(self, args: dict[str, Any], context: dict[str, Any]) -> dict[str, Any] | ActionPause:
         queries = _clean_list(args.get("queries"))
         allow_multiple = bool(args.get("allow_multiple", True))
+        cache_index_version = await self._contact_index_version()
+        cache_key = _contact_resolve_cache_key(
+            queries=queries,
+            allow_multiple=allow_multiple,
+            index_version=cache_index_version,
+            resolver_version=CONTACT_RESOLVE_RESOLVER_VERSION,
+        )
+        if cache_key:
+            cached = self._action_cache.get(CONTACT_RESOLVE_CACHE_NAMESPACE, cache_key)
+            if isinstance(cached, dict):
+                cached["cache_hit"] = True
+                cached["cache_namespace"] = CONTACT_RESOLVE_CACHE_NAMESPACE
+                cached["cache_index_version"] = cache_index_version
+                cached["cache_resolver_version"] = CONTACT_RESOLVE_RESOLVER_VERSION
+                return cached
         contacts: list[dict[str, Any]] = []
         unresolved: list[str] = []
         for query in queries:
@@ -249,7 +266,30 @@ class AtomicActionRegistry:
                 },
                 response_text="这个操作只能选择一个目标，请补充更明确的对象。",
             )
-        return {"contacts": contacts, "groups": [], "ambiguous": [], "unresolved": unresolved}
+        output = {
+            "contacts": contacts,
+            "groups": [],
+            "ambiguous": [],
+            "unresolved": unresolved,
+            "cache_hit": False,
+            "cache_namespace": CONTACT_RESOLVE_CACHE_NAMESPACE,
+            "cache_resolver_version": CONTACT_RESOLVE_RESOLVER_VERSION,
+        }
+        if cache_index_version:
+            output["cache_index_version"] = cache_index_version
+        if cache_key:
+            self._action_cache.set(CONTACT_RESOLVE_CACHE_NAMESPACE, cache_key, output)
+        return output
+
+    async def _contact_index_version(self) -> str:
+        get_version = getattr(self._contact_resolver, "get_contact_index_version", None)
+        if not callable(get_version):
+            return ""
+        try:
+            return str(await get_version() or "").strip()
+        except Exception:
+            logger.exception("Failed to resolve contact cache index version")
+            return ""
 
     async def _exact_contact_matches(self, query: str) -> list[Any]:
         exact = getattr(self._contact_resolver, "_exact_matches", None)
@@ -445,6 +485,26 @@ def _normalize_memory_search_output(value: Any, *, question: str) -> dict[str, A
         if str(output.get("cache_search_version") or "").strip():
             normalized["cache_search_version"] = str(output.get("cache_search_version") or "").strip()
     return normalized
+
+
+def _contact_resolve_cache_key(
+    *,
+    queries: list[str],
+    allow_multiple: bool,
+    index_version: str,
+    resolver_version: str,
+) -> str | None:
+    normalized_index_version = str(index_version or "").strip()
+    normalized_resolver_version = str(resolver_version or "").strip()
+    if not normalized_index_version or not normalized_resolver_version:
+        return None
+    payload = {
+        "allow_multiple": bool(allow_multiple),
+        "index_version": normalized_index_version,
+        "queries": [str(query or "").strip().casefold() for query in list(queries or [])],
+        "resolver_version": normalized_resolver_version,
+    }
+    return hashlib.sha256(_stable_json(payload).encode("utf-8")).hexdigest()
 
 
 def _memory_summarize_cache_key(

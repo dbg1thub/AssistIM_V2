@@ -3074,6 +3074,62 @@ class Database:
             return normalized_owner
         return str(await self.get_app_state(self.AUTH_USER_ID_STATE_KEY) or "").strip()
 
+    async def get_contacts_cache_index_version(self, *, owner_user_id: str | None = None) -> str:
+        """Return a stable metadata fingerprint for one owner's contact cache."""
+        normalized_owner = await self._resolve_directory_cache_owner_user_id(owner_user_id)
+        if not normalized_owner:
+            return ""
+        cursor = await self._db.execute(
+            """
+            SELECT
+                owner_user_id,
+                contact_id,
+                display_name,
+                username,
+                nickname,
+                remark,
+                assistim_id,
+                region,
+                avatar,
+                category,
+                status,
+                updated_at
+            FROM contacts_cache
+            WHERE owner_user_id = ?
+            ORDER BY contact_id
+            """,
+            (normalized_owner,),
+        )
+        rows = await cursor.fetchall()
+        if not rows:
+            return ""
+        digest = hashlib.sha256()
+        for row in rows:
+            payload = {
+                "assistim_id": str(row["assistim_id"] or ""),
+                "avatar": str(row["avatar"] or ""),
+                "category": str(row["category"] or ""),
+                "contact_id": str(row["contact_id"] or ""),
+                "display_name": str(row["display_name"] or ""),
+                "nickname": str(row["nickname"] or ""),
+                "owner_user_id": str(row["owner_user_id"] or ""),
+                "region": str(row["region"] or ""),
+                "remark": str(row["remark"] or ""),
+                "status": str(row["status"] or ""),
+                "updated_at": int(row["updated_at"] or 0),
+                "username": str(row["username"] or ""),
+            }
+            digest.update(
+                json.dumps(
+                    payload,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            )
+            digest.update(b"\n")
+        return f"contacts-cache:{digest.hexdigest()}"
+
     async def replace_contacts_cache(
         self,
         contacts: list[dict[str, Any]],
