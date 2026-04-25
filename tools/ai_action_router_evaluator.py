@@ -7,7 +7,9 @@ executor pipeline.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+import json
+from dataclasses import dataclass, field, replace
+from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from tools.ai_action_prompt_benchmark import PromptBenchmarkCase, parse_plan_json
@@ -42,6 +44,20 @@ FORBIDDEN_ROUTER_FIELDS = frozenset(
     }
 )
 DEFAULT_MIN_CONFIDENCE = 0.6
+ROUTER_SCHEMA_VERSION = "route_v1"
+ROUTER_MAX_OUTPUT_CHARS = 512
+ROUTER_MAX_TOKENS = 96
+
+ROUTER_OUTPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "route": {"type": "string", "enum": [ROUTE_CHAT, ROUTE_ACTION_CANDIDATE, ROUTE_UNKNOWN]},
+        "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+        "reason": {"type": "string"},
+    },
+    "required": ["route", "confidence", "reason"],
+    "additionalProperties": False,
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,6 +80,64 @@ class RouterCaseResult:
     case: PromptBenchmarkCase
     expected_route: str
     samples: list[RouterSampleResult]
+
+
+@dataclass(frozen=True, slots=True)
+class RouterReplayRecord:
+    case_name: str
+    user_input: str
+    expected_route: str
+    raw_output: str
+    elapsed_ms: int = 0
+    provider: str = ""
+    model: str = ""
+    error_code: str = ""
+    error_message: str = ""
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+def build_router_request(case: PromptBenchmarkCase):
+    """Build one local AI request for offline router replay."""
+    from client.services.ai_service import AIPrivacyScope, AIRequest, AITaskType
+
+    return AIRequest(
+        task_type=AITaskType.CHAT,
+        privacy_scope=AIPrivacyScope.GENERAL,
+        must_be_local=True,
+        stream=False,
+        temperature=0.0,
+        max_tokens=ROUTER_MAX_TOKENS,
+        max_output_chars=ROUTER_MAX_OUTPUT_CHARS,
+        response_format={"type": "json_object", "schema": ROUTER_OUTPUT_SCHEMA},
+        system_prompt=build_router_system_prompt(),
+        messages=[{"role": "user", "content": build_router_user_prompt(case.user_input)}],
+        metadata={
+            "source": "ai_action_router_corpus",
+            "router_schema": ROUTER_SCHEMA_VERSION,
+            "router_case_name": case.name,
+        },
+    )
+
+
+def build_router_system_prompt() -> str:
+    """Return the model-only router prompt used for offline corpus replay."""
+    return (
+        "你是 AssistIM 的 AI action Router，只负责判断用户输入是否需要进入 action planner。\n"
+        "只输出一个 JSON 对象，不要输出 Markdown、解释段落或多余文本。\n"
+        f'route 只能是 "{ROUTE_CHAT}"、"{ROUTE_ACTION_CANDIDATE}"、"{ROUTE_UNKNOWN}" 之一。\n'
+        f'"{ROUTE_CHAT}" 表示普通聊天、问答、解释概念或闲聊，不需要执行工具。\n'
+        f'"{ROUTE_ACTION_CANDIDATE}" 表示可能需要查询聊天记忆、总结历史、处理附件信息或准备发送消息，应交给 planner。\n'
+        f'"{ROUTE_UNKNOWN}" 表示意图不明确或置信度不足。\n'
+        '输出字段固定为 {"route": string, "confidence": number, "reason": string}。\n'
+        "confidence 必须是 0 到 1 的数字，reason 不超过 30 个中文字符。\n"
+        "不要输出 steps、action、actions、args、plan、tool、tools、final、depends_on。\n"
+        "不要输出 message.send、message.draft、contact.resolve、memory.search、memory.summarize、user.confirm。\n"
+        "不要解析联系人，不要生成执行计划，不要决定具体业务动作。"
+    )
+
+
+def build_router_user_prompt(user_input: str) -> str:
+    return f"用户输入：{str(user_input or '').strip()}"
 
 
 def parse_router_output(raw_output: str, *, min_confidence: float = DEFAULT_MIN_CONFIDENCE) -> RouterSampleResult:
@@ -172,6 +246,16 @@ def evaluate_router_samples(
     return results
 
 
+def evaluate_router_replay_file(
+    cases: Sequence[PromptBenchmarkCase],
+    path: str | Path,
+    *,
+    min_confidence: float = DEFAULT_MIN_CONFIDENCE,
+) -> list[RouterCaseResult]:
+    records = load_router_replay_records(path)
+    return evaluate_router_samples(cases, _outputs_by_case(records), min_confidence=min_confidence)
+
+
 def summarize_router_results(results: Sequence[RouterCaseResult]) -> dict[str, Any]:
     samples = [sample for result in results for sample in list(result.samples or [])]
     return {
@@ -187,9 +271,85 @@ def summarize_router_results(results: Sequence[RouterCaseResult]) -> dict[str, A
     }
 
 
+def write_router_replay_records(path: str | Path, records: Sequence[RouterReplayRecord]) -> None:
+    replay_path = Path(path)
+    replay_path.parent.mkdir(parents=True, exist_ok=True)
+    with replay_path.open("w", encoding="utf-8", newline="\n") as file:
+        for record in records:
+            file.write(json.dumps(_record_to_payload(record), ensure_ascii=False, sort_keys=True) + "\n")
+
+
+def load_router_replay_records(path: str | Path) -> list[RouterReplayRecord]:
+    replay_path = Path(path)
+    records: list[RouterReplayRecord] = []
+    try:
+        lines = replay_path.read_text(encoding="utf-8-sig").splitlines()
+    except FileNotFoundError as exc:
+        raise ValueError(f"router replay file not found: {replay_path}") from exc
+    for line_no, line in enumerate(lines, start=1):
+        text = line.strip()
+        if not text:
+            continue
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"router replay line {line_no} is not valid JSON") from exc
+        if not isinstance(payload, dict):
+            raise ValueError(f"router replay line {line_no} must be an object")
+        records.append(_record_from_payload(payload, line_no=line_no))
+    return records
+
+
 def _normalize_route(value: Any) -> str:
     route = str(value or "").strip().lower()
     return route if route in ALLOWED_ROUTES else ROUTE_UNKNOWN
+
+
+def _outputs_by_case(records: Sequence[RouterReplayRecord]) -> dict[str, list[str]]:
+    outputs: dict[str, list[str]] = {}
+    for record in records:
+        outputs.setdefault(record.case_name, []).append(record.raw_output)
+    return outputs
+
+
+def _record_to_payload(record: RouterReplayRecord) -> dict[str, Any]:
+    return {
+        "case_name": record.case_name,
+        "user_input": record.user_input,
+        "expected_route": record.expected_route,
+        "raw_output": record.raw_output,
+        "elapsed_ms": int(record.elapsed_ms or 0),
+        "provider": record.provider,
+        "model": record.model,
+        "error_code": record.error_code,
+        "error_message": record.error_message,
+        "metadata": dict(record.metadata or {}),
+    }
+
+
+def _record_from_payload(payload: dict[str, Any], *, line_no: int) -> RouterReplayRecord:
+    case_name = str(payload.get("case_name") or "").strip()
+    user_input = str(payload.get("user_input") or "").strip()
+    expected_route = _normalize_route(payload.get("expected_route"))
+    if not case_name:
+        raise ValueError(f"router replay line {line_no} is missing case_name")
+    if not user_input:
+        raise ValueError(f"router replay line {line_no} is missing user_input")
+    if expected_route == ROUTE_UNKNOWN and str(payload.get("expected_route") or "").strip().lower() != ROUTE_UNKNOWN:
+        raise ValueError(f"router replay line {line_no} has invalid expected_route")
+    metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+    return RouterReplayRecord(
+        case_name=case_name,
+        user_input=user_input,
+        expected_route=expected_route,
+        raw_output=str(payload.get("raw_output") or ""),
+        elapsed_ms=max(0, int(payload.get("elapsed_ms") or 0)),
+        provider=str(payload.get("provider") or "").strip(),
+        model=str(payload.get("model") or "").strip(),
+        error_code=str(payload.get("error_code") or "").strip(),
+        error_message=str(payload.get("error_message") or "").strip(),
+        metadata=dict(metadata),
+    )
 
 
 def _coerce_confidence(value: Any) -> tuple[float, bool]:
