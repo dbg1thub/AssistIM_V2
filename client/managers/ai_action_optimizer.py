@@ -8,7 +8,7 @@ from typing import Any
 from client.managers.ai_action_types import AIActionPlan, AIActionStep
 
 
-MERGEABLE_ACTIONS = {"contact.resolve"}
+MERGEABLE_ACTIONS = {"contact.resolve", "memory.search"}
 ROOT_ACTIONS = {"message.send", "friend.add", "moment.publish", "user.confirm"}
 
 
@@ -77,6 +77,8 @@ class AIPlanOptimizer:
         reasons = []
         if "contact.resolve" in merged_actions:
             reasons.append("optimizer_merge_duplicate_contact_resolve")
+        if "memory.search" in merged_actions:
+            reasons.append("optimizer_merge_duplicate_memory_search")
         return output, final, "+".join(reasons)
 
     @staticmethod

@@ -539,6 +539,116 @@ def test_ai_action_optimizer_merges_duplicate_contact_resolve_and_updates_refs()
     assert draft.args["target"] == "$resolve_a.contacts[0]"
 
 
+def test_ai_action_optimizer_merges_duplicate_memory_search_and_updates_refs() -> None:
+    optimizer = AIPlanOptimizer()
+    search_args = {
+        "participants": "$resolve_contacts.contacts",
+        "participant_match": "any",
+        "time_scope": {"type": "all_history"},
+        "keywords": [],
+        "question": "我和 test3 聊过什么？",
+        "limit": 8,
+    }
+    plan = AIActionPlan(
+        is_action=True,
+        goal="history",
+        risk="low",
+        steps=(
+            AIActionStep(
+                id="resolve_contacts",
+                action="contact.resolve",
+                args={"queries": ["test3"], "allow_multiple": True},
+            ),
+            AIActionStep(
+                id="search_a",
+                action="memory.search",
+                depends_on=("resolve_contacts",),
+                args=dict(search_args),
+            ),
+            AIActionStep(
+                id="search_b",
+                action="memory.search",
+                depends_on=("resolve_contacts",),
+                args=dict(search_args),
+            ),
+            AIActionStep(
+                id="summarize",
+                action="memory.summarize",
+                depends_on=("search_b",),
+                args={"source": "$search_b", "question": "我和 test3 聊过什么？"},
+            ),
+        ),
+        final={"type": "answer", "source": "$summarize"},
+    )
+
+    optimized, reason = optimizer.optimize(plan)
+
+    assert reason == "optimizer_merge_duplicate_memory_search"
+    assert [step.id for step in optimized.steps] == ["resolve_contacts", "search_a", "summarize"]
+    summarize = next(step for step in optimized.steps if step.id == "summarize")
+    assert summarize.depends_on == ("search_a",)
+    assert summarize.args["source"] == "$search_a"
+
+
+def test_ai_action_optimizer_keeps_distinct_memory_search_steps() -> None:
+    optimizer = AIPlanOptimizer()
+    base_args = {
+        "participants": "$resolve_contacts.contacts",
+        "participant_match": "any",
+        "time_scope": {"type": "all_history"},
+        "keywords": [],
+        "question": "我和 test3 聊过什么？",
+    }
+    plan = AIActionPlan(
+        is_action=True,
+        goal="history",
+        risk="low",
+        steps=(
+            AIActionStep(
+                id="resolve_contacts",
+                action="contact.resolve",
+                args={"queries": ["test3"], "allow_multiple": True},
+            ),
+            AIActionStep(
+                id="search_a",
+                action="memory.search",
+                depends_on=("resolve_contacts",),
+                args={**base_args, "limit": 5},
+            ),
+            AIActionStep(
+                id="summarize_a",
+                action="memory.summarize",
+                depends_on=("search_a",),
+                args={"source": "$search_a", "question": "我和 test3 聊过什么？"},
+            ),
+            AIActionStep(
+                id="search_b",
+                action="memory.search",
+                depends_on=("resolve_contacts",),
+                args={**base_args, "limit": 8},
+            ),
+            AIActionStep(
+                id="summarize_b",
+                action="memory.summarize",
+                depends_on=("search_b",),
+                args={"source": "$search_b", "question": "我和 test3 聊过什么？"},
+            ),
+        ),
+        final={"type": "answer", "sources": ["$summarize_a", "$summarize_b"]},
+    )
+
+    optimized, reason = optimizer.optimize(plan)
+
+    assert reason == ""
+    assert [step.id for step in optimized.steps] == [
+        "resolve_contacts",
+        "search_a",
+        "summarize_a",
+        "search_b",
+        "summarize_b",
+    ]
+
+
 def test_ai_action_optimizer_removes_unreachable_read_steps_without_touching_confirm() -> None:
     optimizer = AIPlanOptimizer()
     plan = AIActionPlan(
