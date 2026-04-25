@@ -318,7 +318,35 @@ class AIActionPlanner:
             "询问历史、回顾、总结、检索内容时使用 memory.search 和 memory.summarize；不要为读取类任务生成 user.confirm。\n"
             "多个对象默认表示多对象操作，不是歧义；只有单个名称对应多个本地实体时才由系统澄清。\n"
             "如果用户只是普通问答、写作、翻译或代码分析，输出 is_action=false 且 steps=[]。\n"
-            "只有需要执行、确认、取消或补充高风险应用操作时，才输出 action plan。"
+            "只有需要执行、确认、取消或补充高风险应用操作时，才输出 action plan。\n"
+            "原子 action 参数契约必须严格遵守，字段名错误会导致计划不可执行：\n"
+            "聊天历史查询必须使用固定 step id：resolve_contacts, search_memory, summarize_memory；"
+            "发送消息必须使用固定 step id：resolve_target, draft_message, confirm_send, send_message。\n"
+            "所有 $ 引用的根名称必须等于已存在 step.id；不要生成 %step_0 这类临时 id。\n"
+            'participant_match 只能是 "any", "all", "direct_only", "group_only"；默认使用 "any"。\n'
+            'contact.resolve.args = {"queries": ["张三"], "allow_multiple": false}；queries 必须是数组；'
+            "不要使用 contact.resolve.args.target。\n"
+            'memory.search.args = {"participants": "$resolve_contacts.contacts", "participant_match": "any", '
+            '"time_scope": {"type": "all_history"}, "keywords": [], "question": "用户原始问题"}；'
+            "question 必须是用户原始问题，不要使用 memory.search.args.query。\n"
+            '历史/之前/聊过什么/回顾 -> time_scope.type="all_history"。\n'
+            'memory.summarize.args = {"source": "$search_memory", "question": "用户原始问题"}；'
+            "source 必须引用 memory.search step。\n"
+            'message.draft.args = {"target": "$resolve_target.contacts[0]", "content": "明确消息内容"}。\n'
+            'user.confirm.args = {"risk": "high", "preview": {"operation": "发送消息", '
+            '"target": "$draft_message.target", "content": "$draft_message.content"}}。\n'
+            'message.send.args = {"target": "$draft_message.target_entity", '
+            '"content": "$draft_message.content", "preview": "$draft_message.preview", '
+            '"idempotency_key": "$draft_message.idempotency_key"}。\n'
+            '示例：普通聊天 -> {"is_action": false, "goal": "普通聊天", "risk": "low", "steps": [], "final": {}}。\n'
+            "示例：聊天历史查询 -> resolve_contacts: contact.resolve(queries) -> "
+            'search_memory: memory.search(participants="$resolve_contacts.contacts", '
+            'participant_match="any", time_scope.type="all_history", question="用户原始问题") -> '
+            'summarize_memory: memory.summarize(source="$search_memory")。\n'
+            "示例：发送消息 -> resolve_target: contact.resolve(queries, allow_multiple=false) -> "
+            'draft_message: message.draft(target="$resolve_target.contacts[0]") -> '
+            'confirm_send: user.confirm(preview.target="$draft_message.target") -> '
+            'send_message: message.send(target="$draft_message.target_entity")。'
         )
 
     @staticmethod

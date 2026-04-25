@@ -180,6 +180,53 @@ def test_evaluate_case_checks_all_history() -> None:
     assert messages == []
 
 
+def test_evaluate_case_rejects_unresolved_step_references() -> None:
+    plan = {
+        "goal": "history",
+        "risk": "low",
+        "steps": [
+            {
+                "id": "%step_0",
+                "action": "contact.resolve",
+                "depends_on": [],
+                "args": {"queries": ["test3"], "allow_multiple": False},
+            },
+            {
+                "id": "%step_1",
+                "action": "memory.search",
+                "depends_on": ["%step_0"],
+                "args": {
+                    "participants": "$resolve_contacts.contacts",
+                    "participant_match": "test3",
+                    "time_scope": {"type": "all_history"},
+                    "keywords": [],
+                    "question": "我和 test3 之前聊过什么？",
+                },
+            },
+            {
+                "id": "%step_2",
+                "action": "memory.summarize",
+                "depends_on": ["%step_1"],
+                "args": {"source": "$search_memory", "question": "我和 test3 之前聊过什么？"},
+            },
+        ],
+        "final": {},
+    }
+
+    checks, messages = evaluate_case(
+        plan,
+        PromptCaseExpectation(
+            required_actions=("contact.resolve", "memory.search", "memory.summarize"),
+            risk="low",
+            contact_queries=("test3",),
+            require_all_history=True,
+        ),
+    )
+
+    assert checks["step_references"] is False
+    assert "unresolved step reference" in messages
+
+
 def test_evaluate_case_checks_non_action_and_forbidden_actions() -> None:
     plan = {
         "is_action": False,

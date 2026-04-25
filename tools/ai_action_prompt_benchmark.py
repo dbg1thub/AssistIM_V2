@@ -175,6 +175,10 @@ def evaluate_case(plan: dict[str, Any] | None, expectation: PromptCaseExpectatio
         checks["required_actions"] = all(action in actions for action in expectation.required_actions)
         if not checks["required_actions"]:
             messages.append("missing required actions")
+    if steps:
+        checks["step_references"] = _has_valid_step_references(steps, payload.get("final") if isinstance(payload.get("final"), dict) else {})
+        if not checks["step_references"]:
+            messages.append("unresolved step reference")
     if expectation.forbidden_actions:
         actions = [str(step.get("action") or "").strip() for step in steps]
         forbidden = set(expectation.forbidden_actions)
@@ -370,6 +374,48 @@ def _has_all_history_memory_search(steps: list[dict[str, Any]]) -> bool:
         if scope_type in {"all", "all_history", "history"}:
             return True
     return False
+
+
+def _has_valid_step_references(steps: list[dict[str, Any]], final: dict[str, Any]) -> bool:
+    seen_ids: set[str] = set()
+    for index, step in enumerate(steps, start=1):
+        step_id = str(step.get("id") or f"step_{index}").strip()
+        if not step_id or step_id in seen_ids:
+            return False
+        depends_on = [str(dep or "").strip() for dep in list(step.get("depends_on") or []) if str(dep or "").strip()]
+        if any(dep not in seen_ids for dep in depends_on):
+            return False
+        args = step.get("args") if isinstance(step.get("args"), dict) else {}
+        if not _refs_are_available(args, available=seen_ids):
+            return False
+        seen_ids.add(step_id)
+    return _refs_are_available(final, available=seen_ids)
+
+
+def _refs_are_available(value: Any, *, available: set[str]) -> bool:
+    return all(ref in available for ref in _ref_roots(value))
+
+
+def _ref_roots(value: Any) -> set[str]:
+    if isinstance(value, str):
+        if not value.startswith("$"):
+            return set()
+        body = value[1:]
+        stops = [index for index in (body.find("."), body.find("[")) if index >= 0]
+        split_at = min(stops) if stops else len(body)
+        root = body[:split_at]
+        return {root} if root else {""}
+    if isinstance(value, list):
+        roots: set[str] = set()
+        for item in value:
+            roots.update(_ref_roots(item))
+        return roots
+    if isinstance(value, dict):
+        roots: set[str] = set()
+        for item in value.values():
+            roots.update(_ref_roots(item))
+        return roots
+    return set()
 
 
 def _step_arg_matches(steps: list[dict[str, Any]], expectation: PromptStepArgExpectation) -> bool:

@@ -353,6 +353,37 @@ def test_ai_action_planner_prompt_routes_history_queries_to_memory_actions() -> 
     assert "memory.summarize" in user_prompt
 
 
+def test_ai_action_planner_prompt_documents_atomic_action_arg_contracts() -> None:
+    system_prompt = AIActionPlanner._system_prompt(AIActionPlanner.PROMPT_NEW_ACTION)
+
+    assert 'contact.resolve.args = {"queries": ["张三"], "allow_multiple": false}' in system_prompt
+    assert "不要使用 contact.resolve.args.target" in system_prompt
+    assert (
+        'memory.search.args = {"participants": "$resolve_contacts.contacts", '
+        '"participant_match": "any", "time_scope": {"type": "all_history"}, '
+        '"keywords": [], "question": "用户原始问题"}'
+    ) in system_prompt
+    assert '历史/之前/聊过什么/回顾 -> time_scope.type="all_history"' in system_prompt
+    assert 'memory.summarize.args = {"source": "$search_memory", "question": "用户原始问题"}' in system_prompt
+    assert 'message.draft.args = {"target": "$resolve_target.contacts[0]", "content": "明确消息内容"}' in system_prompt
+    assert (
+        'user.confirm.args = {"risk": "high", "preview": {"operation": "发送消息", '
+        '"target": "$draft_message.target", "content": "$draft_message.content"}}'
+    ) in system_prompt
+    assert (
+        'message.send.args = {"target": "$draft_message.target_entity", '
+        '"content": "$draft_message.content", "preview": "$draft_message.preview", '
+        '"idempotency_key": "$draft_message.idempotency_key"}'
+    ) in system_prompt
+    assert "示例：普通聊天" in system_prompt
+    assert "示例：聊天历史查询" in system_prompt
+    assert "示例：发送消息" in system_prompt
+    assert "聊天历史查询必须使用固定 step id：resolve_contacts, search_memory, summarize_memory" in system_prompt
+    assert "发送消息必须使用固定 step id：resolve_target, draft_message, confirm_send, send_message" in system_prompt
+    assert "所有 $ 引用的根名称必须等于已存在 step.id" in system_prompt
+    assert 'participant_match 只能是 "any", "all", "direct_only", "group_only"' in system_prompt
+
+
 def test_ai_action_planner_uses_state_specific_prompt_templates() -> None:
     confirmation_state = PendingPlannerState(
         id="plan-1",
