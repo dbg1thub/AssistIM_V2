@@ -10,6 +10,7 @@ from client.core import logging
 from client.core.file_text_extraction import (
     FILE_SUMMARY_EXTRA_KEY,
     FILE_TEXT_EXTRACT_EXTRA_KEY,
+    FILE_TEXT_EXTRACT_MAX_CHARS,
     extracted_file_context_text,
 )
 from client.core.voice_transcription import VOICE_TRANSCRIPT_EXTRA_KEY
@@ -26,8 +27,12 @@ class AIMemoryIndexingService:
     """Small coordinator that turns saved local AI artifacts into vector memory."""
 
     FILE_SUMMARY_SOURCE_TYPE = "file_summary"
+    FILE_TEXT_CHUNK_SOURCE_TYPE = "file_text_chunk"
     VOICE_TRANSCRIPT_SOURCE_TYPE = "voice_transcript"
     FILE_TEXT_SNIPPET_CHARS = 2400
+    FILE_TEXT_INDEX_MAX_CHARS = FILE_TEXT_EXTRACT_MAX_CHARS
+    FILE_TEXT_CHUNK_CHARS = 1200
+    FILE_TEXT_CHUNK_OVERLAP_CHARS = 160
 
     def __init__(
         self,
@@ -41,13 +46,19 @@ class AIMemoryIndexingService:
         self._ai_memory_store = ai_memory_store or get_local_ai_memory_store()
 
     async def sync_file_analysis_message(self, message: ChatMessage) -> None:
-        """Upsert or delete one file-summary memory item after message extra is persisted."""
+        """Upsert or delete file-analysis memory items after message extra is persisted."""
 
         if message.message_type != MessageType.FILE:
             return
         owner_scope = await self._owner_scope()
         if not owner_scope:
             return
+        await self._sync_file_summary_message(owner_scope=owner_scope, message=message)
+        await self._sync_file_text_chunks(owner_scope=owner_scope, message=message)
+
+    async def _sync_file_summary_message(self, *, owner_scope: str, message: ChatMessage) -> None:
+        """Upsert or delete one file-summary memory item."""
+
         source_id = self.file_summary_source_id(message)
         summary = dict((message.extra or {}).get(FILE_SUMMARY_EXTRA_KEY) or {})
         summary_text = _normalize_text(summary.get("text"))
@@ -94,6 +105,81 @@ class AIMemoryIndexingService:
                 updated_at=int(time.time()),
             )
         )
+
+    async def _sync_file_text_chunks(self, *, owner_scope: str, message: ChatMessage) -> None:
+        """Replace extracted file-text chunks for one file message."""
+
+        source_id = self.file_text_source_id(message)
+        extraction = dict((message.extra or {}).get(FILE_TEXT_EXTRACT_EXTRA_KEY) or {})
+        file_text = extracted_file_context_text(message.extra, max_chars=self.FILE_TEXT_INDEX_MAX_CHARS)
+        if str(extraction.get("status") or "").strip() != "ready" or not file_text:
+            await self._ai_memory_store.delete_source(
+                owner_scope=owner_scope,
+                source_type=self.FILE_TEXT_CHUNK_SOURCE_TYPE,
+                source_id=source_id,
+            )
+            return
+
+        chunks = self._split_file_text_chunks(file_text)
+        if not chunks:
+            await self._ai_memory_store.delete_source(
+                owner_scope=owner_scope,
+                source_type=self.FILE_TEXT_CHUNK_SOURCE_TYPE,
+                source_id=source_id,
+            )
+            return
+
+        file_name = self._file_name(message)
+        keywords = self._file_keywords(message, file_name=file_name)
+        participants = self._file_participants(message)
+        timestamp = int(message.timestamp.timestamp()) if message.timestamp else 0
+        items: list[AIMemoryItem] = []
+        for index, chunk_text in enumerate(chunks):
+            chunk_id = f"chunk-{index:04d}"
+            title = f"{file_name} #{index + 1}"
+            memory_text = f"文件内容片段：{chunk_text}"
+            vector = await self._vector_index.encode_item(
+                title=title,
+                text=memory_text,
+                keywords=keywords,
+                participants=participants,
+            )
+            items.append(
+                AIMemoryItem(
+                    owner_scope=owner_scope,
+                    source_type=self.FILE_TEXT_CHUNK_SOURCE_TYPE,
+                    source_id=source_id,
+                    chunk_id=chunk_id,
+                    title=title,
+                    text=memory_text,
+                    vector=vector.values,
+                    embedding_model_id=self._vector_index.model_id,
+                    metadata={
+                        "session_id": str(message.session_id or "").strip(),
+                        "message_id": str(message.message_id or "").strip(),
+                        "sender_id": str(message.sender_id or "").strip(),
+                        "is_self": bool(message.is_self),
+                        "file_name": file_name,
+                        "mime_type": str((message.extra or {}).get("mime_type") or "").strip(),
+                        "file_text_status": "ready",
+                        "chunk_index": index,
+                        "chunk_count": len(chunks),
+                        "keywords": keywords,
+                        "participants": participants,
+                        "bucket_start_ts": timestamp,
+                        "bucket_end_ts": timestamp,
+                        "source_version": 1,
+                    },
+                    updated_at=int(time.time()),
+                )
+            )
+
+        await self._ai_memory_store.delete_source(
+            owner_scope=owner_scope,
+            source_type=self.FILE_TEXT_CHUNK_SOURCE_TYPE,
+            source_id=source_id,
+        )
+        await self._ai_memory_store.upsert_items(items)
 
     async def sync_voice_transcript_message(self, message: ChatMessage) -> None:
         """Upsert or delete one voice-transcript memory item after message extra is persisted."""
@@ -213,6 +299,31 @@ class AIMemoryIndexingService:
     @classmethod
     def file_summary_source_id(cls, message: ChatMessage) -> str:
         return f"file:{str(message.session_id or '').strip()}:{str(message.message_id or '').strip()}"
+
+    @classmethod
+    def file_text_source_id(cls, message: ChatMessage) -> str:
+        return f"file_text:{str(message.session_id or '').strip()}:{str(message.message_id or '').strip()}"
+
+    @classmethod
+    def _split_file_text_chunks(cls, text: str) -> list[str]:
+        normalized = str(text or "").strip()
+        if not normalized:
+            return []
+        chunk_size = max(1, int(cls.FILE_TEXT_CHUNK_CHARS or 1))
+        overlap = max(0, min(int(cls.FILE_TEXT_CHUNK_OVERLAP_CHARS or 0), chunk_size - 1))
+        chunks: list[str] = []
+        start = 0
+        text_length = len(normalized)
+        while start < text_length:
+            end = min(text_length, start + chunk_size)
+            chunk = normalized[start:end].strip()
+            if chunk:
+                chunks.append(chunk)
+            if end >= text_length:
+                break
+            next_start = end - overlap
+            start = next_start if next_start > start else end
+        return chunks
 
     @staticmethod
     def _voice_keywords(message: ChatMessage, *, transcript: dict[str, Any]) -> list[str]:

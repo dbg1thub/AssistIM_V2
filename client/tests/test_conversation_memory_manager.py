@@ -9,7 +9,7 @@ from client.services.local_ai_memory_store import AIMemoryItem, AIMemorySearchRe
 from client.storage.database import Database
 
 
-AI_MEMORY_SOURCE_TYPES = ("conversation_summary", "file_summary", "voice_transcript")
+AI_MEMORY_SOURCE_TYPES = ("conversation_summary", "file_summary", "file_text_chunk", "voice_transcript")
 
 
 class _FakeMemoryDatabase:
@@ -229,6 +229,30 @@ def _file_ai_memory_item() -> AIMemoryItem:
             "bucket_start_ts": _ts("2026-04-18T15:00:00"),
             "bucket_end_ts": _ts("2026-04-18T15:00:00"),
             "keywords": ["contract.pdf", "合同金额"],
+            "participants": ["alice"],
+        },
+    )
+
+
+def _file_text_chunk_ai_memory_item() -> AIMemoryItem:
+    return AIMemoryItem(
+        owner_scope="account:test1",
+        source_type="file_text_chunk",
+        source_id="file_text:s-file:m-file",
+        chunk_id="chunk-0001",
+        title="contract.pdf #2",
+        text="文件内容片段：第二段 违约金按每日千分之一计算，付款期限为周五。",
+        vector=tuple(_FakeVectorIndex._vector({"违约金", "千分之一"})),
+        embedding_model_id="fake-embedding-model",
+        metadata={
+            "session_id": "s-file",
+            "message_id": "m-file",
+            "file_name": "contract.pdf",
+            "chunk_index": 1,
+            "chunk_count": 3,
+            "bucket_start_ts": _ts("2026-04-18T15:00:00"),
+            "bucket_end_ts": _ts("2026-04-18T15:00:00"),
+            "keywords": ["contract.pdf", "违约金"],
             "participants": ["alice"],
         },
     )
@@ -516,6 +540,24 @@ def test_conversation_memory_manager_retrieves_file_summary_from_ai_memory_store
         assert context.has_context is True
         assert "contract.pdf" in context.lines[0]
         assert "合同金额为 100 元" in context.lines[0]
+        assert db.ann_calls == []
+        assert store.search_calls[0]["source_types"] == AI_MEMORY_SOURCE_TYPES
+
+    asyncio.run(scenario())
+
+
+def test_conversation_memory_manager_retrieves_file_text_chunk_from_ai_memory_store() -> None:
+    async def scenario() -> None:
+        db = _FakeMemoryDatabase([])
+        store = _FakeAIMemoryStore([_file_text_chunk_ai_memory_item()])
+        planner = _FakeSemanticPlanner(_rag_plan("违约金", participants=[]))
+        manager = _make_memory_manager(db, planner, ai_memory_store=store)
+
+        context = await manager.build_rag_context_for_ai_chat("违约金")
+
+        assert context.has_context is True
+        assert "contract.pdf #2" in context.lines[0]
+        assert "每日千分之一" in context.lines[0]
         assert db.ann_calls == []
         assert store.search_calls[0]["source_types"] == AI_MEMORY_SOURCE_TYPES
 
