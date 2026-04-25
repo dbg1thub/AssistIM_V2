@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import time
@@ -94,19 +95,18 @@ class AIActionExecutor:
             if handler is None:
                 return await self._fail(record, outputs, f"ACTION_NOT_FOUND: {step.action}")
             step_started = time.perf_counter()
-            try:
-                raw_output = await handler(
-                    validated_args,
-                    {
-                        "plan_id": record.id,
-                        "plan_version": record.plan_version,
-                        "step_id": step.id,
-                        "store": self._store,
-                        "step_outputs": outputs,
-                    },
-                )
-            except Exception:
-                logger.exception("AI action step failed: %s", step.action)
+            raw_output, execution_error = await _run_action_handler(
+                spec,
+                validated_args,
+                {
+                    "plan_id": record.id,
+                    "plan_version": record.plan_version,
+                    "step_id": step.id,
+                    "store": self._store,
+                    "step_outputs": outputs,
+                },
+            )
+            if execution_error:
                 logger.info(
                     "[ai-perf] ai_action_step_finished plan_id=%s step_id=%s action=%s state=%s "
                     "duration_ms=%s result_count=%s result_ref=%s output_bytes=%s",
@@ -119,7 +119,7 @@ class AIActionExecutor:
                     False,
                     0,
                 )
-                return await self._fail(record, outputs, f"ACTION_FAILED: {step.action}")
+                return await self._fail(record, outputs, execution_error)
 
             if isinstance(raw_output, ActionPause):
                 payload = dict(raw_output.payload or {})
@@ -310,6 +310,60 @@ class AIActionExecutor:
                 "expires_at": temp.expires_at,
             }
         }
+
+
+async def _run_action_handler(
+    spec: AtomicActionSpec,
+    args: dict[str, Any],
+    context: dict[str, Any],
+) -> tuple[Any, str]:
+    handler = spec.handler
+    if handler is None:
+        return None, f"ACTION_NOT_FOUND: {spec.name}"
+    attempts = _handler_attempt_count(spec)
+    last_error = f"ACTION_FAILED: {spec.name}"
+    for attempt in range(1, attempts + 1):
+        try:
+            timeout_seconds = max(0.001, float(spec.timeout_ms or 0) / 1000.0)
+            return await asyncio.wait_for(handler(args, context), timeout=timeout_seconds), ""
+        except TimeoutError:
+            last_error = f"ACTION_TIMEOUT: {spec.name}"
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            last_error = f"ACTION_FAILED: {spec.name}"
+            logger.info(
+                "[ai-diag] ai_action_step_attempt_failed action=%s attempt=%s max_attempts=%s retryable=%s error_type=%s",
+                spec.name,
+                attempt,
+                attempts,
+                _is_retryable_spec(spec),
+                type(exc).__name__,
+            )
+        if attempt < attempts:
+            logger.info(
+                "[ai-diag] ai_action_step_retrying action=%s attempt=%s next_attempt=%s max_attempts=%s last_error=%s",
+                spec.name,
+                attempt,
+                attempt + 1,
+                attempts,
+                last_error.split(":", 1)[0],
+            )
+    return None, last_error
+
+
+def _handler_attempt_count(spec: AtomicActionSpec) -> int:
+    if not _is_retryable_spec(spec):
+        return 1
+    try:
+        retries = max(0, int(spec.max_retries or 0))
+    except (TypeError, ValueError):
+        retries = 0
+    return 1 + retries
+
+
+def _is_retryable_spec(spec: AtomicActionSpec) -> bool:
+    return spec.kind == "read" and not spec.allow_side_effect
 
 
 def _validate_input(spec: AtomicActionSpec, value: Any) -> dict[str, Any]:

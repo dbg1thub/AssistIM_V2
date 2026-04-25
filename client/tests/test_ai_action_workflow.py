@@ -1788,6 +1788,181 @@ def test_ai_action_executor_validates_output_model_after_handler(tmp_path, monke
     asyncio.run(scenario())
 
 
+def test_ai_action_executor_times_out_action_and_marks_plan_failed(tmp_path, monkeypatch) -> None:
+    async def scenario() -> None:
+        async def slow_contact_output(args, context):
+            del args, context
+            await asyncio.sleep(0.05)
+            return {
+                "contacts": [],
+                "groups": [],
+                "ambiguous": [],
+                "unresolved": [],
+            }
+
+        db = Database(str(tmp_path / "actions.db"))
+        monkeypatch.setattr(action_store_module, "get_database", lambda: db)
+        store = AIActionStore()
+        registry = AtomicActionRegistry(
+            contact_resolver=ContactAliasResolver(db=_FakeContactDatabase([])),
+        )
+        spec = registry.get("contact.resolve")
+        assert spec is not None
+        registry._actions["contact.resolve"] = replace(spec, handler=slow_contact_output, timeout_ms=1)
+        executor = AIActionExecutor(registry=registry, store=store)
+        plan = AIActionPlan(
+            is_action=True,
+            goal="超时",
+            steps=(
+                AIActionStep(
+                    id="resolve_contacts",
+                    action="contact.resolve",
+                    args={"queries": ["张三"], "allow_multiple": True},
+                ),
+            ),
+            final={"type": "answer", "source": "$resolve_contacts"},
+        )
+        try:
+            record = await store.create_plan(
+                thread_id="thread-1",
+                goal=plan.goal,
+                plan_json=plan.to_dict(),
+                reason="test_timeout",
+            )
+            result = await executor.execute(record)
+            updated = await store.get_plan(record.id)
+
+            assert result.state == "failed"
+            assert result.error_text == "ACTION_TIMEOUT: contact.resolve"
+            assert updated is not None
+            assert updated.state == "failed"
+            assert updated.error_text == "ACTION_TIMEOUT: contact.resolve"
+            assert updated.step_outputs == {}
+        finally:
+            await db.close()
+
+    asyncio.run(scenario())
+
+
+def test_ai_action_executor_retries_safe_read_action_once(tmp_path, monkeypatch) -> None:
+    async def scenario() -> None:
+        calls = 0
+
+        async def flaky_contact_output(args, context):
+            nonlocal calls
+            del args, context
+            calls += 1
+            if calls == 1:
+                raise RuntimeError("transient read failure")
+            return {
+                "contacts": [{"contact_id": "user-1", "display_name": "张三"}],
+                "groups": [],
+                "ambiguous": [],
+                "unresolved": [],
+            }
+
+        db = Database(str(tmp_path / "actions.db"))
+        monkeypatch.setattr(action_store_module, "get_database", lambda: db)
+        store = AIActionStore()
+        registry = AtomicActionRegistry(
+            contact_resolver=ContactAliasResolver(db=_FakeContactDatabase([])),
+        )
+        spec = registry.get("contact.resolve")
+        assert spec is not None
+        registry._actions["contact.resolve"] = replace(spec, handler=flaky_contact_output, max_retries=1)
+        executor = AIActionExecutor(registry=registry, store=store)
+        plan = AIActionPlan(
+            is_action=True,
+            goal="短重试",
+            steps=(
+                AIActionStep(
+                    id="resolve_contacts",
+                    action="contact.resolve",
+                    args={"queries": ["张三"], "allow_multiple": True},
+                ),
+            ),
+            final={"type": "answer", "source": "$resolve_contacts"},
+        )
+        try:
+            record = await store.create_plan(
+                thread_id="thread-1",
+                goal=plan.goal,
+                plan_json=plan.to_dict(),
+                reason="test_safe_retry",
+            )
+            result = await executor.execute(record)
+            updated = await store.get_plan(record.id)
+
+            assert result.state == "done"
+            assert calls == 2
+            assert updated is not None
+            assert updated.state == "done"
+            assert updated.step_outputs["resolve_contacts"]["contacts"][0]["contact_id"] == "user-1"
+        finally:
+            await db.close()
+
+    asyncio.run(scenario())
+
+
+def test_ai_action_executor_does_not_retry_side_effect_action(tmp_path, monkeypatch) -> None:
+    async def scenario() -> None:
+        calls = 0
+
+        async def failing_send(args, context):
+            nonlocal calls
+            del args, context
+            calls += 1
+            raise RuntimeError("send failed")
+
+        db = Database(str(tmp_path / "actions.db"))
+        monkeypatch.setattr(action_store_module, "get_database", lambda: db)
+        store = AIActionStore()
+        registry = AtomicActionRegistry(
+            contact_resolver=ContactAliasResolver(db=_FakeContactDatabase([])),
+        )
+        spec = registry.get("message.send")
+        assert spec is not None
+        registry._actions["message.send"] = replace(spec, handler=failing_send, enabled=True, max_retries=3)
+        executor = AIActionExecutor(registry=registry, store=store)
+        plan = AIActionPlan(
+            is_action=True,
+            goal="发送失败不重试",
+            steps=(
+                AIActionStep(
+                    id="send_message",
+                    action="message.send",
+                    args={
+                        "target": {"contact_id": "user-1", "display_name": "张三"},
+                        "content": "我晚点到",
+                        "preview": {"operation": "发送消息", "target": "张三", "content": "我晚点到"},
+                        "idempotency_key": "idem-1",
+                    },
+                ),
+            ),
+            final={"type": "answer", "source": "$send_message"},
+        )
+        try:
+            record = await store.create_plan(
+                thread_id="thread-1",
+                goal=plan.goal,
+                plan_json=plan.to_dict(),
+                reason="test_no_write_retry",
+            )
+            result = await executor.execute(record)
+            updated = await store.get_plan(record.id)
+
+            assert result.state == "failed"
+            assert result.error_text == "ACTION_FAILED: message.send"
+            assert calls == 1
+            assert updated is not None
+            assert updated.state == "failed"
+            assert updated.step_outputs == {}
+        finally:
+            await db.close()
+
+    asyncio.run(scenario())
+
+
 def test_ai_action_workflow_does_not_execute_confirm_without_pending(tmp_path, monkeypatch) -> None:
     async def scenario() -> None:
         db = Database(str(tmp_path / "actions.db"))
