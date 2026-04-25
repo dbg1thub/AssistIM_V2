@@ -12,6 +12,7 @@ from client.core.file_text_extraction import (
     FILE_TEXT_EXTRACT_EXTRA_KEY,
     extracted_file_context_text,
 )
+from client.core.voice_transcription import VOICE_TRANSCRIPT_EXTRA_KEY
 from client.managers.conversation_vector_index import ConversationVectorIndex
 from client.models.message import ChatMessage, MessageType
 from client.services.local_ai_memory_store import AIMemoryItem, get_local_ai_memory_store
@@ -25,6 +26,7 @@ class AIMemoryIndexingService:
     """Small coordinator that turns saved local AI artifacts into vector memory."""
 
     FILE_SUMMARY_SOURCE_TYPE = "file_summary"
+    VOICE_TRANSCRIPT_SOURCE_TYPE = "voice_transcript"
     FILE_TEXT_SNIPPET_CHARS = 2400
 
     def __init__(
@@ -93,6 +95,66 @@ class AIMemoryIndexingService:
             )
         )
 
+    async def sync_voice_transcript_message(self, message: ChatMessage) -> None:
+        """Upsert or delete one voice-transcript memory item after message extra is persisted."""
+
+        if message.message_type != MessageType.VOICE:
+            return
+        owner_scope = await self._owner_scope()
+        if not owner_scope:
+            return
+        source_id = self.voice_transcript_source_id(message)
+        transcript = dict((message.extra or {}).get(VOICE_TRANSCRIPT_EXTRA_KEY) or {})
+        transcript_text = _normalize_text(transcript.get("text"))
+        if str(transcript.get("status") or "").strip() != "ready" or not transcript_text:
+            await self._ai_memory_store.delete_source(
+                owner_scope=owner_scope,
+                source_type=self.VOICE_TRANSCRIPT_SOURCE_TYPE,
+                source_id=source_id,
+            )
+            return
+
+        title = "语音消息"
+        memory_text = f"语音转写：{transcript_text}"
+        keywords = self._voice_keywords(message, transcript=transcript)
+        participants = self._voice_participants(message)
+        timestamp = int(message.timestamp.timestamp()) if message.timestamp else 0
+        vector = await self._vector_index.encode_item(
+            title=title,
+            text=memory_text,
+            keywords=keywords,
+            participants=participants,
+        )
+        await self._ai_memory_store.upsert_item(
+            AIMemoryItem(
+                owner_scope=owner_scope,
+                source_type=self.VOICE_TRANSCRIPT_SOURCE_TYPE,
+                source_id=source_id,
+                title=title,
+                text=memory_text,
+                vector=vector.values,
+                embedding_model_id=self._vector_index.model_id,
+                metadata={
+                    "session_id": str(message.session_id or "").strip(),
+                    "message_id": str(message.message_id or "").strip(),
+                    "sender_id": str(message.sender_id or "").strip(),
+                    "is_self": bool(message.is_self),
+                    "duration_seconds": self._voice_duration_seconds(message, transcript=transcript),
+                    "language": self._voice_language(transcript),
+                    "transcript_status": "ready",
+                    "engine": str(transcript.get("engine") or "").strip(),
+                    "model": str(transcript.get("model") or "").strip(),
+                    "mime_type": str((message.extra or {}).get("mime_type") or "").strip(),
+                    "keywords": keywords,
+                    "participants": participants,
+                    "bucket_start_ts": timestamp,
+                    "bucket_end_ts": timestamp,
+                    "source_version": 1,
+                },
+                updated_at=int(time.time()),
+            )
+        )
+
     async def _owner_scope(self) -> str:
         get_app_state = getattr(self._db, "get_app_state", None)
         if not callable(get_app_state):
@@ -151,6 +213,56 @@ class AIMemoryIndexingService:
     @classmethod
     def file_summary_source_id(cls, message: ChatMessage) -> str:
         return f"file:{str(message.session_id or '').strip()}:{str(message.message_id or '').strip()}"
+
+    @staticmethod
+    def _voice_keywords(message: ChatMessage, *, transcript: dict[str, Any]) -> list[str]:
+        keywords: list[str] = []
+
+        def add(value: Any) -> None:
+            normalized = _normalize_text(value)
+            if normalized and normalized not in keywords:
+                keywords.append(normalized)
+
+        add("语音消息")
+        add(transcript.get("engine"))
+        add(transcript.get("model"))
+        add(transcript.get("language"))
+        add(transcript.get("detected_language"))
+        add(dict(message.extra or {}).get("mime_type"))
+        return keywords
+
+    @staticmethod
+    def _voice_participants(message: ChatMessage) -> list[str]:
+        participants: list[str] = []
+        sender_id = _normalize_text(message.sender_id)
+        if sender_id:
+            participants.append(sender_id)
+        if message.is_self:
+            participants.append("我")
+        return participants
+
+    @staticmethod
+    def _voice_duration_seconds(message: ChatMessage, *, transcript: dict[str, Any]) -> int:
+        extra = dict(message.extra or {})
+        for value in (
+            transcript.get("duration_seconds"),
+            transcript.get("duration"),
+            extra.get("duration_seconds"),
+            extra.get("duration"),
+        ):
+            try:
+                return max(0, int(round(float(value))))
+            except (TypeError, ValueError):
+                continue
+        return 0
+
+    @staticmethod
+    def _voice_language(transcript: dict[str, Any]) -> str:
+        return _normalize_text(transcript.get("language") or transcript.get("detected_language"))
+
+    @classmethod
+    def voice_transcript_source_id(cls, message: ChatMessage) -> str:
+        return f"voice:{str(message.session_id or '').strip()}:{str(message.message_id or '').strip()}"
 
 
 def _normalize_text(value: Any) -> str:

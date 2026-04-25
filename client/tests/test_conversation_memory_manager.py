@@ -9,6 +9,9 @@ from client.services.local_ai_memory_store import AIMemoryItem, AIMemorySearchRe
 from client.storage.database import Database
 
 
+AI_MEMORY_SOURCE_TYPES = ("conversation_summary", "file_summary", "voice_transcript")
+
+
 class _FakeMemoryDatabase:
     def __init__(
         self,
@@ -231,6 +234,28 @@ def _file_ai_memory_item() -> AIMemoryItem:
     )
 
 
+def _voice_ai_memory_item() -> AIMemoryItem:
+    return AIMemoryItem(
+        owner_scope="account:test1",
+        source_type="voice_transcript",
+        source_id="voice:s-voice:m-voice",
+        title="语音消息",
+        text="语音转写：明天下午三点去南山咖啡店。",
+        vector=tuple(_FakeVectorIndex._vector({"明天下午三点", "南山咖啡店"})),
+        embedding_model_id="fake-embedding-model",
+        metadata={
+            "session_id": "s-voice",
+            "message_id": "m-voice",
+            "duration_seconds": 8,
+            "language": "zh",
+            "bucket_start_ts": _ts("2026-04-19T15:00:00"),
+            "bucket_end_ts": _ts("2026-04-19T15:00:00"),
+            "keywords": ["语音消息", "faster-whisper"],
+            "participants": ["alice"],
+        },
+    )
+
+
 def _make_memory_manager(
     db: _FakeMemoryDatabase,
     planner: _FakeSemanticPlanner,
@@ -371,7 +396,7 @@ def test_conversation_memory_manager_formats_history_context() -> None:
         assert "张三" in context.lines[0]
         assert "咖啡店" in context.lines[0]
         assert db.calls == []
-        assert db.ai_memory_store.search_calls[0]["source_types"] == ("conversation_summary", "file_summary")
+        assert db.ai_memory_store.search_calls[0]["source_types"] == AI_MEMORY_SOURCE_TYPES
         assert db.ai_memory_store.search_calls[0]["owner_scope"] == "account:test1"
 
     asyncio.run(scenario())
@@ -429,7 +454,7 @@ def test_conversation_memory_manager_searches_after_explicit_confirmation() -> N
         assert context.has_context is True
         assert "咖啡店" in context.lines[0]
         assert db.calls == []
-        assert db.ai_memory_store.search_calls[0]["source_types"] == ("conversation_summary", "file_summary")
+        assert db.ai_memory_store.search_calls[0]["source_types"] == AI_MEMORY_SOURCE_TYPES
 
     asyncio.run(scenario())
 
@@ -473,7 +498,7 @@ def test_conversation_memory_manager_builds_rag_context_for_general_ai_chat() ->
         assert "张三" in context.lines[0]
         assert "咖啡店" in context.lines[0]
         assert db.ann_calls == []
-        assert db.ai_memory_store.search_calls[0]["source_types"] == ("conversation_summary", "file_summary")
+        assert db.ai_memory_store.search_calls[0]["source_types"] == AI_MEMORY_SOURCE_TYPES
         assert db.ai_memory_store.search_calls[0]["embedding_model_id"] == "fake-embedding-model"
 
     asyncio.run(scenario())
@@ -492,7 +517,25 @@ def test_conversation_memory_manager_retrieves_file_summary_from_ai_memory_store
         assert "contract.pdf" in context.lines[0]
         assert "合同金额为 100 元" in context.lines[0]
         assert db.ann_calls == []
-        assert store.search_calls[0]["source_types"] == ("conversation_summary", "file_summary")
+        assert store.search_calls[0]["source_types"] == AI_MEMORY_SOURCE_TYPES
+
+    asyncio.run(scenario())
+
+
+def test_conversation_memory_manager_retrieves_voice_transcript_from_ai_memory_store() -> None:
+    async def scenario() -> None:
+        db = _FakeMemoryDatabase([])
+        store = _FakeAIMemoryStore([_voice_ai_memory_item()])
+        planner = _FakeSemanticPlanner(_rag_plan("南山咖啡店", participants=[]))
+        manager = _make_memory_manager(db, planner, ai_memory_store=store)
+
+        context = await manager.build_rag_context_for_ai_chat("南山咖啡店")
+
+        assert context.has_context is True
+        assert "语音消息" in context.lines[0]
+        assert "南山咖啡店" in context.lines[0]
+        assert db.ann_calls == []
+        assert store.search_calls[0]["source_types"] == AI_MEMORY_SOURCE_TYPES
 
     asyncio.run(scenario())
 
@@ -555,7 +598,7 @@ def test_conversation_memory_manager_builds_reply_suggestion_rag_context_for_cur
         assert "当前窗口内" not in context.lines[0]
         assert "另一个会话" not in context.lines[0]
         assert db.ann_calls == []
-        assert db.ai_memory_store.search_calls[0]["source_types"] == ("conversation_summary", "file_summary")
+        assert db.ai_memory_store.search_calls[0]["source_types"] == AI_MEMORY_SOURCE_TYPES
         assert db.ai_memory_store.search_calls[0]["owner_scope"] == "account:test1"
 
     asyncio.run(scenario())

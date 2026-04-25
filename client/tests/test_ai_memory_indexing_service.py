@@ -2,6 +2,7 @@ import asyncio
 from datetime import datetime
 
 from client.core.file_text_extraction import FILE_SUMMARY_EXTRA_KEY, FILE_TEXT_EXTRACT_EXTRA_KEY
+from client.core.voice_transcription import VOICE_TRANSCRIPT_EXTRA_KEY
 from client.managers.conversation_vector_index import DenseVector
 from client.models.message import ChatMessage, MessageStatus, MessageType
 from client.services.ai_memory_indexing_service import AIMemoryIndexingService
@@ -75,6 +76,32 @@ def _file_message(*, summary_status: str = "ready", summary_text: str = "文件�
     )
 
 
+def _voice_message(*, transcript_status: str = "ready", transcript_text: str = "今晚八点开会。") -> ChatMessage:
+    now = datetime(2026, 4, 24, 10, 5, 0)
+    return ChatMessage(
+        message_id="m-voice",
+        session_id="session-1",
+        sender_id="test1",
+        content="file:///voice.m4a",
+        message_type=MessageType.VOICE,
+        status=MessageStatus.RECEIVED,
+        timestamp=now,
+        updated_at=now,
+        is_self=True,
+        extra={
+            "duration": 8,
+            "mime_type": "audio/mp4",
+            VOICE_TRANSCRIPT_EXTRA_KEY: {
+                "status": transcript_status,
+                "text": transcript_text,
+                "language": "zh",
+                "engine": "faster-whisper",
+                "model": "small",
+            },
+        },
+    )
+
+
 def test_ai_memory_indexing_service_indexes_ready_file_summary() -> None:
     async def scenario() -> None:
         store = _FakeAIMemoryStore()
@@ -102,6 +129,56 @@ def test_ai_memory_indexing_service_indexes_ready_file_summary() -> None:
         assert vector_index.calls[0]["title"] == "report.pdf"
         assert "report.pdf" in vector_index.calls[0]["keywords"]
         assert "alice" in vector_index.calls[0]["participants"]
+
+    asyncio.run(scenario())
+
+
+def test_ai_memory_indexing_service_indexes_ready_voice_transcript() -> None:
+    async def scenario() -> None:
+        store = _FakeAIMemoryStore()
+        vector_index = _FakeVectorIndex()
+        service = AIMemoryIndexingService(
+            db=_FakeDatabase(),
+            vector_index=vector_index,
+            ai_memory_store=store,
+        )
+
+        await service.sync_voice_transcript_message(_voice_message())
+
+        assert len(store.upserted_items) == 1
+        item = store.upserted_items[0]
+        assert item.owner_scope == "account:test1"
+        assert item.source_type == "voice_transcript"
+        assert item.source_id == "voice:session-1:m-voice"
+        assert item.title == "语音消息"
+        assert "今晚八点开会" in item.text
+        assert item.embedding_model_id == "fake-embedding-model"
+        assert item.metadata["session_id"] == "session-1"
+        assert item.metadata["message_id"] == "m-voice"
+        assert item.metadata["duration_seconds"] == 8
+        assert item.metadata["language"] == "zh"
+        assert item.metadata["transcript_status"] == "ready"
+        assert vector_index.calls[0]["title"] == "语音消息"
+        assert "faster-whisper" in vector_index.calls[0]["keywords"]
+        assert "test1" in vector_index.calls[0]["participants"]
+        assert "我" in vector_index.calls[0]["participants"]
+
+    asyncio.run(scenario())
+
+
+def test_ai_memory_indexing_service_deletes_non_ready_voice_transcript() -> None:
+    async def scenario() -> None:
+        store = _FakeAIMemoryStore()
+        service = AIMemoryIndexingService(
+            db=_FakeDatabase(),
+            vector_index=_FakeVectorIndex(),
+            ai_memory_store=store,
+        )
+
+        await service.sync_voice_transcript_message(_voice_message(transcript_status="failed", transcript_text=""))
+
+        assert store.upserted_items == []
+        assert store.deleted_sources == [("account:test1", "voice_transcript", "voice:session-1:m-voice")]
 
     asyncio.run(scenario())
 

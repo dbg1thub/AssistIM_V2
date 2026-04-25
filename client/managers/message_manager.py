@@ -2958,6 +2958,14 @@ class MessageManager:
                 "message": message,
             },
         )
+        try:
+            await self._ai_memory_indexing_service.sync_voice_transcript_message(message)
+        except Exception:
+            logger.exception(
+                "Failed to sync voice transcript into local AI memory message_id=%s session_id=%s",
+                message.message_id,
+                message.session_id,
+            )
         return message
 
     async def update_message_file_analysis(
