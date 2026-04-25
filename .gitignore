@@ -70,6 +70,7 @@ server/.testdata_manual
 client/tests/.pytest_tmp
 client/data/screenshots
 tools/ai_action_router_replay*.jsonl
+tools/ai_action_planner_replay*.jsonl
 
 # codex
 /.codex/
