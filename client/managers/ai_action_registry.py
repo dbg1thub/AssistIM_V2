@@ -12,6 +12,12 @@ from client.managers.ai_action_types import ActionPause, AtomicActionSpec
 logger = logging.get_logger(__name__)
 
 
+MEMORY_SUMMARIZE_DIRECT_MAX_LINES = 6
+MEMORY_SUMMARIZE_DIRECT_MAX_CONTEXT_CHARS = 1200
+MEMORY_SUMMARIZE_CHUNK_SIZE = 4
+MEMORY_SUMMARIZE_CHUNK_ITEM_MAX_CHARS = 34
+
+
 class AtomicActionRegistry:
     """Registry for executable atomic actions."""
 
@@ -140,12 +146,28 @@ class AtomicActionRegistry:
         if not context_lines:
             question = payload.question or str(payload.source.get("question") or "")
             text = f"没有找到相关记录。用户问题：{question or '本地记忆查询'}。"
-            return {"text": text, "result_count": result_count, "status": "empty"}
+            return {
+                "text": text,
+                "result_count": result_count,
+                "input_result_count": result_count,
+                "context_chars": 0,
+                "chunked": False,
+                "chunk_count": 0,
+                "status": "empty",
+            }
+        summary = _summarize_memory_context_lines(
+            context_lines,
+            input_result_count=result_count or len(context_lines),
+        )
         return {
             "requires_responder": True,
-            "context_lines": context_lines,
+            "context_lines": summary["context_lines"],
             "question": payload.question,
             "result_count": result_count or len(context_lines),
+            "input_result_count": summary["input_result_count"],
+            "context_chars": summary["context_chars"],
+            "chunked": summary["chunked"],
+            "chunk_count": summary["chunk_count"],
             "status": "ready",
         }
 
@@ -385,6 +407,42 @@ def _memory_result_context_line(item: dict[str, Any]) -> str:
     if title and text:
         return f"{title}；摘要：{text}"
     return text or title
+
+
+def _summarize_memory_context_lines(context_lines: list[str], *, input_result_count: int) -> dict[str, Any]:
+    lines = [str(line or "").strip() for line in list(context_lines or []) if str(line or "").strip()]
+    raw_chars = sum(len(line) for line in lines)
+    if (
+        len(lines) <= MEMORY_SUMMARIZE_DIRECT_MAX_LINES
+        and raw_chars <= MEMORY_SUMMARIZE_DIRECT_MAX_CONTEXT_CHARS
+    ):
+        return {
+            "context_lines": lines,
+            "input_result_count": max(int(input_result_count or 0), len(lines)),
+            "context_chars": raw_chars,
+            "chunked": False,
+            "chunk_count": 0,
+        }
+    chunks: list[str] = []
+    for start in range(0, len(lines), MEMORY_SUMMARIZE_CHUNK_SIZE):
+        chunk = lines[start : start + MEMORY_SUMMARIZE_CHUNK_SIZE]
+        snippets = [_clip_text(line, MEMORY_SUMMARIZE_CHUNK_ITEM_MAX_CHARS) for line in chunk]
+        end = start + len(chunk)
+        chunks.append(f"检索结果 {start + 1}-{end}：" + "；".join(snippets))
+    return {
+        "context_lines": chunks,
+        "input_result_count": max(int(input_result_count or 0), len(lines)),
+        "context_chars": sum(len(line) for line in chunks),
+        "chunked": bool(chunks),
+        "chunk_count": len(chunks),
+    }
+
+
+def _clip_text(value: str, max_chars: int) -> str:
+    text = " ".join(str(value or "").split())
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars].rstrip() + "..."
 
 
 def _clean_list(value: object) -> list[str]:

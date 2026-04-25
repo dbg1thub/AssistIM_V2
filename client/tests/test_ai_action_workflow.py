@@ -845,6 +845,79 @@ def test_ai_action_workflow_memory_summarize_reports_empty_result(tmp_path, monk
     asyncio.run(scenario())
 
 
+def test_ai_action_registry_memory_summarize_keeps_small_context_unmodified() -> None:
+    async def scenario() -> None:
+        registry = AtomicActionRegistry(
+            contact_resolver=ContactAliasResolver(db=_FakeContactDatabase([])),
+            memory_manager=_FakeActionMemoryManager(),
+        )
+        spec = registry.get("memory.summarize")
+        assert spec is not None
+
+        output = await spec.handler(  # type: ignore[misc]
+            {
+                "source": {
+                    "context_lines": [
+                        "[2026-04-21 10:00] 摘要：讨论了项目排期。",
+                        "[2026-04-21 10:05] 摘要：确认了交付时间。",
+                    ],
+                    "result_count": 2,
+                },
+                "question": "我和 test3 聊过什么？",
+            },
+            {"store": None},
+        )
+
+        assert output["requires_responder"] is True
+        assert output["context_lines"] == [
+            "[2026-04-21 10:00] 摘要：讨论了项目排期。",
+            "[2026-04-21 10:05] 摘要：确认了交付时间。",
+        ]
+        assert output["chunked"] is False
+        assert output["chunk_count"] == 0
+        assert output["input_result_count"] == 2
+        assert output["context_chars"] > 0
+
+    asyncio.run(scenario())
+
+
+def test_ai_action_registry_memory_summarize_chunks_large_context() -> None:
+    async def scenario() -> None:
+        registry = AtomicActionRegistry(
+            contact_resolver=ContactAliasResolver(db=_FakeContactDatabase([])),
+            memory_manager=_FakeActionMemoryManager(),
+        )
+        spec = registry.get("memory.summarize")
+        assert spec is not None
+        context_lines = [
+            f"[2026-04-21 10:{index:02d}] 摘要：第 {index} 条记录，包含项目排期、风险和下一步安排。"
+            for index in range(10)
+        ]
+
+        output = await spec.handler(  # type: ignore[misc]
+            {
+                "source": {
+                    "context_lines": context_lines,
+                    "result_count": 10,
+                },
+                "question": "总结历史",
+            },
+            {"store": None},
+        )
+
+        assert output["requires_responder"] is True
+        assert output["chunked"] is True
+        assert output["chunk_count"] == 3
+        assert output["input_result_count"] == 10
+        assert len(output["context_lines"]) == 3
+        assert output["context_lines"][0].startswith("检索结果 1-4：")
+        assert output["context_lines"][1].startswith("检索结果 5-8：")
+        assert output["context_lines"][2].startswith("检索结果 9-10：")
+        assert output["context_chars"] < sum(len(line) for line in context_lines)
+
+    asyncio.run(scenario())
+
+
 def test_ai_action_workflow_does_not_execute_confirm_without_pending(tmp_path, monkeypatch) -> None:
     async def scenario() -> None:
         db = Database(str(tmp_path / "actions.db"))
@@ -1048,10 +1121,9 @@ def test_ai_action_executor_passes_large_memory_search_by_result_ref(tmp_path, m
             result_ref = updated.step_outputs["search_memory"]["result_ref"]
             assert await store.get_temp_result(result_ref["id"]) is not None
             assert result.state == "running"
-            assert result.memory_context_lines[:2] == (
-                "[2026-04-21 10:00] 摘要：第 0 条记录。",
-                "[2026-04-21 10:01] 摘要：第 1 条记录。",
-            )
+            assert result.memory_context_lines[0].startswith("检索结果 1-4：")
+            assert updated.step_outputs["summarize_memory"]["chunked"] is True
+            assert updated.step_outputs["summarize_memory"]["input_result_count"] == 20
         finally:
             await db.close()
 
