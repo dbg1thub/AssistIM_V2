@@ -65,6 +65,8 @@ class ConversationMemoryManager:
     RAG_MIN_SCORE = 1.6
     AI_MEMORY_MIN_SCORE = 0.0
     AI_MEMORY_SOURCE_TYPE_SUMMARY = "conversation_summary"
+    AI_MEMORY_SOURCE_TYPE_FILE_SUMMARY = "file_summary"
+    AI_MEMORY_SOURCE_TYPES = (AI_MEMORY_SOURCE_TYPE_SUMMARY, AI_MEMORY_SOURCE_TYPE_FILE_SUMMARY)
     CONTEXT_RESULT_LIMIT = 6
     CONTEXT_LINE_MAX_CHARS = 260
     MESSAGE_FALLBACK_SESSION_LIMIT = 5
@@ -452,7 +454,7 @@ class ConversationMemoryManager:
             results = await self._ai_memory_store.search(
                 query_vector=query_vector.values,
                 owner_scope=owner_scope,
-                source_types=(self.AI_MEMORY_SOURCE_TYPE_SUMMARY,),
+                source_types=self.AI_MEMORY_SOURCE_TYPES,
                 embedding_model_id=self._vector_index.model_id,
                 limit=search_limit,
                 min_score=self.AI_MEMORY_MIN_SCORE,
@@ -507,11 +509,12 @@ class ConversationMemoryManager:
         participants = metadata.get("participants")
         if not isinstance(participants, list):
             participants = []
+        item_source_type = str(getattr(item, "source_type", "") or "").strip()
         source_id = str(metadata.get("legacy_source_id") or getattr(item, "source_id", "") or "").strip()
         vector_values = tuple(getattr(item, "vector", ()) or ())
         return {
             "session_id": str(metadata.get("session_id") or ""),
-            "source_type": str(metadata.get("legacy_source_type") or "summary"),
+            "source_type": str(metadata.get("legacy_source_type") or item_source_type or "summary"),
             "source_id": source_id,
             "source_version": int(metadata.get("source_version") or 1),
             "start_ts": start_ts,

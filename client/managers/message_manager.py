@@ -28,6 +28,7 @@ from client.models.message import ChatMessage, MessageStatus, MessageType, build
 from client.services.chat_service import get_chat_service
 from client.services.e2ee_service import get_e2ee_service
 from client.services.file_service import get_file_service
+from client.services.ai_memory_indexing_service import get_ai_memory_indexing_service
 from client.storage.database import get_database
 
 
@@ -268,6 +269,7 @@ class MessageManager:
         self._chat_service = get_chat_service()
         self._e2ee_service = None
         self._file_service = get_file_service()
+        self._ai_memory_indexing_service = get_ai_memory_indexing_service()
 
         # Send queue
         self._send_queue: Optional[MessageSendQueue] = None
@@ -2990,6 +2992,14 @@ class MessageManager:
                 "message": message,
             },
         )
+        try:
+            await self._ai_memory_indexing_service.sync_file_analysis_message(message)
+        except Exception:
+            logger.exception(
+                "Failed to sync file analysis into local AI memory message_id=%s session_id=%s",
+                message.message_id,
+                message.session_id,
+            )
         return message
 
     @staticmethod

@@ -210,6 +210,27 @@ def _ai_memory_item_from_summary(item: dict) -> AIMemoryItem:
     )
 
 
+def _file_ai_memory_item() -> AIMemoryItem:
+    return AIMemoryItem(
+        owner_scope="account:test1",
+        source_type="file_summary",
+        source_id="file:s-file:m-file",
+        title="contract.pdf",
+        text="文件总结：合同金额为 100 元，付款期限为周五。",
+        vector=tuple(_FakeVectorIndex._vector({"合同金额", "付款期限"})),
+        embedding_model_id="fake-embedding-model",
+        metadata={
+            "session_id": "s-file",
+            "message_id": "m-file",
+            "file_name": "contract.pdf",
+            "bucket_start_ts": _ts("2026-04-18T15:00:00"),
+            "bucket_end_ts": _ts("2026-04-18T15:00:00"),
+            "keywords": ["contract.pdf", "合同金额"],
+            "participants": ["alice"],
+        },
+    )
+
+
 def _make_memory_manager(
     db: _FakeMemoryDatabase,
     planner: _FakeSemanticPlanner,
@@ -350,7 +371,7 @@ def test_conversation_memory_manager_formats_history_context() -> None:
         assert "张三" in context.lines[0]
         assert "咖啡店" in context.lines[0]
         assert db.calls == []
-        assert db.ai_memory_store.search_calls[0]["source_types"] == ("conversation_summary",)
+        assert db.ai_memory_store.search_calls[0]["source_types"] == ("conversation_summary", "file_summary")
         assert db.ai_memory_store.search_calls[0]["owner_scope"] == "account:test1"
 
     asyncio.run(scenario())
@@ -408,7 +429,7 @@ def test_conversation_memory_manager_searches_after_explicit_confirmation() -> N
         assert context.has_context is True
         assert "咖啡店" in context.lines[0]
         assert db.calls == []
-        assert db.ai_memory_store.search_calls[0]["source_types"] == ("conversation_summary",)
+        assert db.ai_memory_store.search_calls[0]["source_types"] == ("conversation_summary", "file_summary")
 
     asyncio.run(scenario())
 
@@ -452,8 +473,26 @@ def test_conversation_memory_manager_builds_rag_context_for_general_ai_chat() ->
         assert "张三" in context.lines[0]
         assert "咖啡店" in context.lines[0]
         assert db.ann_calls == []
-        assert db.ai_memory_store.search_calls[0]["source_types"] == ("conversation_summary",)
+        assert db.ai_memory_store.search_calls[0]["source_types"] == ("conversation_summary", "file_summary")
         assert db.ai_memory_store.search_calls[0]["embedding_model_id"] == "fake-embedding-model"
+
+    asyncio.run(scenario())
+
+
+def test_conversation_memory_manager_retrieves_file_summary_from_ai_memory_store() -> None:
+    async def scenario() -> None:
+        db = _FakeMemoryDatabase([])
+        store = _FakeAIMemoryStore([_file_ai_memory_item()])
+        planner = _FakeSemanticPlanner(_rag_plan("合同金额", participants=[]))
+        manager = _make_memory_manager(db, planner, ai_memory_store=store)
+
+        context = await manager.build_rag_context_for_ai_chat("合同金额是多少？")
+
+        assert context.has_context is True
+        assert "contract.pdf" in context.lines[0]
+        assert "合同金额为 100 元" in context.lines[0]
+        assert db.ann_calls == []
+        assert store.search_calls[0]["source_types"] == ("conversation_summary", "file_summary")
 
     asyncio.run(scenario())
 
@@ -516,7 +555,7 @@ def test_conversation_memory_manager_builds_reply_suggestion_rag_context_for_cur
         assert "当前窗口内" not in context.lines[0]
         assert "另一个会话" not in context.lines[0]
         assert db.ann_calls == []
-        assert db.ai_memory_store.search_calls[0]["source_types"] == ("conversation_summary",)
+        assert db.ai_memory_store.search_calls[0]["source_types"] == ("conversation_summary", "file_summary")
         assert db.ai_memory_store.search_calls[0]["owner_scope"] == "account:test1"
 
     asyncio.run(scenario())

@@ -649,6 +649,14 @@ async def _wait_until(predicate, *, timeout: float = 0.5) -> None:
     raise AssertionError('condition was not met before timeout')
 
 
+class FakeAIMemoryIndexingService:
+    def __init__(self) -> None:
+        self.synced_messages: list[ChatMessage] = []
+
+    async def sync_file_analysis_message(self, message: ChatMessage) -> None:
+        self.synced_messages.append(message)
+
+
 def test_message_send_queue_marks_unprocessed_message_failed_on_stop_timeout() -> None:
     results = []
 
@@ -765,6 +773,7 @@ def test_message_manager_update_file_analysis_persists_local_extra_and_emits(mon
     fake_event_bus = FakeEventBus()
     fake_conn_manager = FakeConnectionManager([])
     fake_db = FakeDatabase()
+    fake_ai_memory_indexing_service = FakeAIMemoryIndexingService()
     fake_db.messages['m-file'] = ChatMessage(
         message_id='m-file',
         session_id='session-1',
@@ -779,6 +788,12 @@ def test_message_manager_update_file_analysis_persists_local_extra_and_emits(mon
     monkeypatch.setattr(message_manager_module, 'get_event_bus', lambda: fake_event_bus)
     monkeypatch.setattr(message_manager_module, 'get_connection_manager', lambda: fake_conn_manager)
     monkeypatch.setattr(message_manager_module, 'get_database', lambda: fake_db)
+    monkeypatch.setattr(
+        message_manager_module,
+        'get_ai_memory_indexing_service',
+        lambda: fake_ai_memory_indexing_service,
+        raising=False,
+    )
 
     async def scenario() -> None:
         manager = message_manager_module.MessageManager()
@@ -803,6 +818,7 @@ def test_message_manager_update_file_analysis_persists_local_extra_and_emits(mon
             assert fake_event_bus.events[-1][0] == message_manager_module.MessageEvent.FILE_ANALYSIS_UPDATED
             assert fake_event_bus.events[-1][1]['message_id'] == 'm-file'
             assert fake_event_bus.events[-1][1]['session_id'] == 'session-1'
+            assert fake_ai_memory_indexing_service.synced_messages == [updated]
         finally:
             await manager.close()
 
