@@ -44,7 +44,21 @@ def test_ai_settings_are_exposed_in_settings_interface() -> None:
     assert "class AIModelSettingCard(SettingCard):" in settings_interface
     assert "class LocalModelResourcesSettingCard(SettingCard):" in settings_interface
     assert "class LocalModelResourcesDialog(QDialog):" in settings_interface
+    assert "class LocalModelImportWorker(QObject):" in settings_interface
     assert "probe_local_model_resources" in settings_interface
+    assert "LocalModelResourceImporter" in settings_interface
+    assert "QFileDialog.getOpenFileName" in settings_interface
+    assert "QFileDialog.getExistingDirectory" in settings_interface
+    assert "QDesktopServices.openUrl" in settings_interface
+    assert "self.open_models_dir_button = PushButton" in settings_interface
+    assert "self.import_chat_model_button = PushButton" in settings_interface
+    assert "self.import_embedding_model_button = PushButton" in settings_interface
+    assert "self.import_voice_model_button = PushButton" in settings_interface
+    assert "def _open_models_dir(self) -> None:" in settings_interface
+    assert "def _import_chat_model(self) -> None:" in settings_interface
+    assert "def _import_embedding_model(self) -> None:" in settings_interface
+    assert "def _import_voice_model(self) -> None:" in settings_interface
+    assert "def _run_import_job(self, job, *, success_content: str) -> None:" in settings_interface
     assert "detect_local_ai_capabilities" in settings_interface
     assert "installed_local_ai_model_specs" in settings_interface
     assert "cfg.aiModelId" in settings_interface
@@ -62,6 +76,8 @@ def test_ai_settings_are_exposed_in_settings_interface() -> None:
     assert "get_ai_service" not in settings_interface
     assert "get_local_voice_transcription_runtime" not in settings_interface
     assert "get_local_embedding_runtime" not in settings_interface
+    assert "shutil." not in settings_interface
+    assert "os.replace" not in settings_interface
     assert "LocalGGUFRuntime(" not in resource_probe
     assert "WhisperModel" not in resource_probe
     assert "Llama(" not in resource_probe
@@ -333,8 +349,19 @@ def test_ai_ui_i18n_resources_are_registered() -> None:
         "settings.card.ai_resources.action",
         "settings.local_model_resources.title",
         "settings.local_model_resources.subtitle",
+        "settings.local_model_resources.open_models_dir",
+        "settings.local_model_resources.import_chat_model",
+        "settings.local_model_resources.import_embedding_model",
+        "settings.local_model_resources.import_voice_model",
         "settings.local_model_resources.refresh",
         "settings.local_model_resources.close",
+        "settings.local_model_resources.busy",
+        "settings.local_model_resources.import_success.title",
+        "settings.local_model_resources.import_success.content",
+        "settings.local_model_resources.import_failed.title",
+        "settings.local_model_resources.import_failed.content",
+        "settings.local_model_resources.file_filter.gguf",
+        "settings.local_model_resources.select_voice_dir_title",
         "settings.local_model_resources.status.ready",
         "settings.local_model_resources.status.missing",
         "settings.local_model_resources.status.dependency_missing",

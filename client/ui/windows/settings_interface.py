@@ -3,8 +3,11 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QSignalBlocker, Qt, Signal
-from PySide6.QtWidgets import QDialog, QFrame, QHBoxLayout, QLabel, QScrollArea, QVBoxLayout, QWidget
+from typing import Callable
+
+from PySide6.QtCore import QObject, QSignalBlocker, Qt, QThread, QUrl, Signal
+from PySide6.QtGui import QDesktopServices
+from PySide6.QtWidgets import QFileDialog, QDialog, QFrame, QHBoxLayout, QLabel, QScrollArea, QVBoxLayout, QWidget
 from qfluentwidgets import (
     BodyLabel,
     CaptionLabel,
@@ -39,6 +42,11 @@ from client.services.local_model_resource_probe import (
     LocalModelResourceItem,
     LocalModelResourceReport,
     probe_local_model_resources,
+)
+from client.services.local_model_resource_importer import (
+    LocalModelImportError,
+    LocalModelImportResult,
+    LocalModelResourceImporter,
 )
 from client.ui.styles import StyleSheet
 
@@ -94,12 +102,41 @@ class LocalModelResourcesSettingCard(SettingCard):
         self.hBoxLayout.addSpacing(16)
 
 
+class LocalModelImportWorker(QObject):
+    """Run one model import outside the UI thread."""
+
+    finished = Signal(object)
+    failed = Signal(str, str)
+
+    def __init__(self, job: Callable[[], LocalModelImportResult], parent=None) -> None:
+        super().__init__(parent)
+        self._job = job
+
+    def run(self) -> None:
+        try:
+            self.finished.emit(self._job())
+        except LocalModelImportError as exc:
+            self.failed.emit(exc.code, str(exc))
+        except Exception as exc:
+            self.failed.emit("IMPORT_FAILED", str(exc))
+
+
 class LocalModelResourcesDialog(QDialog):
     """Read-only local model/dependency report."""
 
-    def __init__(self, report_provider=probe_local_model_resources, parent=None) -> None:
+    def __init__(
+        self,
+        report_provider=probe_local_model_resources,
+        importer: LocalModelResourceImporter | None = None,
+        on_imported: Callable[[LocalModelImportResult], None] | None = None,
+        parent=None,
+    ) -> None:
         super().__init__(parent)
         self._report_provider = report_provider
+        self._importer = importer or LocalModelResourceImporter()
+        self._on_imported = on_imported
+        self._import_thread: QThread | None = None
+        self._import_worker: LocalModelImportWorker | None = None
         self.setObjectName("LocalModelResourcesDialog")
         self.setWindowTitle(tr("settings.local_model_resources.title", "本地模型资源"))
         self.resize(720, 580)
@@ -118,6 +155,26 @@ class LocalModelResourcesDialog(QDialog):
         )
         root.addWidget(self.title_label)
         root.addWidget(self.subtitle_label)
+
+        action_row = QHBoxLayout()
+        action_row.setSpacing(8)
+        self.open_models_dir_button = PushButton(tr("settings.local_model_resources.open_models_dir", "打开模型目录"), self)
+        self.import_chat_model_button = PushButton(tr("settings.local_model_resources.import_chat_model", "导入聊天模型"), self)
+        self.import_embedding_model_button = PushButton(
+            tr("settings.local_model_resources.import_embedding_model", "导入嵌入模型"),
+            self,
+        )
+        self.import_voice_model_button = PushButton(tr("settings.local_model_resources.import_voice_model", "导入语音模型"), self)
+        self.open_models_dir_button.clicked.connect(self._open_models_dir)
+        self.import_chat_model_button.clicked.connect(self._import_chat_model)
+        self.import_embedding_model_button.clicked.connect(self._import_embedding_model)
+        self.import_voice_model_button.clicked.connect(self._import_voice_model)
+        action_row.addWidget(self.open_models_dir_button)
+        action_row.addWidget(self.import_chat_model_button)
+        action_row.addWidget(self.import_embedding_model_button)
+        action_row.addWidget(self.import_voice_model_button)
+        action_row.addStretch(1)
+        root.addLayout(action_row)
 
         self.scroll_area = QScrollArea(self)
         self.scroll_area.setWidgetResizable(True)
@@ -141,9 +198,141 @@ class LocalModelResourcesDialog(QDialog):
 
         self._refresh_report()
 
+    def closeEvent(self, event) -> None:
+        if self._import_thread is not None:
+            event.ignore()
+            InfoBar.info(
+                tr("settings.local_model_resources.title", "本地模型资源"),
+                tr("settings.local_model_resources.busy", "模型正在导入，请等待完成。"),
+                parent=self,
+                duration=1800,
+            )
+            return
+        super().closeEvent(event)
+
     def _refresh_report(self) -> None:
         report = self._report_provider()
         self._render_report(report)
+
+    def _open_models_dir(self) -> None:
+        try:
+            self._importer.models_dir.mkdir(parents=True, exist_ok=True)
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(self._importer.models_dir)))
+        except OSError as exc:
+            InfoBar.error(
+                tr("settings.local_model_resources.import_failed.title", "导入失败"),
+                str(exc),
+                parent=self,
+                duration=4500,
+            )
+
+    def _import_chat_model(self) -> None:
+        file_path, _selected_filter = QFileDialog.getOpenFileName(
+            self,
+            tr("settings.local_model_resources.import_chat_model", "导入聊天模型"),
+            str(self._importer.models_dir),
+            tr("settings.local_model_resources.file_filter.gguf", "GGUF 模型 (*.gguf)"),
+        )
+        if not file_path:
+            return
+        self._run_import_job(
+            lambda: self._importer.import_chat_gguf(file_path),
+            success_content=tr("settings.local_model_resources.import_success.content", "已导入 {model}：{target}"),
+        )
+
+    def _import_embedding_model(self) -> None:
+        file_path, _selected_filter = QFileDialog.getOpenFileName(
+            self,
+            tr("settings.local_model_resources.import_embedding_model", "导入嵌入模型"),
+            str(self._importer.models_dir),
+            tr("settings.local_model_resources.file_filter.gguf", "GGUF 模型 (*.gguf)"),
+        )
+        if not file_path:
+            return
+        self._run_import_job(
+            lambda: self._importer.import_embedding_gguf(file_path),
+            success_content=tr("settings.local_model_resources.import_success.content", "已导入 {model}：{target}"),
+        )
+
+    def _import_voice_model(self) -> None:
+        directory = QFileDialog.getExistingDirectory(
+            self,
+            tr("settings.local_model_resources.select_voice_dir_title", "选择 faster-whisper small 目录"),
+            str(self._importer.models_dir),
+        )
+        if not directory:
+            return
+        self._run_import_job(
+            lambda: self._importer.import_faster_whisper_directory(directory),
+            success_content=tr("settings.local_model_resources.import_success.content", "已导入 {model}：{target}"),
+        )
+
+    def _run_import_job(self, job, *, success_content: str) -> None:
+        if self._import_thread is not None:
+            InfoBar.info(
+                tr("settings.local_model_resources.title", "本地模型资源"),
+                tr("settings.local_model_resources.busy", "模型正在导入，请等待完成。"),
+                parent=self,
+                duration=1800,
+            )
+            return
+
+        thread = QThread(self)
+        worker = LocalModelImportWorker(job)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.finished.connect(lambda result: self._on_import_finished(result, success_content))
+        worker.failed.connect(self._on_import_failed)
+        worker.finished.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        worker.failed.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(self._on_import_thread_finished)
+        self._import_thread = thread
+        self._import_worker = worker
+        self._set_import_actions_enabled(False)
+        thread.start()
+
+    def _on_import_finished(self, result: LocalModelImportResult, success_content: str) -> None:
+        if self._on_imported is not None:
+            self._on_imported(result)
+        elif result.kind == "chat" and result.model_id:
+            cfg.set(cfg.aiModelId, result.model_id)
+        self._refresh_report()
+        try:
+            content = success_content.format(model=result.model_id, target=str(result.target_path))
+        except Exception:
+            content = success_content
+        InfoBar.success(
+            tr("settings.local_model_resources.import_success.title", "导入完成"),
+            content,
+            parent=self,
+            duration=3000,
+        )
+
+    def _on_import_failed(self, _code: str, message: str) -> None:
+        InfoBar.error(
+            tr("settings.local_model_resources.import_failed.title", "导入失败"),
+            tr("settings.local_model_resources.import_failed.content", "{error}", error=message),
+            parent=self,
+            duration=5500,
+        )
+
+    def _on_import_thread_finished(self) -> None:
+        self._import_thread = None
+        self._import_worker = None
+        self._set_import_actions_enabled(True)
+
+    def _set_import_actions_enabled(self, enabled: bool) -> None:
+        for button in (
+            self.open_models_dir_button,
+            self.import_chat_model_button,
+            self.import_embedding_model_button,
+            self.import_voice_model_button,
+            self.refresh_button,
+        ):
+            button.setEnabled(enabled)
 
     def _render_report(self, report: LocalModelResourceReport) -> None:
         while self.report_layout.count():
@@ -479,8 +668,15 @@ class SettingsInterface(ScrollArea):
         )
 
     def _open_local_model_resources_dialog(self) -> None:
-        dialog = LocalModelResourcesDialog(parent=self.window() or self)
+        dialog = LocalModelResourcesDialog(parent=self.window() or self, on_imported=self._on_local_model_resource_imported)
         dialog.exec()
+
+    def _on_local_model_resource_imported(self, result: LocalModelImportResult) -> None:
+        self._ai_model_specs = installed_local_ai_model_specs()
+        if result.kind == "chat" and result.model_id:
+            cfg.set(cfg.aiModelId, result.model_id)
+        self._sync_ai_model_card()
+        self._refresh_ai_gpu_card_state()
 
     def _on_ai_model_changed(self, model_id: str) -> None:
         normalized_model_id = str(model_id or "").strip()
