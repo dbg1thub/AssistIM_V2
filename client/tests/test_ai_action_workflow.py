@@ -7,6 +7,7 @@ from client.managers.ai_action_executor import AIActionExecutor
 from client.managers.ai_action_optimizer import AIPlanOptimizer
 from client.managers.ai_action_registry import AtomicActionRegistry
 from client.managers.ai_action_types import AIActionPlan, AIActionStep
+from client.managers.ai_action_validator import AIPlanValidator
 from client.managers.ai_action_workflow import (
     AIActionPlanner,
     AIActionWorkflow,
@@ -339,6 +340,74 @@ class _DuplicateResolvePlanner:
         )
 
 
+class _InvalidReferenceThenFixedPlanner:
+    def __init__(self) -> None:
+        self.plan_calls = 0
+        self.repair_calls: list[dict] = []
+
+    async def plan(self, *args, **kwargs):
+        self.plan_calls += 1
+        user_text = str(args[0] if args else "").strip()
+        del kwargs
+        return AIActionPlan(
+            is_action=True,
+            goal=user_text,
+            risk="low",
+            steps=(
+                AIActionStep(
+                    id="%step_0",
+                    action="contact.resolve",
+                    args={"queries": ["test3"], "allow_multiple": True},
+                ),
+                AIActionStep(
+                    id="%step_1",
+                    action="memory.search",
+                    depends_on=("%step_0",),
+                    args={
+                        "participants": "$resolve_contacts.contacts",
+                        "participant_match": "test3",
+                        "time_scope": {"type": "all_history"},
+                        "keywords": [],
+                        "question": user_text,
+                    },
+                ),
+                AIActionStep(
+                    id="%step_2",
+                    action="memory.summarize",
+                    depends_on=("%step_1",),
+                    args={"source": "$search_memory", "question": user_text},
+                ),
+            ),
+            final={"type": "answer", "source": "$summarize_memory"},
+        )
+
+    async def repair_plan(self, user_text: str, *, invalid_plan, validation_errors, pending_state=None, strict: bool = True):
+        self.repair_calls.append(
+            {
+                "user_text": user_text,
+                "pending": pending_state is not None,
+                "strict": strict,
+                "errors": list(validation_errors),
+                "invalid_plan": invalid_plan,
+            }
+        )
+        return await _AtomicReadPlanner().plan(user_text)
+
+
+class _AlwaysInvalidReferencePlanner(_InvalidReferenceThenFixedPlanner):
+    async def repair_plan(self, user_text: str, *, invalid_plan, validation_errors, pending_state=None, strict: bool = True):
+        self.repair_calls.append(
+            {
+                "user_text": user_text,
+                "pending": pending_state is not None,
+                "strict": strict,
+                "errors": list(validation_errors),
+                "invalid_plan": invalid_plan,
+            }
+        )
+        return await self.plan(user_text)
+
+
 def test_ai_action_planner_prompt_routes_history_queries_to_memory_actions() -> None:
     system_prompt = AIActionPlanner._system_prompt(AIActionPlanner.PROMPT_NEW_ACTION)
     user_prompt = AIActionPlanner._user_prompt("我和test3昨天聊了什么？")
@@ -465,6 +534,84 @@ def test_ai_action_planner_pending_prompts_are_focused() -> None:
     assert "memory.search" not in contact_prompt
     assert "memory.search" not in clarification_prompt
     assert "contact.resolve -> message.draft -> user.confirm -> message.send" in clarification_prompt
+
+
+def test_ai_plan_validator_rejects_unresolved_step_reference() -> None:
+    registry = AtomicActionRegistry(
+        contact_resolver=ContactAliasResolver(db=_FakeContactDatabase([])),
+        memory_manager=_FakeActionMemoryManager(),
+    )
+    validator = AIPlanValidator(registry=registry)
+    plan = AIActionPlan(
+        is_action=True,
+        goal="查询历史",
+        risk="low",
+        steps=(
+            AIActionStep(
+                id="%step_0",
+                action="contact.resolve",
+                args={"queries": ["test3"], "allow_multiple": True},
+            ),
+            AIActionStep(
+                id="%step_1",
+                action="memory.search",
+                depends_on=("%step_0",),
+                args={
+                    "participants": "$resolve_contacts.contacts",
+                    "participant_match": "any",
+                    "time_scope": {"type": "all_history"},
+                    "keywords": [],
+                    "question": "我和 test3 聊过什么？",
+                },
+            ),
+        ),
+        final={"type": "answer", "source": "$search_memory"},
+    )
+
+    result = validator.validate(plan)
+
+    assert result.allowed is False
+    assert any(error.code == "ARG_REFERENCE_INVALID" for error in result.errors)
+    assert "ARG_REFERENCE_INVALID" in result.repair_instructions()
+
+
+def test_ai_plan_validator_rejects_duplicate_step_id_unknown_action_and_bad_participant_match() -> None:
+    registry = AtomicActionRegistry(
+        contact_resolver=ContactAliasResolver(db=_FakeContactDatabase([])),
+        memory_manager=_FakeActionMemoryManager(),
+    )
+    validator = AIPlanValidator(registry=registry)
+    plan = AIActionPlan(
+        is_action=True,
+        goal="查询历史",
+        risk="low",
+        steps=(
+            AIActionStep(
+                id="search_memory",
+                action="memory.search",
+                args={
+                    "participant_match": "test3",
+                    "time_scope": {"type": "all_history"},
+                    "keywords": [],
+                    "question": "我和 test3 聊过什么？",
+                },
+            ),
+            AIActionStep(
+                id="search_memory",
+                action="memory.lookup",
+                args={},
+            ),
+        ),
+        final={"type": "answer", "source": "$search_memory"},
+    )
+
+    result = validator.validate(plan)
+    codes = [error.code for error in result.errors]
+
+    assert result.allowed is False
+    assert "PLAN_SCHEMA_INVALID" in codes
+    assert "ACTION_NOT_FOUND" in codes
+    assert "ARG_SCHEMA_INVALID" in codes
 
 
 def test_ai_action_workflow_rejects_confirmation_without_write_step(tmp_path, monkeypatch) -> None:
@@ -1169,6 +1316,80 @@ def test_ai_action_workflow_memory_search_preserves_cache_metadata(tmp_path, mon
             assert plan.step_outputs["search_memory"]["cache_namespace"] == "memory.search"
             assert plan.step_outputs["search_memory"]["cache_index_version"] == "index-v1"
             assert plan.step_outputs["search_memory"]["cache_search_version"] == "action_memory_search:v1"
+        finally:
+            await db.close()
+
+    asyncio.run(scenario())
+
+
+def test_ai_action_workflow_repairs_invalid_plan_before_execution(tmp_path, monkeypatch) -> None:
+    async def scenario() -> None:
+        db = Database(str(tmp_path / "actions.db"))
+        monkeypatch.setattr(action_store_module, "get_database", lambda: db)
+        store = AIActionStore()
+        contact_db = _FakeContactDatabase(
+            [
+                {
+                    "id": "user-3",
+                    "display_name": "test3",
+                    "username": "test3",
+                    "nickname": "test3",
+                    "assistim_id": "test3",
+                }
+            ]
+        )
+        memory_manager = _FakeActionMemoryManager(context_lines=["[2026-04-21 10:00] test3；摘要：讨论了项目排期。"])
+        planner = _InvalidReferenceThenFixedPlanner()
+        workflow = AIActionWorkflow(
+            action_store=store,
+            planner=planner,
+            contact_alias_resolver=ContactAliasResolver(db=contact_db),
+            memory_manager=memory_manager,
+        )
+        try:
+            result = await workflow.handle_user_turn(thread_id="thread-1", text="我和test3聊过什么？")
+            plan = await store.get_plan(result.message_extra["ai_action"]["plan_id"])
+
+            assert result.handled is True
+            assert result.memory_context_lines == ("[2026-04-21 10:00] test3；摘要：讨论了项目排期。",)
+            assert planner.plan_calls == 1
+            assert len(planner.repair_calls) == 1
+            assert any("ARG_REFERENCE_INVALID" in error for error in planner.repair_calls[0]["errors"])
+            assert memory_manager.calls[0]["participant_match"] == "any"
+            assert plan is not None
+            assert [step["id"] for step in plan.plan_json["steps"]] == [
+                "resolve_contacts",
+                "search_memory",
+                "summarize_memory",
+            ]
+        finally:
+            await db.close()
+
+    asyncio.run(scenario())
+
+
+def test_ai_action_workflow_rejects_plan_after_failed_repair_without_persisting(tmp_path, monkeypatch) -> None:
+    async def scenario() -> None:
+        db = Database(str(tmp_path / "actions.db"))
+        monkeypatch.setattr(action_store_module, "get_database", lambda: db)
+        store = AIActionStore()
+        memory_manager = _FakeActionMemoryManager(context_lines=["不应执行"])
+        planner = _AlwaysInvalidReferencePlanner()
+        workflow = AIActionWorkflow(
+            action_store=store,
+            planner=planner,
+            contact_alias_resolver=ContactAliasResolver(db=_FakeContactDatabase([])),
+            memory_manager=memory_manager,
+        )
+        try:
+            result = await workflow.handle_user_turn(thread_id="thread-1", text="我和test3聊过什么？")
+
+            assert result.handled is True
+            assert "计划结构有问题" in result.response_text
+            assert planner.plan_calls == 2
+            assert len(planner.repair_calls) == 1
+            assert memory_manager.calls == []
+            assert await store.latest_pending_plan("thread-1") is None
         finally:
             await db.close()
 

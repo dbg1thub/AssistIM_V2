@@ -16,6 +16,7 @@ from client.managers.ai_action_optimizer import AIPlanOptimizer
 from client.managers.ai_action_registry import AtomicActionRegistry
 from client.managers.ai_action_resource_manager import AIResourceManager
 from client.managers.ai_action_types import AIActionPlan, AIActionStep, AIActionTurnResult, ActionExecutionResult
+from client.managers.ai_action_validator import AIPlanValidationResult, AIPlanValidator
 from client.storage.ai_action_plan_store import AIActionPlanRecord, AIActionPlanStore
 from client.storage.ai_action_store import AIActionStore, get_ai_action_store
 from client.storage.database import Database, get_database
@@ -261,6 +262,66 @@ class AIActionPlanner:
             return None
         return _parse_planner_json(str(getattr(snapshot, "content", "") or ""))
 
+    async def repair_plan(
+        self,
+        user_text: str,
+        *,
+        invalid_plan: AIActionPlan,
+        validation_errors: Sequence[str],
+        pending_state: Any | None = None,
+        strict: bool = True,
+    ) -> AIActionPlan | None:
+        if self._task_manager is None:
+            return None
+        try:
+            from client.services.ai_service import AIPrivacyScope, AIRequest, AITaskType
+        except Exception:
+            logger.debug("AI action planner repair request contracts are unavailable", exc_info=True)
+            return None
+
+        prompt_kind = self._prompt_kind(pending_state)
+        schema = self._schema_for_prompt_kind(prompt_kind)
+        invalid_json = json.dumps(invalid_plan.to_dict(), ensure_ascii=False, sort_keys=True)
+        errors_text = "\n".join(str(item or "").strip() for item in validation_errors if str(item or "").strip())
+        repair_prompt = (
+            self._user_prompt(user_text, pending_state=pending_state, prompt_kind=prompt_kind)
+            + "\n\n上一次 plan 未通过结构校验。请只修正结构错误，保持用户目标不变，仍然只输出 JSON。\n"
+            "校验错误：\n"
+            f"{errors_text or 'PLAN_SCHEMA_INVALID'}\n"
+            "无效 plan：\n"
+            f"{invalid_json}"
+        )
+        request = AIRequest(
+            task_id=f"ai-action-plan-repair-{int(time.time() * 1000)}",
+            session_id=str(getattr(pending_state, "ai_thread_id", "") or getattr(pending_state, "thread_id", "") or ""),
+            task_type=AITaskType.CHAT,
+            privacy_scope=AIPrivacyScope.GENERAL,
+            must_be_local=True,
+            stream=False,
+            temperature=0.0,
+            max_tokens=1024,
+            response_format={"type": "json_object", "schema": schema} if strict else None,
+            priority=4,
+            system_prompt=(
+                self._system_prompt(prompt_kind)
+                + "\n你现在处于 plan 修正模式：不要重新解释用户意图，只修正 step id、depends_on、$ 引用、action 名称和 args 字段。"
+            ),
+            messages=[{"role": "user", "content": repair_prompt}],
+            metadata={
+                "source": "ai_action_planner_repair",
+                "strict_json": strict,
+                "planner_schema": "atomic_steps_v1",
+                "planner_prompt_kind": prompt_kind,
+                "validation_error_count": len(tuple(validation_errors or ())),
+            },
+        )
+        try:
+            snapshot = await self._task_manager.run_once(request)
+        except Exception:
+            logger.exception("AI action planner repair failed")
+            return None
+        return _parse_planner_json(str(getattr(snapshot, "content", "") or ""))
+
     @staticmethod
     def _prompt_kind(pending_state: Any | None) -> str:
         if pending_state is None:
@@ -436,6 +497,7 @@ class AIActionWorkflow:
             contact_resolver=self._contact_alias_resolver,
             memory_manager=memory_manager,
         )
+        self._validator = AIPlanValidator(registry=self._registry)
         self._executor = AIActionExecutor(registry=self._registry, store=self._store)
 
     async def handle_user_turn(
@@ -531,9 +593,41 @@ class AIActionWorkflow:
             log_perf("done", handled=True, plan=normalized_plan)
             return await self._disabled_legacy_action(thread_id, normalized_plan)
 
+        validation = self._validator.validate(normalized_plan)
+        if not validation.allowed:
+            repaired_raw_plan = await self._repair_invalid_plan(
+                normalized_text,
+                pending_state=pending_state,
+                invalid_plan=normalized_plan,
+                validation=validation,
+            )
+            if repaired_raw_plan is None:
+                log_perf("plan_invalid", handled=True, plan=normalized_plan)
+                return self._invalid_plan_turn(validation)
+            normalizer_started = time.perf_counter()
+            normalized_plan = self._normalizer.normalize(repaired_raw_plan, user_text=normalized_text)
+            normalizer_ms += _elapsed_ms(normalizer_started)
+            if not normalized_plan.is_action:
+                log_perf("repair_not_action", handled=False, plan=normalized_plan)
+                return AIActionTurnResult(handled=False)
+            if normalized_plan.missing_slots:
+                log_perf("waiting_clarification", handled=True, plan=normalized_plan)
+                return await self._create_clarification(thread_id, normalized_plan)
+            if not normalized_plan.steps:
+                log_perf("done", handled=True, plan=normalized_plan)
+                return await self._disabled_legacy_action(thread_id, normalized_plan)
+            validation = self._validator.validate(normalized_plan)
+            if not validation.allowed:
+                log_perf("plan_invalid_after_repair", handled=True, plan=normalized_plan)
+                return self._invalid_plan_turn(validation)
+
         optimizer_started = time.perf_counter()
         optimized_plan, optimize_reason = self._optimizer.optimize(normalized_plan)
         optimizer_ms = _elapsed_ms(optimizer_started)
+        optimized_validation = self._validator.validate(optimized_plan)
+        if not optimized_validation.allowed:
+            log_perf("optimized_plan_invalid", handled=True, plan=optimized_plan)
+            return self._invalid_plan_turn(optimized_validation)
         resource_started = time.perf_counter()
         resource = self._resource_manager.check_plan(optimized_plan)
         resource_check_ms = _elapsed_ms(resource_started)
@@ -592,6 +686,56 @@ class AIActionWorkflow:
             return strict_plan
         plan = await self._planner.plan(user_text, pending_state=pending_state, strict=False)
         return plan or AIActionPlan(is_action=False)
+
+    async def _repair_invalid_plan(
+        self,
+        user_text: str,
+        *,
+        pending_state: Any | None,
+        invalid_plan: AIActionPlan,
+        validation: AIPlanValidationResult,
+    ) -> AIActionPlan | None:
+        repair = getattr(self._planner, "repair_plan", None)
+        if not callable(repair):
+            logger.info(
+                "[ai-diag] ai_action_plan_validation_repair_unavailable errors=%s",
+                len(validation.errors),
+            )
+            return None
+        logger.info(
+            "[ai-diag] ai_action_plan_validation_repair_start errors=%s first_error=%s",
+            len(validation.errors),
+            validation.errors[0].code if validation.errors else "",
+        )
+        try:
+            repaired = await repair(
+                user_text,
+                invalid_plan=invalid_plan,
+                validation_errors=validation.repair_messages(),
+                pending_state=pending_state,
+                strict=True,
+            )
+        except Exception:
+            logger.exception("AI action planner repair call failed")
+            return None
+        if repaired is None:
+            logger.info("[ai-diag] ai_action_plan_validation_repair_empty errors=%s", len(validation.errors))
+        return repaired
+
+    @staticmethod
+    def _invalid_plan_turn(validation: AIPlanValidationResult) -> AIActionTurnResult:
+        first = validation.errors[0] if validation.errors else None
+        return AIActionTurnResult(
+            handled=True,
+            response_text="这个操作计划结构有问题，请重新描述一下。",
+            message_extra={
+                "ai_action": {
+                    "state": "failed",
+                    "error_code": first.code if first is not None else "PLAN_SCHEMA_INVALID",
+                    "validation_errors": validation.repair_messages()[:5],
+                }
+            },
+        )
 
     def _pending_for_planner(self, pending: AIActionPlanRecord | None) -> PendingPlannerState | None:
         if pending is None:
