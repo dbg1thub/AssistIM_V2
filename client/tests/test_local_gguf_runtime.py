@@ -51,11 +51,15 @@ def test_local_gguf_runtime_adds_current_env_dependency_dirs_before_llama_import
     library_bin_dir = env_root / "Library" / "bin"
     dlls_dir = env_root / "DLLs"
     executable_dir = env_root / "Scripts"
-    for directory in (bin_dir, library_bin_dir, dlls_dir, executable_dir):
+    cuda_root = tmp_path / "cuda" / "v13.2"
+    cuda_bin_x64 = cuda_root / "bin" / "x64"
+    cuda_bin = cuda_root / "bin"
+    for directory in (bin_dir, library_bin_dir, dlls_dir, executable_dir, cuda_bin_x64):
         directory.mkdir(parents=True)
 
     recorded: list[str] = []
     monkeypatch.setenv("PATH", r"C:\windows\system32")
+    monkeypatch.setenv("ASSISTIM_CUDA_PATH", str(cuda_root))
     monkeypatch.setenv("CONDA_PREFIX", r"D:\miniconda3")
     monkeypatch.setenv("VIRTUAL_ENV", "")
     monkeypatch.setattr(runtime_module.sys, "prefix", str(env_root))
@@ -80,6 +84,9 @@ def test_local_gguf_runtime_adds_current_env_dependency_dirs_before_llama_import
     ]
     assert recorded[:4] == path_entries[:4]
     assert str(Path(r"D:\miniconda3").resolve()) not in path_entries[:4]
+    assert str(cuda_bin_x64.resolve()) in path_entries
+    assert str(cuda_bin.resolve()) in path_entries
+    assert str(cuda_bin_x64.resolve()) in recorded
 
 
 def test_local_gguf_runtime_streams_with_stub_llama_cpp(monkeypatch, tmp_path) -> None:

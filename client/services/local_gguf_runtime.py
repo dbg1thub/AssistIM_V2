@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import ctypes
+import importlib.util
 import os
 import sys
 import time
@@ -163,6 +164,60 @@ def _candidate_windows_dependency_dirs() -> list[Path]:
             continue
         root = Path(root_text).expanduser()
         for candidate in (root, root / "bin", root / "Library" / "bin", root / "DLLs"):
+            try:
+                resolved = candidate.resolve()
+            except OSError:
+                continue
+            if not resolved.is_dir():
+                continue
+            key = os.path.normcase(str(resolved))
+            if key in seen:
+                continue
+            seen.add(key)
+            candidates.append(resolved)
+    for candidate in [*_candidate_llama_cpp_dependency_dirs(), *_candidate_cuda_toolkit_dependency_dirs()]:
+        key = os.path.normcase(str(candidate))
+        if key in seen:
+            continue
+        seen.add(key)
+        candidates.append(candidate)
+    return candidates
+
+
+def _candidate_llama_cpp_dependency_dirs() -> list[Path]:
+    try:
+        spec = importlib.util.find_spec("llama_cpp")
+    except (ImportError, ValueError):
+        return []
+    if spec is None:
+        return []
+    package_root = Path(str(spec.origin or "")).resolve().parent if spec.origin else None
+    if package_root is None:
+        return []
+    candidates: list[Path] = []
+    for candidate in (package_root / "bin", package_root / "lib"):
+        if candidate.is_dir():
+            candidates.append(candidate)
+    return candidates
+
+
+def _candidate_cuda_toolkit_dependency_dirs() -> list[Path]:
+    root_texts = [
+        str(os.getenv("ASSISTIM_CUDA_PATH", "") or "").strip(),
+        str(os.getenv("CUDA_PATH", "") or "").strip(),
+        str(os.getenv("CUDA_HOME", "") or "").strip(),
+    ]
+    default_cuda_root = Path(os.getenv("ProgramFiles", r"C:\Program Files")) / "NVIDIA GPU Computing Toolkit" / "CUDA"
+    if default_cuda_root.is_dir():
+        root_texts.extend(str(item) for item in sorted(default_cuda_root.glob("v*"), reverse=True))
+
+    candidates: list[Path] = []
+    seen: set[str] = set()
+    for root_text in root_texts:
+        if not root_text:
+            continue
+        root = Path(root_text).expanduser()
+        for candidate in (root / "bin" / "x64", root / "bin"):
             try:
                 resolved = candidate.resolve()
             except OSError:

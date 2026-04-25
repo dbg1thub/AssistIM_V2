@@ -371,7 +371,7 @@ def test_detect_capability_records_missing_cuda_dependencies(monkeypatch) -> Non
     )
     monkeypatch.setattr(
         selection_module,
-        "_missing_cuda_12_dependencies",
+        "_missing_cuda_dependencies",
         lambda: ("cudart64_12.dll", "cublas64_12.dll"),
     )
 
@@ -389,6 +389,28 @@ def test_detect_capability_records_missing_cuda_dependencies(monkeypatch) -> Non
     assert gpu_layers == 0
     assert acceleration == "cpu"
     assert reason == "cuda_dependencies_missing"
+
+
+def test_cuda_dependency_detection_finds_cuda_13_bin_x64(monkeypatch, tmp_path) -> None:
+    selection_module.detect_local_ai_capabilities.cache_clear()
+    cuda_root = tmp_path / "CUDA" / "v13.2"
+    cuda_bin_x64 = cuda_root / "bin" / "x64"
+    cuda_bin_x64.mkdir(parents=True)
+    for filename in ("cudart64_13.dll", "cublas64_13.dll", "cublasLt64_13.dll"):
+        (cuda_bin_x64 / filename).write_bytes(b"dll")
+    monkeypatch.setenv("PATH", "")
+    monkeypatch.setattr(
+        selection_module,
+        "_candidate_cuda_toolkit_dependency_dirs",
+        lambda: [cuda_bin_x64],
+    )
+
+    try:
+        missing = selection_module._missing_cuda_dependencies()
+    finally:
+        selection_module.detect_local_ai_capabilities.cache_clear()
+
+    assert missing == ()
 
 
 def test_resolve_local_ai_selection_respects_user_disabled_gpu(monkeypatch, tmp_path) -> None:

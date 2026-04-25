@@ -13,12 +13,15 @@ from pathlib import Path
 from typing import Any
 
 from client.core.config_backend import AIConfig, DEFAULT_AI_MODEL_ID, DEFAULT_AI_MODEL_PATH
-from client.services.local_gguf_runtime import LocalGGUFConfig
+from client.services.local_gguf_runtime import LocalGGUFConfig, _candidate_cuda_toolkit_dependency_dirs
 
 
 MODELS_DIR = Path(__file__).resolve().parents[1] / "resources" / "models"
 MODEL_MANIFEST_PATH = MODELS_DIR / "manifest.json"
-CUDA_12_DEPENDENCY_DLLS = ("cudart64_12.dll", "cublas64_12.dll", "cublasLt64_12.dll")
+CUDA_DEPENDENCY_DLL_SETS = (
+    ("cuda13", ("cudart64_13.dll", "cublas64_13.dll", "cublasLt64_13.dll")),
+    ("cuda12", ("cudart64_12.dll", "cublas64_12.dll", "cublasLt64_12.dll")),
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -363,7 +366,7 @@ def detect_local_ai_capabilities() -> LocalAICapabilityProfile:
     preferred_cpu_threads = max(1, min(8, cpu_count - 1 if cpu_count > 2 else cpu_count))
     runtime_supports_gpu_offload, runtime_gpu_probe_error = _detect_runtime_gpu_offload_support()
     gpu_name, gpu_total_memory_bytes, gpu_free_memory_bytes, gpu_probe_error = _detect_nvidia_gpu_memory()
-    missing_cuda_dependencies = _missing_cuda_12_dependencies()
+    missing_cuda_dependencies = _missing_cuda_dependencies()
     return LocalAICapabilityProfile(
         cpu_count=cpu_count,
         total_memory_bytes=total_memory_bytes,
@@ -487,20 +490,32 @@ def _parse_nvidia_smi_memory_line(line: str) -> tuple[str, int, int] | None:
     return name, max(0, total_mib), max(0, free_mib)
 
 
-def _missing_cuda_12_dependencies() -> tuple[str, ...]:
-    missing: list[str] = []
-    for filename in CUDA_12_DEPENDENCY_DLLS:
-        if not _find_file_on_path(filename):
-            missing.append(filename)
-    return tuple(missing)
+def _missing_cuda_dependencies() -> tuple[str, ...]:
+    best_missing: tuple[str, ...] | None = None
+    for _label, filenames in CUDA_DEPENDENCY_DLL_SETS:
+        missing = tuple(filename for filename in filenames if not _find_file_on_path(filename))
+        if not missing:
+            return ()
+        if best_missing is None or len(missing) < len(best_missing):
+            best_missing = missing
+    return best_missing or ()
 
 
 def _find_file_on_path(filename: str) -> Path | None:
-    for raw_dir in str(os.getenv("PATH", "") or "").split(os.pathsep):
-        if not raw_dir:
+    search_dirs = [
+        Path(raw_dir.strip('"'))
+        for raw_dir in str(os.getenv("PATH", "") or "").split(os.pathsep)
+        if raw_dir
+    ]
+    search_dirs.extend(_candidate_cuda_toolkit_dependency_dirs())
+    seen: set[str] = set()
+    for directory in search_dirs:
+        key = os.path.normcase(str(directory))
+        if key in seen:
             continue
+        seen.add(key)
         try:
-            candidate = Path(raw_dir.strip('"')) / filename
+            candidate = directory / filename
         except Exception:
             continue
         if candidate.is_file():
