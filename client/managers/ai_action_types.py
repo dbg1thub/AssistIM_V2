@@ -149,6 +149,8 @@ class AtomicActionSpec:
     kind: ActionKind
     risk_level: RiskLevel
     handler: Callable[..., Any] | None = None
+    input_model: type[Any] | None = None
+    output_model: type[Any] | None = None
     enabled: bool = True
     requires_confirmation: bool = False
     max_input_bytes: int = 32768

@@ -1680,6 +1680,114 @@ def test_ai_action_executor_persists_memory_summarize_cache_hit_result(tmp_path,
     asyncio.run(scenario())
 
 
+def test_ai_action_executor_validates_input_model_before_handler(tmp_path, monkeypatch) -> None:
+    async def scenario() -> None:
+        db = Database(str(tmp_path / "actions.db"))
+        monkeypatch.setattr(action_store_module, "get_database", lambda: db)
+        store = AIActionStore()
+        contact_db = _FakeContactDatabase(
+            [
+                {
+                    "id": "user-1",
+                    "display_name": "张三",
+                    "username": "zhangsan",
+                    "nickname": "张三",
+                    "assistim_id": "zhangsan",
+                }
+            ]
+        )
+        registry = AtomicActionRegistry(
+            contact_resolver=ContactAliasResolver(db=contact_db),
+        )
+        executor = AIActionExecutor(registry=registry, store=store)
+        plan = AIActionPlan(
+            is_action=True,
+            goal="输入类型错误",
+            steps=(
+                AIActionStep(
+                    id="resolve_contacts",
+                    action="contact.resolve",
+                    args={"queries": "张三", "allow_multiple": True},
+                ),
+            ),
+            final={"type": "answer", "source": "$resolve_contacts"},
+        )
+        try:
+            record = await store.create_plan(
+                thread_id="thread-1",
+                goal=plan.goal,
+                plan_json=plan.to_dict(),
+                reason="test_invalid_input_model",
+            )
+            result = await executor.execute(record)
+            updated = await store.get_plan(record.id)
+
+            assert result.state == "failed"
+            assert result.error_text.startswith("ARG_SCHEMA_INVALID")
+            assert updated is not None
+            assert updated.error_text.startswith("ARG_SCHEMA_INVALID")
+            assert updated.step_outputs == {}
+            assert contact_db.resolve_calls == []
+        finally:
+            await db.close()
+
+    asyncio.run(scenario())
+
+
+def test_ai_action_executor_validates_output_model_after_handler(tmp_path, monkeypatch) -> None:
+    async def scenario() -> None:
+        async def invalid_contact_output(args, context):
+            del args, context
+            return {
+                "contacts": "not-a-list",
+                "groups": [],
+                "ambiguous": [],
+                "unresolved": [],
+            }
+
+        db = Database(str(tmp_path / "actions.db"))
+        monkeypatch.setattr(action_store_module, "get_database", lambda: db)
+        store = AIActionStore()
+        registry = AtomicActionRegistry(
+            contact_resolver=ContactAliasResolver(db=_FakeContactDatabase([])),
+        )
+        spec = registry.get("contact.resolve")
+        assert spec is not None
+        registry._actions["contact.resolve"] = replace(spec, handler=invalid_contact_output)
+        executor = AIActionExecutor(registry=registry, store=store)
+        plan = AIActionPlan(
+            is_action=True,
+            goal="输出类型错误",
+            steps=(
+                AIActionStep(
+                    id="resolve_contacts",
+                    action="contact.resolve",
+                    args={"queries": ["张三"], "allow_multiple": True},
+                ),
+            ),
+            final={"type": "answer", "source": "$resolve_contacts"},
+        )
+        try:
+            record = await store.create_plan(
+                thread_id="thread-1",
+                goal=plan.goal,
+                plan_json=plan.to_dict(),
+                reason="test_invalid_output_model",
+            )
+            result = await executor.execute(record)
+            updated = await store.get_plan(record.id)
+
+            assert result.state == "failed"
+            assert result.error_text.startswith("OUTPUT_SCHEMA_INVALID")
+            assert updated is not None
+            assert updated.error_text.startswith("OUTPUT_SCHEMA_INVALID")
+            assert updated.step_outputs == {}
+        finally:
+            await db.close()
+
+    asyncio.run(scenario())
+
+
 def test_ai_action_workflow_does_not_execute_confirm_without_pending(tmp_path, monkeypatch) -> None:
     async def scenario() -> None:
         db = Database(str(tmp_path / "actions.db"))

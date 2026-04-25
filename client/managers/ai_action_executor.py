@@ -7,6 +7,8 @@ import re
 import time
 from typing import Any
 
+from pydantic import ValidationError
+
 from client.core import logging
 from client.managers.ai_action_permission_policy import AIPermissionPolicy
 from client.managers.ai_action_registry import AtomicActionRegistry
@@ -59,13 +61,14 @@ class AIActionExecutor:
 
             try:
                 resolved_args = _resolve_refs(step.args, outputs)
-                self._check_guardrails(spec, resolved_args)
+                validated_args = _validate_input(spec, resolved_args)
+                self._check_guardrails(spec, validated_args)
             except ValueError as exc:
                 return await self._fail(record, outputs, str(exc))
 
             permission = self._permission_policy.check_step(
                 spec=spec,
-                args=resolved_args,
+                args=validated_args,
                 plan_context={"plan_id": record.id, "plan_version": record.plan_version},
             )
             if not permission.allowed:
@@ -93,7 +96,7 @@ class AIActionExecutor:
             step_started = time.perf_counter()
             try:
                 raw_output = await handler(
-                    resolved_args,
+                    validated_args,
                     {
                         "plan_id": record.id,
                         "plan_version": record.plan_version,
@@ -147,7 +150,7 @@ class AIActionExecutor:
                 )
 
             try:
-                validated_output = _validate_output(raw_output)
+                validated_output = _validate_output(spec, raw_output)
                 raw_output_bytes = _json_size(validated_output)
                 output = await self._enforce_output_size(record, step.id, spec, validated_output)
             except ValueError as exc:
@@ -309,10 +312,53 @@ class AIActionExecutor:
         }
 
 
-def _validate_output(value: Any) -> dict[str, Any]:
+def _validate_input(spec: AtomicActionSpec, value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ValueError("ARG_SCHEMA_INVALID")
+    model = spec.input_model
+    if model is None:
+        return dict(value)
+    validate = getattr(model, "model_validate", None)
+    if not callable(validate):
+        return dict(value)
+    try:
+        validated = validate(dict(value))
+    except ValidationError as exc:
+        raise ValueError(_validation_error_text("ARG_SCHEMA_INVALID", exc)) from exc
+    dump = getattr(validated, "model_dump", None)
+    if callable(dump):
+        return dict(dump(mode="python", exclude_none=True))
+    return dict(value)
+
+
+def _validate_output(spec: AtomicActionSpec, value: Any) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError("OUTPUT_SCHEMA_INVALID")
+    model = spec.output_model
+    if model is None:
+        return dict(value)
+    validate = getattr(model, "model_validate", None)
+    if not callable(validate):
+        return dict(value)
+    try:
+        validated = validate(dict(value))
+    except ValidationError as exc:
+        raise ValueError(_validation_error_text("OUTPUT_SCHEMA_INVALID", exc)) from exc
+    dump = getattr(validated, "model_dump", None)
+    if callable(dump):
+        return dict(dump(mode="python", exclude_none=True))
     return dict(value)
+
+
+def _validation_error_text(code: str, exc: ValidationError) -> str:
+    fields: list[str] = []
+    for error in exc.errors():
+        loc = ".".join(str(part) for part in error.get("loc", ()) if str(part))
+        if loc and loc not in fields:
+            fields.append(loc)
+    if not fields:
+        return code
+    return f"{code}: {', '.join(fields[:3])}"
 
 
 def _resolve_refs(value: Any, outputs: dict[str, Any]) -> Any:

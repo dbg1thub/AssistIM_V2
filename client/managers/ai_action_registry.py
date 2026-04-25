@@ -9,6 +9,19 @@ from typing import Any
 
 from client.core import logging
 from client.managers.ai_action_cache import AIActionCache
+from client.managers.ai_action_io_models import (
+    ContactResolveInput,
+    ContactResolveOutput,
+    MemorySearchInput,
+    MemorySearchOutput,
+    MemorySummarizeInput,
+    MemorySummarizeOutput,
+    MessageDraftInput,
+    MessageDraftOutput,
+    MessageSendInput,
+    MessageSendOutput,
+    UserConfirmInput,
+)
 from client.managers.ai_action_types import ActionPause, AtomicActionSpec
 logger = logging.get_logger(__name__)
 
@@ -56,6 +69,8 @@ class AtomicActionRegistry:
                 kind="read",
                 risk_level="low",
                 handler=self._contact_resolve,
+                input_model=ContactResolveInput,
+                output_model=ContactResolveOutput,
                 max_targets=5,
                 allow_batch=True,
             )
@@ -66,6 +81,8 @@ class AtomicActionRegistry:
                 kind="read",
                 risk_level="low",
                 handler=self._memory_search,
+                input_model=MemorySearchInput,
+                output_model=MemorySearchOutput,
                 allow_all_history=True,
                 allow_cross_session=True,
                 max_output_json_bytes=32768,
@@ -77,6 +94,8 @@ class AtomicActionRegistry:
                 kind="read",
                 risk_level="low",
                 handler=self._memory_summarize,
+                input_model=MemorySummarizeInput,
+                output_model=MemorySummarizeOutput,
                 allow_all_history=True,
                 allow_cross_session=True,
                 max_input_bytes=32768,
@@ -89,6 +108,8 @@ class AtomicActionRegistry:
                 kind="read",
                 risk_level="low",
                 handler=self._message_draft,
+                input_model=MessageDraftInput,
+                output_model=MessageDraftOutput,
                 max_content_chars=2000,
             )
         )
@@ -98,6 +119,7 @@ class AtomicActionRegistry:
                 kind="read",
                 risk_level="medium",
                 handler=self._user_confirm,
+                input_model=UserConfirmInput,
             )
         )
         self._register(
@@ -106,6 +128,8 @@ class AtomicActionRegistry:
                 kind="write",
                 risk_level="high",
                 handler=self._message_send,
+                input_model=MessageSendInput,
+                output_model=MessageSendOutput,
                 enabled=False,
                 requires_confirmation=True,
                 max_targets=1,
