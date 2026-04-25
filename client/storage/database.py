@@ -2312,6 +2312,65 @@ class Database:
             {where_clause}
         """
 
+    async def get_conversation_memory_index_version(self) -> str:
+        """Return a stable metadata fingerprint for the local AI memory index."""
+        cursor = await self._db.execute(
+            """
+            SELECT
+                idx.session_id AS session_id,
+                idx.source_type AS source_type,
+                idx.source_id AS source_id,
+                idx.source_version AS source_version,
+                idx.start_ts AS start_ts,
+                idx.end_ts AS end_ts,
+                idx.embedding_id AS index_embedding_id,
+                idx.embedding_model AS index_embedding_model,
+                idx.updated_at AS index_updated_at,
+                emb.source_version AS embedding_source_version,
+                emb.embedding_model AS embedding_model,
+                emb.content_hash AS embedding_content_hash,
+                emb.embedding_dim AS embedding_dim,
+                emb.updated_at AS embedding_updated_at
+            FROM conversation_memory_index AS idx
+            LEFT JOIN conversation_memory_embeddings AS emb
+              ON emb.session_id = idx.session_id
+             AND emb.source_type = idx.source_type
+             AND emb.source_id = idx.source_id
+            ORDER BY idx.session_id, idx.source_type, idx.source_id
+            """
+        )
+        rows = await cursor.fetchall()
+        if not rows:
+            return ""
+        digest = hashlib.sha256()
+        for row in rows:
+            payload = {
+                "embedding_content_hash": str(row["embedding_content_hash"] or ""),
+                "embedding_dim": int(row["embedding_dim"] or 0),
+                "embedding_model": str(row["embedding_model"] or ""),
+                "embedding_source_version": int(row["embedding_source_version"] or 0),
+                "embedding_updated_at": int(row["embedding_updated_at"] or 0),
+                "end_ts": int(row["end_ts"] or 0),
+                "index_embedding_id": str(row["index_embedding_id"] or ""),
+                "index_embedding_model": str(row["index_embedding_model"] or ""),
+                "index_updated_at": int(row["index_updated_at"] or 0),
+                "session_id": str(row["session_id"] or ""),
+                "source_id": str(row["source_id"] or ""),
+                "source_type": str(row["source_type"] or ""),
+                "source_version": int(row["source_version"] or 0),
+                "start_ts": int(row["start_ts"] or 0),
+            }
+            digest.update(
+                json.dumps(
+                    payload,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            )
+            digest.update(b"\n")
+        return f"conversation-memory-index:{digest.hexdigest()}"
+
     async def list_conversation_memory_items(
         self,
         *,

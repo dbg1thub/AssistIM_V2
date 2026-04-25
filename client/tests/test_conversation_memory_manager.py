@@ -20,10 +20,13 @@ class _FakeMemoryDatabase:
         sessions: list[object] | None = None,
         messages_by_session: dict[str, list[object]] | None = None,
         search_results: dict[str, list[object]] | None = None,
+        memory_index_version: str = "memory-index-v1",
     ) -> None:
         self.items = list(items)
         self.calls: list[dict] = []
         self.ann_calls: list[dict] = []
+        self.memory_index_version = memory_index_version
+        self.memory_index_version_calls = 0
         self.get_all_sessions_calls = 0
         self.get_messages_calls: list[dict] = []
         self.search_messages_calls: list[dict] = []
@@ -39,6 +42,10 @@ class _FakeMemoryDatabase:
     async def list_conversation_memory_ann_candidates(self, **kwargs):
         self.ann_calls.append(dict(kwargs))
         return self._normalized_items()[: int(kwargs.get("limit") or 12)]
+
+    async def get_conversation_memory_index_version(self):
+        self.memory_index_version_calls += 1
+        return self.memory_index_version
 
     def _normalized_items(self) -> list[dict]:
         items = []
@@ -649,6 +656,144 @@ def test_conversation_memory_manager_search_for_action_returns_structured_memory
     asyncio.run(scenario())
 
 
+def test_conversation_memory_manager_action_search_uses_versioned_cache_for_summary_results() -> None:
+    async def scenario() -> None:
+        db = _FakeMemoryDatabase(
+            [
+                {
+                    "session_id": "s-test3",
+                    "source_type": "summary",
+                    "source_id": "summary:test3",
+                    "source_version": 1,
+                    "start_ts": _ts("2026-04-18T10:00:00"),
+                    "end_ts": _ts("2026-04-18T10:05:00"),
+                    "title": "test3 2026-04-18 10:00-10:05",
+                    "text": "test3 详细讨论了周末去南山咖啡店见面的安排，包括时间、地点、交通方式和备选方案，最后确认如果下雨就改到商场里面集合。",
+                    "keywords": ["南山咖啡店", "周末", "集合"],
+                    "participants": ["test3", "我"],
+                },
+            ],
+            memory_index_version="index-v1",
+        )
+        planner = _FakeSemanticPlanner({"use_rag": False})
+        manager = _make_memory_manager(db, planner)
+        args = {
+            "question": "我和 test3 聊过什么？",
+            "participants": [
+                {
+                    "contact_id": "user-test3",
+                    "display_name": "test3",
+                    "username": "test3",
+                    "aliases": ["test3"],
+                    "raw": "test3",
+                    "resolved": True,
+                }
+            ],
+            "participant_match": "any",
+            "time_scope": {"type": "all_history"},
+            "keywords": [],
+            "limit": 3,
+        }
+
+        first = await manager.search_for_action(**args)
+        second = await manager.search_for_action(**args)
+        second["context_lines"].append("外部修改不应污染缓存")
+        third = await manager.search_for_action(**args)
+
+        assert first["cache_hit"] is False
+        assert second["cache_hit"] is True
+        assert third["cache_hit"] is True
+        assert third["context_lines"] == first["context_lines"]
+        assert third["cache_namespace"] == "memory.search"
+        assert third["cache_index_version"] == "index-v1"
+        assert len(db.ai_memory_store.search_calls) == 1
+
+    asyncio.run(scenario())
+
+
+def test_conversation_memory_manager_action_search_cache_misses_when_index_version_changes() -> None:
+    async def scenario() -> None:
+        db = _FakeMemoryDatabase(
+            [
+                {
+                    "session_id": "s-test3",
+                    "source_type": "summary",
+                    "source_id": "summary:test3",
+                    "source_version": 1,
+                    "start_ts": _ts("2026-04-18T10:00:00"),
+                    "end_ts": _ts("2026-04-18T10:05:00"),
+                    "title": "test3 2026-04-18 10:00-10:05",
+                    "text": "test3 详细讨论了周末去南山咖啡店见面的安排，包括时间、地点、交通方式和备选方案，最后确认如果下雨就改到商场里面集合。",
+                    "keywords": ["南山咖啡店", "周末", "集合"],
+                    "participants": ["test3", "我"],
+                },
+            ],
+            memory_index_version="index-v1",
+        )
+        planner = _FakeSemanticPlanner({"use_rag": False})
+        manager = _make_memory_manager(db, planner)
+        args = {
+            "question": "我和 test3 聊过什么？",
+            "participants": [{"contact_id": "user-test3", "display_name": "test3", "aliases": ["test3"], "resolved": True}],
+            "participant_match": "any",
+            "time_scope": {"type": "all_history"},
+            "keywords": [],
+            "limit": 3,
+        }
+
+        first = await manager.search_for_action(**args)
+        db.memory_index_version = "index-v2"
+        second = await manager.search_for_action(**args)
+
+        assert first["cache_hit"] is False
+        assert second["cache_hit"] is False
+        assert second["cache_index_version"] == "index-v2"
+        assert len(db.ai_memory_store.search_calls) == 2
+
+    asyncio.run(scenario())
+
+
+def test_conversation_memory_manager_action_search_does_not_cache_without_index_version() -> None:
+    async def scenario() -> None:
+        db = _FakeMemoryDatabase(
+            [
+                {
+                    "session_id": "s-test3",
+                    "source_type": "summary",
+                    "source_id": "summary:test3",
+                    "source_version": 1,
+                    "start_ts": _ts("2026-04-18T10:00:00"),
+                    "end_ts": _ts("2026-04-18T10:05:00"),
+                    "title": "test3 2026-04-18 10:00-10:05",
+                    "text": "test3 详细讨论了周末去南山咖啡店见面的安排，包括时间、地点、交通方式和备选方案，最后确认如果下雨就改到商场里面集合。",
+                    "keywords": ["南山咖啡店", "周末", "集合"],
+                    "participants": ["test3", "我"],
+                },
+            ],
+            memory_index_version="",
+        )
+        planner = _FakeSemanticPlanner({"use_rag": False})
+        manager = _make_memory_manager(db, planner)
+        args = {
+            "question": "我和 test3 聊过什么？",
+            "participants": [{"contact_id": "user-test3", "display_name": "test3", "aliases": ["test3"], "resolved": True}],
+            "participant_match": "any",
+            "time_scope": {"type": "all_history"},
+            "keywords": [],
+            "limit": 3,
+        }
+
+        first = await manager.search_for_action(**args)
+        second = await manager.search_for_action(**args)
+
+        assert first["cache_hit"] is False
+        assert second["cache_hit"] is False
+        assert "cache_index_version" not in second
+        assert len(db.ai_memory_store.search_calls) == 2
+
+    asyncio.run(scenario())
+
+
 def test_conversation_memory_manager_action_search_skips_message_fallback_when_summary_is_enough() -> None:
     async def scenario() -> None:
         session = _FakeSession(
@@ -768,6 +913,54 @@ def test_conversation_memory_manager_action_search_uses_message_fallback_when_su
         assert "南山咖啡店" in result["context_lines"][0]
         assert db.get_all_sessions_calls == 1
         assert db.get_messages_calls[0]["session_id"] == "s-test3"
+
+    asyncio.run(scenario())
+
+
+def test_conversation_memory_manager_action_search_does_not_cache_fallback_results() -> None:
+    async def scenario() -> None:
+        session = _FakeSession(
+            session_id="s-test3",
+            name="test3",
+            session_type="direct",
+            participant_ids=["user-test3"],
+            extra={"counterpart_name": "test3", "counterpart_username": "test3"},
+            last_message_time=datetime.fromisoformat("2026-04-18T10:06:00"),
+        )
+        db = _FakeMemoryDatabase(
+            [],
+            sessions=[session],
+            messages_by_session={
+                "s-test3": [
+                    _FakeMessage(
+                        content="明天下午三点去南山咖啡店见面。",
+                        timestamp=datetime.fromisoformat("2026-04-18T10:05:00"),
+                        sender_id="user-test3",
+                    )
+                ]
+            },
+            memory_index_version="index-v1",
+        )
+        planner = _FakeSemanticPlanner({"use_rag": False})
+        manager = _make_memory_manager(db, planner)
+        args = {
+            "question": "我和 test3 聊过什么？",
+            "participants": [{"contact_id": "user-test3", "display_name": "test3", "aliases": ["test3"], "resolved": True}],
+            "participant_match": "any",
+            "time_scope": {"type": "all_history"},
+            "keywords": [],
+            "limit": 3,
+        }
+
+        first = await manager.search_for_action(**args)
+        second = await manager.search_for_action(**args)
+
+        assert first["fallback_used"] is True
+        assert first["cache_hit"] is False
+        assert second["fallback_used"] is True
+        assert second["cache_hit"] is False
+        assert db.get_all_sessions_calls == 2
+        assert len(db.ai_memory_store.search_calls) == 2
 
     asyncio.run(scenario())
 

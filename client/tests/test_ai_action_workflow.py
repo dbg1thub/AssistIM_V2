@@ -19,9 +19,16 @@ import client.storage.ai_action_store as action_store_module
 
 
 class _FakeActionMemoryManager:
-    def __init__(self, *, context_lines: list[str] | None = None, result_count: int | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        context_lines: list[str] | None = None,
+        result_count: int | None = None,
+        extra_output: dict | None = None,
+    ) -> None:
         self.context_lines = list(context_lines or [])
         self.result_count = len(self.context_lines) if result_count is None else int(result_count)
+        self.extra_output = dict(extra_output or {})
         self.calls: list[dict] = []
 
     async def search_for_action(
@@ -54,13 +61,15 @@ class _FakeActionMemoryManager:
             }
             for index, line in enumerate(self.context_lines, start=1)
         ]
-        return {
+        output = {
             "results": results,
             "preview": results[:3],
             "context_lines": list(self.context_lines),
             "result_count": self.result_count,
             "truncated": self.result_count > len(results),
         }
+        output.update(self.extra_output)
+        return output
 
 
 class _FakeMemoryDatabase:
@@ -841,6 +850,51 @@ def test_ai_action_workflow_memory_summarize_reports_empty_result(tmp_path, monk
             assert "没有找到相关记录" in result.response_text
             assert result.memory_context_lines == ()
             assert result.message_extra["ai_action"]["state"] == "done"
+        finally:
+            await db.close()
+
+    asyncio.run(scenario())
+
+
+def test_ai_action_workflow_memory_search_preserves_cache_metadata(tmp_path, monkeypatch) -> None:
+    async def scenario() -> None:
+        db = Database(str(tmp_path / "actions.db"))
+        monkeypatch.setattr(action_store_module, "get_database", lambda: db)
+        store = AIActionStore()
+        contact_db = _FakeContactDatabase(
+            [
+                {
+                    "id": "user-3",
+                    "display_name": "test3",
+                    "username": "test3",
+                    "nickname": "test3",
+                    "assistim_id": "test3",
+                }
+            ]
+        )
+        workflow = AIActionWorkflow(
+            action_store=store,
+            planner=_AtomicReadPlanner(),
+            contact_alias_resolver=ContactAliasResolver(db=contact_db),
+            memory_manager=_FakeActionMemoryManager(
+                context_lines=["[2026-04-21 10:00] test3；摘要：讨论了项目排期。"],
+                extra_output={
+                    "cache_hit": True,
+                    "cache_namespace": "memory.search",
+                    "cache_index_version": "index-v1",
+                    "cache_search_version": "action_memory_search:v1",
+                },
+            ),
+        )
+        try:
+            result = await workflow.handle_user_turn(thread_id="thread-1", text="我和test3聊过什么？")
+            plan = await store.get_plan(result.message_extra["ai_action"]["plan_id"])
+
+            assert plan is not None
+            assert plan.step_outputs["search_memory"]["cache_hit"] is True
+            assert plan.step_outputs["search_memory"]["cache_namespace"] == "memory.search"
+            assert plan.step_outputs["search_memory"]["cache_index_version"] == "index-v1"
+            assert plan.step_outputs["search_memory"]["cache_search_version"] == "action_memory_search:v1"
         finally:
             await db.close()
 

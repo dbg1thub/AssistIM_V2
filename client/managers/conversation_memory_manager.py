@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -7,6 +9,7 @@ import math
 from typing import Any, Sequence
 
 from client.core import logging
+from client.managers.ai_action_cache import AIActionCache
 from client.managers.conversation_ann_index import ConversationAnnIndex
 from client.managers.conversation_rag_planner import (
     ConversationRagParticipant,
@@ -53,6 +56,66 @@ class _ResolvedParticipant:
     aliases: tuple[str, ...]
 
 
+def _action_memory_search_cache_key(
+    *,
+    question: str,
+    participants: Sequence[_ResolvedParticipant],
+    participant_match: str,
+    start_ts: int | None,
+    end_ts: int | None,
+    keywords: Sequence[str],
+    terms: Sequence[str],
+    limit: int,
+    index_version: str,
+    search_version: str,
+    model_id: str,
+) -> str | None:
+    normalized_index_version = str(index_version or "").strip()
+    normalized_search_version = str(search_version or "").strip()
+    normalized_model_id = str(model_id or "").strip()
+    if not normalized_index_version or not normalized_search_version or not normalized_model_id:
+        return None
+    payload = {
+        "index_version": normalized_index_version,
+        "keywords": sorted(
+            {
+                str(term or "").strip().casefold()
+                for term in list(keywords or [])
+                if str(term or "").strip()
+            }
+        ),
+        "limit": max(1, int(limit or 1)),
+        "model_id": normalized_model_id,
+        "participant_match": str(participant_match or "any").strip().lower() or "any",
+        "participants": [
+            {
+                "aliases": list(participant.aliases),
+                "display_name": participant.display_name,
+                "mention": participant.mention,
+            }
+            for participant in list(participants or [])
+        ],
+        "question": " ".join(str(question or "").split()),
+        "search_version": normalized_search_version,
+        "terms": list(
+            dict.fromkeys(
+                str(term or "").strip().casefold()
+                for term in list(terms or [])
+                if str(term or "").strip()
+            )
+        ),
+        "time_scope": {
+            "end_ts": end_ts,
+            "start_ts": start_ts,
+        },
+    }
+    return hashlib.sha256(_stable_cache_json(payload).encode("utf-8")).hexdigest()
+
+
+def _stable_cache_json(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
 class ConversationMemoryManager:
     """Search local conversation-memory summaries for AI assistant history questions."""
 
@@ -81,6 +144,8 @@ class ConversationMemoryManager:
     MESSAGE_FALLBACK_SESSION_LIMIT = 5
     MESSAGE_FALLBACK_PER_SESSION_LIMIT = 40
     MESSAGE_FALLBACK_RESULT_LIMIT = 8
+    ACTION_MEMORY_SEARCH_CACHE_NAMESPACE = "memory.search"
+    ACTION_MEMORY_SEARCH_VERSION = "action_memory_search:v1"
 
     _HISTORY_INTENTS = (
         "聊了什么",
@@ -196,12 +261,14 @@ class ConversationMemoryManager:
         vector_index: ConversationVectorIndex | None = None,
         ann_index: ConversationAnnIndex | None = None,
         ai_memory_store: Any | None = None,
+        action_cache: AIActionCache | None = None,
     ) -> None:
         self._db = db or get_database()
         self._semantic_planner = semantic_planner or ConversationRagPlanner()
         self._vector_index = vector_index or ConversationVectorIndex()
         self._ann_index = ann_index or ConversationAnnIndex(model_id=self._vector_index.model_id)
         self._ai_memory_store = ai_memory_store or get_local_ai_memory_store()
+        self._action_cache = action_cache or AIActionCache()
         self._item_vector_cache: dict[str, DenseVector] = {}
 
     async def inspect_rag_retrieval_for_ai_chat(
@@ -1145,6 +1212,30 @@ class ConversationMemoryManager:
                 ]
             )
         )[:24]
+        normalized_participant_match = str(participant_match or "any").strip().lower() or "any"
+        cache_index_version = await self._action_memory_index_version()
+        cache_key = _action_memory_search_cache_key(
+            question=query_text,
+            participants=resolved_participants,
+            participant_match=normalized_participant_match,
+            start_ts=start_ts,
+            end_ts=end_ts,
+            keywords=keyword_terms,
+            terms=query_terms,
+            limit=normalized_limit,
+            index_version=cache_index_version,
+            search_version=self.ACTION_MEMORY_SEARCH_VERSION,
+            model_id=self._vector_index.model_id,
+        )
+        if cache_key:
+            cached = self._action_cache.get(self.ACTION_MEMORY_SEARCH_CACHE_NAMESPACE, cache_key)
+            if isinstance(cached, dict):
+                cached["cache_hit"] = True
+                cached["cache_namespace"] = self.ACTION_MEMORY_SEARCH_CACHE_NAMESPACE
+                cached["cache_index_version"] = cache_index_version
+                cached["cache_search_version"] = self.ACTION_MEMORY_SEARCH_VERSION
+                return cached
+
         try:
             query_vector = await self._vector_index.encode_query(
                 query=query_text,
@@ -1201,7 +1292,7 @@ class ConversationMemoryManager:
         if fallback_lines:
             context_lines.extend(line for line in fallback_lines if line)
             results.extend(fallback_results)
-        return {
+        output = {
             "results": results,
             "preview": results[:3],
             "context_lines": context_lines,
@@ -1210,12 +1301,15 @@ class ConversationMemoryManager:
             "fallback_used": bool(fallback_results),
             "summary_result_count": len(matched),
             "message_fallback_count": len(fallback_results),
+            "cache_hit": False,
+            "cache_namespace": self.ACTION_MEMORY_SEARCH_CACHE_NAMESPACE,
+            "cache_search_version": self.ACTION_MEMORY_SEARCH_VERSION,
             "query": {
                 "question": query_text,
                 "terms": list(query_terms),
                 "start_ts": start_ts,
                 "end_ts": end_ts,
-                "participant_match": str(participant_match or "any").strip().lower() or "any",
+                "participant_match": normalized_participant_match,
                 "participants": [
                     {
                         "mention": participant.mention,
@@ -1226,6 +1320,21 @@ class ConversationMemoryManager:
                 ],
             },
         }
+        if cache_index_version:
+            output["cache_index_version"] = cache_index_version
+        if cache_key and not fallback_results:
+            self._action_cache.set(self.ACTION_MEMORY_SEARCH_CACHE_NAMESPACE, cache_key, output)
+        return output
+
+    async def _action_memory_index_version(self) -> str:
+        get_version = getattr(self._db, "get_conversation_memory_index_version", None)
+        if not callable(get_version):
+            return ""
+        try:
+            return str(await get_version() or "").strip()
+        except Exception:
+            logger.exception("Failed to resolve local AI memory index version")
+            return ""
 
     def _parse_query(self, query_text: str, *, confirmed: bool = False) -> _MemoryQuery:
         text = " ".join(str(query_text or "").split())

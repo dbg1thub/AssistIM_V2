@@ -422,7 +422,7 @@ def _normalize_memory_search_output(value: Any, *, question: str) -> dict[str, A
         if str(item or "").strip()
     ]
     preview = [dict(item) for item in list(output.get("preview") or results[:3]) if isinstance(item, dict)]
-    return {
+    normalized = {
         "results": results,
         "preview": preview[:8],
         "context_lines": context_lines,
@@ -433,6 +433,18 @@ def _normalize_memory_search_output(value: Any, *, question: str) -> dict[str, A
         "message_fallback_count": int(output.get("message_fallback_count") or 0),
         "question": question,
     }
+    if any(
+        key in output
+        for key in ("cache_hit", "cache_namespace", "cache_index_version", "cache_search_version")
+    ):
+        normalized["cache_hit"] = bool(output.get("cache_hit"))
+        if str(output.get("cache_namespace") or "").strip():
+            normalized["cache_namespace"] = str(output.get("cache_namespace") or "").strip()
+        if str(output.get("cache_index_version") or "").strip():
+            normalized["cache_index_version"] = str(output.get("cache_index_version") or "").strip()
+        if str(output.get("cache_search_version") or "").strip():
+            normalized["cache_search_version"] = str(output.get("cache_search_version") or "").strip()
+    return normalized
 
 
 def _memory_summarize_cache_key(

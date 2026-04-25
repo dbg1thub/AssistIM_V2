@@ -549,6 +549,94 @@ def test_database_lists_conversation_memory_ann_candidates() -> None:
         shutil.rmtree(temp_root, ignore_errors=True)
 
 
+def test_database_conversation_memory_index_version_changes_with_metadata() -> None:
+    temp_root = (Path.cwd() / "client/tests/.pytest_tmp").resolve()
+    temp_root.mkdir(parents=True, exist_ok=True)
+    db_path = temp_root / "database-conversation-memory-version.db"
+    try:
+        try:
+            db_path.unlink(missing_ok=True)
+        except PermissionError:
+            pass
+        metadata_path = Path(f"{db_path}.crypto.json")
+        metadata_path.unlink(missing_ok=True)
+
+        async def scenario() -> None:
+            database = Database(str(db_path))
+            await database.connect()
+            try:
+                empty_version = await database.get_conversation_memory_index_version()
+                assert empty_version == ""
+
+                now = int(time.time())
+                await database.upsert_conversation_memory_item(
+                    {
+                        "session_id": "session-1",
+                        "source_type": "summary",
+                        "source_id": "summary:a",
+                        "source_version": 1,
+                        "start_ts": now - 60,
+                        "end_ts": now,
+                        "title": "张三摘要",
+                        "text": "讨论了周日咖啡店见面",
+                        "keywords": ["咖啡店"],
+                        "participants": ["张三", "我"],
+                        "embedding_id": "emb-a",
+                        "embedding_model": "fake-embedding-model",
+                        "created_at": now,
+                        "updated_at": now,
+                    }
+                )
+                await database.upsert_conversation_memory_embedding(
+                    {
+                        "embedding_id": "emb-a",
+                        "session_id": "session-1",
+                        "source_type": "summary",
+                        "source_id": "summary:a",
+                        "source_version": 1,
+                        "embedding_model": "fake-embedding-model",
+                        "content_hash": "hash-a",
+                        "embedding_vector": [1.0, 0.0, 0.0],
+                        "created_at": now,
+                        "updated_at": now,
+                    }
+                )
+
+                first_version = await database.get_conversation_memory_index_version()
+                same_version = await database.get_conversation_memory_index_version()
+                assert first_version
+                assert same_version == first_version
+
+                await database.upsert_conversation_memory_embedding(
+                    {
+                        "embedding_id": "emb-a",
+                        "session_id": "session-1",
+                        "source_type": "summary",
+                        "source_id": "summary:a",
+                        "source_version": 1,
+                        "embedding_model": "fake-embedding-model",
+                        "content_hash": "hash-b",
+                        "embedding_vector": [0.5, 0.5, 0.0],
+                        "created_at": now,
+                        "updated_at": now + 1,
+                    }
+                )
+
+                changed_version = await database.get_conversation_memory_index_version()
+                assert changed_version
+                assert changed_version != first_version
+            finally:
+                await database.close()
+
+        asyncio.run(scenario())
+    finally:
+        try:
+            db_path.unlink(missing_ok=True)
+        except PermissionError:
+            pass
+        shutil.rmtree(temp_root, ignore_errors=True)
+
+
 def test_database_replace_sessions_uses_savepoint_inside_existing_transaction() -> None:
     class FakeConnection:
         def __init__(self) -> None:
