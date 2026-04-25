@@ -372,6 +372,9 @@ def _normalize_memory_search_output(value: Any, *, question: str) -> dict[str, A
         "context_lines": context_lines,
         "result_count": int(output.get("result_count") or len(results) or len(context_lines)),
         "truncated": bool(output.get("truncated")),
+        "fallback_used": bool(output.get("fallback_used")),
+        "summary_result_count": int(output.get("summary_result_count") or 0),
+        "message_fallback_count": int(output.get("message_fallback_count") or 0),
         "question": question,
     }
 

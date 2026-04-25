@@ -24,6 +24,9 @@ class _FakeMemoryDatabase:
         self.items = list(items)
         self.calls: list[dict] = []
         self.ann_calls: list[dict] = []
+        self.get_all_sessions_calls = 0
+        self.get_messages_calls: list[dict] = []
+        self.search_messages_calls: list[dict] = []
         self.sessions = list(sessions or [])
         self.messages_by_session = dict(messages_by_session or {})
         self.search_results = dict(search_results or {})
@@ -59,13 +62,16 @@ class _FakeMemoryDatabase:
         return items
 
     async def get_all_sessions(self):
+        self.get_all_sessions_calls += 1
         return list(self.sessions)
 
     async def get_messages(self, session_id: str, limit: int = 50, before_timestamp=None):
+        self.get_messages_calls.append({"session_id": session_id, "limit": limit, "before_timestamp": before_timestamp})
         del before_timestamp
         return list(self.messages_by_session.get(session_id, []))[:limit]
 
     async def search_messages(self, keyword: str, session_id=None, limit: int = 100):
+        self.search_messages_calls.append({"keyword": keyword, "session_id": session_id, "limit": limit})
         del session_id
         return list(self.search_results.get(keyword, []))[:limit]
 
@@ -639,6 +645,129 @@ def test_conversation_memory_manager_search_for_action_returns_structured_memory
         assert "南山咖啡店" in result["context_lines"][0]
         assert "接口联调" not in "\n".join(result["context_lines"])
         assert db.ai_memory_store.search_calls[0]["source_types"] == AI_MEMORY_SOURCE_TYPES
+
+    asyncio.run(scenario())
+
+
+def test_conversation_memory_manager_action_search_skips_message_fallback_when_summary_is_enough() -> None:
+    async def scenario() -> None:
+        session = _FakeSession(
+            session_id="s-test3",
+            name="test3",
+            session_type="direct",
+            participant_ids=["user-test3"],
+            extra={"counterpart_name": "test3", "counterpart_username": "test3"},
+            last_message_time=datetime.fromisoformat("2026-04-18T10:06:00"),
+        )
+        db = _FakeMemoryDatabase(
+            [
+                {
+                    "session_id": "s-test3",
+                    "source_type": "summary",
+                    "source_id": "summary:test3",
+                    "start_ts": _ts("2026-04-18T10:00:00"),
+                    "end_ts": _ts("2026-04-18T10:05:00"),
+                    "title": "test3 2026-04-18 10:00-10:05",
+                    "text": "test3 详细讨论了周末去南山咖啡店见面的安排，包括时间、地点、交通方式和备选方案，最后确认如果下雨就改到商场里面集合。",
+                    "keywords": ["南山咖啡店", "周末", "集合"],
+                    "participants": ["test3", "我"],
+                },
+            ],
+            sessions=[session],
+            messages_by_session={
+                "s-test3": [
+                    _FakeMessage(
+                        content="这条原始消息只有 fallback 触发时才应该出现。",
+                        timestamp=datetime.fromisoformat("2026-04-18T10:05:00"),
+                        sender_id="user-test3",
+                    )
+                ]
+            },
+        )
+        planner = _FakeSemanticPlanner({"use_rag": False})
+        manager = _make_memory_manager(db, planner)
+
+        result = await manager.search_for_action(
+            question="我和 test3 聊过什么？",
+            participants=[
+                {
+                    "contact_id": "user-test3",
+                    "display_name": "test3",
+                    "username": "test3",
+                    "aliases": ["test3"],
+                    "raw": "test3",
+                    "resolved": True,
+                }
+            ],
+            participant_match="any",
+            time_scope={"type": "all_history"},
+            keywords=[],
+            limit=3,
+        )
+
+        assert result["fallback_used"] is False
+        assert result["summary_result_count"] == 1
+        assert result["message_fallback_count"] == 0
+        assert db.get_all_sessions_calls == 0
+        assert db.get_messages_calls == []
+        assert db.search_messages_calls == []
+        assert "原始消息" not in "\n".join(result["context_lines"])
+
+    asyncio.run(scenario())
+
+
+def test_conversation_memory_manager_action_search_uses_message_fallback_when_summary_is_empty() -> None:
+    async def scenario() -> None:
+        session = _FakeSession(
+            session_id="s-test3",
+            name="test3",
+            session_type="direct",
+            participant_ids=["user-test3"],
+            extra={"counterpart_name": "test3", "counterpart_username": "test3"},
+            last_message_time=datetime.fromisoformat("2026-04-18T10:06:00"),
+        )
+        db = _FakeMemoryDatabase(
+            [],
+            sessions=[session],
+            messages_by_session={
+                "s-test3": [
+                    _FakeMessage(
+                        content="明天下午三点去南山咖啡店见面。",
+                        timestamp=datetime.fromisoformat("2026-04-18T10:05:00"),
+                        sender_id="user-test3",
+                    )
+                ]
+            },
+        )
+        planner = _FakeSemanticPlanner({"use_rag": False})
+        manager = _make_memory_manager(db, planner)
+
+        result = await manager.search_for_action(
+            question="我和 test3 聊过什么？",
+            participants=[
+                {
+                    "contact_id": "user-test3",
+                    "display_name": "test3",
+                    "username": "test3",
+                    "aliases": ["test3"],
+                    "raw": "test3",
+                    "resolved": True,
+                }
+            ],
+            participant_match="any",
+            time_scope={"type": "all_history"},
+            keywords=[],
+            limit=3,
+        )
+
+        assert result["fallback_used"] is True
+        assert result["summary_result_count"] == 0
+        assert result["message_fallback_count"] == 1
+        assert result["result_count"] == 1
+        assert result["results"][0]["source_type"] == "message_fallback"
+        assert "南山咖啡店" in result["context_lines"][0]
+        assert db.get_all_sessions_calls == 1
+        assert db.get_messages_calls[0]["session_id"] == "s-test3"
 
     asyncio.run(scenario())
 

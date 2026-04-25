@@ -63,6 +63,8 @@ class ConversationMemoryManager:
     RAG_RESULT_LIMIT = 4
     RAG_MESSAGE_RESULT_LIMIT = 2
     RAG_MIN_SCORE = 1.6
+    ACTION_SEARCH_SUMMARY_ENOUGH_MIN_CONTEXT_CHARS = 120
+    ACTION_SEARCH_SUMMARY_ENOUGH_MIN_TOP_SCORE = 2.8
     AI_MEMORY_MIN_SCORE = 0.0
     AI_MEMORY_SOURCE_TYPE_SUMMARY = "conversation_summary"
     AI_MEMORY_SOURCE_TYPE_FILE_SUMMARY = "file_summary"
@@ -765,6 +767,9 @@ class ConversationMemoryManager:
             "context_lines": [],
             "result_count": 0,
             "truncated": False,
+            "fallback_used": False,
+            "summary_result_count": 0,
+            "message_fallback_count": 0,
             "query": {
                 "question": " ".join(str(question or "").split()),
                 "terms": [],
@@ -788,6 +793,47 @@ class ConversationMemoryManager:
             "end_ts": int(item.get("end_ts") or item.get("start_ts") or 0),
             "score": round(float(score), 4),
         }
+
+    def _action_message_fallback_result(self, line: str, *, index: int) -> dict[str, Any]:
+        return {
+            "source_type": "message_fallback",
+            "source_id": f"message_fallback:{index}",
+            "session_id": "",
+            "title": "原始消息线索",
+            "text_preview": self._clip(str(line or ""), 220),
+            "participants": [],
+            "keywords": [],
+            "start_ts": 0,
+            "end_ts": 0,
+            "score": 0.0,
+        }
+
+    def _action_summary_search_is_enough(
+        self,
+        selected: Sequence[tuple[float, dict[str, Any]]],
+        context_lines: Sequence[str],
+    ) -> bool:
+        if not selected or not context_lines:
+            return False
+        if len(selected) >= 2:
+            return True
+        total_context_chars = sum(len(str(line or "")) for line in context_lines)
+        if total_context_chars >= self.ACTION_SEARCH_SUMMARY_ENOUGH_MIN_CONTEXT_CHARS:
+            return True
+        top_score = max(float(score) for score, _item in selected)
+        if top_score >= self.ACTION_SEARCH_SUMMARY_ENOUGH_MIN_TOP_SCORE:
+            return True
+        sessions = {
+            str(item.get("session_id") or "").strip()
+            for _score, item in selected
+            if str(item.get("session_id") or "").strip()
+        }
+        dates = {
+            self._format_ts(int(item.get("start_ts") or 0)).split(" ", 1)[0]
+            for _score, item in selected
+            if int(item.get("start_ts") or 0) > 0
+        }
+        return len(sessions) >= 2 or len(dates) >= 2
 
     @staticmethod
     def _contact_alias_values(contact: dict[str, Any]) -> tuple[str, ...]:
@@ -1137,12 +1183,33 @@ class ConversationMemoryManager:
             for line in (self._format_item(item) for _score, item in selected)
             if line
         ]
+        summary_enough = self._action_summary_search_is_enough(selected, context_lines)
+        fallback_lines: list[str] = []
+        if not summary_enough:
+            remaining = max(1, normalized_limit - len(context_lines))
+            fallback_lines = (
+                await self._message_fallback_lines(
+                    memory_query,
+                    participant_ids=participant_aliases,
+                    participant_aliases=participant_aliases,
+                )
+            )[:remaining]
+        fallback_results = [
+            self._action_message_fallback_result(line, index=index)
+            for index, line in enumerate(fallback_lines, start=1)
+        ]
+        if fallback_lines:
+            context_lines.extend(line for line in fallback_lines if line)
+            results.extend(fallback_results)
         return {
             "results": results,
             "preview": results[:3],
             "context_lines": context_lines,
-            "result_count": len(matched),
+            "result_count": len(matched) + len(fallback_results),
             "truncated": len(matched) > len(selected),
+            "fallback_used": bool(fallback_results),
+            "summary_result_count": len(matched),
+            "message_fallback_count": len(fallback_results),
             "query": {
                 "question": query_text,
                 "terms": list(query_terms),
