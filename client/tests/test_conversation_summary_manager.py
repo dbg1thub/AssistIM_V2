@@ -15,6 +15,7 @@ from client.managers.conversation_summary_manager import ConversationSummaryEven
 from client.managers.message_manager import MessageEvent
 from client.models.message import ChatMessage, MessageStatus, MessageType, Session
 from client.services.ai_service import AIErrorCode
+from client.storage.database import Database
 from client.services.local_voice_transcription_service import (
     LocalVoiceTranscriptionResult,
     LocalVoiceTranscriptionRuntimeError,
@@ -87,6 +88,7 @@ class _FakeDatabase:
         self.memory_embeddings: dict[tuple[str, str, str], dict] = {}
         self.memory_ann_buckets: dict[tuple[str, str, str], dict] = {}
         self.deleted_memory_sources: list[tuple[str, str, str]] = []
+        self.app_state: dict[str, str] = {Database.AUTH_USER_ID_STATE_KEY: "test1"}
 
     async def get_session(self, session_id: str) -> Session | None:
         if session_id == self._session.session_id:
@@ -259,6 +261,9 @@ class _FakeDatabase:
         items.sort(key=lambda item: (int(item.get("end_ts") or 0), int(item.get("start_ts") or 0)), reverse=True)
         return items[: max(1, int(limit or 1))]
 
+    async def get_app_state(self, key: str):
+        return self.app_state.get(str(key or ""))
+
 
 class _FakeDenseVector:
     def __init__(self, values: list[float]) -> None:
@@ -400,6 +405,18 @@ class _FakeFileTextExtractor:
         return self._result
 
 
+class _FakeAIMemoryStore:
+    def __init__(self) -> None:
+        self.upserted_items = []
+        self.deleted_sources: list[tuple[str, str, str]] = []
+
+    async def upsert_item(self, item) -> None:
+        self.upserted_items.append(item)
+
+    async def delete_source(self, *, owner_scope: str, source_type: str, source_id: str) -> None:
+        self.deleted_sources.append((owner_scope, source_type, source_id))
+
+
 def _make_manager(
     fake_db: _FakeDatabase,
     event_bus: EventBus,
@@ -408,6 +425,7 @@ def _make_manager(
     message_manager=None,
     voice_transcription_runtime=None,
     file_text_extractor=None,
+    ai_memory_store=None,
 ) -> ConversationSummaryManager:
     return ConversationSummaryManager(
         db=fake_db,
@@ -418,6 +436,7 @@ def _make_manager(
         message_manager=message_manager,
         voice_transcription_runtime=voice_transcription_runtime,
         file_text_extractor=file_text_extractor,
+        ai_memory_store=ai_memory_store,
     )
 
 
@@ -487,6 +506,78 @@ def test_conversation_summary_manager_creates_ready_open_bucket(monkeypatch) -> 
             assert fake_db.memory_ann_buckets[memory_key]["ann_namespace"] == "fake-ann:8x8"
         finally:
             await manager.close()
+
+    asyncio.run(scenario())
+
+
+def test_conversation_summary_manager_dual_writes_summary_to_ai_memory_store(monkeypatch) -> None:
+    monkeypatch.setattr(SecureStorage, "encrypt_text", classmethod(lambda cls, value: f"enc:{value}"))
+    session = Session(session_id="session-1", name="Bob", session_type="direct")
+    fake_db = _FakeDatabase(session)
+    fake_task_manager = _FakeTaskManager()
+    event_bus = EventBus()
+    fake_ai_memory_store = _FakeAIMemoryStore()
+
+    async def scenario() -> None:
+        manager = _make_manager(
+            fake_db,
+            event_bus,
+            fake_task_manager,
+            ai_memory_store=fake_ai_memory_store,
+        )
+        manager.DEBOUNCE_SECONDS = 0.0
+        await manager.initialize()
+        try:
+            incoming = _message("m-1", datetime(2026, 4, 19, 10, 0, 0), content="周日下午可以见面。")
+            fake_db.messages_by_session["session-1"].append(incoming)
+            await event_bus.emit(MessageEvent.RECEIVED, {"message": incoming})
+            await _drain_summary_tasks(manager)
+
+            assert len(fake_ai_memory_store.upserted_items) == 1
+            item = fake_ai_memory_store.upserted_items[0]
+            assert item.owner_scope == "account:test1"
+            assert item.source_type == ConversationSummaryManager.AI_MEMORY_SOURCE_TYPE_SUMMARY
+            assert item.source_id == f"conversation:session-1:summary:{int(incoming.timestamp.timestamp())}"
+            assert item.title.startswith("Bob")
+            assert "会话对象：" in item.text
+            assert "Bob" in item.text
+            assert item.embedding_model_id == "fake-embedding-model"
+            assert item.vector
+            assert item.metadata["session_id"] == "session-1"
+            assert item.metadata["bucket_start_ts"] == int(incoming.timestamp.timestamp())
+            assert {"见面", "时间", "地点"}.issubset(set(item.metadata["keywords"]))
+            assert item.metadata["participants"]
+        finally:
+            await manager.close()
+
+    asyncio.run(scenario())
+
+
+def test_conversation_summary_manager_deletes_summary_from_ai_memory_store() -> None:
+    session = Session(session_id="session-1", name="Bob", session_type="direct")
+    fake_db = _FakeDatabase(session)
+    fake_task_manager = _FakeTaskManager()
+    event_bus = EventBus()
+    fake_ai_memory_store = _FakeAIMemoryStore()
+
+    async def scenario() -> None:
+        manager = _make_manager(
+            fake_db,
+            event_bus,
+            fake_task_manager,
+            ai_memory_store=fake_ai_memory_store,
+        )
+
+        await manager._delete_memory_item_for_bucket("session-1", 1776583200)
+
+        assert ("session-1", "summary", "summary:1776583200") in fake_db.deleted_memory_sources
+        assert fake_ai_memory_store.deleted_sources == [
+            (
+                "account:test1",
+                ConversationSummaryManager.AI_MEMORY_SOURCE_TYPE_SUMMARY,
+                "conversation:session-1:summary:1776583200",
+            )
+        ]
 
     asyncio.run(scenario())
 

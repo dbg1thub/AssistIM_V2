@@ -26,6 +26,7 @@ from client.managers.conversation_summary_prompt_builder import (
 from client.managers.message_manager import MessageEvent
 from client.managers.session_manager import SessionEvent
 from client.models.message import ChatMessage, MessageType, Session
+from client.services.local_ai_memory_store import AIMemoryItem, get_local_ai_memory_store
 from client.services.local_voice_transcription_service import LocalVoiceTranscriptionRuntimeError
 from client.storage.database import Database, get_database
 
@@ -48,6 +49,7 @@ class ConversationSummaryManager:
     CLOSE_BUCKET_REFRESH_DELAY = 0.0
     IDLE_REFRESH_THROTTLE_SECONDS = 5.0
     MEMORY_SOURCE_TYPE_SUMMARY = "summary"
+    AI_MEMORY_SOURCE_TYPE_SUMMARY = "conversation_summary"
     MEMORY_INDEX_VERSION = 3
     SUMMARY_SCHEMA_VERSION = 2
 
@@ -63,6 +65,7 @@ class ConversationSummaryManager:
         message_manager: Any | None = None,
         voice_transcription_runtime: Any | None = None,
         file_text_extractor: Any | None = None,
+        ai_memory_store: Any | None = None,
     ) -> None:
         self._db = db or get_database()
         self._event_bus = event_bus or get_event_bus()
@@ -73,6 +76,7 @@ class ConversationSummaryManager:
         self._message_manager = message_manager
         self._voice_transcription_runtime = voice_transcription_runtime
         self._file_text_extractor = file_text_extractor
+        self._ai_memory_store = ai_memory_store
         self._voice_transcription_semaphore = asyncio.Semaphore(1)
         self._file_text_extract_semaphore = asyncio.Semaphore(1)
         self._event_subscriptions: list[tuple[str, Any]] = []
@@ -948,13 +952,13 @@ class ConversationSummaryManager:
 
     async def _delete_memory_item_for_bucket(self, session_id: str, bucket_start_ts: int) -> None:
         delete_source = getattr(self._db, "delete_conversation_memory_items_for_source", None)
-        if delete_source is None:
-            return
-        await delete_source(
-            session_id,
-            self.MEMORY_SOURCE_TYPE_SUMMARY,
-            self._memory_source_id(bucket_start_ts),
-        )
+        if callable(delete_source):
+            await delete_source(
+                session_id,
+                self.MEMORY_SOURCE_TYPE_SUMMARY,
+                self._memory_source_id(bucket_start_ts),
+            )
+        await self._delete_ai_memory_item_for_bucket(session_id, bucket_start_ts)
 
     async def _upsert_memory_item_for_summary(
         self,
@@ -980,9 +984,10 @@ class ConversationSummaryManager:
         )
         embedding_id = ""
         embedding_model = ""
+        vector = None
         upsert_embedding = getattr(self._db, "upsert_conversation_memory_embedding", None)
         replace_ann_buckets = getattr(self._db, "replace_conversation_memory_ann_buckets", None)
-        if callable(upsert_embedding):
+        if callable(upsert_embedding) or self._ai_memory_store is not None:
             try:
                 vector = await self._vector_index.encode_item(
                     title=title,
@@ -991,24 +996,25 @@ class ConversationSummaryManager:
                     participants=participants,
                 )
                 embedding_model = self._vector_index.model_id
-                embedding_id = await upsert_embedding(
-                    {
-                        "session_id": session_id,
-                        "source_type": self.MEMORY_SOURCE_TYPE_SUMMARY,
-                        "source_id": self._memory_source_id(bucket_start_ts),
-                        "source_version": max(self.MEMORY_INDEX_VERSION, int(existing.get("summary_version") or 1)),
-                        "embedding_model": embedding_model,
-                        "content_hash": self._vector_index.item_content_hash(
-                            title=title,
-                            text=retrieval_summary,
-                            keywords=keywords,
-                            participants=participants,
-                        ),
-                        "embedding_vector": list(vector.values),
-                        "updated_at": int(time.time()),
-                    }
-                )
-                if callable(replace_ann_buckets):
+                if callable(upsert_embedding):
+                    embedding_id = await upsert_embedding(
+                        {
+                            "session_id": session_id,
+                            "source_type": self.MEMORY_SOURCE_TYPE_SUMMARY,
+                            "source_id": self._memory_source_id(bucket_start_ts),
+                            "source_version": max(self.MEMORY_INDEX_VERSION, int(existing.get("summary_version") or 1)),
+                            "embedding_model": embedding_model,
+                            "content_hash": self._vector_index.item_content_hash(
+                                title=title,
+                                text=retrieval_summary,
+                                keywords=keywords,
+                                participants=participants,
+                            ),
+                            "embedding_vector": list(vector.values),
+                            "updated_at": int(time.time()),
+                        }
+                    )
+                if callable(upsert_embedding) and callable(replace_ann_buckets):
                     await replace_ann_buckets(
                         embedding_id=embedding_id,
                         session_id=session_id,
@@ -1021,6 +1027,19 @@ class ConversationSummaryManager:
                         ],
                         updated_at=int(time.time()),
                     )
+                await self._upsert_ai_memory_item_for_summary(
+                    session_id=session_id,
+                    bucket_start_ts=bucket_start_ts,
+                    bucket_end_ts=bucket_end_ts,
+                    title=title,
+                    retrieval_summary=retrieval_summary,
+                    participants=participants,
+                    keywords=keywords,
+                    existing=existing,
+                    vector=vector,
+                    embedding_model=embedding_model,
+                    embedding_id=embedding_id,
+                )
             except Exception:
                 logger.exception(
                     "Failed to upsert conversation memory embedding session_id=%s bucket_start_ts=%s",
@@ -1053,6 +1072,97 @@ class ConversationSummaryManager:
                 "updated_at": int(time.time()),
             }
         )
+
+    async def _upsert_ai_memory_item_for_summary(
+        self,
+        *,
+        session_id: str,
+        bucket_start_ts: int,
+        bucket_end_ts: int,
+        title: str,
+        retrieval_summary: str,
+        participants: list[str],
+        keywords: list[str],
+        existing: dict[str, Any],
+        vector: Any,
+        embedding_model: str,
+        embedding_id: str,
+    ) -> None:
+        if self._ai_memory_store is None:
+            return
+        vector_values = tuple(getattr(vector, "values", ()) or ())
+        if not vector_values:
+            return
+        owner_scope = await self._ai_memory_owner_scope()
+        if not owner_scope:
+            return
+        source_id = self._ai_memory_source_id(session_id, bucket_start_ts)
+        try:
+            await self._ai_memory_store.upsert_item(
+                AIMemoryItem(
+                    owner_scope=owner_scope,
+                    source_type=self.AI_MEMORY_SOURCE_TYPE_SUMMARY,
+                    source_id=source_id,
+                    title=title,
+                    text=retrieval_summary,
+                    vector=vector_values,
+                    embedding_model_id=embedding_model,
+                    metadata={
+                        "session_id": str(session_id or "").strip(),
+                        "legacy_source_type": self.MEMORY_SOURCE_TYPE_SUMMARY,
+                        "legacy_source_id": self._memory_source_id(bucket_start_ts),
+                        "bucket_start_ts": int(bucket_start_ts),
+                        "bucket_end_ts": int(bucket_end_ts),
+                        "source_version": max(self.MEMORY_INDEX_VERSION, int(existing.get("summary_version") or 1)),
+                        "embedding_id": str(embedding_id or ""),
+                        "keywords": list(keywords or []),
+                        "participants": list(participants or []),
+                    },
+                    updated_at=int(time.time()),
+                )
+            )
+        except Exception:
+            logger.exception(
+                "Failed to upsert conversation summary into local AI memory store session_id=%s bucket_start_ts=%s",
+                session_id,
+                bucket_start_ts,
+            )
+
+    async def _delete_ai_memory_item_for_bucket(self, session_id: str, bucket_start_ts: int) -> None:
+        if self._ai_memory_store is None:
+            return
+        owner_scope = await self._ai_memory_owner_scope()
+        if not owner_scope:
+            return
+        try:
+            await self._ai_memory_store.delete_source(
+                owner_scope=owner_scope,
+                source_type=self.AI_MEMORY_SOURCE_TYPE_SUMMARY,
+                source_id=self._ai_memory_source_id(session_id, bucket_start_ts),
+            )
+        except Exception:
+            logger.exception(
+                "Failed to delete conversation summary from local AI memory store session_id=%s bucket_start_ts=%s",
+                session_id,
+                bucket_start_ts,
+            )
+
+    async def _ai_memory_owner_scope(self) -> str:
+        get_app_state = getattr(self._db, "get_app_state", None)
+        if not callable(get_app_state):
+            return ""
+        try:
+            user_id = str(await get_app_state(Database.AUTH_USER_ID_STATE_KEY) or "").strip()
+        except Exception:
+            logger.exception("Failed to resolve current account for local AI memory store")
+            return ""
+        if not user_id:
+            return ""
+        return f"account:{user_id}"
+
+    @staticmethod
+    def _ai_memory_source_id(session_id: str, bucket_start_ts: int) -> str:
+        return f"conversation:{str(session_id or '').strip()}:summary:{int(bucket_start_ts or 0)}"
 
     @staticmethod
     def _summary_participants(
@@ -1320,5 +1430,5 @@ def get_conversation_summary_manager() -> ConversationSummaryManager:
     """Return the global conversation summary manager singleton."""
     global _conversation_summary_manager
     if _conversation_summary_manager is None:
-        _conversation_summary_manager = ConversationSummaryManager()
+        _conversation_summary_manager = ConversationSummaryManager(ai_memory_store=get_local_ai_memory_store())
     return _conversation_summary_manager
