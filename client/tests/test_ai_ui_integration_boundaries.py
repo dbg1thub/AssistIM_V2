@@ -39,8 +39,12 @@ def test_ai_menu_is_session_feature_toggle_only() -> None:
 def test_ai_settings_are_exposed_in_settings_interface() -> None:
     settings_interface = Path("client/ui/windows/settings_interface.py").read_text(encoding="utf-8")
     config_module = Path("client/core/config.py").read_text(encoding="utf-8")
+    resource_probe = Path("client/services/local_model_resource_probe.py").read_text(encoding="utf-8")
 
     assert "class AIModelSettingCard(SettingCard):" in settings_interface
+    assert "class LocalModelResourcesSettingCard(SettingCard):" in settings_interface
+    assert "class LocalModelResourcesDialog(QDialog):" in settings_interface
+    assert "probe_local_model_resources" in settings_interface
     assert "detect_local_ai_capabilities" in settings_interface
     assert "installed_local_ai_model_specs" in settings_interface
     assert "cfg.aiModelId" in settings_interface
@@ -48,8 +52,19 @@ def test_ai_settings_are_exposed_in_settings_interface() -> None:
     assert "self.ai_group = SettingCardGroup" in settings_interface
     assert "ai_model_card" in settings_interface
     assert "ai_gpu_card" in settings_interface
+    assert "self.ai_resources_card = LocalModelResourcesSettingCard" in settings_interface
+    assert "self.ai_group.addSettingCard(self.ai_resources_card)" in settings_interface
+    assert "self.ai_resources_card.clicked.connect(self._open_local_model_resources_dialog)" in settings_interface
+    assert "def _open_local_model_resources_dialog(self) -> None:" in settings_interface
+    assert "def _refresh_report(self) -> None:" in settings_interface
     assert 'aiModelId = ConfigItem(' in config_module
     assert 'aiGpuAccelerationEnabled = ConfigItem(' in config_module
+    assert "get_ai_service" not in settings_interface
+    assert "get_local_voice_transcription_runtime" not in settings_interface
+    assert "get_local_embedding_runtime" not in settings_interface
+    assert "LocalGGUFRuntime(" not in resource_probe
+    assert "WhisperModel" not in resource_probe
+    assert "Llama(" not in resource_probe
 
 
 def test_developer_server_switch_is_source_runtime_only() -> None:
@@ -313,6 +328,28 @@ def test_ai_ui_i18n_resources_are_registered() -> None:
         "ai_assistant.delete.confirm_action",
         "settings.card.ai_gpu.gpu_unknown",
         "settings.card.ai_gpu.content_warning_vram",
+        "settings.card.ai_resources.title",
+        "settings.card.ai_resources.content",
+        "settings.card.ai_resources.action",
+        "settings.local_model_resources.title",
+        "settings.local_model_resources.subtitle",
+        "settings.local_model_resources.refresh",
+        "settings.local_model_resources.close",
+        "settings.local_model_resources.status.ready",
+        "settings.local_model_resources.status.missing",
+        "settings.local_model_resources.status.dependency_missing",
+        "settings.local_model_resources.status.config_disabled",
+        "settings.local_model_resources.section.models",
+        "settings.local_model_resources.section.dependencies",
+        "settings.local_model_resources.chat_model",
+        "settings.local_model_resources.embedding_model",
+        "settings.local_model_resources.voice_model",
+        "settings.local_model_resources.llama_cpp",
+        "settings.local_model_resources.llama_cpp_embedding",
+        "settings.local_model_resources.faster_whisper",
+        "settings.local_model_resources.cuda",
+        "settings.local_model_resources.path",
+        "settings.local_model_resources.size",
         "chat.translation.pending",
         "chat.translation.queued",
         "chat.translation.failed",

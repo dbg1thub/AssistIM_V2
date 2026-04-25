@@ -4,19 +4,24 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QSignalBlocker, Qt, Signal
-from PySide6.QtWidgets import QWidget
+from PySide6.QtWidgets import QDialog, QFrame, QHBoxLayout, QLabel, QScrollArea, QVBoxLayout, QWidget
 from qfluentwidgets import (
+    BodyLabel,
+    CaptionLabel,
     ComboBox,
     ComboBoxSettingCard,
     CustomColorSettingCard,
     ExpandLayout,
     InfoBar,
     OptionsSettingCard,
+    PushButton,
     ScrollArea,
     SettingCard,
     SettingCardGroup,
+    SubtitleLabel,
     SwitchSettingCard,
     Theme,
+    isDarkTheme,
     setTheme,
     setThemeColor,
 )
@@ -26,6 +31,15 @@ from client.core.config import cfg, is_win11
 from client.core.config_backend import is_development_runtime
 from client.core.i18n import tr
 from client.services.local_ai_selection import LocalAIModelSpec, detect_local_ai_capabilities, installed_local_ai_model_specs
+from client.services.local_model_resource_probe import (
+    STATUS_CONFIG_DISABLED,
+    STATUS_DEPENDENCY_MISSING,
+    STATUS_MISSING,
+    STATUS_READY,
+    LocalModelResourceItem,
+    LocalModelResourceReport,
+    probe_local_model_resources,
+)
 from client.ui.styles import StyleSheet
 
 
@@ -65,6 +79,187 @@ class AIModelSettingCard(SettingCard):
         value = self.current_value()
         if value:
             self.modelChanged.emit(value)
+
+
+class LocalModelResourcesSettingCard(SettingCard):
+    """Open the local model resource report dialog."""
+
+    clicked = Signal()
+
+    def __init__(self, icon, title: str, content: str | None = None, parent=None) -> None:
+        super().__init__(icon, title, content, parent=parent)
+        self.button = PushButton(tr("settings.card.ai_resources.action", "查看"), self)
+        self.button.clicked.connect(self.clicked.emit)
+        self.hBoxLayout.addWidget(self.button, 0, Qt.AlignmentFlag.AlignRight)
+        self.hBoxLayout.addSpacing(16)
+
+
+class LocalModelResourcesDialog(QDialog):
+    """Read-only local model/dependency report."""
+
+    def __init__(self, report_provider=probe_local_model_resources, parent=None) -> None:
+        super().__init__(parent)
+        self._report_provider = report_provider
+        self.setObjectName("LocalModelResourcesDialog")
+        self.setWindowTitle(tr("settings.local_model_resources.title", "本地模型资源"))
+        self.resize(720, 580)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(24, 24, 24, 20)
+        root.setSpacing(16)
+
+        self.title_label = SubtitleLabel(tr("settings.local_model_resources.title", "本地模型资源"), self)
+        self.subtitle_label = CaptionLabel(
+            tr(
+                "settings.local_model_resources.subtitle",
+                "只检查本地文件、依赖和硬件状态，不会加载大模型。",
+            ),
+            self,
+        )
+        root.addWidget(self.title_label)
+        root.addWidget(self.subtitle_label)
+
+        self.scroll_area = QScrollArea(self)
+        self.scroll_area.setWidgetResizable(True)
+        self.scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+        self.scroll_content = QWidget(self.scroll_area)
+        self.report_layout = QVBoxLayout(self.scroll_content)
+        self.report_layout.setContentsMargins(0, 0, 0, 0)
+        self.report_layout.setSpacing(12)
+        self.scroll_area.setWidget(self.scroll_content)
+        root.addWidget(self.scroll_area, 1)
+
+        button_row = QHBoxLayout()
+        button_row.addStretch(1)
+        self.refresh_button = PushButton(tr("settings.local_model_resources.refresh", "刷新"), self)
+        self.close_button = PushButton(tr("settings.local_model_resources.close", "关闭"), self)
+        self.refresh_button.clicked.connect(self._refresh_report)
+        self.close_button.clicked.connect(self.close)
+        button_row.addWidget(self.refresh_button)
+        button_row.addWidget(self.close_button)
+        root.addLayout(button_row)
+
+        self._refresh_report()
+
+    def _refresh_report(self) -> None:
+        report = self._report_provider()
+        self._render_report(report)
+
+    def _render_report(self, report: LocalModelResourceReport) -> None:
+        while self.report_layout.count():
+            item = self.report_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+
+        for section_key, section_title in (
+            ("models", tr("settings.local_model_resources.section.models", "模型文件")),
+            ("dependencies", tr("settings.local_model_resources.section.dependencies", "运行依赖")),
+        ):
+            section_items = report.section_items(section_key)
+            if not section_items:
+                continue
+            heading = CaptionLabel(section_title, self.scroll_content)
+            self.report_layout.addWidget(heading)
+            for resource in section_items:
+                self.report_layout.addWidget(self._resource_card(resource))
+        self.report_layout.addStretch(1)
+
+    def _resource_card(self, item: LocalModelResourceItem) -> QFrame:
+        card = QFrame(self.scroll_content)
+        card.setObjectName("LocalModelResourceCard")
+        card.setFrameShape(QFrame.Shape.NoFrame)
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(14, 12, 14, 12)
+        layout.setSpacing(6)
+
+        header = QHBoxLayout()
+        title = BodyLabel(self._resource_title(item), card)
+        status = QLabel(self._status_text(item.status), card)
+        status.setObjectName("LocalModelResourceStatus")
+        status.setStyleSheet(self._status_label_style(item.status))
+        header.addWidget(title, 1)
+        header.addWidget(status, 0, Qt.AlignmentFlag.AlignRight)
+        layout.addLayout(header)
+
+        for line in self._resource_detail_lines(item):
+            label = CaptionLabel(line, card)
+            label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            label.setWordWrap(True)
+            layout.addWidget(label)
+
+        card.setStyleSheet(self._card_style())
+        return card
+
+    @staticmethod
+    def _card_style() -> str:
+        background = "rgba(255,255,255,18)" if isDarkTheme() else "rgba(0,0,0,8)"
+        border = "rgba(255,255,255,24)" if isDarkTheme() else "rgba(0,0,0,14)"
+        return f"QFrame#LocalModelResourceCard {{ background: {background}; border: 1px solid {border}; border-radius: 8px; }}"
+
+    @staticmethod
+    def _status_label_style(status: str) -> str:
+        color = {
+            STATUS_READY: "#107C10",
+            STATUS_MISSING: "#C50F1F",
+            STATUS_DEPENDENCY_MISSING: "#C50F1F",
+            STATUS_CONFIG_DISABLED: "#8A8886",
+        }.get(status, "#8A8886")
+        return f"QLabel#LocalModelResourceStatus {{ color: {color}; font-weight: 600; }}"
+
+    @staticmethod
+    def _status_text(status: str) -> str:
+        mapping = {
+            STATUS_READY: tr("settings.local_model_resources.status.ready", "正常"),
+            STATUS_MISSING: tr("settings.local_model_resources.status.missing", "缺失"),
+            STATUS_DEPENDENCY_MISSING: tr("settings.local_model_resources.status.dependency_missing", "依赖缺失"),
+            STATUS_CONFIG_DISABLED: tr("settings.local_model_resources.status.config_disabled", "配置未启用"),
+        }
+        return mapping.get(str(status or "").strip(), str(status or "").strip())
+
+    @staticmethod
+    def _resource_title(item: LocalModelResourceItem) -> str:
+        mapping = {
+            "chat_model": tr("settings.local_model_resources.chat_model", "聊天模型"),
+            "embedding_model": tr("settings.local_model_resources.embedding_model", "嵌入模型"),
+            "voice_transcription_model": tr("settings.local_model_resources.voice_model", "语音转文字模型"),
+            "dependency_llama_cpp": tr("settings.local_model_resources.llama_cpp", "llama-cpp-python"),
+            "dependency_llama_cpp_embedding": tr("settings.local_model_resources.llama_cpp_embedding", "llama-cpp-python embedding"),
+            "dependency_faster_whisper": tr("settings.local_model_resources.faster_whisper", "faster-whisper"),
+            "dependency_cuda_12": tr("settings.local_model_resources.cuda", "CUDA 12 运行时"),
+        }
+        return mapping.get(item.key, item.title)
+
+    def _resource_detail_lines(self, item: LocalModelResourceItem) -> list[str]:
+        lines: list[str] = []
+        if item.model_id:
+            lines.append(f"ID: {item.model_id}")
+        if item.path:
+            lines.append(f"{tr('settings.local_model_resources.path', '路径')}: {item.path}")
+        if item.size_bytes:
+            lines.append(f"{tr('settings.local_model_resources.size', '大小')}: {self._format_bytes(item.size_bytes)}")
+        if item.detail:
+            lines.append(item.detail)
+        for key, value in item.metadata.items():
+            if value in (None, "", (), []):
+                continue
+            if key in {"missing_files"}:
+                lines.append(f"missing_files: {', '.join(str(part) for part in value)}")
+            elif key in {"gpu_name", "acceleration", "device", "compute_type", "cpu_threads", "allow_download"}:
+                lines.append(f"{key}: {value}")
+        return lines or [self._status_text(item.status)]
+
+    @staticmethod
+    def _format_bytes(size_bytes: int) -> str:
+        size = float(max(0, int(size_bytes or 0)))
+        units = ("B", "KB", "MB", "GB")
+        index = 0
+        while size >= 1024 and index < len(units) - 1:
+            size /= 1024.0
+            index += 1
+        if index == 0:
+            return f"{int(size)} {units[index]}"
+        return f"{size:.1f} {units[index]}"
 
 
 class SettingsInterface(ScrollArea):
@@ -171,6 +366,12 @@ class SettingsInterface(ScrollArea):
             configItem=cfg.aiGpuAccelerationEnabled,
             parent=self.ai_group,
         )
+        self.ai_resources_card = LocalModelResourcesSettingCard(
+            AppIcon.INFO,
+            tr("settings.card.ai_resources.title", "本地模型资源"),
+            tr("settings.card.ai_resources.content", "查看聊天模型、嵌入模型、语音转文字模型和运行依赖状态。"),
+            parent=self.ai_group,
+        )
         self.server_localhost_card = SwitchSettingCard(
             AppIcon.GLOBE,
             tr("settings.card.dev_server_localhost.title", "Use Local Server"),
@@ -227,6 +428,7 @@ class SettingsInterface(ScrollArea):
 
         self.ai_group.addSettingCard(self.ai_model_card)
         self.ai_group.addSettingCard(self.ai_gpu_card)
+        self.ai_group.addSettingCard(self.ai_resources_card)
 
         self.notification_group.addSettingCard(self.sound_enabled_card)
         self.notification_group.addSettingCard(self.message_sound_card)
@@ -253,6 +455,7 @@ class SettingsInterface(ScrollArea):
         self.sound_enabled_card.checkedChanged.connect(self.message_sound_card.setEnabled)
         self.ai_model_card.modelChanged.connect(self._on_ai_model_changed)
         self.ai_gpu_card.checkedChanged.connect(lambda _checked: self._refresh_ai_gpu_card_state())
+        self.ai_resources_card.clicked.connect(self._open_local_model_resources_dialog)
 
     def _apply_initial_values(self) -> None:
         setTheme(cfg.get(cfg.themeMode), lazy=True)
@@ -274,6 +477,10 @@ class SettingsInterface(ScrollArea):
             parent=self.window(),
             duration=2500,
         )
+
+    def _open_local_model_resources_dialog(self) -> None:
+        dialog = LocalModelResourcesDialog(parent=self.window() or self)
+        dialog.exec()
 
     def _on_ai_model_changed(self, model_id: str) -> None:
         normalized_model_id = str(model_id or "").strip()
