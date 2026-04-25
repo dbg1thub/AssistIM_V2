@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from client.core import logging
+from client.managers.ai_action_cache import AIActionCache
 from client.managers.ai_action_types import ActionPause, AtomicActionSpec
 logger = logging.get_logger(__name__)
 
@@ -16,6 +17,9 @@ MEMORY_SUMMARIZE_DIRECT_MAX_LINES = 6
 MEMORY_SUMMARIZE_DIRECT_MAX_CONTEXT_CHARS = 1200
 MEMORY_SUMMARIZE_CHUNK_SIZE = 4
 MEMORY_SUMMARIZE_CHUNK_ITEM_MAX_CHARS = 34
+MEMORY_SUMMARIZE_CACHE_NAMESPACE = "memory.summarize"
+MEMORY_SUMMARIZE_PROMPT_VERSION = "memory_summarize_context:v1"
+MEMORY_SUMMARIZE_MODEL_ID = "deterministic-local-summarizer:v1"
 
 
 class AtomicActionRegistry:
@@ -26,9 +30,11 @@ class AtomicActionRegistry:
         *,
         contact_resolver: Any,
         memory_manager: Any | None = None,
+        action_cache: AIActionCache | None = None,
     ) -> None:
         self._contact_resolver = contact_resolver
         self._memory_manager = memory_manager
+        self._action_cache = action_cache or AIActionCache()
         self._actions: dict[str, AtomicActionSpec] = {}
         self._register_defaults()
 
@@ -131,6 +137,20 @@ class AtomicActionRegistry:
     async def _memory_summarize(self, args: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
         payload = await _MemorySummarizeInput.from_args(args, store=context.get("store"))
         result_count = int(payload.source.get("result_count") or 0)
+        cache_key = _memory_summarize_cache_key(
+            source=payload.source,
+            question=payload.question,
+            prompt_version=MEMORY_SUMMARIZE_PROMPT_VERSION,
+            model_id=MEMORY_SUMMARIZE_MODEL_ID,
+        )
+        if cache_key:
+            cached = self._action_cache.get(MEMORY_SUMMARIZE_CACHE_NAMESPACE, cache_key)
+            if isinstance(cached, dict):
+                cached["cache_hit"] = True
+                cached["cache_namespace"] = MEMORY_SUMMARIZE_CACHE_NAMESPACE
+                cached["cache_version"] = MEMORY_SUMMARIZE_PROMPT_VERSION
+                cached["cache_model_id"] = MEMORY_SUMMARIZE_MODEL_ID
+                return cached
         context_lines = [
             str(item or "").strip()
             for item in list(payload.source.get("context_lines") or [])
@@ -146,7 +166,7 @@ class AtomicActionRegistry:
         if not context_lines:
             question = payload.question or str(payload.source.get("question") or "")
             text = f"没有找到相关记录。用户问题：{question or '本地记忆查询'}。"
-            return {
+            output = {
                 "text": text,
                 "result_count": result_count,
                 "input_result_count": result_count,
@@ -154,12 +174,19 @@ class AtomicActionRegistry:
                 "chunked": False,
                 "chunk_count": 0,
                 "status": "empty",
+                "cache_hit": False,
+                "cache_namespace": MEMORY_SUMMARIZE_CACHE_NAMESPACE,
+                "cache_version": MEMORY_SUMMARIZE_PROMPT_VERSION,
+                "cache_model_id": MEMORY_SUMMARIZE_MODEL_ID,
             }
+            if cache_key:
+                self._action_cache.set(MEMORY_SUMMARIZE_CACHE_NAMESPACE, cache_key, output)
+            return output
         summary = _summarize_memory_context_lines(
             context_lines,
             input_result_count=result_count or len(context_lines),
         )
-        return {
+        output = {
             "requires_responder": True,
             "context_lines": summary["context_lines"],
             "question": payload.question,
@@ -169,7 +196,14 @@ class AtomicActionRegistry:
             "chunked": summary["chunked"],
             "chunk_count": summary["chunk_count"],
             "status": "ready",
+            "cache_hit": False,
+            "cache_namespace": MEMORY_SUMMARIZE_CACHE_NAMESPACE,
+            "cache_version": MEMORY_SUMMARIZE_PROMPT_VERSION,
+            "cache_model_id": MEMORY_SUMMARIZE_MODEL_ID,
         }
+        if cache_key:
+            self._action_cache.set(MEMORY_SUMMARIZE_CACHE_NAMESPACE, cache_key, output)
+        return output
 
     def _require_memory_manager(self) -> Any:
         if self._memory_manager is None:
@@ -399,6 +433,58 @@ def _normalize_memory_search_output(value: Any, *, question: str) -> dict[str, A
         "message_fallback_count": int(output.get("message_fallback_count") or 0),
         "question": question,
     }
+
+
+def _memory_summarize_cache_key(
+    *,
+    source: dict[str, Any],
+    question: str,
+    prompt_version: str,
+    model_id: str,
+) -> str | None:
+    normalized_prompt_version = str(prompt_version or "").strip()
+    normalized_model_id = str(model_id or "").strip()
+    if not normalized_prompt_version or not normalized_model_id:
+        return None
+    payload = {
+        "model_id": normalized_model_id,
+        "prompt_version": normalized_prompt_version,
+        "question": " ".join(str(question or "").split()),
+        "source": _memory_summarize_source_cache_payload(source),
+    }
+    return hashlib.sha256(_stable_json(payload).encode("utf-8")).hexdigest()
+
+
+def _memory_summarize_source_cache_payload(source: dict[str, Any]) -> dict[str, Any]:
+    payload = dict(source or {}) if isinstance(source, dict) else {}
+    context_lines = [
+        str(item or "").strip()
+        for item in list(payload.get("context_lines") or [])
+        if str(item or "").strip()
+    ]
+    results: list[dict[str, Any]] = []
+    for item in list(payload.get("results") or []):
+        if not isinstance(item, dict):
+            continue
+        text = str(item.get("text_preview") or item.get("text") or "").strip()
+        results.append(
+            {
+                "source_id": str(item.get("source_id") or "").strip(),
+                "source_type": str(item.get("source_type") or "").strip(),
+                "title": str(item.get("title") or "").strip(),
+                "text_checksum": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+            }
+        )
+    return {
+        "context_lines_checksum": hashlib.sha256(_stable_json(context_lines).encode("utf-8")).hexdigest(),
+        "result_count": int(payload.get("result_count") or len(results) or len(context_lines)),
+        "results": results,
+        "truncated": bool(payload.get("truncated")),
+    }
+
+
+def _stable_json(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
 def _memory_result_context_line(item: dict[str, Any]) -> str:

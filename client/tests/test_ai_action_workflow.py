@@ -1,6 +1,8 @@
 import asyncio
 from dataclasses import replace
 
+from client.managers import ai_action_registry as registry_module
+from client.managers.ai_action_cache import AIActionCache
 from client.managers.ai_action_executor import AIActionExecutor
 from client.managers.ai_action_optimizer import AIPlanOptimizer
 from client.managers.ai_action_registry import AtomicActionRegistry
@@ -914,6 +916,217 @@ def test_ai_action_registry_memory_summarize_chunks_large_context() -> None:
         assert output["context_lines"][1].startswith("检索结果 5-8：")
         assert output["context_lines"][2].startswith("检索结果 9-10：")
         assert output["context_chars"] < sum(len(line) for line in context_lines)
+
+    asyncio.run(scenario())
+
+
+def test_ai_action_registry_memory_summarize_uses_versioned_cache(monkeypatch) -> None:
+    async def scenario() -> None:
+        calls = []
+        original = registry_module._summarize_memory_context_lines
+
+        def wrapped(context_lines, *, input_result_count):
+            calls.append(list(context_lines))
+            return original(context_lines, input_result_count=input_result_count)
+
+        monkeypatch.setattr(registry_module, "_summarize_memory_context_lines", wrapped)
+        registry = AtomicActionRegistry(
+            contact_resolver=ContactAliasResolver(db=_FakeContactDatabase([])),
+            memory_manager=_FakeActionMemoryManager(),
+            action_cache=AIActionCache(),
+        )
+        spec = registry.get("memory.summarize")
+        assert spec is not None
+        source = {
+            "context_lines": [
+                "[2026-04-21 10:00] 摘要：讨论了项目排期。",
+                "[2026-04-21 10:05] 摘要：确认了交付时间。",
+            ],
+            "result_count": 2,
+        }
+
+        first = await spec.handler(  # type: ignore[misc]
+            {"source": source, "question": "我和 test3 聊过什么？"},
+            {"store": None},
+        )
+        first["context_lines"].append("外部修改不应污染缓存")
+        second = await spec.handler(  # type: ignore[misc]
+            {"source": source, "question": "我和 test3 聊过什么？"},
+            {"store": None},
+        )
+
+        assert first["cache_hit"] is False
+        assert second["cache_hit"] is True
+        assert second["cache_namespace"] == "memory.summarize"
+        assert second["context_lines"] == source["context_lines"]
+        assert calls == [source["context_lines"]]
+
+    asyncio.run(scenario())
+
+
+def test_ai_action_registry_memory_summarize_cache_key_changes_with_question(monkeypatch) -> None:
+    async def scenario() -> None:
+        calls = []
+        original = registry_module._summarize_memory_context_lines
+
+        def wrapped(context_lines, *, input_result_count):
+            calls.append(list(context_lines))
+            return original(context_lines, input_result_count=input_result_count)
+
+        monkeypatch.setattr(registry_module, "_summarize_memory_context_lines", wrapped)
+        registry = AtomicActionRegistry(
+            contact_resolver=ContactAliasResolver(db=_FakeContactDatabase([])),
+            memory_manager=_FakeActionMemoryManager(),
+            action_cache=AIActionCache(),
+        )
+        spec = registry.get("memory.summarize")
+        assert spec is not None
+        source = {
+            "context_lines": ["[2026-04-21 10:00] 摘要：讨论了项目排期。"],
+            "result_count": 1,
+        }
+
+        first = await spec.handler(  # type: ignore[misc]
+            {"source": source, "question": "聊过什么？"},
+            {"store": None},
+        )
+        second = await spec.handler(  # type: ignore[misc]
+            {"source": source, "question": "有没有风险？"},
+            {"store": None},
+        )
+
+        assert first["cache_hit"] is False
+        assert second["cache_hit"] is False
+        assert len(calls) == 2
+
+    asyncio.run(scenario())
+
+
+def test_ai_action_registry_memory_summarize_cache_key_changes_with_source_checksum(monkeypatch) -> None:
+    async def scenario() -> None:
+        calls = []
+        original = registry_module._summarize_memory_context_lines
+
+        def wrapped(context_lines, *, input_result_count):
+            calls.append(list(context_lines))
+            return original(context_lines, input_result_count=input_result_count)
+
+        monkeypatch.setattr(registry_module, "_summarize_memory_context_lines", wrapped)
+        registry = AtomicActionRegistry(
+            contact_resolver=ContactAliasResolver(db=_FakeContactDatabase([])),
+            memory_manager=_FakeActionMemoryManager(),
+            action_cache=AIActionCache(),
+        )
+        spec = registry.get("memory.summarize")
+        assert spec is not None
+
+        first = await spec.handler(  # type: ignore[misc]
+            {
+                "source": {
+                    "context_lines": ["[2026-04-21 10:00] 摘要：讨论了项目排期。"],
+                    "result_count": 1,
+                },
+                "question": "聊过什么？",
+            },
+            {"store": None},
+        )
+        second = await spec.handler(  # type: ignore[misc]
+            {
+                "source": {
+                    "context_lines": ["[2026-04-21 10:00] 摘要：讨论了质量风险。"],
+                    "result_count": 1,
+                },
+                "question": "聊过什么？",
+            },
+            {"store": None},
+        )
+
+        assert first["cache_hit"] is False
+        assert second["cache_hit"] is False
+        assert len(calls) == 2
+
+    asyncio.run(scenario())
+
+
+def test_ai_action_registry_memory_summarize_cache_key_requires_versions() -> None:
+    source = {
+        "context_lines": ["[2026-04-21 10:00] 摘要：讨论了项目排期。"],
+        "result_count": 1,
+    }
+
+    assert (
+        registry_module._memory_summarize_cache_key(
+            source=source,
+            question="聊过什么？",
+            prompt_version="",
+            model_id=registry_module.MEMORY_SUMMARIZE_MODEL_ID,
+        )
+        is None
+    )
+    assert (
+        registry_module._memory_summarize_cache_key(
+            source=source,
+            question="聊过什么？",
+            prompt_version=registry_module.MEMORY_SUMMARIZE_PROMPT_VERSION,
+            model_id="",
+        )
+        is None
+    )
+
+
+def test_ai_action_executor_persists_memory_summarize_cache_hit_result(tmp_path, monkeypatch) -> None:
+    async def scenario() -> None:
+        db = Database(str(tmp_path / "actions.db"))
+        monkeypatch.setattr(action_store_module, "get_database", lambda: db)
+        store = AIActionStore()
+        registry = AtomicActionRegistry(
+            contact_resolver=ContactAliasResolver(db=_FakeContactDatabase([])),
+            memory_manager=_FakeActionMemoryManager(),
+            action_cache=AIActionCache(),
+        )
+        executor = AIActionExecutor(registry=registry, store=store)
+        source = {
+            "context_lines": [
+                "[2026-04-21 10:00] 摘要：讨论了项目排期。",
+                "[2026-04-21 10:05] 摘要：确认了交付时间。",
+            ],
+            "result_count": 2,
+        }
+        plan = AIActionPlan(
+            is_action=True,
+            goal="查询历史",
+            steps=(
+                AIActionStep(
+                    id="summarize_memory",
+                    action="memory.summarize",
+                    args={"source": source, "question": "聊过什么？"},
+                ),
+            ),
+            final={"type": "answer", "source": "$summarize_memory"},
+        )
+        try:
+            first_record = await store.create_plan(
+                thread_id="thread-1",
+                goal=plan.goal,
+                plan_json=plan.to_dict(),
+                reason="test_cache_miss",
+            )
+            await executor.execute(first_record)
+
+            second_record = await store.create_plan(
+                thread_id="thread-1",
+                goal=plan.goal,
+                plan_json=plan.to_dict(),
+                reason="test_cache_hit",
+            )
+            await executor.execute(second_record)
+            updated = await store.get_plan(second_record.id)
+
+            assert updated is not None
+            assert updated.step_outputs["summarize_memory"]["cache_hit"] is True
+            assert updated.step_outputs["summarize_memory"]["cache_namespace"] == "memory.summarize"
+        finally:
+            await db.close()
 
     asyncio.run(scenario())
 
