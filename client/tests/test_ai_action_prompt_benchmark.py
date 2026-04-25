@@ -338,6 +338,7 @@ def test_load_golden_corpus_from_json(tmp_path) -> None:
                         "name": "chat_smalltalk",
                         "user_input": "你好",
                         "tags": ["chat"],
+                        "router_expected_route": "chat",
                         "expectation": {
                             "is_action": False,
                             "forbidden_actions": ["contact.resolve", "user.confirm"],
@@ -346,6 +347,7 @@ def test_load_golden_corpus_from_json(tmp_path) -> None:
                     {
                         "name": "send_message",
                         "user_input": "帮我给张三发我晚点到",
+                        "router_expected_route": "action_candidate",
                         "expectation": {
                             "is_action": True,
                             "risk": "high",
@@ -369,8 +371,10 @@ def test_load_golden_corpus_from_json(tmp_path) -> None:
 
     assert [case.name for case in cases] == ["chat_smalltalk", "send_message"]
     assert cases[0].tags == ("chat",)
+    assert cases[0].router_expected_route == "chat"
     assert cases[0].expectation.is_action is False
     assert cases[0].expectation.forbidden_actions == ("contact.resolve", "user.confirm")
+    assert cases[1].router_expected_route == "action_candidate"
     assert cases[1].expectation.required_actions == (
         "contact.resolve",
         "message.draft",
@@ -389,6 +393,7 @@ def test_load_default_golden_corpus_has_core_action_and_chat_cases() -> None:
     assert any(case.expectation.is_action is False for case in cases)
     assert any("memory.search" in case.expectation.required_actions for case in cases)
     assert any("message.send" in case.expectation.required_actions for case in cases)
+    assert {case.router_expected_route for case in cases} >= {"chat", "action_candidate"}
 
 
 def test_load_golden_corpus_rejects_duplicate_names(tmp_path) -> None:

@@ -44,6 +44,7 @@ class PromptBenchmarkCase:
     user_input: str
     expectation: PromptCaseExpectation = field(default_factory=PromptCaseExpectation)
     tags: tuple[str, ...] = ()
+    router_expected_route: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -240,6 +241,7 @@ def _load_golden_case(raw_case: dict[str, Any], *, index: int) -> PromptBenchmar
         user_input=user_input,
         expectation=_load_expectation(expectation, case_name=name),
         tags=tuple(_string_list(raw_case.get("tags"))),
+        router_expected_route=str(raw_case.get("router_expected_route") or "").strip(),
     )
 
 

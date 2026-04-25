@@ -215,7 +215,13 @@ def parse_router_output(raw_output: str, *, min_confidence: float = DEFAULT_MIN_
 
 
 def expected_route_for_case(case: PromptBenchmarkCase) -> str:
-    """Derive router ground truth from the golden corpus expectation."""
+    """Return router ground truth, with a fallback for older corpus cases."""
+    configured_route = str(getattr(case, "router_expected_route", "") or "").strip().lower()
+    if configured_route:
+        route = _normalize_route(configured_route)
+        if route == ROUTE_UNKNOWN and configured_route != ROUTE_UNKNOWN:
+            raise ValueError(f"invalid router_expected_route for case {case.name}: {configured_route}")
+        return route
     is_action = case.expectation.is_action
     if is_action is True:
         return ROUTE_ACTION_CANDIDATE

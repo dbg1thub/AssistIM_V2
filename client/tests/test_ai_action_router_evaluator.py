@@ -76,7 +76,32 @@ def test_parse_router_output_falls_back_to_unknown_when_confidence_is_low() -> N
     assert "confidence below threshold" in sample.messages
 
 
-def test_expected_route_for_case_uses_golden_action_expectation() -> None:
+def test_expected_route_for_case_prefers_router_expected_route() -> None:
+    assert (
+        expected_route_for_case(
+            PromptBenchmarkCase(
+                name="unsupported",
+                user_input="帮我删除服务器数据库",
+                expectation=PromptCaseExpectation(is_action=False),
+                router_expected_route=ROUTE_ACTION_CANDIDATE,
+            )
+        )
+        == ROUTE_ACTION_CANDIDATE
+    )
+    assert (
+        expected_route_for_case(
+            PromptBenchmarkCase(
+                name="unclear",
+                user_input="帮我处理一下",
+                expectation=PromptCaseExpectation(is_action=False),
+                router_expected_route=ROUTE_UNKNOWN,
+            )
+        )
+        == ROUTE_UNKNOWN
+    )
+
+
+def test_expected_route_for_case_falls_back_to_action_expectation() -> None:
     assert (
         expected_route_for_case(
             PromptBenchmarkCase(
@@ -157,6 +182,8 @@ def test_default_golden_corpus_can_seed_router_expectations() -> None:
     assert routes["chat_smalltalk"] == ROUTE_CHAT
     assert routes["history_direct_test3"] == ROUTE_ACTION_CANDIDATE
     assert routes["send_direct_message"] == ROUTE_ACTION_CANDIDATE
+    assert routes["unsupported_delete_server_database"] == ROUTE_ACTION_CANDIDATE
+    assert routes["group_ai_reply_not_enabled"] == ROUTE_ACTION_CANDIDATE
 
 
 def test_build_router_request_uses_strict_classification_prompt() -> None:
