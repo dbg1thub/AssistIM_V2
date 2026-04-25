@@ -75,24 +75,42 @@ class AIActionExecutor:
             if not permission.allowed:
                 return await self._fail(record, outputs, permission.code or "PERMISSION_DENIED")
 
-            events.append(
-                AIActionEvent(
-                    step_id=step.id,
-                    action=step.action,
-                    state="started",
-                    message=step.display_text,
-                ).to_dict()
+            _append_step_event(
+                events,
+                record_id=record.id,
+                step=step,
+                event_type="step_started",
+                state="started",
+                message=step.display_text,
             )
-            await self._store.update_plan(
+            plan_json = _plan_json_with_events(record.plan_json, events)
+            record = await self._store.update_plan(
                 record.id,
+                plan_json=plan_json,
+                reason=f"step_started_{step.id}",
+                bump_version=False,
                 state="running",
                 current_step_id=step.id,
                 step_outputs=outputs,
                 waiting_payload={},
-            )
+            ) or record
 
             handler = spec.handler
             if handler is None:
+                _append_step_event(
+                    events,
+                    record_id=record.id,
+                    step=step,
+                    event_type="step_failed",
+                    state="failed",
+                    error_text=f"ACTION_NOT_FOUND: {step.action}",
+                )
+                record = await self._store.update_plan(
+                    record.id,
+                    plan_json=_plan_json_with_events(record.plan_json, events),
+                    reason=f"step_failed_{step.id}",
+                    bump_version=False,
+                ) or record
                 return await self._fail(record, outputs, f"ACTION_NOT_FOUND: {step.action}")
             step_started = time.perf_counter()
             raw_output, execution_error = await _run_action_handler(
@@ -119,13 +137,40 @@ class AIActionExecutor:
                     False,
                     0,
                 )
+                _append_step_event(
+                    events,
+                    record_id=record.id,
+                    step=step,
+                    event_type="step_failed",
+                    state="failed",
+                    error_text=execution_error,
+                    duration_ms=_elapsed_ms(step_started),
+                )
+                record = await self._store.update_plan(
+                    record.id,
+                    plan_json=_plan_json_with_events(record.plan_json, events),
+                    reason=f"step_failed_{step.id}",
+                    bump_version=False,
+                ) or record
                 return await self._fail(record, outputs, execution_error)
 
             if isinstance(raw_output, ActionPause):
                 payload = dict(raw_output.payload or {})
                 payload["response_text"] = raw_output.response_text
+                _append_step_event(
+                    events,
+                    record_id=record.id,
+                    step=step,
+                    event_type=_waiting_event_type(raw_output.state),
+                    state=raw_output.state,
+                    message=step.display_text,
+                    duration_ms=_elapsed_ms(step_started),
+                )
                 await self._store.update_plan(
                     record.id,
+                    plan_json=_plan_json_with_events(record.plan_json, events),
+                    reason=f"{raw_output.state}_{step.id}",
+                    bump_version=False,
                     state=raw_output.state,
                     current_step_id=step.id,
                     step_outputs=outputs,
@@ -166,6 +211,21 @@ class AIActionExecutor:
                     False,
                     0,
                 )
+                _append_step_event(
+                    events,
+                    record_id=record.id,
+                    step=step,
+                    event_type="step_failed",
+                    state="failed",
+                    error_text=str(exc),
+                    duration_ms=_elapsed_ms(step_started),
+                )
+                record = await self._store.update_plan(
+                    record.id,
+                    plan_json=_plan_json_with_events(record.plan_json, events),
+                    reason=f"step_failed_{step.id}",
+                    bump_version=False,
+                ) or record
                 return await self._fail(record, outputs, str(exc))
 
             outputs[step.id] = output
@@ -184,16 +244,16 @@ class AIActionExecutor:
                 has_result_ref,
                 raw_output_bytes,
             )
-            events.append(
-                AIActionEvent(
-                    step_id=step.id,
-                    action=step.action,
-                    state="completed",
-                    result_count=result_count,
-                ).to_dict()
+            _append_step_event(
+                events,
+                record_id=record.id,
+                step=step,
+                event_type="step_completed",
+                state="completed",
+                result_count=result_count,
+                duration_ms=_elapsed_ms(step_started),
             )
-            plan_json = dict(record.plan_json or {})
-            plan_json["events"] = events[-20:]
+            plan_json = _plan_json_with_events(record.plan_json, events)
             await self._store.update_plan(
                 record.id,
                 plan_json=plan_json,
@@ -211,8 +271,25 @@ class AIActionExecutor:
     async def _complete(self, record: AIActionPlanRecord, outputs: dict[str, Any]) -> ActionExecutionResult:
         final = self._project_final(record, outputs)
         state = "running" if final.memory_context_lines else "done"
+        plan_json = dict(record.plan_json or {})
+        if state == "done":
+            events = _plan_events(plan_json)
+            if not any(str(event.get("type") or "") == "plan_completed" for event in events):
+                events.append(
+                    AIActionEvent(
+                        step_id="",
+                        action="plan",
+                        state="done",
+                        event_type="plan_completed",
+                        plan_id=record.id,
+                    ).to_dict()
+                )
+            plan_json["events"] = events[-20:]
         await self._store.update_plan(
             record.id,
+            plan_json=plan_json,
+            reason="plan_completed" if state == "done" else "",
+            bump_version=False,
             state=state,
             current_step_id="",
             step_outputs={**outputs, "final": dict(final.final_output or {})},
@@ -471,7 +548,67 @@ def _output_result_count(output: dict[str, Any]) -> int:
     result_ref = output.get("result_ref") if isinstance(output.get("result_ref"), dict) else {}
     if result_ref:
         return int(result_ref.get("result_count") or 0)
+    resolved_targets = 0
+    for key in ("contacts", "groups"):
+        values = output.get(key)
+        if isinstance(values, list):
+            resolved_targets += len(values)
+    if resolved_targets:
+        return resolved_targets
+    for key in ("items", "messages", "results"):
+        values = output.get(key)
+        if isinstance(values, list):
+            return len(values)
     return int(output.get("result_count") or 0)
+
+
+def _append_step_event(
+    events: list[dict[str, Any]],
+    *,
+    record_id: str,
+    step: Any,
+    event_type: str,
+    state: str,
+    message: str = "",
+    result_count: int = 0,
+    error_text: str = "",
+    duration_ms: int = 0,
+) -> None:
+    events.append(
+        AIActionEvent(
+            step_id=str(getattr(step, "id", "") or ""),
+            action=str(getattr(step, "action", "") or ""),
+            state=state,
+            event_type=event_type,
+            plan_id=record_id,
+            message=message,
+            result_count=result_count,
+            error_code=_error_code(error_text),
+            duration_ms=duration_ms,
+        ).to_dict()
+    )
+
+
+def _plan_json_with_events(plan_json: dict[str, Any], events: list[dict[str, Any]]) -> dict[str, Any]:
+    payload = dict(plan_json or {})
+    payload["events"] = events[-20:]
+    return payload
+
+
+def _waiting_event_type(state: str) -> str:
+    if state == "waiting_clarification":
+        return "step_waiting_clarification"
+    if state == "waiting_confirmation":
+        return "step_waiting_confirmation"
+    return "step_waiting"
+
+
+def _error_code(error_text: str) -> str:
+    text = str(error_text or "").strip()
+    if not text:
+        return ""
+    code = text.split(":", 1)[0].strip()
+    return code or "ACTION_FAILED"
 
 
 def _plan_events(plan_json: dict[str, Any]) -> list[dict[str, Any]]:

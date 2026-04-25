@@ -1236,6 +1236,18 @@ def test_ai_action_workflow_executes_atomic_memory_plan(tmp_path, monkeypatch) -
             assert plan is not None
             assert plan.step_outputs["search_memory"]["result_count"] == 1
             assert plan.step_outputs["summarize_memory"]["requires_responder"] is True
+            events = result.message_extra["ai_action"]["events"]
+            event_types = [event["type"] for event in events]
+            assert event_types == [
+                "step_started",
+                "step_completed",
+                "step_started",
+                "step_completed",
+                "step_started",
+                "step_completed",
+            ]
+            assert "讨论了项目排期" not in str(events)
+            assert [step["state"] for step in result.message_extra["ai_action"]["steps"]] == ["done", "done", "done"]
         finally:
             await db.close()
 
@@ -1838,6 +1850,8 @@ def test_ai_action_executor_times_out_action_and_marks_plan_failed(tmp_path, mon
             assert updated.state == "failed"
             assert updated.error_text == "ACTION_TIMEOUT: contact.resolve"
             assert updated.step_outputs == {}
+            assert [event["type"] for event in updated.plan_json["events"]] == ["step_started", "step_failed"]
+            assert updated.plan_json["events"][-1]["error_code"] == "ACTION_TIMEOUT"
         finally:
             await db.close()
 
@@ -1898,6 +1912,12 @@ def test_ai_action_executor_retries_safe_read_action_once(tmp_path, monkeypatch)
             assert updated is not None
             assert updated.state == "done"
             assert updated.step_outputs["resolve_contacts"]["contacts"][0]["contact_id"] == "user-1"
+            assert [event["type"] for event in updated.plan_json["events"]] == [
+                "step_started",
+                "step_completed",
+                "plan_completed",
+            ]
+            assert updated.plan_json["events"][1]["result_count"] == 1
         finally:
             await db.close()
 
@@ -1957,6 +1977,61 @@ def test_ai_action_executor_does_not_retry_side_effect_action(tmp_path, monkeypa
             assert updated is not None
             assert updated.state == "failed"
             assert updated.step_outputs == {}
+            assert [event["type"] for event in updated.plan_json["events"]] == ["step_started", "step_failed"]
+            assert updated.plan_json["events"][-1]["error_code"] == "ACTION_FAILED"
+        finally:
+            await db.close()
+
+    asyncio.run(scenario())
+
+
+def test_ai_action_executor_persists_waiting_confirmation_event(tmp_path, monkeypatch) -> None:
+    async def scenario() -> None:
+        db = Database(str(tmp_path / "actions.db"))
+        monkeypatch.setattr(action_store_module, "get_database", lambda: db)
+        store = AIActionStore()
+        registry = AtomicActionRegistry(
+            contact_resolver=ContactAliasResolver(db=_FakeContactDatabase([])),
+        )
+        executor = AIActionExecutor(registry=registry, store=store)
+        plan = AIActionPlan(
+            is_action=True,
+            goal="等待确认",
+            risk="high",
+            steps=(
+                AIActionStep(
+                    id="confirm_send",
+                    action="user.confirm",
+                    args={
+                        "risk": "high",
+                        "preview": {
+                            "operation": "发送消息",
+                            "target": "张三",
+                            "content": "我晚点到",
+                        },
+                    },
+                ),
+            ),
+            final={"type": "answer", "source": "$confirm_send"},
+        )
+        try:
+            record = await store.create_plan(
+                thread_id="thread-1",
+                goal=plan.goal,
+                plan_json=plan.to_dict(),
+                reason="test_waiting_event",
+            )
+            result = await executor.execute(record)
+            updated = await store.get_plan(record.id)
+
+            assert result.state == "waiting_confirmation"
+            assert updated is not None
+            assert updated.state == "waiting_confirmation"
+            assert [event["type"] for event in updated.plan_json["events"]] == [
+                "step_started",
+                "step_waiting_confirmation",
+            ]
+            assert updated.plan_json["events"][-1]["step_id"] == "confirm_send"
         finally:
             await db.close()
 

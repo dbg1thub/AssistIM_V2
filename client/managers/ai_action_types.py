@@ -199,19 +199,27 @@ class AIActionEvent:
     step_id: str
     action: str
     state: str
+    event_type: str = ""
+    plan_id: str = ""
     message: str = ""
     result_count: int = 0
     error_code: str = ""
+    duration_ms: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         payload = {
+            "type": self.event_type or self.state,
             "step_id": self.step_id,
             "action": self.action,
             "state": self.state,
             "message": self.message,
         }
+        if self.plan_id:
+            payload["plan_id"] = self.plan_id
         if self.result_count:
             payload["result_count"] = self.result_count
         if self.error_code:
             payload["error_code"] = self.error_code
+        if self.duration_ms:
+            payload["duration_ms"] = self.duration_ms
         return payload

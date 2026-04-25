@@ -926,11 +926,13 @@ class AIActionWorkflow:
     @staticmethod
     def _extra(record: AIActionPlanRecord, *, state: str | None = None) -> dict[str, Any]:
         plan_json = dict(record.plan_json or {})
+        events = _safe_action_events(plan_json)
+        step_states = _project_action_step_states(plan_json, events, record)
         steps = [
             {
                 "id": str(step.get("id") or ""),
                 "action": str(step.get("action") or ""),
-                "state": "done" if str(step.get("id") or "") in set(record.step_outputs or {}) else "pending",
+                "state": step_states.get(str(step.get("id") or ""), "pending"),
                 "display_text": str(step.get("display_text") or ""),
                 "explanation": str(step.get("explanation") or ""),
             }
@@ -947,8 +949,51 @@ class AIActionWorkflow:
             "plan_version": record.plan_version,
             "current_step_id": record.current_step_id,
             "steps": steps,
+            "events": events,
             "waiting": dict(record.waiting_payload or {}),
         }
+
+
+def _safe_action_events(plan_json: dict[str, Any]) -> list[dict[str, Any]]:
+    events = plan_json.get("events")
+    return [dict(item) for item in list(events or []) if isinstance(item, dict)]
+
+
+def _project_action_step_states(
+    plan_json: dict[str, Any],
+    events: list[dict[str, Any]],
+    record: AIActionPlanRecord,
+) -> dict[str, str]:
+    states: dict[str, str] = {}
+    for step in list(plan_json.get("steps") or []):
+        if isinstance(step, dict):
+            step_id = str(step.get("id") or "")
+            if step_id:
+                states[step_id] = "pending"
+
+    for step_id in set(record.step_outputs or {}):
+        if step_id in states:
+            states[step_id] = "done"
+
+    for event in events:
+        step_id = str(event.get("step_id") or "")
+        if step_id not in states:
+            continue
+        event_type = str(event.get("type") or "")
+        event_state = str(event.get("state") or "")
+        if event_type == "step_completed" or event_state == "completed":
+            states[step_id] = "done"
+        elif event_type == "step_failed" or event_state == "failed":
+            states[step_id] = "failed"
+        elif event_type.startswith("step_waiting") or event_state.startswith("waiting_"):
+            states[step_id] = event_state or "waiting"
+        elif event_type == "step_started" or event_state == "started":
+            states[step_id] = "running"
+
+    current_step_id = str(record.current_step_id or "")
+    if record.state == "running" and current_step_id in states and states[current_step_id] == "pending":
+        states[current_step_id] = "running"
+    return states
 
 
 def _parse_planner_json(raw: str) -> AIActionPlan | None:
