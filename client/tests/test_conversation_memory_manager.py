@@ -5,6 +5,8 @@ from datetime import datetime
 from client.managers.conversation_memory_manager import ConversationMemoryManager
 from client.managers.conversation_vector_index import DenseVector
 from client.models.ai_assistant import AIMessage, AIMessageRole
+from client.services.local_ai_memory_store import AIMemoryItem, AIMemorySearchResult
+from client.storage.database import Database
 
 
 class _FakeMemoryDatabase:
@@ -22,6 +24,7 @@ class _FakeMemoryDatabase:
         self.sessions = list(sessions or [])
         self.messages_by_session = dict(messages_by_session or {})
         self.search_results = dict(search_results or {})
+        self.app_state = {Database.AUTH_USER_ID_STATE_KEY: "test1"}
 
     async def list_conversation_memory_items(self, **kwargs):
         self.calls.append(dict(kwargs))
@@ -80,6 +83,9 @@ class _FakeMemoryDatabase:
                 matches.append(dict(item))
         return matches[:limit]
 
+    async def get_app_state(self, key: str):
+        return self.app_state.get(str(key or ""))
+
 
 class _FakeVectorIndex:
     model_id = "fake-embedding-model"
@@ -133,6 +139,91 @@ class _FakeSemanticPlanner:
             if normalized and normalized in blob:
                 matches.append(dict(item))
         return matches[:limit]
+
+
+class _FakeAIMemoryStore:
+    def __init__(self, items: list[AIMemoryItem] | None = None) -> None:
+        self.items = list(items or [])
+        self.search_calls: list[dict] = []
+
+    @classmethod
+    def from_db(cls, db: _FakeMemoryDatabase) -> "_FakeAIMemoryStore":
+        return cls([_ai_memory_item_from_summary(item) for item in db._normalized_items()])
+
+    async def search(
+        self,
+        *,
+        query_vector,
+        owner_scope: str,
+        embedding_model_id: str,
+        source_types=(),
+        limit: int = 8,
+        min_score: float = 0.0,
+    ):
+        call = {
+            "owner_scope": owner_scope,
+            "embedding_model_id": embedding_model_id,
+            "source_types": tuple(source_types or ()),
+            "limit": limit,
+            "min_score": min_score,
+        }
+        self.search_calls.append(call)
+        query = DenseVector(values=tuple(float(value) for value in tuple(query_vector or ())))
+        normalized_types = {str(value or "").strip() for value in list(source_types or ()) if str(value or "").strip()}
+        results: list[AIMemorySearchResult] = []
+        for item in self.items:
+            if item.owner_scope != owner_scope:
+                continue
+            if embedding_model_id and item.embedding_model_id != embedding_model_id:
+                continue
+            if normalized_types and item.source_type not in normalized_types:
+                continue
+            score = query.cosine(DenseVector(values=item.vector)) if query.values else 0.0
+            if score < float(min_score):
+                continue
+            results.append(AIMemorySearchResult(item=item, score=score))
+        results.sort(key=lambda result: (result.score, int(result.item.metadata.get("bucket_end_ts") or 0)), reverse=True)
+        return results[: int(limit or 8)]
+
+
+def _ai_memory_item_from_summary(item: dict) -> AIMemoryItem:
+    session_id = str(item.get("session_id") or "")
+    source_id = str(item.get("source_id") or "")
+    return AIMemoryItem(
+        owner_scope="account:test1",
+        source_type="conversation_summary",
+        source_id=f"conversation:{session_id}:{source_id}",
+        title=str(item.get("title") or ""),
+        text=str(item.get("text") or ""),
+        vector=tuple(float(value) for value in list(item.get("embedding_vector") or [])),
+        embedding_model_id=str(item.get("embedding_model") or "fake-embedding-model"),
+        metadata={
+            "session_id": session_id,
+            "legacy_source_type": "summary",
+            "legacy_source_id": source_id,
+            "source_version": int(item.get("source_version") or 1),
+            "bucket_start_ts": int(item.get("start_ts") or 0),
+            "bucket_end_ts": int(item.get("end_ts") or 0),
+            "keywords": list(item.get("keywords") or []),
+            "participants": list(item.get("participants") or []),
+        },
+    )
+
+
+def _make_memory_manager(
+    db: _FakeMemoryDatabase,
+    planner: _FakeSemanticPlanner,
+    *,
+    ai_memory_store: _FakeAIMemoryStore | None = None,
+) -> ConversationMemoryManager:
+    store = ai_memory_store or _FakeAIMemoryStore.from_db(db)
+    db.ai_memory_store = store
+    return ConversationMemoryManager(
+        db=db,
+        semantic_planner=planner,
+        vector_index=_FakeVectorIndex(),
+        ai_memory_store=store,
+    )
 
 
 @dataclass
@@ -210,7 +301,7 @@ def test_conversation_memory_manager_skips_regular_chat() -> None:
     async def scenario() -> None:
         db = _FakeMemoryDatabase([])
         planner = _FakeSemanticPlanner({"use_rag": False})
-        manager = ConversationMemoryManager(db=db, semantic_planner=planner, vector_index=_FakeVectorIndex())
+        manager = _make_memory_manager(db, planner)
 
         context = await manager.build_ai_chat_memory_context("帮我写一段介绍")
         dated_context = await manager.build_ai_chat_memory_context("今天帮我写一段介绍")
@@ -220,7 +311,6 @@ def test_conversation_memory_manager_skips_regular_chat() -> None:
         assert db.calls == []
 
     asyncio.run(scenario())
-
 
 def test_conversation_memory_manager_formats_history_context() -> None:
     async def scenario() -> None:
@@ -251,17 +341,17 @@ def test_conversation_memory_manager_formats_history_context() -> None:
             ]
         )
         planner = _FakeSemanticPlanner({"use_rag": False})
-        manager = ConversationMemoryManager(db=db, semantic_planner=planner, vector_index=_FakeVectorIndex())
+        manager = _make_memory_manager(db, planner)
 
-        context = await manager.build_ai_chat_memory_context("今天我和张三聊了什么？")
+        context = await manager.build_ai_chat_memory_context("我和张三聊了什么？")
 
         assert context.has_context is True
         assert len(context.lines) == 1
         assert "张三" in context.lines[0]
         assert "咖啡店" in context.lines[0]
-        assert db.calls[0]["source_type"] == "summary"
-        assert db.calls[0]["start_ts"] is not None
-        assert db.calls[0]["end_ts"] is not None
+        assert db.calls == []
+        assert db.ai_memory_store.search_calls[0]["source_types"] == ("conversation_summary",)
+        assert db.ai_memory_store.search_calls[0]["owner_scope"] == "account:test1"
 
     asyncio.run(scenario())
 
@@ -270,7 +360,7 @@ def test_conversation_memory_manager_requires_confirmation_for_ambiguous_history
     async def scenario() -> None:
         db = _FakeMemoryDatabase([])
         planner = _FakeSemanticPlanner({"use_rag": False})
-        manager = ConversationMemoryManager(db=db, semantic_planner=planner, vector_index=_FakeVectorIndex())
+        manager = _make_memory_manager(db, planner)
 
         context = await manager.build_ai_chat_memory_context("帮我看看聊天记录")
 
@@ -301,7 +391,7 @@ def test_conversation_memory_manager_searches_after_explicit_confirmation() -> N
             ]
         )
         planner = _FakeSemanticPlanner({"use_rag": False})
-        manager = ConversationMemoryManager(db=db, semantic_planner=planner, vector_index=_FakeVectorIndex())
+        manager = _make_memory_manager(db, planner)
         previous_messages = [
             AIMessage(
                 "a1",
@@ -317,7 +407,8 @@ def test_conversation_memory_manager_searches_after_explicit_confirmation() -> N
         assert context.requires_confirmation is False
         assert context.has_context is True
         assert "咖啡店" in context.lines[0]
-        assert db.calls[0]["source_type"] == "summary"
+        assert db.calls == []
+        assert db.ai_memory_store.search_calls[0]["source_types"] == ("conversation_summary",)
 
     asyncio.run(scenario())
 
@@ -352,7 +443,7 @@ def test_conversation_memory_manager_builds_rag_context_for_general_ai_chat() ->
             search_results={"__contacts__": [_contact("user-zhangsan", "张三")]},
         )
         planner = _FakeSemanticPlanner(_rag_plan("张三上次提到的咖啡店是哪家", participants=["张三"]))
-        manager = ConversationMemoryManager(db=db, semantic_planner=planner, vector_index=_FakeVectorIndex())
+        manager = _make_memory_manager(db, planner)
 
         context = await manager.build_rag_context_for_ai_chat("张三上次提到的咖啡店是哪家？")
 
@@ -360,8 +451,9 @@ def test_conversation_memory_manager_builds_rag_context_for_general_ai_chat() ->
         assert len(context.lines) == 1
         assert "张三" in context.lines[0]
         assert "咖啡店" in context.lines[0]
-        assert db.ann_calls[0]["source_type"] == "summary"
-        assert db.ann_calls[0]["ann_namespace"]
+        assert db.ann_calls == []
+        assert db.ai_memory_store.search_calls[0]["source_types"] == ("conversation_summary",)
+        assert db.ai_memory_store.search_calls[0]["embedding_model_id"] == "fake-embedding-model"
 
     asyncio.run(scenario())
 
@@ -409,7 +501,7 @@ def test_conversation_memory_manager_builds_reply_suggestion_rag_context_for_cur
             ]
         )
         planner = _FakeSemanticPlanner({"use_rag": False})
-        manager = ConversationMemoryManager(db=db, semantic_planner=planner, vector_index=_FakeVectorIndex())
+        manager = _make_memory_manager(db, planner)
 
         context = await manager.build_reply_suggestion_rag_context(
             "s1",
@@ -423,9 +515,9 @@ def test_conversation_memory_manager_builds_reply_suggestion_rag_context_for_cur
         assert "之前确认那家店周日人会少一点" in context.lines[0]
         assert "当前窗口内" not in context.lines[0]
         assert "另一个会话" not in context.lines[0]
-        assert db.ann_calls[0]["source_type"] == "summary"
-        assert db.ann_calls[0]["session_id"] == "s1"
-        assert db.ann_calls[0]["end_ts"] == _ts("2026-04-15T18:00:00")
+        assert db.ann_calls == []
+        assert db.ai_memory_store.search_calls[0]["source_types"] == ("conversation_summary",)
+        assert db.ai_memory_store.search_calls[0]["owner_scope"] == "account:test1"
 
     asyncio.run(scenario())
 
@@ -450,14 +542,15 @@ def test_conversation_memory_manager_inspects_ann_retrieval_for_ai_chat() -> Non
             search_results={"__contacts__": [_contact("user-zhangsan", "张三")]},
         )
         planner = _FakeSemanticPlanner(_rag_plan("张三上次提到的咖啡店是哪家", participants=["张三"]))
-        manager = ConversationMemoryManager(db=db, semantic_planner=planner, vector_index=_FakeVectorIndex())
+        manager = _make_memory_manager(db, planner)
 
         debug = await manager.inspect_rag_retrieval_for_ai_chat("张三上次提到的咖啡店是哪家？")
 
         assert debug["use_rag"] is True
-        assert debug["ann_namespace"]
-        assert debug["query_buckets"]
-        assert debug["ann_candidate_count"] == 1
+        assert debug["ann_namespace"] == ""
+        assert debug["query_buckets"] == []
+        assert debug["ann_candidate_count"] == 0
+        assert debug["vector_store_candidate_count"] == 1
         assert debug["top_candidates"][0]["source_id"] == "summary:1"
         assert "咖啡店" in debug["context_lines"][0]
 
@@ -482,7 +575,7 @@ def test_conversation_memory_manager_skips_rag_context_when_no_relevant_summary(
             ]
         )
         planner = _FakeSemanticPlanner({"use_rag": False})
-        manager = ConversationMemoryManager(db=db, semantic_planner=planner, vector_index=_FakeVectorIndex())
+        manager = _make_memory_manager(db, planner)
 
         context = await manager.build_rag_context_for_ai_chat("帮我写一段产品介绍")
 
@@ -514,7 +607,7 @@ def test_conversation_memory_manager_rag_reports_no_summary_without_raw_message_
             messages_by_session={"s1": [message]},
         )
         planner = _FakeSemanticPlanner(_rag_plan("张三上次提到的咖啡店是哪家", participants=[]))
-        manager = ConversationMemoryManager(db=db, semantic_planner=planner, vector_index=_FakeVectorIndex())
+        manager = _make_memory_manager(db, planner)
 
         context = await manager.build_rag_context_for_ai_chat("张三上次提到的咖啡店是哪家？")
 
@@ -556,7 +649,7 @@ def test_conversation_memory_manager_expands_contact_alias_terms_for_rag() -> No
             },
         )
         planner = _FakeSemanticPlanner(_rag_plan("小王上次提到的咖啡店是哪家", participants=["小王"]))
-        manager = ConversationMemoryManager(db=db, semantic_planner=planner, vector_index=_FakeVectorIndex())
+        manager = _make_memory_manager(db, planner)
 
         context = await manager.build_rag_context_for_ai_chat("小王上次提到的咖啡店是哪家？")
 
@@ -604,7 +697,7 @@ def test_conversation_memory_manager_rag_handles_multiple_contacts_separately() 
         planner = _FakeSemanticPlanner(
             _rag_plan("我和 test1、test3 聊过什么", participants=["test1", "test3"], relation="separate")
         )
-        manager = ConversationMemoryManager(db=db, semantic_planner=planner, vector_index=_FakeVectorIndex())
+        manager = _make_memory_manager(db, planner)
 
         context = await manager.build_rag_context_for_ai_chat("我和 test1、test3 聊过什么？")
 
@@ -653,7 +746,7 @@ def test_conversation_memory_manager_rag_handles_together_relation() -> None:
         planner = _FakeSemanticPlanner(
             _rag_plan("我和 test1、test3 一起聊过什么", participants=["test1", "test3"], relation="together")
         )
-        manager = ConversationMemoryManager(db=db, semantic_planner=planner, vector_index=_FakeVectorIndex())
+        manager = _make_memory_manager(db, planner)
 
         context = await manager.build_rag_context_for_ai_chat("我和 test1、test3 一起聊过什么？")
 
@@ -670,7 +763,7 @@ def test_conversation_memory_manager_rag_asks_when_participant_relation_unknown(
         planner = _FakeSemanticPlanner(
             _rag_plan("我和 test1、test3 聊过什么", participants=["test1", "test3"], relation="unknown")
         )
-        manager = ConversationMemoryManager(db=db, semantic_planner=planner, vector_index=_FakeVectorIndex())
+        manager = _make_memory_manager(db, planner)
 
         context = await manager.build_rag_context_for_ai_chat("我和 test1、test3 聊过什么？")
 
@@ -693,7 +786,7 @@ def test_conversation_memory_manager_rag_asks_when_contact_alias_is_ambiguous() 
             },
         )
         planner = _FakeSemanticPlanner(_rag_plan("我和小王聊过什么", participants=["小王"]))
-        manager = ConversationMemoryManager(db=db, semantic_planner=planner, vector_index=_FakeVectorIndex())
+        manager = _make_memory_manager(db, planner)
 
         context = await manager.build_rag_context_for_ai_chat("我和小王聊过什么？")
 
@@ -724,7 +817,7 @@ def test_conversation_memory_manager_merges_followup_user_query_for_rag() -> Non
             search_results={"__contacts__": [_contact("user-zhangsan", "张三")]},
         )
         planner = _FakeSemanticPlanner(_rag_plan("张三上次推荐的那家店在哪", participants=["张三"]))
-        manager = ConversationMemoryManager(db=db, semantic_planner=planner, vector_index=_FakeVectorIndex())
+        manager = _make_memory_manager(db, planner)
         previous_messages = [
             AIMessage("u1", "thread-1", AIMessageRole.USER, "张三上次推荐的那家店是什么？"),
             AIMessage("a1", "thread-1", AIMessageRole.ASSISTANT, "我先帮你想想。"),
@@ -762,7 +855,7 @@ def test_conversation_memory_manager_vector_layer_matches_similar_terms() -> Non
             search_results={"__contacts__": [_contact("user-zhangsan", "张三")]},
         )
         planner = _FakeSemanticPlanner(_rag_plan("张三上次提到的咖啡馆是哪家", participants=["张三"]))
-        manager = ConversationMemoryManager(db=db, semantic_planner=planner, vector_index=_FakeVectorIndex())
+        manager = _make_memory_manager(db, planner)
 
         context = await manager.build_rag_context_for_ai_chat("张三上次提到的咖啡馆是哪家？")
 

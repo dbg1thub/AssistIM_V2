@@ -14,6 +14,7 @@ from client.managers.conversation_rag_planner import (
     ConversationRagSemanticPlan,
 )
 from client.managers.conversation_vector_index import ConversationVectorIndex, DenseVector
+from client.services.local_ai_memory_store import get_local_ai_memory_store
 from client.storage.database import Database, get_database
 
 
@@ -62,6 +63,8 @@ class ConversationMemoryManager:
     RAG_RESULT_LIMIT = 4
     RAG_MESSAGE_RESULT_LIMIT = 2
     RAG_MIN_SCORE = 1.6
+    AI_MEMORY_MIN_SCORE = 0.0
+    AI_MEMORY_SOURCE_TYPE_SUMMARY = "conversation_summary"
     CONTEXT_RESULT_LIMIT = 6
     CONTEXT_LINE_MAX_CHARS = 260
     MESSAGE_FALLBACK_SESSION_LIMIT = 5
@@ -181,11 +184,13 @@ class ConversationMemoryManager:
         semantic_planner: Any | None = None,
         vector_index: ConversationVectorIndex | None = None,
         ann_index: ConversationAnnIndex | None = None,
+        ai_memory_store: Any | None = None,
     ) -> None:
         self._db = db or get_database()
         self._semantic_planner = semantic_planner or ConversationRagPlanner()
         self._vector_index = vector_index or ConversationVectorIndex()
         self._ann_index = ann_index or ConversationAnnIndex(model_id=self._vector_index.model_id)
+        self._ai_memory_store = ai_memory_store or get_local_ai_memory_store()
         self._item_vector_cache: dict[str, DenseVector] = {}
 
     async def inspect_rag_retrieval_for_ai_chat(
@@ -204,9 +209,11 @@ class ConversationMemoryManager:
             "rewritten_query": "",
             "terms": [],
             "alias_terms": [],
-            "ann_namespace": self._ann_index.namespace,
+            "ann_namespace": "",
             "query_buckets": [],
             "ann_candidate_count": 0,
+            "vector_store": "local_ai_memory",
+            "vector_store_candidate_count": 0,
             "top_candidates": [],
             "context_lines": [],
             "fallback_lines": [],
@@ -264,31 +271,18 @@ class ConversationMemoryManager:
             debug["confirmation_prompt"] = self._participant_confirmation_prompt(unresolved, ambiguous)
             return debug
 
-        list_ann_candidates = getattr(self._db, "list_conversation_memory_ann_candidates", None)
-        if list_ann_candidates is None:
-            return debug
         query_vector = await self._vector_index.encode_query(
             query=query_base,
             terms=query_terms,
             contact_aliases=(),
         )
-        ann_buckets = self._ann_index.buckets_for_vector(query_vector)
-        debug["query_buckets"] = [
-            {"band_index": bucket.band_index, "bucket_key": bucket.bucket_key}
-            for bucket in ann_buckets
-        ]
-        if not ann_buckets:
-            return debug
-
-        items = await list_ann_candidates(
-            ann_namespace=self._ann_index.namespace,
-            source_type="summary",
-            bucket_pairs=[(bucket.band_index, bucket.bucket_key) for bucket in ann_buckets],
+        items = await self._search_ai_summary_memory(
+            query_vector=query_vector,
             start_ts=plan.start_ts,
             end_ts=plan.end_ts,
             limit=self.RAG_CANDIDATE_LIMIT,
         )
-        debug["ann_candidate_count"] = len(items)
+        debug["vector_store_candidate_count"] = len(items)
         query = _MemoryQuery(
             text=query_base,
             start_ts=plan.start_ts,
@@ -354,9 +348,6 @@ class ConversationMemoryManager:
                 pending_query_text=plan.memory_query or plan.user_goal or text,
             )
 
-        list_ann_candidates = getattr(self._db, "list_conversation_memory_ann_candidates", None)
-        if list_ann_candidates is None:
-            return ConversationMemoryContext(lines=(), query_kind=plan.query_kind)
         query_base = " ".join(str(plan.memory_query or plan.user_goal or text).split())
         query_terms = self._query_terms_from_plan(plan, resolved)
         query_vector = await self._vector_index.encode_query(
@@ -364,21 +355,12 @@ class ConversationMemoryManager:
             terms=query_terms,
             contact_aliases=(),
         )
-        ann_buckets = self._ann_index.buckets_for_vector(query_vector)
-        if not ann_buckets:
-            return ConversationMemoryContext(lines=(), query_kind=plan.query_kind)
-        try:
-            items = await list_ann_candidates(
-                ann_namespace=self._ann_index.namespace,
-                source_type="summary",
-                bucket_pairs=[(bucket.band_index, bucket.bucket_key) for bucket in ann_buckets],
-                start_ts=plan.start_ts,
-                end_ts=plan.end_ts,
-                limit=self.RAG_CANDIDATE_LIMIT,
-            )
-        except Exception:
-            logger.exception("Failed to query local RAG memory context")
-            return ConversationMemoryContext(lines=(), query_kind=plan.query_kind)
+        items = await self._search_ai_summary_memory(
+            query_vector=query_vector,
+            start_ts=plan.start_ts,
+            end_ts=plan.end_ts,
+            limit=self.RAG_CANDIDATE_LIMIT,
+        )
 
         query = _MemoryQuery(
             text=query_base,
@@ -414,10 +396,6 @@ class ConversationMemoryManager:
         if not normalized_session_id or not text:
             return ConversationMemoryContext(lines=(), query_kind="reply_suggestion_rag")
 
-        list_ann_candidates = getattr(self._db, "list_conversation_memory_ann_candidates", None)
-        if not callable(list_ann_candidates):
-            return ConversationMemoryContext(lines=(), query_kind="reply_suggestion_rag")
-
         query_terms = tuple(self._tokenize_for_rag(text)[:16])
         try:
             query_vector = await self._vector_index.encode_query(
@@ -429,37 +407,15 @@ class ConversationMemoryManager:
             logger.exception("Failed to encode reply-suggestion RAG query")
             return ConversationMemoryContext(lines=(), query_kind="reply_suggestion_rag")
 
-        ann_buckets = self._ann_index.buckets_for_vector(query_vector)
-        if not ann_buckets:
-            return ConversationMemoryContext(lines=(), query_kind="reply_suggestion_rag")
-
         normalized_max_end_ts = int(max_end_ts) if max_end_ts is not None else None
         normalized_min_start_ts = int(min_start_ts) if min_start_ts is not None else None
-        try:
-            items = await list_ann_candidates(
-                ann_namespace=self._ann_index.namespace,
-                source_type="summary",
-                session_id=normalized_session_id,
-                bucket_pairs=[(bucket.band_index, bucket.bucket_key) for bucket in ann_buckets],
-                start_ts=normalized_min_start_ts,
-                end_ts=normalized_max_end_ts,
-                limit=max(1, min(200, int(candidate_limit or 80))),
-            )
-        except Exception:
-            logger.exception("Failed to query reply-suggestion RAG summaries")
-            return ConversationMemoryContext(lines=(), query_kind="reply_suggestion_rag")
-
-        items = [
-            item
-            for item in list(items or [])
-            if str(item.get("session_id") or "").strip() == normalized_session_id
-        ]
-        if normalized_max_end_ts is not None:
-            items = [
-                item
-                for item in items
-                if int(item.get("end_ts") or 0) > 0 and int(item.get("end_ts") or 0) <= normalized_max_end_ts
-            ]
+        items = await self._search_ai_summary_memory(
+            query_vector=query_vector,
+            session_id=normalized_session_id,
+            start_ts=normalized_min_start_ts,
+            end_ts=normalized_max_end_ts,
+            limit=max(1, min(200, int(candidate_limit or 80))),
+        )
         query = _MemoryQuery(
             text=text,
             start_ts=normalized_min_start_ts,
@@ -475,6 +431,125 @@ class ConversationMemoryManager:
             if score >= self.RAG_MIN_SCORE
         ][:limit]
         return ConversationMemoryContext(lines=tuple(line for line in lines if line), query_kind=query.query_kind)
+
+    async def _search_ai_summary_memory(
+        self,
+        *,
+        query_vector: DenseVector,
+        limit: int,
+        start_ts: int | None = None,
+        end_ts: int | None = None,
+        session_id: str = "",
+    ) -> list[dict[str, Any]]:
+        if self._ai_memory_store is None:
+            return []
+        owner_scope = await self._ai_memory_owner_scope()
+        if not owner_scope:
+            return []
+        normalized_limit = max(1, int(limit or self.RAG_CANDIDATE_LIMIT))
+        search_limit = max(normalized_limit, min(500, normalized_limit * 4))
+        try:
+            results = await self._ai_memory_store.search(
+                query_vector=query_vector.values,
+                owner_scope=owner_scope,
+                source_types=(self.AI_MEMORY_SOURCE_TYPE_SUMMARY,),
+                embedding_model_id=self._vector_index.model_id,
+                limit=search_limit,
+                min_score=self.AI_MEMORY_MIN_SCORE,
+            )
+        except Exception:
+            logger.exception("Failed to query local AI memory vector store")
+            return []
+        items: list[dict[str, Any]] = []
+        for result in list(results or []):
+            item = self._ai_memory_result_to_summary_item(result)
+            if item is None:
+                continue
+            if not self._summary_item_matches_bounds(
+                item,
+                start_ts=start_ts,
+                end_ts=end_ts,
+                session_id=session_id,
+            ):
+                continue
+            items.append(item)
+            if len(items) >= normalized_limit:
+                break
+        return items
+
+    async def _ai_memory_owner_scope(self) -> str:
+        get_app_state = getattr(self._db, "get_app_state", None)
+        if not callable(get_app_state):
+            return ""
+        try:
+            user_id = str(await get_app_state(Database.AUTH_USER_ID_STATE_KEY) or "").strip()
+        except Exception:
+            logger.exception("Failed to resolve current account for local AI memory search")
+            return ""
+        if not user_id:
+            return ""
+        return f"account:{user_id}"
+
+    def _ai_memory_result_to_summary_item(self, result: Any) -> dict[str, Any] | None:
+        item = getattr(result, "item", None)
+        if item is None:
+            return None
+        metadata = dict(getattr(item, "metadata", {}) or {})
+        try:
+            start_ts = int(metadata.get("bucket_start_ts") or metadata.get("start_ts") or 0)
+            end_ts = int(metadata.get("bucket_end_ts") or metadata.get("end_ts") or start_ts)
+        except (TypeError, ValueError):
+            start_ts = 0
+            end_ts = 0
+        keywords = metadata.get("keywords")
+        if not isinstance(keywords, list):
+            keywords = []
+        participants = metadata.get("participants")
+        if not isinstance(participants, list):
+            participants = []
+        source_id = str(metadata.get("legacy_source_id") or getattr(item, "source_id", "") or "").strip()
+        vector_values = tuple(getattr(item, "vector", ()) or ())
+        return {
+            "session_id": str(metadata.get("session_id") or ""),
+            "source_type": str(metadata.get("legacy_source_type") or "summary"),
+            "source_id": source_id,
+            "source_version": int(metadata.get("source_version") or 1),
+            "start_ts": start_ts,
+            "end_ts": end_ts,
+            "title": str(getattr(item, "title", "") or ""),
+            "text": str(getattr(item, "text", "") or ""),
+            "keywords": [str(value or "").strip() for value in keywords if str(value or "").strip()],
+            "participants": [str(value or "").strip() for value in participants if str(value or "").strip()],
+            "embedding_id": str(metadata.get("embedding_id") or ""),
+            "embedding_model": str(getattr(item, "embedding_model_id", "") or ""),
+            "embedding_content_hash": str(getattr(item, "content_hash", "") or ""),
+            "embedding_dim": len(vector_values),
+            "embedding_vector": [float(value) for value in vector_values],
+            "embedding_updated_at": int(getattr(item, "updated_at", 0) or 0),
+            "ann_match_count": 0,
+            "vector_store_score": float(getattr(result, "score", 0.0) or 0.0),
+            "created_at": int(getattr(item, "created_at", 0) or 0),
+            "updated_at": int(getattr(item, "updated_at", 0) or 0),
+        }
+
+    @staticmethod
+    def _summary_item_matches_bounds(
+        item: dict[str, Any],
+        *,
+        start_ts: int | None,
+        end_ts: int | None,
+        session_id: str = "",
+    ) -> bool:
+        normalized_session_id = str(session_id or "").strip()
+        if normalized_session_id and str(item.get("session_id") or "").strip() != normalized_session_id:
+            return False
+        item_start_ts = int(item.get("start_ts") or 0)
+        item_end_ts = int(item.get("end_ts") or item_start_ts or 0)
+        if start_ts is not None and item_end_ts < int(start_ts or 0):
+            return False
+        if end_ts is not None and item_start_ts > int(end_ts or 0):
+            return False
+        return True
 
     async def _context_lines_for_rag_items(
         self,
@@ -760,32 +835,30 @@ class ConversationMemoryManager:
             )
         if not query.query_kind:
             return ConversationMemoryContext(lines=(), query_kind="")
-        list_items = getattr(self._db, "list_conversation_memory_items", None)
-        if list_items is None:
-            return ConversationMemoryContext(lines=(), query_kind=query.query_kind)
         try:
-            items = await list_items(
-                source_type="summary",
-                start_ts=query.start_ts,
-                end_ts=query.end_ts,
-                limit=self.SEARCH_CANDIDATE_LIMIT,
+            query_vector = await self._vector_index.encode_query(
+                query=query.text,
+                terms=query.terms,
+                contact_aliases=(),
             )
         except Exception:
-            logger.exception("Failed to query local conversation memory")
+            logger.exception("Failed to encode local conversation memory query")
             return ConversationMemoryContext(lines=(), query_kind=query.query_kind)
+        items = await self._search_ai_summary_memory(
+            query_vector=query_vector,
+            start_ts=query.start_ts,
+            end_ts=query.end_ts,
+            limit=self.SEARCH_CANDIDATE_LIMIT,
+        )
 
         ranked = self._rank_items(items, query)
         if query.terms and not ranked and len(items) >= self.SEARCH_CANDIDATE_LIMIT:
-            try:
-                expanded_items = await list_items(
-                    source_type="summary",
-                    start_ts=query.start_ts,
-                    end_ts=query.end_ts,
-                    limit=self.EXPANDED_SEARCH_CANDIDATE_LIMIT,
-                )
-            except Exception:
-                logger.exception("Failed to query expanded local conversation memory")
-                expanded_items = []
+            expanded_items = await self._search_ai_summary_memory(
+                query_vector=query_vector,
+                start_ts=query.start_ts,
+                end_ts=query.end_ts,
+                limit=self.EXPANDED_SEARCH_CANDIDATE_LIMIT,
+            )
             if len(expanded_items) > len(items):
                 ranked = self._rank_items(expanded_items, query)
         lines = tuple(self._format_item(item) for _score, item in ranked[: self.CONTEXT_RESULT_LIMIT])
@@ -810,32 +883,30 @@ class ConversationMemoryManager:
             terms=tuple(str(term or "").strip().lower() for term in list(terms or []) if str(term or "").strip()),
             query_kind=str(query_kind or "history").strip() or "history",
         )
-        list_items = getattr(self._db, "list_conversation_memory_items", None)
-        if list_items is None:
-            return ConversationMemoryContext(lines=(), query_kind=query.query_kind)
         try:
-            items = await list_items(
-                source_type="summary",
-                start_ts=query.start_ts,
-                end_ts=query.end_ts,
-                limit=self.SEARCH_CANDIDATE_LIMIT,
+            query_vector = await self._vector_index.encode_query(
+                query=query.text,
+                terms=query.terms,
+                contact_aliases=participant_aliases or (),
             )
         except Exception:
-            logger.exception("Failed to query local conversation memory")
+            logger.exception("Failed to encode structured local conversation memory query")
             return ConversationMemoryContext(lines=(), query_kind=query.query_kind)
+        items = await self._search_ai_summary_memory(
+            query_vector=query_vector,
+            start_ts=query.start_ts,
+            end_ts=query.end_ts,
+            limit=self.SEARCH_CANDIDATE_LIMIT,
+        )
 
         ranked = self._rank_items(items, query)
         if query.terms and not ranked and len(items) >= self.SEARCH_CANDIDATE_LIMIT:
-            try:
-                expanded_items = await list_items(
-                    source_type="summary",
-                    start_ts=query.start_ts,
-                    end_ts=query.end_ts,
-                    limit=self.EXPANDED_SEARCH_CANDIDATE_LIMIT,
-                )
-            except Exception:
-                logger.exception("Failed to query expanded local conversation memory")
-                expanded_items = []
+            expanded_items = await self._search_ai_summary_memory(
+                query_vector=query_vector,
+                start_ts=query.start_ts,
+                end_ts=query.end_ts,
+                limit=self.EXPANDED_SEARCH_CANDIDATE_LIMIT,
+            )
             if len(expanded_items) > len(items):
                 ranked = self._rank_items(expanded_items, query)
         lines = tuple(self._format_item(item) for _score, item in ranked[: self.CONTEXT_RESULT_LIMIT])
