@@ -55,6 +55,47 @@ def test_business_perf_metadata_is_count_only() -> None:
     assert '"prompt_chars": len(prompt)' in prompt_builder
     assert '"anchor_group_size": len(anchor_group)' in prompt_builder
     assert '"recent_context_count": recent_context_count' in prompt_builder
-    assert '"has_summary": bool(background_lines)' in prompt_builder
+    assert '"has_summary": bool(background_lines or related_history_lines)' in prompt_builder
     assert "[ai-perf] translation_request" in assist_manager
     assert "[ai-perf] reply_suggestion_request" in assist_manager
+
+
+def test_ai_action_perf_logs_are_registered() -> None:
+    workflow = Path("client/managers/ai_action_workflow.py").read_text(encoding="utf-8")
+    executor = Path("client/managers/ai_action_executor.py").read_text(encoding="utf-8")
+
+    assert "[ai-perf] ai_action_workflow_finished" in workflow
+    assert "planner_ms=%s" in workflow
+    assert "normalizer_ms=%s" in workflow
+    assert "optimizer_ms=%s" in workflow
+    assert "resource_check_ms=%s" in workflow
+    assert "executor_ms=%s" in workflow
+    assert "total_ms=%s" in workflow
+    assert "step_count=%s" in workflow
+
+    assert "[ai-perf] ai_action_step_finished" in executor
+    assert "duration_ms=%s" in executor
+    assert "result_count=%s" in executor
+    assert "result_ref=%s" in executor
+    assert "output_bytes=%s" in executor
+
+
+def test_ai_action_perf_logs_do_not_print_prompt_or_result_content() -> None:
+    paths = [
+        Path("client/managers/ai_action_workflow.py"),
+        Path("client/managers/ai_action_executor.py"),
+    ]
+    combined = "\n".join(path.read_text(encoding="utf-8") for path in paths)
+
+    forbidden_fragments = [
+        "user_text=%s",
+        "normalized_text=%s",
+        "prompt=%s",
+        "prompt_text=%s",
+        "raw_output=%s",
+        "context_lines=%s",
+        "memory_context_lines=%s",
+        "step_output=%s",
+    ]
+    for fragment in forbidden_fragments:
+        assert fragment not in combined

@@ -90,6 +90,7 @@ class AIActionExecutor:
             handler = spec.handler
             if handler is None:
                 return await self._fail(record, outputs, f"ACTION_NOT_FOUND: {step.action}")
+            step_started = time.perf_counter()
             try:
                 raw_output = await handler(
                     resolved_args,
@@ -103,6 +104,18 @@ class AIActionExecutor:
                 )
             except Exception:
                 logger.exception("AI action step failed: %s", step.action)
+                logger.info(
+                    "[ai-perf] ai_action_step_finished plan_id=%s step_id=%s action=%s state=%s "
+                    "duration_ms=%s result_count=%s result_ref=%s output_bytes=%s",
+                    record.id,
+                    step.id,
+                    step.action,
+                    "failed",
+                    _elapsed_ms(step_started),
+                    0,
+                    False,
+                    0,
+                )
                 return await self._fail(record, outputs, f"ACTION_FAILED: {step.action}")
 
             if isinstance(raw_output, ActionPause):
@@ -115,6 +128,18 @@ class AIActionExecutor:
                     step_outputs=outputs,
                     waiting_payload=payload,
                 )
+                logger.info(
+                    "[ai-perf] ai_action_step_finished plan_id=%s step_id=%s action=%s state=%s "
+                    "duration_ms=%s result_count=%s result_ref=%s output_bytes=%s",
+                    record.id,
+                    step.id,
+                    step.action,
+                    raw_output.state,
+                    _elapsed_ms(step_started),
+                    0,
+                    False,
+                    0,
+                )
                 return ActionExecutionResult(
                     state=raw_output.state,
                     response_text=raw_output.response_text,
@@ -122,18 +147,46 @@ class AIActionExecutor:
                 )
 
             try:
-                output = await self._enforce_output_size(record, step.id, spec, _validate_output(raw_output))
+                validated_output = _validate_output(raw_output)
+                raw_output_bytes = _json_size(validated_output)
+                output = await self._enforce_output_size(record, step.id, spec, validated_output)
             except ValueError as exc:
+                logger.info(
+                    "[ai-perf] ai_action_step_finished plan_id=%s step_id=%s action=%s state=%s "
+                    "duration_ms=%s result_count=%s result_ref=%s output_bytes=%s",
+                    record.id,
+                    step.id,
+                    step.action,
+                    "failed",
+                    _elapsed_ms(step_started),
+                    0,
+                    False,
+                    0,
+                )
                 return await self._fail(record, outputs, str(exc))
 
             outputs[step.id] = output
             _update_compat_slots(record.plan_json, step.id, output)
+            result_count = _output_result_count(output)
+            has_result_ref = isinstance(output.get("result_ref"), dict)
+            logger.info(
+                "[ai-perf] ai_action_step_finished plan_id=%s step_id=%s action=%s state=%s "
+                "duration_ms=%s result_count=%s result_ref=%s output_bytes=%s",
+                record.id,
+                step.id,
+                step.action,
+                "completed",
+                _elapsed_ms(step_started),
+                result_count,
+                has_result_ref,
+                raw_output_bytes,
+            )
             events.append(
                 AIActionEvent(
                     step_id=step.id,
                     action=step.action,
                     state="completed",
-                    result_count=int(output.get("result_count") or 0) if isinstance(output, dict) else 0,
+                    result_count=result_count,
                 ).to_dict()
             )
             plan_json = dict(record.plan_json or {})
@@ -308,6 +361,17 @@ def _parse_path_part(part: str) -> tuple[str, list[int]]:
 
 def _json_size(value: Any) -> int:
     return len(json.dumps(value, ensure_ascii=False, default=str).encode("utf-8"))
+
+
+def _elapsed_ms(started_at: float) -> int:
+    return max(0, int((time.perf_counter() - started_at) * 1000))
+
+
+def _output_result_count(output: dict[str, Any]) -> int:
+    result_ref = output.get("result_ref") if isinstance(output.get("result_ref"), dict) else {}
+    if result_ref:
+        return int(result_ref.get("result_count") or 0)
+    return int(output.get("result_count") or 0)
 
 
 def _plan_events(plan_json: dict[str, Any]) -> list[dict[str, Any]]:

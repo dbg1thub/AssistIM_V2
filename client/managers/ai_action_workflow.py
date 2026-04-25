@@ -407,6 +407,32 @@ class AIActionWorkflow:
         text: str,
         has_attachments: bool = False,
     ) -> AIActionTurnResult:
+        total_started = time.perf_counter()
+        planner_ms = 0
+        normalizer_ms = 0
+        optimizer_ms = 0
+        resource_check_ms = 0
+        executor_ms = 0
+
+        def log_perf(result_state: str, *, handled: bool, plan: AIActionPlan | None = None) -> None:
+            logger.info(
+                "[ai-perf] ai_action_workflow_finished thread_id=%s handled=%s state=%s pending=%s "
+                "planner_ms=%s normalizer_ms=%s optimizer_ms=%s resource_check_ms=%s executor_ms=%s "
+                "total_ms=%s step_count=%s action=%s",
+                thread_id,
+                handled,
+                result_state,
+                pending is not None,
+                planner_ms,
+                normalizer_ms,
+                optimizer_ms,
+                resource_check_ms,
+                executor_ms,
+                _elapsed_ms(total_started),
+                len(plan.steps) if plan is not None else 0,
+                _compat_action(plan) if plan is not None else "",
+            )
+
         normalized_text = _normalize_text(text)
         if not normalized_text:
             logger.info(
@@ -433,7 +459,9 @@ class AIActionWorkflow:
             bool(pending),
             len(normalized_text),
         )
+        planner_started = time.perf_counter()
         raw_plan = await self._build_plan(normalized_text, pending_state=pending_state)
+        planner_ms = _elapsed_ms(planner_started)
         logger.info(
             "[ai-diag] ai_action_workflow_planner_result thread_id=%s is_action=%s steps=%s missing_slots=%s action=%s",
             thread_id,
@@ -445,22 +473,34 @@ class AIActionWorkflow:
         if pending is not None:
             control = await self._handle_planner_control(pending, raw_plan)
             if control is not None:
+                log_perf(str(control.message_extra.get("ai_action", {}).get("state") or "pending_control"), handled=True, plan=raw_plan)
                 return control
 
         if not raw_plan.is_action:
+            log_perf("not_action", handled=False, plan=raw_plan)
             return AIActionTurnResult(handled=False)
 
+        normalizer_started = time.perf_counter()
         normalized_plan = self._normalizer.normalize(raw_plan, user_text=normalized_text)
+        normalizer_ms = _elapsed_ms(normalizer_started)
         if not normalized_plan.is_action:
+            log_perf("normalized_not_action", handled=False, plan=normalized_plan)
             return AIActionTurnResult(handled=False)
         if normalized_plan.missing_slots:
+            log_perf("waiting_clarification", handled=True, plan=normalized_plan)
             return await self._create_clarification(thread_id, normalized_plan)
         if not normalized_plan.steps:
+            log_perf("done", handled=True, plan=normalized_plan)
             return await self._disabled_legacy_action(thread_id, normalized_plan)
 
+        optimizer_started = time.perf_counter()
         optimized_plan, optimize_reason = self._optimizer.optimize(normalized_plan)
+        optimizer_ms = _elapsed_ms(optimizer_started)
+        resource_started = time.perf_counter()
         resource = self._resource_manager.check_plan(optimized_plan)
+        resource_check_ms = _elapsed_ms(resource_started)
         if not resource.allowed:
+            log_perf("waiting_clarification", handled=True, plan=optimized_plan)
             return await self._create_resource_clarification(thread_id, optimized_plan, resource.response_text)
 
         plan_json = optimized_plan.to_dict()
@@ -479,7 +519,11 @@ class AIActionWorkflow:
                 plan_json=plan_json,
                 reason=optimize_reason,
             ) or record
-        return await self._execute_to_turn(record)
+        executor_started = time.perf_counter()
+        turn = await self._execute_to_turn(record)
+        executor_ms = _elapsed_ms(executor_started)
+        log_perf(str(turn.message_extra.get("ai_action", {}).get("state") or "done"), handled=turn.handled, plan=optimized_plan)
+        return turn
 
     async def finish_streamed_action(self, extra: dict[str, Any] | None, *, content: str, status: str) -> None:
         data = dict((extra or {}).get("ai_action") or {})
@@ -884,3 +928,7 @@ def _clip(value: str, max_chars: int) -> str:
     if len(text) <= max_chars:
         return text
     return text[:max_chars].rstrip() + "..."
+
+
+def _elapsed_ms(started_at: float) -> int:
+    return max(0, int((time.perf_counter() - started_at) * 1000))
