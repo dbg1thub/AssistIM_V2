@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import dataclass
 from typing import Any
 
 from client.core import logging
@@ -18,8 +19,10 @@ class AtomicActionRegistry:
         self,
         *,
         contact_resolver: Any,
+        memory_manager: Any | None = None,
     ) -> None:
         self._contact_resolver = contact_resolver
+        self._memory_manager = memory_manager
         self._actions: dict[str, AtomicActionSpec] = {}
         self._register_defaults()
 
@@ -41,6 +44,29 @@ class AtomicActionRegistry:
                 handler=self._contact_resolve,
                 max_targets=5,
                 allow_batch=True,
+            )
+        )
+        self._register(
+            AtomicActionSpec(
+                name="memory.search",
+                kind="read",
+                risk_level="low",
+                handler=self._memory_search,
+                allow_all_history=True,
+                allow_cross_session=True,
+                max_output_json_bytes=32768,
+            )
+        )
+        self._register(
+            AtomicActionSpec(
+                name="memory.summarize",
+                kind="read",
+                risk_level="low",
+                handler=self._memory_summarize,
+                allow_all_history=True,
+                allow_cross_session=True,
+                max_input_bytes=32768,
+                max_output_json_bytes=32768,
             )
         )
         self._register(
@@ -78,6 +104,57 @@ class AtomicActionRegistry:
                 idempotency_required=True,
             )
         )
+
+    async def _memory_search(self, args: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
+        del context
+        payload = _MemorySearchInput.from_args(args)
+        manager = self._require_memory_manager()
+        search = getattr(manager, "search_for_action", None)
+        if not callable(search):
+            raise RuntimeError("MEMORY_SEARCH_UNAVAILABLE")
+        raw_output = await search(
+            question=payload.question,
+            participants=payload.participants,
+            participant_match=payload.participant_match,
+            time_scope=payload.time_scope,
+            keywords=payload.keywords,
+            limit=payload.limit,
+        )
+        return _normalize_memory_search_output(raw_output, question=payload.question)
+
+    async def _memory_summarize(self, args: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
+        payload = await _MemorySummarizeInput.from_args(args, store=context.get("store"))
+        result_count = int(payload.source.get("result_count") or 0)
+        context_lines = [
+            str(item or "").strip()
+            for item in list(payload.source.get("context_lines") or [])
+            if str(item or "").strip()
+        ]
+        if not context_lines and isinstance(payload.source.get("results"), list):
+            context_lines = [
+                _memory_result_context_line(dict(item))
+                for item in payload.source["results"]
+                if isinstance(item, dict)
+            ]
+            context_lines = [line for line in context_lines if line]
+        if not context_lines:
+            question = payload.question or str(payload.source.get("question") or "")
+            text = f"没有找到相关记录。用户问题：{question or '本地记忆查询'}。"
+            return {"text": text, "result_count": result_count, "status": "empty"}
+        return {
+            "requires_responder": True,
+            "context_lines": context_lines,
+            "question": payload.question,
+            "result_count": result_count or len(context_lines),
+            "status": "ready",
+        }
+
+    def _require_memory_manager(self) -> Any:
+        if self._memory_manager is None:
+            from client.managers.conversation_memory_manager import ConversationMemoryManager
+
+            self._memory_manager = ConversationMemoryManager()
+        return self._memory_manager
 
     async def _contact_resolve(self, args: dict[str, Any], context: dict[str, Any]) -> dict[str, Any] | ActionPause:
         queries = _clean_list(args.get("queries"))
@@ -203,6 +280,108 @@ class AtomicActionRegistry:
             "当前版本还没有接入真实发送能力，所以不会实际发送。"
         )
         return {"status": "disabled", "text": text, "target": target, "content_chars": len(content)}
+
+
+@dataclass(frozen=True, slots=True)
+class _MemorySearchInput:
+    question: str
+    participants: list[Any]
+    participant_match: str
+    time_scope: dict[str, Any]
+    keywords: list[str]
+    limit: int
+
+    @classmethod
+    def from_args(cls, args: dict[str, Any]) -> "_MemorySearchInput":
+        question = " ".join(str(args.get("question") or "").split())
+        keywords = _clean_list(args.get("keywords"))
+        if not question and keywords:
+            question = " ".join(keywords)
+        participant_match = str(args.get("participant_match") or "any").strip().lower() or "any"
+        if participant_match not in {"any", "all", "direct_only", "group_only"}:
+            participant_match = "any"
+        time_scope = args.get("time_scope") if isinstance(args.get("time_scope"), dict) else {}
+        time_type = str(time_scope.get("type") or "all_history").strip().lower() or "all_history"
+        normalized_time_scope = dict(time_scope)
+        normalized_time_scope["type"] = time_type
+        try:
+            limit = max(1, min(50, int(args.get("limit") or args.get("max_items") or 8)))
+        except (TypeError, ValueError):
+            limit = 8
+        return cls(
+            question=question,
+            participants=_clean_participants(args.get("participants")),
+            participant_match=participant_match,
+            time_scope=normalized_time_scope,
+            keywords=keywords,
+            limit=limit,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class _MemorySummarizeInput:
+    source: dict[str, Any]
+    question: str
+    style: str
+
+    @classmethod
+    async def from_args(cls, args: dict[str, Any], *, store: Any) -> "_MemorySummarizeInput":
+        source = args.get("source")
+        if isinstance(source, dict) and "result_ref" in source:
+            result_ref = dict(source.get("result_ref") or {})
+            result_id = str(result_ref.get("id") or "").strip()
+            get_temp_result = getattr(store, "get_temp_result", None)
+            if result_id and callable(get_temp_result):
+                record = await get_temp_result(result_id)
+                if record is not None:
+                    source = dict(getattr(record, "payload", {}) or {})
+        if not isinstance(source, dict):
+            source = {}
+        return cls(
+            source=dict(source),
+            question=" ".join(str(args.get("question") or "").split()),
+            style=" ".join(str(args.get("style") or "summary").split()) or "summary",
+        )
+
+
+def _clean_participants(value: object) -> list[Any]:
+    raw = value if isinstance(value, list) else ([value] if value else [])
+    participants: list[Any] = []
+    for item in raw:
+        if isinstance(item, dict):
+            participants.append(dict(item))
+            continue
+        text = " ".join(str(item or "").split()).strip(" ，,。？！?;；:：")
+        if text:
+            participants.append(text)
+    return participants[:20]
+
+
+def _normalize_memory_search_output(value: Any, *, question: str) -> dict[str, Any]:
+    output = dict(value or {}) if isinstance(value, dict) else {}
+    results = [dict(item) for item in list(output.get("results") or []) if isinstance(item, dict)]
+    context_lines = [
+        str(item or "").strip()
+        for item in list(output.get("context_lines") or [])
+        if str(item or "").strip()
+    ]
+    preview = [dict(item) for item in list(output.get("preview") or results[:3]) if isinstance(item, dict)]
+    return {
+        "results": results,
+        "preview": preview[:8],
+        "context_lines": context_lines,
+        "result_count": int(output.get("result_count") or len(results) or len(context_lines)),
+        "truncated": bool(output.get("truncated")),
+        "question": question,
+    }
+
+
+def _memory_result_context_line(item: dict[str, Any]) -> str:
+    title = str(item.get("title") or "").strip()
+    text = str(item.get("text_preview") or item.get("text") or "").strip()
+    if title and text:
+        return f"{title}；摘要：{text}"
+    return text or title
 
 
 def _clean_list(value: object) -> list[str]:

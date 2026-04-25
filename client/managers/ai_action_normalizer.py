@@ -18,8 +18,6 @@ class AIPlanNormalizer:
         return self._from_legacy_plan(plan, user_text=user_text)
 
     def _normalize_atomic_plan(self, plan: AIActionPlan, *, user_text: str) -> AIActionPlan:
-        if any(str(step.action or "").strip() in {"memory.search", "memory.summarize"} for step in plan.steps):
-            return AIActionPlan(is_action=False)
         steps: list[AIActionStep] = []
         seen_ids: set[str] = set()
         for index, step in enumerate(plan.steps, start=1):
@@ -336,6 +334,8 @@ def _default_step_id(action: str, index: int) -> str:
 def _display_text(action: str) -> str:
     return {
         "contact.resolve": "正在解析对象...",
+        "memory.search": "正在检索本地记忆...",
+        "memory.summarize": "正在整理检索结果...",
         "message.draft": "正在生成草稿...",
         "user.confirm": "等待你确认...",
         "message.send": "准备执行发送...",
@@ -345,6 +345,8 @@ def _display_text(action: str) -> str:
 def _explanation(action: str) -> str:
     return {
         "contact.resolve": "把用户表达的对象解析为本地稳定实体。",
+        "memory.search": "从本地 AI 记忆库检索相关聊天、语音和文件内容。",
+        "memory.summarize": "把检索结果整理成可供 AI 回复使用的上下文。",
         "message.draft": "生成发送前可预览的草稿。",
         "user.confirm": "高风险或外部副作用操作需要用户确认。",
         "message.send": "执行发送动作；当前真实发送能力可能被禁用。",

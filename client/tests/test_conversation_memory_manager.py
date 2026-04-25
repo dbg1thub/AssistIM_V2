@@ -582,6 +582,67 @@ def test_conversation_memory_manager_retrieves_voice_transcript_from_ai_memory_s
     asyncio.run(scenario())
 
 
+def test_conversation_memory_manager_search_for_action_returns_structured_memory_results() -> None:
+    async def scenario() -> None:
+        db = _FakeMemoryDatabase(
+            [
+                {
+                    "session_id": "s-test3",
+                    "source_type": "summary",
+                    "source_id": "summary:test3",
+                    "start_ts": _ts("2026-04-18T10:00:00"),
+                    "end_ts": _ts("2026-04-18T10:05:00"),
+                    "title": "test3 2026-04-18 10:00-10:05",
+                    "text": "test3 讨论了周末去南山咖啡店。",
+                    "keywords": ["南山咖啡店"],
+                    "participants": ["test3", "我"],
+                },
+                {
+                    "session_id": "s-test1",
+                    "source_type": "summary",
+                    "source_id": "summary:test1",
+                    "start_ts": _ts("2026-04-18T11:00:00"),
+                    "end_ts": _ts("2026-04-18T11:05:00"),
+                    "title": "test1 2026-04-18 11:00-11:05",
+                    "text": "test1 讨论了接口联调。",
+                    "keywords": ["接口联调"],
+                    "participants": ["test1", "我"],
+                },
+            ],
+        )
+        planner = _FakeSemanticPlanner({"use_rag": False})
+        manager = _make_memory_manager(db, planner)
+
+        result = await manager.search_for_action(
+            question="我和 test3 聊过什么？",
+            participants=[
+                {
+                    "contact_id": "user-test3",
+                    "display_name": "test3",
+                    "username": "test3",
+                    "aliases": ["test3", "小王"],
+                    "raw": "小王",
+                    "resolved": True,
+                }
+            ],
+            participant_match="any",
+            time_scope={"type": "all_history"},
+            keywords=[],
+            limit=3,
+        )
+
+        assert result["result_count"] == 1
+        assert result["truncated"] is False
+        assert len(result["results"]) == 1
+        assert result["results"][0]["session_id"] == "s-test3"
+        assert "南山咖啡店" in result["results"][0]["text_preview"]
+        assert "南山咖啡店" in result["context_lines"][0]
+        assert "接口联调" not in "\n".join(result["context_lines"])
+        assert db.ai_memory_store.search_calls[0]["source_types"] == AI_MEMORY_SOURCE_TYPES
+
+    asyncio.run(scenario())
+
+
 def test_conversation_memory_manager_builds_reply_suggestion_rag_context_for_current_session() -> None:
     async def scenario() -> None:
         db = _FakeMemoryDatabase(

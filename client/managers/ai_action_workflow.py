@@ -301,10 +301,11 @@ class AIActionPlanner:
         return (
             common
             + "你的职责是判断用户是否需要 AssistIM 应用数据或本地应用能力，若是则拆成原子 steps。\n"
-            "已注册 action：contact.resolve, message.draft, user.confirm, message.send。\n"
+            "已注册 action：contact.resolve, memory.search, memory.summarize, message.draft, user.confirm, message.send。\n"
             "读取类任务不需要确认；产生外部副作用的任务必须包含 user.confirm，message.send 当前仍需要确认。\n"
             "只有用户明确要求发送、添加、发布、删除或修改时，才允许输出 user.confirm 或 message.send。\n"
-            "查询、总结、回顾、分析、检索、读取历史或询问“聊过什么”都不属于 action workflow，统一输出 is_action=false 且 steps=[]。\n"
+            "聊天记录查询使用 contact.resolve -> memory.search -> memory.summarize。\n"
+            "询问历史、回顾、总结、检索内容时使用 memory.search 和 memory.summarize；不要为读取类任务生成 user.confirm。\n"
             "多个对象默认表示多对象操作，不是歧义；只有单个名称对应多个本地实体时才由系统澄清。\n"
             "如果用户只是普通问答、写作、翻译或代码分析，输出 is_action=false 且 steps=[]。\n"
             "只有需要执行、确认、取消或补充高风险应用操作时，才输出 action plan。"
@@ -354,8 +355,9 @@ class AIActionPlanner:
             + "step 字段：id, action, depends_on, args, display_text, explanation。\n"
             "引用上游输出使用 $step_id.field 或 $step_id.field[0]。\n"
             "发送消息的组合是 contact.resolve -> message.draft -> user.confirm -> message.send。\n"
+            "聊天记录查询的组合是 contact.resolve -> memory.search -> memory.summarize。\n"
             "发送组合必须同时有明确目标和明确消息内容。\n"
-            "只有明确要求发送/发布/添加/删除/修改时才使用发送组合；询问历史、回顾、总结、检索内容时输出 is_action=false 且不要生成 steps。\n"
+            "只有明确要求发送/发布/添加/删除/修改时才使用发送组合；询问历史、回顾、总结、检索内容时使用 memory.search 和 memory.summarize。\n"
             f"用户输入：{str(user_text or '').strip()}"
         )
 
@@ -384,6 +386,7 @@ class AIActionWorkflow:
         action_store: AIActionStore | AIActionPlanStore | None = None,
         planner: AIActionPlanner | None = None,
         contact_alias_resolver: ContactAliasResolver | None = None,
+        memory_manager: Any | None = None,
     ) -> None:
         self._store = action_store or get_ai_action_store()
         self._planner = planner or AIActionPlanner()
@@ -393,6 +396,7 @@ class AIActionWorkflow:
         self._resource_manager = AIResourceManager()
         self._registry = AtomicActionRegistry(
             contact_resolver=self._contact_alias_resolver,
+            memory_manager=memory_manager,
         )
         self._executor = AIActionExecutor(registry=self._registry, store=self._store)
 
@@ -773,6 +777,8 @@ def _compat_action(plan: AIActionPlan) -> str:
     actions = [step.action for step in plan.steps]
     if "message.send" in actions:
         return "send_message"
+    if "memory.search" in actions:
+        return "memory.search"
     if actions:
         return actions[-1].replace(".", "_")
     return ""

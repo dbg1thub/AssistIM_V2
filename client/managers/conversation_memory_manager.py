@@ -616,6 +616,25 @@ class ConversationMemoryManager:
             resolved.append(self._contact_to_resolved_participant(mention, matches[0]))
         return tuple(resolved), tuple(unresolved), ambiguous
 
+    async def _resolve_action_participants(self, participants: Sequence[Any]) -> tuple[_ResolvedParticipant, ...]:
+        resolved: list[_ResolvedParticipant] = []
+        for item in list(participants or []):
+            if isinstance(item, dict):
+                participant = self._action_contact_to_resolved_participant(item)
+                if participant is not None:
+                    resolved.append(participant)
+                continue
+            mention = " ".join(str(item or "").split()).strip(" ，,。？！?;；:：")
+            if not mention:
+                continue
+            matches = await self._lookup_contact_mention(mention)
+            if len(matches) == 1:
+                resolved.append(self._contact_to_resolved_participant(mention, matches[0]))
+                continue
+            alias = mention.casefold()
+            resolved.append(_ResolvedParticipant(mention=mention, display_name=mention, aliases=(alias,)))
+        return tuple(resolved)
+
     async def _lookup_contact_mention(self, mention: str) -> list[dict[str, Any]]:
         exact_resolver = getattr(self._db, "resolve_contacts_cache_alias", None)
         fuzzy_search = getattr(self._db, "search_contacts", None)
@@ -641,6 +660,38 @@ class ConversationMemoryManager:
             deduped.append(dict(contact))
         return deduped
 
+    def _action_contact_to_resolved_participant(self, contact: dict[str, Any]) -> _ResolvedParticipant | None:
+        mention = (
+            str(contact.get("raw") or "").strip()
+            or str(contact.get("display_name") or "").strip()
+            or str(contact.get("remark") or "").strip()
+            or str(contact.get("nickname") or "").strip()
+            or str(contact.get("username") or "").strip()
+            or str(contact.get("contact_id") or contact.get("id") or "").strip()
+        )
+        display_name = (
+            str(contact.get("display_name") or "").strip()
+            or str(contact.get("remark") or "").strip()
+            or str(contact.get("nickname") or "").strip()
+            or str(contact.get("username") or "").strip()
+            or str(contact.get("contact_id") or contact.get("id") or "").strip()
+            or mention
+        )
+        aliases = list(self._contact_alias_values(contact))
+        for alias in list(contact.get("aliases") or []):
+            normalized = str(alias or "").strip().casefold()
+            if normalized and normalized not in aliases:
+                aliases.append(normalized)
+        if mention and mention.casefold() not in aliases:
+            aliases.append(mention.casefold())
+        if not display_name and not aliases:
+            return None
+        return _ResolvedParticipant(
+            mention=mention or display_name,
+            display_name=display_name or mention,
+            aliases=tuple(aliases or [display_name.casefold()]),
+        )
+
     def _contact_to_resolved_participant(self, mention: str, contact: dict[str, Any]) -> _ResolvedParticipant:
         aliases = self._contact_alias_values(contact)
         display_name = (
@@ -654,6 +705,89 @@ class ConversationMemoryManager:
         if mention.casefold() not in aliases:
             aliases = tuple(dict.fromkeys([mention.casefold(), *aliases]))
         return _ResolvedParticipant(mention=mention, display_name=display_name, aliases=aliases)
+
+    @staticmethod
+    def _action_time_bounds(time_scope: dict[str, Any]) -> tuple[int | None, int | None]:
+        scope = dict(time_scope or {})
+        scope_type = str(scope.get("type") or "all_history").strip().lower() or "all_history"
+        if scope_type in {"all", "all_history", "history"}:
+            return None, None
+        if scope_type in {"range", "absolute"}:
+            return (
+                ConversationMemoryManager._coerce_action_ts(scope.get("start_ts") or scope.get("start")),
+                ConversationMemoryManager._coerce_action_ts(scope.get("end_ts") or scope.get("end")),
+            )
+        now = datetime.now()
+        if scope_type in {"today", "yesterday"}:
+            today = now.replace(hour=0, minute=0, second=0, microsecond=0)
+            start = today if scope_type == "today" else today - timedelta(days=1)
+            end = today + timedelta(days=1) if scope_type == "today" else today
+            return int(start.timestamp()), int(end.timestamp())
+        if scope_type in {"recent", "last_days"}:
+            try:
+                days = max(1.0, min(365.0, float(scope.get("days") or 7)))
+            except (TypeError, ValueError):
+                days = 7.0
+            return int((now - timedelta(days=days)).timestamp()), int((now + timedelta(seconds=1)).timestamp())
+        return None, None
+
+    @staticmethod
+    def _coerce_action_ts(value: Any) -> int | None:
+        if value is None or value == "":
+            return None
+        if isinstance(value, int | float):
+            timestamp = int(value)
+            return int(timestamp / 1000) if timestamp > 10_000_000_000 else timestamp
+        text = str(value or "").strip()
+        if not text:
+            return None
+        try:
+            timestamp = int(float(text))
+            return int(timestamp / 1000) if timestamp > 10_000_000_000 else timestamp
+        except ValueError:
+            pass
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            return int(parsed.timestamp())
+        except ValueError:
+            return None
+
+    def _empty_action_search_result(
+        self,
+        *,
+        question: str,
+        start_ts: int | None,
+        end_ts: int | None,
+    ) -> dict[str, Any]:
+        return {
+            "results": [],
+            "preview": [],
+            "context_lines": [],
+            "result_count": 0,
+            "truncated": False,
+            "query": {
+                "question": " ".join(str(question or "").split()),
+                "terms": [],
+                "start_ts": start_ts,
+                "end_ts": end_ts,
+                "participant_match": "any",
+                "participants": [],
+            },
+        }
+
+    def _action_memory_result(self, item: dict[str, Any], *, score: float) -> dict[str, Any]:
+        return {
+            "source_type": str(item.get("source_type") or "").strip(),
+            "source_id": str(item.get("source_id") or "").strip(),
+            "session_id": str(item.get("session_id") or "").strip(),
+            "title": str(item.get("title") or "").strip(),
+            "text_preview": self._clip(str(item.get("text") or ""), 220),
+            "participants": list(item.get("participants") or []),
+            "keywords": list(item.get("keywords") or []),
+            "start_ts": int(item.get("start_ts") or 0),
+            "end_ts": int(item.get("end_ts") or item.get("start_ts") or 0),
+            "score": round(float(score), 4),
+        }
 
     @staticmethod
     def _contact_alias_values(contact: dict[str, Any]) -> tuple[str, ...]:
@@ -929,6 +1063,102 @@ class ConversationMemoryManager:
                 )
             )
         return ConversationMemoryContext(lines=lines, query_kind=query.query_kind)
+
+    async def search_for_action(
+        self,
+        *,
+        question: str,
+        participants: Sequence[Any] | None = None,
+        participant_match: str = "any",
+        time_scope: dict[str, Any] | None = None,
+        keywords: Sequence[str] | None = None,
+        limit: int = 8,
+    ) -> dict[str, Any]:
+        """Return structured memory search results for AI action workflow."""
+        normalized_limit = max(1, min(20, int(limit or 8)))
+        query_text = " ".join(str(question or "").split())
+        keyword_terms = tuple(
+            str(term or "").strip().casefold()
+            for term in list(keywords or [])
+            if str(term or "").strip()
+        )
+        resolved_participants = await self._resolve_action_participants(participants or ())
+        participant_aliases = self._participant_alias_terms(resolved_participants)
+        start_ts, end_ts = self._action_time_bounds(time_scope or {})
+        if not query_text:
+            query_text = " ".join([*keyword_terms, *(participant.display_name for participant in resolved_participants)]).strip()
+        if not query_text:
+            return self._empty_action_search_result(question=question, start_ts=start_ts, end_ts=end_ts)
+
+        query_terms = tuple(
+            dict.fromkeys(
+                [
+                    *self._tokenize_for_rag(query_text),
+                    *keyword_terms,
+                    *participant_aliases,
+                ]
+            )
+        )[:24]
+        try:
+            query_vector = await self._vector_index.encode_query(
+                query=query_text,
+                terms=query_terms,
+                contact_aliases=participant_aliases,
+            )
+        except Exception:
+            logger.exception("Failed to encode AI action memory query")
+            return self._empty_action_search_result(question=query_text, start_ts=start_ts, end_ts=end_ts)
+
+        candidate_limit = max(self.RAG_CANDIDATE_LIMIT, normalized_limit * 8)
+        items = await self._search_ai_summary_memory(
+            query_vector=query_vector,
+            start_ts=start_ts,
+            end_ts=end_ts,
+            limit=candidate_limit,
+        )
+        relation = "together" if str(participant_match or "").strip().lower() == "all" else "separate"
+        filtered = self._filter_items_for_relation(items, resolved_participants, relation)
+        memory_query = _MemoryQuery(
+            text=query_text,
+            start_ts=start_ts,
+            end_ts=end_ts,
+            terms=query_terms,
+            query_kind="action_memory_search",
+        )
+        ranked = await self._rank_rag_items(filtered, memory_query, query_vector=query_vector)
+        matched = [(score, item) for score, item in ranked if score >= self.RAG_MIN_SCORE]
+        selected = matched[:normalized_limit]
+        results = [
+            self._action_memory_result(item, score=score)
+            for score, item in selected
+        ]
+        context_lines = [
+            line
+            for line in (self._format_item(item) for _score, item in selected)
+            if line
+        ]
+        return {
+            "results": results,
+            "preview": results[:3],
+            "context_lines": context_lines,
+            "result_count": len(matched),
+            "truncated": len(matched) > len(selected),
+            "query": {
+                "question": query_text,
+                "terms": list(query_terms),
+                "start_ts": start_ts,
+                "end_ts": end_ts,
+                "participant_match": str(participant_match or "any").strip().lower() or "any",
+                "participants": [
+                    {
+                        "mention": participant.mention,
+                        "display_name": participant.display_name,
+                        "aliases": list(participant.aliases),
+                    }
+                    for participant in resolved_participants
+                ],
+            },
+        }
 
     def _parse_query(self, query_text: str, *, confirmed: bool = False) -> _MemoryQuery:
         text = " ".join(str(query_text or "").split())

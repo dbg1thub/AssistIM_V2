@@ -16,6 +16,51 @@ from client.storage.database import Database
 import client.storage.ai_action_store as action_store_module
 
 
+class _FakeActionMemoryManager:
+    def __init__(self, *, context_lines: list[str] | None = None, result_count: int | None = None) -> None:
+        self.context_lines = list(context_lines or [])
+        self.result_count = len(self.context_lines) if result_count is None else int(result_count)
+        self.calls: list[dict] = []
+
+    async def search_for_action(
+        self,
+        *,
+        question: str,
+        participants=None,
+        participant_match: str = "any",
+        time_scope=None,
+        keywords=None,
+        limit: int = 8,
+    ) -> dict:
+        self.calls.append(
+            {
+                "question": question,
+                "participants": list(participants or []),
+                "participant_match": participant_match,
+                "time_scope": dict(time_scope or {}),
+                "keywords": list(keywords or []),
+                "limit": limit,
+            }
+        )
+        results = [
+            {
+                "source_type": "conversation_summary",
+                "source_id": f"summary:{index}",
+                "title": f"记忆 {index}",
+                "text": line,
+                "text_preview": line,
+            }
+            for index, line in enumerate(self.context_lines, start=1)
+        ]
+        return {
+            "results": results,
+            "preview": results[:3],
+            "context_lines": list(self.context_lines),
+            "result_count": self.result_count,
+            "truncated": self.result_count > len(results),
+        }
+
+
 class _FakeMemoryDatabase:
     async def list_conversation_memory_items(self, **kwargs):
         del kwargs
@@ -196,10 +241,16 @@ class _AtomicReadPlanner:
             risk="low",
             steps=(
                 AIActionStep(
+                    id="resolve_contacts",
+                    action="contact.resolve",
+                    args={"queries": ["test3"], "allow_multiple": True},
+                ),
+                AIActionStep(
                     id="search_memory",
                     action="memory.search",
+                    depends_on=("resolve_contacts",),
                     args={
-                        "participants": ["test3"],
+                        "participants": "$resolve_contacts.contacts",
                         "participant_match": "any",
                         "time_scope": {"type": "all_history"},
                         "keywords": [],
@@ -270,18 +321,18 @@ class _DuplicateResolvePlanner:
         )
 
 
-def test_ai_action_planner_prompt_routes_history_queries_out_of_workflow() -> None:
+def test_ai_action_planner_prompt_routes_history_queries_to_memory_actions() -> None:
     system_prompt = AIActionPlanner._system_prompt(AIActionPlanner.PROMPT_NEW_ACTION)
     user_prompt = AIActionPlanner._user_prompt("我和test3昨天聊了什么？")
 
-    assert "contact.resolve, message.draft, user.confirm, message.send" in system_prompt
-    assert "不属于 action workflow" in system_prompt
-    assert "memory.search" not in system_prompt
-    assert "memory.summarize" not in system_prompt
-    assert "询问历史、回顾、总结、检索内容时输出 is_action=false" in user_prompt
+    assert "contact.resolve, memory.search, memory.summarize, message.draft, user.confirm, message.send" in system_prompt
+    assert "聊天记录查询使用 contact.resolve -> memory.search -> memory.summarize" in system_prompt
+    assert "memory.search" in system_prompt
+    assert "memory.summarize" in system_prompt
+    assert "询问历史、回顾、总结、检索内容时使用 memory.search 和 memory.summarize" in user_prompt
     assert "发送消息的组合是 contact.resolve -> message.draft -> user.confirm -> message.send" in user_prompt
-    assert "memory.search" not in user_prompt
-    assert "memory.summarize" not in user_prompt
+    assert "memory.search" in user_prompt
+    assert "memory.summarize" in user_prompt
 
 
 def test_ai_action_planner_uses_state_specific_prompt_templates() -> None:
@@ -405,19 +456,22 @@ def test_ai_action_workflow_rejects_incomplete_atomic_send_chain(tmp_path, monke
     asyncio.run(scenario())
 
 
-def test_ai_action_registry_only_exposes_execution_actions() -> None:
+def test_ai_action_registry_exposes_memory_actions() -> None:
     registry = AtomicActionRegistry(
         contact_resolver=ContactAliasResolver(db=_FakeContactDatabase([])),
+        memory_manager=_FakeActionMemoryManager(),
     )
 
     assert registry.names() == (
         "contact.resolve",
+        "memory.search",
+        "memory.summarize",
         "message.draft",
         "message.send",
         "user.confirm",
     )
-    assert registry.get("memory.search") is None
-    assert registry.get("memory.summarize") is None
+    assert registry.get("memory.search") is not None
+    assert registry.get("memory.summarize") is not None
 
 
 def test_ai_action_registry_clarifies_send_confirmation_without_preview() -> None:
@@ -602,19 +656,79 @@ def test_ai_action_workflow_ignores_legacy_history_query(tmp_path, monkeypatch) 
     asyncio.run(scenario())
 
 
-def test_ai_action_workflow_ignores_atomic_read_plan(tmp_path, monkeypatch) -> None:
+def test_ai_action_workflow_executes_atomic_memory_plan(tmp_path, monkeypatch) -> None:
     async def scenario() -> None:
         db = Database(str(tmp_path / "actions.db"))
         monkeypatch.setattr(action_store_module, "get_database", lambda: db)
         store = AIActionStore()
+        contact_db = _FakeContactDatabase(
+            [
+                {
+                    "id": "user-3",
+                    "display_name": "test3",
+                    "username": "test3",
+                    "nickname": "test3",
+                    "remark": "",
+                    "assistim_id": "test3",
+                }
+            ]
+        )
+        memory_manager = _FakeActionMemoryManager(context_lines=["[2026-04-21 10:00-10:05] test3；摘要：讨论了项目排期。"])
         workflow = AIActionWorkflow(
             action_store=store,
             planner=_AtomicReadPlanner(),
+            contact_alias_resolver=ContactAliasResolver(db=contact_db),
+            memory_manager=memory_manager,
         )
         try:
             result = await workflow.handle_user_turn(thread_id="thread-1", text="我和test3聊过什么？")
-            assert result.handled is False
-            assert await store.latest_pending_plan("thread-1") is None
+            assert result.handled is True
+            assert result.response_text == ""
+            assert result.memory_context_lines == ("[2026-04-21 10:00-10:05] test3；摘要：讨论了项目排期。",)
+            assert result.message_extra["ai_action"]["action"] == "memory.search"
+            assert result.message_extra["ai_action"]["state"] == "running"
+            assert memory_manager.calls[0]["participant_match"] == "any"
+            assert memory_manager.calls[0]["time_scope"] == {"type": "all_history"}
+            assert memory_manager.calls[0]["participants"][0]["contact_id"] == "user-3"
+            plan = await store.get_plan(result.message_extra["ai_action"]["plan_id"])
+            assert plan is not None
+            assert plan.step_outputs["search_memory"]["result_count"] == 1
+            assert plan.step_outputs["summarize_memory"]["requires_responder"] is True
+        finally:
+            await db.close()
+
+    asyncio.run(scenario())
+
+
+def test_ai_action_workflow_memory_summarize_reports_empty_result(tmp_path, monkeypatch) -> None:
+    async def scenario() -> None:
+        db = Database(str(tmp_path / "actions.db"))
+        monkeypatch.setattr(action_store_module, "get_database", lambda: db)
+        store = AIActionStore()
+        contact_db = _FakeContactDatabase(
+            [
+                {
+                    "id": "user-3",
+                    "display_name": "test3",
+                    "username": "test3",
+                    "nickname": "test3",
+                    "assistim_id": "test3",
+                }
+            ]
+        )
+        workflow = AIActionWorkflow(
+            action_store=store,
+            planner=_AtomicReadPlanner(),
+            contact_alias_resolver=ContactAliasResolver(db=contact_db),
+            memory_manager=_FakeActionMemoryManager(context_lines=[]),
+        )
+        try:
+            result = await workflow.handle_user_turn(thread_id="thread-1", text="我和test3聊过什么？")
+
+            assert result.handled is True
+            assert "没有找到相关记录" in result.response_text
+            assert result.memory_context_lines == ()
+            assert result.message_extra["ai_action"]["state"] == "done"
         finally:
             await db.close()
 
@@ -764,6 +878,70 @@ def test_ai_action_executor_uses_temp_result_for_large_step_output(tmp_path, mon
             assert result.state == "done"
             result_ref = updated.step_outputs["draft_message"]["result_ref"]
             assert await store.get_temp_result(result_ref["id"]) is not None
+        finally:
+            await db.close()
+
+    asyncio.run(scenario())
+
+
+def test_ai_action_executor_passes_large_memory_search_by_result_ref(tmp_path, monkeypatch) -> None:
+    async def scenario() -> None:
+        db = Database(str(tmp_path / "actions.db"))
+        monkeypatch.setattr(action_store_module, "get_database", lambda: db)
+        store = AIActionStore()
+        memory_manager = _FakeActionMemoryManager(
+            context_lines=[f"[2026-04-21 10:{index:02d}] 摘要：第 {index} 条记录。" for index in range(20)]
+        )
+        registry = AtomicActionRegistry(
+            contact_resolver=ContactAliasResolver(db=_FakeContactDatabase([])),
+            memory_manager=memory_manager,
+        )
+        search_spec = registry.get("memory.search")
+        assert search_spec is not None
+        registry._actions["memory.search"] = replace(search_spec, max_output_json_bytes=256)
+        executor = AIActionExecutor(registry=registry, store=store)
+        plan = AIActionPlan(
+            is_action=True,
+            goal="查询历史",
+            steps=(
+                AIActionStep(
+                    id="search_memory",
+                    action="memory.search",
+                    args={
+                        "participants": [],
+                        "participant_match": "any",
+                        "time_scope": {"type": "all_history"},
+                        "question": "查历史",
+                    },
+                ),
+                AIActionStep(
+                    id="summarize_memory",
+                    action="memory.summarize",
+                    depends_on=("search_memory",),
+                    args={"source": "$search_memory", "question": "查历史"},
+                ),
+            ),
+            final={"type": "answer", "source": "$summarize_memory"},
+        )
+        try:
+            record = await store.create_plan(
+                thread_id="thread-1",
+                goal=plan.goal,
+                plan_json=plan.to_dict(),
+                reason="test_large_memory_payload",
+            )
+            result = await executor.execute(record)
+            updated = await store.get_plan(record.id)
+
+            assert updated is not None
+            assert "result_ref" in updated.step_outputs["search_memory"]
+            result_ref = updated.step_outputs["search_memory"]["result_ref"]
+            assert await store.get_temp_result(result_ref["id"]) is not None
+            assert result.state == "running"
+            assert result.memory_context_lines[:2] == (
+                "[2026-04-21 10:00] 摘要：第 0 条记录。",
+                "[2026-04-21 10:01] 摘要：第 1 条记录。",
+            )
         finally:
             await db.close()
 
