@@ -10,7 +10,11 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
+
+
+DEFAULT_GOLDEN_CORPUS_PATH = Path(__file__).with_name("ai_action_golden_corpus.json")
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,6 +34,8 @@ class PromptCaseExpectation:
     expected_content: str = ""
     require_all_history: bool = False
     required_step_args: tuple[PromptStepArgExpectation, ...] = ()
+    is_action: bool | None = None
+    forbidden_actions: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,6 +43,7 @@ class PromptBenchmarkCase:
     name: str
     user_input: str
     expectation: PromptCaseExpectation = field(default_factory=PromptCaseExpectation)
+    tags: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,6 +85,37 @@ def parse_plan_json(raw_output: str) -> tuple[dict[str, Any] | None, bool]:
         if isinstance(parsed, dict):
             return parsed, True
     return None, False
+
+
+def load_golden_corpus(path: str | Path | None = None) -> list[PromptBenchmarkCase]:
+    """Load saved AI action golden cases without running a model."""
+    corpus_path = Path(path) if path is not None else DEFAULT_GOLDEN_CORPUS_PATH
+    try:
+        payload = json.loads(corpus_path.read_text(encoding="utf-8-sig"))
+    except FileNotFoundError as exc:
+        raise ValueError(f"golden corpus not found: {corpus_path}") from exc
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"golden corpus is not valid JSON: {corpus_path}") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("golden corpus root must be an object")
+    version = payload.get("version")
+    if version != 1:
+        raise ValueError("golden corpus version must be 1")
+    raw_cases = payload.get("cases")
+    if not isinstance(raw_cases, list) or not raw_cases:
+        raise ValueError("golden corpus cases must be a non-empty array")
+
+    cases: list[PromptBenchmarkCase] = []
+    seen_names: set[str] = set()
+    for index, raw_case in enumerate(raw_cases, start=1):
+        if not isinstance(raw_case, dict):
+            raise ValueError(f"golden corpus case #{index} must be an object")
+        case = _load_golden_case(raw_case, index=index)
+        if case.name in seen_names:
+            raise ValueError(f"duplicate case name: {case.name}")
+        seen_names.add(case.name)
+        cases.append(case)
+    return cases
 
 
 def canonical_structural_signature(plan: dict[str, Any] | None) -> str:
@@ -122,11 +160,26 @@ def evaluate_case(plan: dict[str, Any] | None, expectation: PromptCaseExpectatio
     checks: dict[str, bool] = {"valid_plan": bool(payload)}
     messages: list[str] = []
 
+    if expectation.is_action is not None:
+        inferred_is_action = bool(payload.get("is_action", True if steps else False))
+        checks["is_action"] = inferred_is_action is bool(expectation.is_action)
+        if not checks["is_action"]:
+            messages.append("is_action mismatch")
+        if expectation.is_action is False:
+            checks["no_steps_for_non_action"] = not steps
+            if not checks["no_steps_for_non_action"]:
+                messages.append("non-action plan contains steps")
     if expectation.required_actions:
         actions = [str(step.get("action") or "").strip() for step in steps]
         checks["required_actions"] = all(action in actions for action in expectation.required_actions)
         if not checks["required_actions"]:
             messages.append("missing required actions")
+    if expectation.forbidden_actions:
+        actions = [str(step.get("action") or "").strip() for step in steps]
+        forbidden = set(expectation.forbidden_actions)
+        checks["forbidden_actions"] = not any(action in forbidden for action in actions)
+        if not checks["forbidden_actions"]:
+            messages.append("forbidden action present")
     if expectation.risk:
         checks["risk"] = str(payload.get("risk") or "").strip().lower() == expectation.risk.strip().lower()
         if not checks["risk"]:
@@ -167,8 +220,70 @@ def summarize_results(results: list[CaseBenchmarkResult]) -> dict[str, Any]:
         "valid_json_rate": _rate(sum(1 for sample in samples if sample.valid_json), len(samples)),
         "expectation_pass_rate": _rate(sum(1 for sample in samples if sample.expectation_passed), len(samples)),
         "error_codes": _error_counts(samples),
+        "failed_cases": _failed_cases(results),
         "cases": [_summarize_case(result) for result in results],
     }
+
+
+def _load_golden_case(raw_case: dict[str, Any], *, index: int) -> PromptBenchmarkCase:
+    name = str(raw_case.get("name") or "").strip()
+    user_input = str(raw_case.get("user_input") or "").strip()
+    if not name:
+        raise ValueError(f"golden corpus case #{index} is missing name")
+    if not user_input:
+        raise ValueError(f"golden corpus case {name} is missing user_input")
+    expectation = raw_case.get("expectation")
+    if not isinstance(expectation, dict):
+        raise ValueError(f"golden corpus case {name} is missing expectation")
+    return PromptBenchmarkCase(
+        name=name,
+        user_input=user_input,
+        expectation=_load_expectation(expectation, case_name=name),
+        tags=tuple(_string_list(raw_case.get("tags"))),
+    )
+
+
+def _load_expectation(payload: dict[str, Any], *, case_name: str) -> PromptCaseExpectation:
+    raw_is_action = payload.get("is_action")
+    if raw_is_action is not None and not isinstance(raw_is_action, bool):
+        raise ValueError(f"golden corpus case {case_name} expectation.is_action must be boolean")
+    raw_requires_confirmation = payload.get("requires_confirmation")
+    if raw_requires_confirmation is not None and not isinstance(raw_requires_confirmation, bool):
+        raise ValueError(f"golden corpus case {case_name} expectation.requires_confirmation must be boolean")
+    raw_required_step_args = payload.get("required_step_args") or []
+    if not isinstance(raw_required_step_args, list):
+        raise ValueError(f"golden corpus case {case_name} required_step_args must be an array")
+    required_step_args = tuple(
+        _load_step_arg_expectation(item, case_name=case_name)
+        for item in raw_required_step_args
+        if isinstance(item, dict)
+    )
+    if len(required_step_args) != len(raw_required_step_args):
+        raise ValueError(f"golden corpus case {case_name} required_step_args must contain objects")
+    return PromptCaseExpectation(
+        is_action=raw_is_action,
+        required_actions=tuple(_string_list(payload.get("required_actions"))),
+        forbidden_actions=tuple(_string_list(payload.get("forbidden_actions"))),
+        risk=str(payload.get("risk") or "").strip(),
+        contact_queries=tuple(_string_list(payload.get("contact_queries"))),
+        requires_confirmation=raw_requires_confirmation,
+        expected_content=str(payload.get("expected_content") or "").strip(),
+        require_all_history=bool(payload.get("require_all_history")),
+        required_step_args=required_step_args,
+    )
+
+
+def _load_step_arg_expectation(payload: dict[str, Any], *, case_name: str) -> PromptStepArgExpectation:
+    action = str(payload.get("action") or "").strip()
+    path = str(payload.get("path") or "").strip()
+    if not action or not path:
+        raise ValueError(f"golden corpus case {case_name} step arg expectation requires action and path")
+    return PromptStepArgExpectation(
+        action=action,
+        path=path,
+        equals=str(payload.get("equals")) if payload.get("equals") is not None else None,
+        starts_with=str(payload.get("starts_with")) if payload.get("starts_with") is not None else None,
+    )
 
 
 def _json_candidates(text: str) -> list[str]:
@@ -184,6 +299,16 @@ def _json_candidates(text: str) -> list[str]:
     if 0 <= start < end:
         return [text[start : end + 1], text]
     return [text]
+
+
+def _string_list(value: Any) -> list[str]:
+    raw_items = value if isinstance(value, list) else ([] if value is None else [value])
+    items: list[str] = []
+    for item in raw_items:
+        text = str(item or "").strip()
+        if text and text not in items:
+            items.append(text)
+    return items
 
 
 def _canonical_value(value: Any) -> Any:
@@ -282,6 +407,28 @@ def _summarize_case(result: CaseBenchmarkResult) -> dict[str, Any]:
         "structural_stability": _rate(dominant_count, len(samples)),
         "error_codes": _error_counts(samples),
     }
+
+
+def _failed_cases(results: list[CaseBenchmarkResult]) -> list[dict[str, Any]]:
+    failed: list[dict[str, Any]] = []
+    for result in results:
+        failed_samples = [sample for sample in list(result.samples or []) if not sample.expectation_passed]
+        if not failed_samples:
+            continue
+        messages: list[str] = []
+        for sample in failed_samples:
+            for message in list(sample.check_messages or []):
+                text = str(message or "").strip()
+                if text and text not in messages:
+                    messages.append(text)
+        failed.append(
+            {
+                "name": result.case.name,
+                "failed_sample_count": len(failed_samples),
+                "messages": messages,
+            }
+        )
+    return failed
 
 
 def _error_counts(samples: list[SampleResult]) -> dict[str, int]:

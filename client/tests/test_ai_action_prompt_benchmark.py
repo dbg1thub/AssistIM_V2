@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from tools.ai_action_prompt_benchmark import (
     CaseBenchmarkResult,
     PromptBenchmarkCase,
@@ -8,6 +10,7 @@ from tools.ai_action_prompt_benchmark import (
     SampleResult,
     canonical_structural_signature,
     evaluate_case,
+    load_golden_corpus,
     parse_plan_json,
     summarize_results,
 )
@@ -177,6 +180,43 @@ def test_evaluate_case_checks_all_history() -> None:
     assert messages == []
 
 
+def test_evaluate_case_checks_non_action_and_forbidden_actions() -> None:
+    plan = {
+        "is_action": False,
+        "goal": "普通聊天",
+        "risk": "low",
+        "steps": [],
+        "final": {"type": "chat"},
+    }
+    checks, messages = evaluate_case(
+        plan,
+        PromptCaseExpectation(
+            is_action=False,
+            forbidden_actions=("contact.resolve", "memory.search", "user.confirm", "message.send"),
+        ),
+    )
+
+    assert all(checks.values()) is True
+    assert messages == []
+
+    bad_plan = {
+        "is_action": False,
+        "goal": "普通聊天",
+        "risk": "low",
+        "steps": [{"id": "confirm", "action": "user.confirm", "depends_on": [], "args": {}}],
+        "final": {},
+    }
+    bad_checks, bad_messages = evaluate_case(
+        bad_plan,
+        PromptCaseExpectation(is_action=False, forbidden_actions=("user.confirm",)),
+    )
+
+    assert bad_checks["no_steps_for_non_action"] is False
+    assert bad_checks["forbidden_actions"] is False
+    assert "non-action plan contains steps" in bad_messages
+    assert "forbidden action present" in bad_messages
+
+
 def test_evaluate_case_checks_required_step_args() -> None:
     plan = {
         "goal": "send",
@@ -278,3 +318,98 @@ def test_summarize_results_reports_structural_stability_by_case() -> None:
     assert summary["error_codes"] == {"AI_MODEL_UNAVAILABLE": 1}
     assert summary["cases"][0]["structural_stability"] == 1.0
     assert summary["cases"][0]["error_codes"] == {"AI_MODEL_UNAVAILABLE": 1}
+    assert summary["failed_cases"] == [
+        {
+            "name": "history",
+            "failed_sample_count": 1,
+            "messages": ["missing required actions"],
+        }
+    ]
+
+
+def test_load_golden_corpus_from_json(tmp_path) -> None:
+    corpus_path = tmp_path / "golden.json"
+    corpus_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "cases": [
+                    {
+                        "name": "chat_smalltalk",
+                        "user_input": "你好",
+                        "tags": ["chat"],
+                        "expectation": {
+                            "is_action": False,
+                            "forbidden_actions": ["contact.resolve", "user.confirm"],
+                        },
+                    },
+                    {
+                        "name": "send_message",
+                        "user_input": "帮我给张三发我晚点到",
+                        "expectation": {
+                            "is_action": True,
+                            "risk": "high",
+                            "required_actions": ["contact.resolve", "message.draft", "user.confirm", "message.send"],
+                            "contact_queries": ["张三"],
+                            "requires_confirmation": True,
+                            "expected_content": "我晚点到",
+                            "required_step_args": [
+                                {"action": "contact.resolve", "path": "allow_multiple", "equals": "False"}
+                            ],
+                        },
+                    },
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    cases = load_golden_corpus(corpus_path)
+
+    assert [case.name for case in cases] == ["chat_smalltalk", "send_message"]
+    assert cases[0].tags == ("chat",)
+    assert cases[0].expectation.is_action is False
+    assert cases[0].expectation.forbidden_actions == ("contact.resolve", "user.confirm")
+    assert cases[1].expectation.required_actions == (
+        "contact.resolve",
+        "message.draft",
+        "user.confirm",
+        "message.send",
+    )
+    assert cases[1].expectation.required_step_args[0].path == "allow_multiple"
+
+
+def test_load_default_golden_corpus_has_core_action_and_chat_cases() -> None:
+    cases = load_golden_corpus()
+    names = [case.name for case in cases]
+
+    assert len(cases) >= 8
+    assert len(names) == len(set(names))
+    assert any(case.expectation.is_action is False for case in cases)
+    assert any("memory.search" in case.expectation.required_actions for case in cases)
+    assert any("message.send" in case.expectation.required_actions for case in cases)
+
+
+def test_load_golden_corpus_rejects_duplicate_names(tmp_path) -> None:
+    corpus_path = tmp_path / "duplicate.json"
+    corpus_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "cases": [
+                    {"name": "same", "user_input": "你好", "expectation": {"is_action": False}},
+                    {"name": "same", "user_input": "再见", "expectation": {"is_action": False}},
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    try:
+        load_golden_corpus(corpus_path)
+    except ValueError as exc:
+        assert "duplicate case name" in str(exc)
+    else:
+        raise AssertionError("duplicate corpus names should be rejected")
