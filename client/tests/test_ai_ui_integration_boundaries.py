@@ -437,9 +437,9 @@ def test_ai_assistant_delete_uses_confirmation_dialog() -> None:
 
 
 def test_ai_action_footer_does_not_repeat_pending_response_text() -> None:
-    assistant_interface = Path("client/ui/windows/ai_assistant_interface.py").read_text(encoding="utf-8")
-    footer_function = assistant_interface.split("def _ai_action_footer_text", 1)[1].split(
-        "\n\nclass AIAssistantPromptEdit",
+    assistant_delegate = Path("client/delegates/ai_assistant_message_delegate.py").read_text(encoding="utf-8")
+    footer_function = assistant_delegate.split("def _action_footer_text", 1)[1].split(
+        "\n\n    @classmethod\n    def _action_status_text",
         1,
     )[0]
 
@@ -451,42 +451,31 @@ def test_ai_action_footer_does_not_repeat_pending_response_text() -> None:
 
 
 def test_ai_action_step_status_area_uses_safe_steps_and_events() -> None:
-    assistant_interface = Path("client/ui/windows/ai_assistant_interface.py").read_text(encoding="utf-8")
-    status_function = assistant_interface.split("def _ai_action_status_text", 1)[1].split(
-        "\n\nclass AIAssistantPromptEdit",
+    assistant_delegate = Path("client/delegates/ai_assistant_message_delegate.py").read_text(encoding="utf-8")
+    status_function = assistant_delegate.split("def _action_status_text", 1)[1].split(
+        "\n\n    @classmethod\n    def _step_state_from_events",
         1,
     )[0]
 
     assert "steps = [item for item in list(action.get(\"steps\") or [])" in status_function
     assert "events = [item for item in list(action.get(\"events\") or [])" in status_function
-    assert "_ai_action_step_state_from_events(step_id, events)" in status_function
-    assert "_ai_action_step_state_label" in status_function
-    assert '"running": "正在执行"' in status_function
-    assert '"done": "已完成"' in status_function
-    assert '"waiting_confirmation": "等待确认"' in status_function
-    assert '"waiting_clarification": "等待补充"' in status_function
-    assert '"failed": "执行失败"' in status_function
+    assert "cls._step_state_from_events(step_id, events)" in status_function
+    assert "cls._step_state_label" in status_function
+    assert '"running": "正在执行"' in assistant_delegate
+    assert '"done": "已完成"' in assistant_delegate
+    assert '"waiting_confirmation": "等待确认"' in assistant_delegate
+    assert '"waiting_clarification": "等待补充"' in assistant_delegate
+    assert '"failed": "执行失败"' in assistant_delegate
     assert "response_text" not in status_function
     assert "waiting_payload" not in status_function
 
-    assert "self.action_status_label = CaptionLabel(self)" in assistant_interface
-    assert "self.action_status_label.setText(_ai_action_status_text(message.extra))" in assistant_interface
-    assert "self.layout.addWidget(self.action_status_label)" in assistant_interface
-    assert "self._sync_wrapped_label_height(self.action_status_label" in assistant_interface
-    assert 'QLabel[isActionStatus="true"]' in assistant_interface
+    assert "status_rect = None" in assistant_delegate
+    assert "self._action_status_text(message.extra)" in assistant_delegate
+    assert "self._draw_auxiliary_text(painter, layout.status_rect" in assistant_delegate
 
 
 def test_ai_action_terminal_state_does_not_render_step_status() -> None:
-    assistant_interface = Path("client/ui/windows/ai_assistant_interface.py").read_text(encoding="utf-8")
-    status_source = "def _ai_action_status_text" + assistant_interface.split("def _ai_action_status_text", 1)[
-        1
-    ].split(
-        "\n\nclass AIAssistantPromptEdit",
-        1,
-    )[0]
-    namespace: dict[str, object] = {}
-    exec(status_source, namespace)
-    status_text = namespace["_ai_action_status_text"]
+    from client.delegates.ai_assistant_message_delegate import AIAssistantMessageDelegate
 
     terminal_extra = {
         "ai_action": {
@@ -509,7 +498,7 @@ def test_ai_action_terminal_state_does_not_render_step_status() -> None:
             ],
         }
     }
-    assert status_text(terminal_extra) == ""
+    assert AIAssistantMessageDelegate._action_status_text(terminal_extra) == ""
 
     waiting_extra = {
         "ai_action": {
@@ -524,7 +513,7 @@ def test_ai_action_terminal_state_does_not_render_step_status() -> None:
             "events": [{"type": "step_waiting_confirmation", "step_id": "confirm_send"}],
         }
     }
-    assert status_text(waiting_extra) == "等待确认：确认发送"
+    assert AIAssistantMessageDelegate._action_status_text(waiting_extra) == "等待确认：确认发送"
 
 
 def test_ai_assistant_tries_action_workflow_before_rag_and_ai_chat() -> None:
@@ -597,18 +586,19 @@ def test_ai_assistant_permission_scope_allows_local_account_memory() -> None:
 
 def test_ai_assistant_action_confirmation_controls_continue_pending_plan() -> None:
     assistant_interface = Path("client/ui/windows/ai_assistant_interface.py").read_text(encoding="utf-8")
+    assistant_delegate = Path("client/delegates/ai_assistant_message_delegate.py").read_text(encoding="utf-8")
 
-    assert "PushButton" in assistant_interface
-    assert "actionRequested = Signal(str, str)" in assistant_interface
-    assert "self.action_confirmation_frame = QFrame(self)" in assistant_interface
-    assert 'self.action_confirm_send_button = PrimaryPushButton("发送"' in assistant_interface
-    assert 'self.action_confirm_cancel_button = PushButton("取消"' in assistant_interface
-    assert 'self.message.message_id, "confirm"' in assistant_interface
-    assert 'self.message.message_id, "cancel"' in assistant_interface
-    assert "wrapper.card.actionRequested.connect(self._on_action_message_requested)" in assistant_interface
+    assert "QListView" in assistant_interface
+    assert "AIAssistantMessageDelegate" in assistant_interface
+    assert "def action_command_at" in assistant_delegate
+    assert 'return "confirm"' in assistant_delegate
+    assert 'return "cancel"' in assistant_delegate
+    assert "def _handle_message_list_release" in assistant_interface
+    assert "self._on_action_message_requested(message.message_id, command)" in assistant_interface
     assert "async def _continue_action_from_message" in assistant_interface
     assert "await self._action_workflow.handle_pending_control(" in assistant_interface
     assert "control_type=normalized_command" in assistant_interface
+    assert "set_action_message_enabled" in assistant_interface
 
 
 def test_ai_assistant_regenerate_capability_exists_without_visible_entry() -> None:
@@ -622,14 +612,15 @@ def test_ai_assistant_regenerate_capability_exists_without_visible_entry() -> No
 
 def test_ai_assistant_truncation_is_marked_in_message_footer() -> None:
     assistant_interface = Path("client/ui/windows/ai_assistant_interface.py").read_text(encoding="utf-8")
+    assistant_delegate = Path("client/delegates/ai_assistant_message_delegate.py").read_text(encoding="utf-8")
 
-    assert 'self.footer_label = CaptionLabel(self)' in assistant_interface
-    assert '"ai_assistant.message.truncated_hint"' in assistant_interface
-    assert 'if bool((message.extra or {}).get("truncated")):' in assistant_interface
-    assert '"ai_assistant.message.failed_hint"' in assistant_interface
-    assert 'elif message.status == AIMessageStatus.FAILED:' in assistant_interface
-    assert 'muted_text = "rgba(236, 239, 243, 166)"' in assistant_interface
-    assert 'muted_text = "rgba(26, 26, 26, 150)"' in assistant_interface
+    assert '"ai_assistant.message.truncated_hint"' in assistant_delegate
+    assert 'if bool((message.extra or {}).get("truncated")):' in assistant_delegate
+    assert '"ai_assistant.message.failed_hint"' in assistant_delegate
+    assert 'if message.status == AIMessageStatus.FAILED:' in assistant_delegate
+    assert "def _draw_auxiliary_text" in assistant_delegate
+    assert "QColor(236, 239, 243, 166)" in assistant_delegate
+    assert "QColor(26, 26, 26, 150)" in assistant_delegate
     assert 'message_extra["truncated"] = True' in assistant_interface
     assert 'message_extra.pop("truncated", None)' in assistant_interface
 

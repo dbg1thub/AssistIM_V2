@@ -9,7 +9,7 @@ import uuid
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QKeyEvent, QPixmap, QRegion
+from PySide6.QtGui import QColor, QGuiApplication, QKeyEvent, QPixmap, QRegion
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QDialog,
@@ -17,9 +17,9 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QListView,
     QListWidget,
     QListWidgetItem,
-    QScrollArea,
     QSizePolicy,
     QTextEdit,
     QVBoxLayout,
@@ -30,8 +30,10 @@ from qfluentwidgets import (
     CaptionLabel,
     IconWidget,
     MessageBoxBase,
+    Action,
+    MenuAnimationType,
     PrimaryPushButton,
-    PushButton,
+    RoundMenu,
     ScrollBarHandleDisplayMode,
     SubtitleLabel,
     TransparentToolButton,
@@ -43,6 +45,7 @@ from qfluentwidgets.components.widgets.scroll_bar import SmoothScrollDelegate
 from client.core import logging
 from client.core.app_icons import AppIcon, CollectionIcon
 from client.core.i18n import tr
+from client.delegates.ai_assistant_message_delegate import AIAssistantMessageDelegate
 from client.events.event_bus import get_event_bus
 from client.managers.ai_action_permission_policy import AIPermissionScope
 from client.managers.ai_action_workflow import AIActionWorkflow
@@ -50,6 +53,7 @@ from client.managers.ai_prompt_builder import AIPromptBuilder
 from client.managers.ai_task_manager import AITaskEvent, AITaskSnapshot, AITaskState, get_ai_task_manager
 from client.managers.conversation_memory_manager import ConversationMemoryContext, ConversationMemoryManager
 from client.models.ai_assistant import AIMessage, AIMessageRole, AIMessageStatus, AIThread
+from client.models.ai_assistant_message_model import AIAssistantMessageModel
 from client.services.ai_service import AIErrorCode
 from client.services.local_embedding_gguf_runtime import LocalEmbeddingGGUFRuntimeError
 from client.storage.ai_assistant_store import get_ai_assistant_store
@@ -57,18 +61,6 @@ from client.storage.ai_assistant_store import get_ai_assistant_store
 logger = logging.get_logger(__name__)
 
 SUPPORTED_IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
-
-
-def _qss_rgba(color: QColor, alpha: int | None = None) -> str:
-    resolved_alpha = color.alpha() if alpha is None else max(0, min(255, int(alpha)))
-    return f"rgba({color.red()}, {color.green()}, {color.blue()}, {resolved_alpha})"
-
-
-def _first_image_attachment(extra: dict | None) -> dict | None:
-    for attachment in list((extra or {}).get("attachments") or []):
-        if isinstance(attachment, dict) and str(attachment.get("type") or "").strip().lower() == "image":
-            return dict(attachment)
-    return None
 
 
 def _attachment_display_name(attachment: dict | None) -> str:
@@ -79,103 +71,6 @@ def _attachment_display_name(attachment: dict | None) -> str:
         return name
     path = str(attachment.get("local_path") or "").strip()
     return Path(path).name if path else ""
-
-
-def _ai_action_footer_text(extra: dict | None) -> str:
-    action = dict((extra or {}).get("ai_action") or {})
-    if not action:
-        return ""
-    state = str(action.get("state") or "").strip()
-    if state == "waiting_confirmation":
-        return "等待你确认后继续。"
-    if state == "waiting_clarification":
-        return "等待你补充信息后继续。"
-    steps = [item for item in list(action.get("steps") or []) if isinstance(item, dict)]
-    current_step_id = str(action.get("current_step_id") or "").strip()
-    current = next((item for item in steps if str(item.get("id") or "") == current_step_id), None)
-    if state == "running" and current is not None:
-        return str(current.get("display_text") or "正在执行操作...")
-    if state == "cancelled":
-        return "操作已取消。"
-    return ""
-
-
-def _ai_action_status_text(extra: dict | None) -> str:
-    action = dict((extra or {}).get("ai_action") or {})
-    if not action:
-        return ""
-    state = str(action.get("state") or "").strip()
-    if state in {"done", "cancelled"}:
-        return ""
-    steps = [item for item in list(action.get("steps") or []) if isinstance(item, dict)]
-    events = [item for item in list(action.get("events") or []) if isinstance(item, dict)]
-    lines: list[str] = []
-    for step in steps:
-        step_id = str(step.get("id") or "").strip()
-        event_state = _ai_action_step_state_from_events(step_id, events)
-        state = event_state or str(step.get("state") or "").strip()
-        label = _ai_action_step_state_label(state)
-        display_text = str(step.get("display_text") or "").strip()
-        explanation = str(step.get("explanation") or "").strip()
-        action_name = str(step.get("action") or "").strip()
-        title = display_text or explanation or action_name
-        if not title:
-            continue
-        if explanation and display_text and explanation != display_text:
-            title = f"{title}（{explanation}）"
-        lines.append(f"{label}：{title}")
-    if not lines:
-        for event in events[-4:]:
-            state = _ai_action_state_from_event(event)
-            label = _ai_action_step_state_label(state)
-            title = str(event.get("message") or event.get("action") or "").strip()
-            if title and title != "plan":
-                lines.append(f"{label}：{title}")
-    return "\n".join(lines[:6])
-
-
-def _ai_action_step_state_from_events(step_id: str, events: list[dict]) -> str:
-    normalized_step_id = str(step_id or "").strip()
-    if not normalized_step_id:
-        return ""
-    for event in reversed(events):
-        if str(event.get("step_id") or "").strip() != normalized_step_id:
-            continue
-        return _ai_action_state_from_event(event)
-    return ""
-
-
-def _ai_action_state_from_event(event: dict) -> str:
-    event_type = str(event.get("type") or "").strip()
-    state = str(event.get("state") or "").strip()
-    if event_type == "step_completed" or state == "completed":
-        return "done"
-    if event_type == "step_failed" or state == "failed":
-        return "failed"
-    if event_type == "step_waiting_confirmation" or state == "waiting_confirmation":
-        return "waiting_confirmation"
-    if event_type == "step_waiting_clarification" or state == "waiting_clarification":
-        return "waiting_clarification"
-    if event_type == "step_started" or state == "started":
-        return "running"
-    if event_type == "plan_cancelled" or state == "cancelled":
-        return "cancelled"
-    return state
-
-
-def _ai_action_step_state_label(state: str) -> str:
-    labels = {
-        "running": "正在执行",
-        "started": "正在执行",
-        "done": "已完成",
-        "completed": "已完成",
-        "waiting_confirmation": "等待确认",
-        "waiting_clarification": "等待补充",
-        "failed": "执行失败",
-        "cancelled": "已取消",
-        "pending": "待执行",
-    }
-    return labels.get(str(state or "").strip(), "待执行")
 
 
 class AIAssistantPromptEdit(QTextEdit):
@@ -192,338 +87,6 @@ class AIAssistantPromptEdit(QTextEdit):
             self.submitted.emit()
             return
         super().keyPressEvent(event)
-
-
-class AIAssistantMessageCard(QFrame):
-    """One message card in the standalone assistant stream."""
-
-    actionRequested = Signal(str, str)
-
-    def __init__(self, message: AIMessage, parent=None):
-        super().__init__(parent)
-        self.message = message
-        self._applying_theme = False
-        self.setObjectName("aiAssistantMessageCard")
-        self.setFrameShape(QFrame.Shape.NoFrame)
-        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
-
-        self.layout = QVBoxLayout(self)
-        self.layout.setContentsMargins(14, 10, 14, 10)
-        self.layout.setSpacing(8)
-
-        self.image_label = QLabel(self)
-        self.image_label.setObjectName("aiAssistantMessageImage")
-        self.image_label.setFixedSize(220, 140)
-        self.image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.image_label.hide()
-
-        self.content_label = BodyLabel(self)
-        self.content_label.setWordWrap(True)
-        self.content_label.setMinimumWidth(0)
-        self.content_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self.content_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        self.content_label.setTextFormat(Qt.TextFormat.PlainText)
-        self.footer_label = CaptionLabel(self)
-        self.footer_label.setWordWrap(True)
-        self.footer_label.setMinimumWidth(0)
-        self.footer_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self.footer_label.hide()
-        self.action_status_label = CaptionLabel(self)
-        self.action_status_label.setWordWrap(True)
-        self.action_status_label.setMinimumWidth(0)
-        self.action_status_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self.action_status_label.hide()
-
-        self.action_confirmation_frame = QFrame(self)
-        self.action_confirmation_frame.setObjectName("aiAssistantActionConfirmCard")
-        self.action_confirmation_frame.hide()
-        self.action_confirmation_layout = QVBoxLayout(self.action_confirmation_frame)
-        self.action_confirmation_layout.setContentsMargins(12, 10, 12, 10)
-        self.action_confirmation_layout.setSpacing(8)
-
-        self.action_confirmation_title_label = BodyLabel(self.action_confirmation_frame)
-        self.action_confirmation_title_label.setObjectName("aiAssistantActionConfirmTitle")
-        self.action_confirmation_title_label.setWordWrap(True)
-        self.action_confirmation_title_label.setText("发送消息")
-
-        self.action_confirmation_target_label = CaptionLabel(self.action_confirmation_frame)
-        self.action_confirmation_target_label.setWordWrap(True)
-        self.action_confirmation_content_label = BodyLabel(self.action_confirmation_frame)
-        self.action_confirmation_content_label.setWordWrap(True)
-        self.action_confirmation_content_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        self.action_confirmation_hint_label = CaptionLabel(self.action_confirmation_frame)
-        self.action_confirmation_hint_label.setWordWrap(True)
-        self.action_confirmation_hint_label.setText("这是会产生外部影响的操作，确认后才会发送。")
-
-        self.action_confirmation_button_row = QWidget(self.action_confirmation_frame)
-        self.action_confirmation_button_layout = QHBoxLayout(self.action_confirmation_button_row)
-        self.action_confirmation_button_layout.setContentsMargins(0, 0, 0, 0)
-        self.action_confirmation_button_layout.setSpacing(8)
-        self.action_confirmation_button_layout.addStretch(1)
-        self.action_confirm_cancel_button = PushButton("取消", self.action_confirmation_button_row)
-        self.action_confirm_send_button = PrimaryPushButton("发送", self.action_confirmation_button_row)
-        self.action_confirm_cancel_button.clicked.connect(lambda: self.actionRequested.emit(self.message.message_id, "cancel"))
-        self.action_confirm_send_button.clicked.connect(lambda: self.actionRequested.emit(self.message.message_id, "confirm"))
-        self.action_confirmation_button_layout.addWidget(self.action_confirm_cancel_button)
-        self.action_confirmation_button_layout.addWidget(self.action_confirm_send_button)
-
-        self.action_confirmation_layout.addWidget(self.action_confirmation_title_label)
-        self.action_confirmation_layout.addWidget(self.action_confirmation_target_label)
-        self.action_confirmation_layout.addWidget(self.action_confirmation_content_label)
-        self.action_confirmation_layout.addWidget(self.action_confirmation_hint_label)
-        self.action_confirmation_layout.addWidget(self.action_confirmation_button_row)
-
-        self.layout.addWidget(self.image_label)
-        self.layout.addWidget(self.content_label)
-        self.layout.addWidget(self.action_status_label)
-        self.layout.addWidget(self.action_confirmation_frame)
-        self.layout.addWidget(self.footer_label)
-        self.set_message(message)
-
-    def set_fill_width(self, fill: bool) -> None:
-        policy = QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
-        if not fill:
-            policy.setHorizontalPolicy(QSizePolicy.Policy.Maximum)
-        self.setSizePolicy(policy)
-
-    def set_message(self, message: AIMessage) -> None:
-        self.message = message
-        self._set_image_attachment(_first_image_attachment(message.extra))
-        self.content_label.setText(message.content or tr("ai_assistant.message.empty", ""))
-        footer_text = ""
-        if bool((message.extra or {}).get("truncated")):
-            footer_text = tr(
-                "ai_assistant.message.truncated_hint",
-                "内容较长，已截断。继续提问可接着往下说。",
-            )
-        elif message.status == AIMessageStatus.FAILED:
-            footer_text = tr(
-                "ai_assistant.message.failed_hint",
-                "本次生成未完成。你可以继续追问，或稍后再试。",
-            )
-        else:
-            footer_text = _ai_action_footer_text(message.extra)
-        self.action_status_label.setText(_ai_action_status_text(message.extra))
-        self.action_status_label.setVisible(bool(self.action_status_label.text()))
-        self._sync_action_confirmation()
-        self.footer_label.setText(footer_text)
-        self.footer_label.setVisible(bool(footer_text))
-        self._sync_text_metrics()
-        self._apply_theme()
-
-    def _sync_action_confirmation(self) -> None:
-        action = dict((self.message.extra or {}).get("ai_action") or {})
-        waiting = dict(action.get("waiting") or {})
-        preview = waiting.get("preview") if isinstance(waiting.get("preview"), dict) else {}
-        should_show = (
-            self.message.role == AIMessageRole.ASSISTANT
-            and str(action.get("state") or "").strip() == "waiting_confirmation"
-            and str(waiting.get("type") or "").strip() == "confirmation"
-            and bool(preview)
-        )
-        self.action_confirmation_frame.setVisible(should_show)
-        if not should_show:
-            return
-        operation = str(preview.get("operation") or "发送消息").strip() or "发送消息"
-        target = str(preview.get("target") or "目标联系人").strip() or "目标联系人"
-        content = str(preview.get("content") or "").strip()
-        self.action_confirmation_title_label.setText(operation)
-        self.action_confirmation_target_label.setText(f"收件人：{target}")
-        self.action_confirmation_content_label.setText(f"内容：{content}" if content else "内容：")
-        self.action_confirmation_hint_label.setText("这是会产生外部影响的操作，确认后才会发送。")
-        self.action_confirm_send_button.setText("发送")
-        self.action_confirm_cancel_button.setText("取消")
-
-    def _set_image_attachment(self, attachment: dict | None) -> None:
-        path = str((attachment or {}).get("local_path") or "").strip()
-        if not path or not Path(path).is_file():
-            self.image_label.clear()
-            self.image_label.hide()
-            return
-        pixmap = QPixmap(path)
-        if pixmap.isNull():
-            self.image_label.clear()
-            self.image_label.hide()
-            return
-        scaled = pixmap.scaled(
-            QSize(220, 140),
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation,
-        )
-        self.image_label.setPixmap(scaled)
-        self.image_label.setToolTip(_attachment_display_name(attachment))
-        self.image_label.show()
-
-    def set_content(self, content: str, *, status: AIMessageStatus | None = None) -> None:
-        if status is not None:
-            self.message.status = status
-        self.message.content = str(content or "")
-        self.set_message(self.message)
-
-    def _sync_text_metrics(self) -> None:
-        self._sync_wrapped_label_height(self.content_label)
-        self._sync_wrapped_label_height(self.action_status_label, visible=self.action_status_label.isVisible())
-        self._sync_wrapped_label_height(self.footer_label, visible=self.footer_label.isVisible())
-        for label in (
-            self.action_confirmation_title_label,
-            self.action_confirmation_target_label,
-            self.action_confirmation_content_label,
-            self.action_confirmation_hint_label,
-        ):
-            self._sync_wrapped_label_height(label, visible=self.action_confirmation_frame.isVisible())
-        self.layout.activate()
-        self.updateGeometry()
-
-    def _sync_wrapped_label_height(self, label: QLabel, *, visible: bool = True) -> None:
-        if not visible:
-            label.setFixedHeight(0)
-            return
-        available_width = label.width()
-        if available_width <= 0:
-            margins = self.layout.contentsMargins()
-            available_width = max(0, self.width() - margins.left() - margins.right())
-        if available_width <= 0:
-            return
-        target_height = max(label.fontMetrics().height(), label.heightForWidth(available_width))
-        if label.height() != target_height:
-            label.setFixedHeight(target_height)
-
-    def _apply_theme(self) -> None:
-        if self._applying_theme:
-            return
-        self._applying_theme = True
-        role = self.message.role.value if isinstance(self.message.role, AIMessageRole) else str(self.message.role or "")
-        try:
-            if isDarkTheme():
-                user_bg = _qss_rgba(QColor(themeColor()), 58)
-                assistant_bg = "transparent"
-                text = "rgba(246, 248, 250, 235)" if role == AIMessageRole.USER.value else "rgba(236, 239, 243, 230)"
-                muted_text = "rgba(236, 239, 243, 166)"
-                image_border = "rgba(255,255,255,0.14)"
-                image_bg = "rgba(255,255,255,0.04)"
-            else:
-                user_bg = _qss_rgba(QColor(themeColor()), 22)
-                assistant_bg = "transparent"
-                text = "rgb(26, 26, 26)"
-                muted_text = "rgba(26, 26, 26, 150)"
-                image_border = "rgba(15,23,42,0.12)"
-                image_bg = "rgba(255,255,255,0.62)"
-            bg = user_bg if role == AIMessageRole.USER.value else assistant_bg
-            self.setStyleSheet(
-                f"""
-                QFrame#aiAssistantMessageCard {{
-                    background: {bg};
-                    border: none;
-                    border-radius: {"10px" if role == AIMessageRole.USER.value else "0"};
-                }}
-                QLabel {{
-                    color: {text};
-                    background: transparent;
-                }}
-                QLabel[isFooter="true"] {{
-                    color: {muted_text};
-                    background: transparent;
-                }}
-                QLabel[isActionStatus="true"] {{
-                    color: {muted_text};
-                    background: transparent;
-                }}
-                QLabel#aiAssistantMessageImage {{
-                    background: {image_bg};
-                    border: 1px solid {image_border};
-                    border-radius: 8px;
-                }}
-                QFrame#aiAssistantActionConfirmCard {{
-                    background: {image_bg};
-                    border: 1px solid {image_border};
-                    border-radius: 8px;
-                }}
-                """
-            )
-            self.action_status_label.setProperty("isActionStatus", True)
-            self.action_status_label.style().unpolish(self.action_status_label)
-            self.action_status_label.style().polish(self.action_status_label)
-            self.footer_label.setProperty("isFooter", True)
-            self.footer_label.style().unpolish(self.footer_label)
-            self.footer_label.style().polish(self.footer_label)
-        finally:
-            self._applying_theme = False
-
-    def changeEvent(self, event) -> None:
-        super().changeEvent(event)
-        if event.type() in {
-            QEvent.Type.PaletteChange,
-            QEvent.Type.ApplicationPaletteChange,
-            QEvent.Type.StyleChange,
-        }:
-            self._apply_theme()
-
-    def resizeEvent(self, event) -> None:
-        super().resizeEvent(event)
-        self._sync_text_metrics()
-
-
-class AIAssistantMessageRow(QWidget):
-    """Message row that aligns assistant/user content to the composer track."""
-
-    DEFAULT_CONTENT_WIDTH = 1100
-    MIN_CONTENT_WIDTH = 320
-
-    def __init__(self, message: AIMessage, parent=None):
-        super().__init__(parent)
-        self.message = message
-        self._role = message.role.value if isinstance(message.role, AIMessageRole) else str(message.role or "")
-        self._content_width = self.DEFAULT_CONTENT_WIDTH
-        self.card = AIAssistantMessageCard(message, self)
-        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-
-        self.row_layout = QHBoxLayout(self)
-        self.row_layout.setContentsMargins(0, 0, 0, 0)
-        self.row_layout.setSpacing(0)
-
-        self._content_lane = QWidget(self)
-        self._content_lane.setObjectName("aiAssistantMessageLane")
-        self._content_lane.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-        self._content_lane_layout = QHBoxLayout(self._content_lane)
-        self._content_lane_layout.setContentsMargins(0, 0, 0, 0)
-        self._content_lane_layout.setSpacing(0)
-
-        self.row_layout.addStretch(1)
-        self.row_layout.addWidget(self._content_lane, 0)
-        self.row_layout.addStretch(1)
-
-        if self._role == AIMessageRole.USER.value:
-            self.card.set_fill_width(False)
-            self._content_lane_layout.addStretch(1)
-            self._content_lane_layout.addWidget(self.card, 0)
-        else:
-            self.card.set_fill_width(True)
-            self._content_lane_layout.addWidget(self.card, 1)
-
-        self.set_content_width(self.DEFAULT_CONTENT_WIDTH)
-
-    def set_content_width(self, width: int) -> None:
-        capped_width = max(self.MIN_CONTENT_WIDTH, int(width or 0))
-        if (
-            capped_width == self._content_width
-            and self._content_lane.width() == capped_width
-            and self.width() == capped_width
-        ):
-            self.card._sync_text_metrics()
-            return
-        self._content_width = capped_width
-        self.setFixedWidth(capped_width)
-        self._content_lane.setFixedWidth(capped_width)
-        self.card.setMaximumWidth(capped_width)
-        self.row_layout.invalidate()
-        self._content_lane_layout.invalidate()
-        self.card._sync_text_metrics()
-        self._content_lane.updateGeometry()
-        self.updateGeometry()
-
-    def resizeEvent(self, event) -> None:
-        super().resizeEvent(event)
-        self.set_content_width(self._content_width)
 
 
 class DeleteAIThreadConfirmDialog(MessageBoxBase):
@@ -731,7 +294,9 @@ class AIAssistantInterface(QWidget):
         self._threads: list[AIThread] = []
         self._current_thread_id = ""
         self._messages: list[AIMessage] = []
-        self._message_cards: dict[str, AIAssistantMessageCard] = {}
+        self._message_model: AIAssistantMessageModel | None = None
+        self._message_delegate: AIAssistantMessageDelegate | None = None
+        self._message_context_menu: RoundMenu | None = None
         self._active_task_id = ""
         self._active_assistant_message: AIMessage | None = None
         self._active_stream_task: asyncio.Task | None = None
@@ -816,30 +381,35 @@ class AIAssistantInterface(QWidget):
         self.header_layout.addWidget(self.title_label, 2, Qt.AlignmentFlag.AlignVCenter)
         self.header_layout.addWidget(self.header_actions, 1, Qt.AlignmentFlag.AlignVCenter)
 
-        self.scroll_area = QScrollArea(self.content_panel)
-        self.scroll_area.setObjectName("aiAssistantScrollArea")
-        self.scroll_area.viewport().setObjectName("aiAssistantScrollViewport")
-        self.scroll_area.setWidgetResizable(True)
-        self.scroll_area.setFrameShape(QFrame.Shape.NoFrame)
-        self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        self._scroll_delegate = SmoothScrollDelegate(self.scroll_area)
+        self.message_list = QListView(self.content_panel)
+        self.message_list.setObjectName("aiAssistantMessageList")
+        self.message_list.viewport().setObjectName("aiAssistantMessageViewport")
+        self.message_list.setFrameShape(QFrame.Shape.NoFrame)
+        self.message_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.message_list.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.message_list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.message_list.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self.message_list.setLayoutMode(QListView.LayoutMode.SinglePass)
+        self.message_list.setResizeMode(QListView.ResizeMode.Adjust)
+        self.message_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.message_list.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.message_list.setSpacing(0)
+        self.message_list.setMouseTracking(True)
+        self._message_model = AIAssistantMessageModel(self.message_list)
+        self._message_delegate = AIAssistantMessageDelegate(self.message_list)
+        self.message_list.setModel(self._message_model)
+        self.message_list.setItemDelegate(self._message_delegate)
+        self._scroll_delegate = SmoothScrollDelegate(self.message_list)
         self._scroll_delegate.vScrollBar.setHandleDisplayMode(ScrollBarHandleDisplayMode.ALWAYS)
         self._scroll_delegate.hScrollBar.setForceHidden(True)
         self._scroll_delegate.vScrollBar.setForceHidden(True)
-        self.message_container = QWidget(self.scroll_area)
-        self.message_container.setObjectName("aiAssistantMessageContainer")
-        self.message_layout = QVBoxLayout(self.message_container)
-        self.message_layout.setContentsMargins(28, 26, 28, self.MESSAGE_BOTTOM_MARGIN)
-        self.message_layout.setSpacing(14)
-        self.message_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
-        self.scroll_area.setWidget(self.message_container)
-        self.scroll_area.installEventFilter(self)
-        self.scroll_area.viewport().installEventFilter(self)
-        self.scroll_area.verticalScrollBar().installEventFilter(self)
+        self.message_list.installEventFilter(self)
+        self.message_list.viewport().installEventFilter(self)
+        self.message_list.verticalScrollBar().installEventFilter(self)
         self._scroll_delegate.vScrollBar.installEventFilter(self)
-        self.scroll_area.verticalScrollBar().valueChanged.connect(self._sync_scroll_to_bottom_button)
-        self.scroll_area.verticalScrollBar().rangeChanged.connect(self._sync_scroll_to_bottom_button)
+        self.message_list.verticalScrollBar().valueChanged.connect(self._sync_scroll_to_bottom_button)
+        self.message_list.verticalScrollBar().rangeChanged.connect(self._sync_scroll_to_bottom_button)
+        self.message_list.customContextMenuRequested.connect(self._on_message_context_menu)
 
         self.empty_widget = QFrame(self.content_panel)
         self.empty_widget.setObjectName("aiAssistantEmpty")
@@ -900,9 +470,9 @@ class AIAssistantInterface(QWidget):
 
         self.content_layout.addWidget(self.header)
         self.content_layout.addWidget(self.empty_widget, 1)
-        self.content_layout.addWidget(self.scroll_area, 1)
+        self.content_layout.addWidget(self.message_list, 1)
         self.content_layout.addWidget(self.input_safe_area)
-        self.scroll_area.hide()
+        self.message_list.hide()
 
         self.scroll_to_bottom_button = PrimaryPushButton(
             tr("ai_assistant.scroll_to_bottom", "Scroll to bottom"),
@@ -1068,53 +638,36 @@ class AIAssistantInterface(QWidget):
         self.thread_list.blockSignals(False)
 
     def _render_messages(self) -> None:
-        while self.message_layout.count() > 0:
-            item = self.message_layout.takeAt(0)
-            widget = item.widget()
-            if widget is not None:
-                widget.deleteLater()
-        self._message_cards.clear()
+        if self._message_model is not None:
+            self._message_model.set_messages(self._messages)
         if not self._messages:
-            self.scroll_area.hide()
+            self.message_list.hide()
             self.empty_widget.show()
             QTimer.singleShot(0, self._update_input_overlay_positions)
             return
         self.empty_widget.hide()
-        self.scroll_area.show()
-        for message in self._messages:
-            self._add_message_card(message)
+        self.message_list.show()
+        if self._message_delegate is not None:
+            self._message_delegate.clear_text_selection(self.message_list)
         QTimer.singleShot(0, self._update_input_overlay_positions)
         self._scroll_to_bottom()
-
-    def _add_message_card(self, message: AIMessage) -> None:
-        wrapper = AIAssistantMessageRow(message, self.message_container)
-        wrapper.card.actionRequested.connect(self._on_action_message_requested)
-        wrapper.set_content_width(self._message_track_width())
-        self.message_layout.insertWidget(self._message_insert_index(), wrapper, 0, Qt.AlignmentFlag.AlignHCenter)
-        self._message_cards[message.message_id] = wrapper.card
-
-    def _message_insert_index(self) -> int:
-        """Return the message insertion point for a top-aligned list layout."""
-        return self.message_layout.count()
 
     def _append_message(self, message: AIMessage) -> None:
         self._messages.append(message)
         if self.empty_widget.isVisible():
             self.empty_widget.hide()
-            self.scroll_area.show()
-            while self.message_layout.count() > 0:
-                item = self.message_layout.takeAt(0)
-                widget = item.widget()
-                if widget is not None:
-                    widget.deleteLater()
-        self._add_message_card(message)
+            self.message_list.show()
+        if self._message_model is not None:
+            self._message_model.add_message(message)
         self._scroll_to_bottom()
 
     def _update_message_card(self, message: AIMessage) -> None:
         should_follow = self._is_generating and self._is_scroll_at_bottom()
-        card = self._message_cards.get(message.message_id)
-        if card is not None:
-            card.set_message(message)
+        if self._message_model is not None:
+            self._message_model.update_message(message)
+        if self._message_delegate is not None:
+            self.message_list.doItemsLayout()
+            self.message_list.viewport().update()
         if should_follow:
             self._scroll_to_bottom()
         else:
@@ -1147,16 +700,15 @@ class AIAssistantInterface(QWidget):
         message = next((item for item in self._messages if item.message_id == normalized_message_id), None)
         if message is None:
             return
-        card = self._message_cards.get(normalized_message_id)
-        if card is not None:
-            card.action_confirmation_frame.setEnabled(False)
+        if self._message_delegate is not None:
+            self._message_delegate.set_action_message_enabled(self.message_list, normalized_message_id, False)
         action_result = await self._action_workflow.handle_pending_control(
             thread_id=message.thread_id,
             control_type=normalized_command,
         )
         if not action_result.handled:
-            if card is not None:
-                card.action_confirmation_frame.setEnabled(True)
+            if self._message_delegate is not None:
+                self._message_delegate.set_action_message_enabled(self.message_list, normalized_message_id, True)
             return
         if action_result.memory_context_lines:
             await self._complete_pending_assistant_message(
@@ -1595,7 +1147,8 @@ class AIAssistantInterface(QWidget):
 
     def _scroll_to_bottom(self, *, passes: int = 3) -> None:
         def _scroll(remaining: int) -> None:
-            bar = self.scroll_area.verticalScrollBar()
+            self.message_list.doItemsLayout()
+            bar = self.message_list.verticalScrollBar()
             bar.setValue(bar.maximum())
             self._sync_scroll_to_bottom_button()
             if remaining > 0:
@@ -1607,13 +1160,13 @@ class AIAssistantInterface(QWidget):
         self._scroll_to_bottom()
 
     def _is_scroll_at_bottom(self, *, tolerance: int = 8) -> bool:
-        bar = self.scroll_area.verticalScrollBar()
+        bar = self.message_list.verticalScrollBar()
         return bar.maximum() - bar.value() <= tolerance
 
     def _sync_scroll_to_bottom_button(self, *_args) -> None:
         if not hasattr(self, "scroll_to_bottom_button"):
             return
-        should_show = self._is_generating and self.scroll_area.isVisible() and not self._is_scroll_at_bottom()
+        should_show = self._is_generating and self.message_list.isVisible() and not self._is_scroll_at_bottom()
         self.scroll_to_bottom_button.setVisible(should_show)
         if should_show:
             self._position_scroll_to_bottom_button()
@@ -1625,7 +1178,7 @@ class AIAssistantInterface(QWidget):
         button.adjustSize()
         button.setFixedHeight(34)
         button_width = max(112, button.sizeHint().width() + 8)
-        scroll_rect = self.scroll_area.geometry()
+        scroll_rect = self.message_list.geometry()
         x = scroll_rect.left() + (scroll_rect.width() - button_width) // 2
         y = scroll_rect.bottom() - button.height() - 16
         button.setGeometry(max(scroll_rect.left(), x), max(scroll_rect.top(), y), button_width, button.height())
@@ -1643,30 +1196,25 @@ class AIAssistantInterface(QWidget):
     def _message_track_width(self) -> int:
         if hasattr(self, "composer_shell") and self.composer_shell.width() > 0:
             return self.composer_shell.width()
-        if hasattr(self, "scroll_area"):
-            viewport_width = self.scroll_area.viewport().width()
+        if hasattr(self, "message_list"):
+            viewport_width = self.message_list.viewport().width()
             if viewport_width > 0:
                 horizontal_margin = getattr(self.composer_overlay, "HORIZONTAL_MARGIN", 28)
                 return max(self.composer_shell.minimumWidth(), min(self.composer_shell.maximumWidth(), viewport_width - horizontal_margin * 2))
         return self.composer_shell.maximumWidth()
 
     def _sync_message_row_widths(self) -> None:
-        track_width = self._message_track_width()
-        for index in range(self.message_layout.count()):
-            item = self.message_layout.itemAt(index)
-            row = item.widget() if item is not None else None
-            if isinstance(row, AIAssistantMessageRow):
-                row.set_content_width(track_width)
-        self.message_layout.invalidate()
-        self.message_container.adjustSize()
-        self.message_container.updateGeometry()
+        if not hasattr(self, "message_list"):
+            return
+        self.message_list.doItemsLayout()
+        self.message_list.viewport().update()
 
     def _sync_message_scrollbar_hover(self) -> None:
         delegate_bar = self._scroll_delegate.vScrollBar if self._scroll_delegate is not None else None
         hovered = (
-            self.scroll_area.underMouse()
-            or self.scroll_area.viewport().underMouse()
-            or self.scroll_area.verticalScrollBar().underMouse()
+            self.message_list.underMouse()
+            or self.message_list.viewport().underMouse()
+            or self.message_list.verticalScrollBar().underMouse()
             or bool(delegate_bar is not None and delegate_bar.underMouse())
         )
         self._set_message_scrollbar_visible(hovered)
@@ -1741,14 +1289,90 @@ class AIAssistantInterface(QWidget):
                 return "本地 embedding 生成失败，无法执行聊天记录检索。"
         return "本地聊天记录检索失败。"
 
+    def _message_at(self, position: QPoint, *, bubble_only: bool = False) -> AIMessage | None:
+        index = self.message_list.indexAt(position)
+        if not index.isValid():
+            return None
+        message = index.data(Qt.ItemDataRole.UserRole)
+        if not isinstance(message, AIMessage):
+            return None
+        if bubble_only and self._message_delegate is not None:
+            if not self._message_delegate.is_bubble_hit(self.message_list, index, position):
+                return None
+        return message
+
+    def _handle_message_list_release(self, position: QPoint, button: Qt.MouseButton) -> bool:
+        if button != Qt.MouseButton.LeftButton or self._message_delegate is None:
+            return False
+        index = self.message_list.indexAt(position)
+        if not index.isValid():
+            return False
+        command = self._message_delegate.action_command_at(self.message_list, index, position)
+        if not command:
+            return False
+        message = index.data(Qt.ItemDataRole.UserRole)
+        if not isinstance(message, AIMessage):
+            return False
+        self._on_action_message_requested(message.message_id, command)
+        return True
+
+    def _on_message_context_menu(self, position: QPoint) -> None:
+        message = self._message_at(position, bubble_only=True)
+        if message is None:
+            return
+        if not str(message.content or "").strip():
+            return
+
+        if self._message_context_menu is not None:
+            self._message_context_menu.close()
+            self._message_context_menu.deleteLater()
+            self._message_context_menu = None
+
+        menu = RoundMenu(parent=self)
+        copy_action = Action(tr("chat.context.copy", "Copy"), self)
+        menu.addAction(copy_action)
+
+        copy_action.triggered.connect(lambda _checked=False, msg=message: self._copy_message_to_clipboard(msg))
+        if self._message_delegate is not None:
+            self._message_delegate.set_context_menu_message(self.message_list, message.message_id)
+
+        def _on_menu_hidden() -> None:
+            if self._message_context_menu is not menu:
+                return
+            self._message_context_menu = None
+            if self._message_delegate is not None:
+                self._message_delegate.set_context_menu_message(self.message_list, None)
+            menu.deleteLater()
+
+        menu.closedSignal.connect(_on_menu_hidden)
+        self._message_context_menu = menu
+        menu.exec(
+            self.message_list.viewport().mapToGlobal(position),
+            ani=True,
+            aniType=MenuAnimationType.DROP_DOWN,
+        )
+
+    def _copy_message_to_clipboard(self, message: AIMessage | None) -> bool:
+        if message is None:
+            return False
+        text = ""
+        if self._message_delegate is not None:
+            text = self._message_delegate.selected_text(str(message.content or ""), message.message_id)
+        if not text:
+            text = str(message.content or "")
+        if not text:
+            return False
+        QGuiApplication.clipboard().setText(text)
+        return True
+
     def eventFilter(self, watched, event) -> bool:
         watched_scrollbar = set()
-        if hasattr(self, "scroll_area"):
+        if hasattr(self, "message_list"):
             watched_scrollbar.update(
                 {
-                    self.scroll_area,
-                    self.scroll_area.viewport(),
-                    self.scroll_area.verticalScrollBar(),
+                    self.message_list,
+                    self.message_list.viewport(),
+                    self.message_list.verticalScrollBar(),
                 }
             )
         if self._scroll_delegate is not None:
@@ -1758,6 +1382,58 @@ class AIAssistantInterface(QWidget):
                 self._set_message_scrollbar_visible(True)
             elif event.type() == QEvent.Type.Leave:
                 QTimer.singleShot(80, self._sync_message_scrollbar_hover)
+
+        if hasattr(self, "message_list") and watched is self.message_list.viewport():
+            if event.type() == QEvent.Type.Resize:
+                self.message_list.doItemsLayout()
+                QTimer.singleShot(0, self._update_input_overlay_positions)
+            if event.type() == QEvent.Type.Leave:
+                if self._message_delegate is not None:
+                    self._message_delegate.clear_action_hover(self.message_list)
+                self.message_list.viewport().unsetCursor()
+            if event.type() == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
+                position = event.position().toPoint() if hasattr(event, "position") else event.pos()
+                index = self.message_list.indexAt(position)
+                if index.isValid() and self._message_delegate and self._message_delegate.begin_text_selection(
+                    self.message_list,
+                    index,
+                    position,
+                ):
+                    self.message_list.viewport().setCursor(Qt.CursorShape.IBeamCursor)
+                    return True
+                if self._message_delegate is not None:
+                    self._message_delegate.clear_text_selection(self.message_list)
+            if event.type() == QEvent.Type.MouseMove:
+                position = event.position().toPoint() if hasattr(event, "position") else event.pos()
+                if self._message_delegate and self._message_delegate.is_selection_active():
+                    if self._message_delegate.update_text_selection(self.message_list, position):
+                        self.message_list.viewport().setCursor(Qt.CursorShape.IBeamCursor)
+                        return True
+                index = self.message_list.indexAt(position)
+                if index.isValid() and self._message_delegate and self._message_delegate.update_action_hover(
+                    self.message_list,
+                    index,
+                    position,
+                ):
+                    self.message_list.viewport().setCursor(Qt.CursorShape.PointingHandCursor)
+                    return True
+                if self._message_delegate is not None:
+                    self._message_delegate.clear_action_hover(self.message_list)
+                if index.isValid() and self._message_delegate and self._message_delegate.is_text_hit(
+                    self.message_list,
+                    index,
+                    position,
+                ):
+                    self.message_list.viewport().setCursor(Qt.CursorShape.IBeamCursor)
+                else:
+                    self.message_list.viewport().unsetCursor()
+            if event.type() == QEvent.Type.MouseButtonRelease:
+                position = event.position().toPoint() if hasattr(event, "position") else event.pos()
+                if self._message_delegate and self._message_delegate.is_selection_active():
+                    self._message_delegate.end_text_selection(self.message_list)
+                    return True
+                if self._handle_message_list_release(position, event.button()):
+                    return True
 
         if hasattr(self, "composer_shell") and watched in {
             self.composer_overlay,
@@ -1850,33 +1526,31 @@ class AIAssistantInterface(QWidget):
                 QWidget#aiAssistantHeaderActions {{
                     background: transparent;
                 }}
-                QScrollArea#aiAssistantScrollArea {{
+                QListView#aiAssistantMessageList {{
                     background: transparent;
                     border: none;
+                    outline: none;
                 }}
-                QWidget#aiAssistantScrollViewport {{
+                QWidget#aiAssistantMessageViewport {{
                     background: transparent;
                 }}
-                QWidget#aiAssistantMessageContainer {{
-                    background: transparent;
-                }}
-                QScrollArea#aiAssistantScrollArea QScrollBar:vertical {{
+                QListView#aiAssistantMessageList QScrollBar:vertical {{
                     width: 8px;
                     margin: 8px 0 8px 0;
                     border: none;
                     border-radius: 4px;
                     background: {scrollbar_track};
                 }}
-                QScrollArea#aiAssistantScrollArea QScrollBar::handle:vertical {{
+                QListView#aiAssistantMessageList QScrollBar::handle:vertical {{
                     min-height: 28px;
                     border: none;
                     border-radius: 4px;
                     background: {scrollbar_handle};
                 }}
-                QScrollArea#aiAssistantScrollArea QScrollBar::add-line:vertical,
-                QScrollArea#aiAssistantScrollArea QScrollBar::sub-line:vertical,
-                QScrollArea#aiAssistantScrollArea QScrollBar::add-page:vertical,
-                QScrollArea#aiAssistantScrollArea QScrollBar::sub-page:vertical {{
+                QListView#aiAssistantMessageList QScrollBar::add-line:vertical,
+                QListView#aiAssistantMessageList QScrollBar::sub-line:vertical,
+                QListView#aiAssistantMessageList QScrollBar::add-page:vertical,
+                QListView#aiAssistantMessageList QScrollBar::sub-page:vertical {{
                     border: none;
                     background: transparent;
                     height: 0;

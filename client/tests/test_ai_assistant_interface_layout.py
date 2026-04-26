@@ -2,11 +2,11 @@ import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QPoint, QRect
-from PySide6.QtWidgets import QApplication
+from PySide6.QtCore import QPoint, QRect, Qt
+from PySide6.QtWidgets import QApplication, QStyleOptionViewItem
 
 from client.models.ai_assistant import AIMessage, AIMessageRole, AIMessageStatus
-from client.ui.windows.ai_assistant_interface import AIAssistantInterface, AIAssistantMessageCard
+from client.ui.windows.ai_assistant_interface import AIAssistantInterface
 
 
 def _message(message_id: str, role: AIMessageRole, content: str, *, status: AIMessageStatus = AIMessageStatus.DONE) -> AIMessage:
@@ -76,11 +76,10 @@ def test_ai_assistant_streaming_layout_keeps_bottom_gap_stable() -> None:
         stream.content += "这是流式输出的较长内容。" * 10
         widget._update_message_card(stream)
         app.processEvents()
-        last_row = widget.message_layout.itemAt(widget.message_layout.count() - 1).widget()
-        assert last_row is not None
-        bottom_gap = widget.message_container.height() - last_row.geometry().bottom() - 1
-        assert bottom_gap <= widget.MESSAGE_BOTTOM_MARGIN + 1
-        assert bottom_gap >= max(0, widget.MESSAGE_BOTTOM_MARGIN - 1)
+        widget.message_list.doItemsLayout()
+        app.processEvents()
+        bottom_gap = widget.message_list.verticalScrollBar().maximum() - widget.message_list.verticalScrollBar().value()
+        assert bottom_gap <= 2
 
     widget.close()
     app.processEvents()
@@ -101,21 +100,37 @@ def test_ai_assistant_message_track_follows_composer_edges() -> None:
     widget._update_input_overlay_positions()
     app.processEvents()
 
-    assistant_row = widget.message_layout.itemAt(0).widget()
-    user_row = widget.message_layout.itemAt(1).widget()
-    assert assistant_row is not None
-    assert user_row is not None
-
     composer_rect = _rect_in_panel(widget, widget.composer_shell)
-    assistant_lane_rect = _rect_in_panel(widget, assistant_row._content_lane)
-    user_lane_rect = _rect_in_panel(widget, user_row._content_lane)
-    user_card_rect = _rect_in_panel(widget, user_row.card)
+    assistant_index = widget._message_model.index(0, 0)
+    user_index = widget._message_model.index(1, 0)
+    assistant_layout = widget._message_delegate.layout_for_index(
+        widget.message_list.visualRect(assistant_index),
+        assistant_index,
+    )
+    user_layout = widget._message_delegate.layout_for_index(
+        widget.message_list.visualRect(user_index),
+        user_index,
+    )
+    assistant_track_rect = _rect_in_panel(widget, widget.message_list.viewport()).translated(
+        assistant_layout.track_rect.topLeft()
+    )
+    assistant_track_rect.setSize(assistant_layout.track_rect.size())
+    user_track_rect = _rect_in_panel(widget, widget.message_list.viewport()).translated(
+        user_layout.track_rect.topLeft()
+    )
+    user_track_rect.setSize(user_layout.track_rect.size())
+    user_bubble_rect = _rect_in_panel(widget, widget.message_list.viewport()).translated(
+        user_layout.bubble_rect.topLeft()
+    )
+    user_bubble_rect.setSize(user_layout.bubble_rect.size())
 
-    assert abs(assistant_lane_rect.left() - composer_rect.left()) <= 1
-    assert abs(assistant_lane_rect.right() - composer_rect.right()) <= 1
-    assert abs(user_lane_rect.left() - composer_rect.left()) <= 1
-    assert abs(user_lane_rect.right() - composer_rect.right()) <= 1
-    assert abs(user_card_rect.right() - composer_rect.right()) <= 1
+    assert abs(assistant_track_rect.left() - composer_rect.left()) <= 1
+    assert abs(assistant_track_rect.right() - composer_rect.right()) <= 1
+    assert abs(user_track_rect.left() - composer_rect.left()) <= 1
+    assert abs(user_track_rect.right() - composer_rect.right()) <= 1
+    assert abs(user_bubble_rect.right() - composer_rect.right()) <= 1
+    assert user_layout.text_rect.top() > user_layout.bubble_rect.top()
+    assert user_layout.text_rect.bottom() < user_layout.bubble_rect.bottom()
 
     widget.resize(1024, 900)
     app.processEvents()
@@ -123,63 +138,115 @@ def test_ai_assistant_message_track_follows_composer_edges() -> None:
     app.processEvents()
 
     composer_rect = _rect_in_panel(widget, widget.composer_shell)
-    assistant_lane_rect = _rect_in_panel(widget, assistant_row._content_lane)
-    user_lane_rect = _rect_in_panel(widget, user_row._content_lane)
-    user_card_rect = _rect_in_panel(widget, user_row.card)
+    assistant_layout = widget._message_delegate.layout_for_index(
+        widget.message_list.visualRect(assistant_index),
+        assistant_index,
+    )
+    user_layout = widget._message_delegate.layout_for_index(
+        widget.message_list.visualRect(user_index),
+        user_index,
+    )
+    assistant_track_rect = _rect_in_panel(widget, widget.message_list.viewport()).translated(
+        assistant_layout.track_rect.topLeft()
+    )
+    assistant_track_rect.setSize(assistant_layout.track_rect.size())
+    user_track_rect = _rect_in_panel(widget, widget.message_list.viewport()).translated(
+        user_layout.track_rect.topLeft()
+    )
+    user_track_rect.setSize(user_layout.track_rect.size())
+    user_bubble_rect = _rect_in_panel(widget, widget.message_list.viewport()).translated(
+        user_layout.bubble_rect.topLeft()
+    )
+    user_bubble_rect.setSize(user_layout.bubble_rect.size())
 
-    assert abs(assistant_lane_rect.left() - composer_rect.left()) <= 1
-    assert abs(assistant_lane_rect.right() - composer_rect.right()) <= 1
-    assert abs(user_lane_rect.left() - composer_rect.left()) <= 1
-    assert abs(user_lane_rect.right() - composer_rect.right()) <= 1
-    assert abs(user_card_rect.right() - composer_rect.right()) <= 1
+    assert abs(assistant_track_rect.left() - composer_rect.left()) <= 1
+    assert abs(assistant_track_rect.right() - composer_rect.right()) <= 1
+    assert abs(user_track_rect.left() - composer_rect.left()) <= 1
+    assert abs(user_track_rect.right() - composer_rect.right()) <= 1
+    assert abs(user_bubble_rect.right() - composer_rect.right()) <= 1
+    assert user_layout.text_rect.top() > user_layout.bubble_rect.top()
+    assert user_layout.text_rect.bottom() < user_layout.bubble_rect.bottom()
 
     widget.close()
     app.processEvents()
 
 
-def test_ai_assistant_message_card_reserves_full_height_for_korean_text() -> None:
+def test_ai_assistant_message_delegate_reserves_full_height_for_korean_text() -> None:
     app = QApplication.instance() or QApplication([])
     text = (
         "안녕하세요. 저는 AssistIM의 AI 어시스턴트입니다. "
         "한국어로 자기소개를 드리겠습니다. "
         "사용자님의 메시지를 이해하고 요약, 정리, 답변 생성을 도와드립니다. "
     ) * 5
-    card = AIAssistantMessageCard(_message("korean", AIMessageRole.ASSISTANT, text.strip()))
-    card.resize(600, 10)
-    card.show()
+    widget = AIAssistantInterface()
+    widget.resize(900, 720)
+    widget.show()
+    widget._append_message(_message("korean", AIMessageRole.ASSISTANT, text.strip()))
     app.processEvents()
 
-    label = card.content_label
-    required_height = label.heightForWidth(label.width())
+    index = widget._message_model.index(0, 0)
+    option = QStyleOptionViewItem()
+    option.rect = QRect(0, 0, widget.message_list.viewport().width(), 1)
+    row_height = widget._message_delegate.sizeHint(option, index).height()
+    layout = widget._message_delegate.layout_for_index(QRect(0, 0, option.rect.width(), row_height), index)
 
-    assert label.width() > 0
-    assert required_height > 0
-    assert label.height() >= required_height
+    assert layout.text_rect.height() > 0
+    assert row_height >= layout.text_rect.bottom() + 1
+    assert row_height <= layout.text_rect.height() + 80
 
-    card.close()
+    widget.close()
     app.processEvents()
 
 
-def test_ai_assistant_message_card_shows_action_confirmation_controls() -> None:
+def test_ai_assistant_message_delegate_hits_action_confirmation_controls() -> None:
     app = QApplication.instance() or QApplication([])
-    card = AIAssistantMessageCard(_action_confirmation_message())
-    card.resize(620, 10)
-    card.show()
+    widget = AIAssistantInterface()
+    widget.resize(900, 720)
+    widget.show()
+    widget._append_message(_action_confirmation_message())
     app.processEvents()
+
+    index = widget._message_model.index(0, 0)
+    layout = widget._message_delegate.layout_for_index(widget.message_list.visualRect(index), index)
+
+    assert layout.confirmation_rect is not None
+    assert layout.confirm_button_rect is not None
+    assert layout.cancel_button_rect is not None
+    assert widget._message_delegate.action_command_at(
+        widget.message_list,
+        index,
+        layout.confirm_button_rect.center(),
+    ) == "confirm"
+    assert widget._message_delegate.action_command_at(
+        widget.message_list,
+        index,
+        layout.cancel_button_rect.center(),
+    ) == "cancel"
 
     emitted: list[tuple[str, str]] = []
-    card.actionRequested.connect(lambda message_id, command: emitted.append((message_id, command)))
+    widget._on_action_message_requested = lambda message_id, command: emitted.append((message_id, command))
 
-    assert card.action_confirmation_frame.isVisible()
-    assert "张三" in card.action_confirmation_target_label.text()
-    assert "我晚点到" in card.action_confirmation_content_label.text()
-    assert card.action_confirm_send_button.text() == "发送"
-    assert card.action_confirm_cancel_button.text() == "取消"
-
-    card.action_confirm_send_button.click()
-    card.action_confirm_cancel_button.click()
-
+    assert widget._handle_message_list_release(layout.confirm_button_rect.center(), Qt.MouseButton.LeftButton)
+    assert widget._handle_message_list_release(layout.cancel_button_rect.center(), Qt.MouseButton.LeftButton)
     assert emitted == [("action-confirm", "confirm"), ("action-confirm", "cancel")]
 
-    card.close()
+    widget.close()
+    app.processEvents()
+
+
+def test_ai_assistant_message_copy_uses_bubble_text() -> None:
+    app = QApplication.instance() or QApplication([])
+    widget = AIAssistantInterface()
+    widget.resize(900, 720)
+    widget.show()
+    widget._append_message(_message("copy-me", AIMessageRole.USER, "给 test3 说我晚点联系他"))
+    app.processEvents()
+
+    index = widget._message_model.index(0, 0)
+    message = index.data(Qt.ItemDataRole.UserRole)
+
+    assert widget._copy_message_to_clipboard(message)
+    assert QApplication.clipboard().text() == "给 test3 说我晚点联系他"
+
+    widget.close()
     app.processEvents()
