@@ -2,8 +2,24 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass, field
 from typing import Any, Callable, Literal
+
+
+CONFIRMATION_PREVIEW_FINGERPRINT_VERSION = "confirmation_preview:v1"
+
+
+def confirmation_preview_fingerprint(preview: Any, *, risk: Any) -> str:
+    normalized_preview = dict(preview or {}) if isinstance(preview, dict) else {}
+    payload = {
+        "version": CONFIRMATION_PREVIEW_FINGERPRINT_VERSION,
+        "risk": str(risk or "").strip() or "high",
+        "preview": normalized_preview,
+    }
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
 PlanState = Literal[

@@ -22,7 +22,7 @@ from client.managers.ai_action_io_models import (
     MessageSendOutput,
     UserConfirmInput,
 )
-from client.managers.ai_action_types import ActionPause, AtomicActionSpec
+from client.managers.ai_action_types import ActionPause, AtomicActionSpec, confirmation_preview_fingerprint
 logger = logging.get_logger(__name__)
 
 
@@ -383,6 +383,7 @@ class AtomicActionRegistry:
                 "step_id": str(context.get("step_id") or ""),
                 "risk": risk,
                 "preview": preview,
+                "preview_fingerprint": confirmation_preview_fingerprint(preview, risk=risk),
                 "response_text": text,
                 "plan_version": int(context.get("plan_version") or 1),
             },

@@ -2420,6 +2420,73 @@ def test_ai_action_workflow_rejects_stale_pending_confirmation_after_plan_versio
     asyncio.run(scenario())
 
 
+def test_ai_action_workflow_rejects_stale_pending_confirmation_after_preview_changes(tmp_path, monkeypatch) -> None:
+    async def scenario() -> None:
+        db = Database(str(tmp_path / "actions.db"))
+        monkeypatch.setattr(action_store_module, "get_database", lambda: db)
+        store = AIActionStore()
+        contact_db = _FakeContactDatabase(
+            [
+                {
+                    "id": "user-1",
+                    "display_name": "张三",
+                    "username": "zhangsan",
+                    "nickname": "张三",
+                    "remark": "张三",
+                    "assistim_id": "zhangsan",
+                }
+            ]
+        )
+        workflow = AIActionWorkflow(
+            action_store=store,
+            planner=_WorkflowPlanner(),
+            contact_alias_resolver=ContactAliasResolver(db=contact_db),
+        )
+        try:
+            first = await workflow.handle_user_turn(thread_id="thread-1", text="帮我给张三发我晚点到")
+            assert first.handled is True
+            plan_id = first.message_extra["ai_action"]["plan_id"]
+            assert first.message_extra["ai_action"]["state"] == "waiting_confirmation"
+
+            record = await store.get_plan(plan_id)
+            assert record is not None
+            assert record.plan_version == 1
+            assert record.waiting_payload["plan_version"] == 1
+            assert record.waiting_payload["preview"]["content"] == "我晚点到"
+            assert record.step_outputs["draft_message"]["preview"]["content"] == "我晚点到"
+
+            mutated_outputs = dict(record.step_outputs)
+            mutated_draft = dict(mutated_outputs["draft_message"])
+            mutated_preview = dict(mutated_draft["preview"])
+            mutated_preview["content"] = "我改成明天到"
+            mutated_draft["content"] = "我改成明天到"
+            mutated_draft["preview"] = mutated_preview
+            mutated_outputs["draft_message"] = mutated_draft
+            mutated = await store.update_plan(
+                plan_id,
+                step_outputs=mutated_outputs,
+                reason="test_mutate_pending_confirmation_preview",
+            )
+            assert mutated is not None
+            assert mutated.plan_version == 1
+            assert mutated.state == "waiting_confirmation"
+
+            confirmed = await workflow.handle_user_turn(thread_id="thread-1", text="确认")
+            latest = await store.get_plan(plan_id)
+
+            assert confirmed.handled is True
+            assert "操作内容已变化" in confirmed.response_text
+            assert confirmed.message_extra["ai_action"]["state"] == "waiting_confirmation"
+            assert latest is not None
+            assert latest.state == "waiting_confirmation"
+            assert "confirm_send" not in latest.step_outputs
+            assert "send_message" not in latest.step_outputs
+        finally:
+            await db.close()
+
+    asyncio.run(scenario())
+
+
 def test_ai_action_executor_uses_temp_result_for_large_step_output(tmp_path, monkeypatch) -> None:
     async def scenario() -> None:
         db = Database(str(tmp_path / "actions.db"))

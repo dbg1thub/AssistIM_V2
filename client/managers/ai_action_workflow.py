@@ -15,7 +15,13 @@ from client.managers.ai_action_normalizer import AIPlanNormalizer
 from client.managers.ai_action_optimizer import AIPlanOptimizer
 from client.managers.ai_action_registry import AtomicActionRegistry
 from client.managers.ai_action_resource_manager import AIResourceManager
-from client.managers.ai_action_types import AIActionPlan, AIActionStep, AIActionTurnResult, ActionExecutionResult
+from client.managers.ai_action_types import (
+    AIActionPlan,
+    AIActionStep,
+    AIActionTurnResult,
+    ActionExecutionResult,
+    confirmation_preview_fingerprint,
+)
 from client.managers.ai_action_validator import AIPlanValidationResult, AIPlanValidator
 from client.storage.ai_action_plan_store import AIActionPlanRecord, AIActionPlanStore
 from client.storage.ai_action_store import AIActionStore, get_ai_action_store
@@ -782,7 +788,19 @@ class AIActionWorkflow:
             waiting_plan_version = int(waiting.get("plan_version") or 0)
         except (TypeError, ValueError):
             waiting_plan_version = 0
-        return waiting_plan_version <= 0 or waiting_plan_version != int(pending.plan_version or 0)
+        if waiting_plan_version <= 0 or waiting_plan_version != int(pending.plan_version or 0):
+            return True
+        risk = str(waiting.get("risk") or "high").strip() or "high"
+        waiting_preview = waiting.get("preview") if isinstance(waiting.get("preview"), dict) else {}
+        waiting_fingerprint = str(waiting.get("preview_fingerprint") or "").strip()
+        if not waiting_fingerprint:
+            return True
+        if waiting_fingerprint != confirmation_preview_fingerprint(waiting_preview, risk=risk):
+            return True
+        current_preview = _current_confirmation_preview(pending)
+        if current_preview is None:
+            return True
+        return waiting_fingerprint != confirmation_preview_fingerprint(current_preview, risk=risk)
 
     async def _select_pending_contact(self, pending: AIActionPlanRecord, selection: str) -> AIActionTurnResult:
         waiting = dict(pending.waiting_payload or {})
@@ -880,6 +898,71 @@ class AIActionWorkflow:
             "events": events,
             "waiting": dict(record.waiting_payload or {}),
         }
+
+
+def _current_confirmation_preview(pending: AIActionPlanRecord) -> dict[str, Any] | None:
+    step = _current_plan_step(pending)
+    if step is None:
+        return None
+    args = step.get("args") if isinstance(step.get("args"), dict) else {}
+    if "preview" not in args:
+        return None
+    try:
+        preview = _resolve_action_arg_refs(args.get("preview"), dict(pending.step_outputs or {}))
+    except ValueError:
+        return None
+    return dict(preview) if isinstance(preview, dict) else None
+
+
+def _current_plan_step(pending: AIActionPlanRecord) -> dict[str, Any] | None:
+    current_step_id = str(pending.current_step_id or "").strip()
+    if not current_step_id:
+        return None
+    for step in list(dict(pending.plan_json or {}).get("steps") or []):
+        if isinstance(step, dict) and str(step.get("id") or "").strip() == current_step_id:
+            return dict(step)
+    return None
+
+
+def _resolve_action_arg_refs(value: Any, outputs: dict[str, Any]) -> Any:
+    if isinstance(value, str) and value.startswith("$"):
+        return _resolve_action_ref(value, outputs)
+    if isinstance(value, list):
+        return [_resolve_action_arg_refs(item, outputs) for item in value]
+    if isinstance(value, dict):
+        return {key: _resolve_action_arg_refs(item, outputs) for key, item in value.items()}
+    return value
+
+
+def _resolve_action_ref(ref: str, outputs: dict[str, Any]) -> Any:
+    text = str(ref or "").strip()
+    if not text.startswith("$"):
+        return text
+    parts = text[1:].split(".")
+    if not parts or not parts[0] or parts[0] not in outputs:
+        raise ValueError("ARG_REFERENCE_INVALID")
+    current: Any = outputs[parts[0]]
+    for raw_part in parts[1:]:
+        name, indexes = _parse_action_ref_path_part(raw_part)
+        if name:
+            if not isinstance(current, dict) or name not in current:
+                raise ValueError("ARG_REFERENCE_INVALID")
+            current = current[name]
+        for index in indexes:
+            if not isinstance(current, list) or index < 0 or index >= len(current):
+                raise ValueError("ARG_REFERENCE_INVALID")
+            current = current[index]
+    return current
+
+
+def _parse_action_ref_path_part(part: str) -> tuple[str, list[int]]:
+    text = str(part or "").strip()
+    match = re.match(r"^(?P<name>[^\[]*)(?P<indexes>(?:\[\d+\])*)$", text)
+    if not match:
+        raise ValueError("ARG_REFERENCE_INVALID")
+    name = match.group("name")
+    indexes = [int(item) for item in re.findall(r"\[(\d+)\]", match.group("indexes") or "")]
+    return name, indexes
 
 
 def _safe_action_events(plan_json: dict[str, Any]) -> list[dict[str, Any]]:
