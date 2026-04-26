@@ -6,7 +6,7 @@ from client.managers.ai_action_cache import AIActionCache
 from client.managers.ai_action_executor import AIActionExecutor
 from client.managers.ai_action_normalizer import AIPlanNormalizer
 from client.managers.ai_action_optimizer import AIPlanOptimizer
-from client.managers.ai_action_permission_policy import AIPermissionPolicy, PermissionDecision
+from client.managers.ai_action_permission_policy import AIPermissionPolicy, AIPermissionScope, PermissionDecision
 from client.managers.ai_action_registry import AtomicActionRegistry
 from client.managers.ai_action_types import AIActionPlan, AIActionStep, AtomicActionSpec
 from client.managers.ai_action_validator import AIPlanValidator
@@ -2203,6 +2203,104 @@ def test_ai_permission_policy_allows_default_local_read_scope() -> None:
 
     assert decision.allowed is True
     assert decision.code == ""
+
+
+def test_ai_permission_policy_rejects_excluded_contact_without_leaking_details() -> None:
+    policy = AIPermissionPolicy(scope=AIPermissionScope(excluded_contacts=("user-1",)))
+    spec = AtomicActionSpec(name="memory.search", kind="read", risk_level="low", allow_cross_session=True)
+
+    decision = policy.check_step(
+        spec=spec,
+        args={
+            "participants": [
+                {
+                    "contact_id": "user-1",
+                    "display_name": "Sensitive Friend",
+                    "tags": ["normal"],
+                }
+            ]
+        },
+    )
+
+    assert decision.allowed is False
+    assert decision.code == "PERMISSION_DENIED"
+    assert "user-1" not in decision.message
+    assert "Sensitive Friend" not in decision.message
+
+
+def test_ai_permission_policy_rejects_target_outside_allowed_contacts() -> None:
+    policy = AIPermissionPolicy(scope=AIPermissionScope(allowed_contacts=("user-2",)))
+    spec = AtomicActionSpec(
+        name="message.send",
+        kind="write",
+        risk_level="high",
+        allow_side_effect=True,
+    )
+
+    decision = policy.check_step(
+        spec=spec,
+        args={
+            "target": {"contact_id": "user-1", "display_name": "张三"},
+            "content": "hello",
+            "preview": {"operation": "发送消息"},
+            "idempotency_key": "send-1",
+        },
+    )
+
+    assert decision.allowed is False
+    assert decision.code == "PERMISSION_DENIED"
+    assert "user-1" not in decision.message
+    assert "张三" not in decision.message
+
+
+def test_ai_permission_policy_rejects_excluded_group_scope() -> None:
+    policy = AIPermissionPolicy(scope=AIPermissionScope(excluded_groups=("group-1",)))
+    spec = AtomicActionSpec(name="memory.search", kind="read", risk_level="low", allow_cross_session=True)
+
+    decision = policy.check_step(
+        spec=spec,
+        args={"participants": [{"group_id": "group-1", "name": "Private Group"}]},
+    )
+
+    assert decision.allowed is False
+    assert decision.code == "PERMISSION_DENIED"
+    assert "group-1" not in decision.message
+    assert "Private Group" not in decision.message
+
+
+def test_ai_permission_policy_rejects_sensitive_tagged_entities() -> None:
+    policy = AIPermissionPolicy(scope=AIPermissionScope(sensitive_tags=("private", "blocked")))
+    spec = AtomicActionSpec(name="memory.search", kind="read", risk_level="low", allow_cross_session=True)
+
+    decision = policy.check_step(
+        spec=spec,
+        args={"participants": [{"contact_id": "user-3", "tags": ["private"]}]},
+    )
+
+    assert decision.allowed is False
+    assert decision.code == "PERMISSION_DENIED"
+    assert "user-3" not in decision.message
+    assert "private" not in decision.message
+
+
+def test_ai_permission_policy_rejects_e2ee_plaintext_without_scope_grant() -> None:
+    policy = AIPermissionPolicy(scope=AIPermissionScope(allow_e2ee_plaintext=False))
+    spec = AtomicActionSpec(name="memory.search", kind="read", risk_level="low", allow_cross_session=True)
+
+    denied = policy.check_step(
+        spec=spec,
+        args={"participants": [{"contact_id": "user-4", "e2ee": True}]},
+    )
+    allowed = AIPermissionPolicy(scope=AIPermissionScope(allow_e2ee_plaintext=True)).check_step(
+        spec=spec,
+        args={"participants": [{"contact_id": "user-4", "e2ee": True}]},
+    )
+
+    assert denied.allowed is False
+    assert denied.code == "PERMISSION_DENIED"
+    assert "user-4" not in denied.message
+    assert allowed.allowed is True
+    assert allowed.code == ""
 
 
 def test_ai_action_executor_validates_output_model_after_handler(tmp_path, monkeypatch) -> None:
