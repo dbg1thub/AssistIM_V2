@@ -4,6 +4,7 @@ import json
 
 from tools.ai_action_prompt_benchmark import (
     CaseBenchmarkResult,
+    LEGACY_PLAN_TOP_LEVEL_FIELDS,
     PromptBenchmarkCase,
     PromptCaseExpectation,
     PromptStepArgExpectation,
@@ -264,6 +265,58 @@ def test_evaluate_case_checks_non_action_and_forbidden_actions() -> None:
     assert "forbidden action present" in bad_messages
 
 
+def test_evaluate_case_rejects_legacy_top_level_plan_fields_by_default() -> None:
+    plan = {
+        "is_action": True,
+        "goal": "查询历史",
+        "risk": "low",
+        "action": "memory.search",
+        "slots": {"query": "test3"},
+        "missing_slots": [],
+        "steps": [],
+        "final": {},
+    }
+
+    checks, messages = evaluate_case(plan, PromptCaseExpectation(is_action=True))
+
+    assert checks["forbidden_top_level_fields"] is False
+    assert "forbidden top-level fields present: action, missing_slots, slots" in messages
+
+
+def test_evaluate_case_checks_required_action_sequence() -> None:
+    expectation = PromptCaseExpectation(
+        required_actions=("contact.resolve", "memory.search", "memory.summarize"),
+        required_action_sequence=("contact.resolve", "memory.search", "memory.summarize"),
+    )
+    plan = {
+        "is_action": True,
+        "goal": "查询历史",
+        "risk": "low",
+        "steps": [
+            {"id": "resolve_1", "action": "contact.resolve", "depends_on": [], "args": {}},
+            {"id": "sum_1", "action": "memory.summarize", "depends_on": ["resolve_1"], "args": {}},
+            {"id": "search_1", "action": "memory.search", "depends_on": ["sum_1"], "args": {}},
+        ],
+        "final": {},
+    }
+
+    checks, messages = evaluate_case(plan, expectation)
+
+    assert checks["required_actions"] is True
+    assert checks["required_action_sequence"] is False
+    assert "required action sequence mismatch" in messages
+
+    plan["steps"] = [
+        {"id": "resolve_1", "action": "contact.resolve", "depends_on": [], "args": {}},
+        {"id": "search_1", "action": "memory.search", "depends_on": ["resolve_1"], "args": {}},
+        {"id": "sum_1", "action": "memory.summarize", "depends_on": ["search_1"], "args": {}},
+    ]
+    ok_checks, ok_messages = evaluate_case(plan, expectation)
+
+    assert ok_checks["required_action_sequence"] is True
+    assert ok_messages == []
+
+
 def test_evaluate_case_checks_required_step_args() -> None:
     plan = {
         "goal": "send",
@@ -399,6 +452,12 @@ def test_load_golden_corpus_from_json(tmp_path) -> None:
                             "is_action": True,
                             "risk": "high",
                             "required_actions": ["contact.resolve", "message.draft", "user.confirm", "message.send"],
+                            "required_action_sequence": [
+                                "contact.resolve",
+                                "message.draft",
+                                "user.confirm",
+                                "message.send"
+                            ],
                             "contact_queries": ["张三"],
                             "requires_confirmation": True,
                             "expected_content": "我晚点到",
@@ -428,6 +487,13 @@ def test_load_golden_corpus_from_json(tmp_path) -> None:
         "user.confirm",
         "message.send",
     )
+    assert cases[1].expectation.required_action_sequence == (
+        "contact.resolve",
+        "message.draft",
+        "user.confirm",
+        "message.send",
+    )
+    assert cases[1].expectation.forbidden_top_level_fields == LEGACY_PLAN_TOP_LEVEL_FIELDS
     assert cases[1].expectation.required_step_args[0].path == "allow_multiple"
 
 
@@ -440,6 +506,11 @@ def test_load_default_golden_corpus_has_core_action_and_chat_cases() -> None:
     assert any(case.expectation.is_action is False for case in cases)
     assert any("memory.search" in case.expectation.required_actions for case in cases)
     assert any("message.send" in case.expectation.required_actions for case in cases)
+    assert any(
+        case.expectation.required_action_sequence == ("contact.resolve", "memory.search", "memory.summarize")
+        for case in cases
+    )
+    assert all(case.expectation.forbidden_top_level_fields == LEGACY_PLAN_TOP_LEVEL_FIELDS for case in cases)
     assert {case.router_expected_route for case in cases} >= {"chat", "action_candidate"}
 
 

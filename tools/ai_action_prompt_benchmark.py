@@ -15,6 +15,13 @@ from typing import Any
 
 
 DEFAULT_GOLDEN_CORPUS_PATH = Path(__file__).with_name("ai_action_golden_corpus.json")
+LEGACY_PLAN_TOP_LEVEL_FIELDS = (
+    "action",
+    "slots",
+    "missing_slots",
+    "requires_app_data",
+    "requires_side_effect",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,6 +35,7 @@ class PromptStepArgExpectation:
 @dataclass(frozen=True, slots=True)
 class PromptCaseExpectation:
     required_actions: tuple[str, ...] = ()
+    required_action_sequence: tuple[str, ...] = ()
     risk: str = ""
     contact_queries: tuple[str, ...] = ()
     requires_confirmation: bool | None = None
@@ -36,6 +44,7 @@ class PromptCaseExpectation:
     required_step_args: tuple[PromptStepArgExpectation, ...] = ()
     is_action: bool | None = None
     forbidden_actions: tuple[str, ...] = ()
+    forbidden_top_level_fields: tuple[str, ...] = field(default_factory=lambda: LEGACY_PLAN_TOP_LEVEL_FIELDS)
 
 
 @dataclass(frozen=True, slots=True)
@@ -158,9 +167,15 @@ def canonical_structural_signature(plan: dict[str, Any] | None) -> str:
 def evaluate_case(plan: dict[str, Any] | None, expectation: PromptCaseExpectation) -> tuple[dict[str, bool], list[str]]:
     payload = dict(plan or {}) if isinstance(plan, dict) else {}
     steps = [dict(item) for item in list(payload.get("steps") or []) if isinstance(item, dict)]
+    actions = [str(step.get("action") or "").strip() for step in steps]
     checks: dict[str, bool] = {"valid_plan": bool(payload)}
     messages: list[str] = []
 
+    if expectation.forbidden_top_level_fields:
+        present_fields = sorted(field for field in expectation.forbidden_top_level_fields if field in payload)
+        checks["forbidden_top_level_fields"] = not present_fields
+        if present_fields:
+            messages.append(f"forbidden top-level fields present: {', '.join(present_fields)}")
     if expectation.is_action is not None:
         inferred_is_action = bool(payload.get("is_action", True if steps else False))
         checks["is_action"] = inferred_is_action is bool(expectation.is_action)
@@ -171,16 +186,18 @@ def evaluate_case(plan: dict[str, Any] | None, expectation: PromptCaseExpectatio
             if not checks["no_steps_for_non_action"]:
                 messages.append("non-action plan contains steps")
     if expectation.required_actions:
-        actions = [str(step.get("action") or "").strip() for step in steps]
         checks["required_actions"] = all(action in actions for action in expectation.required_actions)
         if not checks["required_actions"]:
             messages.append("missing required actions")
+    if expectation.required_action_sequence:
+        checks["required_action_sequence"] = _actions_contain_sequence(actions, expectation.required_action_sequence)
+        if not checks["required_action_sequence"]:
+            messages.append("required action sequence mismatch")
     if steps:
         checks["step_references"] = _has_valid_step_references(steps, payload.get("final") if isinstance(payload.get("final"), dict) else {})
         if not checks["step_references"]:
             messages.append("unresolved step reference")
     if expectation.forbidden_actions:
-        actions = [str(step.get("action") or "").strip() for step in steps]
         forbidden = set(expectation.forbidden_actions)
         checks["forbidden_actions"] = not any(action in forbidden for action in actions)
         if not checks["forbidden_actions"]:
@@ -269,7 +286,13 @@ def _load_expectation(payload: dict[str, Any], *, case_name: str) -> PromptCaseE
     return PromptCaseExpectation(
         is_action=raw_is_action,
         required_actions=tuple(_string_list(payload.get("required_actions"))),
+        required_action_sequence=tuple(_string_list(payload.get("required_action_sequence"))),
         forbidden_actions=tuple(_string_list(payload.get("forbidden_actions"))),
+        forbidden_top_level_fields=(
+            tuple(_string_list(payload.get("forbidden_top_level_fields")))
+            if "forbidden_top_level_fields" in payload
+            else LEGACY_PLAN_TOP_LEVEL_FIELDS
+        ),
         risk=str(payload.get("risk") or "").strip(),
         contact_queries=tuple(_string_list(payload.get("contact_queries"))),
         requires_confirmation=raw_requires_confirmation,
@@ -373,6 +396,19 @@ def _has_all_history_memory_search(steps: list[dict[str, Any]]) -> bool:
         scope_type = str(time_scope.get("type") or "").strip().lower()
         if scope_type in {"all", "all_history", "history"}:
             return True
+    return False
+
+
+def _actions_contain_sequence(actions: list[str], expected_sequence: tuple[str, ...]) -> bool:
+    expected = [str(action or "").strip() for action in expected_sequence if str(action or "").strip()]
+    if not expected:
+        return True
+    cursor = 0
+    for action in actions:
+        if action == expected[cursor]:
+            cursor += 1
+            if cursor == len(expected):
+                return True
     return False
 
 

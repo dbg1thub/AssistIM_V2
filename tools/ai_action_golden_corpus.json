@@ -31,6 +31,7 @@
         "is_action": true,
         "risk": "low",
         "required_actions": ["contact.resolve", "memory.search", "memory.summarize"],
+        "required_action_sequence": ["contact.resolve", "memory.search", "memory.summarize"],
         "contact_queries": ["test3"],
         "requires_confirmation": false,
         "require_all_history": true
@@ -45,6 +46,7 @@
         "is_action": true,
         "risk": "low",
         "required_actions": ["contact.resolve", "memory.search", "memory.summarize"],
+        "required_action_sequence": ["contact.resolve", "memory.search", "memory.summarize"],
         "contact_queries": ["test2"],
         "requires_confirmation": false
       }
@@ -58,6 +60,7 @@
         "is_action": true,
         "risk": "low",
         "required_actions": ["memory.search", "memory.summarize"],
+        "required_action_sequence": ["memory.search", "memory.summarize"],
         "requires_confirmation": false
       }
     },
@@ -70,6 +73,7 @@
         "is_action": true,
         "risk": "high",
         "required_actions": ["contact.resolve", "message.draft", "user.confirm", "message.send"],
+        "required_action_sequence": ["contact.resolve", "message.draft", "user.confirm", "message.send"],
         "contact_queries": ["张三"],
         "requires_confirmation": true,
         "expected_content": "我晚点到",
@@ -101,6 +105,7 @@
         "is_action": true,
         "risk": "high",
         "required_actions": ["contact.resolve", "message.draft", "user.confirm", "message.send"],
+        "required_action_sequence": ["contact.resolve", "message.draft", "user.confirm", "message.send"],
         "contact_queries": ["小王"],
         "requires_confirmation": true,
         "expected_content": "明天见",
