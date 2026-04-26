@@ -4,6 +4,7 @@ import asyncio
 import importlib
 import sys
 import types
+from pathlib import Path
 
 import pytest
 
@@ -219,6 +220,13 @@ class _DeferredRestoreAuthController(_FakeAuthController):
         waiter = asyncio.get_running_loop().create_future()
         self.restore_waiters.append(waiter)
         return await waiter
+
+
+def test_main_preloads_dateutil_tz_before_pyside_imports() -> None:
+    source = Path("client/main.py").read_text(encoding="utf-8")
+
+    assert "import dateutil.tz" in source
+    assert source.index("import dateutil.tz") < source.index("from PySide6.")
 
 
 def _load_main_module():

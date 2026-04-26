@@ -3,6 +3,7 @@ import importlib.util
 
 import pytest
 
+from client.services import local_ai_memory_store as memory_store_module
 from client.services.local_ai_memory_store import (
     AIMemoryItem,
     InMemoryAIMemoryStore,
@@ -181,3 +182,16 @@ def test_lancedb_store_reports_missing_dependency(tmp_path) -> None:
         store._connect_sync()
 
     assert exc_info.value.code == "AI_MEMORY_VECTOR_DB_UNAVAILABLE"
+
+
+def test_lancedb_store_does_not_misclassify_import_hook_failures(tmp_path, monkeypatch) -> None:
+    store = LanceDBAIMemoryStore(LocalAIMemoryStoreConfig(db_path=str(tmp_path), table_name="ai_memory_test"))
+
+    def fail_import(name: str):
+        assert name == "lancedb"
+        raise AttributeError("'_SixMetaPathImporter' object has no attribute '_path'")
+
+    monkeypatch.setattr(memory_store_module.importlib, "import_module", fail_import)
+
+    with pytest.raises(AttributeError, match="_SixMetaPathImporter"):
+        store._connect_sync()

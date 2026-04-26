@@ -15,6 +15,9 @@ if __package__ in {None, ""}:
     if str(workspace_root) not in sys.path:
         sys.path.insert(0, str(workspace_root))
 
+# Preload dateutil before PySide installs shiboken import hooks; LanceDB imports it later.
+import dateutil.tz  # noqa: F401
+
 from PySide6.QtCore import QLockFile, QTimer
 from PySide6.QtWidgets import QApplication, QMessageBox, QPushButton
 from qasync import QEventLoop
