@@ -306,17 +306,7 @@ class AIAssistantMessageCard(QFrame):
             available_width = max(0, self.width() - margins.left() - margins.right())
         if available_width <= 0:
             return
-        metrics = label.fontMetrics()
-        text = label.text() or ""
-        bounding = metrics.boundingRect(
-            0,
-            0,
-            available_width,
-            0,
-            int(Qt.TextFlag.TextWordWrap | Qt.TextFlag.TextExpandTabs),
-            text,
-        )
-        target_height = max(metrics.height(), bounding.height())
+        target_height = max(label.fontMetrics().height(), label.heightForWidth(available_width))
         if label.height() != target_height:
             label.setFixedHeight(target_height)
 

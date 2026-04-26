@@ -6,7 +6,7 @@ from PySide6.QtCore import QPoint, QRect
 from PySide6.QtWidgets import QApplication
 
 from client.models.ai_assistant import AIMessage, AIMessageRole, AIMessageStatus
-from client.ui.windows.ai_assistant_interface import AIAssistantInterface
+from client.ui.windows.ai_assistant_interface import AIAssistantInterface, AIAssistantMessageCard
 
 
 def _message(message_id: str, role: AIMessageRole, content: str, *, status: AIMessageStatus = AIMessageStatus.DONE) -> AIMessage:
@@ -111,4 +111,27 @@ def test_ai_assistant_message_track_follows_composer_edges() -> None:
     assert abs(user_card_rect.right() - composer_rect.right()) <= 1
 
     widget.close()
+    app.processEvents()
+
+
+def test_ai_assistant_message_card_reserves_full_height_for_korean_text() -> None:
+    app = QApplication.instance() or QApplication([])
+    text = (
+        "안녕하세요. 저는 AssistIM의 AI 어시스턴트입니다. "
+        "한국어로 자기소개를 드리겠습니다. "
+        "사용자님의 메시지를 이해하고 요약, 정리, 답변 생성을 도와드립니다. "
+    ) * 5
+    card = AIAssistantMessageCard(_message("korean", AIMessageRole.ASSISTANT, text.strip()))
+    card.resize(600, 10)
+    card.show()
+    app.processEvents()
+
+    label = card.content_label
+    required_height = label.heightForWidth(label.width())
+
+    assert label.width() > 0
+    assert required_height > 0
+    assert label.height() >= required_height
+
+    card.close()
     app.processEvents()
