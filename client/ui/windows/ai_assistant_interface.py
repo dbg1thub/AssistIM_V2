@@ -43,6 +43,7 @@ from client.core import logging
 from client.core.app_icons import AppIcon, CollectionIcon
 from client.core.i18n import tr
 from client.events.event_bus import get_event_bus
+from client.managers.ai_action_permission_policy import AIPermissionScope
 from client.managers.ai_action_workflow import AIActionWorkflow
 from client.managers.ai_prompt_builder import AIPromptBuilder
 from client.managers.ai_task_manager import AITaskEvent, AITaskSnapshot, AITaskState, get_ai_task_manager
@@ -51,10 +52,29 @@ from client.models.ai_assistant import AIMessage, AIMessageRole, AIMessageStatus
 from client.services.ai_service import AIErrorCode
 from client.services.local_embedding_gguf_runtime import LocalEmbeddingGGUFRuntimeError
 from client.storage.ai_assistant_store import get_ai_assistant_store
+from client.ui.controllers.session_controller import get_session_controller
 
 logger = logging.get_logger(__name__)
 
 SUPPORTED_IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
+
+
+def _scope_values(value: object) -> tuple[str, ...]:
+    raw_items = value if isinstance(value, list | tuple | set) else [value]
+    values: list[str] = []
+    for item in raw_items:
+        text = " ".join(str(item or "").split())
+        if text and text not in values:
+            values.append(text)
+    return tuple(values)
+
+
+def _first_scope_value(*values: object) -> str:
+    for value in values:
+        items = _scope_values(value)
+        if items:
+            return items[0]
+    return ""
 
 
 def _qss_rgba(color: QColor, alpha: int | None = None) -> str:
@@ -636,7 +656,11 @@ class AIAssistantInterface(QWidget):
         self._task_manager = get_ai_task_manager()
         self._prompt_builder = AIPromptBuilder()
         self._memory_manager = ConversationMemoryManager()
-        self._action_workflow = AIActionWorkflow(memory_manager=self._memory_manager)
+        self._session_controller = get_session_controller()
+        self._action_workflow = AIActionWorkflow(
+            memory_manager=self._memory_manager,
+            permission_scope_provider=self._current_action_permission_scope,
+        )
         self._event_bus = get_event_bus()
         self._ui_tasks: set[asyncio.Task] = set()
         self._event_subscriptions: list[tuple[str, object]] = []
@@ -658,6 +682,60 @@ class AIAssistantInterface(QWidget):
         self._setup_ui()
         self._subscribe_to_events()
         self.destroyed.connect(self._on_destroyed)
+
+    def _current_action_permission_scope(self) -> AIPermissionScope:
+        session = self._session_controller.get_current_session()
+        if session is None:
+            return AIPermissionScope()
+
+        session_type = str(getattr(session, "session_type", "") or "").strip().lower()
+        if bool(getattr(session, "is_ai_session", False)) or session_type == "ai":
+            return AIPermissionScope()
+
+        extra = dict(getattr(session, "extra", {}) or {})
+        allowed_contacts: tuple[str, ...] = ()
+        allowed_groups: tuple[str, ...] = ()
+        excluded_contacts: tuple[str, ...] = ()
+        excluded_groups: tuple[str, ...] = ()
+
+        if session_type == "direct":
+            counterpart_id = _first_scope_value(extra.get("counterpart_id"))
+            if not counterpart_id:
+                current_user_id = _first_scope_value(extra.get("current_user_id"))
+                participant_ids = _scope_values(getattr(session, "participant_ids", ()))
+                counterpart_id = next(
+                    (participant_id for participant_id in participant_ids if participant_id != current_user_id),
+                    "",
+                )
+            if not counterpart_id:
+                counterpart_id = _first_scope_value(getattr(session, "session_id", ""))
+            if counterpart_id:
+                allowed_contacts = (counterpart_id,)
+        elif session_type == "group":
+            group_id = _first_scope_value(extra.get("group_id"), getattr(session, "session_id", ""))
+            if group_id:
+                allowed_groups = (group_id,)
+
+        uses_e2ee = False
+        if callable(getattr(session, "uses_e2ee", None)):
+            uses_e2ee = bool(session.uses_e2ee())
+        else:
+            encryption_mode = str(extra.get("encryption_mode") or "").strip()
+            uses_e2ee = encryption_mode in {"e2ee_private", "e2ee_group"}
+        if uses_e2ee:
+            excluded_contacts = allowed_contacts
+            excluded_groups = allowed_groups
+            allowed_contacts = ()
+            allowed_groups = ()
+
+        return AIPermissionScope(
+            allowed_contacts=allowed_contacts,
+            allowed_groups=allowed_groups,
+            excluded_contacts=excluded_contacts,
+            excluded_groups=excluded_groups,
+            sensitive_tags=_scope_values(extra.get("sensitive_tags") or extra.get("ai_sensitive_tags")),
+            allow_e2ee_plaintext=False,
+        )
 
     def _setup_ui(self) -> None:
         self.main_layout = QHBoxLayout(self)

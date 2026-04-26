@@ -7,12 +7,13 @@ import re
 import time
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 
 from client.core import logging
 from client.managers.ai_action_executor import AIActionExecutor
 from client.managers.ai_action_normalizer import AIPlanNormalizer
 from client.managers.ai_action_optimizer import AIPlanOptimizer
+from client.managers.ai_action_permission_policy import AIPermissionPolicy, AIPermissionScope
 from client.managers.ai_action_registry import AtomicActionRegistry
 from client.managers.ai_action_resource_manager import AIResourceManager
 from client.managers.ai_action_types import (
@@ -486,10 +487,12 @@ class AIActionWorkflow:
         planner: AIActionPlanner | None = None,
         contact_alias_resolver: ContactAliasResolver | None = None,
         memory_manager: Any | None = None,
+        permission_scope_provider: Callable[[], AIPermissionScope | None] | None = None,
     ) -> None:
         self._store = action_store or get_ai_action_store()
         self._planner = planner or AIActionPlanner()
         self._contact_alias_resolver = contact_alias_resolver or ContactAliasResolver()
+        self._permission_scope_provider = permission_scope_provider
         self._normalizer = AIPlanNormalizer()
         self._optimizer = AIPlanOptimizer()
         self._resource_manager = AIResourceManager()
@@ -849,9 +852,19 @@ class AIActionWorkflow:
         return await self._execute_to_turn(updated or pending)
 
     async def _execute_to_turn(self, record: AIActionPlanRecord) -> AIActionTurnResult:
-        result = await self._executor.execute(record)
+        result = await self._executor_for_current_scope().execute(record)
         latest = await self._store.get_plan(record.id) or record
         return self._result_to_turn(latest, result)
+
+    def _executor_for_current_scope(self) -> AIActionExecutor:
+        if self._permission_scope_provider is None:
+            return self._executor
+        scope = self._permission_scope_provider() or AIPermissionScope()
+        return AIActionExecutor(
+            registry=self._registry,
+            store=self._store,
+            permission_policy=AIPermissionPolicy(scope=scope),
+        )
 
     def _result_to_turn(self, record: AIActionPlanRecord, result: ActionExecutionResult) -> AIActionTurnResult:
         if result.state == "failed":

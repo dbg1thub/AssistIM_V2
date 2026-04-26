@@ -160,16 +160,20 @@ class AIPermissionPolicy:
     def _requests_disallowed_scope(self, args: dict[str, Any]) -> bool:
         for entity in _iter_structured_entities(args):
             contact_id = _entity_contact_id(entity)
+            group_id = _entity_group_id(entity)
             if contact_id:
                 if contact_id in self._excluded_contacts:
                     return True
                 if self._allowed_contacts and contact_id not in self._allowed_contacts:
                     return True
-            group_id = _entity_group_id(entity)
+                if self._allowed_groups and not self._allowed_contacts and not group_id:
+                    return True
             if group_id:
                 if group_id in self._excluded_groups:
                     return True
                 if self._allowed_groups and group_id not in self._allowed_groups:
+                    return True
+                if self._allowed_contacts and not self._allowed_groups:
                     return True
             if self._sensitive_tags and _entity_tags(entity).intersection(self._sensitive_tags):
                 return True

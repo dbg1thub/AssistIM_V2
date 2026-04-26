@@ -474,8 +474,11 @@ def test_ai_assistant_tries_action_workflow_before_rag_and_ai_chat() -> None:
         1,
     )[0]
 
+    assert "from client.managers.ai_action_permission_policy import AIPermissionScope" in assistant_interface
     assert "from client.managers.ai_action_workflow import AIActionWorkflow" in assistant_interface
-    assert "self._action_workflow = AIActionWorkflow(memory_manager=self._memory_manager)" in assistant_interface
+    assert "from client.ui.controllers.session_controller import get_session_controller" in assistant_interface
+    assert "self._session_controller = get_session_controller()" in assistant_interface
+    assert "permission_scope_provider=self._current_action_permission_scope" in assistant_interface
     assert "action_result = await self._action_workflow.handle_user_turn" in send_prompt
     assert "has_attachments=bool(attachments)" in send_prompt
     assert "if action_result.handled:" in send_prompt
@@ -512,6 +515,24 @@ def test_ai_assistant_tries_action_workflow_before_rag_and_ai_chat() -> None:
     assert "extra=action_result.message_extra" in assistant_interface
     assert "memory_context_lines=action_result.memory_context_lines" in assistant_interface
     assert "await self._action_workflow.finish_streamed_action(" in assistant_interface
+
+
+def test_ai_assistant_permission_scope_comes_from_current_chat_session() -> None:
+    assistant_interface = Path("client/ui/windows/ai_assistant_interface.py").read_text(encoding="utf-8")
+    scope_method = assistant_interface.split("def _current_action_permission_scope", 1)[1].split(
+        "\n    def _setup_ui",
+        1,
+    )[0]
+
+    assert "get_current_session()" in scope_method
+    assert "counterpart_id" in scope_method
+    assert "participant_ids" in scope_method
+    assert "group_id" in scope_method
+    assert "allowed_contacts=allowed_contacts" in scope_method
+    assert "allowed_groups=allowed_groups" in scope_method
+    assert "excluded_contacts=excluded_contacts" in scope_method
+    assert "excluded_groups=excluded_groups" in scope_method
+    assert "uses_e2ee()" in scope_method
 
 
 def test_ai_assistant_regenerate_capability_exists_without_visible_entry() -> None:

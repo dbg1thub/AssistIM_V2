@@ -1602,6 +1602,62 @@ def test_ai_action_workflow_executes_atomic_memory_plan(tmp_path, monkeypatch) -
     asyncio.run(scenario())
 
 
+def test_ai_action_workflow_uses_fresh_permission_scope_for_each_execution(tmp_path, monkeypatch) -> None:
+    async def scenario() -> None:
+        db = Database(str(tmp_path / "actions.db"))
+        monkeypatch.setattr(action_store_module, "get_database", lambda: db)
+        store = AIActionStore()
+        contact_db = _FakeContactDatabase(
+            [
+                {
+                    "id": "user-3",
+                    "display_name": "test3",
+                    "username": "test3",
+                    "nickname": "test3",
+                    "remark": "",
+                    "assistim_id": "test3",
+                }
+            ]
+        )
+        memory_manager = _FakeActionMemoryManager(context_lines=["[2026-04-21 10:00] test3；摘要：讨论了项目排期。"])
+        scopes = [
+            AIPermissionScope(allowed_contacts=("user-3",)),
+            AIPermissionScope(allowed_contacts=("user-9",)),
+        ]
+        provider_calls: list[int] = []
+
+        def permission_scope_provider() -> AIPermissionScope:
+            provider_calls.append(1)
+            index = min(len(provider_calls) - 1, len(scopes) - 1)
+            return scopes[index]
+
+        workflow = AIActionWorkflow(
+            action_store=store,
+            planner=_AtomicReadPlanner(),
+            contact_alias_resolver=ContactAliasResolver(db=contact_db),
+            memory_manager=memory_manager,
+            permission_scope_provider=permission_scope_provider,
+        )
+        try:
+            allowed = await workflow.handle_user_turn(thread_id="thread-allowed", text="我和test3聊过什么？")
+            denied = await workflow.handle_user_turn(thread_id="thread-denied", text="我和test3聊过什么？")
+            denied_plan = await store.get_plan(denied.message_extra["ai_action"]["plan_id"])
+
+            assert allowed.handled is True
+            assert allowed.memory_context_lines == ("[2026-04-21 10:00] test3；摘要：讨论了项目排期。",)
+            assert denied.handled is True
+            assert denied.response_text == "这个操作执行失败，请稍后再试。"
+            assert denied.message_extra["ai_action"]["state"] == "failed"
+            assert denied_plan is not None
+            assert denied_plan.error_text == "PERMISSION_DENIED"
+            assert len(provider_calls) == 2
+            assert len(memory_manager.calls) == 1
+        finally:
+            await db.close()
+
+    asyncio.run(scenario())
+
+
 def test_ai_action_workflow_memory_summarize_reports_empty_result(tmp_path, monkeypatch) -> None:
     async def scenario() -> None:
         db = Database(str(tmp_path / "actions.db"))
@@ -2251,6 +2307,36 @@ def test_ai_permission_policy_rejects_target_outside_allowed_contacts() -> None:
     assert decision.code == "PERMISSION_DENIED"
     assert "user-1" not in decision.message
     assert "张三" not in decision.message
+
+
+def test_ai_permission_policy_rejects_group_target_when_only_contact_scope_is_allowed() -> None:
+    policy = AIPermissionPolicy(scope=AIPermissionScope(allowed_contacts=("user-2",)))
+    spec = AtomicActionSpec(name="memory.search", kind="read", risk_level="low", allow_cross_session=True)
+
+    decision = policy.check_step(
+        spec=spec,
+        args={"participants": [{"group_id": "group-1", "name": "Project Group"}]},
+    )
+
+    assert decision.allowed is False
+    assert decision.code == "PERMISSION_DENIED"
+    assert "group-1" not in decision.message
+    assert "Project Group" not in decision.message
+
+
+def test_ai_permission_policy_rejects_contact_target_when_only_group_scope_is_allowed() -> None:
+    policy = AIPermissionPolicy(scope=AIPermissionScope(allowed_groups=("group-1",)))
+    spec = AtomicActionSpec(name="memory.search", kind="read", risk_level="low", allow_cross_session=True)
+
+    decision = policy.check_step(
+        spec=spec,
+        args={"participants": [{"contact_id": "user-3", "display_name": "test3"}]},
+    )
+
+    assert decision.allowed is False
+    assert decision.code == "PERMISSION_DENIED"
+    assert "user-3" not in decision.message
+    assert "test3" not in decision.message
 
 
 def test_ai_permission_policy_rejects_excluded_group_scope() -> None:
