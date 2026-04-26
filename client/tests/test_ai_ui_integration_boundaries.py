@@ -463,7 +463,7 @@ def test_ai_action_step_status_area_uses_safe_steps_and_events() -> None:
     assert 'QLabel[isActionStatus="true"]' in assistant_interface
 
 
-def test_ai_assistant_bypasses_action_workflow_and_uses_rag_before_ai_chat() -> None:
+def test_ai_assistant_tries_action_workflow_before_rag_and_ai_chat() -> None:
     assistant_interface = Path("client/ui/windows/ai_assistant_interface.py").read_text(encoding="utf-8")
     send_prompt = assistant_interface.split("async def _send_prompt", 1)[1].split(
         "\n    async def _run_stream",
@@ -474,29 +474,44 @@ def test_ai_assistant_bypasses_action_workflow_and_uses_rag_before_ai_chat() -> 
         1,
     )[0]
 
-    assert "AIActionWorkflow" not in assistant_interface
-    assert "AIActionPlanner" not in assistant_interface
-    assert "_action_workflow.handle_user_turn" not in send_prompt
+    assert "from client.managers.ai_action_workflow import AIActionWorkflow" in assistant_interface
+    assert "self._action_workflow = AIActionWorkflow(memory_manager=self._memory_manager)" in assistant_interface
+    assert "action_result = await self._action_workflow.handle_user_turn" in send_prompt
+    assert "has_attachments=bool(attachments)" in send_prompt
+    assert "if action_result.handled:" in send_prompt
+    assert "await self._handle_action_turn_result(" in send_prompt
     assert "build_rag_context_for_ai_chat" in send_prompt
-    assert "action_result.response_text" not in send_prompt
     assert "rag_history_messages = [" in send_prompt
     assert "if message.message_id != user_message.message_id" in send_prompt
     assert "memory_context_lines=memory_context.lines" in send_prompt
     assert "_prompt_builder.build_ai_chat_request" in send_prompt
+    assert send_prompt.index("_action_workflow.handle_user_turn") < send_prompt.index(
+        "build_rag_context_for_ai_chat"
+    )
     assert send_prompt.index("build_rag_context_for_ai_chat") < send_prompt.index(
         "_prompt_builder.build_ai_chat_request"
     )
 
-    assert "_action_workflow.handle_user_turn" not in regenerate
+    assert "action_result = await self._action_workflow.handle_user_turn" in regenerate
+    assert "has_attachments=bool(attachments)" in regenerate
+    assert "if action_result.handled:" in regenerate
+    assert "await self._handle_action_turn_result(" in regenerate
     assert "build_rag_context_for_ai_chat" in regenerate
-    assert "action_result.response_text" not in regenerate
     assert "rag_history_messages = [" in regenerate
     assert "if message.message_id != last_user.message_id" in regenerate
     assert "memory_context_lines=memory_context.lines" in regenerate
     assert "_prompt_builder.build_ai_chat_request" in regenerate
+    assert regenerate.index("_action_workflow.handle_user_turn") < regenerate.index(
+        "build_rag_context_for_ai_chat"
+    )
     assert regenerate.index("build_rag_context_for_ai_chat") < regenerate.index(
         "_prompt_builder.build_ai_chat_request"
     )
+
+    assert "async def _handle_action_turn_result(" in assistant_interface
+    assert "extra=action_result.message_extra" in assistant_interface
+    assert "memory_context_lines=action_result.memory_context_lines" in assistant_interface
+    assert "await self._action_workflow.finish_streamed_action(" in assistant_interface
 
 
 def test_ai_assistant_regenerate_capability_exists_without_visible_entry() -> None:

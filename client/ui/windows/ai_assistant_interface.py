@@ -43,6 +43,7 @@ from client.core import logging
 from client.core.app_icons import AppIcon, CollectionIcon
 from client.core.i18n import tr
 from client.events.event_bus import get_event_bus
+from client.managers.ai_action_workflow import AIActionWorkflow
 from client.managers.ai_prompt_builder import AIPromptBuilder
 from client.managers.ai_task_manager import AITaskEvent, AITaskSnapshot, AITaskState, get_ai_task_manager
 from client.managers.conversation_memory_manager import ConversationMemoryContext, ConversationMemoryManager
@@ -645,6 +646,7 @@ class AIAssistantInterface(QWidget):
         self._task_manager = get_ai_task_manager()
         self._prompt_builder = AIPromptBuilder()
         self._memory_manager = ConversationMemoryManager()
+        self._action_workflow = AIActionWorkflow(memory_manager=self._memory_manager)
         self._event_bus = get_event_bus()
         self._ui_tasks: set[asyncio.Task] = set()
         self._event_subscriptions: list[tuple[str, object]] = []
@@ -1116,6 +1118,20 @@ class AIAssistantInterface(QWidget):
         await self._store.maybe_title_from_first_user_message(thread_id, text)
         await self._reload_threads(select_thread_id=thread_id)
 
+        context_messages = list(self._messages)
+        action_result = await self._action_workflow.handle_user_turn(
+            thread_id=thread_id,
+            text=text,
+            has_attachments=bool(attachments),
+        )
+        if action_result.handled:
+            await self._handle_action_turn_result(
+                thread_id,
+                action_result,
+                context_messages=context_messages,
+            )
+            return
+
         assistant_message = await self._store.create_message(
             thread_id=thread_id,
             role=AIMessageRole.ASSISTANT,
@@ -1173,6 +1189,59 @@ class AIAssistantInterface(QWidget):
     async def _run_stream(self, request) -> None:
         snapshot = await self._task_manager.stream(request)
         await self._finalize_snapshot(snapshot)
+
+    async def _handle_action_turn_result(
+        self,
+        thread_id: str,
+        action_result,
+        *,
+        context_messages: list[AIMessage],
+    ) -> None:
+        if not action_result.memory_context_lines:
+            assistant_message = await self._store.create_message(
+                thread_id=thread_id,
+                role=AIMessageRole.ASSISTANT,
+                content=action_result.response_text,
+                status=AIMessageStatus.DONE,
+                extra=action_result.message_extra,
+            )
+            self._append_message(assistant_message)
+            self._threads = await self._store.list_threads()
+            self._render_thread_list()
+            return
+
+        assistant_message = await self._store.create_message(
+            thread_id=thread_id,
+            role=AIMessageRole.ASSISTANT,
+            content=action_result.response_text,
+            status=AIMessageStatus.PENDING,
+            extra=action_result.message_extra,
+        )
+        self._append_message(assistant_message)
+        self._set_generating(True)
+
+        task_id = f"ai-chat-{uuid.uuid4()}"
+        await self._store.update_message(
+            assistant_message,
+            status=AIMessageStatus.STREAMING,
+            task_id=task_id,
+            extra=action_result.message_extra,
+        )
+        assistant_message.status = AIMessageStatus.STREAMING
+        assistant_message.task_id = task_id
+        assistant_message.extra = dict(action_result.message_extra or {})
+        self._update_message_card(assistant_message)
+
+        request = self._prompt_builder.build_ai_chat_request(
+            thread_id,
+            context_messages,
+            task_id=task_id,
+            memory_context_lines=action_result.memory_context_lines,
+        )
+        self._active_task_id = request.task_id
+        self._active_assistant_message = assistant_message
+        self._last_persist_at = 0.0
+        self._active_stream_task = self._create_ui_task(self._run_stream(request), f"AI assistant action stream {request.task_id}")
 
     def _on_ai_task_event(self, data: object) -> None:
         if not isinstance(data, dict):
@@ -1241,6 +1310,11 @@ class AIAssistantInterface(QWidget):
         self._active_assistant_message.status = status
         self._active_assistant_message.model = str(snapshot.model or "")
         self._active_assistant_message.extra = message_extra
+        await self._action_workflow.finish_streamed_action(
+            message_extra,
+            content=content,
+            status=status.value,
+        )
         await self._persist_assistant_message(self._active_assistant_message)
         self._update_message_card(self._active_assistant_message)
         self._active_task_id = ""
@@ -1290,6 +1364,21 @@ class AIAssistantInterface(QWidget):
             return
         self._messages = await self._store.list_messages(self._current_thread_id, limit=self.MAX_CONTEXT_MESSAGES)
         self._render_messages()
+        attachments = list((last_user.extra or {}).get("attachments") or []) if isinstance(last_user.extra, dict) else []
+        context_messages = list(self._messages)
+        action_result = await self._action_workflow.handle_user_turn(
+            thread_id=self._current_thread_id,
+            text=str(last_user.content or ""),
+            has_attachments=bool(attachments),
+        )
+        if action_result.handled:
+            await self._handle_action_turn_result(
+                self._current_thread_id,
+                action_result,
+                context_messages=context_messages,
+            )
+            return
+
         task_id = f"ai-chat-{uuid.uuid4()}"
         assistant_message = await self._store.create_message(
             thread_id=self._current_thread_id,
@@ -1304,7 +1393,6 @@ class AIAssistantInterface(QWidget):
             for message in context_messages
             if message.message_id != last_user.message_id
         ]
-        attachments = list((last_user.extra or {}).get("attachments") or []) if isinstance(last_user.extra, dict) else []
         memory_context = ConversationMemoryContext(lines=(), query_kind="")
         try:
             if not attachments:
