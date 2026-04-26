@@ -25,6 +25,7 @@ from client.managers.ai_action_types import (
     mark_step_output_current,
 )
 from client.managers.ai_action_validator import AIPlanValidationResult, AIPlanValidator
+from client.managers.ai_task_manager import get_ai_task_manager
 from client.storage.ai_action_plan_store import AIActionPlanRecord, AIActionPlanStore
 from client.storage.ai_action_store import AIActionStore, get_ai_action_store
 from client.storage.database import Database, get_database
@@ -485,13 +486,14 @@ class AIActionWorkflow:
         *,
         action_store: AIActionStore | AIActionPlanStore | None = None,
         planner: AIActionPlanner | None = None,
+        task_manager: Any | None = None,
         contact_alias_resolver: ContactAliasResolver | None = None,
         memory_manager: Any | None = None,
         message_sender: Any | None = None,
         permission_scope_provider: Callable[[], AIPermissionScope | None] | None = None,
     ) -> None:
         self._store = action_store or get_ai_action_store()
-        self._planner = planner or AIActionPlanner()
+        self._planner = planner or AIActionPlanner(task_manager=task_manager or get_ai_task_manager())
         self._contact_alias_resolver = contact_alias_resolver or ContactAliasResolver()
         self._message_sender = message_sender
         self._permission_scope_provider = permission_scope_provider

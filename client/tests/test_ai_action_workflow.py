@@ -120,6 +120,22 @@ class _FakeDirectMessageManager:
         return SimpleNamespace(status=self.status, message_id="message-ai-1")
 
 
+class _FakePlannerTaskManager:
+    def __init__(self, raw_output: str) -> None:
+        self.raw_output = raw_output
+        self.requests: list = []
+
+    async def run_once(self, request):
+        self.requests.append(request)
+        return SimpleNamespace(
+            content=self.raw_output,
+            provider="fake",
+            model="planner-test",
+            error_code=None,
+            error_message="",
+        )
+
+
 class _FakeMemoryDatabase:
     async def list_conversation_memory_items(self, **kwargs):
         del kwargs
@@ -2999,6 +3015,121 @@ def test_ai_action_workflow_does_not_execute_confirm_without_pending(tmp_path, m
         try:
             result = await workflow.handle_user_turn(thread_id="thread-1", text="确认")
             assert result.handled is False
+        finally:
+            await db.close()
+
+    asyncio.run(scenario())
+
+
+def test_ai_action_workflow_default_planner_uses_task_manager(tmp_path, monkeypatch) -> None:
+    async def scenario() -> None:
+        db = Database(str(tmp_path / "actions.db"))
+        monkeypatch.setattr(action_store_module, "get_database", lambda: db)
+        store = AIActionStore()
+        task_manager = _FakePlannerTaskManager(
+            '{"is_action": false, "goal": "普通聊天", "risk": "low", "steps": [], "final": {}}'
+        )
+        workflow = AIActionWorkflow(
+            action_store=store,
+            task_manager=task_manager,
+        )
+        try:
+            result = await workflow.handle_user_turn(thread_id="thread-1", text="你好")
+
+            assert result.handled is False
+            assert len(task_manager.requests) == 1
+            request = task_manager.requests[0]
+            assert request.metadata["source"] == "ai_action_planner"
+            assert request.metadata["planner_prompt_kind"] == AIActionPlanner.PROMPT_NEW_ACTION
+            assert request.response_format["type"] == "json_object"
+            assert "用户输入：你好" in request.messages[0]["content"]
+        finally:
+            await db.close()
+
+    asyncio.run(scenario())
+
+
+def test_ai_action_workflow_default_planner_can_surface_send_confirmation_for_transfer_phrase(tmp_path, monkeypatch) -> None:
+    async def scenario() -> None:
+        db = Database(str(tmp_path / "actions.db"))
+        monkeypatch.setattr(action_store_module, "get_database", lambda: db)
+        store = AIActionStore()
+        task_manager = _FakePlannerTaskManager(
+            """
+            {
+              "is_action": true,
+              "goal": "发送消息",
+              "risk": "high",
+              "steps": [
+                {
+                  "id": "resolve_target",
+                  "action": "contact.resolve",
+                  "depends_on": [],
+                  "args": {"queries": ["test3"], "allow_multiple": false}
+                },
+                {
+                  "id": "draft_message",
+                  "action": "message.draft",
+                  "depends_on": ["resolve_target"],
+                  "args": {"target": "$resolve_target.contacts[0]", "content": "我晚点联系他"}
+                },
+                {
+                  "id": "confirm_send",
+                  "action": "user.confirm",
+                  "depends_on": ["draft_message"],
+                  "args": {
+                    "risk": "high",
+                    "preview": {
+                      "operation": "发送消息",
+                      "target": "$draft_message.target",
+                      "content": "$draft_message.content"
+                    }
+                  }
+                },
+                {
+                  "id": "send_message",
+                  "action": "message.send",
+                  "depends_on": ["confirm_send", "draft_message"],
+                  "args": {
+                    "target": "$draft_message.target_entity",
+                    "content": "$draft_message.content",
+                    "preview": "$draft_message.preview",
+                    "idempotency_key": "$draft_message.idempotency_key"
+                  }
+                }
+              ],
+              "final": {"type": "answer", "source": "$send_message.text"}
+            }
+            """
+        )
+        contact_db = _FakeContactDatabase(
+            [
+                {
+                    "id": "user-3",
+                    "display_name": "test3",
+                    "username": "test3",
+                    "nickname": "test3",
+                    "remark": "",
+                    "assistim_id": "test3",
+                }
+            ]
+        )
+        workflow = AIActionWorkflow(
+            action_store=store,
+            task_manager=task_manager,
+            contact_alias_resolver=ContactAliasResolver(db=contact_db),
+            message_sender=_FakeActionMessageSender(),
+        )
+        try:
+            result = await workflow.handle_user_turn(thread_id="thread-1", text="给test3说一声我晚点联系他")
+
+            assert result.handled is True
+            assert result.message_extra["ai_action"]["state"] == "waiting_confirmation"
+            assert result.message_extra["ai_action"]["action"] == "send_message"
+            assert "确认要发送消息给test3" in result.response_text
+            assert "我晚点联系他" in result.response_text
+            assert len(task_manager.requests) == 1
+            assert contact_db.resolve_calls == [{"alias": "test3", "limit": 20}]
         finally:
             await db.close()
 
