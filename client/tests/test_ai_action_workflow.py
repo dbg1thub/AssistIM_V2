@@ -1857,6 +1857,74 @@ def test_ai_action_workflow_uses_fresh_permission_scope_for_each_execution(tmp_p
     asyncio.run(scenario())
 
 
+def test_ai_action_workflow_allows_e2ee_memory_search_when_local_plaintext_granted(tmp_path, monkeypatch) -> None:
+    class _E2EEMemoryPlanner:
+        async def plan(self, *args, **kwargs):
+            user_text = str(args[0] if args else "").strip()
+            del kwargs
+            return AIActionPlan(
+                is_action=True,
+                goal=user_text,
+                risk="low",
+                steps=(
+                    AIActionStep(
+                        id="search_memory",
+                        action="memory.search",
+                        args={
+                            "participants": [
+                                {
+                                    "contact_id": "user-3",
+                                    "display_name": "test3",
+                                    "e2ee": True,
+                                }
+                            ],
+                            "participant_match": "any",
+                            "time_scope": {"type": "all_history"},
+                            "keywords": ["README.md"],
+                            "question": user_text,
+                        },
+                    ),
+                    AIActionStep(
+                        id="summarize_memory",
+                        action="memory.summarize",
+                        depends_on=("search_memory",),
+                        args={"source": "$search_memory", "question": user_text},
+                    ),
+                ),
+                final={"type": "answer", "source": "$summarize_memory"},
+            )
+
+    async def scenario() -> None:
+        db = Database(str(tmp_path / "actions.db"))
+        monkeypatch.setattr(action_store_module, "get_database", lambda: db)
+        store = AIActionStore()
+        memory_manager = _FakeActionMemoryManager(
+            context_lines=["[2026-04-24 15:20] README.md；摘要：AssistIM 文档总览。"]
+        )
+        workflow = AIActionWorkflow(
+            action_store=store,
+            planner=_E2EEMemoryPlanner(),
+            contact_alias_resolver=ContactAliasResolver(db=_FakeContactDatabase([])),
+            memory_manager=memory_manager,
+            permission_scope_provider=lambda: AIPermissionScope(allow_e2ee_plaintext=True),
+        )
+        try:
+            result = await workflow.handle_user_turn(thread_id="thread-1", text="我给test3发的README.md文件内容有什么？")
+            plan = await store.get_plan(result.message_extra["ai_action"]["plan_id"])
+
+            assert result.handled is True
+            assert result.memory_context_lines == ("[2026-04-24 15:20] README.md；摘要：AssistIM 文档总览。",)
+            assert len(memory_manager.calls) == 1
+            assert memory_manager.calls[0]["participants"][0]["e2ee"] is True
+            assert plan is not None
+            assert plan.error_text == ""
+            assert "search_memory" in plan.step_outputs
+        finally:
+            await db.close()
+
+    asyncio.run(scenario())
+
+
 def test_ai_action_workflow_memory_summarize_reports_empty_result(tmp_path, monkeypatch) -> None:
     async def scenario() -> None:
         db = Database(str(tmp_path / "actions.db"))
