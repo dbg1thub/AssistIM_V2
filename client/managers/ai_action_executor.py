@@ -20,6 +20,8 @@ from client.managers.ai_action_types import (
     ActionHandlerError,
     ActionPause,
     AtomicActionSpec,
+    current_plan_step_outputs,
+    mark_step_output_current,
 )
 from client.storage.ai_action_plan_store import AIActionPlanRecord, AIActionPlanStore
 
@@ -45,7 +47,11 @@ class AIActionExecutor:
         plan = AIActionPlan.from_dict(dict(record.plan_json or {}))
         if not plan.steps:
             return ActionExecutionResult(state="failed", error_text="PLAN_SCHEMA_INVALID")
-        outputs = dict(record.step_outputs or {})
+        outputs = current_plan_step_outputs(
+            dict(record.step_outputs or {}),
+            step_ids={step.id for step in plan.steps},
+            plan_version=record.plan_version,
+        )
         events = _plan_events(record.plan_json)
 
         for step in plan.steps:
@@ -261,6 +267,7 @@ class AIActionExecutor:
                 return await self._fail(record, outputs, str(exc))
 
             outputs[step.id] = output
+            mark_step_output_current(outputs, step_id=step.id, plan_version=record.plan_version)
             result_count = _output_result_count(output)
             has_result_ref = isinstance(output.get("result_ref"), dict)
             logger.info(

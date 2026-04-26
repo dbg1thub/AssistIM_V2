@@ -2146,6 +2146,98 @@ def test_ai_action_executor_retries_safe_read_action_once(tmp_path, monkeypatch)
     asyncio.run(scenario())
 
 
+def test_ai_action_executor_does_not_reuse_step_output_after_plan_version_changes(tmp_path, monkeypatch) -> None:
+    async def scenario() -> None:
+        calls: list[list[str]] = []
+
+        async def contact_output(args, context):
+            del context
+            queries = list(args.get("queries") or [])
+            calls.append([str(item) for item in queries])
+            label = str(queries[0] if queries else "")
+            contact_id = "user-2" if label == "李四" else "user-1"
+            return {
+                "contacts": [{"contact_id": contact_id, "display_name": label or "张三"}],
+                "groups": [],
+                "ambiguous": [],
+                "unresolved": [],
+            }
+
+        db = Database(str(tmp_path / "actions.db"))
+        monkeypatch.setattr(action_store_module, "get_database", lambda: db)
+        store = AIActionStore()
+        registry = AtomicActionRegistry(
+            contact_resolver=ContactAliasResolver(db=_FakeContactDatabase([])),
+        )
+        spec = registry.get("contact.resolve")
+        assert spec is not None
+        registry._actions["contact.resolve"] = replace(spec, handler=contact_output)
+        executor = AIActionExecutor(registry=registry, store=store)
+        plan = AIActionPlan(
+            is_action=True,
+            goal="解析联系人",
+            steps=(
+                AIActionStep(
+                    id="resolve_contacts",
+                    action="contact.resolve",
+                    args={"queries": ["张三"], "allow_multiple": True},
+                ),
+            ),
+            final={"type": "answer", "source": "$resolve_contacts.contacts[0].contact_id"},
+        )
+        try:
+            record = await store.create_plan(
+                thread_id="thread-1",
+                goal=plan.goal,
+                plan_json=plan.to_dict(),
+                reason="test_versioned_outputs_initial",
+            )
+            first = await executor.execute(record)
+            stored_first = await store.get_plan(record.id)
+            assert first.response_text == "user-1"
+            assert calls == [["张三"]]
+            assert stored_first is not None
+            assert stored_first.plan_version == 1
+            assert stored_first.step_outputs["resolve_contacts"]["contacts"][0]["contact_id"] == "user-1"
+            assert stored_first.step_outputs["_meta"]["step_versions"]["resolve_contacts"] == 1
+
+            changed_plan = AIActionPlan(
+                is_action=True,
+                goal="解析联系人",
+                steps=(
+                    AIActionStep(
+                        id="resolve_contacts",
+                        action="contact.resolve",
+                        args={"queries": ["李四"], "allow_multiple": True},
+                    ),
+                ),
+                final={"type": "answer", "source": "$resolve_contacts.contacts[0].contact_id"},
+            )
+            updated_plan = await store.update_plan(
+                record.id,
+                plan_json=changed_plan.to_dict(),
+                reason="test_versioned_outputs_changed_plan",
+                state="running",
+                current_step_id="",
+                completed_at=0,
+            )
+            assert updated_plan is not None
+            assert updated_plan.plan_version == 2
+
+            second = await executor.execute(updated_plan)
+            stored_second = await store.get_plan(record.id)
+
+            assert second.response_text == "user-2"
+            assert calls == [["张三"], ["李四"]]
+            assert stored_second is not None
+            assert stored_second.step_outputs["resolve_contacts"]["contacts"][0]["contact_id"] == "user-2"
+            assert stored_second.step_outputs["_meta"]["step_versions"]["resolve_contacts"] == 2
+        finally:
+            await db.close()
+
+    asyncio.run(scenario())
+
+
 def test_ai_action_executor_does_not_retry_side_effect_action(tmp_path, monkeypatch) -> None:
     async def scenario() -> None:
         calls = 0

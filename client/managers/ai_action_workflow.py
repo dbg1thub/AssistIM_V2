@@ -21,6 +21,7 @@ from client.managers.ai_action_types import (
     AIActionTurnResult,
     ActionExecutionResult,
     confirmation_preview_fingerprint,
+    mark_step_output_current,
 )
 from client.managers.ai_action_validator import AIPlanValidationResult, AIPlanValidator
 from client.storage.ai_action_plan_store import AIActionPlanRecord, AIActionPlanStore
@@ -769,6 +770,7 @@ class AIActionWorkflow:
             "preview": waiting.get("preview"),
             "confirmed_at": time.time(),
         }
+        mark_step_output_current(outputs, step_id=pending.current_step_id, plan_version=pending.plan_version)
         updated = await self._store.update_plan(
             pending.id,
             state="running",
@@ -826,6 +828,7 @@ class AIActionWorkflow:
             "ambiguous": [],
             "unresolved": list(waiting.get("unresolved") or []),
         }
+        mark_step_output_current(outputs, step_id=pending.current_step_id, plan_version=pending.plan_version)
         updated = await self._store.update_plan(
             pending.id,
             state="running",

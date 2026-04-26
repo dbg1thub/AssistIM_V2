@@ -9,6 +9,7 @@ from typing import Any, Callable, Literal
 
 
 CONFIRMATION_PREVIEW_FINGERPRINT_VERSION = "confirmation_preview:v1"
+STEP_OUTPUTS_META_KEY = "_meta"
 
 
 def confirmation_preview_fingerprint(preview: Any, *, risk: Any) -> str:
@@ -20,6 +21,59 @@ def confirmation_preview_fingerprint(preview: Any, *, risk: Any) -> str:
     }
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def current_plan_step_outputs(
+    outputs: dict[str, Any],
+    *,
+    step_ids: set[str],
+    plan_version: Any,
+) -> dict[str, Any]:
+    version = _coerce_plan_version(plan_version)
+    raw_versions = _step_output_versions(outputs)
+    current: dict[str, Any] = {}
+    current_versions: dict[str, int] = {}
+    for step_id in step_ids:
+        if step_id not in outputs:
+            continue
+        if _coerce_plan_version(raw_versions.get(step_id)) != version:
+            continue
+        current[step_id] = outputs[step_id]
+        current_versions[step_id] = version
+    if current_versions:
+        current[STEP_OUTPUTS_META_KEY] = {
+            "plan_version": version,
+            "step_versions": current_versions,
+        }
+    return current
+
+
+def mark_step_output_current(outputs: dict[str, Any], *, step_id: str, plan_version: Any) -> None:
+    normalized_step_id = str(step_id or "").strip()
+    if not normalized_step_id:
+        return
+    version = _coerce_plan_version(plan_version)
+    meta = dict(outputs.get(STEP_OUTPUTS_META_KEY) or {}) if isinstance(outputs.get(STEP_OUTPUTS_META_KEY), dict) else {}
+    versions = dict(meta.get("step_versions") or {}) if isinstance(meta.get("step_versions"), dict) else {}
+    versions[normalized_step_id] = version
+    meta["plan_version"] = version
+    meta["step_versions"] = versions
+    outputs[STEP_OUTPUTS_META_KEY] = meta
+
+
+def _step_output_versions(outputs: dict[str, Any]) -> dict[str, Any]:
+    meta = outputs.get(STEP_OUTPUTS_META_KEY) if isinstance(outputs, dict) else None
+    if not isinstance(meta, dict):
+        return {}
+    versions = meta.get("step_versions")
+    return dict(versions or {}) if isinstance(versions, dict) else {}
+
+
+def _coerce_plan_version(value: Any) -> int:
+    try:
+        return max(1, int(value or 1))
+    except (TypeError, ValueError):
+        return 1
 
 
 PlanState = Literal[
