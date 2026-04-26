@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from types import SimpleNamespace
 
+from client.managers.ai_action_workflow import AIActionPlanner
 from tools.ai_action_planner_replay import (
     PlannerReplayRecord,
+    annotate_planner_replay_records,
     build_planner_request,
     evaluate_planner_replay_file,
     load_planner_replay_records,
@@ -31,7 +34,9 @@ def test_build_planner_request_reuses_atomic_planner_prompt_and_schema() -> None
     assert request.response_format["type"] == "json_object"
     assert request.response_format["schema"]["required"] == ["is_action", "goal", "risk", "steps", "final"]
     assert request.metadata["source"] == "ai_action_planner_corpus"
-    assert request.metadata["planner_schema"] == "atomic_steps_v1"
+    assert request.metadata["planner_schema_version"] == AIActionPlanner.PLANNER_SCHEMA_VERSION
+    assert request.metadata["planner_prompt_version"] == AIActionPlanner.PLANNER_PROMPT_VERSION
+    assert request.metadata["planner_prompt_kind"] == AIActionPlanner.PROMPT_NEW_ACTION
     assert "contact.resolve, memory.search, memory.summarize" in request.system_prompt
     assert "用户输入：我和 test3 之前聊过什么？" in request.messages[0]["content"]
     assert "router_expected_route" not in request.messages[0]["content"]
@@ -65,32 +70,42 @@ def test_planner_replay_jsonl_roundtrip_and_evaluation(tmp_path) -> None:
         ),
     ]
 
-    write_planner_replay_records(output_path, records)
-    loaded = load_planner_replay_records(output_path)
-    results = evaluate_planner_replay_file(
-        [
-            PromptBenchmarkCase(
-                name="chat_case",
-                user_input="你好",
-                expectation=PromptCaseExpectation(is_action=False),
+    cases = [
+        PromptBenchmarkCase(
+            name="chat_case",
+            user_input="你好",
+            expectation=PromptCaseExpectation(is_action=False),
+        ),
+        PromptBenchmarkCase(
+            name="history_case",
+            user_input="我和 test3 聊过什么",
+            expectation=PromptCaseExpectation(
+                is_action=True,
+                required_actions=("contact.resolve", "memory.search", "memory.summarize"),
+                contact_queries=("test3",),
+                require_all_history=True,
             ),
-            PromptBenchmarkCase(
-                name="history_case",
-                user_input="我和 test3 聊过什么",
-                expectation=PromptCaseExpectation(
-                    is_action=True,
-                    required_actions=("contact.resolve", "memory.search", "memory.summarize"),
-                    contact_queries=("test3",),
-                    require_all_history=True,
-                ),
-            ),
-        ],
-        output_path,
-    )
-    summary = summarize_results(results)
+        ),
+    ]
+    expected_records = annotate_planner_replay_records(cases, records)
 
-    assert loaded == records
+    write_planner_replay_records(output_path, records, cases=cases)
+    loaded = load_planner_replay_records(output_path)
+    results = evaluate_planner_replay_file(cases, output_path)
+    summary = summarize_results(results)
+    payloads = [json.loads(line) for line in output_path.read_text(encoding="utf-8").splitlines()]
+
+    assert loaded == expected_records
     assert output_path.read_text(encoding="utf-8").count("\n") == 2
+    assert payloads[0]["planner_prompt_version"] == AIActionPlanner.PLANNER_PROMPT_VERSION
+    assert payloads[0]["planner_schema_version"] == AIActionPlanner.PLANNER_SCHEMA_VERSION
+    assert payloads[0]["plan_version"] == AIActionPlanner.PLAN_OUTPUT_VERSION
+    assert payloads[0]["actions"] == []
+    assert payloads[0]["validation_result"] == "passed"
+    assert payloads[0]["diff_from_expected"] == []
+    assert payloads[1]["actions"] == ["contact.resolve", "memory.search", "memory.summarize"]
+    assert payloads[1]["validation_result"] == "passed"
+    assert payloads[1]["diff_from_expected"] == []
     assert summary["sample_count"] == 2
     assert summary["valid_json_rate"] == 1.0
     assert summary["expectation_pass_rate"] == 1.0
@@ -99,32 +114,38 @@ def test_planner_replay_jsonl_roundtrip_and_evaluation(tmp_path) -> None:
 
 def test_planner_replay_evaluation_reports_failed_cases(tmp_path) -> None:
     output_path = tmp_path / "planner-failed.jsonl"
+    records = [
+        PlannerReplayRecord(
+            case_name="send_case",
+            user_input="帮我给张三发我晚点到",
+            raw_output='{"is_action": false, "goal": "闲聊", "risk": "low", "steps": [], "final": {}}',
+        )
+    ]
+    cases = [
+        PromptBenchmarkCase(
+            name="send_case",
+            user_input="帮我给张三发我晚点到",
+            expectation=PromptCaseExpectation(
+                is_action=True,
+                required_actions=("contact.resolve", "message.draft", "user.confirm", "message.send"),
+            ),
+        )
+    ]
     write_planner_replay_records(
         output_path,
-        [
-            PlannerReplayRecord(
-                case_name="send_case",
-                user_input="帮我给张三发我晚点到",
-                raw_output='{"is_action": false, "goal": "闲聊", "risk": "low", "steps": [], "final": {}}',
-            )
-        ],
+        records,
+        cases=cases,
     )
 
-    results = evaluate_planner_replay_file(
-        [
-            PromptBenchmarkCase(
-                name="send_case",
-                user_input="帮我给张三发我晚点到",
-                expectation=PromptCaseExpectation(
-                    is_action=True,
-                    required_actions=("contact.resolve", "message.draft", "user.confirm", "message.send"),
-                ),
-            )
-        ],
-        output_path,
-    )
+    loaded = load_planner_replay_records(output_path)
+    payload = json.loads(output_path.read_text(encoding="utf-8").strip())
+    results = evaluate_planner_replay_file(cases, output_path)
     summary = summarize_results(results)
 
+    assert loaded[0].validation_result == "failed"
+    assert loaded[0].diff_from_expected == ("is_action mismatch", "missing required actions")
+    assert payload["validation_result"] == "failed"
+    assert payload["diff_from_expected"] == ["is_action mismatch", "missing required actions"]
     assert summary["expectation_pass_rate"] == 0.0
     assert summary["failed_cases"] == [
         {
@@ -164,6 +185,10 @@ def test_run_planner_corpus_calls_task_manager_and_writes_jsonl(tmp_path) -> Non
 
     assert len(task_manager.requests) == 1
     assert task_manager.requests[0].metadata["planner_case_name"] == "chat_case"
+    assert task_manager.requests[0].metadata["planner_prompt_version"] == AIActionPlanner.PLANNER_PROMPT_VERSION
+    assert task_manager.requests[0].metadata["planner_schema_version"] == AIActionPlanner.PLANNER_SCHEMA_VERSION
     assert records == load_planner_replay_records(output_path)
     assert records[0].case_name == "chat_case"
     assert records[0].raw_output.startswith('{"is_action": false')
+    assert records[0].actions == ()
+    assert records[0].validation_result == "passed"

@@ -166,6 +166,10 @@ class ContactAliasResolver:
 class AIActionPlanner:
     """Optional model-backed planner that returns atomic JSON action plans."""
 
+    PLANNER_SCHEMA_VERSION = "atomic_steps_v1"
+    PLANNER_PROMPT_VERSION = "atomic_steps_prompt_v1"
+    PLAN_OUTPUT_VERSION = 1
+
     PROMPT_NEW_ACTION = "new_action"
     PROMPT_PENDING_CONFIRMATION = "pending_confirmation"
     PROMPT_PENDING_CONTACT_SELECTION = "pending_contact_selection"
@@ -250,7 +254,8 @@ class AIActionPlanner:
             metadata={
                 "source": "ai_action_planner",
                 "strict_json": strict,
-                "planner_schema": "atomic_steps_v1",
+                "planner_schema_version": self.PLANNER_SCHEMA_VERSION,
+                "planner_prompt_version": self.PLANNER_PROMPT_VERSION,
                 "planner_prompt_kind": prompt_kind,
             },
         )
@@ -309,7 +314,8 @@ class AIActionPlanner:
             metadata={
                 "source": "ai_action_planner_repair",
                 "strict_json": strict,
-                "planner_schema": "atomic_steps_v1",
+                "planner_schema_version": self.PLANNER_SCHEMA_VERSION,
+                "planner_prompt_version": self.PLANNER_PROMPT_VERSION,
                 "planner_prompt_kind": prompt_kind,
                 "validation_error_count": len(tuple(validation_errors or ())),
             },

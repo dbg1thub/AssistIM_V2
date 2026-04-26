@@ -18,6 +18,7 @@ from client.services.ai_bootstrap import configure_default_ai_provider
 from tools.ai_action_planner_replay import (
     DEFAULT_PLANNER_REPLAY_PATH,
     PlannerReplayRecord,
+    annotate_planner_replay_records,
     build_planner_request,
     evaluate_planner_replay_file,
     write_planner_replay_records,
@@ -62,10 +63,13 @@ async def run_planner_corpus(
                     error_code=_error_code_value(getattr(snapshot, "error_code", "")),
                     error_message=str(getattr(snapshot, "error_message", "") or ""),
                     metadata={
-                        "planner_schema": str(request.metadata.get("planner_schema") or ""),
+                        "planner_schema_version": str(request.metadata.get("planner_schema_version") or ""),
+                        "planner_prompt_version": str(request.metadata.get("planner_prompt_version") or ""),
                         "planner_prompt_kind": str(request.metadata.get("planner_prompt_kind") or ""),
                         "prompt_chars": int(request.metadata.get("prompt_chars") or 0),
                     },
+                    planner_schema_version=str(request.metadata.get("planner_schema_version") or ""),
+                    planner_prompt_version=str(request.metadata.get("planner_prompt_version") or ""),
                 )
             )
         except Exception as exc:
@@ -79,13 +83,17 @@ async def run_planner_corpus(
                     error_code=type(exc).__name__,
                     error_message=str(exc),
                     metadata={
-                        "planner_schema": str(request.metadata.get("planner_schema") or ""),
+                        "planner_schema_version": str(request.metadata.get("planner_schema_version") or ""),
+                        "planner_prompt_version": str(request.metadata.get("planner_prompt_version") or ""),
                         "planner_prompt_kind": str(request.metadata.get("planner_prompt_kind") or ""),
                         "prompt_chars": int(request.metadata.get("prompt_chars") or 0),
                     },
+                    planner_schema_version=str(request.metadata.get("planner_schema_version") or ""),
+                    planner_prompt_version=str(request.metadata.get("planner_prompt_version") or ""),
                 )
             )
 
+    records = annotate_planner_replay_records(selected_cases, records)
     if output_path is not None:
         write_planner_replay_records(output_path, records)
     return records
