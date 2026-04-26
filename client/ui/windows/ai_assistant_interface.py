@@ -31,6 +31,7 @@ from qfluentwidgets import (
     IconWidget,
     MessageBoxBase,
     PrimaryPushButton,
+    PushButton,
     ScrollBarHandleDisplayMode,
     SubtitleLabel,
     TransparentToolButton,
@@ -212,6 +213,8 @@ class AIAssistantPromptEdit(QTextEdit):
 class AIAssistantMessageCard(QFrame):
     """One message card in the standalone assistant stream."""
 
+    actionRequested = Signal(str, str)
+
     def __init__(self, message: AIMessage, parent=None):
         super().__init__(parent)
         self.message = message
@@ -247,9 +250,49 @@ class AIAssistantMessageCard(QFrame):
         self.action_status_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.action_status_label.hide()
 
+        self.action_confirmation_frame = QFrame(self)
+        self.action_confirmation_frame.setObjectName("aiAssistantActionConfirmCard")
+        self.action_confirmation_frame.hide()
+        self.action_confirmation_layout = QVBoxLayout(self.action_confirmation_frame)
+        self.action_confirmation_layout.setContentsMargins(12, 10, 12, 10)
+        self.action_confirmation_layout.setSpacing(8)
+
+        self.action_confirmation_title_label = BodyLabel(self.action_confirmation_frame)
+        self.action_confirmation_title_label.setObjectName("aiAssistantActionConfirmTitle")
+        self.action_confirmation_title_label.setWordWrap(True)
+        self.action_confirmation_title_label.setText("发送消息")
+
+        self.action_confirmation_target_label = CaptionLabel(self.action_confirmation_frame)
+        self.action_confirmation_target_label.setWordWrap(True)
+        self.action_confirmation_content_label = BodyLabel(self.action_confirmation_frame)
+        self.action_confirmation_content_label.setWordWrap(True)
+        self.action_confirmation_content_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.action_confirmation_hint_label = CaptionLabel(self.action_confirmation_frame)
+        self.action_confirmation_hint_label.setWordWrap(True)
+        self.action_confirmation_hint_label.setText("这是会产生外部影响的操作，确认后才会发送。")
+
+        self.action_confirmation_button_row = QWidget(self.action_confirmation_frame)
+        self.action_confirmation_button_layout = QHBoxLayout(self.action_confirmation_button_row)
+        self.action_confirmation_button_layout.setContentsMargins(0, 0, 0, 0)
+        self.action_confirmation_button_layout.setSpacing(8)
+        self.action_confirmation_button_layout.addStretch(1)
+        self.action_confirm_cancel_button = PushButton("取消", self.action_confirmation_button_row)
+        self.action_confirm_send_button = PrimaryPushButton("发送", self.action_confirmation_button_row)
+        self.action_confirm_cancel_button.clicked.connect(lambda: self.actionRequested.emit(self.message.message_id, "cancel"))
+        self.action_confirm_send_button.clicked.connect(lambda: self.actionRequested.emit(self.message.message_id, "confirm"))
+        self.action_confirmation_button_layout.addWidget(self.action_confirm_cancel_button)
+        self.action_confirmation_button_layout.addWidget(self.action_confirm_send_button)
+
+        self.action_confirmation_layout.addWidget(self.action_confirmation_title_label)
+        self.action_confirmation_layout.addWidget(self.action_confirmation_target_label)
+        self.action_confirmation_layout.addWidget(self.action_confirmation_content_label)
+        self.action_confirmation_layout.addWidget(self.action_confirmation_hint_label)
+        self.action_confirmation_layout.addWidget(self.action_confirmation_button_row)
+
         self.layout.addWidget(self.image_label)
         self.layout.addWidget(self.content_label)
         self.layout.addWidget(self.action_status_label)
+        self.layout.addWidget(self.action_confirmation_frame)
         self.layout.addWidget(self.footer_label)
         self.set_message(message)
 
@@ -278,10 +321,34 @@ class AIAssistantMessageCard(QFrame):
             footer_text = _ai_action_footer_text(message.extra)
         self.action_status_label.setText(_ai_action_status_text(message.extra))
         self.action_status_label.setVisible(bool(self.action_status_label.text()))
+        self._sync_action_confirmation()
         self.footer_label.setText(footer_text)
         self.footer_label.setVisible(bool(footer_text))
         self._sync_text_metrics()
         self._apply_theme()
+
+    def _sync_action_confirmation(self) -> None:
+        action = dict((self.message.extra or {}).get("ai_action") or {})
+        waiting = dict(action.get("waiting") or {})
+        preview = waiting.get("preview") if isinstance(waiting.get("preview"), dict) else {}
+        should_show = (
+            self.message.role == AIMessageRole.ASSISTANT
+            and str(action.get("state") or "").strip() == "waiting_confirmation"
+            and str(waiting.get("type") or "").strip() == "confirmation"
+            and bool(preview)
+        )
+        self.action_confirmation_frame.setVisible(should_show)
+        if not should_show:
+            return
+        operation = str(preview.get("operation") or "发送消息").strip() or "发送消息"
+        target = str(preview.get("target") or "目标联系人").strip() or "目标联系人"
+        content = str(preview.get("content") or "").strip()
+        self.action_confirmation_title_label.setText(operation)
+        self.action_confirmation_target_label.setText(f"收件人：{target}")
+        self.action_confirmation_content_label.setText(f"内容：{content}" if content else "内容：")
+        self.action_confirmation_hint_label.setText("这是会产生外部影响的操作，确认后才会发送。")
+        self.action_confirm_send_button.setText("发送")
+        self.action_confirm_cancel_button.setText("取消")
 
     def _set_image_attachment(self, attachment: dict | None) -> None:
         path = str((attachment or {}).get("local_path") or "").strip()
@@ -313,6 +380,13 @@ class AIAssistantMessageCard(QFrame):
         self._sync_wrapped_label_height(self.content_label)
         self._sync_wrapped_label_height(self.action_status_label, visible=self.action_status_label.isVisible())
         self._sync_wrapped_label_height(self.footer_label, visible=self.footer_label.isVisible())
+        for label in (
+            self.action_confirmation_title_label,
+            self.action_confirmation_target_label,
+            self.action_confirmation_content_label,
+            self.action_confirmation_hint_label,
+        ):
+            self._sync_wrapped_label_height(label, visible=self.action_confirmation_frame.isVisible())
         self.layout.activate()
         self.updateGeometry()
 
@@ -371,6 +445,11 @@ class AIAssistantMessageCard(QFrame):
                     background: transparent;
                 }}
                 QLabel#aiAssistantMessageImage {{
+                    background: {image_bg};
+                    border: 1px solid {image_border};
+                    border-radius: 8px;
+                }}
+                QFrame#aiAssistantActionConfirmCard {{
                     background: {image_bg};
                     border: 1px solid {image_border};
                     border-radius: 8px;
@@ -1077,6 +1156,7 @@ class AIAssistantInterface(QWidget):
 
     def _add_message_card(self, message: AIMessage) -> None:
         wrapper = AIAssistantMessageRow(message, self.message_container)
+        wrapper.card.actionRequested.connect(self._on_action_message_requested)
         wrapper.set_content_width(self._message_track_width())
         self.message_layout.insertWidget(self._message_insert_index(), wrapper, 0, Qt.AlignmentFlag.AlignHCenter)
         self._message_cards[message.message_id] = wrapper.card
@@ -1122,6 +1202,49 @@ class AIAssistantInterface(QWidget):
             return
         self._pending_image_attachment = attachment
         self._sync_pending_attachment_preview()
+
+    def _on_action_message_requested(self, message_id: str, command: str) -> None:
+        self._create_ui_task(
+            self._continue_action_from_message(message_id, command),
+            f"continue AI action {message_id}",
+        )
+
+    async def _continue_action_from_message(self, message_id: str, command: str) -> None:
+        normalized_message_id = str(message_id or "").strip()
+        normalized_command = str(command or "").strip()
+        message = next((item for item in self._messages if item.message_id == normalized_message_id), None)
+        if message is None:
+            return
+        card = self._message_cards.get(normalized_message_id)
+        if card is not None:
+            card.action_confirmation_frame.setEnabled(False)
+        reply_text = "确认" if normalized_command == "confirm" else "取消"
+        action_result = await self._action_workflow.handle_user_turn(
+            thread_id=message.thread_id,
+            text=reply_text,
+            has_attachments=False,
+        )
+        if not action_result.handled:
+            if card is not None:
+                card.action_confirmation_frame.setEnabled(True)
+            return
+        if action_result.memory_context_lines:
+            await self._complete_pending_assistant_message(
+                message,
+                action_result.response_text,
+                extra=action_result.message_extra,
+            )
+            await self._handle_action_turn_result(
+                message.thread_id,
+                action_result,
+                context_messages=list(self._messages),
+            )
+            return
+        await self._complete_pending_assistant_message(
+            message,
+            action_result.response_text,
+            extra=action_result.message_extra,
+        )
 
     def _build_image_attachment(self, file_path: str) -> dict | None:
         path = Path(file_path).expanduser().resolve()

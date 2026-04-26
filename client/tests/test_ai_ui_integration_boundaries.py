@@ -535,6 +535,22 @@ def test_ai_assistant_permission_scope_comes_from_current_chat_session() -> None
     assert "uses_e2ee()" in scope_method
 
 
+def test_ai_assistant_action_confirmation_controls_continue_pending_plan() -> None:
+    assistant_interface = Path("client/ui/windows/ai_assistant_interface.py").read_text(encoding="utf-8")
+
+    assert "PushButton" in assistant_interface
+    assert "actionRequested = Signal(str, str)" in assistant_interface
+    assert "self.action_confirmation_frame = QFrame(self)" in assistant_interface
+    assert 'self.action_confirm_send_button = PrimaryPushButton("发送"' in assistant_interface
+    assert 'self.action_confirm_cancel_button = PushButton("取消"' in assistant_interface
+    assert 'self.message.message_id, "confirm"' in assistant_interface
+    assert 'self.message.message_id, "cancel"' in assistant_interface
+    assert "wrapper.card.actionRequested.connect(self._on_action_message_requested)" in assistant_interface
+    assert "async def _continue_action_from_message" in assistant_interface
+    assert 'reply_text = "确认" if normalized_command == "confirm" else "取消"' in assistant_interface
+    assert "await self._action_workflow.handle_user_turn(" in assistant_interface
+
+
 def test_ai_assistant_regenerate_capability_exists_without_visible_entry() -> None:
     assistant_interface = Path("client/ui/windows/ai_assistant_interface.py").read_text(encoding="utf-8")
 

@@ -24,6 +24,29 @@ def _message(message_id: str, role: AIMessageRole, content: str, *, status: AIMe
     )
 
 
+def _action_confirmation_message(message_id: str = "action-confirm") -> AIMessage:
+    message = _message(
+        message_id,
+        AIMessageRole.ASSISTANT,
+        "确认要发送消息给张三吗？\n内容预览：我晚点到\n这是高风险操作，确认后才会继续。",
+    )
+    message.extra = {
+        "ai_action": {
+            "state": "waiting_confirmation",
+            "waiting": {
+                "type": "confirmation",
+                "risk": "high",
+                "preview": {
+                    "operation": "发送消息",
+                    "target": "张三",
+                    "content": "我晚点到",
+                },
+            },
+        }
+    }
+    return message
+
+
 def _rect_in_panel(widget: AIAssistantInterface, child) -> QRect:
     top_left = widget.content_panel.mapFromGlobal(child.mapToGlobal(QPoint(0, 0)))
     return QRect(top_left, child.size())
@@ -132,6 +155,31 @@ def test_ai_assistant_message_card_reserves_full_height_for_korean_text() -> Non
     assert label.width() > 0
     assert required_height > 0
     assert label.height() >= required_height
+
+    card.close()
+    app.processEvents()
+
+
+def test_ai_assistant_message_card_shows_action_confirmation_controls() -> None:
+    app = QApplication.instance() or QApplication([])
+    card = AIAssistantMessageCard(_action_confirmation_message())
+    card.resize(620, 10)
+    card.show()
+    app.processEvents()
+
+    emitted: list[tuple[str, str]] = []
+    card.actionRequested.connect(lambda message_id, command: emitted.append((message_id, command)))
+
+    assert card.action_confirmation_frame.isVisible()
+    assert "张三" in card.action_confirmation_target_label.text()
+    assert "我晚点到" in card.action_confirmation_content_label.text()
+    assert card.action_confirm_send_button.text() == "发送"
+    assert card.action_confirm_cancel_button.text() == "取消"
+
+    card.action_confirm_send_button.click()
+    card.action_confirm_cancel_button.click()
+
+    assert emitted == [("action-confirm", "confirm"), ("action-confirm", "cancel")]
 
     card.close()
     app.processEvents()

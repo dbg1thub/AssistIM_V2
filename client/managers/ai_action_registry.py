@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import uuid
 from dataclasses import dataclass
 from typing import Any
 
@@ -42,6 +43,140 @@ MEMORY_SUMMARIZE_PROMPT_VERSION = "memory_summarize_context:v1"
 MEMORY_SUMMARIZE_MODEL_ID = "deterministic-local-summarizer:v1"
 
 
+class AIActionMessageSender:
+    """Send AI-confirmed text through the existing chat message pipeline."""
+
+    def __init__(self, *, session_manager: Any | None = None, message_manager: Any | None = None) -> None:
+        self._session_manager = session_manager
+        self._message_manager = message_manager
+
+    async def send_text_to_contact(
+        self,
+        *,
+        target: dict,
+        content: str,
+        idempotency_key: str,
+        plan_id: str,
+    ) -> dict[str, Any]:
+        normalized_target = dict(target or {})
+        contact_id = str(normalized_target.get("contact_id") or normalized_target.get("id") or "").strip()
+        label = _contact_label(normalized_target) or "目标联系人"
+        normalized_content = str(content or "").strip()
+        normalized_key = str(idempotency_key or "").strip()
+        if not contact_id:
+            return _message_send_failed(
+                "TARGET_NOT_RESOLVED",
+                f"没有找到可发送的联系人，请重新指定收件人。",
+                target=normalized_target,
+                content=normalized_content,
+            )
+        session = self._find_direct_session(contact_id)
+        if session is None:
+            return _message_send_failed(
+                "SESSION_NOT_FOUND",
+                f"没有找到可发送的会话，请先打开或创建与{label}的私聊。",
+                target=normalized_target,
+                content=normalized_content,
+            )
+        session_id = str(getattr(session, "session_id", "") or "").strip()
+        if not session_id:
+            return _message_send_failed(
+                "SESSION_NOT_FOUND",
+                f"没有找到可发送的会话，请先打开或创建与{label}的私聊。",
+                target=normalized_target,
+                content=normalized_content,
+            )
+
+        try:
+            from client.models.message import MessageStatus, MessageType
+        except Exception as exc:
+            logger.exception("AI action message send contracts unavailable")
+            return _message_send_failed(
+                "SEND_CONTRACT_UNAVAILABLE",
+                "发送链路暂时不可用，请稍后再试。",
+                target=normalized_target,
+                content=normalized_content,
+                error=str(exc),
+            )
+
+        try:
+            message = await self._message_manager_instance().send_message(
+                session_id=session_id,
+                content=normalized_content,
+                message_type=MessageType.TEXT,
+                msg_id=_stable_message_id(plan_id=plan_id, idempotency_key=normalized_key),
+                extra={
+                    "ai_action_send": {
+                        "plan_id": str(plan_id or ""),
+                        "idempotency_key": normalized_key,
+                        "target_contact_id": contact_id,
+                    }
+                },
+            )
+        except Exception as exc:
+            logger.exception("AI action message send failed")
+            return _message_send_failed(
+                "SEND_FAILED",
+                "发送失败，请稍后再试。",
+                target=normalized_target,
+                content=normalized_content,
+                error=str(exc),
+            )
+
+        status_value = _status_value(getattr(message, "status", ""))
+        message_id = str(getattr(message, "message_id", "") or "")
+        if status_value == MessageStatus.FAILED.value:
+            return _message_send_failed(
+                "SEND_FAILED",
+                "发送失败，请稍后再试。",
+                target=normalized_target,
+                content=normalized_content,
+                session_id=session_id,
+                message_id=message_id,
+            )
+        if status_value == MessageStatus.AWAITING_SECURITY_CONFIRMATION.value:
+            return {
+                "status": "pending_security_review",
+                "text": f"发送前需要完成身份验证，消息已暂存给{label}。",
+                "target": normalized_target,
+                "content_chars": len(normalized_content),
+                "session_id": session_id,
+                "message_id": message_id,
+            }
+        return {
+            "status": "sent",
+            "text": f"已发送给{label}。",
+            "target": normalized_target,
+            "content_chars": len(normalized_content),
+            "session_id": session_id,
+            "message_id": message_id,
+        }
+
+    def _session_manager_instance(self):
+        if self._session_manager is None:
+            from client.managers.session_manager import get_session_manager
+
+            self._session_manager = get_session_manager()
+        return self._session_manager
+
+    def _message_manager_instance(self):
+        if self._message_manager is None:
+            from client.managers.message_manager import get_message_manager
+
+            self._message_manager = get_message_manager()
+        return self._message_manager
+
+    def _find_direct_session(self, contact_id: str):
+        manager = self._session_manager_instance()
+        current = getattr(manager, "current_session", None)
+        if _session_matches_direct_contact(current, contact_id):
+            return current
+        for session in list(getattr(manager, "sessions", []) or []):
+            if _session_matches_direct_contact(session, contact_id):
+                return session
+        return None
+
+
 class AtomicActionRegistry:
     """Registry for executable atomic actions."""
 
@@ -50,10 +185,12 @@ class AtomicActionRegistry:
         *,
         contact_resolver: Any,
         memory_manager: Any | None = None,
+        message_sender: Any | None = None,
         action_cache: AIActionCache | None = None,
     ) -> None:
         self._contact_resolver = contact_resolver
         self._memory_manager = memory_manager
+        self._message_sender = message_sender
         self._action_cache = action_cache or AIActionCache()
         self._actions: dict[str, AtomicActionSpec] = {}
         self._register_defaults()
@@ -135,7 +272,7 @@ class AtomicActionRegistry:
                 handler=self._message_send,
                 input_model=MessageSendInput,
                 output_model=MessageSendOutput,
-                enabled=False,
+                enabled=True,
                 requires_confirmation=True,
                 max_targets=1,
                 allow_batch=False,
@@ -396,16 +533,27 @@ class AtomicActionRegistry:
         )
 
     async def _message_send(self, args: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
-        del context
         target = _coerce_contact(args.get("target"))
         content = str(args.get("content") or "").strip()
-        if not str(args.get("idempotency_key") or "").strip():
+        idempotency_key = str(args.get("idempotency_key") or "").strip()
+        if not idempotency_key:
             return {"status": "failed", "error_code": "IDEMPOTENCY_KEY_REQUIRED", "text": "发送前缺少幂等键，已停止。"}
-        text = (
-            f"已确认要给{_contact_label(target) or '目标联系人'}发送“{content}”。"
-            "当前版本还没有接入真实发送能力，所以不会实际发送。"
+        sender = self._message_sender or AIActionMessageSender()
+        send = getattr(sender, "send_text_to_contact", None)
+        if not callable(send):
+            return _message_send_failed(
+                "SEND_CONTRACT_UNAVAILABLE",
+                "发送链路暂时不可用，请稍后再试。",
+                target=target,
+                content=content,
+            )
+        result = await send(
+            target=target,
+            content=content,
+            idempotency_key=idempotency_key,
+            plan_id=str(context.get("plan_id") or ""),
         )
-        return {"status": "disabled", "text": text, "target": target, "content_chars": len(content)}
+        return _normalize_message_send_output(result, target=target, content=content)
 
 
 @dataclass(frozen=True, slots=True)
@@ -714,6 +862,81 @@ def _contact_label(contact: dict[str, Any]) -> str:
         or contact.get("raw")
         or ""
     ).strip()
+
+
+def _session_matches_direct_contact(session: Any, contact_id: str) -> bool:
+    normalized_contact_id = str(contact_id or "").strip()
+    if session is None or not normalized_contact_id:
+        return False
+    if bool(getattr(session, "is_ai_session", False)):
+        return False
+    if str(getattr(session, "session_type", "") or "").strip() != "direct":
+        return False
+    extra = dict(getattr(session, "extra", {}) or {})
+    counterpart_id = str(extra.get("counterpart_id") or "").strip()
+    if counterpart_id and counterpart_id == normalized_contact_id:
+        return True
+    participant_ids = {
+        str(item or "").strip()
+        for item in list(getattr(session, "participant_ids", []) or [])
+        if str(item or "").strip()
+    }
+    return normalized_contact_id in participant_ids
+
+
+def _stable_message_id(*, plan_id: str, idempotency_key: str) -> str:
+    raw = f"assistim-ai-action:{str(plan_id or '').strip()}:{str(idempotency_key or '').strip()}"
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, raw))
+
+
+def _status_value(status: Any) -> str:
+    return str(getattr(status, "value", status) or "").strip()
+
+
+def _message_send_failed(
+    error_code: str,
+    text: str,
+    *,
+    target: dict[str, Any],
+    content: str,
+    session_id: str = "",
+    message_id: str = "",
+    error: str = "",
+) -> dict[str, Any]:
+    output = {
+        "status": "failed",
+        "error_code": str(error_code or "SEND_FAILED").strip() or "SEND_FAILED",
+        "text": str(text or "发送失败，请稍后再试。").strip() or "发送失败，请稍后再试。",
+        "target": dict(target or {}),
+        "content_chars": len(str(content or "")),
+    }
+    if session_id:
+        output["session_id"] = session_id
+    if message_id:
+        output["message_id"] = message_id
+    if error:
+        output["error"] = error
+    return output
+
+
+def _normalize_message_send_output(result: Any, *, target: dict[str, Any], content: str) -> dict[str, Any]:
+    payload = dict(result or {}) if isinstance(result, dict) else {}
+    status = str(payload.get("status") or "").strip() or "sent"
+    text = str(payload.get("text") or "").strip()
+    if not text:
+        label = _contact_label(target) or "目标联系人"
+        text = f"已发送给{label}。" if status == "sent" else "发送失败，请稍后再试。"
+    payload["status"] = status
+    payload["text"] = text
+    payload["target"] = dict(payload.get("target") or target or {})
+    try:
+        content_chars = int(payload.get("content_chars") or len(str(content or "")))
+    except (TypeError, ValueError):
+        content_chars = len(str(content or ""))
+    payload["content_chars"] = max(0, content_chars)
+    if "error_code" in payload:
+        payload["error_code"] = str(payload.get("error_code") or "")
+    return payload
 
 
 def _alias_ambiguity_question(query: str, candidates: list[dict[str, Any]]) -> str:

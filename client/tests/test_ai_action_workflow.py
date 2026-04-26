@@ -1,5 +1,6 @@
 import asyncio
 from dataclasses import replace
+from types import SimpleNamespace
 
 from client.managers import ai_action_registry as registry_module
 from client.managers.ai_action_cache import AIActionCache
@@ -7,7 +8,7 @@ from client.managers.ai_action_executor import AIActionExecutor
 from client.managers.ai_action_normalizer import AIPlanNormalizer
 from client.managers.ai_action_optimizer import AIPlanOptimizer
 from client.managers.ai_action_permission_policy import AIPermissionPolicy, AIPermissionScope, PermissionDecision
-from client.managers.ai_action_registry import AtomicActionRegistry
+from client.managers.ai_action_registry import AIActionMessageSender, AtomicActionRegistry
 from client.managers.ai_action_types import AIActionPlan, AIActionStep, AtomicActionSpec
 from client.managers.ai_action_validator import AIPlanValidator
 from client.managers.ai_action_workflow import (
@@ -16,6 +17,7 @@ from client.managers.ai_action_workflow import (
     ContactAliasResolver,
     PendingPlannerState,
 )
+from client.models.message import MessageStatus, Session
 from client.storage.ai_action_store import AIActionStore
 from client.storage.database import Database
 import client.storage.ai_action_store as action_store_module
@@ -73,6 +75,49 @@ class _FakeActionMemoryManager:
         }
         output.update(self.extra_output)
         return output
+
+
+class _FakeActionMessageSender:
+    def __init__(self, *, result: dict | None = None) -> None:
+        self.result = dict(result or {})
+        self.calls: list[dict] = []
+
+    async def send_text_to_contact(
+        self,
+        *,
+        target: dict,
+        content: str,
+        idempotency_key: str,
+        plan_id: str,
+    ) -> dict:
+        self.calls.append(
+            {
+                "target": dict(target or {}),
+                "content": content,
+                "idempotency_key": idempotency_key,
+                "plan_id": plan_id,
+            }
+        )
+        if self.result:
+            return dict(self.result)
+        return {
+            "status": "sent",
+            "text": f"已发送给{target.get('display_name') or target.get('contact_id')}。",
+            "target": dict(target or {}),
+            "content_chars": len(content),
+            "session_id": "session-direct-1",
+            "message_id": "message-ai-1",
+        }
+
+
+class _FakeDirectMessageManager:
+    def __init__(self, *, status=MessageStatus.SENDING) -> None:
+        self.status = status
+        self.calls: list[dict] = []
+
+    async def send_message(self, **kwargs):
+        self.calls.append(dict(kwargs))
+        return SimpleNamespace(status=self.status, message_id="message-ai-1")
 
 
 class _FakeMemoryDatabase:
@@ -2960,7 +3005,7 @@ def test_ai_action_workflow_does_not_execute_confirm_without_pending(tmp_path, m
     asyncio.run(scenario())
 
 
-def test_ai_action_workflow_write_action_is_disabled(tmp_path, monkeypatch) -> None:
+def test_ai_action_workflow_sends_message_after_confirmation(tmp_path, monkeypatch) -> None:
     async def scenario() -> None:
         db = Database(str(tmp_path / "actions.db"))
         monkeypatch.setattr(action_store_module, "get_database", lambda: db)
@@ -2977,10 +3022,12 @@ def test_ai_action_workflow_write_action_is_disabled(tmp_path, monkeypatch) -> N
                 }
             ]
         )
+        message_sender = _FakeActionMessageSender()
         workflow = AIActionWorkflow(
             action_store=store,
             planner=_WorkflowPlanner(),
             contact_alias_resolver=ContactAliasResolver(db=contact_db),
+            message_sender=message_sender,
         )
         try:
             result = await workflow.handle_user_turn(thread_id="thread-1", text="帮我给张三发我晚点到")
@@ -2989,14 +3036,126 @@ def test_ai_action_workflow_write_action_is_disabled(tmp_path, monkeypatch) -> N
             assert "确认要发送消息给张三" in result.response_text
             assert result.message_extra["ai_action"]["action"] == "send_message"
             assert result.message_extra["ai_action"]["state"] == "waiting_confirmation"
+            assert message_sender.calls == []
 
             confirmed = await workflow.handle_user_turn(thread_id="thread-1", text="确认")
             assert confirmed.handled is True
-            assert "还没有接入真实发送能力" in confirmed.response_text
+            assert "已发送给张三" in confirmed.response_text
             assert confirmed.message_extra["ai_action"]["state"] == "done"
+            assert len(message_sender.calls) == 1
+            assert message_sender.calls[0]["target"]["contact_id"] == "user-1"
+            assert message_sender.calls[0]["content"] == "我晚点到"
+            assert message_sender.calls[0]["idempotency_key"]
             assert len(contact_db.resolve_calls) == 1
         finally:
             await db.close()
+
+    asyncio.run(scenario())
+
+
+def test_ai_action_workflow_reports_missing_send_session_after_confirmation(tmp_path, monkeypatch) -> None:
+    async def scenario() -> None:
+        db = Database(str(tmp_path / "actions.db"))
+        monkeypatch.setattr(action_store_module, "get_database", lambda: db)
+        store = AIActionStore()
+        contact_db = _FakeContactDatabase(
+            [
+                {
+                    "id": "user-1",
+                    "display_name": "张三",
+                    "username": "zhangsan",
+                    "nickname": "张三",
+                    "remark": "张三",
+                    "assistim_id": "zhangsan",
+                }
+            ]
+        )
+        message_sender = _FakeActionMessageSender(
+            result={
+                "status": "failed",
+                "error_code": "SESSION_NOT_FOUND",
+                "text": "没有找到可发送的会话，请先打开或创建与张三的私聊。",
+                "target": {"contact_id": "user-1", "display_name": "张三"},
+                "content_chars": 4,
+            }
+        )
+        workflow = AIActionWorkflow(
+            action_store=store,
+            planner=_WorkflowPlanner(),
+            contact_alias_resolver=ContactAliasResolver(db=contact_db),
+            message_sender=message_sender,
+        )
+        try:
+            first = await workflow.handle_user_turn(thread_id="thread-1", text="帮我给张三发我晚点到")
+            confirmed = await workflow.handle_user_turn(thread_id="thread-1", text="确认")
+            plan = await store.get_plan(first.message_extra["ai_action"]["plan_id"])
+
+            assert confirmed.handled is True
+            assert "没有找到可发送的会话" in confirmed.response_text
+            assert confirmed.message_extra["ai_action"]["state"] == "done"
+            assert len(message_sender.calls) == 1
+            assert plan is not None
+            assert plan.step_outputs["send_message"]["status"] == "failed"
+            assert plan.step_outputs["send_message"]["error_code"] == "SESSION_NOT_FOUND"
+        finally:
+            await db.close()
+
+    asyncio.run(scenario())
+
+
+def test_ai_action_message_sender_uses_existing_direct_session() -> None:
+    async def scenario() -> None:
+        session = Session(
+            session_id="session-direct-1",
+            name="张三",
+            session_type="direct",
+            participant_ids=["me", "user-1"],
+            extra={"counterpart_id": "user-1"},
+        )
+        message_manager = _FakeDirectMessageManager()
+        sender = AIActionMessageSender(
+            session_manager=SimpleNamespace(current_session=None, sessions=[session]),
+            message_manager=message_manager,
+        )
+
+        result = await sender.send_text_to_contact(
+            target={"contact_id": "user-1", "display_name": "张三"},
+            content="我晚点到",
+            idempotency_key="idem-1",
+            plan_id="plan-1",
+        )
+
+        assert result["status"] == "sent"
+        assert result["session_id"] == "session-direct-1"
+        assert result["message_id"] == "message-ai-1"
+        assert result["text"] == "已发送给张三。"
+        assert len(message_manager.calls) == 1
+        assert message_manager.calls[0]["session_id"] == "session-direct-1"
+        assert message_manager.calls[0]["content"] == "我晚点到"
+        assert message_manager.calls[0]["extra"]["ai_action_send"]["plan_id"] == "plan-1"
+
+    asyncio.run(scenario())
+
+
+def test_ai_action_message_sender_requires_existing_direct_session() -> None:
+    async def scenario() -> None:
+        message_manager = _FakeDirectMessageManager()
+        sender = AIActionMessageSender(
+            session_manager=SimpleNamespace(current_session=None, sessions=[]),
+            message_manager=message_manager,
+        )
+
+        result = await sender.send_text_to_contact(
+            target={"contact_id": "user-1", "display_name": "张三"},
+            content="我晚点到",
+            idempotency_key="idem-1",
+            plan_id="plan-1",
+        )
+
+        assert result["status"] == "failed"
+        assert result["error_code"] == "SESSION_NOT_FOUND"
+        assert "没有找到可发送的会话" in result["text"]
+        assert message_manager.calls == []
 
     asyncio.run(scenario())
 

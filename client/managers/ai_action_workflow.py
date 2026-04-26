@@ -487,11 +487,13 @@ class AIActionWorkflow:
         planner: AIActionPlanner | None = None,
         contact_alias_resolver: ContactAliasResolver | None = None,
         memory_manager: Any | None = None,
+        message_sender: Any | None = None,
         permission_scope_provider: Callable[[], AIPermissionScope | None] | None = None,
     ) -> None:
         self._store = action_store or get_ai_action_store()
         self._planner = planner or AIActionPlanner()
         self._contact_alias_resolver = contact_alias_resolver or ContactAliasResolver()
+        self._message_sender = message_sender
         self._permission_scope_provider = permission_scope_provider
         self._normalizer = AIPlanNormalizer()
         self._optimizer = AIPlanOptimizer()
@@ -499,6 +501,7 @@ class AIActionWorkflow:
         self._registry = AtomicActionRegistry(
             contact_resolver=self._contact_alias_resolver,
             memory_manager=memory_manager,
+            message_sender=self._message_sender,
         )
         self._validator = AIPlanValidator(registry=self._registry)
         self._executor = AIActionExecutor(registry=self._registry, store=self._store)
