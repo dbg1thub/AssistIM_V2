@@ -2801,6 +2801,39 @@ class Database:
         messages.reverse()
         return messages
 
+    async def list_local_ai_artifact_messages(self, *, limit: int = 500) -> list[ChatMessage]:
+        """Return local messages whose AI-derived artifacts are ready for vector indexing."""
+        normalized_limit = max(1, min(5000, int(limit or 500)))
+        cursor = await self._db.execute(
+            """
+            SELECT *
+            FROM messages
+            WHERE (
+                    message_type = 'file'
+                    AND (
+                        (
+                            json_extract(extra, '$.file_summary.status') = 'ready'
+                            AND LENGTH(COALESCE(json_extract(extra, '$.file_summary.text'), '')) > 0
+                        )
+                        OR (
+                            json_extract(extra, '$.file_text_extract.status') = 'ready'
+                            AND LENGTH(COALESCE(json_extract(extra, '$.file_text_extract.text'), '')) > 0
+                        )
+                    )
+                )
+                OR (
+                    message_type = 'voice'
+                    AND json_extract(extra, '$.voice_transcript.status') = 'ready'
+                    AND LENGTH(COALESCE(json_extract(extra, '$.voice_transcript.text'), '')) > 0
+                )
+            ORDER BY updated_at ASC, order_ts ASC, rowid ASC
+            LIMIT ?
+            """,
+            (normalized_limit,),
+        )
+        rows = await cursor.fetchall()
+        return [self._row_to_message(row) for row in rows]
+
     async def get_security_pending_messages(self, session_id: str) -> list[ChatMessage]:
         """Return all local outbound messages awaiting security confirmation in FIFO order."""
         cursor = await self._db.execute(

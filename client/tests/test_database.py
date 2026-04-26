@@ -1213,6 +1213,74 @@ def test_database_read_cursor_overlay_updates_cached_self_messages_without_row_r
         shutil.rmtree(temp_root, ignore_errors=True)
 
 
+def test_database_lists_ready_local_ai_artifact_messages() -> None:
+    temp_root = (Path.cwd() / "client/tests/.pytest_tmp").resolve()
+    temp_root.mkdir(parents=True, exist_ok=True)
+    db_path = temp_root / "database-local-ai-artifacts.db"
+    try:
+        async def scenario() -> None:
+            database = Database(str(db_path))
+            await database.connect()
+            try:
+                now = datetime(2026, 4, 24, 10, 0, 0)
+                await database.save_message(
+                    ChatMessage(
+                        message_id="m-file-ready",
+                        session_id="session-1",
+                        sender_id="alice",
+                        content="/uploads/readme.md",
+                        message_type=MessageType.FILE,
+                        status=MessageStatus.SENT,
+                        timestamp=now,
+                        updated_at=now,
+                        extra={
+                            "file_summary": {"status": "ready", "text": "README 总结"},
+                            "file_text_extract": {"status": "ready", "text": "README 正文"},
+                        },
+                    )
+                )
+                await database.save_message(
+                    ChatMessage(
+                        message_id="m-voice-ready",
+                        session_id="session-1",
+                        sender_id="bob",
+                        content="/uploads/voice.m4a",
+                        message_type=MessageType.VOICE,
+                        status=MessageStatus.RECEIVED,
+                        timestamp=now,
+                        updated_at=now,
+                        extra={"voice_transcript": {"status": "ready", "text": "语音内容"}},
+                    )
+                )
+                await database.save_message(
+                    ChatMessage(
+                        message_id="m-file-pending",
+                        session_id="session-1",
+                        sender_id="alice",
+                        content="/uploads/pending.pdf",
+                        message_type=MessageType.FILE,
+                        status=MessageStatus.SENT,
+                        timestamp=now,
+                        updated_at=now,
+                        extra={"file_summary": {"status": "pending", "text": ""}},
+                    )
+                )
+
+                messages = await database.list_local_ai_artifact_messages(limit=10)
+
+                assert [message.message_id for message in messages] == ["m-file-ready", "m-voice-ready"]
+            finally:
+                await database.close()
+
+        asyncio.run(scenario())
+    finally:
+        try:
+            db_path.unlink(missing_ok=True)
+        except PermissionError:
+            pass
+        shutil.rmtree(temp_root, ignore_errors=True)
+
+
 def test_database_directory_cache_replace_is_atomic_per_owner() -> None:
     temp_root = (Path.cwd() / "client/tests/.pytest_tmp").resolve()
     temp_root.mkdir(parents=True, exist_ok=True)

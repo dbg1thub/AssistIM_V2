@@ -10,11 +10,47 @@ from client.storage.database import Database
 
 
 class _FakeDatabase:
-    def __init__(self, user_id: str = "test1") -> None:
+    def __init__(
+        self,
+        user_id: str = "test1",
+        *,
+        sessions: dict[str, object] | None = None,
+        ready_artifact_messages: list[ChatMessage] | None = None,
+    ) -> None:
         self.app_state = {Database.AUTH_USER_ID_STATE_KEY: user_id}
+        self.sessions = dict(sessions or {})
+        self.ready_artifact_messages = list(ready_artifact_messages or [])
+        self.ready_artifact_calls: list[dict] = []
 
     async def get_app_state(self, key: str):
         return self.app_state.get(str(key or ""))
+
+    async def get_session(self, session_id: str):
+        return self.sessions.get(str(session_id or ""))
+
+    async def list_local_ai_artifact_messages(self, *, limit: int = 500):
+        self.ready_artifact_calls.append({"limit": limit})
+        return list(self.ready_artifact_messages)[: int(limit or 500)]
+
+
+class _FakeSession:
+    def __init__(
+        self,
+        *,
+        session_id: str = "session-1",
+        name: str = "test3",
+        session_type: str = "direct",
+        participant_ids: list[str] | None = None,
+        extra: dict | None = None,
+    ) -> None:
+        self.session_id = session_id
+        self.name = name
+        self.session_type = session_type
+        self.participant_ids = list(participant_ids or [])
+        self.extra = dict(extra or {})
+
+    def display_name(self) -> str:
+        return self.name
 
 
 class _FakeVectorIndex:
@@ -52,6 +88,9 @@ class _FakeAIMemoryStore:
 
 def _file_message(
     *,
+    session_id: str = "session-1",
+    sender_id: str = "alice",
+    is_self: bool = False,
     summary_status: str = "ready",
     summary_text: str = "文件确认了合同金额。",
     text_status: str = "ready",
@@ -60,14 +99,14 @@ def _file_message(
     now = datetime(2026, 4, 24, 10, 0, 0)
     return ChatMessage(
         message_id="m-file",
-        session_id="session-1",
-        sender_id="alice",
+        session_id=session_id,
+        sender_id=sender_id,
         content="/uploads/report.pdf",
         message_type=MessageType.FILE,
         status=MessageStatus.RECEIVED,
         timestamp=now,
         updated_at=now,
-        is_self=False,
+        is_self=is_self,
         extra={
             "name": "report.pdf",
             "mime_type": "application/pdf",
@@ -85,18 +124,25 @@ def _file_message(
     )
 
 
-def _voice_message(*, transcript_status: str = "ready", transcript_text: str = "今晚八点开会。") -> ChatMessage:
+def _voice_message(
+    *,
+    session_id: str = "session-1",
+    sender_id: str = "test1",
+    is_self: bool = True,
+    transcript_status: str = "ready",
+    transcript_text: str = "今晚八点开会。",
+) -> ChatMessage:
     now = datetime(2026, 4, 24, 10, 5, 0)
     return ChatMessage(
         message_id="m-voice",
-        session_id="session-1",
-        sender_id="test1",
+        session_id=session_id,
+        sender_id=sender_id,
         content="file:///voice.m4a",
         message_type=MessageType.VOICE,
         status=MessageStatus.RECEIVED,
         timestamp=now,
         updated_at=now,
-        is_self=True,
+        is_self=is_self,
         extra={
             "duration": 8,
             "mime_type": "audio/mp4",
@@ -137,6 +183,37 @@ def test_ai_memory_indexing_service_indexes_ready_file_summary() -> None:
         assert vector_index.calls[0]["title"] == "report.pdf"
         assert "report.pdf" in vector_index.calls[0]["keywords"]
         assert "alice" in vector_index.calls[0]["participants"]
+
+    asyncio.run(scenario())
+
+
+def test_ai_memory_indexing_service_adds_session_participants_to_file_memory() -> None:
+    async def scenario() -> None:
+        store = _FakeAIMemoryStore()
+        vector_index = _FakeVectorIndex()
+        session = _FakeSession(
+            participant_ids=["user-test1", "user-test3"],
+            extra={
+                "current_user_id": "user-test1",
+                "counterpart_id": "user-test3",
+                "counterpart_name": "test3",
+                "counterpart_username": "test3",
+            },
+        )
+        service = AIMemoryIndexingService(
+            db=_FakeDatabase(sessions={"session-1": session}),
+            vector_index=vector_index,
+            ai_memory_store=store,
+        )
+
+        await service.sync_file_analysis_message(_file_message(sender_id="user-test1", is_self=True))
+
+        item = next(item for item in store.upserted_items if item.source_type == "file_summary")
+        assert "user-test1" in item.metadata["participants"]
+        assert "user-test3" in item.metadata["participants"]
+        assert "test3" in item.metadata["participants"]
+        assert "我" in item.metadata["participants"]
+        assert "test3" in vector_index.calls[0]["participants"]
 
     asyncio.run(scenario())
 
@@ -231,6 +308,37 @@ def test_ai_memory_indexing_service_indexes_ready_voice_transcript() -> None:
     asyncio.run(scenario())
 
 
+def test_ai_memory_indexing_service_adds_session_participants_to_voice_memory() -> None:
+    async def scenario() -> None:
+        store = _FakeAIMemoryStore()
+        vector_index = _FakeVectorIndex()
+        session = _FakeSession(
+            participant_ids=["user-test1", "user-test3"],
+            extra={
+                "current_user_id": "user-test1",
+                "counterpart_id": "user-test3",
+                "counterpart_name": "test3",
+                "counterpart_username": "test3",
+            },
+        )
+        service = AIMemoryIndexingService(
+            db=_FakeDatabase(sessions={"session-1": session}),
+            vector_index=vector_index,
+            ai_memory_store=store,
+        )
+
+        await service.sync_voice_transcript_message(_voice_message(sender_id="user-test3", is_self=False))
+
+        item = store.upserted_items[0]
+        assert item.source_type == "voice_transcript"
+        assert "user-test3" in item.metadata["participants"]
+        assert "test3" in item.metadata["participants"]
+        assert "user-test1" in item.metadata["participants"]
+        assert "test3" in vector_index.calls[0]["participants"]
+
+    asyncio.run(scenario())
+
+
 def test_ai_memory_indexing_service_deletes_non_ready_voice_transcript() -> None:
     async def scenario() -> None:
         store = _FakeAIMemoryStore()
@@ -244,6 +352,35 @@ def test_ai_memory_indexing_service_deletes_non_ready_voice_transcript() -> None
 
         assert store.upserted_items == []
         assert store.deleted_sources == [("account:test1", "voice_transcript", "voice:session-1:m-voice")]
+
+    asyncio.run(scenario())
+
+
+def test_ai_memory_indexing_service_backfills_ready_local_artifacts() -> None:
+    async def scenario() -> None:
+        store = _FakeAIMemoryStore()
+        db = _FakeDatabase(
+            ready_artifact_messages=[
+                _file_message(),
+                _voice_message(),
+            ],
+        )
+        service = AIMemoryIndexingService(
+            db=db,
+            vector_index=_FakeVectorIndex(),
+            ai_memory_store=store,
+        )
+
+        result = await service.sync_ready_local_artifact_messages(limit=20)
+
+        assert db.ready_artifact_calls == [{"limit": 20}]
+        assert result["processed"] == 2
+        assert result["files"] == 1
+        assert result["voices"] == 1
+        source_types = [item.source_type for item in store.upserted_items]
+        assert "file_summary" in source_types
+        assert "file_text_chunk" in source_types
+        assert "voice_transcript" in source_types
 
     asyncio.run(scenario())
 

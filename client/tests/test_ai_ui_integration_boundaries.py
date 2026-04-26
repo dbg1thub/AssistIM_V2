@@ -266,6 +266,19 @@ def test_file_summary_right_click_flow_is_wired() -> None:
     assert "def build_file_summary_request(" in prompt_builder
 
 
+def test_local_ai_artifact_backfill_is_wired_after_authenticated_startup() -> None:
+    main_py = Path("client/main.py").read_text(encoding="utf-8")
+    indexing_service = Path("client/services/ai_memory_indexing_service.py").read_text(encoding="utf-8")
+    database = Path("client/storage/database.py").read_text(encoding="utf-8")
+
+    assert "from client.services.ai_memory_indexing_service import get_ai_memory_indexing_service" in main_py
+    assert "self.create_task(self._sync_ready_local_ai_memory_artifacts(generation))" in main_py
+    assert "async def _sync_ready_local_ai_memory_artifacts(self, generation: int) -> None:" in main_py
+    assert "sync_ready_local_artifact_messages(limit=1000)" in main_py
+    assert "async def sync_ready_local_artifact_messages(self, *, limit: int = 500)" in indexing_service
+    assert "async def list_local_ai_artifact_messages(self, *, limit: int = 500)" in database
+
+
 def test_summary_infobar_only_targets_current_active_session() -> None:
     chat_interface = Path("client/ui/windows/chat_interface.py").read_text(encoding="utf-8")
 

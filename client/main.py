@@ -40,6 +40,7 @@ from client.managers.search_manager import peek_search_manager
 from client.managers.call_manager import peek_call_manager
 from client.managers.ai_task_manager import peek_ai_task_manager
 from client.services.ai_bootstrap import configure_default_ai_provider
+from client.services.ai_memory_indexing_service import get_ai_memory_indexing_service
 from client.services.ai_service import peek_ai_service
 
 from client.ui.controllers.auth_controller import get_auth_controller, peek_auth_controller
@@ -751,6 +752,7 @@ class Application:
             refresh_profile = getattr(auth_controller, "refresh_current_user_profile_if_needed", None)
             if callable(refresh_profile):
                 await refresh_profile()
+            self.create_task(self._sync_ready_local_ai_memory_artifacts(generation))
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -1065,6 +1067,25 @@ class Application:
             logger.info("Background services completed for stale runtime generation %s", generation)
             return
         logger.info("Background services started")
+
+    async def _sync_ready_local_ai_memory_artifacts(self, generation: int) -> None:
+        """Backfill local AI artifacts into the vector memory store after authenticated startup."""
+        if not self._is_runtime_generation_current(generation):
+            return
+        try:
+            stats = await get_ai_memory_indexing_service().sync_ready_local_artifact_messages(limit=1000)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Local AI memory artifact backfill failed")
+            return
+        logger.info(
+            "[ai-perf] local_ai_memory_artifact_backfill_done processed=%s files=%s voices=%s failed=%s",
+            int(stats.get("processed", 0) or 0),
+            int(stats.get("files", 0) or 0),
+            int(stats.get("voices", 0) or 0),
+            int(stats.get("failed", 0) or 0),
+        )
 
     async def _perform_logout_flow(self) -> None:
         """Sign out the current user, reset authenticated runtime state, and reopen auth UI."""

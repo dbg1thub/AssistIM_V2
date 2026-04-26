@@ -53,10 +53,17 @@ class AIMemoryIndexingService:
         owner_scope = await self._owner_scope()
         if not owner_scope:
             return
-        await self._sync_file_summary_message(owner_scope=owner_scope, message=message)
-        await self._sync_file_text_chunks(owner_scope=owner_scope, message=message)
+        participants = await self._message_participants(message)
+        await self._sync_file_summary_message(owner_scope=owner_scope, message=message, participants=participants)
+        await self._sync_file_text_chunks(owner_scope=owner_scope, message=message, participants=participants)
 
-    async def _sync_file_summary_message(self, *, owner_scope: str, message: ChatMessage) -> None:
+    async def _sync_file_summary_message(
+        self,
+        *,
+        owner_scope: str,
+        message: ChatMessage,
+        participants: list[str],
+    ) -> None:
         """Upsert or delete one file-summary memory item."""
 
         source_id = self.file_summary_source_id(message)
@@ -73,7 +80,6 @@ class AIMemoryIndexingService:
         file_name = self._file_name(message)
         memory_text = self._file_memory_text(message, summary_text=summary_text)
         keywords = self._file_keywords(message, file_name=file_name)
-        participants = self._file_participants(message)
         vector = await self._vector_index.encode_item(
             title=file_name,
             text=memory_text,
@@ -101,12 +107,20 @@ class AIMemoryIndexingService:
                     "bucket_start_ts": int(message.timestamp.timestamp()) if message.timestamp else 0,
                     "bucket_end_ts": int(message.timestamp.timestamp()) if message.timestamp else 0,
                     "source_version": 1,
+                    "keywords": keywords,
+                    "participants": participants,
                 },
                 updated_at=int(time.time()),
             )
         )
 
-    async def _sync_file_text_chunks(self, *, owner_scope: str, message: ChatMessage) -> None:
+    async def _sync_file_text_chunks(
+        self,
+        *,
+        owner_scope: str,
+        message: ChatMessage,
+        participants: list[str],
+    ) -> None:
         """Replace extracted file-text chunks for one file message."""
 
         source_id = self.file_text_source_id(message)
@@ -131,7 +145,6 @@ class AIMemoryIndexingService:
 
         file_name = self._file_name(message)
         keywords = self._file_keywords(message, file_name=file_name)
-        participants = self._file_participants(message)
         timestamp = int(message.timestamp.timestamp()) if message.timestamp else 0
         items: list[AIMemoryItem] = []
         for index, chunk_text in enumerate(chunks):
@@ -203,7 +216,7 @@ class AIMemoryIndexingService:
         title = "语音消息"
         memory_text = f"语音转写：{transcript_text}"
         keywords = self._voice_keywords(message, transcript=transcript)
-        participants = self._voice_participants(message)
+        participants = await self._message_participants(message)
         timestamp = int(message.timestamp.timestamp()) if message.timestamp else 0
         vector = await self._vector_index.encode_item(
             title=title,
@@ -240,6 +253,37 @@ class AIMemoryIndexingService:
                 updated_at=int(time.time()),
             )
         )
+
+    async def sync_ready_local_artifact_messages(self, *, limit: int = 500) -> dict[str, int]:
+        """Backfill ready local file/voice AI artifacts into the unified vector memory store."""
+
+        list_messages = getattr(self._db, "list_local_ai_artifact_messages", None)
+        if not callable(list_messages):
+            return {"processed": 0, "files": 0, "voices": 0, "failed": 0}
+
+        normalized_limit = max(1, min(5000, int(limit or 500)))
+        messages = list(await list_messages(limit=normalized_limit))
+        stats = {"processed": 0, "files": 0, "voices": 0, "failed": 0}
+        for message in messages:
+            try:
+                if message.message_type == MessageType.FILE:
+                    await self.sync_file_analysis_message(message)
+                    stats["files"] += 1
+                elif message.message_type == MessageType.VOICE:
+                    await self.sync_voice_transcript_message(message)
+                    stats["voices"] += 1
+                else:
+                    continue
+                stats["processed"] += 1
+            except Exception:
+                stats["failed"] += 1
+                logger.exception(
+                    "Failed to backfill local AI memory artifact message_id=%s session_id=%s message_type=%s",
+                    getattr(message, "message_id", ""),
+                    getattr(message, "session_id", ""),
+                    getattr(getattr(message, "message_type", ""), "value", getattr(message, "message_type", "")),
+                )
+        return stats
 
     async def _owner_scope(self) -> str:
         get_app_state = getattr(self._db, "get_app_state", None)
@@ -286,14 +330,70 @@ class AIMemoryIndexingService:
         add(dict(message.extra or {}).get("mime_type"))
         return keywords
 
-    @staticmethod
-    def _file_participants(message: ChatMessage) -> list[str]:
+    async def _message_participants(self, message: ChatMessage) -> list[str]:
         participants: list[str] = []
-        sender_id = _normalize_text(message.sender_id)
-        if sender_id:
-            participants.append(sender_id)
+
+        def add(value: Any) -> None:
+            normalized = _normalize_text(value)
+            if normalized and normalized not in participants:
+                participants.append(normalized)
+
+        add(message.sender_id)
         if message.is_self:
-            participants.append("我")
+            add("我")
+        extra = dict(message.extra or {})
+        for key in (
+            "sender_id",
+            "sender_name",
+            "sender_username",
+            "sender_nickname",
+            "sender_display_name",
+        ):
+            add(extra.get(key))
+
+        get_session = getattr(self._db, "get_session", None)
+        if callable(get_session) and str(message.session_id or "").strip():
+            try:
+                session = await get_session(str(message.session_id or "").strip())
+            except Exception:
+                logger.exception("Failed to resolve session participants for local AI memory message_id=%s", message.message_id)
+                session = None
+            if session is not None:
+                add(getattr(session, "session_id", ""))
+                add(getattr(session, "name", ""))
+                display_name = getattr(session, "display_name", None)
+                if callable(display_name):
+                    try:
+                        add(display_name())
+                    except Exception:
+                        pass
+                for participant_id in list(getattr(session, "participant_ids", []) or []):
+                    add(participant_id)
+                session_extra = dict(getattr(session, "extra", {}) or {})
+                for key in (
+                    "current_user_id",
+                    "counterpart_id",
+                    "counterpart_name",
+                    "counterpart_username",
+                    "counterpart_nickname",
+                    "counterpart_display_name",
+                    "server_name",
+                ):
+                    add(session_extra.get(key))
+                for member in list(session_extra.get("members") or []):
+                    if not isinstance(member, dict):
+                        continue
+                    for key in (
+                        "id",
+                        "user_id",
+                        "contact_id",
+                        "username",
+                        "nickname",
+                        "remark",
+                        "display_name",
+                        "group_nickname",
+                    ):
+                        add(member.get(key))
         return participants
 
     @classmethod
@@ -341,16 +441,6 @@ class AIMemoryIndexingService:
         add(transcript.get("detected_language"))
         add(dict(message.extra or {}).get("mime_type"))
         return keywords
-
-    @staticmethod
-    def _voice_participants(message: ChatMessage) -> list[str]:
-        participants: list[str] = []
-        sender_id = _normalize_text(message.sender_id)
-        if sender_id:
-            participants.append(sender_id)
-        if message.is_self:
-            participants.append("我")
-        return participants
 
     @staticmethod
     def _voice_duration_seconds(message: ChatMessage, *, transcript: dict[str, Any]) -> int:

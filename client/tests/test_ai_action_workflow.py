@@ -1,4 +1,5 @@
 import asyncio
+import time
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -3403,6 +3404,121 @@ def test_ai_action_workflow_structured_cancel_bypasses_pending_planner(tmp_path,
             assert record.state == "cancelled"
             assert message_sender.calls == []
             assert planner.calls == [("帮我给张三发我晚点到", False)]
+        finally:
+            await db.close()
+
+    asyncio.run(scenario())
+
+
+def test_ai_action_workflow_expires_stale_confirmation_before_next_user_turn(tmp_path, monkeypatch) -> None:
+    async def scenario() -> None:
+        db = Database(str(tmp_path / "actions.db"))
+        monkeypatch.setattr(action_store_module, "get_database", lambda: db)
+        store = AIActionStore()
+        contact_db = _FakeContactDatabase(
+            [
+                {
+                    "id": "user-1",
+                    "display_name": "张三",
+                    "username": "zhangsan",
+                    "nickname": "张三",
+                    "remark": "张三",
+                    "assistim_id": "zhangsan",
+                },
+                {
+                    "id": "user-3",
+                    "display_name": "test3",
+                    "username": "test3",
+                    "nickname": "test3",
+                    "remark": "",
+                    "assistim_id": "test3",
+                },
+            ]
+        )
+        planner = _WorkflowPlanner()
+        memory_manager = _FakeActionMemoryManager(context_lines=["test3 收到过 README.md 文件。"])
+        message_sender = _FakeActionMessageSender()
+        workflow = AIActionWorkflow(
+            action_store=store,
+            planner=planner,
+            contact_alias_resolver=ContactAliasResolver(db=contact_db),
+            memory_manager=memory_manager,
+            message_sender=message_sender,
+        )
+        try:
+            first = await workflow.handle_user_turn(thread_id="thread-1", text="帮我给张三发我晚点到")
+            plan_id = first.message_extra["ai_action"]["plan_id"]
+            assert first.message_extra["ai_action"]["state"] == "waiting_confirmation"
+
+            old_ts = time.time() - AIActionWorkflow.PENDING_CONFIRMATION_TTL_SECONDS - 5
+            await store._connection().execute(  # noqa: SLF001
+                "UPDATE ai_action_plans SET updated_at = ? WHERE id = ?",
+                (old_ts, plan_id),
+            )
+            await store._connection().commit()  # noqa: SLF001
+
+            second = await workflow.handle_user_turn(thread_id="thread-1", text="我和test3聊过什么？")
+            expired = await store.get_plan(plan_id)
+
+            assert second.handled is True
+            assert planner.calls[-1] == ("我和test3聊过什么？", False)
+            assert memory_manager.calls
+            assert message_sender.calls == []
+            assert expired is not None
+            assert expired.state == "cancelled"
+            assert expired.error_text == "expired_confirmation"
+        finally:
+            await db.close()
+
+    asyncio.run(scenario())
+
+
+def test_ai_action_workflow_rejects_expired_structured_confirmation(tmp_path, monkeypatch) -> None:
+    async def scenario() -> None:
+        db = Database(str(tmp_path / "actions.db"))
+        monkeypatch.setattr(action_store_module, "get_database", lambda: db)
+        store = AIActionStore()
+        contact_db = _FakeContactDatabase(
+            [
+                {
+                    "id": "user-1",
+                    "display_name": "张三",
+                    "username": "zhangsan",
+                    "nickname": "张三",
+                    "remark": "张三",
+                    "assistim_id": "zhangsan",
+                }
+            ]
+        )
+        message_sender = _FakeActionMessageSender()
+        workflow = AIActionWorkflow(
+            action_store=store,
+            planner=_WorkflowPlanner(),
+            contact_alias_resolver=ContactAliasResolver(db=contact_db),
+            message_sender=message_sender,
+        )
+        try:
+            first = await workflow.handle_user_turn(thread_id="thread-1", text="帮我给张三发我晚点到")
+            plan_id = first.message_extra["ai_action"]["plan_id"]
+            assert first.message_extra["ai_action"]["state"] == "waiting_confirmation"
+
+            old_ts = time.time() - AIActionWorkflow.PENDING_CONFIRMATION_TTL_SECONDS - 5
+            await store._connection().execute(  # noqa: SLF001
+                "UPDATE ai_action_plans SET updated_at = ? WHERE id = ?",
+                (old_ts, plan_id),
+            )
+            await store._connection().commit()  # noqa: SLF001
+
+            confirmed = await workflow.handle_pending_control(thread_id="thread-1", control_type="confirm")
+            latest = await store.get_plan(plan_id)
+
+            assert confirmed.handled is True
+            assert "确认已过期" in confirmed.response_text
+            assert confirmed.message_extra["ai_action"]["state"] == "cancelled"
+            assert message_sender.calls == []
+            assert latest is not None
+            assert latest.state == "cancelled"
+            assert latest.error_text == "expired_confirmation"
         finally:
             await db.close()
 

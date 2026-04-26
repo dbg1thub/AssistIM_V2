@@ -481,6 +481,8 @@ def _pending_prompt_block(pending_state: Any | None) -> str:
 class AIActionWorkflow:
     """Plan, validate, execute, pause, and resume assistant actions."""
 
+    PENDING_CONFIRMATION_TTL_SECONDS = 120
+
     def __init__(
         self,
         *,
@@ -560,6 +562,7 @@ class AIActionWorkflow:
             return AIActionTurnResult(handled=False)
 
         pending = await self._store.latest_pending_plan(thread_id)
+        pending = await self._expire_pending_confirmation_if_needed(pending)
         pending_state = self._pending_for_planner(pending)
         logger.info(
             "[ai-diag] ai_action_workflow_planner_start thread_id=%s pending=%s text_chars=%s",
@@ -695,6 +698,14 @@ class AIActionWorkflow:
                 normalized_control,
             )
             return AIActionTurnResult(handled=False)
+        expired = await self._expire_pending_confirmation_if_needed(pending)
+        if expired is None:
+            return AIActionTurnResult(
+                handled=True,
+                response_text="这个确认已过期，请重新发起操作。",
+                message_extra={"ai_action": self._extra(pending, state="cancelled")},
+            )
+        pending = expired
         logger.info(
             "[ai-diag] ai_action_pending_control thread_id=%s plan_id=%s state=%s control=%s",
             normalized_thread_id,
@@ -803,6 +814,35 @@ class AIActionWorkflow:
             state=pending.state,
             waiting_payload=waiting,
         )
+
+    async def _expire_pending_confirmation_if_needed(
+        self, pending: AIActionPlanRecord | None
+    ) -> AIActionPlanRecord | None:
+        if pending is None or pending.state != "waiting_confirmation":
+            return pending
+        if not self._pending_confirmation_expired(pending):
+            return pending
+        age_seconds = max(0.0, time.time() - float(pending.updated_at or pending.created_at or 0.0))
+        await self._store.update_plan(
+            pending.id,
+            state="cancelled",
+            error_text="expired_confirmation",
+            completed_at=time.time(),
+        )
+        logger.info(
+            "[ai-diag] ai_action_pending_confirmation_expired thread_id=%s plan_id=%s age_ms=%s ttl_ms=%s",
+            pending.thread_id,
+            pending.id,
+            int(age_seconds * 1000),
+            int(self.PENDING_CONFIRMATION_TTL_SECONDS * 1000),
+        )
+        return None
+
+    def _pending_confirmation_expired(self, pending: AIActionPlanRecord) -> bool:
+        started = float(pending.updated_at or pending.created_at or 0.0)
+        if started <= 0:
+            return False
+        return (time.time() - started) > self.PENDING_CONFIRMATION_TTL_SECONDS
 
     async def _handle_planner_control(self, pending: AIActionPlanRecord, plan: AIActionPlan) -> AIActionTurnResult | None:
         control = dict(plan.control or {})
