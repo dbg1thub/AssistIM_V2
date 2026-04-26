@@ -34,6 +34,21 @@ class ConnectionState(Enum):
     RECONNECTING = "reconnecting"
 
 
+def _connection_closed_details(exc: BaseException) -> tuple[str, str]:
+    """Extract close code and reason across websockets exception versions."""
+    code = getattr(exc, "code", "")
+    reason = getattr(exc, "reason", "")
+    for frame_name in ("rcvd", "sent"):
+        if code and reason:
+            break
+        frame = getattr(exc, frame_name, None)
+        if not code:
+            code = getattr(frame, "code", "")
+        if not reason:
+            reason = getattr(frame, "reason", "")
+    return str(code or ""), str(reason or "")
+
+
 # Try to import PySide6 signals, fall back to callback if not available
 try:
     from PySide6.QtCore import QCoreApplication, QTimer, Signal, QObject, Slot
@@ -422,8 +437,9 @@ class WebSocketClient:
                 logger.warning("Receive timeout, no message received")
                 continue
             
-            except ConnectionClosed:
-                logger.warning("WebSocket connection closed")
+            except ConnectionClosed as exc:
+                code, reason = _connection_closed_details(exc)
+                logger.warning("WebSocket connection closed code=%s reason=%s", code or "unknown", reason or "")
                 await self._handle_disconnect()
                 break
             
@@ -451,8 +467,9 @@ class WebSocketClient:
                 await self._handle_disconnect()
                 break
             
-            except ConnectionClosed:
-                logger.warning("WebSocket closed during heartbeat")
+            except ConnectionClosed as exc:
+                code, reason = _connection_closed_details(exc)
+                logger.warning("WebSocket closed during heartbeat code=%s reason=%s", code or "unknown", reason or "")
                 await self._handle_disconnect()
                 break
             
@@ -566,8 +583,9 @@ class WebSocketClient:
             logger.error("Send timeout")
             return False
 
-        except ConnectionClosed:
-            logger.warning("Connection closed, cannot send")
+        except ConnectionClosed as exc:
+            code, reason = _connection_closed_details(exc)
+            logger.warning("Connection closed, cannot send code=%s reason=%s", code or "unknown", reason or "")
             await self._handle_disconnect()
             return False
 

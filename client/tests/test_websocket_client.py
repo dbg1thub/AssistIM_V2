@@ -5,7 +5,7 @@ from concurrent.futures import Future
 
 import pytest
 
-from client.network.websocket_client import ConnectionState, WebSocketClient
+from client.network.websocket_client import ConnectionState, WebSocketClient, _connection_closed_details
 
 
 class _Signals:
@@ -30,6 +30,16 @@ class _AliveThread:
 class _DeadLoop:
     def is_running(self) -> bool:
         return False
+
+
+class _CloseFrame:
+    code = 1001
+    reason = "server reload"
+
+
+class _ConnectionClosedLike(Exception):
+    rcvd = _CloseFrame()
+    sent = None
 
 
 def _client_without_init(**overrides):
@@ -99,6 +109,10 @@ def test_websocket_worker_loop_refuses_to_replace_stuck_thread() -> None:
 
     with pytest.raises(RuntimeError, match="did not stop cleanly"):
         client._ensure_worker_loop()
+
+
+def test_websocket_connection_closed_details_include_code_and_reason() -> None:
+    assert _connection_closed_details(_ConnectionClosedLike()) == ("1001", "server reload")
 
 
 def test_websocket_unexpected_disconnect_resets_state_before_reconnect() -> None:

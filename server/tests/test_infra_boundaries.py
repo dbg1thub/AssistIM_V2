@@ -114,6 +114,14 @@ def test_request_and_websocket_settings_resolve_app_snapshot() -> None:
     assert get_websocket_settings(SimpleNamespace(app=app)) is custom_settings
 
 
+def test_run_api_reload_watches_server_directory_only() -> None:
+    script = Path("server/scripts/run-api.ps1").read_text(encoding="utf-8")
+
+    assert "Push-Location $repoRoot" in script
+    assert "--reload-dir" in script
+    assert "'server'" in script
+    assert script.index("--reload-dir") > script.index("if ($Reload)")
+
 
 def test_shared_ws_message_uses_type_only() -> None:
     from app.websocket.payloads import ws_message

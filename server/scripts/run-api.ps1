@@ -27,6 +27,7 @@ $python = Resolve-PythonPath -ServerRoot $serverRoot
 $args = @('-m', 'uvicorn', 'app.main:app', '--app-dir', 'server', '--host', $BindHost, '--port', $Port)
 if ($Reload) {
     $args += '--reload'
+    $args += @('--reload-dir', 'server')
 }
 
 Push-Location $repoRoot
