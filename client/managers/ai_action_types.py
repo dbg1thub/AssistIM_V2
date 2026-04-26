@@ -183,6 +183,14 @@ class ActionExecutionResult:
     error_text: str = ""
 
 
+class ActionHandlerError(RuntimeError):
+    """Stable action error that should be surfaced by the executor unchanged."""
+
+    def __init__(self, error_text: str) -> None:
+        self.error_text = str(error_text or "ACTION_FAILED").strip() or "ACTION_FAILED"
+        super().__init__(self.error_text)
+
+
 @dataclass(frozen=True, slots=True)
 class AIActionEvent:
     """Small, UI-safe execution event."""

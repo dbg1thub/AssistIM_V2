@@ -2768,3 +2768,73 @@ def test_ai_action_executor_passes_large_memory_search_by_result_ref(tmp_path, m
             await db.close()
 
     asyncio.run(scenario())
+
+
+def test_ai_action_executor_fails_memory_summarize_when_result_ref_expired(tmp_path, monkeypatch) -> None:
+    async def scenario() -> None:
+        db = Database(str(tmp_path / "actions.db"))
+        monkeypatch.setattr(action_store_module, "get_database", lambda: db)
+        store = AIActionStore()
+        temp = await store.create_temp_result(
+            plan_id="expired-plan",
+            step_id="search_memory",
+            result_type="memory.search",
+            payload={
+                "context_lines": ["[2026-04-21 10:00] 摘要：旧临时结果。"],
+                "result_count": 1,
+            },
+        )
+        assert db._db is not None
+        await db._db.execute("UPDATE ai_action_temp_results SET expires_at = 1 WHERE id = ?", (temp.id,))
+        await db._db.commit()
+        assert await store.get_temp_result(temp.id) is None
+
+        registry = AtomicActionRegistry(
+            contact_resolver=ContactAliasResolver(db=_FakeContactDatabase([])),
+        )
+        executor = AIActionExecutor(registry=registry, store=store)
+        plan = AIActionPlan(
+            is_action=True,
+            goal="过期临时结果",
+            steps=(
+                AIActionStep(
+                    id="summarize_memory",
+                    action="memory.summarize",
+                    args={
+                        "source": {
+                            "result_ref": {
+                                "type": "memory.search",
+                                "id": temp.id,
+                                "result_count": 1,
+                            }
+                        },
+                        "question": "查历史",
+                    },
+                ),
+            ),
+            final={"type": "answer", "source": "$summarize_memory"},
+        )
+        try:
+            record = await store.create_plan(
+                thread_id="thread-1",
+                goal=plan.goal,
+                plan_json=plan.to_dict(),
+                reason="test_expired_temp_result",
+            )
+            result = await executor.execute(record)
+            updated = await store.get_plan(record.id)
+
+            assert result.state == "failed"
+            assert result.error_text == "TEMP_RESULT_EXPIRED"
+            assert updated is not None
+            assert updated.state == "failed"
+            assert updated.error_text == "TEMP_RESULT_EXPIRED"
+            assert "summarize_memory" not in updated.step_outputs
+            assert [event["type"] for event in updated.plan_json["events"]] == ["step_started", "step_failed"]
+            assert updated.plan_json["events"][-1]["step_id"] == "summarize_memory"
+            assert updated.plan_json["events"][-1]["action"] == "memory.summarize"
+            assert updated.plan_json["events"][-1]["error_code"] == "TEMP_RESULT_EXPIRED"
+        finally:
+            await db.close()
+
+    asyncio.run(scenario())

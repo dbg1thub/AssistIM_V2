@@ -22,7 +22,12 @@ from client.managers.ai_action_io_models import (
     MessageSendOutput,
     UserConfirmInput,
 )
-from client.managers.ai_action_types import ActionPause, AtomicActionSpec, confirmation_preview_fingerprint
+from client.managers.ai_action_types import (
+    ActionHandlerError,
+    ActionPause,
+    AtomicActionSpec,
+    confirmation_preview_fingerprint,
+)
 logger = logging.get_logger(__name__)
 
 
@@ -452,10 +457,12 @@ class _MemorySummarizeInput:
             result_ref = dict(source.get("result_ref") or {})
             result_id = str(result_ref.get("id") or "").strip()
             get_temp_result = getattr(store, "get_temp_result", None)
-            if result_id and callable(get_temp_result):
-                record = await get_temp_result(result_id)
-                if record is not None:
-                    source = dict(getattr(record, "payload", {}) or {})
+            if not result_id or not callable(get_temp_result):
+                raise ActionHandlerError("TEMP_RESULT_EXPIRED")
+            record = await get_temp_result(result_id)
+            if record is None:
+                raise ActionHandlerError("TEMP_RESULT_EXPIRED")
+            source = dict(getattr(record, "payload", {}) or {})
         if not isinstance(source, dict):
             source = {}
         return cls(

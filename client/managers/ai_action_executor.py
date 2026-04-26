@@ -17,6 +17,7 @@ from client.managers.ai_action_types import (
     AIActionEvent,
     AIActionPlan,
     ActionExecutionResult,
+    ActionHandlerError,
     ActionPause,
     AtomicActionSpec,
 )
@@ -469,6 +470,8 @@ async def _run_action_handler(
             last_error = f"ACTION_TIMEOUT: {spec.name}"
         except asyncio.CancelledError:
             raise
+        except ActionHandlerError as exc:
+            return None, exc.error_text
         except Exception as exc:
             last_error = f"ACTION_FAILED: {spec.name}"
             logger.info(
