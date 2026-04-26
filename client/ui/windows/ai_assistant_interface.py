@@ -97,6 +97,81 @@ def _ai_action_footer_text(extra: dict | None) -> str:
     return ""
 
 
+def _ai_action_status_text(extra: dict | None) -> str:
+    action = dict((extra or {}).get("ai_action") or {})
+    if not action:
+        return ""
+    steps = [item for item in list(action.get("steps") or []) if isinstance(item, dict)]
+    events = [item for item in list(action.get("events") or []) if isinstance(item, dict)]
+    lines: list[str] = []
+    for step in steps:
+        step_id = str(step.get("id") or "").strip()
+        event_state = _ai_action_step_state_from_events(step_id, events)
+        state = event_state or str(step.get("state") or "").strip()
+        label = _ai_action_step_state_label(state)
+        display_text = str(step.get("display_text") or "").strip()
+        explanation = str(step.get("explanation") or "").strip()
+        action_name = str(step.get("action") or "").strip()
+        title = display_text or explanation or action_name
+        if not title:
+            continue
+        if explanation and display_text and explanation != display_text:
+            title = f"{title}（{explanation}）"
+        lines.append(f"{label}：{title}")
+    if not lines:
+        for event in events[-4:]:
+            state = _ai_action_state_from_event(event)
+            label = _ai_action_step_state_label(state)
+            title = str(event.get("message") or event.get("action") or "").strip()
+            if title and title != "plan":
+                lines.append(f"{label}：{title}")
+    return "\n".join(lines[:6])
+
+
+def _ai_action_step_state_from_events(step_id: str, events: list[dict]) -> str:
+    normalized_step_id = str(step_id or "").strip()
+    if not normalized_step_id:
+        return ""
+    for event in reversed(events):
+        if str(event.get("step_id") or "").strip() != normalized_step_id:
+            continue
+        return _ai_action_state_from_event(event)
+    return ""
+
+
+def _ai_action_state_from_event(event: dict) -> str:
+    event_type = str(event.get("type") or "").strip()
+    state = str(event.get("state") or "").strip()
+    if event_type == "step_completed" or state == "completed":
+        return "done"
+    if event_type == "step_failed" or state == "failed":
+        return "failed"
+    if event_type == "step_waiting_confirmation" or state == "waiting_confirmation":
+        return "waiting_confirmation"
+    if event_type == "step_waiting_clarification" or state == "waiting_clarification":
+        return "waiting_clarification"
+    if event_type == "step_started" or state == "started":
+        return "running"
+    if event_type == "plan_cancelled" or state == "cancelled":
+        return "cancelled"
+    return state
+
+
+def _ai_action_step_state_label(state: str) -> str:
+    labels = {
+        "running": "正在执行",
+        "started": "正在执行",
+        "done": "已完成",
+        "completed": "已完成",
+        "waiting_confirmation": "等待确认",
+        "waiting_clarification": "等待补充",
+        "failed": "执行失败",
+        "cancelled": "已取消",
+        "pending": "待执行",
+    }
+    return labels.get(str(state or "").strip(), "待执行")
+
+
 class AIAssistantPromptEdit(QTextEdit):
     """Prompt editor that sends on Enter and inserts a newline on Shift+Enter."""
 
@@ -145,9 +220,15 @@ class AIAssistantMessageCard(QFrame):
         self.footer_label.setMinimumWidth(0)
         self.footer_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.footer_label.hide()
+        self.action_status_label = CaptionLabel(self)
+        self.action_status_label.setWordWrap(True)
+        self.action_status_label.setMinimumWidth(0)
+        self.action_status_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.action_status_label.hide()
 
         self.layout.addWidget(self.image_label)
         self.layout.addWidget(self.content_label)
+        self.layout.addWidget(self.action_status_label)
         self.layout.addWidget(self.footer_label)
         self.set_message(message)
 
@@ -174,6 +255,8 @@ class AIAssistantMessageCard(QFrame):
             )
         else:
             footer_text = _ai_action_footer_text(message.extra)
+        self.action_status_label.setText(_ai_action_status_text(message.extra))
+        self.action_status_label.setVisible(bool(self.action_status_label.text()))
         self.footer_label.setText(footer_text)
         self.footer_label.setVisible(bool(footer_text))
         self._sync_text_metrics()
@@ -207,6 +290,7 @@ class AIAssistantMessageCard(QFrame):
 
     def _sync_text_metrics(self) -> None:
         self._sync_wrapped_label_height(self.content_label)
+        self._sync_wrapped_label_height(self.action_status_label, visible=self.action_status_label.isVisible())
         self._sync_wrapped_label_height(self.footer_label, visible=self.footer_label.isVisible())
         self.layout.activate()
         self.updateGeometry()
@@ -271,6 +355,10 @@ class AIAssistantMessageCard(QFrame):
                     color: {muted_text};
                     background: transparent;
                 }}
+                QLabel[isActionStatus="true"] {{
+                    color: {muted_text};
+                    background: transparent;
+                }}
                 QLabel#aiAssistantMessageImage {{
                     background: {image_bg};
                     border: 1px solid {image_border};
@@ -278,6 +366,9 @@ class AIAssistantMessageCard(QFrame):
                 }}
                 """
             )
+            self.action_status_label.setProperty("isActionStatus", True)
+            self.action_status_label.style().unpolish(self.action_status_label)
+            self.action_status_label.style().polish(self.action_status_label)
             self.footer_label.setProperty("isFooter", True)
             self.footer_label.style().unpolish(self.footer_label)
             self.footer_label.style().polish(self.footer_label)

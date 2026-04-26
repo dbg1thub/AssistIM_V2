@@ -437,6 +437,32 @@ def test_ai_action_footer_does_not_repeat_pending_response_text() -> None:
     assert "response_text" not in footer_function
 
 
+def test_ai_action_step_status_area_uses_safe_steps_and_events() -> None:
+    assistant_interface = Path("client/ui/windows/ai_assistant_interface.py").read_text(encoding="utf-8")
+    status_function = assistant_interface.split("def _ai_action_status_text", 1)[1].split(
+        "\n\nclass AIAssistantPromptEdit",
+        1,
+    )[0]
+
+    assert "steps = [item for item in list(action.get(\"steps\") or [])" in status_function
+    assert "events = [item for item in list(action.get(\"events\") or [])" in status_function
+    assert "_ai_action_step_state_from_events(step_id, events)" in status_function
+    assert "_ai_action_step_state_label" in status_function
+    assert '"running": "正在执行"' in status_function
+    assert '"done": "已完成"' in status_function
+    assert '"waiting_confirmation": "等待确认"' in status_function
+    assert '"waiting_clarification": "等待补充"' in status_function
+    assert '"failed": "执行失败"' in status_function
+    assert "response_text" not in status_function
+    assert "waiting_payload" not in status_function
+
+    assert "self.action_status_label = CaptionLabel(self)" in assistant_interface
+    assert "self.action_status_label.setText(_ai_action_status_text(message.extra))" in assistant_interface
+    assert "self.layout.addWidget(self.action_status_label)" in assistant_interface
+    assert "self._sync_wrapped_label_height(self.action_status_label" in assistant_interface
+    assert 'QLabel[isActionStatus="true"]' in assistant_interface
+
+
 def test_ai_assistant_bypasses_action_workflow_and_uses_rag_before_ai_chat() -> None:
     assistant_interface = Path("client/ui/windows/ai_assistant_interface.py").read_text(encoding="utf-8")
     send_prompt = assistant_interface.split("async def _send_prompt", 1)[1].split(
