@@ -64,23 +64,14 @@ class AIActionStep:
 
 @dataclass(frozen=True, slots=True)
 class AIActionPlan:
-    """Planner output.
-
-    The legacy single-action fields are intentionally kept because older tests
-    and callers can still construct this object directly. Normalization is the
-    compatibility boundary that converts those fields into atomic steps.
-    """
+    """Planner output based on atomic steps or an explicit pending control."""
 
     is_action: bool
     goal: str = ""
     risk: RiskLevel = "low"
     steps: tuple[AIActionStep, ...] = ()
     final: dict[str, Any] = field(default_factory=dict)
-    action: str = ""
-    requires_app_data: bool = False
-    requires_side_effect: bool = False
-    slots: dict[str, Any] = field(default_factory=dict)
-    missing_slots: tuple[str, ...] = ()
+    control: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -90,16 +81,8 @@ class AIActionPlan:
             "steps": [step.to_dict() for step in self.steps],
             "final": dict(self.final or {}),
         }
-        if self.action:
-            payload["action"] = self.action
-        if self.requires_app_data:
-            payload["requires_app_data"] = True
-        if self.requires_side_effect:
-            payload["requires_side_effect"] = True
-        if self.slots:
-            payload["slots"] = dict(self.slots)
-        if self.missing_slots:
-            payload["missing_slots"] = list(self.missing_slots)
+        if self.control:
+            payload["control"] = dict(self.control)
         return payload
 
     @classmethod
@@ -119,15 +102,7 @@ class AIActionPlan:
             risk=risk,  # type: ignore[arg-type]
             steps=steps,
             final=dict(payload.get("final") or {}) if isinstance(payload.get("final"), dict) else {},
-            action=str(payload.get("action") or "").strip(),
-            requires_app_data=bool(payload.get("requires_app_data")),
-            requires_side_effect=bool(payload.get("requires_side_effect")),
-            slots=dict(payload.get("slots") or {}) if isinstance(payload.get("slots"), dict) else {},
-            missing_slots=tuple(
-                str(item or "").strip()
-                for item in list(payload.get("missing_slots") or [])
-                if str(item or "").strip()
-            ),
+            control=dict(payload.get("control") or {}) if isinstance(payload.get("control"), dict) else {},
         )
 
 

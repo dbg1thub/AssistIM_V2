@@ -2,20 +2,20 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 from client.managers.ai_action_types import AIActionPlan, AIActionStep
 
 
 class AIPlanNormalizer:
-    """Deterministic plan cleanup and legacy-plan conversion."""
+    """Deterministic cleanup for atomic action plans."""
 
     def normalize(self, plan: AIActionPlan, *, user_text: str) -> AIActionPlan:
         if not plan.is_action:
             return plan
+        if plan.control and not plan.steps:
+            return plan
         if plan.steps:
             return self._normalize_atomic_plan(plan, user_text=user_text)
-        return self._from_legacy_plan(plan, user_text=user_text)
+        return AIActionPlan(is_action=False)
 
     def _normalize_atomic_plan(self, plan: AIActionPlan, *, user_text: str) -> AIActionPlan:
         steps: list[AIActionStep] = []
@@ -47,112 +47,7 @@ class AIPlanNormalizer:
             risk=_plan_risk(steps, plan.risk),
             steps=tuple(steps),
             final=dict(plan.final or {"type": "answer"}),
-            action=plan.action,
-            requires_app_data=plan.requires_app_data,
-            requires_side_effect=plan.requires_side_effect or any(step.action == "message.send" for step in steps),
-            slots=dict(plan.slots or {}),
-            missing_slots=plan.missing_slots,
-        )
-
-    def _from_legacy_plan(self, plan: AIActionPlan, *, user_text: str) -> AIActionPlan:
-        action = str(plan.action or "").strip()
-        if action in {"cancel_action", "confirm_action", "select_contact_alias"}:
-            return plan
-        slots = _normalize_slots(dict(plan.slots or {}))
-        if action == "memory_query":
-            return AIActionPlan(is_action=False)
-        if action == "send_message":
-            return self._legacy_send_message(slots, user_text=user_text)
-        if action == "add_friend":
-            return self._disabled_legacy_write(action, slots, user_text=user_text)
-        if action == "post_moment":
-            return self._disabled_legacy_write(action, slots, user_text=user_text)
-        return AIActionPlan(is_action=False)
-
-    def _legacy_send_message(self, slots: dict[str, Any], *, user_text: str) -> AIActionPlan:
-        target_user = str(slots.get("target_user") or "").strip()
-        message_text = str(slots.get("message_text") or "").strip()
-        missing = []
-        if not target_user:
-            missing.append("target_user")
-        if not message_text:
-            missing.append("message_text")
-        if missing:
-            return AIActionPlan(
-                is_action=True,
-                goal=_clip(user_text, 80),
-                risk="high",
-                action="send_message",
-                requires_side_effect=True,
-                slots={"target_user": target_user, "message_text": message_text},
-                missing_slots=tuple(missing),
-            )
-
-        steps = (
-            AIActionStep(
-                id="resolve_target",
-                action="contact.resolve",
-                args={"queries": [target_user], "allow_multiple": False},
-                display_text="正在解析发送对象...",
-                explanation="发送消息前必须确认唯一目标。",
-            ),
-            AIActionStep(
-                id="draft_message",
-                action="message.draft",
-                depends_on=("resolve_target",),
-                args={"target": "$resolve_target.contacts[0]", "content": message_text},
-                display_text="正在生成消息草稿...",
-                explanation="发送前先生成可预览的消息草稿。",
-            ),
-            AIActionStep(
-                id="confirm_send",
-                action="user.confirm",
-                depends_on=("draft_message",),
-                args={
-                    "risk": "high",
-                    "preview": {
-                        "operation": "发送消息",
-                        "target": "$draft_message.target",
-                        "content": "$draft_message.content",
-                    },
-                },
-                display_text="等待你确认发送...",
-                explanation="发送消息会产生外部影响，必须先确认。",
-            ),
-            AIActionStep(
-                id="send_message",
-                action="message.send",
-                depends_on=("confirm_send", "draft_message"),
-                args={
-                    "target": "$draft_message.target_entity",
-                    "content": "$draft_message.content",
-                    "preview": "$draft_message.preview",
-                    "idempotency_key": "$draft_message.idempotency_key",
-                },
-                display_text="准备发送消息...",
-                explanation="确认后才会进入真实发送步骤；当前版本发送能力禁用。",
-            ),
-        )
-        return AIActionPlan(
-            is_action=True,
-            goal=_clip(user_text, 80),
-            risk="high",
-            steps=steps,
-            final={"type": "answer", "source": "$send_message.text"},
-            action="send_message",
-            requires_side_effect=True,
-            slots={"target_user": target_user, "message_text": message_text},
-        )
-
-    def _disabled_legacy_write(self, action: str, slots: dict[str, Any], *, user_text: str) -> AIActionPlan:
-        return AIActionPlan(
-            is_action=True,
-            goal=_clip(user_text, 80),
-            risk="high",
-            action=action,
-            requires_side_effect=True,
-            slots=dict(slots or {}),
-            missing_slots=(),
+            control=dict(plan.control or {}),
         )
 
     def _ensure_write_confirmation(self, steps: list[AIActionStep]) -> list[AIActionStep]:
@@ -233,30 +128,6 @@ class AIPlanNormalizer:
             if not _refs_are_available(step.args, available=set(step.depends_on)):
                 return True
         return False
-
-
-def _normalize_slots(slots: dict[str, Any]) -> dict[str, Any]:
-    normalized = dict(slots or {})
-    normalized["participants"] = _clean_list(normalized.get("participants"))
-    normalized["keywords"] = _clean_list(normalized.get("keywords"))
-    for key in ("target_user", "message_text", "content"):
-        if key in normalized:
-            normalized[key] = " ".join(str(normalized.get(key) or "").split())
-    return normalized
-
-
-def _clean_list(value: object) -> list[str]:
-    if value is None:
-        return []
-    raw = value if isinstance(value, list) else [value]
-    items: list[str] = []
-    for item in raw:
-        text = " ".join(str(item or "").split()).strip(" ，,。？！?;；:：")
-        if not text:
-            continue
-        if text not in items:
-            items.append(text)
-    return items[:8]
 
 
 def _message_draft_is_complete(step: AIActionStep) -> bool:

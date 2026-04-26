@@ -57,10 +57,7 @@ class PendingPlannerState:
     id: str
     thread_id: str
     ai_thread_id: str
-    action: str
     state: str
-    slots: dict[str, Any]
-    missing_slots: tuple[str, ...]
     waiting_payload: dict[str, Any]
 
 
@@ -186,9 +183,6 @@ class AIActionPlanner:
             "is_action": {"type": "boolean"},
             "goal": {"type": "string"},
             "risk": {"type": "string", "enum": ["low", "medium", "high"]},
-            "action": {"type": "string"},
-            "slots": {"type": "object"},
-            "missing_slots": {"type": "array", "items": {"type": "string"}},
             "steps": {
                 "type": "array",
                 "items": ACTION_STEP_SCHEMA,
@@ -204,16 +198,14 @@ class AIActionPlanner:
             "is_action": {"type": "boolean"},
             "goal": {"type": "string"},
             "risk": {"type": "string", "enum": ["low", "medium", "high"]},
-            "action": {"type": "string"},
-            "slots": {"type": "object"},
-            "missing_slots": {"type": "array", "items": {"type": "string"}},
+            "control": {"type": "object"},
             "steps": {"type": "array", "items": ACTION_STEP_SCHEMA},
             "final": {"type": "object"},
         },
-        "required": ["is_action", "goal", "risk", "action", "slots", "steps", "final"],
+        "required": ["is_action", "goal", "risk", "steps", "final"],
         "additionalProperties": False,
     }
-    PENDING_CLARIFICATION_SCHEMA: dict[str, Any] = NEW_ACTION_SCHEMA
+    PENDING_CLARIFICATION_SCHEMA: dict[str, Any] = PENDING_CONTROL_SCHEMA
 
     def __init__(self, task_manager: Any | None = None) -> None:
         self._task_manager = task_manager
@@ -367,7 +359,7 @@ class AIActionPlanner:
         if prompt_kind == AIActionPlanner.PROMPT_PENDING_CLARIFICATION:
             return (
                 common
-                + "当前只处理 pending 补充信息。由你结合 missing_slots 和 waiting_payload 判断用户是否补齐所需结构。"
+                + "当前只处理 pending 补充信息。由你结合 waiting_payload 判断用户是否补齐所需结构。"
             )
         return (
             common
@@ -414,17 +406,15 @@ class AIActionPlanner:
     def _user_prompt(user_text: str, *, pending_state: Any | None = None, prompt_kind: str | None = None) -> str:
         prompt_kind = prompt_kind or AIActionPlanner._prompt_kind(pending_state)
         now = datetime.now()
-        header = (
-            "请输出 JSON：is_action, goal, risk, action, slots, steps, final。\n"
-            f"当前本地时间：{now.strftime('%Y-%m-%d %H:%M:%S')}。\n"
-        )
+        fields = "is_action, goal, risk, control, steps, final" if pending_state is not None else "is_action, goal, risk, steps, final"
+        header = f"请输出 JSON：{fields}。\n当前本地时间：{now.strftime('%Y-%m-%d %H:%M:%S')}。\n"
         pending = _pending_prompt_block(pending_state)
         if prompt_kind == AIActionPlanner.PROMPT_PENDING_CONFIRMATION:
             return (
                 header
                 + "当前任务：判断用户对 pending 确认的回复。\n"
-                "用户确认当前 preview：输出 action=\"confirm_action\"，slots={}，steps=[]，final={}。\n"
-                "用户取消当前 pending：输出 action=\"cancel_action\"，slots={}，steps=[]，final={}。\n"
+                '用户确认当前 preview：输出 "control": {"type": "confirm"}，steps=[]，final={}。\n'
+                '用户取消当前 pending：输出 "control": {"type": "cancel"}，steps=[]，final={}。\n'
                 "用户修改目标、内容或条件：不要确认原 plan，可输出新的结构化动作；无法判断则 is_action=false 且 steps=[]。\n"
                 f"用户输入：{str(user_text or '').strip()}"
                 f"{pending}"
@@ -433,8 +423,8 @@ class AIActionPlanner:
             return (
                 header
                 + "当前任务：从 pending 候选联系人中判断用户选择了哪一个。\n"
-                "能确定候选：输出 action=\"select_contact_alias\"，slots 使用 selection_index、contact_id 或 alias_text，steps=[]，final={}。\n"
-                "用户取消 pending：输出 action=\"cancel_action\"，slots={}，steps=[]，final={}。\n"
+                '能确定候选：输出 "control": {"type": "select_contact_alias", "selection_index": 1}，也可使用 contact_id 或 alias_text，steps=[]，final={}。\n'
+                '用户取消 pending：输出 "control": {"type": "cancel"}，steps=[]，final={}。\n'
                 "无法确定候选或输入无关：输出 is_action=false 且 steps=[]。\n"
                 f"用户输入：{str(user_text or '').strip()}"
                 f"{pending}"
@@ -443,7 +433,7 @@ class AIActionPlanner:
             return (
                 header
                 + "当前任务：判断用户是否补齐 pending 缺失信息。\n"
-                "如果补齐信息后能继续，输出修正后的结构化 plan；如果用户取消，输出 action=\"cancel_action\" 且 steps=[]。\n"
+                '如果补齐信息后能继续，输出修正后的结构化 plan；如果用户取消，输出 "control": {"type": "cancel"} 且 steps=[]。\n'
                 "如果仍无法补齐或输入无关，输出 is_action=false 且 steps=[]。\n"
                 "需要生成发送 plan 时使用 contact.resolve -> message.draft -> user.confirm -> message.send。\n"
                 f"用户输入：{str(user_text or '').strip()}"
@@ -464,12 +454,9 @@ class AIActionPlanner:
 def _pending_prompt_block(pending_state: Any | None) -> str:
     if pending_state is None:
         return ""
-    return "\n\n当前 pending plan/action：" + json.dumps(
+    return "\n\n当前 pending plan：" + json.dumps(
                 {
-                    "action": getattr(pending_state, "action", ""),
                     "state": getattr(pending_state, "state", ""),
-                    "slots": getattr(pending_state, "slots", {}),
-                    "missing_slots": getattr(pending_state, "missing_slots", []),
                     "waiting_payload": getattr(pending_state, "waiting_payload", {}),
                 },
                 ensure_ascii=False,
@@ -530,7 +517,7 @@ class AIActionWorkflow:
                 executor_ms,
                 _elapsed_ms(total_started),
                 len(plan.steps) if plan is not None else 0,
-                _compat_action(plan) if plan is not None else "",
+                _plan_action_label(plan) if plan is not None else "",
             )
 
         normalized_text = _normalize_text(text)
@@ -563,12 +550,11 @@ class AIActionWorkflow:
         raw_plan = await self._build_plan(normalized_text, pending_state=pending_state)
         planner_ms = _elapsed_ms(planner_started)
         logger.info(
-            "[ai-diag] ai_action_workflow_planner_result thread_id=%s is_action=%s steps=%s missing_slots=%s action=%s",
+            "[ai-diag] ai_action_workflow_planner_result thread_id=%s is_action=%s steps=%s control=%s",
             thread_id,
             raw_plan.is_action,
             len(raw_plan.steps),
-            len(raw_plan.missing_slots),
-            raw_plan.action,
+            str((raw_plan.control or {}).get("type") or ""),
         )
         if pending is not None:
             control = await self._handle_planner_control(pending, raw_plan)
@@ -586,12 +572,9 @@ class AIActionWorkflow:
         if not normalized_plan.is_action:
             log_perf("normalized_not_action", handled=False, plan=normalized_plan)
             return AIActionTurnResult(handled=False)
-        if normalized_plan.missing_slots:
-            log_perf("waiting_clarification", handled=True, plan=normalized_plan)
-            return await self._create_clarification(thread_id, normalized_plan)
         if not normalized_plan.steps:
             log_perf("done", handled=True, plan=normalized_plan)
-            return await self._disabled_legacy_action(thread_id, normalized_plan)
+            return AIActionTurnResult(handled=False)
 
         validation = self._validator.validate(normalized_plan)
         if not validation.allowed:
@@ -610,12 +593,9 @@ class AIActionWorkflow:
             if not normalized_plan.is_action:
                 log_perf("repair_not_action", handled=False, plan=normalized_plan)
                 return AIActionTurnResult(handled=False)
-            if normalized_plan.missing_slots:
-                log_perf("waiting_clarification", handled=True, plan=normalized_plan)
-                return await self._create_clarification(thread_id, normalized_plan)
             if not normalized_plan.steps:
                 log_perf("done", handled=True, plan=normalized_plan)
-                return await self._disabled_legacy_action(thread_id, normalized_plan)
+                return AIActionTurnResult(handled=False)
             validation = self._validator.validate(normalized_plan)
             if not validation.allowed:
                 log_perf("plan_invalid_after_repair", handled=True, plan=normalized_plan)
@@ -636,8 +616,6 @@ class AIActionWorkflow:
             return await self._create_resource_clarification(thread_id, optimized_plan, resource.response_text)
 
         plan_json = optimized_plan.to_dict()
-        plan_json["compat_action"] = _compat_action(optimized_plan)
-        plan_json["compat_slots"] = dict(optimized_plan.slots or {})
         record = await self._store.create_plan(
             thread_id=thread_id,
             goal=optimized_plan.goal,
@@ -740,40 +718,24 @@ class AIActionWorkflow:
     def _pending_for_planner(self, pending: AIActionPlanRecord | None) -> PendingPlannerState | None:
         if pending is None:
             return None
-        plan_json = dict(pending.plan_json or {})
         waiting = dict(pending.waiting_payload or {})
-        slots = dict(plan_json.get("compat_slots") or {})
-        missing_slots: list[str] = []
-        waiting_type = str(waiting.get("type") or "")
-        if waiting_type == "contact_ambiguity":
-            slots["alias_ambiguity"] = waiting
-            missing_slots.append("participant_identity")
-        elif waiting_type == "clarification":
-            missing_slots.extend(
-                str(item or "").strip()
-                for item in list(waiting.get("missing") or [])
-                if str(item or "").strip()
-            )
         return PendingPlannerState(
             id=pending.id,
             thread_id=pending.thread_id,
             ai_thread_id=pending.thread_id,
-            action=str(plan_json.get("compat_action") or _compat_action(AIActionPlan.from_dict(plan_json)) or ""),
             state=pending.state,
-            slots=slots,
-            missing_slots=tuple(missing_slots),
             waiting_payload=waiting,
         )
 
     async def _handle_planner_control(self, pending: AIActionPlanRecord, plan: AIActionPlan) -> AIActionTurnResult | None:
-        action = str(plan.action or "").strip()
-        if action == "cancel_action":
+        control = dict(plan.control or {})
+        control_type = str(control.get("type") or "").strip()
+        if control_type == "cancel":
             return await self._cancel_pending(pending)
-        if action == "confirm_action" and pending.state == "waiting_confirmation":
+        if control_type == "confirm" and pending.state == "waiting_confirmation":
             return await self._confirm_pending(pending)
-        if action == "select_contact_alias" and pending.state == "waiting_clarification":
-            slots = dict(plan.slots or {})
-            selection = str(slots.get("selection_index") or slots.get("contact_id") or slots.get("alias_text") or "")
+        if control_type == "select_contact_alias" and pending.state == "waiting_clarification":
+            selection = str(control.get("selection_index") or control.get("contact_id") or control.get("alias_text") or "")
             if selection:
                 return await self._select_pending_contact(pending, selection)
         return None
@@ -827,15 +789,9 @@ class AIActionWorkflow:
             "ambiguous": [],
             "unresolved": list(waiting.get("unresolved") or []),
         }
-        plan_json = dict(pending.plan_json or {})
-        compat = dict(plan_json.get("compat_slots") or {})
-        compat["resolved_contacts"] = contacts
-        plan_json["compat_slots"] = compat
         updated = await self._store.update_plan(
             pending.id,
             state="running",
-            plan_json=plan_json,
-            bump_version=False,
             step_outputs=outputs,
             waiting_payload={},
         )
@@ -860,34 +816,8 @@ class AIActionWorkflow:
             message_extra={"ai_action": self._extra(record, state=record.state)},
         )
 
-    async def _create_clarification(self, thread_id: str, plan: AIActionPlan) -> AIActionTurnResult:
-        response_text = _clarification_question(plan)
-        plan_json = plan.to_dict()
-        plan_json["compat_action"] = _compat_action(plan)
-        plan_json["compat_slots"] = dict(plan.slots or {})
-        record = await self._store.create_plan(
-            thread_id=thread_id,
-            goal=plan.goal,
-            plan_json=plan_json,
-            state="waiting_clarification",
-            reason="normalizer_missing_slots",
-        )
-        await self._store.update_plan(
-            record.id,
-            waiting_payload={
-                "type": "clarification",
-                "missing": list(plan.missing_slots or []),
-                "slots": dict(plan.slots or {}),
-                "response_text": response_text,
-            },
-        )
-        latest = await self._store.get_plan(record.id) or record
-        return AIActionTurnResult(handled=True, response_text=response_text, message_extra={"ai_action": self._extra(latest)})
-
     async def _create_resource_clarification(self, thread_id: str, plan: AIActionPlan, response_text: str) -> AIActionTurnResult:
         plan_json = plan.to_dict()
-        plan_json["compat_action"] = _compat_action(plan)
-        plan_json["compat_slots"] = dict(plan.slots or {})
         record = await self._store.create_plan(
             thread_id=thread_id,
             goal=plan.goal,
@@ -901,27 +831,6 @@ class AIActionWorkflow:
         )
         latest = await self._store.get_plan(record.id) or record
         return AIActionTurnResult(handled=True, response_text=response_text, message_extra={"ai_action": self._extra(latest)})
-
-    async def _disabled_legacy_action(self, thread_id: str, plan: AIActionPlan) -> AIActionTurnResult:
-        text = _disabled_legacy_text(plan.action, plan.slots)
-        plan_json = plan.to_dict()
-        plan_json["compat_action"] = _compat_action(plan)
-        plan_json["compat_slots"] = dict(plan.slots or {})
-        record = await self._store.create_plan(
-            thread_id=thread_id,
-            goal=plan.goal,
-            plan_json=plan_json,
-            state="done",
-            reason="disabled_legacy_action",
-        )
-        await self._store.update_plan(
-            record.id,
-            state="done",
-            step_outputs={"final": {"text": text, "status": "disabled"}},
-            completed_at=time.time(),
-        )
-        latest = await self._store.get_plan(record.id) or record
-        return AIActionTurnResult(handled=True, response_text=text, message_extra={"ai_action": self._extra(latest)})
 
     @staticmethod
     def _extra(record: AIActionPlanRecord, *, state: str | None = None) -> dict[str, Any]:
@@ -942,7 +851,7 @@ class AIActionWorkflow:
         return {
             "id": record.id,
             "plan_id": record.id,
-            "action": str(plan_json.get("compat_action") or _compat_action(AIActionPlan.from_dict(plan_json)) or ""),
+            "action": _plan_json_action_label(plan_json),
             "state": state or record.state,
             "kind": "write" if _plan_has_action(plan_json, "message.send") else "read",
             "risk_level": str(plan_json.get("risk") or "low"),
@@ -1014,37 +923,10 @@ def _parse_planner_json(raw: str) -> AIActionPlan | None:
         return None
     if isinstance(data.get("steps"), list):
         return AIActionPlan.from_dict(data)
-    return AIActionPlan(
-        is_action=bool(data.get("is_action")),
-        action=str(data.get("action") or "").strip(),
-        requires_app_data=bool(data.get("requires_app_data")),
-        requires_side_effect=bool(data.get("requires_side_effect")),
-        slots=dict(data.get("slots") or {}) if isinstance(data.get("slots"), dict) else {},
-        missing_slots=tuple(_clean_list(data.get("missing_slots"))),
-    )
+    return None
 
 
-def _clarification_question(plan: AIActionPlan) -> str:
-    missing = set(plan.missing_slots)
-    slots = dict(plan.slots or {})
-    if "target_user" in missing:
-        return "你想把这句话发给谁？"
-    if "message_text" in missing:
-        return "你想发送的具体内容是什么？"
-    return "这个操作还缺少信息，请继续补充。"
-
-
-def _disabled_legacy_text(action: str, slots: dict[str, Any]) -> str:
-    if action == "add_friend":
-        return f"我识别到你想添加{slots.get('target_user') or '某人'}为好友。当前版本还没有接入真实添加好友能力。"
-    if action == "post_moment":
-        return "我识别到你想发朋友圈。当前版本还没有接入真实发布能力，所以不会实际发布。"
-    return "这个操作当前还没有接入真实执行。"
-
-
-def _compat_action(plan: AIActionPlan) -> str:
-    if plan.action:
-        return plan.action
+def _plan_action_label(plan: AIActionPlan) -> str:
     actions = [step.action for step in plan.steps]
     if "message.send" in actions:
         return "send_message"
@@ -1053,6 +935,10 @@ def _compat_action(plan: AIActionPlan) -> str:
     if actions:
         return actions[-1].replace(".", "_")
     return ""
+
+
+def _plan_json_action_label(plan_json: dict[str, Any]) -> str:
+    return _plan_action_label(AIActionPlan.from_dict(plan_json))
 
 
 def _plan_has_action(plan_json: dict[str, Any], action: str) -> bool:

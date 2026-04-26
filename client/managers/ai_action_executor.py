@@ -229,7 +229,6 @@ class AIActionExecutor:
                 return await self._fail(record, outputs, str(exc))
 
             outputs[step.id] = output
-            _update_compat_slots(record.plan_json, step.id, output)
             result_count = _output_result_count(output)
             has_result_ref = isinstance(output.get("result_ref"), dict)
             logger.info(
@@ -614,12 +613,3 @@ def _error_code(error_text: str) -> str:
 def _plan_events(plan_json: dict[str, Any]) -> list[dict[str, Any]]:
     events = plan_json.get("events")
     return [dict(item) for item in list(events or []) if isinstance(item, dict)]
-
-
-def _update_compat_slots(plan_json: dict[str, Any], step_id: str, output: dict[str, Any]) -> None:
-    compat = dict(plan_json.get("compat_slots") or {})
-    if step_id.startswith("resolve") and isinstance(output.get("contacts"), list):
-        contacts = [item for item in output["contacts"] if isinstance(item, dict)]
-        if contacts:
-            compat["resolved_contacts"] = contacts
-    plan_json["compat_slots"] = compat

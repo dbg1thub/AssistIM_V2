@@ -43,11 +43,7 @@ class AIPlanOptimizer:
                 risk=plan.risk,
                 steps=tuple(steps),
                 final=final,
-                action=plan.action,
-                requires_app_data=plan.requires_app_data,
-                requires_side_effect=plan.requires_side_effect,
-                slots=dict(plan.slots or {}),
-                missing_slots=plan.missing_slots,
+                control=dict(plan.control or {}),
             ),
             "+".join(dict.fromkeys(reasons)) or "optimizer_safe",
         )

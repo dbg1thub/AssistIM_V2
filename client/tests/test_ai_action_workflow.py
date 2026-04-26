@@ -4,6 +4,7 @@ from dataclasses import replace
 from client.managers import ai_action_registry as registry_module
 from client.managers.ai_action_cache import AIActionCache
 from client.managers.ai_action_executor import AIActionExecutor
+from client.managers.ai_action_normalizer import AIPlanNormalizer
 from client.managers.ai_action_optimizer import AIPlanOptimizer
 from client.managers.ai_action_registry import AtomicActionRegistry
 from client.managers.ai_action_types import AIActionPlan, AIActionStep
@@ -144,23 +145,13 @@ class _WorkflowPlanner:
         self.calls.append((user_text, pending_state is not None))
 
         if pending_state is not None and user_text == "取消":
-            return AIActionPlan(is_action=True, action="cancel_action")
+            return AIActionPlan(is_action=True, control={"type": "cancel"})
         if pending_state is not None and user_text == "确认":
-            return AIActionPlan(is_action=True, action="confirm_action")
+            return AIActionPlan(is_action=True, control={"type": "confirm"})
         if user_text == "帮我给张三发我晚点到":
-            return AIActionPlan(
-                is_action=True,
-                action="send_message",
-                requires_side_effect=True,
-                slots={"target_user": "张三", "message_text": "我晚点到"},
-            )
+            return _atomic_send_plan(user_text=user_text)
         if "聊了什么" in user_text or "聊过什么" in user_text:
-            return AIActionPlan(
-                is_action=True,
-                action="memory_query",
-                requires_app_data=True,
-                slots={"participants": ["test3"]},
-            )
+            return await _AtomicReadPlanner().plan(user_text)
         return AIActionPlan(is_action=False)
 
 
@@ -175,13 +166,87 @@ class _PendingNonControlPlanner:
         if pending_state is not None:
             return AIActionPlan(is_action=False)
         if user_text == "帮我给张三发我晚点到":
-            return AIActionPlan(
-                is_action=True,
-                action="send_message",
-                requires_side_effect=True,
-                slots={"target_user": "张三", "message_text": "我晚点到"},
+            return _atomic_send_plan(user_text=user_text)
+        return AIActionPlan(is_action=False)
+
+
+class _LegacyBusinessActionPlanner:
+    async def plan(self, *args, **kwargs):
+        user_text = str(args[0] if args else "").strip()
+        del kwargs
+        if user_text == "帮我给张三发我晚点到":
+            return AIActionPlan.from_dict(
+                {
+                    "is_action": True,
+                    "goal": user_text,
+                    "risk": "high",
+                    "action": "send_message",
+                    "requires_side_effect": True,
+                    "slots": {"target_user": "张三", "message_text": "我晚点到"},
+                    "steps": [],
+                    "final": {},
+                }
+            )
+        if "聊了什么" in user_text or "聊过什么" in user_text:
+            return AIActionPlan.from_dict(
+                {
+                    "is_action": True,
+                    "goal": user_text,
+                    "risk": "low",
+                    "action": "memory_query",
+                    "requires_app_data": True,
+                    "slots": {"participants": ["test3"]},
+                    "steps": [],
+                    "final": {},
+                }
             )
         return AIActionPlan(is_action=False)
+
+
+def _atomic_send_plan(*, user_text: str = "帮我给张三发我晚点到") -> AIActionPlan:
+    return AIActionPlan(
+        is_action=True,
+        goal=user_text,
+        risk="high",
+        steps=(
+            AIActionStep(
+                id="resolve_target",
+                action="contact.resolve",
+                args={"queries": ["张三"], "allow_multiple": False},
+            ),
+            AIActionStep(
+                id="draft_message",
+                action="message.draft",
+                depends_on=("resolve_target",),
+                args={"target": "$resolve_target.contacts[0]", "content": "我晚点到"},
+            ),
+            AIActionStep(
+                id="confirm_send",
+                action="user.confirm",
+                depends_on=("draft_message",),
+                args={
+                    "risk": "high",
+                    "preview": {
+                        "operation": "发送消息",
+                        "target": "$draft_message.target",
+                        "content": "$draft_message.content",
+                    },
+                },
+            ),
+            AIActionStep(
+                id="send_message",
+                action="message.send",
+                depends_on=("confirm_send", "draft_message"),
+                args={
+                    "target": "$draft_message.target_entity",
+                    "content": "$draft_message.content",
+                    "preview": "$draft_message.preview",
+                    "idempotency_key": "$draft_message.idempotency_key",
+                },
+            ),
+        ),
+        final={"type": "answer", "source": "$send_message.text"},
+    )
 
 
 class _InvalidConfirmationPlanner:
@@ -453,35 +518,39 @@ def test_ai_action_planner_prompt_documents_atomic_action_arg_contracts() -> Non
     assert 'participant_match 只能是 "any", "all", "direct_only", "group_only"' in system_prompt
 
 
+def test_ai_action_planner_schema_uses_atomic_steps_or_control_not_legacy_slots() -> None:
+    new_schema = AIActionPlanner.NEW_ACTION_SCHEMA
+    control_schema = AIActionPlanner.PENDING_CONTROL_SCHEMA
+
+    assert "control" in control_schema["properties"]
+    assert "action" not in new_schema["properties"]
+    assert "slots" not in new_schema["properties"]
+    assert "missing_slots" not in new_schema["properties"]
+    assert "action" not in control_schema["properties"]
+    assert "slots" not in control_schema["properties"]
+    assert "missing_slots" not in control_schema["properties"]
+
+
 def test_ai_action_planner_uses_state_specific_prompt_templates() -> None:
     confirmation_state = PendingPlannerState(
         id="plan-1",
         thread_id="thread-1",
         ai_thread_id="thread-1",
-        action="send_message",
         state="waiting_confirmation",
-        slots={},
-        missing_slots=(),
         waiting_payload={"type": "confirmation", "preview": {"operation": "发送消息", "target": "张三"}},
     )
     contact_state = PendingPlannerState(
         id="plan-2",
         thread_id="thread-1",
         ai_thread_id="thread-1",
-        action="send_message",
         state="waiting_clarification",
-        slots={},
-        missing_slots=("target_user",),
         waiting_payload={"type": "contact_ambiguity", "candidates": [{"contact_id": "user-1"}]},
     )
     clarification_state = PendingPlannerState(
         id="plan-3",
         thread_id="thread-1",
         ai_thread_id="thread-1",
-        action="send_message",
         state="waiting_clarification",
-        slots={},
-        missing_slots=("message_text",),
         waiting_payload={"type": "clarification", "missing": ["message_text"]},
     )
 
@@ -496,30 +565,21 @@ def test_ai_action_planner_pending_prompts_are_focused() -> None:
         id="plan-1",
         thread_id="thread-1",
         ai_thread_id="thread-1",
-        action="send_message",
         state="waiting_confirmation",
-        slots={},
-        missing_slots=(),
         waiting_payload={"type": "confirmation", "preview": {"operation": "发送消息", "target": "张三"}},
     )
     contact_state = PendingPlannerState(
         id="plan-2",
         thread_id="thread-1",
         ai_thread_id="thread-1",
-        action="send_message",
         state="waiting_clarification",
-        slots={},
-        missing_slots=("target_user",),
         waiting_payload={"type": "contact_ambiguity", "candidates": [{"contact_id": "user-1"}]},
     )
     clarification_state = PendingPlannerState(
         id="plan-3",
         thread_id="thread-1",
         ai_thread_id="thread-1",
-        action="send_message",
         state="waiting_clarification",
-        slots={},
-        missing_slots=("message_text",),
         waiting_payload={"type": "clarification", "missing": ["message_text"]},
     )
 
@@ -527,13 +587,60 @@ def test_ai_action_planner_pending_prompts_are_focused() -> None:
     contact_prompt = AIActionPlanner._user_prompt("2", pending_state=contact_state)
     clarification_prompt = AIActionPlanner._user_prompt("我晚点到", pending_state=clarification_state)
 
-    assert 'action="confirm_action"' in confirmation_prompt
-    assert 'action="select_contact_alias"' in contact_prompt
-    assert 'action="cancel_action"' in clarification_prompt
+    assert '"control": {"type": "confirm"}' in confirmation_prompt
+    assert '"control": {"type": "select_contact_alias"' in contact_prompt
+    assert '"control": {"type": "cancel"}' in clarification_prompt
     assert "memory.search" not in confirmation_prompt
     assert "memory.search" not in contact_prompt
     assert "memory.search" not in clarification_prompt
     assert "contact.resolve -> message.draft -> user.confirm -> message.send" in clarification_prompt
+
+
+def test_ai_plan_normalizer_rejects_legacy_single_business_actions() -> None:
+    normalizer = AIPlanNormalizer()
+    for payload in (
+        {
+            "is_action": True,
+            "goal": "旧发送",
+            "risk": "high",
+            "action": "send_message",
+            "slots": {"target_user": "张三", "message_text": "我晚点到"},
+            "steps": [],
+            "final": {},
+        },
+        {
+            "is_action": True,
+            "goal": "旧查询",
+            "risk": "low",
+            "action": "memory_query",
+            "slots": {"participants": ["test3"]},
+            "steps": [],
+            "final": {},
+        },
+        {
+            "is_action": True,
+            "goal": "旧加好友",
+            "risk": "high",
+            "action": "add_friend",
+            "slots": {"target_user": "张三"},
+            "steps": [],
+            "final": {},
+        },
+        {
+            "is_action": True,
+            "goal": "旧发朋友圈",
+            "risk": "high",
+            "action": "post_moment",
+            "slots": {"content": "今天很开心"},
+            "steps": [],
+            "final": {},
+        },
+    ):
+        normalized = normalizer.normalize(AIActionPlan.from_dict(payload), user_text=str(payload["goal"]))
+
+        assert normalized.is_action is False
+        assert normalized.steps == ()
+        assert normalized.control == {}
 
 
 def test_ai_plan_validator_rejects_unresolved_step_reference() -> None:
@@ -1179,18 +1286,21 @@ def test_ai_action_workflow_ignores_regular_chat(tmp_path, monkeypatch) -> None:
     asyncio.run(scenario())
 
 
-def test_ai_action_workflow_ignores_legacy_history_query(tmp_path, monkeypatch) -> None:
+def test_ai_action_workflow_rejects_legacy_single_business_actions(tmp_path, monkeypatch) -> None:
     async def scenario() -> None:
         db = Database(str(tmp_path / "actions.db"))
         monkeypatch.setattr(action_store_module, "get_database", lambda: db)
         store = AIActionStore()
         workflow = AIActionWorkflow(
             action_store=store,
-            planner=_WorkflowPlanner(),
+            planner=_LegacyBusinessActionPlanner(),
         )
         try:
-            result = await workflow.handle_user_turn(thread_id="thread-1", text="我和test3聊过什么？")
-            assert result.handled is False
+            send_result = await workflow.handle_user_turn(thread_id="thread-1", text="帮我给张三发我晚点到")
+            history_result = await workflow.handle_user_turn(thread_id="thread-1", text="我和test3聊过什么？")
+
+            assert send_result.handled is False
+            assert history_result.handled is False
             assert await store.latest_pending_plan("thread-1") is None
         finally:
             await db.close()
