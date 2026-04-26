@@ -8,13 +8,23 @@ from client.managers.ai_action_types import AIActionPlan, AIActionStep
 class AIPlanNormalizer:
     """Deterministic cleanup for atomic action plans."""
 
+    def __init__(self) -> None:
+        self._last_rejection_reason = ""
+
+    @property
+    def last_rejection_reason(self) -> str:
+        return self._last_rejection_reason
+
     def normalize(self, plan: AIActionPlan, *, user_text: str) -> AIActionPlan:
+        self._last_rejection_reason = ""
         if not plan.is_action:
+            self._last_rejection_reason = "plan_not_action"
             return plan
         if plan.control and not plan.steps:
             return plan
         if plan.steps:
             return self._normalize_atomic_plan(plan, user_text=user_text)
+        self._last_rejection_reason = "action_without_steps"
         return AIActionPlan(is_action=False)
 
     def _normalize_atomic_plan(self, plan: AIActionPlan, *, user_text: str) -> AIActionPlan:
@@ -38,8 +48,11 @@ class AIPlanNormalizer:
             )
         steps = self._ensure_write_confirmation(steps)
         if self._has_confirmation_without_write(steps):
+            self._last_rejection_reason = "confirmation_without_write"
             return AIActionPlan(is_action=False)
-        if self._has_invalid_atomic_write_chain(steps):
+        invalid_reasons = self._invalid_atomic_write_chain_reasons(steps)
+        if invalid_reasons:
+            self._last_rejection_reason = ",".join(invalid_reasons)
             return AIActionPlan(is_action=False)
         return AIActionPlan(
             is_action=True,
@@ -62,6 +75,20 @@ class AIPlanNormalizer:
             )
             if has_confirmation:
                 output.append(step)
+                continue
+            existing_confirm = _latest_complete_send_confirmation(output, send_step=step)
+            if existing_confirm is not None:
+                output.append(
+                    AIActionStep(
+                        id=step.id,
+                        action=step.action,
+                        depends_on=tuple(dict.fromkeys([*step.depends_on, existing_confirm.id])),
+                        args=dict(step.args or {}),
+                        display_text=step.display_text,
+                        explanation=step.explanation,
+                        fallback=step.fallback,
+                    )
+                )
                 continue
             confirm_id = f"confirm_{step.id}"
             output.append(
@@ -112,22 +139,39 @@ class AIPlanNormalizer:
 
     @staticmethod
     def _has_invalid_atomic_write_chain(steps: list[AIActionStep]) -> bool:
+        return bool(AIPlanNormalizer._invalid_atomic_write_chain_reasons(steps))
+
+    @staticmethod
+    def _invalid_atomic_write_chain_reasons(steps: list[AIActionStep]) -> list[str]:
         by_id = {step.id: step for step in steps}
+        reasons: list[str] = []
         for step in steps:
             if step.action == "message.draft" and not _message_draft_is_complete(step):
-                return True
+                reasons.append(f"{step.id}:message_draft_incomplete")
             if step.action != "message.send":
                 continue
             if not _message_send_is_complete(step):
-                return True
+                reasons.append(f"{step.id}:message_send_incomplete")
             confirm_steps = [by_id.get(dep) for dep in step.depends_on if by_id.get(dep) and by_id[dep].action == "user.confirm"]
             if not confirm_steps:
-                return True
+                reasons.append(f"{step.id}:missing_user_confirm_dependency")
             if not any(_confirm_send_is_complete(confirm) for confirm in confirm_steps if confirm is not None):
-                return True
+                reasons.append(f"{step.id}:incomplete_user_confirm_preview")
             if not _refs_are_available(step.args, available=set(step.depends_on)):
-                return True
-        return False
+                reasons.append(f"{step.id}:message_send_unavailable_ref")
+        return reasons
+
+
+def _latest_complete_send_confirmation(steps: list[AIActionStep], *, send_step: AIActionStep) -> AIActionStep | None:
+    send_refs = _refs_in_value(send_step.args)
+    for step in reversed(steps):
+        if step.action != "user.confirm" or not _confirm_send_is_complete(step):
+            continue
+        confirm_refs = _refs_in_value(step.args)
+        confirm_depends = set(step.depends_on)
+        if not send_refs or send_refs & confirm_refs or send_refs & confirm_depends:
+            return step
+    return None
 
 
 def _message_draft_is_complete(step: AIActionStep) -> bool:

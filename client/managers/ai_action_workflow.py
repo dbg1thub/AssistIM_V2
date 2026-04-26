@@ -577,6 +577,11 @@ class AIActionWorkflow:
             len(raw_plan.steps),
             str((raw_plan.control or {}).get("type") or ""),
         )
+        logger.info(
+            "[ai-diag] ai_action_workflow_raw_plan thread_id=%s plan=%s",
+            thread_id,
+            json.dumps(raw_plan.to_dict(), ensure_ascii=False, sort_keys=True, default=str),
+        )
         if pending is not None:
             control = await self._handle_planner_control(pending, raw_plan)
             if control is not None:
@@ -591,6 +596,12 @@ class AIActionWorkflow:
         normalized_plan = self._normalizer.normalize(raw_plan, user_text=normalized_text)
         normalizer_ms = _elapsed_ms(normalizer_started)
         if not normalized_plan.is_action:
+            logger.info(
+                "[ai-diag] ai_action_workflow_normalizer_rejected thread_id=%s reason=%s raw_plan=%s",
+                thread_id,
+                self._normalizer.last_rejection_reason,
+                json.dumps(raw_plan.to_dict(), ensure_ascii=False, sort_keys=True, default=str),
+            )
             log_perf("normalized_not_action", handled=False, plan=normalized_plan)
             return AIActionTurnResult(handled=False)
         if not normalized_plan.steps:

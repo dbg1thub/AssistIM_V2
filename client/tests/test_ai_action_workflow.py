@@ -467,6 +467,60 @@ class _DuplicateResolvePlanner:
         )
 
 
+class _NonCanonicalAtomicSendPlanner:
+    async def plan(self, *args, **kwargs):
+        user_text = str(args[0] if args else "").strip()
+        del kwargs
+        return AIActionPlan(
+            is_action=True,
+            goal=user_text,
+            risk="high",
+            steps=(
+                AIActionStep(
+                    id="resolve_target",
+                    action="contact.resolve",
+                    args={"queries": ["test3"], "allow_multiple": False},
+                ),
+                AIActionStep(
+                    id="resolve_target_again",
+                    action="contact.resolve",
+                    args={"queries": ["test3"], "allow_multiple": False},
+                ),
+                AIActionStep(
+                    id="draft_message",
+                    action="message.draft",
+                    depends_on=("resolve_target",),
+                    args={"target": "$resolve_target.contacts[0]", "content": "我晚点联系他"},
+                ),
+                AIActionStep(
+                    id="confirm_send",
+                    action="user.confirm",
+                    depends_on=("draft_message",),
+                    args={
+                        "risk": "high",
+                        "preview": {
+                            "operation": "发送消息",
+                            "target": "$draft_message.target",
+                            "content": "$draft_message.content",
+                        },
+                    },
+                ),
+                AIActionStep(
+                    id="send_message",
+                    action="message.send",
+                    depends_on=("draft_message",),
+                    args={
+                        "target": "$draft_message.target_entity",
+                        "content": "$draft_message.content",
+                        "preview": "$draft_message.preview",
+                        "idempotency_key": "$draft_message.idempotency_key",
+                    },
+                ),
+            ),
+            final={"type": "answer", "source": "$send_message.text"},
+        )
+
+
 class _TooManyStepsPlanner:
     async def plan(self, *args, **kwargs):
         user_text = str(args[0] if args else "").strip()
@@ -1451,6 +1505,47 @@ def test_ai_action_workflow_checks_resources_after_safe_optimizer(tmp_path, monk
             plan = await store.get_plan(result.message_extra["ai_action"]["plan_id"])
             assert plan is not None
             assert plan.plan_version == 2
+        finally:
+            await db.close()
+
+    asyncio.run(scenario())
+
+
+def test_ai_action_workflow_canonicalizes_noncanonical_send_confirmation(tmp_path, monkeypatch) -> None:
+    async def scenario() -> None:
+        db = Database(str(tmp_path / "actions.db"))
+        monkeypatch.setattr(action_store_module, "get_database", lambda: db)
+        store = AIActionStore()
+        contact_db = _FakeContactDatabase(
+            [
+                {
+                    "id": "user-3",
+                    "display_name": "test3",
+                    "username": "test3",
+                    "nickname": "test3",
+                    "remark": "",
+                    "assistim_id": "test3",
+                }
+            ]
+        )
+        workflow = AIActionWorkflow(
+            action_store=store,
+            planner=_NonCanonicalAtomicSendPlanner(),
+            contact_alias_resolver=ContactAliasResolver(db=contact_db),
+            message_sender=_FakeActionMessageSender(),
+        )
+        try:
+            result = await workflow.handle_user_turn(thread_id="thread-1", text="给test3说我晚点联系他")
+
+            assert result.handled is True
+            assert result.message_extra["ai_action"]["state"] == "waiting_confirmation"
+            assert result.message_extra["ai_action"]["action"] == "send_message"
+            assert "确认要发送消息给test3" in result.response_text
+            assert "我晚点联系他" in result.response_text
+            record = await store.latest_pending_plan("thread-1")
+            assert record is not None
+            send = next(step for step in record.plan_json["steps"] if step["action"] == "message.send")
+            assert "confirm_send" in send["depends_on"]
         finally:
             await db.close()
 
