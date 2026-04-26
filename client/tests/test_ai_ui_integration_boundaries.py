@@ -463,6 +463,57 @@ def test_ai_action_step_status_area_uses_safe_steps_and_events() -> None:
     assert 'QLabel[isActionStatus="true"]' in assistant_interface
 
 
+def test_ai_action_terminal_state_does_not_render_step_status() -> None:
+    assistant_interface = Path("client/ui/windows/ai_assistant_interface.py").read_text(encoding="utf-8")
+    status_source = "def _ai_action_status_text" + assistant_interface.split("def _ai_action_status_text", 1)[
+        1
+    ].split(
+        "\n\nclass AIAssistantPromptEdit",
+        1,
+    )[0]
+    namespace: dict[str, object] = {}
+    exec(status_source, namespace)
+    status_text = namespace["_ai_action_status_text"]
+
+    terminal_extra = {
+        "ai_action": {
+            "state": "done",
+            "steps": [
+                {
+                    "id": "resolve_target",
+                    "state": "done",
+                    "display_text": "确定联系人",
+                },
+                {
+                    "id": "send_message",
+                    "state": "done",
+                    "display_text": "发送消息",
+                },
+            ],
+            "events": [
+                {"type": "step_completed", "step_id": "resolve_target"},
+                {"type": "step_completed", "step_id": "send_message"},
+            ],
+        }
+    }
+    assert status_text(terminal_extra) == ""
+
+    waiting_extra = {
+        "ai_action": {
+            "state": "waiting_confirmation",
+            "steps": [
+                {
+                    "id": "confirm_send",
+                    "state": "waiting_confirmation",
+                    "display_text": "确认发送",
+                }
+            ],
+            "events": [{"type": "step_waiting_confirmation", "step_id": "confirm_send"}],
+        }
+    }
+    assert status_text(waiting_extra) == "等待确认：确认发送"
+
+
 def test_ai_assistant_tries_action_workflow_before_rag_and_ai_chat() -> None:
     assistant_interface = Path("client/ui/windows/ai_assistant_interface.py").read_text(encoding="utf-8")
     send_prompt = assistant_interface.split("async def _send_prompt", 1)[1].split(

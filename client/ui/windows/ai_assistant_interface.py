@@ -123,6 +123,9 @@ def _ai_action_status_text(extra: dict | None) -> str:
     action = dict((extra or {}).get("ai_action") or {})
     if not action:
         return ""
+    state = str(action.get("state") or "").strip()
+    if state in {"done", "cancelled"}:
+        return ""
     steps = [item for item in list(action.get("steps") or []) if isinstance(item, dict)]
     events = [item for item in list(action.get("events") or []) if isinstance(item, dict)]
     lines: list[str] = []
