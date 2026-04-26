@@ -37,9 +37,10 @@ CONTACT_RESOLVE_RESOLVER_VERSION = "contact_resolve:v1"
 MEMORY_SUMMARIZE_DIRECT_MAX_LINES = 6
 MEMORY_SUMMARIZE_DIRECT_MAX_CONTEXT_CHARS = 1200
 MEMORY_SUMMARIZE_CHUNK_SIZE = 4
-MEMORY_SUMMARIZE_CHUNK_ITEM_MAX_CHARS = 34
+MEMORY_SUMMARIZE_CHUNK_DEFAULT_ITEM_MAX_CHARS = 34
+MEMORY_SUMMARIZE_CHUNK_FILE_ITEM_MAX_CHARS = 260
 MEMORY_SUMMARIZE_CACHE_NAMESPACE = "memory.summarize"
-MEMORY_SUMMARIZE_PROMPT_VERSION = "memory_summarize_context:v1"
+MEMORY_SUMMARIZE_PROMPT_VERSION = "memory_summarize_context:v2"
 MEMORY_SUMMARIZE_MODEL_ID = "deterministic-local-summarizer:v1"
 
 
@@ -764,7 +765,7 @@ def _summarize_memory_context_lines(context_lines: list[str], *, input_result_co
     chunks: list[str] = []
     for start in range(0, len(lines), MEMORY_SUMMARIZE_CHUNK_SIZE):
         chunk = lines[start : start + MEMORY_SUMMARIZE_CHUNK_SIZE]
-        snippets = [_clip_text(line, MEMORY_SUMMARIZE_CHUNK_ITEM_MAX_CHARS) for line in chunk]
+        snippets = [_clip_memory_context_line(line) for line in chunk]
         end = start + len(chunk)
         chunks.append(f"检索结果 {start + 1}-{end}：" + "；".join(snippets))
     return {
@@ -774,6 +775,17 @@ def _summarize_memory_context_lines(context_lines: list[str], *, input_result_co
         "chunked": bool(chunks),
         "chunk_count": len(chunks),
     }
+
+
+def _clip_memory_context_line(line: str) -> str:
+    return _clip_text(line, _memory_context_line_clip_limit(line))
+
+
+def _memory_context_line_clip_limit(line: str) -> int:
+    text = str(line or "")
+    if "文件总结：" in text or "文件内容片段：" in text:
+        return MEMORY_SUMMARIZE_CHUNK_FILE_ITEM_MAX_CHARS
+    return MEMORY_SUMMARIZE_CHUNK_DEFAULT_ITEM_MAX_CHARS
 
 
 def _clip_text(value: str, max_chars: int) -> str:

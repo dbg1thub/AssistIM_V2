@@ -2152,6 +2152,67 @@ def test_ai_action_registry_memory_summarize_chunks_large_context() -> None:
     asyncio.run(scenario())
 
 
+def test_ai_action_registry_memory_summarize_keeps_file_result_content_when_chunked() -> None:
+    async def scenario() -> None:
+        registry = AtomicActionRegistry(
+            contact_resolver=ContactAliasResolver(db=_FakeContactDatabase([])),
+            memory_manager=_FakeActionMemoryManager(),
+        )
+        spec = registry.get("memory.summarize")
+        assert spec is not None
+        context_lines = [
+            (
+                "[2026-04-24 15:20-15:20]；README.md #1；参与者：test1、test3；"
+                "摘要：文件内容片段：# AssistIM 文档总览 本文档集用于约束 AssistIM 的产品边界、"
+                "系统架构、实时协议、UI 设计系统与工程实践。"
+            ),
+            (
+                "[2026-04-24 15:20-15:20]；README.md；参与者：test1、test3；"
+                "摘要：文件总结：AssistIM 是一个 AI 增强即时通讯桌面应用，目标是将即时通讯和 AI 助手能力整合。"
+            ),
+            (
+                "[2026-04-24 15:20-15:20]；README.md #2；参与者：test1、test3；"
+                "摘要：文件内容片段：系统由桌面客户端、后端 API/WebSocket 网关、外部 AI 提供商和文件存储组成。"
+            ),
+            (
+                "[2026-04-24 15:20-15:20]；README.md #3；参与者：test1、test3；"
+                "摘要：文件内容片段：核心能力包括私聊群聊、消息处理、AI 会话流式输出、本地缓存等。"
+            ),
+            (
+                "[2026-04-24 15:20-15:20]；README.md #4；参与者：test1、test3；"
+                "摘要：文件内容片段：文档集约束产品边界、架构、协议和 UI 设计，并规定文档职责划分。"
+            ),
+            (
+                "[2026-04-24 15:20-15:20]；README.md #5；参与者：test1、test3；"
+                "摘要：文件内容片段：架构、协议、UI 设计系统和工程规则变化时必须同步更新文档。"
+            ),
+            "[2026-04-24 15:19-15:19]；requirements.txt；摘要：GUI 依赖使用 PySide6。",
+            "[2026-04-24 15:19-15:19]；requirements.txt #1；摘要：异步通信依赖包含 websockets。",
+        ]
+
+        output = await spec.handler(  # type: ignore[misc]
+            {
+                "source": {
+                    "context_lines": context_lines,
+                    "result_count": 13,
+                    "truncated": True,
+                },
+                "question": "我给test3发的README.md文件主要是讲什么",
+            },
+            {"store": None},
+        )
+
+        joined = "\n".join(output["context_lines"])
+        assert output["requires_responder"] is True
+        assert output["chunked"] is True
+        assert "README.md" in joined
+        assert "AI 增强即时通讯桌面应用" in joined
+        assert "桌面客户端、后端 API/WebSocket 网关" in joined
+        assert "核心能力包括私聊群聊" in joined
+
+    asyncio.run(scenario())
+
+
 def test_ai_action_registry_memory_summarize_uses_versioned_cache(monkeypatch) -> None:
     async def scenario() -> None:
         calls = []
