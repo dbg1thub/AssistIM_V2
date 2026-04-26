@@ -62,6 +62,7 @@ class AIActionExecutor:
 
             try:
                 resolved_args = _resolve_refs(step.args, outputs)
+                self._check_guardrails(spec, resolved_args)
                 validated_args = _validate_input(spec, resolved_args)
                 self._check_guardrails(spec, validated_args)
             except ValueError as exc:
@@ -348,21 +349,23 @@ class AIActionExecutor:
         return ActionExecutionResult(state="failed", response_text="这个操作执行失败，请稍后再试。", error_text=error_text)
 
     def _check_guardrails(self, spec: AtomicActionSpec, args: dict[str, Any]) -> None:
+        if not isinstance(args, dict):
+            raise ValueError("ARG_SCHEMA_INVALID")
         if _json_size(args) > spec.max_input_bytes:
             raise ValueError("PAYLOAD_TOO_LARGE: input")
-        if spec.name == "contact.resolve":
-            queries = args.get("queries")
-            if spec.max_targets is not None and isinstance(queries, list) and len(queries) > spec.max_targets:
-                raise ValueError("PLAN_TOO_LARGE: too many targets")
-        if spec.name == "message.send":
-            content = str(args.get("content") or "")
-            if spec.max_content_chars is not None and len(content) > spec.max_content_chars:
-                raise ValueError("PAYLOAD_TOO_LARGE: content")
-            target = args.get("target") if isinstance(args.get("target"), dict) else {}
-            if spec.require_resolved_target and not str(target.get("contact_id") or "").strip():
-                raise ValueError("ARG_SCHEMA_INVALID: target")
-            if spec.idempotency_required and not str(args.get("idempotency_key") or "").strip():
-                raise ValueError("IDEMPOTENCY_KEY_REQUIRED")
+        target_count = _guardrail_target_count(args)
+        if target_count > 1 and not spec.allow_batch:
+            raise ValueError("BATCH_NOT_ALLOWED")
+        if spec.max_targets is not None and target_count > spec.max_targets:
+            raise ValueError("PLAN_TOO_LARGE: too many targets")
+        if spec.max_content_chars is not None and len(str(args.get("content") or "")) > spec.max_content_chars:
+            raise ValueError("PAYLOAD_TOO_LARGE: content")
+        if spec.require_resolved_target and not _has_resolved_target(args.get("target")):
+            raise ValueError("ARG_SCHEMA_INVALID: target")
+        if spec.require_preview and not _has_guardrail_value(args.get("preview")):
+            raise ValueError("ARG_SCHEMA_INVALID: preview")
+        if spec.idempotency_required and not str(args.get("idempotency_key") or "").strip():
+            raise ValueError("IDEMPOTENCY_KEY_REQUIRED")
 
     async def _enforce_output_size(
         self,
@@ -446,6 +449,37 @@ def _handler_attempt_count(spec: AtomicActionSpec) -> int:
 
 def _is_retryable_spec(spec: AtomicActionSpec) -> bool:
     return spec.kind == "read" and not spec.allow_side_effect
+
+
+def _guardrail_target_count(args: dict[str, Any]) -> int:
+    for key in ("targets", "target", "queries", "participants"):
+        if key in args:
+            return _guardrail_value_count(args.get(key))
+    return 0
+
+
+def _guardrail_value_count(value: Any) -> int:
+    if value is None:
+        return 0
+    if isinstance(value, list | tuple):
+        return len(value)
+    if isinstance(value, dict):
+        return 1 if value else 0
+    return 1 if str(value or "").strip() else 0
+
+
+def _has_resolved_target(value: Any) -> bool:
+    return isinstance(value, dict) and bool(str(value.get("contact_id") or "").strip())
+
+
+def _has_guardrail_value(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, dict | list | tuple):
+        return bool(value)
+    return True
 
 
 def _validate_input(spec: AtomicActionSpec, value: Any) -> dict[str, Any]:

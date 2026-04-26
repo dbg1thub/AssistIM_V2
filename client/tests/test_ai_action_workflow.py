@@ -2204,6 +2204,118 @@ def test_ai_action_executor_does_not_retry_side_effect_action(tmp_path, monkeypa
     asyncio.run(scenario())
 
 
+def test_ai_action_executor_rejects_spec_guardrail_violations_before_handler(tmp_path, monkeypatch) -> None:
+    async def scenario() -> None:
+        cases = [
+            {
+                "name": "contact_targets",
+                "action": "contact.resolve",
+                "args": {"queries": [f"用户{index}" for index in range(6)], "allow_multiple": True},
+                "error": "PLAN_TOO_LARGE: too many targets",
+            },
+            {
+                "name": "send_content_chars",
+                "action": "message.send",
+                "args": {
+                    "target": {"contact_id": "user-1", "display_name": "张三"},
+                    "content": "x" * 501,
+                    "preview": {"operation": "发送消息", "target": "张三", "content": "x" * 501},
+                    "idempotency_key": "idem-1",
+                },
+                "error": "PAYLOAD_TOO_LARGE: content",
+            },
+            {
+                "name": "send_idempotency",
+                "action": "message.send",
+                "args": {
+                    "target": {"contact_id": "user-1", "display_name": "张三"},
+                    "content": "我晚点到",
+                    "preview": {"operation": "发送消息", "target": "张三", "content": "我晚点到"},
+                },
+                "error": "IDEMPOTENCY_KEY_REQUIRED",
+            },
+            {
+                "name": "send_unresolved_target",
+                "action": "message.send",
+                "args": {
+                    "target": {"display_name": "张三"},
+                    "content": "我晚点到",
+                    "preview": {"operation": "发送消息", "target": "张三", "content": "我晚点到"},
+                    "idempotency_key": "idem-1",
+                },
+                "error": "ARG_SCHEMA_INVALID: target",
+            },
+            {
+                "name": "send_batch_target",
+                "action": "message.send",
+                "args": {
+                    "target": [
+                        {"contact_id": "user-1", "display_name": "张三"},
+                        {"contact_id": "user-2", "display_name": "李四"},
+                    ],
+                    "content": "我晚点到",
+                    "preview": {"operation": "发送消息", "target": "张三、李四", "content": "我晚点到"},
+                    "idempotency_key": "idem-1",
+                },
+                "error": "BATCH_NOT_ALLOWED",
+            },
+        ]
+
+        for index, case in enumerate(cases):
+            calls = 0
+
+            async def forbidden_handler(args, context):
+                nonlocal calls
+                del args, context
+                calls += 1
+                return {"status": "unexpected", "text": "不应执行"}
+
+            db = Database(str(tmp_path / f"guardrail_{index}_{case['name']}.db"))
+            monkeypatch.setattr(action_store_module, "get_database", lambda: db)
+            store = AIActionStore()
+            registry = AtomicActionRegistry(
+                contact_resolver=ContactAliasResolver(db=_FakeContactDatabase([])),
+            )
+            spec = registry.get(str(case["action"]))
+            assert spec is not None
+            registry._actions[str(case["action"])] = replace(spec, handler=forbidden_handler, enabled=True)
+            executor = AIActionExecutor(registry=registry, store=store)
+            plan = AIActionPlan(
+                is_action=True,
+                goal=f"guardrail {case['name']}",
+                risk="high" if case["action"] == "message.send" else "low",
+                steps=(
+                    AIActionStep(
+                        id="guarded_step",
+                        action=str(case["action"]),
+                        args=dict(case["args"]),
+                    ),
+                ),
+                final={"type": "answer", "source": "$guarded_step"},
+            )
+            try:
+                record = await store.create_plan(
+                    thread_id=f"thread-{index}",
+                    goal=plan.goal,
+                    plan_json=plan.to_dict(),
+                    reason=f"test_guardrail_{case['name']}",
+                )
+                result = await executor.execute(record)
+                updated = await store.get_plan(record.id)
+
+                assert result.state == "failed", case["name"]
+                assert result.error_text == case["error"], case["name"]
+                assert calls == 0, case["name"]
+                assert updated is not None
+                assert updated.state == "failed", case["name"]
+                assert updated.error_text == case["error"], case["name"]
+                assert updated.step_outputs == {}, case["name"]
+            finally:
+                await db.close()
+
+    asyncio.run(scenario())
+
+
 def test_ai_action_executor_persists_waiting_confirmation_event(tmp_path, monkeypatch) -> None:
     async def scenario() -> None:
         db = Database(str(tmp_path / "actions.db"))
