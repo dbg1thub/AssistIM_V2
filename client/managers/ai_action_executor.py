@@ -70,7 +70,13 @@ class AIActionExecutor:
             permission = self._permission_policy.check_step(
                 spec=spec,
                 args=validated_args,
-                plan_context={"plan_id": record.id, "plan_version": record.plan_version},
+                plan_context={
+                    "thread_id": record.thread_id,
+                    "plan_id": record.id,
+                    "plan_version": record.plan_version,
+                    "step_id": step.id,
+                    "action": step.action,
+                },
             )
             if not permission.allowed:
                 return await self._fail(record, outputs, permission.code or "PERMISSION_DENIED")

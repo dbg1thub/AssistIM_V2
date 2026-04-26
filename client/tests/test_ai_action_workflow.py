@@ -6,8 +6,9 @@ from client.managers.ai_action_cache import AIActionCache
 from client.managers.ai_action_executor import AIActionExecutor
 from client.managers.ai_action_normalizer import AIPlanNormalizer
 from client.managers.ai_action_optimizer import AIPlanOptimizer
+from client.managers.ai_action_permission_policy import AIPermissionPolicy, PermissionDecision
 from client.managers.ai_action_registry import AtomicActionRegistry
-from client.managers.ai_action_types import AIActionPlan, AIActionStep
+from client.managers.ai_action_types import AIActionPlan, AIActionStep, AtomicActionSpec
 from client.managers.ai_action_validator import AIPlanValidator
 from client.managers.ai_action_workflow import (
     AIActionPlanner,
@@ -1854,6 +1855,114 @@ def test_ai_action_executor_validates_input_model_before_handler(tmp_path, monke
             await db.close()
 
     asyncio.run(scenario())
+
+
+def test_ai_action_executor_passes_permission_context_and_skips_denied_handler(tmp_path, monkeypatch) -> None:
+    async def scenario() -> None:
+        class DenyPolicy(AIPermissionPolicy):
+            def __init__(self) -> None:
+                self.calls: list[dict] = []
+
+            def check_step(self, *, spec, args, plan_context=None):
+                self.calls.append(
+                    {
+                        "spec_name": spec.name,
+                        "args": dict(args or {}),
+                        "plan_context": dict(plan_context or {}),
+                    }
+                )
+                return PermissionDecision(False, "PERMISSION_DENIED", "blocked by test policy")
+
+        async def denied_handler(args, context):
+            raise AssertionError("permission-denied steps must not execute their handler")
+
+        db = Database(str(tmp_path / "actions.db"))
+        monkeypatch.setattr(action_store_module, "get_database", lambda: db)
+        store = AIActionStore()
+        registry = AtomicActionRegistry(
+            contact_resolver=ContactAliasResolver(db=_FakeContactDatabase([])),
+        )
+        spec = registry.get("contact.resolve")
+        assert spec is not None
+        registry._actions["contact.resolve"] = replace(spec, handler=denied_handler)
+        policy = DenyPolicy()
+        executor = AIActionExecutor(registry=registry, store=store, permission_policy=policy)
+        plan = AIActionPlan(
+            is_action=True,
+            goal="权限拒绝",
+            steps=(
+                AIActionStep(
+                    id="resolve_contacts",
+                    action="contact.resolve",
+                    args={"queries": ["张三"], "allow_multiple": True},
+                ),
+            ),
+            final={"type": "answer", "source": "$resolve_contacts"},
+        )
+        try:
+            record = await store.create_plan(
+                thread_id="thread-1",
+                goal=plan.goal,
+                plan_json=plan.to_dict(),
+                reason="test_permission_denied",
+            )
+            result = await executor.execute(record)
+            updated = await store.get_plan(record.id)
+
+            assert result.state == "failed"
+            assert result.error_text == "PERMISSION_DENIED"
+            assert policy.calls == [
+                {
+                    "spec_name": "contact.resolve",
+                    "args": {"queries": ["张三"], "allow_multiple": True},
+                    "plan_context": {
+                        "thread_id": "thread-1",
+                        "plan_id": record.id,
+                        "plan_version": 1,
+                        "step_id": "resolve_contacts",
+                        "action": "contact.resolve",
+                    },
+                }
+            ]
+            assert updated is not None
+            assert updated.state == "failed"
+            assert updated.error_text == "PERMISSION_DENIED"
+            assert updated.step_outputs == {}
+            assert updated.plan_json.get("events") is None
+        finally:
+            await db.close()
+
+    asyncio.run(scenario())
+
+
+def test_ai_permission_policy_rejects_structured_raw_content_return_request() -> None:
+    policy = AIPermissionPolicy()
+    spec = AtomicActionSpec(name="read.local", kind="read", risk_level="low", allow_raw_content_return=False)
+
+    decision = policy.check_step(spec=spec, args={"return_raw_content": True})
+
+    assert decision.allowed is False
+    assert decision.code == "PERMISSION_DENIED"
+
+
+def test_ai_permission_policy_rejects_cross_session_read_when_spec_disallows() -> None:
+    policy = AIPermissionPolicy()
+    spec = AtomicActionSpec(name="read.local", kind="read", risk_level="low", allow_cross_session=False)
+
+    decision = policy.check_step(spec=spec, args={"scope": "all_sessions"})
+
+    assert decision.allowed is False
+    assert decision.code == "PERMISSION_DENIED"
+
+
+def test_ai_permission_policy_allows_default_local_read_scope() -> None:
+    policy = AIPermissionPolicy()
+    spec = AtomicActionSpec(name="read.local", kind="read", risk_level="low")
+
+    decision = policy.check_step(spec=spec, args={"query": "test3"})
+
+    assert decision.allowed is True
+    assert decision.code == ""
 
 
 def test_ai_action_executor_validates_output_model_after_handler(tmp_path, monkeypatch) -> None:
