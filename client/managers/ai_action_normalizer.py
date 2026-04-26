@@ -46,6 +46,7 @@ class AIPlanNormalizer:
                     fallback=step.fallback,
                 )
             )
+        steps = self._ensure_reference_dependencies(steps)
         steps = self._ensure_write_confirmation(steps)
         if self._has_confirmation_without_write(steps):
             self._last_rejection_reason = "confirmation_without_write"
@@ -119,6 +120,34 @@ class AIPlanNormalizer:
                     fallback=step.fallback,
                 )
             )
+        return output
+
+    @staticmethod
+    def _ensure_reference_dependencies(steps: list[AIActionStep]) -> list[AIActionStep]:
+        output: list[AIActionStep] = []
+        seen_ids: set[str] = set()
+        for step in steps:
+            refs = _refs_in_value(step.args)
+            depends = tuple(
+                dict.fromkeys(
+                    [
+                        *step.depends_on,
+                        *(ref for ref in refs if ref in seen_ids and ref != step.id),
+                    ]
+                )
+            )
+            output.append(
+                AIActionStep(
+                    id=step.id,
+                    action=step.action,
+                    depends_on=depends,
+                    args=dict(step.args or {}),
+                    display_text=step.display_text,
+                    explanation=step.explanation,
+                    fallback=step.fallback,
+                )
+            )
+            seen_ids.add(step.id)
         return output
 
     @staticmethod

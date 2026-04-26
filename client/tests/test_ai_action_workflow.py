@@ -508,7 +508,7 @@ class _NonCanonicalAtomicSendPlanner:
                 AIActionStep(
                     id="send_message",
                     action="message.send",
-                    depends_on=("draft_message",),
+                    depends_on=("confirm_send",),
                     args={
                         "target": "$draft_message.target_entity",
                         "content": "$draft_message.content",
@@ -884,6 +884,47 @@ def test_ai_plan_normalizer_rejects_legacy_single_business_actions() -> None:
         assert normalized.is_action is False
         assert normalized.steps == ()
         assert normalized.control == {}
+
+
+def test_ai_plan_normalizer_adds_dependencies_for_existing_arg_refs() -> None:
+    normalizer = AIPlanNormalizer()
+    plan = AIActionPlan(
+        is_action=True,
+        goal="查询历史",
+        risk="low",
+        steps=(
+            AIActionStep(
+                id="resolve_contacts",
+                action="contact.resolve",
+                args={"queries": ["test3"], "allow_multiple": True},
+            ),
+            AIActionStep(
+                id="search_memory",
+                action="memory.search",
+                args={
+                    "participants": "$resolve_contacts.contacts",
+                    "participant_match": "any",
+                    "time_scope": {"type": "all_history"},
+                    "keywords": [],
+                    "question": "我和 test3 聊过什么？",
+                },
+            ),
+            AIActionStep(
+                id="summarize_memory",
+                action="memory.summarize",
+                args={"source": "$search_memory", "question": "我和 test3 聊过什么？"},
+            ),
+        ),
+        final={"type": "answer", "source": "$summarize_memory"},
+    )
+
+    normalized = normalizer.normalize(plan, user_text="我和 test3 聊过什么？")
+
+    assert normalized.is_action is True
+    search = next(step for step in normalized.steps if step.id == "search_memory")
+    summarize = next(step for step in normalized.steps if step.id == "summarize_memory")
+    assert search.depends_on == ("resolve_contacts",)
+    assert summarize.depends_on == ("search_memory",)
 
 
 def test_ai_plan_validator_rejects_unresolved_step_reference() -> None:
@@ -1546,6 +1587,7 @@ def test_ai_action_workflow_canonicalizes_noncanonical_send_confirmation(tmp_pat
             assert record is not None
             send = next(step for step in record.plan_json["steps"] if step["action"] == "message.send")
             assert "confirm_send" in send["depends_on"]
+            assert "draft_message" in send["depends_on"]
         finally:
             await db.close()
 
