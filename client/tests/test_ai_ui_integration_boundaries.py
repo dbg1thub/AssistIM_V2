@@ -547,8 +547,8 @@ def test_ai_assistant_action_confirmation_controls_continue_pending_plan() -> No
     assert 'self.message.message_id, "cancel"' in assistant_interface
     assert "wrapper.card.actionRequested.connect(self._on_action_message_requested)" in assistant_interface
     assert "async def _continue_action_from_message" in assistant_interface
-    assert 'reply_text = "确认" if normalized_command == "confirm" else "取消"' in assistant_interface
-    assert "await self._action_workflow.handle_user_turn(" in assistant_interface
+    assert "await self._action_workflow.handle_pending_control(" in assistant_interface
+    assert "control_type=normalized_command" in assistant_interface
 
 
 def test_ai_assistant_regenerate_capability_exists_without_visible_entry() -> None:

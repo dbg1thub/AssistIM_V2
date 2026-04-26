@@ -1218,11 +1218,9 @@ class AIAssistantInterface(QWidget):
         card = self._message_cards.get(normalized_message_id)
         if card is not None:
             card.action_confirmation_frame.setEnabled(False)
-        reply_text = "确认" if normalized_command == "confirm" else "取消"
-        action_result = await self._action_workflow.handle_user_turn(
+        action_result = await self._action_workflow.handle_pending_control(
             thread_id=message.thread_id,
-            text=reply_text,
-            has_attachments=False,
+            control_type=normalized_command,
         )
         if not action_result.handled:
             if card is not None:

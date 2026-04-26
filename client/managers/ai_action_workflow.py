@@ -672,6 +672,46 @@ class AIActionWorkflow:
         log_perf(str(turn.message_extra.get("ai_action", {}).get("state") or "done"), handled=turn.handled, plan=optimized_plan)
         return turn
 
+    async def handle_pending_control(
+        self,
+        *,
+        thread_id: str,
+        control_type: str,
+    ) -> AIActionTurnResult:
+        normalized_thread_id = str(thread_id or "").strip()
+        normalized_control = str(control_type or "").strip().lower()
+        if not normalized_thread_id or normalized_control not in {"confirm", "cancel"}:
+            logger.info(
+                "[ai-diag] ai_action_pending_control_skipped thread_id=%s control=%s reason=invalid_input",
+                normalized_thread_id,
+                normalized_control,
+            )
+            return AIActionTurnResult(handled=False)
+        pending = await self._store.latest_pending_plan(normalized_thread_id)
+        if pending is None:
+            logger.info(
+                "[ai-diag] ai_action_pending_control_skipped thread_id=%s control=%s reason=no_pending",
+                normalized_thread_id,
+                normalized_control,
+            )
+            return AIActionTurnResult(handled=False)
+        logger.info(
+            "[ai-diag] ai_action_pending_control thread_id=%s plan_id=%s state=%s control=%s",
+            normalized_thread_id,
+            pending.id,
+            pending.state,
+            normalized_control,
+        )
+        if normalized_control == "cancel":
+            return await self._cancel_pending(pending)
+        if pending.state == "waiting_confirmation":
+            return await self._confirm_pending(pending)
+        return AIActionTurnResult(
+            handled=True,
+            response_text=str(pending.waiting_payload.get("response_text") or "这个操作还在等待补充信息。"),
+            message_extra={"ai_action": self._extra(pending)},
+        )
+
     async def finish_streamed_action(self, extra: dict[str, Any] | None, *, content: str, status: str) -> None:
         data = dict((extra or {}).get("ai_action") or {})
         plan_id = str(data.get("plan_id") or data.get("id") or "").strip()

@@ -3321,6 +3321,94 @@ def test_ai_action_workflow_sends_message_after_confirmation(tmp_path, monkeypat
     asyncio.run(scenario())
 
 
+def test_ai_action_workflow_structured_confirm_bypasses_pending_planner(tmp_path, monkeypatch) -> None:
+    async def scenario() -> None:
+        db = Database(str(tmp_path / "actions.db"))
+        monkeypatch.setattr(action_store_module, "get_database", lambda: db)
+        store = AIActionStore()
+        contact_db = _FakeContactDatabase(
+            [
+                {
+                    "id": "user-1",
+                    "display_name": "张三",
+                    "username": "zhangsan",
+                    "nickname": "张三",
+                    "remark": "张三",
+                    "assistim_id": "zhangsan",
+                }
+            ]
+        )
+        planner = _PendingNonControlPlanner()
+        message_sender = _FakeActionMessageSender()
+        workflow = AIActionWorkflow(
+            action_store=store,
+            planner=planner,
+            contact_alias_resolver=ContactAliasResolver(db=contact_db),
+            message_sender=message_sender,
+        )
+        try:
+            first = await workflow.handle_user_turn(thread_id="thread-1", text="帮我给张三发我晚点到")
+            assert first.handled is True
+            assert first.message_extra["ai_action"]["state"] == "waiting_confirmation"
+
+            confirmed = await workflow.handle_pending_control(thread_id="thread-1", control_type="confirm")
+
+            assert confirmed.handled is True
+            assert "已发送给张三" in confirmed.response_text
+            assert confirmed.message_extra["ai_action"]["state"] == "done"
+            assert len(message_sender.calls) == 1
+            assert planner.calls == [("帮我给张三发我晚点到", False)]
+        finally:
+            await db.close()
+
+    asyncio.run(scenario())
+
+
+def test_ai_action_workflow_structured_cancel_bypasses_pending_planner(tmp_path, monkeypatch) -> None:
+    async def scenario() -> None:
+        db = Database(str(tmp_path / "actions.db"))
+        monkeypatch.setattr(action_store_module, "get_database", lambda: db)
+        store = AIActionStore()
+        contact_db = _FakeContactDatabase(
+            [
+                {
+                    "id": "user-1",
+                    "display_name": "张三",
+                    "username": "zhangsan",
+                    "nickname": "张三",
+                    "remark": "张三",
+                    "assistim_id": "zhangsan",
+                }
+            ]
+        )
+        planner = _PendingNonControlPlanner()
+        message_sender = _FakeActionMessageSender()
+        workflow = AIActionWorkflow(
+            action_store=store,
+            planner=planner,
+            contact_alias_resolver=ContactAliasResolver(db=contact_db),
+            message_sender=message_sender,
+        )
+        try:
+            first = await workflow.handle_user_turn(thread_id="thread-1", text="帮我给张三发我晚点到")
+            plan_id = first.message_extra["ai_action"]["plan_id"]
+
+            cancelled = await workflow.handle_pending_control(thread_id="thread-1", control_type="cancel")
+            record = await store.get_plan(plan_id)
+
+            assert cancelled.handled is True
+            assert cancelled.response_text == "已取消这个操作。"
+            assert cancelled.message_extra["ai_action"]["state"] == "cancelled"
+            assert record is not None
+            assert record.state == "cancelled"
+            assert message_sender.calls == []
+            assert planner.calls == [("帮我给张三发我晚点到", False)]
+        finally:
+            await db.close()
+
+    asyncio.run(scenario())
+
+
 def test_ai_action_workflow_reports_missing_send_session_after_confirmation(tmp_path, monkeypatch) -> None:
     async def scenario() -> None:
         db = Database(str(tmp_path / "actions.db"))
