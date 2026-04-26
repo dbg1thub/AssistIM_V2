@@ -620,7 +620,12 @@ class AIActionWorkflow:
         resource_check_ms = _elapsed_ms(resource_started)
         if not resource.allowed:
             log_perf("waiting_clarification", handled=True, plan=optimized_plan)
-            return await self._create_resource_clarification(thread_id, optimized_plan, resource.response_text)
+            return await self._create_resource_clarification(
+                thread_id,
+                optimized_plan,
+                resource.response_text,
+                resource_reason=resource.reason,
+            )
 
         plan_json = optimized_plan.to_dict()
         record = await self._store.create_plan(
@@ -856,7 +861,14 @@ class AIActionWorkflow:
             message_extra={"ai_action": self._extra(record, state=record.state)},
         )
 
-    async def _create_resource_clarification(self, thread_id: str, plan: AIActionPlan, response_text: str) -> AIActionTurnResult:
+    async def _create_resource_clarification(
+        self,
+        thread_id: str,
+        plan: AIActionPlan,
+        response_text: str,
+        *,
+        resource_reason: str,
+    ) -> AIActionTurnResult:
         plan_json = plan.to_dict()
         record = await self._store.create_plan(
             thread_id=thread_id,
@@ -867,7 +879,12 @@ class AIActionWorkflow:
         )
         await self._store.update_plan(
             record.id,
-            waiting_payload={"type": "clarification", "reason": "resource_limit", "response_text": response_text},
+            waiting_payload={
+                "type": "clarification",
+                "reason": "resource_limit",
+                "resource_reason": str(resource_reason or "").strip(),
+                "response_text": response_text,
+            },
         )
         latest = await self._store.get_plan(record.id) or record
         return AIActionTurnResult(handled=True, response_text=response_text, message_extra={"ai_action": self._extra(latest)})

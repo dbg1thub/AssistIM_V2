@@ -406,6 +406,133 @@ class _DuplicateResolvePlanner:
         )
 
 
+class _TooManyStepsPlanner:
+    async def plan(self, *args, **kwargs):
+        user_text = str(args[0] if args else "").strip()
+        del kwargs
+        steps = []
+        for index in range(1, 22):
+            step_id = f"search_{index}"
+            steps.append(
+                AIActionStep(
+                    id=step_id,
+                    action="memory.search",
+                    depends_on=(f"search_{index - 1}",) if index > 1 else (),
+                    args={
+                        "participant_match": "any",
+                        "time_scope": {"type": "all_history"},
+                        "keywords": [],
+                        "question": user_text,
+                    },
+                )
+            )
+        return AIActionPlan(
+            is_action=True,
+            goal=user_text,
+            risk="low",
+            steps=tuple(steps),
+            final={"type": "answer", "source": "$search_21.context_lines"},
+        )
+
+
+class _TooManyContactsPlanner:
+    async def plan(self, *args, **kwargs):
+        user_text = str(args[0] if args else "").strip()
+        del kwargs
+        return AIActionPlan(
+            is_action=True,
+            goal=user_text,
+            risk="low",
+            steps=(
+                AIActionStep(
+                    id="resolve_contacts",
+                    action="contact.resolve",
+                    args={"queries": [f"用户{index}" for index in range(1, 7)], "allow_multiple": True},
+                ),
+            ),
+            final={"type": "answer", "source": "$resolve_contacts.contacts"},
+        )
+
+
+class _TooManyWriteActionsPlanner:
+    async def plan(self, *args, **kwargs):
+        user_text = str(args[0] if args else "").strip()
+        del kwargs
+        return AIActionPlan(
+            is_action=True,
+            goal=user_text,
+            risk="high",
+            steps=(
+                AIActionStep(
+                    id="resolve_target",
+                    action="contact.resolve",
+                    args={"queries": ["张三"], "allow_multiple": False},
+                ),
+                AIActionStep(
+                    id="draft_first",
+                    action="message.draft",
+                    depends_on=("resolve_target",),
+                    args={"target": "$resolve_target.contacts[0]", "content": "第一条"},
+                ),
+                AIActionStep(
+                    id="confirm_first",
+                    action="user.confirm",
+                    depends_on=("draft_first",),
+                    args={
+                        "risk": "high",
+                        "preview": {
+                            "operation": "发送消息",
+                            "target": "$draft_first.target",
+                            "content": "$draft_first.content",
+                        },
+                    },
+                ),
+                AIActionStep(
+                    id="send_first",
+                    action="message.send",
+                    depends_on=("confirm_first", "draft_first"),
+                    args={
+                        "target": "$draft_first.target_entity",
+                        "content": "$draft_first.content",
+                        "preview": "$draft_first.preview",
+                        "idempotency_key": "$draft_first.idempotency_key",
+                    },
+                ),
+                AIActionStep(
+                    id="draft_second",
+                    action="message.draft",
+                    depends_on=("resolve_target",),
+                    args={"target": "$resolve_target.contacts[0]", "content": "第二条"},
+                ),
+                AIActionStep(
+                    id="confirm_second",
+                    action="user.confirm",
+                    depends_on=("draft_second",),
+                    args={
+                        "risk": "high",
+                        "preview": {
+                            "operation": "发送消息",
+                            "target": "$draft_second.target",
+                            "content": "$draft_second.content",
+                        },
+                    },
+                ),
+                AIActionStep(
+                    id="send_second",
+                    action="message.send",
+                    depends_on=("confirm_second", "draft_second"),
+                    args={
+                        "target": "$draft_second.target_entity",
+                        "content": "$draft_second.content",
+                        "preview": "$draft_second.preview",
+                        "idempotency_key": "$draft_second.idempotency_key",
+                    },
+                ),
+            ),
+            final={"type": "answer", "source": "$send_second.text"},
+        )
+
+
 class _InvalidReferenceThenFixedPlanner:
     def __init__(self) -> None:
         self.plan_calls = 0
@@ -1263,6 +1390,116 @@ def test_ai_action_workflow_checks_resources_after_safe_optimizer(tmp_path, monk
             plan = await store.get_plan(result.message_extra["ai_action"]["plan_id"])
             assert plan is not None
             assert plan.plan_version == 2
+        finally:
+            await db.close()
+
+    asyncio.run(scenario())
+
+
+def test_ai_action_workflow_records_too_many_steps_resource_reason(tmp_path, monkeypatch) -> None:
+    async def scenario() -> None:
+        db = Database(str(tmp_path / "actions.db"))
+        monkeypatch.setattr(action_store_module, "get_database", lambda: db)
+        store = AIActionStore()
+        memory_manager = _FakeActionMemoryManager()
+        workflow = AIActionWorkflow(
+            action_store=store,
+            planner=_TooManyStepsPlanner(),
+            memory_manager=memory_manager,
+        )
+        try:
+            result = await workflow.handle_user_turn(thread_id="thread-1", text="帮我查很多内容")
+            assert result.handled is True
+            action_extra = result.message_extra["ai_action"]
+            assert action_extra["state"] == "waiting_clarification"
+            assert "步骤太多" in result.response_text
+            assert action_extra["waiting"]["reason"] == "resource_limit"
+            assert action_extra["waiting"]["resource_reason"] == "too_many_steps"
+
+            plan = await store.get_plan(action_extra["plan_id"])
+            assert plan is not None
+            assert plan.state == "waiting_clarification"
+            assert plan.waiting_payload["resource_reason"] == "too_many_steps"
+            assert plan.current_step_id == ""
+            assert plan.step_outputs == {}
+            assert memory_manager.calls == []
+        finally:
+            await db.close()
+
+    asyncio.run(scenario())
+
+
+def test_ai_action_workflow_records_too_many_contacts_resource_reason(tmp_path, monkeypatch) -> None:
+    async def scenario() -> None:
+        db = Database(str(tmp_path / "actions.db"))
+        monkeypatch.setattr(action_store_module, "get_database", lambda: db)
+        store = AIActionStore()
+        contact_db = _FakeContactDatabase([])
+        workflow = AIActionWorkflow(
+            action_store=store,
+            planner=_TooManyContactsPlanner(),
+            contact_alias_resolver=ContactAliasResolver(db=contact_db),
+        )
+        try:
+            result = await workflow.handle_user_turn(thread_id="thread-1", text="帮我找很多联系人")
+            assert result.handled is True
+            action_extra = result.message_extra["ai_action"]
+            assert action_extra["state"] == "waiting_clarification"
+            assert "最多处理 5 个" in result.response_text
+            assert action_extra["waiting"]["reason"] == "resource_limit"
+            assert action_extra["waiting"]["resource_reason"] == "too_many_contacts"
+
+            plan = await store.get_plan(action_extra["plan_id"])
+            assert plan is not None
+            assert plan.state == "waiting_clarification"
+            assert plan.waiting_payload["resource_reason"] == "too_many_contacts"
+            assert plan.current_step_id == ""
+            assert plan.step_outputs == {}
+            assert contact_db.resolve_calls == []
+        finally:
+            await db.close()
+
+    asyncio.run(scenario())
+
+
+def test_ai_action_workflow_records_too_many_write_actions_resource_reason(tmp_path, monkeypatch) -> None:
+    async def scenario() -> None:
+        db = Database(str(tmp_path / "actions.db"))
+        monkeypatch.setattr(action_store_module, "get_database", lambda: db)
+        store = AIActionStore()
+        contact_db = _FakeContactDatabase(
+            [
+                {
+                    "id": "user-1",
+                    "display_name": "张三",
+                    "username": "zhangsan",
+                    "nickname": "张三",
+                    "remark": "张三",
+                    "assistim_id": "zhangsan",
+                }
+            ]
+        )
+        workflow = AIActionWorkflow(
+            action_store=store,
+            planner=_TooManyWriteActionsPlanner(),
+            contact_alias_resolver=ContactAliasResolver(db=contact_db),
+        )
+        try:
+            result = await workflow.handle_user_turn(thread_id="thread-1", text="帮我连续发两条消息")
+            assert result.handled is True
+            action_extra = result.message_extra["ai_action"]
+            assert action_extra["state"] == "waiting_clarification"
+            assert "一次只能确认一个" in result.response_text
+            assert action_extra["waiting"]["reason"] == "resource_limit"
+            assert action_extra["waiting"]["resource_reason"] == "too_many_write_actions"
+
+            plan = await store.get_plan(action_extra["plan_id"])
+            assert plan is not None
+            assert plan.state == "waiting_clarification"
+            assert plan.waiting_payload["resource_reason"] == "too_many_write_actions"
+            assert plan.current_step_id == ""
+            assert plan.step_outputs == {}
+            assert contact_db.resolve_calls == []
         finally:
             await db.close()
 
