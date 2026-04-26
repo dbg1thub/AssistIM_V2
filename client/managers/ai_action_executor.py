@@ -52,13 +52,31 @@ class AIActionExecutor:
                 continue
             missing_deps = [dep for dep in step.depends_on if dep not in outputs]
             if missing_deps:
-                return await self._fail(record, outputs, f"ARG_REFERENCE_INVALID: missing dependency {missing_deps[0]}")
+                return await self._fail_step_before_handler(
+                    record,
+                    outputs,
+                    events,
+                    step,
+                    f"ARG_REFERENCE_INVALID: missing dependency {missing_deps[0]}",
+                )
 
             spec = self._registry.get(step.action)
             if spec is None:
-                return await self._fail(record, outputs, f"ACTION_NOT_FOUND: {step.action}")
+                return await self._fail_step_before_handler(
+                    record,
+                    outputs,
+                    events,
+                    step,
+                    f"ACTION_NOT_FOUND: {step.action}",
+                )
             if not spec.enabled and step.action != "message.send":
-                return await self._fail(record, outputs, f"ACTION_DISABLED: {step.action}")
+                return await self._fail_step_before_handler(
+                    record,
+                    outputs,
+                    events,
+                    step,
+                    f"ACTION_DISABLED: {step.action}",
+                )
 
             try:
                 resolved_args = _resolve_refs(step.args, outputs)
@@ -66,7 +84,7 @@ class AIActionExecutor:
                 validated_args = _validate_input(spec, resolved_args)
                 self._check_guardrails(spec, validated_args)
             except ValueError as exc:
-                return await self._fail(record, outputs, str(exc))
+                return await self._fail_step_before_handler(record, outputs, events, step, str(exc))
 
             permission = self._permission_policy.check_step(
                 spec=spec,
@@ -80,7 +98,13 @@ class AIActionExecutor:
                 },
             )
             if not permission.allowed:
-                return await self._fail(record, outputs, permission.code or "PERMISSION_DENIED")
+                return await self._fail_step_before_handler(
+                    record,
+                    outputs,
+                    events,
+                    step,
+                    permission.code or "PERMISSION_DENIED",
+                )
 
             _append_step_event(
                 events,
@@ -343,6 +367,36 @@ class AIActionExecutor:
             record.id,
             state="failed",
             step_outputs=outputs,
+            error_text=error_text,
+            completed_at=time.time(),
+        )
+        return ActionExecutionResult(state="failed", response_text="这个操作执行失败，请稍后再试。", error_text=error_text)
+
+    async def _fail_step_before_handler(
+        self,
+        record: AIActionPlanRecord,
+        outputs: dict[str, Any],
+        events: list[dict[str, Any]],
+        step: Any,
+        error_text: str,
+    ) -> ActionExecutionResult:
+        _append_step_event(
+            events,
+            record_id=record.id,
+            step=step,
+            event_type="step_failed",
+            state="failed",
+            error_text=error_text,
+        )
+        await self._store.update_plan(
+            record.id,
+            plan_json=_plan_json_with_events(record.plan_json, events),
+            reason=f"step_failed_{str(getattr(step, 'id', '') or '')}",
+            bump_version=False,
+            state="failed",
+            current_step_id=str(getattr(step, "id", "") or ""),
+            step_outputs=outputs,
+            waiting_payload={},
             error_text=error_text,
             completed_at=time.time(),
         )

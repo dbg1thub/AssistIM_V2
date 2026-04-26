@@ -1928,7 +1928,10 @@ def test_ai_action_executor_passes_permission_context_and_skips_denied_handler(t
             assert updated.state == "failed"
             assert updated.error_text == "PERMISSION_DENIED"
             assert updated.step_outputs == {}
-            assert updated.plan_json.get("events") is None
+            assert [event["type"] for event in updated.plan_json["events"]] == ["step_failed"]
+            assert updated.plan_json["events"][0]["step_id"] == "resolve_contacts"
+            assert updated.plan_json["events"][0]["action"] == "contact.resolve"
+            assert updated.plan_json["events"][0]["error_code"] == "PERMISSION_DENIED"
         finally:
             await db.close()
 
@@ -2310,8 +2313,65 @@ def test_ai_action_executor_rejects_spec_guardrail_violations_before_handler(tmp
                 assert updated.state == "failed", case["name"]
                 assert updated.error_text == case["error"], case["name"]
                 assert updated.step_outputs == {}, case["name"]
+                assert [event["type"] for event in updated.plan_json["events"]] == ["step_failed"], case["name"]
+                assert updated.plan_json["events"][0]["step_id"] == "guarded_step", case["name"]
+                assert updated.plan_json["events"][0]["action"] == case["action"], case["name"]
+                assert updated.plan_json["events"][0]["error_code"] == case["error"].split(":", 1)[0], case["name"]
             finally:
                 await db.close()
+
+    asyncio.run(scenario())
+
+
+def test_ai_action_executor_records_step_failed_event_for_missing_dependency(tmp_path, monkeypatch) -> None:
+    async def scenario() -> None:
+        db = Database(str(tmp_path / "actions.db"))
+        monkeypatch.setattr(action_store_module, "get_database", lambda: db)
+        store = AIActionStore()
+        registry = AtomicActionRegistry(
+            contact_resolver=ContactAliasResolver(db=_FakeContactDatabase([])),
+        )
+        executor = AIActionExecutor(registry=registry, store=store)
+        plan = AIActionPlan(
+            is_action=True,
+            goal="缺失依赖",
+            steps=(
+                AIActionStep(
+                    id="search_memory",
+                    action="memory.search",
+                    depends_on=("missing_step",),
+                    args={
+                        "question": "聊过什么",
+                        "participants": ["张三"],
+                        "participant_match": "any",
+                        "time_scope": {"type": "all_history"},
+                    },
+                ),
+            ),
+            final={"type": "answer", "source": "$search_memory"},
+        )
+        try:
+            record = await store.create_plan(
+                thread_id="thread-1",
+                goal=plan.goal,
+                plan_json=plan.to_dict(),
+                reason="test_missing_dependency_event",
+            )
+            result = await executor.execute(record)
+            updated = await store.get_plan(record.id)
+
+            assert result.state == "failed"
+            assert result.error_text == "ARG_REFERENCE_INVALID: missing dependency missing_step"
+            assert updated is not None
+            assert updated.state == "failed"
+            assert updated.error_text == "ARG_REFERENCE_INVALID: missing dependency missing_step"
+            assert updated.step_outputs == {}
+            assert [event["type"] for event in updated.plan_json["events"]] == ["step_failed"]
+            assert updated.plan_json["events"][0]["step_id"] == "search_memory"
+            assert updated.plan_json["events"][0]["action"] == "memory.search"
+            assert updated.plan_json["events"][0]["error_code"] == "ARG_REFERENCE_INVALID"
+        finally:
+            await db.close()
 
     asyncio.run(scenario())
 
