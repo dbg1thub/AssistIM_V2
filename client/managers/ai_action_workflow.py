@@ -750,6 +750,12 @@ class AIActionWorkflow:
 
     async def _confirm_pending(self, pending: AIActionPlanRecord) -> AIActionTurnResult:
         waiting = dict(pending.waiting_payload or {})
+        if self._pending_confirmation_is_stale(pending, waiting):
+            return AIActionTurnResult(
+                handled=True,
+                response_text="操作内容已变化，请重新发起这个操作。",
+                message_extra={"ai_action": self._extra(pending)},
+            )
         outputs = dict(pending.step_outputs or {})
         outputs[pending.current_step_id] = {
             "confirmed": True,
@@ -764,6 +770,19 @@ class AIActionWorkflow:
             waiting_payload={},
         )
         return await self._execute_to_turn(updated or pending)
+
+    @staticmethod
+    def _pending_confirmation_is_stale(pending: AIActionPlanRecord, waiting: dict[str, Any]) -> bool:
+        if str(waiting.get("type") or "").strip() != "confirmation":
+            return True
+        waiting_step_id = str(waiting.get("step_id") or "").strip()
+        if not waiting_step_id or waiting_step_id != str(pending.current_step_id or "").strip():
+            return True
+        try:
+            waiting_plan_version = int(waiting.get("plan_version") or 0)
+        except (TypeError, ValueError):
+            waiting_plan_version = 0
+        return waiting_plan_version <= 0 or waiting_plan_version != int(pending.plan_version or 0)
 
     async def _select_pending_contact(self, pending: AIActionPlanRecord, selection: str) -> AIActionTurnResult:
         waiting = dict(pending.waiting_payload or {})
