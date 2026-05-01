@@ -11,7 +11,7 @@ from client.managers.ai_action_memory_summarizer import AIActionMemorySummarizer
 from client.managers.ai_action_normalizer import AIPlanNormalizer
 from client.managers.ai_action_optimizer import AIPlanOptimizer
 from client.managers.ai_action_permission_policy import AIPermissionPolicy, AIPermissionScope, PermissionDecision
-from client.managers.ai_action_resource_manager import AIResourceManager
+from client.managers.ai_action_resource_manager import AIResourceManager, ResourceBudget
 from client.managers.ai_action_registry import AIActionMessageSender, AtomicActionRegistry
 from client.managers.ai_action_types import AIActionPlan, AIActionStep, AtomicActionSpec
 from client.managers.ai_action_validator import AIPlanValidator
@@ -794,6 +794,36 @@ class _TooManyMemoryResultsPlanner:
         )
 
 
+class _TokenBudgetPlanner:
+    async def plan(self, *args, **kwargs):
+        user_text = str(args[0] if args else "").strip()
+        del kwargs
+        return AIActionPlan(
+            is_action=True,
+            goal=user_text,
+            risk="low",
+            steps=(
+                AIActionStep(
+                    id="search_memory",
+                    action="memory.search",
+                    args={
+                        "participant_match": "any",
+                        "time_scope": {"type": "all_history"},
+                        "keywords": [],
+                        "question": user_text,
+                    },
+                ),
+                AIActionStep(
+                    id="summarize_memory",
+                    action="memory.summarize",
+                    depends_on=("search_memory",),
+                    args={"source": "$search_memory", "question": user_text},
+                ),
+            ),
+            final={"type": "answer", "source": "$summarize_memory"},
+        )
+
+
 class _InvalidReferenceThenFixedPlanner:
     def __init__(self) -> None:
         self.plan_calls = 0
@@ -1222,8 +1252,16 @@ def test_ai_action_registry_default_specs_declare_platform_boundaries() -> None:
         assert spec.max_input_bytes > 0
         assert spec.max_output_json_bytes > 0
         assert spec.timeout_ms > 0
+        assert spec.estimated_input_tokens >= 0
+        assert spec.estimated_output_tokens >= 0
         if spec.kind == "read":
             assert spec.allow_side_effect is False
+
+    summarize = registry.get("memory.summarize")
+    assert summarize is not None
+    assert summarize.model_call_cost == 1
+    assert summarize.estimated_input_tokens > 0
+    assert summarize.estimated_output_tokens > 0
 
     send = registry.get("message.send")
     assert send is not None
@@ -1242,6 +1280,8 @@ def test_ai_action_registry_default_specs_declare_platform_boundaries() -> None:
 def test_ai_action_registry_rejects_invalid_platform_boundaries() -> None:
     invalid_specs = [
         AtomicActionSpec(name="test.bad_read", kind="read", risk_level="low", allow_side_effect=True),
+        AtomicActionSpec(name="test.bad_input_tokens", kind="read", risk_level="low", estimated_input_tokens=-1),
+        AtomicActionSpec(name="test.bad_output_tokens", kind="read", risk_level="low", estimated_output_tokens=-1),
         AtomicActionSpec(name="test.bad_write_risk", kind="write", risk_level="medium", allow_side_effect=True),
         AtomicActionSpec(name="test.bad_write_effect", kind="write", risk_level="high", allow_side_effect=False),
         AtomicActionSpec(
@@ -2240,6 +2280,117 @@ def test_ai_action_workflow_records_too_many_memory_results_resource_reason(tmp_
             await db.close()
 
     asyncio.run(scenario())
+
+
+def test_ai_action_workflow_records_too_many_input_tokens_resource_reason(tmp_path, monkeypatch) -> None:
+    async def scenario() -> None:
+        db = Database(str(tmp_path / "actions.db"))
+        monkeypatch.setattr(action_store_module, "get_database", lambda: db)
+        store = AIActionStore()
+        memory_manager = _FakeActionMemoryManager(context_lines=["项目排期"])
+        memory_summarizer = _FakeMemorySummarizer()
+        workflow = AIActionWorkflow(
+            action_store=store,
+            planner=_TokenBudgetPlanner(),
+            memory_manager=memory_manager,
+            memory_summarizer=memory_summarizer,
+        )
+        workflow._resource_manager = AIResourceManager(
+            registry=workflow._registry,
+            budget=ResourceBudget(max_total_input_tokens=1, max_total_output_tokens=999999),
+        )
+        try:
+            result = await workflow.handle_user_turn(thread_id="thread-1", text="帮我总结聊天记录")
+            assert result.handled is True
+            action_extra = result.message_extra["ai_action"]
+            assert action_extra["state"] == "waiting_clarification"
+            assert "上下文" in result.response_text
+            assert action_extra["waiting"]["reason"] == "resource_limit"
+            assert action_extra["waiting"]["resource_reason"] == "too_many_input_tokens"
+            assert action_extra["waiting"]["resource_estimate"]["input_tokens"] > 1
+
+            plan = await store.get_plan(action_extra["plan_id"])
+            assert plan is not None
+            assert plan.state == "waiting_clarification"
+            assert plan.waiting_payload["resource_reason"] == "too_many_input_tokens"
+            assert plan.waiting_payload["resource_estimate"]["input_tokens"] > 1
+            assert plan.current_step_id == ""
+            assert plan.step_outputs == {}
+            assert memory_manager.calls == []
+            assert memory_summarizer.calls == []
+        finally:
+            await db.close()
+
+    asyncio.run(scenario())
+
+
+def test_ai_action_workflow_records_too_many_output_tokens_resource_reason(tmp_path, monkeypatch) -> None:
+    async def scenario() -> None:
+        db = Database(str(tmp_path / "actions.db"))
+        monkeypatch.setattr(action_store_module, "get_database", lambda: db)
+        store = AIActionStore()
+        memory_manager = _FakeActionMemoryManager(context_lines=["项目排期"])
+        memory_summarizer = _FakeMemorySummarizer()
+        workflow = AIActionWorkflow(
+            action_store=store,
+            planner=_TokenBudgetPlanner(),
+            memory_manager=memory_manager,
+            memory_summarizer=memory_summarizer,
+        )
+        workflow._resource_manager = AIResourceManager(
+            registry=workflow._registry,
+            budget=ResourceBudget(max_total_input_tokens=999999, max_total_output_tokens=1),
+        )
+        try:
+            result = await workflow.handle_user_turn(thread_id="thread-1", text="帮我总结聊天记录")
+            assert result.handled is True
+            action_extra = result.message_extra["ai_action"]
+            assert action_extra["state"] == "waiting_clarification"
+            assert "过长" in result.response_text
+            assert action_extra["waiting"]["reason"] == "resource_limit"
+            assert action_extra["waiting"]["resource_reason"] == "too_many_output_tokens"
+            assert action_extra["waiting"]["resource_estimate"]["output_tokens"] > 1
+
+            plan = await store.get_plan(action_extra["plan_id"])
+            assert plan is not None
+            assert plan.state == "waiting_clarification"
+            assert plan.waiting_payload["resource_reason"] == "too_many_output_tokens"
+            assert plan.waiting_payload["resource_estimate"]["output_tokens"] > 1
+            assert plan.current_step_id == ""
+            assert plan.step_outputs == {}
+            assert memory_manager.calls == []
+            assert memory_summarizer.calls == []
+        finally:
+            await db.close()
+
+    asyncio.run(scenario())
+
+
+def test_ai_action_resource_manager_does_not_apply_token_budget_to_plain_read_action() -> None:
+    registry = AtomicActionRegistry(contact_resolver=SimpleNamespace())
+    manager = AIResourceManager(
+        registry=registry,
+        budget=ResourceBudget(max_total_input_tokens=0, max_total_output_tokens=0),
+    )
+    plan = AIActionPlan(
+        is_action=True,
+        goal="解析联系人",
+        risk="low",
+        steps=(
+            AIActionStep(
+                id="resolve_contacts",
+                action="contact.resolve",
+                args={"queries": ["test3"], "allow_multiple": True},
+            ),
+        ),
+        final={"type": "answer", "source": "$resolve_contacts"},
+    )
+
+    result = manager.check_plan(plan)
+
+    assert result.allowed is True
+    assert result.estimate["input_tokens"] == 0
+    assert result.estimate["output_tokens"] == 0
 
 
 def test_ai_action_workflow_ignores_regular_chat(tmp_path, monkeypatch) -> None:

@@ -252,6 +252,8 @@ class AtomicActionRegistry:
                 max_input_bytes=32768,
                 max_output_json_bytes=32768,
                 model_call_cost=1,
+                estimated_input_tokens=2048,
+                estimated_output_tokens=512,
             )
         )
         self._register(
@@ -1022,6 +1024,13 @@ def _validate_action_spec(spec: AtomicActionSpec) -> None:
         raise ValueError(f"ACTION_SPEC_INVALID: {name}: max_retries") from exc
     if max_retries < 0:
         raise ValueError(f"ACTION_SPEC_INVALID: {name}: max_retries")
+    for attr in ("model_call_cost", "estimated_input_tokens", "estimated_output_tokens"):
+        try:
+            value = int(getattr(spec, attr, 0) or 0)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"ACTION_SPEC_INVALID: {name}: {attr}") from exc
+        if value < 0:
+            raise ValueError(f"ACTION_SPEC_INVALID: {name}: {attr}")
     if kind == "read":
         if bool(getattr(spec, "allow_side_effect", False)):
             raise ValueError(f"ACTION_SPEC_INVALID: {name}: read_side_effect")

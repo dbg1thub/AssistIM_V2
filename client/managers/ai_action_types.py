@@ -216,6 +216,8 @@ class AtomicActionSpec:
     supports_compensation: bool = False
     compensate_action: str | None = None
     model_call_cost: int = 0
+    estimated_input_tokens: int = 0
+    estimated_output_tokens: int = 0
     target_arg_names: tuple[str, ...] = ()
     result_budget_kind: str = ""
     result_limit_arg_names: tuple[str, ...] = ()

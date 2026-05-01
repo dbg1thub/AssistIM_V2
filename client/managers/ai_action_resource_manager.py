@@ -15,6 +15,8 @@ class ResourceBudget:
     max_write_actions_per_plan: int = 1
     max_total_model_calls: int = 3
     max_memory_results: int = 80
+    max_total_input_tokens: int = 8192
+    max_total_output_tokens: int = 4096
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,6 +74,20 @@ class AIResourceManager:
                 response_text="这个操作预计会读取过多检索结果，请缩小联系人、时间范围或关键词后再试。",
                 estimate=estimate,
             )
+        if estimate["input_tokens"] > self._budget.max_total_input_tokens:
+            return ResourceCheckResult(
+                allowed=False,
+                reason="too_many_input_tokens",
+                response_text="这个操作预计需要读取过多上下文，请缩小联系人、时间范围或关键词后再试。",
+                estimate=estimate,
+            )
+        if estimate["output_tokens"] > self._budget.max_total_output_tokens:
+            return ResourceCheckResult(
+                allowed=False,
+                reason="too_many_output_tokens",
+                response_text="这个操作预计会生成过长结果，请缩小问题范围或要求更简短。",
+                estimate=estimate,
+            )
         return ResourceCheckResult(allowed=True, estimate=estimate)
 
     def estimate_plan(self, plan: AIActionPlan) -> dict[str, int]:
@@ -82,6 +98,8 @@ class AIResourceManager:
             "write_actions": 0,
             "model_calls": 0,
             "memory_results": 0,
+            "input_tokens": 0,
+            "output_tokens": 0,
         }
         for step in plan.steps:
             spec = self._spec_for(step.action)
@@ -91,6 +109,8 @@ class AIResourceManager:
                 estimate["write_actions"] += 1
             estimate["contacts"] += self._target_count_for_step(step.args, spec)
             estimate["model_calls"] += max(0, int(getattr(spec, "model_call_cost", 0) or 0))
+            estimate["input_tokens"] += max(0, int(getattr(spec, "estimated_input_tokens", 0) or 0))
+            estimate["output_tokens"] += max(0, int(getattr(spec, "estimated_output_tokens", 0) or 0))
             if str(getattr(spec, "result_budget_kind", "") or "").strip() == "memory":
                 estimate["memory_results"] += self._result_limit_for_step(step.args, spec)
         return estimate
