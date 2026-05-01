@@ -188,6 +188,42 @@ class AIActionExecutor:
                     progress_callback=progress_callback,
                 )
             step_started = time.perf_counter()
+
+            async def persist_attempt_event(
+                *,
+                event_type: str,
+                state: str,
+                attempt: int,
+                max_attempts: int,
+                error_text: str = "",
+                retryable: bool | None = None,
+                duration_ms: int = 0,
+            ) -> None:
+                nonlocal record
+                _append_step_event(
+                    events,
+                    record_id=record.id,
+                    step=step,
+                    event_type=event_type,
+                    state=state,
+                    error_text=error_text,
+                    duration_ms=duration_ms,
+                    attempt=attempt,
+                    max_attempts=max_attempts,
+                    retryable=retryable,
+                )
+                record = await self._store.update_plan(
+                    record.id,
+                    plan_json=_plan_json_with_events(record.plan_json, events),
+                    reason=f"{event_type}_{step.id}",
+                    bump_version=False,
+                    state="running",
+                    current_step_id=step.id,
+                    step_outputs=outputs,
+                    waiting_payload={},
+                ) or record
+                await _emit_progress(progress_callback, record)
+
             raw_output, execution_error = await _run_action_handler(
                 spec,
                 validated_args,
@@ -198,6 +234,7 @@ class AIActionExecutor:
                     "store": self._store,
                     "step_outputs": outputs,
                 },
+                attempt_event_callback=persist_attempt_event,
             )
             cancelled, record = await self._cancelled_result_if_requested(
                 record,
@@ -612,6 +649,8 @@ async def _run_action_handler(
     spec: AtomicActionSpec,
     args: dict[str, Any],
     context: dict[str, Any],
+    *,
+    attempt_event_callback: Callable[..., Any] | None = None,
 ) -> tuple[Any, str]:
     handler = spec.handler
     if handler is None:
@@ -619,6 +658,7 @@ async def _run_action_handler(
     attempts = _handler_attempt_count(spec)
     last_error = f"ACTION_FAILED: {spec.name}"
     for attempt in range(1, attempts + 1):
+        attempt_started = time.perf_counter()
         try:
             timeout_seconds = max(0.001, float(spec.timeout_ms or 0) / 1000.0)
             return await asyncio.wait_for(handler(args, context), timeout=timeout_seconds), ""
@@ -639,6 +679,16 @@ async def _run_action_handler(
                 type(exc).__name__,
             )
         if attempt < attempts:
+            await _emit_attempt_event(
+                attempt_event_callback,
+                event_type="step_attempt_failed",
+                state="failed",
+                attempt=attempt,
+                max_attempts=attempts,
+                error_text=last_error,
+                retryable=_is_retryable_spec(spec),
+                duration_ms=_elapsed_ms(attempt_started),
+            )
             logger.info(
                 "[ai-diag] ai_action_step_retrying action=%s attempt=%s next_attempt=%s max_attempts=%s last_error=%s",
                 spec.name,
@@ -647,7 +697,26 @@ async def _run_action_handler(
                 attempts,
                 last_error.split(":", 1)[0],
             )
+            await _emit_attempt_event(
+                attempt_event_callback,
+                event_type="step_retrying",
+                state="retrying",
+                attempt=attempt + 1,
+                max_attempts=attempts,
+                retryable=_is_retryable_spec(spec),
+            )
     return None, last_error
+
+
+async def _emit_attempt_event(
+    callback: Callable[..., Any] | None,
+    **payload: Any,
+) -> None:
+    if callback is None:
+        return
+    result = callback(**payload)
+    if inspect.isawaitable(result):
+        await result
 
 
 def _handler_attempt_count(spec: AtomicActionSpec) -> int:
@@ -826,6 +895,9 @@ def _append_step_event(
     error_text: str = "",
     duration_ms: int = 0,
     resource_usage: dict[str, Any] | None = None,
+    attempt: int = 0,
+    max_attempts: int = 0,
+    retryable: bool | None = None,
 ) -> None:
     events.append(
         AIActionEvent(
@@ -839,6 +911,9 @@ def _append_step_event(
             error_code=_error_code(error_text),
             duration_ms=duration_ms,
             resource_usage=dict(resource_usage or {}),
+            attempt=attempt,
+            max_attempts=max_attempts,
+            retryable=retryable,
         ).to_dict()
     )
 

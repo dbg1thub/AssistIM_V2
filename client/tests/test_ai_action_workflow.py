@@ -3205,10 +3205,25 @@ def test_ai_action_executor_retries_safe_read_action_once(tmp_path, monkeypatch)
             assert updated.step_outputs["resolve_contacts"]["contacts"][0]["contact_id"] == "user-1"
             assert [event["type"] for event in updated.plan_json["events"]] == [
                 "step_started",
+                "step_attempt_failed",
+                "step_retrying",
                 "step_completed",
                 "plan_completed",
             ]
-            assert updated.plan_json["events"][1]["result_count"] == 1
+            failed_attempt = updated.plan_json["events"][1]
+            retrying = updated.plan_json["events"][2]
+            assert failed_attempt["step_id"] == "resolve_contacts"
+            assert failed_attempt["attempt"] == 1
+            assert failed_attempt["max_attempts"] == 2
+            assert failed_attempt["retryable"] is True
+            assert failed_attempt["error_code"] == "ACTION_FAILED"
+            assert "transient read failure" not in str(failed_attempt)
+            assert retrying["step_id"] == "resolve_contacts"
+            assert retrying["attempt"] == 2
+            assert retrying["max_attempts"] == 2
+            assert retrying["retryable"] is True
+            assert "transient read failure" not in str(retrying)
+            assert updated.plan_json["events"][3]["result_count"] == 1
         finally:
             await db.close()
 
@@ -3430,6 +3445,8 @@ def test_ai_action_executor_does_not_retry_side_effect_action(tmp_path, monkeypa
             assert updated.step_outputs == {}
             assert [event["type"] for event in updated.plan_json["events"]] == ["step_started", "step_failed"]
             assert updated.plan_json["events"][-1]["error_code"] == "ACTION_FAILED"
+            assert "step_retrying" not in [event["type"] for event in updated.plan_json["events"]]
+            assert "step_attempt_failed" not in [event["type"] for event in updated.plan_json["events"]]
         finally:
             await db.close()
 

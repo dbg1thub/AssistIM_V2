@@ -265,6 +265,9 @@ class AIActionEvent:
     error_code: str = ""
     duration_ms: int = 0
     resource_usage: dict[str, Any] = field(default_factory=dict)
+    attempt: int = 0
+    max_attempts: int = 0
+    retryable: bool | None = None
 
     def to_dict(self) -> dict[str, Any]:
         payload = {
@@ -285,6 +288,12 @@ class AIActionEvent:
         usage = _safe_resource_usage(self.resource_usage)
         if usage:
             payload["resource_usage"] = usage
+        if self.attempt:
+            payload["attempt"] = max(0, int(self.attempt))
+        if self.max_attempts:
+            payload["max_attempts"] = max(0, int(self.max_attempts))
+        if self.retryable is not None:
+            payload["retryable"] = bool(self.retryable)
         return payload
 
 

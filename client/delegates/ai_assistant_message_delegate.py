@@ -738,6 +738,8 @@ class AIAssistantMessageDelegate(QStyledItemDelegate):
             return "waiting_clarification"
         if event_type == "step_started" or state == "started":
             return "running"
+        if event_type == "step_retrying" or state == "retrying":
+            return "retrying"
         if event_type == "plan_cancelled" or state == "cancelled":
             return "cancelled"
         return state
@@ -752,6 +754,7 @@ class AIAssistantMessageDelegate(QStyledItemDelegate):
             "waiting_confirmation": "等待确认",
             "waiting_clarification": "等待补充",
             "failed": "执行失败",
+            "retrying": "正在重试",
             "cancelled": "已取消",
             "pending": "待执行",
         }

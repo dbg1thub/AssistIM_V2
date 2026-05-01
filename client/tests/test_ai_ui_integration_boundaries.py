@@ -466,6 +466,7 @@ def test_ai_action_step_status_area_uses_safe_steps_and_events() -> None:
     assert '"waiting_confirmation": "等待确认"' in assistant_delegate
     assert '"waiting_clarification": "等待补充"' in assistant_delegate
     assert '"failed": "执行失败"' in assistant_delegate
+    assert '"retrying": "正在重试"' in assistant_delegate
     assert "response_text" not in status_function
     assert "waiting_payload" not in status_function
 
@@ -514,6 +515,21 @@ def test_ai_action_terminal_state_does_not_render_step_status() -> None:
         }
     }
     assert AIAssistantMessageDelegate._action_status_text(waiting_extra) == "等待确认：确认发送"
+
+    retrying_extra = {
+        "ai_action": {
+            "state": "running",
+            "steps": [
+                {
+                    "id": "resolve_target",
+                    "state": "running",
+                    "display_text": "确定联系人",
+                }
+            ],
+            "events": [{"type": "step_retrying", "state": "retrying", "step_id": "resolve_target"}],
+        }
+    }
+    assert AIAssistantMessageDelegate._action_status_text(retrying_extra) == "正在重试：确定联系人"
 
 
 def test_ai_assistant_tries_action_workflow_before_rag_and_ai_chat() -> None:
