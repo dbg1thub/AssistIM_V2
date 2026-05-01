@@ -550,6 +550,64 @@ def test_ai_action_terminal_state_does_not_render_step_status() -> None:
     assert AIAssistantMessageDelegate._action_status_text(resource_limit_extra) == "执行失败：检索聊天记录"
 
 
+def test_ai_action_status_renders_structured_explanation_without_reasoning_chain() -> None:
+    from client.delegates.ai_assistant_message_delegate import AIAssistantMessageDelegate
+
+    running_extra = {
+        "ai_action": {
+            "state": "running",
+            "steps": [
+                {
+                    "id": "search_memory",
+                    "state": "running",
+                    "action": "memory.search",
+                    "display_text": "检索聊天记录",
+                    "explanation": "只读取本地记忆索引",
+                    "reasoning": "完整推理链不应展示",
+                    "thought": "模型思考不应展示",
+                    "prompt": "planner prompt 不应展示",
+                    "raw_output": "模型原始输出不应展示",
+                },
+                {
+                    "id": "summarize_memory",
+                    "state": "pending",
+                    "action": "memory.summarize",
+                    "explanation": "根据检索证据总结",
+                },
+            ],
+            "events": [{"type": "step_started", "state": "started", "step_id": "search_memory"}],
+            "reasoning": "plan 级推理链不应展示",
+            "raw_output": "plan 原始输出不应展示",
+        }
+    }
+
+    status = AIAssistantMessageDelegate._action_status_text(running_extra)
+
+    assert "正在执行：检索聊天记录（只读取本地记忆索引）" in status
+    assert "待执行：根据检索证据总结" in status
+    assert "完整推理链不应展示" not in status
+    assert "模型思考不应展示" not in status
+    assert "planner prompt 不应展示" not in status
+    assert "模型原始输出不应展示" not in status
+    assert "plan 级推理链不应展示" not in status
+    assert "plan 原始输出不应展示" not in status
+
+    cancelled_extra = {
+        "ai_action": {
+            "state": "cancelled",
+            "steps": [
+                {
+                    "id": "search_memory",
+                    "state": "cancelled",
+                    "display_text": "检索聊天记录",
+                    "explanation": "只读取本地记忆索引",
+                }
+            ],
+        }
+    }
+    assert AIAssistantMessageDelegate._action_status_text(cancelled_extra) == ""
+
+
 def test_ai_assistant_tries_action_workflow_before_rag_and_ai_chat() -> None:
     assistant_interface = Path("client/ui/windows/ai_assistant_interface.py").read_text(encoding="utf-8")
     send_prompt = assistant_interface.split("async def _send_prompt", 1)[1].split(
