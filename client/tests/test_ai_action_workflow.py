@@ -3140,6 +3140,46 @@ def test_ai_action_registry_memory_summarize_uses_versioned_cache(monkeypatch) -
     asyncio.run(scenario())
 
 
+def test_ai_action_registry_memory_summarize_cache_skips_repeated_chunked_summary() -> None:
+    async def scenario() -> None:
+        memory_summarizer = _FakeMemorySummarizer("缓存后的大上下文总结。")
+        registry = AtomicActionRegistry(
+            contact_resolver=ContactAliasResolver(db=_FakeContactDatabase([])),
+            memory_manager=_FakeActionMemoryManager(),
+            memory_summarizer=memory_summarizer,
+            action_cache=AIActionCache(),
+        )
+        spec = registry.get("memory.summarize")
+        assert spec is not None
+        source = {
+            "context_lines": [
+                f"[2026-04-21 10:{index:02d}] 摘要：第 {index} 条记录，包含项目排期、风险和下一步安排。"
+                for index in range(10)
+            ],
+            "result_count": 10,
+        }
+
+        first = await spec.handler(  # type: ignore[misc]
+            {"source": source, "question": "总结历史"},
+            {"store": None},
+        )
+        second = await spec.handler(  # type: ignore[misc]
+            {"source": source, "question": "总结历史"},
+            {"store": None},
+        )
+
+        assert first["cache_hit"] is False
+        assert first["chunked"] is True
+        assert first["chunk_count"] == 3
+        assert second["cache_hit"] is True
+        assert second["chunked"] is True
+        assert second["chunk_count"] == 3
+        assert second["text"] == "缓存后的大上下文总结。"
+        assert len(memory_summarizer.calls) == 1
+
+    asyncio.run(scenario())
+
+
 def test_ai_action_registry_memory_summarize_cache_key_changes_with_question(monkeypatch) -> None:
     async def scenario() -> None:
         calls = []
