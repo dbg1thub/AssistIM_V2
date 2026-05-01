@@ -510,13 +510,13 @@ class AIActionWorkflow:
         self._permission_scope_provider = permission_scope_provider
         self._normalizer = AIPlanNormalizer()
         self._optimizer = AIPlanOptimizer()
-        self._resource_manager = AIResourceManager()
         self._registry = AtomicActionRegistry(
             contact_resolver=self._contact_alias_resolver,
             memory_manager=memory_manager,
             memory_summarizer=memory_summarizer or AIActionMemorySummarizer(task_manager=resolved_task_manager),
             message_sender=self._message_sender,
         )
+        self._resource_manager = AIResourceManager(registry=self._registry)
         self._validator = AIPlanValidator(registry=self._registry)
         self._executor = AIActionExecutor(registry=self._registry, store=self._store)
 
@@ -668,6 +668,7 @@ class AIActionWorkflow:
                 optimized_plan,
                 resource.response_text,
                 resource_reason=resource.reason,
+                resource_estimate=resource.estimate,
             )
 
         plan_json = optimized_plan.to_dict()
@@ -1124,6 +1125,7 @@ class AIActionWorkflow:
         response_text: str,
         *,
         resource_reason: str,
+        resource_estimate: dict[str, int] | None = None,
     ) -> AIActionTurnResult:
         plan_json = plan.to_dict()
         record = await self._store.create_plan(
@@ -1139,6 +1141,7 @@ class AIActionWorkflow:
                 "type": "clarification",
                 "reason": "resource_limit",
                 "resource_reason": str(resource_reason or "").strip(),
+                "resource_estimate": dict(resource_estimate or {}),
                 "response_text": response_text,
             },
         )

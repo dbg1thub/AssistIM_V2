@@ -10,6 +10,7 @@ from client.managers.ai_action_memory_summarizer import AIActionMemorySummarizer
 from client.managers.ai_action_normalizer import AIPlanNormalizer
 from client.managers.ai_action_optimizer import AIPlanOptimizer
 from client.managers.ai_action_permission_policy import AIPermissionPolicy, AIPermissionScope, PermissionDecision
+from client.managers.ai_action_resource_manager import AIResourceManager
 from client.managers.ai_action_registry import AIActionMessageSender, AtomicActionRegistry
 from client.managers.ai_action_types import AIActionPlan, AIActionStep, AtomicActionSpec
 from client.managers.ai_action_validator import AIPlanValidator
@@ -677,6 +678,86 @@ class _TooManyWriteActionsPlanner:
                 ),
             ),
             final={"type": "answer", "source": "$send_second.text"},
+        )
+
+
+class _TooManyModelCallsPlanner:
+    async def plan(self, *args, **kwargs):
+        user_text = str(args[0] if args else "").strip()
+        del kwargs
+        summarize_steps = []
+        for index in range(1, 5):
+            summarize_steps.append(
+                AIActionStep(
+                    id=f"summarize_{index}",
+                    action="memory.summarize",
+                    depends_on=(f"summarize_{index - 1}",) if index > 1 else ("search_memory",),
+                    args={"source": "$search_memory", "question": user_text},
+                )
+            )
+        return AIActionPlan(
+            is_action=True,
+            goal=user_text,
+            risk="low",
+            steps=(
+                AIActionStep(
+                    id="search_memory",
+                    action="memory.search",
+                    args={
+                        "participant_match": "any",
+                        "time_scope": {"type": "all_history"},
+                        "keywords": [],
+                        "question": user_text,
+                    },
+                ),
+                *summarize_steps,
+            ),
+            final={"type": "answer", "source": "$summarize_4"},
+        )
+
+
+class _TooManyMemoryResultsPlanner:
+    async def plan(self, *args, **kwargs):
+        user_text = str(args[0] if args else "").strip()
+        del kwargs
+        return AIActionPlan(
+            is_action=True,
+            goal=user_text,
+            risk="low",
+            steps=(
+                AIActionStep(
+                    id="search_first",
+                    action="memory.search",
+                    args={
+                        "participant_match": "any",
+                        "time_scope": {"type": "all_history"},
+                        "keywords": ["第一批"],
+                        "question": f"{user_text} 第一批",
+                        "limit": 50,
+                    },
+                ),
+                AIActionStep(
+                    id="search_second",
+                    action="memory.search",
+                    args={
+                        "participant_match": "any",
+                        "time_scope": {"type": "all_history"},
+                        "keywords": ["第二批"],
+                        "question": f"{user_text} 第二批",
+                        "limit": 50,
+                    },
+                ),
+                AIActionStep(
+                    id="summarize_memory",
+                    action="memory.summarize",
+                    depends_on=("search_first", "search_second"),
+                    args={
+                        "source": {"first": "$search_first", "second": "$search_second"},
+                        "question": user_text,
+                    },
+                ),
+            ),
+            final={"type": "answer", "source": "$summarize_memory"},
         )
 
 
@@ -1784,6 +1865,101 @@ def test_ai_action_workflow_records_too_many_write_actions_resource_reason(tmp_p
             assert plan.current_step_id == ""
             assert plan.step_outputs == {}
             assert contact_db.resolve_calls == []
+        finally:
+            await db.close()
+
+    asyncio.run(scenario())
+
+
+def test_ai_action_resource_manager_counts_write_actions_from_registry_specs() -> None:
+    registry = AtomicActionRegistry(contact_resolver=SimpleNamespace())
+    registry._actions["test.write"] = AtomicActionSpec(name="test.write", kind="write", risk_level="high")
+    manager = AIResourceManager(registry=registry)
+    plan = AIActionPlan(
+        is_action=True,
+        goal="执行两个写操作",
+        risk="high",
+        steps=(
+            AIActionStep(id="write_first", action="test.write", args={}),
+            AIActionStep(id="write_second", action="test.write", args={}),
+        ),
+        final={"type": "answer", "source": "$write_second"},
+    )
+
+    result = manager.check_plan(plan)
+
+    assert result.allowed is False
+    assert result.reason == "too_many_write_actions"
+    assert result.estimate["write_actions"] == 2
+
+
+def test_ai_action_workflow_records_too_many_model_calls_resource_reason(tmp_path, monkeypatch) -> None:
+    async def scenario() -> None:
+        db = Database(str(tmp_path / "actions.db"))
+        monkeypatch.setattr(action_store_module, "get_database", lambda: db)
+        store = AIActionStore()
+        memory_manager = _FakeActionMemoryManager(context_lines=["项目排期"])
+        memory_summarizer = _FakeMemorySummarizer()
+        workflow = AIActionWorkflow(
+            action_store=store,
+            planner=_TooManyModelCallsPlanner(),
+            memory_manager=memory_manager,
+            memory_summarizer=memory_summarizer,
+        )
+        try:
+            result = await workflow.handle_user_turn(thread_id="thread-1", text="帮我总结很多轮记录")
+            assert result.handled is True
+            action_extra = result.message_extra["ai_action"]
+            assert action_extra["state"] == "waiting_clarification"
+            assert "模型调用次数" in result.response_text
+            assert action_extra["waiting"]["reason"] == "resource_limit"
+            assert action_extra["waiting"]["resource_reason"] == "too_many_model_calls"
+            assert action_extra["waiting"]["resource_estimate"]["model_calls"] == 4
+
+            plan = await store.get_plan(action_extra["plan_id"])
+            assert plan is not None
+            assert plan.state == "waiting_clarification"
+            assert plan.waiting_payload["resource_reason"] == "too_many_model_calls"
+            assert plan.waiting_payload["resource_estimate"]["model_calls"] == 4
+            assert plan.current_step_id == ""
+            assert plan.step_outputs == {}
+            assert memory_manager.calls == []
+            assert memory_summarizer.calls == []
+        finally:
+            await db.close()
+
+    asyncio.run(scenario())
+
+
+def test_ai_action_workflow_records_too_many_memory_results_resource_reason(tmp_path, monkeypatch) -> None:
+    async def scenario() -> None:
+        db = Database(str(tmp_path / "actions.db"))
+        monkeypatch.setattr(action_store_module, "get_database", lambda: db)
+        store = AIActionStore()
+        memory_manager = _FakeActionMemoryManager(context_lines=["项目排期"])
+        workflow = AIActionWorkflow(
+            action_store=store,
+            planner=_TooManyMemoryResultsPlanner(),
+            memory_manager=memory_manager,
+        )
+        try:
+            result = await workflow.handle_user_turn(thread_id="thread-1", text="帮我查很多聊天记录")
+            assert result.handled is True
+            action_extra = result.message_extra["ai_action"]
+            assert action_extra["state"] == "waiting_clarification"
+            assert "检索结果" in result.response_text
+            assert action_extra["waiting"]["reason"] == "resource_limit"
+            assert action_extra["waiting"]["resource_reason"] == "too_many_memory_results"
+            assert action_extra["waiting"]["resource_estimate"]["memory_results"] == 100
+
+            plan = await store.get_plan(action_extra["plan_id"])
+            assert plan is not None
+            assert plan.state == "waiting_clarification"
+            assert plan.waiting_payload["resource_reason"] == "too_many_memory_results"
+            assert plan.waiting_payload["resource_estimate"]["memory_results"] == 100
+            assert plan.current_step_id == ""
+            assert plan.step_outputs == {}
+            assert memory_manager.calls == []
         finally:
             await db.close()
 

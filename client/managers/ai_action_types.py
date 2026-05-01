@@ -215,6 +215,12 @@ class AtomicActionSpec:
     allow_auto_resume_after_confirm: bool = True
     supports_compensation: bool = False
     compensate_action: str | None = None
+    model_call_cost: int = 0
+    target_arg_names: tuple[str, ...] = ()
+    result_budget_kind: str = ""
+    result_limit_arg_names: tuple[str, ...] = ()
+    default_result_limit: int = 0
+    max_result_items: int | None = None
 
 
 @dataclass(frozen=True, slots=True)

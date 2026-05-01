@@ -218,6 +218,7 @@ class AtomicActionRegistry:
                 output_model=ContactResolveOutput,
                 max_targets=5,
                 allow_batch=True,
+                target_arg_names=("queries",),
             )
         )
         self._register(
@@ -231,6 +232,10 @@ class AtomicActionRegistry:
                 allow_all_history=True,
                 allow_cross_session=True,
                 max_output_json_bytes=32768,
+                result_budget_kind="memory",
+                result_limit_arg_names=("limit", "max_items"),
+                default_result_limit=8,
+                max_result_items=50,
             )
         )
         self._register(
@@ -245,6 +250,7 @@ class AtomicActionRegistry:
                 allow_cross_session=True,
                 max_input_bytes=32768,
                 max_output_json_bytes=32768,
+                model_call_cost=1,
             )
         )
         self._register(
