@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import re
 import time
-from typing import Any
+from typing import Any, Callable
 
 from pydantic import ValidationError
 
@@ -28,6 +29,8 @@ from client.storage.ai_action_plan_store import AIActionPlanRecord, AIActionPlan
 
 logger = logging.get_logger(__name__)
 
+AIActionProgressCallback = Callable[[AIActionPlanRecord], Any]
+
 
 class AIActionExecutor:
     """Execute atomic action steps and persist progress after every step."""
@@ -43,7 +46,12 @@ class AIActionExecutor:
         self._store = store
         self._permission_policy = permission_policy or AIPermissionPolicy()
 
-    async def execute(self, record: AIActionPlanRecord) -> ActionExecutionResult:
+    async def execute(
+        self,
+        record: AIActionPlanRecord,
+        *,
+        progress_callback: AIActionProgressCallback | None = None,
+    ) -> ActionExecutionResult:
         plan = AIActionPlan.from_dict(dict(record.plan_json or {}))
         if not plan.steps:
             return ActionExecutionResult(state="failed", error_text="PLAN_SCHEMA_INVALID")
@@ -65,6 +73,7 @@ class AIActionExecutor:
                     events,
                     step,
                     f"ARG_REFERENCE_INVALID: missing dependency {missing_deps[0]}",
+                    progress_callback=progress_callback,
                 )
 
             spec = self._registry.get(step.action)
@@ -75,6 +84,7 @@ class AIActionExecutor:
                     events,
                     step,
                     f"ACTION_NOT_FOUND: {step.action}",
+                    progress_callback=progress_callback,
                 )
             if not spec.enabled and step.action != "message.send":
                 return await self._fail_step_before_handler(
@@ -83,6 +93,7 @@ class AIActionExecutor:
                     events,
                     step,
                     f"ACTION_DISABLED: {step.action}",
+                    progress_callback=progress_callback,
                 )
 
             try:
@@ -91,7 +102,14 @@ class AIActionExecutor:
                 validated_args = _validate_input(spec, resolved_args)
                 self._check_guardrails(spec, validated_args)
             except ValueError as exc:
-                return await self._fail_step_before_handler(record, outputs, events, step, str(exc))
+                return await self._fail_step_before_handler(
+                    record,
+                    outputs,
+                    events,
+                    step,
+                    str(exc),
+                    progress_callback=progress_callback,
+                )
 
             permission = self._permission_policy.check_step(
                 spec=spec,
@@ -111,6 +129,7 @@ class AIActionExecutor:
                     events,
                     step,
                     permission.code or "PERMISSION_DENIED",
+                    progress_callback=progress_callback,
                 )
 
             _append_step_event(
@@ -132,6 +151,7 @@ class AIActionExecutor:
                 step_outputs=outputs,
                 waiting_payload={},
             ) or record
+            await _emit_progress(progress_callback, record)
 
             handler = spec.handler
             if handler is None:
@@ -149,7 +169,13 @@ class AIActionExecutor:
                     reason=f"step_failed_{step.id}",
                     bump_version=False,
                 ) or record
-                return await self._fail(record, outputs, f"ACTION_NOT_FOUND: {step.action}")
+                await _emit_progress(progress_callback, record)
+                return await self._fail(
+                    record,
+                    outputs,
+                    f"ACTION_NOT_FOUND: {step.action}",
+                    progress_callback=progress_callback,
+                )
             step_started = time.perf_counter()
             raw_output, execution_error = await _run_action_handler(
                 spec,
@@ -190,7 +216,13 @@ class AIActionExecutor:
                     reason=f"step_failed_{step.id}",
                     bump_version=False,
                 ) or record
-                return await self._fail(record, outputs, execution_error)
+                await _emit_progress(progress_callback, record)
+                return await self._fail(
+                    record,
+                    outputs,
+                    execution_error,
+                    progress_callback=progress_callback,
+                )
 
             if isinstance(raw_output, ActionPause):
                 payload = dict(raw_output.payload or {})
@@ -204,7 +236,7 @@ class AIActionExecutor:
                     message=step.display_text,
                     duration_ms=_elapsed_ms(step_started),
                 )
-                await self._store.update_plan(
+                record = await self._store.update_plan(
                     record.id,
                     plan_json=_plan_json_with_events(record.plan_json, events),
                     reason=f"{raw_output.state}_{step.id}",
@@ -213,7 +245,8 @@ class AIActionExecutor:
                     current_step_id=step.id,
                     step_outputs=outputs,
                     waiting_payload=payload,
-                )
+                ) or record
+                await _emit_progress(progress_callback, record)
                 logger.info(
                     "[ai-perf] ai_action_step_finished plan_id=%s step_id=%s action=%s state=%s "
                     "duration_ms=%s result_count=%s result_ref=%s output_bytes=%s",
@@ -264,7 +297,13 @@ class AIActionExecutor:
                     reason=f"step_failed_{step.id}",
                     bump_version=False,
                 ) or record
-                return await self._fail(record, outputs, str(exc))
+                await _emit_progress(progress_callback, record)
+                return await self._fail(
+                    record,
+                    outputs,
+                    str(exc),
+                    progress_callback=progress_callback,
+                )
 
             outputs[step.id] = output
             mark_step_output_current(outputs, step_id=step.id, plan_version=record.plan_version)
@@ -292,7 +331,7 @@ class AIActionExecutor:
                 duration_ms=_elapsed_ms(step_started),
             )
             plan_json = _plan_json_with_events(record.plan_json, events)
-            await self._store.update_plan(
+            record = await self._store.update_plan(
                 record.id,
                 plan_json=plan_json,
                 reason=f"step_completed_{step.id}",
@@ -301,12 +340,18 @@ class AIActionExecutor:
                 current_step_id=step.id,
                 step_outputs=outputs,
                 waiting_payload={},
-            )
-            record = await self._store.get_plan(record.id) or record
+            ) or record
+            await _emit_progress(progress_callback, record)
 
-        return await self._complete(record, outputs)
+        return await self._complete(record, outputs, progress_callback=progress_callback)
 
-    async def _complete(self, record: AIActionPlanRecord, outputs: dict[str, Any]) -> ActionExecutionResult:
+    async def _complete(
+        self,
+        record: AIActionPlanRecord,
+        outputs: dict[str, Any],
+        *,
+        progress_callback: AIActionProgressCallback | None = None,
+    ) -> ActionExecutionResult:
         final = self._project_final(record, outputs)
         state = "running" if final.memory_context_lines else "done"
         plan_json = dict(record.plan_json or {})
@@ -323,7 +368,7 @@ class AIActionExecutor:
                     ).to_dict()
                 )
             plan_json["events"] = events[-20:]
-        await self._store.update_plan(
+        updated = await self._store.update_plan(
             record.id,
             plan_json=plan_json,
             reason="plan_completed" if state == "done" else "",
@@ -334,6 +379,7 @@ class AIActionExecutor:
             waiting_payload={},
             completed_at=0 if state == "running" else time.time(),
         )
+        await _emit_progress(progress_callback, updated or record)
         return final
 
     def _project_final(self, record: AIActionPlanRecord, outputs: dict[str, Any]) -> ActionExecutionResult:
@@ -370,14 +416,17 @@ class AIActionExecutor:
         record: AIActionPlanRecord,
         outputs: dict[str, Any],
         error_text: str,
+        *,
+        progress_callback: AIActionProgressCallback | None = None,
     ) -> ActionExecutionResult:
-        await self._store.update_plan(
+        updated = await self._store.update_plan(
             record.id,
             state="failed",
             step_outputs=outputs,
             error_text=error_text,
             completed_at=time.time(),
         )
+        await _emit_progress(progress_callback, updated or record)
         return ActionExecutionResult(state="failed", response_text="这个操作执行失败，请稍后再试。", error_text=error_text)
 
     async def _fail_step_before_handler(
@@ -387,6 +436,8 @@ class AIActionExecutor:
         events: list[dict[str, Any]],
         step: Any,
         error_text: str,
+        *,
+        progress_callback: AIActionProgressCallback | None = None,
     ) -> ActionExecutionResult:
         _append_step_event(
             events,
@@ -396,7 +447,7 @@ class AIActionExecutor:
             state="failed",
             error_text=error_text,
         )
-        await self._store.update_plan(
+        updated = await self._store.update_plan(
             record.id,
             plan_json=_plan_json_with_events(record.plan_json, events),
             reason=f"step_failed_{str(getattr(step, 'id', '') or '')}",
@@ -408,6 +459,7 @@ class AIActionExecutor:
             error_text=error_text,
             completed_at=time.time(),
         )
+        await _emit_progress(progress_callback, updated or record)
         return ActionExecutionResult(state="failed", response_text="这个操作执行失败，请稍后再试。", error_text=error_text)
 
     def _check_guardrails(self, spec: AtomicActionSpec, args: dict[str, Any]) -> None:
@@ -457,6 +509,20 @@ class AIActionExecutor:
                 "expires_at": temp.expires_at,
             }
         }
+
+
+async def _emit_progress(
+    progress_callback: AIActionProgressCallback | None,
+    record: AIActionPlanRecord,
+) -> None:
+    if progress_callback is None:
+        return
+    try:
+        result = progress_callback(record)
+        if inspect.isawaitable(result):
+            await result
+    except Exception:
+        logger.exception("AI action progress callback failed")
 
 
 async def _run_action_handler(

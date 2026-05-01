@@ -702,24 +702,29 @@ class AIAssistantInterface(QWidget):
             return
         if self._message_delegate is not None:
             self._message_delegate.set_action_message_enabled(self.message_list, normalized_message_id, False)
+
+        async def on_action_progress(progress_result) -> None:
+            await self._upsert_action_progress_message(
+                message.thread_id,
+                progress_result,
+                message,
+            )
+
         action_result = await self._action_workflow.handle_pending_control(
             thread_id=message.thread_id,
             control_type=normalized_command,
+            progress_callback=on_action_progress,
         )
         if not action_result.handled:
             if self._message_delegate is not None:
                 self._message_delegate.set_action_message_enabled(self.message_list, normalized_message_id, True)
             return
         if action_result.memory_context_lines:
-            await self._complete_pending_assistant_message(
-                message,
-                action_result.response_text,
-                extra=action_result.message_extra,
-            )
             await self._handle_action_turn_result(
                 message.thread_id,
                 action_result,
                 context_messages=list(self._messages),
+                assistant_message=message,
             )
             return
         await self._complete_pending_assistant_message(
@@ -792,16 +797,28 @@ class AIAssistantInterface(QWidget):
         await self._reload_threads(select_thread_id=thread_id)
 
         context_messages = list(self._messages)
+        action_message: AIMessage | None = None
+
+        async def on_action_progress(progress_result) -> None:
+            nonlocal action_message
+            action_message = await self._upsert_action_progress_message(
+                thread_id,
+                progress_result,
+                action_message,
+            )
+
         action_result = await self._action_workflow.handle_user_turn(
             thread_id=thread_id,
             text=text,
             has_attachments=bool(attachments),
+            progress_callback=on_action_progress,
         )
         if action_result.handled:
             await self._handle_action_turn_result(
                 thread_id,
                 action_result,
                 context_messages=context_messages,
+                assistant_message=action_message,
             )
             return
 
@@ -859,6 +876,34 @@ class AIAssistantInterface(QWidget):
         self._last_persist_at = 0.0
         self._active_stream_task = self._create_ui_task(self._run_stream(request), f"AI assistant stream {request.task_id}")
 
+    async def _upsert_action_progress_message(
+        self,
+        thread_id: str,
+        action_result,
+        assistant_message: AIMessage | None,
+    ) -> AIMessage:
+        extra = dict(action_result.message_extra or {})
+        content = str(action_result.response_text or "").strip()
+        if assistant_message is None:
+            message = await self._store.create_message(
+                thread_id=thread_id,
+                role=AIMessageRole.ASSISTANT,
+                content=content,
+                status=AIMessageStatus.PENDING,
+                extra=extra,
+            )
+            self._append_message(message)
+            return message
+
+        if content:
+            assistant_message.content = content
+        assistant_message.status = AIMessageStatus.PENDING
+        assistant_message.task_id = ""
+        assistant_message.extra = extra
+        await self._persist_assistant_message(assistant_message)
+        self._update_message_card(assistant_message)
+        return assistant_message
+
     async def _run_stream(self, request) -> None:
         snapshot = await self._task_manager.stream(request)
         await self._finalize_snapshot(snapshot)
@@ -869,8 +914,16 @@ class AIAssistantInterface(QWidget):
         action_result,
         *,
         context_messages: list[AIMessage],
+        assistant_message: AIMessage | None = None,
     ) -> None:
         if not action_result.memory_context_lines:
+            if assistant_message is not None:
+                await self._complete_pending_assistant_message(
+                    assistant_message,
+                    action_result.response_text,
+                    extra=action_result.message_extra,
+                )
+                return
             assistant_message = await self._store.create_message(
                 thread_id=thread_id,
                 role=AIMessageRole.ASSISTANT,
@@ -883,14 +936,22 @@ class AIAssistantInterface(QWidget):
             self._render_thread_list()
             return
 
-        assistant_message = await self._store.create_message(
-            thread_id=thread_id,
-            role=AIMessageRole.ASSISTANT,
-            content=action_result.response_text,
-            status=AIMessageStatus.PENDING,
-            extra=action_result.message_extra,
-        )
-        self._append_message(assistant_message)
+        if assistant_message is None:
+            assistant_message = await self._store.create_message(
+                thread_id=thread_id,
+                role=AIMessageRole.ASSISTANT,
+                content=action_result.response_text,
+                status=AIMessageStatus.PENDING,
+                extra=action_result.message_extra,
+            )
+            self._append_message(assistant_message)
+        else:
+            assistant_message.content = str(action_result.response_text or "").strip()
+            assistant_message.status = AIMessageStatus.PENDING
+            assistant_message.task_id = ""
+            assistant_message.extra = dict(action_result.message_extra or {})
+            await self._persist_assistant_message(assistant_message)
+            self._update_message_card(assistant_message)
         self._set_generating(True)
 
         task_id = f"ai-chat-{uuid.uuid4()}"
@@ -1039,16 +1100,28 @@ class AIAssistantInterface(QWidget):
         self._render_messages()
         attachments = list((last_user.extra or {}).get("attachments") or []) if isinstance(last_user.extra, dict) else []
         context_messages = list(self._messages)
+        action_message: AIMessage | None = None
+
+        async def on_action_progress(progress_result) -> None:
+            nonlocal action_message
+            action_message = await self._upsert_action_progress_message(
+                self._current_thread_id,
+                progress_result,
+                action_message,
+            )
+
         action_result = await self._action_workflow.handle_user_turn(
             thread_id=self._current_thread_id,
             text=str(last_user.content or ""),
             has_attachments=bool(attachments),
+            progress_callback=on_action_progress,
         )
         if action_result.handled:
             await self._handle_action_turn_result(
                 self._current_thread_id,
                 action_result,
                 context_messages=context_messages,
+                assistant_message=action_message,
             )
             return
 

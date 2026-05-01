@@ -1626,6 +1626,60 @@ def test_ai_action_workflow_canonicalizes_noncanonical_send_confirmation(tmp_pat
     asyncio.run(scenario())
 
 
+def test_ai_action_workflow_emits_action_progress_updates(tmp_path, monkeypatch) -> None:
+    async def scenario() -> None:
+        db = Database(str(tmp_path / "actions.db"))
+        monkeypatch.setattr(action_store_module, "get_database", lambda: db)
+        store = AIActionStore()
+        contact_db = _FakeContactDatabase(
+            [
+                {
+                    "id": "user-1",
+                    "display_name": "张三",
+                    "username": "zhangsan",
+                    "nickname": "张三",
+                    "remark": "张三",
+                    "assistim_id": "zhangsan",
+                }
+            ]
+        )
+        workflow = AIActionWorkflow(
+            action_store=store,
+            planner=_WorkflowPlanner(),
+            contact_alias_resolver=ContactAliasResolver(db=contact_db),
+        )
+        progress_updates = []
+
+        async def on_progress(turn) -> None:
+            progress_updates.append(turn)
+
+        try:
+            result = await workflow.handle_user_turn(
+                thread_id="thread-1",
+                text="帮我给张三发我晚点到",
+                progress_callback=on_progress,
+            )
+
+            assert result.handled is True
+            assert progress_updates
+            progress_extras = [item.message_extra["ai_action"] for item in progress_updates]
+            assert progress_extras[-1]["state"] == result.message_extra["ai_action"]["state"]
+            assert progress_extras[-1]["current_step_id"] == result.message_extra["ai_action"]["current_step_id"]
+            assert any(extra["state"] == "running" for extra in progress_extras)
+            assert any(extra["current_step_id"] == "resolve_target" for extra in progress_extras)
+            assert any(
+                step["id"] == "resolve_target" and step["state"] == "done"
+                for extra in progress_extras
+                for step in extra["steps"]
+            )
+            assert result.message_extra["ai_action"]["state"] == "waiting_confirmation"
+            assert result.message_extra["ai_action"]["current_step_id"] == "confirm_send"
+        finally:
+            await db.close()
+
+    asyncio.run(scenario())
+
+
 def test_ai_action_workflow_records_too_many_steps_resource_reason(tmp_path, monkeypatch) -> None:
     async def scenario() -> None:
         db = Database(str(tmp_path / "actions.db"))

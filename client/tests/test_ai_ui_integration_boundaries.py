@@ -532,8 +532,15 @@ def test_ai_assistant_tries_action_workflow_before_rag_and_ai_chat() -> None:
     assert "permission_scope_provider=self._current_action_permission_scope" in assistant_interface
     assert "action_result = await self._action_workflow.handle_user_turn" in send_prompt
     assert "has_attachments=bool(attachments)" in send_prompt
+    assert "progress_callback=on_action_progress" in send_prompt
     assert "if action_result.handled:" in send_prompt
     assert "await self._handle_action_turn_result(" in send_prompt
+    assert "assistant_message=action_message" in send_prompt
+    assert "async def _upsert_action_progress_message(" in assistant_interface
+    assert "status=AIMessageStatus.PENDING" in assistant_interface.split("async def _upsert_action_progress_message", 1)[1].split(
+        "\n    async def _run_stream",
+        1,
+    )[0]
     assert "build_rag_context_for_ai_chat" in send_prompt
     assert "rag_history_messages = [" in send_prompt
     assert "if message.message_id != user_message.message_id" in send_prompt
@@ -548,8 +555,10 @@ def test_ai_assistant_tries_action_workflow_before_rag_and_ai_chat() -> None:
 
     assert "action_result = await self._action_workflow.handle_user_turn" in regenerate
     assert "has_attachments=bool(attachments)" in regenerate
+    assert "progress_callback=on_action_progress" in regenerate
     assert "if action_result.handled:" in regenerate
     assert "await self._handle_action_turn_result(" in regenerate
+    assert "assistant_message=action_message" in regenerate
     assert "build_rag_context_for_ai_chat" in regenerate
     assert "rag_history_messages = [" in regenerate
     assert "if message.message_id != last_user.message_id" in regenerate
@@ -563,6 +572,7 @@ def test_ai_assistant_tries_action_workflow_before_rag_and_ai_chat() -> None:
     )
 
     assert "async def _handle_action_turn_result(" in assistant_interface
+    assert "assistant_message: AIMessage | None = None" in assistant_interface
     assert "extra=action_result.message_extra" in assistant_interface
     assert "memory_context_lines=action_result.memory_context_lines" in assistant_interface
     assert "await self._action_workflow.finish_streamed_action(" in assistant_interface

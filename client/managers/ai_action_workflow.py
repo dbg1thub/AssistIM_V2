@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import inspect
 import re
 import time
 from dataclasses import dataclass
@@ -33,6 +34,8 @@ from client.storage.database import Database, get_database
 
 
 logger = logging.get_logger(__name__)
+
+AIActionTurnProgressCallback = Callable[[AIActionTurnResult], Any]
 
 
 @dataclass(frozen=True, slots=True)
@@ -522,6 +525,7 @@ class AIActionWorkflow:
         thread_id: str,
         text: str,
         has_attachments: bool = False,
+        progress_callback: AIActionTurnProgressCallback | None = None,
     ) -> AIActionTurnResult:
         total_started = time.perf_counter()
         planner_ms = 0
@@ -592,7 +596,11 @@ class AIActionWorkflow:
             json.dumps(raw_plan.to_dict(), ensure_ascii=False, sort_keys=True, default=str),
         )
         if pending is not None:
-            control = await self._handle_planner_control(pending, raw_plan)
+            control = await self._handle_planner_control(
+                pending,
+                raw_plan,
+                progress_callback=progress_callback,
+            )
             if control is not None:
                 log_perf(str(control.message_extra.get("ai_action", {}).get("state") or "pending_control"), handled=True, plan=raw_plan)
                 return control
@@ -675,8 +683,9 @@ class AIActionWorkflow:
                 plan_json=plan_json,
                 reason=optimize_reason,
             ) or record
+        await self._emit_progress_turn(progress_callback, record)
         executor_started = time.perf_counter()
-        turn = await self._execute_to_turn(record)
+        turn = await self._execute_to_turn(record, progress_callback=progress_callback)
         executor_ms = _elapsed_ms(executor_started)
         log_perf(str(turn.message_extra.get("ai_action", {}).get("state") or "done"), handled=turn.handled, plan=optimized_plan)
         return turn
@@ -686,6 +695,7 @@ class AIActionWorkflow:
         *,
         thread_id: str,
         control_type: str,
+        progress_callback: AIActionTurnProgressCallback | None = None,
     ) -> AIActionTurnResult:
         normalized_thread_id = str(thread_id or "").strip()
         normalized_control = str(control_type or "").strip().lower()
@@ -720,9 +730,9 @@ class AIActionWorkflow:
             normalized_control,
         )
         if normalized_control == "cancel":
-            return await self._cancel_pending(pending)
+            return await self._cancel_pending(pending, progress_callback=progress_callback)
         if pending.state == "waiting_confirmation":
-            return await self._confirm_pending(pending)
+            return await self._confirm_pending(pending, progress_callback=progress_callback)
         return AIActionTurnResult(
             handled=True,
             response_text=str(pending.waiting_payload.get("response_text") or "这个操作还在等待补充信息。"),
@@ -850,28 +860,49 @@ class AIActionWorkflow:
             return False
         return (time.time() - started) > self.PENDING_CONFIRMATION_TTL_SECONDS
 
-    async def _handle_planner_control(self, pending: AIActionPlanRecord, plan: AIActionPlan) -> AIActionTurnResult | None:
+    async def _handle_planner_control(
+        self,
+        pending: AIActionPlanRecord,
+        plan: AIActionPlan,
+        *,
+        progress_callback: AIActionTurnProgressCallback | None = None,
+    ) -> AIActionTurnResult | None:
         control = dict(plan.control or {})
         control_type = str(control.get("type") or "").strip()
         if control_type == "cancel":
-            return await self._cancel_pending(pending)
+            return await self._cancel_pending(pending, progress_callback=progress_callback)
         if control_type == "confirm" and pending.state == "waiting_confirmation":
-            return await self._confirm_pending(pending)
+            return await self._confirm_pending(pending, progress_callback=progress_callback)
         if control_type == "select_contact_alias" and pending.state == "waiting_clarification":
             selection = str(control.get("selection_index") or control.get("contact_id") or control.get("alias_text") or "")
             if selection:
-                return await self._select_pending_contact(pending, selection)
+                return await self._select_pending_contact(
+                    pending,
+                    selection,
+                    progress_callback=progress_callback,
+                )
         return None
 
-    async def _cancel_pending(self, pending: AIActionPlanRecord) -> AIActionTurnResult:
-        await self._store.update_plan(pending.id, state="cancelled", completed_at=time.time())
+    async def _cancel_pending(
+        self,
+        pending: AIActionPlanRecord,
+        *,
+        progress_callback: AIActionTurnProgressCallback | None = None,
+    ) -> AIActionTurnResult:
+        updated = await self._store.update_plan(pending.id, state="cancelled", completed_at=time.time()) or pending
+        await self._emit_progress_turn(progress_callback, updated)
         return AIActionTurnResult(
             handled=True,
             response_text="已取消这个操作。",
-            message_extra={"ai_action": self._extra(pending, state="cancelled")},
+            message_extra={"ai_action": self._extra(updated, state="cancelled")},
         )
 
-    async def _confirm_pending(self, pending: AIActionPlanRecord) -> AIActionTurnResult:
+    async def _confirm_pending(
+        self,
+        pending: AIActionPlanRecord,
+        *,
+        progress_callback: AIActionTurnProgressCallback | None = None,
+    ) -> AIActionTurnResult:
         waiting = dict(pending.waiting_payload or {})
         if self._pending_confirmation_is_stale(pending, waiting):
             return AIActionTurnResult(
@@ -893,7 +924,8 @@ class AIActionWorkflow:
             step_outputs=outputs,
             waiting_payload={},
         )
-        return await self._execute_to_turn(updated or pending)
+        await self._emit_progress_turn(progress_callback, updated or pending)
+        return await self._execute_to_turn(updated or pending, progress_callback=progress_callback)
 
     @staticmethod
     def _pending_confirmation_is_stale(pending: AIActionPlanRecord, waiting: dict[str, Any]) -> bool:
@@ -920,7 +952,13 @@ class AIActionWorkflow:
             return True
         return waiting_fingerprint != confirmation_preview_fingerprint(current_preview, risk=risk)
 
-    async def _select_pending_contact(self, pending: AIActionPlanRecord, selection: str) -> AIActionTurnResult:
+    async def _select_pending_contact(
+        self,
+        pending: AIActionPlanRecord,
+        selection: str,
+        *,
+        progress_callback: AIActionTurnProgressCallback | None = None,
+    ) -> AIActionTurnResult:
         waiting = dict(pending.waiting_payload or {})
         if str(waiting.get("type") or "") not in {"contact_ambiguity", "target_too_many"}:
             return AIActionTurnResult(
@@ -951,12 +989,44 @@ class AIActionWorkflow:
             step_outputs=outputs,
             waiting_payload={},
         )
-        return await self._execute_to_turn(updated or pending)
+        await self._emit_progress_turn(progress_callback, updated or pending)
+        return await self._execute_to_turn(updated or pending, progress_callback=progress_callback)
 
-    async def _execute_to_turn(self, record: AIActionPlanRecord) -> AIActionTurnResult:
-        result = await self._executor_for_current_scope().execute(record)
+    async def _execute_to_turn(
+        self,
+        record: AIActionPlanRecord,
+        *,
+        progress_callback: AIActionTurnProgressCallback | None = None,
+    ) -> AIActionTurnResult:
+        async def on_executor_progress(updated_record: AIActionPlanRecord) -> None:
+            await self._emit_progress_turn(progress_callback, updated_record)
+
+        result = await self._executor_for_current_scope().execute(
+            record,
+            progress_callback=on_executor_progress if progress_callback is not None else None,
+        )
         latest = await self._store.get_plan(record.id) or record
         return self._result_to_turn(latest, result)
+
+    async def _emit_progress_turn(
+        self,
+        progress_callback: AIActionTurnProgressCallback | None,
+        record: AIActionPlanRecord,
+    ) -> None:
+        if progress_callback is None:
+            return
+        waiting_payload = dict(record.waiting_payload or {})
+        turn = AIActionTurnResult(
+            handled=True,
+            response_text=str(waiting_payload.get("response_text") or ""),
+            message_extra={"ai_action": self._extra(record)},
+        )
+        try:
+            result = progress_callback(turn)
+            if inspect.isawaitable(result):
+                await result
+        except Exception:
+            logger.exception("AI action turn progress callback failed")
 
     def _executor_for_current_scope(self) -> AIActionExecutor:
         if self._permission_scope_provider is None:
