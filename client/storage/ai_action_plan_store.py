@@ -244,6 +244,36 @@ class AIActionPlanStore:
         row = await cursor.fetchone()
         return self._row_to_plan_record(row) if row is not None else None
 
+    async def recover_interrupted_plans(self) -> list[AIActionPlanRecord]:
+        """Mark startup-left running action plans as failed and recoverable."""
+        await self.initialize()
+        cursor = await self._connection().execute(
+            """
+            SELECT * FROM ai_action_plans
+            WHERE state = ?
+            ORDER BY updated_at ASC, created_at ASC
+            """,
+            ("running",),
+        )
+        records = [self._row_to_plan_record(row) for row in await cursor.fetchall()]
+        recovered: list[AIActionPlanRecord] = []
+        now = time.time()
+        for record in records:
+            updated = await self.update_plan(
+                record.id,
+                plan_json=_plan_json_with_interrupted_event(record.plan_json, plan_id=record.id),
+                reason="startup_interrupted_recovery",
+                bump_version=False,
+                state="failed",
+                current_step_id="",
+                waiting_payload={},
+                error_text="interrupted_recoverable",
+                completed_at=now,
+            )
+            if updated is not None:
+                recovered.append(updated)
+        return recovered
+
     async def create_temp_result(
         self,
         *,
@@ -400,3 +430,26 @@ def get_ai_action_plan_store() -> AIActionPlanStore:
     if _ai_action_plan_store is None:
         _ai_action_plan_store = AIActionPlanStore()
     return _ai_action_plan_store
+
+
+def _safe_events(plan_json: dict[str, Any]) -> list[dict[str, Any]]:
+    events = dict(plan_json or {}).get("events")
+    return [dict(item) for item in list(events or []) if isinstance(item, dict)]
+
+
+def _plan_json_with_interrupted_event(plan_json: dict[str, Any], *, plan_id: str) -> dict[str, Any]:
+    payload = dict(plan_json or {})
+    events = _safe_events(payload)
+    if not any(str(event.get("type") or "") == "plan_interrupted" for event in events):
+        events.append(
+            {
+                "type": "plan_interrupted",
+                "step_id": "",
+                "action": "plan",
+                "state": "failed",
+                "plan_id": str(plan_id or "").strip(),
+                "error_code": "interrupted_recoverable",
+            }
+        )
+    payload["events"] = events[-20:]
+    return payload

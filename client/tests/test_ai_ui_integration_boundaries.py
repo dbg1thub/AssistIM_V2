@@ -633,6 +633,20 @@ def test_ai_assistant_stop_button_cancels_active_action_plan() -> None:
     assert "self._active_action_plan_id = plan_id" in progress_method
 
 
+def test_ai_assistant_initial_load_recovers_interrupted_action_plans_first() -> None:
+    assistant_interface = Path("client/ui/windows/ai_assistant_interface.py").read_text(encoding="utf-8")
+    initial_load = assistant_interface.split("async def _ensure_initial_load_async", 1)[1].split(
+        "\n    def _subscribe_to_events",
+        1,
+    )[0]
+
+    assert "await self._store.initialize()" in initial_load
+    assert "await self._action_workflow.recover_interrupted_plans()" in initial_load
+    assert "await self._reload_threads(select_first=True)" in initial_load
+    assert initial_load.index("_store.initialize") < initial_load.index("_action_workflow.recover_interrupted_plans")
+    assert initial_load.index("_action_workflow.recover_interrupted_plans") < initial_load.index("_reload_threads")
+
+
 def test_ai_assistant_regenerate_capability_exists_without_visible_entry() -> None:
     assistant_interface = Path("client/ui/windows/ai_assistant_interface.py").read_text(encoding="utf-8")
 

@@ -503,6 +503,7 @@ class AIAssistantInterface(QWidget):
         """Load local AI assistant threads once the authenticated shell is ready."""
         try:
             await self._store.initialize()
+            await self._action_workflow.recover_interrupted_plans()
             await self._reload_threads(select_first=True)
         except Exception:
             self._initialized = False

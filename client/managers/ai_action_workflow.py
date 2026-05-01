@@ -779,6 +779,12 @@ class AIActionWorkflow:
             message_extra={"ai_action": self._extra(updated, state="cancelled")},
         )
 
+    async def recover_interrupted_plans(self) -> list[AIActionPlanRecord]:
+        recovered = await self._store.recover_interrupted_plans()
+        if recovered:
+            logger.info("[ai-diag] ai_action_startup_recovered interrupted_count=%s", len(recovered))
+        return recovered
+
     async def finish_streamed_action(self, extra: dict[str, Any] | None, *, content: str, status: str) -> None:
         data = dict((extra or {}).get("ai_action") or {})
         plan_id = str(data.get("plan_id") or data.get("id") or "").strip()

@@ -3731,6 +3731,102 @@ def test_ai_action_workflow_cancel_plan_marks_active_plan_cancelled(tmp_path, mo
     asyncio.run(scenario())
 
 
+def test_ai_action_store_recovers_only_running_plans_on_startup(tmp_path, monkeypatch) -> None:
+    async def scenario() -> None:
+        db = Database(str(tmp_path / "actions.db"))
+        monkeypatch.setattr(action_store_module, "get_database", lambda: db)
+        store = AIActionStore()
+        plan = _atomic_send_plan()
+        try:
+            running = await store.create_plan(
+                thread_id="thread-1",
+                goal="运行中计划",
+                plan_json=plan.to_dict(),
+                state="running",
+                reason="test_running",
+            )
+            running = await store.update_plan(
+                running.id,
+                current_step_id="draft_message",
+                waiting_payload={"response_text": "旧的执行中提示"},
+                step_outputs={"resolve_target": {"contacts": [{"contact_id": "user-1"}]}},
+                reason="test_running_state",
+                bump_version=False,
+            )
+            waiting_confirmation = await store.create_plan(
+                thread_id="thread-1",
+                goal="等待确认计划",
+                plan_json=plan.to_dict(),
+                state="waiting_confirmation",
+                reason="test_waiting_confirmation",
+            )
+            waiting_clarification = await store.create_plan(
+                thread_id="thread-1",
+                goal="等待补充计划",
+                plan_json=plan.to_dict(),
+                state="waiting_clarification",
+                reason="test_waiting_clarification",
+            )
+
+            recovered = await store.recover_interrupted_plans()
+            recovered_running = await store.get_plan(running.id)
+            preserved_confirmation = await store.get_plan(waiting_confirmation.id)
+            preserved_clarification = await store.get_plan(waiting_clarification.id)
+            pending = await store.latest_pending_plan("thread-1")
+
+            assert [item.id for item in recovered] == [running.id]
+            assert recovered_running is not None
+            assert recovered_running.state == "failed"
+            assert recovered_running.error_text == "interrupted_recoverable"
+            assert recovered_running.current_step_id == ""
+            assert recovered_running.waiting_payload == {}
+            assert recovered_running.completed_at > 0
+            assert recovered_running.step_outputs == running.step_outputs
+            assert recovered_running.plan_json["events"][-1]["type"] == "plan_interrupted"
+            assert preserved_confirmation is not None
+            assert preserved_confirmation.state == "waiting_confirmation"
+            assert preserved_clarification is not None
+            assert preserved_clarification.state == "waiting_clarification"
+            assert pending is not None
+            assert pending.id in {waiting_confirmation.id, waiting_clarification.id}
+            assert pending.id != running.id
+        finally:
+            await db.close()
+
+    asyncio.run(scenario())
+
+
+def test_ai_action_workflow_recovers_interrupted_plans(tmp_path, monkeypatch) -> None:
+    async def scenario() -> None:
+        db = Database(str(tmp_path / "actions.db"))
+        monkeypatch.setattr(action_store_module, "get_database", lambda: db)
+        store = AIActionStore()
+        workflow = AIActionWorkflow(action_store=store, planner=_WorkflowPlanner())
+        plan = _atomic_send_plan()
+        try:
+            running = await store.create_plan(
+                thread_id="thread-1",
+                goal="运行中计划",
+                plan_json=plan.to_dict(),
+                state="running",
+                reason="test_workflow_recover",
+            )
+
+            recovered = await workflow.recover_interrupted_plans()
+            latest = await store.get_plan(running.id)
+
+            assert [item.id for item in recovered] == [running.id]
+            assert latest is not None
+            assert latest.state == "failed"
+            assert latest.error_text == "interrupted_recoverable"
+            assert latest.plan_json["events"][-1]["type"] == "plan_interrupted"
+            assert await store.latest_pending_plan("thread-1") is None
+        finally:
+            await db.close()
+
+    asyncio.run(scenario())
+
+
 def test_ai_action_workflow_expires_stale_confirmation_before_next_user_turn(tmp_path, monkeypatch) -> None:
     async def scenario() -> None:
         db = Database(str(tmp_path / "actions.db"))
