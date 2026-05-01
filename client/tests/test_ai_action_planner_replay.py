@@ -4,6 +4,8 @@ import asyncio
 import json
 from types import SimpleNamespace
 
+import pytest
+
 from client.managers.ai_action_workflow import AIActionPlanner
 from tools.ai_action_planner_replay import (
     PlannerReplayRecord,
@@ -305,6 +307,85 @@ def test_run_planner_corpus_calls_task_manager_and_writes_jsonl(tmp_path) -> Non
     assert records[0].raw_output.startswith('{"is_action": false')
     assert records[0].actions == ()
     assert records[0].validation_result == "passed"
+
+
+def test_run_planner_corpus_filters_cases_and_repeats_samples(tmp_path) -> None:
+    class FakeTaskManager:
+        def __init__(self) -> None:
+            self.requests = []
+
+        async def run_once(self, request):
+            self.requests.append(request)
+            return SimpleNamespace(
+                content='{"is_action": false, "goal": "闲聊", "risk": "low", "steps": [], "final": {}}',
+                provider="fake",
+                model="planner-test",
+                error_code=None,
+                error_message="",
+            )
+
+    output_path = tmp_path / "planner-repeat.jsonl"
+    task_manager = FakeTaskManager()
+    cases = [
+        PromptBenchmarkCase(
+            name="chat_case",
+            user_input="你好",
+            expectation=PromptCaseExpectation(is_action=False),
+        ),
+        PromptBenchmarkCase(
+            name="send_case",
+            user_input="帮我给张三发我晚点到",
+            expectation=PromptCaseExpectation(is_action=True),
+        ),
+    ]
+
+    records = asyncio.run(
+        run_planner_corpus(
+            cases,
+            task_manager=task_manager,
+            output_path=output_path,
+            case_names=("chat_case",),
+            repeat=3,
+        )
+    )
+
+    assert len(task_manager.requests) == 3
+    assert [request.metadata["planner_case_name"] for request in task_manager.requests] == [
+        "chat_case",
+        "chat_case",
+        "chat_case",
+    ]
+    assert [request.metadata["planner_case_iteration"] for request in task_manager.requests] == [1, 2, 3]
+    assert [request.metadata["planner_case_repeat"] for request in task_manager.requests] == [3, 3, 3]
+    assert [record.case_name for record in records] == ["chat_case", "chat_case", "chat_case"]
+    assert [record.metadata["planner_case_iteration"] for record in records] == [1, 2, 3]
+    assert [record.metadata["planner_case_repeat"] for record in records] == [3, 3, 3]
+    assert records == load_planner_replay_records(output_path)
+
+
+def test_run_planner_corpus_rejects_unknown_case_name(tmp_path) -> None:
+    class FakeTaskManager:
+        async def run_once(self, request):
+            del request
+            return SimpleNamespace(content="{}", provider="fake", model="planner-test")
+
+    cases = [
+        PromptBenchmarkCase(
+            name="chat_case",
+            user_input="你好",
+            expectation=PromptCaseExpectation(is_action=False),
+        )
+    ]
+
+    with pytest.raises(ValueError, match="unknown golden case name: missing_case"):
+        asyncio.run(
+            run_planner_corpus(
+                cases,
+                task_manager=FakeTaskManager(),
+                output_path=tmp_path / "unused.jsonl",
+                case_names=("missing_case",),
+            )
+        )
 
 
 def test_validate_planner_replay_evaluates_existing_jsonl_without_model(tmp_path) -> None:
