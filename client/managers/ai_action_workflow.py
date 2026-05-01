@@ -174,7 +174,7 @@ class AIActionPlanner:
     """Optional model-backed planner that returns atomic JSON action plans."""
 
     PLANNER_SCHEMA_VERSION = "atomic_steps_v1"
-    PLANNER_PROMPT_VERSION = "atomic_steps_prompt_v2"
+    PLANNER_PROMPT_VERSION = "atomic_steps_prompt_v6"
     PLAN_OUTPUT_VERSION = 1
 
     PROMPT_NEW_ACTION = "new_action"
@@ -397,6 +397,8 @@ class AIActionPlanner:
             "- 多个对象默认表示多对象读取或操作，不是歧义；只有单个名称对应多个本地实体时才由系统澄清。\n"
             "- 严格使用已注册 action、输入字段和输出字段；不要发明 action、字段或不存在的上游输出。\n"
             "- 根据 action 用途和输入/输出契约自行组合 plan，不要按固定示例补齐计划。\n"
+            "- 只输出完成用户目标的最小必要 steps；不要加入可选、辅助、预热或候选步骤。\n"
+            "- 如果某个 step 的输出不会被后续 step 或 final 使用，说明它不在当前目标的执行链路中，不要输出。\n"
             f"{contract}"
         )
 

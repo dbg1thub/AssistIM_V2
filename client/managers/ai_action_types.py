@@ -225,6 +225,12 @@ class AtomicActionSpec:
     max_result_items: int | None = None
     prompt_purpose: str = ""
     prompt_notes: tuple[str, ...] = ()
+    planner_required_predecessors: tuple[str, ...] = ()
+    planner_required_arg_refs: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    planner_required_object_args: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    planner_required_object_arg_refs: dict[str, dict[str, tuple[str, ...]]] = field(default_factory=dict)
+    planner_required_object_arg_contains: dict[str, dict[str, tuple[str, ...]]] = field(default_factory=dict)
+    planner_forbidden_literal_args: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

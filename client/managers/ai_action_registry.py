@@ -279,7 +279,13 @@ class AtomicActionRegistry:
                 output_model=MessageDraftOutput,
                 max_content_chars=2000,
                 prompt_purpose="根据已解析目标和明确文本内容生成发送预览、目标实体和幂等键。",
-                prompt_notes=("只准备草稿和 preview，不产生外部副作用。",),
+                prompt_notes=(
+                    "只准备草稿和 preview，不产生外部副作用。",
+                    "单目标写操作的联系人解析应设置 allow_multiple=false，必须显式输出 allow_multiple=false。",
+                ),
+                planner_required_predecessors=("contact.resolve",),
+                planner_required_arg_refs={"target": ("contact.resolve.contacts[0]",)},
+                planner_forbidden_literal_args=("target",),
             )
         )
         self._register(
@@ -290,7 +296,19 @@ class AtomicActionRegistry:
                 handler=self._user_confirm,
                 input_model=UserConfirmInput,
                 prompt_purpose="在执行外部副作用前暂停并请求用户确认 preview。",
-                prompt_notes=("确认动作必须服务于明确写操作，不能用于普通读取任务。",),
+                prompt_notes=(
+                    "确认动作必须服务于明确写操作，不能用于普通读取任务。",
+                    "preview 不能是字符串引用，operation、target、content 必须放在 preview 对象内部。",
+                ),
+                planner_required_predecessors=("message.draft",),
+                planner_required_object_args={"preview": ("operation", "target", "content")},
+                planner_required_object_arg_refs={
+                    "preview": {
+                        "target": ("message.draft.target",),
+                        "content": ("message.draft.content",),
+                    }
+                },
+                planner_required_object_arg_contains={"preview": {"operation": ("发送",)}},
             )
         )
         self._register(
@@ -315,7 +333,16 @@ class AtomicActionRegistry:
                 prompt_notes=(
                     "必须依赖 user.confirm 的确认结果。",
                     "target、content、preview 和 idempotency_key 应来自上游草稿或确认上下文。",
+                    "不要引用 user.confirm 输出作为 message.send 的 target/content/idempotency_key 参数。",
                 ),
+                planner_required_predecessors=("message.draft", "user.confirm"),
+                planner_required_arg_refs={
+                    "target": ("message.draft.target_entity",),
+                    "content": ("message.draft.content",),
+                    "preview": ("message.draft.preview", "user.confirm.preview"),
+                    "idempotency_key": ("message.draft.idempotency_key",),
+                },
+                planner_forbidden_literal_args=("target", "content", "preview", "idempotency_key"),
             )
         )
 
@@ -788,6 +815,9 @@ def _format_action_prompt_contract(spec: AtomicActionSpec) -> str:
     constraints = _spec_prompt_constraints(spec)
     if constraints:
         parts.append(f"约束 {constraints}")
+    planning_constraints = _spec_planner_constraints(spec)
+    if planning_constraints:
+        parts.append(f"规划契约 {planning_constraints}")
     for note in spec.prompt_notes:
         normalized = " ".join(str(note or "").split())
         if normalized:
@@ -854,6 +884,63 @@ def _spec_prompt_constraints(spec: AtomicActionSpec) -> str:
         values.append(f"default_result_limit={spec.default_result_limit}")
     if spec.max_result_items is not None:
         values.append(f"max_result_items={spec.max_result_items}")
+    return ", ".join(values)
+
+
+def _spec_planner_constraints(spec: AtomicActionSpec) -> str:
+    values: list[str] = []
+    for action_name in spec.planner_required_predecessors:
+        normalized = str(action_name or "").strip()
+        if normalized:
+            values.append(f"前置动作 {normalized}")
+    for field_name, refs in spec.planner_required_arg_refs.items():
+        normalized_field = str(field_name or "").strip()
+        if not normalized_field:
+            continue
+        normalized_refs = [
+            str(ref or "").strip()
+            for ref in list(refs or ())
+            if str(ref or "").strip()
+        ]
+        for ref in normalized_refs:
+            values.append(f"字段引用 {normalized_field}<-{ref}")
+    for arg_name, required_fields in spec.planner_required_object_args.items():
+        normalized_arg = str(arg_name or "").strip()
+        if not normalized_arg:
+            continue
+        values.append(f"{normalized_arg} 必须是对象")
+        for field_name in list(required_fields or ()):
+            normalized_field = str(field_name or "").strip()
+            if normalized_field:
+                values.append(f"对象字段 {normalized_arg}.{normalized_field} 必填")
+    for arg_name, field_refs in spec.planner_required_object_arg_refs.items():
+        normalized_arg = str(arg_name or "").strip()
+        if not normalized_arg:
+            continue
+        for field_name, refs in dict(field_refs or {}).items():
+            normalized_field = str(field_name or "").strip()
+            if not normalized_field:
+                continue
+            for ref in list(refs or ()):
+                normalized_ref = str(ref or "").strip()
+                if normalized_ref:
+                    values.append(f"对象字段 {normalized_arg}.{normalized_field}<-{normalized_ref}")
+    for arg_name, field_values in spec.planner_required_object_arg_contains.items():
+        normalized_arg = str(arg_name or "").strip()
+        if not normalized_arg:
+            continue
+        for field_name, expected_values in dict(field_values or {}).items():
+            normalized_field = str(field_name or "").strip()
+            if not normalized_field:
+                continue
+            for expected in list(expected_values or ()):
+                normalized_expected = str(expected or "").strip()
+                if normalized_expected:
+                    values.append(f"对象字段 {normalized_arg}.{normalized_field} 包含 {normalized_expected}")
+    for field_name in spec.planner_forbidden_literal_args:
+        normalized = str(field_name or "").strip()
+        if normalized:
+            values.append(f"不允许直接使用自然语言对象作为 {normalized}")
     return ", ".join(values)
 
 

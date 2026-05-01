@@ -15,7 +15,12 @@ from tools.ai_action_planner_replay import (
     load_planner_replay_records,
     write_planner_replay_records,
 )
-from tools.ai_action_prompt_benchmark import PromptBenchmarkCase, PromptCaseExpectation, summarize_results
+from tools.ai_action_prompt_benchmark import (
+    PromptBenchmarkCase,
+    PromptCaseExpectation,
+    PromptStepArgExpectation,
+    summarize_results,
+)
 from tools.run_ai_action_planner_corpus import run_planner_corpus, validate_planner_replay
 
 
@@ -215,6 +220,51 @@ def test_planner_replay_runtime_evaluation_normalizes_send_plan(tmp_path) -> Non
     assert summary["raw_expectation_pass_rate"] == 0.0
     assert summary["runtime_expectation_pass_rate"] == 1.0
     assert summary["runtime_safe_rate"] == 1.0
+
+
+def test_planner_replay_evaluation_rejects_send_refs_that_do_not_point_to_draft(tmp_path) -> None:
+    output_path = tmp_path / "planner-send-ref-action.jsonl"
+    raw_output = (
+        '{"is_action": true, "goal": "发送消息", "risk": "high", "steps": ['
+        '{"id": "resolve", "action": "contact.resolve", "depends_on": [], '
+        '"args": {"queries": ["张三"], "allow_multiple": false}},'
+        '{"id": "draft", "action": "message.draft", "depends_on": ["resolve"], '
+        '"args": {"target": "$resolve.contacts[0]", "content": "我晚点到"}},'
+        '{"id": "confirm", "action": "user.confirm", "depends_on": ["draft"], '
+        '"args": {"risk": "high", "preview": {"operation": "发送", '
+        '"target": "$draft.target", "content": "$draft.content"}}},'
+        '{"id": "send", "action": "message.send", "depends_on": ["confirm"], '
+        '"args": {"target": "$confirm.target_entity", "content": "$confirm.content", '
+        '"preview": "$confirm.preview", "idempotency_key": "$confirm.idempotency_key"}}'
+        '], "final": {}}'
+    )
+    cases = [
+        PromptBenchmarkCase(
+            name="send_case",
+            user_input="帮我给张三发我晚点到",
+            expectation=PromptCaseExpectation(
+                is_action=True,
+                required_actions=("contact.resolve", "message.draft", "user.confirm", "message.send"),
+                required_step_args=(
+                    PromptStepArgExpectation(action="message.send", path="target", ref_action="message.draft"),
+                    PromptStepArgExpectation(action="message.send", path="content", ref_action="message.draft"),
+                    PromptStepArgExpectation(action="message.send", path="idempotency_key", ref_action="message.draft"),
+                ),
+            ),
+        )
+    ]
+    write_planner_replay_records(
+        output_path,
+        [PlannerReplayRecord(case_name="send_case", user_input="帮我给张三发我晚点到", raw_output=raw_output)],
+        cases=cases,
+    )
+
+    loaded = load_planner_replay_records(output_path)
+    results = evaluate_planner_replay_file(cases, output_path)
+
+    assert loaded[0].validation_result == "failed"
+    assert "required step args mismatch" in loaded[0].diff_from_expected
+    assert results[0].samples[0].expectation_passed is False
 
 
 def test_planner_replay_runtime_evaluation_marks_unsafe_plan_blocked(tmp_path) -> None:

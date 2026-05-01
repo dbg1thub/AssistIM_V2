@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -30,6 +31,7 @@ class PromptStepArgExpectation:
     path: str
     equals: str | None = None
     starts_with: str | None = None
+    ref_action: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,6 +46,7 @@ class PromptCaseExpectation:
     required_step_args: tuple[PromptStepArgExpectation, ...] = ()
     is_action: bool | None = None
     forbidden_actions: tuple[str, ...] = ()
+    allow_extra_actions: bool = False
     forbidden_top_level_fields: tuple[str, ...] = field(default_factory=lambda: LEGACY_PLAN_TOP_LEVEL_FIELDS)
 
 
@@ -194,6 +197,10 @@ def evaluate_case(plan: dict[str, Any] | None, expectation: PromptCaseExpectatio
         checks["required_actions"] = all(action in actions for action in expectation.required_actions)
         if not checks["required_actions"]:
             messages.append("missing required actions")
+        if not expectation.allow_extra_actions:
+            checks["unexpected_actions"] = not _extra_actions(actions, expectation.required_actions)
+            if not checks["unexpected_actions"]:
+                messages.append("unexpected actions present")
     if expectation.required_action_sequence:
         checks["required_action_sequence"] = _actions_contain_sequence(actions, expectation.required_action_sequence)
         if not checks["required_action_sequence"]:
@@ -307,6 +314,7 @@ def _load_expectation(payload: dict[str, Any], *, case_name: str) -> PromptCaseE
         required_actions=tuple(_string_list(payload.get("required_actions"))),
         required_action_sequence=tuple(_string_list(payload.get("required_action_sequence"))),
         forbidden_actions=tuple(_string_list(payload.get("forbidden_actions"))),
+        allow_extra_actions=bool(payload.get("allow_extra_actions")),
         forbidden_top_level_fields=(
             tuple(_string_list(payload.get("forbidden_top_level_fields")))
             if "forbidden_top_level_fields" in payload
@@ -331,6 +339,7 @@ def _load_step_arg_expectation(payload: dict[str, Any], *, case_name: str) -> Pr
         path=path,
         equals=str(payload.get("equals")) if payload.get("equals") is not None else None,
         starts_with=str(payload.get("starts_with")) if payload.get("starts_with") is not None else None,
+        ref_action=str(payload.get("ref_action")) if payload.get("ref_action") is not None else None,
     )
 
 
@@ -431,6 +440,17 @@ def _actions_contain_sequence(actions: list[str], expected_sequence: tuple[str, 
     return False
 
 
+def _extra_actions(actions: list[str], expected_actions: tuple[str, ...]) -> list[str]:
+    actual_counts = Counter(action for action in actions if action)
+    expected_counts = Counter(action for action in expected_actions if action)
+    extras: list[str] = []
+    for action, count in actual_counts.items():
+        excess = count - expected_counts.get(action, 0)
+        if excess > 0:
+            extras.extend([action] * excess)
+    return extras
+
+
 def _has_valid_step_references(steps: list[dict[str, Any]], final: dict[str, Any]) -> bool:
     seen_ids: set[str] = set()
     for index, step in enumerate(steps, start=1):
@@ -474,6 +494,10 @@ def _ref_roots(value: Any) -> set[str]:
 
 
 def _step_arg_matches(steps: list[dict[str, Any]], expectation: PromptStepArgExpectation) -> bool:
+    steps_by_id = {
+        str(step.get("id") or f"step_{index}").strip(): step
+        for index, step in enumerate(steps, start=1)
+    }
     for step in steps:
         if str(step.get("action") or "").strip() != expectation.action:
             continue
@@ -483,8 +507,26 @@ def _step_arg_matches(steps: list[dict[str, Any]], expectation: PromptStepArgExp
             continue
         if expectation.starts_with is not None and not str(value).startswith(expectation.starts_with):
             continue
+        if expectation.ref_action is not None and not _ref_points_to_action(
+            value,
+            steps_by_id=steps_by_id,
+            action=expectation.ref_action,
+        ):
+            continue
         return True
     return False
+
+
+def _ref_points_to_action(value: Any, *, steps_by_id: dict[str, dict[str, Any]], action: str) -> bool:
+    expected_action = str(action or "").strip()
+    if not expected_action or not isinstance(value, str) or not value.startswith("$"):
+        return False
+    roots = _ref_roots(value)
+    if len(roots) != 1:
+        return False
+    root = next(iter(roots))
+    step = steps_by_id.get(root)
+    return str((step or {}).get("action") or "").strip() == expected_action
 
 
 def _get_path(payload: dict[str, Any], path: str) -> Any:

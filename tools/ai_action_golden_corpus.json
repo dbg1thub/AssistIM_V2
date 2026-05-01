@@ -85,8 +85,19 @@
           },
           {
             "action": "message.send",
+            "path": "target",
+            "ref_action": "message.draft"
+          },
+          {
+            "action": "message.send",
+            "path": "content",
+            "ref_action": "message.draft"
+          },
+          {
+            "action": "message.send",
             "path": "idempotency_key",
-            "starts_with": "$"
+            "starts_with": "$",
+            "ref_action": "message.draft"
           },
           {
             "action": "message.send",
@@ -114,6 +125,27 @@
             "action": "contact.resolve",
             "path": "allow_multiple",
             "equals": "False"
+          },
+          {
+            "action": "message.send",
+            "path": "target",
+            "ref_action": "message.draft"
+          },
+          {
+            "action": "message.send",
+            "path": "content",
+            "ref_action": "message.draft"
+          },
+          {
+            "action": "message.send",
+            "path": "idempotency_key",
+            "starts_with": "$",
+            "ref_action": "message.draft"
+          },
+          {
+            "action": "message.send",
+            "path": "preview",
+            "starts_with": "$"
           }
         ]
       }

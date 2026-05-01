@@ -317,6 +317,33 @@ def test_evaluate_case_checks_required_action_sequence() -> None:
     assert ok_messages == []
 
 
+def test_evaluate_case_rejects_unexpected_actions_when_required_actions_are_declared() -> None:
+    expectation = PromptCaseExpectation(
+        required_actions=("contact.resolve", "message.draft", "user.confirm", "message.send"),
+        required_action_sequence=("contact.resolve", "message.draft", "user.confirm", "message.send"),
+    )
+    plan = {
+        "is_action": True,
+        "goal": "发送消息",
+        "risk": "high",
+        "steps": [
+            {"id": "resolve_1", "action": "contact.resolve", "depends_on": [], "args": {}},
+            {"id": "draft_1", "action": "message.draft", "depends_on": ["resolve_1"], "args": {}},
+            {"id": "confirm_1", "action": "user.confirm", "depends_on": ["draft_1"], "args": {}},
+            {"id": "send_1", "action": "message.send", "depends_on": ["confirm_1"], "args": {}},
+            {"id": "search_1", "action": "memory.search", "depends_on": [], "args": {}},
+        ],
+        "final": {},
+    }
+
+    checks, messages = evaluate_case(plan, expectation)
+
+    assert checks["required_actions"] is True
+    assert checks["required_action_sequence"] is True
+    assert checks["unexpected_actions"] is False
+    assert "unexpected actions present" in messages
+
+
 def test_evaluate_case_checks_required_step_args() -> None:
     plan = {
         "goal": "send",

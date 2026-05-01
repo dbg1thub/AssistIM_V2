@@ -1053,6 +1053,8 @@ def test_ai_action_planner_prompt_keeps_generic_planning_rules_without_case_temp
     assert "depends_on 必须包含被 args 引用的上游 step.id" in system_prompt
     assert "读取类任务不需要确认" in system_prompt
     assert "写操作必须先生成 preview 并经过 user.confirm" in system_prompt
+    assert "只输出完成用户目标的最小必要 steps" in system_prompt
+    assert "不会被后续 step 或 final 使用" in system_prompt
     assert "不要按固定示例补齐计划" in user_prompt
     assert "用户输入：我和test3昨天聊了什么？" in user_prompt
 
@@ -1070,6 +1072,32 @@ def test_ai_action_planner_prompt_documents_atomic_action_arg_contracts_without_
     assert "target_entity" in system_prompt
     assert "张三" not in system_prompt
     assert "用户原始问题" not in system_prompt
+
+
+def test_ai_action_planner_prompt_documents_write_dependency_contracts_without_fixed_ids() -> None:
+    system_prompt = AIActionPlanner._system_prompt(AIActionPlanner.PROMPT_NEW_ACTION)
+
+    assert "message.send" in system_prompt
+    assert "前置动作 user.confirm" in system_prompt
+    assert "字段引用 target<-message.draft.target_entity" in system_prompt
+    assert "字段引用 content<-message.draft.content" in system_prompt
+    assert "字段引用 preview<-message.draft.preview" in system_prompt
+    assert "字段引用 preview<-user.confirm.preview" in system_prompt
+    assert "字段引用 idempotency_key<-message.draft.idempotency_key" in system_prompt
+    assert "不要引用 user.confirm 输出作为 message.send 的 target/content/idempotency_key 参数" in system_prompt
+    assert "字段引用 target<-contact.resolve.contacts[0]" in system_prompt
+    assert "不允许直接使用自然语言对象作为 target" in system_prompt
+    assert "preview 必须是对象" in system_prompt
+    assert "对象字段 preview.operation 包含 发送" in system_prompt
+    assert "对象字段 preview.target<-message.draft.target" in system_prompt
+    assert "对象字段 preview.content<-message.draft.content" in system_prompt
+    assert "单目标写操作的联系人解析应设置 allow_multiple=false" in system_prompt
+    assert "必须显式输出 allow_multiple=false" in system_prompt
+    assert "preview 不能是字符串引用" in system_prompt
+    assert "operation、target、content 必须放在 preview 对象内部" in system_prompt
+    assert "固定 step id" not in system_prompt
+    assert "resolve_target" not in system_prompt
+    assert "confirm_send" not in system_prompt
 
 
 def test_ai_action_planner_schema_uses_atomic_steps_or_control_not_legacy_slots() -> None:
