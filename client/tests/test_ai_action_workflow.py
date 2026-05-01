@@ -1207,6 +1207,107 @@ def test_ai_action_registry_exposes_memory_actions() -> None:
     assert registry.get("memory.summarize") is not None
 
 
+def test_ai_action_registry_default_specs_declare_platform_boundaries() -> None:
+    registry = AtomicActionRegistry(
+        contact_resolver=ContactAliasResolver(db=_FakeContactDatabase([])),
+        memory_manager=_FakeActionMemoryManager(),
+    )
+
+    for action_name in registry.names():
+        spec = registry.get(action_name)
+        assert spec is not None
+        assert spec.name == action_name
+        assert spec.kind in {"read", "write"}
+        assert spec.risk_level in {"low", "medium", "high"}
+        assert spec.max_input_bytes > 0
+        assert spec.max_output_json_bytes > 0
+        assert spec.timeout_ms > 0
+        if spec.kind == "read":
+            assert spec.allow_side_effect is False
+
+    send = registry.get("message.send")
+    assert send is not None
+    assert send.kind == "write"
+    assert send.risk_level == "high"
+    assert send.allow_side_effect is True
+    assert send.requires_confirmation is True
+    assert send.max_targets == 1
+    assert send.allow_batch is False
+    assert send.require_resolved_target is True
+    assert send.require_preview is True
+    assert send.idempotency_required is True
+    assert send.allow_auto_resume_after_confirm is False
+
+
+def test_ai_action_registry_rejects_invalid_platform_boundaries() -> None:
+    invalid_specs = [
+        AtomicActionSpec(name="test.bad_read", kind="read", risk_level="low", allow_side_effect=True),
+        AtomicActionSpec(name="test.bad_write_risk", kind="write", risk_level="medium", allow_side_effect=True),
+        AtomicActionSpec(name="test.bad_write_effect", kind="write", risk_level="high", allow_side_effect=False),
+        AtomicActionSpec(
+            name="test.bad_write_confirmation",
+            kind="write",
+            risk_level="high",
+            allow_side_effect=True,
+            requires_confirmation=False,
+        ),
+        AtomicActionSpec(
+            name="test.bad_write_preview",
+            kind="write",
+            risk_level="high",
+            allow_side_effect=True,
+            requires_confirmation=True,
+            require_preview=False,
+            idempotency_required=True,
+            max_targets=1,
+        ),
+        AtomicActionSpec(
+            name="test.bad_write_idempotency",
+            kind="write",
+            risk_level="high",
+            allow_side_effect=True,
+            requires_confirmation=True,
+            require_preview=True,
+            idempotency_required=False,
+            max_targets=1,
+        ),
+        AtomicActionSpec(
+            name="test.bad_write_targets",
+            kind="write",
+            risk_level="high",
+            allow_side_effect=True,
+            requires_confirmation=True,
+            require_preview=True,
+            idempotency_required=True,
+            max_targets=2,
+        ),
+        AtomicActionSpec(
+            name="test.bad_write_resume",
+            kind="write",
+            risk_level="high",
+            allow_side_effect=True,
+            requires_confirmation=True,
+            require_preview=True,
+            idempotency_required=True,
+            max_targets=1,
+            allow_auto_resume_after_confirm=True,
+        ),
+    ]
+
+    for spec in invalid_specs:
+        registry = AtomicActionRegistry(
+            contact_resolver=ContactAliasResolver(db=_FakeContactDatabase([])),
+            memory_manager=_FakeActionMemoryManager(),
+        )
+        try:
+            registry._register(spec)
+        except ValueError as exc:
+            assert "ACTION_SPEC_INVALID" in str(exc)
+            assert spec.name in str(exc)
+        else:
+            raise AssertionError(f"invalid action spec should be rejected: {spec.name}")
+
+
 def test_ai_action_registry_clarifies_send_confirmation_without_preview() -> None:
     async def scenario() -> None:
         registry = AtomicActionRegistry(

@@ -205,6 +205,7 @@ class AtomicActionRegistry:
         return tuple(sorted(self._actions))
 
     def _register(self, spec: AtomicActionSpec) -> None:
+        _validate_action_spec(spec)
         self._actions[spec.name] = spec
 
     def _register_defaults(self) -> None:
@@ -997,6 +998,57 @@ def _coerce_contacts(value: object) -> list[dict[str, Any]]:
         return []
     raw_items = value if isinstance(value, list) else [value]
     return [_coerce_contact(item) for item in raw_items if _coerce_contact(item)]
+
+
+def _validate_action_spec(spec: AtomicActionSpec) -> None:
+    name = str(getattr(spec, "name", "") or "").strip()
+    if not name:
+        raise ValueError("ACTION_SPEC_INVALID: unnamed action")
+    kind = str(getattr(spec, "kind", "") or "").strip()
+    risk = str(getattr(spec, "risk_level", "") or "").strip()
+    if kind not in {"read", "write"}:
+        raise ValueError(f"ACTION_SPEC_INVALID: {name}: kind")
+    if risk not in {"low", "medium", "high"}:
+        raise ValueError(f"ACTION_SPEC_INVALID: {name}: risk_level")
+    if _positive_spec_int(getattr(spec, "max_input_bytes", 0)) <= 0:
+        raise ValueError(f"ACTION_SPEC_INVALID: {name}: max_input_bytes")
+    if _positive_spec_int(getattr(spec, "max_output_json_bytes", 0)) <= 0:
+        raise ValueError(f"ACTION_SPEC_INVALID: {name}: max_output_json_bytes")
+    if _positive_spec_int(getattr(spec, "timeout_ms", 0)) <= 0:
+        raise ValueError(f"ACTION_SPEC_INVALID: {name}: timeout_ms")
+    try:
+        max_retries = int(getattr(spec, "max_retries", 0) or 0)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"ACTION_SPEC_INVALID: {name}: max_retries") from exc
+    if max_retries < 0:
+        raise ValueError(f"ACTION_SPEC_INVALID: {name}: max_retries")
+    if kind == "read":
+        if bool(getattr(spec, "allow_side_effect", False)):
+            raise ValueError(f"ACTION_SPEC_INVALID: {name}: read_side_effect")
+        return
+    if risk != "high":
+        raise ValueError(f"ACTION_SPEC_INVALID: {name}: write_risk")
+    if not bool(getattr(spec, "allow_side_effect", False)):
+        raise ValueError(f"ACTION_SPEC_INVALID: {name}: write_side_effect")
+    if not bool(getattr(spec, "requires_confirmation", False)):
+        raise ValueError(f"ACTION_SPEC_INVALID: {name}: confirmation")
+    if bool(getattr(spec, "allow_batch", False)):
+        raise ValueError(f"ACTION_SPEC_INVALID: {name}: batch")
+    if getattr(spec, "max_targets", None) != 1:
+        raise ValueError(f"ACTION_SPEC_INVALID: {name}: max_targets")
+    if not bool(getattr(spec, "require_preview", False)):
+        raise ValueError(f"ACTION_SPEC_INVALID: {name}: preview")
+    if not bool(getattr(spec, "idempotency_required", False)):
+        raise ValueError(f"ACTION_SPEC_INVALID: {name}: idempotency")
+    if bool(getattr(spec, "allow_auto_resume_after_confirm", True)):
+        raise ValueError(f"ACTION_SPEC_INVALID: {name}: auto_resume")
+
+
+def _positive_spec_int(value: Any) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
 
 
 def _coerce_contact(value: object) -> dict[str, Any]:
