@@ -268,6 +268,7 @@ class AIActionEvent:
     attempt: int = 0
     max_attempts: int = 0
     retryable: bool | None = None
+    resource_limit: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         payload = {
@@ -294,6 +295,8 @@ class AIActionEvent:
             payload["max_attempts"] = max(0, int(self.max_attempts))
         if self.retryable is not None:
             payload["retryable"] = bool(self.retryable)
+        if self.resource_limit:
+            payload["resource_limit"] = str(self.resource_limit)
         return payload
 
 

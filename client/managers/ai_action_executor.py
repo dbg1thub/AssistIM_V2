@@ -7,6 +7,7 @@ import inspect
 import json
 import re
 import time
+from dataclasses import dataclass
 from typing import Any, Callable
 
 from pydantic import ValidationError
@@ -32,6 +33,19 @@ logger = logging.get_logger(__name__)
 AIActionProgressCallback = Callable[[AIActionPlanRecord], Any]
 
 
+@dataclass(frozen=True, slots=True)
+class ActionRuntimeBudget:
+    max_total_output_bytes: int = 262144
+    max_result_ref_count: int = 8
+    max_total_result_count: int = 500
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeBudgetCheck:
+    allowed: bool
+    reason: str = ""
+
+
 class AIActionExecutor:
     """Execute atomic action steps and persist progress after every step."""
 
@@ -41,10 +55,12 @@ class AIActionExecutor:
         registry: AtomicActionRegistry,
         store: AIActionPlanStore,
         permission_policy: AIPermissionPolicy | None = None,
+        runtime_budget: ActionRuntimeBudget | None = None,
     ) -> None:
         self._registry = registry
         self._store = store
         self._permission_policy = permission_policy or AIPermissionPolicy()
+        self._runtime_budget = runtime_budget or ActionRuntimeBudget()
 
     async def execute(
         self,
@@ -415,6 +431,15 @@ class AIActionExecutor:
                 waiting_payload={},
             ) or record
             await _emit_progress(progress_callback, record)
+            budget_check = _check_runtime_budget(plan_json, self._runtime_budget)
+            if not budget_check.allowed:
+                return await self._fail_runtime_budget(
+                    record,
+                    outputs,
+                    events,
+                    budget_check.reason,
+                    progress_callback=progress_callback,
+                )
 
         cancelled, record = await self._cancelled_result_if_requested(
             record,
@@ -548,6 +573,42 @@ class AIActionExecutor:
         )
         await _emit_progress(progress_callback, updated or record)
         return ActionExecutionResult(state="failed", response_text="这个操作执行失败，请稍后再试。", error_text=error_text)
+
+    async def _fail_runtime_budget(
+        self,
+        record: AIActionPlanRecord,
+        outputs: dict[str, Any],
+        events: list[dict[str, Any]],
+        reason: str,
+        *,
+        progress_callback: AIActionProgressCallback | None = None,
+    ) -> ActionExecutionResult:
+        error_text = f"RESOURCE_LIMIT_EXCEEDED: {str(reason or '').strip() or 'runtime_budget'}"
+        events.append(
+            AIActionEvent(
+                step_id=str(record.current_step_id or ""),
+                action="plan",
+                state="failed",
+                event_type="plan_resource_limit_exceeded",
+                plan_id=record.id,
+                error_code="RESOURCE_LIMIT_EXCEEDED",
+                resource_limit=str(reason or "").strip(),
+            ).to_dict()
+        )
+        updated = await self._store.update_plan(
+            record.id,
+            plan_json=_plan_json_with_events(record.plan_json, events),
+            reason="plan_resource_limit_exceeded",
+            bump_version=False,
+            state="failed",
+            current_step_id=record.current_step_id,
+            step_outputs=outputs,
+            waiting_payload={},
+            error_text=error_text,
+            completed_at=time.time(),
+        )
+        await _emit_progress(progress_callback, updated or record)
+        return ActionExecutionResult(state="failed", response_text="这个操作超过资源限制，已停止后续步骤。", error_text=error_text)
 
     async def _fail_step_before_handler(
         self,
@@ -965,6 +1026,17 @@ def _aggregate_resource_usage(events: list[dict[str, Any]]) -> dict[str, int]:
         if bool(usage.get("result_ref")):
             aggregate["result_ref_count"] += 1
     return aggregate
+
+
+def _check_runtime_budget(plan_json: dict[str, Any], budget: ActionRuntimeBudget) -> RuntimeBudgetCheck:
+    usage = dict((plan_json or {}).get("resource_usage") or {})
+    if _positive_int(usage.get("total_output_bytes")) > _positive_int(budget.max_total_output_bytes):
+        return RuntimeBudgetCheck(False, "total_output_bytes")
+    if _positive_int(usage.get("result_ref_count")) > _positive_int(budget.max_result_ref_count):
+        return RuntimeBudgetCheck(False, "result_ref_count")
+    if _positive_int(usage.get("total_result_count")) > _positive_int(budget.max_total_result_count):
+        return RuntimeBudgetCheck(False, "total_result_count")
+    return RuntimeBudgetCheck(True)
 
 
 def _model_call_cost(spec: AtomicActionSpec) -> int:

@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 from client.managers import ai_action_registry as registry_module
 from client.managers.ai_action_cache import AIActionCache
-from client.managers.ai_action_executor import AIActionExecutor
+from client.managers.ai_action_executor import AIActionExecutor, ActionRuntimeBudget
 from client.managers.ai_action_memory_summarizer import AIActionMemorySummarizer
 from client.managers.ai_action_normalizer import AIPlanNormalizer
 from client.managers.ai_action_optimizer import AIPlanOptimizer
@@ -3292,6 +3292,263 @@ def test_ai_action_executor_records_safe_step_resource_usage(tmp_path, monkeypat
             assert aggregate["result_ref_count"] == 0
             assert aggregate["step_event_count"] == 1
             assert "张三" not in str(aggregate)
+        finally:
+            await db.close()
+
+    asyncio.run(scenario())
+
+
+def test_ai_action_executor_stops_after_runtime_output_budget_exceeded(tmp_path, monkeypatch) -> None:
+    async def scenario() -> None:
+        calls: list[str] = []
+
+        async def large_read(args, context):
+            del args, context
+            calls.append("large_read")
+            return {"text": "x" * 220, "result_count": 1}
+
+        async def second_read(args, context):
+            del args, context
+            calls.append("second_read")
+            return {"text": "should not run", "result_count": 1}
+
+        db = Database(str(tmp_path / "actions.db"))
+        monkeypatch.setattr(action_store_module, "get_database", lambda: db)
+        store = AIActionStore()
+        registry = AtomicActionRegistry(
+            contact_resolver=ContactAliasResolver(db=_FakeContactDatabase([])),
+        )
+        registry._actions["test.large_read"] = AtomicActionSpec(
+            name="test.large_read",
+            kind="read",
+            risk_level="low",
+            handler=large_read,
+        )
+        registry._actions["test.second_read"] = AtomicActionSpec(
+            name="test.second_read",
+            kind="read",
+            risk_level="low",
+            handler=second_read,
+        )
+        executor = AIActionExecutor(
+            registry=registry,
+            store=store,
+            runtime_budget=ActionRuntimeBudget(max_total_output_bytes=120),
+        )
+        plan = AIActionPlan(
+            is_action=True,
+            goal="运行时硬限制",
+            steps=(
+                AIActionStep(id="large_read", action="test.large_read", args={}),
+                AIActionStep(id="second_read", action="test.second_read", depends_on=("large_read",), args={}),
+            ),
+            final={"type": "answer", "source": "$second_read"},
+        )
+        try:
+            record = await store.create_plan(
+                thread_id="thread-1",
+                goal=plan.goal,
+                plan_json=plan.to_dict(),
+                reason="test_runtime_output_budget",
+            )
+            result = await executor.execute(record)
+            updated = await store.get_plan(record.id)
+
+            assert result.state == "failed"
+            assert result.error_text == "RESOURCE_LIMIT_EXCEEDED: total_output_bytes"
+            assert calls == ["large_read"]
+            assert updated is not None
+            assert updated.state == "failed"
+            assert updated.error_text == "RESOURCE_LIMIT_EXCEEDED: total_output_bytes"
+            assert "large_read" in updated.step_outputs
+            assert "second_read" not in updated.step_outputs
+            assert [event["type"] for event in updated.plan_json["events"]] == [
+                "step_started",
+                "step_completed",
+                "plan_resource_limit_exceeded",
+            ]
+            assert updated.plan_json["events"][-1]["error_code"] == "RESOURCE_LIMIT_EXCEEDED"
+            assert updated.plan_json["events"][-1]["resource_limit"] == "total_output_bytes"
+            assert updated.plan_json["events"][-1]["step_id"] == "large_read"
+            assert updated.plan_json["resource_usage"]["total_output_bytes"] > 120
+        finally:
+            await db.close()
+
+    asyncio.run(scenario())
+
+
+def test_ai_action_executor_runtime_budget_blocks_following_write_action(tmp_path, monkeypatch) -> None:
+    async def scenario() -> None:
+        send_calls: list[dict] = []
+
+        async def large_read(args, context):
+            del args, context
+            return {"text": "x" * 220, "result_count": 1}
+
+        async def send_message(args, context):
+            del context
+            send_calls.append(dict(args))
+            return {"status": "sent", "text": "sent", "target": dict(args.get("target") or {}), "content_chars": 4}
+
+        db = Database(str(tmp_path / "actions.db"))
+        monkeypatch.setattr(action_store_module, "get_database", lambda: db)
+        store = AIActionStore()
+        registry = AtomicActionRegistry(
+            contact_resolver=ContactAliasResolver(db=_FakeContactDatabase([])),
+        )
+        registry._actions["test.large_read"] = AtomicActionSpec(
+            name="test.large_read",
+            kind="read",
+            risk_level="low",
+            handler=large_read,
+        )
+        send_spec = registry.get("message.send")
+        assert send_spec is not None
+        registry._actions["message.send"] = replace(send_spec, handler=send_message, enabled=True)
+        executor = AIActionExecutor(
+            registry=registry,
+            store=store,
+            runtime_budget=ActionRuntimeBudget(max_total_output_bytes=120),
+        )
+        plan = AIActionPlan(
+            is_action=True,
+            goal="超限后不能发送",
+            risk="high",
+            steps=(
+                AIActionStep(id="large_read", action="test.large_read", args={}),
+                AIActionStep(
+                    id="send_message",
+                    action="message.send",
+                    depends_on=("large_read",),
+                    args={
+                        "target": {"contact_id": "user-1", "display_name": "张三"},
+                        "content": "测试",
+                        "preview": {"operation": "发送消息", "target": "张三", "content": "测试"},
+                        "idempotency_key": "idem-runtime-budget",
+                    },
+                ),
+            ),
+            final={"type": "answer", "source": "$send_message.text"},
+        )
+        try:
+            record = await store.create_plan(
+                thread_id="thread-1",
+                goal=plan.goal,
+                plan_json=plan.to_dict(),
+                reason="test_runtime_budget_before_write",
+            )
+            result = await executor.execute(record)
+            updated = await store.get_plan(record.id)
+
+            assert result.state == "failed"
+            assert result.error_text == "RESOURCE_LIMIT_EXCEEDED: total_output_bytes"
+            assert send_calls == []
+            assert updated is not None
+            assert updated.state == "failed"
+            assert "send_message" not in updated.step_outputs
+            assert updated.plan_json["events"][-1]["type"] == "plan_resource_limit_exceeded"
+        finally:
+            await db.close()
+
+    asyncio.run(scenario())
+
+
+def test_ai_action_executor_stops_after_runtime_result_count_budget_exceeded(tmp_path, monkeypatch) -> None:
+    async def scenario() -> None:
+        async def many_results(args, context):
+            del args, context
+            return {"results": [{"id": "1"}, {"id": "2"}], "result_count": 2}
+
+        db = Database(str(tmp_path / "actions.db"))
+        monkeypatch.setattr(action_store_module, "get_database", lambda: db)
+        store = AIActionStore()
+        registry = AtomicActionRegistry(
+            contact_resolver=ContactAliasResolver(db=_FakeContactDatabase([])),
+        )
+        registry._actions["test.many_results"] = AtomicActionSpec(
+            name="test.many_results",
+            kind="read",
+            risk_level="low",
+            handler=many_results,
+        )
+        executor = AIActionExecutor(
+            registry=registry,
+            store=store,
+            runtime_budget=ActionRuntimeBudget(max_total_result_count=1),
+        )
+        plan = AIActionPlan(
+            is_action=True,
+            goal="结果数硬限制",
+            steps=(AIActionStep(id="many_results", action="test.many_results", args={}),),
+            final={"type": "answer", "source": "$many_results"},
+        )
+        try:
+            record = await store.create_plan(
+                thread_id="thread-1",
+                goal=plan.goal,
+                plan_json=plan.to_dict(),
+                reason="test_runtime_result_count_budget",
+            )
+            result = await executor.execute(record)
+            updated = await store.get_plan(record.id)
+
+            assert result.state == "failed"
+            assert result.error_text == "RESOURCE_LIMIT_EXCEEDED: total_result_count"
+            assert updated is not None
+            assert updated.plan_json["events"][-1]["resource_limit"] == "total_result_count"
+            assert updated.plan_json["resource_usage"]["total_result_count"] == 2
+        finally:
+            await db.close()
+
+    asyncio.run(scenario())
+
+
+def test_ai_action_executor_stops_after_runtime_result_ref_budget_exceeded(tmp_path, monkeypatch) -> None:
+    async def scenario() -> None:
+        async def large_result(args, context):
+            del args, context
+            return {"results": [{"text": "x" * 200}], "result_count": 1}
+
+        db = Database(str(tmp_path / "actions.db"))
+        monkeypatch.setattr(action_store_module, "get_database", lambda: db)
+        store = AIActionStore()
+        registry = AtomicActionRegistry(
+            contact_resolver=ContactAliasResolver(db=_FakeContactDatabase([])),
+        )
+        registry._actions["test.large_result"] = AtomicActionSpec(
+            name="test.large_result",
+            kind="read",
+            risk_level="low",
+            handler=large_result,
+            max_output_json_bytes=64,
+        )
+        executor = AIActionExecutor(
+            registry=registry,
+            store=store,
+            runtime_budget=ActionRuntimeBudget(max_result_ref_count=0),
+        )
+        plan = AIActionPlan(
+            is_action=True,
+            goal="result ref 硬限制",
+            steps=(AIActionStep(id="large_result", action="test.large_result", args={}),),
+            final={"type": "answer", "source": "$large_result"},
+        )
+        try:
+            record = await store.create_plan(
+                thread_id="thread-1",
+                goal=plan.goal,
+                plan_json=plan.to_dict(),
+                reason="test_runtime_result_ref_budget",
+            )
+            result = await executor.execute(record)
+            updated = await store.get_plan(record.id)
+
+            assert result.state == "failed"
+            assert result.error_text == "RESOURCE_LIMIT_EXCEEDED: result_ref_count"
+            assert updated is not None
+            assert "result_ref" in updated.step_outputs["large_result"]
+            assert updated.plan_json["events"][-1]["resource_limit"] == "result_ref_count"
+            assert updated.plan_json["resource_usage"]["result_ref_count"] == 1
         finally:
             await db.close()
 

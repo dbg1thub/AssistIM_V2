@@ -531,6 +531,24 @@ def test_ai_action_terminal_state_does_not_render_step_status() -> None:
     }
     assert AIAssistantMessageDelegate._action_status_text(retrying_extra) == "正在重试：确定联系人"
 
+    resource_limit_extra = {
+        "ai_action": {
+            "state": "failed",
+            "steps": [
+                {
+                    "id": "search_memory",
+                    "state": "done",
+                    "display_text": "检索聊天记录",
+                }
+            ],
+            "events": [
+                {"type": "step_completed", "state": "completed", "step_id": "search_memory"},
+                {"type": "plan_resource_limit_exceeded", "state": "failed", "step_id": "search_memory"},
+            ],
+        }
+    }
+    assert AIAssistantMessageDelegate._action_status_text(resource_limit_extra) == "执行失败：检索聊天记录"
+
 
 def test_ai_assistant_tries_action_workflow_before_rag_and_ai_chat() -> None:
     assistant_interface = Path("client/ui/windows/ai_assistant_interface.py").read_text(encoding="utf-8")
