@@ -3215,6 +3215,74 @@ def test_ai_action_executor_retries_safe_read_action_once(tmp_path, monkeypatch)
     asyncio.run(scenario())
 
 
+def test_ai_action_executor_records_safe_step_resource_usage(tmp_path, monkeypatch) -> None:
+    async def scenario() -> None:
+        async def contact_output(args, context):
+            del args, context
+            return {
+                "contacts": [{"contact_id": "user-1", "display_name": "张三"}],
+                "groups": [],
+                "ambiguous": [],
+                "unresolved": [],
+            }
+
+        db = Database(str(tmp_path / "actions.db"))
+        monkeypatch.setattr(action_store_module, "get_database", lambda: db)
+        store = AIActionStore()
+        registry = AtomicActionRegistry(
+            contact_resolver=ContactAliasResolver(db=_FakeContactDatabase([])),
+        )
+        spec = registry.get("contact.resolve")
+        assert spec is not None
+        registry._actions["contact.resolve"] = replace(spec, handler=contact_output)
+        executor = AIActionExecutor(registry=registry, store=store)
+        plan = AIActionPlan(
+            is_action=True,
+            goal="解析联系人",
+            steps=(
+                AIActionStep(
+                    id="resolve_contacts",
+                    action="contact.resolve",
+                    args={"queries": ["张三"], "allow_multiple": True},
+                ),
+            ),
+            final={"type": "answer", "source": "$resolve_contacts.contacts[0].contact_id"},
+        )
+        try:
+            record = await store.create_plan(
+                thread_id="thread-1",
+                goal=plan.goal,
+                plan_json=plan.to_dict(),
+                reason="test_resource_usage",
+            )
+            result = await executor.execute(record)
+            updated = await store.get_plan(record.id)
+
+            assert result.state == "done"
+            assert updated is not None
+            completed_event = next(event for event in updated.plan_json["events"] if event["type"] == "step_completed")
+            usage = completed_event["resource_usage"]
+            assert usage["duration_ms"] >= 0
+            assert usage["result_count"] == 1
+            assert usage["output_bytes"] > 0
+            assert usage["result_ref"] is False
+            assert usage["model_call_cost"] == 0
+            assert "张三" not in str(usage)
+
+            aggregate = updated.plan_json["resource_usage"]
+            assert aggregate["total_duration_ms"] >= 0
+            assert aggregate["total_result_count"] == 1
+            assert aggregate["total_output_bytes"] == usage["output_bytes"]
+            assert aggregate["total_model_call_cost"] == 0
+            assert aggregate["result_ref_count"] == 0
+            assert aggregate["step_event_count"] == 1
+            assert "张三" not in str(aggregate)
+        finally:
+            await db.close()
+
+    asyncio.run(scenario())
+
+
 def test_ai_action_executor_does_not_reuse_step_output_after_plan_version_changes(tmp_path, monkeypatch) -> None:
     async def scenario() -> None:
         calls: list[list[str]] = []
@@ -4575,6 +4643,22 @@ def test_ai_action_executor_passes_large_memory_search_by_result_ref(tmp_path, m
             assert "result_ref" in updated.step_outputs["search_memory"]
             result_ref = updated.step_outputs["search_memory"]["result_ref"]
             assert await store.get_temp_result(result_ref["id"]) is not None
+            search_event = next(
+                event
+                for event in updated.plan_json["events"]
+                if event["type"] == "step_completed" and event["step_id"] == "search_memory"
+            )
+            assert search_event["resource_usage"]["result_ref"] is True
+            assert search_event["resource_usage"]["result_count"] == 20
+            assert search_event["resource_usage"]["output_bytes"] > 256
+            summarize_event = next(
+                event
+                for event in updated.plan_json["events"]
+                if event["type"] == "step_completed" and event["step_id"] == "summarize_memory"
+            )
+            assert summarize_event["resource_usage"]["model_call_cost"] == 1
+            assert updated.plan_json["resource_usage"]["result_ref_count"] == 1
+            assert updated.plan_json["resource_usage"]["total_model_call_cost"] == 1
             assert result.state == "done"
             assert result.response_text == "大结果已分块总结。"
             assert result.memory_context_lines == ()

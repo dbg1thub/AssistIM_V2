@@ -264,6 +264,7 @@ class AIActionEvent:
     result_count: int = 0
     error_code: str = ""
     duration_ms: int = 0
+    resource_usage: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         payload = {
@@ -281,4 +282,22 @@ class AIActionEvent:
             payload["error_code"] = self.error_code
         if self.duration_ms:
             payload["duration_ms"] = self.duration_ms
+        usage = _safe_resource_usage(self.resource_usage)
+        if usage:
+            payload["resource_usage"] = usage
         return payload
+
+
+def _safe_resource_usage(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    if not value:
+        return {}
+    output: dict[str, Any] = {}
+    for key in ("duration_ms", "result_count", "output_bytes", "model_call_cost"):
+        try:
+            output[key] = max(0, int(value.get(key) or 0))
+        except (TypeError, ValueError):
+            output[key] = 0
+    output["result_ref"] = bool(value.get("result_ref"))
+    return output

@@ -226,6 +226,10 @@ class AIActionExecutor:
                     state="failed",
                     error_text=execution_error,
                     duration_ms=_elapsed_ms(step_started),
+                    resource_usage=_step_resource_usage(
+                        duration_ms=_elapsed_ms(step_started),
+                        model_call_cost=_model_call_cost(spec),
+                    ),
                 )
                 record = await self._store.update_plan(
                     record.id,
@@ -252,6 +256,10 @@ class AIActionExecutor:
                     state=raw_output.state,
                     message=step.display_text,
                     duration_ms=_elapsed_ms(step_started),
+                    resource_usage=_step_resource_usage(
+                        duration_ms=_elapsed_ms(step_started),
+                        model_call_cost=_model_call_cost(spec),
+                    ),
                 )
                 record = await self._store.update_plan(
                     record.id,
@@ -307,6 +315,10 @@ class AIActionExecutor:
                     state="failed",
                     error_text=str(exc),
                     duration_ms=_elapsed_ms(step_started),
+                    resource_usage=_step_resource_usage(
+                        duration_ms=_elapsed_ms(step_started),
+                        model_call_cost=_model_call_cost(spec),
+                    ),
                 )
                 record = await self._store.update_plan(
                     record.id,
@@ -346,6 +358,13 @@ class AIActionExecutor:
                 state="completed",
                 result_count=result_count,
                 duration_ms=_elapsed_ms(step_started),
+                resource_usage=_step_resource_usage(
+                    duration_ms=_elapsed_ms(step_started),
+                    result_count=result_count,
+                    output_bytes=raw_output_bytes,
+                    result_ref=has_result_ref,
+                    model_call_cost=_model_call_cost(spec),
+                ),
             )
             plan_json = _plan_json_with_events(record.plan_json, events)
             record = await self._store.update_plan(
@@ -806,6 +825,7 @@ def _append_step_event(
     result_count: int = 0,
     error_text: str = "",
     duration_ms: int = 0,
+    resource_usage: dict[str, Any] | None = None,
 ) -> None:
     events.append(
         AIActionEvent(
@@ -818,6 +838,7 @@ def _append_step_event(
             result_count=result_count,
             error_code=_error_code(error_text),
             duration_ms=duration_ms,
+            resource_usage=dict(resource_usage or {}),
         ).to_dict()
     )
 
@@ -825,7 +846,61 @@ def _append_step_event(
 def _plan_json_with_events(plan_json: dict[str, Any], events: list[dict[str, Any]]) -> dict[str, Any]:
     payload = dict(plan_json or {})
     payload["events"] = events[-20:]
+    payload["resource_usage"] = _aggregate_resource_usage(events)
     return payload
+
+
+def _step_resource_usage(
+    *,
+    duration_ms: int = 0,
+    result_count: int = 0,
+    output_bytes: int = 0,
+    result_ref: bool = False,
+    model_call_cost: int = 0,
+) -> dict[str, Any]:
+    return {
+        "duration_ms": _positive_int(duration_ms),
+        "result_count": _positive_int(result_count),
+        "output_bytes": _positive_int(output_bytes),
+        "result_ref": bool(result_ref),
+        "model_call_cost": _positive_int(model_call_cost),
+    }
+
+
+def _aggregate_resource_usage(events: list[dict[str, Any]]) -> dict[str, int]:
+    aggregate = {
+        "total_duration_ms": 0,
+        "total_result_count": 0,
+        "total_output_bytes": 0,
+        "total_model_call_cost": 0,
+        "result_ref_count": 0,
+        "step_event_count": 0,
+    }
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        usage = event.get("resource_usage")
+        if not isinstance(usage, dict):
+            continue
+        aggregate["step_event_count"] += 1
+        aggregate["total_duration_ms"] += _positive_int(usage.get("duration_ms"))
+        aggregate["total_result_count"] += _positive_int(usage.get("result_count"))
+        aggregate["total_output_bytes"] += _positive_int(usage.get("output_bytes"))
+        aggregate["total_model_call_cost"] += _positive_int(usage.get("model_call_cost"))
+        if bool(usage.get("result_ref")):
+            aggregate["result_ref_count"] += 1
+    return aggregate
+
+
+def _model_call_cost(spec: AtomicActionSpec) -> int:
+    return _positive_int(getattr(spec, "model_call_cost", 0))
+
+
+def _positive_int(value: Any) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
 
 
 def _waiting_event_type(state: str) -> str:
