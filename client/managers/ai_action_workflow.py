@@ -636,7 +636,7 @@ class AIActionWorkflow:
             )
             if repaired_raw_plan is None:
                 log_perf("plan_invalid", handled=True, plan=normalized_plan)
-                return self._invalid_plan_turn(validation)
+                return self._invalid_plan_turn(validation, plan=normalized_plan)
             normalizer_started = time.perf_counter()
             normalized_plan = self._normalizer.normalize(repaired_raw_plan, user_text=normalized_text)
             normalizer_ms += _elapsed_ms(normalizer_started)
@@ -649,7 +649,7 @@ class AIActionWorkflow:
             validation = self._validator.validate(normalized_plan)
             if not validation.allowed:
                 log_perf("plan_invalid_after_repair", handled=True, plan=normalized_plan)
-                return self._invalid_plan_turn(validation)
+                return self._invalid_plan_turn(validation, plan=normalized_plan)
 
         optimizer_started = time.perf_counter()
         optimized_plan, optimize_reason = self._optimizer.optimize(normalized_plan)
@@ -657,7 +657,7 @@ class AIActionWorkflow:
         optimized_validation = self._validator.validate(optimized_plan)
         if not optimized_validation.allowed:
             log_perf("optimized_plan_invalid", handled=True, plan=optimized_plan)
-            return self._invalid_plan_turn(optimized_validation)
+            return self._invalid_plan_turn(optimized_validation, plan=optimized_plan)
         resource_started = time.perf_counter()
         resource = self._resource_manager.check_plan(optimized_plan)
         resource_check_ms = _elapsed_ms(resource_started)
@@ -824,6 +824,15 @@ class AIActionWorkflow:
         invalid_plan: AIActionPlan,
         validation: AIPlanValidationResult,
     ) -> AIActionPlan | None:
+        repair_skip_reason = self._plan_repair_skip_reason(invalid_plan, validation)
+        if repair_skip_reason:
+            logger.info(
+                "[ai-diag] ai_action_plan_validation_repair_skipped reason=%s errors=%s first_error=%s",
+                repair_skip_reason,
+                len(validation.errors),
+                validation.errors[0].code if validation.errors else "",
+            )
+            return None
         repair = getattr(self._planner, "repair_plan", None)
         if not callable(repair):
             logger.info(
@@ -851,12 +860,30 @@ class AIActionWorkflow:
             logger.info("[ai-diag] ai_action_plan_validation_repair_empty errors=%s", len(validation.errors))
         return repaired
 
-    @staticmethod
-    def _invalid_plan_turn(validation: AIPlanValidationResult) -> AIActionTurnResult:
+    def _plan_repair_skip_reason(self, plan: AIActionPlan, validation: AIPlanValidationResult) -> str:
+        if any(error.code == "ACTION_NOT_FOUND" for error in validation.errors):
+            return "unknown_action"
+        if self._plan_has_side_effect(plan):
+            return "side_effect_plan"
+        return ""
+
+    def _plan_has_side_effect(self, plan: AIActionPlan) -> bool:
+        for step in tuple(plan.steps or ()):
+            spec = self._registry.get(step.action)
+            if spec is not None and (spec.kind == "write" or spec.allow_side_effect):
+                return True
+        return False
+
+    def _invalid_plan_turn(self, validation: AIPlanValidationResult, *, plan: AIActionPlan | None = None) -> AIActionTurnResult:
         first = validation.errors[0] if validation.errors else None
+        response_text = "这个操作计划结构有问题，请重新描述一下。"
+        if any(error.code == "ACTION_NOT_FOUND" for error in validation.errors):
+            response_text = "这个操作超出当前支持的能力，请重新描述一下。"
+        elif plan is not None and self._plan_has_side_effect(plan):
+            response_text = "这个高风险操作计划结构不安全，请重新描述一下。"
         return AIActionTurnResult(
             handled=True,
-            response_text="这个操作计划结构有问题，请重新描述一下。",
+            response_text=response_text,
             message_extra={
                 "ai_action": {
                     "state": "failed",

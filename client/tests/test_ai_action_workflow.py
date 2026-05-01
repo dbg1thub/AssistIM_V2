@@ -892,6 +892,133 @@ class _AlwaysInvalidReferencePlanner(_InvalidReferenceThenFixedPlanner):
         return await self.plan(user_text)
 
 
+class _InvalidWriteUnknownActionRepairWouldSendPlanner:
+    def __init__(self) -> None:
+        self.plan_calls = 0
+        self.repair_calls: list[dict] = []
+
+    async def plan(self, *args, **kwargs):
+        self.plan_calls += 1
+        user_text = str(args[0] if args else "").strip()
+        del kwargs
+        return AIActionPlan(
+            is_action=True,
+            goal=user_text,
+            risk="high",
+            steps=(
+                AIActionStep(
+                    id="resolve_target",
+                    action="contact.resolve",
+                    args={"queries": ["服务器数据库"], "allow_multiple": False},
+                ),
+                AIActionStep(
+                    id="draft_message",
+                    action="message.draft",
+                    depends_on=("resolve_target",),
+                    args={"target": "$resolve_target.contacts[0]", "content": "请确认删除服务器数据库。"},
+                ),
+                AIActionStep(
+                    id="confirm_send",
+                    action="user.confirm",
+                    depends_on=("draft_message",),
+                    args={
+                        "risk": "high",
+                        "preview": {
+                            "operation": "发送消息",
+                            "target": "$draft_message.target",
+                            "content": "$draft_message.content",
+                        },
+                    },
+                ),
+                AIActionStep(
+                    id="send_message",
+                    action="message.send",
+                    depends_on=("confirm_send",),
+                    args={
+                        "target": "$draft_message.target_entity",
+                        "content": "$draft_message.content",
+                        "preview": "$draft_message.preview",
+                        "idempotency_key": "$draft_message.idempotency_key",
+                    },
+                ),
+                AIActionStep(
+                    id="delete_db",
+                    action="system_action",
+                    depends_on=("send_message",),
+                    args={"database_name": "服务器数据库"},
+                ),
+            ),
+            final={},
+        )
+
+    async def repair_plan(self, user_text: str, *, invalid_plan, validation_errors, pending_state=None, strict: bool = True):
+        self.repair_calls.append(
+            {
+                "user_text": user_text,
+                "pending": pending_state is not None,
+                "strict": strict,
+                "errors": list(validation_errors),
+                "invalid_plan": invalid_plan,
+            }
+        )
+        return _atomic_send_plan(user_text=user_text)
+
+
+class _InvalidWriteBadReadTailRepairWouldSendPlanner(_InvalidWriteUnknownActionRepairWouldSendPlanner):
+    async def plan(self, *args, **kwargs):
+        self.plan_calls += 1
+        user_text = str(args[0] if args else "").strip()
+        del kwargs
+        return AIActionPlan(
+            is_action=True,
+            goal=user_text,
+            risk="low",
+            steps=(
+                AIActionStep(
+                    id="resolve_target",
+                    action="contact.resolve",
+                    args={"queries": ["这个群里"], "allow_multiple": False},
+                ),
+                AIActionStep(
+                    id="draft_message",
+                    action="message.draft",
+                    depends_on=("resolve_target",),
+                    args={"target": "$resolve_target.contacts[0]", "content": "生成推荐回复"},
+                ),
+                AIActionStep(
+                    id="confirm_send",
+                    action="user.confirm",
+                    depends_on=("draft_message",),
+                    args={
+                        "risk": "low",
+                        "preview": {
+                            "operation": "发送消息",
+                            "target": "$draft_message.target",
+                            "content": "$draft_message.content",
+                        },
+                    },
+                ),
+                AIActionStep(
+                    id="send_message",
+                    action="message.send",
+                    depends_on=("confirm_send",),
+                    args={
+                        "target": "$draft_message.target_entity",
+                        "content": "$draft_message.content",
+                        "preview": "$draft_message.preview",
+                        "idempotency_key": "$draft_message.idempotency_key",
+                    },
+                ),
+                AIActionStep(
+                    id="summarize_memory",
+                    action="memory.summarize",
+                    args={"source": None, "question": user_text},
+                ),
+            ),
+            final={},
+        )
+
+
 def test_ai_action_planner_prompt_routes_history_queries_to_memory_actions() -> None:
     system_prompt = AIActionPlanner._system_prompt(AIActionPlanner.PROMPT_NEW_ACTION)
     user_prompt = AIActionPlanner._user_prompt("我和test3昨天聊了什么？")
@@ -3000,6 +3127,64 @@ def test_ai_action_workflow_rejects_plan_after_failed_repair_without_persisting(
             assert planner.plan_calls == 2
             assert len(planner.repair_calls) == 1
             assert memory_manager.calls == []
+            assert await store.latest_pending_plan("thread-1") is None
+        finally:
+            await db.close()
+
+    asyncio.run(scenario())
+
+
+def test_ai_action_workflow_does_not_repair_unknown_write_action(tmp_path, monkeypatch) -> None:
+    async def scenario() -> None:
+        db = Database(str(tmp_path / "actions.db"))
+        monkeypatch.setattr(action_store_module, "get_database", lambda: db)
+        store = AIActionStore()
+        planner = _InvalidWriteUnknownActionRepairWouldSendPlanner()
+        message_sender = _FakeActionMessageSender()
+        workflow = AIActionWorkflow(
+            action_store=store,
+            planner=planner,
+            contact_alias_resolver=ContactAliasResolver(db=_FakeContactDatabase([])),
+            message_sender=message_sender,
+        )
+        try:
+            result = await workflow.handle_user_turn(thread_id="thread-1", text="帮我删除服务器数据库")
+
+            assert result.handled is True
+            assert result.message_extra["ai_action"]["state"] == "failed"
+            assert "超出当前支持" in result.response_text
+            assert planner.plan_calls == 1
+            assert planner.repair_calls == []
+            assert message_sender.calls == []
+            assert await store.latest_pending_plan("thread-1") is None
+        finally:
+            await db.close()
+
+    asyncio.run(scenario())
+
+
+def test_ai_action_workflow_does_not_repair_invalid_side_effect_plan(tmp_path, monkeypatch) -> None:
+    async def scenario() -> None:
+        db = Database(str(tmp_path / "actions.db"))
+        monkeypatch.setattr(action_store_module, "get_database", lambda: db)
+        store = AIActionStore()
+        planner = _InvalidWriteBadReadTailRepairWouldSendPlanner()
+        message_sender = _FakeActionMessageSender()
+        workflow = AIActionWorkflow(
+            action_store=store,
+            planner=planner,
+            contact_alias_resolver=ContactAliasResolver(db=_FakeContactDatabase([])),
+            message_sender=message_sender,
+        )
+        try:
+            result = await workflow.handle_user_turn(thread_id="thread-1", text="帮我在这个群里生成推荐回复")
+
+            assert result.handled is True
+            assert result.message_extra["ai_action"]["state"] == "failed"
+            assert "结构不安全" in result.response_text
+            assert planner.plan_calls == 1
+            assert planner.repair_calls == []
+            assert message_sender.calls == []
             assert await store.latest_pending_plan("thread-1") is None
         finally:
             await db.close()
