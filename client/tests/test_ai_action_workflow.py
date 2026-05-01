@@ -152,6 +152,16 @@ class _FakeMemorySummarizer:
         }
 
 
+class _FailingMemorySummarizer:
+    def __init__(self, error_text: str = "MEMORY_SUMMARIZE_FAILED") -> None:
+        self.error_text = error_text
+        self.calls: list[dict] = []
+
+    async def summarize(self, **kwargs):
+        self.calls.append(dict(kwargs))
+        raise RuntimeError(self.error_text)
+
+
 class _FakeSummaryTaskManager:
     def __init__(self) -> None:
         self.requests: list = []
@@ -2495,6 +2505,124 @@ def test_ai_action_registry_memory_summarize_keeps_file_result_content_when_chun
         assert "AI 增强即时通讯桌面应用" in joined
         assert "桌面客户端、后端 API/WebSocket 网关" in joined
         assert "核心能力包括私聊群聊" in joined
+
+    asyncio.run(scenario())
+
+
+def test_ai_action_registry_memory_summarize_degrades_when_model_fails() -> None:
+    async def scenario() -> None:
+        memory_summarizer = _FailingMemorySummarizer("MEMORY_SUMMARIZE_FAILED")
+        registry = AtomicActionRegistry(
+            contact_resolver=ContactAliasResolver(db=_FakeContactDatabase([])),
+            memory_manager=_FakeActionMemoryManager(),
+            memory_summarizer=memory_summarizer,
+            action_cache=AIActionCache(),
+        )
+        spec = registry.get("memory.summarize")
+        assert spec is not None
+        source = {
+            "context_lines": [
+                "[2026-04-24 15:20] README.md；摘要：文件总结：AssistIM 是一个 AI 增强即时通讯桌面应用。",
+                "[2026-04-24 15:21] README.md #1；摘要：文件内容片段：核心能力包括私聊群聊、AI 会话流式输出。",
+            ],
+            "result_count": 2,
+        }
+
+        first = await spec.handler(  # type: ignore[misc]
+            {"source": source, "question": "README.md 主要讲什么？"},
+            {"store": None},
+        )
+        second = await spec.handler(  # type: ignore[misc]
+            {"source": source, "question": "README.md 主要讲什么？"},
+            {"store": None},
+        )
+
+        assert first["requires_responder"] is False
+        assert first["status"] == "degraded"
+        assert first["fallback_used"] is True
+        assert first["fallback_reason"] == "model_failed"
+        assert first["cache_hit"] is False
+        assert "模型总结暂不可用" in first["text"]
+        assert "AssistIM 是一个 AI 增强即时通讯桌面应用" in first["text"]
+        assert "核心能力包括私聊群聊" in first["text"]
+        assert second["cache_hit"] is False
+        assert len(memory_summarizer.calls) == 2
+
+    asyncio.run(scenario())
+
+
+def test_ai_action_registry_memory_summarize_degrades_when_model_returns_empty() -> None:
+    async def scenario() -> None:
+        registry = AtomicActionRegistry(
+            contact_resolver=ContactAliasResolver(db=_FakeContactDatabase([])),
+            memory_manager=_FakeActionMemoryManager(),
+            memory_summarizer=_FakeMemorySummarizer(""),
+        )
+        spec = registry.get("memory.summarize")
+        assert spec is not None
+
+        output = await spec.handler(  # type: ignore[misc]
+            {
+                "source": {
+                    "context_lines": ["[2026-04-21 10:00] 摘要：讨论了项目排期。"],
+                    "result_count": 1,
+                },
+                "question": "我和 test3 聊过什么？",
+            },
+            {"store": None},
+        )
+
+        assert output["status"] == "degraded"
+        assert output["fallback_used"] is True
+        assert output["fallback_reason"] == "model_empty"
+        assert output["cache_hit"] is False
+        assert "模型总结暂不可用" in output["text"]
+        assert "讨论了项目排期" in output["text"]
+
+    asyncio.run(scenario())
+
+
+def test_ai_action_workflow_memory_summarize_degraded_result_finishes_plan(tmp_path, monkeypatch) -> None:
+    async def scenario() -> None:
+        db = Database(str(tmp_path / "actions.db"))
+        monkeypatch.setattr(action_store_module, "get_database", lambda: db)
+        store = AIActionStore()
+        workflow = AIActionWorkflow(
+            action_store=store,
+            planner=_AtomicReadPlanner(),
+            contact_alias_resolver=ContactAliasResolver(
+                db=_FakeContactDatabase(
+                    [
+                        {
+                            "id": "user-3",
+                            "display_name": "test3",
+                            "username": "test3",
+                            "nickname": "test3",
+                            "assistim_id": "test3",
+                        }
+                    ]
+                )
+            ),
+            memory_manager=_FakeActionMemoryManager(
+                context_lines=[
+                    "[2026-04-24 15:20] README.md；参与者：test1、test3；摘要：文件总结：AssistIM 文档总览。"
+                ]
+            ),
+            memory_summarizer=_FailingMemorySummarizer("MEMORY_SUMMARIZE_FAILED"),
+        )
+        try:
+            result = await workflow.handle_user_turn(thread_id="thread-1", text="我给test3发的README.md文件内容有什么？")
+            plan = await store.get_plan(result.message_extra["ai_action"]["plan_id"])
+
+            assert result.handled is True
+            assert result.message_extra["ai_action"]["state"] == "done"
+            assert "模型总结暂不可用" in result.response_text
+            assert plan is not None
+            assert plan.error_text == ""
+            assert plan.step_outputs["summarize_memory"]["status"] == "degraded"
+            assert plan.step_outputs["summarize_memory"]["fallback_reason"] == "model_failed"
+        finally:
+            await db.close()
 
     asyncio.run(scenario())
 

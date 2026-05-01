@@ -364,15 +364,43 @@ class AtomicActionRegistry:
             input_result_count=result_count or len(context_lines),
         )
         summarizer = self._require_memory_summarizer()
-        summary_result = await summarizer.summarize(
-            question=payload.question or str(payload.source.get("question") or ""),
-            context_lines=list(summary["context_lines"]),
-            style=payload.style,
-            input_result_count=summary["input_result_count"],
-        )
+        question = payload.question or str(payload.source.get("question") or "")
+        try:
+            summary_result = await summarizer.summarize(
+                question=question,
+                context_lines=list(summary["context_lines"]),
+                style=payload.style,
+                input_result_count=summary["input_result_count"],
+            )
+        except RuntimeError as exc:
+            fallback_reason = _memory_summarize_model_failure_reason(exc)
+            if not fallback_reason:
+                raise
+            logger.warning(
+                "AI action memory summarize degraded reason=%s result_count=%s context_chars=%s",
+                fallback_reason,
+                result_count or len(context_lines),
+                summary["context_chars"],
+            )
+            return _memory_summarize_degraded_output(
+                summary=summary,
+                question=question,
+                result_count=result_count or len(context_lines),
+                fallback_reason=fallback_reason,
+            )
         text = " ".join(str(summary_result.get("text") or "").split()).strip()
         if not text:
-            raise ActionHandlerError("MEMORY_SUMMARIZE_EMPTY_OUTPUT")
+            logger.warning(
+                "AI action memory summarize degraded reason=model_empty result_count=%s context_chars=%s",
+                result_count or len(context_lines),
+                summary["context_chars"],
+            )
+            return _memory_summarize_degraded_output(
+                summary=summary,
+                question=question,
+                result_count=result_count or len(context_lines),
+                fallback_reason="model_empty",
+            )
         output = {
             "requires_responder": False,
             "context_lines": summary["context_lines"],
@@ -774,6 +802,65 @@ def _memory_result_context_line(item: dict[str, Any]) -> str:
     if title and text:
         return f"{title}；摘要：{text}"
     return text or title
+
+
+def _memory_summarize_model_failure_reason(exc: RuntimeError) -> str:
+    message = str(exc or "").strip()
+    if message == "MEMORY_SUMMARIZE_FAILED":
+        return "model_failed"
+    if message == "MEMORY_SUMMARIZE_EMPTY_OUTPUT":
+        return "model_empty"
+    return ""
+
+
+def _memory_summarize_degraded_output(
+    *,
+    summary: dict[str, Any],
+    question: str,
+    result_count: int,
+    fallback_reason: str,
+) -> dict[str, Any]:
+    context_lines = [
+        str(item or "").strip()
+        for item in list(summary.get("context_lines") or [])
+        if str(item or "").strip()
+    ]
+    input_result_count = int(summary.get("input_result_count") or result_count or len(context_lines))
+    return {
+        "requires_responder": False,
+        "context_lines": context_lines,
+        "question": question,
+        "result_count": int(result_count or len(context_lines)),
+        "input_result_count": input_result_count,
+        "context_chars": int(summary.get("context_chars") or sum(len(line) for line in context_lines)),
+        "chunked": bool(summary.get("chunked")),
+        "chunk_count": int(summary.get("chunk_count") or 0),
+        "status": "degraded",
+        "text": _memory_summarize_degraded_text(context_lines, input_result_count=input_result_count),
+        "summary_model_id": MEMORY_SUMMARIZE_MODEL_ID,
+        "model_chunk_count": 0,
+        "fallback_used": True,
+        "fallback_reason": fallback_reason,
+        "cache_hit": False,
+        "cache_namespace": MEMORY_SUMMARIZE_CACHE_NAMESPACE,
+        "cache_version": MEMORY_SUMMARIZE_PROMPT_VERSION,
+        "cache_model_id": MEMORY_SUMMARIZE_MODEL_ID,
+    }
+
+
+def _memory_summarize_degraded_text(context_lines: list[str], *, input_result_count: int) -> str:
+    lines = [
+        _clip_text(str(line or "").strip(), 220)
+        for line in list(context_lines or [])
+        if str(line or "").strip()
+    ][:5]
+    count = max(int(input_result_count or 0), len(lines))
+    if not lines:
+        return f"模型总结暂不可用。已检索到 {count} 条相关记录，但暂时无法生成摘要。"
+    header = "模型总结暂不可用，以下是根据本地检索结果提取的证据摘要："
+    count_line = f"共检索到 {count} 条相关记录。"
+    evidence = [f"{index}. {line}" for index, line in enumerate(lines, start=1)]
+    return "\n".join([header, count_line, *evidence])
 
 
 def _summarize_memory_context_lines(context_lines: list[str], *, input_result_count: int) -> dict[str, Any]:
