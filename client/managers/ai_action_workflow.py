@@ -19,6 +19,7 @@ from client.managers.ai_action_permission_policy import AIPermissionPolicy, AIPe
 from client.managers.ai_action_registry import AtomicActionRegistry
 from client.managers.ai_action_resource_manager import AIResourceManager
 from client.managers.ai_action_types import (
+    AIActionEvent,
     AIActionPlan,
     AIActionStep,
     AIActionTurnResult,
@@ -739,6 +740,45 @@ class AIActionWorkflow:
             message_extra={"ai_action": self._extra(pending)},
         )
 
+    async def cancel_plan(
+        self,
+        plan_id: str,
+        *,
+        progress_callback: AIActionTurnProgressCallback | None = None,
+    ) -> AIActionTurnResult:
+        normalized_plan_id = str(plan_id or "").strip()
+        if not normalized_plan_id:
+            return AIActionTurnResult(handled=False)
+        record = await self._store.get_plan(normalized_plan_id)
+        if record is None:
+            logger.info("[ai-diag] ai_action_cancel_skipped plan_id=%s reason=not_found", normalized_plan_id)
+            return AIActionTurnResult(handled=False)
+        if record.state == "cancelled":
+            updated = await self._mark_plan_cancelled(record, progress_callback=progress_callback)
+            return AIActionTurnResult(
+                handled=True,
+                response_text="已取消这个操作。",
+                message_extra={"ai_action": self._extra(updated, state="cancelled")},
+            )
+        if record.state in {"done", "failed"}:
+            return AIActionTurnResult(
+                handled=True,
+                response_text="这个操作已经结束。",
+                message_extra={"ai_action": self._extra(record)},
+            )
+        updated = await self._mark_plan_cancelled(record, progress_callback=progress_callback)
+        logger.info(
+            "[ai-diag] ai_action_plan_cancelled thread_id=%s plan_id=%s previous_state=%s",
+            record.thread_id,
+            record.id,
+            record.state,
+        )
+        return AIActionTurnResult(
+            handled=True,
+            response_text="已取消这个操作。",
+            message_extra={"ai_action": self._extra(updated, state="cancelled")},
+        )
+
     async def finish_streamed_action(self, extra: dict[str, Any] | None, *, content: str, status: str) -> None:
         data = dict((extra or {}).get("ai_action") or {})
         plan_id = str(data.get("plan_id") or data.get("id") or "").strip()
@@ -889,13 +929,32 @@ class AIActionWorkflow:
         *,
         progress_callback: AIActionTurnProgressCallback | None = None,
     ) -> AIActionTurnResult:
-        updated = await self._store.update_plan(pending.id, state="cancelled", completed_at=time.time()) or pending
-        await self._emit_progress_turn(progress_callback, updated)
+        updated = await self._mark_plan_cancelled(pending, progress_callback=progress_callback)
         return AIActionTurnResult(
             handled=True,
             response_text="已取消这个操作。",
             message_extra={"ai_action": self._extra(updated, state="cancelled")},
         )
+
+    async def _mark_plan_cancelled(
+        self,
+        record: AIActionPlanRecord,
+        *,
+        progress_callback: AIActionTurnProgressCallback | None = None,
+    ) -> AIActionPlanRecord:
+        plan_json = _plan_json_with_cancelled_event(record.plan_json, plan_id=record.id)
+        updated = await self._store.update_plan(
+            record.id,
+            plan_json=plan_json,
+            reason="plan_cancelled",
+            bump_version=False,
+            state="cancelled",
+            current_step_id="",
+            waiting_payload={},
+            completed_at=time.time(),
+        ) or record
+        await self._emit_progress_turn(progress_callback, updated)
+        return updated
 
     async def _confirm_pending(
         self,
@@ -1179,6 +1238,23 @@ def _parse_action_ref_path_part(part: str) -> tuple[str, list[int]]:
 def _safe_action_events(plan_json: dict[str, Any]) -> list[dict[str, Any]]:
     events = plan_json.get("events")
     return [dict(item) for item in list(events or []) if isinstance(item, dict)]
+
+
+def _plan_json_with_cancelled_event(plan_json: dict[str, Any], *, plan_id: str) -> dict[str, Any]:
+    payload = dict(plan_json or {})
+    events = _safe_action_events(payload)
+    if not any(str(event.get("type") or "") == "plan_cancelled" for event in events):
+        events.append(
+            AIActionEvent(
+                step_id="",
+                action="plan",
+                state="cancelled",
+                event_type="plan_cancelled",
+                plan_id=plan_id,
+            ).to_dict()
+        )
+    payload["events"] = events[-20:]
+    return payload
 
 
 def _project_action_step_states(

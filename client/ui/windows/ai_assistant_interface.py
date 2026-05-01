@@ -300,6 +300,9 @@ class AIAssistantInterface(QWidget):
         self._active_task_id = ""
         self._active_assistant_message: AIMessage | None = None
         self._active_stream_task: asyncio.Task | None = None
+        self._active_action_plan_id = ""
+        self._active_action_message: AIMessage | None = None
+        self._active_action_task: asyncio.Task | None = None
         self._last_persist_at = 0.0
         self._applying_theme = False
         self._scroll_delegate: SmoothScrollDelegate | None = None
@@ -525,13 +528,19 @@ class AIAssistantInterface(QWidget):
         self._teardown_started = True
         self._unsubscribe_from_events()
         cancel_task = None
+        cancel_action_task = None
         if self._active_task_id:
             cancel_task = self._create_ui_task(
                 self._task_manager.cancel(self._active_task_id),
                 "cancel AI assistant task on teardown",
             )
+        if self._active_action_plan_id:
+            cancel_action_task = self._create_ui_task(
+                self._action_workflow.cancel_plan(self._active_action_plan_id),
+                "cancel AI assistant action on teardown",
+            )
         for task in list(self._ui_tasks):
-            if task is not cancel_task and not task.done():
+            if task not in {cancel_task, cancel_action_task} and not task.done():
                 task.cancel()
 
     def _create_ui_task(self, coro, context: str, *, on_done=None) -> asyncio.Task:
@@ -618,7 +627,7 @@ class AIAssistantInterface(QWidget):
         self._messages = await self._store.list_messages(thread.thread_id, limit=self.MAX_CONTEXT_MESSAGES)
         self._render_thread_list()
         self._render_messages()
-        self._set_generating(bool(self._active_task_id))
+        self._set_generating(bool(self._active_task_id or self._active_action_plan_id))
         self.prompt_edit.setFocus()
 
     def _render_thread_list(self) -> None:
@@ -759,7 +768,7 @@ class AIAssistantInterface(QWidget):
         self._update_input_overlay_positions()
 
     def _on_send_clicked(self) -> None:
-        if self._active_task_id:
+        if self._active_task_id or self._active_action_plan_id:
             self._create_ui_task(self._stop_active_generation(), "stop AI assistant generation from send button")
             return
         text = self.prompt_edit.toPlainText().strip()
@@ -884,6 +893,9 @@ class AIAssistantInterface(QWidget):
     ) -> AIMessage:
         extra = dict(action_result.message_extra or {})
         content = str(action_result.response_text or "").strip()
+        action = dict(extra.get("ai_action") or {})
+        state = str(action.get("state") or "").strip()
+        plan_id = str(action.get("plan_id") or action.get("id") or "").strip()
         if assistant_message is None:
             message = await self._store.create_message(
                 thread_id=thread_id,
@@ -893,6 +905,7 @@ class AIAssistantInterface(QWidget):
                 extra=extra,
             )
             self._append_message(message)
+            self._sync_active_action_progress(message, plan_id=plan_id, state=state)
             return message
 
         if content:
@@ -902,7 +915,24 @@ class AIAssistantInterface(QWidget):
         assistant_message.extra = extra
         await self._persist_assistant_message(assistant_message)
         self._update_message_card(assistant_message)
+        self._sync_active_action_progress(assistant_message, plan_id=plan_id, state=state)
         return assistant_message
+
+    def _sync_active_action_progress(self, message: AIMessage, *, plan_id: str, state: str) -> None:
+        if state == "running" and plan_id:
+            self._active_action_plan_id = plan_id
+            self._active_action_message = message
+            self._active_action_task = asyncio.current_task()
+            self._set_generating(True)
+            return
+        if plan_id and plan_id == self._active_action_plan_id:
+            self._clear_active_action()
+            self._set_generating(bool(self._active_task_id or self._active_action_plan_id))
+
+    def _clear_active_action(self) -> None:
+        self._active_action_plan_id = ""
+        self._active_action_message = None
+        self._active_action_task = None
 
     async def _run_stream(self, request) -> None:
         snapshot = await self._task_manager.stream(request)
@@ -1071,8 +1101,23 @@ class AIAssistantInterface(QWidget):
         self._create_ui_task(self._stop_active_generation(), "stop AI assistant generation")
 
     async def _stop_active_generation(self) -> None:
+        action_plan_id = self._active_action_plan_id
+        action_message = self._active_action_message
+        action_task = self._active_action_task
+        if action_plan_id:
+            action_result = await self._action_workflow.cancel_plan(action_plan_id)
+            if action_result.handled and action_message is not None:
+                await self._complete_pending_assistant_message(
+                    action_message,
+                    action_result.response_text,
+                    extra=action_result.message_extra,
+                )
+            self._clear_active_action()
+            if action_task is not None and action_task is not asyncio.current_task() and not action_task.done():
+                action_task.cancel()
         task_id = self._active_task_id
         if not task_id:
+            self._set_generating(bool(self._active_task_id or self._active_action_plan_id))
             return
         await self._task_manager.cancel(task_id)
 
@@ -1322,6 +1367,8 @@ class AIAssistantInterface(QWidget):
         message.status = AIMessageStatus.FAILED
         await self._persist_assistant_message(message)
         self._update_message_card(message)
+        if message is self._active_action_message:
+            self._clear_active_action()
         self._active_task_id = ""
         self._active_assistant_message = None
         self._active_stream_task = None
@@ -1341,6 +1388,8 @@ class AIAssistantInterface(QWidget):
             message.extra = dict(extra)
         await self._persist_assistant_message(message)
         self._update_message_card(message)
+        if message is self._active_action_message:
+            self._clear_active_action()
         self._active_task_id = ""
         self._active_assistant_message = None
         self._active_stream_task = None

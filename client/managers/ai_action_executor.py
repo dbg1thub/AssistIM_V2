@@ -63,6 +63,17 @@ class AIActionExecutor:
         events = _plan_events(record.plan_json)
 
         for step in plan.steps:
+            cancelled, record = await self._cancelled_result_if_requested(
+                record,
+                progress_callback=progress_callback,
+            )
+            if cancelled is not None:
+                return cancelled
+            outputs = current_plan_step_outputs(
+                {**outputs, **dict(record.step_outputs or {})},
+                step_ids={item.id for item in plan.steps},
+                plan_version=record.plan_version,
+            )
             if step.id in outputs:
                 continue
             missing_deps = [dep for dep in step.depends_on if dep not in outputs]
@@ -188,6 +199,12 @@ class AIActionExecutor:
                     "step_outputs": outputs,
                 },
             )
+            cancelled, record = await self._cancelled_result_if_requested(
+                record,
+                progress_callback=progress_callback,
+            )
+            if cancelled is not None:
+                return cancelled
             if execution_error:
                 logger.info(
                     "[ai-perf] ai_action_step_finished plan_id=%s step_id=%s action=%s state=%s "
@@ -343,6 +360,12 @@ class AIActionExecutor:
             ) or record
             await _emit_progress(progress_callback, record)
 
+        cancelled, record = await self._cancelled_result_if_requested(
+            record,
+            progress_callback=progress_callback,
+        )
+        if cancelled is not None:
+            return cancelled
         return await self._complete(record, outputs, progress_callback=progress_callback)
 
     async def _complete(
@@ -381,6 +404,47 @@ class AIActionExecutor:
         )
         await _emit_progress(progress_callback, updated or record)
         return final
+
+    async def _cancelled_result_if_requested(
+        self,
+        record: AIActionPlanRecord,
+        *,
+        progress_callback: AIActionProgressCallback | None = None,
+    ) -> tuple[ActionExecutionResult | None, AIActionPlanRecord]:
+        latest = await self._store.get_plan(record.id) or record
+        if latest.state != "cancelled":
+            return None, latest
+        updated = await self._ensure_cancelled_record(latest)
+        await _emit_progress(progress_callback, updated)
+        return ActionExecutionResult(state="cancelled", response_text="已取消这个操作。"), updated
+
+    async def _ensure_cancelled_record(self, record: AIActionPlanRecord) -> AIActionPlanRecord:
+        events = _plan_events(record.plan_json)
+        has_cancel_event = any(str(event.get("type") or "") == "plan_cancelled" for event in events)
+        plan_json = dict(record.plan_json or {})
+        if not has_cancel_event:
+            events.append(
+                AIActionEvent(
+                    step_id="",
+                    action="plan",
+                    state="cancelled",
+                    event_type="plan_cancelled",
+                    plan_id=record.id,
+                ).to_dict()
+            )
+            plan_json["events"] = events[-20:]
+        if has_cancel_event and not record.current_step_id and not record.waiting_payload:
+            return record
+        return await self._store.update_plan(
+            record.id,
+            plan_json=plan_json,
+            reason="plan_cancelled",
+            bump_version=False,
+            state="cancelled",
+            current_step_id="",
+            waiting_payload={},
+            completed_at=record.completed_at or time.time(),
+        ) or record
 
     def _project_final(self, record: AIActionPlanRecord, outputs: dict[str, Any]) -> ActionExecutionResult:
         plan = AIActionPlan.from_dict(dict(record.plan_json or {}))

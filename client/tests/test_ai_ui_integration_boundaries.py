@@ -611,6 +611,28 @@ def test_ai_assistant_action_confirmation_controls_continue_pending_plan() -> No
     assert "set_action_message_enabled" in assistant_interface
 
 
+def test_ai_assistant_stop_button_cancels_active_action_plan() -> None:
+    assistant_interface = Path("client/ui/windows/ai_assistant_interface.py").read_text(encoding="utf-8")
+    stop_method = assistant_interface.split("async def _stop_active_generation", 1)[1].split(
+        "\n    def _on_regenerate_clicked",
+        1,
+    )[0]
+    progress_method = assistant_interface.split("async def _upsert_action_progress_message", 1)[1].split(
+        "\n    async def _run_stream",
+        1,
+    )[0]
+
+    assert "self._active_action_plan_id = \"\"" in assistant_interface
+    assert "self._active_action_message: AIMessage | None = None" in assistant_interface
+    assert "await self._action_workflow.cancel_plan(" in stop_method
+    assert "self._active_action_plan_id" in stop_method
+    assert "self._active_action_message" in stop_method
+    assert "self._clear_active_action()" in stop_method
+    assert "self._set_generating(bool(self._active_task_id or self._active_action_plan_id))" in assistant_interface
+    assert 'if state == "running" and plan_id:' in progress_method
+    assert "self._active_action_plan_id = plan_id" in progress_method
+
+
 def test_ai_assistant_regenerate_capability_exists_without_visible_entry() -> None:
     assistant_interface = Path("client/ui/windows/ai_assistant_interface.py").read_text(encoding="utf-8")
 

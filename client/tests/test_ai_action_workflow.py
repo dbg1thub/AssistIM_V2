@@ -3683,6 +3683,54 @@ def test_ai_action_workflow_structured_cancel_bypasses_pending_planner(tmp_path,
     asyncio.run(scenario())
 
 
+def test_ai_action_workflow_cancel_plan_marks_active_plan_cancelled(tmp_path, monkeypatch) -> None:
+    async def scenario() -> None:
+        db = Database(str(tmp_path / "actions.db"))
+        monkeypatch.setattr(action_store_module, "get_database", lambda: db)
+        store = AIActionStore()
+        contact_db = _FakeContactDatabase(
+            [
+                {
+                    "id": "user-1",
+                    "display_name": "张三",
+                    "username": "zhangsan",
+                    "nickname": "张三",
+                    "remark": "张三",
+                    "assistim_id": "zhangsan",
+                }
+            ]
+        )
+        workflow = AIActionWorkflow(
+            action_store=store,
+            planner=_WorkflowPlanner(),
+            contact_alias_resolver=ContactAliasResolver(db=contact_db),
+        )
+        progress_updates = []
+
+        async def on_progress(turn) -> None:
+            progress_updates.append(turn)
+
+        try:
+            first = await workflow.handle_user_turn(thread_id="thread-1", text="帮我给张三发我晚点到")
+            plan_id = first.message_extra["ai_action"]["plan_id"]
+
+            cancelled = await workflow.cancel_plan(plan_id, progress_callback=on_progress)
+            record = await store.get_plan(plan_id)
+
+            assert cancelled.handled is True
+            assert cancelled.response_text == "已取消这个操作。"
+            assert cancelled.message_extra["ai_action"]["state"] == "cancelled"
+            assert record is not None
+            assert record.state == "cancelled"
+            assert record.current_step_id == ""
+            assert record.plan_json["events"][-1]["type"] == "plan_cancelled"
+            assert progress_updates[-1].message_extra["ai_action"]["state"] == "cancelled"
+        finally:
+            await db.close()
+
+    asyncio.run(scenario())
+
+
 def test_ai_action_workflow_expires_stale_confirmation_before_next_user_turn(tmp_path, monkeypatch) -> None:
     async def scenario() -> None:
         db = Database(str(tmp_path / "actions.db"))
@@ -4118,6 +4166,83 @@ def test_ai_action_executor_uses_temp_result_for_large_step_output(tmp_path, mon
             assert result.state == "done"
             result_ref = updated.step_outputs["draft_message"]["result_ref"]
             assert await store.get_temp_result(result_ref["id"]) is not None
+        finally:
+            await db.close()
+
+    asyncio.run(scenario())
+
+
+def test_ai_action_executor_stops_after_plan_is_cancelled_between_steps(tmp_path, monkeypatch) -> None:
+    async def scenario() -> None:
+        db = Database(str(tmp_path / "actions.db"))
+        monkeypatch.setattr(action_store_module, "get_database", lambda: db)
+        store = AIActionStore()
+        registry = AtomicActionRegistry(
+            contact_resolver=ContactAliasResolver(db=_FakeContactDatabase([])),
+        )
+        calls: list[str] = []
+
+        async def first_handler(args, context):
+            del args, context
+            calls.append("first")
+            return {"text": "第一步完成"}
+
+        async def second_handler(args, context):
+            del args, context
+            calls.append("second")
+            return {"text": "第二步完成"}
+
+        registry._actions["test.first"] = AtomicActionSpec(
+            name="test.first",
+            kind="read",
+            risk_level="low",
+            handler=first_handler,
+        )
+        registry._actions["test.second"] = AtomicActionSpec(
+            name="test.second",
+            kind="read",
+            risk_level="low",
+            handler=second_handler,
+        )
+        executor = AIActionExecutor(registry=registry, store=store)
+        plan = AIActionPlan(
+            is_action=True,
+            goal="可取消计划",
+            steps=(
+                AIActionStep(id="first", action="test.first"),
+                AIActionStep(id="second", action="test.second", depends_on=("first",)),
+            ),
+            final={"type": "answer", "source": "$second.text"},
+        )
+        cancelled_once = False
+
+        async def on_progress(record) -> None:
+            nonlocal cancelled_once
+            if cancelled_once:
+                return
+            if "first" in dict(record.step_outputs or {}) and record.state == "running":
+                cancelled_once = True
+                await store.update_plan(record.id, state="cancelled")
+
+        try:
+            record = await store.create_plan(
+                thread_id="thread-1",
+                goal=plan.goal,
+                plan_json=plan.to_dict(),
+                reason="test_cancel_between_steps",
+            )
+            result = await executor.execute(record, progress_callback=on_progress)
+            updated = await store.get_plan(record.id)
+
+            assert result.state == "cancelled"
+            assert result.response_text == "已取消这个操作。"
+            assert calls == ["first"]
+            assert updated is not None
+            assert updated.state == "cancelled"
+            assert "first" in updated.step_outputs
+            assert "second" not in updated.step_outputs
+            assert updated.current_step_id == ""
+            assert updated.plan_json["events"][-1]["type"] == "plan_cancelled"
         finally:
             await db.close()
 
