@@ -162,6 +162,9 @@ class AITaskManager:
             snapshot.truncated = truncated
             snapshot.chunk_count = 1 if content else 0
             snapshot.metadata.update(response.metadata)
+            usage = _safe_usage(response.usage)
+            if usage:
+                snapshot.metadata["usage"] = usage
             await self._mark_done(snapshot)
             return snapshot.copy()
         except asyncio.CancelledError:
@@ -576,6 +579,9 @@ class AITaskManager:
         snapshot.truncated = bool(snapshot.truncated or response.truncated)
         if response.metadata:
             snapshot.metadata.update(response.metadata)
+        usage = _safe_usage(response.usage)
+        if usage:
+            snapshot.metadata["usage"] = usage
 
     def _is_cancel_requested(self, task_id: str) -> bool:
         return str(task_id or "").strip() in self._cancel_requested
@@ -685,6 +691,20 @@ class AITaskManager:
                 continue
             total += len(str(message.get("content") or ""))
         return total
+
+
+def _safe_usage(value: object) -> dict[str, int]:
+    if not isinstance(value, dict):
+        return {}
+    usage: dict[str, int] = {}
+    for key, raw in value.items():
+        try:
+            amount = max(0, int(raw or 0))
+        except (TypeError, ValueError):
+            continue
+        if amount:
+            usage[str(key)] = amount
+    return usage
 
 
 _ai_task_manager: Optional[AITaskManager] = None

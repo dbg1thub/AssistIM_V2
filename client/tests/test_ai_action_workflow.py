@@ -4,6 +4,7 @@ from dataclasses import replace
 from types import SimpleNamespace
 
 from client.managers import ai_action_registry as registry_module
+from client.managers import ai_action_executor as executor_module
 from client.managers.ai_action_cache import AIActionCache
 from client.managers.ai_action_executor import AIActionExecutor, ActionRuntimeBudget
 from client.managers.ai_action_memory_summarizer import AIActionMemorySummarizer
@@ -140,16 +141,21 @@ class _FakePlannerTaskManager:
 
 
 class _FakeMemorySummarizer:
-    def __init__(self, text: str = "根据检索结果，主要讨论了项目排期。") -> None:
+    def __init__(self, text: str = "根据检索结果，主要讨论了项目排期。", *, model_tokens: int = 0) -> None:
         self.text = text
+        self.model_tokens = int(model_tokens or 0)
         self.calls: list[dict] = []
 
     async def summarize(self, **kwargs):
         self.calls.append(dict(kwargs))
-        return {
+        output = {
             "text": self.text,
             "summary_model_id": "fake-memory-summarizer",
         }
+        if self.model_tokens:
+            output["model_tokens"] = self.model_tokens
+            output["usage"] = {"total_tokens": self.model_tokens}
+        return output
 
 
 class _FailingMemorySummarizer:
@@ -176,6 +182,23 @@ class _FakeSummaryTaskManager:
             model="summary-test",
             error_code=None,
             error_message="",
+        )
+
+
+class _UsageSummaryTaskManager:
+    def __init__(self, usage: dict[str, int]) -> None:
+        self.usage = dict(usage)
+        self.requests: list = []
+
+    async def run_once(self, request):
+        self.requests.append(request)
+        return SimpleNamespace(
+            content="最终总结：README.md 主要介绍 AssistIM。",
+            provider="fake",
+            model="summary-test",
+            error_code=None,
+            error_message="",
+            metadata={"usage": dict(self.usage)},
         )
 
 
@@ -2656,6 +2679,27 @@ def test_ai_action_memory_summarizer_chunks_then_finalizes() -> None:
     asyncio.run(scenario())
 
 
+def test_ai_action_memory_summarizer_returns_model_token_usage() -> None:
+    async def scenario() -> None:
+        task_manager = _UsageSummaryTaskManager(
+            {"prompt_tokens": 5, "completion_tokens": 6, "total_tokens": 11}
+        )
+        summarizer = AIActionMemorySummarizer(task_manager=task_manager)
+
+        result = await summarizer.summarize(
+            question="README.md 主要讲什么？",
+            context_lines=["[2026-04-24 15:20] README.md；摘要：AssistIM 文档总览。"],
+            style="summary",
+            input_result_count=1,
+        )
+
+        assert result["text"] == "最终总结：README.md 主要介绍 AssistIM。"
+        assert result["usage"] == {"prompt_tokens": 5, "completion_tokens": 6, "total_tokens": 11}
+        assert result["model_tokens"] == 11
+
+    asyncio.run(scenario())
+
+
 def test_ai_action_registry_memory_summarize_uses_versioned_cache(monkeypatch) -> None:
     async def scenario() -> None:
         calls = []
@@ -3420,6 +3464,207 @@ def test_ai_action_executor_records_safe_step_resource_usage(tmp_path, monkeypat
             assert aggregate["result_ref_count"] == 0
             assert aggregate["step_event_count"] == 1
             assert "张三" not in str(aggregate)
+        finally:
+            await db.close()
+
+    asyncio.run(scenario())
+
+
+def test_ai_action_executor_stops_after_runtime_duration_budget_exceeded(tmp_path, monkeypatch) -> None:
+    async def scenario() -> None:
+        calls: list[str] = []
+
+        async def first_read(args, context):
+            del args, context
+            calls.append("first_read")
+            return {"text": "first", "result_count": 1}
+
+        async def second_read(args, context):
+            del args, context
+            calls.append("second_read")
+            return {"text": "second", "result_count": 1}
+
+        monkeypatch.setattr(executor_module, "_elapsed_ms", lambda _started: 50)
+        db = Database(str(tmp_path / "actions.db"))
+        monkeypatch.setattr(action_store_module, "get_database", lambda: db)
+        store = AIActionStore()
+        registry = AtomicActionRegistry(
+            contact_resolver=ContactAliasResolver(db=_FakeContactDatabase([])),
+        )
+        registry._actions["test.first_read"] = AtomicActionSpec(
+            name="test.first_read",
+            kind="read",
+            risk_level="low",
+            handler=first_read,
+        )
+        registry._actions["test.second_read"] = AtomicActionSpec(
+            name="test.second_read",
+            kind="read",
+            risk_level="low",
+            handler=second_read,
+        )
+        executor = AIActionExecutor(
+            registry=registry,
+            store=store,
+            runtime_budget=ActionRuntimeBudget(max_total_duration_ms=25),
+        )
+        plan = AIActionPlan(
+            is_action=True,
+            goal="总时长硬限制",
+            steps=(
+                AIActionStep(id="first_read", action="test.first_read", args={}),
+                AIActionStep(id="second_read", action="test.second_read", depends_on=("first_read",), args={}),
+            ),
+            final={"type": "answer", "source": "$second_read"},
+        )
+        try:
+            record = await store.create_plan(
+                thread_id="thread-1",
+                goal=plan.goal,
+                plan_json=plan.to_dict(),
+                reason="test_runtime_duration_budget",
+            )
+            result = await executor.execute(record)
+            updated = await store.get_plan(record.id)
+
+            assert result.state == "failed"
+            assert result.error_text == "RESOURCE_LIMIT_EXCEEDED: total_duration_ms"
+            assert calls == ["first_read"]
+            assert updated is not None
+            assert "second_read" not in updated.step_outputs
+            assert updated.plan_json["events"][-1]["resource_limit"] == "total_duration_ms"
+            assert updated.plan_json["resource_usage"]["total_duration_ms"] == 50
+        finally:
+            await db.close()
+
+    asyncio.run(scenario())
+
+
+def test_ai_action_executor_stops_after_runtime_model_token_budget_exceeded(tmp_path, monkeypatch) -> None:
+    async def scenario() -> None:
+        calls: list[str] = []
+
+        async def second_read(args, context):
+            del args, context
+            calls.append("second_read")
+            return {"text": "should not run", "result_count": 1}
+
+        db = Database(str(tmp_path / "actions.db"))
+        monkeypatch.setattr(action_store_module, "get_database", lambda: db)
+        store = AIActionStore()
+        registry = AtomicActionRegistry(
+            contact_resolver=ContactAliasResolver(db=_FakeContactDatabase([])),
+            memory_manager=_FakeActionMemoryManager(),
+            memory_summarizer=_FakeMemorySummarizer("模型总结。", model_tokens=8),
+            action_cache=AIActionCache(),
+        )
+        registry._actions["test.second_read"] = AtomicActionSpec(
+            name="test.second_read",
+            kind="read",
+            risk_level="low",
+            handler=second_read,
+        )
+        executor = AIActionExecutor(
+            registry=registry,
+            store=store,
+            runtime_budget=ActionRuntimeBudget(max_total_model_tokens=5),
+        )
+        plan = AIActionPlan(
+            is_action=True,
+            goal="模型 token 硬限制",
+            steps=(
+                AIActionStep(
+                    id="summarize_memory",
+                    action="memory.summarize",
+                    args={
+                        "source": {
+                            "context_lines": ["[2026-04-24 15:20] README.md；摘要：AssistIM 文档总览。"],
+                            "result_count": 1,
+                        },
+                        "question": "README.md 主要讲什么？",
+                    },
+                ),
+                AIActionStep(id="second_read", action="test.second_read", depends_on=("summarize_memory",), args={}),
+            ),
+            final={"type": "answer", "source": "$second_read"},
+        )
+        try:
+            record = await store.create_plan(
+                thread_id="thread-1",
+                goal=plan.goal,
+                plan_json=plan.to_dict(),
+                reason="test_runtime_model_token_budget",
+            )
+            result = await executor.execute(record)
+            updated = await store.get_plan(record.id)
+
+            assert result.state == "failed"
+            assert result.error_text == "RESOURCE_LIMIT_EXCEEDED: total_model_tokens"
+            assert calls == []
+            assert updated is not None
+            completed_event = next(
+                event
+                for event in updated.plan_json["events"]
+                if event["type"] == "step_completed" and event["step_id"] == "summarize_memory"
+            )
+            assert completed_event["resource_usage"]["model_tokens"] == 8
+            assert updated.plan_json["events"][-1]["resource_limit"] == "total_model_tokens"
+            assert updated.plan_json["resource_usage"]["total_model_tokens"] == 8
+        finally:
+            await db.close()
+
+    asyncio.run(scenario())
+
+
+def test_ai_action_executor_rejects_oversized_temp_result_before_persisting(tmp_path, monkeypatch) -> None:
+    async def scenario() -> None:
+        async def huge_result(args, context):
+            del args, context
+            return {"results": [{"text": "x" * 240}], "result_count": 1}
+
+        db = Database(str(tmp_path / "actions.db"))
+        monkeypatch.setattr(action_store_module, "get_database", lambda: db)
+        store = AIActionStore()
+        registry = AtomicActionRegistry(
+            contact_resolver=ContactAliasResolver(db=_FakeContactDatabase([])),
+        )
+        registry._actions["test.huge_result"] = AtomicActionSpec(
+            name="test.huge_result",
+            kind="read",
+            risk_level="low",
+            handler=huge_result,
+            max_output_json_bytes=64,
+        )
+        executor = AIActionExecutor(
+            registry=registry,
+            store=store,
+            runtime_budget=ActionRuntimeBudget(max_temp_result_bytes=100),
+        )
+        plan = AIActionPlan(
+            is_action=True,
+            goal="临时结果体积硬限制",
+            steps=(AIActionStep(id="huge_result", action="test.huge_result", args={}),),
+            final={"type": "answer", "source": "$huge_result"},
+        )
+        try:
+            record = await store.create_plan(
+                thread_id="thread-1",
+                goal=plan.goal,
+                plan_json=plan.to_dict(),
+                reason="test_temp_result_budget",
+            )
+            result = await executor.execute(record)
+            updated = await store.get_plan(record.id)
+            assert db._db is not None
+            cursor = await db._db.execute("SELECT COUNT(*) FROM ai_action_temp_results")
+            row = await cursor.fetchone()
+
+            assert result.state == "failed"
+            assert result.error_text == "RESOURCE_LIMIT_EXCEEDED: temp_result_bytes"
+            assert row[0] == 0
+            assert updated is not None
+            assert "huge_result" not in updated.step_outputs
+            assert updated.plan_json["events"][-1]["error_code"] == "RESOURCE_LIMIT_EXCEEDED"
         finally:
             await db.close()
 

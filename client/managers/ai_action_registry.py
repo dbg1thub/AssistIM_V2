@@ -401,6 +401,7 @@ class AtomicActionRegistry:
                 result_count=result_count or len(context_lines),
                 fallback_reason="model_empty",
             )
+        summary_usage = _memory_summarize_usage(summary_result)
         output = {
             "requires_responder": False,
             "context_lines": summary["context_lines"],
@@ -414,6 +415,8 @@ class AtomicActionRegistry:
             "text": text,
             "summary_model_id": str(summary_result.get("summary_model_id") or MEMORY_SUMMARIZE_MODEL_ID),
             "model_chunk_count": int(summary_result.get("model_chunk_count") or 0),
+            "usage": summary_usage,
+            "model_tokens": _memory_summarize_model_tokens(summary_result, usage=summary_usage),
             "cache_hit": False,
             "cache_namespace": MEMORY_SUMMARIZE_CACHE_NAMESPACE,
             "cache_version": MEMORY_SUMMARIZE_PROMPT_VERSION,
@@ -811,6 +814,33 @@ def _memory_summarize_model_failure_reason(exc: RuntimeError) -> str:
     if message == "MEMORY_SUMMARIZE_EMPTY_OUTPUT":
         return "model_empty"
     return ""
+
+
+def _memory_summarize_usage(summary_result: dict[str, Any]) -> dict[str, int]:
+    usage = summary_result.get("usage")
+    if not isinstance(usage, dict):
+        return {}
+    normalized: dict[str, int] = {}
+    for key, raw in usage.items():
+        try:
+            amount = max(0, int(raw or 0))
+        except (TypeError, ValueError):
+            continue
+        if amount:
+            normalized[str(key)] = amount
+    return normalized
+
+
+def _memory_summarize_model_tokens(summary_result: dict[str, Any], *, usage: dict[str, int]) -> int:
+    try:
+        explicit = max(0, int(summary_result.get("model_tokens") or 0))
+    except (TypeError, ValueError):
+        explicit = 0
+    if explicit:
+        return explicit
+    if usage.get("total_tokens"):
+        return int(usage["total_tokens"])
+    return int(usage.get("prompt_tokens") or 0) + int(usage.get("completion_tokens") or 0)
 
 
 def _memory_summarize_degraded_output(

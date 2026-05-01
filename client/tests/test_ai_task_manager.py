@@ -89,6 +89,7 @@ class FakeAIService:
             task_id=request.task_id,
             provider=self.response.provider,
             finish_reason=self.response.finish_reason,
+            usage=dict(self.response.usage),
             metadata=dict(self.response.metadata),
         )
 
@@ -177,6 +178,28 @@ def test_ai_task_manager_run_once_success_transitions_to_done() -> None:
             AITaskEvent.UPDATED,
             AITaskEvent.FINISHED,
         ]
+
+    asyncio.run(scenario())
+
+
+def test_ai_task_manager_run_once_preserves_response_usage_in_metadata() -> None:
+    async def scenario() -> None:
+        event_bus = FakeEventBus()
+        service = FakeAIService(
+            response=AIResponse(
+                content="answer",
+                model="fake-model",
+                provider="fake",
+                usage={"prompt_tokens": 3, "completion_tokens": 4, "total_tokens": 7},
+            )
+        )
+        manager = AITaskManager(service=service, event_bus=event_bus)
+
+        snapshot = await manager.run_once(_request("task-usage"))
+
+        assert snapshot.state == AITaskState.DONE
+        assert snapshot.metadata["usage"] == {"prompt_tokens": 3, "completion_tokens": 4, "total_tokens": 7}
+        assert "answer" not in str(snapshot.metadata["usage"])
 
     asyncio.run(scenario())
 

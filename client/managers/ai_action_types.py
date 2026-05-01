@@ -306,7 +306,14 @@ def _safe_resource_usage(value: Any) -> dict[str, Any]:
     if not value:
         return {}
     output: dict[str, Any] = {}
-    for key in ("duration_ms", "result_count", "output_bytes", "model_call_cost"):
+    for key in (
+        "duration_ms",
+        "result_count",
+        "output_bytes",
+        "model_call_cost",
+        "model_tokens",
+        "temp_result_bytes",
+    ):
         try:
             output[key] = max(0, int(value.get(key) or 0))
         except (TypeError, ValueError):

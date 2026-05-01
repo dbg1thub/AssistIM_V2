@@ -53,7 +53,7 @@ class AIActionMemorySummarizer:
 
         chunks = _chunk_lines(lines, self._chunk_context_chars)
         if len(chunks) == 1 and sum(len(line) for line in lines) <= self._max_context_chars:
-            text = await self._run_summary_request(
+            summary = await self._run_summary_request(
                 question=question,
                 evidence_lines=lines,
                 style=style,
@@ -62,15 +62,18 @@ class AIActionMemorySummarizer:
                 input_result_count=input_result_count,
             )
             return {
-                "text": text,
+                "text": summary["text"],
                 "summary_model_id": self.PROMPT_VERSION,
                 "model_chunk_count": 0,
                 "chunk_count": 1,
+                "usage": summary["usage"],
+                "model_tokens": _usage_total_tokens(summary["usage"]),
             }
 
         chunk_summaries: list[str] = []
+        usage = {}
         for index, chunk in enumerate(chunks, start=1):
-            chunk_text = await self._run_summary_request(
+            chunk_result = await self._run_summary_request(
                 question=question,
                 evidence_lines=chunk,
                 style=style,
@@ -80,13 +83,15 @@ class AIActionMemorySummarizer:
                 max_output_chars=self._chunk_output_chars,
                 input_result_count=input_result_count,
             )
+            chunk_text = str(chunk_result.get("text") or "").strip()
             if chunk_text:
                 chunk_summaries.append(f"分块 {index}：{chunk_text}")
+            usage = _merge_usage(usage, dict(chunk_result.get("usage") or {}))
 
         if not chunk_summaries:
             raise RuntimeError("MEMORY_SUMMARIZE_EMPTY_OUTPUT")
 
-        text = await self._run_summary_request(
+        final_result = await self._run_summary_request(
             question=question,
             evidence_lines=chunk_summaries,
             style=style,
@@ -94,11 +99,14 @@ class AIActionMemorySummarizer:
             max_output_chars=self._max_output_chars,
             input_result_count=input_result_count,
         )
+        usage = _merge_usage(usage, dict(final_result.get("usage") or {}))
         return {
-            "text": text,
+            "text": final_result["text"],
             "summary_model_id": self.PROMPT_VERSION,
             "model_chunk_count": len(chunks),
             "chunk_count": len(chunks),
+            "usage": usage,
+            "model_tokens": _usage_total_tokens(usage),
         }
 
     async def _run_summary_request(
@@ -112,7 +120,7 @@ class AIActionMemorySummarizer:
         input_result_count: int,
         chunk_index: int = 0,
         chunk_count: int = 0,
-    ) -> str:
+    ) -> dict[str, Any]:
         task_manager = self._require_task_manager()
         request = self._build_request(
             question=question,
@@ -137,7 +145,9 @@ class AIActionMemorySummarizer:
         text = " ".join(str(getattr(snapshot, "content", "") or "").split()).strip()
         if not text:
             raise RuntimeError("MEMORY_SUMMARIZE_EMPTY_OUTPUT")
-        return text
+        metadata = getattr(snapshot, "metadata", {}) or {}
+        usage = _safe_usage(dict(metadata.get("usage") or {}) if isinstance(metadata, dict) else {})
+        return {"text": text, "usage": usage}
 
     def _build_request(
         self,
@@ -226,3 +236,29 @@ def _chunk_lines(lines: list[str], max_chars: int) -> list[list[str]]:
     if current:
         chunks.append(current)
     return chunks
+
+
+def _safe_usage(value: dict[str, Any]) -> dict[str, int]:
+    usage: dict[str, int] = {}
+    for key, raw in dict(value or {}).items():
+        try:
+            amount = max(0, int(raw or 0))
+        except (TypeError, ValueError):
+            continue
+        if amount:
+            usage[str(key)] = amount
+    return usage
+
+
+def _merge_usage(left: dict[str, int], right: dict[str, int]) -> dict[str, int]:
+    merged = _safe_usage(left)
+    for key, amount in _safe_usage(right).items():
+        merged[key] = int(merged.get(key) or 0) + amount
+    return merged
+
+
+def _usage_total_tokens(usage: dict[str, int]) -> int:
+    normalized = _safe_usage(usage)
+    if normalized.get("total_tokens"):
+        return int(normalized["total_tokens"])
+    return int(normalized.get("prompt_tokens") or 0) + int(normalized.get("completion_tokens") or 0)

@@ -38,6 +38,9 @@ class ActionRuntimeBudget:
     max_total_output_bytes: int = 262144
     max_result_ref_count: int = 8
     max_total_result_count: int = 500
+    max_total_duration_ms: int = 600000
+    max_total_model_tokens: int = 100000
+    max_temp_result_bytes: int = 1048576
 
 
 @dataclass(frozen=True, slots=True)
@@ -343,11 +346,13 @@ class AIActionExecutor:
                     final_output={"waiting_payload": payload},
                 )
 
+            raw_output_bytes = 0
             try:
                 validated_output = _validate_output(spec, raw_output)
                 raw_output_bytes = _json_size(validated_output)
                 output = await self._enforce_output_size(record, step.id, spec, validated_output)
             except ValueError as exc:
+                resource_limit = _resource_limit_from_error(str(exc))
                 logger.info(
                     "[ai-perf] ai_action_step_finished plan_id=%s step_id=%s action=%s state=%s "
                     "duration_ms=%s result_count=%s result_ref=%s output_bytes=%s",
@@ -358,7 +363,7 @@ class AIActionExecutor:
                     _elapsed_ms(step_started),
                     0,
                     False,
-                    0,
+                    raw_output_bytes,
                 )
                 _append_step_event(
                     events,
@@ -370,8 +375,10 @@ class AIActionExecutor:
                     duration_ms=_elapsed_ms(step_started),
                     resource_usage=_step_resource_usage(
                         duration_ms=_elapsed_ms(step_started),
+                        output_bytes=raw_output_bytes,
                         model_call_cost=_model_call_cost(spec),
                     ),
+                    resource_limit=resource_limit,
                 )
                 record = await self._store.update_plan(
                     record.id,
@@ -391,6 +398,8 @@ class AIActionExecutor:
             mark_step_output_current(outputs, step_id=step.id, plan_version=record.plan_version)
             result_count = _output_result_count(output)
             has_result_ref = isinstance(output.get("result_ref"), dict)
+            model_tokens = _output_model_tokens(output)
+            temp_result_bytes = _output_temp_result_bytes(output)
             logger.info(
                 "[ai-perf] ai_action_step_finished plan_id=%s step_id=%s action=%s state=%s "
                 "duration_ms=%s result_count=%s result_ref=%s output_bytes=%s",
@@ -417,6 +426,8 @@ class AIActionExecutor:
                     output_bytes=raw_output_bytes,
                     result_ref=has_result_ref,
                     model_call_cost=_model_call_cost(spec),
+                    model_tokens=model_tokens,
+                    temp_result_bytes=temp_result_bytes,
                 ),
             )
             plan_json = _plan_json_with_events(record.plan_json, events)
@@ -669,8 +680,11 @@ class AIActionExecutor:
         spec: AtomicActionSpec,
         output: dict[str, Any],
     ) -> dict[str, Any]:
-        if _json_size(output) <= spec.max_output_json_bytes:
+        output_size = _json_size(output)
+        if output_size <= spec.max_output_json_bytes:
             return output
+        if output_size > _positive_int(self._runtime_budget.max_temp_result_bytes):
+            raise ValueError("RESOURCE_LIMIT_EXCEEDED: temp_result_bytes")
         temp = await self._store.create_temp_result(
             plan_id=record.id,
             step_id=step_id,
@@ -678,7 +692,7 @@ class AIActionExecutor:
             payload=output,
             payload_meta={
                 "result_count": int(output.get("result_count") or 0),
-                "estimated_chars": _json_size(output),
+                "estimated_chars": output_size,
             },
         )
         return {
@@ -686,7 +700,7 @@ class AIActionExecutor:
                 "type": spec.name,
                 "id": temp.id,
                 "result_count": int(output.get("result_count") or 0),
-                "estimated_chars": _json_size(output),
+                "estimated_chars": output_size,
                 "expires_at": temp.expires_at,
             }
         }
@@ -944,6 +958,36 @@ def _output_result_count(output: dict[str, Any]) -> int:
     return int(output.get("result_count") or 0)
 
 
+def _output_model_tokens(output: dict[str, Any]) -> int:
+    if bool(output.get("cache_hit")):
+        return 0
+    explicit = _positive_int(output.get("model_tokens"))
+    if explicit:
+        return explicit
+    usage = output.get("usage")
+    if not isinstance(usage, dict):
+        return 0
+    total = _positive_int(usage.get("total_tokens"))
+    if total:
+        return total
+    return _positive_int(usage.get("prompt_tokens")) + _positive_int(usage.get("completion_tokens"))
+
+
+def _output_temp_result_bytes(output: dict[str, Any]) -> int:
+    result_ref = output.get("result_ref") if isinstance(output.get("result_ref"), dict) else {}
+    if not result_ref:
+        return 0
+    return _positive_int(result_ref.get("estimated_chars"))
+
+
+def _resource_limit_from_error(error_text: str) -> str:
+    text = str(error_text or "").strip()
+    prefix = "RESOURCE_LIMIT_EXCEEDED:"
+    if not text.startswith(prefix):
+        return ""
+    return text.split(":", 1)[1].strip()
+
+
 def _append_step_event(
     events: list[dict[str, Any]],
     *,
@@ -959,6 +1003,7 @@ def _append_step_event(
     attempt: int = 0,
     max_attempts: int = 0,
     retryable: bool | None = None,
+    resource_limit: str = "",
 ) -> None:
     events.append(
         AIActionEvent(
@@ -975,6 +1020,7 @@ def _append_step_event(
             attempt=attempt,
             max_attempts=max_attempts,
             retryable=retryable,
+            resource_limit=str(resource_limit or "").strip(),
         ).to_dict()
     )
 
@@ -993,6 +1039,8 @@ def _step_resource_usage(
     output_bytes: int = 0,
     result_ref: bool = False,
     model_call_cost: int = 0,
+    model_tokens: int = 0,
+    temp_result_bytes: int = 0,
 ) -> dict[str, Any]:
     return {
         "duration_ms": _positive_int(duration_ms),
@@ -1000,6 +1048,8 @@ def _step_resource_usage(
         "output_bytes": _positive_int(output_bytes),
         "result_ref": bool(result_ref),
         "model_call_cost": _positive_int(model_call_cost),
+        "model_tokens": _positive_int(model_tokens),
+        "temp_result_bytes": _positive_int(temp_result_bytes),
     }
 
 
@@ -1009,6 +1059,8 @@ def _aggregate_resource_usage(events: list[dict[str, Any]]) -> dict[str, int]:
         "total_result_count": 0,
         "total_output_bytes": 0,
         "total_model_call_cost": 0,
+        "total_model_tokens": 0,
+        "total_temp_result_bytes": 0,
         "result_ref_count": 0,
         "step_event_count": 0,
     }
@@ -1023,6 +1075,8 @@ def _aggregate_resource_usage(events: list[dict[str, Any]]) -> dict[str, int]:
         aggregate["total_result_count"] += _positive_int(usage.get("result_count"))
         aggregate["total_output_bytes"] += _positive_int(usage.get("output_bytes"))
         aggregate["total_model_call_cost"] += _positive_int(usage.get("model_call_cost"))
+        aggregate["total_model_tokens"] += _positive_int(usage.get("model_tokens"))
+        aggregate["total_temp_result_bytes"] += _positive_int(usage.get("temp_result_bytes"))
         if bool(usage.get("result_ref")):
             aggregate["result_ref_count"] += 1
     return aggregate
@@ -1036,6 +1090,10 @@ def _check_runtime_budget(plan_json: dict[str, Any], budget: ActionRuntimeBudget
         return RuntimeBudgetCheck(False, "result_ref_count")
     if _positive_int(usage.get("total_result_count")) > _positive_int(budget.max_total_result_count):
         return RuntimeBudgetCheck(False, "total_result_count")
+    if _positive_int(usage.get("total_duration_ms")) > _positive_int(budget.max_total_duration_ms):
+        return RuntimeBudgetCheck(False, "total_duration_ms")
+    if _positive_int(usage.get("total_model_tokens")) > _positive_int(budget.max_total_model_tokens):
+        return RuntimeBudgetCheck(False, "total_model_tokens")
     return RuntimeBudgetCheck(True)
 
 
