@@ -14,7 +14,7 @@ from tools.ai_action_planner_replay import (
     write_planner_replay_records,
 )
 from tools.ai_action_prompt_benchmark import PromptBenchmarkCase, PromptCaseExpectation, summarize_results
-from tools.run_ai_action_planner_corpus import run_planner_corpus
+from tools.run_ai_action_planner_corpus import run_planner_corpus, validate_planner_replay
 
 
 def test_build_planner_request_reuses_atomic_planner_prompt_and_schema() -> None:
@@ -192,3 +192,63 @@ def test_run_planner_corpus_calls_task_manager_and_writes_jsonl(tmp_path) -> Non
     assert records[0].raw_output.startswith('{"is_action": false')
     assert records[0].actions == ()
     assert records[0].validation_result == "passed"
+
+
+def test_validate_planner_replay_evaluates_existing_jsonl_without_model(tmp_path) -> None:
+    output_path = tmp_path / "planner-existing.jsonl"
+    cases = [
+        PromptBenchmarkCase(
+            name="chat_case",
+            user_input="你好",
+            expectation=PromptCaseExpectation(is_action=False),
+        ),
+        PromptBenchmarkCase(
+            name="history_case",
+            user_input="我和 test3 聊过什么",
+            expectation=PromptCaseExpectation(
+                is_action=True,
+                required_actions=("contact.resolve", "memory.search", "memory.summarize"),
+                required_action_sequence=("contact.resolve", "memory.search", "memory.summarize"),
+                contact_queries=("test3",),
+                require_all_history=True,
+            ),
+        ),
+    ]
+    write_planner_replay_records(
+        output_path,
+        [
+            PlannerReplayRecord(
+                case_name="chat_case",
+                user_input="你好",
+                raw_output='{"is_action": false, "goal": "闲聊", "risk": "low", "steps": [], "final": {"type": "chat"}}',
+                provider="fake",
+                model="planner-test",
+            ),
+            PlannerReplayRecord(
+                case_name="history_case",
+                user_input="我和 test3 聊过什么",
+                raw_output=(
+                    '{"is_action": true, "goal": "查询历史", "risk": "low", '
+                    '"steps": ['
+                    '{"id": "resolve", "action": "contact.resolve", "depends_on": [], "args": {"queries": ["test3"]}},'
+                    '{"id": "search", "action": "memory.search", "depends_on": ["resolve"], '
+                    '"args": {"participants": "$resolve.contacts", "time_scope": {"type": "all_history"}}},'
+                    '{"id": "summarize", "action": "memory.summarize", "depends_on": ["search"], '
+                    '"args": {"source": "$search"}}'
+                    '], "final": {"source": "$summarize"}}'
+                ),
+                provider="fake",
+                model="planner-test",
+            ),
+        ],
+        cases=cases,
+    )
+
+    summary = validate_planner_replay(cases, output_path)
+
+    assert summary["mode"] == "validate_only"
+    assert summary["output_path"] == str(output_path)
+    assert summary["replay_record_count"] == 2
+    assert summary["sample_count"] == 2
+    assert summary["valid_json_rate"] == 1.0
+    assert summary["expectation_pass_rate"] == 1.0

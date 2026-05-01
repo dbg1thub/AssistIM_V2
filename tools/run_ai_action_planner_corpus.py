@@ -31,6 +31,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--corpus-path", default=str(DEFAULT_GOLDEN_CORPUS_PATH), help="Golden corpus JSON path.")
     parser.add_argument("--output-path", default=str(DEFAULT_PLANNER_REPLAY_PATH), help="JSONL replay output path.")
     parser.add_argument("--limit", type=int, default=0, help="Maximum cases to run. 0 means all cases.")
+    parser.add_argument(
+        "--validate-only",
+        action="store_true",
+        help="Validate an existing JSONL replay file without running a local model.",
+    )
     return parser.parse_args()
 
 
@@ -101,12 +106,16 @@ async def run_planner_corpus(
 
 async def main() -> None:
     args = parse_args()
+    corpus_path = Path(args.corpus_path)
+    output_path = Path(args.output_path)
+    cases = load_golden_corpus(corpus_path)
+    if args.validate_only:
+        summary = validate_planner_replay(cases, output_path)
+        print(json.dumps(summary, ensure_ascii=False, indent=2), flush=True)
+        return
     configure_default_ai_provider()
     task_manager = AITaskManager()
     try:
-        corpus_path = Path(args.corpus_path)
-        output_path = Path(args.output_path)
-        cases = load_golden_corpus(corpus_path)
         records = await run_planner_corpus(
             cases,
             task_manager=task_manager,
@@ -120,6 +129,16 @@ async def main() -> None:
         print(json.dumps(summary, ensure_ascii=False, indent=2), flush=True)
     finally:
         await task_manager.close()
+
+
+def validate_planner_replay(cases: Sequence[PromptBenchmarkCase], output_path: str | Path) -> dict[str, Any]:
+    """Evaluate a saved planner replay JSONL without invoking the AI runtime."""
+    results = evaluate_planner_replay_file(cases, output_path)
+    summary = summarize_results(results)
+    summary["output_path"] = str(output_path)
+    summary["replay_record_count"] = sum(len(result.samples) for result in results)
+    summary["mode"] = "validate_only"
+    return summary
 
 
 def _error_code_value(value: Any) -> str:
