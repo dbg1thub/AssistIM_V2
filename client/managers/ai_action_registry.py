@@ -40,8 +40,8 @@ MEMORY_SUMMARIZE_CHUNK_SIZE = 4
 MEMORY_SUMMARIZE_CHUNK_DEFAULT_ITEM_MAX_CHARS = 34
 MEMORY_SUMMARIZE_CHUNK_FILE_ITEM_MAX_CHARS = 260
 MEMORY_SUMMARIZE_CACHE_NAMESPACE = "memory.summarize"
-MEMORY_SUMMARIZE_PROMPT_VERSION = "memory_summarize_context:v2"
-MEMORY_SUMMARIZE_MODEL_ID = "deterministic-local-summarizer:v1"
+MEMORY_SUMMARIZE_PROMPT_VERSION = "memory_summarize_context:v3"
+MEMORY_SUMMARIZE_MODEL_ID = "ai_action_memory_summarizer:v1"
 
 
 class AIActionMessageSender:
@@ -186,11 +186,13 @@ class AtomicActionRegistry:
         *,
         contact_resolver: Any,
         memory_manager: Any | None = None,
+        memory_summarizer: Any | None = None,
         message_sender: Any | None = None,
         action_cache: AIActionCache | None = None,
     ) -> None:
         self._contact_resolver = contact_resolver
         self._memory_manager = memory_manager
+        self._memory_summarizer = memory_summarizer
         self._message_sender = message_sender
         self._action_cache = action_cache or AIActionCache()
         self._actions: dict[str, AtomicActionSpec] = {}
@@ -355,8 +357,18 @@ class AtomicActionRegistry:
             context_lines,
             input_result_count=result_count or len(context_lines),
         )
+        summarizer = self._require_memory_summarizer()
+        summary_result = await summarizer.summarize(
+            question=payload.question or str(payload.source.get("question") or ""),
+            context_lines=list(summary["context_lines"]),
+            style=payload.style,
+            input_result_count=summary["input_result_count"],
+        )
+        text = " ".join(str(summary_result.get("text") or "").split()).strip()
+        if not text:
+            raise ActionHandlerError("MEMORY_SUMMARIZE_EMPTY_OUTPUT")
         output = {
-            "requires_responder": True,
+            "requires_responder": False,
             "context_lines": summary["context_lines"],
             "question": payload.question,
             "result_count": result_count or len(context_lines),
@@ -365,6 +377,9 @@ class AtomicActionRegistry:
             "chunked": summary["chunked"],
             "chunk_count": summary["chunk_count"],
             "status": "ready",
+            "text": text,
+            "summary_model_id": str(summary_result.get("summary_model_id") or MEMORY_SUMMARIZE_MODEL_ID),
+            "model_chunk_count": int(summary_result.get("model_chunk_count") or 0),
             "cache_hit": False,
             "cache_namespace": MEMORY_SUMMARIZE_CACHE_NAMESPACE,
             "cache_version": MEMORY_SUMMARIZE_PROMPT_VERSION,
@@ -380,6 +395,13 @@ class AtomicActionRegistry:
 
             self._memory_manager = ConversationMemoryManager()
         return self._memory_manager
+
+    def _require_memory_summarizer(self) -> Any:
+        if self._memory_summarizer is None:
+            from client.managers.ai_action_memory_summarizer import AIActionMemorySummarizer
+
+            self._memory_summarizer = AIActionMemorySummarizer()
+        return self._memory_summarizer
 
     async def _contact_resolve(self, args: dict[str, Any], context: dict[str, Any]) -> dict[str, Any] | ActionPause:
         queries = _clean_list(args.get("queries"))

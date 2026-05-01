@@ -11,6 +11,7 @@ from typing import Any, Callable, Sequence
 
 from client.core import logging
 from client.managers.ai_action_executor import AIActionExecutor
+from client.managers.ai_action_memory_summarizer import AIActionMemorySummarizer
 from client.managers.ai_action_normalizer import AIPlanNormalizer
 from client.managers.ai_action_optimizer import AIPlanOptimizer
 from client.managers.ai_action_permission_policy import AIPermissionPolicy, AIPermissionScope
@@ -491,11 +492,15 @@ class AIActionWorkflow:
         task_manager: Any | None = None,
         contact_alias_resolver: ContactAliasResolver | None = None,
         memory_manager: Any | None = None,
+        memory_summarizer: Any | None = None,
         message_sender: Any | None = None,
         permission_scope_provider: Callable[[], AIPermissionScope | None] | None = None,
     ) -> None:
         self._store = action_store or get_ai_action_store()
-        self._planner = planner or AIActionPlanner(task_manager=task_manager or get_ai_task_manager())
+        resolved_task_manager = task_manager
+        if resolved_task_manager is None and (planner is None or memory_summarizer is None):
+            resolved_task_manager = get_ai_task_manager()
+        self._planner = planner or AIActionPlanner(task_manager=resolved_task_manager)
         self._contact_alias_resolver = contact_alias_resolver or ContactAliasResolver()
         self._message_sender = message_sender
         self._permission_scope_provider = permission_scope_provider
@@ -505,6 +510,7 @@ class AIActionWorkflow:
         self._registry = AtomicActionRegistry(
             contact_resolver=self._contact_alias_resolver,
             memory_manager=memory_manager,
+            memory_summarizer=memory_summarizer or AIActionMemorySummarizer(task_manager=resolved_task_manager),
             message_sender=self._message_sender,
         )
         self._validator = AIPlanValidator(registry=self._registry)

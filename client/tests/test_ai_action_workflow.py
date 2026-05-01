@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from client.managers import ai_action_registry as registry_module
 from client.managers.ai_action_cache import AIActionCache
 from client.managers.ai_action_executor import AIActionExecutor
+from client.managers.ai_action_memory_summarizer import AIActionMemorySummarizer
 from client.managers.ai_action_normalizer import AIPlanNormalizer
 from client.managers.ai_action_optimizer import AIPlanOptimizer
 from client.managers.ai_action_permission_policy import AIPermissionPolicy, AIPermissionScope, PermissionDecision
@@ -132,6 +133,36 @@ class _FakePlannerTaskManager:
             content=self.raw_output,
             provider="fake",
             model="planner-test",
+            error_code=None,
+            error_message="",
+        )
+
+
+class _FakeMemorySummarizer:
+    def __init__(self, text: str = "根据检索结果，主要讨论了项目排期。") -> None:
+        self.text = text
+        self.calls: list[dict] = []
+
+    async def summarize(self, **kwargs):
+        self.calls.append(dict(kwargs))
+        return {
+            "text": self.text,
+            "summary_model_id": "fake-memory-summarizer",
+        }
+
+
+class _FakeSummaryTaskManager:
+    def __init__(self) -> None:
+        self.requests: list = []
+
+    async def run_once(self, request):
+        self.requests.append(request)
+        stage = str(request.metadata.get("summary_stage") or "")
+        content = "最终总结：README.md 主要介绍 AssistIM。" if stage == "final" else f"分块总结 {len(self.requests)}"
+        return SimpleNamespace(
+            content=content,
+            provider="fake",
+            model="summary-test",
             error_code=None,
             error_message="",
         )
@@ -1763,26 +1794,30 @@ def test_ai_action_workflow_executes_atomic_memory_plan(tmp_path, monkeypatch) -
             ]
         )
         memory_manager = _FakeActionMemoryManager(context_lines=["[2026-04-21 10:00-10:05] test3；摘要：讨论了项目排期。"])
+        memory_summarizer = _FakeMemorySummarizer("你和 test3 主要讨论了项目排期。")
         workflow = AIActionWorkflow(
             action_store=store,
             planner=_AtomicReadPlanner(),
             contact_alias_resolver=ContactAliasResolver(db=contact_db),
             memory_manager=memory_manager,
+            memory_summarizer=memory_summarizer,
         )
         try:
             result = await workflow.handle_user_turn(thread_id="thread-1", text="我和test3聊过什么？")
             assert result.handled is True
-            assert result.response_text == ""
-            assert result.memory_context_lines == ("[2026-04-21 10:00-10:05] test3；摘要：讨论了项目排期。",)
+            assert result.response_text == "你和 test3 主要讨论了项目排期。"
+            assert result.memory_context_lines == ()
             assert result.message_extra["ai_action"]["action"] == "memory.search"
-            assert result.message_extra["ai_action"]["state"] == "running"
+            assert result.message_extra["ai_action"]["state"] == "done"
             assert memory_manager.calls[0]["participant_match"] == "any"
             assert memory_manager.calls[0]["time_scope"] == {"type": "all_history"}
             assert memory_manager.calls[0]["participants"][0]["contact_id"] == "user-3"
+            assert memory_summarizer.calls[0]["question"] == "我和test3聊过什么？"
             plan = await store.get_plan(result.message_extra["ai_action"]["plan_id"])
             assert plan is not None
             assert plan.step_outputs["search_memory"]["result_count"] == 1
-            assert plan.step_outputs["summarize_memory"]["requires_responder"] is True
+            assert plan.step_outputs["summarize_memory"]["requires_responder"] is False
+            assert plan.step_outputs["summarize_memory"]["text"] == "你和 test3 主要讨论了项目排期。"
             events = result.message_extra["ai_action"]["events"]
             event_types = [event["type"] for event in events]
             assert event_types == [
@@ -1792,6 +1827,7 @@ def test_ai_action_workflow_executes_atomic_memory_plan(tmp_path, monkeypatch) -
                 "step_completed",
                 "step_started",
                 "step_completed",
+                "plan_completed",
             ]
             assert "讨论了项目排期" not in str(events)
             assert [step["state"] for step in result.message_extra["ai_action"]["steps"]] == ["done", "done", "done"]
@@ -1819,6 +1855,7 @@ def test_ai_action_workflow_uses_fresh_permission_scope_for_each_execution(tmp_p
             ]
         )
         memory_manager = _FakeActionMemoryManager(context_lines=["[2026-04-21 10:00] test3；摘要：讨论了项目排期。"])
+        memory_summarizer = _FakeMemorySummarizer("已总结 test3 的项目排期记录。")
         scopes = [
             AIPermissionScope(allowed_contacts=("user-3",)),
             AIPermissionScope(allowed_contacts=("user-9",)),
@@ -1835,6 +1872,7 @@ def test_ai_action_workflow_uses_fresh_permission_scope_for_each_execution(tmp_p
             planner=_AtomicReadPlanner(),
             contact_alias_resolver=ContactAliasResolver(db=contact_db),
             memory_manager=memory_manager,
+            memory_summarizer=memory_summarizer,
             permission_scope_provider=permission_scope_provider,
         )
         try:
@@ -1843,7 +1881,8 @@ def test_ai_action_workflow_uses_fresh_permission_scope_for_each_execution(tmp_p
             denied_plan = await store.get_plan(denied.message_extra["ai_action"]["plan_id"])
 
             assert allowed.handled is True
-            assert allowed.memory_context_lines == ("[2026-04-21 10:00] test3；摘要：讨论了项目排期。",)
+            assert allowed.response_text == "已总结 test3 的项目排期记录。"
+            assert allowed.memory_context_lines == ()
             assert denied.handled is True
             assert denied.response_text == "这个操作执行失败，请稍后再试。"
             assert denied.message_extra["ai_action"]["state"] == "failed"
@@ -1851,6 +1890,7 @@ def test_ai_action_workflow_uses_fresh_permission_scope_for_each_execution(tmp_p
             assert denied_plan.error_text == "PERMISSION_DENIED"
             assert len(provider_calls) == 2
             assert len(memory_manager.calls) == 1
+            assert len(memory_summarizer.calls) == 1
         finally:
             await db.close()
 
@@ -1901,11 +1941,13 @@ def test_ai_action_workflow_allows_e2ee_memory_search_when_local_plaintext_grant
         memory_manager = _FakeActionMemoryManager(
             context_lines=["[2026-04-24 15:20] README.md；摘要：AssistIM 文档总览。"]
         )
+        memory_summarizer = _FakeMemorySummarizer("README.md 主要是 AssistIM 文档总览。")
         workflow = AIActionWorkflow(
             action_store=store,
             planner=_E2EEMemoryPlanner(),
             contact_alias_resolver=ContactAliasResolver(db=_FakeContactDatabase([])),
             memory_manager=memory_manager,
+            memory_summarizer=memory_summarizer,
             permission_scope_provider=lambda: AIPermissionScope(allow_e2ee_plaintext=True),
         )
         try:
@@ -1913,8 +1955,10 @@ def test_ai_action_workflow_allows_e2ee_memory_search_when_local_plaintext_grant
             plan = await store.get_plan(result.message_extra["ai_action"]["plan_id"])
 
             assert result.handled is True
-            assert result.memory_context_lines == ("[2026-04-24 15:20] README.md；摘要：AssistIM 文档总览。",)
+            assert result.response_text == "README.md 主要是 AssistIM 文档总览。"
+            assert result.memory_context_lines == ()
             assert len(memory_manager.calls) == 1
+            assert len(memory_summarizer.calls) == 1
             assert memory_manager.calls[0]["participants"][0]["e2ee"] is True
             assert plan is not None
             assert plan.error_text == ""
@@ -1941,11 +1985,13 @@ def test_ai_action_workflow_memory_summarize_reports_empty_result(tmp_path, monk
                 }
             ]
         )
+        memory_summarizer = _FakeMemorySummarizer("不应被调用")
         workflow = AIActionWorkflow(
             action_store=store,
             planner=_AtomicReadPlanner(),
             contact_alias_resolver=ContactAliasResolver(db=contact_db),
             memory_manager=_FakeActionMemoryManager(context_lines=[]),
+            memory_summarizer=memory_summarizer,
         )
         try:
             result = await workflow.handle_user_turn(thread_id="thread-1", text="我和test3聊过什么？")
@@ -1954,6 +2000,7 @@ def test_ai_action_workflow_memory_summarize_reports_empty_result(tmp_path, monk
             assert "没有找到相关记录" in result.response_text
             assert result.memory_context_lines == ()
             assert result.message_extra["ai_action"]["state"] == "done"
+            assert memory_summarizer.calls == []
         finally:
             await db.close()
 
@@ -1989,6 +2036,7 @@ def test_ai_action_workflow_memory_search_preserves_cache_metadata(tmp_path, mon
                     "cache_search_version": "action_memory_search:v1",
                 },
             ),
+            memory_summarizer=_FakeMemorySummarizer("已总结缓存命中的搜索结果。"),
         )
         try:
             result = await workflow.handle_user_turn(thread_id="thread-1", text="我和test3聊过什么？")
@@ -2028,13 +2076,15 @@ def test_ai_action_workflow_repairs_invalid_plan_before_execution(tmp_path, monk
             planner=planner,
             contact_alias_resolver=ContactAliasResolver(db=contact_db),
             memory_manager=memory_manager,
+            memory_summarizer=_FakeMemorySummarizer("修复计划后总结了项目排期。"),
         )
         try:
             result = await workflow.handle_user_turn(thread_id="thread-1", text="我和test3聊过什么？")
             plan = await store.get_plan(result.message_extra["ai_action"]["plan_id"])
 
             assert result.handled is True
-            assert result.memory_context_lines == ("[2026-04-21 10:00] test3；摘要：讨论了项目排期。",)
+            assert result.response_text == "修复计划后总结了项目排期。"
+            assert result.memory_context_lines == ()
             assert planner.plan_calls == 1
             assert len(planner.repair_calls) == 1
             assert any("ARG_REFERENCE_INVALID" in error for error in planner.repair_calls[0]["errors"])
@@ -2084,6 +2134,7 @@ def test_ai_action_registry_memory_summarize_keeps_small_context_unmodified() ->
         registry = AtomicActionRegistry(
             contact_resolver=ContactAliasResolver(db=_FakeContactDatabase([])),
             memory_manager=_FakeActionMemoryManager(),
+            memory_summarizer=_FakeMemorySummarizer("总结：讨论了项目排期，并确认了交付时间。"),
         )
         spec = registry.get("memory.summarize")
         assert spec is not None
@@ -2102,7 +2153,8 @@ def test_ai_action_registry_memory_summarize_keeps_small_context_unmodified() ->
             {"store": None},
         )
 
-        assert output["requires_responder"] is True
+        assert output["requires_responder"] is False
+        assert output["text"] == "总结：讨论了项目排期，并确认了交付时间。"
         assert output["context_lines"] == [
             "[2026-04-21 10:00] 摘要：讨论了项目排期。",
             "[2026-04-21 10:05] 摘要：确认了交付时间。",
@@ -2120,6 +2172,7 @@ def test_ai_action_registry_memory_summarize_chunks_large_context() -> None:
         registry = AtomicActionRegistry(
             contact_resolver=ContactAliasResolver(db=_FakeContactDatabase([])),
             memory_manager=_FakeActionMemoryManager(),
+            memory_summarizer=_FakeMemorySummarizer("总结：历史记录包含项目排期、风险和下一步安排。"),
         )
         spec = registry.get("memory.summarize")
         assert spec is not None
@@ -2139,7 +2192,8 @@ def test_ai_action_registry_memory_summarize_chunks_large_context() -> None:
             {"store": None},
         )
 
-        assert output["requires_responder"] is True
+        assert output["requires_responder"] is False
+        assert output["text"] == "总结：历史记录包含项目排期、风险和下一步安排。"
         assert output["chunked"] is True
         assert output["chunk_count"] == 3
         assert output["input_result_count"] == 10
@@ -2157,6 +2211,7 @@ def test_ai_action_registry_memory_summarize_keeps_file_result_content_when_chun
         registry = AtomicActionRegistry(
             contact_resolver=ContactAliasResolver(db=_FakeContactDatabase([])),
             memory_manager=_FakeActionMemoryManager(),
+            memory_summarizer=_FakeMemorySummarizer("README.md 主要介绍 AssistIM。"),
         )
         spec = registry.get("memory.summarize")
         assert spec is not None
@@ -2203,12 +2258,42 @@ def test_ai_action_registry_memory_summarize_keeps_file_result_content_when_chun
         )
 
         joined = "\n".join(output["context_lines"])
-        assert output["requires_responder"] is True
+        assert output["requires_responder"] is False
+        assert output["text"] == "README.md 主要介绍 AssistIM。"
         assert output["chunked"] is True
         assert "README.md" in joined
         assert "AI 增强即时通讯桌面应用" in joined
         assert "桌面客户端、后端 API/WebSocket 网关" in joined
         assert "核心能力包括私聊群聊" in joined
+
+    asyncio.run(scenario())
+
+
+def test_ai_action_memory_summarizer_chunks_then_finalizes() -> None:
+    async def scenario() -> None:
+        task_manager = _FakeSummaryTaskManager()
+        summarizer = AIActionMemorySummarizer(
+            task_manager=task_manager,
+            max_context_chars=120,
+            chunk_context_chars=80,
+        )
+        context_lines = [
+            f"[2026-04-24 15:{index:02d}] README.md；摘要：第 {index} 段内容介绍 AssistIM 的架构、协议和 AI 能力。"
+            for index in range(6)
+        ]
+
+        result = await summarizer.summarize(
+            question="README.md 主要讲什么？",
+            context_lines=context_lines,
+            style="summary",
+            input_result_count=6,
+        )
+
+        assert result["text"] == "最终总结：README.md 主要介绍 AssistIM。"
+        assert result["chunk_count"] > 1
+        assert len(task_manager.requests) == result["chunk_count"] + 1
+        assert task_manager.requests[-1].metadata["summary_stage"] == "final"
+        assert all(request.stream is False for request in task_manager.requests)
 
     asyncio.run(scenario())
 
@@ -2226,6 +2311,7 @@ def test_ai_action_registry_memory_summarize_uses_versioned_cache(monkeypatch) -
         registry = AtomicActionRegistry(
             contact_resolver=ContactAliasResolver(db=_FakeContactDatabase([])),
             memory_manager=_FakeActionMemoryManager(),
+            memory_summarizer=_FakeMemorySummarizer("缓存测试总结。"),
             action_cache=AIActionCache(),
         )
         spec = registry.get("memory.summarize")
@@ -2251,6 +2337,7 @@ def test_ai_action_registry_memory_summarize_uses_versioned_cache(monkeypatch) -
         assert first["cache_hit"] is False
         assert second["cache_hit"] is True
         assert second["cache_namespace"] == "memory.summarize"
+        assert second["text"] == "缓存测试总结。"
         assert second["context_lines"] == source["context_lines"]
         assert calls == [source["context_lines"]]
 
@@ -2270,6 +2357,7 @@ def test_ai_action_registry_memory_summarize_cache_key_changes_with_question(mon
         registry = AtomicActionRegistry(
             contact_resolver=ContactAliasResolver(db=_FakeContactDatabase([])),
             memory_manager=_FakeActionMemoryManager(),
+            memory_summarizer=_FakeMemorySummarizer("问题变化测试总结。"),
             action_cache=AIActionCache(),
         )
         spec = registry.get("memory.summarize")
@@ -2308,6 +2396,7 @@ def test_ai_action_registry_memory_summarize_cache_key_changes_with_source_check
         registry = AtomicActionRegistry(
             contact_resolver=ContactAliasResolver(db=_FakeContactDatabase([])),
             memory_manager=_FakeActionMemoryManager(),
+            memory_summarizer=_FakeMemorySummarizer("来源变化测试总结。"),
             action_cache=AIActionCache(),
         )
         spec = registry.get("memory.summarize")
@@ -2375,6 +2464,7 @@ def test_ai_action_executor_persists_memory_summarize_cache_hit_result(tmp_path,
         registry = AtomicActionRegistry(
             contact_resolver=ContactAliasResolver(db=_FakeContactDatabase([])),
             memory_manager=_FakeActionMemoryManager(),
+            memory_summarizer=_FakeMemorySummarizer("缓存命中后的总结。"),
             action_cache=AIActionCache(),
         )
         executor = AIActionExecutor(registry=registry, store=store)
@@ -3991,6 +4081,7 @@ def test_ai_action_executor_passes_large_memory_search_by_result_ref(tmp_path, m
         registry = AtomicActionRegistry(
             contact_resolver=ContactAliasResolver(db=_FakeContactDatabase([])),
             memory_manager=memory_manager,
+            memory_summarizer=_FakeMemorySummarizer("大结果已分块总结。"),
         )
         search_spec = registry.get("memory.search")
         assert search_spec is not None
@@ -4033,10 +4124,12 @@ def test_ai_action_executor_passes_large_memory_search_by_result_ref(tmp_path, m
             assert "result_ref" in updated.step_outputs["search_memory"]
             result_ref = updated.step_outputs["search_memory"]["result_ref"]
             assert await store.get_temp_result(result_ref["id"]) is not None
-            assert result.state == "running"
-            assert result.memory_context_lines[0].startswith("检索结果 1-4：")
+            assert result.state == "done"
+            assert result.response_text == "大结果已分块总结。"
+            assert result.memory_context_lines == ()
             assert updated.step_outputs["summarize_memory"]["chunked"] is True
             assert updated.step_outputs["summarize_memory"]["input_result_count"] == 20
+            assert updated.step_outputs["summarize_memory"]["text"] == "大结果已分块总结。"
         finally:
             await db.close()
 
