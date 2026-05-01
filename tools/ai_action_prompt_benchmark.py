@@ -73,6 +73,11 @@ class SampleResult:
     raw_signature: str
     error_code: str = ""
     error_message: str = ""
+    runtime_validation_result: str = ""
+    runtime_expectation_passed: bool | None = None
+    runtime_safe: bool | None = None
+    runtime_check_messages: list[str] = field(default_factory=list)
+    runtime_structural_signature: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -236,15 +241,29 @@ def evaluate_case(plan: dict[str, Any] | None, expectation: PromptCaseExpectatio
 
 def summarize_results(results: list[CaseBenchmarkResult]) -> dict[str, Any]:
     samples = [sample for result in results for sample in list(result.samples or [])]
-    return {
+    summary = {
         "case_count": len(results),
         "sample_count": len(samples),
         "valid_json_rate": _rate(sum(1 for sample in samples if sample.valid_json), len(samples)),
         "expectation_pass_rate": _rate(sum(1 for sample in samples if sample.expectation_passed), len(samples)),
+        "raw_expectation_pass_rate": _rate(sum(1 for sample in samples if sample.expectation_passed), len(samples)),
         "error_codes": _error_counts(samples),
         "failed_cases": _failed_cases(results),
         "cases": [_summarize_case(result) for result in results],
     }
+    runtime_samples = [sample for sample in samples if sample.runtime_validation_result]
+    if runtime_samples:
+        summary["runtime_expectation_pass_rate"] = _rate(
+            sum(1 for sample in runtime_samples if sample.runtime_expectation_passed is True),
+            len(runtime_samples),
+        )
+        summary["runtime_safe_rate"] = _rate(
+            sum(1 for sample in runtime_samples if sample.runtime_safe is True),
+            len(runtime_samples),
+        )
+        summary["runtime_blocked_cases"] = _runtime_blocked_cases(results)
+        summary["runtime_failed_cases"] = _runtime_failed_cases(results)
+    return summary
 
 
 def _load_golden_case(raw_case: dict[str, Any], *, index: int) -> PromptBenchmarkCase:
@@ -483,14 +502,31 @@ def _summarize_case(result: CaseBenchmarkResult) -> dict[str, Any]:
     for sample in samples:
         signatures[sample.structural_signature] = signatures.get(sample.structural_signature, 0) + 1
     dominant_count = max(signatures.values(), default=0)
-    return {
+    payload = {
         "name": result.case.name,
         "sample_count": len(samples),
         "valid_json_rate": _rate(sum(1 for sample in samples if sample.valid_json), len(samples)),
         "expectation_pass_rate": _rate(sum(1 for sample in samples if sample.expectation_passed), len(samples)),
+        "raw_expectation_pass_rate": _rate(sum(1 for sample in samples if sample.expectation_passed), len(samples)),
         "structural_stability": _rate(dominant_count, len(samples)),
         "error_codes": _error_counts(samples),
     }
+    runtime_samples = [sample for sample in samples if sample.runtime_validation_result]
+    if runtime_samples:
+        runtime_signatures: dict[str, int] = {}
+        for sample in runtime_samples:
+            runtime_signatures[sample.runtime_structural_signature] = runtime_signatures.get(sample.runtime_structural_signature, 0) + 1
+        runtime_dominant_count = max(runtime_signatures.values(), default=0)
+        payload["runtime_expectation_pass_rate"] = _rate(
+            sum(1 for sample in runtime_samples if sample.runtime_expectation_passed is True),
+            len(runtime_samples),
+        )
+        payload["runtime_safe_rate"] = _rate(
+            sum(1 for sample in runtime_samples if sample.runtime_safe is True),
+            len(runtime_samples),
+        )
+        payload["runtime_structural_stability"] = _rate(runtime_dominant_count, len(runtime_samples))
+    return payload
 
 
 def _failed_cases(results: list[CaseBenchmarkResult]) -> list[dict[str, Any]]:
@@ -502,6 +538,60 @@ def _failed_cases(results: list[CaseBenchmarkResult]) -> list[dict[str, Any]]:
         messages: list[str] = []
         for sample in failed_samples:
             for message in list(sample.check_messages or []):
+                text = str(message or "").strip()
+                if text and text not in messages:
+                    messages.append(text)
+        failed.append(
+            {
+                "name": result.case.name,
+                "failed_sample_count": len(failed_samples),
+                "messages": messages,
+            }
+        )
+    return failed
+
+
+def _runtime_blocked_cases(results: list[CaseBenchmarkResult]) -> list[dict[str, Any]]:
+    blocked: list[dict[str, Any]] = []
+    for result in results:
+        blocked_samples = [
+            sample
+            for sample in list(result.samples or [])
+            if sample.runtime_validation_result == "blocked"
+        ]
+        if not blocked_samples:
+            continue
+        messages: list[str] = []
+        for sample in blocked_samples:
+            for message in list(sample.runtime_check_messages or []):
+                text = str(message or "").strip()
+                if text.startswith("runtime blocked:") and text not in messages:
+                    messages.append(text)
+        blocked.append(
+            {
+                "name": result.case.name,
+                "blocked_sample_count": len(blocked_samples),
+                "messages": messages,
+            }
+        )
+    return blocked
+
+
+def _runtime_failed_cases(results: list[CaseBenchmarkResult]) -> list[dict[str, Any]]:
+    failed: list[dict[str, Any]] = []
+    for result in results:
+        failed_samples = [
+            sample
+            for sample in list(result.samples or [])
+            if sample.runtime_validation_result
+            and sample.runtime_validation_result != "blocked"
+            and sample.runtime_expectation_passed is not True
+        ]
+        if not failed_samples:
+            continue
+        messages: list[str] = []
+        for sample in failed_samples:
+            for message in list(sample.runtime_check_messages or []):
                 text = str(message or "").strip()
                 if text and text not in messages:
                     messages.append(text)

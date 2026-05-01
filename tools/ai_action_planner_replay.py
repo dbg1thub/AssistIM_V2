@@ -11,6 +11,11 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from client.managers.ai_action_normalizer import AIPlanNormalizer
+from client.managers.ai_action_optimizer import AIPlanOptimizer
+from client.managers.ai_action_registry import AtomicActionRegistry
+from client.managers.ai_action_types import AIActionPlan
+from client.managers.ai_action_validator import AIPlanValidationResult, AIPlanValidator
 from client.managers.ai_action_workflow import AIActionPlanner
 from tools.ai_action_prompt_benchmark import (
     CaseBenchmarkResult,
@@ -45,6 +50,20 @@ class PlannerReplayRecord:
     actions: tuple[str, ...] = ()
     validation_result: str = ""
     diff_from_expected: tuple[str, ...] = ()
+    runtime_actions: tuple[str, ...] = ()
+    runtime_validation_result: str = ""
+    runtime_safe: bool | None = None
+    runtime_diff_from_expected: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeReplayEvaluation:
+    actions: tuple[str, ...] = ()
+    validation_result: str = ""
+    expectation_passed: bool = False
+    safe: bool = False
+    messages: tuple[str, ...] = ()
+    structural_signature: str = "{}"
 
 
 def build_planner_request(case: PromptBenchmarkCase):
@@ -158,6 +177,12 @@ def _sample_from_record(
         checks["valid_plan"] = False
         messages.append("invalid json")
     expectation_passed = valid_json and all(checks.values())
+    runtime = _evaluate_runtime_replay(
+        case=case,
+        parsed=parsed,
+        valid_json=valid_json,
+        user_text=record.user_input,
+    )
     return SampleResult(
         iteration=iteration,
         elapsed_ms=max(0, int(record.elapsed_ms or 0)),
@@ -174,6 +199,11 @@ def _sample_from_record(
         raw_signature=_raw_signature(parsed),
         error_code=record.error_code,
         error_message=record.error_message,
+        runtime_validation_result=runtime.validation_result,
+        runtime_expectation_passed=runtime.expectation_passed,
+        runtime_safe=runtime.safe,
+        runtime_check_messages=list(runtime.messages),
+        runtime_structural_signature=runtime.structural_signature,
     )
 
 
@@ -182,6 +212,7 @@ def _annotate_record(case: PromptBenchmarkCase | None, record: PlannerReplayReco
     actions = _actions_from_plan(parsed)
     validation_result = "not_evaluated"
     diff_from_expected: tuple[str, ...] = ()
+    runtime = RuntimeReplayEvaluation()
     if case is None:
         if not valid_json:
             validation_result = "invalid_json"
@@ -189,10 +220,22 @@ def _annotate_record(case: PromptBenchmarkCase | None, record: PlannerReplayReco
     elif not valid_json:
         validation_result = "invalid_json"
         diff_from_expected = ("invalid json",)
+        runtime = _evaluate_runtime_replay(
+            case=case,
+            parsed=parsed,
+            valid_json=valid_json,
+            user_text=record.user_input,
+        )
     else:
         checks, messages = evaluate_case(parsed, case.expectation)
         validation_result = "passed" if checks and all(checks.values()) else "failed"
         diff_from_expected = tuple(messages)
+        runtime = _evaluate_runtime_replay(
+            case=case,
+            parsed=parsed,
+            valid_json=valid_json,
+            user_text=record.user_input,
+        )
     return replace(
         record,
         planner_prompt_version=_planner_prompt_version(record),
@@ -201,7 +244,119 @@ def _annotate_record(case: PromptBenchmarkCase | None, record: PlannerReplayReco
         actions=actions,
         validation_result=validation_result,
         diff_from_expected=diff_from_expected,
+        runtime_actions=runtime.actions,
+        runtime_validation_result=runtime.validation_result,
+        runtime_safe=runtime.safe,
+        runtime_diff_from_expected=runtime.messages,
     )
+
+
+def _evaluate_runtime_replay(
+    *,
+    case: PromptBenchmarkCase,
+    parsed: Mapping[str, Any] | None,
+    valid_json: bool,
+    user_text: str,
+) -> RuntimeReplayEvaluation:
+    if not valid_json or not isinstance(parsed, Mapping):
+        return RuntimeReplayEvaluation(
+            validation_result="invalid_json",
+            expectation_passed=False,
+            safe=False,
+            messages=("invalid json",),
+        )
+
+    registry = _runtime_registry()
+    normalizer = AIPlanNormalizer()
+    optimizer = AIPlanOptimizer()
+    validator = AIPlanValidator(registry=registry)
+    normalized = normalizer.normalize(AIActionPlan.from_dict(dict(parsed)), user_text=user_text)
+
+    if not normalized.is_action:
+        return _runtime_expectation_result(normalized.to_dict(), case)
+
+    validation = validator.validate(normalized)
+    if not validation.allowed:
+        return _runtime_invalid_result(normalized, validation, registry=registry)
+
+    optimized, _reason = optimizer.optimize(normalized)
+    optimized_validation = validator.validate(optimized)
+    if not optimized_validation.allowed:
+        return _runtime_invalid_result(optimized, optimized_validation, registry=registry)
+    return _runtime_expectation_result(optimized.to_dict(), case)
+
+
+def _runtime_expectation_result(plan_payload: dict[str, Any], case: PromptBenchmarkCase) -> RuntimeReplayEvaluation:
+    checks, messages = evaluate_case(plan_payload, case.expectation)
+    passed = bool(checks) and all(checks.values())
+    return RuntimeReplayEvaluation(
+        actions=_actions_from_plan(plan_payload),
+        validation_result="passed" if passed else "failed",
+        expectation_passed=passed,
+        safe=passed,
+        messages=tuple(messages),
+        structural_signature=canonical_structural_signature(plan_payload),
+    )
+
+
+def _runtime_invalid_result(
+    plan: AIActionPlan,
+    validation: AIPlanValidationResult,
+    *,
+    registry: AtomicActionRegistry,
+) -> RuntimeReplayEvaluation:
+    skip_reason = _runtime_repair_skip_reason(plan, validation, registry=registry)
+    if skip_reason:
+        return RuntimeReplayEvaluation(
+            actions=tuple(step.action for step in tuple(plan.steps or ()) if step.action),
+            validation_result="blocked",
+            expectation_passed=False,
+            safe=True,
+            messages=(
+                f"runtime blocked: {skip_reason}",
+                *validation.repair_messages(),
+            ),
+            structural_signature=canonical_structural_signature(plan.to_dict()),
+        )
+    return RuntimeReplayEvaluation(
+        actions=tuple(step.action for step in tuple(plan.steps or ()) if step.action),
+        validation_result="repairable_invalid",
+        expectation_passed=False,
+        safe=False,
+        messages=validation.repair_messages(),
+        structural_signature=canonical_structural_signature(plan.to_dict()),
+    )
+
+
+_RUNTIME_REGISTRY: AtomicActionRegistry | None = None
+
+
+def _runtime_registry() -> AtomicActionRegistry:
+    global _RUNTIME_REGISTRY
+    if _RUNTIME_REGISTRY is None:
+        _RUNTIME_REGISTRY = AtomicActionRegistry(contact_resolver=None)
+    return _RUNTIME_REGISTRY
+
+
+def _runtime_repair_skip_reason(
+    plan: AIActionPlan,
+    validation: AIPlanValidationResult,
+    *,
+    registry: AtomicActionRegistry,
+) -> str:
+    if any(error.code == "ACTION_NOT_FOUND" for error in validation.errors):
+        return "unknown_action"
+    if _runtime_plan_has_side_effect(plan, registry=registry):
+        return "side_effect_plan"
+    return ""
+
+
+def _runtime_plan_has_side_effect(plan: AIActionPlan, *, registry: AtomicActionRegistry) -> bool:
+    for step in tuple(plan.steps or ()):
+        spec = registry.get(step.action)
+        if spec is not None and (spec.kind == "write" or spec.allow_side_effect):
+            return True
+    return False
 
 
 def _actions_from_plan(plan: Mapping[str, Any] | None) -> tuple[str, ...]:
@@ -263,6 +418,10 @@ def _record_to_payload(record: PlannerReplayRecord) -> dict[str, Any]:
         "actions": list(record.actions or ()),
         "validation_result": str(record.validation_result or "").strip(),
         "diff_from_expected": list(record.diff_from_expected or ()),
+        "runtime_actions": list(record.runtime_actions or ()),
+        "runtime_validation_result": str(record.runtime_validation_result or "").strip(),
+        "runtime_safe": record.runtime_safe,
+        "runtime_diff_from_expected": list(record.runtime_diff_from_expected or ()),
     }
 
 
@@ -290,6 +449,14 @@ def _record_from_payload(payload: dict[str, Any], *, line_no: int) -> PlannerRep
         actions=tuple(str(item or "").strip() for item in list(payload.get("actions") or []) if str(item or "").strip()),
         validation_result=str(payload.get("validation_result") or "").strip(),
         diff_from_expected=tuple(str(item or "").strip() for item in list(payload.get("diff_from_expected") or []) if str(item or "").strip()),
+        runtime_actions=tuple(str(item or "").strip() for item in list(payload.get("runtime_actions") or []) if str(item or "").strip()),
+        runtime_validation_result=str(payload.get("runtime_validation_result") or "").strip(),
+        runtime_safe=payload.get("runtime_safe") if isinstance(payload.get("runtime_safe"), bool) else None,
+        runtime_diff_from_expected=tuple(
+            str(item or "").strip()
+            for item in list(payload.get("runtime_diff_from_expected") or [])
+            if str(item or "").strip()
+        ),
     )
 
 
