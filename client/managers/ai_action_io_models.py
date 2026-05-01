@@ -35,6 +35,7 @@ class MemorySearchInput(_StrictInputModel):
     question: str = ""
     limit: int = Field(default=8, ge=1, le=50)
     max_items: int | None = Field(default=None, ge=1, le=50)
+    return_raw_content: bool = False
 
 
 class MemorySearchOutput(_ActionOutputModel):

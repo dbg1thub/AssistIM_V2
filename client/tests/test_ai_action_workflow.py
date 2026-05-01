@@ -2626,6 +2626,227 @@ def test_ai_action_workflow_allows_e2ee_memory_search_when_local_plaintext_grant
     asyncio.run(scenario())
 
 
+def test_ai_action_workflow_rejects_sensitive_tagged_memory_search_before_handler(tmp_path, monkeypatch) -> None:
+    class _SensitiveTaggedMemoryPlanner:
+        async def plan(self, *args, **kwargs):
+            user_text = str(args[0] if args else "").strip()
+            del kwargs
+            return AIActionPlan(
+                is_action=True,
+                goal=user_text,
+                risk="low",
+                steps=(
+                    AIActionStep(
+                        id="search_memory",
+                        action="memory.search",
+                        args={
+                            "participants": [
+                                {
+                                    "contact_id": "user-secret",
+                                    "display_name": "Sensitive Friend",
+                                    "tags": ["private"],
+                                }
+                            ],
+                            "participant_match": "any",
+                            "time_scope": {"type": "all_history"},
+                            "keywords": ["private"],
+                            "question": user_text,
+                        },
+                    ),
+                    AIActionStep(
+                        id="summarize_memory",
+                        action="memory.summarize",
+                        depends_on=("search_memory",),
+                        args={"source": "$search_memory", "question": user_text},
+                    ),
+                ),
+                final={"type": "answer", "source": "$summarize_memory"},
+            )
+
+    async def scenario() -> None:
+        db = Database(str(tmp_path / "actions.db"))
+        monkeypatch.setattr(action_store_module, "get_database", lambda: db)
+        store = AIActionStore()
+        memory_manager = _FakeActionMemoryManager(context_lines=["不应读取"])
+        memory_summarizer = _FakeMemorySummarizer("不应总结")
+        workflow = AIActionWorkflow(
+            action_store=store,
+            planner=_SensitiveTaggedMemoryPlanner(),
+            memory_manager=memory_manager,
+            memory_summarizer=memory_summarizer,
+            permission_scope_provider=lambda: AIPermissionScope(sensitive_tags=("private",)),
+        )
+        try:
+            result = await workflow.handle_user_turn(thread_id="thread-1", text="总结敏感联系人记录")
+            plan = await store.get_plan(result.message_extra["ai_action"]["plan_id"])
+
+            assert result.handled is True
+            assert result.response_text == "这个操作执行失败，请稍后再试。"
+            assert result.message_extra["ai_action"]["state"] == "failed"
+            assert result.message_extra["ai_action"]["current_step_id"] == "search_memory"
+            assert result.message_extra["ai_action"]["events"] == [
+                {
+                    "type": "step_failed",
+                    "step_id": "search_memory",
+                    "action": "memory.search",
+                    "state": "failed",
+                    "message": "",
+                    "plan_id": plan.id if plan is not None else result.message_extra["ai_action"]["plan_id"],
+                    "error_code": "PERMISSION_DENIED",
+                }
+            ]
+            assert "user-secret" not in result.response_text
+            assert "Sensitive Friend" not in result.response_text
+            assert "private" not in result.response_text
+            assert "user-secret" not in str(result.message_extra["ai_action"]["events"])
+            assert "Sensitive Friend" not in str(result.message_extra["ai_action"]["events"])
+            assert "private" not in str(result.message_extra["ai_action"]["events"])
+            assert plan is not None
+            assert plan.error_text == "PERMISSION_DENIED"
+            assert plan.step_outputs == {}
+            assert memory_manager.calls == []
+            assert memory_summarizer.calls == []
+        finally:
+            await db.close()
+
+    asyncio.run(scenario())
+
+
+def test_ai_action_workflow_rejects_e2ee_memory_search_without_plaintext_grant(tmp_path, monkeypatch) -> None:
+    class _E2EEMemoryPlanner:
+        async def plan(self, *args, **kwargs):
+            user_text = str(args[0] if args else "").strip()
+            del kwargs
+            return AIActionPlan(
+                is_action=True,
+                goal=user_text,
+                risk="low",
+                steps=(
+                    AIActionStep(
+                        id="search_memory",
+                        action="memory.search",
+                        args={
+                            "participants": [
+                                {
+                                    "contact_id": "user-e2ee",
+                                    "display_name": "Encrypted Friend",
+                                    "e2ee": True,
+                                }
+                            ],
+                            "participant_match": "any",
+                            "time_scope": {"type": "all_history"},
+                            "keywords": ["README.md"],
+                            "question": user_text,
+                        },
+                    ),
+                    AIActionStep(
+                        id="summarize_memory",
+                        action="memory.summarize",
+                        depends_on=("search_memory",),
+                        args={"source": "$search_memory", "question": user_text},
+                    ),
+                ),
+                final={"type": "answer", "source": "$summarize_memory"},
+            )
+
+    async def scenario() -> None:
+        db = Database(str(tmp_path / "actions.db"))
+        monkeypatch.setattr(action_store_module, "get_database", lambda: db)
+        store = AIActionStore()
+        memory_manager = _FakeActionMemoryManager(context_lines=["不应读取"])
+        memory_summarizer = _FakeMemorySummarizer("不应总结")
+        workflow = AIActionWorkflow(
+            action_store=store,
+            planner=_E2EEMemoryPlanner(),
+            memory_manager=memory_manager,
+            memory_summarizer=memory_summarizer,
+            permission_scope_provider=lambda: AIPermissionScope(allow_e2ee_plaintext=False),
+        )
+        try:
+            result = await workflow.handle_user_turn(thread_id="thread-1", text="总结加密会话记录")
+            plan = await store.get_plan(result.message_extra["ai_action"]["plan_id"])
+
+            assert result.handled is True
+            assert result.response_text == "这个操作执行失败，请稍后再试。"
+            assert result.message_extra["ai_action"]["state"] == "failed"
+            assert result.message_extra["ai_action"]["events"][0]["error_code"] == "PERMISSION_DENIED"
+            assert "user-e2ee" not in result.response_text
+            assert "Encrypted Friend" not in result.response_text
+            assert "user-e2ee" not in str(result.message_extra["ai_action"]["events"])
+            assert "Encrypted Friend" not in str(result.message_extra["ai_action"]["events"])
+            assert plan is not None
+            assert plan.error_text == "PERMISSION_DENIED"
+            assert plan.step_outputs == {}
+            assert memory_manager.calls == []
+            assert memory_summarizer.calls == []
+        finally:
+            await db.close()
+
+    asyncio.run(scenario())
+
+
+def test_ai_action_workflow_rejects_raw_content_memory_search_before_handler(tmp_path, monkeypatch) -> None:
+    class _RawContentMemoryPlanner:
+        async def plan(self, *args, **kwargs):
+            user_text = str(args[0] if args else "").strip()
+            del kwargs
+            return AIActionPlan(
+                is_action=True,
+                goal=user_text,
+                risk="low",
+                steps=(
+                    AIActionStep(
+                        id="search_memory",
+                        action="memory.search",
+                        args={
+                            "participant_match": "any",
+                            "time_scope": {"type": "all_history"},
+                            "keywords": ["README.md"],
+                            "question": user_text,
+                            "return_raw_content": True,
+                        },
+                    ),
+                    AIActionStep(
+                        id="summarize_memory",
+                        action="memory.summarize",
+                        depends_on=("search_memory",),
+                        args={"source": "$search_memory", "question": user_text},
+                    ),
+                ),
+                final={"type": "answer", "source": "$summarize_memory"},
+            )
+
+    async def scenario() -> None:
+        db = Database(str(tmp_path / "actions.db"))
+        monkeypatch.setattr(action_store_module, "get_database", lambda: db)
+        store = AIActionStore()
+        memory_manager = _FakeActionMemoryManager(context_lines=["不应读取原文"])
+        memory_summarizer = _FakeMemorySummarizer("不应总结")
+        workflow = AIActionWorkflow(
+            action_store=store,
+            planner=_RawContentMemoryPlanner(),
+            memory_manager=memory_manager,
+            memory_summarizer=memory_summarizer,
+        )
+        try:
+            result = await workflow.handle_user_turn(thread_id="thread-1", text="把 README.md 原文找出来")
+            plan = await store.get_plan(result.message_extra["ai_action"]["plan_id"])
+
+            assert result.handled is True
+            assert result.response_text == "这个操作执行失败，请稍后再试。"
+            assert result.message_extra["ai_action"]["state"] == "failed"
+            assert result.message_extra["ai_action"]["events"][0]["error_code"] == "PERMISSION_DENIED"
+            assert plan is not None
+            assert plan.error_text == "PERMISSION_DENIED"
+            assert plan.step_outputs == {}
+            assert memory_manager.calls == []
+            assert memory_summarizer.calls == []
+        finally:
+            await db.close()
+
+    asyncio.run(scenario())
+
+
 def test_ai_action_workflow_memory_summarize_reports_empty_result(tmp_path, monkeypatch) -> None:
     async def scenario() -> None:
         db = Database(str(tmp_path / "actions.db"))
