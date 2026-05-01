@@ -223,6 +223,8 @@ class AtomicActionSpec:
     result_limit_arg_names: tuple[str, ...] = ()
     default_result_limit: int = 0
     max_result_items: int | None = None
+    prompt_purpose: str = ""
+    prompt_notes: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

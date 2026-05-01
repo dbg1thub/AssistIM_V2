@@ -1019,49 +1019,57 @@ class _InvalidWriteBadReadTailRepairWouldSendPlanner(_InvalidWriteUnknownActionR
         )
 
 
-def test_ai_action_planner_prompt_routes_history_queries_to_memory_actions() -> None:
+def test_ai_action_planner_prompt_uses_registry_action_contracts() -> None:
+    registry = AtomicActionRegistry(
+        contact_resolver=_FakeContactDatabase([]),
+        memory_manager=_FakeActionMemoryManager(),
+    )
+    contract = registry.prompt_contract()
+    system_prompt = AIActionPlanner._system_prompt(AIActionPlanner.PROMPT_NEW_ACTION, action_contract=contract)
+
+    assert "已注册 action 能力：" in system_prompt
+    for action_name in registry.names():
+        assert f"- {action_name}:" in system_prompt
+    assert "输入字段" in system_prompt
+    assert "输出字段" in system_prompt
+    assert "message.send" in system_prompt
+    assert "requires_confirmation=true" in system_prompt
+    assert "固定 step id" not in system_prompt
+    assert "resolve_target" not in system_prompt
+    assert "draft_message" not in system_prompt
+    assert "confirm_send" not in system_prompt
+    assert "send_message" not in system_prompt
+    assert "search_memory" not in system_prompt
+    assert "示例：发送消息" not in system_prompt
+    assert "示例：聊天历史查询" not in system_prompt
+
+
+def test_ai_action_planner_prompt_keeps_generic_planning_rules_without_case_templates() -> None:
     system_prompt = AIActionPlanner._system_prompt(AIActionPlanner.PROMPT_NEW_ACTION)
     user_prompt = AIActionPlanner._user_prompt("我和test3昨天聊了什么？")
 
-    assert "contact.resolve, memory.search, memory.summarize, message.draft, user.confirm, message.send" in system_prompt
-    assert "聊天记录查询使用 contact.resolve -> memory.search -> memory.summarize" in system_prompt
-    assert "memory.search" in system_prompt
-    assert "memory.summarize" in system_prompt
-    assert "询问历史、回顾、总结、检索内容时使用 memory.search 和 memory.summarize" in user_prompt
-    assert "发送消息的组合是 contact.resolve -> message.draft -> user.confirm -> message.send" in user_prompt
-    assert "memory.search" in user_prompt
-    assert "memory.summarize" in user_prompt
+    assert "每个 step.id 必须唯一" in system_prompt
+    assert "所有 $ 引用的根名称必须等于已存在 step.id" in system_prompt
+    assert "depends_on 必须包含被 args 引用的上游 step.id" in system_prompt
+    assert "读取类任务不需要确认" in system_prompt
+    assert "写操作必须先生成 preview 并经过 user.confirm" in system_prompt
+    assert "不要按固定示例补齐计划" in user_prompt
+    assert "用户输入：我和test3昨天聊了什么？" in user_prompt
 
 
-def test_ai_action_planner_prompt_documents_atomic_action_arg_contracts() -> None:
+def test_ai_action_planner_prompt_documents_atomic_action_arg_contracts_without_examples() -> None:
     system_prompt = AIActionPlanner._system_prompt(AIActionPlanner.PROMPT_NEW_ACTION)
 
-    assert 'contact.resolve.args = {"queries": ["张三"], "allow_multiple": false}' in system_prompt
-    assert "不要使用 contact.resolve.args.target" in system_prompt
-    assert (
-        'memory.search.args = {"participants": "$resolve_contacts.contacts", '
-        '"participant_match": "any", "time_scope": {"type": "all_history"}, '
-        '"keywords": [], "question": "用户原始问题"}'
-    ) in system_prompt
-    assert '历史/之前/聊过什么/回顾 -> time_scope.type="all_history"' in system_prompt
-    assert 'memory.summarize.args = {"source": "$search_memory", "question": "用户原始问题"}' in system_prompt
-    assert 'message.draft.args = {"target": "$resolve_target.contacts[0]", "content": "明确消息内容"}' in system_prompt
-    assert (
-        'user.confirm.args = {"risk": "high", "preview": {"operation": "发送消息", '
-        '"target": "$draft_message.target", "content": "$draft_message.content"}}'
-    ) in system_prompt
-    assert (
-        'message.send.args = {"target": "$draft_message.target_entity", '
-        '"content": "$draft_message.content", "preview": "$draft_message.preview", '
-        '"idempotency_key": "$draft_message.idempotency_key"}'
-    ) in system_prompt
-    assert "示例：普通聊天" in system_prompt
-    assert "示例：聊天历史查询" in system_prompt
-    assert "示例：发送消息" in system_prompt
-    assert "聊天历史查询必须使用固定 step id：resolve_contacts, search_memory, summarize_memory" in system_prompt
-    assert "发送消息必须使用固定 step id：resolve_target, draft_message, confirm_send, send_message" in system_prompt
-    assert "所有 $ 引用的根名称必须等于已存在 step.id" in system_prompt
-    assert 'participant_match 只能是 "any", "all", "direct_only", "group_only"' in system_prompt
+    assert "contact.resolve" in system_prompt
+    assert "queries:list[str]" in system_prompt
+    assert "allow_multiple:bool" in system_prompt
+    assert "memory.search" in system_prompt
+    assert "participant_match:Literal['any', 'all', 'direct_only', 'group_only']" in system_prompt
+    assert "message.send" in system_prompt
+    assert "idempotency_key:str" in system_prompt
+    assert "target_entity" in system_prompt
+    assert "张三" not in system_prompt
+    assert "用户原始问题" not in system_prompt
 
 
 def test_ai_action_planner_schema_uses_atomic_steps_or_control_not_legacy_slots() -> None:
@@ -1139,7 +1147,8 @@ def test_ai_action_planner_pending_prompts_are_focused() -> None:
     assert "memory.search" not in confirmation_prompt
     assert "memory.search" not in contact_prompt
     assert "memory.search" not in clarification_prompt
-    assert "contact.resolve -> message.draft -> user.confirm -> message.send" in clarification_prompt
+    assert "写操作仍必须经过 user.confirm" in clarification_prompt
+    assert "contact.resolve -> message.draft" not in clarification_prompt
 
 
 def test_ai_plan_normalizer_rejects_legacy_single_business_actions() -> None:

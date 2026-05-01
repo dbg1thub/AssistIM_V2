@@ -39,7 +39,10 @@ def test_build_planner_request_reuses_atomic_planner_prompt_and_schema() -> None
     assert request.metadata["planner_schema_version"] == AIActionPlanner.PLANNER_SCHEMA_VERSION
     assert request.metadata["planner_prompt_version"] == AIActionPlanner.PLANNER_PROMPT_VERSION
     assert request.metadata["planner_prompt_kind"] == AIActionPlanner.PROMPT_NEW_ACTION
-    assert "contact.resolve, memory.search, memory.summarize" in request.system_prompt
+    assert "已注册 action 能力：" in request.system_prompt
+    assert "contact.resolve" in request.system_prompt
+    assert "memory.search" in request.system_prompt
+    assert "memory.summarize" in request.system_prompt
     assert "用户输入：我和 test3 之前聊过什么？" in request.messages[0]["content"]
     assert "router_expected_route" not in request.messages[0]["content"]
 

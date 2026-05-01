@@ -16,7 +16,7 @@ from client.managers.ai_action_memory_summarizer import AIActionMemorySummarizer
 from client.managers.ai_action_normalizer import AIPlanNormalizer
 from client.managers.ai_action_optimizer import AIPlanOptimizer
 from client.managers.ai_action_permission_policy import AIPermissionPolicy, AIPermissionScope
-from client.managers.ai_action_registry import AtomicActionRegistry
+from client.managers.ai_action_registry import AtomicActionRegistry, build_default_action_prompt_contract
 from client.managers.ai_action_resource_manager import AIResourceManager
 from client.managers.ai_action_types import (
     AIActionEvent,
@@ -174,7 +174,7 @@ class AIActionPlanner:
     """Optional model-backed planner that returns atomic JSON action plans."""
 
     PLANNER_SCHEMA_VERSION = "atomic_steps_v1"
-    PLANNER_PROMPT_VERSION = "atomic_steps_prompt_v1"
+    PLANNER_PROMPT_VERSION = "atomic_steps_prompt_v2"
     PLAN_OUTPUT_VERSION = 1
 
     PROMPT_NEW_ACTION = "new_action"
@@ -225,8 +225,9 @@ class AIActionPlanner:
     }
     PENDING_CLARIFICATION_SCHEMA: dict[str, Any] = PENDING_CONTROL_SCHEMA
 
-    def __init__(self, task_manager: Any | None = None) -> None:
+    def __init__(self, task_manager: Any | None = None, *, action_contract_prompt: str | None = None) -> None:
         self._task_manager = task_manager
+        self._action_contract_prompt = str(action_contract_prompt or "").strip()
 
     async def plan(
         self,
@@ -256,7 +257,7 @@ class AIActionPlanner:
             max_tokens=1024,
             response_format={"type": "json_object", "schema": schema} if strict else None,
             priority=4,
-            system_prompt=self._system_prompt(prompt_kind),
+            system_prompt=self._system_prompt(prompt_kind, action_contract=self._action_contract_prompt),
             messages=[{"role": "user", "content": self._user_prompt(user_text, pending_state=pending_state, prompt_kind=prompt_kind)}],
             metadata={
                 "source": "ai_action_planner",
@@ -314,7 +315,7 @@ class AIActionPlanner:
             response_format={"type": "json_object", "schema": schema} if strict else None,
             priority=4,
             system_prompt=(
-                self._system_prompt(prompt_kind)
+                self._system_prompt(prompt_kind, action_contract=self._action_contract_prompt)
                 + "\n你现在处于 plan 修正模式：不要重新解释用户意图，只修正 step id、depends_on、$ 引用、action 名称和 args 字段。"
             ),
             messages=[{"role": "user", "content": repair_prompt}],
@@ -361,7 +362,7 @@ class AIActionPlanner:
         return AIActionPlanner.NEW_ACTION_SCHEMA
 
     @staticmethod
-    def _system_prompt(prompt_kind: str = PROMPT_NEW_ACTION) -> str:
+    def _system_prompt(prompt_kind: str = PROMPT_NEW_ACTION, *, action_contract: str | None = None) -> str:
         common = (
             "你是 AssistIM 的动作规划器，只输出 JSON，不要解释，不要使用代码块。\n"
             "不要在本地自然语言短语上做假设；语义理解由你完成，系统只执行结构化 plan。\n"
@@ -381,45 +382,22 @@ class AIActionPlanner:
                 common
                 + "当前只处理 pending 补充信息。由你结合 waiting_payload 判断用户是否补齐所需结构。"
             )
+        contract = str(action_contract or "").strip() or build_default_action_prompt_contract()
         return (
             common
             + "你的职责是判断用户是否需要 AssistIM 应用数据或本地应用能力，若是则拆成原子 steps。\n"
-            "已注册 action：contact.resolve, memory.search, memory.summarize, message.draft, user.confirm, message.send。\n"
-            "读取类任务不需要确认；产生外部副作用的任务必须包含 user.confirm，message.send 当前仍需要确认。\n"
-            "只有用户明确要求发送、添加、发布、删除或修改时，才允许输出 user.confirm 或 message.send。\n"
-            "聊天记录查询使用 contact.resolve -> memory.search -> memory.summarize。\n"
-            "询问历史、回顾、总结、检索内容时使用 memory.search 和 memory.summarize；不要为读取类任务生成 user.confirm。\n"
-            "多个对象默认表示多对象操作，不是歧义；只有单个名称对应多个本地实体时才由系统澄清。\n"
             "如果用户只是普通问答、写作、翻译或代码分析，输出 is_action=false 且 steps=[]。\n"
             "只有需要执行、确认、取消或补充高风险应用操作时，才输出 action plan。\n"
-            "原子 action 参数契约必须严格遵守，字段名错误会导致计划不可执行：\n"
-            "聊天历史查询必须使用固定 step id：resolve_contacts, search_memory, summarize_memory；"
-            "发送消息必须使用固定 step id：resolve_target, draft_message, confirm_send, send_message。\n"
+            "规划规则：\n"
+            "- 每个 step.id 必须唯一，使用简短稳定名称即可，不要求固定命名。\n"
             "所有 $ 引用的根名称必须等于已存在 step.id；不要生成 %step_0 这类临时 id。\n"
-            'participant_match 只能是 "any", "all", "direct_only", "group_only"；默认使用 "any"。\n'
-            'contact.resolve.args = {"queries": ["张三"], "allow_multiple": false}；queries 必须是数组；'
-            "不要使用 contact.resolve.args.target。\n"
-            'memory.search.args = {"participants": "$resolve_contacts.contacts", "participant_match": "any", '
-            '"time_scope": {"type": "all_history"}, "keywords": [], "question": "用户原始问题"}；'
-            "question 必须是用户原始问题，不要使用 memory.search.args.query。\n"
-            '历史/之前/聊过什么/回顾 -> time_scope.type="all_history"。\n'
-            'memory.summarize.args = {"source": "$search_memory", "question": "用户原始问题"}；'
-            "source 必须引用 memory.search step。\n"
-            'message.draft.args = {"target": "$resolve_target.contacts[0]", "content": "明确消息内容"}。\n'
-            'user.confirm.args = {"risk": "high", "preview": {"operation": "发送消息", '
-            '"target": "$draft_message.target", "content": "$draft_message.content"}}。\n'
-            'message.send.args = {"target": "$draft_message.target_entity", '
-            '"content": "$draft_message.content", "preview": "$draft_message.preview", '
-            '"idempotency_key": "$draft_message.idempotency_key"}。\n'
-            '示例：普通聊天 -> {"is_action": false, "goal": "普通聊天", "risk": "low", "steps": [], "final": {}}。\n'
-            "示例：聊天历史查询 -> resolve_contacts: contact.resolve(queries) -> "
-            'search_memory: memory.search(participants="$resolve_contacts.contacts", '
-            'participant_match="any", time_scope.type="all_history", question="用户原始问题") -> '
-            'summarize_memory: memory.summarize(source="$search_memory")。\n'
-            "示例：发送消息 -> resolve_target: contact.resolve(queries, allow_multiple=false) -> "
-            'draft_message: message.draft(target="$resolve_target.contacts[0]") -> '
-            'confirm_send: user.confirm(preview.target="$draft_message.target") -> '
-            'send_message: message.send(target="$draft_message.target_entity")。'
+            "- depends_on 必须包含被 args 引用的上游 step.id；没有引用时 depends_on 为空数组。\n"
+            "- 读取类任务不需要确认；写操作必须先生成 preview 并经过 user.confirm，确认后才能执行写 action。\n"
+            "- 只有用户明确要求发送、添加、发布、删除或修改时，才允许规划写 action。\n"
+            "- 多个对象默认表示多对象读取或操作，不是歧义；只有单个名称对应多个本地实体时才由系统澄清。\n"
+            "- 严格使用已注册 action、输入字段和输出字段；不要发明 action、字段或不存在的上游输出。\n"
+            "- 根据 action 用途和输入/输出契约自行组合 plan，不要按固定示例补齐计划。\n"
+            f"{contract}"
         )
 
     @staticmethod
@@ -455,7 +433,7 @@ class AIActionPlanner:
                 + "当前任务：判断用户是否补齐 pending 缺失信息。\n"
                 '如果补齐信息后能继续，输出修正后的结构化 plan；如果用户取消，输出 "control": {"type": "cancel"} 且 steps=[]。\n'
                 "如果仍无法补齐或输入无关，输出 is_action=false 且 steps=[]。\n"
-                "需要生成发送 plan 时使用 contact.resolve -> message.draft -> user.confirm -> message.send。\n"
+                "补齐后的写操作仍必须经过 user.confirm，并继续遵守已注册 action 契约。\n"
                 f"用户输入：{str(user_text or '').strip()}"
                 f"{pending}"
             )
@@ -463,10 +441,9 @@ class AIActionPlanner:
             header
             + "step 字段：id, action, depends_on, args, display_text, explanation。\n"
             "引用上游输出使用 $step_id.field 或 $step_id.field[0]。\n"
-            "发送消息的组合是 contact.resolve -> message.draft -> user.confirm -> message.send。\n"
-            "聊天记录查询的组合是 contact.resolve -> memory.search -> memory.summarize。\n"
-            "发送组合必须同时有明确目标和明确消息内容。\n"
-            "只有明确要求发送/发布/添加/删除/修改时才使用发送组合；询问历史、回顾、总结、检索内容时使用 memory.search 和 memory.summarize。\n"
+            "发送、发布、添加、删除或修改等写操作必须同时有明确目标和明确内容，并经过确认。\n"
+            "查询、回顾、总结或检索已存在内容属于读取类任务，不要要求确认。\n"
+            "根据已注册 action 的用途、输入字段和输出字段组合 steps，不要按固定示例补齐计划。\n"
             f"用户输入：{str(user_text or '').strip()}"
         )
 
@@ -504,7 +481,6 @@ class AIActionWorkflow:
         resolved_task_manager = task_manager
         if resolved_task_manager is None and (planner is None or memory_summarizer is None):
             resolved_task_manager = get_ai_task_manager()
-        self._planner = planner or AIActionPlanner(task_manager=resolved_task_manager)
         self._contact_alias_resolver = contact_alias_resolver or ContactAliasResolver()
         self._message_sender = message_sender
         self._permission_scope_provider = permission_scope_provider
@@ -515,6 +491,10 @@ class AIActionWorkflow:
             memory_manager=memory_manager,
             memory_summarizer=memory_summarizer or AIActionMemorySummarizer(task_manager=resolved_task_manager),
             message_sender=self._message_sender,
+        )
+        self._planner = planner or AIActionPlanner(
+            task_manager=resolved_task_manager,
+            action_contract_prompt=self._registry.prompt_contract(),
         )
         self._resource_manager = AIResourceManager(registry=self._registry)
         self._validator = AIPlanValidator(registry=self._registry)

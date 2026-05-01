@@ -6,7 +6,8 @@ import hashlib
 import json
 import uuid
 from dataclasses import dataclass
-from typing import Any
+from types import UnionType
+from typing import Any, Literal, Union, get_args, get_origin
 
 from client.core import logging
 from client.managers.ai_action_cache import AIActionCache
@@ -220,6 +221,11 @@ class AtomicActionRegistry:
                 max_targets=5,
                 allow_batch=True,
                 target_arg_names=("queries",),
+                prompt_purpose="解析用户表达的联系人、群名、用户名或备注名为本地稳定实体。",
+                prompt_notes=(
+                    "queries 必须来自用户明确表达的对象名称。",
+                    "allow_multiple=false 表示该动作需要单一目标，命中多个候选时由系统澄清。",
+                ),
             )
         )
         self._register(
@@ -237,6 +243,11 @@ class AtomicActionRegistry:
                 result_limit_arg_names=("limit", "max_items"),
                 default_result_limit=8,
                 max_result_items=50,
+                prompt_purpose="检索本地聊天记忆、摘要和可用消息索引。",
+                prompt_notes=(
+                    "用于用户询问历史、回顾、总结或查找已存在内容。",
+                    "time_scope.type 可表达 all_history 等结构化范围；question 保留用户问题。",
+                ),
             )
         )
         self._register(
@@ -254,6 +265,8 @@ class AtomicActionRegistry:
                 model_call_cost=1,
                 estimated_input_tokens=2048,
                 estimated_output_tokens=512,
+                prompt_purpose="把 memory.search 的结构化结果压缩为面向用户问题的回答摘要。",
+                prompt_notes=("source 应引用上游检索结果，不直接引用用户自然语言。",),
             )
         )
         self._register(
@@ -265,6 +278,8 @@ class AtomicActionRegistry:
                 input_model=MessageDraftInput,
                 output_model=MessageDraftOutput,
                 max_content_chars=2000,
+                prompt_purpose="根据已解析目标和明确文本内容生成发送预览、目标实体和幂等键。",
+                prompt_notes=("只准备草稿和 preview，不产生外部副作用。",),
             )
         )
         self._register(
@@ -274,6 +289,8 @@ class AtomicActionRegistry:
                 risk_level="medium",
                 handler=self._user_confirm,
                 input_model=UserConfirmInput,
+                prompt_purpose="在执行外部副作用前暂停并请求用户确认 preview。",
+                prompt_notes=("确认动作必须服务于明确写操作，不能用于普通读取任务。",),
             )
         )
         self._register(
@@ -294,8 +311,22 @@ class AtomicActionRegistry:
                 allow_auto_resume_after_confirm=False,
                 allow_side_effect=True,
                 idempotency_required=True,
+                prompt_purpose="通过现有会话发送已确认的文本消息。",
+                prompt_notes=(
+                    "必须依赖 user.confirm 的确认结果。",
+                    "target、content、preview 和 idempotency_key 应来自上游草稿或确认上下文。",
+                ),
             )
         )
+
+    def prompt_contract(self) -> str:
+        """Return a compact model-facing contract generated from registered action specs."""
+
+        lines = ["已注册 action 能力："]
+        for name in self.names():
+            spec = self._actions[name]
+            lines.append(_format_action_prompt_contract(spec))
+        return "\n".join(lines)
 
     async def _memory_search(self, args: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
         del context
@@ -728,6 +759,106 @@ def _normalize_memory_search_output(value: Any, *, question: str) -> dict[str, A
         if str(output.get("cache_search_version") or "").strip():
             normalized["cache_search_version"] = str(output.get("cache_search_version") or "").strip()
     return normalized
+
+
+class _PromptContractContactResolver:
+    async def get_contact_index_version(self) -> str:
+        return ""
+
+
+def build_default_action_prompt_contract() -> str:
+    """Build the canonical planner action contract without touching runtime services."""
+
+    return AtomicActionRegistry(contact_resolver=_PromptContractContactResolver()).prompt_contract()
+
+
+def _format_action_prompt_contract(spec: AtomicActionSpec) -> str:
+    parts = [
+        f"- {spec.name}: kind={spec.kind}",
+        f"risk={spec.risk_level}",
+    ]
+    if spec.prompt_purpose:
+        parts.append(f"用途={spec.prompt_purpose}")
+    input_fields = _model_prompt_fields(spec.input_model)
+    if input_fields:
+        parts.append(f"输入字段 {input_fields}")
+    output_fields = _model_prompt_fields(spec.output_model)
+    if output_fields:
+        parts.append(f"输出字段 {output_fields}")
+    constraints = _spec_prompt_constraints(spec)
+    if constraints:
+        parts.append(f"约束 {constraints}")
+    for note in spec.prompt_notes:
+        normalized = " ".join(str(note or "").split())
+        if normalized:
+            parts.append(f"说明 {normalized}")
+    return "；".join(parts) + "。"
+
+
+def _model_prompt_fields(model: type[Any] | None) -> str:
+    fields = getattr(model, "model_fields", None)
+    if not fields:
+        return ""
+    items: list[str] = []
+    for name, field in fields.items():
+        type_name = _annotation_prompt_name(getattr(field, "annotation", Any))
+        item = f"{name}:{type_name}"
+        is_required = getattr(field, "is_required", None)
+        if callable(is_required) and is_required():
+            item += " required"
+        items.append(item)
+    return ", ".join(items)
+
+
+def _annotation_prompt_name(annotation: Any) -> str:
+    origin = get_origin(annotation)
+    args = get_args(annotation)
+    if origin is Literal:
+        return "Literal[" + ", ".join(repr(arg) for arg in args) + "]"
+    if origin in {list, tuple, set, frozenset}:
+        item_type = _annotation_prompt_name(args[0]) if args else "Any"
+        return f"{origin.__name__}[{item_type}]"
+    if origin is dict:
+        key_type = _annotation_prompt_name(args[0]) if args else "Any"
+        value_type = _annotation_prompt_name(args[1]) if len(args) > 1 else "Any"
+        return f"dict[{key_type}, {value_type}]"
+    if origin in {Union, UnionType}:
+        return " | ".join(_annotation_prompt_name(arg) for arg in args)
+    if annotation is Any:
+        return "Any"
+    if annotation is None or annotation is type(None):
+        return "None"
+    name = getattr(annotation, "__name__", "")
+    if name:
+        return str(name)
+    return str(annotation).replace("typing.", "")
+
+
+def _spec_prompt_constraints(spec: AtomicActionSpec) -> str:
+    values = [
+        f"enabled={_bool_prompt(spec.enabled)}",
+        f"requires_confirmation={_bool_prompt(spec.requires_confirmation)}",
+        f"allow_side_effect={_bool_prompt(spec.allow_side_effect)}",
+    ]
+    if spec.max_targets is not None:
+        values.append(f"max_targets={spec.max_targets}")
+    if spec.max_content_chars is not None:
+        values.append(f"max_content_chars={spec.max_content_chars}")
+    if spec.idempotency_required:
+        values.append("idempotency_required=true")
+    if spec.require_preview:
+        values.append("require_preview=true")
+    if spec.require_resolved_target:
+        values.append("require_resolved_target=true")
+    if spec.default_result_limit:
+        values.append(f"default_result_limit={spec.default_result_limit}")
+    if spec.max_result_items is not None:
+        values.append(f"max_result_items={spec.max_result_items}")
+    return ", ".join(values)
+
+
+def _bool_prompt(value: bool) -> str:
+    return "true" if bool(value) else "false"
 
 
 def _contact_resolve_cache_key(
