@@ -27,6 +27,55 @@ class ContactResolveOutput(_ActionOutputModel):
     unresolved: list[str] = Field(default_factory=list)
 
 
+class EmptyReadInput(_StrictInputModel):
+    pass
+
+
+class PagedReadInput(_StrictInputModel):
+    page: int = Field(default=1, ge=1)
+    size: int = Field(default=20, ge=1, le=100)
+
+
+class UserSearchInput(PagedReadInput):
+    keyword: str = Field(min_length=1)
+
+
+class UserGetInput(_StrictInputModel):
+    user_id: str = Field(min_length=1)
+
+
+class GroupGetInput(_StrictInputModel):
+    group_id: str = Field(min_length=1)
+
+
+class SessionGetInput(_StrictInputModel):
+    session_id: str = Field(min_length=1)
+
+
+class FileListInput(_StrictInputModel):
+    limit: int = Field(default=50, ge=1, le=200)
+
+
+class MomentListInput(_StrictInputModel):
+    user_id: str | None = None
+    page: int = Field(default=1, ge=1)
+    size: int = Field(default=20, ge=1, le=50)
+
+
+class MomentGetInput(_StrictInputModel):
+    moment_id: str = Field(min_length=1)
+
+
+class ServerReadOutput(_ActionOutputModel):
+    action: str
+    status: str
+    text: str = ""
+    result_count: int = Field(ge=0)
+    items: list[Any] = Field(default_factory=list)
+    item: dict[str, Any] = Field(default_factory=dict)
+    result: Any = None
+
+
 class MemorySearchInput(_StrictInputModel):
     participants: list[Any] = Field(default_factory=list)
     participant_match: Literal["any", "all", "direct_only", "group_only"] = "any"

@@ -184,7 +184,7 @@ class AIActionPlanner:
     """Optional model-backed planner that returns atomic JSON action plans."""
 
     PLANNER_SCHEMA_VERSION = "atomic_steps_v2"
-    PLANNER_PROMPT_VERSION = "atomic_steps_prompt_v14"
+    PLANNER_PROMPT_VERSION = "atomic_steps_prompt_v15"
     PLAN_OUTPUT_VERSION = 1
 
     PROMPT_NEW_ACTION = "new_action"
@@ -471,17 +471,22 @@ class AIActionPlanner:
             "规划规则：\n"
             "- 每个 step.id 必须唯一，使用简短稳定名称即可，不要求固定命名。\n"
             "所有 $ 引用的根名称必须等于已存在 step.id；不要生成 %step_0 这类临时 id。\n"
+            "- 规划契约里的 action 名称只说明输出来源；实际 $ 引用必须使用 step.id 作为根，不能把 action 名称写成引用根。\n"
+            "- final 是顶层结果描述，不是 step；不要生成 id=final 的 step，也不要为了返回结果重复执行同一个只读 action。\n"
             "- depends_on 必须包含被 args 引用的上游 step.id；没有引用时 depends_on 为空数组。\n"
             "- 读取类任务不需要确认；写操作必须先生成 preview 并经过 user.confirm，确认后才能执行写 action。\n"
             "- 只有用户明确要求发送、添加、发布、删除或修改时，才允许规划写 action。\n"
             "- 多个对象默认表示多对象读取或操作，不是歧义；只有单个名称对应多个本地实体时才由系统澄清。\n"
             "- 涉及联系人、群名或会话对象的读取任务，必须先解析对象，并把解析结果传给后续读取 action 的 participants；不要把名称字符串直接放到 participants，也不要只把名称留在 question 或 keywords。\n"
+            "- 历史聊天、语音转写、文件内容总结和已存在内容回顾属于本地记忆读取，优先使用 memory.search；如果用户问题里出现联系人或会话对象，memory.search 前必须有 contact.resolve，participants 不能为空。\n"
+            "- 用户要求搜索用户、查看好友、群组、会话、未读、文件列表或朋友圈列表等当前账号服务端数据时，使用对应服务端只读 action；输入中已有关键词时不要要求用户再次提供。\n"
             "- 需要向用户回答检索到的内容时，先检索再总结；final 不直接指向 memory.search，除非用户明确只要原始列表或原始记录。\n"
             "- 严格使用已注册 action、输入字段和输出字段；不要发明 action、字段或不存在的上游输出。\n"
             "- 如果用户请求的应用能力不能完全用已注册 action 完成，输出 is_action=false 且 steps=[]；不要发明 action，也不要用相近 action 代替。\n"
             "- 根据 action 用途和输入/输出契约自行组合 plan，不要按固定示例补齐计划。\n"
             "- 只输出完成用户目标的最小必要 steps；不要加入可选、辅助、预热或候选步骤。\n"
             "- 如果某个 step 的输出不会被后续 step 或 final 使用，说明它不在当前目标的执行链路中，不要输出。\n"
+            "- 写操作完成后 final 指向写 action 的输出；除非用户明确要求继续查询，否则不要在写 action 后追加只读 action。\n"
             f"{contract}"
         )
 

@@ -5,10 +5,11 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from client.managers.ai_action_registry import SERVER_READ_ACTION_ROUTES
 from client.managers.ai_action_types import AIActionPlan, AIActionStep
 
 
-MERGEABLE_ACTIONS = {"contact.resolve", "memory.search", "memory.summarize"}
+MERGEABLE_ACTIONS = {"contact.resolve", "memory.search", "memory.summarize", *SERVER_READ_ACTION_ROUTES.keys()}
 ROOT_ACTIONS = {"message.send", "friend.add", "moment.publish", "user.confirm"}
 
 
@@ -51,6 +52,8 @@ class AIPlanOptimizer:
     @staticmethod
     def _merge_duplicate_read_steps(steps: list[AIActionStep], final: dict[str, Any]) -> tuple[list[AIActionStep], dict[str, Any], str]:
         seen: dict[tuple[str, str, tuple[str, ...]], str] = {}
+        seen_by_args: dict[tuple[str, str], str] = {}
+        output_by_id: dict[str, AIActionStep] = {}
         replacements: dict[str, str] = {}
         output: list[AIActionStep] = []
         merged_actions: set[str] = set()
@@ -58,25 +61,35 @@ class AIPlanOptimizer:
             current = _replace_step_refs(step, replacements)
             if current.action not in MERGEABLE_ACTIONS:
                 output.append(current)
+                output_by_id[current.id] = current
                 continue
             key = (current.action, _stable_json(current.args), _dedupe_depends(current.depends_on, current.id))
-            if key in seen:
-                replacements[current.id] = seen[key]
+            args_key = (current.action, _stable_json(current.args))
+            replacement_id = seen.get(key)
+            if replacement_id is None:
+                candidate_id = seen_by_args.get(args_key)
+                if (
+                    current.action in SERVER_READ_ACTION_ROUTES
+                    and candidate_id
+                    and _depends_only_on_duplicate_chain(current.depends_on, candidate_id, output_by_id)
+                ):
+                    replacement_id = candidate_id
+            if replacement_id:
+                replacements[current.id] = replacement_id
                 merged_actions.add(current.action)
                 continue
             seen[key] = current.id
+            seen_by_args.setdefault(args_key, current.id)
             output.append(current)
+            output_by_id[current.id] = current
         if not replacements:
             return steps, final, ""
         output = [_replace_step_refs(step, replacements) for step in output]
         final = _replace_value_refs(final, replacements)
-        reasons = []
-        if "contact.resolve" in merged_actions:
-            reasons.append("optimizer_merge_duplicate_contact_resolve")
-        if "memory.search" in merged_actions:
-            reasons.append("optimizer_merge_duplicate_memory_search")
-        if "memory.summarize" in merged_actions:
-            reasons.append("optimizer_merge_duplicate_memory_summarize")
+        reasons = [
+            f"optimizer_merge_duplicate_{action.replace('.', '_')}"
+            for action in sorted(merged_actions)
+        ]
         return output, final, "+".join(reasons)
 
     @staticmethod
@@ -158,6 +171,21 @@ def _replace_value_refs(value: Any, replacements: dict[str, str]) -> Any:
     if isinstance(value, dict):
         return {key: _replace_value_refs(item, replacements) for key, item in value.items()}
     return value
+
+
+def _depends_only_on_duplicate_chain(
+    depends_on: tuple[str, ...],
+    duplicate_id: str,
+    output_by_id: dict[str, AIActionStep],
+) -> bool:
+    depends = set(_dedupe_depends(depends_on, ""))
+    if not depends:
+        return False
+    duplicate = output_by_id.get(duplicate_id)
+    if duplicate is None:
+        return False
+    allowed = {duplicate_id, *duplicate.depends_on}
+    return depends.issubset(allowed)
 
 
 def _replace_ref_string(value: str, replacements: dict[str, str]) -> str:

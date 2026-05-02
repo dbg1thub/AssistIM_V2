@@ -65,6 +65,39 @@
       }
     },
     {
+      "name": "server_user_search",
+      "user_input": "帮我搜索用户 test1",
+      "tags": ["action", "server_read", "user"],
+      "router_expected_route": "action_candidate",
+      "expectation": {
+        "is_action": true,
+        "risk": "low",
+        "required_actions": ["user.search"],
+        "required_action_sequence": ["user.search"],
+        "requires_confirmation": false,
+        "required_step_args": [
+          {
+            "action": "user.search",
+            "path": "keyword",
+            "equals": "test1"
+          }
+        ]
+      }
+    },
+    {
+      "name": "server_file_list",
+      "user_input": "列一下我上传过的文件",
+      "tags": ["action", "server_read", "file"],
+      "router_expected_route": "action_candidate",
+      "expectation": {
+        "is_action": true,
+        "risk": "low",
+        "required_actions": ["file.list"],
+        "required_action_sequence": ["file.list"],
+        "requires_confirmation": false
+      }
+    },
+    {
       "name": "send_direct_message",
       "user_input": "帮我给张三发我晚点到",
       "tags": ["action", "send", "confirmation"],

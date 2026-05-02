@@ -14,6 +14,9 @@ from client.managers.ai_action_cache import AIActionCache
 from client.managers.ai_action_io_models import (
     ContactResolveInput,
     ContactResolveOutput,
+    EmptyReadInput,
+    FileListInput,
+    GroupGetInput,
     MemorySearchInput,
     MemorySearchOutput,
     MemorySummarizeInput,
@@ -22,7 +25,14 @@ from client.managers.ai_action_io_models import (
     MessageDraftOutput,
     MessageSendInput,
     MessageSendOutput,
+    MomentGetInput,
+    MomentListInput,
+    PagedReadInput,
+    ServerReadOutput,
+    SessionGetInput,
     UserConfirmInput,
+    UserGetInput,
+    UserSearchInput,
 )
 from client.managers.ai_action_types import (
     ActionHandlerError,
@@ -43,6 +53,78 @@ MEMORY_SUMMARIZE_CHUNK_FILE_ITEM_MAX_CHARS = 260
 MEMORY_SUMMARIZE_CACHE_NAMESPACE = "memory.summarize"
 MEMORY_SUMMARIZE_PROMPT_VERSION = "memory_summarize_context:v3"
 MEMORY_SUMMARIZE_MODEL_ID = "ai_action_memory_summarizer:v1"
+
+
+@dataclass(frozen=True, slots=True)
+class _ServerReadRoute:
+    path: str
+    path_args: tuple[str, ...] = ()
+    param_args: tuple[str, ...] = ()
+
+
+SERVER_READ_ACTION_ROUTES: dict[str, _ServerReadRoute] = {
+    "user.search": _ServerReadRoute("/users/search", param_args=("keyword", "page", "size")),
+    "user.list": _ServerReadRoute("/users", param_args=("page", "size")),
+    "user.get": _ServerReadRoute("/users/{user_id}", path_args=("user_id",)),
+    "friend.list": _ServerReadRoute("/friends"),
+    "friend.request.list": _ServerReadRoute("/friends/requests"),
+    "group.list": _ServerReadRoute("/groups"),
+    "group.get": _ServerReadRoute("/groups/{group_id}", path_args=("group_id",)),
+    "session.list": _ServerReadRoute("/sessions"),
+    "session.get": _ServerReadRoute("/sessions/{session_id}", path_args=("session_id",)),
+    "session.unread": _ServerReadRoute("/sessions/unread"),
+    "message.unread": _ServerReadRoute("/messages/unread"),
+    "file.list": _ServerReadRoute("/files", param_args=("limit",)),
+    "moment.list": _ServerReadRoute("/moments", param_args=("user_id", "page", "size")),
+    "moment.get": _ServerReadRoute("/moments/{moment_id}", path_args=("moment_id",)),
+}
+
+SERVER_READ_ACTION_LABELS: dict[str, str] = {
+    "user.search": "用户搜索",
+    "user.list": "用户列表查询",
+    "user.get": "用户资料查询",
+    "friend.list": "好友列表查询",
+    "friend.request.list": "好友申请查询",
+    "group.list": "群组列表查询",
+    "group.get": "群组详情查询",
+    "session.list": "会话列表查询",
+    "session.get": "会话详情查询",
+    "session.unread": "会话未读统计查询",
+    "message.unread": "消息未读摘要查询",
+    "file.list": "文件列表查询",
+    "moment.list": "朋友圈列表查询",
+    "moment.get": "朋友圈详情查询",
+}
+
+
+class AIActionServerReadClient:
+    """Read-only bridge from AI actions to existing /api/v1 REST endpoints."""
+
+    def __init__(self, http_client: Any | None = None) -> None:
+        self._http_client = http_client
+
+    async def execute(self, action_name: str, args: dict[str, Any]) -> Any:
+        route = SERVER_READ_ACTION_ROUTES.get(str(action_name or "").strip())
+        if route is None:
+            raise ActionHandlerError(f"ACTION_NOT_FOUND: {action_name}")
+        path_args = {
+            name: _url_path_arg(args.get(name))
+            for name in route.path_args
+        }
+        path = route.path.format(**path_args) if path_args else route.path
+        params = {
+            name: args.get(name)
+            for name in route.param_args
+            if args.get(name) not in (None, "")
+        }
+        return await self._http().get(path, params=params or None)
+
+    def _http(self) -> Any:
+        if self._http_client is None:
+            from client.network.http_client import get_http_client
+
+            self._http_client = get_http_client()
+        return self._http_client
 
 
 class AIActionMessageSender:
@@ -189,12 +271,14 @@ class AtomicActionRegistry:
         memory_manager: Any | None = None,
         memory_summarizer: Any | None = None,
         message_sender: Any | None = None,
+        server_reader: Any | None = None,
         action_cache: AIActionCache | None = None,
     ) -> None:
         self._contact_resolver = contact_resolver
         self._memory_manager = memory_manager
         self._memory_summarizer = memory_summarizer
         self._message_sender = message_sender
+        self._server_reader = server_reader
         self._action_cache = action_cache or AIActionCache()
         self._actions: dict[str, AtomicActionSpec] = {}
         self._register_defaults()
@@ -208,6 +292,45 @@ class AtomicActionRegistry:
     def _register(self, spec: AtomicActionSpec) -> None:
         _validate_action_spec(spec)
         self._actions[spec.name] = spec
+
+    def _register_server_read(
+        self,
+        name: str,
+        *,
+        input_model: type[Any],
+        prompt_purpose: str,
+        prompt_notes: tuple[str, ...] = (),
+        max_result_items: int | None = None,
+    ) -> None:
+        self._register(
+            AtomicActionSpec(
+                name=name,
+                kind="read",
+                risk_level="low",
+                handler=self._server_read_handler(name),
+                input_model=input_model,
+                output_model=ServerReadOutput,
+                max_output_json_bytes=65536,
+                timeout_ms=15000,
+                max_retries=1,
+                max_targets=max_result_items,
+                result_budget_kind="server_read",
+                default_result_limit=max_result_items or 0,
+                max_result_items=max_result_items,
+                prompt_purpose=prompt_purpose,
+                prompt_notes=(
+                    "这是只读服务端动作，不需要 user.confirm。",
+                    "只能用于读取当前账号通过现有接口可见的数据，不产生外部副作用。",
+                    *prompt_notes,
+                ),
+            )
+        )
+
+    def _server_read_handler(self, action_name: str):
+        async def handler(args: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
+            return await self._server_read(action_name, args, context)
+
+        return handler
 
     def _register_defaults(self) -> None:
         self._register(
@@ -228,6 +351,96 @@ class AtomicActionRegistry:
                     "中文表达“我和 X”“我跟 X”“与 X”中的 X 是联系人或会话对象，应放入 queries。",
                 ),
             )
+        )
+        self._register_server_read(
+            "user.search",
+            input_model=UserSearchInput,
+            prompt_purpose="通过服务端用户搜索接口查找用户。",
+            prompt_notes=("keyword 必须来自用户明确提供的搜索词。",),
+            max_result_items=100,
+        )
+        self._register_server_read(
+            "user.list",
+            input_model=PagedReadInput,
+            prompt_purpose="列出服务端用户目录。",
+            max_result_items=100,
+        )
+        self._register_server_read(
+            "user.get",
+            input_model=UserGetInput,
+            prompt_purpose="查看一个用户的公开资料。",
+            prompt_notes=("user_id 必须来自上游结果或用户明确提供的稳定 ID。",),
+            max_result_items=1,
+        )
+        self._register_server_read(
+            "friend.list",
+            input_model=EmptyReadInput,
+            prompt_purpose="查看当前账号好友列表。",
+            max_result_items=100,
+        )
+        self._register_server_read(
+            "friend.request.list",
+            input_model=EmptyReadInput,
+            prompt_purpose="查看当前账号的好友申请列表。",
+            max_result_items=100,
+        )
+        self._register_server_read(
+            "group.list",
+            input_model=EmptyReadInput,
+            prompt_purpose="查看当前账号加入的群组列表。",
+            max_result_items=100,
+        )
+        self._register_server_read(
+            "group.get",
+            input_model=GroupGetInput,
+            prompt_purpose="查看一个群组详情。",
+            prompt_notes=("group_id 必须来自上游结果或用户明确提供的稳定 ID。",),
+            max_result_items=1,
+        )
+        self._register_server_read(
+            "session.list",
+            input_model=EmptyReadInput,
+            prompt_purpose="查看当前账号会话列表。",
+            max_result_items=100,
+        )
+        self._register_server_read(
+            "session.get",
+            input_model=SessionGetInput,
+            prompt_purpose="查看一个会话详情。",
+            prompt_notes=("session_id 必须来自上游结果或用户明确提供的稳定 ID。",),
+            max_result_items=1,
+        )
+        self._register_server_read(
+            "session.unread",
+            input_model=EmptyReadInput,
+            prompt_purpose="查看会话未读统计。",
+            max_result_items=100,
+        )
+        self._register_server_read(
+            "message.unread",
+            input_model=EmptyReadInput,
+            prompt_purpose="查看消息未读摘要。",
+            max_result_items=100,
+        )
+        self._register_server_read(
+            "file.list",
+            input_model=FileListInput,
+            prompt_purpose="查看当前账号上传过的文件列表。",
+            max_result_items=200,
+        )
+        self._register_server_read(
+            "moment.list",
+            input_model=MomentListInput,
+            prompt_purpose="查看朋友圈列表。",
+            prompt_notes=("user_id 为空表示查看当前可见时间线。",),
+            max_result_items=50,
+        )
+        self._register_server_read(
+            "moment.get",
+            input_model=MomentGetInput,
+            prompt_purpose="查看一条朋友圈详情。",
+            prompt_notes=("moment_id 必须来自上游结果或用户明确提供的稳定 ID。",),
+            max_result_items=1,
         )
         self._register(
             AtomicActionSpec(
@@ -358,10 +571,30 @@ class AtomicActionRegistry:
         """Return a compact model-facing contract generated from registered action specs."""
 
         lines = ["已注册 action 能力："]
-        for name in self.names():
+        if any(_is_server_read_spec(spec) for spec in self._actions.values()):
+            lines.append(
+                "服务端只读 action 通用：kind=read risk=low，不需要 user.confirm，无外部副作用；"
+                "输出字段 text、items、item、result_count、result。"
+            )
+        for name in _prompt_contract_action_order(self.names()):
             spec = self._actions[name]
-            lines.append(_format_action_prompt_contract(spec))
+            formatter = _format_server_read_prompt_contract if _is_server_read_spec(spec) else _format_action_prompt_contract
+            lines.append(formatter(spec))
         return "\n".join(lines)
+
+    async def _server_read(self, action_name: str, args: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
+        del context
+        reader = self._require_server_reader()
+        execute = getattr(reader, "execute", None)
+        if not callable(execute):
+            raise RuntimeError("SERVER_READ_UNAVAILABLE")
+        payload = await execute(action_name, dict(args or {}))
+        return _normalize_server_read_output(action_name, payload)
+
+    def _require_server_reader(self) -> Any:
+        if self._server_reader is None:
+            self._server_reader = AIActionServerReadClient()
+        return self._server_reader
 
     async def _memory_search(self, args: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
         del context
@@ -796,6 +1029,61 @@ def _normalize_memory_search_output(value: Any, *, question: str) -> dict[str, A
     return normalized
 
 
+def _normalize_server_read_output(action_name: str, payload: Any) -> dict[str, Any]:
+    action = str(action_name or "").strip()
+    items, item, result_count = _server_read_result_shape(payload)
+    return {
+        "action": action,
+        "status": "ready",
+        "text": _server_read_text(action, result_count),
+        "result_count": result_count,
+        "items": items,
+        "item": item,
+        "result": payload,
+    }
+
+
+def _server_read_result_shape(payload: Any) -> tuple[list[Any], dict[str, Any], int]:
+    if isinstance(payload, list):
+        return list(payload), {}, len(payload)
+    if isinstance(payload, dict):
+        items = _server_read_items(payload)
+        if items is not None:
+            return items, {}, _server_read_count(payload, fallback=len(items))
+        return [], dict(payload), 1 if payload else 0
+    return [], {}, 0
+
+
+def _server_read_items(payload: dict[str, Any]) -> list[Any] | None:
+    for key in ("items", "messages", "sessions", "users", "friends", "groups", "files", "moments", "requests", "results"):
+        value = payload.get(key)
+        if isinstance(value, list):
+            return list(value)
+    return None
+
+
+def _server_read_count(payload: dict[str, Any], *, fallback: int) -> int:
+    for key in ("total", "count", "result_count"):
+        try:
+            if payload.get(key) is not None:
+                return max(0, int(payload.get(key)))
+        except (TypeError, ValueError):
+            continue
+    return max(0, int(fallback or 0))
+
+
+def _server_read_text(action_name: str, result_count: int) -> str:
+    label = SERVER_READ_ACTION_LABELS.get(str(action_name or "").strip(), "服务端只读查询")
+    return f"已完成{label}，返回 {max(0, int(result_count or 0))} 条结果。"
+
+
+def _url_path_arg(value: Any) -> str:
+    text = str(value or "").strip().strip("/")
+    if not text:
+        raise ActionHandlerError("ARG_SCHEMA_INVALID: path")
+    return text
+
+
 class _PromptContractContactResolver:
     async def get_contact_index_version(self) -> str:
         return ""
@@ -837,6 +1125,51 @@ def _format_action_prompt_contract(spec: AtomicActionSpec) -> str:
         if normalized:
             parts.append(f"说明 {normalized}")
     return "；".join(parts) + "。"
+
+
+def _prompt_contract_action_order(names: tuple[str, ...]) -> tuple[str, ...]:
+    priority = (
+        "contact.resolve",
+        "memory.search",
+        "memory.summarize",
+        "message.draft",
+        "user.confirm",
+        "message.send",
+    )
+    available = {str(name or "").strip() for name in names}
+    ordered = [name for name in priority if name in available]
+    ordered.extend(name for name in names if name not in set(ordered))
+    return tuple(ordered)
+
+
+def _format_server_read_prompt_contract(spec: AtomicActionSpec) -> str:
+    parts = [
+        f"- {spec.name}: kind=read",
+        "risk=low",
+    ]
+    if spec.prompt_purpose:
+        parts.append(f"用途={spec.prompt_purpose}")
+    input_fields = _model_prompt_fields(spec.input_model)
+    if input_fields:
+        parts.append(f"输入字段 {input_fields}")
+    if spec.default_result_limit:
+        parts.append(f"default_result_limit={spec.default_result_limit}")
+    if spec.max_result_items is not None:
+        parts.append(f"max_result_items={spec.max_result_items}")
+    for note in spec.prompt_notes:
+        normalized = " ".join(str(note or "").split())
+        if not normalized or _is_common_server_read_note(normalized):
+            continue
+        parts.append(f"说明 {normalized}")
+    return "；".join(parts) + "。"
+
+
+def _is_server_read_spec(spec: AtomicActionSpec) -> bool:
+    return spec.output_model is ServerReadOutput and spec.name in SERVER_READ_ACTION_ROUTES
+
+
+def _is_common_server_read_note(note: str) -> bool:
+    return note.startswith("这是只读服务端动作") or note.startswith("只能用于读取当前账号")
 
 
 def _model_prompt_fields(model: type[Any] | None) -> str:

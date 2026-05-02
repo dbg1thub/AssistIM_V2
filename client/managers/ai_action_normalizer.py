@@ -46,10 +46,11 @@ class AIPlanNormalizer:
                     fallback=step.fallback,
                 )
             )
+        final = dict(plan.final or {"type": "answer"})
+        steps, final = self._canonicalize_unique_action_name_refs(steps, final)
         steps = self._ensure_reference_dependencies(steps)
         steps = self._canonicalize_send_chain_refs(steps)
         steps = self._canonicalize_single_target_send_contact_resolve(steps)
-        final = dict(plan.final or {"type": "answer"})
         steps, final = self._ensure_memory_summarize_for_search_answer(steps, final=final, user_text=user_text)
         steps = self._ensure_reference_dependencies(steps)
         steps = self._ensure_write_confirmation(steps)
@@ -67,6 +68,43 @@ class AIPlanNormalizer:
             steps=tuple(steps),
             final=final,
             control=dict(plan.control or {}),
+        )
+
+    @staticmethod
+    def _canonicalize_unique_action_name_refs(
+        steps: list[AIActionStep],
+        final: dict,
+    ) -> tuple[list[AIActionStep], dict]:
+        action_step_ids: dict[str, str | None] = {}
+        for step in steps:
+            action = str(step.action or "").strip()
+            if not action:
+                continue
+            if action in action_step_ids:
+                action_step_ids[action] = None
+            else:
+                action_step_ids[action] = step.id
+        replacements = {
+            action: step_id
+            for action, step_id in action_step_ids.items()
+            if action and step_id
+        }
+        if not replacements:
+            return steps, final
+        return (
+            [
+                AIActionStep(
+                    id=step.id,
+                    action=step.action,
+                    depends_on=step.depends_on,
+                    args=_replace_unique_action_refs(dict(step.args or {}), replacements),
+                    display_text=step.display_text,
+                    explanation=step.explanation,
+                    fallback=_replace_unique_action_refs(step.fallback, replacements) if step.fallback else None,
+                )
+                for step in steps
+            ],
+            _replace_unique_action_refs(final, replacements),
         )
 
     @staticmethod
@@ -443,6 +481,24 @@ def _refs_are_available(value: object, *, available: set[str]) -> bool:
         if ref not in available:
             return False
     return True
+
+
+def _replace_unique_action_refs(value: object, replacements: dict[str, str]) -> object:
+    if isinstance(value, str):
+        if not value.startswith("$"):
+            return value
+        body = value[1:]
+        for action_name in sorted(replacements, key=len, reverse=True):
+            if body == action_name or body.startswith(f"{action_name}.") or body.startswith(f"{action_name}["):
+                return f"${replacements[action_name]}{body[len(action_name):]}"
+        return value
+    if isinstance(value, list):
+        return [_replace_unique_action_refs(item, replacements) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_replace_unique_action_refs(item, replacements) for item in value)
+    if isinstance(value, dict):
+        return {key: _replace_unique_action_refs(item, replacements) for key, item in value.items()}
+    return value
 
 
 def _refs_in_value(value: object) -> set[str]:

@@ -114,6 +114,16 @@ class _FakeActionMessageSender:
         }
 
 
+class _FakeServerReadClient:
+    def __init__(self, responses: dict[str, dict] | None = None) -> None:
+        self.responses = {str(key): dict(value or {}) for key, value in dict(responses or {}).items()}
+        self.calls: list[dict] = []
+
+    async def execute(self, action_name: str, args: dict) -> dict:
+        self.calls.append({"action": action_name, "args": dict(args or {})})
+        return dict(self.responses.get(str(action_name or ""), {}))
+
+
 class _FakeDirectMessageManager:
     def __init__(self, *, status=MessageStatus.SENDING) -> None:
         self.status = status
@@ -1114,15 +1124,34 @@ def test_ai_action_planner_prompt_uses_registry_action_contracts() -> None:
     assert "示例：聊天历史查询" not in system_prompt
 
 
+def test_ai_action_planner_prompt_fits_local_context_budget() -> None:
+    contract = AtomicActionRegistry(
+        contact_resolver=_FakeContactDatabase([]),
+        memory_manager=_FakeActionMemoryManager(),
+    ).prompt_contract()
+    prompt = (
+        AIActionPlanner._system_prompt(AIActionPlanner.PROMPT_NEW_ACTION, action_contract=contract)
+        + "\n"
+        + AIActionPlanner._user_prompt("帮我搜索用户 test1")
+    )
+
+    assert len(prompt) < 9500
+
+
 def test_ai_action_planner_prompt_keeps_generic_planning_rules_without_case_templates() -> None:
     system_prompt = AIActionPlanner._system_prompt(AIActionPlanner.PROMPT_NEW_ACTION)
     user_prompt = AIActionPlanner._user_prompt("我和test3昨天聊了什么？")
 
     assert "每个 step.id 必须唯一" in system_prompt
     assert "所有 $ 引用的根名称必须等于已存在 step.id" in system_prompt
+    assert "规划契约里的 action 名称只说明输出来源" in system_prompt
+    assert "final 是顶层结果描述，不是 step" in system_prompt
     assert "depends_on 必须包含被 args 引用的上游 step.id" in system_prompt
     assert "读取类任务不需要确认" in system_prompt
     assert "写操作必须先生成 preview 并经过 user.confirm" in system_prompt
+    assert "历史聊天、语音转写、文件内容总结和已存在内容回顾属于本地记忆读取" in system_prompt
+    assert "输入中已有关键词时不要要求用户再次提供" in system_prompt
+    assert "不要在写 action 后追加只读 action" in system_prompt
     assert "只输出完成用户目标的最小必要 steps" in system_prompt
     assert "不会被后续 step 或 final 使用" in system_prompt
     assert "不能完全用已注册 action 完成" in system_prompt
@@ -1230,6 +1259,8 @@ def test_ai_action_planner_schema_restricts_step_actions_to_registered_names() -
     assert action_schema["enum"] == list(registry.names())
     assert "contact.resolve" in action_schema["enum"]
     assert "message.send" in action_schema["enum"]
+    assert "user.search" in action_schema["enum"]
+    assert "file.list" in action_schema["enum"]
     assert "delete_server_database" not in action_schema["enum"]
 
 
@@ -1463,6 +1494,72 @@ def test_ai_plan_normalizer_canonicalizes_confirmation_preview_target_for_send_d
     confirm = next(step for step in normalized.steps if step.id == "confirm")
     assert confirm.args["preview"]["target"] == "$draft.target"
     assert confirm.args["preview"]["content"] == "$draft.content"
+    assert validator.validate(normalized).allowed is True
+
+
+def test_ai_plan_normalizer_rewrites_unique_action_name_refs_to_step_ids() -> None:
+    normalizer = AIPlanNormalizer()
+    registry = AtomicActionRegistry(
+        contact_resolver=ContactAliasResolver(db=_FakeContactDatabase([])),
+        memory_manager=_FakeActionMemoryManager(),
+    )
+    validator = AIPlanValidator(registry=registry)
+    plan = AIActionPlan(
+        is_action=True,
+        goal="给张三发送消息",
+        risk="high",
+        steps=(
+            AIActionStep(
+                id="resolve_target",
+                action="contact.resolve",
+                args={"queries": ["张三"], "allow_multiple": False},
+            ),
+            AIActionStep(
+                id="draft_message",
+                action="message.draft",
+                depends_on=("resolve_target",),
+                args={"target": "$resolve_target.contacts[0]", "content": "我晚点到"},
+            ),
+            AIActionStep(
+                id="confirm_message",
+                action="user.confirm",
+                depends_on=("draft_message",),
+                args={
+                    "risk": "high",
+                    "preview": {
+                        "operation": "发送消息",
+                        "target": "$message.draft.target",
+                        "content": "$message.draft.content",
+                    },
+                },
+            ),
+            AIActionStep(
+                id="send_message",
+                action="message.send",
+                depends_on=("confirm_message",),
+                args={
+                    "target": "$message.draft.target_entity",
+                    "content": "$message.draft.content",
+                    "preview": "$user.confirm.preview",
+                    "idempotency_key": "$message.draft.idempotency_key",
+                },
+            ),
+        ),
+        final={"type": "answer", "source": "$send_message.text"},
+    )
+
+    normalized = normalizer.normalize(plan, user_text="帮我给张三发我晚点到")
+
+    assert normalized.is_action is True
+    confirm = next(step for step in normalized.steps if step.id == "confirm_message")
+    send = next(step for step in normalized.steps if step.id == "send_message")
+    assert confirm.args["preview"]["target"] == "$draft_message.target"
+    assert confirm.args["preview"]["content"] == "$draft_message.content"
+    assert send.args["target"] == "$draft_message.target_entity"
+    assert send.args["content"] == "$draft_message.content"
+    assert send.args["preview"] == "$confirm_message.preview"
+    assert send.args["idempotency_key"] == "$draft_message.idempotency_key"
+    assert send.depends_on == ("confirm_message", "draft_message")
     assert validator.validate(normalized).allowed is True
 
 
@@ -1856,14 +1953,113 @@ def test_ai_action_registry_exposes_memory_actions() -> None:
 
     assert registry.names() == (
         "contact.resolve",
+        "file.list",
+        "friend.list",
+        "friend.request.list",
+        "group.get",
+        "group.list",
         "memory.search",
         "memory.summarize",
         "message.draft",
         "message.send",
+        "message.unread",
+        "moment.get",
+        "moment.list",
+        "session.get",
+        "session.list",
+        "session.unread",
         "user.confirm",
+        "user.get",
+        "user.list",
+        "user.search",
     )
     assert registry.get("memory.search") is not None
     assert registry.get("memory.summarize") is not None
+
+
+def test_ai_action_registry_exposes_first_server_read_actions() -> None:
+    registry = AtomicActionRegistry(
+        contact_resolver=ContactAliasResolver(db=_FakeContactDatabase([])),
+        memory_manager=_FakeActionMemoryManager(),
+    )
+    expected = {
+        "user.search",
+        "user.list",
+        "user.get",
+        "friend.list",
+        "friend.request.list",
+        "group.list",
+        "group.get",
+        "session.list",
+        "session.get",
+        "session.unread",
+        "message.unread",
+        "file.list",
+        "moment.list",
+        "moment.get",
+    }
+
+    assert expected <= set(registry.names())
+    for action_name in expected:
+        spec = registry.get(action_name)
+        assert spec is not None
+        assert spec.kind == "read"
+        assert spec.risk_level == "low"
+        assert spec.requires_confirmation is False
+        assert spec.allow_side_effect is False
+        assert spec.handler is not None
+        assert spec.input_model is not None
+        assert spec.output_model is not None
+
+
+def test_ai_action_registry_server_read_inputs_reject_unknown_fields() -> None:
+    registry = AtomicActionRegistry(
+        contact_resolver=ContactAliasResolver(db=_FakeContactDatabase([])),
+        memory_manager=_FakeActionMemoryManager(),
+    )
+    spec = registry.get("user.search")
+    assert spec is not None
+    assert spec.input_model is not None
+
+    try:
+        spec.input_model.model_validate({"keyword": "test", "unexpected": True})
+    except Exception as exc:
+        assert "unexpected" in str(exc)
+    else:
+        raise AssertionError("server read action input should reject unknown fields")
+
+
+def test_ai_action_registry_server_read_action_calls_client_and_normalizes_result() -> None:
+    async def scenario() -> None:
+        reader = _FakeServerReadClient(
+            {
+                "user.search": {
+                    "items": [{"id": "user-1", "username": "test1"}],
+                    "total": 1,
+                }
+            }
+        )
+        registry = AtomicActionRegistry(
+            contact_resolver=ContactAliasResolver(db=_FakeContactDatabase([])),
+            memory_manager=_FakeActionMemoryManager(),
+            server_reader=reader,
+        )
+        spec = registry.get("user.search")
+        assert spec is not None
+
+        output = await spec.handler(  # type: ignore[misc]
+            {"keyword": "test", "page": 1, "size": 5},
+            {"step_id": "search_users"},
+        )
+
+        assert reader.calls == [{"action": "user.search", "args": {"keyword": "test", "page": 1, "size": 5}}]
+        assert output["status"] == "ready"
+        assert output["action"] == "user.search"
+        assert output["items"] == [{"id": "user-1", "username": "test1"}]
+        assert output["result_count"] == 1
+        assert output["text"] == "已完成用户搜索，返回 1 条结果。"
+
+    asyncio.run(scenario())
 
 
 def test_ai_action_registry_default_specs_declare_platform_boundaries() -> None:
@@ -2327,6 +2523,34 @@ def test_ai_action_optimizer_merges_duplicate_memory_search_and_updates_refs() -
     summarize = next(step for step in optimized.steps if step.id == "summarize")
     assert summarize.depends_on == ("search_a",)
     assert summarize.args["source"] == "$search_a"
+
+
+def test_ai_action_optimizer_merges_redundant_server_read_step_wrapped_as_final() -> None:
+    optimizer = AIPlanOptimizer()
+    plan = AIActionPlan(
+        is_action=True,
+        goal="搜索用户 test1",
+        risk="low",
+        steps=(
+            AIActionStep(
+                id="search_user_test1",
+                action="user.search",
+                args={"keyword": "test1", "page": 1, "size": 100},
+            ),
+            AIActionStep(
+                id="final",
+                action="user.search",
+                depends_on=("search_user_test1",),
+                args={"keyword": "test1", "page": 1, "size": 100},
+            ),
+        ),
+        final={"result": {"search_user_test1": {"result": "..."}}},
+    )
+
+    optimized, reason = optimizer.optimize(plan)
+
+    assert reason == "optimizer_merge_duplicate_user_search"
+    assert [step.id for step in optimized.steps] == ["search_user_test1"]
 
 
 def test_ai_action_optimizer_keeps_distinct_memory_search_steps() -> None:
@@ -4348,6 +4572,58 @@ def test_ai_action_executor_validates_input_model_before_handler(tmp_path, monke
             assert updated.error_text.startswith("ARG_SCHEMA_INVALID")
             assert updated.step_outputs == {}
             assert contact_db.resolve_calls == []
+        finally:
+            await db.close()
+
+    asyncio.run(scenario())
+
+
+def test_ai_action_executor_runs_server_read_action_without_confirmation(tmp_path, monkeypatch) -> None:
+    async def scenario() -> None:
+        db = Database(str(tmp_path / "actions.db"))
+        monkeypatch.setattr(action_store_module, "get_database", lambda: db)
+        store = AIActionStore()
+        reader = _FakeServerReadClient(
+            {
+                "user.search": {
+                    "items": [{"id": "user-1", "username": "test1"}],
+                    "total": 1,
+                }
+            }
+        )
+        registry = AtomicActionRegistry(
+            contact_resolver=ContactAliasResolver(db=_FakeContactDatabase([])),
+            server_reader=reader,
+        )
+        executor = AIActionExecutor(registry=registry, store=store)
+        plan = AIActionPlan(
+            is_action=True,
+            goal="搜索用户 test1",
+            steps=(
+                AIActionStep(
+                    id="search_users",
+                    action="user.search",
+                    args={"keyword": "test1", "page": 1, "size": 10},
+                ),
+            ),
+            final={"type": "answer", "source": "$search_users.text"},
+        )
+        try:
+            record = await store.create_plan(
+                thread_id="thread-1",
+                goal=plan.goal,
+                plan_json=plan.to_dict(),
+                reason="test_server_read_action",
+            )
+            result = await executor.execute(record)
+            updated = await store.get_plan(record.id)
+
+            assert result.state == "done"
+            assert result.response_text == "已完成用户搜索，返回 1 条结果。"
+            assert reader.calls == [{"action": "user.search", "args": {"keyword": "test1", "page": 1, "size": 10}}]
+            assert updated is not None
+            assert updated.state == "done"
+            assert updated.waiting_payload == {}
         finally:
             await db.close()
 
