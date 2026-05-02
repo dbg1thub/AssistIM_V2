@@ -152,6 +152,69 @@ class AdminDatabaseBackupService:
             raise AppError(ErrorCode.RESOURCE_NOT_FOUND, "database backup not found", 404)
         return self.serialize_backup(backup)
 
+    def delete_backup(
+        self,
+        backup_id: str,
+        *,
+        actor: User,
+        request_path: str = "",
+        request_method: str = "",
+        client_ip: str = "",
+    ) -> dict[str, Any]:
+        backup = self.db.get(AdminDatabaseBackup, str(backup_id or "").strip())
+        if backup is None:
+            raise AppError(ErrorCode.RESOURCE_NOT_FOUND, "database backup not found", 404)
+
+        status_before = str(backup.status or "")
+        try:
+            file_result = self._delete_backup_file(backup)
+            backup.status = "deleted"
+            self.audit.record(
+                actor=actor,
+                action="admin.database.backup.delete",
+                target_type="database_backup",
+                target_id=str(backup.id or ""),
+                request_path=request_path,
+                request_method=request_method,
+                client_ip=client_ip,
+                success=True,
+                detail={
+                    "backup_id": str(backup.id or ""),
+                    "status_before": status_before,
+                    "status_after": backup.status,
+                    "storage_key": str(backup.storage_key or ""),
+                    "file_name": str(backup.file_name or ""),
+                    "file_deleted": bool(file_result["file_deleted"]),
+                    "file_missing": bool(file_result["file_missing"]),
+                },
+                commit=False,
+            )
+            self.db.commit()
+            self.db.refresh(backup)
+            payload = self.serialize_backup(backup)
+            payload.update(file_result)
+            return payload
+        except AppError as exc:
+            self.audit.record(
+                actor=actor,
+                action="admin.database.backup.delete",
+                target_type="database_backup",
+                target_id=str(backup.id or ""),
+                request_path=request_path,
+                request_method=request_method,
+                client_ip=client_ip,
+                success=False,
+                error_code=str(exc.code),
+                detail={
+                    "backup_id": str(backup.id or ""),
+                    "status": status_before,
+                    "error": exc.message,
+                },
+                commit=False,
+            )
+            self.db.commit()
+            raise
+
     def prepare_download(
         self,
         backup_id: str,
@@ -309,6 +372,29 @@ class AdminDatabaseBackupService:
         except ValueError as exc:
             raise AppError(ErrorCode.FORBIDDEN, "database backup file is outside the backup directory", 403) from exc
         return file_path
+
+    def _delete_backup_file(self, backup: AdminDatabaseBackup) -> dict[str, bool]:
+        raw_path = str(backup.file_path or "").strip()
+        if not raw_path:
+            return {"file_deleted": False, "file_missing": True}
+
+        file_path = Path(raw_path).expanduser().resolve()
+        backup_root = self._backup_root()
+        try:
+            file_path.relative_to(backup_root)
+        except ValueError as exc:
+            raise AppError(ErrorCode.FORBIDDEN, "database backup file is outside the backup directory", 403) from exc
+
+        if not file_path.exists():
+            return {"file_deleted": False, "file_missing": True}
+        if not file_path.is_file():
+            raise AppError(ErrorCode.INVALID_REQUEST, "database backup path is not a file", 409)
+
+        try:
+            file_path.unlink()
+        except OSError as exc:
+            raise AppError(ErrorCode.INTERNAL_ERROR, "database backup file delete failed", 500) from exc
+        return {"file_deleted": True, "file_missing": False}
 
     def _sqlite_database_path(self) -> Path:
         database = self.db.get_bind().url.database or make_url(self.settings.database_url).database

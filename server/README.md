@@ -139,6 +139,7 @@ The same admin role also unlocks backend-only user-management APIs:
 - `GET /api/v1/admin/database/backups`: list database backup records.
 - `GET /api/v1/admin/database/backups/{backup_id}`: inspect one database backup record.
 - `GET /api/v1/admin/database/backups/{backup_id}/download`: download one completed database backup as an attachment.
+- `DELETE /api/v1/admin/database/backups/{backup_id}`: delete one server-local backup file and mark its record as deleted.
 - `GET /api/v1/admin/users`: list users with `keyword`, `role`, `disabled`, `page`, and `size` filters.
 - `GET /api/v1/admin/users/{user_id}`: inspect one user, including safe profile fields, device metadata, and business counts.
 - `PATCH /api/v1/admin/users/{user_id}/role`: set a user role to `user` or `admin`.
@@ -154,10 +155,13 @@ responses. Database inspection APIs are read-only and redact database URL
 passwords. Database backup files are written to a server-controlled local
 directory and are not exposed through public upload URLs. Backup downloads are
 admin-only, require a completed backup record, and verify the file remains
-inside the configured backup directory before streaming it. SQLite backups use
-the SQLite backup API; PostgreSQL backups require `pg_dump` on the server and
-fail explicitly when it is unavailable. Self-disable and self-demotion are
-blocked to avoid locking out the only active administrator.
+inside the configured backup directory before streaming it. Backup deletion is
+also admin-only, verifies the same backup-directory boundary, deletes only the
+server-local backup file, and keeps the database record with `status=deleted`
+for auditability. SQLite backups use the SQLite backup API; PostgreSQL backups
+require `pg_dump` on the server and fail explicitly when it is unavailable.
+Self-disable and self-demotion are blocked to avoid locking out the only active
+administrator.
 
 ## Creating test accounts
 
