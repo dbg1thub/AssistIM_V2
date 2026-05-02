@@ -12,7 +12,7 @@ import re
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 
 DEFAULT_GOLDEN_CORPUS_PATH = Path(__file__).with_name("ai_action_golden_corpus.json")
@@ -263,6 +263,7 @@ def summarize_results(results: list[CaseBenchmarkResult]) -> dict[str, Any]:
         "error_codes": _error_counts(samples),
         "failed_cases": _failed_cases(results),
         "cases": [_summarize_case(result) for result in results],
+        "failure_analysis": _failure_analysis(results),
     }
     runtime_samples = [sample for sample in samples if sample.runtime_validation_result]
     if runtime_samples:
@@ -742,6 +743,201 @@ def _workflow_repair_failed_cases(results: list[CaseBenchmarkResult]) -> list[di
             }
         )
     return failed
+
+
+def _failure_analysis(results: list[CaseBenchmarkResult]) -> dict[str, Any]:
+    return {
+        "raw": _raw_failure_analysis(results),
+        "runtime": _runtime_failure_analysis(results),
+        "workflow_repair": _workflow_repair_failure_analysis(results),
+    }
+
+
+def _raw_failure_analysis(results: list[CaseBenchmarkResult]) -> dict[str, Any]:
+    return _layer_failure_analysis(
+        results,
+        sample_selector=lambda sample: True,
+        failed_selector=lambda sample: not sample.expectation_passed,
+        categories_for_sample=_raw_failure_categories,
+        messages_for_sample=lambda sample: list(sample.check_messages or []),
+    )
+
+
+def _runtime_failure_analysis(results: list[CaseBenchmarkResult]) -> dict[str, Any]:
+    return _layer_failure_analysis(
+        results,
+        sample_selector=lambda sample: bool(sample.runtime_validation_result),
+        failed_selector=lambda sample: bool(sample.runtime_validation_result)
+        and (
+            sample.runtime_validation_result == "blocked"
+            or sample.runtime_safe is False
+            or sample.runtime_expectation_passed is not True
+        ),
+        categories_for_sample=_runtime_failure_categories,
+        messages_for_sample=lambda sample: list(sample.runtime_check_messages or []),
+    )
+
+
+def _workflow_repair_failure_analysis(results: list[CaseBenchmarkResult]) -> dict[str, Any]:
+    return _layer_failure_analysis(
+        results,
+        sample_selector=lambda sample: bool(sample.workflow_repair_result),
+        failed_selector=lambda sample: bool(sample.workflow_repair_result)
+        and (
+            sample.workflow_repair_result in {"blocked", "blocked_after_repair"}
+            or sample.workflow_repair_safe is False
+            or sample.workflow_repair_expectation_passed is not True
+        ),
+        categories_for_sample=_workflow_repair_failure_categories,
+        messages_for_sample=lambda sample: list(sample.workflow_repair_check_messages or []),
+    )
+
+
+def _layer_failure_analysis(
+    results: list[CaseBenchmarkResult],
+    *,
+    sample_selector: Callable[[SampleResult], bool],
+    failed_selector: Callable[[SampleResult], bool],
+    categories_for_sample: Callable[[SampleResult], list[str]],
+    messages_for_sample: Callable[[SampleResult], list[str]],
+) -> dict[str, Any]:
+    selected_samples = [
+        sample
+        for result in results
+        for sample in list(result.samples or [])
+        if sample_selector(sample)
+    ]
+    failed_samples = [
+        sample
+        for sample in selected_samples
+        if failed_selector(sample)
+    ]
+    category_counts: Counter[str] = Counter()
+    for sample in failed_samples:
+        category_counts.update(categories_for_sample(sample))
+
+    cases: list[dict[str, Any]] = []
+    for result in results:
+        case_failed_samples = [
+            sample
+            for sample in list(result.samples or [])
+            if sample_selector(sample) and failed_selector(sample)
+        ]
+        if not case_failed_samples:
+            continue
+        case_category_counts: Counter[str] = Counter()
+        messages: list[str] = []
+        for sample in case_failed_samples:
+            case_category_counts.update(categories_for_sample(sample))
+            for message in messages_for_sample(sample):
+                text = str(message or "").strip()
+                if text and text not in messages:
+                    messages.append(text)
+        cases.append(
+            {
+                "name": result.case.name,
+                "failed_sample_count": len(case_failed_samples),
+                "category_counts": _counter_payload(case_category_counts),
+                "messages": messages,
+            }
+        )
+
+    return {
+        "sample_count": len(selected_samples),
+        "failed_sample_count": len(failed_samples),
+        "category_counts": _counter_payload(category_counts),
+        "cases": cases,
+    }
+
+
+def _raw_failure_categories(sample: SampleResult) -> list[str]:
+    if not sample.valid_json:
+        return ["invalid_json"]
+
+    categories: list[str] = []
+    checks = dict(sample.checks or {})
+    if checks.get("is_action") is False or checks.get("no_steps_for_non_action") is False:
+        categories.append("wrong_is_action")
+    if checks.get("required_actions") is False:
+        categories.append("missing_action")
+    if checks.get("unexpected_actions") is False or checks.get("forbidden_actions") is False:
+        categories.append("extra_action")
+    if checks.get("required_action_sequence") is False or checks.get("step_references") is False:
+        categories.append("wrong_dependency")
+    if any(
+        checks.get(key) is False
+        for key in (
+            "all_history",
+            "contact_queries",
+            "expected_content",
+            "forbidden_top_level_fields",
+            "requires_confirmation",
+            "required_step_args",
+            "risk",
+            "valid_plan",
+        )
+    ):
+        categories.append("wrong_args")
+    return _dedupe_categories(categories or ["unknown"])
+
+
+def _runtime_failure_categories(sample: SampleResult) -> list[str]:
+    messages = [str(message or "").strip() for message in list(sample.runtime_check_messages or [])]
+    if sample.runtime_validation_result == "blocked" or any(message.startswith("runtime blocked:") for message in messages):
+        return ["unsafe_or_blocked"]
+    categories = _message_failure_categories(messages)
+    if sample.runtime_safe is False:
+        categories.append("unsafe_or_blocked")
+    return _dedupe_categories(categories or ["unknown"])
+
+
+def _workflow_repair_failure_categories(sample: SampleResult) -> list[str]:
+    messages = [str(message or "").strip() for message in list(sample.workflow_repair_check_messages or [])]
+    if sample.workflow_repair_result in {"blocked", "blocked_after_repair"} or any(
+        message.startswith("workflow repair blocked:") for message in messages
+    ):
+        return ["unsafe_or_blocked"]
+    categories = _message_failure_categories(messages)
+    if sample.workflow_repair_safe is False:
+        categories.append("unsafe_or_blocked")
+    return _dedupe_categories(categories or ["unknown"])
+
+
+def _message_failure_categories(messages: list[str]) -> list[str]:
+    categories: list[str] = []
+    for message in messages:
+        if message == "invalid json":
+            categories.append("invalid_json")
+        elif message in {"is_action mismatch", "non-action plan contains steps"}:
+            categories.append("wrong_is_action")
+        elif message == "missing required actions":
+            categories.append("missing_action")
+        elif message in {"unexpected actions present", "forbidden action present"}:
+            categories.append("extra_action")
+        elif message in {"required action sequence mismatch", "unresolved step reference"}:
+            categories.append("wrong_dependency")
+        elif message.startswith("runtime blocked:") or message.startswith("workflow repair blocked:"):
+            categories.append("unsafe_or_blocked")
+        elif message:
+            categories.append("wrong_args")
+    return _dedupe_categories(categories)
+
+
+def _dedupe_categories(categories: list[str]) -> list[str]:
+    output: list[str] = []
+    for category in categories:
+        text = str(category or "").strip()
+        if text and text not in output:
+            output.append(text)
+    return output
+
+
+def _counter_payload(counter: Counter[str]) -> dict[str, int]:
+    return {
+        key: int(counter[key])
+        for key in sorted(counter)
+        if int(counter[key]) > 0
+    }
 
 
 def _error_counts(samples: list[SampleResult]) -> dict[str, int]:

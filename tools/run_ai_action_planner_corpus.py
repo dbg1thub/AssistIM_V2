@@ -6,7 +6,7 @@ import json
 import sys
 import time
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -31,6 +31,11 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run offline AI action planner replay against the golden corpus.")
     parser.add_argument("--corpus-path", default=str(DEFAULT_GOLDEN_CORPUS_PATH), help="Golden corpus JSON path.")
     parser.add_argument("--output-path", default=str(DEFAULT_PLANNER_REPLAY_PATH), help="JSONL replay output path.")
+    parser.add_argument(
+        "--summary-path",
+        default="",
+        help="Optional JSON summary report path. When omitted, only prints the summary.",
+    )
     parser.add_argument("--limit", type=int, default=0, help="Maximum cases to run. 0 means all cases.")
     parser.add_argument("--repeat", type=int, default=1, help="Number of samples to run per selected case.")
     parser.add_argument(
@@ -128,7 +133,7 @@ async def main() -> None:
     cases = load_golden_corpus(corpus_path)
     evaluation_cases = _select_cases(cases, case_names=tuple(args.case_names or ()))
     if args.validate_only:
-        summary = validate_planner_replay(evaluation_cases, output_path)
+        summary = validate_planner_replay(evaluation_cases, output_path, summary_path=args.summary_path or None)
         print(json.dumps(summary, ensure_ascii=False, indent=2), flush=True)
         return
     configure_default_ai_provider()
@@ -147,19 +152,38 @@ async def main() -> None:
         summary = summarize_results(results)
         summary["output_path"] = str(output_path)
         summary["replay_record_count"] = len(records)
+        if args.summary_path:
+            write_planner_replay_summary(args.summary_path, summary)
         print(json.dumps(summary, ensure_ascii=False, indent=2), flush=True)
     finally:
         await task_manager.close()
 
 
-def validate_planner_replay(cases: Sequence[PromptBenchmarkCase], output_path: str | Path) -> dict[str, Any]:
+def validate_planner_replay(
+    cases: Sequence[PromptBenchmarkCase],
+    output_path: str | Path,
+    *,
+    summary_path: str | Path | None = None,
+) -> dict[str, Any]:
     """Evaluate a saved planner replay JSONL without invoking the AI runtime."""
     results = evaluate_planner_replay_file(cases, output_path)
     summary = summarize_results(results)
     summary["output_path"] = str(output_path)
     summary["replay_record_count"] = sum(len(result.samples) for result in results)
     summary["mode"] = "validate_only"
+    if summary_path is not None:
+        write_planner_replay_summary(summary_path, summary)
     return summary
+
+
+def write_planner_replay_summary(path: str | Path, summary: Mapping[str, Any]) -> None:
+    """Write a deterministic JSON summary beside replay JSONL output."""
+    summary_path = Path(path)
+    summary_path.parent.mkdir(parents=True, exist_ok=True)
+    summary_path.write_text(
+        json.dumps(dict(summary), ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
 
 
 def _select_cases(

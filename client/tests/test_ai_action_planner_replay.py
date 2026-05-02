@@ -169,6 +169,21 @@ def test_planner_replay_evaluation_reports_failed_cases(tmp_path) -> None:
             "messages": ["is_action mismatch", "missing required actions"],
         }
     ]
+    assert summary["failure_analysis"]["raw"]["category_counts"] == {
+        "wrong_is_action": 1,
+        "missing_action": 1,
+    }
+    assert summary["failure_analysis"]["raw"]["cases"] == [
+        {
+            "name": "send_case",
+            "failed_sample_count": 1,
+            "category_counts": {
+                "wrong_is_action": 1,
+                "missing_action": 1,
+            },
+            "messages": ["is_action mismatch", "missing required actions"],
+        }
+    ]
 
 
 def test_planner_replay_runtime_evaluation_normalizes_send_plan(tmp_path) -> None:
@@ -319,6 +334,8 @@ def test_planner_replay_evaluation_rejects_send_refs_that_do_not_point_to_draft(
     assert loaded[0].validation_result == "failed"
     assert "required step args mismatch" in loaded[0].diff_from_expected
     assert results[0].samples[0].expectation_passed is False
+    summary = summarize_results(results)
+    assert summary["failure_analysis"]["raw"]["category_counts"] == {"wrong_args": 1}
 
 
 def test_planner_replay_runtime_evaluation_marks_unsafe_plan_blocked(tmp_path) -> None:
@@ -376,6 +393,9 @@ def test_planner_replay_runtime_evaluation_marks_unsafe_plan_blocked(tmp_path) -
             "messages": ["runtime blocked: unknown_action"],
         }
     ]
+    assert summary["failure_analysis"]["runtime"]["category_counts"] == {
+        "unsafe_or_blocked": 1,
+    }
 
 
 def test_planner_replay_workflow_repair_skips_model_when_normalizer_fixes_send_plan(tmp_path) -> None:
@@ -696,6 +716,7 @@ def test_run_planner_corpus_rejects_unknown_case_name(tmp_path) -> None:
 
 def test_validate_planner_replay_evaluates_existing_jsonl_without_model(tmp_path) -> None:
     output_path = tmp_path / "planner-existing.jsonl"
+    summary_path = tmp_path / "planner-summary.json"
     cases = [
         PromptBenchmarkCase(
             name="chat_case",
@@ -744,7 +765,8 @@ def test_validate_planner_replay_evaluates_existing_jsonl_without_model(tmp_path
         cases=cases,
     )
 
-    summary = validate_planner_replay(cases, output_path)
+    summary = validate_planner_replay(cases, output_path, summary_path=summary_path)
+    written_summary = json.loads(summary_path.read_text(encoding="utf-8"))
 
     assert summary["mode"] == "validate_only"
     assert summary["output_path"] == str(output_path)
@@ -752,3 +774,5 @@ def test_validate_planner_replay_evaluates_existing_jsonl_without_model(tmp_path
     assert summary["sample_count"] == 2
     assert summary["valid_json_rate"] == 1.0
     assert summary["expectation_pass_rate"] == 1.0
+    assert written_summary == summary
+    assert summary["failure_analysis"]["raw"]["failed_sample_count"] == 0
