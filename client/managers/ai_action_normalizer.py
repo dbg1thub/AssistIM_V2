@@ -528,6 +528,9 @@ def _canonicalize_confirm_step(step: AIActionStep, *, draft_id: str) -> AIAction
     args = dict(step.args or {})
     preview = dict(args.get("preview") or {}) if isinstance(args.get("preview"), dict) else {}
     if preview:
+        operation = str(preview.get("operation") or "").strip()
+        if "发送" not in operation:
+            preview["operation"] = "发送消息"
         preview["target"] = f"${draft_id}.target"
         preview["content"] = f"${draft_id}.content"
         args["preview"] = preview

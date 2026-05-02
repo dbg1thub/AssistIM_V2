@@ -231,6 +231,7 @@ class AtomicActionSpec:
     planner_required_object_arg_refs: dict[str, dict[str, tuple[str, ...]]] = field(default_factory=dict)
     planner_required_object_arg_contains: dict[str, dict[str, tuple[str, ...]]] = field(default_factory=dict)
     planner_forbidden_literal_args: tuple[str, ...] = ()
+    planner_prompt_support_actions: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

@@ -20,8 +20,10 @@ from tools.ai_action_planner_replay import (
     PlannerReplayRecord,
     annotate_planner_replay_records_with_workflow_repair,
     annotate_planner_replay_records,
+    build_candidate_selector_request,
     build_planner_request,
     evaluate_planner_replay_file,
+    parse_candidate_selection_json,
     write_planner_replay_records,
 )
 from tools.ai_action_prompt_benchmark import DEFAULT_GOLDEN_CORPUS_PATH, PromptBenchmarkCase, load_golden_corpus, summarize_results
@@ -89,13 +91,74 @@ async def run_planner_corpus(
     records: list[PlannerReplayRecord] = []
     for case in selected_cases:
         for iteration in range(1, sample_count + 1):
-            request = build_planner_request(case)
-            request.metadata["planner_case_iteration"] = iteration
-            request.metadata["planner_case_repeat"] = sample_count
+            selector_request = build_candidate_selector_request(case)
+            selector_request.metadata["planner_case_iteration"] = iteration
+            selector_request.metadata["planner_case_repeat"] = sample_count
             started = time.perf_counter()
             try:
+                selector_snapshot = await task_manager.run_once(selector_request)
+                selector_elapsed_ms = int((time.perf_counter() - started) * 1000)
+                selector_raw = str(getattr(selector_snapshot, "content", "") or "")
+                selection = parse_candidate_selection_json(
+                    selector_raw,
+                    registered_action_names=selector_request.response_format["schema"]["properties"]["candidate_actions"]["items"].get("enum", ()),
+                )
+                if selection is None:
+                    elapsed_ms = int((time.perf_counter() - started) * 1000)
+                    records.append(
+                        PlannerReplayRecord(
+                            case_name=case.name,
+                            user_input=case.user_input,
+                            raw_output="",
+                            elapsed_ms=elapsed_ms,
+                            provider=str(getattr(selector_snapshot, "provider", "") or ""),
+                            model=str(getattr(selector_snapshot, "model", "") or ""),
+                            error_code="CANDIDATE_SELECTOR_INVALID",
+                            error_message=selector_raw,
+                            metadata={
+                                **_record_metadata(selector_request),
+                                "candidate_raw_output": selector_raw,
+                                "candidate_elapsed_ms": selector_elapsed_ms,
+                            },
+                            planner_schema_version=str(selector_request.metadata.get("candidate_schema_version") or ""),
+                            planner_prompt_version=str(selector_request.metadata.get("candidate_prompt_version") or ""),
+                        )
+                    )
+                    continue
+                if not selection.is_action:
+                    elapsed_ms = int((time.perf_counter() - started) * 1000)
+                    raw_output = _not_action_plan_json(selection)
+                    records.append(
+                        PlannerReplayRecord(
+                            case_name=case.name,
+                            user_input=case.user_input,
+                            raw_output=raw_output,
+                            elapsed_ms=elapsed_ms,
+                            provider=str(getattr(selector_snapshot, "provider", "") or ""),
+                            model=str(getattr(selector_snapshot, "model", "") or ""),
+                            error_code=_error_code_value(getattr(selector_snapshot, "error_code", "")),
+                            error_message=str(getattr(selector_snapshot, "error_message", "") or ""),
+                            metadata={
+                                **_record_metadata(selector_request),
+                                "candidate_actions": [],
+                                "candidate_action_closure": [],
+                                "candidate_raw_output": selector_raw,
+                                "candidate_elapsed_ms": selector_elapsed_ms,
+                            },
+                            planner_schema_version=str(selector_request.metadata.get("candidate_schema_version") or ""),
+                            planner_prompt_version=str(selector_request.metadata.get("candidate_prompt_version") or ""),
+                        )
+                    )
+                    continue
+
+                request = build_planner_request(case, candidate_action_names=selection.candidate_actions)
+                request.metadata["planner_case_iteration"] = iteration
+                request.metadata["planner_case_repeat"] = sample_count
                 snapshot = await task_manager.run_once(request)
                 elapsed_ms = int((time.perf_counter() - started) * 1000)
+                metadata = _record_metadata(request)
+                metadata["candidate_raw_output"] = selector_raw
+                metadata["candidate_elapsed_ms"] = selector_elapsed_ms
                 records.append(
                     PlannerReplayRecord(
                         case_name=case.name,
@@ -106,7 +169,7 @@ async def run_planner_corpus(
                         model=str(getattr(snapshot, "model", "") or ""),
                         error_code=_error_code_value(getattr(snapshot, "error_code", "")),
                         error_message=str(getattr(snapshot, "error_message", "") or ""),
-                        metadata=_record_metadata(request),
+                        metadata=metadata,
                         planner_schema_version=str(request.metadata.get("planner_schema_version") or ""),
                         planner_prompt_version=str(request.metadata.get("planner_prompt_version") or ""),
                     )
@@ -121,9 +184,9 @@ async def run_planner_corpus(
                         elapsed_ms=elapsed_ms,
                         error_code=type(exc).__name__,
                         error_message=str(exc),
-                        metadata=_record_metadata(request),
-                        planner_schema_version=str(request.metadata.get("planner_schema_version") or ""),
-                        planner_prompt_version=str(request.metadata.get("planner_prompt_version") or ""),
+                        metadata=_record_metadata(selector_request),
+                        planner_schema_version=str(selector_request.metadata.get("candidate_schema_version") or ""),
+                        planner_prompt_version=str(selector_request.metadata.get("candidate_prompt_version") or ""),
                     )
                 )
 
@@ -328,10 +391,27 @@ def _record_metadata(request: Any) -> dict[str, Any]:
         "planner_schema_version": str(metadata.get("planner_schema_version") or ""),
         "planner_prompt_version": str(metadata.get("planner_prompt_version") or ""),
         "planner_prompt_kind": str(metadata.get("planner_prompt_kind") or ""),
+        "candidate_schema_version": str(metadata.get("candidate_schema_version") or ""),
+        "candidate_prompt_version": str(metadata.get("candidate_prompt_version") or ""),
+        "candidate_actions": list(metadata.get("candidate_actions") or []),
+        "candidate_action_closure": list(metadata.get("candidate_action_closure") or []),
         "prompt_chars": int(metadata.get("prompt_chars") or 0),
         "planner_case_iteration": int(metadata.get("planner_case_iteration") or 1),
         "planner_case_repeat": int(metadata.get("planner_case_repeat") or 1),
     }
+
+
+def _not_action_plan_json(selection: Any) -> str:
+    return json.dumps(
+        {
+            "is_action": False,
+            "goal": str(getattr(selection, "goal", "") or ""),
+            "risk": "low",
+            "steps": [],
+            "final": {"reason": str(getattr(selection, "reason", "") or "")},
+        },
+        ensure_ascii=False,
+    )
 
 
 def _error_code_value(value: Any) -> str:

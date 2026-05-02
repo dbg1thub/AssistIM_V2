@@ -17,7 +17,15 @@ from client.managers.ai_action_memory_summarizer import AIActionMemorySummarizer
 from client.managers.ai_action_normalizer import AIPlanNormalizer
 from client.managers.ai_action_optimizer import AIPlanOptimizer
 from client.managers.ai_action_permission_policy import AIPermissionPolicy, AIPermissionScope
-from client.managers.ai_action_registry import AtomicActionRegistry, build_default_action_names, build_default_action_prompt_contract
+from client.managers.ai_action_registry import (
+    AtomicActionRegistry,
+    build_default_action_names,
+    build_default_action_prompt_closure,
+    build_default_action_prompt_contract,
+    build_default_candidate_action_names,
+    build_default_candidate_action_prompt_contract,
+    build_default_required_action_closure,
+)
 from client.managers.ai_action_resource_manager import AIResourceManager
 from client.managers.ai_action_types import (
     AIActionEvent,
@@ -83,6 +91,16 @@ class PendingPlannerState:
     ai_thread_id: str
     state: str
     waiting_payload: dict[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
+class AIActionCandidateSelection:
+    """First-stage model output listing candidate target actions for planning."""
+
+    is_action: bool
+    goal: str = ""
+    candidate_actions: tuple[str, ...] = ()
+    reason: str = ""
 
 
 class ContactAliasResolver:
@@ -185,7 +203,12 @@ class AIActionPlanner:
 
     PLANNER_SCHEMA_VERSION = "atomic_steps_v2"
     PLANNER_PROMPT_VERSION = "atomic_steps_prompt_v18"
+    CANDIDATE_SCHEMA_VERSION = "action_candidates_v1"
+    CANDIDATE_PROMPT_VERSION = "action_candidates_prompt_v1"
     PLAN_OUTPUT_VERSION = 1
+    PLAN_MAX_TOKENS = 2048
+    PLAN_REPAIR_MAX_TOKENS = 2048
+    CANDIDATE_MAX_TOKENS = 384
 
     PROMPT_NEW_ACTION = "new_action"
     PROMPT_PENDING_CONFIRMATION = "pending_confirmation"
@@ -251,18 +274,36 @@ class AIActionPlanner:
         "additionalProperties": False,
     }
     PENDING_CLARIFICATION_SCHEMA: dict[str, Any] = PENDING_CONTROL_SCHEMA
+    CANDIDATE_SCHEMA: dict[str, Any] = {
+        "type": "object",
+        "properties": {
+            "is_action": {"type": "boolean"},
+            "goal": {"type": "string"},
+            "candidate_actions": {"type": "array", "items": {"type": "string"}},
+            "reason": {"type": "string"},
+        },
+        "required": ["is_action", "goal", "candidate_actions"],
+        "additionalProperties": False,
+    }
 
     def __init__(
         self,
         task_manager: Any | None = None,
         *,
+        action_registry: AtomicActionRegistry | None = None,
         action_contract_prompt: str | None = None,
         registered_action_names: Sequence[str] | None = None,
     ) -> None:
         self._task_manager = task_manager
+        self._action_registry = action_registry
         self._action_contract_prompt = str(action_contract_prompt or "").strip()
         self._registered_action_names = _normalize_registered_action_names(
             registered_action_names if registered_action_names is not None else build_default_action_names()
+        )
+        self._candidate_action_names = (
+            action_registry.candidate_action_names()
+            if action_registry is not None
+            else build_default_candidate_action_names()
         )
 
     async def plan(
@@ -281,7 +322,49 @@ class AIActionPlanner:
             return None
 
         prompt_kind = self._prompt_kind(pending_state)
-        schema = self._schema_for_prompt_kind(prompt_kind)
+        action_contract_prompt = self._action_contract_prompt_for(prompt_kind)
+        registered_action_names = self._registered_action_names
+        candidate_selection: AIActionCandidateSelection | None = None
+        candidate_action_closure: tuple[str, ...] = ()
+        required_action_closure: tuple[str, ...] = ()
+        if prompt_kind == self.PROMPT_NEW_ACTION:
+            candidate_selection = await self._select_candidate_actions(user_text, strict=strict)
+            if candidate_selection is None:
+                return None
+            if not candidate_selection.is_action:
+                return AIActionPlan(
+                    is_action=False,
+                    goal=candidate_selection.goal,
+                    risk="low",
+                    steps=(),
+                    final={},
+                )
+            candidate_action_closure = self._candidate_action_closure(candidate_selection.candidate_actions)
+            if not candidate_action_closure:
+                logger.info(
+                    "[ai-diag] ai_action_candidate_selector_empty_closure candidates=%s",
+                    list(candidate_selection.candidate_actions),
+                )
+                return AIActionPlan(
+                    is_action=False,
+                    goal=candidate_selection.goal,
+                    risk="low",
+                    steps=(),
+                    final={"reason": "candidate_actions_empty"},
+                )
+            action_contract_prompt = self._action_contract_prompt_for(
+                prompt_kind,
+                action_names=candidate_action_closure,
+            )
+            registered_action_names = candidate_action_closure
+            required_action_closure = self._candidate_required_action_closure(candidate_selection.candidate_actions)
+        schema = self._schema_for_prompt_kind(prompt_kind, registered_action_names=registered_action_names)
+        user_prompt = self._user_prompt(
+            user_text,
+            pending_state=pending_state,
+            prompt_kind=prompt_kind,
+            required_action_names=required_action_closure,
+        )
         request = AIRequest(
             task_id=f"ai-action-plan-{int(time.time() * 1000)}",
             session_id=str(getattr(pending_state, "ai_thread_id", "") or getattr(pending_state, "thread_id", "") or ""),
@@ -290,17 +373,20 @@ class AIActionPlanner:
             must_be_local=True,
             stream=False,
             temperature=0.0,
-            max_tokens=1024,
+            max_tokens=self.PLAN_MAX_TOKENS,
             response_format={"type": "json_object", "schema": schema} if strict else None,
             priority=4,
-            system_prompt=self._system_prompt(prompt_kind, action_contract=self._action_contract_prompt),
-            messages=[{"role": "user", "content": self._user_prompt(user_text, pending_state=pending_state, prompt_kind=prompt_kind)}],
+            system_prompt=self._system_prompt(prompt_kind, action_contract=action_contract_prompt),
+            messages=[{"role": "user", "content": user_prompt}],
             metadata={
                 "source": "ai_action_planner",
                 "strict_json": strict,
                 "planner_schema_version": self.PLANNER_SCHEMA_VERSION,
                 "planner_prompt_version": self.PLANNER_PROMPT_VERSION,
                 "planner_prompt_kind": prompt_kind,
+                "candidate_actions": list(candidate_selection.candidate_actions) if candidate_selection is not None else [],
+                "candidate_action_closure": list(candidate_action_closure),
+                "required_action_closure": list(required_action_closure),
             },
         )
         try:
@@ -309,6 +395,59 @@ class AIActionPlanner:
             logger.exception("AI action planner failed")
             return None
         return _parse_planner_json(str(getattr(snapshot, "content", "") or ""))
+
+    async def _select_candidate_actions(self, user_text: str, *, strict: bool) -> AIActionCandidateSelection | None:
+        if self._task_manager is None:
+            return None
+        try:
+            from client.services.ai_service import AIPrivacyScope, AIRequest, AITaskType
+        except Exception:
+            logger.debug("AI action candidate selector request contracts are unavailable", exc_info=True)
+            return None
+
+        request = AIRequest(
+            task_id=f"ai-action-candidates-{int(time.time() * 1000)}",
+            task_type=AITaskType.CHAT,
+            privacy_scope=AIPrivacyScope.GENERAL,
+            must_be_local=True,
+            stream=False,
+            temperature=0.0,
+            max_tokens=self.CANDIDATE_MAX_TOKENS,
+            response_format={
+                "type": "json_object",
+                "schema": self.build_candidate_schema(registered_action_names=self._candidate_action_names),
+            }
+            if strict
+            else None,
+            priority=4,
+            system_prompt=self._candidate_system_prompt(action_catalog=self._candidate_action_catalog_prompt()),
+            messages=[{"role": "user", "content": self._candidate_user_prompt(user_text)}],
+            metadata={
+                "source": "ai_action_candidate_selector",
+                "strict_json": strict,
+                "candidate_schema_version": self.CANDIDATE_SCHEMA_VERSION,
+                "candidate_prompt_version": self.CANDIDATE_PROMPT_VERSION,
+            },
+        )
+        try:
+            snapshot = await self._task_manager.run_once(request)
+        except Exception:
+            logger.exception("AI action candidate selector failed")
+            return None
+        selection = parse_candidate_selection_json(
+            str(getattr(snapshot, "content", "") or ""),
+            registered_action_names=self._candidate_action_names,
+        )
+        if selection is None:
+            logger.info("[ai-diag] ai_action_candidate_selector_invalid")
+            return None
+        logger.info(
+            "[ai-diag] ai_action_candidate_selector_result is_action=%s candidates=%s reason=%s",
+            selection.is_action,
+            list(selection.candidate_actions),
+            selection.reason,
+        )
+        return selection
 
     async def repair_plan(
         self,
@@ -328,7 +467,14 @@ class AIActionPlanner:
             return None
 
         prompt_kind = self._prompt_kind(pending_state)
-        schema = self._schema_for_prompt_kind(prompt_kind)
+        invalid_action_names = tuple(step.action for step in tuple(invalid_plan.steps or ()))
+        repair_action_closure = self._candidate_action_closure(invalid_action_names)
+        action_contract_prompt = self._action_contract_prompt_for(
+            prompt_kind,
+            action_names=repair_action_closure or None,
+        )
+        registered_action_names = repair_action_closure or self._registered_action_names
+        schema = self._schema_for_prompt_kind(prompt_kind, registered_action_names=registered_action_names)
         invalid_json = json.dumps(invalid_plan.to_dict(), ensure_ascii=False, sort_keys=True)
         errors_text = "\n".join(str(item or "").strip() for item in validation_errors if str(item or "").strip())
         repair_prompt = (
@@ -347,11 +493,11 @@ class AIActionPlanner:
             must_be_local=True,
             stream=False,
             temperature=0.0,
-            max_tokens=1024,
+            max_tokens=self.PLAN_REPAIR_MAX_TOKENS,
             response_format={"type": "json_object", "schema": schema} if strict else None,
             priority=4,
             system_prompt=(
-                self._system_prompt(prompt_kind, action_contract=self._action_contract_prompt)
+                self._system_prompt(prompt_kind, action_contract=action_contract_prompt)
                 + "\n你现在处于 plan 修正模式：不要重新解释用户意图，只修正结构错误。"
                 "可以修正 step id、depends_on、$ 引用、action 名称、args 字段和 final 引用。"
                 "如果 final 中包含 action、args 或 depends_on，表示可执行动作放错位置：把该 action 移到 steps，final 改为引用对应 step 输出。"
@@ -364,6 +510,7 @@ class AIActionPlanner:
                 "planner_prompt_version": self.PLANNER_PROMPT_VERSION,
                 "planner_prompt_kind": prompt_kind,
                 "validation_error_count": len(tuple(validation_errors or ())),
+                "candidate_action_closure": list(repair_action_closure),
             },
         )
         try:
@@ -388,10 +535,15 @@ class AIActionPlanner:
             return AIActionPlanner.PROMPT_PENDING_CLARIFICATION
         return AIActionPlanner.PROMPT_PENDING_CLARIFICATION
 
-    def _schema_for_prompt_kind(self, prompt_kind: str) -> dict[str, Any]:
+    def _schema_for_prompt_kind(
+        self,
+        prompt_kind: str,
+        *,
+        registered_action_names: Sequence[str] | None = None,
+    ) -> dict[str, Any]:
         return self.build_schema_for_prompt_kind(
             prompt_kind,
-            registered_action_names=self._registered_action_names,
+            registered_action_names=registered_action_names or self._registered_action_names,
         )
 
     @classmethod
@@ -420,6 +572,22 @@ class AIActionPlanner:
         )
 
     @classmethod
+    def build_candidate_schema(
+        cls,
+        *,
+        registered_action_names: Sequence[str] | None = None,
+    ) -> dict[str, Any]:
+        schema_copy = copy.deepcopy(cls.CANDIDATE_SCHEMA)
+        names = _normalize_registered_action_names(registered_action_names)
+        if names:
+            actions = schema_copy.get("properties", {}).get("candidate_actions")
+            if isinstance(actions, dict):
+                items = actions.get("items")
+                if isinstance(items, dict):
+                    items["enum"] = list(names)
+        return schema_copy
+
+    @classmethod
     def _schema_with_action_enum(
         cls,
         schema: dict[str, Any],
@@ -441,11 +609,39 @@ class AIActionPlanner:
             action_schema["enum"] = list(names)
         return schema_copy
 
+    def _candidate_action_catalog_prompt(self) -> str:
+        if self._action_registry is not None:
+            return self._action_registry.candidate_prompt_contract()
+        return build_default_candidate_action_prompt_contract()
+
+    def _action_contract_prompt_for(
+        self,
+        prompt_kind: str,
+        *,
+        action_names: Sequence[str] | None = None,
+    ) -> str:
+        if prompt_kind != self.PROMPT_NEW_ACTION:
+            return self._action_contract_prompt
+        if self._action_registry is not None:
+            return self._action_registry.prompt_contract(action_names=action_names)
+        if action_names is not None:
+            return build_default_action_prompt_contract(action_names=action_names)
+        return self._action_contract_prompt or build_default_action_prompt_contract()
+
+    def _candidate_action_closure(self, action_names: Sequence[str] | None) -> tuple[str, ...]:
+        if self._action_registry is not None:
+            return self._action_registry.prompt_action_closure(action_names)
+        return build_default_action_prompt_closure(action_names)
+
+    def _candidate_required_action_closure(self, action_names: Sequence[str] | None) -> tuple[str, ...]:
+        if self._action_registry is not None:
+            return self._action_registry.required_action_closure(action_names)
+        return build_default_required_action_closure(action_names)
+
     @staticmethod
     def _system_prompt(prompt_kind: str = PROMPT_NEW_ACTION, *, action_contract: str | None = None) -> str:
         common = (
             "你是 AssistIM 的动作规划器，只输出 JSON，不要解释，不要使用代码块。\n"
-            "语义理解由你完成，系统只执行结构化 plan。\n"
         )
         if prompt_kind == AIActionPlanner.PROMPT_PENDING_CONFIRMATION:
             return (
@@ -465,28 +661,31 @@ class AIActionPlanner:
         contract = str(action_contract or "").strip() or build_default_action_prompt_contract()
         return (
             common
-            + "判断用户是否需要 AssistIM 应用数据或本地能力，若是拆成原子 steps。\n"
-            "如果用户只是普通问答、写作、翻译或代码分析，输出 is_action=false 且 steps=[]。\n"
-            "只有需要读取或操作 AssistIM 本地数据、调用已注册应用能力、确认或取消 pending 操作时，才输出 action plan。\n"
+            + "需 AssistIM 数据/本地能力时拆原子 steps。\n"
+            "普通问答等输出 is_action=false。\n"
+            "只有读取或操作 AssistIM 本地数据、调用已注册能力、处理 pending 时才输出 action plan。\n"
             "规划规则：\n"
             "- 每个 step.id 必须唯一，使用简短稳定名称即可，不要求固定命名。\n"
             "step.id 只能使用字母、数字和下划线，不能包含点号，避免和 $ 引用路径混淆。\n"
             "所有 $ 引用的根名称必须等于已存在 step.id；不要生成 %step_0 这类临时 id。\n"
-            "- 规划契约里的 action 名称只说明输出来源；实际 $ 引用必须使用 step.id 作为根，不能把 action 名称写成引用根。\n"
+            "- 契约中 deps=a,b 表示 depends_on 包含对应上游 step；refs=x<-a.y 表示 args.x 写成 $step_id.y；"
+            "no_literal 禁止普通字符串；obj=p(a,b) 表示 args.p 是对象且含字段。\n"
+            "- 契约里的 action 名称只说明输出来源，不能用 action 名称当 $ 引用根。\n"
             "- final 是顶层结果描述，不是 step；展示、返回或最终结果只写在顶层 final，final 只引用最后一个 step 输出，不要编造或展开服务端返回字段；不要生成 id=final 的 step，也不能为返回结果重复执行同一个 action。\n"
-            "- 规划契约里的 字段引用 X<-Y 表示 args.X 必须写成 $step_id.field，不能把 Y 写成普通字符串；没有 $ 前缀的 step.field 是普通字符串。\n"
-            "- depends_on 必须包含被 args 引用的上游 step.id；没有引用时 depends_on 为空数组。\n"
             "- 用户已经给出稳定 ID（如 user-*、session-*、group-*、moment-*、req-*）时，直接填入对应 ID 字段，不要再额外规划 contact.resolve 或搜索动作。\n"
             "- 输入契约没有字段的 action，args 必须是 {}，不要补 null 字段或猜测字段。\n"
             "- 读取类任务不需要确认；写操作必须先生成 preview 并经过 user.confirm，确认后才能执行写 action。\n"
+            "- plan 包含 write action 时 risk=high。\n"
             "- 对任何写 action，idempotency_key 必须是写 action 的顶层 args 字段，不要放进 preview 对象；preview.content 必须非空并描述本次操作内容。\n"
-            "- 只有用户明确要求发送、添加、发布、删除或修改时，才允许规划写 action。\n"
+            "- 明确要求发送/添加/发布/删除/修改应用数据时，必须规划写 action。\n"
             "- 多个对象默认表示多对象读取或操作，不是歧义；只有单个名称对应多个本地实体时才由系统澄清。\n"
             "- 涉及联系人、群名或会话对象的读取任务，必须先解析对象，并把解析结果传给后续读取 action 的 participants；不要把名称字符串直接放到 participants，也不要只把名称留在 question 或 keywords。\n"
             "- 历史聊天、语音转写、文件内容总结和已存在内容回顾属于本地记忆读取，优先使用 memory.search；如果用户问题里出现联系人或会话对象，memory.search 前必须有 contact.resolve，participants 不能为空。\n"
             "- 用户要求搜索用户、查看好友、群组、会话、未读、文件列表或朋友圈列表等当前账号服务端数据时，使用对应服务端只读 action；输入中已有关键词时不要要求用户再次提供。\n"
             "- 需要向用户回答检索到的内容时，先检索再总结；final 不直接指向 memory.search，除非用户明确只要原始列表或原始记录。\n"
             "- 严格使用已注册 action、输入字段和输出字段；不要发明 action、字段或不存在的上游输出。\n"
+            "- 可由已注册 read action 解析或搜索到的目标仍视为可完成，不要因为当前没有 ID 就输出 false。\n"
+            "- 需要先调用某个已注册 action 不是失败理由；把它规划成 step，再让后续 step 引用它的输出。\n"
             "- 如果用户请求的应用能力不能完全用已注册 action 完成，输出 is_action=false 且 steps=[]；不要发明 action，也不要用相近 action 代替。\n"
             "- 根据 action 用途和输入/输出契约自行组合 plan，不要按固定示例补齐计划。\n"
             "- 只输出完成用户目标的最小必要 steps；不要加入可选、辅助、预热或候选步骤。\n"
@@ -496,7 +695,33 @@ class AIActionPlanner:
         )
 
     @staticmethod
-    def _user_prompt(user_text: str, *, pending_state: Any | None = None, prompt_kind: str | None = None) -> str:
+    def _candidate_system_prompt(*, action_catalog: str | None = None) -> str:
+        catalog = str(action_catalog or "").strip() or build_default_candidate_action_prompt_contract()
+        return (
+            "你是 AssistIM 的候选 action 选择器，只输出 JSON，不要解释，不要使用代码块。\n"
+            "当前只判断用户目标需要哪些已注册目标 action，不能输出 steps、args、final 或执行计划。\n"
+            "candidate_actions 只能从目录选择，放用户最终需要的目标 action；系统会按 registry 自动补齐闭包里的前置/支撑 action。\n"
+            "候选阶段只选择能力，不要判断参数是否已经完整；不要因为目标、内容或 ID 尚未结构化就输出 false。\n"
+            "不要为了确认、草稿或解析对象选择内部支撑 action；普通问答、写作、翻译、代码分析输出 is_action=false 且 candidate_actions=[]。\n"
+            "如果用户明确要求读取或操作 AssistIM 本地数据、聊天记忆、当前账号服务端数据，输出 is_action=true 并选择最小目标 action 集合。\n"
+            f"{catalog}"
+        )
+
+    @staticmethod
+    def _candidate_user_prompt(user_text: str) -> str:
+        return (
+            "请输出 JSON：is_action, goal, candidate_actions, reason。\n"
+            f"用户输入：{str(user_text or '').strip()}"
+        )
+
+    @staticmethod
+    def _user_prompt(
+        user_text: str,
+        *,
+        pending_state: Any | None = None,
+        prompt_kind: str | None = None,
+        required_action_names: Sequence[str] | None = None,
+    ) -> str:
         prompt_kind = prompt_kind or AIActionPlanner._prompt_kind(pending_state)
         now = datetime.now()
         fields = "is_action, goal, risk, control, steps, final" if pending_state is not None else "is_action, goal, risk, steps, final"
@@ -532,6 +757,7 @@ class AIActionPlanner:
                 f"用户输入：{str(user_text or '').strip()}"
                 f"{pending}"
             )
+        required_chain = _required_action_chain_prompt(required_action_names)
         return (
             header
             + "step 字段：id, action, depends_on, args, display_text, explanation。\n"
@@ -539,6 +765,7 @@ class AIActionPlanner:
             "写操作必须有明确目标和内容，并经过确认。\n"
             "查询、回顾、总结或检索已存在内容是读取，不要确认。\n"
             "按已注册 action 的用途、输入字段和输出字段组合 steps，不要按固定示例补齐计划。\n"
+            f"{required_chain}"
             f"用户输入：{str(user_text or '').strip()}"
         )
 
@@ -553,6 +780,16 @@ def _pending_prompt_block(pending_state: Any | None) -> str:
                 },
                 ensure_ascii=False,
             )
+
+
+def _required_action_chain_prompt(action_names: Sequence[str] | None) -> str:
+    names = _normalize_registered_action_names(action_names)
+    if not names:
+        return ""
+    return (
+        f"候选阶段已判定这是 action。必需执行链路：{' -> '.join(names)}。\n"
+        "这些 action 必须出现在 steps；如果某一步需要上游结果，先规划上游 step，不能输出 is_action=false。\n"
+    )
 
 
 class AIActionWorkflow:
@@ -604,7 +841,7 @@ class AIActionWorkflow:
         )
         self._planner = planner or AIActionPlanner(
             task_manager=resolved_task_manager,
-            action_contract_prompt=self._registry.prompt_contract(),
+            action_registry=self._registry,
             registered_action_names=self._registry.names(),
         )
         self._resource_manager = AIResourceManager(registry=self._registry)
@@ -1447,6 +1684,46 @@ def _parse_planner_json(raw: str) -> AIActionPlan | None:
     if isinstance(data.get("steps"), list):
         return AIActionPlan.from_dict(data)
     return None
+
+
+def parse_candidate_selection_json(
+    raw: str,
+    *,
+    registered_action_names: Sequence[str] | None = None,
+) -> AIActionCandidateSelection | None:
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*", "", text)
+        text = re.sub(r"\s*```$", "", text)
+    match = re.search(r"\{.*\}", text, re.S)
+    if match:
+        text = match.group(0)
+    try:
+        data = json.loads(text)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    allowed = set(_normalize_registered_action_names(registered_action_names))
+    candidates: list[str] = []
+    for raw_name in list(data.get("candidate_actions") or []):
+        name = str(raw_name or "").strip()
+        if not name or name in candidates:
+            continue
+        if allowed and name not in allowed:
+            continue
+        candidates.append(name)
+    is_action = bool(data.get("is_action"))
+    if is_action and not candidates:
+        return None
+    return AIActionCandidateSelection(
+        is_action=is_action,
+        goal=str(data.get("goal") or ""),
+        candidate_actions=tuple(candidates) if is_action else (),
+        reason=str(data.get("reason") or ""),
+    )
 
 
 def _plan_action_label(plan: AIActionPlan) -> str:

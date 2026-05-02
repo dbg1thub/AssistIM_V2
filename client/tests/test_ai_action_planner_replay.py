@@ -6,11 +6,14 @@ from types import SimpleNamespace
 
 import pytest
 
+from client.managers.ai_action_types import AIActionPlan, AIActionStep
 from client.managers.ai_action_workflow import AIActionPlanner
 from tools.ai_action_planner_replay import (
     PlannerReplayRecord,
     annotate_planner_replay_records_with_workflow_repair,
     annotate_planner_replay_records,
+    build_candidate_selector_request,
+    build_planner_repair_request,
     build_planner_request,
     evaluate_planner_replay_file,
     load_planner_replay_records,
@@ -42,7 +45,7 @@ def test_build_planner_request_reuses_atomic_planner_prompt_and_schema() -> None
     assert request.stream is False
     assert request.must_be_local is True
     assert request.temperature == 0.0
-    assert request.max_tokens == 1024
+    assert request.max_tokens == AIActionPlanner.PLAN_MAX_TOKENS
     assert request.priority == 4
     assert request.response_format["type"] == "json_object"
     assert request.response_format["schema"]["required"] == ["is_action", "goal", "risk", "steps", "final"]
@@ -60,6 +63,95 @@ def test_build_planner_request_reuses_atomic_planner_prompt_and_schema() -> None
     assert "memory.summarize" in request.system_prompt
     assert "用户输入：我和 test3 之前聊过什么？" in request.messages[0]["content"]
     assert "router_expected_route" not in request.messages[0]["content"]
+
+
+def test_build_candidate_selector_request_uses_non_executable_schema() -> None:
+    case = PromptBenchmarkCase(
+        name="send",
+        user_input="帮我给张三发我晚点到",
+        expectation=PromptCaseExpectation(is_action=True),
+    )
+
+    request = build_candidate_selector_request(case)
+
+    assert request.stream is False
+    assert request.must_be_local is True
+    assert request.temperature == 0.0
+    assert request.max_tokens == AIActionPlanner.CANDIDATE_MAX_TOKENS
+    assert request.metadata["source"] == "ai_action_candidate_selector"
+    assert request.metadata["candidate_schema_version"] == AIActionPlanner.CANDIDATE_SCHEMA_VERSION
+    assert request.response_format["type"] == "json_object"
+    assert request.response_format["schema"]["required"] == ["is_action", "goal", "candidate_actions"]
+    assert "candidate_actions" in request.messages[0]["content"]
+    assert "用户输入：帮我给张三发我晚点到" in request.messages[0]["content"]
+    assert "不能输出 steps" in request.system_prompt
+    assert "message.send" in request.system_prompt
+    assert "\n- message.draft:" not in request.system_prompt
+    assert "\n- user.confirm:" not in request.system_prompt
+
+
+def test_build_planner_request_can_use_candidate_action_prompt_closure() -> None:
+    case = PromptBenchmarkCase(
+        name="send",
+        user_input="帮我给张三发我晚点到",
+        expectation=PromptCaseExpectation(is_action=True),
+    )
+
+    request = build_planner_request(case, candidate_action_names=("message.send",))
+
+    action_enum = request.response_format["schema"]["properties"]["steps"]["items"]["properties"]["action"]["enum"]
+    assert action_enum == ["contact.resolve", "message.draft", "user.confirm", "message.send"]
+    assert request.metadata["candidate_actions"] == ["message.send"]
+    assert request.metadata["candidate_action_closure"] == [
+        "contact.resolve",
+        "message.draft",
+        "user.confirm",
+        "message.send",
+    ]
+    assert request.metadata["required_action_closure"] == [
+        "contact.resolve",
+        "message.draft",
+        "user.confirm",
+        "message.send",
+    ]
+    assert "必需执行链路：contact.resolve -> message.draft -> user.confirm -> message.send" in request.messages[0]["content"]
+    assert "message.send" in request.system_prompt
+    assert "message.draft" in request.system_prompt
+    assert "contact.resolve" in request.system_prompt
+    assert "friend.request.send" not in request.system_prompt
+    assert "group.list" not in request.system_prompt
+
+
+def test_build_planner_repair_request_reuses_action_planner_repair_budget() -> None:
+    case = PromptBenchmarkCase(
+        name="send",
+        user_input="帮我给张三发我晚点到",
+        expectation=PromptCaseExpectation(is_action=True),
+    )
+    invalid_plan = AIActionPlan(
+        is_action=True,
+        goal="发送消息",
+        risk="high",
+        steps=(
+            AIActionStep(
+                id="resolve_target",
+                action="contact.resolve",
+                args={"queries": ["张三"]},
+            ),
+        ),
+        final={"status": "$resolve_target"},
+    )
+
+    request = build_planner_repair_request(
+        case,
+        invalid_plan=invalid_plan,
+        validation_errors=("PLAN_SCHEMA_INVALID",),
+    )
+
+    assert request.max_tokens == AIActionPlanner.PLAN_REPAIR_MAX_TOKENS
+    assert request.metadata["source"] == "ai_action_planner_repair"
+    assert request.metadata["planner_prompt_version"] == AIActionPlanner.PLANNER_PROMPT_VERSION
+    assert "PLAN_SCHEMA_INVALID" in request.messages[0]["content"]
 
 
 def test_planner_replay_jsonl_roundtrip_and_evaluation(tmp_path) -> None:
@@ -631,8 +723,8 @@ def test_run_planner_corpus_calls_task_manager_and_writes_jsonl(tmp_path) -> Non
 
     assert len(task_manager.requests) == 1
     assert task_manager.requests[0].metadata["planner_case_name"] == "chat_case"
-    assert task_manager.requests[0].metadata["planner_prompt_version"] == AIActionPlanner.PLANNER_PROMPT_VERSION
-    assert task_manager.requests[0].metadata["planner_schema_version"] == AIActionPlanner.PLANNER_SCHEMA_VERSION
+    assert task_manager.requests[0].metadata["candidate_prompt_version"] == AIActionPlanner.CANDIDATE_PROMPT_VERSION
+    assert task_manager.requests[0].metadata["candidate_schema_version"] == AIActionPlanner.CANDIDATE_SCHEMA_VERSION
     assert records == load_planner_replay_records(output_path)
     assert records[0].case_name == "chat_case"
     assert records[0].raw_output.startswith('{"is_action": false')

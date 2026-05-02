@@ -176,14 +176,15 @@ class _FakeDirectMessageManager:
 
 
 class _FakePlannerTaskManager:
-    def __init__(self, raw_output: str) -> None:
-        self.raw_output = raw_output
+    def __init__(self, raw_output: str | list[str]) -> None:
+        self.raw_outputs = list(raw_output) if isinstance(raw_output, list) else [raw_output]
         self.requests: list = []
 
     async def run_once(self, request):
         self.requests.append(request)
+        index = min(len(self.requests) - 1, len(self.raw_outputs) - 1)
         return SimpleNamespace(
-            content=self.raw_output,
+            content=self.raw_outputs[index],
             provider="fake",
             model="planner-test",
             error_code=None,
@@ -1154,7 +1155,9 @@ def test_ai_action_planner_prompt_uses_registry_action_contracts() -> None:
     assert "输入字段" in system_prompt
     assert "输出字段" in system_prompt
     assert "message.send" in system_prompt
-    assert "requires_confirmation=true" in system_prompt
+    assert "deps=message.draft,user.confirm" in system_prompt
+    assert "refs=target<-message.draft.target_entity" in system_prompt
+    assert "idempotency_key<-message.draft.idempotency_key" in system_prompt
     assert "固定 step id" not in system_prompt
     assert "resolve_target" not in system_prompt
     assert "draft_message" not in system_prompt
@@ -1163,6 +1166,109 @@ def test_ai_action_planner_prompt_uses_registry_action_contracts() -> None:
     assert "search_memory" not in system_prompt
     assert "示例：发送消息" not in system_prompt
     assert "示例：聊天历史查询" not in system_prompt
+
+
+def test_ai_action_registry_builds_prompt_closure_from_selected_actions() -> None:
+    registry = AtomicActionRegistry(
+        contact_resolver=_FakeContactDatabase([]),
+        memory_manager=_FakeActionMemoryManager(),
+    )
+
+    send_closure = registry.prompt_action_closure(("message.send",))
+    send_required_closure = registry.required_action_closure(("message.send",))
+    friend_request_closure = registry.prompt_action_closure(("friend.request.send",))
+    memory_closure = registry.prompt_action_closure(("memory.summarize",))
+    send_contract = registry.prompt_contract(action_names=send_closure)
+
+    assert send_closure == ("contact.resolve", "message.draft", "user.confirm", "message.send")
+    assert send_required_closure == ("contact.resolve", "message.draft", "user.confirm", "message.send")
+    assert friend_request_closure == ("user.search", "user.confirm", "friend.request.send")
+    assert memory_closure == ("contact.resolve", "memory.search", "memory.summarize")
+    assert "message.send" in send_contract
+    assert "message.draft" in send_contract
+    assert "contact.resolve" in send_contract
+    assert "friend.request.send" not in send_contract
+    assert "group.list" not in send_contract
+
+
+def test_ai_action_planner_selects_candidate_actions_before_building_plan() -> None:
+    registry = AtomicActionRegistry(
+        contact_resolver=_FakeContactDatabase([]),
+        memory_manager=_FakeActionMemoryManager(),
+    )
+    task_manager = _FakePlannerTaskManager(
+        [
+            '{"is_action": true, "goal": "发送消息", "candidate_actions": ["message.send"], "reason": "需要发送文本消息"}',
+            (
+                '{"is_action": true, "goal": "发送消息", "risk": "high", "steps": ['
+                '{"id": "resolve_target", "action": "contact.resolve", "depends_on": [], '
+                '"args": {"queries": ["张三"], "allow_multiple": false}},'
+                '{"id": "draft_message", "action": "message.draft", "depends_on": ["resolve_target"], '
+                '"args": {"target": "$resolve_target.contacts[0]", "content": "我晚点到"}},'
+                '{"id": "confirm_send", "action": "user.confirm", "depends_on": ["draft_message"], '
+                '"args": {"risk": "high", "preview": {"operation": "发送消息", '
+                '"target": "$draft_message.target", "content": "$draft_message.content"}}},'
+                '{"id": "send_message", "action": "message.send", "depends_on": ["draft_message", "confirm_send"], '
+                '"args": {"target": "$draft_message.target_entity", "content": "$draft_message.content", '
+                '"preview": "$confirm_send.preview", "idempotency_key": "$draft_message.idempotency_key"}}'
+                '], "final": {"source": "$send_message.text"}}'
+            ),
+        ]
+    )
+    planner = AIActionPlanner(task_manager=task_manager, action_registry=registry)
+
+    plan = asyncio.run(planner.plan("帮我给张三发我晚点到", strict=True))
+
+    assert plan is not None
+    assert plan.is_action is True
+    assert [step.action for step in plan.steps] == [
+        "contact.resolve",
+        "message.draft",
+        "user.confirm",
+        "message.send",
+    ]
+    assert len(task_manager.requests) == 2
+    selector_request, planner_request = task_manager.requests
+    assert selector_request.metadata["source"] == "ai_action_candidate_selector"
+    assert planner_request.metadata["source"] == "ai_action_planner"
+    assert planner_request.metadata["candidate_actions"] == ["message.send"]
+    assert planner_request.metadata["candidate_action_closure"] == [
+        "contact.resolve",
+        "message.draft",
+        "user.confirm",
+        "message.send",
+    ]
+    assert planner_request.metadata["required_action_closure"] == [
+        "contact.resolve",
+        "message.draft",
+        "user.confirm",
+        "message.send",
+    ]
+    assert "必需执行链路：contact.resolve -> message.draft -> user.confirm -> message.send" in planner_request.messages[0]["content"]
+    assert "这些 action 必须出现在 steps" in planner_request.messages[0]["content"]
+    action_enum = planner_request.response_format["schema"]["properties"]["steps"]["items"]["properties"]["action"]["enum"]
+    assert action_enum == ["contact.resolve", "message.draft", "user.confirm", "message.send"]
+    assert "message.send" in planner_request.system_prompt
+    assert "contact.resolve" in planner_request.system_prompt
+    assert "friend.request.send" not in planner_request.system_prompt
+    assert "group.list" not in planner_request.system_prompt
+
+
+def test_ai_action_planner_stops_after_candidate_selector_rejects_non_action() -> None:
+    registry = AtomicActionRegistry(
+        contact_resolver=_FakeContactDatabase([]),
+        memory_manager=_FakeActionMemoryManager(),
+    )
+    task_manager = _FakePlannerTaskManager(
+        '{"is_action": false, "goal": "普通聊天", "candidate_actions": [], "reason": "不需要应用数据"}'
+    )
+    planner = AIActionPlanner(task_manager=task_manager, action_registry=registry)
+
+    plan = asyncio.run(planner.plan("你好", strict=True))
+
+    assert plan == AIActionPlan(is_action=False, goal="普通聊天", risk="low", steps=(), final={})
+    assert len(task_manager.requests) == 1
+    assert task_manager.requests[0].metadata["source"] == "ai_action_candidate_selector"
 
 
 def test_ai_action_planner_prompt_fits_local_context_budget() -> None:
@@ -1176,7 +1282,7 @@ def test_ai_action_planner_prompt_fits_local_context_budget() -> None:
         + AIActionPlanner._user_prompt("帮我搜索用户 test1")
     )
 
-    assert len(prompt) < 9500
+    assert len(prompt) < 5500
 
 
 def test_ai_action_planner_prompt_keeps_generic_planning_rules_without_case_templates() -> None:
@@ -1186,13 +1292,16 @@ def test_ai_action_planner_prompt_keeps_generic_planning_rules_without_case_temp
     assert "每个 step.id 必须唯一" in system_prompt
     assert "step.id 只能使用字母、数字和下划线" in system_prompt
     assert "所有 $ 引用的根名称必须等于已存在 step.id" in system_prompt
-    assert "规划契约里的 action 名称只说明输出来源" in system_prompt
+    assert "契约中 deps=a,b 表示 depends_on 包含对应上游 step" in system_prompt
+    assert "refs=x<-a.y 表示 args.x 写成 $step_id.y" in system_prompt
+    assert "action 名称只说明输出来源" in system_prompt
     assert "final 是顶层结果描述，不是 step" in system_prompt
     assert "展示、返回或最终结果只写在顶层 final" in system_prompt
     assert "final 只引用最后一个 step 输出" in system_prompt
     assert "不要编造或展开服务端返回字段" in system_prompt
     assert "不能为返回结果重复执行同一个 action" in system_prompt
-    assert "depends_on 必须包含被 args 引用的上游 step.id" in system_prompt
+    assert "no_literal 禁止普通字符串" in system_prompt
+    assert "obj=p(a,b) 表示 args.p 是对象且含字段" in system_prompt
     assert "用户已经给出稳定 ID" in system_prompt
     assert "直接填入对应 ID 字段" in system_prompt
     assert "不要再额外规划 contact.resolve" in system_prompt
@@ -1200,29 +1309,45 @@ def test_ai_action_planner_prompt_keeps_generic_planning_rules_without_case_temp
     assert "不要补 null 字段" in system_prompt
     assert "读取类任务不需要确认" in system_prompt
     assert "写操作必须先生成 preview 并经过 user.confirm" in system_prompt
+    assert "明确要求发送/添加/发布/删除/修改应用数据时，必须规划写 action" in system_prompt
     assert "历史聊天、语音转写、文件内容总结和已存在内容回顾属于本地记忆读取" in system_prompt
     assert "输入中已有关键词时不要要求用户再次提供" in system_prompt
     assert "不要在写 action 后追加只读 action" in system_prompt
     assert "只输出完成用户目标的最小必要 steps" in system_prompt
     assert "不会被后续 step 或 final 使用" in system_prompt
     assert "不能完全用已注册 action 完成" in system_prompt
+    assert "可由已注册 read action 解析或搜索到的目标仍视为可完成" in system_prompt
+    assert "需要先调用某个已注册 action 不是失败理由" in system_prompt
+    assert "把它规划成 step" in system_prompt
     assert "不要发明 action" in system_prompt
     assert "不要按固定示例补齐计划" in user_prompt
     assert "用户输入：我和test3昨天聊了什么？" in user_prompt
+
+
+def test_ai_action_candidate_selector_only_selects_capabilities_not_arg_completeness() -> None:
+    system_prompt = AIActionPlanner._candidate_system_prompt()
+
+    assert "候选阶段只选择能力" in system_prompt
+    assert "不要判断参数是否已经完整" in system_prompt
+    assert "不要因为目标、内容或 ID 尚未结构化就输出 false" in system_prompt
+    assert "不能输出 steps" in system_prompt
+    assert "固定 step id" not in system_prompt
+    assert "张三" not in system_prompt
+    assert "test3" not in system_prompt
 
 
 def test_ai_action_planner_prompt_documents_atomic_action_arg_contracts_without_examples() -> None:
     system_prompt = AIActionPlanner._system_prompt(AIActionPlanner.PROMPT_NEW_ACTION)
 
     assert "contact.resolve" in system_prompt
-    assert "queries:list[str]" in system_prompt
+    assert "queries:list!" in system_prompt
     assert "allow_multiple:bool" in system_prompt
     assert "memory.search" in system_prompt
-    assert "participant_match:Literal['any', 'all', 'direct_only', 'group_only']" in system_prompt
+    assert "participant_match" in system_prompt
     assert "message.send" in system_prompt
-    assert "idempotency_key:str" in system_prompt
+    assert "idempotency_key" in system_prompt
     assert "message.list" in system_prompt
-    assert "before_seq:int | None" in system_prompt
+    assert "before_seq" in system_prompt
     assert "friend.check" in system_prompt
     assert "target_entity" in system_prompt
     assert "输入字段 无" in system_prompt
@@ -1233,19 +1358,18 @@ def test_ai_action_planner_prompt_documents_atomic_action_arg_contracts_without_
 def test_ai_action_planner_prompt_documents_memory_planning_contracts_without_case_templates() -> None:
     system_prompt = AIActionPlanner._system_prompt(AIActionPlanner.PROMPT_NEW_ACTION)
 
-    assert "用户输入中出现联系人、群名或对话对象" in system_prompt
-    assert "participants 引用 contact.resolve" in system_prompt
-    assert "不直接把自然语言名称写入 participants" in system_prompt
-    assert "未限定具体时间窗口的历史回顾问题" in system_prompt
-    assert "time_scope.type 使用 all_history" in system_prompt
-    assert "memory.search 之后应接 memory.summarize" in system_prompt
-    assert "只要原始列表或原始记录时才把检索结果作为 final" in system_prompt
+    assert "如果用户问题里出现联系人或会话对象" in system_prompt
+    assert "把解析结果传给后续读取 action 的 participants" in system_prompt
+    assert "不要把名称字符串直接放到 participants" in system_prompt
+    assert "participants 不能为空" in system_prompt
+    assert "需要向用户回答检索到的内容时，先检索再总结" in system_prompt
+    assert "除非用户明确只要原始列表或原始记录" in system_prompt
     assert "涉及联系人、群名或会话对象的读取任务，必须先解析对象" in system_prompt
     assert "中文表达“我和 X”“我跟 X”“与 X”中的 X 是联系人或会话对象" in system_prompt
+    assert "自然语言联系人名可作为 contact.resolve.queries" in system_prompt
     assert "不要把名称字符串直接放到 participants" in system_prompt
     assert "不要只把名称留在 question 或 keywords" in system_prompt
     assert "需要向用户回答检索到的内容时，先检索再总结" in system_prompt
-    assert "历史回顾问题默认需要自然语言回答，不是返回原始列表" in system_prompt
     assert "final 不直接指向 memory.search" in system_prompt
     assert "读取或操作 AssistIM 本地数据" in system_prompt
     assert "只有需要执行、确认、取消或补充高风险应用操作时" not in system_prompt
@@ -1257,30 +1381,28 @@ def test_ai_action_planner_prompt_documents_write_dependency_contracts_without_f
     system_prompt = AIActionPlanner._system_prompt(AIActionPlanner.PROMPT_NEW_ACTION)
 
     assert "message.send" in system_prompt
-    assert "前置动作 user.confirm" in system_prompt
-    assert "字段引用 target<-message.draft.target_entity" in system_prompt
-    assert "字段引用 content<-message.draft.content" in system_prompt
-    assert "字段引用 preview<-message.draft.preview" in system_prompt
-    assert "字段引用 preview<-user.confirm.preview" in system_prompt
-    assert "字段引用 idempotency_key<-message.draft.idempotency_key" in system_prompt
-    assert "字段引用 X<-Y 表示 args.X 必须写成 $step_id.field" in system_prompt
-    assert "不能把 Y 写成普通字符串" in system_prompt
-    assert "没有 $ 前缀的 step.field 是普通字符串" in system_prompt
+    assert "deps=message.draft,user.confirm" in system_prompt
+    assert "refs=target<-message.draft.target_entity" in system_prompt
+    assert "content<-message.draft.content" in system_prompt
+    assert "preview<-message.draft.preview|user.confirm.preview" in system_prompt
+    assert "idempotency_key<-message.draft.idempotency_key" in system_prompt
+    assert "refs=x<-a.y 表示 args.x 写成 $step_id.y" in system_prompt
+    assert "不能用 action 名称当 $ 引用根" in system_prompt
     assert "不要引用 user.confirm 输出作为 message.send 的 target/content/idempotency_key 参数" in system_prompt
     assert "idempotency_key 必须是写 action 的顶层 args 字段" in system_prompt
     assert "不要放进 preview 对象" in system_prompt
     assert "preview.content 必须非空" in system_prompt
-    assert "字段引用 target<-contact.resolve.contacts[0]" in system_prompt
-    assert "不允许直接使用自然语言对象作为 target" in system_prompt
-    assert "preview 必须是对象" in system_prompt
-    assert "对象字段 preview.operation" in system_prompt
-    assert "对象字段 preview.target" in system_prompt
-    assert "对象字段 preview.content" in system_prompt
+    assert "refs=target<-contact.resolve.contacts[0]" in system_prompt
+    assert "no_literal=target" in system_prompt
+    assert "obj=preview(operation,target,content)" in system_prompt
     assert "单目标写操作的联系人解析应设置 allow_multiple=false" in system_prompt
     assert "必须显式输出 allow_multiple=false" in system_prompt
     assert "preview 不能是字符串引用" in system_prompt
     assert "operation、target、content 必须放在 preview 对象内部" in system_prompt
-    assert "user.confirm: kind=read" in system_prompt
+    assert "user.confirm: read medium" in system_prompt
+    assert "加好友、添加好友或发送好友申请时使用此 action，不是 message.send" in system_prompt
+    assert "加好友链路必须 user.search" in system_prompt
+    assert "好友申请目标必须来自 user.search" in system_prompt
     assert "对象字段 preview.operation 包含 发送" not in system_prompt
     assert "对象字段 preview.target<-message.draft.target" not in system_prompt
     assert "对象字段 preview.content<-message.draft.content" not in system_prompt
@@ -1562,6 +1684,65 @@ def test_ai_plan_normalizer_canonicalizes_confirmation_preview_target_for_send_d
     confirm = next(step for step in normalized.steps if step.id == "confirm")
     assert confirm.args["preview"]["target"] == "$draft.target"
     assert confirm.args["preview"]["content"] == "$draft.content"
+    assert validator.validate(normalized).allowed is True
+
+
+def test_ai_plan_normalizer_canonicalizes_confirmation_preview_operation_for_send_draft() -> None:
+    normalizer = AIPlanNormalizer()
+    registry = AtomicActionRegistry(
+        contact_resolver=ContactAliasResolver(db=_FakeContactDatabase([])),
+        memory_manager=_FakeActionMemoryManager(),
+    )
+    validator = AIPlanValidator(registry=registry)
+    plan = AIActionPlan(
+        is_action=True,
+        goal="给张三发送消息",
+        risk="high",
+        steps=(
+            AIActionStep(
+                id="resolve",
+                action="contact.resolve",
+                args={"queries": ["张三"], "allow_multiple": False},
+            ),
+            AIActionStep(
+                id="draft",
+                action="message.draft",
+                depends_on=("resolve",),
+                args={"target": "$resolve.contacts[0]", "content": "我晚点到"},
+            ),
+            AIActionStep(
+                id="confirm",
+                action="user.confirm",
+                depends_on=("draft",),
+                args={
+                    "risk": "medium",
+                    "preview": {
+                        "operation": "draft_message",
+                        "target": "$draft.target_entity",
+                        "content": "$draft.content",
+                    },
+                },
+            ),
+            AIActionStep(
+                id="send",
+                action="message.send",
+                depends_on=("confirm",),
+                args={
+                    "target": "$draft.target_entity",
+                    "content": "$draft.content",
+                    "preview": "$confirm.preview",
+                    "idempotency_key": "$draft.idempotency_key",
+                },
+            ),
+        ),
+        final={"type": "answer", "source": "$send.text"},
+    )
+
+    normalized = normalizer.normalize(plan, user_text="帮我给张三发我晚点到")
+
+    assert normalized.is_action is True
+    confirm = next(step for step in normalized.steps if step.id == "confirm")
+    assert confirm.args["preview"]["operation"] == "发送消息"
     assert validator.validate(normalized).allowed is True
 
 
@@ -2099,6 +2280,7 @@ def test_ai_action_planner_repair_prompt_moves_final_action_fields_into_steps() 
 
     assert len(task_manager.requests) == 1
     request = task_manager.requests[0]
+    assert request.max_tokens == AIActionPlanner.PLAN_REPAIR_MAX_TOKENS
     assert "把该 action 移到 steps" in request.system_prompt
     assert "final 改为引用对应 step 输出" in request.system_prompt
     assert "final must not contain executable action fields" in request.messages[0]["content"]
@@ -6633,8 +6815,9 @@ def test_ai_action_workflow_default_planner_uses_task_manager(tmp_path, monkeypa
             assert result.handled is False
             assert len(task_manager.requests) == 1
             request = task_manager.requests[0]
-            assert request.metadata["source"] == "ai_action_planner"
-            assert request.metadata["planner_prompt_kind"] == AIActionPlanner.PROMPT_NEW_ACTION
+            assert request.max_tokens == AIActionPlanner.CANDIDATE_MAX_TOKENS
+            assert request.metadata["source"] == "ai_action_candidate_selector"
+            assert request.metadata["candidate_schema_version"] == AIActionPlanner.CANDIDATE_SCHEMA_VERSION
             assert request.response_format["type"] == "json_object"
             assert "用户输入：你好" in request.messages[0]["content"]
         finally:
@@ -6649,52 +6832,55 @@ def test_ai_action_workflow_default_planner_can_surface_send_confirmation_for_tr
         monkeypatch.setattr(action_store_module, "get_database", lambda: db)
         store = AIActionStore()
         task_manager = _FakePlannerTaskManager(
-            """
-            {
-              "is_action": true,
-              "goal": "发送消息",
-              "risk": "high",
-              "steps": [
+            [
+                '{"is_action": true, "goal": "发送消息", "candidate_actions": ["message.send"], "reason": "需要发送文本消息"}',
+                """
                 {
-                  "id": "resolve_target",
-                  "action": "contact.resolve",
-                  "depends_on": [],
-                  "args": {"queries": ["test3"], "allow_multiple": false}
-                },
-                {
-                  "id": "draft_message",
-                  "action": "message.draft",
-                  "depends_on": ["resolve_target"],
-                  "args": {"target": "$resolve_target.contacts[0]", "content": "我晚点联系他"}
-                },
-                {
-                  "id": "confirm_send",
-                  "action": "user.confirm",
-                  "depends_on": ["draft_message"],
-                  "args": {
-                    "risk": "high",
-                    "preview": {
-                      "operation": "发送消息",
-                      "target": "$draft_message.target",
-                      "content": "$draft_message.content"
+                  "is_action": true,
+                  "goal": "发送消息",
+                  "risk": "high",
+                  "steps": [
+                    {
+                      "id": "resolve_target",
+                      "action": "contact.resolve",
+                      "depends_on": [],
+                      "args": {"queries": ["test3"], "allow_multiple": false}
+                    },
+                    {
+                      "id": "draft_message",
+                      "action": "message.draft",
+                      "depends_on": ["resolve_target"],
+                      "args": {"target": "$resolve_target.contacts[0]", "content": "我晚点联系他"}
+                    },
+                    {
+                      "id": "confirm_send",
+                      "action": "user.confirm",
+                      "depends_on": ["draft_message"],
+                      "args": {
+                        "risk": "high",
+                        "preview": {
+                          "operation": "发送消息",
+                          "target": "$draft_message.target",
+                          "content": "$draft_message.content"
+                        }
+                      }
+                    },
+                    {
+                      "id": "send_message",
+                      "action": "message.send",
+                      "depends_on": ["confirm_send", "draft_message"],
+                      "args": {
+                        "target": "$draft_message.target_entity",
+                        "content": "$draft_message.content",
+                        "preview": "$draft_message.preview",
+                        "idempotency_key": "$draft_message.idempotency_key"
+                      }
                     }
-                  }
-                },
-                {
-                  "id": "send_message",
-                  "action": "message.send",
-                  "depends_on": ["confirm_send", "draft_message"],
-                  "args": {
-                    "target": "$draft_message.target_entity",
-                    "content": "$draft_message.content",
-                    "preview": "$draft_message.preview",
-                    "idempotency_key": "$draft_message.idempotency_key"
-                  }
+                  ],
+                  "final": {"type": "answer", "source": "$send_message.text"}
                 }
-              ],
-              "final": {"type": "answer", "source": "$send_message.text"}
-            }
-            """
+                """,
+            ]
         )
         contact_db = _FakeContactDatabase(
             [
@@ -6722,7 +6908,14 @@ def test_ai_action_workflow_default_planner_can_surface_send_confirmation_for_tr
             assert result.message_extra["ai_action"]["action"] == "send_message"
             assert "确认要发送消息给test3" in result.response_text
             assert "我晚点联系他" in result.response_text
-            assert len(task_manager.requests) == 1
+            assert len(task_manager.requests) == 2
+            assert task_manager.requests[0].metadata["source"] == "ai_action_candidate_selector"
+            assert task_manager.requests[1].metadata["candidate_action_closure"] == [
+                "contact.resolve",
+                "message.draft",
+                "user.confirm",
+                "message.send",
+            ]
             assert contact_db.resolve_calls == [{"alias": "test3", "limit": 20}]
         finally:
             await db.close()

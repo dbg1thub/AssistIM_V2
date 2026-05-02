@@ -14,10 +14,18 @@ from typing import Any, Mapping, Sequence
 
 from client.managers.ai_action_normalizer import AIPlanNormalizer
 from client.managers.ai_action_optimizer import AIPlanOptimizer
-from client.managers.ai_action_registry import AtomicActionRegistry, build_default_action_names
+from client.managers.ai_action_registry import (
+    AtomicActionRegistry,
+    build_default_action_names,
+    build_default_action_prompt_closure,
+    build_default_action_prompt_contract,
+    build_default_candidate_action_names,
+    build_default_candidate_action_prompt_contract,
+    build_default_required_action_closure,
+)
 from client.managers.ai_action_types import AIActionPlan
 from client.managers.ai_action_validator import AIPlanValidationResult, AIPlanValidator
-from client.managers.ai_action_workflow import AIActionPlanner
+from client.managers.ai_action_workflow import AIActionCandidateSelection, AIActionPlanner, parse_candidate_selection_json
 from tools.ai_action_prompt_benchmark import (
     CaseBenchmarkResult,
     PromptBenchmarkCase,
@@ -91,21 +99,76 @@ class WorkflowRepairReplayEvaluation:
     error_message: str = ""
 
 
-def build_planner_request(case: PromptBenchmarkCase):
-    """Build one local AI request that matches the normal new-action planner prompt."""
+def build_candidate_selector_request(case: PromptBenchmarkCase):
+    """Build one local AI request for the first-stage model-driven action selector."""
     from client.services.ai_service import AIPrivacyScope, AIRequest, AITaskType
 
-    prompt_kind = AIActionPlanner.PROMPT_NEW_ACTION
-    registered_action_names = build_default_action_names()
-    system_prompt = AIActionPlanner._system_prompt(prompt_kind)
-    user_prompt = AIActionPlanner._user_prompt(case.user_input, prompt_kind=prompt_kind)
+    system_prompt = AIActionPlanner._candidate_system_prompt(
+        action_catalog=build_default_candidate_action_prompt_contract()
+    )
+    user_prompt = AIActionPlanner._candidate_user_prompt(case.user_input)
     return AIRequest(
         task_type=AITaskType.CHAT,
         privacy_scope=AIPrivacyScope.GENERAL,
         must_be_local=True,
         stream=False,
         temperature=0.0,
-        max_tokens=1024,
+        max_tokens=AIActionPlanner.CANDIDATE_MAX_TOKENS,
+        response_format={
+            "type": "json_object",
+            "schema": AIActionPlanner.build_candidate_schema(
+                registered_action_names=build_default_candidate_action_names(),
+            ),
+        },
+        priority=4,
+        system_prompt=system_prompt,
+        messages=[{"role": "user", "content": user_prompt}],
+        metadata={
+            "source": "ai_action_candidate_selector",
+            "strict_json": True,
+            "candidate_schema_version": AIActionPlanner.CANDIDATE_SCHEMA_VERSION,
+            "candidate_prompt_version": AIActionPlanner.CANDIDATE_PROMPT_VERSION,
+            "planner_case_name": case.name,
+            "prompt_chars": len(system_prompt) + len(user_prompt),
+        },
+    )
+
+
+def build_planner_request(
+    case: PromptBenchmarkCase,
+    *,
+    candidate_action_names: Sequence[str] | None = None,
+):
+    """Build one local AI request that matches the normal new-action planner prompt."""
+    from client.services.ai_service import AIPrivacyScope, AIRequest, AITaskType
+
+    prompt_kind = AIActionPlanner.PROMPT_NEW_ACTION
+    candidate_actions = tuple(
+        str(name or "").strip()
+        for name in tuple(candidate_action_names or ())
+        if str(name or "").strip()
+    )
+    candidate_closure = build_default_action_prompt_closure(candidate_actions) if candidate_actions else ()
+    required_closure = build_default_required_action_closure(candidate_actions) if candidate_actions else ()
+    registered_action_names = candidate_closure or build_default_action_names()
+    action_contract = (
+        build_default_action_prompt_contract(action_names=candidate_closure)
+        if candidate_closure
+        else build_default_action_prompt_contract()
+    )
+    system_prompt = AIActionPlanner._system_prompt(prompt_kind, action_contract=action_contract)
+    user_prompt = AIActionPlanner._user_prompt(
+        case.user_input,
+        prompt_kind=prompt_kind,
+        required_action_names=required_closure,
+    )
+    return AIRequest(
+        task_type=AITaskType.CHAT,
+        privacy_scope=AIPrivacyScope.GENERAL,
+        must_be_local=True,
+        stream=False,
+        temperature=0.0,
+        max_tokens=AIActionPlanner.PLAN_MAX_TOKENS,
         response_format={
             "type": "json_object",
             "schema": AIActionPlanner.build_schema_for_prompt_kind(
@@ -124,6 +187,9 @@ def build_planner_request(case: PromptBenchmarkCase):
             "planner_prompt_kind": prompt_kind,
             "planner_case_name": case.name,
             "prompt_chars": len(system_prompt) + len(user_prompt),
+            "candidate_actions": list(candidate_actions),
+            "candidate_action_closure": list(candidate_closure),
+            "required_action_closure": list(required_closure),
         },
     )
 
@@ -163,7 +229,7 @@ def build_planner_repair_request(
         must_be_local=True,
         stream=False,
         temperature=0.0,
-        max_tokens=1024,
+        max_tokens=AIActionPlanner.PLAN_REPAIR_MAX_TOKENS,
         response_format={"type": "json_object", "schema": schema},
         priority=4,
         system_prompt=system_prompt,

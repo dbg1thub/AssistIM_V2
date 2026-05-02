@@ -7,7 +7,7 @@ import json
 import uuid
 from dataclasses import dataclass
 from types import UnionType
-from typing import Any, Literal, Union, get_args, get_origin
+from typing import Any, Literal, Sequence, Union, get_args, get_origin
 
 from client.core import logging
 from client.managers.ai_action_cache import AIActionCache
@@ -455,6 +455,7 @@ class AtomicActionRegistry:
                 prompt_purpose="解析用户表达的联系人、群名、用户名或备注名为本地稳定实体。",
                 prompt_notes=(
                     "queries 必须来自用户明确表达的对象名称。",
+                    "自然语言联系人名可作为 contact.resolve.queries，不需要用户先提供联系人 ID。",
                     "allow_multiple=false 表示该动作需要单一目标，命中多个候选时由系统澄清。",
                     "中文表达“我和 X”“我跟 X”“与 X”中的 X 是联系人或会话对象，应放入 queries。",
                 ),
@@ -498,6 +499,9 @@ class AtomicActionRegistry:
             input_model=FriendRequestSendInput,
             prompt_purpose="通过现有好友申请接口向目标用户发送好友申请。",
             prompt_notes=(
+                "加好友、添加好友或发送好友申请时使用此 action，不是 message.send。",
+                "加好友链路必须 user.search -> user.confirm -> friend.request.send，不用 contact.resolve/message.draft。",
+                "好友申请目标必须来自 user.search，不使用 contact.resolve。",
                 "target_user_id 应来自 user.search 的用户结果；不要把用户名或昵称直接作为 target_user_id。",
                 "message 是好友申请附言，可为空。",
             ),
@@ -594,6 +598,7 @@ class AtomicActionRegistry:
                     "用户输入中出现联系人、群名或对话对象时，先使用 contact.resolve；participants 引用 contact.resolve 的 contacts 或 groups 输出，不直接把自然语言名称写入 participants，也不要只把名称留在 question 或 keywords。",
                     "未限定具体时间窗口的历史回顾问题，time_scope.type 使用 all_history。",
                 ),
+                planner_prompt_support_actions=("contact.resolve",),
             )
         )
         self._register(
@@ -689,20 +694,94 @@ class AtomicActionRegistry:
             )
         )
 
-    def prompt_contract(self) -> str:
+    def prompt_contract(self, action_names: Sequence[str] | None = None) -> str:
         """Return a compact model-facing contract generated from registered action specs."""
 
+        names = self._contract_action_names(action_names)
+        ordered_names = names if action_names is not None else _prompt_contract_action_order(names)
         lines = ["已注册 action 能力："]
-        if any(_is_server_read_spec(spec) for spec in self._actions.values()):
+        if any((spec := self._actions.get(name)) is not None and _is_server_read_spec(spec) for name in ordered_names):
             lines.append(
-                "服务端只读 action 通用：kind=read risk=low，不需要 user.confirm；"
-                "输出 text/items/item/result_count/result。"
+                "通用：read low 不确认；write high 必须 user.confirm+preview+idempotency_key；"
+                "输入字段 ! 表示必填；服务端只读输出字段 text,items,item,result_count,result。"
             )
-        for name in _prompt_contract_action_order(self.names()):
+        for name in ordered_names:
             spec = self._actions[name]
             formatter = _format_server_read_prompt_contract if _is_server_read_spec(spec) else _format_action_prompt_contract
             lines.append(formatter(spec))
         return "\n".join(lines)
+
+    def candidate_prompt_contract(self) -> str:
+        """Return the compact model-facing catalog for first-stage candidate selection."""
+
+        lines = ["可选目标 action："]
+        for name in _prompt_contract_action_order(self.names()):
+            spec = self._actions[name]
+            if not _is_candidate_action_spec(spec):
+                continue
+            lines.append(_format_candidate_action_prompt_contract(spec, closure=self.prompt_action_closure((name,))))
+        return "\n".join(lines)
+
+    def prompt_action_closure(self, action_names: Sequence[str] | None) -> tuple[str, ...]:
+        """Return selected actions plus registry-declared planning dependencies in prompt order."""
+
+        return self._action_closure(action_names, include_prompt_support=True)
+
+    def required_action_closure(self, action_names: Sequence[str] | None) -> tuple[str, ...]:
+        """Return selected actions plus required planning dependencies in execution order."""
+
+        return self._action_closure(action_names, include_prompt_support=False)
+
+    def _action_closure(
+        self,
+        action_names: Sequence[str] | None,
+        *,
+        include_prompt_support: bool,
+    ) -> tuple[str, ...]:
+        """Return selected actions plus registry-declared dependencies in dependency order."""
+
+        selected = _normalize_action_name_sequence(action_names)
+        if not selected:
+            return ()
+        output: list[str] = []
+        visiting: set[str] = set()
+
+        def visit(raw_name: str) -> None:
+            name = str(raw_name or "").strip()
+            if not name or name in output or name in visiting:
+                return
+            spec = self._actions.get(name)
+            if spec is None:
+                return
+            visiting.add(name)
+            if include_prompt_support:
+                for dependency_name in tuple(spec.planner_prompt_support_actions or ()):
+                    visit(dependency_name)
+            for dependency_name in tuple(spec.planner_required_predecessors or ()):
+                visit(dependency_name)
+            visiting.discard(name)
+            if name not in output:
+                output.append(name)
+
+        for name in selected:
+            visit(name)
+        return tuple(output)
+
+    def candidate_action_names(self) -> tuple[str, ...]:
+        return tuple(
+            name
+            for name in _prompt_contract_action_order(self.names())
+            if (spec := self._actions.get(name)) is not None and _is_candidate_action_spec(spec)
+        )
+
+    def _contract_action_names(self, action_names: Sequence[str] | None) -> tuple[str, ...]:
+        if action_names is None:
+            return self.names()
+        return tuple(
+            name
+            for name in _normalize_action_name_sequence(action_names)
+            if name in self._actions
+        )
 
     async def _server_read(self, action_name: str, args: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
         del context
@@ -1252,10 +1331,34 @@ class _PromptContractContactResolver:
         return ""
 
 
-def build_default_action_prompt_contract() -> str:
+def build_default_action_prompt_contract(action_names: Sequence[str] | None = None) -> str:
     """Build the canonical planner action contract without touching runtime services."""
 
-    return AtomicActionRegistry(contact_resolver=_PromptContractContactResolver()).prompt_contract()
+    return AtomicActionRegistry(contact_resolver=_PromptContractContactResolver()).prompt_contract(action_names=action_names)
+
+
+def build_default_candidate_action_prompt_contract() -> str:
+    """Build the canonical first-stage candidate action catalog without runtime services."""
+
+    return AtomicActionRegistry(contact_resolver=_PromptContractContactResolver()).candidate_prompt_contract()
+
+
+def build_default_candidate_action_names() -> tuple[str, ...]:
+    """Build the canonical candidate action names without runtime services."""
+
+    return AtomicActionRegistry(contact_resolver=_PromptContractContactResolver()).candidate_action_names()
+
+
+def build_default_action_prompt_closure(action_names: Sequence[str] | None) -> tuple[str, ...]:
+    """Build the default prompt action closure without runtime services."""
+
+    return AtomicActionRegistry(contact_resolver=_PromptContractContactResolver()).prompt_action_closure(action_names)
+
+
+def build_default_required_action_closure(action_names: Sequence[str] | None) -> tuple[str, ...]:
+    """Build the default required action closure without runtime services."""
+
+    return AtomicActionRegistry(contact_resolver=_PromptContractContactResolver()).required_action_closure(action_names)
 
 
 def build_default_action_names() -> tuple[str, ...]:
@@ -1264,31 +1367,56 @@ def build_default_action_names() -> tuple[str, ...]:
     return AtomicActionRegistry(contact_resolver=_PromptContractContactResolver()).names()
 
 
-def _format_action_prompt_contract(spec: AtomicActionSpec) -> str:
+def _format_candidate_action_prompt_contract(spec: AtomicActionSpec, *, closure: Sequence[str]) -> str:
     parts = [
-        f"- {spec.name}: kind={spec.kind}",
-        f"risk={spec.risk_level}",
+        f"- {spec.name}: {spec.kind} {spec.risk_level}",
     ]
     if spec.prompt_purpose:
         parts.append(f"用途={spec.prompt_purpose}")
-    input_fields = _model_prompt_fields(spec.input_model)
+    dependency_names = tuple(name for name in tuple(closure or ()) if name and name != spec.name)
+    if dependency_names:
+        parts.append(f"自动闭包={','.join(dependency_names)}")
+    return "；".join(parts) + "。"
+
+
+def _is_candidate_action_spec(spec: AtomicActionSpec) -> bool:
+    if not spec.enabled:
+        return False
+    return spec.name not in {"contact.resolve", "message.draft", "user.confirm"}
+
+
+def _normalize_action_name_sequence(action_names: Sequence[str] | None) -> tuple[str, ...]:
+    names: list[str] = []
+    for raw_name in tuple(action_names or ()):
+        name = str(raw_name or "").strip()
+        if name and name not in names:
+            names.append(name)
+    return tuple(names)
+
+
+def _format_action_prompt_contract(spec: AtomicActionSpec) -> str:
+    parts = [
+        f"- {spec.name}: {spec.kind} {spec.risk_level}",
+    ]
+    if spec.prompt_purpose and _include_prompt_purpose(spec):
+        parts.append(f"用途={spec.prompt_purpose}")
+    input_fields = _input_prompt_fields(spec)
     if input_fields:
         parts.append(f"输入字段 {input_fields}")
     elif spec.input_model is not None:
         parts.append("输入字段 无")
-    output_fields = _model_prompt_fields(spec.output_model)
-    if output_fields:
+    output_fields = _output_prompt_fields(spec)
+    if output_fields and _include_output_fields(spec):
         parts.append(f"输出字段 {output_fields}")
     constraints = _spec_prompt_constraints(spec)
     if constraints:
-        parts.append(f"约束 {constraints}")
+        parts.append(constraints)
     planning_constraints = _spec_planner_constraints(spec)
     if planning_constraints:
-        parts.append(f"规划契约 {planning_constraints}")
-    for note in spec.prompt_notes:
-        normalized = " ".join(str(note or "").split())
-        if normalized:
-            parts.append(f"说明 {normalized}")
+        parts.append(planning_constraints)
+    notes = _compact_prompt_notes(spec)
+    if notes:
+        parts.append(f"说明 {notes}")
     return "；".join(parts) + "。"
 
 
@@ -1300,6 +1428,8 @@ def _prompt_contract_action_order(names: tuple[str, ...]) -> tuple[str, ...]:
         "message.draft",
         "user.confirm",
         "message.send",
+        "user.search",
+        "friend.request.send",
     )
     available = {str(name or "").strip() for name in names}
     ordered = [name for name in priority if name in available]
@@ -1309,21 +1439,18 @@ def _prompt_contract_action_order(names: tuple[str, ...]) -> tuple[str, ...]:
 
 def _format_server_read_prompt_contract(spec: AtomicActionSpec) -> str:
     parts = [
-        f"- {spec.name}: kind=read",
-        "risk=low",
+        f"- {spec.name}: read low",
     ]
-    if spec.prompt_purpose:
+    if spec.prompt_purpose and _include_prompt_purpose(spec):
         parts.append(f"用途={spec.prompt_purpose}")
-    input_fields = _model_prompt_fields(spec.input_model)
+    input_fields = _input_prompt_fields(spec)
     if input_fields:
         parts.append(f"输入字段 {input_fields}")
     elif spec.input_model is not None:
         parts.append("输入字段 无")
-    for note in spec.prompt_notes:
-        normalized = " ".join(str(note or "").split())
-        if not normalized or _is_common_server_read_note(normalized):
-            continue
-        parts.append(f"说明 {normalized}")
+    notes = _compact_prompt_notes(spec)
+    if notes:
+        parts.append(f"说明 {notes}")
     return "；".join(parts) + "。"
 
 
@@ -1335,19 +1462,80 @@ def _is_common_server_read_note(note: str) -> bool:
     return note.startswith("这是只读服务端动作") or note.startswith("只能用于读取当前账号")
 
 
+def _include_prompt_purpose(spec: AtomicActionSpec) -> bool:
+    return spec.name in {
+        "contact.resolve",
+        "memory.search",
+        "memory.summarize",
+        "user.search",
+        "message.draft",
+        "user.confirm",
+        "message.send",
+        "friend.request.send",
+    }
+
+
+def _include_output_fields(spec: AtomicActionSpec) -> bool:
+    if spec.output_model in {ServerReadOutput, ServerWriteOutput}:
+        return False
+    return True
+
+
+def _output_prompt_fields(spec: AtomicActionSpec) -> str:
+    fields_by_action = {
+        "memory.search": "results, context_lines, result_count!",
+        "memory.summarize": "result_count!, status!, text",
+        "message.send": "status!, text!",
+    }
+    if spec.name in fields_by_action:
+        return fields_by_action[spec.name]
+    return _model_prompt_fields(spec.output_model)
+
+
+def _input_prompt_fields(spec: AtomicActionSpec) -> str:
+    fields_by_action = {
+        "contact.resolve": "queries:list!, allow_multiple:bool",
+        "user.confirm": "risk:low/medium/high, preview:dict!",
+    }
+    if spec.name in fields_by_action:
+        return fields_by_action[spec.name]
+    return _model_prompt_fields(spec.input_model)
+
+
 def _model_prompt_fields(model: type[Any] | None) -> str:
     fields = getattr(model, "model_fields", None)
     if not fields:
         return ""
     items: list[str] = []
     for name, field in fields.items():
-        type_name = _annotation_prompt_name(getattr(field, "annotation", Any))
-        item = f"{name}:{type_name}"
+        item = str(name)
         is_required = getattr(field, "is_required", None)
         if callable(is_required) and is_required():
-            item += " required"
+            item += "!"
         items.append(item)
     return ", ".join(items)
+
+
+def _compact_annotation_prompt_name(annotation: Any) -> str:
+    origin = get_origin(annotation)
+    args = get_args(annotation)
+    if origin is Literal:
+        return "/".join(str(arg) for arg in args)
+    if origin in {list, tuple, set, frozenset}:
+        return "list"
+    if origin is dict:
+        return "dict"
+    if origin in {Union, UnionType}:
+        values = [_compact_annotation_prompt_name(arg) for arg in args]
+        return "|".join(value for value in values if value)
+    if annotation is Any:
+        return ""
+    if annotation is None or annotation is type(None):
+        return "None"
+    name = getattr(annotation, "__name__", "")
+    if name in {"str", "int", "bool", "float"}:
+        return str(name)
+    return ""
 
 
 def _annotation_prompt_name(annotation: Any) -> str:
@@ -1375,34 +1563,20 @@ def _annotation_prompt_name(annotation: Any) -> str:
 
 
 def _spec_prompt_constraints(spec: AtomicActionSpec) -> str:
-    values = [
-        f"enabled={_bool_prompt(spec.enabled)}",
-        f"requires_confirmation={_bool_prompt(spec.requires_confirmation)}",
-        f"allow_side_effect={_bool_prompt(spec.allow_side_effect)}",
-    ]
-    if spec.max_targets is not None:
-        values.append(f"max_targets={spec.max_targets}")
-    if spec.max_content_chars is not None:
-        values.append(f"max_content_chars={spec.max_content_chars}")
-    if spec.idempotency_required:
-        values.append("idempotency_required=true")
-    if spec.require_preview:
-        values.append("require_preview=true")
-    if spec.require_resolved_target:
-        values.append("require_resolved_target=true")
-    if spec.default_result_limit:
-        values.append(f"default_result_limit={spec.default_result_limit}")
-    if spec.max_result_items is not None:
-        values.append(f"max_result_items={spec.max_result_items}")
-    return ", ".join(values)
+    del spec
+    return ""
 
 
 def _spec_planner_constraints(spec: AtomicActionSpec) -> str:
     values: list[str] = []
-    for action_name in spec.planner_required_predecessors:
-        normalized = str(action_name or "").strip()
-        if normalized:
-            values.append(f"前置动作 {normalized}")
+    predecessors = [
+        str(action_name or "").strip()
+        for action_name in spec.planner_required_predecessors
+        if str(action_name or "").strip()
+    ]
+    if predecessors:
+        values.append(f"deps={','.join(predecessors)}")
+    field_refs: list[str] = []
     for field_name, refs in spec.planner_required_arg_refs.items():
         normalized_field = str(field_name or "").strip()
         if not normalized_field:
@@ -1412,17 +1586,20 @@ def _spec_planner_constraints(spec: AtomicActionSpec) -> str:
             for ref in list(refs or ())
             if str(ref or "").strip()
         ]
-        for ref in normalized_refs:
-            values.append(f"字段引用 {normalized_field}<-{ref}")
+        if normalized_refs:
+            field_refs.append(f"{normalized_field}<-{'|'.join(normalized_refs)}")
+    if field_refs:
+        values.append(f"refs={','.join(field_refs)}")
     for arg_name, required_fields in spec.planner_required_object_args.items():
         normalized_arg = str(arg_name or "").strip()
         if not normalized_arg:
             continue
-        values.append(f"{normalized_arg} 必须是对象")
-        for field_name in list(required_fields or ()):
-            normalized_field = str(field_name or "").strip()
-            if normalized_field:
-                values.append(f"对象字段 {normalized_arg}.{normalized_field} 必填")
+        fields = [
+            str(field_name or "").strip()
+            for field_name in list(required_fields or ())
+            if str(field_name or "").strip()
+        ]
+        values.append(f"obj={normalized_arg}({','.join(fields)})" if fields else f"obj={normalized_arg}")
     for arg_name, field_refs in spec.planner_required_object_arg_refs.items():
         normalized_arg = str(arg_name or "").strip()
         if not normalized_arg:
@@ -1434,7 +1611,7 @@ def _spec_planner_constraints(spec: AtomicActionSpec) -> str:
             for ref in list(refs or ()):
                 normalized_ref = str(ref or "").strip()
                 if normalized_ref:
-                    values.append(f"对象字段 {normalized_arg}.{normalized_field}<-{normalized_ref}")
+                    values.append(f"obj_ref={normalized_arg}.{normalized_field}<-{normalized_ref}")
     for arg_name, field_values in spec.planner_required_object_arg_contains.items():
         normalized_arg = str(arg_name or "").strip()
         if not normalized_arg:
@@ -1446,12 +1623,36 @@ def _spec_planner_constraints(spec: AtomicActionSpec) -> str:
             for expected in list(expected_values or ()):
                 normalized_expected = str(expected or "").strip()
                 if normalized_expected:
-                    values.append(f"对象字段 {normalized_arg}.{normalized_field} 包含 {normalized_expected}")
-    for field_name in spec.planner_forbidden_literal_args:
-        normalized = str(field_name or "").strip()
-        if normalized:
-            values.append(f"不允许直接使用自然语言对象作为 {normalized}")
+                    values.append(f"obj_has={normalized_arg}.{normalized_field}:{normalized_expected}")
+    forbidden_literals = [
+        str(field_name or "").strip()
+        for field_name in spec.planner_forbidden_literal_args
+        if str(field_name or "").strip()
+    ]
+    if forbidden_literals:
+        values.append(f"no_literal={'/'.join(forbidden_literals)}")
     return ", ".join(values)
+
+
+def _compact_prompt_notes(spec: AtomicActionSpec) -> str:
+    keepers = {
+        "contact.resolve": ("中文表达", "自然语言联系人名"),
+        "message.draft": ("单目标写操作",),
+        "user.confirm": ("preview 不能是字符串引用",),
+        "message.send": ("不要引用 user.confirm",),
+        "friend.request.send": ("加好友", "不要把用户名", "加好友链路", "好友申请目标"),
+    }
+    required_fragments = keepers.get(spec.name, ())
+    notes: list[str] = []
+    for note in spec.prompt_notes:
+        normalized = " ".join(str(note or "").split())
+        if not normalized or _is_common_server_read_note(normalized):
+            continue
+        if not required_fragments:
+            continue
+        if any(fragment in normalized for fragment in required_fragments):
+            notes.append(normalized)
+    return "；".join(notes)
 
 
 def _bool_prompt(value: bool) -> str:
