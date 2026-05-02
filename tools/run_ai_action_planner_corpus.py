@@ -27,6 +27,14 @@ from tools.ai_action_planner_replay import (
 from tools.ai_action_prompt_benchmark import DEFAULT_GOLDEN_CORPUS_PATH, PromptBenchmarkCase, load_golden_corpus, summarize_results
 
 
+QUALITY_GATE_THRESHOLDS: tuple[tuple[str, float], ...] = (
+    ("runtime_expectation_pass_rate", 1.0),
+    ("runtime_safe_rate", 1.0),
+    ("workflow_repair_expectation_pass_rate", 1.0),
+    ("workflow_repair_safe_rate", 1.0),
+)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run offline AI action planner replay against the golden corpus.")
     parser.add_argument("--corpus-path", default=str(DEFAULT_GOLDEN_CORPUS_PATH), help="Golden corpus JSON path.")
@@ -54,6 +62,11 @@ def parse_args() -> argparse.Namespace:
         "--workflow-repair",
         action="store_true",
         help="During model runs, also evaluate repairable invalid plans through the workflow repair prompt.",
+    )
+    parser.add_argument(
+        "--quality-gate",
+        action="store_true",
+        help="Fail unless runtime and workflow repair quality metrics meet the strict baseline.",
     )
     return parser.parse_args()
 
@@ -133,8 +146,15 @@ async def main() -> None:
     cases = load_golden_corpus(corpus_path)
     evaluation_cases = _select_cases(cases, case_names=tuple(args.case_names or ()))
     if args.validate_only:
-        summary = validate_planner_replay(evaluation_cases, output_path, summary_path=args.summary_path or None)
+        summary = validate_planner_replay(
+            evaluation_cases,
+            output_path,
+            summary_path=args.summary_path or None,
+            quality_gate=bool(args.quality_gate),
+        )
         print(json.dumps(summary, ensure_ascii=False, indent=2), flush=True)
+        if quality_gate_exit_code(summary):
+            raise SystemExit(1)
         return
     configure_default_ai_provider()
     task_manager = AITaskManager()
@@ -152,9 +172,13 @@ async def main() -> None:
         summary = summarize_results(results)
         summary["output_path"] = str(output_path)
         summary["replay_record_count"] = len(records)
+        if args.quality_gate:
+            summary["quality_gate"] = evaluate_quality_gate(summary)
         if args.summary_path:
             write_planner_replay_summary(args.summary_path, summary)
         print(json.dumps(summary, ensure_ascii=False, indent=2), flush=True)
+        if quality_gate_exit_code(summary):
+            raise SystemExit(1)
     finally:
         await task_manager.close()
 
@@ -164,6 +188,7 @@ def validate_planner_replay(
     output_path: str | Path,
     *,
     summary_path: str | Path | None = None,
+    quality_gate: bool = False,
 ) -> dict[str, Any]:
     """Evaluate a saved planner replay JSONL without invoking the AI runtime."""
     results = evaluate_planner_replay_file(cases, output_path)
@@ -171,9 +196,81 @@ def validate_planner_replay(
     summary["output_path"] = str(output_path)
     summary["replay_record_count"] = sum(len(result.samples) for result in results)
     summary["mode"] = "validate_only"
+    if quality_gate:
+        summary["quality_gate"] = evaluate_quality_gate(summary)
     if summary_path is not None:
         write_planner_replay_summary(summary_path, summary)
     return summary
+
+
+def evaluate_quality_gate(
+    summary: Mapping[str, Any],
+    *,
+    thresholds: Sequence[tuple[str, float]] = QUALITY_GATE_THRESHOLDS,
+) -> dict[str, Any]:
+    """Evaluate strict planner replay quality thresholds against a summary."""
+    checked_metrics: list[dict[str, Any]] = []
+    failures: list[dict[str, Any]] = []
+    for metric, expected_min in thresholds:
+        expected_value = float(expected_min)
+        raw_actual = summary.get(metric)
+        if raw_actual is None:
+            failure = {
+                "metric": metric,
+                "actual": None,
+                "expected_min": expected_value,
+                "reason": "missing_metric",
+            }
+            checked_metrics.append(dict(failure))
+            failures.append(failure)
+            continue
+        try:
+            actual = float(raw_actual)
+        except (TypeError, ValueError):
+            actual = None
+        if actual is None:
+            failure = {
+                "metric": metric,
+                "actual": None,
+                "expected_min": expected_value,
+                "reason": "invalid_metric",
+            }
+            checked_metrics.append(dict(failure))
+            failures.append(failure)
+            continue
+        passed = actual >= expected_value
+        item = {
+            "metric": metric,
+            "actual": round(actual, 4),
+            "expected_min": expected_value,
+            "passed": passed,
+        }
+        checked_metrics.append(item)
+        if not passed:
+            failures.append(
+                {
+                    "metric": metric,
+                    "actual": round(actual, 4),
+                    "expected_min": expected_value,
+                    "reason": "below_threshold",
+                }
+            )
+    return {
+        "enabled": True,
+        "passed": not failures,
+        "thresholds": {metric: float(value) for metric, value in thresholds},
+        "checked_metrics": checked_metrics,
+        "failures": failures,
+    }
+
+
+def quality_gate_exit_code(summary: Mapping[str, Any]) -> int:
+    gate = summary.get("quality_gate") if isinstance(summary, Mapping) else None
+    if not isinstance(gate, Mapping):
+        return 0
+    if gate.get("enabled") is True and gate.get("passed") is not True:
+        return 1
+    return 0
 
 
 def write_planner_replay_summary(path: str | Path, summary: Mapping[str, Any]) -> None:

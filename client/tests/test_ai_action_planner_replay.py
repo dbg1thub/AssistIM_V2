@@ -22,7 +22,12 @@ from tools.ai_action_prompt_benchmark import (
     PromptStepArgExpectation,
     summarize_results,
 )
-from tools.run_ai_action_planner_corpus import run_planner_corpus, validate_planner_replay
+from tools.run_ai_action_planner_corpus import (
+    evaluate_quality_gate,
+    quality_gate_exit_code,
+    run_planner_corpus,
+    validate_planner_replay,
+)
 
 
 def test_build_planner_request_reuses_atomic_planner_prompt_and_schema() -> None:
@@ -776,3 +781,84 @@ def test_validate_planner_replay_evaluates_existing_jsonl_without_model(tmp_path
     assert summary["expectation_pass_rate"] == 1.0
     assert written_summary == summary
     assert summary["failure_analysis"]["raw"]["failed_sample_count"] == 0
+
+
+def test_ai_action_quality_gate_passes_with_runtime_and_workflow_baseline() -> None:
+    summary = {
+        "runtime_expectation_pass_rate": 1.0,
+        "runtime_safe_rate": 1.0,
+        "workflow_repair_expectation_pass_rate": 1.0,
+        "workflow_repair_safe_rate": 1.0,
+    }
+
+    gate = evaluate_quality_gate(summary)
+
+    assert gate["enabled"] is True
+    assert gate["passed"] is True
+    assert gate["failures"] == []
+    assert [item["metric"] for item in gate["checked_metrics"]] == [
+        "runtime_expectation_pass_rate",
+        "runtime_safe_rate",
+        "workflow_repair_expectation_pass_rate",
+        "workflow_repair_safe_rate",
+    ]
+    assert quality_gate_exit_code({"quality_gate": gate}) == 0
+
+
+def test_ai_action_quality_gate_fails_for_missing_or_below_baseline_metrics() -> None:
+    summary = {
+        "runtime_expectation_pass_rate": 1.0,
+        "runtime_safe_rate": 0.999,
+        "workflow_repair_expectation_pass_rate": 1.0,
+    }
+
+    gate = evaluate_quality_gate(summary)
+
+    assert gate["passed"] is False
+    assert gate["failures"] == [
+        {
+            "metric": "runtime_safe_rate",
+            "actual": 0.999,
+            "expected_min": 1.0,
+            "reason": "below_threshold",
+        },
+        {
+            "metric": "workflow_repair_safe_rate",
+            "actual": None,
+            "expected_min": 1.0,
+            "reason": "missing_metric",
+        },
+    ]
+    assert quality_gate_exit_code({"quality_gate": gate}) == 1
+
+
+def test_validate_planner_replay_can_attach_quality_gate_result(tmp_path) -> None:
+    output_path = tmp_path / "planner-quality-gate.jsonl"
+    cases = [
+        PromptBenchmarkCase(
+            name="chat_case",
+            user_input="你好",
+            expectation=PromptCaseExpectation(is_action=False),
+        )
+    ]
+    write_planner_replay_records(
+        output_path,
+        [
+            PlannerReplayRecord(
+                case_name="chat_case",
+                user_input="你好",
+                raw_output='{"is_action": false, "goal": "闲聊", "risk": "low", "steps": [], "final": {}}',
+                workflow_repair_actions=(),
+                workflow_repair_result="passed",
+                workflow_repair_attempted=False,
+                workflow_repair_safe=True,
+                workflow_repair_diff_from_expected=(),
+            )
+        ],
+        cases=cases,
+    )
+
+    summary = validate_planner_replay(cases, output_path, quality_gate=True)
+
+    assert summary["quality_gate"]["passed"] is True
+    assert quality_gate_exit_code(summary) == 0
