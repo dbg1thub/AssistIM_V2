@@ -132,6 +132,9 @@ The same admin role also unlocks backend-only user-management APIs:
 
 - `GET /api/v1/admin/audit-logs`: list audit logs with `actor_username`, `action`, `target_type`, `target_id`, `success`, `created_from`, `created_to`, `page`, and `size` filters.
 - `GET /api/v1/admin/audit-logs/{log_id}`: inspect one audit log.
+- `GET /api/v1/admin/database/status`: inspect database connection status, dialect, Alembic revision state, runtime schema completeness, and required table presence.
+- `GET /api/v1/admin/database/tables`: inspect table row counts and required index presence.
+- `GET /api/v1/admin/database/health`: inspect read-only database health checks and schema issues.
 - `GET /api/v1/admin/users`: list users with `keyword`, `role`, `disabled`, `page`, and `size` filters.
 - `GET /api/v1/admin/users/{user_id}`: inspect one user, including safe profile fields, device metadata, and business counts.
 - `PATCH /api/v1/admin/users/{user_id}/role`: set a user role to `user` or `admin`.
@@ -143,7 +146,8 @@ User-management write operations are recorded in `admin_audit_logs`. Audit-log
 responses redact sensitive detail keys such as passwords, tokens, credentials,
 authorization headers, and secrets. The API does not expose password hashes,
 tokens, private keys, or E2EE public key material in admin list/detail
-responses. Self-disable and self-demotion are blocked to avoid locking out the
+responses. Database inspection APIs are read-only and redact database URL
+passwords. Self-disable and self-demotion are blocked to avoid locking out the
 only active administrator.
 
 ## Creating test accounts

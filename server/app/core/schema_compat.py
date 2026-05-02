@@ -211,6 +211,14 @@ def _has_current_runtime_schema(bind: Engine | Connection) -> bool:
     )
 
 
+def has_current_runtime_schema(bind: Engine | Connection) -> bool:
+    """Return whether the database already has the required runtime schema."""
+    if isinstance(bind, Engine):
+        with bind.connect() as connection:
+            return _has_current_runtime_schema(connection)
+    return _has_current_runtime_schema(bind)
+
+
 def _ensure_columns(connection: Connection, table_name: str, column_ddl: dict[str, str], applied: list[str]) -> None:
     if table_name not in _get_table_names(connection):
         return

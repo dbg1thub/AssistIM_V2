@@ -13,6 +13,7 @@ from app.dependencies.settings_dependency import get_request_settings
 from app.models.user import User
 from app.schemas.admin import AdminDisableUserRequest, AdminSetUserRoleRequest
 from app.services.admin_audit_service import AdminAuditService
+from app.services.admin_database_service import AdminDatabaseService
 from app.services.admin_dashboard_service import AdminDashboardService
 from app.services.admin_user_service import AdminUserService
 from app.utils.response import success_response
@@ -98,6 +99,78 @@ def get_admin_audit_log(
     """Return one admin operation audit log."""
     _ = current_user
     return success_response(AdminAuditService(db).get_log(log_id))
+
+
+@router.get("/database/status")
+def get_admin_database_status(
+    request: Request,
+    current_user: User = Depends(get_current_admin_user),
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_request_settings),
+) -> dict:
+    """Return a read-only database runtime status snapshot."""
+    AdminAuditService(db).record(
+        actor=current_user,
+        action="admin.database.status.read",
+        target_type="database",
+        target_id="status",
+        request_path=str(request.url.path),
+        request_method=request.method,
+        client_ip=_client_ip(request),
+        success=True,
+        commit=False,
+    )
+    payload = AdminDatabaseService(db, settings).build_status()
+    db.commit()
+    return success_response(payload)
+
+
+@router.get("/database/tables")
+def get_admin_database_tables(
+    request: Request,
+    current_user: User = Depends(get_current_admin_user),
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_request_settings),
+) -> dict:
+    """Return read-only table and index inspection data."""
+    AdminAuditService(db).record(
+        actor=current_user,
+        action="admin.database.tables.read",
+        target_type="database",
+        target_id="tables",
+        request_path=str(request.url.path),
+        request_method=request.method,
+        client_ip=_client_ip(request),
+        success=True,
+        commit=False,
+    )
+    payload = AdminDatabaseService(db, settings).build_tables()
+    db.commit()
+    return success_response(payload)
+
+
+@router.get("/database/health")
+def get_admin_database_health(
+    request: Request,
+    current_user: User = Depends(get_current_admin_user),
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_request_settings),
+) -> dict:
+    """Return read-only database health checks."""
+    AdminAuditService(db).record(
+        actor=current_user,
+        action="admin.database.health.read",
+        target_type="database",
+        target_id="health",
+        request_path=str(request.url.path),
+        request_method=request.method,
+        client_ip=_client_ip(request),
+        success=True,
+        commit=False,
+    )
+    payload = AdminDatabaseService(db, settings).build_health()
+    db.commit()
+    return success_response(payload)
 
 
 @router.get("/users")
