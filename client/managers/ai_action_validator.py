@@ -11,6 +11,7 @@ from client.managers.ai_action_types import AIActionPlan, AIActionStep, AtomicAc
 
 VALID_PARTICIPANT_MATCHES = {"any", "all", "direct_only", "group_only"}
 VALID_RISKS = {"low", "medium", "high"}
+EXECUTABLE_FINAL_FIELDS = {"action", "args", "depends_on", "display_text", "explanation"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,6 +113,7 @@ class AIPlanValidator:
                         field="final",
                     )
                 )
+        errors.extend(_validate_final_contract(plan.final))
         return AIPlanValidationResult(errors=tuple(errors))
 
 
@@ -288,7 +290,82 @@ def _validate_planner_contract(
                     )
                 )
 
+    if step.action == "memory.search":
+        errors.extend(_validate_memory_search_participants_contract(step, args, seen_step_actions=seen_step_actions))
+
     return errors
+
+
+def _validate_memory_search_participants_contract(
+    step: AIActionStep,
+    args: dict[str, Any],
+    *,
+    seen_step_actions: dict[str, str],
+) -> list[AIPlanValidationError]:
+    participants = args.get("participants")
+    if not _has_value(participants):
+        return []
+    if _memory_search_participants_are_planner_safe(participants, seen_step_actions=seen_step_actions):
+        return []
+    return [
+        _error(
+            "PLANNER_CONTRACT_INVALID",
+            "memory.search.participants must reference contact.resolve output or contain resolved entity objects",
+            step=step,
+            field="participants",
+        )
+    ]
+
+
+def _memory_search_participants_are_planner_safe(value: Any, *, seen_step_actions: dict[str, str]) -> bool:
+    if isinstance(value, str):
+        return _value_references_action(value, "contact.resolve", seen_step_actions=seen_step_actions)
+    if isinstance(value, list | tuple):
+        return all(_memory_search_participant_item_is_planner_safe(item, seen_step_actions=seen_step_actions) for item in value)
+    if isinstance(value, dict):
+        return _is_resolved_participant_object(value)
+    return False
+
+
+def _memory_search_participant_item_is_planner_safe(value: Any, *, seen_step_actions: dict[str, str]) -> bool:
+    if isinstance(value, str):
+        return _value_references_action(value, "contact.resolve", seen_step_actions=seen_step_actions)
+    if isinstance(value, dict):
+        return _is_resolved_participant_object(value)
+    return False
+
+
+def _value_references_action(value: Any, action_name: str, *, seen_step_actions: dict[str, str]) -> bool:
+    ref = _single_ref(value)
+    if ref is None:
+        return False
+    root, _field_path = ref
+    return seen_step_actions.get(root, "") == action_name
+
+
+def _is_resolved_participant_object(value: dict[str, Any]) -> bool:
+    return _has_value(value.get("contact_id")) or _has_value(value.get("group_id"))
+
+
+def _validate_final_contract(final: Any) -> list[AIPlanValidationError]:
+    if not isinstance(final, dict):
+        return [
+            AIPlanValidationError(
+                code="PLAN_SCHEMA_INVALID",
+                message="final must be an object",
+                field="final",
+            )
+        ]
+    executable_fields = sorted(field for field in EXECUTABLE_FINAL_FIELDS if field in final)
+    if not executable_fields:
+        return []
+    return [
+        AIPlanValidationError(
+            code="PLAN_SCHEMA_INVALID",
+            message=f"final must not contain executable action fields: {', '.join(executable_fields)}",
+            field="final",
+        )
+    ]
 
 
 def _ref_roots(value: Any) -> set[str]:

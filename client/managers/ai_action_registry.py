@@ -225,6 +225,7 @@ class AtomicActionRegistry:
                 prompt_notes=(
                     "queries 必须来自用户明确表达的对象名称。",
                     "allow_multiple=false 表示该动作需要单一目标，命中多个候选时由系统澄清。",
+                    "中文表达“我和 X”“我跟 X”“与 X”中的 X 是联系人或会话对象，应放入 queries。",
                 ),
             )
         )
@@ -247,6 +248,8 @@ class AtomicActionRegistry:
                 prompt_notes=(
                     "用于用户询问历史、回顾、总结或查找已存在内容。",
                     "time_scope.type 可表达 all_history 等结构化范围；question 保留用户问题。",
+                    "用户输入中出现联系人、群名或对话对象时，先使用 contact.resolve；participants 引用 contact.resolve 的 contacts 或 groups 输出，不直接把自然语言名称写入 participants，也不要只把名称留在 question 或 keywords。",
+                    "未限定具体时间窗口的历史回顾问题，time_scope.type 使用 all_history。",
                 ),
             )
         )
@@ -266,7 +269,12 @@ class AtomicActionRegistry:
                 estimated_input_tokens=2048,
                 estimated_output_tokens=512,
                 prompt_purpose="把 memory.search 的结构化结果压缩为面向用户问题的回答摘要。",
-                prompt_notes=("source 应引用上游检索结果，不直接引用用户自然语言。",),
+                planner_required_predecessors=("memory.search",),
+                prompt_notes=(
+                    "source 应引用上游检索结果，不直接引用用户自然语言。",
+                    "当用户目标是回答、总结或解释检索到的历史内容时，memory.search 之后应接 memory.summarize；只有用户明确只要原始列表或原始记录时才把检索结果作为 final。",
+                    "历史回顾问题默认需要自然语言回答，不是返回原始列表；除非用户明确要求列表或原始记录，否则必须在 search 后使用 memory.summarize。",
+                ),
             )
         )
         self._register(

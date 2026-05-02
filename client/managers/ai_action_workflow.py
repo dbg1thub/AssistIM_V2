@@ -183,8 +183,8 @@ class ContactAliasResolver:
 class AIActionPlanner:
     """Optional model-backed planner that returns atomic JSON action plans."""
 
-    PLANNER_SCHEMA_VERSION = "atomic_steps_v1"
-    PLANNER_PROMPT_VERSION = "atomic_steps_prompt_v7"
+    PLANNER_SCHEMA_VERSION = "atomic_steps_v2"
+    PLANNER_PROMPT_VERSION = "atomic_steps_prompt_v14"
     PLAN_OUTPUT_VERSION = 1
 
     PROMPT_NEW_ACTION = "new_action"
@@ -205,6 +205,23 @@ class AIActionPlanner:
         "required": ["id", "action", "depends_on", "args"],
         "additionalProperties": False,
     }
+    FINAL_SCHEMA: dict[str, Any] = {
+        "type": "object",
+        "properties": {
+            "type": {},
+            "source": {},
+            "sources": {},
+            "status": {},
+            "text": {},
+            "result": {},
+            "summary": {},
+            "reason": {},
+            "error": {},
+            "message": {},
+            "details": {},
+        },
+        "additionalProperties": False,
+    }
     NEW_ACTION_SCHEMA: dict[str, Any] = {
         "type": "object",
         "properties": {
@@ -215,7 +232,7 @@ class AIActionPlanner:
                 "type": "array",
                 "items": ACTION_STEP_SCHEMA,
             },
-            "final": {"type": "object"},
+            "final": FINAL_SCHEMA,
         },
         "required": ["is_action", "goal", "risk", "steps", "final"],
         "additionalProperties": False,
@@ -228,7 +245,7 @@ class AIActionPlanner:
             "risk": {"type": "string", "enum": ["low", "medium", "high"]},
             "control": {"type": "object"},
             "steps": {"type": "array", "items": ACTION_STEP_SCHEMA},
-            "final": {"type": "object"},
+            "final": FINAL_SCHEMA,
         },
         "required": ["is_action", "goal", "risk", "steps", "final"],
         "additionalProperties": False,
@@ -335,7 +352,9 @@ class AIActionPlanner:
             priority=4,
             system_prompt=(
                 self._system_prompt(prompt_kind, action_contract=self._action_contract_prompt)
-                + "\n你现在处于 plan 修正模式：不要重新解释用户意图，只修正 step id、depends_on、$ 引用、action 名称和 args 字段。"
+                + "\n你现在处于 plan 修正模式：不要重新解释用户意图，只修正结构错误。"
+                "可以修正 step id、depends_on、$ 引用、action 名称、args 字段和 final 引用。"
+                "如果 final 中包含 action、args 或 depends_on，表示可执行动作放错位置：把该 action 移到 steps，final 改为引用对应 step 输出。"
             ),
             messages=[{"role": "user", "content": repair_prompt}],
             metadata={
@@ -448,7 +467,7 @@ class AIActionPlanner:
             common
             + "你的职责是判断用户是否需要 AssistIM 应用数据或本地应用能力，若是则拆成原子 steps。\n"
             "如果用户只是普通问答、写作、翻译或代码分析，输出 is_action=false 且 steps=[]。\n"
-            "只有需要执行、确认、取消或补充高风险应用操作时，才输出 action plan。\n"
+            "只有需要读取或操作 AssistIM 本地数据、调用已注册应用能力、确认或取消 pending 操作时，才输出 action plan。\n"
             "规划规则：\n"
             "- 每个 step.id 必须唯一，使用简短稳定名称即可，不要求固定命名。\n"
             "所有 $ 引用的根名称必须等于已存在 step.id；不要生成 %step_0 这类临时 id。\n"
@@ -456,6 +475,8 @@ class AIActionPlanner:
             "- 读取类任务不需要确认；写操作必须先生成 preview 并经过 user.confirm，确认后才能执行写 action。\n"
             "- 只有用户明确要求发送、添加、发布、删除或修改时，才允许规划写 action。\n"
             "- 多个对象默认表示多对象读取或操作，不是歧义；只有单个名称对应多个本地实体时才由系统澄清。\n"
+            "- 涉及联系人、群名或会话对象的读取任务，必须先解析对象，并把解析结果传给后续读取 action 的 participants；不要把名称字符串直接放到 participants，也不要只把名称留在 question 或 keywords。\n"
+            "- 需要向用户回答检索到的内容时，先检索再总结；final 不直接指向 memory.search，除非用户明确只要原始列表或原始记录。\n"
             "- 严格使用已注册 action、输入字段和输出字段；不要发明 action、字段或不存在的上游输出。\n"
             "- 如果用户请求的应用能力不能完全用已注册 action 完成，输出 is_action=false 且 steps=[]；不要发明 action，也不要用相近 action 代替。\n"
             "- 根据 action 用途和输入/输出契约自行组合 plan，不要按固定示例补齐计划。\n"

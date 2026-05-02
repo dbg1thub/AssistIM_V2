@@ -49,6 +49,8 @@ class AIPlanNormalizer:
         steps = self._ensure_reference_dependencies(steps)
         steps = self._canonicalize_send_chain_refs(steps)
         steps = self._canonicalize_single_target_send_contact_resolve(steps)
+        final = dict(plan.final or {"type": "answer"})
+        steps, final = self._ensure_memory_summarize_for_search_answer(steps, final=final, user_text=user_text)
         steps = self._ensure_reference_dependencies(steps)
         steps = self._ensure_write_confirmation(steps)
         if self._has_confirmation_without_write(steps):
@@ -63,9 +65,49 @@ class AIPlanNormalizer:
             goal=plan.goal or _clip(user_text, 80),
             risk=_plan_risk(steps, plan.risk),
             steps=tuple(steps),
-            final=dict(plan.final or {"type": "answer"}),
+            final=final,
             control=dict(plan.control or {}),
         )
+
+    @staticmethod
+    def _ensure_memory_summarize_for_search_answer(
+        steps: list[AIActionStep],
+        *,
+        final: dict,
+        user_text: str,
+    ) -> tuple[list[AIActionStep], dict]:
+        if any(step.action == "memory.summarize" for step in steps):
+            return steps, final
+        search_steps = [step for step in steps if step.action == "memory.search"]
+        if not search_steps:
+            return steps, final
+
+        existing_ids = {step.id for step in steps}
+        if len(search_steps) == 1:
+            search_step = search_steps[0]
+            summarize_id = _unique_step_id(f"summarize_{search_step.id}", existing_ids)
+            depends_on = (search_step.id,)
+            source: object = f"${search_step.id}"
+            question = str(search_step.args.get("question") or user_text or "").strip()
+        else:
+            summarize_id = _unique_step_id("summarize_memory", existing_ids)
+            depends_on = tuple(step.id for step in search_steps)
+            source = {step.id: f"${step.id}" for step in search_steps}
+            question = str(user_text or "").strip()
+
+        summarize_step = AIActionStep(
+            id=summarize_id,
+            action="memory.summarize",
+            depends_on=depends_on,
+            args={
+                "source": source,
+                "question": question,
+                "style": "summary",
+            },
+            display_text=_display_text("memory.summarize"),
+            explanation="历史检索结果需要整理成自然语言回答。",
+        )
+        return [*steps, summarize_step], {"type": "answer", "source": f"${summarize_id}"}
 
     def _ensure_write_confirmation(self, steps: list[AIActionStep]) -> list[AIActionStep]:
         output: list[AIActionStep] = []
@@ -436,6 +478,16 @@ def _has_value(value: object) -> bool:
 def _default_step_id(action: str, index: int) -> str:
     base = str(action or "step").replace(".", "_").replace("-", "_").strip("_") or "step"
     return f"{base}_{index}"
+
+
+def _unique_step_id(base: str, existing_ids: set[str]) -> str:
+    normalized = str(base or "step").strip() or "step"
+    if normalized not in existing_ids:
+        return normalized
+    index = 2
+    while f"{normalized}_{index}" in existing_ids:
+        index += 1
+    return f"{normalized}_{index}"
 
 
 def _display_text(action: str) -> str:

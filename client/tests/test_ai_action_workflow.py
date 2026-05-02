@@ -1146,6 +1146,29 @@ def test_ai_action_planner_prompt_documents_atomic_action_arg_contracts_without_
     assert "用户原始问题" not in system_prompt
 
 
+def test_ai_action_planner_prompt_documents_memory_planning_contracts_without_case_templates() -> None:
+    system_prompt = AIActionPlanner._system_prompt(AIActionPlanner.PROMPT_NEW_ACTION)
+
+    assert "用户输入中出现联系人、群名或对话对象" in system_prompt
+    assert "participants 引用 contact.resolve" in system_prompt
+    assert "不直接把自然语言名称写入 participants" in system_prompt
+    assert "未限定具体时间窗口的历史回顾问题" in system_prompt
+    assert "time_scope.type 使用 all_history" in system_prompt
+    assert "memory.search 之后应接 memory.summarize" in system_prompt
+    assert "只要原始列表或原始记录时才把检索结果作为 final" in system_prompt
+    assert "涉及联系人、群名或会话对象的读取任务，必须先解析对象" in system_prompt
+    assert "中文表达“我和 X”“我跟 X”“与 X”中的 X 是联系人或会话对象" in system_prompt
+    assert "不要把名称字符串直接放到 participants" in system_prompt
+    assert "不要只把名称留在 question 或 keywords" in system_prompt
+    assert "需要向用户回答检索到的内容时，先检索再总结" in system_prompt
+    assert "历史回顾问题默认需要自然语言回答，不是返回原始列表" in system_prompt
+    assert "final 不直接指向 memory.search" in system_prompt
+    assert "读取或操作 AssistIM 本地数据" in system_prompt
+    assert "只有需要执行、确认、取消或补充高风险应用操作时" not in system_prompt
+    assert "test2" not in system_prompt
+    assert "test3" not in system_prompt
+
+
 def test_ai_action_planner_prompt_documents_write_dependency_contracts_without_fixed_ids() -> None:
     system_prompt = AIActionPlanner._system_prompt(AIActionPlanner.PROMPT_NEW_ACTION)
 
@@ -1183,6 +1206,12 @@ def test_ai_action_planner_schema_uses_atomic_steps_or_control_not_legacy_slots(
     assert "action" not in control_schema["properties"]
     assert "slots" not in control_schema["properties"]
     assert "missing_slots" not in control_schema["properties"]
+    final_schema = new_schema["properties"]["final"]
+    assert final_schema["additionalProperties"] is False
+    assert "source" in final_schema["properties"]
+    assert "action" not in final_schema["properties"]
+    assert "args" not in final_schema["properties"]
+    assert "depends_on" not in final_schema["properties"]
 
 
 def test_ai_action_planner_schema_restricts_step_actions_to_registered_names() -> None:
@@ -1531,6 +1560,44 @@ def test_ai_plan_normalizer_keeps_read_contact_resolve_allow_multiple_true() -> 
     assert resolve.args["allow_multiple"] is True
 
 
+def test_ai_plan_normalizer_adds_memory_summarize_for_search_answer() -> None:
+    normalizer = AIPlanNormalizer()
+    plan = AIActionPlan(
+        is_action=True,
+        goal="检索历史聊天记录",
+        risk="low",
+        steps=(
+            AIActionStep(
+                id="resolve_test3",
+                action="contact.resolve",
+                args={"queries": ["test3"], "allow_multiple": False},
+            ),
+            AIActionStep(
+                id="search_test3_history",
+                action="memory.search",
+                depends_on=("resolve_test3",),
+                args={
+                    "participants": ["$resolve_test3.contacts[0]"],
+                    "participant_match": "direct_only",
+                    "time_scope": {"type": "all_history"},
+                    "question": "我和 test3 之前聊过什么？",
+                },
+            ),
+        ),
+        final={"result": {"type": "list", "content": "检索到的历史记录列表"}},
+    )
+
+    normalized = normalizer.normalize(plan, user_text="我和 test3 之前聊过什么？")
+
+    assert [step.action for step in normalized.steps] == ["contact.resolve", "memory.search", "memory.summarize"]
+    summarize = normalized.steps[-1]
+    assert summarize.id == "summarize_search_test3_history"
+    assert summarize.depends_on == ("search_test3_history",)
+    assert summarize.args["source"] == "$search_test3_history"
+    assert summarize.args["question"] == "我和 test3 之前聊过什么？"
+    assert normalized.final == {"type": "answer", "source": "$summarize_search_test3_history"}
+
+
 def test_ai_plan_validator_rejects_unresolved_step_reference() -> None:
     registry = AtomicActionRegistry(
         contact_resolver=ContactAliasResolver(db=_FakeContactDatabase([])),
@@ -1607,6 +1674,124 @@ def test_ai_plan_validator_rejects_duplicate_step_id_unknown_action_and_bad_part
     assert "PLAN_SCHEMA_INVALID" in codes
     assert "ACTION_NOT_FOUND" in codes
     assert "ARG_SCHEMA_INVALID" in codes
+
+
+def test_ai_plan_validator_rejects_literal_memory_search_participant_names_from_planner() -> None:
+    registry = AtomicActionRegistry(
+        contact_resolver=ContactAliasResolver(db=_FakeContactDatabase([])),
+        memory_manager=_FakeActionMemoryManager(),
+    )
+    validator = AIPlanValidator(registry=registry)
+    plan = AIActionPlan(
+        is_action=True,
+        goal="查询历史",
+        risk="low",
+        steps=(
+            AIActionStep(
+                id="search_memory",
+                action="memory.search",
+                args={
+                    "participants": ["test2"],
+                    "participant_match": "any",
+                    "time_scope": {"type": "all_history"},
+                    "question": "我和 test2 上次语音里说了什么",
+                },
+            ),
+        ),
+        final={"type": "answer", "source": "$search_memory"},
+    )
+
+    result = validator.validate(plan)
+    messages = result.repair_messages()
+
+    assert result.allowed is False
+    assert any(error.code == "PLANNER_CONTRACT_INVALID" and error.field == "participants" for error in result.errors)
+    assert any("memory.search.participants must reference contact.resolve output" in message for message in messages)
+
+
+def test_ai_plan_validator_rejects_executable_action_fields_inside_final() -> None:
+    registry = AtomicActionRegistry(
+        contact_resolver=ContactAliasResolver(db=_FakeContactDatabase([])),
+        memory_manager=_FakeActionMemoryManager(),
+    )
+    validator = AIPlanValidator(registry=registry)
+    plan = AIActionPlan(
+        is_action=True,
+        goal="查询历史",
+        risk="low",
+        steps=(
+            AIActionStep(
+                id="search_memory",
+                action="memory.search",
+                args={
+                    "participants": [],
+                    "participant_match": "any",
+                    "time_scope": {"type": "all_history"},
+                    "question": "查历史",
+                },
+            ),
+        ),
+        final={
+            "action": "memory.summarize",
+            "depends_on": ["search_memory"],
+            "args": {"source": "$search_memory"},
+        },
+    )
+
+    result = validator.validate(plan)
+    messages = result.repair_messages()
+
+    assert result.allowed is False
+    assert any(error.code == "PLAN_SCHEMA_INVALID" and error.field == "final" for error in result.errors)
+    assert any("final must not contain executable action fields" in message for message in messages)
+
+
+def test_ai_action_planner_repair_prompt_moves_final_action_fields_into_steps() -> None:
+    class _CaptureTaskManager:
+        def __init__(self) -> None:
+            self.requests = []
+
+        async def run_once(self, request):
+            self.requests.append(request)
+            return SimpleNamespace(
+                content='{"is_action": false, "goal": "noop", "risk": "low", "steps": [], "final": {}}',
+                provider="fake",
+                model="fake",
+            )
+
+    task_manager = _CaptureTaskManager()
+    planner = AIActionPlanner(task_manager=task_manager)
+    invalid_plan = AIActionPlan(
+        is_action=True,
+        goal="查询历史",
+        risk="low",
+        steps=(
+            AIActionStep(
+                id="search_memory",
+                action="memory.search",
+                args={"question": "查历史", "time_scope": {"type": "all_history"}},
+            ),
+        ),
+        final={
+            "action": "memory.summarize",
+            "depends_on": ["search_memory"],
+            "args": {"source": "$search_memory"},
+        },
+    )
+
+    asyncio.run(
+        planner.repair_plan(
+            "查历史",
+            invalid_plan=invalid_plan,
+            validation_errors=("PLAN_SCHEMA_INVALID: field=final: final must not contain executable action fields",),
+        )
+    )
+
+    assert len(task_manager.requests) == 1
+    request = task_manager.requests[0]
+    assert "把该 action 移到 steps" in request.system_prompt
+    assert "final 改为引用对应 step 输出" in request.system_prompt
+    assert "final must not contain executable action fields" in request.messages[0]["content"]
 
 
 def test_ai_plan_validator_rejects_send_args_that_reference_confirmation_outputs() -> None:
