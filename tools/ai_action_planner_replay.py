@@ -13,7 +13,7 @@ from typing import Any, Mapping, Sequence
 
 from client.managers.ai_action_normalizer import AIPlanNormalizer
 from client.managers.ai_action_optimizer import AIPlanOptimizer
-from client.managers.ai_action_registry import AtomicActionRegistry
+from client.managers.ai_action_registry import AtomicActionRegistry, build_default_action_names
 from client.managers.ai_action_types import AIActionPlan
 from client.managers.ai_action_validator import AIPlanValidationResult, AIPlanValidator
 from client.managers.ai_action_workflow import AIActionPlanner
@@ -71,6 +71,7 @@ def build_planner_request(case: PromptBenchmarkCase):
     from client.services.ai_service import AIPrivacyScope, AIRequest, AITaskType
 
     prompt_kind = AIActionPlanner.PROMPT_NEW_ACTION
+    registered_action_names = build_default_action_names()
     system_prompt = AIActionPlanner._system_prompt(prompt_kind)
     user_prompt = AIActionPlanner._user_prompt(case.user_input, prompt_kind=prompt_kind)
     return AIRequest(
@@ -80,7 +81,13 @@ def build_planner_request(case: PromptBenchmarkCase):
         stream=False,
         temperature=0.0,
         max_tokens=1024,
-        response_format={"type": "json_object", "schema": AIActionPlanner.NEW_ACTION_SCHEMA},
+        response_format={
+            "type": "json_object",
+            "schema": AIActionPlanner.build_schema_for_prompt_kind(
+                prompt_kind,
+                registered_action_names=registered_action_names,
+            ),
+        },
         priority=4,
         system_prompt=system_prompt,
         messages=[{"role": "user", "content": user_prompt}],

@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Sequence
 
 from client.managers.ai_action_registry import AtomicActionRegistry
-from client.managers.ai_action_types import AIActionPlan, AIActionStep
+from client.managers.ai_action_types import AIActionPlan, AIActionStep, AtomicActionSpec
 
 
 VALID_PARTICIPANT_MATCHES = {"any", "all", "direct_only", "group_only"}
@@ -63,15 +63,17 @@ class AIPlanValidator:
             errors.append(_error("PLAN_SCHEMA_INVALID", "risk must be low, medium, or high", field="risk"))
 
         seen_ids: set[str] = set()
+        seen_step_actions: dict[str, str] = {}
         for index, step in enumerate(plan.steps, start=1):
             step_id = str(step.id or "").strip()
             action = str(step.action or "").strip()
+            spec = self._registry.get(action)
             if not step_id:
                 errors.append(_error("PLAN_SCHEMA_INVALID", "step id is required", step=step, field="id"))
                 step_id = f"step_{index}"
             if step_id in seen_ids:
                 errors.append(_error("PLAN_SCHEMA_INVALID", "step id must be unique", step=step, field="id"))
-            if not action or self._registry.get(action) is None:
+            if not action or spec is None:
                 errors.append(_error("ACTION_NOT_FOUND", "action is not registered", step=step, field="action"))
 
             depends_on = tuple(str(dep or "").strip() for dep in step.depends_on if str(dep or "").strip())
@@ -96,7 +98,10 @@ class AIPlanValidator:
                         )
                     )
             errors.extend(_validate_step_args(step, self._registry))
+            if spec is not None:
+                errors.extend(_validate_planner_contract(step, spec, registry=self._registry, seen_step_actions=seen_step_actions))
             seen_ids.add(step_id)
+            seen_step_actions[step_id] = action
 
         for ref in _ref_roots(plan.final):
             if ref not in seen_ids:
@@ -174,6 +179,118 @@ def _validate_step_args(step: AIActionStep, registry: AtomicActionRegistry) -> l
     return errors
 
 
+def _validate_planner_contract(
+    step: AIActionStep,
+    spec: AtomicActionSpec,
+    *,
+    registry: AtomicActionRegistry,
+    seen_step_actions: dict[str, str],
+) -> list[AIPlanValidationError]:
+    errors: list[AIPlanValidationError] = []
+    args = dict(step.args or {})
+
+    for required_action in spec.planner_required_predecessors:
+        action = str(required_action or "").strip()
+        if action and action not in seen_step_actions.values():
+            errors.append(
+                _error(
+                    "PLANNER_CONTRACT_INVALID",
+                    f"{step.action} requires predecessor action {action}",
+                    step=step,
+                    field="depends_on",
+                )
+            )
+
+    for field_name, expected_refs in spec.planner_required_arg_refs.items():
+        if not _value_references_expected_action_field(
+            args.get(field_name),
+            expected_refs,
+            registry=registry,
+            seen_step_actions=seen_step_actions,
+        ):
+            errors.append(
+                _error(
+                    "PLANNER_CONTRACT_INVALID",
+                    f"{step.action}.{field_name} must reference {_format_expected_refs(expected_refs)}",
+                    step=step,
+                    field=field_name,
+                )
+            )
+
+    for field_name in spec.planner_forbidden_literal_args:
+        value = args.get(field_name)
+        if _has_value(value) and not _is_single_ref_string(value):
+            errors.append(
+                _error(
+                    "PLANNER_CONTRACT_INVALID",
+                    f"{step.action}.{field_name} must be a step output reference",
+                    step=step,
+                    field=field_name,
+                )
+            )
+
+    for arg_name, required_fields in spec.planner_required_object_args.items():
+        value = args.get(arg_name)
+        if not isinstance(value, dict):
+            errors.append(
+                _error(
+                    "PLANNER_CONTRACT_INVALID",
+                    f"{step.action}.{arg_name} must be an object",
+                    step=step,
+                    field=arg_name,
+                )
+            )
+            continue
+        for field_name in required_fields:
+            if not _has_value(value.get(field_name)):
+                errors.append(
+                    _error(
+                        "PLANNER_CONTRACT_INVALID",
+                        f"{step.action}.{arg_name}.{field_name} is required",
+                        step=step,
+                        field=f"{arg_name}.{field_name}",
+                    )
+                )
+
+    for arg_name, field_refs in spec.planner_required_object_arg_refs.items():
+        value = args.get(arg_name)
+        if not isinstance(value, dict):
+            continue
+        for field_name, expected_refs in field_refs.items():
+            if not _value_references_expected_action_field(
+                value.get(field_name),
+                expected_refs,
+                registry=registry,
+                seen_step_actions=seen_step_actions,
+            ):
+                errors.append(
+                    _error(
+                        "PLANNER_CONTRACT_INVALID",
+                        f"{step.action}.{arg_name}.{field_name} must reference {_format_expected_refs(expected_refs)}",
+                        step=step,
+                        field=f"{arg_name}.{field_name}",
+                    )
+                )
+
+    for arg_name, field_values in spec.planner_required_object_arg_contains.items():
+        value = args.get(arg_name)
+        if not isinstance(value, dict):
+            continue
+        for field_name, expected_values in field_values.items():
+            text = str(value.get(field_name) or "")
+            if not any(str(expected or "") in text for expected in expected_values):
+                errors.append(
+                    _error(
+                        "PLANNER_CONTRACT_INVALID",
+                        f"{step.action}.{arg_name}.{field_name} must contain one of {', '.join(expected_values)}",
+                        step=step,
+                        field=f"{arg_name}.{field_name}",
+                    )
+                )
+
+    return errors
+
+
 def _ref_roots(value: Any) -> set[str]:
     if isinstance(value, str):
         if not value.startswith("$"):
@@ -194,6 +311,62 @@ def _ref_roots(value: Any) -> set[str]:
             roots.update(_ref_roots(item))
         return roots
     return set()
+
+
+def _value_references_expected_action_field(
+    value: Any,
+    expected_refs: Sequence[str],
+    *,
+    registry: AtomicActionRegistry,
+    seen_step_actions: dict[str, str],
+) -> bool:
+    ref = _single_ref(value)
+    if ref is None:
+        return False
+    root, field_path = ref
+    actual_action = seen_step_actions.get(root, "")
+    for expected_ref in expected_refs:
+        expected = _split_expected_ref(expected_ref, registry=registry)
+        if expected is None:
+            continue
+        expected_action, expected_field_path = expected
+        if actual_action == expected_action and field_path == expected_field_path:
+            return True
+    return False
+
+
+def _split_expected_ref(expected_ref: str, *, registry: AtomicActionRegistry) -> tuple[str, str] | None:
+    text = str(expected_ref or "").strip()
+    if not text:
+        return None
+    for action_name in sorted(registry.names(), key=len, reverse=True):
+        if text == action_name:
+            return action_name, ""
+        prefix = f"{action_name}."
+        if text.startswith(prefix):
+            return action_name, text[len(prefix) :]
+    return None
+
+
+def _single_ref(value: Any) -> tuple[str, str] | None:
+    if not isinstance(value, str) or not value.startswith("$"):
+        return None
+    body = value[1:]
+    stops = [index for index in (body.find("."), body.find("[")) if index >= 0]
+    split_at = min(stops) if stops else len(body)
+    root = body[:split_at]
+    if not root:
+        return None
+    field_path = body[split_at + 1 :] if split_at < len(body) and body[split_at] == "." else body[split_at:]
+    return root, field_path
+
+
+def _is_single_ref_string(value: Any) -> bool:
+    return _single_ref(value) is not None
+
+
+def _format_expected_refs(expected_refs: Sequence[str]) -> str:
+    return " or ".join(str(item or "").strip() for item in expected_refs if str(item or "").strip())
 
 
 def _has_value(value: object) -> bool:

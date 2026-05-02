@@ -1019,6 +1019,76 @@ class _InvalidWriteBadReadTailRepairWouldSendPlanner(_InvalidWriteUnknownActionR
         )
 
 
+class _InvalidSendRefsThenFixedPlanner:
+    def __init__(self) -> None:
+        self.plan_calls = 0
+        self.repair_calls: list[dict] = []
+
+    async def plan(self, *args, **kwargs):
+        self.plan_calls += 1
+        user_text = str(args[0] if args else "").strip()
+        del kwargs
+        return _send_plan_with_confirm_refs(user_text=user_text)
+
+    async def repair_plan(self, user_text: str, *, invalid_plan, validation_errors, pending_state=None, strict: bool = True):
+        self.repair_calls.append(
+            {
+                "user_text": user_text,
+                "pending": pending_state is not None,
+                "strict": strict,
+                "errors": list(validation_errors),
+                "invalid_plan": invalid_plan,
+            }
+        )
+        return _atomic_send_plan(user_text=user_text)
+
+
+def _send_plan_with_confirm_refs(*, user_text: str = "帮我给张三发我晚点到") -> AIActionPlan:
+    return AIActionPlan(
+        is_action=True,
+        goal=user_text,
+        risk="high",
+        steps=(
+            AIActionStep(
+                id="resolve_target",
+                action="contact.resolve",
+                args={"queries": ["张三"], "allow_multiple": False},
+            ),
+            AIActionStep(
+                id="draft_message",
+                action="message.draft",
+                depends_on=("resolve_target",),
+                args={"target": "$resolve_target.contacts[0]", "content": "我晚点到"},
+            ),
+            AIActionStep(
+                id="confirm_send",
+                action="user.confirm",
+                depends_on=("draft_message",),
+                args={
+                    "risk": "high",
+                    "preview": {
+                        "operation": "发送消息",
+                        "target": "$draft_message.target",
+                        "content": "$draft_message.content",
+                    },
+                },
+            ),
+            AIActionStep(
+                id="send_message",
+                action="message.send",
+                depends_on=("confirm_send",),
+                args={
+                    "target": "$confirm_send.target_entity",
+                    "content": "$confirm_send.content",
+                    "preview": "$confirm_send.preview",
+                    "idempotency_key": "$draft_message.idempotency_key",
+                },
+            ),
+        ),
+        final={"type": "answer", "source": "$send_message.text"},
+    )
+
+
 def test_ai_action_planner_prompt_uses_registry_action_contracts() -> None:
     registry = AtomicActionRegistry(
         contact_resolver=_FakeContactDatabase([]),
@@ -1055,6 +1125,8 @@ def test_ai_action_planner_prompt_keeps_generic_planning_rules_without_case_temp
     assert "写操作必须先生成 preview 并经过 user.confirm" in system_prompt
     assert "只输出完成用户目标的最小必要 steps" in system_prompt
     assert "不会被后续 step 或 final 使用" in system_prompt
+    assert "不能完全用已注册 action 完成" in system_prompt
+    assert "不要发明 action" in system_prompt
     assert "不要按固定示例补齐计划" in user_prompt
     assert "用户输入：我和test3昨天聊了什么？" in user_prompt
 
@@ -1111,6 +1183,25 @@ def test_ai_action_planner_schema_uses_atomic_steps_or_control_not_legacy_slots(
     assert "action" not in control_schema["properties"]
     assert "slots" not in control_schema["properties"]
     assert "missing_slots" not in control_schema["properties"]
+
+
+def test_ai_action_planner_schema_restricts_step_actions_to_registered_names() -> None:
+    registry = AtomicActionRegistry(
+        contact_resolver=_FakeContactDatabase([]),
+        memory_manager=_FakeActionMemoryManager(),
+    )
+    planner = AIActionPlanner(
+        action_contract_prompt=registry.prompt_contract(),
+        registered_action_names=registry.names(),
+    )
+
+    schema = planner._schema_for_prompt_kind(AIActionPlanner.PROMPT_NEW_ACTION)
+    action_schema = schema["properties"]["steps"]["items"]["properties"]["action"]
+
+    assert action_schema["enum"] == list(registry.names())
+    assert "contact.resolve" in action_schema["enum"]
+    assert "message.send" in action_schema["enum"]
+    assert "delete_server_database" not in action_schema["enum"]
 
 
 def test_ai_action_planner_uses_state_specific_prompt_templates() -> None:
@@ -1343,6 +1434,22 @@ def test_ai_plan_validator_rejects_duplicate_step_id_unknown_action_and_bad_part
     assert "PLAN_SCHEMA_INVALID" in codes
     assert "ACTION_NOT_FOUND" in codes
     assert "ARG_SCHEMA_INVALID" in codes
+
+
+def test_ai_plan_validator_rejects_send_args_that_reference_confirmation_outputs() -> None:
+    registry = AtomicActionRegistry(
+        contact_resolver=ContactAliasResolver(db=_FakeContactDatabase([])),
+        memory_manager=_FakeActionMemoryManager(),
+    )
+    validator = AIPlanValidator(registry=registry)
+
+    result = validator.validate(_send_plan_with_confirm_refs())
+
+    assert result.allowed is False
+    messages = result.repair_messages()
+    assert any("PLANNER_CONTRACT_INVALID" in message for message in messages)
+    assert any("message.send.target must reference message.draft.target_entity" in message for message in messages)
+    assert any("message.send.content must reference message.draft.content" in message for message in messages)
 
 
 def test_ai_action_workflow_rejects_confirmation_without_write_step(tmp_path, monkeypatch) -> None:
@@ -3223,6 +3330,49 @@ def test_ai_action_workflow_does_not_repair_invalid_side_effect_plan(tmp_path, m
             assert planner.repair_calls == []
             assert message_sender.calls == []
             assert await store.latest_pending_plan("thread-1") is None
+        finally:
+            await db.close()
+
+    asyncio.run(scenario())
+
+
+def test_ai_action_workflow_repairs_registered_send_reference_contract_errors(tmp_path, monkeypatch) -> None:
+    async def scenario() -> None:
+        db = Database(str(tmp_path / "actions.db"))
+        monkeypatch.setattr(action_store_module, "get_database", lambda: db)
+        store = AIActionStore()
+        planner = _InvalidSendRefsThenFixedPlanner()
+        contact_db = _FakeContactDatabase(
+            [
+                {
+                    "id": "user-1",
+                    "display_name": "张三",
+                    "username": "zhangsan",
+                    "nickname": "张三",
+                    "remark": "张三",
+                    "assistim_id": "zhangsan",
+                }
+            ]
+        )
+        workflow = AIActionWorkflow(
+            action_store=store,
+            planner=planner,
+            contact_alias_resolver=ContactAliasResolver(db=contact_db),
+            message_sender=_FakeActionMessageSender(),
+        )
+        try:
+            result = await workflow.handle_user_turn(thread_id="thread-1", text="帮我给张三发我晚点到")
+
+            assert result.handled is True
+            assert result.message_extra["ai_action"]["state"] == "waiting_confirmation"
+            assert planner.plan_calls == 1
+            assert len(planner.repair_calls) == 1
+            assert any("PLANNER_CONTRACT_INVALID" in error for error in planner.repair_calls[0]["errors"])
+            record = await store.latest_pending_plan("thread-1")
+            assert record is not None
+            send = next(step for step in record.plan_json["steps"] if step["action"] == "message.send")
+            assert send["args"]["target"] == "$draft_message.target_entity"
+            assert send["args"]["content"] == "$draft_message.content"
         finally:
             await db.close()
 

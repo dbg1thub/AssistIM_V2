@@ -40,6 +40,10 @@ def test_build_planner_request_reuses_atomic_planner_prompt_and_schema() -> None
     assert request.priority == 4
     assert request.response_format["type"] == "json_object"
     assert request.response_format["schema"]["required"] == ["is_action", "goal", "risk", "steps", "final"]
+    action_enum = request.response_format["schema"]["properties"]["steps"]["items"]["properties"]["action"]["enum"]
+    assert "contact.resolve" in action_enum
+    assert "message.send" in action_enum
+    assert "delete_server_database" not in action_enum
     assert request.metadata["source"] == "ai_action_planner_corpus"
     assert request.metadata["planner_schema_version"] == AIActionPlanner.PLANNER_SCHEMA_VERSION
     assert request.metadata["planner_prompt_version"] == AIActionPlanner.PLANNER_PROMPT_VERSION

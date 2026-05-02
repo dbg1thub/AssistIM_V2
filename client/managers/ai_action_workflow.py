@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import inspect
 import re
@@ -16,7 +17,7 @@ from client.managers.ai_action_memory_summarizer import AIActionMemorySummarizer
 from client.managers.ai_action_normalizer import AIPlanNormalizer
 from client.managers.ai_action_optimizer import AIPlanOptimizer
 from client.managers.ai_action_permission_policy import AIPermissionPolicy, AIPermissionScope
-from client.managers.ai_action_registry import AtomicActionRegistry, build_default_action_prompt_contract
+from client.managers.ai_action_registry import AtomicActionRegistry, build_default_action_names, build_default_action_prompt_contract
 from client.managers.ai_action_resource_manager import AIResourceManager
 from client.managers.ai_action_types import (
     AIActionEvent,
@@ -37,6 +38,15 @@ from client.storage.database import Database, get_database
 logger = logging.get_logger(__name__)
 
 AIActionTurnProgressCallback = Callable[[AIActionTurnResult], Any]
+
+
+def _normalize_registered_action_names(action_names: Sequence[str] | None) -> tuple[str, ...]:
+    names: list[str] = []
+    for raw_name in tuple(action_names or ()):
+        name = str(raw_name or "").strip()
+        if name and name not in names:
+            names.append(name)
+    return tuple(names)
 
 
 @dataclass(frozen=True, slots=True)
@@ -174,7 +184,7 @@ class AIActionPlanner:
     """Optional model-backed planner that returns atomic JSON action plans."""
 
     PLANNER_SCHEMA_VERSION = "atomic_steps_v1"
-    PLANNER_PROMPT_VERSION = "atomic_steps_prompt_v6"
+    PLANNER_PROMPT_VERSION = "atomic_steps_prompt_v7"
     PLAN_OUTPUT_VERSION = 1
 
     PROMPT_NEW_ACTION = "new_action"
@@ -225,9 +235,18 @@ class AIActionPlanner:
     }
     PENDING_CLARIFICATION_SCHEMA: dict[str, Any] = PENDING_CONTROL_SCHEMA
 
-    def __init__(self, task_manager: Any | None = None, *, action_contract_prompt: str | None = None) -> None:
+    def __init__(
+        self,
+        task_manager: Any | None = None,
+        *,
+        action_contract_prompt: str | None = None,
+        registered_action_names: Sequence[str] | None = None,
+    ) -> None:
         self._task_manager = task_manager
         self._action_contract_prompt = str(action_contract_prompt or "").strip()
+        self._registered_action_names = _normalize_registered_action_names(
+            registered_action_names if registered_action_names is not None else build_default_action_names()
+        )
 
     async def plan(
         self,
@@ -350,16 +369,58 @@ class AIActionPlanner:
             return AIActionPlanner.PROMPT_PENDING_CLARIFICATION
         return AIActionPlanner.PROMPT_PENDING_CLARIFICATION
 
-    @staticmethod
-    def _schema_for_prompt_kind(prompt_kind: str) -> dict[str, Any]:
+    def _schema_for_prompt_kind(self, prompt_kind: str) -> dict[str, Any]:
+        return self.build_schema_for_prompt_kind(
+            prompt_kind,
+            registered_action_names=self._registered_action_names,
+        )
+
+    @classmethod
+    def build_schema_for_prompt_kind(
+        cls,
+        prompt_kind: str,
+        *,
+        registered_action_names: Sequence[str] | None = None,
+    ) -> dict[str, Any]:
         if prompt_kind in {
             AIActionPlanner.PROMPT_PENDING_CONFIRMATION,
             AIActionPlanner.PROMPT_PENDING_CONTACT_SELECTION,
         }:
-            return AIActionPlanner.PENDING_CONTROL_SCHEMA
+            return cls._schema_with_action_enum(
+                cls.PENDING_CONTROL_SCHEMA,
+                registered_action_names=registered_action_names,
+            )
         if prompt_kind == AIActionPlanner.PROMPT_PENDING_CLARIFICATION:
-            return AIActionPlanner.PENDING_CLARIFICATION_SCHEMA
-        return AIActionPlanner.NEW_ACTION_SCHEMA
+            return cls._schema_with_action_enum(
+                cls.PENDING_CLARIFICATION_SCHEMA,
+                registered_action_names=registered_action_names,
+            )
+        return cls._schema_with_action_enum(
+            cls.NEW_ACTION_SCHEMA,
+            registered_action_names=registered_action_names,
+        )
+
+    @classmethod
+    def _schema_with_action_enum(
+        cls,
+        schema: dict[str, Any],
+        *,
+        registered_action_names: Sequence[str] | None = None,
+    ) -> dict[str, Any]:
+        schema_copy = copy.deepcopy(schema)
+        names = _normalize_registered_action_names(registered_action_names)
+        if not names:
+            return schema_copy
+        steps = schema_copy.get("properties", {}).get("steps")
+        if not isinstance(steps, dict):
+            return schema_copy
+        items = steps.get("items")
+        if not isinstance(items, dict):
+            return schema_copy
+        action_schema = items.get("properties", {}).get("action")
+        if isinstance(action_schema, dict):
+            action_schema["enum"] = list(names)
+        return schema_copy
 
     @staticmethod
     def _system_prompt(prompt_kind: str = PROMPT_NEW_ACTION, *, action_contract: str | None = None) -> str:
@@ -396,6 +457,7 @@ class AIActionPlanner:
             "- 只有用户明确要求发送、添加、发布、删除或修改时，才允许规划写 action。\n"
             "- 多个对象默认表示多对象读取或操作，不是歧义；只有单个名称对应多个本地实体时才由系统澄清。\n"
             "- 严格使用已注册 action、输入字段和输出字段；不要发明 action、字段或不存在的上游输出。\n"
+            "- 如果用户请求的应用能力不能完全用已注册 action 完成，输出 is_action=false 且 steps=[]；不要发明 action，也不要用相近 action 代替。\n"
             "- 根据 action 用途和输入/输出契约自行组合 plan，不要按固定示例补齐计划。\n"
             "- 只输出完成用户目标的最小必要 steps；不要加入可选、辅助、预热或候选步骤。\n"
             "- 如果某个 step 的输出不会被后续 step 或 final 使用，说明它不在当前目标的执行链路中，不要输出。\n"
@@ -497,6 +559,7 @@ class AIActionWorkflow:
         self._planner = planner or AIActionPlanner(
             task_manager=resolved_task_manager,
             action_contract_prompt=self._registry.prompt_contract(),
+            registered_action_names=self._registry.names(),
         )
         self._resource_manager = AIResourceManager(registry=self._registry)
         self._validator = AIPlanValidator(registry=self._registry)
@@ -845,9 +908,13 @@ class AIActionWorkflow:
     def _plan_repair_skip_reason(self, plan: AIActionPlan, validation: AIPlanValidationResult) -> str:
         if any(error.code == "ACTION_NOT_FOUND" for error in validation.errors):
             return "unknown_action"
-        if self._plan_has_side_effect(plan):
+        if self._plan_has_side_effect(plan) and not self._validation_is_planner_contract_only(validation):
             return "side_effect_plan"
         return ""
+
+    @staticmethod
+    def _validation_is_planner_contract_only(validation: AIPlanValidationResult) -> bool:
+        return bool(validation.errors) and all(error.code == "PLANNER_CONTRACT_INVALID" for error in validation.errors)
 
     def _plan_has_side_effect(self, plan: AIActionPlan) -> bool:
         for step in tuple(plan.steps or ()):

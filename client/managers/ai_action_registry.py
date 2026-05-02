@@ -799,6 +799,12 @@ def build_default_action_prompt_contract() -> str:
     return AtomicActionRegistry(contact_resolver=_PromptContractContactResolver()).prompt_contract()
 
 
+def build_default_action_names() -> tuple[str, ...]:
+    """Build the canonical registered action name list without touching runtime services."""
+
+    return AtomicActionRegistry(contact_resolver=_PromptContractContactResolver()).names()
+
+
 def _format_action_prompt_contract(spec: AtomicActionSpec) -> str:
     parts = [
         f"- {spec.name}: kind={spec.kind}",
