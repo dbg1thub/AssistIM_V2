@@ -565,6 +565,8 @@ class AIActionWorkflow:
         memory_manager: Any | None = None,
         memory_summarizer: Any | None = None,
         message_sender: Any | None = None,
+        server_reader: Any | None = None,
+        server_writer: Any | None = None,
         permission_scope_provider: Callable[[], AIPermissionScope | None] | None = None,
     ) -> None:
         self._store = action_store or get_ai_action_store()
@@ -574,13 +576,21 @@ class AIActionWorkflow:
         self._contact_alias_resolver = contact_alias_resolver or ContactAliasResolver()
         self._message_sender = message_sender
         self._permission_scope_provider = permission_scope_provider
-        self._normalizer = AIPlanNormalizer()
         self._optimizer = AIPlanOptimizer()
         self._registry = AtomicActionRegistry(
             contact_resolver=self._contact_alias_resolver,
             memory_manager=memory_manager,
             memory_summarizer=memory_summarizer or AIActionMemorySummarizer(task_manager=resolved_task_manager),
             message_sender=self._message_sender,
+            server_reader=server_reader,
+            server_writer=server_writer,
+        )
+        self._normalizer = AIPlanNormalizer(
+            write_action_names=(
+                name
+                for name in self._registry.names()
+                if (spec := self._registry.get(name)) is not None and spec.kind == "write"
+            )
         )
         self._planner = planner or AIActionPlanner(
             task_manager=resolved_task_manager,
@@ -1079,10 +1089,13 @@ class AIActionWorkflow:
                 message_extra={"ai_action": self._extra(pending)},
             )
         outputs = dict(pending.step_outputs or {})
+        risk = waiting.get("risk")
+        preview = waiting.get("preview")
         outputs[pending.current_step_id] = {
             "confirmed": True,
-            "risk": waiting.get("risk"),
-            "preview": waiting.get("preview"),
+            "risk": risk,
+            "preview": preview,
+            "preview_fingerprint": confirmation_preview_fingerprint(preview, risk=risk),
             "confirmed_at": time.time(),
         }
         mark_step_output_current(outputs, step_id=pending.current_step_id, plan_version=pending.plan_version)

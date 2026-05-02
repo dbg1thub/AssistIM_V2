@@ -659,7 +659,7 @@ class AIActionExecutor:
             raise ValueError("ARG_SCHEMA_INVALID")
         if _json_size(args) > spec.max_input_bytes:
             raise ValueError("PAYLOAD_TOO_LARGE: input")
-        target_count = _guardrail_target_count(args)
+        target_count = _guardrail_target_count(args, spec.target_arg_names)
         if target_count > 1 and not spec.allow_batch:
             raise ValueError("BATCH_NOT_ALLOWED")
         if spec.max_targets is not None and target_count > spec.max_targets:
@@ -808,8 +808,8 @@ def _is_retryable_spec(spec: AtomicActionSpec) -> bool:
     return spec.kind == "read" and not spec.allow_side_effect
 
 
-def _guardrail_target_count(args: dict[str, Any]) -> int:
-    for key in ("targets", "target", "queries", "participants"):
+def _guardrail_target_count(args: dict[str, Any], target_arg_names: tuple[str, ...] = ()) -> int:
+    for key in (*tuple(target_arg_names or ()), "targets", "target", "queries", "participants"):
         if key in args:
             return _guardrail_value_count(args.get(key))
     return 0

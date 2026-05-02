@@ -16,6 +16,8 @@ from client.managers.ai_action_io_models import (
     ContactResolveOutput,
     EmptyReadInput,
     FileListInput,
+    FriendRequestDecisionInput,
+    FriendRequestSendInput,
     GroupGetInput,
     MemorySearchInput,
     MemorySearchOutput,
@@ -29,6 +31,7 @@ from client.managers.ai_action_io_models import (
     MomentListInput,
     PagedReadInput,
     ServerReadOutput,
+    ServerWriteOutput,
     SessionGetInput,
     UserConfirmInput,
     UserGetInput,
@@ -62,6 +65,14 @@ class _ServerReadRoute:
     param_args: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True, slots=True)
+class _ServerWriteRoute:
+    method: str
+    path: str
+    path_args: tuple[str, ...] = ()
+    body_args: tuple[str, ...] = ()
+
+
 SERVER_READ_ACTION_ROUTES: dict[str, _ServerReadRoute] = {
     "user.search": _ServerReadRoute("/users/search", param_args=("keyword", "page", "size")),
     "user.list": _ServerReadRoute("/users", param_args=("page", "size")),
@@ -79,6 +90,12 @@ SERVER_READ_ACTION_ROUTES: dict[str, _ServerReadRoute] = {
     "moment.get": _ServerReadRoute("/moments/{moment_id}", path_args=("moment_id",)),
 }
 
+SERVER_WRITE_ACTION_ROUTES: dict[str, _ServerWriteRoute] = {
+    "friend.request.send": _ServerWriteRoute("POST", "/friends/requests", body_args=("target_user_id", "message")),
+    "friend.request.accept": _ServerWriteRoute("POST", "/friends/requests/{request_id}/accept", path_args=("request_id",)),
+    "friend.request.reject": _ServerWriteRoute("POST", "/friends/requests/{request_id}/reject", path_args=("request_id",)),
+}
+
 SERVER_READ_ACTION_LABELS: dict[str, str] = {
     "user.search": "用户搜索",
     "user.list": "用户列表查询",
@@ -94,6 +111,12 @@ SERVER_READ_ACTION_LABELS: dict[str, str] = {
     "file.list": "文件列表查询",
     "moment.list": "朋友圈列表查询",
     "moment.get": "朋友圈详情查询",
+}
+
+SERVER_WRITE_ACTION_LABELS: dict[str, str] = {
+    "friend.request.send": "发送好友申请",
+    "friend.request.accept": "接受好友申请",
+    "friend.request.reject": "拒绝好友申请",
 }
 
 
@@ -118,6 +141,42 @@ class AIActionServerReadClient:
             if args.get(name) not in (None, "")
         }
         return await self._http().get(path, params=params or None)
+
+    def _http(self) -> Any:
+        if self._http_client is None:
+            from client.network.http_client import get_http_client
+
+            self._http_client = get_http_client()
+        return self._http_client
+
+
+class AIActionServerWriteClient:
+    """Write bridge from confirmed AI actions to existing /api/v1 REST endpoints."""
+
+    def __init__(self, http_client: Any | None = None) -> None:
+        self._http_client = http_client
+
+    async def execute(self, action_name: str, args: dict[str, Any]) -> Any:
+        route = SERVER_WRITE_ACTION_ROUTES.get(str(action_name or "").strip())
+        if route is None:
+            raise ActionHandlerError(f"ACTION_NOT_FOUND: {action_name}")
+        path_args = {
+            name: _url_path_arg(args.get(name))
+            for name in route.path_args
+        }
+        path = route.path.format(**path_args) if path_args else route.path
+        body = {
+            name: args.get(name)
+            for name in route.body_args
+            if args.get(name) not in (None, "")
+        }
+        idempotency_key = str(args.get("idempotency_key") or "").strip()
+        headers = {"X-Idempotency-Key": idempotency_key} if idempotency_key else None
+        if route.method.upper() == "POST":
+            if route.body_args:
+                return await self._http().post(path, json=body, headers=headers)
+            return await self._http().post(path, headers=headers)
+        raise ActionHandlerError(f"ACTION_NOT_FOUND: {action_name}")
 
     def _http(self) -> Any:
         if self._http_client is None:
@@ -272,6 +331,7 @@ class AtomicActionRegistry:
         memory_summarizer: Any | None = None,
         message_sender: Any | None = None,
         server_reader: Any | None = None,
+        server_writer: Any | None = None,
         action_cache: AIActionCache | None = None,
     ) -> None:
         self._contact_resolver = contact_resolver
@@ -279,6 +339,7 @@ class AtomicActionRegistry:
         self._memory_summarizer = memory_summarizer
         self._message_sender = message_sender
         self._server_reader = server_reader
+        self._server_writer = server_writer
         self._action_cache = action_cache or AIActionCache()
         self._actions: dict[str, AtomicActionSpec] = {}
         self._register_defaults()
@@ -326,9 +387,57 @@ class AtomicActionRegistry:
             )
         )
 
+    def _register_server_write(
+        self,
+        name: str,
+        *,
+        input_model: type[Any],
+        prompt_purpose: str,
+        prompt_notes: tuple[str, ...] = (),
+        planner_required_predecessors: tuple[str, ...] = ("user.confirm",),
+        planner_required_arg_refs: dict[str, tuple[str, ...]] | None = None,
+    ) -> None:
+        self._register(
+            AtomicActionSpec(
+                name=name,
+                kind="write",
+                risk_level="high",
+                handler=self._server_write_handler(name),
+                input_model=input_model,
+                output_model=ServerWriteOutput,
+                enabled=True,
+                requires_confirmation=True,
+                max_targets=1,
+                allow_batch=False,
+                require_preview=True,
+                allow_side_effect=True,
+                idempotency_required=True,
+                allow_auto_resume_after_confirm=False,
+                max_output_json_bytes=65536,
+                timeout_ms=15000,
+                max_retries=0,
+                target_arg_names=("target_user_id", "request_id"),
+                prompt_purpose=prompt_purpose,
+                prompt_notes=prompt_notes,
+                planner_required_predecessors=planner_required_predecessors,
+                planner_required_arg_refs={
+                    "preview": ("user.confirm.preview",),
+                    "idempotency_key": ("user.confirm.preview_fingerprint",),
+                    **dict(planner_required_arg_refs or {}),
+                },
+                planner_forbidden_literal_args=("preview", "idempotency_key"),
+            )
+        )
+
     def _server_read_handler(self, action_name: str):
         async def handler(args: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
             return await self._server_read(action_name, args, context)
+
+        return handler
+
+    def _server_write_handler(self, action_name: str):
+        async def handler(args: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
+            return await self._server_write(action_name, args, context)
 
         return handler
 
@@ -383,6 +492,29 @@ class AtomicActionRegistry:
             input_model=EmptyReadInput,
             prompt_purpose="查看当前账号的好友申请列表。",
             max_result_items=100,
+        )
+        self._register_server_write(
+            "friend.request.send",
+            input_model=FriendRequestSendInput,
+            prompt_purpose="通过现有好友申请接口向目标用户发送好友申请。",
+            prompt_notes=(
+                "target_user_id 应来自 user.search 的用户结果；不要把用户名或昵称直接作为 target_user_id。",
+                "message 是好友申请附言，可为空。",
+            ),
+            planner_required_predecessors=("user.search", "user.confirm"),
+            planner_required_arg_refs={"target_user_id": ("user.search.items[0].id",)},
+        )
+        self._register_server_write(
+            "friend.request.accept",
+            input_model=FriendRequestDecisionInput,
+            prompt_purpose="接受一条已存在的好友申请。",
+            prompt_notes=("request_id 必须来自用户明确提供的申请 ID，或来自 friend.request.list 的结果。",),
+        )
+        self._register_server_write(
+            "friend.request.reject",
+            input_model=FriendRequestDecisionInput,
+            prompt_purpose="拒绝一条已存在的好友申请。",
+            prompt_notes=("request_id 必须来自用户明确提供的申请 ID，或来自 friend.request.list 的结果。",),
         )
         self._register_server_read(
             "group.list",
@@ -521,15 +653,7 @@ class AtomicActionRegistry:
                     "确认动作必须服务于明确写操作，不能用于普通读取任务。",
                     "preview 不能是字符串引用，operation、target、content 必须放在 preview 对象内部。",
                 ),
-                planner_required_predecessors=("message.draft",),
                 planner_required_object_args={"preview": ("operation", "target", "content")},
-                planner_required_object_arg_refs={
-                    "preview": {
-                        "target": ("message.draft.target",),
-                        "content": ("message.draft.content",),
-                    }
-                },
-                planner_required_object_arg_contains={"preview": {"operation": ("发送",)}},
             )
         )
         self._register(
@@ -591,10 +715,24 @@ class AtomicActionRegistry:
         payload = await execute(action_name, dict(args or {}))
         return _normalize_server_read_output(action_name, payload)
 
+    async def _server_write(self, action_name: str, args: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
+        del context
+        writer = self._require_server_writer()
+        execute = getattr(writer, "execute", None)
+        if not callable(execute):
+            raise RuntimeError("SERVER_WRITE_UNAVAILABLE")
+        payload = await execute(action_name, dict(args or {}))
+        return _normalize_server_write_output(action_name, payload)
+
     def _require_server_reader(self) -> Any:
         if self._server_reader is None:
             self._server_reader = AIActionServerReadClient()
         return self._server_reader
+
+    def _require_server_writer(self) -> Any:
+        if self._server_writer is None:
+            self._server_writer = AIActionServerWriteClient()
+        return self._server_writer
 
     async def _memory_search(self, args: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
         del context
@@ -1075,6 +1213,33 @@ def _server_read_count(payload: dict[str, Any], *, fallback: int) -> int:
 def _server_read_text(action_name: str, result_count: int) -> str:
     label = SERVER_READ_ACTION_LABELS.get(str(action_name or "").strip(), "服务端只读查询")
     return f"已完成{label}，返回 {max(0, int(result_count or 0))} 条结果。"
+
+
+def _normalize_server_write_output(action_name: str, payload: Any) -> dict[str, Any]:
+    action = str(action_name or "").strip()
+    status = _server_write_status(payload)
+    return {
+        "action": action,
+        "status": status,
+        "text": _server_write_text(action, status),
+        "result": payload,
+        "error_code": "" if status == "done" else status.upper(),
+    }
+
+
+def _server_write_status(payload: Any) -> str:
+    if isinstance(payload, dict):
+        explicit = str(payload.get("status") or "").strip().lower()
+        if explicit in {"failed", "error"}:
+            return "failed"
+    return "done"
+
+
+def _server_write_text(action_name: str, status: str) -> str:
+    label = SERVER_WRITE_ACTION_LABELS.get(str(action_name or "").strip(), "服务端写操作")
+    if status == "done":
+        return f"已完成{label}。"
+    return f"{label}未完成。"
 
 
 def _url_path_arg(value: Any) -> str:

@@ -533,6 +533,8 @@ def test_load_default_golden_corpus_has_core_action_and_chat_cases() -> None:
     assert any(case.expectation.is_action is False for case in cases)
     assert any("memory.search" in case.expectation.required_actions for case in cases)
     assert any("message.send" in case.expectation.required_actions for case in cases)
+    assert any("friend.request.send" in case.expectation.required_actions for case in cases)
+    assert any("friend.request.reject" in case.expectation.required_actions for case in cases)
     assert any(
         case.expectation.required_action_sequence == ("contact.resolve", "memory.search", "memory.summarize")
         for case in cases

@@ -76,6 +76,27 @@ class ServerReadOutput(_ActionOutputModel):
     result: Any = None
 
 
+class FriendRequestSendInput(_StrictInputModel):
+    target_user_id: str = Field(min_length=1)
+    message: str | None = Field(default=None, max_length=500)
+    preview: dict[str, Any]
+    idempotency_key: str = Field(min_length=1)
+
+
+class FriendRequestDecisionInput(_StrictInputModel):
+    request_id: str = Field(min_length=1)
+    preview: dict[str, Any]
+    idempotency_key: str = Field(min_length=1)
+
+
+class ServerWriteOutput(_ActionOutputModel):
+    action: str
+    status: str
+    text: str = ""
+    result: Any = None
+    error_code: str = ""
+
+
 class MemorySearchInput(_StrictInputModel):
     participants: list[Any] = Field(default_factory=list)
     participant_match: Literal["any", "all", "direct_only", "group_only"] = "any"

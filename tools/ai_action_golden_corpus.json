@@ -184,6 +184,78 @@
       }
     },
     {
+      "name": "friend_request_send",
+      "user_input": "加 test3 好友，附言你好",
+      "tags": ["action", "server_write", "friend_request", "confirmation"],
+      "router_expected_route": "action_candidate",
+      "expectation": {
+        "is_action": true,
+        "risk": "high",
+        "required_actions": ["user.search", "user.confirm", "friend.request.send"],
+        "required_action_sequence": ["user.search", "user.confirm", "friend.request.send"],
+        "requires_confirmation": true,
+        "expected_content": "你好",
+        "required_step_args": [
+          {
+            "action": "user.search",
+            "path": "keyword",
+            "equals": "test3"
+          },
+          {
+            "action": "friend.request.send",
+            "path": "target_user_id",
+            "starts_with": "$",
+            "ref_action": "user.search"
+          },
+          {
+            "action": "friend.request.send",
+            "path": "preview",
+            "starts_with": "$",
+            "ref_action": "user.confirm"
+          },
+          {
+            "action": "friend.request.send",
+            "path": "idempotency_key",
+            "starts_with": "$",
+            "ref_action": "user.confirm"
+          }
+        ]
+      }
+    },
+    {
+      "name": "friend_request_reject",
+      "user_input": "拒绝 req-1 这个好友申请",
+      "tags": ["action", "server_write", "friend_request", "confirmation"],
+      "router_expected_route": "action_candidate",
+      "expectation": {
+        "is_action": true,
+        "risk": "high",
+        "required_actions": ["user.confirm", "friend.request.reject"],
+        "required_action_sequence": ["user.confirm", "friend.request.reject"],
+        "requires_confirmation": true,
+        "expected_content": "req-1",
+        "required_step_args": [
+          {
+            "action": "friend.request.reject",
+            "path": "request_id",
+            "equals": "req-1"
+          },
+          {
+            "action": "friend.request.reject",
+            "path": "preview",
+            "starts_with": "$",
+            "ref_action": "user.confirm"
+          },
+          {
+            "action": "friend.request.reject",
+            "path": "idempotency_key",
+            "starts_with": "$",
+            "ref_action": "user.confirm"
+          }
+        ]
+      }
+    },
+    {
       "name": "cancel_without_pending",
       "user_input": "取消",
       "tags": ["control", "non_action"],

@@ -2,13 +2,23 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
+
 from client.managers.ai_action_types import AIActionPlan, AIActionStep
+
+
+DEFAULT_WRITE_ACTION_NAMES = frozenset({"message.send"})
 
 
 class AIPlanNormalizer:
     """Deterministic cleanup for atomic action plans."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, write_action_names: Iterable[str] | None = None) -> None:
+        self._write_action_names = frozenset(
+            name
+            for name in (write_action_names or DEFAULT_WRITE_ACTION_NAMES)
+            if str(name or "").strip()
+        )
         self._last_rejection_reason = ""
 
     @property
@@ -64,7 +74,7 @@ class AIPlanNormalizer:
         return AIActionPlan(
             is_action=True,
             goal=plan.goal or _clip(user_text, 80),
-            risk=_plan_risk(steps, plan.risk),
+            risk=_plan_risk(steps, plan.risk, write_action_names=self._write_action_names),
             steps=tuple(steps),
             final=final,
             control=dict(plan.control or {}),
@@ -280,12 +290,11 @@ class AIPlanNormalizer:
             seen_ids.add(step.id)
         return output
 
-    @staticmethod
-    def _has_confirmation_without_write(steps: list[AIActionStep]) -> bool:
+    def _has_confirmation_without_write(self, steps: list[AIActionStep]) -> bool:
         write_step_ids = {
             step.id
             for step in steps
-            if step.action in {"message.send", "friend.add", "moment.publish"}
+            if step.action in self._write_action_names
         }
         if not write_step_ids:
             return any(step.action == "user.confirm" for step in steps)
@@ -568,8 +577,14 @@ def _explanation(action: str) -> str:
     }.get(str(action or ""), "执行模型计划中的原子动作。")
 
 
-def _plan_risk(steps: list[AIActionStep], fallback: str) -> str:
-    if any(step.action == "message.send" for step in steps):
+def _plan_risk(
+    steps: list[AIActionStep],
+    fallback: str,
+    *,
+    write_action_names: Iterable[str] | None = None,
+) -> str:
+    writes = frozenset(write_action_names or DEFAULT_WRITE_ACTION_NAMES)
+    if any(step.action in writes for step in steps):
         return "high"
     normalized = str(fallback or "low").strip().lower()
     return normalized if normalized in {"low", "medium", "high"} else "low"

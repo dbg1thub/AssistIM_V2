@@ -12,7 +12,7 @@ from client.managers.ai_action_normalizer import AIPlanNormalizer
 from client.managers.ai_action_optimizer import AIPlanOptimizer
 from client.managers.ai_action_permission_policy import AIPermissionPolicy, AIPermissionScope, PermissionDecision
 from client.managers.ai_action_resource_manager import AIResourceManager, ResourceBudget
-from client.managers.ai_action_registry import AIActionMessageSender, AtomicActionRegistry
+from client.managers.ai_action_registry import AIActionMessageSender, AIActionServerWriteClient, AtomicActionRegistry
 from client.managers.ai_action_types import AIActionPlan, AIActionStep, AtomicActionSpec
 from client.managers.ai_action_validator import AIPlanValidator
 from client.managers.ai_action_workflow import (
@@ -122,6 +122,25 @@ class _FakeServerReadClient:
     async def execute(self, action_name: str, args: dict) -> dict:
         self.calls.append({"action": action_name, "args": dict(args or {})})
         return dict(self.responses.get(str(action_name or ""), {}))
+
+
+class _FakeServerWriteClient:
+    def __init__(self, responses: dict[str, dict] | None = None) -> None:
+        self.responses = {str(key): dict(value or {}) for key, value in dict(responses or {}).items()}
+        self.calls: list[dict] = []
+
+    async def execute(self, action_name: str, args: dict) -> dict:
+        self.calls.append({"action": action_name, "args": dict(args or {})})
+        return dict(self.responses.get(str(action_name or ""), {"changed": True}))
+
+
+class _FakeServerWriteHTTPClient:
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    async def post(self, path: str, **kwargs) -> dict:
+        self.calls.append({"method": "POST", "path": path, **dict(kwargs or {})})
+        return {"ok": True}
 
 
 class _FakeDirectMessageManager:
@@ -1212,13 +1231,17 @@ def test_ai_action_planner_prompt_documents_write_dependency_contracts_without_f
     assert "字段引用 target<-contact.resolve.contacts[0]" in system_prompt
     assert "不允许直接使用自然语言对象作为 target" in system_prompt
     assert "preview 必须是对象" in system_prompt
-    assert "对象字段 preview.operation 包含 发送" in system_prompt
-    assert "对象字段 preview.target<-message.draft.target" in system_prompt
-    assert "对象字段 preview.content<-message.draft.content" in system_prompt
+    assert "对象字段 preview.operation" in system_prompt
+    assert "对象字段 preview.target" in system_prompt
+    assert "对象字段 preview.content" in system_prompt
     assert "单目标写操作的联系人解析应设置 allow_multiple=false" in system_prompt
     assert "必须显式输出 allow_multiple=false" in system_prompt
     assert "preview 不能是字符串引用" in system_prompt
     assert "operation、target、content 必须放在 preview 对象内部" in system_prompt
+    assert "user.confirm: kind=read" in system_prompt
+    assert "对象字段 preview.operation 包含 发送" not in system_prompt
+    assert "对象字段 preview.target<-message.draft.target" not in system_prompt
+    assert "对象字段 preview.content<-message.draft.content" not in system_prompt
     assert "固定 step id" not in system_prompt
     assert "resolve_target" not in system_prompt
     assert "confirm_send" not in system_prompt
@@ -1955,7 +1978,10 @@ def test_ai_action_registry_exposes_memory_actions() -> None:
         "contact.resolve",
         "file.list",
         "friend.list",
+        "friend.request.accept",
         "friend.request.list",
+        "friend.request.reject",
+        "friend.request.send",
         "group.get",
         "group.list",
         "memory.search",
@@ -2012,6 +2038,35 @@ def test_ai_action_registry_exposes_first_server_read_actions() -> None:
         assert spec.output_model is not None
 
 
+def test_ai_action_registry_exposes_first_server_write_actions() -> None:
+    registry = AtomicActionRegistry(
+        contact_resolver=ContactAliasResolver(db=_FakeContactDatabase([])),
+        memory_manager=_FakeActionMemoryManager(),
+    )
+    expected = {
+        "friend.request.send",
+        "friend.request.accept",
+        "friend.request.reject",
+    }
+
+    assert expected <= set(registry.names())
+    for action_name in expected:
+        spec = registry.get(action_name)
+        assert spec is not None
+        assert spec.kind == "write"
+        assert spec.risk_level == "high"
+        assert spec.requires_confirmation is True
+        assert spec.allow_side_effect is True
+        assert spec.require_preview is True
+        assert spec.idempotency_required is True
+        assert spec.max_targets == 1
+        assert spec.allow_batch is False
+        assert spec.allow_auto_resume_after_confirm is False
+        assert spec.handler is not None
+        assert spec.input_model is not None
+        assert spec.output_model is not None
+
+
 def test_ai_action_registry_server_read_inputs_reject_unknown_fields() -> None:
     registry = AtomicActionRegistry(
         contact_resolver=ContactAliasResolver(db=_FakeContactDatabase([])),
@@ -2027,6 +2082,31 @@ def test_ai_action_registry_server_read_inputs_reject_unknown_fields() -> None:
         assert "unexpected" in str(exc)
     else:
         raise AssertionError("server read action input should reject unknown fields")
+
+
+def test_ai_action_registry_server_write_inputs_reject_unknown_fields() -> None:
+    registry = AtomicActionRegistry(
+        contact_resolver=ContactAliasResolver(db=_FakeContactDatabase([])),
+        memory_manager=_FakeActionMemoryManager(),
+    )
+    spec = registry.get("friend.request.send")
+    assert spec is not None
+    assert spec.input_model is not None
+
+    try:
+        spec.input_model.model_validate(
+            {
+                "target_user_id": "user-3",
+                "message": "你好",
+                "preview": {"operation": "发送好友申请", "target": "test3", "content": "你好"},
+                "idempotency_key": "idem-1",
+                "unexpected": True,
+            }
+        )
+    except Exception as exc:
+        assert "unexpected" in str(exc)
+    else:
+        raise AssertionError("server write action input should reject unknown fields")
 
 
 def test_ai_action_registry_server_read_action_calls_client_and_normalizes_result() -> None:
@@ -2058,6 +2138,251 @@ def test_ai_action_registry_server_read_action_calls_client_and_normalizes_resul
         assert output["items"] == [{"id": "user-1", "username": "test1"}]
         assert output["result_count"] == 1
         assert output["text"] == "已完成用户搜索，返回 1 条结果。"
+
+    asyncio.run(scenario())
+
+
+def test_ai_action_registry_server_write_action_calls_client_and_normalizes_result() -> None:
+    async def scenario() -> None:
+        writer = _FakeServerWriteClient(
+            {
+                "friend.request.send": {
+                    "request": {"request_id": "req-1", "status": "pending"},
+                    "mutation": {"action": "friend_request_created"},
+                }
+            }
+        )
+        registry = AtomicActionRegistry(
+            contact_resolver=ContactAliasResolver(db=_FakeContactDatabase([])),
+            memory_manager=_FakeActionMemoryManager(),
+            server_writer=writer,
+        )
+        spec = registry.get("friend.request.send")
+        assert spec is not None
+
+        output = await spec.handler(  # type: ignore[misc]
+            {
+                "target_user_id": "user-3",
+                "message": "你好",
+                "preview": {"operation": "发送好友申请", "target": "test3", "content": "你好"},
+                "idempotency_key": "idem-1",
+            },
+            {"step_id": "send_friend_request"},
+        )
+
+        assert writer.calls == [
+            {
+                "action": "friend.request.send",
+                "args": {
+                    "target_user_id": "user-3",
+                    "message": "你好",
+                    "preview": {"operation": "发送好友申请", "target": "test3", "content": "你好"},
+                    "idempotency_key": "idem-1",
+                },
+            }
+        ]
+        assert output["status"] == "done"
+        assert output["action"] == "friend.request.send"
+        assert output["result"]["request"]["request_id"] == "req-1"
+        assert output["text"] == "已完成发送好友申请。"
+
+    asyncio.run(scenario())
+
+
+def test_ai_action_server_write_client_maps_friend_request_routes() -> None:
+    async def scenario() -> None:
+        http = _FakeServerWriteHTTPClient()
+        client = AIActionServerWriteClient(http_client=http)
+
+        await client.execute(
+            "friend.request.send",
+            {
+                "target_user_id": "user-3",
+                "message": "你好",
+                "idempotency_key": "idem-send",
+            },
+        )
+        await client.execute(
+            "friend.request.accept",
+            {
+                "request_id": "req-1",
+                "idempotency_key": "idem-accept",
+            },
+        )
+        await client.execute(
+            "friend.request.reject",
+            {
+                "request_id": "req-2",
+                "idempotency_key": "idem-reject",
+            },
+        )
+
+        assert http.calls == [
+            {
+                "method": "POST",
+                "path": "/friends/requests",
+                "json": {"target_user_id": "user-3", "message": "你好"},
+                "headers": {"X-Idempotency-Key": "idem-send"},
+            },
+            {
+                "method": "POST",
+                "path": "/friends/requests/req-1/accept",
+                "headers": {"X-Idempotency-Key": "idem-accept"},
+            },
+            {
+                "method": "POST",
+                "path": "/friends/requests/req-2/reject",
+                "headers": {"X-Idempotency-Key": "idem-reject"},
+            },
+        ]
+
+    asyncio.run(scenario())
+
+
+def test_ai_action_workflow_waits_for_confirmation_before_friend_request_send(tmp_path, monkeypatch) -> None:
+    class FriendRequestPlanner:
+        async def plan(self, *args, **kwargs):
+            del args, kwargs
+            return AIActionPlan(
+                is_action=True,
+                goal="给 test3 发送好友申请",
+                risk="high",
+                steps=(
+                    AIActionStep(
+                        id="search_user",
+                        action="user.search",
+                        args={"keyword": "test3", "page": 1, "size": 10},
+                    ),
+                    AIActionStep(
+                        id="confirm_friend_request",
+                        action="user.confirm",
+                        depends_on=("search_user",),
+                        args={
+                            "risk": "high",
+                            "preview": {
+                                "operation": "发送好友申请",
+                                "target": "$search_user.items[0].username",
+                                "content": "你好",
+                            },
+                        },
+                    ),
+                    AIActionStep(
+                        id="send_friend_request",
+                        action="friend.request.send",
+                        depends_on=("search_user", "confirm_friend_request"),
+                        args={
+                            "target_user_id": "$search_user.items[0].id",
+                            "message": "你好",
+                            "preview": "$confirm_friend_request.preview",
+                            "idempotency_key": "$confirm_friend_request.preview_fingerprint",
+                        },
+                    ),
+                ),
+                final={"type": "answer", "source": "$send_friend_request.text"},
+            )
+
+    async def scenario() -> None:
+        db = Database(str(tmp_path / "actions.db"))
+        monkeypatch.setattr(action_store_module, "get_database", lambda: db)
+        store = AIActionStore()
+        reader = _FakeServerReadClient(
+            {"user.search": {"items": [{"id": "user-3", "username": "test3"}], "total": 1}}
+        )
+        writer = _FakeServerWriteClient(
+            {"friend.request.send": {"request": {"request_id": "req-1", "status": "pending"}}}
+        )
+        workflow = AIActionWorkflow(
+            action_store=store,
+            planner=FriendRequestPlanner(),
+            contact_alias_resolver=ContactAliasResolver(db=_FakeContactDatabase([])),
+            server_reader=reader,
+            server_writer=writer,
+        )
+        try:
+            result = await workflow.handle_user_turn(thread_id="thread-1", text="加 test3 好友，备注你好")
+            assert result.handled is True
+            assert result.message_extra["ai_action"]["state"] == "waiting_confirmation"
+            assert "确认要发送好友申请给test3" in result.response_text
+            assert writer.calls == []
+
+            confirmed = await workflow.handle_pending_control(thread_id="thread-1", control_type="confirm")
+            assert confirmed.handled is True
+            assert confirmed.message_extra["ai_action"]["state"] == "done"
+            assert confirmed.response_text == "已完成发送好友申请。"
+            assert writer.calls == [
+                {
+                    "action": "friend.request.send",
+                    "args": {
+                        "target_user_id": "user-3",
+                        "message": "你好",
+                        "preview": {"operation": "发送好友申请", "target": "test3", "content": "你好"},
+                        "idempotency_key": result.message_extra["ai_action"]["waiting"]["preview_fingerprint"],
+                    },
+                }
+            ]
+        finally:
+            await db.close()
+
+    asyncio.run(scenario())
+
+
+def test_ai_action_workflow_cancels_friend_request_without_server_write(tmp_path, monkeypatch) -> None:
+    class FriendRequestPlanner:
+        async def plan(self, *args, **kwargs):
+            del args, kwargs
+            return AIActionPlan(
+                is_action=True,
+                goal="拒绝好友申请",
+                risk="high",
+                steps=(
+                    AIActionStep(
+                        id="confirm_reject",
+                        action="user.confirm",
+                        args={
+                            "risk": "high",
+                            "preview": {
+                                "operation": "拒绝好友申请",
+                                "target": "req-1",
+                                "content": "拒绝好友申请 req-1",
+                            },
+                        },
+                    ),
+                    AIActionStep(
+                        id="reject_friend_request",
+                        action="friend.request.reject",
+                        depends_on=("confirm_reject",),
+                        args={
+                            "request_id": "req-1",
+                            "preview": "$confirm_reject.preview",
+                            "idempotency_key": "$confirm_reject.preview_fingerprint",
+                        },
+                    ),
+                ),
+                final={"type": "answer", "source": "$reject_friend_request.text"},
+            )
+
+    async def scenario() -> None:
+        db = Database(str(tmp_path / "actions.db"))
+        monkeypatch.setattr(action_store_module, "get_database", lambda: db)
+        store = AIActionStore()
+        writer = _FakeServerWriteClient()
+        workflow = AIActionWorkflow(
+            action_store=store,
+            planner=FriendRequestPlanner(),
+            contact_alias_resolver=ContactAliasResolver(db=_FakeContactDatabase([])),
+            server_writer=writer,
+        )
+        try:
+            result = await workflow.handle_user_turn(thread_id="thread-1", text="拒绝 req-1")
+            assert result.handled is True
+            assert result.message_extra["ai_action"]["state"] == "waiting_confirmation"
+
+            cancelled = await workflow.handle_pending_control(thread_id="thread-1", control_type="cancel")
+            assert cancelled.handled is True
+            assert cancelled.message_extra["ai_action"]["state"] == "cancelled"
+            assert writer.calls == []
+        finally:
+            await db.close()
 
     asyncio.run(scenario())
 
