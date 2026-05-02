@@ -59,6 +59,47 @@ def get_admin_dashboard(
     return success_response(snapshot)
 
 
+@router.get("/audit-logs")
+def list_admin_audit_logs(
+    actor_username: str = "",
+    action: str = "",
+    target_type: str = "",
+    target_id: str = "",
+    success: bool | None = None,
+    created_from: str = "",
+    created_to: str = "",
+    page: int = 1,
+    size: int = 20,
+    current_user: User = Depends(get_current_admin_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    """List admin operation audit logs."""
+    _ = current_user
+    payload = AdminAuditService(db).list_logs(
+        actor_username=actor_username,
+        action=action,
+        target_type=target_type,
+        target_id=target_id,
+        success=success,
+        created_from=created_from,
+        created_to=created_to,
+        page=page,
+        size=size,
+    )
+    return success_response(payload)
+
+
+@router.get("/audit-logs/{log_id}")
+def get_admin_audit_log(
+    log_id: str,
+    current_user: User = Depends(get_current_admin_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Return one admin operation audit log."""
+    _ = current_user
+    return success_response(AdminAuditService(db).get_log(log_id))
+
+
 @router.get("/users")
 def list_admin_users(
     keyword: str = "",
