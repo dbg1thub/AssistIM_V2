@@ -7,13 +7,18 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
 from client.core.config_backend import AIConfig, DEFAULT_AI_MODEL_ID, DEFAULT_AI_MODEL_PATH
-from client.services.local_gguf_runtime import LocalGGUFConfig, _candidate_cuda_toolkit_dependency_dirs
+from client.services.local_gguf_runtime import (
+    LocalGGUFConfig,
+    _candidate_cuda_toolkit_dependency_dirs,
+    _ensure_windows_runtime_dependency_dirs,
+)
 
 
 MODELS_DIR = Path(__file__).resolve().parents[1] / "resources" / "models"
@@ -428,6 +433,10 @@ def _resolve_gpu_layers(
 
 def _detect_runtime_gpu_offload_support() -> tuple[bool, str]:
     try:
+        _ensure_windows_runtime_dependency_dirs()
+    except Exception as exc:
+        return False, f"{type(exc).__name__}: {exc}"
+    try:
         import llama_cpp
     except Exception as exc:
         return False, f"{type(exc).__name__}: {exc}"
@@ -507,6 +516,7 @@ def _find_file_on_path(filename: str) -> Path | None:
         for raw_dir in str(os.getenv("PATH", "") or "").split(os.pathsep)
         if raw_dir
     ]
+    search_dirs.extend(_candidate_python_environment_dependency_dirs())
     search_dirs.extend(_candidate_cuda_toolkit_dependency_dirs())
     seen: set[str] = set()
     for directory in search_dirs:
@@ -521,6 +531,34 @@ def _find_file_on_path(filename: str) -> Path | None:
         if candidate.is_file():
             return candidate
     return None
+
+
+def _candidate_python_environment_dependency_dirs() -> list[Path]:
+    root_texts = [
+        str(getattr(sys, "prefix", "") or "").strip(),
+        str(os.getenv("VIRTUAL_ENV", "") or "").strip(),
+        str(os.getenv("CONDA_PREFIX", "") or "").strip(),
+        str(Path(getattr(sys, "executable", "")).resolve().parent if getattr(sys, "executable", "") else "").strip(),
+    ]
+    candidates: list[Path] = []
+    seen: set[str] = set()
+    for root_text in root_texts:
+        if not root_text:
+            continue
+        root = Path(root_text).expanduser()
+        for candidate in (root, root / "bin", root / "Library" / "bin", root / "DLLs"):
+            try:
+                resolved = candidate.resolve()
+            except OSError:
+                continue
+            if not resolved.is_dir():
+                continue
+            key = os.path.normcase(str(resolved))
+            if key in seen:
+                continue
+            seen.add(key)
+            candidates.append(resolved)
+    return candidates
 
 
 def _gpu_unavailable_reason(capability: LocalAICapabilityProfile) -> str:

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import builtins
 import json
+import sys
+from types import SimpleNamespace
 
 from client.core.config_backend import AIConfig
 from client.services import local_ai_selection as selection_module
@@ -411,6 +414,57 @@ def test_cuda_dependency_detection_finds_cuda_13_bin_x64(monkeypatch, tmp_path) 
         selection_module.detect_local_ai_capabilities.cache_clear()
 
     assert missing == ()
+
+
+def test_cuda_dependency_detection_finds_cuda_12_conda_env_bin(monkeypatch, tmp_path) -> None:
+    selection_module.detect_local_ai_capabilities.cache_clear()
+    conda_root = tmp_path / "envs" / "AssistIM"
+    conda_bin = conda_root / "bin"
+    conda_bin.mkdir(parents=True)
+    for filename in ("cudart64_12.dll", "cublas64_12.dll", "cublasLt64_12.dll"):
+        (conda_bin / filename).write_bytes(b"dll")
+    monkeypatch.setenv("PATH", "")
+    monkeypatch.setenv("CONDA_PREFIX", str(conda_root))
+    monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+    monkeypatch.setattr(
+        selection_module,
+        "_candidate_cuda_toolkit_dependency_dirs",
+        lambda: [],
+    )
+
+    try:
+        missing = selection_module._missing_cuda_dependencies()
+    finally:
+        selection_module.detect_local_ai_capabilities.cache_clear()
+
+    assert missing == ()
+
+
+def test_runtime_gpu_probe_adds_dependency_dirs_before_importing_llama_cpp(monkeypatch) -> None:
+    selection_module.detect_local_ai_capabilities.cache_clear()
+    calls: list[str] = []
+    fake_llama_cpp = SimpleNamespace(llama_supports_gpu_offload=lambda: True)
+    real_import = builtins.__import__
+
+    def fake_import(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == "llama_cpp":
+            if calls != ["ensure"]:
+                raise AssertionError("dependency dirs must be added before importing llama_cpp")
+            return fake_llama_cpp
+        return real_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.delitem(sys.modules, "llama_cpp", raising=False)
+    monkeypatch.setattr(selection_module, "_ensure_windows_runtime_dependency_dirs", lambda: calls.append("ensure"), raising=False)
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+
+    try:
+        supports, error = selection_module._detect_runtime_gpu_offload_support()
+    finally:
+        selection_module.detect_local_ai_capabilities.cache_clear()
+
+    assert supports is True
+    assert error == ""
+    assert calls == ["ensure"]
 
 
 def test_resolve_local_ai_selection_respects_user_disabled_gpu(monkeypatch, tmp_path) -> None:
