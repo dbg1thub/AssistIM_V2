@@ -76,7 +76,10 @@ class AIPlanNormalizer:
         final = dict(plan.final or {"type": "answer"})
         steps, final = self._canonicalize_unique_action_name_refs(steps, final)
         steps = self._normalize_args_against_input_contracts(steps)
+        steps = self._merge_non_executable_final_read_step_args(steps)
         steps = self._remove_non_executable_final_steps(steps)
+        steps = self._canonicalize_memory_search_args(steps, user_text=user_text)
+        steps = self._canonicalize_literal_memory_search_participants(steps)
         steps = self._ensure_reference_dependencies(steps)
         steps = self._canonicalize_send_chain_refs(steps)
         steps = self._canonicalize_planner_contract_refs(steps)
@@ -84,6 +87,7 @@ class AIPlanNormalizer:
         steps, final = self._ensure_memory_summarize_for_search_answer(steps, final=final, user_text=user_text)
         steps = self._ensure_reference_dependencies(steps)
         steps = self._remove_unreferenced_invalid_read_steps(steps, final=final)
+        steps = self._remove_dependency_only_read_steps(steps, final=final)
         steps = self._ensure_reference_dependencies(steps)
         steps = self._ensure_write_confirmation(steps)
         if self._has_confirmation_without_write(steps):
@@ -197,6 +201,144 @@ class AIPlanNormalizer:
             ):
                 continue
             output.append(step)
+        return output or steps
+
+    def _merge_non_executable_final_read_step_args(self, steps: list[AIActionStep]) -> list[AIActionStep]:
+        if len(steps) <= 1:
+            return steps
+        output: list[AIActionStep] = []
+        for step in steps:
+            if not (step.id == "final" and self._spec_kind(step.action) != "write"):
+                output.append(step)
+                continue
+            target_id = next((dep for dep in step.depends_on if dep), "")
+            if not target_id:
+                output.append(step)
+                continue
+            for index in range(len(output) - 1, -1, -1):
+                target = output[index]
+                if target.id != target_id or target.action != step.action:
+                    continue
+                output[index] = AIActionStep(
+                    id=target.id,
+                    action=target.action,
+                    depends_on=target.depends_on,
+                    args=_merge_non_executable_final_args(dict(target.args or {}), dict(step.args or {})),
+                    display_text=target.display_text,
+                    explanation=target.explanation,
+                    fallback=target.fallback,
+                )
+                break
+            output.append(step)
+        return output
+
+    @staticmethod
+    def _canonicalize_memory_search_args(steps: list[AIActionStep], *, user_text: str) -> list[AIActionStep]:
+        output: list[AIActionStep] = []
+        for step in steps:
+            if step.action != "memory.search":
+                output.append(step)
+                continue
+            args = dict(step.args or {})
+            if "keywords" in args:
+                args["keywords"] = list(_string_list_arg(args.get("keywords")))
+            if not isinstance(args.get("time_scope"), dict) or not args.get("time_scope"):
+                args["time_scope"] = {"type": "all_history"}
+            if not isinstance(args.get("question"), str) or not args.get("question", "").strip():
+                args["question"] = str(user_text or "").strip()
+            output.append(
+                AIActionStep(
+                    id=step.id,
+                    action=step.action,
+                    depends_on=step.depends_on,
+                    args=args,
+                    display_text=step.display_text,
+                    explanation=step.explanation,
+                    fallback=step.fallback,
+                )
+            )
+        return output
+
+    def _canonicalize_literal_memory_search_participants(self, steps: list[AIActionStep]) -> list[AIActionStep]:
+        if not self._action_specs or "contact.resolve" not in self._action_specs:
+            return steps
+        output: list[AIActionStep] = []
+        existing_ids = {step.id for step in steps}
+        for step in steps:
+            if step.action != "memory.search":
+                output.append(step)
+                continue
+            args = dict(step.args or {})
+            names = _literal_memory_participant_names(args.get("participants"))
+            if not names:
+                output.append(step)
+                continue
+            resolve_id = _unique_step_id(f"resolve_{step.id}_participants", existing_ids)
+            existing_ids.add(resolve_id)
+            output.append(
+                AIActionStep(
+                    id=resolve_id,
+                    action="contact.resolve",
+                    args={"queries": list(names[:5]), "allow_multiple": True},
+                    display_text=_display_text("contact.resolve"),
+                    explanation=_explanation("contact.resolve"),
+                )
+            )
+            args["participants"] = f"${resolve_id}.contacts"
+            output.append(
+                AIActionStep(
+                    id=step.id,
+                    action=step.action,
+                    depends_on=tuple(dict.fromkeys([*step.depends_on, resolve_id])),
+                    args=args,
+                    display_text=step.display_text,
+                    explanation=step.explanation,
+                    fallback=step.fallback,
+                )
+            )
+        return output
+
+    def _remove_dependency_only_read_steps(self, steps: list[AIActionStep], *, final: dict) -> list[AIActionStep]:
+        if len(steps) <= 1 or not self._action_specs:
+            return steps
+        if any(self._spec_kind(step.action) == "write" for step in steps):
+            return steps
+        value_refs = set(_refs_in_value(final))
+        for step in steps:
+            value_refs.update(_refs_in_value(step.args))
+        dependency_ids = {
+            dep
+            for step in steps
+            for dep in tuple(step.depends_on or ())
+            if dep
+        }
+        removable_ids = {
+            step.id
+            for step in steps[:-1]
+            if (
+                step.id in dependency_ids
+                and step.id not in value_refs
+                and self._spec_kind(step.action) == "read"
+                and int(getattr(self._action_specs.get(step.action), "model_call_cost", 0) or 0) == 0
+            )
+        }
+        if not removable_ids:
+            return steps
+        output: list[AIActionStep] = []
+        for step in steps:
+            if step.id in removable_ids:
+                continue
+            output.append(
+                AIActionStep(
+                    id=step.id,
+                    action=step.action,
+                    depends_on=tuple(dep for dep in step.depends_on if dep not in removable_ids),
+                    args=dict(step.args or {}),
+                    display_text=step.display_text,
+                    explanation=step.explanation,
+                    fallback=step.fallback,
+                )
+            )
         return output or steps
 
     def _spec_kind(self, action: str) -> str:
@@ -751,6 +893,58 @@ def _has_value(value: object) -> bool:
     if isinstance(value, list | tuple | dict):
         return bool(value)
     return True
+
+
+def _literal_memory_participant_names(value: object) -> tuple[str, ...]:
+    if isinstance(value, str):
+        text = value.strip()
+        return (text,) if text and not text.startswith("$") else ()
+    if not isinstance(value, list | tuple):
+        return ()
+    names: list[str] = []
+    for item in value:
+        if isinstance(item, str):
+            text = item.strip()
+            if text.startswith("$"):
+                return ()
+            if text and text not in names:
+                names.append(text)
+            continue
+        if _has_value(item):
+            return ()
+    return tuple(names)
+
+
+def _merge_non_executable_final_args(base: dict[str, Any], final_args: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(base or {})
+    for key, value in dict(final_args or {}).items():
+        if key == "keywords":
+            keywords = [*list(_string_list_arg(merged.get(key))), *list(_string_list_arg(value))]
+            deduped: list[str] = []
+            for keyword in keywords:
+                if keyword and keyword not in deduped:
+                    deduped.append(keyword)
+            if deduped:
+                merged[key] = deduped
+            continue
+        if not _has_value(merged.get(key)) and _has_value(value):
+            merged[key] = value
+    return merged
+
+
+def _string_list_arg(value: object) -> tuple[str, ...]:
+    if isinstance(value, str):
+        text = value.strip()
+        return (text,) if text else ()
+    if isinstance(value, list | tuple):
+        output: list[str] = []
+        for item in value:
+            text = str(item or "").strip()
+            if text:
+                output.append(text)
+        return tuple(output)
+    return ()
+
 
 def _default_step_id(action: str, index: int) -> str:
     base = str(action or "step").replace(".", "_").replace("-", "_").strip("_") or "step"

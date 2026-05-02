@@ -103,55 +103,9 @@ async def run_planner_corpus(
                     selector_raw,
                     registered_action_names=selector_request.response_format["schema"]["properties"]["candidate_actions"]["items"].get("enum", ()),
                 )
-                if selection is None:
-                    elapsed_ms = int((time.perf_counter() - started) * 1000)
-                    records.append(
-                        PlannerReplayRecord(
-                            case_name=case.name,
-                            user_input=case.user_input,
-                            raw_output="",
-                            elapsed_ms=elapsed_ms,
-                            provider=str(getattr(selector_snapshot, "provider", "") or ""),
-                            model=str(getattr(selector_snapshot, "model", "") or ""),
-                            error_code="CANDIDATE_SELECTOR_INVALID",
-                            error_message=selector_raw,
-                            metadata={
-                                **_record_metadata(selector_request),
-                                "candidate_raw_output": selector_raw,
-                                "candidate_elapsed_ms": selector_elapsed_ms,
-                            },
-                            planner_schema_version=str(selector_request.metadata.get("candidate_schema_version") or ""),
-                            planner_prompt_version=str(selector_request.metadata.get("candidate_prompt_version") or ""),
-                        )
-                    )
-                    continue
-                if not selection.is_action:
-                    elapsed_ms = int((time.perf_counter() - started) * 1000)
-                    raw_output = _not_action_plan_json(selection)
-                    records.append(
-                        PlannerReplayRecord(
-                            case_name=case.name,
-                            user_input=case.user_input,
-                            raw_output=raw_output,
-                            elapsed_ms=elapsed_ms,
-                            provider=str(getattr(selector_snapshot, "provider", "") or ""),
-                            model=str(getattr(selector_snapshot, "model", "") or ""),
-                            error_code=_error_code_value(getattr(selector_snapshot, "error_code", "")),
-                            error_message=str(getattr(selector_snapshot, "error_message", "") or ""),
-                            metadata={
-                                **_record_metadata(selector_request),
-                                "candidate_actions": [],
-                                "candidate_action_closure": [],
-                                "candidate_raw_output": selector_raw,
-                                "candidate_elapsed_ms": selector_elapsed_ms,
-                            },
-                            planner_schema_version=str(selector_request.metadata.get("candidate_schema_version") or ""),
-                            planner_prompt_version=str(selector_request.metadata.get("candidate_prompt_version") or ""),
-                        )
-                    )
-                    continue
-
-                request = build_planner_request(case, candidate_action_names=selection.candidate_actions)
+                candidate_action_names = selection.candidate_actions if selection is not None and selection.is_action else ()
+                candidate_selector_fallback = selection is None or not candidate_action_names
+                request = build_planner_request(case, candidate_action_names=candidate_action_names)
                 request.metadata["planner_case_iteration"] = iteration
                 request.metadata["planner_case_repeat"] = sample_count
                 snapshot = await task_manager.run_once(request)
@@ -159,6 +113,9 @@ async def run_planner_corpus(
                 metadata = _record_metadata(request)
                 metadata["candidate_raw_output"] = selector_raw
                 metadata["candidate_elapsed_ms"] = selector_elapsed_ms
+                metadata["candidate_selector_fallback"] = candidate_selector_fallback
+                metadata["candidate_selector_invalid"] = selection is None
+                metadata["candidate_selector_is_action"] = selection.is_action if selection is not None else None
                 records.append(
                     PlannerReplayRecord(
                         case_name=case.name,

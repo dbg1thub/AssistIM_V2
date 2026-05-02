@@ -18,6 +18,7 @@ AI_ACTION_REGRESSION_CASES: tuple[str, ...] = (
     "server_user_get",
     "server_file_list",
     "server_friend_list",
+    "server_friend_check",
     "server_friend_request_list",
     "server_session_list",
     "server_session_get",
@@ -26,6 +27,8 @@ AI_ACTION_REGRESSION_CASES: tuple[str, ...] = (
     "server_group_get",
     "server_moment_list",
     "server_moment_get",
+    "send_direct_message",
+    "friend_request_send",
     "friend_request_accept",
     "friend_request_reject",
 )

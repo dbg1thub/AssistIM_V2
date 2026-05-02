@@ -1254,21 +1254,70 @@ def test_ai_action_planner_selects_candidate_actions_before_building_plan() -> N
     assert "group.list" not in planner_request.system_prompt
 
 
-def test_ai_action_planner_stops_after_candidate_selector_rejects_non_action() -> None:
+def test_ai_action_planner_falls_back_after_candidate_selector_rejects_action_candidate() -> None:
     registry = AtomicActionRegistry(
         contact_resolver=_FakeContactDatabase([]),
         memory_manager=_FakeActionMemoryManager(),
     )
     task_manager = _FakePlannerTaskManager(
-        '{"is_action": false, "goal": "普通聊天", "candidate_actions": [], "reason": "不需要应用数据"}'
+        [
+            '{"is_action": false, "goal": "发送消息给张三", "candidate_actions": [], "reason": "误判参数不完整"}',
+            (
+                '{"is_action": true, "goal": "发送消息", "risk": "high", "steps": ['
+                '{"id": "resolve_target", "action": "contact.resolve", "depends_on": [], '
+                '"args": {"queries": ["张三"], "allow_multiple": false}},'
+                '{"id": "draft_message", "action": "message.draft", "depends_on": ["resolve_target"], '
+                '"args": {"target": "$resolve_target.contacts[0]", "content": "我晚点到"}},'
+                '{"id": "confirm_send", "action": "user.confirm", "depends_on": ["draft_message"], '
+                '"args": {"risk": "high", "preview": {"operation": "发送消息", '
+                '"target": "$draft_message.target", "content": "$draft_message.content"}}},'
+                '{"id": "send_message", "action": "message.send", "depends_on": ["draft_message", "confirm_send"], '
+                '"args": {"target": "$draft_message.target_entity", "content": "$draft_message.content", '
+                '"preview": "$confirm_send.preview", "idempotency_key": "$draft_message.idempotency_key"}}'
+                '], "final": {"source": "$send_message.text"}}'
+            ),
+        ]
+    )
+    planner = AIActionPlanner(task_manager=task_manager, action_registry=registry)
+
+    plan = asyncio.run(planner.plan("帮我给张三发我晚点到", strict=True))
+
+    assert plan is not None
+    assert plan.is_action is True
+    assert [step.action for step in plan.steps] == [
+        "contact.resolve",
+        "message.draft",
+        "user.confirm",
+        "message.send",
+    ]
+    assert len(task_manager.requests) == 2
+    assert task_manager.requests[0].metadata["source"] == "ai_action_candidate_selector"
+    assert task_manager.requests[1].metadata["source"] == "ai_action_planner"
+    assert task_manager.requests[1].metadata["candidate_selector_fallback"] is True
+    assert task_manager.requests[1].metadata["candidate_actions"] == []
+    assert task_manager.requests[1].metadata["candidate_action_closure"] == []
+
+
+def test_ai_action_planner_falls_back_to_planner_for_candidate_non_action_chat() -> None:
+    registry = AtomicActionRegistry(
+        contact_resolver=_FakeContactDatabase([]),
+        memory_manager=_FakeActionMemoryManager(),
+    )
+    task_manager = _FakePlannerTaskManager(
+        [
+            '{"is_action": false, "goal": "普通聊天", "candidate_actions": [], "reason": "不需要应用数据"}',
+            '{"is_action": false, "goal": "普通聊天", "risk": "low", "steps": [], "final": {}}',
+        ]
     )
     planner = AIActionPlanner(task_manager=task_manager, action_registry=registry)
 
     plan = asyncio.run(planner.plan("你好", strict=True))
 
     assert plan == AIActionPlan(is_action=False, goal="普通聊天", risk="low", steps=(), final={})
-    assert len(task_manager.requests) == 1
+    assert len(task_manager.requests) == 2
     assert task_manager.requests[0].metadata["source"] == "ai_action_candidate_selector"
+    assert task_manager.requests[1].metadata["source"] == "ai_action_planner"
+    assert task_manager.requests[1].metadata["candidate_selector_fallback"] is True
 
 
 def test_ai_action_planner_prompt_fits_local_context_budget() -> None:
@@ -1330,6 +1379,9 @@ def test_ai_action_candidate_selector_only_selects_capabilities_not_arg_complete
     assert "候选阶段只选择能力" in system_prompt
     assert "不要判断参数是否已经完整" in system_prompt
     assert "不要因为目标、内容或 ID 尚未结构化就输出 false" in system_prompt
+    assert "给X发Y" in system_prompt
+    assert "已有稳定 ID" in system_prompt
+    assert "不要额外选择列表、搜索或检查 action" in system_prompt
     assert "不能输出 steps" in system_prompt
     assert "固定 step id" not in system_prompt
     assert "张三" not in system_prompt
@@ -1944,6 +1996,79 @@ def test_ai_plan_normalizer_adds_memory_summarize_for_search_answer() -> None:
     assert normalized.final == {"type": "answer", "source": "$summarize_search_test3_history"}
 
 
+def test_ai_plan_normalizer_resolves_literal_memory_search_participants_before_validation() -> None:
+    registry = AtomicActionRegistry(
+        contact_resolver=ContactAliasResolver(db=_FakeContactDatabase([])),
+        memory_manager=_FakeActionMemoryManager(),
+    )
+    normalizer = AIPlanNormalizer(action_specs=_registry_specs(registry))
+    validator = AIPlanValidator(registry=registry)
+    plan = AIActionPlan(
+        is_action=True,
+        goal="查询历史",
+        risk="low",
+        steps=(
+            AIActionStep(
+                id="memsearch1",
+                action="memory.search",
+                args={
+                    "participants": ["test3"],
+                    "keywords": ["之前聊过"],
+                    "question": "我和 test3 之前聊过什么？",
+                    "time_scope": {"type": "all_history"},
+                },
+            ),
+        ),
+        final={"result": {"items": []}},
+    )
+
+    normalized = normalizer.normalize(plan, user_text="我和 test3 之前聊过什么？")
+
+    assert normalized.is_action is True
+    assert [step.action for step in normalized.steps] == ["contact.resolve", "memory.search", "memory.summarize"]
+    resolve = normalized.steps[0]
+    search = normalized.steps[1]
+    assert resolve.args == {"queries": ["test3"], "allow_multiple": True}
+    assert search.depends_on == (resolve.id,)
+    assert search.args["participants"] == f"${resolve.id}.contacts"
+    assert validator.validate(normalized).allowed is True
+
+
+def test_ai_plan_normalizer_removes_dependency_only_read_helper_step() -> None:
+    registry = AtomicActionRegistry(
+        contact_resolver=ContactAliasResolver(db=_FakeContactDatabase([])),
+        memory_manager=_FakeActionMemoryManager(),
+    )
+    normalizer = AIPlanNormalizer(action_specs=_registry_specs(registry))
+    validator = AIPlanValidator(registry=registry)
+    plan = AIActionPlan(
+        is_action=True,
+        goal="查看会话消息",
+        risk="low",
+        steps=(
+            AIActionStep(
+                id="list_sessions",
+                action="session.list",
+                args={},
+            ),
+            AIActionStep(
+                id="list_messages",
+                action="message.list",
+                depends_on=("list_sessions",),
+                args={"session_id": "session-1", "limit": 20},
+            ),
+        ),
+        final={"result": {"items": []}},
+    )
+
+    normalized = normalizer.normalize(plan, user_text="查看 session-1 最近 20 条消息")
+
+    assert normalized.is_action is True
+    assert [step.action for step in normalized.steps] == ["message.list"]
+    assert normalized.steps[0].depends_on == ()
+    assert validator.validate(normalized).allowed is True
+
+
 def test_ai_plan_normalizer_removes_non_executable_final_read_step() -> None:
     registry = AtomicActionRegistry(
         contact_resolver=ContactAliasResolver(db=_FakeContactDatabase([])),
@@ -1975,6 +2100,44 @@ def test_ai_plan_normalizer_removes_non_executable_final_read_step() -> None:
 
     assert normalized.is_action is True
     assert [step.id for step in normalized.steps] == ["get_group_1"]
+    assert validator.validate(normalized).allowed is True
+
+
+def test_ai_plan_normalizer_preserves_memory_search_args_from_non_executable_final_step() -> None:
+    registry = AtomicActionRegistry(
+        contact_resolver=ContactAliasResolver(db=_FakeContactDatabase([])),
+        memory_manager=_FakeActionMemoryManager(),
+    )
+    normalizer = AIPlanNormalizer(action_specs=_registry_specs(registry))
+    validator = AIPlanValidator(registry=registry)
+    plan = AIActionPlan(
+        is_action=True,
+        goal="查询历史",
+        risk="low",
+        steps=(
+            AIActionStep(
+                id="memsearch1",
+                action="memory.search",
+                args={"keywords": "test3", "question": "我和 test3 之前聊过什么？"},
+            ),
+            AIActionStep(
+                id="final",
+                action="memory.search",
+                depends_on=("memsearch1",),
+                args={"participants": ["test3"], "keywords": "之前聊过"},
+            ),
+        ),
+        final={"result": {"items": []}},
+    )
+
+    normalized = normalizer.normalize(plan, user_text="我和 test3 之前聊过什么？")
+
+    assert normalized.is_action is True
+    assert [step.action for step in normalized.steps] == ["contact.resolve", "memory.search", "memory.summarize"]
+    search = normalized.steps[1]
+    assert search.args["participants"].endswith(".contacts")
+    assert search.args["keywords"] == ["test3", "之前聊过"]
+    assert search.args["time_scope"] == {"type": "all_history"}
     assert validator.validate(normalized).allowed is True
 
 
@@ -6813,13 +6976,15 @@ def test_ai_action_workflow_default_planner_uses_task_manager(tmp_path, monkeypa
             result = await workflow.handle_user_turn(thread_id="thread-1", text="你好")
 
             assert result.handled is False
-            assert len(task_manager.requests) == 1
-            request = task_manager.requests[0]
-            assert request.max_tokens == AIActionPlanner.CANDIDATE_MAX_TOKENS
-            assert request.metadata["source"] == "ai_action_candidate_selector"
-            assert request.metadata["candidate_schema_version"] == AIActionPlanner.CANDIDATE_SCHEMA_VERSION
-            assert request.response_format["type"] == "json_object"
-            assert "用户输入：你好" in request.messages[0]["content"]
+            assert len(task_manager.requests) == 2
+            selector_request, planner_request = task_manager.requests
+            assert selector_request.max_tokens == AIActionPlanner.CANDIDATE_MAX_TOKENS
+            assert selector_request.metadata["source"] == "ai_action_candidate_selector"
+            assert selector_request.metadata["candidate_schema_version"] == AIActionPlanner.CANDIDATE_SCHEMA_VERSION
+            assert selector_request.response_format["type"] == "json_object"
+            assert "用户输入：你好" in selector_request.messages[0]["content"]
+            assert planner_request.metadata["source"] == "ai_action_planner"
+            assert planner_request.metadata["candidate_selector_fallback"] is True
         finally:
             await db.close()
 

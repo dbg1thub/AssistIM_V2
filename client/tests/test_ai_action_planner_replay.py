@@ -721,10 +721,12 @@ def test_run_planner_corpus_calls_task_manager_and_writes_jsonl(tmp_path) -> Non
 
     records = asyncio.run(run_planner_corpus(cases, task_manager=task_manager, output_path=output_path))
 
-    assert len(task_manager.requests) == 1
+    assert len(task_manager.requests) == 2
     assert task_manager.requests[0].metadata["planner_case_name"] == "chat_case"
     assert task_manager.requests[0].metadata["candidate_prompt_version"] == AIActionPlanner.CANDIDATE_PROMPT_VERSION
     assert task_manager.requests[0].metadata["candidate_schema_version"] == AIActionPlanner.CANDIDATE_SCHEMA_VERSION
+    assert task_manager.requests[1].metadata["planner_case_name"] == "chat_case"
+    assert task_manager.requests[1].metadata["source"] == "ai_action_planner_corpus"
     assert records == load_planner_replay_records(output_path)
     assert records[0].case_name == "chat_case"
     assert records[0].raw_output.startswith('{"is_action": false')
@@ -772,14 +774,18 @@ def test_run_planner_corpus_filters_cases_and_repeats_samples(tmp_path) -> None:
         )
     )
 
-    assert len(task_manager.requests) == 3
-    assert [request.metadata["planner_case_name"] for request in task_manager.requests] == [
+    assert len(task_manager.requests) == 6
+    planner_requests = [
+        request for request in task_manager.requests if request.metadata["source"] == "ai_action_planner_corpus"
+    ]
+    assert len(planner_requests) == 3
+    assert [request.metadata["planner_case_name"] for request in planner_requests] == [
         "chat_case",
         "chat_case",
         "chat_case",
     ]
-    assert [request.metadata["planner_case_iteration"] for request in task_manager.requests] == [1, 2, 3]
-    assert [request.metadata["planner_case_repeat"] for request in task_manager.requests] == [3, 3, 3]
+    assert [request.metadata["planner_case_iteration"] for request in planner_requests] == [1, 2, 3]
+    assert [request.metadata["planner_case_repeat"] for request in planner_requests] == [3, 3, 3]
     assert [record.case_name for record in records] == ["chat_case", "chat_case", "chat_case"]
     assert [record.metadata["planner_case_iteration"] for record in records] == [1, 2, 3]
     assert [record.metadata["planner_case_repeat"] for record in records] == [3, 3, 3]

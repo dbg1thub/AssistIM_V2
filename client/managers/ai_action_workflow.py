@@ -327,37 +327,32 @@ class AIActionPlanner:
         candidate_selection: AIActionCandidateSelection | None = None
         candidate_action_closure: tuple[str, ...] = ()
         required_action_closure: tuple[str, ...] = ()
+        candidate_selector_fallback = False
         if prompt_kind == self.PROMPT_NEW_ACTION:
             candidate_selection = await self._select_candidate_actions(user_text, strict=strict)
-            if candidate_selection is None:
-                return None
-            if not candidate_selection.is_action:
-                return AIActionPlan(
-                    is_action=False,
-                    goal=candidate_selection.goal,
-                    risk="low",
-                    steps=(),
-                    final={},
-                )
-            candidate_action_closure = self._candidate_action_closure(candidate_selection.candidate_actions)
-            if not candidate_action_closure:
+            if candidate_selection is not None and candidate_selection.is_action:
+                candidate_action_closure = self._candidate_action_closure(candidate_selection.candidate_actions)
+                if candidate_action_closure:
+                    action_contract_prompt = self._action_contract_prompt_for(
+                        prompt_kind,
+                        action_names=candidate_action_closure,
+                    )
+                    registered_action_names = candidate_action_closure
+                    required_action_closure = self._candidate_required_action_closure(candidate_selection.candidate_actions)
+                else:
+                    candidate_selector_fallback = True
+                    logger.info(
+                        "[ai-diag] ai_action_candidate_selector_empty_closure_fallback candidates=%s",
+                        list(candidate_selection.candidate_actions),
+                    )
+            else:
+                candidate_selector_fallback = True
                 logger.info(
-                    "[ai-diag] ai_action_candidate_selector_empty_closure candidates=%s",
-                    list(candidate_selection.candidate_actions),
+                    "[ai-diag] ai_action_candidate_selector_fallback selection_present=%s is_action=%s reason=%s",
+                    candidate_selection is not None,
+                    getattr(candidate_selection, "is_action", None),
+                    getattr(candidate_selection, "reason", ""),
                 )
-                return AIActionPlan(
-                    is_action=False,
-                    goal=candidate_selection.goal,
-                    risk="low",
-                    steps=(),
-                    final={"reason": "candidate_actions_empty"},
-                )
-            action_contract_prompt = self._action_contract_prompt_for(
-                prompt_kind,
-                action_names=candidate_action_closure,
-            )
-            registered_action_names = candidate_action_closure
-            required_action_closure = self._candidate_required_action_closure(candidate_selection.candidate_actions)
         schema = self._schema_for_prompt_kind(prompt_kind, registered_action_names=registered_action_names)
         user_prompt = self._user_prompt(
             user_text,
@@ -387,6 +382,7 @@ class AIActionPlanner:
                 "candidate_actions": list(candidate_selection.candidate_actions) if candidate_selection is not None else [],
                 "candidate_action_closure": list(candidate_action_closure),
                 "required_action_closure": list(required_action_closure),
+                "candidate_selector_fallback": candidate_selector_fallback,
             },
         )
         try:
@@ -703,6 +699,8 @@ class AIActionPlanner:
             "candidate_actions 只能从目录选择，放用户最终需要的目标 action；系统会按 registry 自动补齐闭包里的前置/支撑 action。\n"
             "候选阶段只选择能力，不要判断参数是否已经完整；不要因为目标、内容或 ID 尚未结构化就输出 false。\n"
             "不要为了确认、草稿或解析对象选择内部支撑 action；普通问答、写作、翻译、代码分析输出 is_action=false 且 candidate_actions=[]。\n"
+            "发送类话术里“给X发Y/告诉X Y/跟X说Y”表示明确写操作，Y 是消息内容，不要因为尚未拆分字段而输出 false。\n"
+            "已有稳定 ID 时只选择直接完成目标的 action，不要额外选择列表、搜索或检查 action 做存在性确认。\n"
             "如果用户明确要求读取或操作 AssistIM 本地数据、聊天记忆、当前账号服务端数据，输出 is_action=true 并选择最小目标 action 集合。\n"
             f"{catalog}"
         )

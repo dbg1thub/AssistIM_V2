@@ -53,12 +53,12 @@ def test_ai_action_regression_run_command_uses_workflow_repair_quality_gate_and_
     assert "history_direct_test3" in case_values
     assert "server_user_search" in case_values
     assert "server_file_list" in case_values
+    assert "server_friend_check" in case_values
     assert "server_message_list" in case_values
+    assert "send_direct_message" in case_values
+    assert "friend_request_send" in case_values
     assert "friend_request_reject" in case_values
-    assert "server_friend_check" not in case_values
     assert "file_summary_lookup" not in case_values
-    assert "send_direct_message" not in case_values
-    assert "friend_request_send" not in case_values
 
 
 def test_ai_action_regression_command_paths_stay_in_ignored_local_outputs() -> None:
@@ -90,4 +90,7 @@ def test_ai_action_regression_doc_lists_fixed_commands() -> None:
     assert "--quality-gate" in doc
     assert DEFAULT_RUN_OUTPUT_PATH.as_posix() in doc
     assert "history_direct_test3" in doc
+    assert "server_friend_check" in doc
+    assert "send_direct_message" in doc
+    assert "friend_request_send" in doc
     assert "friend_request_reject" in doc
