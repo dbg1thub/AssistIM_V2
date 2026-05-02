@@ -19,6 +19,7 @@ from app.core.database import configure_database, get_db, init_db
 from app.core.errors import AppError, ErrorCode
 from app.core.logging import configure_logging, logger
 from app.core.rate_limit import rate_limiter
+from app.core.runtime_diagnostics import record_http_request
 from app.core.security import decode_access_token
 from app.dependencies.auth_dependency import get_current_user
 from app.media.default_avatars import sync_default_avatar_assets
@@ -69,6 +70,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         lifespan=app_lifespan,
     )
     app.state.settings = current_settings
+    app.state.started_at = time.time()
 
     allow_origins = list(current_settings.cors_origins)
     allow_credentials = "*" not in allow_origins
@@ -115,6 +117,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         response = await call_next(request)
         duration_ms = round((time.perf_counter() - start) * 1000, 2)
+        record_http_request(
+            method=request.method,
+            path=request.url.path,
+            status_code=response.status_code,
+            duration_ms=duration_ms,
+            user_id=user_id,
+            timestamp=time.time(),
+            slow_request_ms=current_settings.admin_dashboard_slow_request_ms,
+        )
         logger.info(
             "timestamp=%s user_id=%s endpoint=%s method=%s status_code=%s duration_ms=%s",
             int(time.time()),

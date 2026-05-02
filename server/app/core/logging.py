@@ -5,6 +5,8 @@ from __future__ import annotations
 import logging
 from logging.config import dictConfig
 
+from app.core.runtime_diagnostics import InMemoryDiagnosticLogHandler
+
 
 def configure_logging() -> None:
     """Configure structured-ish logging output."""
@@ -32,6 +34,9 @@ def configure_logging() -> None:
             },
         }
     )
+    root_logger = logging.getLogger()
+    if not any(isinstance(handler, InMemoryDiagnosticLogHandler) for handler in root_logger.handlers):
+        root_logger.addHandler(InMemoryDiagnosticLogHandler())
 
 
 logger = logging.getLogger("assistim")

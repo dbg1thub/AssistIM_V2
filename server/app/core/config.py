@@ -63,6 +63,8 @@ class Settings:
     rate_limit_register: int = field(default_factory=lambda: _env_int("RATE_LIMIT_REGISTER", 3))
     rate_limit_friend_request: int = field(default_factory=lambda: _env_int("RATE_LIMIT_FRIEND_REQUEST", 10))
     rate_limit_store_backend: str = field(default_factory=lambda: _env_str("RATE_LIMIT_STORE_BACKEND", "database"))
+    admin_dashboard_enabled: bool = field(default_factory=lambda: _env_bool("ADMIN_DASHBOARD_ENABLED", False))
+    admin_dashboard_slow_request_ms: int = field(default_factory=lambda: _env_int("ADMIN_DASHBOARD_SLOW_REQUEST_MS", 1000))
     webrtc_ice_server_urls: tuple[str, ...] = field(default_factory=lambda: _env_csv("WEBRTC_ICE_SERVER_URLS", ""))
     webrtc_stun_urls: tuple[str, ...] = field(default_factory=lambda: _env_csv("WEBRTC_STUN_URLS", ""))
     webrtc_turn_urls: tuple[str, ...] = field(default_factory=lambda: _env_csv("WEBRTC_TURN_URLS", ""))

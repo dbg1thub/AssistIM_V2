@@ -155,6 +155,18 @@ class InMemoryCallRegistry:
         self._calls.clear()
         self._call_id_by_user_id.clear()
 
+    def snapshot(self) -> dict:
+        """Return active-call counts for runtime diagnostics."""
+        by_media_type: dict[str, int] = {}
+        active_calls = [call for call in self._calls.values() if call.status in ACTIVE_CALL_STATUSES]
+        for call in active_calls:
+            media_type = str(call.media_type or "unknown").strip() or "unknown"
+            by_media_type[media_type] = by_media_type.get(media_type, 0) + 1
+        return {
+            "active": len(active_calls),
+            "by_media_type": dict(sorted(by_media_type.items())),
+        }
+
     def _drop_user_mappings_for_call(self, call: ActiveCall) -> None:
         """Remove user-to-call mappings that still point at the given call."""
         for participant_id in call.participant_ids():

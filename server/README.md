@@ -90,6 +90,32 @@ The current test suite covers:
 - direct session creation and message read flow
 - group permission and ownership transfer
 
+## Development diagnostics dashboard
+
+The backend exposes a read-only diagnostics endpoint for development and test
+verification. It is disabled by default and requires a valid login token.
+
+Enable it only in a local or controlled test environment:
+
+```powershell
+$env:ADMIN_DASHBOARD_ENABLED = "true"
+powershell -ExecutionPolicy Bypass -File server/scripts/run-api.ps1 -Reload
+```
+
+Request:
+
+```powershell
+$token = "<access_token>"
+Invoke-RestMethod -Method Get `
+  -Uri "http://127.0.0.1:8000/api/v1/admin/dashboard" `
+  -Headers @{ Authorization = "Bearer $token" }
+```
+
+The endpoint reports backend runtime, database, users, contacts, sessions,
+messages, groups, moments, files, WebSocket, active calls, E2EE key inventory,
+recent HTTP requests, and recent warning/error logs. It does not expose private
+keys or provide any write operation.
+
 ## Creating test accounts
 
 The backend no longer ships a demo seed path. This keeps local development on the same code path as production and avoids a second, schema-sensitive data writer.

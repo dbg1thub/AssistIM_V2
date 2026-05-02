@@ -77,6 +77,10 @@ class RealtimeHub(ABC):
     def reset(self) -> None:
         """Clear all in-memory runtime state."""
 
+    @abstractmethod
+    def snapshot(self) -> dict:
+        """Return one read-only runtime diagnostics snapshot."""
+
 
 class InMemoryRealtimeHub(RealtimeHub):
     """Single-process in-memory realtime hub."""
@@ -216,6 +220,14 @@ class InMemoryRealtimeHub(RealtimeHub):
         self._user_by_connection.clear()
         self._connection_by_socket.clear()
         self._connections_by_user.clear()
+
+    def snapshot(self) -> dict:
+        return {
+            "hub": type(self).__name__,
+            "raw_connections": len(self._connections),
+            "bound_connections": sum(len(connection_ids) for connection_ids in self._connections_by_user.values()),
+            "online_users": len(self._connections_by_user),
+        }
 
 
 _realtime_hub: RealtimeHub | None = None
