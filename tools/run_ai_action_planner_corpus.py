@@ -18,6 +18,7 @@ from client.services.ai_bootstrap import configure_default_ai_provider
 from tools.ai_action_planner_replay import (
     DEFAULT_PLANNER_REPLAY_PATH,
     PlannerReplayRecord,
+    annotate_planner_replay_records_with_workflow_repair,
     annotate_planner_replay_records,
     build_planner_request,
     evaluate_planner_replay_file,
@@ -44,6 +45,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Validate an existing JSONL replay file without running a local model.",
     )
+    parser.add_argument(
+        "--workflow-repair",
+        action="store_true",
+        help="During model runs, also evaluate repairable invalid plans through the workflow repair prompt.",
+    )
     return parser.parse_args()
 
 
@@ -55,6 +61,7 @@ async def run_planner_corpus(
     limit: int = 0,
     case_names: Sequence[str] = (),
     repeat: int = 1,
+    workflow_repair: bool = False,
 ) -> list[PlannerReplayRecord]:
     selected_cases = _select_cases(cases, case_names=case_names)
     if int(limit or 0) > 0:
@@ -103,6 +110,12 @@ async def run_planner_corpus(
                 )
 
     records = annotate_planner_replay_records(selected_cases, records)
+    if workflow_repair:
+        records = await annotate_planner_replay_records_with_workflow_repair(
+            selected_cases,
+            records,
+            task_manager=task_manager,
+        )
     if output_path is not None:
         write_planner_replay_records(output_path, records)
     return records
@@ -128,6 +141,7 @@ async def main() -> None:
             limit=max(0, int(args.limit or 0)),
             case_names=tuple(args.case_names or ()),
             repeat=max(1, int(args.repeat or 1)),
+            workflow_repair=bool(args.workflow_repair),
         )
         results = evaluate_planner_replay_file(evaluation_cases, output_path)
         summary = summarize_results(results)

@@ -7,6 +7,7 @@ application action.
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -54,6 +55,15 @@ class PlannerReplayRecord:
     runtime_validation_result: str = ""
     runtime_safe: bool | None = None
     runtime_diff_from_expected: tuple[str, ...] = ()
+    workflow_repair_actions: tuple[str, ...] = ()
+    workflow_repair_result: str = ""
+    workflow_repair_attempted: bool | None = None
+    workflow_repair_safe: bool | None = None
+    workflow_repair_diff_from_expected: tuple[str, ...] = ()
+    workflow_repair_raw_output: str = ""
+    workflow_repair_elapsed_ms: int = 0
+    workflow_repair_error_code: str = ""
+    workflow_repair_error_message: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,6 +74,21 @@ class RuntimeReplayEvaluation:
     safe: bool = False
     messages: tuple[str, ...] = ()
     structural_signature: str = "{}"
+
+
+@dataclass(frozen=True, slots=True)
+class WorkflowRepairReplayEvaluation:
+    actions: tuple[str, ...] = ()
+    result: str = ""
+    expectation_passed: bool = False
+    attempted: bool = False
+    safe: bool = False
+    messages: tuple[str, ...] = ()
+    structural_signature: str = "{}"
+    raw_output: str = ""
+    elapsed_ms: int = 0
+    error_code: str = ""
+    error_message: str = ""
 
 
 def build_planner_request(case: PromptBenchmarkCase):
@@ -103,6 +128,59 @@ def build_planner_request(case: PromptBenchmarkCase):
     )
 
 
+def build_planner_repair_request(
+    case: PromptBenchmarkCase,
+    *,
+    invalid_plan: AIActionPlan,
+    validation_errors: Sequence[str],
+):
+    """Build one local AI request matching the workflow plan-repair prompt."""
+    from client.services.ai_service import AIPrivacyScope, AIRequest, AITaskType
+
+    prompt_kind = AIActionPlanner.PROMPT_NEW_ACTION
+    registered_action_names = build_default_action_names()
+    schema = AIActionPlanner.build_schema_for_prompt_kind(
+        prompt_kind,
+        registered_action_names=registered_action_names,
+    )
+    invalid_json = json.dumps(invalid_plan.to_dict(), ensure_ascii=False, sort_keys=True)
+    errors_text = "\n".join(str(item or "").strip() for item in validation_errors if str(item or "").strip())
+    user_prompt = (
+        AIActionPlanner._user_prompt(case.user_input, prompt_kind=prompt_kind)
+        + "\n\n上一次 plan 未通过结构校验。请只修正结构错误，保持用户目标不变，仍然只输出 JSON。\n"
+        "校验错误：\n"
+        f"{errors_text or 'PLAN_SCHEMA_INVALID'}\n"
+        "无效 plan：\n"
+        f"{invalid_json}"
+    )
+    system_prompt = (
+        AIActionPlanner._system_prompt(prompt_kind)
+        + "\n你现在处于 plan 修正模式：不要重新解释用户意图，只修正 step id、depends_on、$ 引用、action 名称和 args 字段。"
+    )
+    return AIRequest(
+        task_type=AITaskType.CHAT,
+        privacy_scope=AIPrivacyScope.GENERAL,
+        must_be_local=True,
+        stream=False,
+        temperature=0.0,
+        max_tokens=1024,
+        response_format={"type": "json_object", "schema": schema},
+        priority=4,
+        system_prompt=system_prompt,
+        messages=[{"role": "user", "content": user_prompt}],
+        metadata={
+            "source": "ai_action_planner_repair",
+            "strict_json": True,
+            "planner_schema_version": DEFAULT_PLANNER_SCHEMA_VERSION,
+            "planner_prompt_version": DEFAULT_PLANNER_PROMPT_VERSION,
+            "planner_prompt_kind": prompt_kind,
+            "planner_case_name": case.name,
+            "validation_error_count": len(tuple(validation_errors or ())),
+            "prompt_chars": len(system_prompt) + len(user_prompt),
+        },
+    )
+
+
 def evaluate_planner_replay_file(cases: Sequence[PromptBenchmarkCase], path: str | Path) -> list[CaseBenchmarkResult]:
     records = load_planner_replay_records(path)
     return evaluate_planner_replay_records(cases, records)
@@ -130,6 +208,46 @@ def annotate_planner_replay_records(
     """Attach plan-shape and expectation-diff metadata before writing replay JSONL."""
     cases_by_name = {case.name: case for case in cases}
     return [_annotate_record(cases_by_name.get(record.case_name), record) for record in records]
+
+
+async def annotate_planner_replay_records_with_workflow_repair(
+    cases: Sequence[PromptBenchmarkCase],
+    records: Sequence[PlannerReplayRecord],
+    *,
+    task_manager: Any | None,
+) -> list[PlannerReplayRecord]:
+    """Attach workflow-level repair evaluation without executing application actions."""
+    cases_by_name = {case.name: case for case in cases}
+    annotated = annotate_planner_replay_records(cases, records)
+    output: list[PlannerReplayRecord] = []
+    for record in annotated:
+        case = cases_by_name.get(record.case_name)
+        if case is None:
+            output.append(record)
+            continue
+        parsed, valid_json = parse_plan_json(record.raw_output)
+        repair = await _evaluate_workflow_repair_replay(
+            case=case,
+            parsed=parsed,
+            valid_json=valid_json,
+            user_text=record.user_input,
+            task_manager=task_manager,
+        )
+        output.append(
+            replace(
+                record,
+                workflow_repair_actions=repair.actions,
+                workflow_repair_result=repair.result,
+                workflow_repair_attempted=repair.attempted,
+                workflow_repair_safe=repair.safe,
+                workflow_repair_diff_from_expected=repair.messages,
+                workflow_repair_raw_output=repair.raw_output,
+                workflow_repair_elapsed_ms=repair.elapsed_ms,
+                workflow_repair_error_code=repair.error_code,
+                workflow_repair_error_message=repair.error_message,
+            )
+        )
+    return output
 
 
 def write_planner_replay_records(
@@ -211,6 +329,16 @@ def _sample_from_record(
         runtime_safe=runtime.safe,
         runtime_check_messages=list(runtime.messages),
         runtime_structural_signature=runtime.structural_signature,
+        workflow_repair_result=record.workflow_repair_result,
+        workflow_repair_expectation_passed=(
+            None
+            if not record.workflow_repair_result
+            else record.workflow_repair_result == "passed"
+        ),
+        workflow_repair_safe=record.workflow_repair_safe,
+        workflow_repair_attempted=record.workflow_repair_attempted,
+        workflow_repair_check_messages=list(record.workflow_repair_diff_from_expected or ()),
+        workflow_repair_structural_signature=_workflow_repair_structural_signature(record),
     )
 
 
@@ -293,6 +421,167 @@ def _evaluate_runtime_replay(
     return _runtime_expectation_result(optimized.to_dict(), case)
 
 
+async def _evaluate_workflow_repair_replay(
+    *,
+    case: PromptBenchmarkCase,
+    parsed: Mapping[str, Any] | None,
+    valid_json: bool,
+    user_text: str,
+    task_manager: Any | None,
+) -> WorkflowRepairReplayEvaluation:
+    if not valid_json or not isinstance(parsed, Mapping):
+        return WorkflowRepairReplayEvaluation(
+            result="invalid_json",
+            expectation_passed=False,
+            attempted=False,
+            safe=False,
+            messages=("invalid json",),
+        )
+
+    registry = _runtime_registry()
+    normalizer = AIPlanNormalizer()
+    optimizer = AIPlanOptimizer()
+    validator = AIPlanValidator(registry=registry)
+    normalized = normalizer.normalize(AIActionPlan.from_dict(dict(parsed)), user_text=user_text)
+
+    if not normalized.is_action:
+        return _workflow_expectation_result(normalized.to_dict(), case, attempted=False)
+
+    validation = validator.validate(normalized)
+    if validation.allowed:
+        optimized, _reason = optimizer.optimize(normalized)
+        optimized_validation = validator.validate(optimized)
+        if optimized_validation.allowed:
+            return _workflow_expectation_result(optimized.to_dict(), case, attempted=False)
+        return _workflow_invalid_after_repair_result(
+            optimized,
+            optimized_validation,
+            registry=registry,
+            attempted=False,
+            prefix="workflow repair validation failed",
+        )
+
+    initial_messages = validation.repair_messages()
+    skip_reason = _workflow_repair_skip_reason(normalized, validation, registry=registry)
+    if skip_reason:
+        return WorkflowRepairReplayEvaluation(
+            actions=tuple(step.action for step in tuple(normalized.steps or ()) if step.action),
+            result="blocked",
+            expectation_passed=False,
+            attempted=False,
+            safe=True,
+            messages=(
+                f"workflow repair blocked: {skip_reason}",
+                *initial_messages,
+            ),
+            structural_signature=canonical_structural_signature(normalized.to_dict()),
+        )
+    if task_manager is None:
+        return WorkflowRepairReplayEvaluation(
+            actions=tuple(step.action for step in tuple(normalized.steps or ()) if step.action),
+            result="repair_unavailable",
+            expectation_passed=False,
+            attempted=False,
+            safe=False,
+            messages=initial_messages,
+            structural_signature=canonical_structural_signature(normalized.to_dict()),
+        )
+
+    request = build_planner_repair_request(
+        case,
+        invalid_plan=normalized,
+        validation_errors=initial_messages,
+    )
+    started = time.perf_counter()
+    try:
+        snapshot = await task_manager.run_once(request)
+    except Exception as exc:
+        return WorkflowRepairReplayEvaluation(
+            actions=tuple(step.action for step in tuple(normalized.steps or ()) if step.action),
+            result="repair_failed",
+            expectation_passed=False,
+            attempted=True,
+            safe=False,
+            messages=(*initial_messages, str(exc)),
+            structural_signature=canonical_structural_signature(normalized.to_dict()),
+            elapsed_ms=int((time.perf_counter() - started) * 1000),
+            error_code=type(exc).__name__,
+            error_message=str(exc),
+        )
+
+    elapsed_ms = int((time.perf_counter() - started) * 1000)
+    raw_output = str(getattr(snapshot, "content", "") or "")
+    repaired_payload, repaired_valid_json = parse_plan_json(raw_output)
+    if not repaired_valid_json or not isinstance(repaired_payload, Mapping):
+        return WorkflowRepairReplayEvaluation(
+            actions=tuple(step.action for step in tuple(normalized.steps or ()) if step.action),
+            result="repair_invalid_json",
+            expectation_passed=False,
+            attempted=True,
+            safe=False,
+            messages=(*initial_messages, "repair invalid json"),
+            structural_signature=canonical_structural_signature(normalized.to_dict()),
+            raw_output=raw_output,
+            elapsed_ms=elapsed_ms,
+            error_code=_error_code_value(getattr(snapshot, "error_code", "")),
+            error_message=str(getattr(snapshot, "error_message", "") or ""),
+        )
+
+    repaired = normalizer.normalize(AIActionPlan.from_dict(dict(repaired_payload)), user_text=user_text)
+    if not repaired.is_action:
+        return _workflow_expectation_result(
+            repaired.to_dict(),
+            case,
+            attempted=True,
+            prior_messages=initial_messages,
+            raw_output=raw_output,
+            elapsed_ms=elapsed_ms,
+            error_code=_error_code_value(getattr(snapshot, "error_code", "")),
+            error_message=str(getattr(snapshot, "error_message", "") or ""),
+        )
+
+    repaired_validation = validator.validate(repaired)
+    if not repaired_validation.allowed:
+        return _workflow_invalid_after_repair_result(
+            repaired,
+            repaired_validation,
+            registry=registry,
+            attempted=True,
+            prefix="workflow repair failed",
+            prior_messages=initial_messages,
+            raw_output=raw_output,
+            elapsed_ms=elapsed_ms,
+            error_code=_error_code_value(getattr(snapshot, "error_code", "")),
+            error_message=str(getattr(snapshot, "error_message", "") or ""),
+        )
+
+    optimized, _reason = optimizer.optimize(repaired)
+    optimized_validation = validator.validate(optimized)
+    if not optimized_validation.allowed:
+        return _workflow_invalid_after_repair_result(
+            optimized,
+            optimized_validation,
+            registry=registry,
+            attempted=True,
+            prefix="workflow repair optimized plan failed",
+            prior_messages=initial_messages,
+            raw_output=raw_output,
+            elapsed_ms=elapsed_ms,
+            error_code=_error_code_value(getattr(snapshot, "error_code", "")),
+            error_message=str(getattr(snapshot, "error_message", "") or ""),
+        )
+    return _workflow_expectation_result(
+        optimized.to_dict(),
+        case,
+        attempted=True,
+        prior_messages=initial_messages,
+        raw_output=raw_output,
+        elapsed_ms=elapsed_ms,
+        error_code=_error_code_value(getattr(snapshot, "error_code", "")),
+        error_message=str(getattr(snapshot, "error_message", "") or ""),
+    )
+
+
 def _runtime_expectation_result(plan_payload: dict[str, Any], case: PromptBenchmarkCase) -> RuntimeReplayEvaluation:
     checks, messages = evaluate_case(plan_payload, case.expectation)
     passed = bool(checks) and all(checks.values())
@@ -335,6 +624,87 @@ def _runtime_invalid_result(
     )
 
 
+def _workflow_expectation_result(
+    plan_payload: dict[str, Any],
+    case: PromptBenchmarkCase,
+    *,
+    attempted: bool,
+    prior_messages: Sequence[str] = (),
+    raw_output: str = "",
+    elapsed_ms: int = 0,
+    error_code: str = "",
+    error_message: str = "",
+) -> WorkflowRepairReplayEvaluation:
+    checks, messages = evaluate_case(plan_payload, case.expectation)
+    passed = bool(checks) and all(checks.values())
+    return WorkflowRepairReplayEvaluation(
+        actions=_actions_from_plan(plan_payload),
+        result="passed" if passed else "failed",
+        expectation_passed=passed,
+        attempted=attempted,
+        safe=passed,
+        messages=tuple([*prior_messages, *messages]),
+        structural_signature=canonical_structural_signature(plan_payload),
+        raw_output=raw_output,
+        elapsed_ms=elapsed_ms,
+        error_code=error_code,
+        error_message=error_message,
+    )
+
+
+def _workflow_invalid_after_repair_result(
+    plan: AIActionPlan,
+    validation: AIPlanValidationResult,
+    *,
+    registry: AtomicActionRegistry,
+    attempted: bool,
+    prefix: str,
+    prior_messages: Sequence[str] = (),
+    raw_output: str = "",
+    elapsed_ms: int = 0,
+    error_code: str = "",
+    error_message: str = "",
+) -> WorkflowRepairReplayEvaluation:
+    skip_reason = _workflow_repair_skip_reason(plan, validation, registry=registry)
+    if skip_reason:
+        result = "blocked_after_repair" if attempted else "blocked"
+        return WorkflowRepairReplayEvaluation(
+            actions=tuple(step.action for step in tuple(plan.steps or ()) if step.action),
+            result=result,
+            expectation_passed=False,
+            attempted=attempted,
+            safe=True,
+            messages=(
+                *prior_messages,
+                f"workflow repair blocked: {skip_reason}",
+                *validation.repair_messages(),
+            ),
+            structural_signature=canonical_structural_signature(plan.to_dict()),
+            raw_output=raw_output,
+            elapsed_ms=elapsed_ms,
+            error_code=error_code,
+            error_message=error_message,
+        )
+    result = "failed_after_repair" if attempted else "repairable_invalid"
+    return WorkflowRepairReplayEvaluation(
+        actions=tuple(step.action for step in tuple(plan.steps or ()) if step.action),
+        result=result,
+        expectation_passed=False,
+        attempted=attempted,
+        safe=False,
+        messages=(
+            *prior_messages,
+            prefix,
+            *validation.repair_messages(),
+        ),
+        structural_signature=canonical_structural_signature(plan.to_dict()),
+        raw_output=raw_output,
+        elapsed_ms=elapsed_ms,
+        error_code=error_code,
+        error_message=error_message,
+    )
+
+
 _RUNTIME_REGISTRY: AtomicActionRegistry | None = None
 
 
@@ -356,6 +726,23 @@ def _runtime_repair_skip_reason(
     if _runtime_plan_has_side_effect(plan, registry=registry):
         return "side_effect_plan"
     return ""
+
+
+def _workflow_repair_skip_reason(
+    plan: AIActionPlan,
+    validation: AIPlanValidationResult,
+    *,
+    registry: AtomicActionRegistry,
+) -> str:
+    if any(error.code == "ACTION_NOT_FOUND" for error in validation.errors):
+        return "unknown_action"
+    if _runtime_plan_has_side_effect(plan, registry=registry) and not _validation_is_planner_contract_only(validation):
+        return "side_effect_plan"
+    return ""
+
+
+def _validation_is_planner_contract_only(validation: AIPlanValidationResult) -> bool:
+    return bool(validation.errors) and all(error.code == "PLANNER_CONTRACT_INVALID" for error in validation.errors)
 
 
 def _runtime_plan_has_side_effect(plan: AIActionPlan, *, registry: AtomicActionRegistry) -> bool:
@@ -429,6 +816,15 @@ def _record_to_payload(record: PlannerReplayRecord) -> dict[str, Any]:
         "runtime_validation_result": str(record.runtime_validation_result or "").strip(),
         "runtime_safe": record.runtime_safe,
         "runtime_diff_from_expected": list(record.runtime_diff_from_expected or ()),
+        "workflow_repair_actions": list(record.workflow_repair_actions or ()),
+        "workflow_repair_result": str(record.workflow_repair_result or "").strip(),
+        "workflow_repair_attempted": record.workflow_repair_attempted,
+        "workflow_repair_safe": record.workflow_repair_safe,
+        "workflow_repair_diff_from_expected": list(record.workflow_repair_diff_from_expected or ()),
+        "workflow_repair_raw_output": record.workflow_repair_raw_output,
+        "workflow_repair_elapsed_ms": int(record.workflow_repair_elapsed_ms or 0),
+        "workflow_repair_error_code": record.workflow_repair_error_code,
+        "workflow_repair_error_message": record.workflow_repair_error_message,
     }
 
 
@@ -464,7 +860,45 @@ def _record_from_payload(payload: dict[str, Any], *, line_no: int) -> PlannerRep
             for item in list(payload.get("runtime_diff_from_expected") or [])
             if str(item or "").strip()
         ),
+        workflow_repair_actions=tuple(
+            str(item or "").strip()
+            for item in list(payload.get("workflow_repair_actions") or [])
+            if str(item or "").strip()
+        ),
+        workflow_repair_result=str(payload.get("workflow_repair_result") or "").strip(),
+        workflow_repair_attempted=(
+            payload.get("workflow_repair_attempted") if isinstance(payload.get("workflow_repair_attempted"), bool) else None
+        ),
+        workflow_repair_safe=payload.get("workflow_repair_safe") if isinstance(payload.get("workflow_repair_safe"), bool) else None,
+        workflow_repair_diff_from_expected=tuple(
+            str(item or "").strip()
+            for item in list(payload.get("workflow_repair_diff_from_expected") or [])
+            if str(item or "").strip()
+        ),
+        workflow_repair_raw_output=str(payload.get("workflow_repair_raw_output") or ""),
+        workflow_repair_elapsed_ms=max(0, int(payload.get("workflow_repair_elapsed_ms") or 0)),
+        workflow_repair_error_code=str(payload.get("workflow_repair_error_code") or "").strip(),
+        workflow_repair_error_message=str(payload.get("workflow_repair_error_message") or "").strip(),
     )
+
+
+def _workflow_repair_structural_signature(record: PlannerReplayRecord) -> str:
+    raw_output = str(record.workflow_repair_raw_output or "").strip()
+    if raw_output:
+        parsed, valid_json = parse_plan_json(raw_output)
+        if valid_json:
+            return canonical_structural_signature(parsed)
+    if record.workflow_repair_actions:
+        return json.dumps(
+            {
+                "result": record.workflow_repair_result,
+                "actions": list(record.workflow_repair_actions),
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    return ""
 
 
 def _raw_signature(parsed: Mapping[str, Any] | None) -> str:
@@ -478,3 +912,12 @@ def _metadata_int(metadata: Mapping[str, Any], key: str) -> int:
         return int(metadata.get(key) or 0)
     except (TypeError, ValueError):
         return 0
+
+
+def _error_code_value(value: Any) -> str:
+    if value is None:
+        return ""
+    enum_value = getattr(value, "value", None)
+    if enum_value is not None:
+        return str(enum_value)
+    return str(value or "").strip()

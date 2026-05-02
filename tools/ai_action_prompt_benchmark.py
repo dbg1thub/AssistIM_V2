@@ -81,6 +81,12 @@ class SampleResult:
     runtime_safe: bool | None = None
     runtime_check_messages: list[str] = field(default_factory=list)
     runtime_structural_signature: str = ""
+    workflow_repair_result: str = ""
+    workflow_repair_expectation_passed: bool | None = None
+    workflow_repair_safe: bool | None = None
+    workflow_repair_attempted: bool | None = None
+    workflow_repair_check_messages: list[str] = field(default_factory=list)
+    workflow_repair_structural_signature: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -270,6 +276,22 @@ def summarize_results(results: list[CaseBenchmarkResult]) -> dict[str, Any]:
         )
         summary["runtime_blocked_cases"] = _runtime_blocked_cases(results)
         summary["runtime_failed_cases"] = _runtime_failed_cases(results)
+    workflow_samples = [sample for sample in samples if sample.workflow_repair_result]
+    if workflow_samples:
+        summary["workflow_repair_expectation_pass_rate"] = _rate(
+            sum(1 for sample in workflow_samples if sample.workflow_repair_expectation_passed is True),
+            len(workflow_samples),
+        )
+        summary["workflow_repair_safe_rate"] = _rate(
+            sum(1 for sample in workflow_samples if sample.workflow_repair_safe is True),
+            len(workflow_samples),
+        )
+        summary["workflow_repair_attempt_rate"] = _rate(
+            sum(1 for sample in workflow_samples if sample.workflow_repair_attempted is True),
+            len(workflow_samples),
+        )
+        summary["workflow_repair_blocked_cases"] = _workflow_repair_blocked_cases(results)
+        summary["workflow_repair_failed_cases"] = _workflow_repair_failed_cases(results)
     return summary
 
 
@@ -568,6 +590,27 @@ def _summarize_case(result: CaseBenchmarkResult) -> dict[str, Any]:
             len(runtime_samples),
         )
         payload["runtime_structural_stability"] = _rate(runtime_dominant_count, len(runtime_samples))
+    workflow_samples = [sample for sample in samples if sample.workflow_repair_result]
+    if workflow_samples:
+        workflow_signatures: dict[str, int] = {}
+        for sample in workflow_samples:
+            workflow_signatures[sample.workflow_repair_structural_signature] = (
+                workflow_signatures.get(sample.workflow_repair_structural_signature, 0) + 1
+            )
+        workflow_dominant_count = max(workflow_signatures.values(), default=0)
+        payload["workflow_repair_expectation_pass_rate"] = _rate(
+            sum(1 for sample in workflow_samples if sample.workflow_repair_expectation_passed is True),
+            len(workflow_samples),
+        )
+        payload["workflow_repair_safe_rate"] = _rate(
+            sum(1 for sample in workflow_samples if sample.workflow_repair_safe is True),
+            len(workflow_samples),
+        )
+        payload["workflow_repair_attempt_rate"] = _rate(
+            sum(1 for sample in workflow_samples if sample.workflow_repair_attempted is True),
+            len(workflow_samples),
+        )
+        payload["workflow_repair_structural_stability"] = _rate(workflow_dominant_count, len(workflow_samples))
     return payload
 
 
@@ -634,6 +677,60 @@ def _runtime_failed_cases(results: list[CaseBenchmarkResult]) -> list[dict[str, 
         messages: list[str] = []
         for sample in failed_samples:
             for message in list(sample.runtime_check_messages or []):
+                text = str(message or "").strip()
+                if text and text not in messages:
+                    messages.append(text)
+        failed.append(
+            {
+                "name": result.case.name,
+                "failed_sample_count": len(failed_samples),
+                "messages": messages,
+            }
+        )
+    return failed
+
+
+def _workflow_repair_blocked_cases(results: list[CaseBenchmarkResult]) -> list[dict[str, Any]]:
+    blocked: list[dict[str, Any]] = []
+    for result in results:
+        blocked_samples = [
+            sample
+            for sample in list(result.samples or [])
+            if sample.workflow_repair_result in {"blocked", "blocked_after_repair"}
+        ]
+        if not blocked_samples:
+            continue
+        messages: list[str] = []
+        for sample in blocked_samples:
+            for message in list(sample.workflow_repair_check_messages or []):
+                text = str(message or "").strip()
+                if text.startswith("workflow repair blocked:") and text not in messages:
+                    messages.append(text)
+        blocked.append(
+            {
+                "name": result.case.name,
+                "blocked_sample_count": len(blocked_samples),
+                "messages": messages,
+            }
+        )
+    return blocked
+
+
+def _workflow_repair_failed_cases(results: list[CaseBenchmarkResult]) -> list[dict[str, Any]]:
+    failed: list[dict[str, Any]] = []
+    for result in results:
+        failed_samples = [
+            sample
+            for sample in list(result.samples or [])
+            if sample.workflow_repair_result
+            and sample.workflow_repair_result not in {"blocked", "blocked_after_repair"}
+            and sample.workflow_repair_expectation_passed is not True
+        ]
+        if not failed_samples:
+            continue
+        messages: list[str] = []
+        for sample in failed_samples:
+            for message in list(sample.workflow_repair_check_messages or []):
                 text = str(message or "").strip()
                 if text and text not in messages:
                     messages.append(text)
