@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 
+from client.managers.ai_action_registry import build_default_action_names
 from tools.ai_action_prompt_benchmark import (
     CaseBenchmarkResult,
     LEGACY_PLAN_TOP_LEVEL_FIELDS,
@@ -553,6 +554,15 @@ def test_load_default_golden_corpus_has_core_action_and_chat_cases() -> None:
     )
     assert all(case.expectation.forbidden_top_level_fields == LEGACY_PLAN_TOP_LEVEL_FIELDS for case in cases)
     assert {case.router_expected_route for case in cases} >= {"chat", "action_candidate"}
+
+
+def test_load_default_golden_corpus_covers_registered_actions() -> None:
+    cases = load_golden_corpus()
+    covered_actions: set[str] = set()
+    for case in cases:
+        covered_actions.update(case.expectation.required_actions)
+
+    assert covered_actions == set(build_default_action_names())
 
 
 def test_load_golden_corpus_rejects_duplicate_names(tmp_path) -> None:
