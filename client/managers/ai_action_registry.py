@@ -79,6 +79,7 @@ SERVER_READ_ACTION_ROUTES: dict[str, _ServerReadRoute] = {
     "user.list": _ServerReadRoute("/users", param_args=("page", "size")),
     "user.get": _ServerReadRoute("/users/{user_id}", path_args=("user_id",)),
     "friend.list": _ServerReadRoute("/friends"),
+    "friend.check": _ServerReadRoute("/friends/check/{user_id}", path_args=("user_id",)),
     "friend.request.list": _ServerReadRoute("/friends/requests"),
     "group.list": _ServerReadRoute("/groups"),
     "group.get": _ServerReadRoute("/groups/{group_id}", path_args=("group_id",)),
@@ -103,6 +104,7 @@ SERVER_READ_ACTION_LABELS: dict[str, str] = {
     "user.list": "用户列表查询",
     "user.get": "用户资料查询",
     "friend.list": "好友列表查询",
+    "friend.check": "好友关系查询",
     "friend.request.list": "好友申请查询",
     "group.list": "群组列表查询",
     "group.get": "群组详情查询",
@@ -489,6 +491,13 @@ class AtomicActionRegistry:
             input_model=EmptyReadInput,
             prompt_purpose="查看当前账号好友列表。",
             max_result_items=100,
+        )
+        self._register_server_read(
+            "friend.check",
+            input_model=UserGetInput,
+            prompt_purpose="检查当前账号和一个用户是否已经是好友。",
+            prompt_notes=("user_id 必须来自 user.search/user.get 的结果，或用户明确提供的稳定用户 ID。",),
+            max_result_items=1,
         )
         self._register_server_read(
             "friend.request.list",

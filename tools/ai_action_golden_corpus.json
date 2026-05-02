@@ -98,6 +98,26 @@
       }
     },
     {
+      "name": "server_friend_check",
+      "user_input": "检查我和 user-3 是否是好友",
+      "tags": ["action", "server_read", "friend"],
+      "router_expected_route": "action_candidate",
+      "expectation": {
+        "is_action": true,
+        "risk": "low",
+        "required_actions": ["friend.check"],
+        "required_action_sequence": ["friend.check"],
+        "requires_confirmation": false,
+        "required_step_args": [
+          {
+            "action": "friend.check",
+            "path": "user_id",
+            "equals": "user-3"
+          }
+        ]
+      }
+    },
+    {
       "name": "server_message_list",
       "user_input": "查看 session-1 最近 20 条消息",
       "tags": ["action", "server_read", "message"],

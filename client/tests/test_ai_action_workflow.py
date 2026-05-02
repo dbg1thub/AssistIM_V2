@@ -1205,6 +1205,7 @@ def test_ai_action_planner_prompt_documents_atomic_action_arg_contracts_without_
     assert "idempotency_key:str" in system_prompt
     assert "message.list" in system_prompt
     assert "before_seq:int | None" in system_prompt
+    assert "friend.check" in system_prompt
     assert "target_entity" in system_prompt
     assert "张三" not in system_prompt
     assert "用户原始问题" not in system_prompt
@@ -1993,6 +1994,7 @@ def test_ai_action_registry_exposes_memory_actions() -> None:
     assert registry.names() == (
         "contact.resolve",
         "file.list",
+        "friend.check",
         "friend.list",
         "friend.request.accept",
         "friend.request.list",
@@ -2030,6 +2032,7 @@ def test_ai_action_registry_exposes_first_server_read_actions() -> None:
         "user.list",
         "user.get",
         "friend.list",
+        "friend.check",
         "friend.request.list",
         "group.list",
         "group.get",
@@ -2205,6 +2208,24 @@ def test_ai_action_server_read_client_maps_message_list_route() -> None:
                 "method": "GET",
                 "path": "/sessions/session-1/messages",
                 "params": {"limit": 25, "before_seq": 10},
+            }
+        ]
+
+    asyncio.run(scenario())
+
+
+def test_ai_action_server_read_client_maps_friend_check_route() -> None:
+    async def scenario() -> None:
+        http = _FakeServerReadHTTPClient()
+        client = AIActionServerReadClient(http_client=http)
+
+        await client.execute("friend.check", {"user_id": "user-3"})
+
+        assert http.calls == [
+            {
+                "method": "GET",
+                "path": "/friends/check/user-3",
+                "params": None,
             }
         ]
 
