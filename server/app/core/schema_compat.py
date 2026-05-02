@@ -23,6 +23,10 @@ USER_PROFILE_COLUMN_DDL: dict[str, str] = {
     "auth_session_version": "INTEGER NOT NULL DEFAULT 0",
 }
 
+USER_ADMIN_COLUMN_DDL: dict[str, str] = {
+    "role": "VARCHAR(32) NOT NULL DEFAULT 'user'",
+}
+
 USER_AVATAR_COLUMN_DDL: dict[str, str] = {
     "avatar_kind": "VARCHAR(16) NOT NULL DEFAULT 'default'",
     "avatar_default_key": "VARCHAR(128)",
@@ -101,6 +105,12 @@ USER_SESSION_EVENT_INDEX_DDL: dict[str, str] = {
     "idx_user_session_events_type": "CREATE INDEX IF NOT EXISTS idx_user_session_events_type ON user_session_events (type)",
 }
 
+ADMIN_AUDIT_INDEX_DDL: dict[str, str] = {
+    "idx_admin_audit_logs_actor_user_id": "CREATE INDEX IF NOT EXISTS idx_admin_audit_logs_actor_user_id ON admin_audit_logs (actor_user_id)",
+    "idx_admin_audit_logs_action": "CREATE INDEX IF NOT EXISTS idx_admin_audit_logs_action ON admin_audit_logs (action)",
+    "idx_admin_audit_logs_created_at": "CREATE INDEX IF NOT EXISTS idx_admin_audit_logs_created_at ON admin_audit_logs (created_at)",
+}
+
 
 def _get_table_names(bind: Engine | Connection) -> set[str]:
     return set(inspect(bind).get_table_names())
@@ -140,7 +150,7 @@ def _has_indexes(bind: Engine | Connection, table_name: str, required_indexes: I
     return all(index_name in indexes for index_name in required_indexes)
 
 
-RUNTIME_SCHEMA_ALEMBIC_REVISION = "20260413_0012"
+RUNTIME_SCHEMA_ALEMBIC_REVISION = "20260503_0015"
 
 def _parse_revision(revision: str) -> tuple[int, int] | None:
     candidate = str(revision or "").strip()
@@ -173,12 +183,13 @@ def _has_runtime_schema_migration(bind: Engine | Connection) -> bool:
 
 
 def _has_current_runtime_schema(bind: Engine | Connection) -> bool:
-    required_tables = {"users", "messages", "sessions", "session_members", "files", "session_events", "groups", "group_members", "user_session_events"}
+    required_tables = {"users", "messages", "sessions", "session_members", "files", "session_events", "groups", "group_members", "user_session_events", "admin_audit_logs"}
     if required_tables - _get_table_names(bind):
         return False
 
     return (
         _has_columns(bind, "users", USER_PROFILE_COLUMN_DDL)
+        and _has_columns(bind, "users", USER_ADMIN_COLUMN_DDL)
         and _has_columns(bind, "users", USER_AVATAR_COLUMN_DDL)
         and _has_columns(bind, "messages", MESSAGE_COLUMN_DDL)
         and _has_columns(bind, "sessions", SESSION_COLUMN_DDL)
@@ -193,6 +204,7 @@ def _has_current_runtime_schema(bind: Engine | Connection) -> bool:
         and _has_columns(bind, "group_members", GROUP_MEMBER_PROFILE_COLUMN_DDL)
         and _has_indexes(bind, "session_events", SESSION_EVENT_INDEX_DDL)
         and _has_indexes(bind, "user_session_events", USER_SESSION_EVENT_INDEX_DDL)
+        and _has_indexes(bind, "admin_audit_logs", ADMIN_AUDIT_INDEX_DDL)
     )
 
 
@@ -237,6 +249,35 @@ def _ensure_user_session_events_table(connection: Connection, applied: list[str]
     )
     applied.append("user_session_events.create")
     applied.append("uq_user_session_event_seq")
+
+
+def _ensure_admin_audit_logs_table(connection: Connection, applied: list[str]) -> None:
+    table_names = _get_table_names(connection)
+    if "admin_audit_logs" in table_names:
+        return
+
+    connection.execute(
+        text(
+            """
+            CREATE TABLE admin_audit_logs (
+                id VARCHAR(36) PRIMARY KEY,
+                actor_user_id VARCHAR(36),
+                actor_username VARCHAR(255) NOT NULL DEFAULT '',
+                action VARCHAR(128) NOT NULL,
+                target_type VARCHAR(64) NOT NULL DEFAULT '',
+                target_id VARCHAR(128) NOT NULL DEFAULT '',
+                request_path VARCHAR(255) NOT NULL DEFAULT '',
+                request_method VARCHAR(16) NOT NULL DEFAULT '',
+                client_ip VARCHAR(64) NOT NULL DEFAULT '',
+                success BOOLEAN NOT NULL DEFAULT 1,
+                error_code VARCHAR(64) NOT NULL DEFAULT '',
+                detail_json TEXT NOT NULL DEFAULT '{}',
+                created_at TIMESTAMP NOT NULL
+            )
+            """
+        )
+    )
+    applied.append("admin_audit_logs.create")
 
 
 def _ensure_indexes(connection: Connection, table_name: str, index_ddl: dict[str, str], applied: list[str]) -> None:
@@ -1081,6 +1122,7 @@ def ensure_schema_compatibility(engine: Engine) -> list[str]:
             return applied
 
         _ensure_columns(connection, "users", USER_PROFILE_COLUMN_DDL, applied)
+        _ensure_columns(connection, "users", USER_ADMIN_COLUMN_DDL, applied)
         _ensure_columns(connection, "users", USER_AVATAR_COLUMN_DDL, applied)
         _ensure_indexes(connection, "users", USER_PROFILE_INDEX_DDL, applied)
         _ensure_indexes(connection, "users", USERNAME_INDEX_DDL, applied)
@@ -1108,6 +1150,8 @@ def ensure_schema_compatibility(engine: Engine) -> list[str]:
         _ensure_indexes(connection, "session_events", SESSION_EVENT_INDEX_DDL, applied)
         _ensure_user_session_events_table(connection, applied)
         _ensure_indexes(connection, "user_session_events", USER_SESSION_EVENT_INDEX_DDL, applied)
+        _ensure_admin_audit_logs_table(connection, applied)
+        _ensure_indexes(connection, "admin_audit_logs", ADMIN_AUDIT_INDEX_DDL, applied)
 
     return applied
 

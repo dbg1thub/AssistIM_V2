@@ -17,6 +17,7 @@ from app.core.database import RUNTIME_SCHEMA_REQUIRED_TABLES
 from app.core.rate_limit import rate_limiter
 from app.core.runtime_diagnostics import runtime_diagnostics_snapshot
 from app.models.device import UserDevice, UserPreKey, UserSignedPreKey
+from app.models.admin import AdminAuditLog
 from app.models.file import StoredFile
 from app.models.group import Group, GroupMember
 from app.models.message import Message, MessageRead
@@ -42,6 +43,7 @@ class AdminDashboardService:
             "system": self._system_snapshot(),
             "database": self._database_snapshot(),
             "users": self._user_snapshot(),
+            "admin": self._admin_snapshot(),
             "contacts": self._contact_snapshot(),
             "chat": self._chat_snapshot(),
             "groups": self._group_snapshot(),
@@ -106,6 +108,12 @@ class AdminDashboardService:
         return {
             "friendships": self._count(Friendship),
             "pending_friend_requests": self._count(FriendRequest, FriendRequest.status == "pending"),
+        }
+
+    def _admin_snapshot(self) -> dict[str, int]:
+        return {
+            "admin_users": self._count(User, User.role == "admin"),
+            "audit_logs": self._count(AdminAuditLog),
         }
 
     def _chat_snapshot(self) -> dict[str, Any]:

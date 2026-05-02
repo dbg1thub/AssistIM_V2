@@ -16,7 +16,7 @@ from app.models.group import Group, GroupMember
 from app.models.message import Message, MessageRead
 from app.models.moment import Moment, MomentComment, MomentLike
 from app.models.session import ChatSession, SessionEvent, SessionMember
-from app.models.user import FriendRequest, Friendship
+from app.models.user import FriendRequest, Friendship, User
 from app.realtime.call_registry import get_call_registry
 from app.websocket.manager import connection_manager
 
@@ -44,6 +44,7 @@ def _auth_header(token: str) -> dict[str, str]:
 def test_admin_dashboard_is_disabled_by_default(monkeypatch) -> None:
     with _client_with_dashboard(monkeypatch, enabled=False) as client:
         auth_payload = _register(client, "dashboard-disabled", "Dashboard Disabled")
+        _set_user_role(auth_payload["user"]["id"], "admin")
 
         response = client.get(
             "/api/v1/admin/dashboard",
@@ -62,7 +63,21 @@ def test_admin_dashboard_requires_authentication_when_enabled(monkeypatch) -> No
     assert response.json()["code"] == ErrorCode.UNAUTHORIZED
 
 
+def test_admin_dashboard_forbids_non_admin_user_when_enabled(monkeypatch) -> None:
+    with _client_with_dashboard(monkeypatch, enabled=True) as client:
+        auth_payload = _register(client, "dashboard-user", "Dashboard User")
+
+        response = client.get(
+            "/api/v1/admin/dashboard",
+            headers=_auth_header(auth_payload["access_token"]),
+        )
+
+    assert response.status_code == 403
+    assert response.json()["code"] == ErrorCode.FORBIDDEN
+
+
 def test_admin_dashboard_reports_runtime_business_and_diagnostic_counts(monkeypatch) -> None:
+    from app.models.admin import AdminAuditLog
     from app.core.runtime_diagnostics import reset_runtime_diagnostics
 
     reset_runtime_diagnostics()
@@ -71,6 +86,7 @@ def test_admin_dashboard_reports_runtime_business_and_diagnostic_counts(monkeypa
         bob_auth = _register(client, "dashboard-bob", "Bob")
         alice = alice_auth["user"]
         bob = bob_auth["user"]
+        _set_user_role(alice["id"], "admin")
         _seed_dashboard_records(alice["id"], bob["id"])
 
         connection_manager.bind_user("dashboard-conn-1", alice["id"])
@@ -96,6 +112,11 @@ def test_admin_dashboard_reports_runtime_business_and_diagnostic_counts(monkeypa
     assert response.status_code == 200
     payload = response.json()["data"]
 
+    assert payload["actor"] == {
+        "user_id": alice["id"],
+        "username": "dashboard-alice",
+        "role": "admin",
+    }
     assert payload["system"]["app_name"] == "AssistIM Test API"
     assert payload["system"]["api_v1_prefix"] == "/api/v1"
     assert payload["database"]["status"] == "ok"
@@ -106,6 +127,8 @@ def test_admin_dashboard_reports_runtime_business_and_diagnostic_counts(monkeypa
     assert payload["users"]["online"] == 1
     assert payload["users"]["devices"]["total"] == 2
     assert payload["users"]["devices"]["active"] == 1
+    assert payload["admin"]["admin_users"] == 1
+    assert payload["admin"]["audit_logs"] == 0
     assert payload["contacts"]["friendships"] == 2
     assert payload["contacts"]["pending_friend_requests"] == 1
 
@@ -148,6 +171,69 @@ def test_admin_dashboard_reports_runtime_business_and_diagnostic_counts(monkeypa
     assert payload["http"]["error_requests"] >= 1
     assert any(item["path"] == "/api/v1/dashboard-missing" for item in payload["http"]["recent"])
     assert any("dashboard-test-warning" in item["message"] for item in payload["logs"]["recent_warnings_errors"])
+
+    with SessionLocal() as db:
+        audit_log = db.query(AdminAuditLog).filter(AdminAuditLog.action == "admin.dashboard.read").one()
+        assert audit_log.actor_user_id == alice["id"]
+        assert audit_log.actor_username == "dashboard-alice"
+        assert audit_log.target_type == "admin_dashboard"
+        assert audit_log.target_id == "dashboard"
+        assert audit_log.request_path == "/api/v1/admin/dashboard"
+        assert audit_log.request_method == "GET"
+        assert audit_log.success is True
+        assert "access_token" not in audit_log.detail_json
+        assert "secret" not in audit_log.detail_json.lower()
+
+
+def test_user_role_defaults_to_user_and_admin_user_service_rejects_invalid_roles(client: TestClient) -> None:
+    from app.services.admin_user_service import AdminUserService
+
+    auth_payload = _register(client, "role-default", "Role Default")
+    with SessionLocal() as db:
+        user = db.get(User, auth_payload["user"]["id"])
+        assert user is not None
+        assert user.role == "user"
+
+        try:
+            AdminUserService(db).set_user_role_by_username(
+                "role-default",
+                "owner",
+                actor_username="server-script",
+            )
+        except ValueError as exc:
+            assert "unsupported admin role" in str(exc)
+        else:
+            raise AssertionError("invalid role should be rejected")
+
+
+def test_admin_user_service_promotes_user_and_records_audit_log(client: TestClient) -> None:
+    from app.models.admin import AdminAuditLog
+    from app.services.admin_user_service import AdminUserService
+
+    auth_payload = _register(client, "promote-admin", "Promote Admin")
+    with SessionLocal() as db:
+        result = AdminUserService(db).set_user_role_by_username(
+            "promote-admin",
+            "admin",
+            actor_username="server-script",
+        )
+
+        assert result["user_id"] == auth_payload["user"]["id"]
+        assert result["username"] == "promote-admin"
+        assert result["old_role"] == "user"
+        assert result["new_role"] == "admin"
+
+        user = db.get(User, auth_payload["user"]["id"])
+        assert user is not None
+        assert user.role == "admin"
+
+        audit_log = db.query(AdminAuditLog).filter(AdminAuditLog.action == "admin.user.role.set").one()
+        assert audit_log.actor_username == "server-script"
+        assert audit_log.target_type == "user"
+        assert audit_log.target_id == auth_payload["user"]["id"]
+        assert audit_log.success is True
+        assert "access_token" not in audit_log.detail_json
+        assert "password" not in audit_log.detail_json.lower()
 
 
 def test_realtime_hub_snapshot_reports_bound_connections() -> None:
@@ -347,4 +433,13 @@ def _seed_dashboard_records(alice_id: str, bob_id: str) -> None:
                 ),
             ]
         )
+        db.commit()
+
+
+def _set_user_role(user_id: str, role: str) -> None:
+    with SessionLocal() as db:
+        user = db.get(User, user_id)
+        assert user is not None
+        user.role = role
+        db.add(user)
         db.commit()

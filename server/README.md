@@ -93,7 +93,19 @@ The current test suite covers:
 ## Development diagnostics dashboard
 
 The backend exposes a read-only diagnostics endpoint for development and test
-verification. It is disabled by default and requires a valid login token.
+verification. It is disabled by default and requires an authenticated admin user.
+
+Run migrations before enabling the dashboard after pulling this feature:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File server/scripts/migrate.ps1
+```
+
+Create the first admin from the server machine:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File server/scripts/set-admin.ps1 -Username test1
+```
 
 Enable it only in a local or controlled test environment:
 
@@ -113,8 +125,8 @@ Invoke-RestMethod -Method Get `
 
 The endpoint reports backend runtime, database, users, contacts, sessions,
 messages, groups, moments, files, WebSocket, active calls, E2EE key inventory,
-recent HTTP requests, and recent warning/error logs. It does not expose private
-keys or provide any write operation.
+admin audit counts, recent HTTP requests, and recent warning/error logs. It
+does not expose private keys or provide any write operation.
 
 ## Creating test accounts
 

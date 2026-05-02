@@ -33,6 +33,7 @@ class User(IdMixin, TimestampMixin, Base):
     signature: Mapped[str | None] = mapped_column(Text, nullable=True)
     gender: Mapped[str | None] = mapped_column(String(length=32), nullable=True)
     auth_session_version: Mapped[int] = mapped_column(default=0)
+    role: Mapped[str] = mapped_column(String(length=32), nullable=False, default="user", server_default="user")
     status: Mapped[str] = mapped_column(default="offline")
 
 
