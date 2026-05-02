@@ -184,7 +184,7 @@ class AIActionPlanner:
     """Optional model-backed planner that returns atomic JSON action plans."""
 
     PLANNER_SCHEMA_VERSION = "atomic_steps_v2"
-    PLANNER_PROMPT_VERSION = "atomic_steps_prompt_v15"
+    PLANNER_PROMPT_VERSION = "atomic_steps_prompt_v18"
     PLAN_OUTPUT_VERSION = 1
 
     PROMPT_NEW_ACTION = "new_action"
@@ -445,7 +445,7 @@ class AIActionPlanner:
     def _system_prompt(prompt_kind: str = PROMPT_NEW_ACTION, *, action_contract: str | None = None) -> str:
         common = (
             "你是 AssistIM 的动作规划器，只输出 JSON，不要解释，不要使用代码块。\n"
-            "不要在本地自然语言短语上做假设；语义理解由你完成，系统只执行结构化 plan。\n"
+            "语义理解由你完成，系统只执行结构化 plan。\n"
         )
         if prompt_kind == AIActionPlanner.PROMPT_PENDING_CONFIRMATION:
             return (
@@ -465,16 +465,21 @@ class AIActionPlanner:
         contract = str(action_contract or "").strip() or build_default_action_prompt_contract()
         return (
             common
-            + "你的职责是判断用户是否需要 AssistIM 应用数据或本地应用能力，若是则拆成原子 steps。\n"
+            + "判断用户是否需要 AssistIM 应用数据或本地能力，若是拆成原子 steps。\n"
             "如果用户只是普通问答、写作、翻译或代码分析，输出 is_action=false 且 steps=[]。\n"
             "只有需要读取或操作 AssistIM 本地数据、调用已注册应用能力、确认或取消 pending 操作时，才输出 action plan。\n"
             "规划规则：\n"
             "- 每个 step.id 必须唯一，使用简短稳定名称即可，不要求固定命名。\n"
+            "step.id 只能使用字母、数字和下划线，不能包含点号，避免和 $ 引用路径混淆。\n"
             "所有 $ 引用的根名称必须等于已存在 step.id；不要生成 %step_0 这类临时 id。\n"
             "- 规划契约里的 action 名称只说明输出来源；实际 $ 引用必须使用 step.id 作为根，不能把 action 名称写成引用根。\n"
-            "- final 是顶层结果描述，不是 step；不要生成 id=final 的 step，也不要为了返回结果重复执行同一个只读 action。\n"
+            "- final 是顶层结果描述，不是 step；展示、返回或最终结果只写在顶层 final，final 只引用最后一个 step 输出，不要编造或展开服务端返回字段；不要生成 id=final 的 step，也不能为返回结果重复执行同一个 action。\n"
+            "- 规划契约里的 字段引用 X<-Y 表示 args.X 必须写成 $step_id.field，不能把 Y 写成普通字符串；没有 $ 前缀的 step.field 是普通字符串。\n"
             "- depends_on 必须包含被 args 引用的上游 step.id；没有引用时 depends_on 为空数组。\n"
+            "- 用户已经给出稳定 ID（如 user-*、session-*、group-*、moment-*、req-*）时，直接填入对应 ID 字段，不要再额外规划 contact.resolve 或搜索动作。\n"
+            "- 输入契约没有字段的 action，args 必须是 {}，不要补 null 字段或猜测字段。\n"
             "- 读取类任务不需要确认；写操作必须先生成 preview 并经过 user.confirm，确认后才能执行写 action。\n"
+            "- 对任何写 action，idempotency_key 必须是写 action 的顶层 args 字段，不要放进 preview 对象；preview.content 必须非空并描述本次操作内容。\n"
             "- 只有用户明确要求发送、添加、发布、删除或修改时，才允许规划写 action。\n"
             "- 多个对象默认表示多对象读取或操作，不是歧义；只有单个名称对应多个本地实体时才由系统澄清。\n"
             "- 涉及联系人、群名或会话对象的读取任务，必须先解析对象，并把解析结果传给后续读取 action 的 participants；不要把名称字符串直接放到 participants，也不要只把名称留在 question 或 keywords。\n"
@@ -531,9 +536,9 @@ class AIActionPlanner:
             header
             + "step 字段：id, action, depends_on, args, display_text, explanation。\n"
             "引用上游输出使用 $step_id.field 或 $step_id.field[0]。\n"
-            "发送、发布、添加、删除或修改等写操作必须同时有明确目标和明确内容，并经过确认。\n"
-            "查询、回顾、总结或检索已存在内容属于读取类任务，不要要求确认。\n"
-            "根据已注册 action 的用途、输入字段和输出字段组合 steps，不要按固定示例补齐计划。\n"
+            "写操作必须有明确目标和内容，并经过确认。\n"
+            "查询、回顾、总结或检索已存在内容是读取，不要确认。\n"
+            "按已注册 action 的用途、输入字段和输出字段组合 steps，不要按固定示例补齐计划。\n"
             f"用户输入：{str(user_text or '').strip()}"
         )
 

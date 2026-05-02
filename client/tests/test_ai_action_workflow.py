@@ -1176,10 +1176,20 @@ def test_ai_action_planner_prompt_keeps_generic_planning_rules_without_case_temp
     user_prompt = AIActionPlanner._user_prompt("我和test3昨天聊了什么？")
 
     assert "每个 step.id 必须唯一" in system_prompt
+    assert "step.id 只能使用字母、数字和下划线" in system_prompt
     assert "所有 $ 引用的根名称必须等于已存在 step.id" in system_prompt
     assert "规划契约里的 action 名称只说明输出来源" in system_prompt
     assert "final 是顶层结果描述，不是 step" in system_prompt
+    assert "展示、返回或最终结果只写在顶层 final" in system_prompt
+    assert "final 只引用最后一个 step 输出" in system_prompt
+    assert "不要编造或展开服务端返回字段" in system_prompt
+    assert "不能为返回结果重复执行同一个 action" in system_prompt
     assert "depends_on 必须包含被 args 引用的上游 step.id" in system_prompt
+    assert "用户已经给出稳定 ID" in system_prompt
+    assert "直接填入对应 ID 字段" in system_prompt
+    assert "不要再额外规划 contact.resolve" in system_prompt
+    assert "输入契约没有字段的 action，args 必须是 {}" in system_prompt
+    assert "不要补 null 字段" in system_prompt
     assert "读取类任务不需要确认" in system_prompt
     assert "写操作必须先生成 preview 并经过 user.confirm" in system_prompt
     assert "历史聊天、语音转写、文件内容总结和已存在内容回顾属于本地记忆读取" in system_prompt
@@ -1207,6 +1217,7 @@ def test_ai_action_planner_prompt_documents_atomic_action_arg_contracts_without_
     assert "before_seq:int | None" in system_prompt
     assert "friend.check" in system_prompt
     assert "target_entity" in system_prompt
+    assert "输入字段 无" in system_prompt
     assert "张三" not in system_prompt
     assert "用户原始问题" not in system_prompt
 
@@ -1244,7 +1255,13 @@ def test_ai_action_planner_prompt_documents_write_dependency_contracts_without_f
     assert "字段引用 preview<-message.draft.preview" in system_prompt
     assert "字段引用 preview<-user.confirm.preview" in system_prompt
     assert "字段引用 idempotency_key<-message.draft.idempotency_key" in system_prompt
+    assert "字段引用 X<-Y 表示 args.X 必须写成 $step_id.field" in system_prompt
+    assert "不能把 Y 写成普通字符串" in system_prompt
+    assert "没有 $ 前缀的 step.field 是普通字符串" in system_prompt
     assert "不要引用 user.confirm 输出作为 message.send 的 target/content/idempotency_key 参数" in system_prompt
+    assert "idempotency_key 必须是写 action 的顶层 args 字段" in system_prompt
+    assert "不要放进 preview 对象" in system_prompt
+    assert "preview.content 必须非空" in system_prompt
     assert "字段引用 target<-contact.resolve.contacts[0]" in system_prompt
     assert "不允许直接使用自然语言对象作为 target" in system_prompt
     assert "preview 必须是对象" in system_prompt

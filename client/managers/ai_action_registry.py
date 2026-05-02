@@ -695,8 +695,8 @@ class AtomicActionRegistry:
         lines = ["已注册 action 能力："]
         if any(_is_server_read_spec(spec) for spec in self._actions.values()):
             lines.append(
-                "服务端只读 action 通用：kind=read risk=low，不需要 user.confirm，无外部副作用；"
-                "输出字段 text、items、item、result_count、result。"
+                "服务端只读 action 通用：kind=read risk=low，不需要 user.confirm；"
+                "输出 text/items/item/result_count/result。"
             )
         for name in _prompt_contract_action_order(self.names()):
             spec = self._actions[name]
@@ -1274,6 +1274,8 @@ def _format_action_prompt_contract(spec: AtomicActionSpec) -> str:
     input_fields = _model_prompt_fields(spec.input_model)
     if input_fields:
         parts.append(f"输入字段 {input_fields}")
+    elif spec.input_model is not None:
+        parts.append("输入字段 无")
     output_fields = _model_prompt_fields(spec.output_model)
     if output_fields:
         parts.append(f"输出字段 {output_fields}")
@@ -1315,6 +1317,8 @@ def _format_server_read_prompt_contract(spec: AtomicActionSpec) -> str:
     input_fields = _model_prompt_fields(spec.input_model)
     if input_fields:
         parts.append(f"输入字段 {input_fields}")
+    elif spec.input_model is not None:
+        parts.append("输入字段 无")
     for note in spec.prompt_notes:
         normalized = " ".join(str(note or "").split())
         if not normalized or _is_common_server_read_note(normalized):
