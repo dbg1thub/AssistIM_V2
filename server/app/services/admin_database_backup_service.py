@@ -215,6 +215,82 @@ class AdminDatabaseBackupService:
             self.db.commit()
             raise
 
+    def verify_backup(
+        self,
+        backup_id: str,
+        *,
+        actor: User,
+        request_path: str = "",
+        request_method: str = "",
+        client_ip: str = "",
+    ) -> dict[str, Any]:
+        backup = self.db.get(AdminDatabaseBackup, str(backup_id or "").strip())
+        if backup is None:
+            raise AppError(ErrorCode.RESOURCE_NOT_FOUND, "database backup not found", 404)
+
+        try:
+            result = self._verify_backup_file(backup)
+            verified_at = utcnow()
+            backup.verification_status = "passed"
+            backup.verification_message = str(result["verification_message"])
+            backup.verified_at = verified_at
+            self.audit.record(
+                actor=actor,
+                action="admin.database.backup.verify",
+                target_type="database_backup",
+                target_id=str(backup.id or ""),
+                request_path=request_path,
+                request_method=request_method,
+                client_ip=client_ip,
+                success=True,
+                detail={
+                    "backup_id": str(backup.id or ""),
+                    "status": str(backup.status or ""),
+                    "database_dialect": str(backup.database_dialect or ""),
+                    "backup_format": str(backup.backup_format or ""),
+                    "storage_key": str(backup.storage_key or ""),
+                    "file_name": str(backup.file_name or ""),
+                    "verification_status": backup.verification_status,
+                    "verification_message": backup.verification_message,
+                    "checksum_matched": bool(result["checksum_matched"]),
+                    "size_matched": bool(result["size_matched"]),
+                    "integrity_check": str(result["integrity_check"]),
+                },
+                commit=False,
+            )
+            self.db.commit()
+            self.db.refresh(backup)
+            payload = self.serialize_backup(backup)
+            payload.update(result)
+            return payload
+        except AppError as exc:
+            verified_at = utcnow()
+            backup.verification_status = "failed"
+            backup.verification_message = self._verification_message(exc.message)
+            backup.verified_at = verified_at
+            self.audit.record(
+                actor=actor,
+                action="admin.database.backup.verify",
+                target_type="database_backup",
+                target_id=str(backup.id or ""),
+                request_path=request_path,
+                request_method=request_method,
+                client_ip=client_ip,
+                success=False,
+                error_code=str(exc.code),
+                detail={
+                    "backup_id": str(backup.id or ""),
+                    "status": str(backup.status or ""),
+                    "database_dialect": str(backup.database_dialect or ""),
+                    "backup_format": str(backup.backup_format or ""),
+                    "verification_status": backup.verification_status,
+                    "error": backup.verification_message,
+                },
+                commit=False,
+            )
+            self.db.commit()
+            raise
+
     def prepare_download(
         self,
         backup_id: str,
@@ -289,6 +365,9 @@ class AdminDatabaseBackupService:
             "size_bytes": int(backup.size_bytes or 0),
             "checksum_sha256": str(backup.checksum_sha256 or ""),
             "error_message": str(backup.error_message or ""),
+            "verification_status": str(backup.verification_status or ""),
+            "verification_message": str(backup.verification_message or ""),
+            "verified_at": isoformat_utc(backup.verified_at),
             "started_at": isoformat_utc(backup.started_at),
             "finished_at": isoformat_utc(backup.finished_at),
             "duration_ms": int(backup.duration_ms or 0),
@@ -396,6 +475,108 @@ class AdminDatabaseBackupService:
             raise AppError(ErrorCode.INTERNAL_ERROR, "database backup file delete failed", 500) from exc
         return {"file_deleted": True, "file_missing": False}
 
+    def _verify_backup_file(self, backup: AdminDatabaseBackup) -> dict[str, Any]:
+        file_path = self._validate_verifiable_backup(backup)
+        expected_checksum = str(backup.checksum_sha256 or "").strip()
+        if not expected_checksum:
+            raise AppError(ErrorCode.INVALID_REQUEST, "database backup checksum is missing", 409)
+
+        actual_checksum = self._sha256(str(file_path))
+        if actual_checksum != expected_checksum:
+            raise AppError(ErrorCode.INVALID_REQUEST, "database backup checksum mismatch", 409)
+
+        expected_size = int(backup.size_bytes or 0)
+        actual_size = int(file_path.stat().st_size)
+        if expected_size != actual_size:
+            raise AppError(ErrorCode.INVALID_REQUEST, "database backup size mismatch", 409)
+
+        dialect = str(backup.database_dialect or "").strip().lower()
+        backup_format = str(backup.backup_format or "").strip().lower()
+        if dialect == "sqlite" or backup_format == "sqlite":
+            integrity_check = self._verify_sqlite_backup(file_path)
+            verification_message = "sqlite integrity_check ok"
+        elif dialect in {"postgresql", "postgres"} or backup_format == "pg_dump_custom":
+            integrity_check = self._verify_postgresql_backup(file_path)
+            verification_message = "pg_restore --list ok"
+        else:
+            raise AppError(ErrorCode.INVALID_REQUEST, "unsupported database backup format", 409)
+
+        return {
+            "verification_message": verification_message,
+            "size_matched": True,
+            "checksum_matched": True,
+            "integrity_check": integrity_check,
+        }
+
+    def _validate_verifiable_backup(self, backup: AdminDatabaseBackup) -> Path:
+        status = str(backup.status or "").strip().lower()
+        if status != "completed":
+            raise AppError(ErrorCode.INVALID_REQUEST, "only completed backups can be verified", 409)
+
+        raw_path = str(backup.file_path or "").strip()
+        if not raw_path:
+            raise AppError(ErrorCode.RESOURCE_NOT_FOUND, "database backup file is missing", 404)
+
+        file_path = Path(raw_path).expanduser().resolve()
+        backup_root = self._backup_root()
+        try:
+            file_path.relative_to(backup_root)
+        except ValueError as exc:
+            raise AppError(ErrorCode.FORBIDDEN, "database backup file is outside the backup directory", 403) from exc
+
+        if not file_path.is_file():
+            raise AppError(ErrorCode.RESOURCE_NOT_FOUND, "database backup file is missing", 404)
+        return file_path
+
+    def _verify_sqlite_backup(self, file_path: Path) -> str:
+        try:
+            with closing(sqlite3.connect(f"{file_path.as_uri()}?mode=ro", uri=True)) as connection:
+                rows = connection.execute("PRAGMA integrity_check").fetchall()
+        except sqlite3.DatabaseError as exc:
+            message = self._verification_message(str(exc) or "sqlite integrity_check failed")
+            raise AppError(ErrorCode.INVALID_REQUEST, f"sqlite backup integrity check failed: {message}", 409) from exc
+
+        messages = [str(row[0] if row else "") for row in rows]
+        if messages != ["ok"]:
+            detail = "; ".join(item for item in messages if item) or "unknown integrity_check failure"
+            raise AppError(
+                ErrorCode.INVALID_REQUEST,
+                f"sqlite backup integrity check failed: {self._verification_message(detail)}",
+                409,
+            )
+        return "ok"
+
+    def _verify_postgresql_backup(self, file_path: Path) -> str:
+        pg_restore = shutil.which("pg_restore")
+        if not pg_restore:
+            raise AppError(
+                ErrorCode.INTERNAL_ERROR,
+                "pg_restore not found; install PostgreSQL client tools on the server",
+                500,
+            )
+
+        try:
+            result = subprocess.run(
+                [pg_restore, "--list", str(file_path)],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=600,
+            )
+        except OSError as exc:
+            raise AppError(ErrorCode.INTERNAL_ERROR, "pg_restore execution failed", 500) from exc
+        except subprocess.TimeoutExpired as exc:
+            raise AppError(ErrorCode.INTERNAL_ERROR, "pg_restore verification timed out", 500) from exc
+
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout or "pg_restore --list failed").strip()
+            raise AppError(
+                ErrorCode.INVALID_REQUEST,
+                f"postgresql backup verification failed: {self._verification_message(detail)}",
+                409,
+            )
+        return "pg_restore_list_ok"
+
     def _sqlite_database_path(self) -> Path:
         database = self.db.get_bind().url.database or make_url(self.settings.database_url).database
         if not database:
@@ -440,3 +621,6 @@ class AdminDatabaseBackupService:
         except Exception:
             pass
         return sanitized
+
+    def _verification_message(self, message: str) -> str:
+        return self._sanitize_error_message(str(message or "")).strip()[:500]

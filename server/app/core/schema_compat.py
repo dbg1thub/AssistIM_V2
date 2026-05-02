@@ -120,6 +120,12 @@ ADMIN_DATABASE_BACKUP_INDEX_DDL: dict[str, str] = {
     "idx_admin_database_backups_created_at": "CREATE INDEX IF NOT EXISTS idx_admin_database_backups_created_at ON admin_database_backups (created_at)",
 }
 
+ADMIN_DATABASE_BACKUP_VERIFICATION_COLUMN_DDL: dict[str, str] = {
+    "verification_status": "VARCHAR(32) NOT NULL DEFAULT ''",
+    "verification_message": "TEXT NOT NULL DEFAULT ''",
+    "verified_at": "TIMESTAMP",
+}
+
 
 def _get_table_names(bind: Engine | Connection) -> set[str]:
     return set(inspect(bind).get_table_names())
@@ -159,7 +165,7 @@ def _has_indexes(bind: Engine | Connection, table_name: str, required_indexes: I
     return all(index_name in indexes for index_name in required_indexes)
 
 
-RUNTIME_SCHEMA_ALEMBIC_REVISION = "20260503_0017"
+RUNTIME_SCHEMA_ALEMBIC_REVISION = "20260503_0018"
 
 def _parse_revision(revision: str) -> tuple[int, int] | None:
     candidate = str(revision or "").strip()
@@ -214,6 +220,7 @@ def _has_current_runtime_schema(bind: Engine | Connection) -> bool:
         and _has_indexes(bind, "session_events", SESSION_EVENT_INDEX_DDL)
         and _has_indexes(bind, "user_session_events", USER_SESSION_EVENT_INDEX_DDL)
         and _has_indexes(bind, "admin_audit_logs", ADMIN_AUDIT_INDEX_DDL)
+        and _has_columns(bind, "admin_database_backups", ADMIN_DATABASE_BACKUP_VERIFICATION_COLUMN_DDL)
         and _has_indexes(bind, "admin_database_backups", ADMIN_DATABASE_BACKUP_INDEX_DDL)
     )
 
@@ -319,6 +326,9 @@ def _ensure_admin_database_backups_table(connection: Connection, applied: list[s
                 size_bytes INTEGER NOT NULL DEFAULT 0,
                 checksum_sha256 VARCHAR(64) NOT NULL DEFAULT '',
                 error_message TEXT NOT NULL DEFAULT '',
+                verification_status VARCHAR(32) NOT NULL DEFAULT '',
+                verification_message TEXT NOT NULL DEFAULT '',
+                verified_at TIMESTAMP,
                 started_at TIMESTAMP,
                 finished_at TIMESTAMP,
                 duration_ms INTEGER NOT NULL DEFAULT 0,
@@ -1203,6 +1213,12 @@ def ensure_schema_compatibility(engine: Engine) -> list[str]:
         _ensure_admin_audit_logs_table(connection, applied)
         _ensure_indexes(connection, "admin_audit_logs", ADMIN_AUDIT_INDEX_DDL, applied)
         _ensure_admin_database_backups_table(connection, applied)
+        _ensure_columns(
+            connection,
+            "admin_database_backups",
+            ADMIN_DATABASE_BACKUP_VERIFICATION_COLUMN_DDL,
+            applied,
+        )
         _ensure_indexes(connection, "admin_database_backups", ADMIN_DATABASE_BACKUP_INDEX_DDL, applied)
 
     return applied

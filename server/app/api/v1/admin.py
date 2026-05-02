@@ -228,6 +228,25 @@ def download_admin_database_backup(
     )
 
 
+@router.post("/database/backups/{backup_id}/verify")
+def verify_admin_database_backup(
+    backup_id: str,
+    request: Request,
+    current_user: User = Depends(get_current_admin_user),
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_request_settings),
+) -> dict:
+    """Verify one completed server-local database backup without restoring it."""
+    payload = AdminDatabaseBackupService(db, settings).verify_backup(
+        backup_id,
+        actor=current_user,
+        request_path=str(request.url.path),
+        request_method=request.method,
+        client_ip=_client_ip(request),
+    )
+    return success_response(payload)
+
+
 @router.delete("/database/backups/{backup_id}")
 def delete_admin_database_backup(
     backup_id: str,

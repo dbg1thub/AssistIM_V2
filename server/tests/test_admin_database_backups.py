@@ -101,6 +101,26 @@ def test_admin_database_backup_delete_forbids_non_admin(client: TestClient) -> N
         assert Path(backup.file_path).is_file()
 
 
+def test_admin_database_backup_verify_forbids_non_admin(client: TestClient) -> None:
+    admin_auth = _register(client, "backup-verify-owner", "Backup Verify Owner")
+    normal_auth = _register(client, "backup-verify-normal", "Backup Verify Normal")
+    _set_role(admin_auth["user"]["id"], "admin")
+    create_response = client.post(
+        "/api/v1/admin/database/backups",
+        headers=_auth_header(admin_auth["access_token"]),
+    )
+    assert create_response.status_code == 200, create_response.text
+    backup_id = create_response.json()["data"]["id"]
+
+    response = client.post(
+        f"/api/v1/admin/database/backups/{backup_id}/verify",
+        headers=_auth_header(normal_auth["access_token"]),
+    )
+
+    assert response.status_code == 403
+    assert response.json()["code"] == ErrorCode.FORBIDDEN
+
+
 def test_admin_database_backup_creates_real_sqlite_backup_and_audit(client: TestClient) -> None:
     admin_auth = _register(client, "backup-admin", "Backup Admin")
     _register(client, "backup-data", "Backup Data")
@@ -208,6 +228,275 @@ def test_admin_database_backup_download_returns_attachment_and_records_audit(cli
         assert audit.actor_user_id == admin_auth["user"]["id"]
         assert audit.target_id == backup_payload["id"]
         assert audit.success is True
+        assert "file_path" not in audit.detail_json
+
+
+def test_admin_database_backup_verify_sqlite_success_records_fields_and_audit(client: TestClient) -> None:
+    admin_auth = _register(client, "backup-verify-admin", "Backup Verify Admin")
+    _set_role(admin_auth["user"]["id"], "admin")
+    create_response = client.post(
+        "/api/v1/admin/database/backups",
+        headers=_auth_header(admin_auth["access_token"]),
+    )
+    assert create_response.status_code == 200, create_response.text
+    backup_payload = create_response.json()["data"]
+
+    response = client.post(
+        f"/api/v1/admin/database/backups/{backup_payload['id']}/verify",
+        headers=_auth_header(admin_auth["access_token"]),
+    )
+
+    assert response.status_code == 200, response.text
+    payload = response.json()["data"]
+    assert payload["id"] == backup_payload["id"]
+    assert payload["verification_status"] == "passed"
+    assert payload["verification_message"]
+    assert payload["verified_at"]
+    assert payload["size_matched"] is True
+    assert payload["checksum_matched"] is True
+    assert payload["integrity_check"] == "ok"
+    assert "file_path" not in payload
+
+    detail_response = client.get(
+        f"/api/v1/admin/database/backups/{backup_payload['id']}",
+        headers=_auth_header(admin_auth["access_token"]),
+    )
+    assert detail_response.status_code == 200, detail_response.text
+    detail_payload = detail_response.json()["data"]
+    assert detail_payload["verification_status"] == "passed"
+    assert detail_payload["verification_message"] == payload["verification_message"]
+    assert detail_payload["verified_at"] == payload["verified_at"]
+    assert "file_path" not in detail_payload
+
+    with SessionLocal() as db:
+        backup = db.get(AdminDatabaseBackup, backup_payload["id"])
+        assert backup is not None
+        assert backup.verification_status == "passed"
+        assert backup.verified_at is not None
+        audit = (
+            db.query(AdminAuditLog)
+            .filter(AdminAuditLog.action == "admin.database.backup.verify")
+            .one()
+        )
+        assert audit.actor_user_id == admin_auth["user"]["id"]
+        assert audit.target_id == backup_payload["id"]
+        assert audit.success is True
+        assert "file_path" not in audit.detail_json
+
+
+def test_admin_database_backup_verify_missing_file_marks_failed_and_records_audit(
+    client: TestClient,
+) -> None:
+    admin_auth = _register(client, "backup-verify-missing-admin", "Backup Verify Missing Admin")
+    _set_role(admin_auth["user"]["id"], "admin")
+    missing_path = _backup_root_for_client(client) / "verify-missing.sqlite3"
+    missing_path.unlink(missing_ok=True)
+    backup_id = _insert_backup_record(
+        created_by_user_id=admin_auth["user"]["id"],
+        created_by_username="backup-verify-missing-admin",
+        status="completed",
+        file_path=str(missing_path),
+        file_name="verify-missing.sqlite3",
+        size_bytes=128,
+        checksum_sha256="4" * 64,
+    )
+
+    response = client.post(
+        f"/api/v1/admin/database/backups/{backup_id}/verify",
+        headers=_auth_header(admin_auth["access_token"]),
+    )
+
+    assert response.status_code == 404
+    assert response.json()["code"] == ErrorCode.RESOURCE_NOT_FOUND
+    assert "file" in response.json()["message"]
+
+    with SessionLocal() as db:
+        backup = db.get(AdminDatabaseBackup, backup_id)
+        assert backup is not None
+        assert backup.status == "completed"
+        assert backup.verification_status == "failed"
+        assert "file" in backup.verification_message
+        assert backup.verified_at is not None
+        audit = (
+            db.query(AdminAuditLog)
+            .filter(AdminAuditLog.action == "admin.database.backup.verify")
+            .one()
+        )
+        assert audit.target_id == backup_id
+        assert audit.success is False
+        assert "file_path" not in audit.detail_json
+
+
+def test_admin_database_backup_verify_rejects_checksum_mismatch_and_records_audit(
+    client: TestClient,
+) -> None:
+    admin_auth = _register(client, "backup-verify-checksum-admin", "Backup Verify Checksum Admin")
+    _set_role(admin_auth["user"]["id"], "admin")
+    create_response = client.post(
+        "/api/v1/admin/database/backups",
+        headers=_auth_header(admin_auth["access_token"]),
+    )
+    assert create_response.status_code == 200, create_response.text
+    backup_payload = create_response.json()["data"]
+    with SessionLocal() as db:
+        backup = db.get(AdminDatabaseBackup, backup_payload["id"])
+        assert backup is not None
+        backup_file = Path(backup.file_path)
+    with backup_file.open("ab") as handle:
+        handle.write(b"tampered")
+
+    response = client.post(
+        f"/api/v1/admin/database/backups/{backup_payload['id']}/verify",
+        headers=_auth_header(admin_auth["access_token"]),
+    )
+
+    assert response.status_code == 409
+    assert response.json()["code"] == ErrorCode.INVALID_REQUEST
+    assert "checksum" in response.json()["message"]
+
+    with SessionLocal() as db:
+        backup = db.get(AdminDatabaseBackup, backup_payload["id"])
+        assert backup is not None
+        assert backup.verification_status == "failed"
+        assert "checksum" in backup.verification_message
+        audit = (
+            db.query(AdminAuditLog)
+            .filter(AdminAuditLog.action == "admin.database.backup.verify")
+            .one()
+        )
+        assert audit.target_id == backup_payload["id"]
+        assert audit.success is False
+        assert "file_path" not in audit.detail_json
+
+
+def test_admin_database_backup_verify_rejects_path_outside_backup_root(client: TestClient) -> None:
+    admin_auth = _register(client, "backup-verify-path-admin", "Backup Verify Path Admin")
+    _set_role(admin_auth["user"]["id"], "admin")
+    outside_file = _testdata_path("outside-verify-backup.sqlite3")
+    outside_file.write_bytes(b"outside")
+    backup_id = _insert_backup_record(
+        created_by_user_id=admin_auth["user"]["id"],
+        created_by_username="backup-verify-path-admin",
+        status="completed",
+        file_path=str(outside_file),
+        file_name="outside-verify-backup.sqlite3",
+        size_bytes=outside_file.stat().st_size,
+        checksum_sha256=_sha256_file(outside_file),
+    )
+
+    response = client.post(
+        f"/api/v1/admin/database/backups/{backup_id}/verify",
+        headers=_auth_header(admin_auth["access_token"]),
+    )
+
+    assert response.status_code == 403
+    assert response.json()["code"] == ErrorCode.FORBIDDEN
+    assert "backup directory" in response.json()["message"]
+    assert outside_file.is_file()
+
+    with SessionLocal() as db:
+        backup = db.get(AdminDatabaseBackup, backup_id)
+        assert backup is not None
+        assert backup.status == "completed"
+        audit = (
+            db.query(AdminAuditLog)
+            .filter(AdminAuditLog.action == "admin.database.backup.verify")
+            .one()
+        )
+        assert audit.target_id == backup_id
+        assert audit.success is False
+        assert "outside-verify-backup" not in audit.detail_json
+
+
+def test_admin_database_backup_verify_rejects_failed_and_deleted_backups(client: TestClient) -> None:
+    admin_auth = _register(client, "backup-verify-state-admin", "Backup Verify State Admin")
+    _set_role(admin_auth["user"]["id"], "admin")
+    failed_backup_id = _insert_backup_record(
+        created_by_user_id=admin_auth["user"]["id"],
+        created_by_username="backup-verify-state-admin",
+        status="failed",
+        file_path="",
+        file_name="verify-failed.dump",
+        error_message="pg_dump not found",
+    )
+    create_response = client.post(
+        "/api/v1/admin/database/backups",
+        headers=_auth_header(admin_auth["access_token"]),
+    )
+    assert create_response.status_code == 200, create_response.text
+    deleted_backup_id = create_response.json()["data"]["id"]
+    delete_response = client.delete(
+        f"/api/v1/admin/database/backups/{deleted_backup_id}",
+        headers=_auth_header(admin_auth["access_token"]),
+    )
+    assert delete_response.status_code == 200, delete_response.text
+
+    failed_response = client.post(
+        f"/api/v1/admin/database/backups/{failed_backup_id}/verify",
+        headers=_auth_header(admin_auth["access_token"]),
+    )
+    deleted_response = client.post(
+        f"/api/v1/admin/database/backups/{deleted_backup_id}/verify",
+        headers=_auth_header(admin_auth["access_token"]),
+    )
+
+    assert failed_response.status_code == 409
+    assert failed_response.json()["code"] == ErrorCode.INVALID_REQUEST
+    assert "completed" in failed_response.json()["message"]
+    assert deleted_response.status_code == 409
+    assert deleted_response.json()["code"] == ErrorCode.INVALID_REQUEST
+    assert "completed" in deleted_response.json()["message"]
+
+
+def test_admin_database_backup_verify_postgresql_requires_pg_restore(monkeypatch) -> None:
+    settings = Settings(
+        database_url="postgresql+psycopg://assistim:super-secret@db.example:5432/assistim",
+        upload_dir=_testdata_path("postgres-uploads").as_posix(),
+    )
+    backup_root = Path(settings.upload_dir).resolve().parent / "database_backups"
+    backup_root.mkdir(parents=True, exist_ok=True)
+    dump_path = backup_root / "verify-postgres.dump"
+    dump_path.write_bytes(b"pg custom dump placeholder")
+    with SessionLocal() as db:
+        actor = User(
+            username="backup-verify-pg-admin",
+            password_hash="hash",
+            nickname="Backup Verify Pg Admin",
+            role="admin",
+        )
+        db.add(actor)
+        db.commit()
+        db.refresh(actor)
+        backup = AdminDatabaseBackup(
+            created_by_user_id=str(actor.id),
+            created_by_username=actor.username,
+            status="completed",
+            database_dialect="postgresql",
+            backup_format="pg_dump_custom",
+            storage_key=f"database_backups/{dump_path.name}",
+            file_name=dump_path.name,
+            file_path=str(dump_path),
+            size_bytes=dump_path.stat().st_size,
+            checksum_sha256=_sha256_file(dump_path),
+        )
+        db.add(backup)
+        db.commit()
+        db.refresh(backup)
+
+        monkeypatch.setattr(backup_service_module.shutil, "which", lambda name: None)
+        with pytest.raises(AppError) as exc_info:
+            AdminDatabaseBackupService(db, settings).verify_backup(str(backup.id), actor=actor)
+
+        assert exc_info.value.status_code == 500
+        assert "pg_restore" in exc_info.value.message
+        db.refresh(backup)
+        assert backup.verification_status == "failed"
+        assert "pg_restore" in backup.verification_message
+        assert "super-secret" not in backup.verification_message
+        audit = db.query(AdminAuditLog).filter(AdminAuditLog.action == "admin.database.backup.verify").one()
+        assert audit.success is False
+        assert audit.target_id == str(backup.id)
+        assert "super-secret" not in audit.detail_json
         assert "file_path" not in audit.detail_json
 
 
@@ -533,6 +822,8 @@ def _insert_backup_record(
     status: str,
     file_path: str,
     file_name: str,
+    database_dialect: str = "sqlite",
+    backup_format: str = "sqlite",
     size_bytes: int = 0,
     checksum_sha256: str = "",
     error_message: str = "",
@@ -542,8 +833,8 @@ def _insert_backup_record(
             created_by_user_id=created_by_user_id,
             created_by_username=created_by_username,
             status=status,
-            database_dialect="sqlite",
-            backup_format="sqlite",
+            database_dialect=database_dialect,
+            backup_format=backup_format,
             storage_key=f"database_backups/{file_name}",
             file_name=file_name,
             file_path=file_path,
@@ -567,3 +858,13 @@ def _backup_root_for_client(client: TestClient) -> Path:
 
 def _testdata_path(file_name: str) -> Path:
     return (Path(__file__).resolve().parents[1] / ".testdata" / file_name).resolve()
+
+
+def _sha256_file(path: Path) -> str:
+    import hashlib
+
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
