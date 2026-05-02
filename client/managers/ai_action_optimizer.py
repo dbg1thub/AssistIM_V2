@@ -5,12 +5,12 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from client.managers.ai_action_registry import SERVER_READ_ACTION_ROUTES
+from client.managers.ai_action_registry import SERVER_READ_ACTION_ROUTES, SERVER_WRITE_ACTION_ROUTES
 from client.managers.ai_action_types import AIActionPlan, AIActionStep
 
 
 MERGEABLE_ACTIONS = {"contact.resolve", "memory.search", "memory.summarize", *SERVER_READ_ACTION_ROUTES.keys()}
-ROOT_ACTIONS = {"message.send", "friend.add", "moment.publish", "user.confirm"}
+ROOT_ACTIONS = {"message.send", "friend.add", "moment.publish", "user.confirm", *SERVER_WRITE_ACTION_ROUTES.keys()}
 
 
 class AIPlanOptimizer:

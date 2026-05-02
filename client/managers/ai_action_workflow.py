@@ -595,7 +595,12 @@ class AIActionWorkflow:
                 name
                 for name in self._registry.names()
                 if (spec := self._registry.get(name)) is not None and spec.kind == "write"
-            )
+            ),
+            action_specs=(
+                spec
+                for name in self._registry.names()
+                if (spec := self._registry.get(name)) is not None
+            ),
         )
         self._planner = planner or AIActionPlanner(
             task_manager=resolved_task_manager,

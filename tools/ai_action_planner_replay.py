@@ -402,7 +402,7 @@ def _evaluate_runtime_replay(
         )
 
     registry = _runtime_registry()
-    normalizer = AIPlanNormalizer()
+    normalizer = _runtime_normalizer(registry)
     optimizer = AIPlanOptimizer()
     validator = AIPlanValidator(registry=registry)
     normalized = normalizer.normalize(AIActionPlan.from_dict(dict(parsed)), user_text=user_text)
@@ -439,7 +439,7 @@ async def _evaluate_workflow_repair_replay(
         )
 
     registry = _runtime_registry()
-    normalizer = AIPlanNormalizer()
+    normalizer = _runtime_normalizer(registry)
     optimizer = AIPlanOptimizer()
     validator = AIPlanValidator(registry=registry)
     normalized = normalizer.normalize(AIActionPlan.from_dict(dict(parsed)), user_text=user_text)
@@ -713,6 +713,21 @@ def _runtime_registry() -> AtomicActionRegistry:
     if _RUNTIME_REGISTRY is None:
         _RUNTIME_REGISTRY = AtomicActionRegistry(contact_resolver=None)
     return _RUNTIME_REGISTRY
+
+
+def _runtime_normalizer(registry: AtomicActionRegistry) -> AIPlanNormalizer:
+    return AIPlanNormalizer(
+        write_action_names=(
+            name
+            for name in registry.names()
+            if (spec := registry.get(name)) is not None and spec.kind == "write"
+        ),
+        action_specs=(
+            spec
+            for name in registry.names()
+            if (spec := registry.get(name)) is not None
+        ),
+    )
 
 
 def _runtime_repair_skip_reason(

@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from typing import Any
 
-from client.managers.ai_action_types import AIActionPlan, AIActionStep
+from client.managers.ai_action_types import AIActionPlan, AIActionStep, AtomicActionSpec
 
 
 DEFAULT_WRITE_ACTION_NAMES = frozenset({"message.send"})
@@ -13,12 +14,28 @@ DEFAULT_WRITE_ACTION_NAMES = frozenset({"message.send"})
 class AIPlanNormalizer:
     """Deterministic cleanup for atomic action plans."""
 
-    def __init__(self, *, write_action_names: Iterable[str] | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        write_action_names: Iterable[str] | None = None,
+        action_specs: Iterable[AtomicActionSpec] | None = None,
+    ) -> None:
+        specs = {
+            str(spec.name or "").strip(): spec
+            for spec in list(action_specs or ())
+            if str(getattr(spec, "name", "") or "").strip()
+        }
+        derived_write_names = {
+            name
+            for name, spec in specs.items()
+            if str(getattr(spec, "kind", "") or "").strip() == "write"
+        }
         self._write_action_names = frozenset(
             name
-            for name in (write_action_names or DEFAULT_WRITE_ACTION_NAMES)
+            for name in (write_action_names or (derived_write_names or DEFAULT_WRITE_ACTION_NAMES))
             if str(name or "").strip()
         )
+        self._action_specs = specs
         self._last_rejection_reason = ""
 
     @property
@@ -58,10 +75,15 @@ class AIPlanNormalizer:
             )
         final = dict(plan.final or {"type": "answer"})
         steps, final = self._canonicalize_unique_action_name_refs(steps, final)
+        steps = self._normalize_args_against_input_contracts(steps)
+        steps = self._remove_non_executable_final_steps(steps)
         steps = self._ensure_reference_dependencies(steps)
         steps = self._canonicalize_send_chain_refs(steps)
+        steps = self._canonicalize_planner_contract_refs(steps)
         steps = self._canonicalize_single_target_send_contact_resolve(steps)
         steps, final = self._ensure_memory_summarize_for_search_answer(steps, final=final, user_text=user_text)
+        steps = self._ensure_reference_dependencies(steps)
+        steps = self._remove_unreferenced_invalid_read_steps(steps, final=final)
         steps = self._ensure_reference_dependencies(steps)
         steps = self._ensure_write_confirmation(steps)
         if self._has_confirmation_without_write(steps):
@@ -79,6 +101,107 @@ class AIPlanNormalizer:
             final=final,
             control=dict(plan.control or {}),
         )
+
+    def _normalize_args_against_input_contracts(self, steps: list[AIActionStep]) -> list[AIActionStep]:
+        if not self._action_specs:
+            return steps
+        output: list[AIActionStep] = []
+        for step in steps:
+            spec = self._action_specs.get(step.action)
+            if spec is None:
+                output.append(step)
+                continue
+            normalized_args = _normalize_args_against_input_model(dict(step.args or {}), spec=spec)
+            if normalized_args == dict(step.args or {}):
+                output.append(step)
+                continue
+            output.append(
+                AIActionStep(
+                    id=step.id,
+                    action=step.action,
+                    depends_on=step.depends_on,
+                    args=normalized_args,
+                    display_text=step.display_text,
+                    explanation=step.explanation,
+                    fallback=step.fallback,
+                )
+            )
+        return output
+
+    def _remove_non_executable_final_steps(self, steps: list[AIActionStep]) -> list[AIActionStep]:
+        if len(steps) <= 1:
+            return steps
+        output = [
+            step
+            for step in steps
+            if not (step.id == "final" and self._spec_kind(step.action) != "write")
+        ]
+        return output or steps
+
+    def _canonicalize_planner_contract_refs(self, steps: list[AIActionStep]) -> list[AIActionStep]:
+        if not self._action_specs:
+            return steps
+        seen_step_actions: dict[str, str] = {}
+        output: list[AIActionStep] = []
+        for step in steps:
+            spec = self._action_specs.get(step.action)
+            args = dict(step.args or {})
+            if spec is not None:
+                for field_name, expected_refs in spec.planner_required_arg_refs.items():
+                    if _value_references_expected_action_field(
+                        args.get(field_name),
+                        expected_refs,
+                        action_specs=self._action_specs,
+                        seen_step_actions=seen_step_actions,
+                    ):
+                        continue
+                    replacement = _first_available_expected_ref(
+                        expected_refs,
+                        action_specs=self._action_specs,
+                        seen_step_actions=seen_step_actions,
+                        preferred_step_ids=step.depends_on,
+                    )
+                    if replacement:
+                        args[field_name] = replacement
+            output.append(
+                AIActionStep(
+                    id=step.id,
+                    action=step.action,
+                    depends_on=step.depends_on,
+                    args=args,
+                    display_text=step.display_text,
+                    explanation=step.explanation,
+                    fallback=step.fallback,
+                )
+            )
+            seen_step_actions[step.id] = step.action
+        return output
+
+    def _remove_unreferenced_invalid_read_steps(self, steps: list[AIActionStep], *, final: dict) -> list[AIActionStep]:
+        if len(steps) <= 1 or not self._action_specs:
+            return steps
+        if any(self._spec_kind(step.action) == "write" for step in steps):
+            return steps
+        used_ids = set(_refs_in_value(final))
+        for step in steps:
+            used_ids.update(step.depends_on)
+            used_ids.update(_refs_in_value(step.args))
+        output: list[AIActionStep] = []
+        for step in steps:
+            spec = self._action_specs.get(step.action)
+            if (
+                step.id not in used_ids
+                and spec is not None
+                and str(spec.kind or "").strip() == "read"
+                and _step_has_missing_required_input(step, spec=spec)
+            ):
+                continue
+            output.append(step)
+        return output or steps
+
+    def _spec_kind(self, action: str) -> str:
+        spec = self._action_specs.get(str(action or "").strip())
+        return str(getattr(spec, "kind", "") or "").strip()
 
     @staticmethod
     def _canonicalize_unique_action_name_refs(
@@ -483,6 +606,92 @@ def _confirm_send_is_complete(step: AIActionStep) -> bool:
         and _has_value(preview.get("content"))
         and _refs_are_available(preview, available=set(step.depends_on))
     )
+
+
+def _normalize_args_against_input_model(args: dict[str, Any], *, spec: AtomicActionSpec) -> dict[str, Any]:
+    fields = getattr(getattr(spec, "input_model", None), "model_fields", None)
+    if fields is None:
+        return args
+    allowed_fields = set(fields.keys())
+    if not allowed_fields:
+        return {}
+    return {
+        key: value
+        for key, value in args.items()
+        if key in allowed_fields or value is not None
+    }
+
+
+def _step_has_missing_required_input(step: AIActionStep, *, spec: AtomicActionSpec) -> bool:
+    fields = getattr(getattr(spec, "input_model", None), "model_fields", None)
+    if not fields:
+        return False
+    args = dict(step.args or {})
+    for field_name, field in fields.items():
+        is_required = getattr(field, "is_required", None)
+        if callable(is_required) and is_required() and not _has_value(args.get(field_name)):
+            return True
+    return False
+
+
+def _value_references_expected_action_field(
+    value: Any,
+    expected_refs: Iterable[str],
+    *,
+    action_specs: dict[str, AtomicActionSpec],
+    seen_step_actions: dict[str, str],
+) -> bool:
+    ref = _single_ref(value)
+    if ref is None:
+        return False
+    root, field_path = ref
+    actual_action = seen_step_actions.get(root, "")
+    for expected_ref in expected_refs:
+        expected = _split_expected_ref(expected_ref, action_specs=action_specs)
+        if expected is None:
+            continue
+        expected_action, expected_field_path = expected
+        if actual_action == expected_action and field_path == expected_field_path:
+            return True
+    return False
+
+
+def _first_available_expected_ref(
+    expected_refs: Iterable[str],
+    *,
+    action_specs: dict[str, AtomicActionSpec],
+    seen_step_actions: dict[str, str],
+    preferred_step_ids: Iterable[str],
+) -> str:
+    preferred = tuple(str(step_id or "").strip() for step_id in preferred_step_ids if str(step_id or "").strip())
+    ordered_step_ids = tuple(dict.fromkeys([*preferred, *seen_step_actions.keys()]))
+    for expected_ref in expected_refs:
+        expected = _split_expected_ref(expected_ref, action_specs=action_specs)
+        if expected is None:
+            continue
+        expected_action, expected_field_path = expected
+        for step_id in ordered_step_ids:
+            if seen_step_actions.get(step_id) != expected_action:
+                continue
+            return f"${step_id}.{expected_field_path}" if expected_field_path else f"${step_id}"
+    return ""
+
+
+def _split_expected_ref(
+    expected_ref: str,
+    *,
+    action_specs: dict[str, AtomicActionSpec],
+) -> tuple[str, str] | None:
+    text = str(expected_ref or "").strip()
+    if not text:
+        return None
+    for action_name in sorted(action_specs.keys(), key=len, reverse=True):
+        if text == action_name:
+            return action_name, ""
+        prefix = f"{action_name}."
+        if text.startswith(prefix):
+            return action_name, text[len(prefix) :]
+    return None
 
 
 def _refs_are_available(value: object, *, available: set[str]) -> bool:

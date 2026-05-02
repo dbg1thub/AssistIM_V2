@@ -157,6 +157,14 @@ class _FakeServerWriteHTTPClient:
         return {"ok": True}
 
 
+def _registry_specs(registry: AtomicActionRegistry) -> tuple[AtomicActionSpec, ...]:
+    return tuple(
+        spec
+        for name in registry.names()
+        if (spec := registry.get(name)) is not None
+    )
+
+
 class _FakeDirectMessageManager:
     def __init__(self, *, status=MessageStatus.SENDING) -> None:
         self.status = status
@@ -1753,6 +1761,151 @@ def test_ai_plan_normalizer_adds_memory_summarize_for_search_answer() -> None:
     assert summarize.args["source"] == "$search_test3_history"
     assert summarize.args["question"] == "我和 test3 之前聊过什么？"
     assert normalized.final == {"type": "answer", "source": "$summarize_search_test3_history"}
+
+
+def test_ai_plan_normalizer_removes_non_executable_final_read_step() -> None:
+    registry = AtomicActionRegistry(
+        contact_resolver=ContactAliasResolver(db=_FakeContactDatabase([])),
+        memory_manager=_FakeActionMemoryManager(),
+    )
+    normalizer = AIPlanNormalizer(action_specs=_registry_specs(registry))
+    validator = AIPlanValidator(registry=registry)
+    plan = AIActionPlan(
+        is_action=True,
+        goal="查看群详情",
+        risk="low",
+        steps=(
+            AIActionStep(
+                id="get_group_1",
+                action="group.get",
+                args={"group_id": "group-1"},
+            ),
+            AIActionStep(
+                id="final",
+                action="group.get",
+                depends_on=("get_group_1",),
+                args={"group_id": "group-1"},
+            ),
+        ),
+        final={"result": {"group_id": "group-1"}},
+    )
+
+    normalized = normalizer.normalize(plan, user_text="查看 group-1 这个群的信息")
+
+    assert normalized.is_action is True
+    assert [step.id for step in normalized.steps] == ["get_group_1"]
+    assert validator.validate(normalized).allowed is True
+
+
+def test_ai_plan_normalizer_removes_unreferenced_read_step_with_missing_required_args() -> None:
+    registry = AtomicActionRegistry(
+        contact_resolver=ContactAliasResolver(db=_FakeContactDatabase([])),
+        memory_manager=_FakeActionMemoryManager(),
+    )
+    normalizer = AIPlanNormalizer(action_specs=_registry_specs(registry))
+    validator = AIPlanValidator(registry=registry)
+    plan = AIActionPlan(
+        is_action=True,
+        goal="查看朋友圈列表",
+        risk="low",
+        steps=(
+            AIActionStep(
+                id="moment_list",
+                action="moment.list",
+                args={"user_id": None},
+            ),
+            AIActionStep(
+                id="user_id_lookup",
+                action="user.get",
+                args={"user_id": None},
+            ),
+        ),
+        final={"result": {"list": []}},
+    )
+
+    normalized = normalizer.normalize(plan, user_text="查看最近的朋友圈列表")
+
+    assert normalized.is_action is True
+    assert [step.action for step in normalized.steps] == ["moment.list"]
+    assert validator.validate(normalized).allowed is True
+
+
+def test_ai_plan_normalizer_clears_null_extra_args_for_empty_input_action() -> None:
+    registry = AtomicActionRegistry(
+        contact_resolver=ContactAliasResolver(db=_FakeContactDatabase([])),
+        memory_manager=_FakeActionMemoryManager(),
+    )
+    normalizer = AIPlanNormalizer(action_specs=_registry_specs(registry))
+    validator = AIPlanValidator(registry=registry)
+    plan = AIActionPlan(
+        is_action=True,
+        goal="查看好友列表",
+        risk="low",
+        steps=(
+            AIActionStep(
+                id="friend_list",
+                action="friend.list",
+                args={"user_id": None},
+            ),
+        ),
+        final={"type": "answer", "source": "$friend_list"},
+    )
+
+    normalized = normalizer.normalize(plan, user_text="查看我的好友列表")
+
+    assert normalized.is_action is True
+    assert normalized.steps[0].args == {}
+    assert validator.validate(normalized).allowed is True
+
+
+def test_ai_plan_normalizer_canonicalizes_registered_write_refs_from_action_specs() -> None:
+    registry = AtomicActionRegistry(
+        contact_resolver=ContactAliasResolver(db=_FakeContactDatabase([])),
+        memory_manager=_FakeActionMemoryManager(),
+    )
+    normalizer = AIPlanNormalizer(action_specs=_registry_specs(registry))
+    validator = AIPlanValidator(registry=registry)
+    plan = AIActionPlan(
+        is_action=True,
+        goal="接受好友申请",
+        risk="high",
+        steps=(
+            AIActionStep(
+                id="confirm_req_1",
+                action="user.confirm",
+                args={
+                    "risk": "high",
+                    "preview": {
+                        "operation": "接受好友申请",
+                        "target": {"request_id": "req-1"},
+                        "content": "接受好友申请 req-1",
+                    },
+                },
+            ),
+            AIActionStep(
+                id="accept_req_1",
+                action="friend.request.accept",
+                depends_on=("confirm_req_1",),
+                args={
+                    "request_id": "req-1",
+                    "preview": {
+                        "operation": "接受好友申请",
+                        "target": {"request_id": "req-1"},
+                        "idempotency_key": "...",
+                    },
+                },
+            ),
+        ),
+        final={"status": {"action": "accept_req_1", "text": "..."}},
+    )
+
+    normalized = normalizer.normalize(plan, user_text="接受 req-1 这个好友申请")
+
+    assert normalized.is_action is True
+    accept = next(step for step in normalized.steps if step.id == "accept_req_1")
+    assert accept.args["preview"] == "$confirm_req_1.preview"
+    assert accept.args["idempotency_key"] == "$confirm_req_1.preview_fingerprint"
+    assert validator.validate(normalized).allowed is True
 
 
 def test_ai_plan_validator_rejects_unresolved_step_reference() -> None:
