@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 
-from sqlalchemy import Date, ForeignKey, Index, String, Text, UniqueConstraint, Uuid, column, func
+from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Index, String, Text, UniqueConstraint, Uuid, column, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base, IdMixin, TimestampMixin
@@ -34,6 +34,9 @@ class User(IdMixin, TimestampMixin, Base):
     gender: Mapped[str | None] = mapped_column(String(length=32), nullable=True)
     auth_session_version: Mapped[int] = mapped_column(default=0)
     role: Mapped[str] = mapped_column(String(length=32), nullable=False, default="user", server_default="user")
+    is_disabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="0")
+    disabled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    disabled_reason: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default="")
     status: Mapped[str] = mapped_column(default="offline")
 
 

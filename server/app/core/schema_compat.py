@@ -25,6 +25,9 @@ USER_PROFILE_COLUMN_DDL: dict[str, str] = {
 
 USER_ADMIN_COLUMN_DDL: dict[str, str] = {
     "role": "VARCHAR(32) NOT NULL DEFAULT 'user'",
+    "is_disabled": "BOOLEAN NOT NULL DEFAULT 0",
+    "disabled_at": "TIMESTAMP",
+    "disabled_reason": "TEXT NOT NULL DEFAULT ''",
 }
 
 USER_AVATAR_COLUMN_DDL: dict[str, str] = {
@@ -150,7 +153,7 @@ def _has_indexes(bind: Engine | Connection, table_name: str, required_indexes: I
     return all(index_name in indexes for index_name in required_indexes)
 
 
-RUNTIME_SCHEMA_ALEMBIC_REVISION = "20260503_0015"
+RUNTIME_SCHEMA_ALEMBIC_REVISION = "20260503_0016"
 
 def _parse_revision(revision: str) -> tuple[int, int] | None:
     candidate = str(revision or "").strip()

@@ -39,6 +39,12 @@ def get_current_user(
             message="session expired",
             status_code=401,
         )
+    if bool(getattr(user, "is_disabled", False)):
+        raise AppError(
+            code=ErrorCode.FORBIDDEN,
+            message="account disabled",
+            status_code=403,
+        )
     if token_session_version(payload) != int(getattr(user, "auth_session_version", 0) or 0):
         raise AppError(
             code=ErrorCode.UNAUTHORIZED,

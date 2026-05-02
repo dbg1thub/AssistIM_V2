@@ -123,10 +123,24 @@ Invoke-RestMethod -Method Get `
   -Headers @{ Authorization = "Bearer $token" }
 ```
 
-The endpoint reports backend runtime, database, users, contacts, sessions,
+The dashboard endpoint reports backend runtime, database, users, contacts, sessions,
 messages, groups, moments, files, WebSocket, active calls, E2EE key inventory,
 admin audit counts, recent HTTP requests, and recent warning/error logs. It
 does not expose private keys or provide any write operation.
+
+The same admin role also unlocks backend-only user-management APIs:
+
+- `GET /api/v1/admin/users`: list users with `keyword`, `role`, `disabled`, `page`, and `size` filters.
+- `GET /api/v1/admin/users/{user_id}`: inspect one user, including safe profile fields, device metadata, and business counts.
+- `PATCH /api/v1/admin/users/{user_id}/role`: set a user role to `user` or `admin`.
+- `POST /api/v1/admin/users/{user_id}/disable`: disable a user, invalidate existing tokens, and disconnect realtime sessions.
+- `POST /api/v1/admin/users/{user_id}/enable`: re-enable a disabled user.
+- `POST /api/v1/admin/users/{user_id}/force-logout`: invalidate existing tokens and disconnect realtime sessions.
+
+User-management write operations are recorded in `admin_audit_logs`. The API
+does not expose password hashes, tokens, private keys, or E2EE public key
+material in admin list/detail responses. Self-disable and self-demotion are
+blocked to avoid locking out the only active administrator.
 
 ## Creating test accounts
 

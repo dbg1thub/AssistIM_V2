@@ -64,6 +64,7 @@ class AuthService:
         user = self.users.get_by_username(canonicalize_username(username))
         if user is None or not verify_password(password, user.password_hash):
             raise AppError(ErrorCode.INVALID_CREDENTIALS, "invalid credentials", 401)
+        self._ensure_account_enabled(user)
         return user
 
     def login_user(self, user: User, *, rotate_session: bool = True) -> dict:
@@ -74,6 +75,7 @@ class AuthService:
         user = self.users.get_by_id(payload["sub"])
         if user is None:
             raise AppError(ErrorCode.UNAUTHORIZED, "session expired", 401)
+        self._ensure_account_enabled(user)
         self._ensure_active_session(user, payload)
         return self._build_auth_payload(user, rotate_session=False)
 
@@ -82,6 +84,7 @@ class AuthService:
         user = self.users.get_by_id(payload["sub"])
         if user is None:
             raise AppError(ErrorCode.UNAUTHORIZED, "session expired", 401)
+        self._ensure_account_enabled(user)
         self._ensure_active_session(user, payload)
         return {
             "access_token": create_access_token(
@@ -98,11 +101,16 @@ class AuthService:
     def logout(self, user: User) -> None:
         self.users.advance_auth_session_version(user)
 
+    def _ensure_account_enabled(self, user: User) -> None:
+        if bool(getattr(user, "is_disabled", False)):
+            raise AppError(ErrorCode.FORBIDDEN, "account disabled", 403)
+
     def _ensure_active_session(self, user: User, payload: dict) -> None:
         if token_session_version(payload) != int(user.auth_session_version or 0):
             raise AppError(ErrorCode.UNAUTHORIZED, "session expired", 401)
 
     def _build_auth_payload(self, user: User, *, rotate_session: bool) -> dict:
+        self._ensure_account_enabled(user)
         user = self.avatars.backfill_user_avatar_state(user)
         if rotate_session:
             user = self.users.advance_auth_session_version(user)

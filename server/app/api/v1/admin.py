@@ -11,12 +11,20 @@ from app.core.errors import AppError, ErrorCode
 from app.dependencies.admin_dependency import get_current_admin_user, normalize_user_role
 from app.dependencies.settings_dependency import get_request_settings
 from app.models.user import User
+from app.schemas.admin import AdminDisableUserRequest, AdminSetUserRoleRequest
 from app.services.admin_audit_service import AdminAuditService
 from app.services.admin_dashboard_service import AdminDashboardService
+from app.services.admin_user_service import AdminUserService
 from app.utils.response import success_response
+from app.websocket.manager import connection_manager
+from app.websocket.payloads import ws_message
 
 
 router = APIRouter()
+
+
+def _client_ip(request: Request) -> str:
+    return request.client.host if request.client else ""
 
 
 @router.get("/dashboard")
@@ -37,7 +45,6 @@ def get_admin_dashboard(
         "username": str(current_user.username or ""),
         "role": normalize_user_role(getattr(current_user, "role", "user")),
     }
-    client_ip = request.client.host if request.client else ""
     AdminAuditService(db).record(
         actor=current_user,
         action="admin.dashboard.read",
@@ -45,8 +52,130 @@ def get_admin_dashboard(
         target_id="dashboard",
         request_path=str(request.url.path),
         request_method=request.method,
-        client_ip=client_ip,
+        client_ip=_client_ip(request),
         success=True,
         detail={"sections": sorted(snapshot.keys())},
     )
     return success_response(snapshot)
+
+
+@router.get("/users")
+def list_admin_users(
+    keyword: str = "",
+    role: str = "",
+    disabled: bool | None = None,
+    page: int = 1,
+    size: int = 20,
+    current_user: User = Depends(get_current_admin_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    """List users for backend admin tooling."""
+    _ = current_user
+    payload = AdminUserService(db).list_users(
+        keyword=keyword,
+        role=role,
+        disabled=disabled,
+        page=page,
+        size=size,
+    )
+    return success_response(payload)
+
+
+@router.get("/users/{user_id}")
+def get_admin_user_detail(
+    user_id: str,
+    current_user: User = Depends(get_current_admin_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Return a safe admin detail view for one user."""
+    _ = current_user
+    return success_response(AdminUserService(db).get_user_detail(user_id))
+
+
+@router.patch("/users/{user_id}/role")
+def set_admin_user_role(
+    user_id: str,
+    payload: AdminSetUserRoleRequest,
+    request: Request,
+    current_user: User = Depends(get_current_admin_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    service = AdminUserService(db)
+    result = service.set_user_role_by_id(
+        user_id,
+        payload.role,
+        actor=current_user,
+        request_path=str(request.url.path),
+        request_method=request.method,
+        client_ip=_client_ip(request),
+    )
+    return success_response(result)
+
+
+@router.post("/users/{user_id}/disable")
+async def disable_admin_user(
+    user_id: str,
+    payload: AdminDisableUserRequest,
+    request: Request,
+    current_user: User = Depends(get_current_admin_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    service = AdminUserService(db)
+    result = service.disable_user(
+        user_id,
+        actor=current_user,
+        reason=payload.reason,
+        request_path=str(request.url.path),
+        request_method=request.method,
+        client_ip=_client_ip(request),
+    )
+    await connection_manager.disconnect_user_connections(
+        user_id,
+        close_code=4001,
+        reason="admin_disable_user",
+        payload=ws_message("force_logout", {"reason": "admin_disable_user"}),
+    )
+    return success_response(result)
+
+
+@router.post("/users/{user_id}/enable")
+def enable_admin_user(
+    user_id: str,
+    request: Request,
+    current_user: User = Depends(get_current_admin_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    service = AdminUserService(db)
+    result = service.enable_user(
+        user_id,
+        actor=current_user,
+        request_path=str(request.url.path),
+        request_method=request.method,
+        client_ip=_client_ip(request),
+    )
+    return success_response(result)
+
+
+@router.post("/users/{user_id}/force-logout")
+async def force_logout_admin_user(
+    user_id: str,
+    request: Request,
+    current_user: User = Depends(get_current_admin_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    service = AdminUserService(db)
+    result = service.force_logout_user(
+        user_id,
+        actor=current_user,
+        request_path=str(request.url.path),
+        request_method=request.method,
+        client_ip=_client_ip(request),
+    )
+    disconnected = await connection_manager.disconnect_user_connections(
+        user_id,
+        close_code=4001,
+        reason="admin_force_logout",
+        payload=ws_message("force_logout", {"reason": "admin_force_logout"}),
+    )
+    result["disconnected"] = bool(disconnected)
+    return success_response(result)
