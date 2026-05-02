@@ -832,6 +832,26 @@ def test_ai_action_quality_gate_fails_for_missing_or_below_baseline_metrics() ->
     assert quality_gate_exit_code({"quality_gate": gate}) == 1
 
 
+def test_ai_action_quality_gate_fails_when_selected_case_has_no_sample() -> None:
+    summary = {
+        "runtime_expectation_pass_rate": 1.0,
+        "runtime_safe_rate": 1.0,
+        "workflow_repair_expectation_pass_rate": 1.0,
+        "workflow_repair_safe_rate": 1.0,
+        "cases": [
+            {"name": "covered_case", "sample_count": 1},
+            {"name": "missing_case", "sample_count": 0},
+        ],
+    }
+
+    gate = evaluate_quality_gate(summary)
+
+    assert gate["passed"] is False
+    assert gate["missing_case_samples"] == ["missing_case"]
+    assert gate["failures"] == []
+    assert quality_gate_exit_code({"quality_gate": gate}) == 1
+
+
 def test_validate_planner_replay_can_attach_quality_gate_result(tmp_path) -> None:
     output_path = tmp_path / "planner-quality-gate.jsonl"
     cases = [

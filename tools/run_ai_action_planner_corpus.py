@@ -211,6 +211,7 @@ def evaluate_quality_gate(
     """Evaluate strict planner replay quality thresholds against a summary."""
     checked_metrics: list[dict[str, Any]] = []
     failures: list[dict[str, Any]] = []
+    missing_case_samples = _missing_case_samples(summary)
     for metric, expected_min in thresholds:
         expected_value = float(expected_min)
         raw_actual = summary.get(metric)
@@ -257,9 +258,10 @@ def evaluate_quality_gate(
             )
     return {
         "enabled": True,
-        "passed": not failures,
+        "passed": not failures and not missing_case_samples,
         "thresholds": {metric: float(value) for metric, value in thresholds},
         "checked_metrics": checked_metrics,
+        "missing_case_samples": missing_case_samples,
         "failures": failures,
     }
 
@@ -271,6 +273,24 @@ def quality_gate_exit_code(summary: Mapping[str, Any]) -> int:
     if gate.get("enabled") is True and gate.get("passed") is not True:
         return 1
     return 0
+
+
+def _missing_case_samples(summary: Mapping[str, Any]) -> list[str]:
+    raw_cases = summary.get("cases")
+    if not isinstance(raw_cases, list):
+        return []
+    missing: list[str] = []
+    for item in raw_cases:
+        if not isinstance(item, Mapping):
+            continue
+        name = str(item.get("name") or "").strip()
+        try:
+            sample_count = int(item.get("sample_count") or 0)
+        except (TypeError, ValueError):
+            sample_count = 0
+        if name and sample_count <= 0:
+            missing.append(name)
+    return missing
 
 
 def write_planner_replay_summary(path: str | Path, summary: Mapping[str, Any]) -> None:

@@ -6,23 +6,28 @@ from typing import Sequence
 
 
 PLANNER_CORPUS_SCRIPT = Path("tools") / "run_ai_action_planner_corpus.py"
-DEFAULT_VALIDATE_OUTPUT_PATH = Path("tools") / "ai_action_planner_replay_retained_actions_targeted.jsonl"
-DEFAULT_VALIDATE_SUMMARY_PATH = Path("data") / "ai_action_diagnostics" / "retained_quality_summary.json"
 DEFAULT_RUN_OUTPUT_PATH = Path("data") / "ai_action_diagnostics" / "ai_action_regression_replay.jsonl"
 DEFAULT_RUN_SUMMARY_PATH = Path("data") / "ai_action_diagnostics" / "ai_action_regression_summary.json"
+DEFAULT_VALIDATE_OUTPUT_PATH = DEFAULT_RUN_OUTPUT_PATH
+DEFAULT_VALIDATE_SUMMARY_PATH = DEFAULT_RUN_SUMMARY_PATH
 
 
 AI_ACTION_REGRESSION_CASES: tuple[str, ...] = (
+    "history_direct_test3",
+    "server_user_search",
     "server_user_get",
+    "server_file_list",
     "server_friend_list",
     "server_friend_request_list",
     "server_session_list",
     "server_session_get",
+    "server_message_list",
     "server_group_list",
     "server_group_get",
     "server_moment_list",
     "server_moment_get",
     "friend_request_accept",
+    "friend_request_reject",
 )
 
 
@@ -52,6 +57,11 @@ def build_validate_command(
             _path_arg(replay_path),
             "--summary-path",
             _path_arg(report_path),
+            *(
+                item
+                for case_name in AI_ACTION_REGRESSION_CASES
+                for item in ("--case", case_name)
+            ),
         ),
         output_path=replay_path,
         summary_path=report_path,

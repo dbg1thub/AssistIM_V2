@@ -26,6 +26,12 @@ def test_ai_action_regression_validate_command_uses_existing_replay_and_quality_
     assert command.args[command.args.index("--output-path") + 1] == DEFAULT_VALIDATE_OUTPUT_PATH.as_posix()
     assert command.args[command.args.index("--summary-path") + 1] == DEFAULT_VALIDATE_SUMMARY_PATH.as_posix()
     assert "--workflow-repair" not in command.args
+    case_values = [
+        command.args[index + 1]
+        for index, value in enumerate(command.args)
+        if value == "--case"
+    ]
+    assert tuple(case_values) == AI_ACTION_REGRESSION_CASES
 
 
 def test_ai_action_regression_run_command_uses_workflow_repair_quality_gate_and_a_cases() -> None:
@@ -44,6 +50,15 @@ def test_ai_action_regression_run_command_uses_workflow_repair_quality_gate_and_
         if value == "--case"
     ]
     assert tuple(case_values) == AI_ACTION_REGRESSION_CASES
+    assert "history_direct_test3" in case_values
+    assert "server_user_search" in case_values
+    assert "server_file_list" in case_values
+    assert "server_message_list" in case_values
+    assert "friend_request_reject" in case_values
+    assert "server_friend_check" not in case_values
+    assert "file_summary_lookup" not in case_values
+    assert "send_direct_message" not in case_values
+    assert "friend_request_send" not in case_values
 
 
 def test_ai_action_regression_command_paths_stay_in_ignored_local_outputs() -> None:
@@ -74,3 +89,5 @@ def test_ai_action_regression_doc_lists_fixed_commands() -> None:
     assert "--workflow-repair" in doc
     assert "--quality-gate" in doc
     assert DEFAULT_RUN_OUTPUT_PATH.as_posix() in doc
+    assert "history_direct_test3" in doc
+    assert "friend_request_reject" in doc
