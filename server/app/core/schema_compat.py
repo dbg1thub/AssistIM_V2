@@ -114,6 +114,12 @@ ADMIN_AUDIT_INDEX_DDL: dict[str, str] = {
     "idx_admin_audit_logs_created_at": "CREATE INDEX IF NOT EXISTS idx_admin_audit_logs_created_at ON admin_audit_logs (created_at)",
 }
 
+ADMIN_DATABASE_BACKUP_INDEX_DDL: dict[str, str] = {
+    "idx_admin_database_backups_created_by_user_id": "CREATE INDEX IF NOT EXISTS idx_admin_database_backups_created_by_user_id ON admin_database_backups (created_by_user_id)",
+    "idx_admin_database_backups_status": "CREATE INDEX IF NOT EXISTS idx_admin_database_backups_status ON admin_database_backups (status)",
+    "idx_admin_database_backups_created_at": "CREATE INDEX IF NOT EXISTS idx_admin_database_backups_created_at ON admin_database_backups (created_at)",
+}
+
 
 def _get_table_names(bind: Engine | Connection) -> set[str]:
     return set(inspect(bind).get_table_names())
@@ -153,7 +159,7 @@ def _has_indexes(bind: Engine | Connection, table_name: str, required_indexes: I
     return all(index_name in indexes for index_name in required_indexes)
 
 
-RUNTIME_SCHEMA_ALEMBIC_REVISION = "20260503_0016"
+RUNTIME_SCHEMA_ALEMBIC_REVISION = "20260503_0017"
 
 def _parse_revision(revision: str) -> tuple[int, int] | None:
     candidate = str(revision or "").strip()
@@ -186,7 +192,7 @@ def _has_runtime_schema_migration(bind: Engine | Connection) -> bool:
 
 
 def _has_current_runtime_schema(bind: Engine | Connection) -> bool:
-    required_tables = {"users", "messages", "sessions", "session_members", "files", "session_events", "groups", "group_members", "user_session_events", "admin_audit_logs"}
+    required_tables = {"users", "messages", "sessions", "session_members", "files", "session_events", "groups", "group_members", "user_session_events", "admin_audit_logs", "admin_database_backups"}
     if required_tables - _get_table_names(bind):
         return False
 
@@ -208,6 +214,7 @@ def _has_current_runtime_schema(bind: Engine | Connection) -> bool:
         and _has_indexes(bind, "session_events", SESSION_EVENT_INDEX_DDL)
         and _has_indexes(bind, "user_session_events", USER_SESSION_EVENT_INDEX_DDL)
         and _has_indexes(bind, "admin_audit_logs", ADMIN_AUDIT_INDEX_DDL)
+        and _has_indexes(bind, "admin_database_backups", ADMIN_DATABASE_BACKUP_INDEX_DDL)
     )
 
 
@@ -289,6 +296,38 @@ def _ensure_admin_audit_logs_table(connection: Connection, applied: list[str]) -
         )
     )
     applied.append("admin_audit_logs.create")
+
+
+def _ensure_admin_database_backups_table(connection: Connection, applied: list[str]) -> None:
+    table_names = _get_table_names(connection)
+    if "admin_database_backups" in table_names:
+        return
+
+    connection.execute(
+        text(
+            """
+            CREATE TABLE admin_database_backups (
+                id VARCHAR(36) PRIMARY KEY,
+                created_by_user_id VARCHAR(36),
+                created_by_username VARCHAR(255) NOT NULL DEFAULT '',
+                status VARCHAR(32) NOT NULL DEFAULT 'pending',
+                database_dialect VARCHAR(32) NOT NULL DEFAULT '',
+                backup_format VARCHAR(32) NOT NULL DEFAULT '',
+                storage_key VARCHAR(512) NOT NULL DEFAULT '',
+                file_name VARCHAR(255) NOT NULL DEFAULT '',
+                file_path VARCHAR(1024) NOT NULL DEFAULT '',
+                size_bytes INTEGER NOT NULL DEFAULT 0,
+                checksum_sha256 VARCHAR(64) NOT NULL DEFAULT '',
+                error_message TEXT NOT NULL DEFAULT '',
+                started_at TIMESTAMP,
+                finished_at TIMESTAMP,
+                duration_ms INTEGER NOT NULL DEFAULT 0,
+                created_at TIMESTAMP NOT NULL
+            )
+            """
+        )
+    )
+    applied.append("admin_database_backups.create")
 
 
 def _ensure_indexes(connection: Connection, table_name: str, index_ddl: dict[str, str], applied: list[str]) -> None:
@@ -1163,6 +1202,8 @@ def ensure_schema_compatibility(engine: Engine) -> list[str]:
         _ensure_indexes(connection, "user_session_events", USER_SESSION_EVENT_INDEX_DDL, applied)
         _ensure_admin_audit_logs_table(connection, applied)
         _ensure_indexes(connection, "admin_audit_logs", ADMIN_AUDIT_INDEX_DDL, applied)
+        _ensure_admin_database_backups_table(connection, applied)
+        _ensure_indexes(connection, "admin_database_backups", ADMIN_DATABASE_BACKUP_INDEX_DDL, applied)
 
     return applied
 

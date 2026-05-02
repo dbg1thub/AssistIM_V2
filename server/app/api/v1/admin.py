@@ -13,6 +13,7 @@ from app.dependencies.settings_dependency import get_request_settings
 from app.models.user import User
 from app.schemas.admin import AdminDisableUserRequest, AdminSetUserRoleRequest
 from app.services.admin_audit_service import AdminAuditService
+from app.services.admin_database_backup_service import AdminDatabaseBackupService
 from app.services.admin_database_service import AdminDatabaseService
 from app.services.admin_dashboard_service import AdminDashboardService
 from app.services.admin_user_service import AdminUserService
@@ -171,6 +172,48 @@ def get_admin_database_health(
     payload = AdminDatabaseService(db, settings).build_health()
     db.commit()
     return success_response(payload)
+
+
+@router.post("/database/backups")
+def create_admin_database_backup(
+    request: Request,
+    current_user: User = Depends(get_current_admin_user),
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_request_settings),
+) -> dict:
+    """Create one server-local database backup."""
+    payload = AdminDatabaseBackupService(db, settings).create_backup(
+        actor=current_user,
+        request_path=str(request.url.path),
+        request_method=request.method,
+        client_ip=_client_ip(request),
+    )
+    return success_response(payload)
+
+
+@router.get("/database/backups")
+def list_admin_database_backups(
+    page: int = 1,
+    size: int = 20,
+    current_user: User = Depends(get_current_admin_user),
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_request_settings),
+) -> dict:
+    """List server-local database backup records."""
+    _ = current_user
+    return success_response(AdminDatabaseBackupService(db, settings).list_backups(page=page, size=size))
+
+
+@router.get("/database/backups/{backup_id}")
+def get_admin_database_backup(
+    backup_id: str,
+    current_user: User = Depends(get_current_admin_user),
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_request_settings),
+) -> dict:
+    """Return one server-local database backup record."""
+    _ = current_user
+    return success_response(AdminDatabaseBackupService(db, settings).get_backup(backup_id))
 
 
 @router.get("/users")

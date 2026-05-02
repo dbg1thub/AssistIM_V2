@@ -12,6 +12,7 @@ from app.core.config import Settings
 from app.core.database import RUNTIME_SCHEMA_REQUIRED_TABLES
 from app.core.schema_compat import (
     ADMIN_AUDIT_INDEX_DDL,
+    ADMIN_DATABASE_BACKUP_INDEX_DDL,
     CHAT_INDEX_DDL,
     FILE_INDEX_DDL,
     RUNTIME_SCHEMA_ALEMBIC_REVISION,
@@ -32,6 +33,7 @@ REQUIRED_INDEXES_BY_TABLE: dict[str, tuple[str, ...]] = {
     "session_events": tuple(SESSION_EVENT_INDEX_DDL),
     "user_session_events": tuple(USER_SESSION_EVENT_INDEX_DDL),
     "admin_audit_logs": tuple(ADMIN_AUDIT_INDEX_DDL),
+    "admin_database_backups": tuple(ADMIN_DATABASE_BACKUP_INDEX_DDL),
 }
 
 

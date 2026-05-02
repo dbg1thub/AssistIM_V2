@@ -54,6 +54,7 @@ class Settings:
     refresh_token_expire_days: int = field(default_factory=lambda: _env_int("REFRESH_TOKEN_EXPIRE_DAYS", 7))
 
     upload_dir: str = field(default_factory=lambda: _env_str("UPLOAD_DIR", "data/uploads"))
+    admin_backup_dir: str = field(default_factory=lambda: _env_str("ADMIN_BACKUP_DIR", ""))
     media_storage_backend: str = field(default_factory=lambda: _env_str("MEDIA_STORAGE_BACKEND", "local"))
     media_public_base_url: str = field(default_factory=lambda: _env_str("MEDIA_PUBLIC_BASE_URL", "/uploads"))
     max_upload_bytes: int = field(default_factory=lambda: _env_int("MAX_UPLOAD_BYTES", 25 * 1024 * 1024))
