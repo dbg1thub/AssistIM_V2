@@ -85,6 +85,26 @@
       }
     },
     {
+      "name": "server_user_get",
+      "user_input": "查看 user-3 的资料",
+      "tags": ["action", "server_read", "user"],
+      "router_expected_route": "action_candidate",
+      "expectation": {
+        "is_action": true,
+        "risk": "low",
+        "required_actions": ["user.get"],
+        "required_action_sequence": ["user.get"],
+        "requires_confirmation": false,
+        "required_step_args": [
+          {
+            "action": "user.get",
+            "path": "user_id",
+            "equals": "user-3"
+          }
+        ]
+      }
+    },
+    {
       "name": "server_file_list",
       "user_input": "列一下我上传过的文件",
       "tags": ["action", "server_read", "file"],
@@ -94,6 +114,19 @@
         "risk": "low",
         "required_actions": ["file.list"],
         "required_action_sequence": ["file.list"],
+        "requires_confirmation": false
+      }
+    },
+    {
+      "name": "server_friend_list",
+      "user_input": "我现在有哪些好友？",
+      "tags": ["action", "server_read", "friend"],
+      "router_expected_route": "action_candidate",
+      "expectation": {
+        "is_action": true,
+        "risk": "low",
+        "required_actions": ["friend.list"],
+        "required_action_sequence": ["friend.list"],
         "requires_confirmation": false
       }
     },
@@ -113,6 +146,52 @@
             "action": "friend.check",
             "path": "user_id",
             "equals": "user-3"
+          }
+        ]
+      }
+    },
+    {
+      "name": "server_friend_request_list",
+      "user_input": "有没有新的好友申请？",
+      "tags": ["action", "server_read", "friend_request"],
+      "router_expected_route": "action_candidate",
+      "expectation": {
+        "is_action": true,
+        "risk": "low",
+        "required_actions": ["friend.request.list"],
+        "required_action_sequence": ["friend.request.list"],
+        "requires_confirmation": false
+      }
+    },
+    {
+      "name": "server_session_list",
+      "user_input": "我最近有哪些会话？",
+      "tags": ["action", "server_read", "session"],
+      "router_expected_route": "action_candidate",
+      "expectation": {
+        "is_action": true,
+        "risk": "low",
+        "required_actions": ["session.list"],
+        "required_action_sequence": ["session.list"],
+        "requires_confirmation": false
+      }
+    },
+    {
+      "name": "server_session_get",
+      "user_input": "查看 session-1 的会话信息",
+      "tags": ["action", "server_read", "session"],
+      "router_expected_route": "action_candidate",
+      "expectation": {
+        "is_action": true,
+        "risk": "low",
+        "required_actions": ["session.get"],
+        "required_action_sequence": ["session.get"],
+        "requires_confirmation": false,
+        "required_step_args": [
+          {
+            "action": "session.get",
+            "path": "session_id",
+            "equals": "session-1"
           }
         ]
       }
@@ -138,6 +217,72 @@
             "action": "message.list",
             "path": "limit",
             "equals": "20"
+          }
+        ]
+      }
+    },
+    {
+      "name": "server_group_list",
+      "user_input": "我有哪些群？",
+      "tags": ["action", "server_read", "group"],
+      "router_expected_route": "action_candidate",
+      "expectation": {
+        "is_action": true,
+        "risk": "low",
+        "required_actions": ["group.list"],
+        "required_action_sequence": ["group.list"],
+        "requires_confirmation": false
+      }
+    },
+    {
+      "name": "server_group_get",
+      "user_input": "查看 group-1 这个群的信息",
+      "tags": ["action", "server_read", "group"],
+      "router_expected_route": "action_candidate",
+      "expectation": {
+        "is_action": true,
+        "risk": "low",
+        "required_actions": ["group.get"],
+        "required_action_sequence": ["group.get"],
+        "requires_confirmation": false,
+        "required_step_args": [
+          {
+            "action": "group.get",
+            "path": "group_id",
+            "equals": "group-1"
+          }
+        ]
+      }
+    },
+    {
+      "name": "server_moment_list",
+      "user_input": "最近朋友圈有什么？",
+      "tags": ["action", "server_read", "moment"],
+      "router_expected_route": "action_candidate",
+      "expectation": {
+        "is_action": true,
+        "risk": "low",
+        "required_actions": ["moment.list"],
+        "required_action_sequence": ["moment.list"],
+        "requires_confirmation": false
+      }
+    },
+    {
+      "name": "server_moment_get",
+      "user_input": "查看 moment-1 这条朋友圈详情",
+      "tags": ["action", "server_read", "moment"],
+      "router_expected_route": "action_candidate",
+      "expectation": {
+        "is_action": true,
+        "risk": "low",
+        "required_actions": ["moment.get"],
+        "required_action_sequence": ["moment.get"],
+        "requires_confirmation": false,
+        "required_step_args": [
+          {
+            "action": "moment.get",
+            "path": "moment_id",
+            "equals": "moment-1"
           }
         ]
       }
@@ -260,6 +405,39 @@
           },
           {
             "action": "friend.request.send",
+            "path": "idempotency_key",
+            "starts_with": "$",
+            "ref_action": "user.confirm"
+          }
+        ]
+      }
+    },
+    {
+      "name": "friend_request_accept",
+      "user_input": "接受 req-1 这个好友申请",
+      "tags": ["action", "server_write", "friend_request", "confirmation"],
+      "router_expected_route": "action_candidate",
+      "expectation": {
+        "is_action": true,
+        "risk": "high",
+        "required_actions": ["user.confirm", "friend.request.accept"],
+        "required_action_sequence": ["user.confirm", "friend.request.accept"],
+        "requires_confirmation": true,
+        "expected_content": "req-1",
+        "required_step_args": [
+          {
+            "action": "friend.request.accept",
+            "path": "request_id",
+            "equals": "req-1"
+          },
+          {
+            "action": "friend.request.accept",
+            "path": "preview",
+            "starts_with": "$",
+            "ref_action": "user.confirm"
+          },
+          {
+            "action": "friend.request.accept",
             "path": "idempotency_key",
             "starts_with": "$",
             "ref_action": "user.confirm"
