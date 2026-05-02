@@ -1437,6 +1437,100 @@ def test_ai_plan_normalizer_canonicalizes_confirmation_preview_target_for_send_d
     assert validator.validate(normalized).allowed is True
 
 
+def test_ai_plan_normalizer_sets_single_target_send_contact_resolve_allow_multiple_false() -> None:
+    normalizer = AIPlanNormalizer()
+    registry = AtomicActionRegistry(
+        contact_resolver=ContactAliasResolver(db=_FakeContactDatabase([])),
+        memory_manager=_FakeActionMemoryManager(),
+    )
+    validator = AIPlanValidator(registry=registry)
+    plan = AIActionPlan(
+        is_action=True,
+        goal="给小王发送消息",
+        risk="high",
+        steps=(
+            AIActionStep(
+                id="resolve",
+                action="contact.resolve",
+                args={"queries": ["小王"]},
+            ),
+            AIActionStep(
+                id="draft",
+                action="message.draft",
+                depends_on=("resolve",),
+                args={"target": "$resolve.contacts[0]", "content": "明天见"},
+            ),
+            AIActionStep(
+                id="confirm",
+                action="user.confirm",
+                depends_on=("draft",),
+                args={
+                    "risk": "high",
+                    "preview": {
+                        "operation": "发送",
+                        "target": "$draft.target_entity",
+                        "content": "$draft.content",
+                    },
+                },
+            ),
+            AIActionStep(
+                id="send",
+                action="message.send",
+                depends_on=("confirm",),
+                args={
+                    "target": "$draft.target_entity",
+                    "content": "$draft.content",
+                    "preview": "$confirm.preview",
+                    "idempotency_key": "$draft.idempotency_key",
+                },
+            ),
+        ),
+        final={"type": "answer", "source": "$send.text"},
+    )
+
+    normalized = normalizer.normalize(plan, user_text="帮我给小王发明天见")
+
+    assert normalized.is_action is True
+    resolve = next(step for step in normalized.steps if step.id == "resolve")
+    assert resolve.args["allow_multiple"] is False
+    assert validator.validate(normalized).allowed is True
+
+
+def test_ai_plan_normalizer_keeps_read_contact_resolve_allow_multiple_true() -> None:
+    normalizer = AIPlanNormalizer()
+    plan = AIActionPlan(
+        is_action=True,
+        goal="查询多人历史",
+        risk="low",
+        steps=(
+            AIActionStep(
+                id="resolve_contacts",
+                action="contact.resolve",
+                args={"queries": ["test2", "test3"], "allow_multiple": True},
+            ),
+            AIActionStep(
+                id="search_memory",
+                action="memory.search",
+                depends_on=("resolve_contacts",),
+                args={
+                    "participants": "$resolve_contacts.contacts",
+                    "participant_match": "all",
+                    "time_scope": {"type": "all_history"},
+                    "keywords": [],
+                    "question": "我和 test2、test3 聊过什么？",
+                },
+            ),
+        ),
+        final={"type": "answer", "source": "$search_memory.context_lines"},
+    )
+
+    normalized = normalizer.normalize(plan, user_text="我和 test2、test3 聊过什么？")
+
+    assert normalized.is_action is True
+    resolve = next(step for step in normalized.steps if step.id == "resolve_contacts")
+    assert resolve.args["allow_multiple"] is True
+
+
 def test_ai_plan_validator_rejects_unresolved_step_reference() -> None:
     registry = AtomicActionRegistry(
         contact_resolver=ContactAliasResolver(db=_FakeContactDatabase([])),

@@ -48,6 +48,7 @@ class AIPlanNormalizer:
             )
         steps = self._ensure_reference_dependencies(steps)
         steps = self._canonicalize_send_chain_refs(steps)
+        steps = self._canonicalize_single_target_send_contact_resolve(steps)
         steps = self._ensure_reference_dependencies(steps)
         steps = self._ensure_write_confirmation(steps)
         if self._has_confirmation_without_write(steps):
@@ -142,6 +143,31 @@ class AIPlanNormalizer:
             if step.action == "message.send" and step.id in chains:
                 draft_id, confirm_id = chains[step.id]
                 output.append(_canonicalize_send_step(step, draft_id=draft_id, confirm_id=confirm_id))
+                continue
+            output.append(step)
+        return output
+
+    @staticmethod
+    def _canonicalize_single_target_send_contact_resolve(steps: list[AIActionStep]) -> list[AIActionStep]:
+        contact_step_ids = _single_target_send_contact_resolve_ids(steps)
+        if not contact_step_ids:
+            return steps
+        output: list[AIActionStep] = []
+        for step in steps:
+            if step.action == "contact.resolve" and step.id in contact_step_ids:
+                args = dict(step.args or {})
+                args["allow_multiple"] = False
+                output.append(
+                    AIActionStep(
+                        id=step.id,
+                        action=step.action,
+                        depends_on=step.depends_on,
+                        args=args,
+                        display_text=step.display_text,
+                        explanation=step.explanation,
+                        fallback=step.fallback,
+                    )
+                )
                 continue
             output.append(step)
         return output
@@ -267,6 +293,25 @@ def _send_chain_refs(steps: list[AIActionStep]) -> dict[str, tuple[str, str]]:
     return chains
 
 
+def _single_target_send_contact_resolve_ids(steps: list[AIActionStep]) -> set[str]:
+    by_id = {step.id: step for step in steps}
+    contact_step_ids: set[str] = set()
+    for draft_id, _confirm_id in _send_chain_refs(steps).values():
+        draft = by_id.get(draft_id)
+        if draft is None or draft.action != "message.draft":
+            continue
+        target_ref = _single_ref(draft.args.get("target"))
+        if target_ref is None:
+            continue
+        root, field_path = target_ref
+        source = by_id.get(root)
+        if source is None or source.action != "contact.resolve":
+            continue
+        if _is_first_contact_ref_path(field_path):
+            contact_step_ids.add(root)
+    return contact_step_ids
+
+
 def _canonicalize_confirm_step(step: AIActionStep, *, draft_id: str) -> AIActionStep:
     args = dict(step.args or {})
     preview = dict(args.get("preview") or {}) if isinstance(args.get("preview"), dict) else {}
@@ -302,6 +347,23 @@ def _canonicalize_send_step(step: AIActionStep, *, draft_id: str, confirm_id: st
         explanation=step.explanation,
         fallback=step.fallback,
     )
+
+
+def _single_ref(value: object) -> tuple[str, str] | None:
+    if not isinstance(value, str) or not value.startswith("$"):
+        return None
+    body = value[1:]
+    stops = [index for index in (body.find("."), body.find("[")) if index >= 0]
+    split_at = min(stops) if stops else len(body)
+    root = body[:split_at]
+    if not root:
+        return None
+    field_path = body[split_at + 1 :] if split_at < len(body) and body[split_at] == "." else body[split_at:]
+    return root, field_path
+
+
+def _is_first_contact_ref_path(field_path: str) -> bool:
+    return field_path == "contacts[0]" or field_path.startswith("contacts[0].")
 
 
 def _message_draft_is_complete(step: AIActionStep) -> bool:
