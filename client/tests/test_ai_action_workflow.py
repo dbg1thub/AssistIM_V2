@@ -1358,6 +1358,85 @@ def test_ai_plan_normalizer_adds_dependencies_for_existing_arg_refs() -> None:
     assert summarize.depends_on == ("search_memory",)
 
 
+def test_ai_plan_normalizer_canonicalizes_send_args_that_reference_confirmation_outputs() -> None:
+    normalizer = AIPlanNormalizer()
+    registry = AtomicActionRegistry(
+        contact_resolver=ContactAliasResolver(db=_FakeContactDatabase([])),
+        memory_manager=_FakeActionMemoryManager(),
+    )
+    validator = AIPlanValidator(registry=registry)
+
+    normalized = normalizer.normalize(_send_plan_with_confirm_refs(), user_text="帮我给张三发我晚点到")
+
+    assert normalized.is_action is True
+    send = next(step for step in normalized.steps if step.id == "send_message")
+    assert send.args["target"] == "$draft_message.target_entity"
+    assert send.args["content"] == "$draft_message.content"
+    assert send.args["idempotency_key"] == "$draft_message.idempotency_key"
+    assert send.depends_on == ("confirm_send", "draft_message")
+    assert validator.validate(normalized).allowed is True
+
+
+def test_ai_plan_normalizer_canonicalizes_confirmation_preview_target_for_send_draft() -> None:
+    normalizer = AIPlanNormalizer()
+    registry = AtomicActionRegistry(
+        contact_resolver=ContactAliasResolver(db=_FakeContactDatabase([])),
+        memory_manager=_FakeActionMemoryManager(),
+    )
+    validator = AIPlanValidator(registry=registry)
+    plan = AIActionPlan(
+        is_action=True,
+        goal="给小王发送消息",
+        risk="high",
+        steps=(
+            AIActionStep(
+                id="resolve",
+                action="contact.resolve",
+                args={"queries": ["小王"], "allow_multiple": False},
+            ),
+            AIActionStep(
+                id="draft",
+                action="message.draft",
+                depends_on=("resolve",),
+                args={"target": "$resolve.contacts[0]", "content": "明天见"},
+            ),
+            AIActionStep(
+                id="confirm",
+                action="user.confirm",
+                depends_on=("draft",),
+                args={
+                    "risk": "high",
+                    "preview": {
+                        "operation": "发送",
+                        "target": "$draft.target_entity",
+                        "content": "$draft.content",
+                    },
+                },
+            ),
+            AIActionStep(
+                id="send",
+                action="message.send",
+                depends_on=("confirm",),
+                args={
+                    "target": "$draft.target_entity",
+                    "content": "$draft.content",
+                    "preview": "$confirm.preview",
+                    "idempotency_key": "$draft.idempotency_key",
+                },
+            ),
+        ),
+        final={"type": "answer", "source": "$send.text"},
+    )
+
+    normalized = normalizer.normalize(plan, user_text="帮我给小王发明天见")
+
+    assert normalized.is_action is True
+    confirm = next(step for step in normalized.steps if step.id == "confirm")
+    assert confirm.args["preview"]["target"] == "$draft.target"
+    assert confirm.args["preview"]["content"] == "$draft.content"
+    assert validator.validate(normalized).allowed is True
+
+
 def test_ai_plan_validator_rejects_unresolved_step_reference() -> None:
     registry = AtomicActionRegistry(
         contact_resolver=ContactAliasResolver(db=_FakeContactDatabase([])),
@@ -3336,7 +3415,7 @@ def test_ai_action_workflow_does_not_repair_invalid_side_effect_plan(tmp_path, m
     asyncio.run(scenario())
 
 
-def test_ai_action_workflow_repairs_registered_send_reference_contract_errors(tmp_path, monkeypatch) -> None:
+def test_ai_action_workflow_normalizes_registered_send_reference_contract_errors_without_repair(tmp_path, monkeypatch) -> None:
     async def scenario() -> None:
         db = Database(str(tmp_path / "actions.db"))
         monkeypatch.setattr(action_store_module, "get_database", lambda: db)
@@ -3366,8 +3445,7 @@ def test_ai_action_workflow_repairs_registered_send_reference_contract_errors(tm
             assert result.handled is True
             assert result.message_extra["ai_action"]["state"] == "waiting_confirmation"
             assert planner.plan_calls == 1
-            assert len(planner.repair_calls) == 1
-            assert any("PLANNER_CONTRACT_INVALID" in error for error in planner.repair_calls[0]["errors"])
+            assert planner.repair_calls == []
             record = await store.latest_pending_plan("thread-1")
             assert record is not None
             send = next(step for step in record.plan_json["steps"] if step["action"] == "message.send")

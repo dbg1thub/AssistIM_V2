@@ -47,6 +47,8 @@ class AIPlanNormalizer:
                 )
             )
         steps = self._ensure_reference_dependencies(steps)
+        steps = self._canonicalize_send_chain_refs(steps)
+        steps = self._ensure_reference_dependencies(steps)
         steps = self._ensure_write_confirmation(steps)
         if self._has_confirmation_without_write(steps):
             self._last_rejection_reason = "confirmation_without_write"
@@ -120,6 +122,28 @@ class AIPlanNormalizer:
                     fallback=step.fallback,
                 )
             )
+        return output
+
+    @staticmethod
+    def _canonicalize_send_chain_refs(steps: list[AIActionStep]) -> list[AIActionStep]:
+        chains = _send_chain_refs(steps)
+        if not chains:
+            return steps
+        confirm_drafts = {
+            confirm_id: draft_id
+            for draft_id, confirm_id in chains.values()
+            if confirm_id
+        }
+        output: list[AIActionStep] = []
+        for step in steps:
+            if step.action == "user.confirm" and step.id in confirm_drafts:
+                output.append(_canonicalize_confirm_step(step, draft_id=confirm_drafts[step.id]))
+                continue
+            if step.action == "message.send" and step.id in chains:
+                draft_id, confirm_id = chains[step.id]
+                output.append(_canonicalize_send_step(step, draft_id=draft_id, confirm_id=confirm_id))
+                continue
+            output.append(step)
         return output
 
     @staticmethod
@@ -201,6 +225,83 @@ def _latest_complete_send_confirmation(steps: list[AIActionStep], *, send_step: 
         if not send_refs or send_refs & confirm_refs or send_refs & confirm_depends:
             return step
     return None
+
+
+def _send_chain_refs(steps: list[AIActionStep]) -> dict[str, tuple[str, str]]:
+    by_id = {step.id: step for step in steps}
+    chains: dict[str, tuple[str, str]] = {}
+    for step in steps:
+        if step.action != "message.send":
+            continue
+        confirm_ids = [
+            dep
+            for dep in step.depends_on
+            if (by_id.get(dep) is not None and by_id[dep].action == "user.confirm")
+        ]
+        for root in _refs_in_value(step.args.get("preview")):
+            candidate = by_id.get(root)
+            if candidate is not None and candidate.action == "user.confirm" and root not in confirm_ids:
+                confirm_ids.append(root)
+
+        draft_ids = {
+            root
+            for root in _refs_in_value(step.args)
+            if (by_id.get(root) is not None and by_id[root].action == "message.draft")
+        }
+        for confirm_id in confirm_ids:
+            confirm = by_id.get(confirm_id)
+            if confirm is None:
+                continue
+            draft_ids.update(
+                dep
+                for dep in confirm.depends_on
+                if (by_id.get(dep) is not None and by_id[dep].action == "message.draft")
+            )
+            draft_ids.update(
+                root
+                for root in _refs_in_value(confirm.args)
+                if (by_id.get(root) is not None and by_id[root].action == "message.draft")
+            )
+        if len(draft_ids) == 1:
+            chains[step.id] = (next(iter(draft_ids)), confirm_ids[0] if len(confirm_ids) == 1 else "")
+    return chains
+
+
+def _canonicalize_confirm_step(step: AIActionStep, *, draft_id: str) -> AIActionStep:
+    args = dict(step.args or {})
+    preview = dict(args.get("preview") or {}) if isinstance(args.get("preview"), dict) else {}
+    if preview:
+        preview["target"] = f"${draft_id}.target"
+        preview["content"] = f"${draft_id}.content"
+        args["preview"] = preview
+    return AIActionStep(
+        id=step.id,
+        action=step.action,
+        depends_on=step.depends_on,
+        args=args,
+        display_text=step.display_text,
+        explanation=step.explanation,
+        fallback=step.fallback,
+    )
+
+
+def _canonicalize_send_step(step: AIActionStep, *, draft_id: str, confirm_id: str) -> AIActionStep:
+    args = dict(step.args or {})
+    args["target"] = f"${draft_id}.target_entity"
+    args["content"] = f"${draft_id}.content"
+    args["idempotency_key"] = f"${draft_id}.idempotency_key"
+    depends_on = step.depends_on
+    if confirm_id:
+        depends_on = tuple(dict.fromkeys([*depends_on, confirm_id]))
+    return AIActionStep(
+        id=step.id,
+        action=step.action,
+        depends_on=depends_on,
+        args=args,
+        display_text=step.display_text,
+        explanation=step.explanation,
+        fallback=step.fallback,
+    )
 
 
 def _message_draft_is_complete(step: AIActionStep) -> bool:
