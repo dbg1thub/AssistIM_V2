@@ -2069,6 +2069,43 @@ def test_ai_action_registry_does_not_expose_simple_ui_only_reads() -> None:
         assert action_name not in contract
 
 
+def test_ai_action_registry_does_not_expose_deferred_manual_ui_actions() -> None:
+    registry = AtomicActionRegistry(
+        contact_resolver=ContactAliasResolver(db=_FakeContactDatabase([])),
+        memory_manager=_FakeActionMemoryManager(),
+    )
+
+    deferred = {
+        "user.update_me",
+        "user.avatar.upload",
+        "user.avatar.reset",
+        "friend.delete",
+        "session.create_direct",
+        "message.read_batch",
+        "message.edit",
+        "message.recall",
+        "message.delete",
+        "group.create",
+        "group.update",
+        "group.update_me",
+        "group.delete",
+        "group.member.add",
+        "group.member.remove",
+        "group.member.update_role",
+        "group.leave",
+        "group.transfer",
+        "moment.create",
+        "moment.like",
+        "moment.unlike",
+        "moment.comment",
+        "file.upload",
+    }
+    assert deferred.isdisjoint(registry.names())
+    contract = registry.prompt_contract()
+    for action_name in deferred:
+        assert action_name not in contract
+
+
 def test_ai_action_registry_exposes_first_server_write_actions() -> None:
     registry = AtomicActionRegistry(
         contact_resolver=ContactAliasResolver(db=_FakeContactDatabase([])),
