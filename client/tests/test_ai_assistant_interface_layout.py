@@ -47,6 +47,45 @@ def _action_confirmation_message(message_id: str = "action-confirm") -> AIMessag
     return message
 
 
+def _action_running_message(message_id: str = "action-running") -> AIMessage:
+    message = _message(message_id, AIMessageRole.ASSISTANT, "")
+    message.extra = {
+        "ai_action": {
+            "state": "running",
+            "current_step_id": "draft_message",
+            "steps": [
+                {
+                    "id": "resolve_target",
+                    "state": "done",
+                    "display_text": "确定联系人",
+                },
+                {
+                    "id": "draft_message",
+                    "state": "running",
+                    "display_text": "生成草稿",
+                    "explanation": "准备确认内容",
+                },
+                {
+                    "id": "confirm_send",
+                    "state": "pending",
+                    "display_text": "等待确认",
+                },
+            ],
+            "events": [
+                {"type": "step_completed", "state": "completed", "step_id": "resolve_target"},
+                {"type": "step_started", "state": "started", "step_id": "draft_message"},
+            ],
+        }
+    }
+    return message
+
+
+def _thinking_message(message_id: str = "thinking") -> AIMessage:
+    message = _message(message_id, AIMessageRole.ASSISTANT, "", status=AIMessageStatus.PENDING)
+    message.extra = {"ai_thinking": {"state": "planning"}}
+    return message
+
+
 def _rect_in_panel(widget: AIAssistantInterface, child) -> QRect:
     top_left = widget.content_panel.mapFromGlobal(child.mapToGlobal(QPoint(0, 0)))
     return QRect(top_left, child.size())
@@ -229,6 +268,74 @@ def test_ai_assistant_message_delegate_hits_action_confirmation_controls() -> No
     assert widget._handle_message_list_release(layout.confirm_button_rect.center(), Qt.MouseButton.LeftButton)
     assert widget._handle_message_list_release(layout.cancel_button_rect.center(), Qt.MouseButton.LeftButton)
     assert emitted == [("action-confirm", "confirm"), ("action-confirm", "cancel")]
+
+    widget.close()
+    app.processEvents()
+
+
+def test_ai_assistant_action_status_collapses_and_expands_steps() -> None:
+    app = QApplication.instance() or QApplication([])
+    widget = AIAssistantInterface()
+    widget.resize(900, 720)
+    widget.show()
+    widget._append_message(_action_running_message())
+    app.processEvents()
+
+    index = widget._message_model.index(0, 0)
+    collapsed_height = widget._message_delegate.sizeHint(
+        QStyleOptionViewItem(),
+        index,
+    ).height()
+    collapsed_layout = widget._message_delegate.layout_for_index(
+        QRect(0, 0, widget.message_list.viewport().width(), collapsed_height),
+        index,
+    )
+
+    assert collapsed_layout.status_rect is not None
+    message = index.data(Qt.ItemDataRole.UserRole)
+    assert widget._message_delegate._action_status_summary_text(
+        message.extra,
+        animation_frame=0,
+    ) == "正在执行：生成草稿 · 1/3"
+    assert widget._message_delegate._action_status_text(message.extra).splitlines() == [
+        "已完成：确定联系人",
+        "正在执行：生成草稿（准备确认内容）",
+        "待执行：等待确认",
+    ]
+
+    assert widget._handle_message_list_release(collapsed_layout.status_rect.center(), Qt.MouseButton.LeftButton)
+    assert widget._message_delegate.is_action_status_expanded("action-running")
+
+    expanded_height = widget._message_delegate.sizeHint(
+        QStyleOptionViewItem(),
+        index,
+    ).height()
+    assert expanded_height > collapsed_height
+
+    widget.close()
+    app.processEvents()
+
+
+def test_ai_assistant_thinking_placeholder_uses_stable_delegate_text() -> None:
+    app = QApplication.instance() or QApplication([])
+    widget = AIAssistantInterface()
+    widget.resize(900, 720)
+    widget.show()
+    widget._append_message(_thinking_message())
+    app.processEvents()
+
+    index = widget._message_model.index(0, 0)
+    message = index.data(Qt.ItemDataRole.UserRole)
+    widget._message_delegate.set_animation_frame(0, widget.message_list)
+    first = widget._message_delegate._message_display_text(message)
+    first_height = widget._message_delegate.sizeHint(QStyleOptionViewItem(), index).height()
+    widget._message_delegate.set_animation_frame(2, widget.message_list)
+    second = widget._message_delegate._message_display_text(message)
+    second_height = widget._message_delegate.sizeHint(QStyleOptionViewItem(), index).height()
+
+    assert first == "正在理解请求"
+    assert second == "正在理解请求.."
+    assert first_height == second_height
 
     widget.close()
     app.processEvents()

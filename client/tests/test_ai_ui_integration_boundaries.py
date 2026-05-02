@@ -456,11 +456,17 @@ def test_ai_action_step_status_area_uses_safe_steps_and_events() -> None:
         "\n\n    @classmethod\n    def _step_state_from_events",
         1,
     )[0]
+    summary_function = assistant_delegate.split("def _action_status_summary_text", 1)[1].split(
+        "\n\n    @classmethod\n    def _action_status_text",
+        1,
+    )[0]
 
     assert "steps = [item for item in list(action.get(\"steps\") or [])" in status_function
     assert "events = [item for item in list(action.get(\"events\") or [])" in status_function
     assert "cls._step_state_from_events(step_id, events)" in status_function
     assert "cls._step_state_label" in status_function
+    assert "cls._current_action_step_summary" in summary_function
+    assert "cls._action_failure_hint" in summary_function
     assert '"running": "正在执行"' in assistant_delegate
     assert '"done": "已完成"' in assistant_delegate
     assert '"waiting_confirmation": "等待确认"' in assistant_delegate
@@ -472,7 +478,7 @@ def test_ai_action_step_status_area_uses_safe_steps_and_events() -> None:
 
     assert "status_rect = None" in assistant_delegate
     assert "self._action_status_text(message.extra)" in assistant_delegate
-    assert "self._draw_auxiliary_text(painter, layout.status_rect" in assistant_delegate
+    assert "self._draw_action_status_card(painter, layout.status_rect" in assistant_delegate
 
 
 def test_ai_action_terminal_state_does_not_render_step_status() -> None:
@@ -500,6 +506,7 @@ def test_ai_action_terminal_state_does_not_render_step_status() -> None:
         }
     }
     assert AIAssistantMessageDelegate._action_status_text(terminal_extra) == ""
+    assert AIAssistantMessageDelegate._action_status_summary_text(terminal_extra) == ""
 
     waiting_extra = {
         "ai_action": {
@@ -515,6 +522,7 @@ def test_ai_action_terminal_state_does_not_render_step_status() -> None:
         }
     }
     assert AIAssistantMessageDelegate._action_status_text(waiting_extra) == "等待确认：确认发送"
+    assert AIAssistantMessageDelegate._action_status_summary_text(waiting_extra) == "等待确认：确认发送"
 
     retrying_extra = {
         "ai_action": {
@@ -530,6 +538,7 @@ def test_ai_action_terminal_state_does_not_render_step_status() -> None:
         }
     }
     assert AIAssistantMessageDelegate._action_status_text(retrying_extra) == "正在重试：确定联系人"
+    assert AIAssistantMessageDelegate._action_status_summary_text(retrying_extra) == "正在重试：确定联系人 · 0/1"
 
     resource_limit_extra = {
         "ai_action": {
@@ -548,6 +557,27 @@ def test_ai_action_terminal_state_does_not_render_step_status() -> None:
         }
     }
     assert AIAssistantMessageDelegate._action_status_text(resource_limit_extra) == "执行失败：检索聊天记录"
+    assert (
+        AIAssistantMessageDelegate._action_status_summary_text(resource_limit_extra)
+        == "执行失败：检索聊天记录 · 结果过多，已停止执行"
+    )
+
+    invalid_plan_extra = {
+        "ai_action": {
+            "state": "failed",
+            "error_code": "PLANNER_CONTRACT_INVALID",
+            "validation_errors": [
+                "prompt 不应展示",
+                "raw_output 不应展示",
+                "reasoning 不应展示",
+            ],
+        }
+    }
+    invalid_summary = AIAssistantMessageDelegate._action_status_summary_text(invalid_plan_extra)
+    assert invalid_summary == "执行失败：操作计划结构不安全"
+    assert "prompt 不应展示" not in invalid_summary
+    assert "raw_output 不应展示" not in invalid_summary
+    assert "reasoning 不应展示" not in invalid_summary
 
 
 def test_ai_action_status_renders_structured_explanation_without_reasoning_chain() -> None:
@@ -582,9 +612,11 @@ def test_ai_action_status_renders_structured_explanation_without_reasoning_chain
     }
 
     status = AIAssistantMessageDelegate._action_status_text(running_extra)
+    summary = AIAssistantMessageDelegate._action_status_summary_text(running_extra)
 
     assert "正在执行：检索聊天记录（只读取本地记忆索引）" in status
     assert "待执行：根据检索证据总结" in status
+    assert summary == "正在执行：检索聊天记录 · 0/2"
     assert "完整推理链不应展示" not in status
     assert "模型思考不应展示" not in status
     assert "planner prompt 不应展示" not in status
@@ -606,6 +638,7 @@ def test_ai_action_status_renders_structured_explanation_without_reasoning_chain
         }
     }
     assert AIAssistantMessageDelegate._action_status_text(cancelled_extra) == ""
+    assert AIAssistantMessageDelegate._action_status_summary_text(cancelled_extra) == ""
 
 
 def test_ai_assistant_tries_action_workflow_before_rag_and_ai_chat() -> None:

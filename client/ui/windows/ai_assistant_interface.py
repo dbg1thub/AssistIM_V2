@@ -308,6 +308,10 @@ class AIAssistantInterface(QWidget):
         self._scroll_delegate: SmoothScrollDelegate | None = None
         self._is_generating = False
         self._pending_image_attachment: dict | None = None
+        self._thinking_animation_frame = 0
+        self._thinking_animation_timer = QTimer(self)
+        self._thinking_animation_timer.setInterval(420)
+        self._thinking_animation_timer.timeout.connect(self._advance_thinking_animation)
 
         self._setup_ui()
         self._subscribe_to_events()
@@ -769,7 +773,7 @@ class AIAssistantInterface(QWidget):
         self._update_input_overlay_positions()
 
     def _on_send_clicked(self) -> None:
-        if self._active_task_id or self._active_action_plan_id:
+        if self._active_task_id or self._active_action_plan_id or self._is_generating:
             self._create_ui_task(self._stop_active_generation(), "stop AI assistant generation from send button")
             return
         text = self.prompt_edit.toPlainText().strip()
@@ -807,7 +811,16 @@ class AIAssistantInterface(QWidget):
         await self._reload_threads(select_thread_id=thread_id)
 
         context_messages = list(self._messages)
-        action_message: AIMessage | None = None
+        assistant_message = await self._store.create_message(
+            thread_id=thread_id,
+            role=AIMessageRole.ASSISTANT,
+            content="",
+            status=AIMessageStatus.PENDING,
+            extra={"ai_thinking": {"state": "planning"}},
+        )
+        self._append_message(assistant_message)
+        self._set_generating(True)
+        action_message: AIMessage | None = assistant_message
 
         async def on_action_progress(progress_result) -> None:
             nonlocal action_message
@@ -832,20 +845,17 @@ class AIAssistantInterface(QWidget):
             )
             return
 
-        assistant_message = await self._store.create_message(
-            thread_id=thread_id,
-            role=AIMessageRole.ASSISTANT,
-            content="",
-            status=AIMessageStatus.PENDING,
-        )
-        self._append_message(assistant_message)
-        self._set_generating(True)
+        assistant_message.content = ""
+        assistant_message.status = AIMessageStatus.PENDING
+        assistant_message.task_id = ""
+        assistant_message.extra = {"ai_thinking": {"state": "generating"}}
 
         task_id = f"ai-chat-{uuid.uuid4()}"
         await self._store.update_message(
             assistant_message,
             status=AIMessageStatus.STREAMING,
             task_id=task_id,
+            extra=assistant_message.extra,
         )
         assistant_message.status = AIMessageStatus.STREAMING
         assistant_message.task_id = task_id
@@ -1071,6 +1081,7 @@ class AIAssistantInterface(QWidget):
             message_extra["truncated"] = True
         else:
             message_extra.pop("truncated", None)
+        message_extra.pop("ai_thinking", None)
         self._active_assistant_message.content = content
         self._active_assistant_message.status = status
         self._active_assistant_message.model = str(snapshot.model or "")
@@ -1256,13 +1267,24 @@ class AIAssistantInterface(QWidget):
             self.send_button.setText(tr("ai_assistant.stop", "Stop"))
             self.send_button.setIcon(CollectionIcon("stop").icon())
             self.send_button.setToolTip(tr("ai_assistant.stop", "Stop"))
+            if not self._thinking_animation_timer.isActive():
+                self._thinking_animation_timer.start()
         else:
             self.send_button.setText(tr("common.send", "Send"))
             self.send_button.setIcon(AppIcon.SEND_FILL.icon())
             self.send_button.setToolTip(tr("common.send", "Send"))
+            self._thinking_animation_timer.stop()
+            self._thinking_animation_frame = 0
+            if self._message_delegate is not None:
+                self._message_delegate.set_animation_frame(0, self.message_list)
         self.delete_button.setEnabled(bool(self._current_thread_id))
         self._update_input_overlay_positions()
         self._sync_scroll_to_bottom_button()
+
+    def _advance_thinking_animation(self) -> None:
+        self._thinking_animation_frame = (self._thinking_animation_frame + 1) % 4
+        if self._message_delegate is not None:
+            self._message_delegate.set_animation_frame(self._thinking_animation_frame, self.message_list)
 
     def _scroll_to_bottom(self, *, passes: int = 3) -> None:
         def _scroll(remaining: int) -> None:
@@ -1366,6 +1388,11 @@ class AIAssistantInterface(QWidget):
     async def _fail_pending_assistant_message(self, message: AIMessage, text: str) -> None:
         message.content = str(text or "").strip() or tr("ai_assistant.error.failed", "AI could not complete this request.")
         message.status = AIMessageStatus.FAILED
+        message.extra = {
+            key: value
+            for key, value in dict(message.extra or {}).items()
+            if key != "ai_thinking"
+        }
         await self._persist_assistant_message(message)
         self._update_message_card(message)
         if message is self._active_action_message:
@@ -1432,7 +1459,7 @@ class AIAssistantInterface(QWidget):
             return False
         command = self._message_delegate.action_command_at(self.message_list, index, position)
         if not command:
-            return False
+            return self._message_delegate.toggle_action_status_expanded(self.message_list, index, position)
         message = index.data(Qt.ItemDataRole.UserRole)
         if not isinstance(message, AIMessage):
             return False
@@ -1534,6 +1561,13 @@ class AIAssistantInterface(QWidget):
                         return True
                 index = self.message_list.indexAt(position)
                 if index.isValid() and self._message_delegate and self._message_delegate.update_action_hover(
+                    self.message_list,
+                    index,
+                    position,
+                ):
+                    self.message_list.viewport().setCursor(Qt.CursorShape.PointingHandCursor)
+                    return True
+                if index.isValid() and self._message_delegate and self._message_delegate.update_action_status_hover(
                     self.message_list,
                     index,
                     position,

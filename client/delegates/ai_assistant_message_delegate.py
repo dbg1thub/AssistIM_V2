@@ -59,6 +59,9 @@ class AIAssistantMessageDelegate(QStyledItemDelegate):
     ACTION_BUTTON_WIDTH = 76
     ACTION_BUTTON_HEIGHT = 32
     ACTION_BUTTON_GAP = 8
+    ACTION_STATUS_MAX_WIDTH = 560
+    ACTION_STATUS_PADDING = 10
+    ACTION_STATUS_LINE_GAP = 6
     IMAGE_WIDTH = 220
     IMAGE_HEIGHT = 140
     IMAGE_BOTTOM_GAP = 10
@@ -71,7 +74,10 @@ class AIAssistantMessageDelegate(QStyledItemDelegate):
         self._selection_active = False
         self._context_menu_message_id: str | None = None
         self._hovered_action: tuple[str, str] | None = None
+        self._hovered_status_message_id: str | None = None
         self._disabled_action_message_ids: set[str] = set()
+        self._expanded_action_status_message_ids: set[str] = set()
+        self._animation_frame = 0
 
     def sizeHint(self, option: QStyleOptionViewItem, index: QModelIndex) -> QSize:
         message = self._message(index)
@@ -102,7 +108,7 @@ class AIAssistantMessageDelegate(QStyledItemDelegate):
         if layout.text_rect.height() > 0:
             self._draw_message_text(painter, layout.text_rect, message)
         if layout.status_rect is not None:
-            self._draw_auxiliary_text(painter, layout.status_rect, self._action_status_text(message.extra))
+            self._draw_action_status_card(painter, layout.status_rect, message)
         if layout.confirmation_rect is not None:
             self._draw_confirmation_card(painter, layout, message)
         if layout.footer_rect is not None:
@@ -135,6 +141,39 @@ class AIAssistantMessageDelegate(QStyledItemDelegate):
         layout = self.layout_for_index(view.visualRect(index), index)
         return layout.text_rect.contains(position)
 
+    def is_action_status_hit(self, view, index: QModelIndex, position: QPoint) -> bool:
+        if not index.isValid():
+            return False
+        message = self._message(index)
+        if message is None or not self._action_status_summary_text(message.extra):
+            return False
+        layout = self.layout_for_index(view.visualRect(index), index)
+        return layout.status_rect is not None and layout.status_rect.contains(position)
+
+    def toggle_action_status_expanded(self, view, index: QModelIndex, position: QPoint) -> bool:
+        message = self._message(index)
+        if message is None or not self.is_action_status_hit(view, index, position):
+            return False
+        if message.message_id in self._expanded_action_status_message_ids:
+            self._expanded_action_status_message_ids.discard(message.message_id)
+        else:
+            self._expanded_action_status_message_ids.add(message.message_id)
+        if view is not None:
+            view.doItemsLayout()
+            view.viewport().update()
+        return True
+
+    def is_action_status_expanded(self, message_id: str) -> bool:
+        return str(message_id or "").strip() in self._expanded_action_status_message_ids
+
+    def set_animation_frame(self, frame: int, view=None) -> None:
+        next_frame = max(0, int(frame or 0)) % 4
+        if next_frame == self._animation_frame:
+            return
+        self._animation_frame = next_frame
+        if view is not None:
+            view.viewport().update()
+
     def action_command_at(self, view, index: QModelIndex, position: QPoint) -> str | None:
         message = self._message(index)
         if message is None or message.message_id in self._disabled_action_message_ids:
@@ -153,14 +192,33 @@ class AIAssistantMessageDelegate(QStyledItemDelegate):
         if next_hover == self._hovered_action:
             return bool(next_hover)
         self._hovered_action = next_hover
+        if next_hover is not None:
+            self._hovered_status_message_id = None
+        if view is not None:
+            view.viewport().update()
+        return bool(next_hover)
+
+    def update_action_status_hover(self, view, index: QModelIndex, position: QPoint) -> bool:
+        message = self._message(index)
+        next_hover = (
+            message.message_id
+            if message is not None and self.is_action_status_hit(view, index, position)
+            else None
+        )
+        if next_hover == self._hovered_status_message_id:
+            return bool(next_hover)
+        self._hovered_status_message_id = next_hover
+        if next_hover is not None:
+            self._hovered_action = None
         if view is not None:
             view.viewport().update()
         return bool(next_hover)
 
     def clear_action_hover(self, view=None) -> None:
-        if self._hovered_action is None:
+        if self._hovered_action is None and self._hovered_status_message_id is None:
             return
         self._hovered_action = None
+        self._hovered_status_message_id = None
         if view is not None:
             view.viewport().update()
 
@@ -252,9 +310,9 @@ class AIAssistantMessageDelegate(QStyledItemDelegate):
         if image_rect is not None:
             cursor_y = image_rect.bottom() + 1 + self.IMAGE_BOTTOM_GAP
 
-        text = str(message.content or "")
+        text = self._message_display_text(message)
         footer_text = self._footer_text(message)
-        status_text = self._action_status_text(message.extra)
+        status_lines = self._action_status_display_lines(message)
         confirmation = self._confirmation_preview(message.extra)
 
         if is_user:
@@ -293,11 +351,10 @@ class AIAssistantMessageDelegate(QStyledItemDelegate):
         cursor_y = text_rect.bottom() + 1 if text_height > 0 else cursor_y
 
         status_rect = None
-        if status_text:
+        if status_lines:
             if cursor_y > top:
                 cursor_y += self.ASSISTANT_SECTION_GAP
-            status_size = self._measure_text(status_text, text_width, self._caption_font())
-            status_rect = QRect(track_x, cursor_y, text_width, status_size.height())
+            status_rect = self._action_status_layout(track_x, cursor_y, track_width, status_lines)
             cursor_y = status_rect.bottom() + 1
 
         confirmation_rect = None
@@ -351,7 +408,7 @@ class AIAssistantMessageDelegate(QStyledItemDelegate):
         painter.fillPath(path, color)
 
     def _draw_message_text(self, painter: QPainter, rect: QRect, message: AIMessage) -> None:
-        text = str(message.content or "")
+        text = self._message_display_text(message)
         if not text:
             return
         color = QColor(246, 248, 250, 235) if isDarkTheme() else QColor(26, 26, 26)
@@ -369,6 +426,32 @@ class AIAssistantMessageDelegate(QStyledItemDelegate):
             return
         color = QColor(236, 239, 243, 166) if isDarkTheme() else QColor(26, 26, 26, 150)
         self._draw_text_layout(painter, rect, text, self._caption_font(), color)
+
+    def _draw_action_status_card(self, painter: QPainter, rect: QRect, message: AIMessage) -> None:
+        lines = self._action_status_display_lines(message)
+        if not lines:
+            return
+        dark = isDarkTheme()
+        hovered = self._hovered_status_message_id == message.message_id
+        bg = QColor(255, 255, 255, 14 if hovered else 9) if dark else QColor(255, 255, 255, 180 if hovered else 150)
+        border = QColor(255, 255, 255, 42) if dark else QColor(15, 23, 42, 28)
+        path = QPainterPath()
+        path.addRoundedRect(QRectF(rect), 8, 8)
+        painter.fillPath(path, bg)
+        painter.setPen(border)
+        painter.drawPath(path)
+
+        x = rect.x() + self.ACTION_STATUS_PADDING
+        y = rect.y() + self.ACTION_STATUS_PADDING
+        width = rect.width() - self.ACTION_STATUS_PADDING * 2
+        header_color = QColor(246, 248, 250, 235) if dark else QColor(26, 26, 26)
+        detail_color = QColor(236, 239, 243, 166) if dark else QColor(26, 26, 26, 150)
+        for index, text in enumerate(lines):
+            font = self._text_font() if index == 0 else self._caption_font()
+            color = header_color if index == 0 else detail_color
+            size = self._measure_text(text, width, font)
+            self._draw_text_layout(painter, QRect(x, y, width, size.height()), text, font, color)
+            y += size.height() + self.ACTION_STATUS_LINE_GAP
 
     def _draw_confirmation_card(self, painter: QPainter, layout: AIAssistantMessageLayout, message: AIMessage) -> None:
         rect = layout.confirmation_rect
@@ -518,6 +601,30 @@ class AIAssistantMessageDelegate(QStyledItemDelegate):
         end = min(len(message.content or ""), max(self._selection_anchor, self._selection_position))
         return start, end
 
+    def _action_status_display_lines(self, message: AIMessage) -> list[str]:
+        summary = self._action_status_summary_text(message.extra, animation_frame=self._animation_frame)
+        if not summary:
+            return []
+        if not self.is_action_status_expanded(message.message_id):
+            return [summary]
+        details = [line for line in self._action_status_text(message.extra).splitlines() if line.strip()]
+        if not details:
+            return [summary]
+        if len(details) == 1 and details[0] == summary:
+            return [summary]
+        return [summary, *details[:6]]
+
+    def _action_status_layout(self, x: int, y: int, track_width: int, lines: list[str]) -> QRect:
+        width = min(self.ACTION_STATUS_MAX_WIDTH, max(240, track_width))
+        content_width = width - self.ACTION_STATUS_PADDING * 2
+        height = self.ACTION_STATUS_PADDING * 2
+        for index, text in enumerate(lines):
+            font = self._text_font() if index == 0 else self._caption_font()
+            height += self._measure_text(text, content_width, font).height()
+            if index < len(lines) - 1:
+                height += self.ACTION_STATUS_LINE_GAP
+        return QRect(x, y, width, height)
+
     def _confirmation_layout(self, x: int, y: int, track_width: int, preview: dict) -> tuple[QRect, QRect, QRect]:
         width = min(self.ACTION_CARD_MAX_WIDTH, max(240, track_width))
         content_width = width - self.ACTION_CARD_PADDING * 2
@@ -589,6 +696,26 @@ class AIAssistantMessageDelegate(QStyledItemDelegate):
     def _track_width(self, row_width: int) -> int:
         available = max(self.MIN_TRACK_WIDTH, int(row_width or 0) - self.TRACK_HORIZONTAL_MARGIN * 2)
         return max(self.MIN_TRACK_WIDTH, min(self.MAX_TRACK_WIDTH, available))
+
+    def _message_display_text(self, message: AIMessage) -> str:
+        text = str(message.content or "")
+        if text:
+            return text
+        if self._is_user(message):
+            return ""
+        if dict((message.extra or {}).get("ai_action") or {}):
+            return ""
+        if message.status not in {AIMessageStatus.PENDING, AIMessageStatus.STREAMING}:
+            return ""
+        thinking = dict((message.extra or {}).get("ai_thinking") or {})
+        state = str(thinking.get("state") or "").strip()
+        labels = {
+            "planning": "正在理解请求",
+            "generating": "正在生成回复",
+            "action": "正在执行操作",
+        }
+        label = labels.get(state, "正在处理")
+        return f"{label}{self._animated_dots(self._animation_frame)}"
 
     @staticmethod
     def _message(index: QModelIndex) -> AIMessage | None:
@@ -681,6 +808,55 @@ class AIAssistantMessageDelegate(QStyledItemDelegate):
         return ""
 
     @classmethod
+    def _action_status_summary_text(cls, extra: dict | None, *, animation_frame: int = 0) -> str:
+        action = dict((extra or {}).get("ai_action") or {})
+        if not action:
+            return ""
+        state = str(action.get("state") or "").strip()
+        if state in {"done", "cancelled"}:
+            return ""
+        steps = [item for item in list(action.get("steps") or []) if isinstance(item, dict)]
+        events = [item for item in list(action.get("events") or []) if isinstance(item, dict)]
+        if state == "failed":
+            current = cls._current_action_step_summary(
+                steps,
+                events,
+                current_step_id=str(action.get("current_step_id") or ""),
+                preferred_states={"failed"},
+            )
+            title = current[1] if current else ""
+            hint = cls._action_failure_hint(action, events)
+            if title and hint:
+                return f"执行失败：{title} · {hint}"
+            if title:
+                return f"执行失败：{title}"
+            return f"执行失败：{hint or '操作未完成'}"
+        current = cls._current_action_step_summary(
+            steps,
+            events,
+            current_step_id=str(action.get("current_step_id") or ""),
+            preferred_states={"running", "retrying", "waiting_confirmation", "waiting_clarification"},
+        )
+        if current is None and steps:
+            current = cls._current_action_step_summary(
+                steps,
+                events,
+                current_step_id="",
+                preferred_states={"pending"},
+            )
+        if current is None:
+            label = "正在处理" if state == "running" else cls._step_state_label(state)
+            return f"{label}{cls._animated_dots(animation_frame)}"
+        step_state, title = current
+        label = cls._step_state_label(step_state)
+        if state == "running" and step_state in {"running", "started"}:
+            label = f"正在执行{cls._animated_dots(animation_frame)}"
+        completed = cls._completed_step_count(steps, events)
+        total = len(steps)
+        suffix = f" · {completed}/{total}" if state == "running" and total > 0 else ""
+        return f"{label}：{title}{suffix}"
+
+    @classmethod
     def _action_status_text(cls, extra: dict | None) -> str:
         action = dict((extra or {}).get("ai_action") or {})
         if not action:
@@ -712,7 +888,92 @@ class AIAssistantMessageDelegate(QStyledItemDelegate):
                 title = str(event.get("message") or event.get("action") or "").strip()
                 if title and title != "plan":
                     lines.append(f"{label}：{title}")
+        if not lines and state == "failed":
+            hint = cls._action_failure_hint(action, events)
+            if hint:
+                lines.append(f"执行失败：{hint}")
         return "\n".join(lines[:6])
+
+    @classmethod
+    def _current_action_step_summary(
+        cls,
+        steps: list[dict],
+        events: list[dict],
+        *,
+        current_step_id: str,
+        preferred_states: set[str],
+    ) -> tuple[str, str] | None:
+        normalized_current = str(current_step_id or "").strip()
+        candidates: list[tuple[str, dict]] = []
+        for step in steps:
+            step_id = str(step.get("id") or "").strip()
+            event_state = cls._step_state_from_events(step_id, events)
+            step_state = event_state or str(step.get("state") or "").strip()
+            candidates.append((step_state, step))
+        if normalized_current:
+            for step_state, step in candidates:
+                if str(step.get("id") or "").strip() == normalized_current:
+                    title = cls._step_title(step)
+                    if title:
+                        return step_state or "pending", title
+        for step_state, step in candidates:
+            if step_state in preferred_states:
+                title = cls._step_title(step)
+                if title:
+                    return step_state, title
+        return None
+
+    @classmethod
+    def _completed_step_count(cls, steps: list[dict], events: list[dict]) -> int:
+        count = 0
+        for step in steps:
+            step_id = str(step.get("id") or "").strip()
+            state = cls._step_state_from_events(step_id, events) or str(step.get("state") or "").strip()
+            if state in {"done", "completed"}:
+                count += 1
+        return count
+
+    @staticmethod
+    def _step_title(step: dict) -> str:
+        display_text = str(step.get("display_text") or "").strip()
+        explanation = str(step.get("explanation") or "").strip()
+        action_name = str(step.get("action") or "").strip()
+        return display_text or explanation or action_name
+
+    @classmethod
+    def _action_failure_hint(cls, action: dict, events: list[dict]) -> str:
+        error_code = str(action.get("error_code") or "").strip()
+        if not error_code:
+            for event in reversed(events):
+                error_code = str(event.get("error_code") or "").strip()
+                if error_code:
+                    break
+        resource_limit = ""
+        for event in reversed(events):
+            resource_limit = str(event.get("resource_limit") or "").strip()
+            if resource_limit:
+                break
+        if (
+            error_code == "RESOURCE_LIMIT_EXCEEDED"
+            or resource_limit
+            or any(str(event.get("type") or "").strip() == "plan_resource_limit_exceeded" for event in events)
+        ):
+            return "结果过多，已停止执行"
+        labels = {
+            "ACTION_NOT_FOUND": "当前不支持这个操作",
+            "PLAN_SCHEMA_INVALID": "操作计划结构有问题",
+            "PLANNER_CONTRACT_INVALID": "操作计划结构不安全",
+            "PERMISSION_DENIED": "权限不允许访问",
+            "SESSION_NOT_FOUND": "没有找到可发送的会话",
+            "ACTION_TIMEOUT": "操作超时",
+            "ACTION_FAILED": "操作执行失败",
+            "ARG_REFERENCE_INVALID": "操作参数不完整",
+            "ARG_SCHEMA_INVALID": "操作参数不完整",
+            "OUTPUT_SCHEMA_INVALID": "操作结果格式异常",
+            "TEMP_RESULT_EXPIRED": "临时结果已过期",
+            "expired_confirmation": "确认已过期",
+        }
+        return labels.get(error_code, "操作未完成" if error_code else "")
 
     @classmethod
     def _step_state_from_events(cls, step_id: str, events: list[dict]) -> str:
@@ -759,3 +1020,7 @@ class AIAssistantMessageDelegate(QStyledItemDelegate):
             "pending": "待执行",
         }
         return labels.get(str(state or "").strip(), "待执行")
+
+    @staticmethod
+    def _animated_dots(frame: int) -> str:
+        return "." * (max(0, int(frame or 0)) % 4)
