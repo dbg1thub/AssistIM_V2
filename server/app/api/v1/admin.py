@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Request
+from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings
@@ -202,6 +203,29 @@ def list_admin_database_backups(
     """List server-local database backup records."""
     _ = current_user
     return success_response(AdminDatabaseBackupService(db, settings).list_backups(page=page, size=size))
+
+
+@router.get("/database/backups/{backup_id}/download")
+def download_admin_database_backup(
+    backup_id: str,
+    request: Request,
+    current_user: User = Depends(get_current_admin_user),
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_request_settings),
+) -> FileResponse:
+    """Download one completed server-local database backup."""
+    payload = AdminDatabaseBackupService(db, settings).prepare_download(
+        backup_id,
+        actor=current_user,
+        request_path=str(request.url.path),
+        request_method=request.method,
+        client_ip=_client_ip(request),
+    )
+    return FileResponse(
+        path=payload["path"],
+        filename=payload["file_name"],
+        media_type=payload["media_type"],
+    )
 
 
 @router.get("/database/backups/{backup_id}")

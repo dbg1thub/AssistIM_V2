@@ -56,6 +56,26 @@ def test_admin_database_backup_forbids_non_admin(client: TestClient) -> None:
     assert list_response.json()["code"] == ErrorCode.FORBIDDEN
 
 
+def test_admin_database_backup_download_forbids_non_admin(client: TestClient) -> None:
+    admin_auth = _register(client, "backup-download-owner", "Backup Download Owner")
+    normal_auth = _register(client, "backup-download-normal", "Backup Download Normal")
+    _set_role(admin_auth["user"]["id"], "admin")
+    create_response = client.post(
+        "/api/v1/admin/database/backups",
+        headers=_auth_header(admin_auth["access_token"]),
+    )
+    assert create_response.status_code == 200, create_response.text
+    backup_id = create_response.json()["data"]["id"]
+
+    response = client.get(
+        f"/api/v1/admin/database/backups/{backup_id}/download",
+        headers=_auth_header(normal_auth["access_token"]),
+    )
+
+    assert response.status_code == 403
+    assert response.json()["code"] == ErrorCode.FORBIDDEN
+
+
 def test_admin_database_backup_creates_real_sqlite_backup_and_audit(client: TestClient) -> None:
     admin_auth = _register(client, "backup-admin", "Backup Admin")
     _register(client, "backup-data", "Backup Data")
@@ -132,6 +152,40 @@ def test_admin_database_backups_list_and_detail(client: TestClient) -> None:
     assert "file_path" not in detail_payload
 
 
+def test_admin_database_backup_download_returns_attachment_and_records_audit(client: TestClient) -> None:
+    admin_auth = _register(client, "backup-download-admin", "Backup Download Admin")
+    _set_role(admin_auth["user"]["id"], "admin")
+    create_response = client.post(
+        "/api/v1/admin/database/backups",
+        headers=_auth_header(admin_auth["access_token"]),
+    )
+    assert create_response.status_code == 200, create_response.text
+    backup_payload = create_response.json()["data"]
+
+    response = client.get(
+        f"/api/v1/admin/database/backups/{backup_payload['id']}/download",
+        headers=_auth_header(admin_auth["access_token"]),
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.headers["content-type"].startswith("application/octet-stream")
+    assert f'filename="{backup_payload["file_name"]}"' in response.headers["content-disposition"]
+    assert len(response.content) == backup_payload["size_bytes"]
+    assert len(response.content) > 0
+    assert "file_path" not in response.headers["content-disposition"]
+
+    with SessionLocal() as db:
+        audit = (
+            db.query(AdminAuditLog)
+            .filter(AdminAuditLog.action == "admin.database.backup.download")
+            .one()
+        )
+        assert audit.actor_user_id == admin_auth["user"]["id"]
+        assert audit.target_id == backup_payload["id"]
+        assert audit.success is True
+        assert "file_path" not in audit.detail_json
+
+
 def test_admin_database_backup_detail_returns_404_for_missing_backup(client: TestClient) -> None:
     admin_auth = _register(client, "backup-missing-admin", "Backup Missing Admin")
     _set_role(admin_auth["user"]["id"], "admin")
@@ -143,6 +197,108 @@ def test_admin_database_backup_detail_returns_404_for_missing_backup(client: Tes
 
     assert response.status_code == 404
     assert response.json()["code"] == ErrorCode.RESOURCE_NOT_FOUND
+
+
+def test_admin_database_backup_download_rejects_failed_backup_and_records_audit(client: TestClient) -> None:
+    admin_auth = _register(client, "backup-download-failed-admin", "Backup Download Failed Admin")
+    _set_role(admin_auth["user"]["id"], "admin")
+    backup_id = _insert_backup_record(
+        created_by_user_id=admin_auth["user"]["id"],
+        created_by_username="backup-download-failed-admin",
+        status="failed",
+        file_path="",
+        file_name="failed.dump",
+        error_message="pg_dump not found",
+    )
+
+    response = client.get(
+        f"/api/v1/admin/database/backups/{backup_id}/download",
+        headers=_auth_header(admin_auth["access_token"]),
+    )
+
+    assert response.status_code == 409
+    assert response.json()["code"] == ErrorCode.INVALID_REQUEST
+    assert "completed" in response.json()["message"]
+
+    with SessionLocal() as db:
+        audit = (
+            db.query(AdminAuditLog)
+            .filter(AdminAuditLog.action == "admin.database.backup.download")
+            .one()
+        )
+        assert audit.target_id == backup_id
+        assert audit.success is False
+        assert "failed" in audit.detail_json
+
+
+def test_admin_database_backup_download_returns_404_when_file_missing_and_records_audit(
+    client: TestClient,
+) -> None:
+    admin_auth = _register(client, "backup-download-missing-admin", "Backup Download Missing Admin")
+    _set_role(admin_auth["user"]["id"], "admin")
+    backup_id = _insert_backup_record(
+        created_by_user_id=admin_auth["user"]["id"],
+        created_by_username="backup-download-missing-admin",
+        status="completed",
+        file_path=str(Path("server/.testdata/missing-backup.sqlite3").resolve()),
+        file_name="missing-backup.sqlite3",
+        size_bytes=128,
+        checksum_sha256="0" * 64,
+    )
+
+    response = client.get(
+        f"/api/v1/admin/database/backups/{backup_id}/download",
+        headers=_auth_header(admin_auth["access_token"]),
+    )
+
+    assert response.status_code == 404
+    assert response.json()["code"] == ErrorCode.RESOURCE_NOT_FOUND
+    assert "file" in response.json()["message"]
+
+    with SessionLocal() as db:
+        audit = (
+            db.query(AdminAuditLog)
+            .filter(AdminAuditLog.action == "admin.database.backup.download")
+            .one()
+        )
+        assert audit.target_id == backup_id
+        assert audit.success is False
+        assert "file_path" not in audit.detail_json
+
+
+def test_admin_database_backup_download_rejects_path_outside_backup_root(client: TestClient) -> None:
+    admin_auth = _register(client, "backup-download-path-admin", "Backup Download Path Admin")
+    _set_role(admin_auth["user"]["id"], "admin")
+    outside_file = Path("server/.testdata/outside-backup.sqlite3").resolve()
+    outside_file.write_bytes(b"outside")
+    backup_id = _insert_backup_record(
+        created_by_user_id=admin_auth["user"]["id"],
+        created_by_username="backup-download-path-admin",
+        status="completed",
+        file_path=str(outside_file),
+        file_name="outside-backup.sqlite3",
+        size_bytes=outside_file.stat().st_size,
+        checksum_sha256="1" * 64,
+    )
+
+    response = client.get(
+        f"/api/v1/admin/database/backups/{backup_id}/download",
+        headers=_auth_header(admin_auth["access_token"]),
+    )
+
+    assert response.status_code == 403
+    assert response.json()["code"] == ErrorCode.FORBIDDEN
+    assert "backup directory" in response.json()["message"]
+
+    with SessionLocal() as db:
+        audit = (
+            db.query(AdminAuditLog)
+            .filter(AdminAuditLog.action == "admin.database.backup.download")
+            .one()
+        )
+        assert audit.target_id == backup_id
+        assert audit.success is False
+        assert "outside-backup" not in audit.detail_json
 
 
 def test_admin_database_backup_failure_records_error_and_redacts_password(monkeypatch) -> None:
@@ -172,3 +328,34 @@ def test_admin_database_backup_failure_records_error_and_redacts_password(monkey
         assert audit.success is False
         assert audit.target_id == str(backup.id)
         assert "super-secret" not in audit.detail_json
+
+
+def _insert_backup_record(
+    *,
+    created_by_user_id: str,
+    created_by_username: str,
+    status: str,
+    file_path: str,
+    file_name: str,
+    size_bytes: int = 0,
+    checksum_sha256: str = "",
+    error_message: str = "",
+) -> str:
+    with SessionLocal() as db:
+        backup = AdminDatabaseBackup(
+            created_by_user_id=created_by_user_id,
+            created_by_username=created_by_username,
+            status=status,
+            database_dialect="sqlite",
+            backup_format="sqlite",
+            storage_key=f"database_backups/{file_name}",
+            file_name=file_name,
+            file_path=file_path,
+            size_bytes=size_bytes,
+            checksum_sha256=checksum_sha256,
+            error_message=error_message,
+        )
+        db.add(backup)
+        db.commit()
+        db.refresh(backup)
+        return str(backup.id)

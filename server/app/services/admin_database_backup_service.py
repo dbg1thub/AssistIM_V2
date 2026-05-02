@@ -152,6 +152,67 @@ class AdminDatabaseBackupService:
             raise AppError(ErrorCode.RESOURCE_NOT_FOUND, "database backup not found", 404)
         return self.serialize_backup(backup)
 
+    def prepare_download(
+        self,
+        backup_id: str,
+        *,
+        actor: User,
+        request_path: str = "",
+        request_method: str = "",
+        client_ip: str = "",
+    ) -> dict[str, Any]:
+        backup = self.db.get(AdminDatabaseBackup, str(backup_id or "").strip())
+        if backup is None:
+            raise AppError(ErrorCode.RESOURCE_NOT_FOUND, "database backup not found", 404)
+
+        try:
+            file_path = self._validate_downloadable_backup(backup)
+            self.audit.record(
+                actor=actor,
+                action="admin.database.backup.download",
+                target_type="database_backup",
+                target_id=str(backup.id or ""),
+                request_path=request_path,
+                request_method=request_method,
+                client_ip=client_ip,
+                success=True,
+                detail={
+                    "backup_id": str(backup.id or ""),
+                    "status": str(backup.status or ""),
+                    "storage_key": str(backup.storage_key or ""),
+                    "file_name": str(backup.file_name or ""),
+                    "size_bytes": int(backup.size_bytes or 0),
+                    "checksum_sha256": str(backup.checksum_sha256 or ""),
+                },
+                commit=False,
+            )
+            self.db.commit()
+            return {
+                "path": file_path,
+                "file_name": str(backup.file_name or file_path.name),
+                "media_type": "application/octet-stream",
+            }
+        except AppError as exc:
+            self.audit.record(
+                actor=actor,
+                action="admin.database.backup.download",
+                target_type="database_backup",
+                target_id=str(backup.id or ""),
+                request_path=request_path,
+                request_method=request_method,
+                client_ip=client_ip,
+                success=False,
+                error_code=str(exc.code),
+                detail={
+                    "backup_id": str(backup.id or ""),
+                    "status": str(backup.status or ""),
+                    "error": exc.message,
+                },
+                commit=False,
+            )
+            self.db.commit()
+            raise
+
     def serialize_backup(self, backup: AdminDatabaseBackup) -> dict[str, Any]:
         return {
             "id": str(backup.id or ""),
@@ -228,6 +289,26 @@ class AdminDatabaseBackupService:
         if configured:
             return Path(configured).expanduser().resolve()
         return (Path(self.settings.upload_dir).expanduser().resolve().parent / "database_backups").resolve()
+
+    def _validate_downloadable_backup(self, backup: AdminDatabaseBackup) -> Path:
+        status = str(backup.status or "").strip().lower()
+        if status != "completed":
+            raise AppError(ErrorCode.INVALID_REQUEST, "only completed backups can be downloaded", 409)
+
+        raw_path = str(backup.file_path or "").strip()
+        if not raw_path:
+            raise AppError(ErrorCode.RESOURCE_NOT_FOUND, "database backup file is missing", 404)
+
+        file_path = Path(raw_path).expanduser().resolve()
+        if not file_path.is_file():
+            raise AppError(ErrorCode.RESOURCE_NOT_FOUND, "database backup file is missing", 404)
+
+        backup_root = self._backup_root()
+        try:
+            file_path.relative_to(backup_root)
+        except ValueError as exc:
+            raise AppError(ErrorCode.FORBIDDEN, "database backup file is outside the backup directory", 403) from exc
+        return file_path
 
     def _sqlite_database_path(self) -> Path:
         database = self.db.get_bind().url.database or make_url(self.settings.database_url).database
