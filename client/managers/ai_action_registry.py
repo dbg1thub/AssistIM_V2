@@ -76,7 +76,6 @@ class _ServerWriteRoute:
 
 SERVER_READ_ACTION_ROUTES: dict[str, _ServerReadRoute] = {
     "user.search": _ServerReadRoute("/users/search", param_args=("keyword", "page", "size")),
-    "user.list": _ServerReadRoute("/users", param_args=("page", "size")),
     "user.get": _ServerReadRoute("/users/{user_id}", path_args=("user_id",)),
     "friend.list": _ServerReadRoute("/friends"),
     "friend.check": _ServerReadRoute("/friends/check/{user_id}", path_args=("user_id",)),
@@ -85,9 +84,7 @@ SERVER_READ_ACTION_ROUTES: dict[str, _ServerReadRoute] = {
     "group.get": _ServerReadRoute("/groups/{group_id}", path_args=("group_id",)),
     "session.list": _ServerReadRoute("/sessions"),
     "session.get": _ServerReadRoute("/sessions/{session_id}", path_args=("session_id",)),
-    "session.unread": _ServerReadRoute("/sessions/unread"),
     "message.list": _ServerReadRoute("/sessions/{session_id}/messages", path_args=("session_id",), param_args=("limit", "before_seq")),
-    "message.unread": _ServerReadRoute("/messages/unread"),
     "file.list": _ServerReadRoute("/files", param_args=("limit",)),
     "moment.list": _ServerReadRoute("/moments", param_args=("user_id", "page", "size")),
     "moment.get": _ServerReadRoute("/moments/{moment_id}", path_args=("moment_id",)),
@@ -101,7 +98,6 @@ SERVER_WRITE_ACTION_ROUTES: dict[str, _ServerWriteRoute] = {
 
 SERVER_READ_ACTION_LABELS: dict[str, str] = {
     "user.search": "用户搜索",
-    "user.list": "用户列表查询",
     "user.get": "用户资料查询",
     "friend.list": "好友列表查询",
     "friend.check": "好友关系查询",
@@ -110,9 +106,7 @@ SERVER_READ_ACTION_LABELS: dict[str, str] = {
     "group.get": "群组详情查询",
     "session.list": "会话列表查询",
     "session.get": "会话详情查询",
-    "session.unread": "会话未读统计查询",
     "message.list": "会话消息列表查询",
-    "message.unread": "消息未读摘要查询",
     "file.list": "文件列表查询",
     "moment.list": "朋友圈列表查询",
     "moment.get": "朋友圈详情查询",
@@ -474,12 +468,6 @@ class AtomicActionRegistry:
             max_result_items=100,
         )
         self._register_server_read(
-            "user.list",
-            input_model=PagedReadInput,
-            prompt_purpose="列出服务端用户目录。",
-            max_result_items=100,
-        )
-        self._register_server_read(
             "user.get",
             input_model=UserGetInput,
             prompt_purpose="查看一个用户的公开资料。",
@@ -555,12 +543,6 @@ class AtomicActionRegistry:
             max_result_items=1,
         )
         self._register_server_read(
-            "session.unread",
-            input_model=EmptyReadInput,
-            prompt_purpose="查看会话未读统计。",
-            max_result_items=100,
-        )
-        self._register_server_read(
             "message.list",
             input_model=MessageListInput,
             prompt_purpose="查看一个会话的最近消息列表。",
@@ -569,12 +551,6 @@ class AtomicActionRegistry:
                 "limit 控制返回消息数量；before_seq 为空表示从最新消息向前读取。",
             ),
             max_result_items=200,
-        )
-        self._register_server_read(
-            "message.unread",
-            input_model=EmptyReadInput,
-            prompt_purpose="查看消息未读摘要。",
-            max_result_items=100,
         )
         self._register_server_read(
             "file.list",

@@ -1301,6 +1301,9 @@ def test_ai_action_planner_schema_restricts_step_actions_to_registered_names() -
     assert "message.send" in action_schema["enum"]
     assert "user.search" in action_schema["enum"]
     assert "file.list" in action_schema["enum"]
+    assert "user.list" not in action_schema["enum"]
+    assert "session.unread" not in action_schema["enum"]
+    assert "message.unread" not in action_schema["enum"]
     assert "delete_server_database" not in action_schema["enum"]
 
 
@@ -2007,15 +2010,12 @@ def test_ai_action_registry_exposes_memory_actions() -> None:
         "message.draft",
         "message.list",
         "message.send",
-        "message.unread",
         "moment.get",
         "moment.list",
         "session.get",
         "session.list",
-        "session.unread",
         "user.confirm",
         "user.get",
-        "user.list",
         "user.search",
     )
     assert registry.get("memory.search") is not None
@@ -2029,7 +2029,6 @@ def test_ai_action_registry_exposes_first_server_read_actions() -> None:
     )
     expected = {
         "user.search",
-        "user.list",
         "user.get",
         "friend.list",
         "friend.check",
@@ -2038,9 +2037,7 @@ def test_ai_action_registry_exposes_first_server_read_actions() -> None:
         "group.get",
         "session.list",
         "session.get",
-        "session.unread",
         "message.list",
-        "message.unread",
         "file.list",
         "moment.list",
         "moment.get",
@@ -2057,6 +2054,19 @@ def test_ai_action_registry_exposes_first_server_read_actions() -> None:
         assert spec.handler is not None
         assert spec.input_model is not None
         assert spec.output_model is not None
+
+
+def test_ai_action_registry_does_not_expose_simple_ui_only_reads() -> None:
+    registry = AtomicActionRegistry(
+        contact_resolver=ContactAliasResolver(db=_FakeContactDatabase([])),
+        memory_manager=_FakeActionMemoryManager(),
+    )
+
+    removed = {"user.list", "session.unread", "message.unread"}
+    assert removed.isdisjoint(registry.names())
+    contract = registry.prompt_contract()
+    for action_name in removed:
+        assert action_name not in contract
 
 
 def test_ai_action_registry_exposes_first_server_write_actions() -> None:
