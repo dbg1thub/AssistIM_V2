@@ -12,7 +12,12 @@ from client.managers.ai_action_normalizer import AIPlanNormalizer
 from client.managers.ai_action_optimizer import AIPlanOptimizer
 from client.managers.ai_action_permission_policy import AIPermissionPolicy, AIPermissionScope, PermissionDecision
 from client.managers.ai_action_resource_manager import AIResourceManager, ResourceBudget
-from client.managers.ai_action_registry import AIActionMessageSender, AIActionServerWriteClient, AtomicActionRegistry
+from client.managers.ai_action_registry import (
+    AIActionMessageSender,
+    AIActionServerReadClient,
+    AIActionServerWriteClient,
+    AtomicActionRegistry,
+)
 from client.managers.ai_action_types import AIActionPlan, AIActionStep, AtomicActionSpec
 from client.managers.ai_action_validator import AIPlanValidator
 from client.managers.ai_action_workflow import (
@@ -122,6 +127,15 @@ class _FakeServerReadClient:
     async def execute(self, action_name: str, args: dict) -> dict:
         self.calls.append({"action": action_name, "args": dict(args or {})})
         return dict(self.responses.get(str(action_name or ""), {}))
+
+
+class _FakeServerReadHTTPClient:
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    async def get(self, path: str, **kwargs) -> dict:
+        self.calls.append({"method": "GET", "path": path, **dict(kwargs or {})})
+        return {"items": []}
 
 
 class _FakeServerWriteClient:
@@ -1189,6 +1203,8 @@ def test_ai_action_planner_prompt_documents_atomic_action_arg_contracts_without_
     assert "participant_match:Literal['any', 'all', 'direct_only', 'group_only']" in system_prompt
     assert "message.send" in system_prompt
     assert "idempotency_key:str" in system_prompt
+    assert "message.list" in system_prompt
+    assert "before_seq:int | None" in system_prompt
     assert "target_entity" in system_prompt
     assert "张三" not in system_prompt
     assert "用户原始问题" not in system_prompt
@@ -1987,6 +2003,7 @@ def test_ai_action_registry_exposes_memory_actions() -> None:
         "memory.search",
         "memory.summarize",
         "message.draft",
+        "message.list",
         "message.send",
         "message.unread",
         "moment.get",
@@ -2019,6 +2036,7 @@ def test_ai_action_registry_exposes_first_server_read_actions() -> None:
         "session.list",
         "session.get",
         "session.unread",
+        "message.list",
         "message.unread",
         "file.list",
         "moment.list",
@@ -2084,6 +2102,32 @@ def test_ai_action_registry_server_read_inputs_reject_unknown_fields() -> None:
         raise AssertionError("server read action input should reject unknown fields")
 
 
+def test_ai_action_registry_message_list_input_validates_bounds_and_unknown_fields() -> None:
+    registry = AtomicActionRegistry(
+        contact_resolver=ContactAliasResolver(db=_FakeContactDatabase([])),
+        memory_manager=_FakeActionMemoryManager(),
+    )
+    spec = registry.get("message.list")
+    assert spec is not None
+    assert spec.input_model is not None
+
+    parsed = spec.input_model.model_validate({"session_id": "session-1", "limit": 20, "before_seq": 10})
+    assert parsed.session_id == "session-1"
+    assert parsed.limit == 20
+    assert parsed.before_seq == 10
+
+    for payload in (
+        {"session_id": "session-1", "limit": 201},
+        {"session_id": "session-1", "before_seq": 0},
+        {"session_id": "session-1", "unexpected": True},
+    ):
+        try:
+            spec.input_model.model_validate(payload)
+        except Exception:
+            continue
+        raise AssertionError(f"message.list input should reject invalid payload: {payload}")
+
+
 def test_ai_action_registry_server_write_inputs_reject_unknown_fields() -> None:
     registry = AtomicActionRegistry(
         contact_resolver=ContactAliasResolver(db=_FakeContactDatabase([])),
@@ -2138,6 +2182,31 @@ def test_ai_action_registry_server_read_action_calls_client_and_normalizes_resul
         assert output["items"] == [{"id": "user-1", "username": "test1"}]
         assert output["result_count"] == 1
         assert output["text"] == "已完成用户搜索，返回 1 条结果。"
+
+    asyncio.run(scenario())
+
+
+def test_ai_action_server_read_client_maps_message_list_route() -> None:
+    async def scenario() -> None:
+        http = _FakeServerReadHTTPClient()
+        client = AIActionServerReadClient(http_client=http)
+
+        await client.execute(
+            "message.list",
+            {
+                "session_id": "session-1",
+                "limit": 25,
+                "before_seq": 10,
+            },
+        )
+
+        assert http.calls == [
+            {
+                "method": "GET",
+                "path": "/sessions/session-1/messages",
+                "params": {"limit": 25, "before_seq": 10},
+            }
+        ]
 
     asyncio.run(scenario())
 

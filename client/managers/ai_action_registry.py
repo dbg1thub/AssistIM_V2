@@ -24,6 +24,7 @@ from client.managers.ai_action_io_models import (
     MemorySummarizeInput,
     MemorySummarizeOutput,
     MessageDraftInput,
+    MessageListInput,
     MessageDraftOutput,
     MessageSendInput,
     MessageSendOutput,
@@ -84,6 +85,7 @@ SERVER_READ_ACTION_ROUTES: dict[str, _ServerReadRoute] = {
     "session.list": _ServerReadRoute("/sessions"),
     "session.get": _ServerReadRoute("/sessions/{session_id}", path_args=("session_id",)),
     "session.unread": _ServerReadRoute("/sessions/unread"),
+    "message.list": _ServerReadRoute("/sessions/{session_id}/messages", path_args=("session_id",), param_args=("limit", "before_seq")),
     "message.unread": _ServerReadRoute("/messages/unread"),
     "file.list": _ServerReadRoute("/files", param_args=("limit",)),
     "moment.list": _ServerReadRoute("/moments", param_args=("user_id", "page", "size")),
@@ -107,6 +109,7 @@ SERVER_READ_ACTION_LABELS: dict[str, str] = {
     "session.list": "会话列表查询",
     "session.get": "会话详情查询",
     "session.unread": "会话未读统计查询",
+    "message.list": "会话消息列表查询",
     "message.unread": "消息未读摘要查询",
     "file.list": "文件列表查询",
     "moment.list": "朋友圈列表查询",
@@ -547,6 +550,16 @@ class AtomicActionRegistry:
             input_model=EmptyReadInput,
             prompt_purpose="查看会话未读统计。",
             max_result_items=100,
+        )
+        self._register_server_read(
+            "message.list",
+            input_model=MessageListInput,
+            prompt_purpose="查看一个会话的最近消息列表。",
+            prompt_notes=(
+                "session_id 必须来自 session.list/session.get 的结果，或用户明确提供的稳定会话 ID。",
+                "limit 控制返回消息数量；before_seq 为空表示从最新消息向前读取。",
+            ),
+            max_result_items=200,
         )
         self._register_server_read(
             "message.unread",
@@ -1317,10 +1330,6 @@ def _format_server_read_prompt_contract(spec: AtomicActionSpec) -> str:
     input_fields = _model_prompt_fields(spec.input_model)
     if input_fields:
         parts.append(f"输入字段 {input_fields}")
-    if spec.default_result_limit:
-        parts.append(f"default_result_limit={spec.default_result_limit}")
-    if spec.max_result_items is not None:
-        parts.append(f"max_result_items={spec.max_result_items}")
     for note in spec.prompt_notes:
         normalized = " ".join(str(note or "").split())
         if not normalized or _is_common_server_read_note(normalized):

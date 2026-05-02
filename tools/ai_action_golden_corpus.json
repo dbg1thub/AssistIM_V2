@@ -98,6 +98,31 @@
       }
     },
     {
+      "name": "server_message_list",
+      "user_input": "查看 session-1 最近 20 条消息",
+      "tags": ["action", "server_read", "message"],
+      "router_expected_route": "action_candidate",
+      "expectation": {
+        "is_action": true,
+        "risk": "low",
+        "required_actions": ["message.list"],
+        "required_action_sequence": ["message.list"],
+        "requires_confirmation": false,
+        "required_step_args": [
+          {
+            "action": "message.list",
+            "path": "session_id",
+            "equals": "session-1"
+          },
+          {
+            "action": "message.list",
+            "path": "limit",
+            "equals": "20"
+          }
+        ]
+      }
+    },
+    {
       "name": "send_direct_message",
       "user_input": "帮我给张三发我晚点到",
       "tags": ["action", "send", "confirmation"],

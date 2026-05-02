@@ -52,6 +52,12 @@ class SessionGetInput(_StrictInputModel):
     session_id: str = Field(min_length=1)
 
 
+class MessageListInput(_StrictInputModel):
+    session_id: str = Field(min_length=1)
+    limit: int = Field(default=50, ge=1, le=200)
+    before_seq: int | None = Field(default=None, ge=1)
+
+
 class FileListInput(_StrictInputModel):
     limit: int = Field(default=50, ge=1, le=200)
 
