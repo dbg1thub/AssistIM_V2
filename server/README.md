@@ -132,6 +132,9 @@ The same admin role also unlocks backend-only user-management APIs:
 
 - `GET /api/v1/admin/audit-logs`: list audit logs with `actor_username`, `action`, `target_type`, `target_id`, `success`, `created_from`, `created_to`, `page`, and `size` filters.
 - `GET /api/v1/admin/audit-logs/{log_id}`: inspect one audit log.
+- `GET /api/v1/admin/logs/files`: list server log files under the configured log directory.
+- `GET /api/v1/admin/logs`: query sanitized server log entries with `file_name`, `level`, `keyword`, `created_from`, `created_to`, and `limit` filters.
+- `GET /api/v1/admin/logs/files/{file_name}/download`: download one sanitized server log file as a text attachment.
 - `GET /api/v1/admin/database/status`: inspect database connection status, dialect, Alembic revision state, runtime schema completeness, and required table presence.
 - `GET /api/v1/admin/database/tables`: inspect table row counts and required index presence.
 - `GET /api/v1/admin/database/health`: inspect read-only database health checks and schema issues.
@@ -154,19 +157,24 @@ responses redact sensitive detail keys such as passwords, tokens, credentials,
 authorization headers, and secrets. The API does not expose password hashes,
 tokens, private keys, or E2EE public key material in admin list/detail
 responses. Database inspection APIs are read-only and redact database URL
-passwords. Database backup files are written to a server-controlled local
-directory and are not exposed through public upload URLs. Backup downloads are
-admin-only, require a completed backup record, and verify the file remains
-inside the configured backup directory before streaming it. Backup verification
-is admin-only, checks the same directory boundary, validates recorded size and
-checksum, then runs SQLite `PRAGMA integrity_check` or PostgreSQL `pg_restore
---list` without restoring into the active database. Backup deletion is also
-admin-only, verifies the same backup-directory boundary, deletes only the
-server-local backup file, and keeps the database record with `status=deleted`
-for auditability. SQLite backups use the SQLite backup API; PostgreSQL backups
-require `pg_dump` on the server to create backups and `pg_restore` to verify
-custom dump backups; both fail explicitly when unavailable. Self-disable and
-self-demotion are blocked to avoid locking out the only active administrator.
+passwords. Server logs are written to `LOG_DIR` (`data/logs` by default) with a
+rotating `assistim.log` file. Admin log APIs read only that configured log
+directory, reject path traversal, and redact sensitive values such as tokens,
+passwords, secrets, credentials, and authorization headers before returning
+query or download content. Database backup files are written to a
+server-controlled local directory and are not exposed through public upload URLs.
+Backup downloads are admin-only, require a completed backup record, and verify
+the file remains inside the configured backup directory before streaming it.
+Backup verification is admin-only, checks the same directory boundary, validates
+recorded size and checksum, then runs SQLite `PRAGMA integrity_check` or
+PostgreSQL `pg_restore --list` without restoring into the active database.
+Backup deletion is also admin-only, verifies the same backup-directory boundary,
+deletes only the server-local backup file, and keeps the database record with
+`status=deleted` for auditability. SQLite backups use the SQLite backup API;
+PostgreSQL backups require `pg_dump` on the server to create backups and
+`pg_restore` to verify custom dump backups; both fail explicitly when
+unavailable. Self-disable and self-demotion are blocked to avoid locking out the
+only active administrator.
 
 Backup cleanup accepts a JSON body with `keep_last`, `older_than_days`,
 `include_failed`, `include_deleted`, and `dry_run`. At least one of `keep_last`

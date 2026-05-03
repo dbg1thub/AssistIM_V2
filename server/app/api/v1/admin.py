@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings
@@ -17,6 +17,7 @@ from app.services.admin_audit_service import AdminAuditService
 from app.services.admin_database_backup_service import AdminDatabaseBackupService
 from app.services.admin_database_service import AdminDatabaseService
 from app.services.admin_dashboard_service import AdminDashboardService
+from app.services.admin_log_service import AdminLogService
 from app.services.admin_user_service import AdminUserService
 from app.utils.response import success_response
 from app.websocket.manager import connection_manager
@@ -173,6 +174,75 @@ def get_admin_database_health(
     payload = AdminDatabaseService(db, settings).build_health()
     db.commit()
     return success_response(payload)
+
+
+@router.get("/logs/files")
+def list_admin_log_files(
+    request: Request,
+    current_user: User = Depends(get_current_admin_user),
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_request_settings),
+) -> dict:
+    """List server-controlled log files."""
+    payload = AdminLogService(db, settings).list_files(
+        actor=current_user,
+        request_path=str(request.url.path),
+        request_method=request.method,
+        client_ip=_client_ip(request),
+    )
+    return success_response(payload)
+
+
+@router.get("/logs")
+def query_admin_logs(
+    request: Request,
+    file_name: str = "",
+    level: str = "",
+    keyword: str = "",
+    created_from: str = "",
+    created_to: str = "",
+    limit: int = 100,
+    current_user: User = Depends(get_current_admin_user),
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_request_settings),
+) -> dict:
+    """Query server-controlled log files."""
+    payload = AdminLogService(db, settings).query_logs(
+        actor=current_user,
+        file_name=file_name,
+        level=level,
+        keyword=keyword,
+        created_from=created_from,
+        created_to=created_to,
+        limit=limit,
+        request_path=str(request.url.path),
+        request_method=request.method,
+        client_ip=_client_ip(request),
+    )
+    return success_response(payload)
+
+
+@router.get("/logs/files/{file_name}/download")
+def download_admin_log_file(
+    file_name: str,
+    request: Request,
+    current_user: User = Depends(get_current_admin_user),
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_request_settings),
+) -> Response:
+    """Download one sanitized server log file."""
+    payload = AdminLogService(db, settings).download_file(
+        file_name,
+        actor=current_user,
+        request_path=str(request.url.path),
+        request_method=request.method,
+        client_ip=_client_ip(request),
+    )
+    return Response(
+        content=payload["content"],
+        media_type="text/plain; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{payload["file_name"]}"'},
+    )
 
 
 @router.post("/database/backups")
