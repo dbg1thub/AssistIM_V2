@@ -308,6 +308,42 @@ function mockFetch() {
         ]
       });
     }
+    if (url.includes("/api/v1/admin/groups/group-1/members")) {
+      return jsonResponse({
+        total: 1,
+        page: 1,
+        size: 20,
+        group: { id: "group-1", name: "项目组", session_id: "session-group-1" },
+        items: [
+          {
+            group_id: "group-1",
+            user_id: "user-1",
+            user: userSummary("user-1", "test1", "测试一"),
+            role: "owner",
+            group_nickname: "群主",
+            note: "项目负责人",
+            joined_at: "2026-05-03T08:00:00+00:00",
+            session_member: {
+              exists: true,
+              last_read_seq: 8,
+              last_read_message_id: "group-message-8",
+              last_read_at: "2026-05-03T10:30:00+00:00"
+            }
+          }
+        ]
+      });
+    }
+    if (url.endsWith("/api/v1/admin/groups/group-1")) {
+      return jsonResponse(groupDetail());
+    }
+    if (url.includes("/api/v1/admin/groups?") || url.endsWith("/api/v1/admin/groups")) {
+      return jsonResponse({
+        total: 1,
+        page: 1,
+        size: 20,
+        items: [groupSummary()]
+      });
+    }
     if (url.endsWith("/api/v1/admin/chat/health")) {
       return jsonResponse({
         status: "warning",
@@ -472,6 +508,80 @@ function userSummary(id: string, username: string, nickname: string) {
     avatar: "",
     is_disabled: false,
     exists: true
+  };
+}
+
+function groupSummary() {
+  return {
+    id: "group-1",
+    name: "项目组",
+    owner_id: "user-1",
+    owner: userSummary("user-1", "test1", "测试一"),
+    session_id: "session-group-1",
+    session: {
+      id: "session-group-1",
+      exists: true,
+      type: "group",
+      name: "项目组",
+      is_ai_session: false,
+      encryption_mode: "none",
+      last_message_seq: 8,
+      last_event_seq: 2
+    },
+    announcement: "今天同步进度",
+    announcement_message_id: "group-message-7",
+    announcement_author_id: "user-1",
+    announcement_published_at: "2026-05-03T09:30:00+00:00",
+    avatar_kind: "generated",
+    avatar_file_id: "file-avatar-1",
+    avatar_file: {
+      id: "file-avatar-1",
+      exists: true,
+      storage_provider: "local",
+      storage_key: "avatars/group-1.png",
+      file_name: "group-1.png",
+      file_type: "image/png",
+      size_bytes: 1024
+    },
+    avatar_version: 2,
+    member_count: 2,
+    session_member_count: 2,
+    created_at: "2026-05-03T08:00:00+00:00",
+    updated_at: "2026-05-03T10:00:00+00:00"
+  };
+}
+
+function groupDetail() {
+  return {
+    ...groupSummary(),
+    announcement_message: {
+      id: "group-message-7",
+      session_id: "session-group-1",
+      sender_id: "user-1",
+      session_seq: 7,
+      type: "text",
+      content: "今天同步进度",
+      status: "sent",
+      created_at: "2026-05-03T09:30:00+00:00",
+      updated_at: "2026-05-03T09:30:00+00:00"
+    },
+    members: [
+      {
+        group_id: "group-1",
+        user_id: "user-1",
+        user: userSummary("user-1", "test1", "测试一"),
+        role: "owner",
+        group_nickname: "群主",
+        note: "项目负责人",
+        joined_at: "2026-05-03T08:00:00+00:00",
+        session_member: {
+          exists: true,
+          last_read_seq: 8,
+          last_read_message_id: "group-message-8",
+          last_read_at: "2026-05-03T10:30:00+00:00"
+        }
+      }
+    ]
   };
 }
 
@@ -853,6 +963,61 @@ describe("Admin web shell", () => {
       expect(requestedUrls.some((url) => url.includes("sender_id=user-1"))).toBe(true);
       expect(requestedUrls.some((url) => url.includes("receiver_id=user-3"))).toBe(true);
       expect(requestedUrls.some((url) => url.includes("friendships?user_id=user-1&friend_id=user-3"))).toBe(true);
+    });
+  });
+
+  it("loads groups, group detail, and filtered member rows", async () => {
+    const fetchMock = mockFetch();
+    render(<App fetcher={fetchMock} />);
+
+    fireEvent.change(screen.getByLabelText("服务端地址"), {
+      target: { value: "http://localhost:8000" }
+    });
+    fireEvent.change(screen.getByLabelText("访问令牌"), {
+      target: { value: "admin-token" }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "连接" }));
+    await screen.findByRole("heading", { name: "概览" });
+
+    fireEvent.click(screen.getByRole("button", { name: "群组" }));
+    expect(await screen.findByRole("heading", { name: "群组" })).toBeInTheDocument();
+    expect(screen.getByText("项目组")).toBeInTheDocument();
+    expect(screen.getByText("今天同步进度")).toBeInTheDocument();
+    expect(screen.getByText("generated")).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("群关键词"), {
+      target: { value: "team" }
+    });
+    fireEvent.change(screen.getByLabelText("群主 ID"), {
+      target: { value: "user-1" }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "筛选群组" }));
+
+    await waitFor(() => {
+      const requestedUrls = fetchMock.mock.calls.map(([input]) => String(input));
+      expect(requestedUrls.some((url) => url.includes("keyword=team"))).toBe(true);
+      expect(requestedUrls.some((url) => url.includes("owner_id=user-1"))).toBe(true);
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "查看群组详情" }));
+    expect(await screen.findByRole("heading", { name: "项目组" })).toBeInTheDocument();
+    expect(screen.getByText("group-1.png")).toBeInTheDocument();
+    expect(screen.getByText("group-message-7")).toBeInTheDocument();
+    expect(screen.getByText("项目负责人")).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("成员角色"), {
+      target: { value: "owner" }
+    });
+    fireEvent.change(screen.getByLabelText("成员用户 ID"), {
+      target: { value: "user-1" }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "查询成员" }));
+
+    await waitFor(() => {
+      const requestedUrls = fetchMock.mock.calls.map(([input]) => String(input));
+      expect(requestedUrls.some((url) => url.includes("/api/v1/admin/groups/group-1/members"))).toBe(true);
+      expect(requestedUrls.some((url) => url.includes("role=owner"))).toBe(true);
+      expect(requestedUrls.some((url) => url.includes("user_id=user-1"))).toBe(true);
     });
   });
 

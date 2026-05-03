@@ -55,6 +55,20 @@ export interface ListContactFriendshipsParams extends Record<string, unknown> {
   size?: number;
 }
 
+export interface ListGroupsParams extends Record<string, unknown> {
+  keyword?: string;
+  owner_id?: string;
+  page?: number;
+  size?: number;
+}
+
+export interface ListGroupMembersParams extends Record<string, unknown> {
+  role?: string;
+  user_id?: string;
+  page?: number;
+  size?: number;
+}
+
 export interface ListDatabaseBackupsParams extends Record<string, unknown> {
   page?: number;
   size?: number;
@@ -189,6 +203,18 @@ export class AdminApiClient {
 
   listContactFriendships<T = unknown>(params: ListContactFriendshipsParams = {}): Promise<T> {
     return this.get<T>("/api/v1/admin/contacts/friendships", params);
+  }
+
+  listGroups<T = unknown>(params: ListGroupsParams = {}): Promise<T> {
+    return this.get<T>("/api/v1/admin/groups", params);
+  }
+
+  getGroup<T = unknown>(groupId: string): Promise<T> {
+    return this.get<T>(`/api/v1/admin/groups/${encodeURIComponent(groupId)}`);
+  }
+
+  listGroupMembers<T = unknown>(groupId: string, params: ListGroupMembersParams = {}): Promise<T> {
+    return this.get<T>(`/api/v1/admin/groups/${encodeURIComponent(groupId)}/members`, params);
   }
 
   getDatabaseStatus<T = unknown>(): Promise<T> {

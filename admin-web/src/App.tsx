@@ -29,6 +29,8 @@ import {
   ListChatSessionsParams,
   ListContactFriendRequestsParams,
   ListContactFriendshipsParams,
+  ListGroupMembersParams,
+  ListGroupsParams,
   ListUsersParams,
   PruneDatabaseBackupsParams,
   QueryLogsParams
@@ -41,6 +43,7 @@ type PageKey =
   | "audit"
   | "chat"
   | "contacts"
+  | "groups"
   | "users"
   | "database"
   | "files"
@@ -356,6 +359,111 @@ interface ContactFriendshipFilters {
   friend_id: string;
 }
 
+interface GroupUserSummary extends Record<string, unknown> {
+  id?: string;
+  username?: string;
+  nickname?: string;
+  exists?: boolean;
+  is_disabled?: boolean;
+}
+
+interface GroupSessionSummary extends Record<string, unknown> {
+  id?: string;
+  exists?: boolean;
+  type?: string;
+  name?: string;
+  is_ai_session?: boolean;
+  encryption_mode?: string;
+  last_message_seq?: number;
+  last_event_seq?: number;
+}
+
+interface GroupFileSummary extends Record<string, unknown> {
+  id?: string;
+  exists?: boolean;
+  storage_provider?: string;
+  storage_key?: string;
+  file_name?: string;
+  file_type?: string;
+  size_bytes?: number;
+}
+
+interface GroupMessageSummary extends Record<string, unknown> {
+  id?: string;
+  session_id?: string;
+  sender_id?: string;
+  session_seq?: number;
+  type?: string;
+  content?: string;
+  status?: string;
+  created_at?: string;
+  updated_at?: string;
+}
+
+interface GroupItem extends Record<string, unknown> {
+  id: string;
+  name?: string;
+  owner_id?: string;
+  owner?: GroupUserSummary;
+  session_id?: string;
+  session?: GroupSessionSummary;
+  announcement?: string;
+  announcement_message_id?: string | null;
+  announcement_author_id?: string | null;
+  announcement_published_at?: string | null;
+  announcement_message?: GroupMessageSummary | null;
+  avatar_kind?: string;
+  avatar_file_id?: string | null;
+  avatar_file?: GroupFileSummary | null;
+  avatar_version?: number;
+  member_count?: number;
+  session_member_count?: number;
+  created_at?: string;
+  updated_at?: string;
+  members?: GroupMemberItem[];
+}
+
+interface GroupMemberItem extends Record<string, unknown> {
+  group_id?: string;
+  user_id?: string;
+  user?: GroupUserSummary;
+  role?: string;
+  group_nickname?: string;
+  note?: string;
+  joined_at?: string;
+  session_member?: {
+    exists?: boolean;
+    last_read_seq?: number;
+    last_read_message_id?: string;
+    last_read_at?: string | null;
+  };
+}
+
+interface GroupListPayload {
+  total: number;
+  page: number;
+  size: number;
+  items: GroupItem[];
+}
+
+interface GroupMemberListPayload {
+  total: number;
+  page: number;
+  size: number;
+  group?: Record<string, unknown>;
+  items: GroupMemberItem[];
+}
+
+interface GroupFilters {
+  keyword: string;
+  owner_id: string;
+}
+
+interface GroupMemberFilters {
+  role: string;
+  user_id: string;
+}
+
 interface SessionState {
   baseUrl: string;
   token: string;
@@ -367,6 +475,7 @@ const navItems: Array<{ key: PageKey; label: string; icon: ReactNode }> = [
   { key: "audit", label: "审计", icon: <ClipboardList size={18} /> },
   { key: "chat", label: "聊天", icon: <MessageSquare size={18} /> },
   { key: "contacts", label: "联系人", icon: <Users size={18} /> },
+  { key: "groups", label: "群组", icon: <Users size={18} /> },
   { key: "users", label: "用户", icon: <Users size={18} /> },
   { key: "database", label: "数据库", icon: <Database size={18} /> },
   { key: "files", label: "文件", icon: <HardDrive size={18} /> },
@@ -419,6 +528,16 @@ const defaultContactRequestFilters: ContactRequestFilters = {
 const defaultContactFriendshipFilters: ContactFriendshipFilters = {
   user_id: "",
   friend_id: ""
+};
+
+const defaultGroupFilters: GroupFilters = {
+  keyword: "",
+  owner_id: ""
+};
+
+const defaultGroupMemberFilters: GroupMemberFilters = {
+  role: "",
+  user_id: ""
 };
 
 const healthModuleDefinitions: Array<{
@@ -476,6 +595,12 @@ export default function App({ fetcher }: AppProps) {
     useState<ContactRequestFilters>(defaultContactRequestFilters);
   const [contactFriendshipFilters, setContactFriendshipFilters] =
     useState<ContactFriendshipFilters>(defaultContactFriendshipFilters);
+  const [groups, setGroups] = useState<GroupListPayload | null>(null);
+  const [groupFilters, setGroupFilters] = useState<GroupFilters>(defaultGroupFilters);
+  const [selectedGroup, setSelectedGroup] = useState<GroupItem | null>(null);
+  const [groupMembers, setGroupMembers] = useState<GroupMemberListPayload | null>(null);
+  const [groupMemberFilters, setGroupMemberFilters] = useState<GroupMemberFilters>(defaultGroupMemberFilters);
+  const [groupDetailLoading, setGroupDetailLoading] = useState(false);
   const [selectedUser, setSelectedUser] = useState<UserDetailPayload | null>(null);
   const [disableReason, setDisableReason] = useState("");
   const [userOperationLoading, setUserOperationLoading] = useState(false);
@@ -527,6 +652,7 @@ export default function App({ fetcher }: AppProps) {
       (page === "audit" && !auditLogs) ||
       (page === "chat" && !chatSessions) ||
       (page === "contacts" && (!contactFriendRequests || !contactFriendships)) ||
+      (page === "groups" && !groups) ||
       (page === "users" && !users) ||
       (page === "database" && !databaseStatus) ||
       (page === "files" && (!fileStorageStatus || !fileStorageIssues)) ||
@@ -554,6 +680,9 @@ export default function App({ fetcher }: AppProps) {
         const payload = await loadContactData(client, contactRequestFilters, contactFriendshipFilters);
         setContactFriendRequests(payload.requests);
         setContactFriendships(payload.friendships);
+      }
+      if (page === "groups" && !groups) {
+        setGroups(await loadGroups(client, groupFilters));
       }
       if (page === "users" && !users) {
         setUsers(await loadUsers(client, keyword));
@@ -606,6 +735,11 @@ export default function App({ fetcher }: AppProps) {
         const payload = await loadContactData(client, contactRequestFilters, contactFriendshipFilters);
         setContactFriendRequests(payload.requests);
         setContactFriendships(payload.friendships);
+      }
+      if (activePage === "groups") {
+        setGroups(await loadGroups(client, groupFilters));
+        setSelectedGroup(null);
+        setGroupMembers(null);
       }
       if (activePage === "users") {
         setUsers(await loadUsers(client, keyword));
@@ -748,6 +882,58 @@ export default function App({ fetcher }: AppProps) {
       setError(readableError(currentError));
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function searchGroups() {
+    if (!client) {
+      return;
+    }
+    setLoading(true);
+    setError("");
+    try {
+      setGroups(await loadGroups(client, groupFilters));
+      setSelectedGroup(null);
+      setGroupMembers(null);
+    } catch (currentError) {
+      setError(readableError(currentError));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function openGroupDetail(groupId: string) {
+    if (!client) {
+      return;
+    }
+    setGroupDetailLoading(true);
+    setError("");
+    try {
+      const [detail, members] = await Promise.all([
+        client.getGroup<GroupItem>(groupId),
+        loadGroupMembers(client, groupId, groupMemberFilters)
+      ]);
+      setSelectedGroup(detail);
+      setGroupMembers(members);
+    } catch (currentError) {
+      setError(readableError(currentError));
+    } finally {
+      setGroupDetailLoading(false);
+    }
+  }
+
+  async function searchGroupMembers() {
+    if (!client || !selectedGroup) {
+      return;
+    }
+    setGroupDetailLoading(true);
+    setError("");
+    try {
+      setGroupMembers(await loadGroupMembers(client, selectedGroup.id, groupMemberFilters));
+    } catch (currentError) {
+      setError(readableError(currentError));
+    } finally {
+      setGroupDetailLoading(false);
     }
   }
 
@@ -1067,6 +1253,21 @@ export default function App({ fetcher }: AppProps) {
             }
             searchRequests={() => void searchContactFriendRequests()}
             searchFriendships={() => void searchContactFriendships()}
+          />
+        ) : null}
+        {activePage === "groups" ? (
+          <GroupsPage
+            payload={groups}
+            filters={groupFilters}
+            setFilter={(key, value) => setGroupFilters((current) => ({ ...current, [key]: value }))}
+            search={() => void searchGroups()}
+            selectedGroup={selectedGroup}
+            members={groupMembers}
+            memberFilters={groupMemberFilters}
+            setMemberFilter={(key, value) => setGroupMemberFilters((current) => ({ ...current, [key]: value }))}
+            detailLoading={groupDetailLoading}
+            openGroup={(groupId) => void openGroupDetail(groupId)}
+            searchMembers={() => void searchGroupMembers()}
           />
         ) : null}
         {activePage === "users" ? (
@@ -1819,6 +2020,245 @@ function ContactsPage({
         {!friendshipItems.length ? <p className="empty-text">暂无好友关系</p> : null}
       </article>
     </section>
+  );
+}
+
+function GroupsPage({
+  payload,
+  filters,
+  setFilter,
+  search,
+  selectedGroup,
+  members,
+  memberFilters,
+  setMemberFilter,
+  detailLoading,
+  openGroup,
+  searchMembers
+}: {
+  payload: GroupListPayload | null;
+  filters: GroupFilters;
+  setFilter: (key: keyof GroupFilters, value: string) => void;
+  search: () => void;
+  selectedGroup: GroupItem | null;
+  members: GroupMemberListPayload | null;
+  memberFilters: GroupMemberFilters;
+  setMemberFilter: (key: keyof GroupMemberFilters, value: string) => void;
+  detailLoading: boolean;
+  openGroup: (groupId: string) => void;
+  searchMembers: () => void;
+}) {
+  const items = payload?.items ?? [];
+
+  function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    search();
+  }
+
+  return (
+    <section className="page-section">
+      <PageTitle title="群组" subtitle={`共 ${payload?.total ?? 0} 个群组`} />
+      <form className="filter-panel" onSubmit={submit}>
+        <label>
+          <span>群关键词</span>
+          <input
+            value={filters.keyword}
+            onChange={(event) => setFilter("keyword", event.target.value)}
+            placeholder="群名、群 ID 或会话 ID"
+          />
+        </label>
+        <label>
+          <span>群主 ID</span>
+          <input
+            value={filters.owner_id}
+            onChange={(event) => setFilter("owner_id", event.target.value)}
+            placeholder="owner user id"
+          />
+        </label>
+        <button className="secondary-button" type="submit">
+          <Search size={17} />
+          筛选群组
+        </button>
+      </form>
+      <div className="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>群名</th>
+              <th>群主</th>
+              <th>群主 ID</th>
+              <th>会话 ID</th>
+              <th>成员</th>
+              <th>会话成员</th>
+              <th>头像类型</th>
+              <th>公告</th>
+              <th>更新时间</th>
+              <th>详情</th>
+            </tr>
+          </thead>
+          <tbody>
+            {items.map((group) => (
+              <tr key={group.id}>
+                <td>{String(group.name ?? "")}</td>
+                <td>{groupUserName(group.owner, group.owner_id)}</td>
+                <td>{String(group.owner_id ?? group.owner?.id ?? "")}</td>
+                <td>{String(group.session_id ?? "")}</td>
+                <td>{displayValue(group.member_count)}</td>
+                <td>{displayValue(group.session_member_count)}</td>
+                <td>{String(group.avatar_kind ?? "")}</td>
+                <td className="message-cell">{String(group.announcement ?? "")}</td>
+                <td>{String(group.updated_at ?? "")}</td>
+                <td>
+                  <button
+                    className="table-action-button"
+                    type="button"
+                    onClick={() => openGroup(group.id)}
+                    aria-label="查看群组详情"
+                  >
+                    查看
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {detailLoading ? <p className="empty-text">正在读取群组详情...</p> : null}
+      {selectedGroup ? (
+        <GroupDetailPanel
+          group={selectedGroup}
+          members={members}
+          memberFilters={memberFilters}
+          setMemberFilter={setMemberFilter}
+          searchMembers={searchMembers}
+        />
+      ) : null}
+    </section>
+  );
+}
+
+function GroupDetailPanel({
+  group,
+  members,
+  memberFilters,
+  setMemberFilter,
+  searchMembers
+}: {
+  group: GroupItem;
+  members: GroupMemberListPayload | null;
+  memberFilters: GroupMemberFilters;
+  setMemberFilter: (key: keyof GroupMemberFilters, value: string) => void;
+  searchMembers: () => void;
+}) {
+  const memberItems = members?.items ?? group.members ?? [];
+
+  function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    searchMembers();
+  }
+
+  return (
+    <article className="detail-panel">
+      <div className="detail-header">
+        <div>
+          <h2>{String(group.name || group.id)}</h2>
+          <p>{group.id}</p>
+        </div>
+        <span className="status-badge ok">{String(group.session?.type ?? "group")}</span>
+      </div>
+      <div className="info-grid">
+        <InfoBlock title="群组" rows={[
+          ["群 ID", group.id],
+          ["群主", groupUserName(group.owner, group.owner_id)],
+          ["群主 ID", group.owner_id],
+          ["会话 ID", group.session_id],
+          ["成员数", group.member_count],
+          ["会话成员数", group.session_member_count],
+          ["创建时间", group.created_at],
+          ["更新时间", group.updated_at]
+        ]} />
+        <InfoBlock title="会话" rows={[
+          ["会话名称", group.session?.name],
+          ["会话存在", boolLabel(group.session?.exists)],
+          ["加密模式", group.session?.encryption_mode],
+          ["最后消息序号", group.session?.last_message_seq],
+          ["最后事件序号", group.session?.last_event_seq],
+          ["AI 会话", boolLabel(group.session?.is_ai_session)]
+        ]} />
+        <InfoBlock title="头像" rows={[
+          ["头像类型", group.avatar_kind],
+          ["头像版本", group.avatar_version],
+          ["文件 ID", group.avatar_file_id],
+          ["文件名", group.avatar_file?.file_name],
+          ["存储键", group.avatar_file?.storage_key],
+          ["大小", formatBytes(group.avatar_file?.size_bytes)]
+        ]} />
+        <InfoBlock title="公告" rows={[
+          ["公告", group.announcement],
+          ["公告消息 ID", group.announcement_message_id],
+          ["发布人 ID", group.announcement_author_id],
+          ["发布时间", group.announcement_published_at],
+          ["消息内容", group.announcement_message?.content],
+          ["消息状态", group.announcement_message?.status]
+        ]} />
+      </div>
+      <form className="filter-panel" onSubmit={submit}>
+        <label>
+          <span>成员角色</span>
+          <select value={memberFilters.role} onChange={(event) => setMemberFilter("role", event.target.value)}>
+            <option value="">全部</option>
+            <option value="owner">owner</option>
+            <option value="admin">admin</option>
+            <option value="member">member</option>
+          </select>
+        </label>
+        <label>
+          <span>成员用户 ID</span>
+          <input
+            value={memberFilters.user_id}
+            onChange={(event) => setMemberFilter("user_id", event.target.value)}
+            placeholder="user id"
+          />
+        </label>
+        <button className="secondary-button" type="submit">
+          <Search size={17} />
+          查询成员
+        </button>
+      </form>
+      <div className="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>用户</th>
+              <th>用户 ID</th>
+              <th>角色</th>
+              <th>群昵称</th>
+              <th>备注</th>
+              <th>入群时间</th>
+              <th>会话成员</th>
+              <th>已读序号</th>
+              <th>最后已读消息</th>
+            </tr>
+          </thead>
+          <tbody>
+            {memberItems.map((member) => (
+              <tr key={`${String(member.group_id ?? group.id)}-${String(member.user_id ?? "")}`}>
+                <td>{groupUserName(member.user, member.user_id)}</td>
+                <td>{String(member.user_id ?? member.user?.id ?? "")}</td>
+                <td>{String(member.role ?? "")}</td>
+                <td>{String(member.group_nickname ?? "")}</td>
+                <td>{String(member.note ?? "")}</td>
+                <td>{String(member.joined_at ?? "")}</td>
+                <td>{boolLabel(member.session_member?.exists)}</td>
+                <td>{displayValue(member.session_member?.last_read_seq)}</td>
+                <td>{String(member.session_member?.last_read_message_id ?? "")}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {members ? <p className="empty-text">{`匹配 ${members.total ?? memberItems.length} 个成员`}</p> : null}
+    </article>
   );
 }
 
@@ -2683,6 +3123,30 @@ function loadContactFriendships(
   return client.listContactFriendships<ContactFriendshipListPayload>(params);
 }
 
+function loadGroups(client: AdminApiClient, filters: GroupFilters): Promise<GroupListPayload> {
+  const params: ListGroupsParams = { page: 1, size: 20 };
+  for (const key of ["keyword", "owner_id"] as const) {
+    if (filters[key].trim()) {
+      params[key] = filters[key].trim();
+    }
+  }
+  return client.listGroups<GroupListPayload>(params);
+}
+
+function loadGroupMembers(
+  client: AdminApiClient,
+  groupId: string,
+  filters: GroupMemberFilters
+): Promise<GroupMemberListPayload> {
+  const params: ListGroupMembersParams = { page: 1, size: 20 };
+  for (const key of ["role", "user_id"] as const) {
+    if (filters[key].trim()) {
+      params[key] = filters[key].trim();
+    }
+  }
+  return client.listGroupMembers<GroupMemberListPayload>(groupId, params);
+}
+
 async function loadFileStorageInspection(client: AdminApiClient): Promise<{
   status: FileStorageStatusPayload;
   issues: FileStorageIssuesPayload;
@@ -2909,6 +3373,10 @@ function displayValue(value: unknown): string {
 }
 
 function contactUserName(user?: ContactUserSummary, fallbackId?: string): string {
+  return String(user?.username || user?.nickname || user?.id || fallbackId || "");
+}
+
+function groupUserName(user?: GroupUserSummary, fallbackId?: string): string {
   return String(user?.username || user?.nickname || user?.id || fallbackId || "");
 }
 
