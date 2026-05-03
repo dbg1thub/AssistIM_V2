@@ -20,6 +20,7 @@ from app.services.admin_database_backup_service import AdminDatabaseBackupServic
 from app.services.admin_database_service import AdminDatabaseService
 from app.services.admin_dashboard_service import AdminDashboardService
 from app.services.admin_file_storage_service import AdminFileStorageService
+from app.services.admin_groups_inspection_service import AdminGroupsInspectionService
 from app.services.admin_log_service import AdminLogService
 from app.services.admin_user_service import AdminUserService
 from app.utils.response import success_response
@@ -372,6 +373,90 @@ def get_admin_contacts_health(
 ) -> dict:
     """Return read-only contacts data consistency checks."""
     payload = AdminContactsInspectionService(db).build_health(
+        actor=current_user,
+        request_path=str(request.url.path),
+        request_method=request.method,
+        client_ip=_client_ip(request),
+    )
+    return success_response(payload)
+
+
+@router.get("/groups")
+def list_admin_groups(
+    request: Request,
+    keyword: str = "",
+    owner_id: str = "",
+    page: int = 1,
+    size: int = 20,
+    current_user: User = Depends(get_current_admin_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    """List groups for backend admin tooling."""
+    payload = AdminGroupsInspectionService(db).list_groups(
+        actor=current_user,
+        keyword=keyword,
+        owner_id=owner_id,
+        page=page,
+        size=size,
+        request_path=str(request.url.path),
+        request_method=request.method,
+        client_ip=_client_ip(request),
+    )
+    return success_response(payload)
+
+
+@router.get("/groups/health")
+def get_admin_groups_health(
+    request: Request,
+    current_user: User = Depends(get_current_admin_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Return read-only group data consistency checks."""
+    payload = AdminGroupsInspectionService(db).build_health(
+        actor=current_user,
+        request_path=str(request.url.path),
+        request_method=request.method,
+        client_ip=_client_ip(request),
+    )
+    return success_response(payload)
+
+
+@router.get("/groups/{group_id}/members")
+def list_admin_group_members(
+    group_id: str,
+    request: Request,
+    role: str = "",
+    user_id: str = "",
+    page: int = 1,
+    size: int = 20,
+    current_user: User = Depends(get_current_admin_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    """List group members for backend admin tooling."""
+    payload = AdminGroupsInspectionService(db).list_members(
+        group_id,
+        actor=current_user,
+        role=role,
+        user_id=user_id,
+        page=page,
+        size=size,
+        request_path=str(request.url.path),
+        request_method=request.method,
+        client_ip=_client_ip(request),
+    )
+    return success_response(payload)
+
+
+@router.get("/groups/{group_id}")
+def get_admin_group(
+    group_id: str,
+    request: Request,
+    current_user: User = Depends(get_current_admin_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Return one group detail for backend admin tooling."""
+    payload = AdminGroupsInspectionService(db).get_group(
+        group_id,
         actor=current_user,
         request_path=str(request.url.path),
         request_method=request.method,

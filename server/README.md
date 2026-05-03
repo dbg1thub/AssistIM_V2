@@ -144,6 +144,10 @@ The same admin role also unlocks backend-only user-management APIs:
 - `GET /api/v1/admin/contacts/friend-requests`: list friend requests with `status`, `sender_id`, `receiver_id`, `page`, and `size` filters.
 - `GET /api/v1/admin/contacts/friendships`: list friendship rows with `user_id`, `friend_id`, `page`, and `size` filters.
 - `GET /api/v1/admin/contacts/health`: inspect contact data consistency issues such as one-way friendships, self-friend rows, missing users, duplicate requests, and invalid request statuses.
+- `GET /api/v1/admin/groups`: list groups with `keyword`, `owner_id`, `page`, and `size` filters.
+- `GET /api/v1/admin/groups/{group_id}`: inspect one group, including owner, session, members, announcement, and avatar metadata.
+- `GET /api/v1/admin/groups/{group_id}/members`: inspect group members with `role`, `user_id`, `page`, and `size` filters.
+- `GET /api/v1/admin/groups/health`: inspect group data consistency issues such as missing sessions, invalid session type, missing owners, owner/member drift, group/session member drift, invalid announcement messages, and missing avatar file records.
 - `GET /api/v1/admin/database/status`: inspect database connection status, dialect, Alembic revision state, runtime schema completeness, and required table presence.
 - `GET /api/v1/admin/database/tables`: inspect table row counts and required index presence.
 - `GET /api/v1/admin/database/health`: inspect read-only database health checks and schema issues.
@@ -177,7 +181,9 @@ server-visible chat metadata and message content for administrator diagnostics;
 they do not expose passwords, tokens, private keys, device keys, or E2EE key
 material. Contact inspection APIs are read-only and expose friend-request and
 friendship metadata needed to diagnose contact-list and private-chat visibility
-issues. Database backup files are written to a
+issues. Group inspection APIs are read-only and expose group/session/member,
+announcement, and avatar metadata needed to diagnose group-chat visibility and
+profile drift. Database backup files are written to a
 server-controlled local directory and are not exposed through public upload URLs.
 Backup downloads are admin-only, require a completed backup record, and verify
 the file remains inside the configured backup directory before streaming it.
