@@ -15,6 +15,7 @@ from app.models.user import User
 from app.schemas.admin import AdminDatabaseBackupPruneRequest, AdminDisableUserRequest, AdminSetUserRoleRequest
 from app.services.admin_audit_service import AdminAuditService
 from app.services.admin_chat_inspection_service import AdminChatInspectionService
+from app.services.admin_contacts_inspection_service import AdminContactsInspectionService
 from app.services.admin_database_backup_service import AdminDatabaseBackupService
 from app.services.admin_database_service import AdminDatabaseService
 from app.services.admin_dashboard_service import AdminDashboardService
@@ -305,6 +306,72 @@ def get_admin_chat_session(
     """Return one chat session detail for backend admin tooling."""
     payload = AdminChatInspectionService(db).get_session(
         session_id,
+        actor=current_user,
+        request_path=str(request.url.path),
+        request_method=request.method,
+        client_ip=_client_ip(request),
+    )
+    return success_response(payload)
+
+
+@router.get("/contacts/friend-requests")
+def list_admin_contact_friend_requests(
+    request: Request,
+    status: str = "",
+    sender_id: str = "",
+    receiver_id: str = "",
+    page: int = 1,
+    size: int = 20,
+    current_user: User = Depends(get_current_admin_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    """List friend requests for backend admin tooling."""
+    payload = AdminContactsInspectionService(db).list_friend_requests(
+        actor=current_user,
+        status=status,
+        sender_id=sender_id,
+        receiver_id=receiver_id,
+        page=page,
+        size=size,
+        request_path=str(request.url.path),
+        request_method=request.method,
+        client_ip=_client_ip(request),
+    )
+    return success_response(payload)
+
+
+@router.get("/contacts/friendships")
+def list_admin_contact_friendships(
+    request: Request,
+    user_id: str = "",
+    friend_id: str = "",
+    page: int = 1,
+    size: int = 20,
+    current_user: User = Depends(get_current_admin_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    """List friendship rows for backend admin tooling."""
+    payload = AdminContactsInspectionService(db).list_friendships(
+        actor=current_user,
+        user_id=user_id,
+        friend_id=friend_id,
+        page=page,
+        size=size,
+        request_path=str(request.url.path),
+        request_method=request.method,
+        client_ip=_client_ip(request),
+    )
+    return success_response(payload)
+
+
+@router.get("/contacts/health")
+def get_admin_contacts_health(
+    request: Request,
+    current_user: User = Depends(get_current_admin_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Return read-only contacts data consistency checks."""
+    payload = AdminContactsInspectionService(db).build_health(
         actor=current_user,
         request_path=str(request.url.path),
         request_method=request.method,
