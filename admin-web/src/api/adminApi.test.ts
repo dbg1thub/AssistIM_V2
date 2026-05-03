@@ -151,6 +151,32 @@ describe("AdminApiClient", () => {
     );
   });
 
+  it("loads file storage inspection endpoints", async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(JSON.stringify({ code: 0, message: "success", data: { ok: true } }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" }
+      })
+    );
+    const client = new AdminApiClient({
+      baseUrl: "http://localhost:8000",
+      token: "token-value",
+      fetcher: fetchMock
+    });
+
+    await client.getFileStorageStatus();
+    await client.listFileStorageIssues();
+
+    expect(fetchMock).toHaveBeenCalledWith("http://localhost:8000/api/v1/admin/files/storage/status", {
+      headers: { Authorization: "Bearer token-value" },
+      method: "GET"
+    });
+    expect(fetchMock).toHaveBeenCalledWith("http://localhost:8000/api/v1/admin/files/storage/issues", {
+      headers: { Authorization: "Bearer token-value" },
+      method: "GET"
+    });
+  });
+
   it("builds query strings for audit log filters and loads detail", async () => {
     const fetchMock = vi.fn(async () =>
       new Response(JSON.stringify({ code: 0, message: "success", data: { items: [] } }), {

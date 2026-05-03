@@ -6,6 +6,7 @@ import {
   ClipboardList,
   Database,
   FileText,
+  HardDrive,
   LayoutDashboard,
   Loader2,
   LogOut,
@@ -28,7 +29,7 @@ import {
 } from "./api/adminApi";
 import "./styles.css";
 
-type PageKey = "overview" | "health" | "audit" | "users" | "database" | "backups" | "logs";
+type PageKey = "overview" | "health" | "audit" | "users" | "database" | "files" | "backups" | "logs";
 type HealthStatus = "ok" | "warning" | "error" | "unknown";
 
 interface AppProps {
@@ -78,6 +79,31 @@ interface DatabaseStatusPayload {
   runtime_schema_complete?: boolean;
   runtime_schema_revision?: string;
   required_tables?: Record<string, boolean>;
+}
+
+interface FileStorageStatusPayload {
+  status?: string;
+  storage_provider?: string;
+  upload_dir?: Record<string, unknown>;
+  database?: Record<string, unknown>;
+  disk?: Record<string, unknown>;
+  issues?: Record<string, unknown>;
+}
+
+interface FileStorageIssueItem extends Record<string, unknown> {
+  issue_type?: string;
+  severity?: string;
+  file_id?: string;
+  file_name?: string;
+  storage_provider?: string;
+  storage_key?: string;
+  expected_size_bytes?: number;
+  actual_size_bytes?: number | null;
+}
+
+interface FileStorageIssuesPayload {
+  total: number;
+  items: FileStorageIssueItem[];
 }
 
 interface DatabaseBackupItem extends Record<string, unknown> {
@@ -190,6 +216,7 @@ const navItems: Array<{ key: PageKey; label: string; icon: ReactNode }> = [
   { key: "audit", label: "审计", icon: <ClipboardList size={18} /> },
   { key: "users", label: "用户", icon: <Users size={18} /> },
   { key: "database", label: "数据库", icon: <Database size={18} /> },
+  { key: "files", label: "文件", icon: <HardDrive size={18} /> },
   { key: "backups", label: "备份", icon: <Archive size={18} /> },
   { key: "logs", label: "日志", icon: <FileText size={18} /> }
 ];
@@ -240,6 +267,9 @@ export default function App({ fetcher }: AppProps) {
   const [dashboard, setDashboard] = useState<DashboardPayload | null>(null);
   const [users, setUsers] = useState<UserListPayload | null>(null);
   const [databaseStatus, setDatabaseStatus] = useState<DatabaseStatusPayload | null>(null);
+  const [fileStorageStatus, setFileStorageStatus] = useState<FileStorageStatusPayload | null>(null);
+  const [fileStorageIssues, setFileStorageIssues] = useState<FileStorageIssuesPayload | null>(null);
+  const [fileStorageIssueType, setFileStorageIssueType] = useState("");
   const [logFiles, setLogFiles] = useState<LogFilesPayload | null>(null);
   const [healthReports, setHealthReports] = useState<HealthModuleReport[] | null>(null);
   const [healthRefreshedAt, setHealthRefreshedAt] = useState("");
@@ -299,6 +329,7 @@ export default function App({ fetcher }: AppProps) {
       (page === "audit" && !auditLogs) ||
       (page === "users" && !users) ||
       (page === "database" && !databaseStatus) ||
+      (page === "files" && (!fileStorageStatus || !fileStorageIssues)) ||
       (page === "backups" && !databaseBackups) ||
       (page === "logs" && !logFiles);
     if (!shouldLoad) {
@@ -321,6 +352,11 @@ export default function App({ fetcher }: AppProps) {
       }
       if (page === "database" && !databaseStatus) {
         setDatabaseStatus(await client.getDatabaseStatus<DatabaseStatusPayload>());
+      }
+      if (page === "files" && (!fileStorageStatus || !fileStorageIssues)) {
+        const payload = await loadFileStorageInspection(client);
+        setFileStorageStatus(payload.status);
+        setFileStorageIssues(payload.issues);
       }
       if (page === "backups" && !databaseBackups) {
         setDatabaseBackups(await loadDatabaseBackups(client));
@@ -358,6 +394,11 @@ export default function App({ fetcher }: AppProps) {
       }
       if (activePage === "database") {
         setDatabaseStatus(await client.getDatabaseStatus<DatabaseStatusPayload>());
+      }
+      if (activePage === "files") {
+        const payload = await loadFileStorageInspection(client);
+        setFileStorageStatus(payload.status);
+        setFileStorageIssues(payload.issues);
       }
       if (activePage === "backups") {
         setDatabaseBackups(await loadDatabaseBackups(client));
@@ -676,6 +717,14 @@ export default function App({ fetcher }: AppProps) {
           />
         ) : null}
         {activePage === "database" ? <DatabasePage payload={databaseStatus} /> : null}
+        {activePage === "files" ? (
+          <FilesPage
+            status={fileStorageStatus}
+            issues={fileStorageIssues}
+            issueType={fileStorageIssueType}
+            setIssueType={setFileStorageIssueType}
+          />
+        ) : null}
         {activePage === "backups" ? (
           <BackupsPage
             payload={databaseBackups}
@@ -1201,6 +1250,128 @@ function DatabasePage({ payload }: { payload: DatabaseStatusPayload | null }) {
   );
 }
 
+function FilesPage({
+  status,
+  issues,
+  issueType,
+  setIssueType
+}: {
+  status: FileStorageStatusPayload | null;
+  issues: FileStorageIssuesPayload | null;
+  issueType: string;
+  setIssueType: (value: string) => void;
+}) {
+  const [page, setPage] = useState(1);
+  const items = issues?.items ?? [];
+  const issueTypes = Array.from(new Set(items.map((item) => String(item.issue_type ?? "")).filter(Boolean))).sort();
+  const filteredItems = issueType ? items.filter((item) => String(item.issue_type ?? "") === issueType) : items;
+  const pageSize = 20;
+  const totalPages = Math.max(1, Math.ceil(filteredItems.length / pageSize));
+  const safePage = Math.min(page, totalPages);
+  const pageItems = filteredItems.slice((safePage - 1) * pageSize, safePage * pageSize);
+  const issueCount = numberValue(status?.issues?.total ?? issues?.total);
+  const errorCount = numberValue(status?.issues?.errors);
+  const warningCount = numberValue(status?.issues?.warnings);
+
+  function updateIssueType(value: string) {
+    setIssueType(value);
+    setPage(1);
+  }
+
+  return (
+    <section className="page-section">
+      <PageTitle title="文件" subtitle="本地上传文件记录与磁盘一致性巡检" />
+      <div className="metric-grid compact-grid">
+        <MetricCard label="状态" value={status?.status} tone={status?.status === "ok" ? "ok" : "warn"} />
+        <MetricCard label="本地记录" value={status?.database?.local_records} />
+        <MetricCard label="磁盘托管文件" value={status?.disk?.managed_files} />
+        <MetricCard label="问题总数" value={issueCount} tone={issueCount > 0 ? "warn" : "ok"} />
+        <MetricCard label="错误" value={errorCount} tone={errorCount > 0 ? "warn" : "ok"} />
+        <MetricCard label="警告" value={warningCount} tone={warningCount > 0 ? "warn" : "ok"} />
+      </div>
+      <div className="info-grid">
+        <InfoBlock title="上传目录" rows={[
+          ["存储后端", status?.storage_provider],
+          ["目录存在", boolLabel(status?.upload_dir?.exists)],
+          ["是目录", boolLabel(status?.upload_dir?.is_dir)],
+          ["可读", boolLabel(status?.upload_dir?.readable)],
+          ["可写", boolLabel(status?.upload_dir?.writable)]
+        ]} />
+        <InfoBlock title="容量与记录" rows={[
+          ["全部记录", status?.database?.total_records],
+          ["非本地记录", status?.database?.non_local_records],
+          ["本地记录大小", formatBytes(status?.database?.local_size_bytes)],
+          ["磁盘文件数", status?.disk?.total_files],
+          ["磁盘总大小", formatBytes(status?.disk?.total_size_bytes)],
+          ["忽略系统生成文件", status?.disk?.ignored_server_generated_files]
+        ]} />
+      </div>
+      <form className="filter-panel" onSubmit={(event) => event.preventDefault()}>
+        <label>
+          <span>问题类型</span>
+          <select value={issueType} onChange={(event) => updateIssueType(event.target.value)}>
+            <option value="">全部</option>
+            {issueTypes.map((type) => (
+              <option value={type} key={type}>
+                {type}
+              </option>
+            ))}
+          </select>
+        </label>
+      </form>
+      <div className="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>类型</th>
+              <th>级别</th>
+              <th>文件</th>
+              <th>Storage Key</th>
+              <th>预期大小</th>
+              <th>实际大小</th>
+              <th>详情</th>
+            </tr>
+          </thead>
+          <tbody>
+            {pageItems.map((issue, index) => (
+              <tr key={`${String(issue.issue_type ?? "issue")}-${String(issue.storage_key ?? issue.file_id ?? index)}`}>
+                <td>{String(issue.issue_type ?? "")}</td>
+                <td>{String(issue.severity ?? "")}</td>
+                <td>{String(issue.file_name ?? issue.file_id ?? "")}</td>
+                <td>{String(issue.storage_key ?? "")}</td>
+                <td>{formatBytes(issue.expected_size_bytes)}</td>
+                <td>{formatBytes(issue.actual_size_bytes)}</td>
+                <td>{issueSummary(issue)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <div className="pager-row">
+        <span>{`显示 ${pageItems.length} / ${filteredItems.length} 个问题，第 ${safePage} / ${totalPages} 页`}</span>
+        <div className="table-actions">
+          <button
+            className="table-action-button"
+            type="button"
+            disabled={safePage <= 1}
+            onClick={() => setPage((current) => Math.max(1, current - 1))}
+          >
+            上一页
+          </button>
+          <button
+            className="table-action-button"
+            type="button"
+            disabled={safePage >= totalPages}
+            onClick={() => setPage((current) => Math.min(totalPages, current + 1))}
+          >
+            下一页
+          </button>
+        </div>
+      </div>
+    </section>
+  );
+}
+
 function BackupsPage({
   payload,
   selectedBackup,
@@ -1535,6 +1706,17 @@ function loadUsers(client: AdminApiClient, keyword: string): Promise<UserListPay
   return client.listUsers<UserListPayload>(params);
 }
 
+async function loadFileStorageInspection(client: AdminApiClient): Promise<{
+  status: FileStorageStatusPayload;
+  issues: FileStorageIssuesPayload;
+}> {
+  const [status, issues] = await Promise.all([
+    client.getFileStorageStatus<FileStorageStatusPayload>(),
+    client.listFileStorageIssues<FileStorageIssuesPayload>()
+  ]);
+  return { status, issues };
+}
+
 function loadDatabaseBackups(client: AdminApiClient): Promise<DatabaseBackupListPayload> {
   return client.listDatabaseBackups<DatabaseBackupListPayload>({ page: 1, size: 20 });
 }
@@ -1729,6 +1911,16 @@ function displayValue(value: unknown): string {
     return "-";
   }
   return String(value);
+}
+
+function boolLabel(value: unknown): string {
+  if (value === true) {
+    return "是";
+  }
+  if (value === false) {
+    return "否";
+  }
+  return "-";
 }
 
 function auditTarget(log: AuditLogItem): string {

@@ -137,6 +137,14 @@ export class AdminApiClient {
     return this.get<T>("/api/v1/admin/database/status");
   }
 
+  getFileStorageStatus<T = unknown>(): Promise<T> {
+    return this.get<T>("/api/v1/admin/files/storage/status");
+  }
+
+  listFileStorageIssues<T = unknown>(): Promise<T> {
+    return this.get<T>("/api/v1/admin/files/storage/issues");
+  }
+
   listDatabaseBackups<T = unknown>(params: ListDatabaseBackupsParams = {}): Promise<T> {
     return this.get<T>("/api/v1/admin/database/backups", params);
   }

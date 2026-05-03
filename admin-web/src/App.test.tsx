@@ -229,19 +229,54 @@ function mockFetch() {
     if (url.endsWith("/api/v1/admin/files/storage/status")) {
       return jsonResponse({
         status: "warning",
-        database: { local_records: 3 },
-        disk: { managed_files: 2 },
-        issues: { total: 1, warnings: 1, errors: 0 }
+        storage_provider: "local",
+        upload_dir: { exists: true, is_dir: true, readable: true, writable: true },
+        database: {
+          total_records: 4,
+          local_records: 3,
+          non_local_records: 1,
+          local_size_bytes: 4096
+        },
+        disk: {
+          total_files: 4,
+          managed_files: 2,
+          ignored_server_generated_files: 1,
+          total_size_bytes: 8192,
+          managed_size_bytes: 2048
+        },
+        issues: {
+          total: 2,
+          errors: 1,
+          warnings: 1,
+          missing_disk_files: 1,
+          orphan_disk_files: 1,
+          metadata_mismatches: 0,
+          invalid_storage_keys: 0
+        }
       });
     }
     if (url.endsWith("/api/v1/admin/files/storage/issues")) {
       return jsonResponse({
-        total: 1,
+        total: 2,
         items: [
           {
             issue_type: "orphan_disk_file",
             severity: "warning",
-            storage_key: "orphan.txt"
+            storage_provider: "local",
+            storage_key: "orphan.txt",
+            actual_size_bytes: 512
+          },
+          {
+            issue_type: "missing_disk_file",
+            severity: "error",
+            file_id: "file-1",
+            file_name: "report.pdf",
+            storage_provider: "local",
+            storage_key: "uploads/report.pdf",
+            expected_size_bytes: 1024,
+            actual_size_bytes: null,
+            expected_checksum_sha256: "sha256-expected",
+            actual_checksum_sha256: ""
           }
         ]
       });
@@ -487,6 +522,37 @@ describe("Admin web shell", () => {
     });
     expect(confirmMock).toHaveBeenCalled();
     confirmMock.mockRestore();
+  });
+
+  it("loads file storage status and filters issue rows", async () => {
+    const fetchMock = mockFetch();
+    render(<App fetcher={fetchMock} />);
+
+    fireEvent.change(screen.getByLabelText("服务端地址"), {
+      target: { value: "http://localhost:8000" }
+    });
+    fireEvent.change(screen.getByLabelText("访问令牌"), {
+      target: { value: "admin-token" }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "连接" }));
+    await screen.findByRole("heading", { name: "概览" });
+
+    fireEvent.click(screen.getByRole("button", { name: "文件" }));
+    expect(await screen.findByRole("heading", { name: "文件" })).toBeInTheDocument();
+    expect(screen.getByText("本地记录")).toBeInTheDocument();
+    expect(screen.getByText("磁盘托管文件")).toBeInTheDocument();
+    expect(screen.getByText("uploads/report.pdf")).toBeInTheDocument();
+    expect(screen.getByText("orphan.txt")).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("问题类型"), {
+      target: { value: "missing_disk_file" }
+    });
+    expect(screen.getByText("missing_disk_file")).toBeInTheDocument();
+    expect(screen.queryByText("orphan.txt")).not.toBeInTheDocument();
+
+    const requestedUrls = fetchMock.mock.calls.map(([input]) => String(input));
+    expect(requestedUrls).toContain("http://localhost:8000/api/v1/admin/files/storage/status");
+    expect(requestedUrls).toContain("http://localhost:8000/api/v1/admin/files/storage/issues");
   });
 
   it("loads health inspection modules and expands issue details", async () => {
