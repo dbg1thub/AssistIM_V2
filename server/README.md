@@ -157,6 +157,10 @@ The same admin role also unlocks backend-only user-management APIs:
 - `GET /api/v1/admin/realtime/health`: inspect realtime connection integrity issues such as missing users, unbound raw sockets, and bound records without live sockets.
 - `GET /api/v1/admin/calls/active`: inspect active in-memory private calls with an optional `user_id` filter.
 - `GET /api/v1/admin/calls/health`: inspect active-call registry issues such as missing sessions, invalid session type, missing users, non-member participants, invalid statuses, and user-to-call mapping drift.
+- `GET /api/v1/admin/e2ee/devices`: inspect E2EE device inventory with `user_id`, `active`, `page`, and `size` filters without returning key material.
+- `GET /api/v1/admin/e2ee/devices/{device_id}`: inspect one E2EE device's redacted key inventory counts.
+- `GET /api/v1/admin/e2ee/prekeys`: inspect one-time prekey inventory with `device_id`, `user_id`, `consumed`, `page`, and `size` filters without returning public keys.
+- `GET /api/v1/admin/e2ee/health`: inspect E2EE inventory issues such as missing device owners, users without active devices, devices missing active signed prekeys, low available prekey counts, orphan prekeys, and duplicate active signed prekeys.
 - `GET /api/v1/admin/database/status`: inspect database connection status, dialect, Alembic revision state, runtime schema completeness, and required table presence.
 - `GET /api/v1/admin/database/tables`: inspect table row counts and required index presence.
 - `GET /api/v1/admin/database/health`: inspect read-only database health checks and schema issues.
@@ -197,8 +201,11 @@ author metadata, comments, likes, and interaction integrity checks needed to
 diagnose timeline visibility and social interaction drift. Realtime and call
 inspection APIs are read-only and expose in-memory WebSocket connection state
 and active-call registry metadata needed to diagnose online presence and call
-signaling drift; they do not force disconnect users or end calls. Database
-backup files are written to a
+signaling drift; they do not force disconnect users or end calls. E2EE
+inspection APIs are read-only and expose device/key inventory counts and state
+needed to diagnose verification and decryption readiness; they do not return
+identity keys, signing keys, signed prekey public keys, signatures, or one-time
+prekey public keys. Database backup files are written to a
 server-controlled local directory and are not exposed through public upload URLs.
 Backup downloads are admin-only, require a completed backup record, and verify
 the file remains inside the configured backup directory before streaming it.

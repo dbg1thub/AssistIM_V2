@@ -19,6 +19,7 @@ from app.services.admin_contacts_inspection_service import AdminContactsInspecti
 from app.services.admin_database_backup_service import AdminDatabaseBackupService
 from app.services.admin_database_service import AdminDatabaseService
 from app.services.admin_dashboard_service import AdminDashboardService
+from app.services.admin_e2ee_inspection_service import AdminE2EEInspectionService
 from app.services.admin_file_storage_service import AdminFileStorageService
 from app.services.admin_groups_inspection_service import AdminGroupsInspectionService
 from app.services.admin_log_service import AdminLogService
@@ -633,6 +634,92 @@ def get_admin_calls_health(
 ) -> dict:
     """Return read-only active call registry integrity checks."""
     payload = AdminRealtimeCallInspectionService(db).build_calls_health(
+        actor=current_user,
+        request_path=str(request.url.path),
+        request_method=request.method,
+        client_ip=_client_ip(request),
+    )
+    return success_response(payload)
+
+
+@router.get("/e2ee/devices")
+def list_admin_e2ee_devices(
+    request: Request,
+    user_id: str = "",
+    active: bool | None = None,
+    page: int = 1,
+    size: int = 20,
+    current_user: User = Depends(get_current_admin_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    """List E2EE devices without exposing key material."""
+    payload = AdminE2EEInspectionService(db).list_devices(
+        actor=current_user,
+        user_id=user_id,
+        active=active,
+        page=page,
+        size=size,
+        request_path=str(request.url.path),
+        request_method=request.method,
+        client_ip=_client_ip(request),
+    )
+    return success_response(payload)
+
+
+@router.get("/e2ee/health")
+def get_admin_e2ee_health(
+    request: Request,
+    min_available_prekeys: int = 5,
+    current_user: User = Depends(get_current_admin_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Return read-only E2EE device and key inventory checks."""
+    payload = AdminE2EEInspectionService(db).build_health(
+        actor=current_user,
+        min_available_prekeys=min_available_prekeys,
+        request_path=str(request.url.path),
+        request_method=request.method,
+        client_ip=_client_ip(request),
+    )
+    return success_response(payload)
+
+
+@router.get("/e2ee/prekeys")
+def list_admin_e2ee_prekeys(
+    request: Request,
+    device_id: str = "",
+    user_id: str = "",
+    consumed: bool | None = None,
+    page: int = 1,
+    size: int = 20,
+    current_user: User = Depends(get_current_admin_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    """List one-time prekey inventory without exposing public keys."""
+    payload = AdminE2EEInspectionService(db).list_prekeys(
+        actor=current_user,
+        device_id=device_id,
+        user_id=user_id,
+        consumed=consumed,
+        page=page,
+        size=size,
+        request_path=str(request.url.path),
+        request_method=request.method,
+        client_ip=_client_ip(request),
+    )
+    return success_response(payload)
+
+
+@router.get("/e2ee/devices/{device_id}")
+def get_admin_e2ee_device(
+    device_id: str,
+    request: Request,
+    current_user: User = Depends(get_current_admin_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Return one E2EE device inventory detail without key material."""
+    payload = AdminE2EEInspectionService(db).get_device(
+        device_id,
         actor=current_user,
         request_path=str(request.url.path),
         request_method=request.method,
