@@ -137,6 +137,7 @@ The same admin role also unlocks backend-only user-management APIs:
 - `GET /api/v1/admin/database/health`: inspect read-only database health checks and schema issues.
 - `POST /api/v1/admin/database/backups`: create one server-local database backup.
 - `GET /api/v1/admin/database/backups`: list database backup records.
+- `POST /api/v1/admin/database/backups/prune`: preview or execute backup cleanup by retention criteria.
 - `GET /api/v1/admin/database/backups/{backup_id}`: inspect one database backup record.
 - `GET /api/v1/admin/database/backups/{backup_id}/download`: download one completed database backup as an attachment.
 - `POST /api/v1/admin/database/backups/{backup_id}/verify`: verify one completed database backup without restoring it.
@@ -166,6 +167,12 @@ for auditability. SQLite backups use the SQLite backup API; PostgreSQL backups
 require `pg_dump` on the server to create backups and `pg_restore` to verify
 custom dump backups; both fail explicitly when unavailable. Self-disable and
 self-demotion are blocked to avoid locking out the only active administrator.
+
+Backup cleanup accepts a JSON body with `keep_last`, `older_than_days`,
+`include_failed`, `include_deleted`, and `dry_run`. At least one of `keep_last`
+or `older_than_days` is required. `dry_run` defaults to `true`; execution mode
+deletes only backup files inside the configured backup directory and marks
+matched records as `deleted` without removing audit history.
 
 ## Creating test accounts
 

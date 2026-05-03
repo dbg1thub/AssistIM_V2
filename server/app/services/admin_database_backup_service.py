@@ -9,6 +9,7 @@ import sqlite3
 import subprocess
 import time
 from contextlib import closing
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -21,7 +22,7 @@ from app.core.errors import AppError, ErrorCode
 from app.models.admin import AdminDatabaseBackup
 from app.models.user import User
 from app.services.admin_audit_service import AdminAuditService
-from app.utils.time import isoformat_utc, utcnow
+from app.utils.time import ensure_utc, isoformat_utc, utcnow
 
 
 class AdminDatabaseBackupError(RuntimeError):
@@ -151,6 +152,118 @@ class AdminDatabaseBackupService:
         if backup is None:
             raise AppError(ErrorCode.RESOURCE_NOT_FOUND, "database backup not found", 404)
         return self.serialize_backup(backup)
+
+    def prune_backups(
+        self,
+        *,
+        keep_last: int | None,
+        older_than_days: int | None,
+        include_failed: bool,
+        include_deleted: bool,
+        dry_run: bool,
+        actor: User,
+        request_path: str = "",
+        request_method: str = "",
+        client_ip: str = "",
+    ) -> dict[str, Any]:
+        criteria = {
+            "keep_last": keep_last,
+            "older_than_days": older_than_days,
+            "include_failed": bool(include_failed),
+            "include_deleted": bool(include_deleted),
+            "dry_run": bool(dry_run),
+        }
+        if keep_last is None and older_than_days is None:
+            raise AppError(ErrorCode.INVALID_REQUEST, "keep_last or older_than_days is required", 422)
+
+        candidates = self._select_prune_candidates(
+            keep_last=keep_last,
+            older_than_days=older_than_days,
+            include_failed=include_failed,
+            include_deleted=include_deleted,
+        )
+
+        try:
+            for backup in candidates:
+                self._validate_backup_path_for_cleanup(backup)
+
+            items: list[dict[str, Any]] = []
+            file_deleted_count = 0
+            file_missing_count = 0
+            processed_count = 0
+
+            if dry_run:
+                items = [self._serialize_prune_item(backup, dry_run=True) for backup in candidates]
+            else:
+                for backup in candidates:
+                    status_before = str(backup.status or "")
+                    file_result = self._delete_backup_file(backup)
+                    backup.status = "deleted"
+                    processed_count += 1
+                    if file_result["file_deleted"]:
+                        file_deleted_count += 1
+                    if file_result["file_missing"]:
+                        file_missing_count += 1
+                    items.append(
+                        self._serialize_prune_item(
+                            backup,
+                            dry_run=False,
+                            status_before=status_before,
+                            file_deleted=bool(file_result["file_deleted"]),
+                            file_missing=bool(file_result["file_missing"]),
+                        )
+                    )
+
+            payload = {
+                **criteria,
+                "candidate_count": len(candidates),
+                "processed_count": processed_count,
+                "file_deleted_count": file_deleted_count,
+                "file_missing_count": file_missing_count,
+                "items": items,
+            }
+            self.audit.record(
+                actor=actor,
+                action="admin.database.backup.prune",
+                target_type="database_backup",
+                target_id="prune",
+                request_path=request_path,
+                request_method=request_method,
+                client_ip=client_ip,
+                success=True,
+                detail={
+                    **criteria,
+                    "candidate_count": payload["candidate_count"],
+                    "processed_count": payload["processed_count"],
+                    "file_deleted_count": payload["file_deleted_count"],
+                    "file_missing_count": payload["file_missing_count"],
+                    "backup_ids": [str(backup.id or "") for backup in candidates],
+                },
+                commit=False,
+            )
+            self.db.commit()
+            return payload
+        except AppError as exc:
+            self.audit.record(
+                actor=actor,
+                action="admin.database.backup.prune",
+                target_type="database_backup",
+                target_id="prune",
+                request_path=request_path,
+                request_method=request_method,
+                client_ip=client_ip,
+                success=False,
+                error_code=str(exc.code),
+                detail={
+                    **criteria,
+                    "candidate_count": len(candidates),
+                    "error": exc.message,
+                    "backup_ids": [str(backup.id or "") for backup in candidates],
+                },
+                commit=False,
+            )
+            self.db.commit()
+            raise
 
     def delete_backup(
         self,
@@ -474,6 +587,82 @@ class AdminDatabaseBackupService:
         except OSError as exc:
             raise AppError(ErrorCode.INTERNAL_ERROR, "database backup file delete failed", 500) from exc
         return {"file_deleted": True, "file_missing": False}
+
+    def _select_prune_candidates(
+        self,
+        *,
+        keep_last: int | None,
+        older_than_days: int | None,
+        include_failed: bool,
+        include_deleted: bool,
+    ) -> list[AdminDatabaseBackup]:
+        statuses = {"completed"}
+        if include_failed:
+            statuses.add("failed")
+        if include_deleted:
+            statuses.add("deleted")
+
+        statement = (
+            select(AdminDatabaseBackup)
+            .where(AdminDatabaseBackup.status.in_(sorted(statuses)))
+            .order_by(AdminDatabaseBackup.created_at.desc(), AdminDatabaseBackup.id.desc())
+        )
+        backups = list(self.db.execute(statement).scalars().all())
+        protected_ids: set[str] = set()
+        if keep_last is not None and keep_last > 0:
+            protected_ids = {str(backup.id or "") for backup in backups[:keep_last]}
+
+        cutoff = None
+        if older_than_days is not None:
+            cutoff = utcnow() - timedelta(days=int(older_than_days))
+
+        candidates: list[AdminDatabaseBackup] = []
+        for backup in backups:
+            backup_id = str(backup.id or "")
+            if backup_id in protected_ids:
+                continue
+
+            matches_retention = keep_last is not None
+            matches_age = cutoff is not None and backup.created_at is not None and ensure_utc(backup.created_at) < cutoff
+            if matches_retention or matches_age:
+                candidates.append(backup)
+        return candidates
+
+    def _validate_backup_path_for_cleanup(self, backup: AdminDatabaseBackup) -> None:
+        raw_path = str(backup.file_path or "").strip()
+        if not raw_path:
+            return
+
+        file_path = Path(raw_path).expanduser().resolve()
+        backup_root = self._backup_root()
+        try:
+            file_path.relative_to(backup_root)
+        except ValueError as exc:
+            raise AppError(ErrorCode.FORBIDDEN, "database backup file is outside the backup directory", 403) from exc
+
+    def _serialize_prune_item(
+        self,
+        backup: AdminDatabaseBackup,
+        *,
+        dry_run: bool,
+        status_before: str | None = None,
+        file_deleted: bool = False,
+        file_missing: bool = False,
+    ) -> dict[str, Any]:
+        before = str(status_before if status_before is not None else backup.status or "")
+        after = before if dry_run else "deleted"
+        return {
+            "id": str(backup.id or ""),
+            "status_before": before,
+            "status_after": after,
+            "action": "would_delete" if dry_run else "deleted",
+            "storage_key": str(backup.storage_key or ""),
+            "file_name": str(backup.file_name or ""),
+            "size_bytes": int(backup.size_bytes or 0),
+            "created_at": isoformat_utc(backup.created_at),
+            "file_deleted": bool(file_deleted),
+            "file_missing": bool(file_missing),
+        }
 
     def _verify_backup_file(self, backup: AdminDatabaseBackup) -> dict[str, Any]:
         file_path = self._validate_verifiable_backup(backup)

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.dependencies.admin_dependency import validate_user_role
 
@@ -36,3 +36,19 @@ class AdminDisableUserRequest(BaseModel):
         if isinstance(value, str):
             return value.strip()
         return value
+
+
+class AdminDatabaseBackupPruneRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    keep_last: int | None = Field(default=None, ge=0, le=10000)
+    older_than_days: int | None = Field(default=None, ge=0, le=36500)
+    include_failed: bool = False
+    include_deleted: bool = False
+    dry_run: bool = True
+
+    @model_validator(mode="after")
+    def _validate_cleanup_criteria(self):
+        if self.keep_last is None and self.older_than_days is None:
+            raise ValueError("keep_last or older_than_days is required")
+        return self

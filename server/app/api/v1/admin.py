@@ -12,7 +12,7 @@ from app.core.errors import AppError, ErrorCode
 from app.dependencies.admin_dependency import get_current_admin_user, normalize_user_role
 from app.dependencies.settings_dependency import get_request_settings
 from app.models.user import User
-from app.schemas.admin import AdminDisableUserRequest, AdminSetUserRoleRequest
+from app.schemas.admin import AdminDatabaseBackupPruneRequest, AdminDisableUserRequest, AdminSetUserRoleRequest
 from app.services.admin_audit_service import AdminAuditService
 from app.services.admin_database_backup_service import AdminDatabaseBackupService
 from app.services.admin_database_service import AdminDatabaseService
@@ -203,6 +203,29 @@ def list_admin_database_backups(
     """List server-local database backup records."""
     _ = current_user
     return success_response(AdminDatabaseBackupService(db, settings).list_backups(page=page, size=size))
+
+
+@router.post("/database/backups/prune")
+def prune_admin_database_backups(
+    payload: AdminDatabaseBackupPruneRequest,
+    request: Request,
+    current_user: User = Depends(get_current_admin_user),
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_request_settings),
+) -> dict:
+    """Prune server-local database backups by retention criteria."""
+    result = AdminDatabaseBackupService(db, settings).prune_backups(
+        keep_last=payload.keep_last,
+        older_than_days=payload.older_than_days,
+        include_failed=payload.include_failed,
+        include_deleted=payload.include_deleted,
+        dry_run=payload.dry_run,
+        actor=current_user,
+        request_path=str(request.url.path),
+        request_method=request.method,
+        client_ip=_client_ip(request),
+    )
+    return success_response(result)
 
 
 @router.get("/database/backups/{backup_id}/download")

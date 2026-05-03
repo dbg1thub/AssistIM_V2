@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -14,6 +15,7 @@ from app.models.admin import AdminAuditLog, AdminDatabaseBackup
 from app.models.user import User
 from app.services import admin_database_backup_service as backup_service_module
 from app.services.admin_database_backup_service import AdminDatabaseBackupService
+from app.utils.time import utcnow
 
 
 def _register(client: TestClient, username: str, nickname: str) -> dict:
@@ -115,6 +117,19 @@ def test_admin_database_backup_verify_forbids_non_admin(client: TestClient) -> N
     response = client.post(
         f"/api/v1/admin/database/backups/{backup_id}/verify",
         headers=_auth_header(normal_auth["access_token"]),
+    )
+
+    assert response.status_code == 403
+    assert response.json()["code"] == ErrorCode.FORBIDDEN
+
+
+def test_admin_database_backup_prune_forbids_non_admin(client: TestClient) -> None:
+    normal_auth = _register(client, "backup-prune-normal", "Backup Prune Normal")
+
+    response = client.post(
+        "/api/v1/admin/database/backups/prune",
+        headers=_auth_header(normal_auth["access_token"]),
+        json={"keep_last": 0, "dry_run": True},
     )
 
     assert response.status_code == 403
@@ -228,6 +243,306 @@ def test_admin_database_backup_download_returns_attachment_and_records_audit(cli
         assert audit.actor_user_id == admin_auth["user"]["id"]
         assert audit.target_id == backup_payload["id"]
         assert audit.success is True
+        assert "file_path" not in audit.detail_json
+
+
+def test_admin_database_backup_prune_dry_run_does_not_delete_or_update(client: TestClient) -> None:
+    admin_auth = _register(client, "backup-prune-dry-admin", "Backup Prune Dry Admin")
+    _set_role(admin_auth["user"]["id"], "admin")
+    now = utcnow()
+    old_file = _write_backup_file(client, "prune-dry-old.sqlite3", b"old")
+    recent_file = _write_backup_file(client, "prune-dry-recent.sqlite3", b"recent")
+    old_backup_id = _insert_backup_record(
+        created_by_user_id=admin_auth["user"]["id"],
+        created_by_username="backup-prune-dry-admin",
+        status="completed",
+        file_path=str(old_file),
+        file_name=old_file.name,
+        size_bytes=old_file.stat().st_size,
+        checksum_sha256=_sha256_file(old_file),
+        created_at=now - timedelta(days=10),
+    )
+    recent_backup_id = _insert_backup_record(
+        created_by_user_id=admin_auth["user"]["id"],
+        created_by_username="backup-prune-dry-admin",
+        status="completed",
+        file_path=str(recent_file),
+        file_name=recent_file.name,
+        size_bytes=recent_file.stat().st_size,
+        checksum_sha256=_sha256_file(recent_file),
+        created_at=now,
+    )
+
+    response = client.post(
+        "/api/v1/admin/database/backups/prune",
+        headers=_auth_header(admin_auth["access_token"]),
+        json={"older_than_days": 7, "dry_run": True},
+    )
+
+    assert response.status_code == 200, response.text
+    payload = response.json()["data"]
+    assert payload["dry_run"] is True
+    assert payload["candidate_count"] == 1
+    assert payload["processed_count"] == 0
+    assert payload["file_deleted_count"] == 0
+    assert payload["items"][0]["id"] == old_backup_id
+    assert payload["items"][0]["action"] == "would_delete"
+    assert "file_path" not in payload["items"][0]
+    assert old_file.is_file()
+    assert recent_file.is_file()
+
+    with SessionLocal() as db:
+        old_backup = db.get(AdminDatabaseBackup, old_backup_id)
+        recent_backup = db.get(AdminDatabaseBackup, recent_backup_id)
+        assert old_backup is not None
+        assert recent_backup is not None
+        assert old_backup.status == "completed"
+        assert recent_backup.status == "completed"
+        audit = db.query(AdminAuditLog).filter(AdminAuditLog.action == "admin.database.backup.prune").one()
+        assert audit.success is True
+        assert '"dry_run": true' in audit.detail_json
+        assert "file_path" not in audit.detail_json
+
+
+def test_admin_database_backup_prune_executes_and_marks_candidates_deleted(client: TestClient) -> None:
+    admin_auth = _register(client, "backup-prune-exec-admin", "Backup Prune Exec Admin")
+    _set_role(admin_auth["user"]["id"], "admin")
+    old_file = _write_backup_file(client, "prune-exec-old.sqlite3", b"old")
+    backup_id = _insert_backup_record(
+        created_by_user_id=admin_auth["user"]["id"],
+        created_by_username="backup-prune-exec-admin",
+        status="completed",
+        file_path=str(old_file),
+        file_name=old_file.name,
+        size_bytes=old_file.stat().st_size,
+        checksum_sha256=_sha256_file(old_file),
+        created_at=utcnow() - timedelta(days=30),
+    )
+
+    response = client.post(
+        "/api/v1/admin/database/backups/prune",
+        headers=_auth_header(admin_auth["access_token"]),
+        json={"older_than_days": 7, "dry_run": False},
+    )
+
+    assert response.status_code == 200, response.text
+    payload = response.json()["data"]
+    assert payload["dry_run"] is False
+    assert payload["candidate_count"] == 1
+    assert payload["processed_count"] == 1
+    assert payload["file_deleted_count"] == 1
+    assert payload["items"][0]["id"] == backup_id
+    assert payload["items"][0]["status_before"] == "completed"
+    assert payload["items"][0]["status_after"] == "deleted"
+    assert payload["items"][0]["file_deleted"] is True
+    assert "file_path" not in payload["items"][0]
+    assert not old_file.exists()
+
+    with SessionLocal() as db:
+        backup = db.get(AdminDatabaseBackup, backup_id)
+        assert backup is not None
+        assert backup.status == "deleted"
+        audit = db.query(AdminAuditLog).filter(AdminAuditLog.action == "admin.database.backup.prune").one()
+        assert audit.success is True
+        assert '"processed_count": 1' in audit.detail_json
+        assert "file_path" not in audit.detail_json
+
+
+def test_admin_database_backup_prune_keep_last_preserves_newest(client: TestClient) -> None:
+    admin_auth = _register(client, "backup-prune-keep-admin", "Backup Prune Keep Admin")
+    _set_role(admin_auth["user"]["id"], "admin")
+    now = utcnow()
+    old_file = _write_backup_file(client, "prune-keep-old.sqlite3", b"old")
+    middle_file = _write_backup_file(client, "prune-keep-middle.sqlite3", b"middle")
+    newest_file = _write_backup_file(client, "prune-keep-newest.sqlite3", b"newest")
+    old_backup_id = _insert_backup_record(
+        created_by_user_id=admin_auth["user"]["id"],
+        created_by_username="backup-prune-keep-admin",
+        status="completed",
+        file_path=str(old_file),
+        file_name=old_file.name,
+        size_bytes=old_file.stat().st_size,
+        checksum_sha256=_sha256_file(old_file),
+        created_at=now - timedelta(days=3),
+    )
+    middle_backup_id = _insert_backup_record(
+        created_by_user_id=admin_auth["user"]["id"],
+        created_by_username="backup-prune-keep-admin",
+        status="completed",
+        file_path=str(middle_file),
+        file_name=middle_file.name,
+        size_bytes=middle_file.stat().st_size,
+        checksum_sha256=_sha256_file(middle_file),
+        created_at=now - timedelta(days=2),
+    )
+    newest_backup_id = _insert_backup_record(
+        created_by_user_id=admin_auth["user"]["id"],
+        created_by_username="backup-prune-keep-admin",
+        status="completed",
+        file_path=str(newest_file),
+        file_name=newest_file.name,
+        size_bytes=newest_file.stat().st_size,
+        checksum_sha256=_sha256_file(newest_file),
+        created_at=now,
+    )
+
+    response = client.post(
+        "/api/v1/admin/database/backups/prune",
+        headers=_auth_header(admin_auth["access_token"]),
+        json={"keep_last": 1, "dry_run": False},
+    )
+
+    assert response.status_code == 200, response.text
+    payload = response.json()["data"]
+    assert payload["candidate_count"] == 2
+    assert payload["processed_count"] == 2
+    assert {item["id"] for item in payload["items"]} == {old_backup_id, middle_backup_id}
+    assert not old_file.exists()
+    assert not middle_file.exists()
+    assert newest_file.is_file()
+
+    with SessionLocal() as db:
+        old_backup = db.get(AdminDatabaseBackup, old_backup_id)
+        middle_backup = db.get(AdminDatabaseBackup, middle_backup_id)
+        newest_backup = db.get(AdminDatabaseBackup, newest_backup_id)
+        assert old_backup is not None
+        assert middle_backup is not None
+        assert newest_backup is not None
+        assert old_backup.status == "deleted"
+        assert middle_backup.status == "deleted"
+        assert newest_backup.status == "completed"
+
+
+def test_admin_database_backup_prune_older_than_days_only_deletes_expired(
+    client: TestClient,
+) -> None:
+    admin_auth = _register(client, "backup-prune-age-admin", "Backup Prune Age Admin")
+    _set_role(admin_auth["user"]["id"], "admin")
+    now = utcnow()
+    old_file = _write_backup_file(client, "prune-age-old.sqlite3", b"old")
+    recent_file = _write_backup_file(client, "prune-age-recent.sqlite3", b"recent")
+    old_backup_id = _insert_backup_record(
+        created_by_user_id=admin_auth["user"]["id"],
+        created_by_username="backup-prune-age-admin",
+        status="completed",
+        file_path=str(old_file),
+        file_name=old_file.name,
+        size_bytes=old_file.stat().st_size,
+        checksum_sha256=_sha256_file(old_file),
+        created_at=now - timedelta(days=20),
+    )
+    recent_backup_id = _insert_backup_record(
+        created_by_user_id=admin_auth["user"]["id"],
+        created_by_username="backup-prune-age-admin",
+        status="completed",
+        file_path=str(recent_file),
+        file_name=recent_file.name,
+        size_bytes=recent_file.stat().st_size,
+        checksum_sha256=_sha256_file(recent_file),
+        created_at=now - timedelta(days=1),
+    )
+
+    response = client.post(
+        "/api/v1/admin/database/backups/prune",
+        headers=_auth_header(admin_auth["access_token"]),
+        json={"older_than_days": 7, "dry_run": False},
+    )
+
+    assert response.status_code == 200, response.text
+    payload = response.json()["data"]
+    assert payload["candidate_count"] == 1
+    assert payload["items"][0]["id"] == old_backup_id
+    assert not old_file.exists()
+    assert recent_file.is_file()
+
+    with SessionLocal() as db:
+        old_backup = db.get(AdminDatabaseBackup, old_backup_id)
+        recent_backup = db.get(AdminDatabaseBackup, recent_backup_id)
+        assert old_backup is not None
+        assert recent_backup is not None
+        assert old_backup.status == "deleted"
+        assert recent_backup.status == "completed"
+
+
+def test_admin_database_backup_prune_include_failed_marks_failed_without_file_deleted(
+    client: TestClient,
+) -> None:
+    admin_auth = _register(client, "backup-prune-failed-admin", "Backup Prune Failed Admin")
+    _set_role(admin_auth["user"]["id"], "admin")
+    backup_id = _insert_backup_record(
+        created_by_user_id=admin_auth["user"]["id"],
+        created_by_username="backup-prune-failed-admin",
+        status="failed",
+        file_path="",
+        file_name="failed-prune.dump",
+        error_message="pg_dump not found",
+        created_at=utcnow() - timedelta(days=10),
+    )
+
+    skipped_response = client.post(
+        "/api/v1/admin/database/backups/prune",
+        headers=_auth_header(admin_auth["access_token"]),
+        json={"older_than_days": 7, "dry_run": True},
+    )
+    response = client.post(
+        "/api/v1/admin/database/backups/prune",
+        headers=_auth_header(admin_auth["access_token"]),
+        json={"older_than_days": 7, "include_failed": True, "dry_run": False},
+    )
+
+    assert skipped_response.status_code == 200, skipped_response.text
+    assert skipped_response.json()["data"]["candidate_count"] == 0
+    assert response.status_code == 200, response.text
+    payload = response.json()["data"]
+    assert payload["candidate_count"] == 1
+    assert payload["processed_count"] == 1
+    assert payload["file_deleted_count"] == 0
+    assert payload["file_missing_count"] == 1
+    assert payload["items"][0]["id"] == backup_id
+    assert payload["items"][0]["status_before"] == "failed"
+    assert payload["items"][0]["status_after"] == "deleted"
+    assert payload["items"][0]["file_missing"] is True
+
+    with SessionLocal() as db:
+        backup = db.get(AdminDatabaseBackup, backup_id)
+        assert backup is not None
+        assert backup.status == "deleted"
+
+
+def test_admin_database_backup_prune_rejects_path_outside_backup_root(client: TestClient) -> None:
+    admin_auth = _register(client, "backup-prune-path-admin", "Backup Prune Path Admin")
+    _set_role(admin_auth["user"]["id"], "admin")
+    outside_file = _testdata_path("outside-prune-backup.sqlite3")
+    outside_file.write_bytes(b"outside")
+    backup_id = _insert_backup_record(
+        created_by_user_id=admin_auth["user"]["id"],
+        created_by_username="backup-prune-path-admin",
+        status="completed",
+        file_path=str(outside_file),
+        file_name="outside-prune-backup.sqlite3",
+        size_bytes=outside_file.stat().st_size,
+        checksum_sha256=_sha256_file(outside_file),
+        created_at=utcnow() - timedelta(days=10),
+    )
+
+    response = client.post(
+        "/api/v1/admin/database/backups/prune",
+        headers=_auth_header(admin_auth["access_token"]),
+        json={"older_than_days": 7, "dry_run": False},
+    )
+
+    assert response.status_code == 403
+    assert response.json()["code"] == ErrorCode.FORBIDDEN
+    assert "backup directory" in response.json()["message"]
+    assert outside_file.is_file()
+
+    with SessionLocal() as db:
+        backup = db.get(AdminDatabaseBackup, backup_id)
+        assert backup is not None
+        assert backup.status == "completed"
+        audit = db.query(AdminAuditLog).filter(AdminAuditLog.action == "admin.database.backup.prune").one()
+        assert audit.success is False
+        assert "outside-prune-backup" not in audit.detail_json
         assert "file_path" not in audit.detail_json
 
 
@@ -827,6 +1142,7 @@ def _insert_backup_record(
     size_bytes: int = 0,
     checksum_sha256: str = "",
     error_message: str = "",
+    created_at: datetime | None = None,
 ) -> str:
     with SessionLocal() as db:
         backup = AdminDatabaseBackup(
@@ -841,6 +1157,7 @@ def _insert_backup_record(
             size_bytes=size_bytes,
             checksum_sha256=checksum_sha256,
             error_message=error_message,
+            created_at=created_at or utcnow(),
         )
         db.add(backup)
         db.commit()
@@ -858,6 +1175,14 @@ def _backup_root_for_client(client: TestClient) -> Path:
 
 def _testdata_path(file_name: str) -> Path:
     return (Path(__file__).resolve().parents[1] / ".testdata" / file_name).resolve()
+
+
+def _write_backup_file(client: TestClient, file_name: str, content: bytes) -> Path:
+    backup_root = _backup_root_for_client(client)
+    backup_root.mkdir(parents=True, exist_ok=True)
+    path = backup_root / file_name
+    path.write_bytes(content)
+    return path
 
 
 def _sha256_file(path: Path) -> str:
