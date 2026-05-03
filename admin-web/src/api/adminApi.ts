@@ -40,6 +40,21 @@ export interface ListChatMessagesParams extends Record<string, unknown> {
   size?: number;
 }
 
+export interface ListContactFriendRequestsParams extends Record<string, unknown> {
+  status?: string;
+  sender_id?: string;
+  receiver_id?: string;
+  page?: number;
+  size?: number;
+}
+
+export interface ListContactFriendshipsParams extends Record<string, unknown> {
+  user_id?: string;
+  friend_id?: string;
+  page?: number;
+  size?: number;
+}
+
 export interface ListDatabaseBackupsParams extends Record<string, unknown> {
   page?: number;
   size?: number;
@@ -166,6 +181,14 @@ export class AdminApiClient {
 
   listChatMessages<T = unknown>(sessionId: string, params: ListChatMessagesParams = {}): Promise<T> {
     return this.get<T>(`/api/v1/admin/chat/sessions/${encodeURIComponent(sessionId)}/messages`, params);
+  }
+
+  listContactFriendRequests<T = unknown>(params: ListContactFriendRequestsParams = {}): Promise<T> {
+    return this.get<T>("/api/v1/admin/contacts/friend-requests", params);
+  }
+
+  listContactFriendships<T = unknown>(params: ListContactFriendshipsParams = {}): Promise<T> {
+    return this.get<T>("/api/v1/admin/contacts/friendships", params);
   }
 
   getDatabaseStatus<T = unknown>(): Promise<T> {

@@ -27,13 +27,25 @@ import {
   ListAuditLogsParams,
   ListChatMessagesParams,
   ListChatSessionsParams,
+  ListContactFriendRequestsParams,
+  ListContactFriendshipsParams,
   ListUsersParams,
   PruneDatabaseBackupsParams,
   QueryLogsParams
 } from "./api/adminApi";
 import "./styles.css";
 
-type PageKey = "overview" | "health" | "audit" | "chat" | "users" | "database" | "files" | "backups" | "logs";
+type PageKey =
+  | "overview"
+  | "health"
+  | "audit"
+  | "chat"
+  | "contacts"
+  | "users"
+  | "database"
+  | "files"
+  | "backups"
+  | "logs";
 type HealthStatus = "ok" | "warning" | "error" | "unknown";
 
 interface AppProps {
@@ -289,6 +301,61 @@ interface ChatMessageFilters {
   type: string;
 }
 
+interface ContactUserSummary extends Record<string, unknown> {
+  id?: string;
+  username?: string;
+  nickname?: string;
+  exists?: boolean;
+  is_disabled?: boolean;
+}
+
+interface ContactFriendRequestItem extends Record<string, unknown> {
+  id: string;
+  sender_id?: string;
+  receiver_id?: string;
+  status?: string;
+  message?: string;
+  sender?: ContactUserSummary;
+  receiver?: ContactUserSummary;
+  created_at?: string;
+  updated_at?: string;
+}
+
+interface ContactFriendshipItem extends Record<string, unknown> {
+  id: string;
+  user_id?: string;
+  friend_id?: string;
+  user?: ContactUserSummary;
+  friend?: ContactUserSummary;
+  created_at?: string;
+  updated_at?: string;
+}
+
+interface ContactFriendRequestListPayload {
+  total: number;
+  page: number;
+  size: number;
+  items: ContactFriendRequestItem[];
+}
+
+interface ContactFriendshipListPayload {
+  total: number;
+  page: number;
+  size: number;
+  items: ContactFriendshipItem[];
+}
+
+interface ContactRequestFilters {
+  status: string;
+  sender_id: string;
+  receiver_id: string;
+}
+
+interface ContactFriendshipFilters {
+  user_id: string;
+  friend_id: string;
+}
+
 interface SessionState {
   baseUrl: string;
   token: string;
@@ -299,6 +366,7 @@ const navItems: Array<{ key: PageKey; label: string; icon: ReactNode }> = [
   { key: "health", label: "巡检", icon: <Activity size={18} /> },
   { key: "audit", label: "审计", icon: <ClipboardList size={18} /> },
   { key: "chat", label: "聊天", icon: <MessageSquare size={18} /> },
+  { key: "contacts", label: "联系人", icon: <Users size={18} /> },
   { key: "users", label: "用户", icon: <Users size={18} /> },
   { key: "database", label: "数据库", icon: <Database size={18} /> },
   { key: "files", label: "文件", icon: <HardDrive size={18} /> },
@@ -340,6 +408,17 @@ const defaultChatFilters: ChatFilters = {
 
 const defaultChatMessageFilters: ChatMessageFilters = {
   type: ""
+};
+
+const defaultContactRequestFilters: ContactRequestFilters = {
+  status: "",
+  sender_id: "",
+  receiver_id: ""
+};
+
+const defaultContactFriendshipFilters: ContactFriendshipFilters = {
+  user_id: "",
+  friend_id: ""
 };
 
 const healthModuleDefinitions: Array<{
@@ -391,6 +470,12 @@ export default function App({ fetcher }: AppProps) {
   const [chatMessages, setChatMessages] = useState<ChatMessageListPayload | null>(null);
   const [chatMessageFilters, setChatMessageFilters] = useState<ChatMessageFilters>(defaultChatMessageFilters);
   const [chatDetailLoading, setChatDetailLoading] = useState(false);
+  const [contactFriendRequests, setContactFriendRequests] = useState<ContactFriendRequestListPayload | null>(null);
+  const [contactFriendships, setContactFriendships] = useState<ContactFriendshipListPayload | null>(null);
+  const [contactRequestFilters, setContactRequestFilters] =
+    useState<ContactRequestFilters>(defaultContactRequestFilters);
+  const [contactFriendshipFilters, setContactFriendshipFilters] =
+    useState<ContactFriendshipFilters>(defaultContactFriendshipFilters);
   const [selectedUser, setSelectedUser] = useState<UserDetailPayload | null>(null);
   const [disableReason, setDisableReason] = useState("");
   const [userOperationLoading, setUserOperationLoading] = useState(false);
@@ -441,6 +526,7 @@ export default function App({ fetcher }: AppProps) {
       (page === "health" && !healthReports) ||
       (page === "audit" && !auditLogs) ||
       (page === "chat" && !chatSessions) ||
+      (page === "contacts" && (!contactFriendRequests || !contactFriendships)) ||
       (page === "users" && !users) ||
       (page === "database" && !databaseStatus) ||
       (page === "files" && (!fileStorageStatus || !fileStorageIssues)) ||
@@ -463,6 +549,11 @@ export default function App({ fetcher }: AppProps) {
       }
       if (page === "chat" && !chatSessions) {
         setChatSessions(await loadChatSessions(client, chatFilters));
+      }
+      if (page === "contacts" && (!contactFriendRequests || !contactFriendships)) {
+        const payload = await loadContactData(client, contactRequestFilters, contactFriendshipFilters);
+        setContactFriendRequests(payload.requests);
+        setContactFriendships(payload.friendships);
       }
       if (page === "users" && !users) {
         setUsers(await loadUsers(client, keyword));
@@ -510,6 +601,11 @@ export default function App({ fetcher }: AppProps) {
         setChatSessions(await loadChatSessions(client, chatFilters));
         setSelectedChatSession(null);
         setChatMessages(null);
+      }
+      if (activePage === "contacts") {
+        const payload = await loadContactData(client, contactRequestFilters, contactFriendshipFilters);
+        setContactFriendRequests(payload.requests);
+        setContactFriendships(payload.friendships);
       }
       if (activePage === "users") {
         setUsers(await loadUsers(client, keyword));
@@ -622,6 +718,36 @@ export default function App({ fetcher }: AppProps) {
       setError(readableError(currentError));
     } finally {
       setChatDetailLoading(false);
+    }
+  }
+
+  async function searchContactFriendRequests() {
+    if (!client) {
+      return;
+    }
+    setLoading(true);
+    setError("");
+    try {
+      setContactFriendRequests(await loadContactFriendRequests(client, contactRequestFilters));
+    } catch (currentError) {
+      setError(readableError(currentError));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function searchContactFriendships() {
+    if (!client) {
+      return;
+    }
+    setLoading(true);
+    setError("");
+    try {
+      setContactFriendships(await loadContactFriendships(client, contactFriendshipFilters));
+    } catch (currentError) {
+      setError(readableError(currentError));
+    } finally {
+      setLoading(false);
     }
   }
 
@@ -927,6 +1053,20 @@ export default function App({ fetcher }: AppProps) {
             detailLoading={chatDetailLoading}
             openSession={(sessionId) => void openChatSession(sessionId)}
             searchMessages={() => void searchChatMessages()}
+          />
+        ) : null}
+        {activePage === "contacts" ? (
+          <ContactsPage
+            requests={contactFriendRequests}
+            friendships={contactFriendships}
+            requestFilters={contactRequestFilters}
+            friendshipFilters={contactFriendshipFilters}
+            setRequestFilter={(key, value) => setContactRequestFilters((current) => ({ ...current, [key]: value }))}
+            setFriendshipFilter={(key, value) =>
+              setContactFriendshipFilters((current) => ({ ...current, [key]: value }))
+            }
+            searchRequests={() => void searchContactFriendRequests()}
+            searchFriendships={() => void searchContactFriendships()}
           />
         ) : null}
         {activePage === "users" ? (
@@ -1505,6 +1645,180 @@ function ChatSessionDetailPanel({
       </div>
       {messages ? <p className="empty-text">{`匹配 ${messages.total ?? messageItems.length} 条消息`}</p> : null}
     </article>
+  );
+}
+
+function ContactsPage({
+  requests,
+  friendships,
+  requestFilters,
+  friendshipFilters,
+  setRequestFilter,
+  setFriendshipFilter,
+  searchRequests,
+  searchFriendships
+}: {
+  requests: ContactFriendRequestListPayload | null;
+  friendships: ContactFriendshipListPayload | null;
+  requestFilters: ContactRequestFilters;
+  friendshipFilters: ContactFriendshipFilters;
+  setRequestFilter: (key: keyof ContactRequestFilters, value: string) => void;
+  setFriendshipFilter: (key: keyof ContactFriendshipFilters, value: string) => void;
+  searchRequests: () => void;
+  searchFriendships: () => void;
+}) {
+  const requestItems = requests?.items ?? [];
+  const friendshipItems = friendships?.items ?? [];
+
+  function submitRequests(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    searchRequests();
+  }
+
+  function submitFriendships(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    searchFriendships();
+  }
+
+  return (
+    <section className="page-section">
+      <PageTitle
+        title="联系人"
+        subtitle={`请求 ${requests?.total ?? 0} 条 · 关系 ${friendships?.total ?? 0} 条`}
+      />
+      <article className="detail-panel">
+        <div className="detail-header">
+          <div>
+            <h2>好友请求</h2>
+            <p>查看用户之间的好友申请记录</p>
+          </div>
+        </div>
+        <form className="filter-panel" onSubmit={submitRequests}>
+          <label>
+            <span>请求状态</span>
+            <select value={requestFilters.status} onChange={(event) => setRequestFilter("status", event.target.value)}>
+              <option value="">全部</option>
+              <option value="pending">待处理</option>
+              <option value="accepted">已接受</option>
+              <option value="rejected">已拒绝</option>
+              <option value="cancelled">已取消</option>
+            </select>
+          </label>
+          <label>
+            <span>发送人 ID</span>
+            <input
+              value={requestFilters.sender_id}
+              onChange={(event) => setRequestFilter("sender_id", event.target.value)}
+              placeholder="sender user id"
+            />
+          </label>
+          <label>
+            <span>接收人 ID</span>
+            <input
+              value={requestFilters.receiver_id}
+              onChange={(event) => setRequestFilter("receiver_id", event.target.value)}
+              placeholder="receiver user id"
+            />
+          </label>
+          <button className="secondary-button" type="submit">
+            <Search size={17} />
+            查询请求
+          </button>
+        </form>
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>状态</th>
+                <th>发送人</th>
+                <th>发送人 ID</th>
+                <th>接收人</th>
+                <th>接收人 ID</th>
+                <th>附言</th>
+                <th>创建时间</th>
+                <th>更新时间</th>
+              </tr>
+            </thead>
+            <tbody>
+              {requestItems.map((request) => (
+                <tr key={request.id}>
+                  <td>
+                    <span className={`status-badge ${contactStatusTone(request.status)}`}>
+                      {String(request.status ?? "")}
+                    </span>
+                  </td>
+                  <td>{contactUserName(request.sender, request.sender_id)}</td>
+                  <td>{String(request.sender_id ?? request.sender?.id ?? "")}</td>
+                  <td>{contactUserName(request.receiver, request.receiver_id)}</td>
+                  <td>{String(request.receiver_id ?? request.receiver?.id ?? "")}</td>
+                  <td className="message-cell">{String(request.message ?? "")}</td>
+                  <td>{String(request.created_at ?? "")}</td>
+                  <td>{String(request.updated_at ?? "")}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        {!requestItems.length ? <p className="empty-text">暂无好友请求</p> : null}
+      </article>
+      <article className="detail-panel">
+        <div className="detail-header">
+          <div>
+            <h2>好友关系</h2>
+            <p>查看已建立的用户好友关系</p>
+          </div>
+        </div>
+        <form className="filter-panel" onSubmit={submitFriendships}>
+          <label>
+            <span>用户 ID</span>
+            <input
+              value={friendshipFilters.user_id}
+              onChange={(event) => setFriendshipFilter("user_id", event.target.value)}
+              placeholder="user id"
+            />
+          </label>
+          <label>
+            <span>好友 ID</span>
+            <input
+              value={friendshipFilters.friend_id}
+              onChange={(event) => setFriendshipFilter("friend_id", event.target.value)}
+              placeholder="friend id"
+            />
+          </label>
+          <button className="secondary-button" type="submit">
+            <Search size={17} />
+            查询关系
+          </button>
+        </form>
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>用户</th>
+                <th>用户 ID</th>
+                <th>好友</th>
+                <th>好友 ID</th>
+                <th>创建时间</th>
+                <th>更新时间</th>
+              </tr>
+            </thead>
+            <tbody>
+              {friendshipItems.map((friendship) => (
+                <tr key={friendship.id}>
+                  <td>{contactUserName(friendship.user, friendship.user_id)}</td>
+                  <td>{String(friendship.user_id ?? friendship.user?.id ?? "")}</td>
+                  <td>{contactUserName(friendship.friend, friendship.friend_id)}</td>
+                  <td>{String(friendship.friend_id ?? friendship.friend?.id ?? "")}</td>
+                  <td>{String(friendship.created_at ?? "")}</td>
+                  <td>{String(friendship.updated_at ?? "")}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        {!friendshipItems.length ? <p className="empty-text">暂无好友关系</p> : null}
+      </article>
+    </section>
   );
 }
 
@@ -2331,6 +2645,44 @@ function loadChatMessages(
   return client.listChatMessages<ChatMessageListPayload>(sessionId, params);
 }
 
+async function loadContactData(
+  client: AdminApiClient,
+  requestFilters: ContactRequestFilters,
+  friendshipFilters: ContactFriendshipFilters
+): Promise<{ requests: ContactFriendRequestListPayload; friendships: ContactFriendshipListPayload }> {
+  const [requests, friendships] = await Promise.all([
+    loadContactFriendRequests(client, requestFilters),
+    loadContactFriendships(client, friendshipFilters)
+  ]);
+  return { requests, friendships };
+}
+
+function loadContactFriendRequests(
+  client: AdminApiClient,
+  filters: ContactRequestFilters
+): Promise<ContactFriendRequestListPayload> {
+  const params: ListContactFriendRequestsParams = { page: 1, size: 20 };
+  for (const key of ["status", "sender_id", "receiver_id"] as const) {
+    if (filters[key].trim()) {
+      params[key] = filters[key].trim();
+    }
+  }
+  return client.listContactFriendRequests<ContactFriendRequestListPayload>(params);
+}
+
+function loadContactFriendships(
+  client: AdminApiClient,
+  filters: ContactFriendshipFilters
+): Promise<ContactFriendshipListPayload> {
+  const params: ListContactFriendshipsParams = { page: 1, size: 20 };
+  for (const key of ["user_id", "friend_id"] as const) {
+    if (filters[key].trim()) {
+      params[key] = filters[key].trim();
+    }
+  }
+  return client.listContactFriendships<ContactFriendshipListPayload>(params);
+}
+
 async function loadFileStorageInspection(client: AdminApiClient): Promise<{
   status: FileStorageStatusPayload;
   issues: FileStorageIssuesPayload;
@@ -2554,6 +2906,24 @@ function displayValue(value: unknown): string {
     return "-";
   }
   return String(value);
+}
+
+function contactUserName(user?: ContactUserSummary, fallbackId?: string): string {
+  return String(user?.username || user?.nickname || user?.id || fallbackId || "");
+}
+
+function contactStatusTone(status: unknown): HealthStatus {
+  const normalized = String(status ?? "").toLowerCase();
+  if (normalized === "accepted") {
+    return "ok";
+  }
+  if (normalized === "rejected" || normalized === "cancelled") {
+    return "error";
+  }
+  if (normalized === "pending") {
+    return "warning";
+  }
+  return "unknown";
 }
 
 function boolLabel(value: unknown): string {

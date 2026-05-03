@@ -270,6 +270,44 @@ function mockFetch() {
         items: [chatSessionSummary()]
       });
     }
+    if (url.includes("/api/v1/admin/contacts/friend-requests")) {
+      return jsonResponse({
+        total: 1,
+        page: 1,
+        size: 20,
+        items: [
+          {
+            id: "request-1",
+            sender_id: "user-1",
+            receiver_id: "user-3",
+            status: "pending",
+            message: "加一下",
+            sender: userSummary("user-1", "test1", "测试一"),
+            receiver: userSummary("user-3", "test3", "测试三"),
+            created_at: "2026-05-03T09:30:00+00:00",
+            updated_at: "2026-05-03T09:30:00+00:00"
+          }
+        ]
+      });
+    }
+    if (url.includes("/api/v1/admin/contacts/friendships")) {
+      return jsonResponse({
+        total: 1,
+        page: 1,
+        size: 20,
+        items: [
+          {
+            id: "friendship-1",
+            user_id: "user-1",
+            friend_id: "user-3",
+            user: userSummary("user-1", "test1", "测试一"),
+            friend: userSummary("user-3", "test3", "测试三"),
+            created_at: "2026-05-03T10:00:00+00:00",
+            updated_at: "2026-05-03T10:00:00+00:00"
+          }
+        ]
+      });
+    }
     if (url.endsWith("/api/v1/admin/chat/health")) {
       return jsonResponse({
         status: "warning",
@@ -423,6 +461,17 @@ function chatSessionDetail() {
         last_read_at: ""
       }
     ]
+  };
+}
+
+function userSummary(id: string, username: string, nickname: string) {
+  return {
+    id,
+    username,
+    nickname,
+    avatar: "",
+    is_disabled: false,
+    exists: true
   };
 }
 
@@ -755,6 +804,55 @@ describe("Admin web shell", () => {
       const requestedUrls = fetchMock.mock.calls.map(([input]) => String(input));
       expect(requestedUrls.some((url) => url.includes("/api/v1/admin/chat/sessions/session-1/messages"))).toBe(true);
       expect(requestedUrls.some((url) => url.includes("type=text"))).toBe(true);
+    });
+  });
+
+  it("loads contact friend requests and friendship rows with filters", async () => {
+    const fetchMock = mockFetch();
+    render(<App fetcher={fetchMock} />);
+
+    fireEvent.change(screen.getByLabelText("服务端地址"), {
+      target: { value: "http://localhost:8000" }
+    });
+    fireEvent.change(screen.getByLabelText("访问令牌"), {
+      target: { value: "admin-token" }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "连接" }));
+    await screen.findByRole("heading", { name: "概览" });
+
+    fireEvent.click(screen.getByRole("button", { name: "联系人" }));
+    expect(await screen.findByRole("heading", { name: "联系人" })).toBeInTheDocument();
+    expect(screen.getByText("好友请求")).toBeInTheDocument();
+    expect(screen.getByText("好友关系")).toBeInTheDocument();
+    expect(screen.getByText("pending")).toBeInTheDocument();
+    expect(screen.getByText("加一下")).toBeInTheDocument();
+    expect(screen.getAllByText("test3").length).toBeGreaterThan(0);
+
+    fireEvent.change(screen.getByLabelText("请求状态"), {
+      target: { value: "pending" }
+    });
+    fireEvent.change(screen.getByLabelText("发送人 ID"), {
+      target: { value: "user-1" }
+    });
+    fireEvent.change(screen.getByLabelText("接收人 ID"), {
+      target: { value: "user-3" }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "查询请求" }));
+
+    fireEvent.change(screen.getByLabelText("用户 ID"), {
+      target: { value: "user-1" }
+    });
+    fireEvent.change(screen.getByLabelText("好友 ID"), {
+      target: { value: "user-3" }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "查询关系" }));
+
+    await waitFor(() => {
+      const requestedUrls = fetchMock.mock.calls.map(([input]) => String(input));
+      expect(requestedUrls.some((url) => url.includes("status=pending"))).toBe(true);
+      expect(requestedUrls.some((url) => url.includes("sender_id=user-1"))).toBe(true);
+      expect(requestedUrls.some((url) => url.includes("receiver_id=user-3"))).toBe(true);
+      expect(requestedUrls.some((url) => url.includes("friendships?user_id=user-1&friend_id=user-3"))).toBe(true);
     });
   });
 
