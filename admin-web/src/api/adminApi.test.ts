@@ -220,6 +220,43 @@ describe("AdminApiClient", () => {
     });
   });
 
+  it("loads admin chat sessions, session detail, and messages", async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(JSON.stringify({ code: 0, message: "success", data: { ok: true } }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" }
+      })
+    );
+    const client = new AdminApiClient({
+      baseUrl: "http://localhost:8000",
+      token: "token-value",
+      fetcher: fetchMock
+    });
+
+    await client.listChatSessions({ type: "private", keyword: "test3", user_id: "user-3", page: 2, size: 10 });
+    await client.getChatSession("session-1");
+    await client.listChatMessages("session-1", { type: "text", page: 1, size: 50 });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://localhost:8000/api/v1/admin/chat/sessions?type=private&keyword=test3&user_id=user-3&page=2&size=10",
+      {
+        headers: { Authorization: "Bearer token-value" },
+        method: "GET"
+      }
+    );
+    expect(fetchMock).toHaveBeenCalledWith("http://localhost:8000/api/v1/admin/chat/sessions/session-1", {
+      headers: { Authorization: "Bearer token-value" },
+      method: "GET"
+    });
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://localhost:8000/api/v1/admin/chat/sessions/session-1/messages?type=text&page=1&size=50",
+      {
+        headers: { Authorization: "Bearer token-value" },
+        method: "GET"
+      }
+    );
+  });
+
   it("builds query strings for audit log filters and loads detail", async () => {
     const fetchMock = vi.fn(async () =>
       new Response(JSON.stringify({ code: 0, message: "success", data: { items: [] } }), {

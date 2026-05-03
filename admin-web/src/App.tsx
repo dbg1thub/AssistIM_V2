@@ -10,6 +10,7 @@ import {
   LayoutDashboard,
   Loader2,
   LogOut,
+  MessageSquare,
   RefreshCcw,
   Search,
   Server,
@@ -24,13 +25,15 @@ import {
   ApiError,
   Fetcher,
   ListAuditLogsParams,
+  ListChatMessagesParams,
+  ListChatSessionsParams,
   ListUsersParams,
   PruneDatabaseBackupsParams,
   QueryLogsParams
 } from "./api/adminApi";
 import "./styles.css";
 
-type PageKey = "overview" | "health" | "audit" | "users" | "database" | "files" | "backups" | "logs";
+type PageKey = "overview" | "health" | "audit" | "chat" | "users" | "database" | "files" | "backups" | "logs";
 type HealthStatus = "ok" | "warning" | "error" | "unknown";
 
 interface AppProps {
@@ -229,6 +232,63 @@ interface AuditFilters {
   created_to: string;
 }
 
+interface ChatMessageItem extends Record<string, unknown> {
+  id: string;
+  session_id?: string;
+  sender_id?: string;
+  sender_username?: string;
+  sender_nickname?: string;
+  session_seq?: number;
+  type?: string;
+  content?: string;
+  status?: string;
+  created_at?: string;
+  updated_at?: string;
+}
+
+interface ChatSessionItem extends Record<string, unknown> {
+  id: string;
+  type?: string;
+  name?: string;
+  encryption_mode?: string;
+  member_count?: number;
+  message_count?: number;
+  last_message_seq?: number;
+  last_event_seq?: number;
+  last_message?: ChatMessageItem | null;
+  created_at?: string;
+  updated_at?: string;
+}
+
+interface ChatSessionDetailPayload extends ChatSessionItem {
+  members?: Array<Record<string, unknown>>;
+}
+
+interface ChatSessionListPayload {
+  total: number;
+  page: number;
+  size: number;
+  items: ChatSessionItem[];
+}
+
+interface ChatMessageListPayload {
+  total: number;
+  page: number;
+  size: number;
+  session?: Record<string, unknown>;
+  items: ChatMessageItem[];
+}
+
+interface ChatFilters {
+  type: string;
+  keyword: string;
+  user_id: string;
+}
+
+interface ChatMessageFilters {
+  type: string;
+}
+
 interface SessionState {
   baseUrl: string;
   token: string;
@@ -238,6 +298,7 @@ const navItems: Array<{ key: PageKey; label: string; icon: ReactNode }> = [
   { key: "overview", label: "概览", icon: <LayoutDashboard size={18} /> },
   { key: "health", label: "巡检", icon: <Activity size={18} /> },
   { key: "audit", label: "审计", icon: <ClipboardList size={18} /> },
+  { key: "chat", label: "聊天", icon: <MessageSquare size={18} /> },
   { key: "users", label: "用户", icon: <Users size={18} /> },
   { key: "database", label: "数据库", icon: <Database size={18} /> },
   { key: "files", label: "文件", icon: <HardDrive size={18} /> },
@@ -269,6 +330,16 @@ const defaultLogFilters: LogFilters = {
   created_from: "",
   created_to: "",
   limit: "100"
+};
+
+const defaultChatFilters: ChatFilters = {
+  type: "",
+  keyword: "",
+  user_id: ""
+};
+
+const defaultChatMessageFilters: ChatMessageFilters = {
+  type: ""
 };
 
 const healthModuleDefinitions: Array<{
@@ -314,6 +385,12 @@ export default function App({ fetcher }: AppProps) {
   const [auditFilters, setAuditFilters] = useState<AuditFilters>(defaultAuditFilters);
   const [selectedAuditLog, setSelectedAuditLog] = useState<AuditLogItem | null>(null);
   const [auditDetailLoading, setAuditDetailLoading] = useState(false);
+  const [chatSessions, setChatSessions] = useState<ChatSessionListPayload | null>(null);
+  const [chatFilters, setChatFilters] = useState<ChatFilters>(defaultChatFilters);
+  const [selectedChatSession, setSelectedChatSession] = useState<ChatSessionDetailPayload | null>(null);
+  const [chatMessages, setChatMessages] = useState<ChatMessageListPayload | null>(null);
+  const [chatMessageFilters, setChatMessageFilters] = useState<ChatMessageFilters>(defaultChatMessageFilters);
+  const [chatDetailLoading, setChatDetailLoading] = useState(false);
   const [selectedUser, setSelectedUser] = useState<UserDetailPayload | null>(null);
   const [disableReason, setDisableReason] = useState("");
   const [userOperationLoading, setUserOperationLoading] = useState(false);
@@ -363,6 +440,7 @@ export default function App({ fetcher }: AppProps) {
       (page === "overview" && !dashboard) ||
       (page === "health" && !healthReports) ||
       (page === "audit" && !auditLogs) ||
+      (page === "chat" && !chatSessions) ||
       (page === "users" && !users) ||
       (page === "database" && !databaseStatus) ||
       (page === "files" && (!fileStorageStatus || !fileStorageIssues)) ||
@@ -382,6 +460,9 @@ export default function App({ fetcher }: AppProps) {
       }
       if (page === "audit" && !auditLogs) {
         setAuditLogs(await loadAuditLogs(client, auditFilters));
+      }
+      if (page === "chat" && !chatSessions) {
+        setChatSessions(await loadChatSessions(client, chatFilters));
       }
       if (page === "users" && !users) {
         setUsers(await loadUsers(client, keyword));
@@ -424,6 +505,11 @@ export default function App({ fetcher }: AppProps) {
       if (activePage === "audit") {
         setAuditLogs(await loadAuditLogs(client, auditFilters));
         setSelectedAuditLog(null);
+      }
+      if (activePage === "chat") {
+        setChatSessions(await loadChatSessions(client, chatFilters));
+        setSelectedChatSession(null);
+        setChatMessages(null);
       }
       if (activePage === "users") {
         setUsers(await loadUsers(client, keyword));
@@ -484,6 +570,58 @@ export default function App({ fetcher }: AppProps) {
       setError(readableError(currentError));
     } finally {
       setAuditDetailLoading(false);
+    }
+  }
+
+  async function searchChatSessions() {
+    if (!client) {
+      return;
+    }
+    setLoading(true);
+    setError("");
+    try {
+      setChatSessions(await loadChatSessions(client, chatFilters));
+      setSelectedChatSession(null);
+      setChatMessages(null);
+    } catch (currentError) {
+      setError(readableError(currentError));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function openChatSession(sessionId: string) {
+    if (!client) {
+      return;
+    }
+    setChatDetailLoading(true);
+    setError("");
+    try {
+      const [detail, messages] = await Promise.all([
+        client.getChatSession<ChatSessionDetailPayload>(sessionId),
+        loadChatMessages(client, sessionId, chatMessageFilters)
+      ]);
+      setSelectedChatSession(detail);
+      setChatMessages(messages);
+    } catch (currentError) {
+      setError(readableError(currentError));
+    } finally {
+      setChatDetailLoading(false);
+    }
+  }
+
+  async function searchChatMessages() {
+    if (!client || !selectedChatSession) {
+      return;
+    }
+    setChatDetailLoading(true);
+    setError("");
+    try {
+      setChatMessages(await loadChatMessages(client, selectedChatSession.id, chatMessageFilters));
+    } catch (currentError) {
+      setError(readableError(currentError));
+    } finally {
+      setChatDetailLoading(false);
     }
   }
 
@@ -774,6 +912,21 @@ export default function App({ fetcher }: AppProps) {
             selectedLog={selectedAuditLog}
             detailLoading={auditDetailLoading}
             openDetail={(logId) => void openAuditLogDetail(logId)}
+          />
+        ) : null}
+        {activePage === "chat" ? (
+          <ChatPage
+            payload={chatSessions}
+            filters={chatFilters}
+            setFilter={(key, value) => setChatFilters((current) => ({ ...current, [key]: value }))}
+            search={() => void searchChatSessions()}
+            selectedSession={selectedChatSession}
+            messages={chatMessages}
+            messageFilters={chatMessageFilters}
+            setMessageFilter={(key, value) => setChatMessageFilters((current) => ({ ...current, [key]: value }))}
+            detailLoading={chatDetailLoading}
+            openSession={(sessionId) => void openChatSession(sessionId)}
+            searchMessages={() => void searchChatMessages()}
           />
         ) : null}
         {activePage === "users" ? (
@@ -1109,6 +1262,248 @@ function AuditDetailPanel({ log }: { log: AuditLogItem }) {
         <span>detail</span>
         <pre>{JSON.stringify(log.detail ?? {}, null, 2)}</pre>
       </div>
+    </article>
+  );
+}
+
+function ChatPage({
+  payload,
+  filters,
+  setFilter,
+  search,
+  selectedSession,
+  messages,
+  messageFilters,
+  setMessageFilter,
+  detailLoading,
+  openSession,
+  searchMessages
+}: {
+  payload: ChatSessionListPayload | null;
+  filters: ChatFilters;
+  setFilter: (key: keyof ChatFilters, value: string) => void;
+  search: () => void;
+  selectedSession: ChatSessionDetailPayload | null;
+  messages: ChatMessageListPayload | null;
+  messageFilters: ChatMessageFilters;
+  setMessageFilter: (key: keyof ChatMessageFilters, value: string) => void;
+  detailLoading: boolean;
+  openSession: (sessionId: string) => void;
+  searchMessages: () => void;
+}) {
+  const sessions = payload?.items ?? [];
+
+  function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    search();
+  }
+
+  return (
+    <section className="page-section">
+      <PageTitle title="聊天" subtitle={`共 ${payload?.total ?? 0} 个会话`} />
+      <form className="filter-panel" onSubmit={submit}>
+        <label>
+          <span>会话类型</span>
+          <select value={filters.type} onChange={(event) => setFilter("type", event.target.value)}>
+            <option value="">全部</option>
+            <option value="private">private</option>
+            <option value="group">group</option>
+          </select>
+        </label>
+        <label>
+          <span>会话关键词</span>
+          <input
+            value={filters.keyword}
+            onChange={(event) => setFilter("keyword", event.target.value)}
+            placeholder="会话名或会话 ID"
+          />
+        </label>
+        <label>
+          <span>成员用户 ID</span>
+          <input
+            value={filters.user_id}
+            onChange={(event) => setFilter("user_id", event.target.value)}
+            placeholder="user id"
+          />
+        </label>
+        <button className="secondary-button" type="submit">
+          <Search size={17} />
+          筛选会话
+        </button>
+      </form>
+      <div className="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>会话 ID</th>
+              <th>类型</th>
+              <th>名称</th>
+              <th>加密</th>
+              <th>成员</th>
+              <th>消息</th>
+              <th>最后消息序号</th>
+              <th>更新时间</th>
+              <th>详情</th>
+            </tr>
+          </thead>
+          <tbody>
+            {sessions.map((session) => (
+              <tr key={session.id}>
+                <td>{session.id}</td>
+                <td>{String(session.type ?? "")}</td>
+                <td>{String(session.name ?? "")}</td>
+                <td>{String(session.encryption_mode ?? "")}</td>
+                <td>{displayValue(session.member_count)}</td>
+                <td>{displayValue(session.message_count)}</td>
+                <td>{displayValue(session.last_message_seq)}</td>
+                <td>{String(session.updated_at ?? "")}</td>
+                <td>
+                  <button
+                    className="table-action-button"
+                    type="button"
+                    onClick={() => openSession(session.id)}
+                    aria-label="查看会话详情"
+                  >
+                    查看
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {detailLoading ? <p className="empty-text">正在读取会话详情...</p> : null}
+      {selectedSession ? (
+        <ChatSessionDetailPanel
+          session={selectedSession}
+          messages={messages}
+          messageFilters={messageFilters}
+          setMessageFilter={setMessageFilter}
+          searchMessages={searchMessages}
+        />
+      ) : null}
+    </section>
+  );
+}
+
+function ChatSessionDetailPanel({
+  session,
+  messages,
+  messageFilters,
+  setMessageFilter,
+  searchMessages
+}: {
+  session: ChatSessionDetailPayload;
+  messages: ChatMessageListPayload | null;
+  messageFilters: ChatMessageFilters;
+  setMessageFilter: (key: keyof ChatMessageFilters, value: string) => void;
+  searchMessages: () => void;
+}) {
+  const members = session.members ?? [];
+  const messageItems = messages?.items ?? [];
+
+  function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    searchMessages();
+  }
+
+  return (
+    <article className="detail-panel">
+      <div className="detail-header">
+        <div>
+          <h2>{String(session.name || session.id)}</h2>
+          <p>{session.id}</p>
+        </div>
+        <span className="status-badge ok">{String(session.type ?? "")}</span>
+      </div>
+      <div className="info-grid">
+        <InfoBlock title="会话" rows={[
+          ["类型", session.type],
+          ["加密模式", session.encryption_mode],
+          ["成员数", session.member_count],
+          ["消息数", session.message_count],
+          ["最后消息序号", session.last_message_seq],
+          ["最后事件序号", session.last_event_seq]
+        ]} />
+        <InfoBlock title="最后消息" rows={[
+          ["消息 ID", session.last_message?.id],
+          ["类型", session.last_message?.type],
+          ["发送人", session.last_message?.sender_username || session.last_message?.sender_id],
+          ["状态", session.last_message?.status],
+          ["时间", session.last_message?.created_at],
+          ["内容", session.last_message?.content]
+        ]} />
+      </div>
+      <div className="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>用户 ID</th>
+              <th>用户名</th>
+              <th>昵称</th>
+              <th>最后已读序号</th>
+              <th>最后已读消息</th>
+              <th>最后已读时间</th>
+            </tr>
+          </thead>
+          <tbody>
+            {members.map((member) => (
+              <tr key={String(member.user_id)}>
+                <td>{String(member.user_id ?? "")}</td>
+                <td>{String(member.username ?? "")}</td>
+                <td>{String(member.nickname ?? "")}</td>
+                <td>{displayValue(member.last_read_seq)}</td>
+                <td>{String(member.last_read_message_id ?? "")}</td>
+                <td>{String(member.last_read_at ?? "")}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <form className="filter-panel" onSubmit={submit}>
+        <label>
+          <span>消息类型</span>
+          <select value={messageFilters.type} onChange={(event) => setMessageFilter("type", event.target.value)}>
+            <option value="">全部</option>
+            <option value="text">text</option>
+            <option value="image">image</option>
+            <option value="file">file</option>
+            <option value="voice">voice</option>
+            <option value="system">system</option>
+          </select>
+        </label>
+        <button className="secondary-button" type="submit">
+          <Search size={17} />
+          查询消息
+        </button>
+      </form>
+      <div className="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Seq</th>
+              <th>类型</th>
+              <th>发送人</th>
+              <th>状态</th>
+              <th>时间</th>
+              <th>内容</th>
+            </tr>
+          </thead>
+          <tbody>
+            {messageItems.map((message) => (
+              <tr key={message.id}>
+                <td>{displayValue(message.session_seq)}</td>
+                <td>{String(message.type ?? "")}</td>
+                <td>{String(message.sender_username || message.sender_nickname || message.sender_id || "")}</td>
+                <td>{String(message.status ?? "")}</td>
+                <td>{String(message.created_at ?? "")}</td>
+                <td className="message-cell">{String(message.content ?? "")}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {messages ? <p className="empty-text">{`匹配 ${messages.total ?? messageItems.length} 条消息`}</p> : null}
     </article>
   );
 }
@@ -1912,6 +2307,28 @@ function loadUsers(client: AdminApiClient, keyword: string): Promise<UserListPay
     params.keyword = keyword.trim();
   }
   return client.listUsers<UserListPayload>(params);
+}
+
+function loadChatSessions(client: AdminApiClient, filters: ChatFilters): Promise<ChatSessionListPayload> {
+  const params: ListChatSessionsParams = { page: 1, size: 20 };
+  for (const key of ["type", "keyword", "user_id"] as const) {
+    if (filters[key].trim()) {
+      params[key] = filters[key].trim();
+    }
+  }
+  return client.listChatSessions<ChatSessionListPayload>(params);
+}
+
+function loadChatMessages(
+  client: AdminApiClient,
+  sessionId: string,
+  filters: ChatMessageFilters
+): Promise<ChatMessageListPayload> {
+  const params: ListChatMessagesParams = { page: 1, size: 50 };
+  if (filters.type.trim()) {
+    params.type = filters.type.trim();
+  }
+  return client.listChatMessages<ChatMessageListPayload>(sessionId, params);
 }
 
 async function loadFileStorageInspection(client: AdminApiClient): Promise<{

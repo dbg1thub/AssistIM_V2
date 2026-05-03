@@ -235,6 +235,41 @@ function mockFetch() {
         ]
       });
     }
+    if (url.includes("/api/v1/admin/chat/sessions/session-1/messages")) {
+      return jsonResponse({
+        total: 1,
+        page: 1,
+        size: 50,
+        session: { id: "session-1", type: "private", name: "test1, test3" },
+        items: [
+          {
+            id: "message-1",
+            session_id: "session-1",
+            sender_id: "user-1",
+            sender_username: "test1",
+            sender_nickname: "测试一",
+            session_seq: 1,
+            type: "text",
+            content: "你好 test3",
+            status: "sent",
+            extra: {},
+            created_at: "2026-05-03T10:00:00+00:00",
+            updated_at: "2026-05-03T10:00:00+00:00"
+          }
+        ]
+      });
+    }
+    if (url.endsWith("/api/v1/admin/chat/sessions/session-1")) {
+      return jsonResponse(chatSessionDetail());
+    }
+    if (url.includes("/api/v1/admin/chat/sessions")) {
+      return jsonResponse({
+        total: 1,
+        page: 1,
+        size: 20,
+        items: [chatSessionSummary()]
+      });
+    }
     if (url.endsWith("/api/v1/admin/chat/health")) {
       return jsonResponse({
         status: "warning",
@@ -335,6 +370,59 @@ function backupItem() {
     finished_at: "2026-05-03T10:00:01+00:00",
     duration_ms: 1000,
     created_at: "2026-05-03T10:00:00+00:00"
+  };
+}
+
+function chatSessionSummary() {
+  return {
+    id: "session-1",
+    type: "private",
+    name: "test1, test3",
+    avatar: "",
+    is_ai_session: false,
+    encryption_mode: "e2ee_private",
+    member_count: 2,
+    message_count: 1,
+    last_message_seq: 1,
+    last_event_seq: 0,
+    last_message: {
+      id: "message-1",
+      session_id: "session-1",
+      sender_id: "user-1",
+      session_seq: 1,
+      type: "text",
+      content: "你好 test3",
+      status: "sent",
+      created_at: "2026-05-03T10:00:00+00:00"
+    },
+    created_at: "2026-05-03T09:00:00+00:00",
+    updated_at: "2026-05-03T10:00:00+00:00"
+  };
+}
+
+function chatSessionDetail() {
+  return {
+    ...chatSessionSummary(),
+    members: [
+      {
+        user_id: "user-1",
+        username: "test1",
+        nickname: "测试一",
+        joined_at: "2026-05-03T09:00:00+00:00",
+        last_read_seq: 1,
+        last_read_message_id: "message-1",
+        last_read_at: "2026-05-03T10:01:00+00:00"
+      },
+      {
+        user_id: "user-3",
+        username: "test3",
+        nickname: "测试三",
+        joined_at: "2026-05-03T09:00:00+00:00",
+        last_read_seq: 0,
+        last_read_message_id: "",
+        last_read_at: ""
+      }
+    ]
   };
 }
 
@@ -616,6 +704,58 @@ describe("Admin web shell", () => {
     const requestedUrls = fetchMock.mock.calls.map(([input]) => String(input));
     expect(requestedUrls.some((url) => url.includes("/api/v1/admin/logs?"))).toBe(true);
     expect(requestedUrls.some((url) => url.endsWith("/api/v1/admin/logs/files/assistim.log/download"))).toBe(true);
+  });
+
+  it("loads chat sessions, session detail, and message rows", async () => {
+    const fetchMock = mockFetch();
+    render(<App fetcher={fetchMock} />);
+
+    fireEvent.change(screen.getByLabelText("服务端地址"), {
+      target: { value: "http://localhost:8000" }
+    });
+    fireEvent.change(screen.getByLabelText("访问令牌"), {
+      target: { value: "admin-token" }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "连接" }));
+    await screen.findByRole("heading", { name: "概览" });
+
+    fireEvent.click(screen.getByRole("button", { name: "聊天" }));
+    expect(await screen.findByRole("heading", { name: "聊天" })).toBeInTheDocument();
+    expect(screen.getByText("e2ee_private")).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("会话类型"), {
+      target: { value: "private" }
+    });
+    fireEvent.change(screen.getByLabelText("会话关键词"), {
+      target: { value: "test3" }
+    });
+    fireEvent.change(screen.getByLabelText("成员用户 ID"), {
+      target: { value: "user-3" }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "筛选会话" }));
+
+    await waitFor(() => {
+      const requestedUrls = fetchMock.mock.calls.map(([input]) => String(input));
+      expect(requestedUrls.some((url) => url.includes("type=private"))).toBe(true);
+      expect(requestedUrls.some((url) => url.includes("keyword=test3"))).toBe(true);
+      expect(requestedUrls.some((url) => url.includes("user_id=user-3"))).toBe(true);
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "查看会话详情" }));
+    expect(await screen.findByRole("heading", { name: "test1, test3" })).toBeInTheDocument();
+    expect(screen.getByText("test3")).toBeInTheDocument();
+    expect(screen.getAllByText("你好 test3").length).toBeGreaterThan(0);
+
+    fireEvent.change(screen.getByLabelText("消息类型"), {
+      target: { value: "text" }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "查询消息" }));
+
+    await waitFor(() => {
+      const requestedUrls = fetchMock.mock.calls.map(([input]) => String(input));
+      expect(requestedUrls.some((url) => url.includes("/api/v1/admin/chat/sessions/session-1/messages"))).toBe(true);
+      expect(requestedUrls.some((url) => url.includes("type=text"))).toBe(true);
+    });
   });
 
   it("loads health inspection modules and expands issue details", async () => {

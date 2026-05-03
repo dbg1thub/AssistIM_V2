@@ -8,6 +8,7 @@
 - 概览页：读取 `/api/v1/admin/dashboard`。
 - 巡检页：读取认证、数据库、聊天、联系人、群组、朋友圈、实时连接、通话、HTTP、限流、E2EE、文件存储等只读健康检查接口。
 - 审计页：读取 `/api/v1/admin/audit-logs` 和 `/api/v1/admin/audit-logs/{log_id}`，用于查看管理员操作记录与脱敏详情。
+- 聊天页：读取 `/api/v1/admin/chat/sessions`、`/api/v1/admin/chat/sessions/{session_id}` 和 `/api/v1/admin/chat/sessions/{session_id}/messages`，用于查看会话、成员和消息入库情况。
 - 用户页：读取 `/api/v1/admin/users` 和 `/api/v1/admin/users/{user_id}`，支持改角色、禁用、启用、强制下线等需要确认的账号管理操作。
 - 数据库页：读取 `/api/v1/admin/database/status`。
 - 文件页：读取 `/api/v1/admin/files/storage/status` 和 `/api/v1/admin/files/storage/issues`，用于查看本地上传文件记录与磁盘文件一致性问题。

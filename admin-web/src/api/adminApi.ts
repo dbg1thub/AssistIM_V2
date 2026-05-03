@@ -26,6 +26,20 @@ export interface ListAuditLogsParams extends Record<string, unknown> {
   size?: number;
 }
 
+export interface ListChatSessionsParams extends Record<string, unknown> {
+  type?: string;
+  keyword?: string;
+  user_id?: string;
+  page?: number;
+  size?: number;
+}
+
+export interface ListChatMessagesParams extends Record<string, unknown> {
+  type?: string;
+  page?: number;
+  size?: number;
+}
+
 export interface ListDatabaseBackupsParams extends Record<string, unknown> {
   page?: number;
   size?: number;
@@ -140,6 +154,18 @@ export class AdminApiClient {
 
   getAuditLog<T = unknown>(logId: string): Promise<T> {
     return this.get<T>(`/api/v1/admin/audit-logs/${encodeURIComponent(logId)}`);
+  }
+
+  listChatSessions<T = unknown>(params: ListChatSessionsParams = {}): Promise<T> {
+    return this.get<T>("/api/v1/admin/chat/sessions", params);
+  }
+
+  getChatSession<T = unknown>(sessionId: string): Promise<T> {
+    return this.get<T>(`/api/v1/admin/chat/sessions/${encodeURIComponent(sessionId)}`);
+  }
+
+  listChatMessages<T = unknown>(sessionId: string, params: ListChatMessagesParams = {}): Promise<T> {
+    return this.get<T>(`/api/v1/admin/chat/sessions/${encodeURIComponent(sessionId)}/messages`, params);
   }
 
   getDatabaseStatus<T = unknown>(): Promise<T> {
