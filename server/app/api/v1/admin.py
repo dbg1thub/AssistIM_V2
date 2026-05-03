@@ -22,6 +22,7 @@ from app.services.admin_dashboard_service import AdminDashboardService
 from app.services.admin_e2ee_inspection_service import AdminE2EEInspectionService
 from app.services.admin_file_storage_service import AdminFileStorageService
 from app.services.admin_groups_inspection_service import AdminGroupsInspectionService
+from app.services.admin_http_rate_limit_inspection_service import AdminHttpRateLimitInspectionService
 from app.services.admin_log_service import AdminLogService
 from app.services.admin_moments_inspection_service import AdminMomentsInspectionService
 from app.services.admin_realtime_call_inspection_service import AdminRealtimeCallInspectionService
@@ -635,6 +636,92 @@ def get_admin_calls_health(
     """Return read-only active call registry integrity checks."""
     payload = AdminRealtimeCallInspectionService(db).build_calls_health(
         actor=current_user,
+        request_path=str(request.url.path),
+        request_method=request.method,
+        client_ip=_client_ip(request),
+    )
+    return success_response(payload)
+
+
+@router.get("/http/requests")
+def list_admin_http_requests(
+    request: Request,
+    method: str = "",
+    path_contains: str = "",
+    status_code: int | None = None,
+    user_id: str = "",
+    limit: int = 50,
+    current_user: User = Depends(get_current_admin_user),
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_request_settings),
+) -> dict:
+    """List recent in-process HTTP request diagnostics."""
+    payload = AdminHttpRateLimitInspectionService(db, settings).list_http_requests(
+        actor=current_user,
+        method=method,
+        path_contains=path_contains,
+        status_code=status_code,
+        user_id=user_id,
+        limit=limit,
+        request_path=str(request.url.path),
+        request_method=request.method,
+        client_ip=_client_ip(request),
+    )
+    return success_response(payload)
+
+
+@router.get("/http/health")
+def get_admin_http_health(
+    request: Request,
+    current_user: User = Depends(get_current_admin_user),
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_request_settings),
+) -> dict:
+    """Return read-only HTTP request diagnostics health checks."""
+    payload = AdminHttpRateLimitInspectionService(db, settings).build_http_health(
+        actor=current_user,
+        request_path=str(request.url.path),
+        request_method=request.method,
+        client_ip=_client_ip(request),
+    )
+    return success_response(payload)
+
+
+@router.get("/rate-limits/status")
+def get_admin_rate_limit_status(
+    request: Request,
+    key_prefix: str = "",
+    limit: int = 100,
+    current_user: User = Depends(get_current_admin_user),
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_request_settings),
+) -> dict:
+    """Return read-only rate-limit store status."""
+    payload = AdminHttpRateLimitInspectionService(db, settings).build_rate_limit_status(
+        actor=current_user,
+        key_prefix=key_prefix,
+        limit=limit,
+        request_path=str(request.url.path),
+        request_method=request.method,
+        client_ip=_client_ip(request),
+    )
+    return success_response(payload)
+
+
+@router.get("/rate-limits/health")
+def get_admin_rate_limit_health(
+    request: Request,
+    max_bucket_count: int = 5000,
+    max_stale_hit_count: int = 1000,
+    current_user: User = Depends(get_current_admin_user),
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_request_settings),
+) -> dict:
+    """Return read-only rate-limit store health checks."""
+    payload = AdminHttpRateLimitInspectionService(db, settings).build_rate_limit_health(
+        actor=current_user,
+        max_bucket_count=max_bucket_count,
+        max_stale_hit_count=max_stale_hit_count,
         request_path=str(request.url.path),
         request_method=request.method,
         client_ip=_client_ip(request),
