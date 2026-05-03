@@ -7,6 +7,7 @@
 - 登录页：输入服务端地址和管理员访问令牌。
 - 概览页：读取 `/api/v1/admin/dashboard`。
 - 巡检页：读取认证、数据库、聊天、联系人、群组、朋友圈、实时连接、通话、HTTP、限流、E2EE、文件存储等只读健康检查接口。
+- 审计页：读取 `/api/v1/admin/audit-logs` 和 `/api/v1/admin/audit-logs/{log_id}`，用于查看管理员操作记录与脱敏详情。
 - 用户页：读取 `/api/v1/admin/users`。
 - 数据库页：读取 `/api/v1/admin/database/status`。
 - 日志页：读取 `/api/v1/admin/logs/files`。

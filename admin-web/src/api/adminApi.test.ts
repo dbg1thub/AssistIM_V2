@@ -46,6 +46,45 @@ describe("AdminApiClient", () => {
     );
   });
 
+  it("builds query strings for audit log filters and loads detail", async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(JSON.stringify({ code: 0, message: "success", data: { items: [] } }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" }
+      })
+    );
+    const client = new AdminApiClient({
+      baseUrl: "http://localhost:8000",
+      token: "token-value",
+      fetcher: fetchMock
+    });
+
+    await client.listAuditLogs({
+      actor_username: "admin",
+      action: "admin.user.disable",
+      target_type: "user",
+      target_id: "user-1",
+      success: true,
+      created_from: "2026-05-01T00:00:00+00:00",
+      created_to: "2026-05-03T00:00:00+00:00",
+      page: 2,
+      size: 50
+    });
+    await client.getAuditLog("audit-1");
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://localhost:8000/api/v1/admin/audit-logs?actor_username=admin&action=admin.user.disable&target_type=user&target_id=user-1&success=true&created_from=2026-05-01T00%3A00%3A00%2B00%3A00&created_to=2026-05-03T00%3A00%3A00%2B00%3A00&page=2&size=50",
+      {
+        headers: { Authorization: "Bearer token-value" },
+        method: "GET"
+      }
+    );
+    expect(fetchMock).toHaveBeenCalledWith("http://localhost:8000/api/v1/admin/audit-logs/audit-1", {
+      headers: { Authorization: "Bearer token-value" },
+      method: "GET"
+    });
+  });
+
   it("requests configured admin health endpoints", async () => {
     const fetchMock = vi.fn(async () =>
       new Response(JSON.stringify({ code: 0, message: "success", data: { status: "ok" } }), {

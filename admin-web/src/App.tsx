@@ -2,6 +2,7 @@ import {
   Activity,
   AlertCircle,
   CheckCircle2,
+  ClipboardList,
   Database,
   FileText,
   LayoutDashboard,
@@ -20,11 +21,12 @@ import {
   AdminHealthRequestKey,
   ApiError,
   Fetcher,
+  ListAuditLogsParams,
   ListUsersParams
 } from "./api/adminApi";
 import "./styles.css";
 
-type PageKey = "overview" | "health" | "users" | "database" | "logs";
+type PageKey = "overview" | "health" | "audit" | "users" | "database" | "logs";
 type HealthStatus = "ok" | "warning" | "error" | "unknown";
 
 interface AppProps {
@@ -87,6 +89,39 @@ interface HealthModuleReport {
   checks: Record<string, unknown>;
 }
 
+interface AuditLogItem {
+  [key: string]: unknown;
+  id: string;
+  actor_username?: string;
+  action?: string;
+  target_type?: string;
+  target_id?: string;
+  request_path?: string;
+  request_method?: string;
+  client_ip?: string;
+  success?: boolean;
+  error_code?: string;
+  detail?: unknown;
+  created_at?: string;
+}
+
+interface AuditLogListPayload {
+  total: number;
+  page: number;
+  size: number;
+  items: AuditLogItem[];
+}
+
+interface AuditFilters {
+  actor_username: string;
+  action: string;
+  target_type: string;
+  target_id: string;
+  success: "" | "true" | "false";
+  created_from: string;
+  created_to: string;
+}
+
 interface SessionState {
   baseUrl: string;
   token: string;
@@ -95,10 +130,21 @@ interface SessionState {
 const navItems: Array<{ key: PageKey; label: string; icon: ReactNode }> = [
   { key: "overview", label: "概览", icon: <LayoutDashboard size={18} /> },
   { key: "health", label: "巡检", icon: <Activity size={18} /> },
+  { key: "audit", label: "审计", icon: <ClipboardList size={18} /> },
   { key: "users", label: "用户", icon: <Users size={18} /> },
   { key: "database", label: "数据库", icon: <Database size={18} /> },
   { key: "logs", label: "日志", icon: <FileText size={18} /> }
 ];
+
+const defaultAuditFilters: AuditFilters = {
+  actor_username: "",
+  action: "",
+  target_type: "",
+  target_id: "",
+  success: "",
+  created_from: "",
+  created_to: ""
+};
 
 const healthModuleDefinitions: Array<{
   key: string;
@@ -133,6 +179,10 @@ export default function App({ fetcher }: AppProps) {
   const [healthReports, setHealthReports] = useState<HealthModuleReport[] | null>(null);
   const [healthRefreshedAt, setHealthRefreshedAt] = useState("");
   const [expandedHealthModules, setExpandedHealthModules] = useState<Record<string, boolean>>({});
+  const [auditLogs, setAuditLogs] = useState<AuditLogListPayload | null>(null);
+  const [auditFilters, setAuditFilters] = useState<AuditFilters>(defaultAuditFilters);
+  const [selectedAuditLog, setSelectedAuditLog] = useState<AuditLogItem | null>(null);
+  const [auditDetailLoading, setAuditDetailLoading] = useState(false);
   const [keyword, setKeyword] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -172,6 +222,7 @@ export default function App({ fetcher }: AppProps) {
     const shouldLoad =
       (page === "overview" && !dashboard) ||
       (page === "health" && !healthReports) ||
+      (page === "audit" && !auditLogs) ||
       (page === "users" && !users) ||
       (page === "database" && !databaseStatus) ||
       (page === "logs" && !logFiles);
@@ -186,6 +237,9 @@ export default function App({ fetcher }: AppProps) {
       if (page === "health" && !healthReports) {
         setHealthReports(await loadHealthReports(client));
         setHealthRefreshedAt(new Date().toLocaleString());
+      }
+      if (page === "audit" && !auditLogs) {
+        setAuditLogs(await loadAuditLogs(client, auditFilters));
       }
       if (page === "users" && !users) {
         setUsers(await client.listUsers<UserListPayload>({ page: 1, size: 20 }));
@@ -217,6 +271,10 @@ export default function App({ fetcher }: AppProps) {
         setHealthReports(await loadHealthReports(client));
         setHealthRefreshedAt(new Date().toLocaleString());
       }
+      if (activePage === "audit") {
+        setAuditLogs(await loadAuditLogs(client, auditFilters));
+        setSelectedAuditLog(null);
+      }
       if (activePage === "users") {
         const params: ListUsersParams = { page: 1, size: 20 };
         if (keyword.trim()) {
@@ -234,6 +292,37 @@ export default function App({ fetcher }: AppProps) {
       setError(readableError(currentError));
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function searchAuditLogs() {
+    if (!client) {
+      return;
+    }
+    setLoading(true);
+    setError("");
+    try {
+      setAuditLogs(await loadAuditLogs(client, auditFilters));
+      setSelectedAuditLog(null);
+    } catch (currentError) {
+      setError(readableError(currentError));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function openAuditLogDetail(logId: string) {
+    if (!client) {
+      return;
+    }
+    setAuditDetailLoading(true);
+    setError("");
+    try {
+      setSelectedAuditLog(await client.getAuditLog<AuditLogItem>(logId));
+    } catch (currentError) {
+      setError(readableError(currentError));
+    } finally {
+      setAuditDetailLoading(false);
     }
   }
 
@@ -328,6 +417,17 @@ export default function App({ fetcher }: AppProps) {
             toggleExpanded={(key) =>
               setExpandedHealthModules((current) => ({ ...current, [key]: !current[key] }))
             }
+          />
+        ) : null}
+        {activePage === "audit" ? (
+          <AuditPage
+            payload={auditLogs}
+            filters={auditFilters}
+            setFilter={(key, value) => setAuditFilters((current) => ({ ...current, [key]: value }))}
+            search={() => void searchAuditLogs()}
+            selectedLog={selectedAuditLog}
+            detailLoading={auditDetailLoading}
+            openDetail={(logId) => void openAuditLogDetail(logId)}
           />
         ) : null}
         {activePage === "users" ? (
@@ -458,6 +558,171 @@ function HealthPage({
         })}
       </div>
     </section>
+  );
+}
+
+function AuditPage({
+  payload,
+  filters,
+  setFilter,
+  search,
+  selectedLog,
+  detailLoading,
+  openDetail
+}: {
+  payload: AuditLogListPayload | null;
+  filters: AuditFilters;
+  setFilter: (key: keyof AuditFilters, value: string) => void;
+  search: () => void;
+  selectedLog: AuditLogItem | null;
+  detailLoading: boolean;
+  openDetail: (logId: string) => void;
+}) {
+  const logs = payload?.items ?? [];
+
+  function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    search();
+  }
+
+  return (
+    <section className="page-section">
+      <PageTitle title="审计" subtitle={`共 ${payload?.total ?? 0} 条记录`} />
+      <form className="filter-panel" onSubmit={submit}>
+        <label>
+          <span>操作人</span>
+          <input
+            value={filters.actor_username}
+            onChange={(event) => setFilter("actor_username", event.target.value)}
+            placeholder="admin"
+          />
+        </label>
+        <label>
+          <span>动作</span>
+          <input
+            value={filters.action}
+            onChange={(event) => setFilter("action", event.target.value)}
+            placeholder="admin.user.disable"
+          />
+        </label>
+        <label>
+          <span>目标类型</span>
+          <input
+            value={filters.target_type}
+            onChange={(event) => setFilter("target_type", event.target.value)}
+            placeholder="user"
+          />
+        </label>
+        <label>
+          <span>目标 ID</span>
+          <input
+            value={filters.target_id}
+            onChange={(event) => setFilter("target_id", event.target.value)}
+            placeholder="user id"
+          />
+        </label>
+        <label>
+          <span>结果</span>
+          <select value={filters.success} onChange={(event) => setFilter("success", event.target.value)}>
+            <option value="">全部</option>
+            <option value="true">成功</option>
+            <option value="false">失败</option>
+          </select>
+        </label>
+        <label>
+          <span>开始时间</span>
+          <input
+            value={filters.created_from}
+            onChange={(event) => setFilter("created_from", event.target.value)}
+            placeholder="2026-05-01T00:00:00+00:00"
+          />
+        </label>
+        <label>
+          <span>结束时间</span>
+          <input
+            value={filters.created_to}
+            onChange={(event) => setFilter("created_to", event.target.value)}
+            placeholder="2026-05-03T00:00:00+00:00"
+          />
+        </label>
+        <button className="secondary-button" type="submit">
+          <Search size={17} />
+          筛选
+        </button>
+      </form>
+      <div className="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>时间</th>
+              <th>操作人</th>
+              <th>动作</th>
+              <th>目标</th>
+              <th>结果</th>
+              <th>路径</th>
+              <th>客户端 IP</th>
+              <th>详情</th>
+            </tr>
+          </thead>
+          <tbody>
+            {logs.map((log) => (
+              <tr key={log.id}>
+                <td>{String(log.created_at ?? "")}</td>
+                <td>{String(log.actor_username ?? "")}</td>
+                <td>{String(log.action ?? "")}</td>
+                <td>{auditTarget(log)}</td>
+                <td>{log.success ? "成功" : "失败"}</td>
+                <td>{String(log.request_path ?? "")}</td>
+                <td>{String(log.client_ip ?? "")}</td>
+                <td>
+                  <button
+                    className="table-action-button"
+                    type="button"
+                    onClick={() => openDetail(log.id)}
+                    aria-label="查看审计详情"
+                  >
+                    查看
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {detailLoading ? <p className="empty-text">正在读取详情...</p> : null}
+      {selectedLog ? <AuditDetailPanel log={selectedLog} /> : null}
+    </section>
+  );
+}
+
+function AuditDetailPanel({ log }: { log: AuditLogItem }) {
+  return (
+    <article className="detail-panel">
+      <div className="detail-header">
+        <div>
+          <h2>{String(log.action ?? "")}</h2>
+          <p>{String(log.created_at ?? "")}</p>
+        </div>
+        <span className={`status-badge ${log.success ? "ok" : "error"}`}>{log.success ? "成功" : "失败"}</span>
+      </div>
+      <div className="info-grid">
+        <InfoBlock title="请求" rows={[
+          ["请求方法", log.request_method],
+          ["请求路径", log.request_path],
+          ["客户端 IP", log.client_ip]
+        ]} />
+        <InfoBlock title="目标" rows={[
+          ["操作人", log.actor_username],
+          ["目标类型", log.target_type],
+          ["目标 ID", log.target_id],
+          ["错误码", log.error_code]
+        ]} />
+      </div>
+      <div className="json-block">
+        <span>detail</span>
+        <pre>{JSON.stringify(log.detail ?? {}, null, 2)}</pre>
+      </div>
+    </article>
   );
 }
 
@@ -628,6 +893,23 @@ function readableError(error: unknown): string {
   return "请求失败";
 }
 
+function loadAuditLogs(client: AdminApiClient, filters: AuditFilters): Promise<AuditLogListPayload> {
+  return client.listAuditLogs<AuditLogListPayload>(auditParams(filters));
+}
+
+function auditParams(filters: AuditFilters): ListAuditLogsParams {
+  const params: ListAuditLogsParams = { page: 1, size: 20 };
+  for (const key of ["actor_username", "action", "target_type", "target_id", "created_from", "created_to"] as const) {
+    if (filters[key].trim()) {
+      params[key] = filters[key].trim();
+    }
+  }
+  if (filters.success) {
+    params.success = filters.success === "true";
+  }
+  return params;
+}
+
 async function loadHealthReports(client: AdminApiClient): Promise<HealthModuleReport[]> {
   return Promise.all(
     healthModuleDefinitions.map(async (definition) => {
@@ -753,6 +1035,15 @@ function displayValue(value: unknown): string {
     return "-";
   }
   return String(value);
+}
+
+function auditTarget(log: AuditLogItem): string {
+  const targetType = String(log.target_type ?? "");
+  const targetId = String(log.target_id ?? "");
+  if (!targetType && !targetId) {
+    return "-";
+  }
+  return [targetType, targetId].filter(Boolean).join(": ");
 }
 
 function compactValue(value: unknown): string {

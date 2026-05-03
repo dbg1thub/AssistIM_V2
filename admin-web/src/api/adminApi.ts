@@ -14,6 +14,18 @@ export interface ListUsersParams extends Record<string, unknown> {
   size?: number;
 }
 
+export interface ListAuditLogsParams extends Record<string, unknown> {
+  actor_username?: string;
+  action?: string;
+  target_type?: string;
+  target_id?: string;
+  success?: boolean | "";
+  created_from?: string;
+  created_to?: string;
+  page?: number;
+  size?: number;
+}
+
 export const ADMIN_HEALTH_REQUESTS = [
   { key: "auth", path: "/api/v1/admin/auth/health" },
   { key: "database", path: "/api/v1/admin/database/health" },
@@ -68,6 +80,14 @@ export class AdminApiClient {
 
   listUsers<T = unknown>(params: ListUsersParams = {}): Promise<T> {
     return this.get<T>("/api/v1/admin/users", params);
+  }
+
+  listAuditLogs<T = unknown>(params: ListAuditLogsParams = {}): Promise<T> {
+    return this.get<T>("/api/v1/admin/audit-logs", params);
+  }
+
+  getAuditLog<T = unknown>(logId: string): Promise<T> {
+    return this.get<T>(`/api/v1/admin/audit-logs/${encodeURIComponent(logId)}`);
   }
 
   getDatabaseStatus<T = unknown>(): Promise<T> {

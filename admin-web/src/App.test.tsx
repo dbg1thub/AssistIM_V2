@@ -39,6 +39,45 @@ function mockFetch() {
         ]
       });
     }
+    if (url.includes("/api/v1/admin/audit-logs/audit-1")) {
+      return jsonResponse({
+        id: "audit-1",
+        actor_username: "admin",
+        action: "admin.user.disable",
+        target_type: "user",
+        target_id: "user-1",
+        request_method: "POST",
+        request_path: "/api/v1/admin/users/user-1/disable",
+        client_ip: "127.0.0.1",
+        success: true,
+        error_code: "",
+        detail: { reason: "manual", token: "[redacted]" },
+        created_at: "2026-05-03T10:00:00+00:00"
+      });
+    }
+    if (url.includes("/api/v1/admin/audit-logs")) {
+      return jsonResponse({
+        total: 1,
+        page: 1,
+        size: 20,
+        items: [
+          {
+            id: "audit-1",
+            actor_username: "admin",
+            action: "admin.user.disable",
+            target_type: "user",
+            target_id: "user-1",
+            request_method: "POST",
+            request_path: "/api/v1/admin/users/user-1/disable",
+            client_ip: "127.0.0.1",
+            success: true,
+            error_code: "",
+            detail: { reason: "manual" },
+            created_at: "2026-05-03T10:00:00+00:00"
+          }
+        ]
+      });
+    }
     if (url.endsWith("/api/v1/admin/database/status")) {
       return jsonResponse({
         status: "ok",
@@ -195,6 +234,44 @@ describe("Admin web shell", () => {
     const requestedUrls = fetchMock.mock.calls.map(([input]) => String(input));
     expect(requestedUrls).toContain("http://localhost:8000/api/v1/admin/auth/health");
     expect(requestedUrls).toContain("http://localhost:8000/api/v1/admin/files/storage/issues");
+  });
+
+  it("loads audit logs with filters and expands audit detail", async () => {
+    const fetchMock = mockFetch();
+    render(<App fetcher={fetchMock} />);
+
+    fireEvent.change(screen.getByLabelText("服务端地址"), {
+      target: { value: "http://localhost:8000" }
+    });
+    fireEvent.change(screen.getByLabelText("访问令牌"), {
+      target: { value: "admin-token" }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "连接" }));
+    await screen.findByRole("heading", { name: "概览" });
+
+    fireEvent.click(screen.getByRole("button", { name: "审计" }));
+    expect(await screen.findByRole("heading", { name: "审计" })).toBeInTheDocument();
+    expect(await screen.findByText("admin.user.disable")).toBeInTheDocument();
+    expect(screen.getAllByText("成功").length).toBeGreaterThan(0);
+
+    fireEvent.change(screen.getByLabelText("操作人"), {
+      target: { value: "admin" }
+    });
+    fireEvent.change(screen.getByLabelText("动作"), {
+      target: { value: "admin.user.disable" }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "筛选" }));
+
+    await waitFor(() => {
+      const requestedUrls = fetchMock.mock.calls.map(([input]) => String(input));
+      expect(requestedUrls.some((url) => url.includes("actor_username=admin"))).toBe(true);
+      expect(requestedUrls.some((url) => url.includes("action=admin.user.disable"))).toBe(true);
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "查看审计详情" }));
+    expect(await screen.findByText("请求路径")).toBeInTheDocument();
+    expect(screen.getByText("/api/v1/admin/users/user-1/disable")).toBeInTheDocument();
+    expect(screen.getByText(/redacted/)).toBeInTheDocument();
   });
 
   it("shows a readable error when the admin API rejects the token", async () => {
