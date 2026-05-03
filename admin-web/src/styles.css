@@ -267,7 +267,8 @@ p {
 
 .metric-card,
 .info-block,
-.table-wrap {
+.table-wrap,
+.health-card {
   background: #ffffff;
   border: 1px solid #dce5e7;
   border-radius: 8px;
@@ -348,6 +349,150 @@ p {
   overflow: auto;
 }
 
+.health-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.health-card {
+  display: grid;
+  gap: 14px;
+  min-width: 0;
+  padding: 16px;
+}
+
+.health-card-header {
+  align-items: flex-start;
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.health-card-header h2 {
+  font-size: 16px;
+  margin-bottom: 8px;
+}
+
+.health-card-header strong {
+  color: #243940;
+  font-size: 30px;
+  line-height: 1;
+}
+
+.status-badge {
+  border-radius: 999px;
+  display: inline-flex;
+  font-size: 12px;
+  font-weight: 700;
+  min-height: 24px;
+  padding: 4px 9px;
+}
+
+.status-badge.ok {
+  background: #e8f6ef;
+  color: #147a51;
+}
+
+.status-badge.warning {
+  background: #fff4e6;
+  color: #a94912;
+}
+
+.status-badge.error {
+  background: #fff1ee;
+  color: #9a331f;
+}
+
+.status-badge.unknown {
+  background: #edf2f4;
+  color: #586a70;
+}
+
+.health-checks {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.health-check {
+  background: #f7fafb;
+  border: 1px solid #edf2f3;
+  border-radius: 6px;
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  padding: 9px 10px;
+}
+
+.health-check span,
+.empty-text {
+  color: #647278;
+  font-size: 12px;
+}
+
+.health-check strong {
+  color: #1c2930;
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.link-button {
+  background: transparent;
+  border: 0;
+  color: #0c5d5d;
+  font-weight: 700;
+  justify-self: flex-start;
+  padding: 0;
+}
+
+.issue-list {
+  border-top: 1px solid #eef2f3;
+  display: grid;
+  gap: 10px;
+  padding-top: 12px;
+}
+
+.issue-row {
+  align-items: flex-start;
+  display: grid;
+  gap: 9px;
+  grid-template-columns: 10px minmax(0, 1fr);
+}
+
+.issue-row strong {
+  font-size: 13px;
+}
+
+.issue-row p {
+  color: #647278;
+  font-size: 12px;
+  line-height: 1.5;
+  margin-top: 3px;
+  overflow-wrap: anywhere;
+}
+
+.severity-dot {
+  border-radius: 999px;
+  height: 8px;
+  margin-top: 6px;
+  width: 8px;
+}
+
+.severity-dot.error {
+  background: #d33f2f;
+}
+
+.severity-dot.warning {
+  background: #d87a1d;
+}
+
+.severity-dot.info {
+  background: #2875c7;
+}
+
 table {
   border-collapse: collapse;
   min-width: 640px;
@@ -398,7 +543,7 @@ td {
   }
 
   .sidebar nav {
-    grid-template-columns: repeat(4, minmax(0, 1fr));
+    grid-template-columns: repeat(5, minmax(0, 1fr));
   }
 
   .nav-button {
@@ -416,7 +561,9 @@ td {
 
   .metric-grid,
   .compact-grid,
-  .info-grid {
+  .info-grid,
+  .health-grid,
+  .health-checks {
     grid-template-columns: 1fr;
   }
 }

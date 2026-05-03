@@ -14,10 +14,18 @@ import {
 } from "lucide-react";
 import { FormEvent, ReactNode, useMemo, useState } from "react";
 
-import { AdminApiClient, ApiError, Fetcher, ListUsersParams } from "./api/adminApi";
+import {
+  ADMIN_HEALTH_REQUESTS,
+  AdminApiClient,
+  AdminHealthRequestKey,
+  ApiError,
+  Fetcher,
+  ListUsersParams
+} from "./api/adminApi";
 import "./styles.css";
 
-type PageKey = "overview" | "users" | "database" | "logs";
+type PageKey = "overview" | "health" | "users" | "database" | "logs";
+type HealthStatus = "ok" | "warning" | "error" | "unknown";
 
 interface AppProps {
   fetcher?: Fetcher;
@@ -59,6 +67,26 @@ interface LogFilesPayload {
   items?: Array<Record<string, unknown>>;
 }
 
+interface HealthModulePayload {
+  status?: string;
+  issue_count?: number;
+  issues?: unknown;
+  checks?: Record<string, unknown>;
+  total?: number;
+  items?: Array<Record<string, unknown>>;
+  database?: Record<string, unknown>;
+  disk?: Record<string, unknown>;
+}
+
+interface HealthModuleReport {
+  key: string;
+  label: string;
+  status: HealthStatus;
+  issueCount: number;
+  issues: Array<Record<string, unknown>>;
+  checks: Record<string, unknown>;
+}
+
 interface SessionState {
   baseUrl: string;
   token: string;
@@ -66,10 +94,32 @@ interface SessionState {
 
 const navItems: Array<{ key: PageKey; label: string; icon: ReactNode }> = [
   { key: "overview", label: "概览", icon: <LayoutDashboard size={18} /> },
+  { key: "health", label: "巡检", icon: <Activity size={18} /> },
   { key: "users", label: "用户", icon: <Users size={18} /> },
   { key: "database", label: "数据库", icon: <Database size={18} /> },
   { key: "logs", label: "日志", icon: <FileText size={18} /> }
 ];
+
+const healthModuleDefinitions: Array<{
+  key: string;
+  label: string;
+  requests: AdminHealthRequestKey[];
+}> = [
+  { key: "auth", label: "认证", requests: ["auth"] },
+  { key: "database", label: "数据库", requests: ["database"] },
+  { key: "chat", label: "聊天", requests: ["chat"] },
+  { key: "contacts", label: "联系人", requests: ["contacts"] },
+  { key: "groups", label: "群组", requests: ["groups"] },
+  { key: "moments", label: "朋友圈", requests: ["moments"] },
+  { key: "realtime", label: "实时连接", requests: ["realtime"] },
+  { key: "calls", label: "通话", requests: ["calls"] },
+  { key: "http", label: "HTTP", requests: ["http"] },
+  { key: "rateLimits", label: "限流", requests: ["rateLimits"] },
+  { key: "e2ee", label: "端到端加密", requests: ["e2ee"] },
+  { key: "fileStorage", label: "文件存储", requests: ["fileStorageStatus", "fileStorageIssues"] }
+];
+
+const healthRequestsByKey = new Map(ADMIN_HEALTH_REQUESTS.map((request) => [request.key, request]));
 
 export default function App({ fetcher }: AppProps) {
   const [session, setSession] = useState<SessionState | null>(null);
@@ -80,6 +130,9 @@ export default function App({ fetcher }: AppProps) {
   const [users, setUsers] = useState<UserListPayload | null>(null);
   const [databaseStatus, setDatabaseStatus] = useState<DatabaseStatusPayload | null>(null);
   const [logFiles, setLogFiles] = useState<LogFilesPayload | null>(null);
+  const [healthReports, setHealthReports] = useState<HealthModuleReport[] | null>(null);
+  const [healthRefreshedAt, setHealthRefreshedAt] = useState("");
+  const [expandedHealthModules, setExpandedHealthModules] = useState<Record<string, boolean>>({});
   const [keyword, setKeyword] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -116,9 +169,23 @@ export default function App({ fetcher }: AppProps) {
     }
     setActivePage(page);
     setError("");
+    const shouldLoad =
+      (page === "overview" && !dashboard) ||
+      (page === "health" && !healthReports) ||
+      (page === "users" && !users) ||
+      (page === "database" && !databaseStatus) ||
+      (page === "logs" && !logFiles);
+    if (!shouldLoad) {
+      return;
+    }
+    setLoading(true);
     try {
       if (page === "overview" && !dashboard) {
         setDashboard(await client.getDashboard<DashboardPayload>());
+      }
+      if (page === "health" && !healthReports) {
+        setHealthReports(await loadHealthReports(client));
+        setHealthRefreshedAt(new Date().toLocaleString());
       }
       if (page === "users" && !users) {
         setUsers(await client.listUsers<UserListPayload>({ page: 1, size: 20 }));
@@ -131,6 +198,8 @@ export default function App({ fetcher }: AppProps) {
       }
     } catch (currentError) {
       setError(readableError(currentError));
+    } finally {
+      setLoading(false);
     }
   }
 
@@ -143,6 +212,10 @@ export default function App({ fetcher }: AppProps) {
     try {
       if (activePage === "overview") {
         setDashboard(await client.getDashboard<DashboardPayload>());
+      }
+      if (activePage === "health") {
+        setHealthReports(await loadHealthReports(client));
+        setHealthRefreshedAt(new Date().toLocaleString());
       }
       if (activePage === "users") {
         const params: ListUsersParams = { page: 1, size: 20 };
@@ -247,6 +320,16 @@ export default function App({ fetcher }: AppProps) {
         </header>
         {error ? <ErrorBanner message={error} /> : null}
         {activePage === "overview" ? <OverviewPage dashboard={dashboard} /> : null}
+        {activePage === "health" ? (
+          <HealthPage
+            reports={healthReports}
+            refreshedAt={healthRefreshedAt}
+            expanded={expandedHealthModules}
+            toggleExpanded={(key) =>
+              setExpandedHealthModules((current) => ({ ...current, [key]: !current[key] }))
+            }
+          />
+        ) : null}
         {activePage === "users" ? (
           <UsersPage
             payload={users}
@@ -296,6 +379,83 @@ function OverviewPage({ dashboard }: { dashboard: DashboardPayload | null }) {
           ["连接数", realtime.bound_connections],
           ["请求数", http.total_requests]
         ]} />
+      </div>
+    </section>
+  );
+}
+
+function HealthPage({
+  reports,
+  refreshedAt,
+  expanded,
+  toggleExpanded
+}: {
+  reports: HealthModuleReport[] | null;
+  refreshedAt: string;
+  expanded: Record<string, boolean>;
+  toggleExpanded: (key: string) => void;
+}) {
+  const items = reports ?? [];
+  const issueTotal = items.reduce((total, item) => total + item.issueCount, 0);
+  const warningModules = items.filter((item) => item.status === "warning" || item.status === "error").length;
+
+  return (
+    <section className="page-section">
+      <PageTitle title="巡检" subtitle={refreshedAt ? `最近刷新 ${refreshedAt}` : "读取后端只读巡检接口"} />
+      <div className="metric-grid compact-grid">
+        <MetricCard label="模块" value={items.length || "-"} />
+        <MetricCard label="异常模块" value={warningModules} tone={warningModules > 0 ? "warn" : "ok"} />
+        <MetricCard label="问题总数" value={issueTotal} tone={issueTotal > 0 ? "warn" : "ok"} />
+      </div>
+      <div className="health-grid">
+        {items.map((report) => {
+          const isExpanded = Boolean(expanded[report.key]);
+          return (
+            <article className="health-card" key={report.key}>
+              <div className="health-card-header">
+                <div>
+                  <h2>{report.label}</h2>
+                  <span className={`status-badge ${report.status}`}>{healthStatusLabel(report.status)}</span>
+                </div>
+                <strong>{report.issueCount}</strong>
+              </div>
+              <div className="health-checks">
+                {Object.entries(report.checks).slice(0, 6).map(([key, value]) => (
+                  <div className="health-check" key={key}>
+                    <span>{key}</span>
+                    <strong>{compactValue(value)}</strong>
+                  </div>
+                ))}
+              </div>
+              <button
+                className="link-button"
+                type="button"
+                onClick={() => toggleExpanded(report.key)}
+                aria-expanded={isExpanded}
+                aria-label={`${isExpanded ? "收起" : "展开"}${report.label}详情`}
+              >
+                {isExpanded ? "收起详情" : "展开详情"}
+              </button>
+              {isExpanded ? (
+                <div className="issue-list">
+                  {report.issues.length > 0 ? (
+                    report.issues.map((issue, index) => (
+                      <div className="issue-row" key={`${report.key}-${index}`}>
+                        <span className={`severity-dot ${String(issue.severity ?? "warning")}`} />
+                        <div>
+                          <strong>{String(issue.issue_type ?? issue.code ?? "issue")}</strong>
+                          <p>{issueSummary(issue)}</p>
+                        </div>
+                      </div>
+                    ))
+                  ) : (
+                    <p className="empty-text">暂无问题</p>
+                  )}
+                </div>
+              ) : null}
+            </article>
+          );
+        })}
       </div>
     </section>
   );
@@ -468,11 +628,164 @@ function readableError(error: unknown): string {
   return "请求失败";
 }
 
+async function loadHealthReports(client: AdminApiClient): Promise<HealthModuleReport[]> {
+  return Promise.all(
+    healthModuleDefinitions.map(async (definition) => {
+      try {
+        const payloads = await Promise.all(
+          definition.requests.map(async (key) => {
+            const request = healthRequest(key);
+            return [key, await client.getHealthCheck<HealthModulePayload>(request.path)] as const;
+          })
+        );
+        return buildHealthReport(definition, payloads);
+      } catch (error) {
+        return {
+          key: definition.key,
+          label: definition.label,
+          status: "error",
+          issueCount: 1,
+          checks: { request: "failed" },
+          issues: [
+            {
+              issue_type: "health_request_failed",
+              severity: "error",
+              message: readableError(error)
+            }
+          ]
+        };
+      }
+    })
+  );
+}
+
+function healthRequest(key: AdminHealthRequestKey) {
+  const request = healthRequestsByKey.get(key);
+  if (!request) {
+    throw new Error(`Unknown health request: ${key}`);
+  }
+  return request;
+}
+
+function buildHealthReport(
+  definition: (typeof healthModuleDefinitions)[number],
+  payloads: Array<readonly [AdminHealthRequestKey, HealthModulePayload]>
+): HealthModuleReport {
+  const primaryPayload = payloads[0]?.[1] ?? {};
+  const issues = payloads.flatMap(([, payload]) => extractHealthIssues(payload));
+  const issueCount = Math.max(
+    issues.length,
+    ...payloads.flatMap(([, payload]) => [
+      numberValue(payload.issue_count),
+      Array.isArray(payload.items) ? numberValue(payload.total) : 0,
+      objectValue(payload.issues) ? numberValue(objectValue(payload.issues)?.total) : 0
+    ])
+  );
+  return {
+    key: definition.key,
+    label: definition.label,
+    status: normalizeHealthStatus(primaryPayload.status, issueCount),
+    issueCount,
+    issues,
+    checks: collectHealthChecks(payloads)
+  };
+}
+
+function extractHealthIssues(payload: HealthModulePayload): Array<Record<string, unknown>> {
+  if (Array.isArray(payload.issues)) {
+    return payload.issues.filter(isRecord);
+  }
+  if (Array.isArray(payload.items)) {
+    return payload.items.filter(isRecord);
+  }
+  return [];
+}
+
+function collectHealthChecks(
+  payloads: Array<readonly [AdminHealthRequestKey, HealthModulePayload]>
+): Record<string, unknown> {
+  const checks: Record<string, unknown> = {};
+  for (const [key, payload] of payloads) {
+    if (isRecord(payload.checks)) {
+      Object.assign(checks, payload.checks);
+    }
+    if (key === "fileStorageStatus") {
+      const database = objectValue(payload.database);
+      const disk = objectValue(payload.disk);
+      const issues = objectValue(payload.issues);
+      checks.local_records = database?.local_records;
+      checks.managed_files = disk?.managed_files;
+      checks.storage_issues = issues?.total;
+    }
+    if (key === "fileStorageIssues") {
+      checks.issue_rows = payload.total ?? payload.items?.length ?? 0;
+    }
+  }
+  return Object.fromEntries(Object.entries(checks).filter(([, value]) => value !== undefined));
+}
+
+function normalizeHealthStatus(value: unknown, issueCount: number): HealthStatus {
+  const status = String(value ?? "").toLowerCase();
+  if (status === "ok") {
+    return issueCount > 0 ? "warning" : "ok";
+  }
+  if (status === "warning" || status === "error") {
+    return status;
+  }
+  return issueCount > 0 ? "warning" : "unknown";
+}
+
+function healthStatusLabel(status: HealthStatus): string {
+  if (status === "ok") {
+    return "正常";
+  }
+  if (status === "warning") {
+    return "有问题";
+  }
+  if (status === "error") {
+    return "请求失败";
+  }
+  return "无数据";
+}
+
 function displayValue(value: unknown): string {
   if (value === undefined || value === null || value === "") {
     return "-";
   }
   return String(value);
+}
+
+function compactValue(value: unknown): string {
+  if (value === undefined || value === null || value === "") {
+    return "-";
+  }
+  if (typeof value === "object") {
+    return JSON.stringify(value);
+  }
+  return String(value);
+}
+
+function issueSummary(issue: Record<string, unknown>): string {
+  const entries = Object.entries(issue)
+    .filter(([key]) => !["issue_type", "code", "severity"].includes(key))
+    .slice(0, 6);
+  if (!entries.length) {
+    return "-";
+  }
+  return entries.map(([key, value]) => `${key}: ${compactValue(value)}`).join(" · ");
+}
+
+function numberValue(value: unknown): number {
+  const number = Number(value ?? 0);
+  return Number.isFinite(number) ? number : 0;
+}
+
+function objectValue(value: unknown): Record<string, unknown> | null {
+  return isRecord(value) ? value : null;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
 function readNested(source: Record<string, unknown>, path: string[]): unknown {

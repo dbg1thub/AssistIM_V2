@@ -60,6 +60,48 @@ function mockFetch() {
         ]
       });
     }
+    if (url.endsWith("/api/v1/admin/chat/health")) {
+      return jsonResponse({
+        status: "warning",
+        issue_count: 1,
+        issues: [
+          {
+            issue_type: "message_without_session",
+            severity: "error",
+            session_id: "missing-session"
+          }
+        ],
+        checks: { sessions: 5, messages: 8 }
+      });
+    }
+    if (url.endsWith("/api/v1/admin/files/storage/status")) {
+      return jsonResponse({
+        status: "warning",
+        database: { local_records: 3 },
+        disk: { managed_files: 2 },
+        issues: { total: 1, warnings: 1, errors: 0 }
+      });
+    }
+    if (url.endsWith("/api/v1/admin/files/storage/issues")) {
+      return jsonResponse({
+        total: 1,
+        items: [
+          {
+            issue_type: "orphan_disk_file",
+            severity: "warning",
+            storage_key: "orphan.txt"
+          }
+        ]
+      });
+    }
+    if (url.includes("/api/v1/admin/") && url.endsWith("/health")) {
+      return jsonResponse({
+        status: "ok",
+        issue_count: 0,
+        issues: [],
+        checks: { total: 1 }
+      });
+    }
     return jsonResponse({}, 404, 1001, "not found");
   });
 }
@@ -121,6 +163,38 @@ describe("Admin web shell", () => {
     fireEvent.click(screen.getByRole("button", { name: "日志" }));
     expect(await screen.findByRole("heading", { name: "日志" })).toBeInTheDocument();
     expect(screen.getByText("assistim.log")).toBeInTheDocument();
+  });
+
+  it("loads health inspection modules and expands issue details", async () => {
+    const fetchMock = mockFetch();
+    render(<App fetcher={fetchMock} />);
+
+    fireEvent.change(screen.getByLabelText("服务端地址"), {
+      target: { value: "http://localhost:8000" }
+    });
+    fireEvent.change(screen.getByLabelText("访问令牌"), {
+      target: { value: "admin-token" }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "连接" }));
+    await screen.findByRole("heading", { name: "概览" });
+
+    fireEvent.click(screen.getByRole("button", { name: "巡检" }));
+    expect(await screen.findByRole("heading", { name: "巡检" })).toBeInTheDocument();
+    expect(await screen.findByText("聊天")).toBeInTheDocument();
+    expect(screen.getByText("文件存储")).toBeInTheDocument();
+    expect(screen.getAllByText("有问题").length).toBeGreaterThan(0);
+
+    fireEvent.click(screen.getByRole("button", { name: "展开聊天详情" }));
+    expect(screen.getByText("message_without_session")).toBeInTheDocument();
+    expect(screen.getByText(/missing-session/)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "展开文件存储详情" }));
+    expect(screen.getByText("orphan_disk_file")).toBeInTheDocument();
+    expect(screen.getByText(/orphan.txt/)).toBeInTheDocument();
+
+    const requestedUrls = fetchMock.mock.calls.map(([input]) => String(input));
+    expect(requestedUrls).toContain("http://localhost:8000/api/v1/admin/auth/health");
+    expect(requestedUrls).toContain("http://localhost:8000/api/v1/admin/files/storage/issues");
   });
 
   it("shows a readable error when the admin API rejects the token", async () => {

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { AdminApiClient, ApiError } from "./adminApi";
+import { ADMIN_HEALTH_REQUESTS, AdminApiClient, ApiError } from "./adminApi";
 
 describe("AdminApiClient", () => {
   it("normalizes the base URL, sends bearer token, and unwraps success data", async () => {
@@ -44,6 +44,32 @@ describe("AdminApiClient", () => {
         method: "GET"
       }
     );
+  });
+
+  it("requests configured admin health endpoints", async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(JSON.stringify({ code: 0, message: "success", data: { status: "ok" } }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" }
+      })
+    );
+    const client = new AdminApiClient({
+      baseUrl: "http://localhost:8000",
+      token: "token-value",
+      fetcher: fetchMock
+    });
+
+    await Promise.all(ADMIN_HEALTH_REQUESTS.map((request) => client.getHealthCheck(request.path)));
+
+    expect(fetchMock).toHaveBeenCalledTimes(13);
+    expect(fetchMock).toHaveBeenCalledWith("http://localhost:8000/api/v1/admin/auth/health", {
+      headers: { Authorization: "Bearer token-value" },
+      method: "GET"
+    });
+    expect(fetchMock).toHaveBeenCalledWith("http://localhost:8000/api/v1/admin/files/storage/issues", {
+      headers: { Authorization: "Bearer token-value" },
+      method: "GET"
+    });
   });
 
   it("throws ApiError with server code and message", async () => {

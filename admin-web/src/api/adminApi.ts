@@ -14,6 +14,25 @@ export interface ListUsersParams extends Record<string, unknown> {
   size?: number;
 }
 
+export const ADMIN_HEALTH_REQUESTS = [
+  { key: "auth", path: "/api/v1/admin/auth/health" },
+  { key: "database", path: "/api/v1/admin/database/health" },
+  { key: "chat", path: "/api/v1/admin/chat/health" },
+  { key: "contacts", path: "/api/v1/admin/contacts/health" },
+  { key: "groups", path: "/api/v1/admin/groups/health" },
+  { key: "moments", path: "/api/v1/admin/moments/health" },
+  { key: "realtime", path: "/api/v1/admin/realtime/health" },
+  { key: "calls", path: "/api/v1/admin/calls/health" },
+  { key: "http", path: "/api/v1/admin/http/health" },
+  { key: "rateLimits", path: "/api/v1/admin/rate-limits/health" },
+  { key: "e2ee", path: "/api/v1/admin/e2ee/health" },
+  { key: "fileStorageStatus", path: "/api/v1/admin/files/storage/status" },
+  { key: "fileStorageIssues", path: "/api/v1/admin/files/storage/issues" }
+] as const;
+
+export type AdminHealthRequestKey = (typeof ADMIN_HEALTH_REQUESTS)[number]["key"];
+export type AdminHealthPath = (typeof ADMIN_HEALTH_REQUESTS)[number]["path"];
+
 interface ApiEnvelope<T> {
   code: number;
   message: string;
@@ -57,6 +76,10 @@ export class AdminApiClient {
 
   listLogFiles<T = unknown>(): Promise<T> {
     return this.get<T>("/api/v1/admin/logs/files");
+  }
+
+  getHealthCheck<T = unknown>(path: AdminHealthPath): Promise<T> {
+    return this.get<T>(path);
   }
 
   private async get<T>(path: string, params?: Record<string, unknown>): Promise<T> {
