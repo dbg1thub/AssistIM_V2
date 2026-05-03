@@ -7,6 +7,7 @@ import {
   Database,
   FileText,
   HardDrive,
+  Heart,
   LayoutDashboard,
   Loader2,
   LogOut,
@@ -31,6 +32,9 @@ import {
   ListContactFriendshipsParams,
   ListGroupMembersParams,
   ListGroupsParams,
+  ListMomentCommentsParams,
+  ListMomentLikesParams,
+  ListMomentsParams,
   ListUsersParams,
   PruneDatabaseBackupsParams,
   QueryLogsParams
@@ -44,6 +48,7 @@ type PageKey =
   | "chat"
   | "contacts"
   | "groups"
+  | "moments"
   | "users"
   | "database"
   | "files"
@@ -464,6 +469,75 @@ interface GroupMemberFilters {
   user_id: string;
 }
 
+interface MomentUserSummary extends Record<string, unknown> {
+  id?: string;
+  username?: string;
+  nickname?: string;
+  exists?: boolean;
+  is_disabled?: boolean;
+}
+
+interface MomentItem extends Record<string, unknown> {
+  id: string;
+  user_id?: string;
+  author?: MomentUserSummary;
+  content?: string;
+  comment_count?: number;
+  like_count?: number;
+  created_at?: string;
+  updated_at?: string;
+}
+
+interface MomentCommentItem extends Record<string, unknown> {
+  id: string;
+  moment_id?: string;
+  user_id?: string;
+  user?: MomentUserSummary;
+  content?: string;
+  created_at?: string;
+  updated_at?: string;
+}
+
+interface MomentLikeItem extends Record<string, unknown> {
+  moment_id?: string;
+  user_id?: string;
+  user?: MomentUserSummary;
+  created_at?: string;
+  updated_at?: string;
+}
+
+interface MomentListPayload {
+  total: number;
+  page: number;
+  size: number;
+  items: MomentItem[];
+}
+
+interface MomentCommentListPayload {
+  total: number;
+  page: number;
+  size: number;
+  moment?: Record<string, unknown>;
+  items: MomentCommentItem[];
+}
+
+interface MomentLikeListPayload {
+  total: number;
+  page: number;
+  size: number;
+  moment?: Record<string, unknown>;
+  items: MomentLikeItem[];
+}
+
+interface MomentFilters {
+  keyword: string;
+  user_id: string;
+}
+
+interface MomentUserFilters {
+  user_id: string;
+}
+
 interface SessionState {
   baseUrl: string;
   token: string;
@@ -476,6 +550,7 @@ const navItems: Array<{ key: PageKey; label: string; icon: ReactNode }> = [
   { key: "chat", label: "聊天", icon: <MessageSquare size={18} /> },
   { key: "contacts", label: "联系人", icon: <Users size={18} /> },
   { key: "groups", label: "群组", icon: <Users size={18} /> },
+  { key: "moments", label: "朋友圈", icon: <Heart size={18} /> },
   { key: "users", label: "用户", icon: <Users size={18} /> },
   { key: "database", label: "数据库", icon: <Database size={18} /> },
   { key: "files", label: "文件", icon: <HardDrive size={18} /> },
@@ -540,6 +615,15 @@ const defaultGroupMemberFilters: GroupMemberFilters = {
   user_id: ""
 };
 
+const defaultMomentFilters: MomentFilters = {
+  keyword: "",
+  user_id: ""
+};
+
+const defaultMomentUserFilters: MomentUserFilters = {
+  user_id: ""
+};
+
 const healthModuleDefinitions: Array<{
   key: string;
   label: string;
@@ -601,6 +685,14 @@ export default function App({ fetcher }: AppProps) {
   const [groupMembers, setGroupMembers] = useState<GroupMemberListPayload | null>(null);
   const [groupMemberFilters, setGroupMemberFilters] = useState<GroupMemberFilters>(defaultGroupMemberFilters);
   const [groupDetailLoading, setGroupDetailLoading] = useState(false);
+  const [moments, setMoments] = useState<MomentListPayload | null>(null);
+  const [momentFilters, setMomentFilters] = useState<MomentFilters>(defaultMomentFilters);
+  const [selectedMoment, setSelectedMoment] = useState<MomentItem | null>(null);
+  const [momentComments, setMomentComments] = useState<MomentCommentListPayload | null>(null);
+  const [momentLikes, setMomentLikes] = useState<MomentLikeListPayload | null>(null);
+  const [momentCommentFilters, setMomentCommentFilters] = useState<MomentUserFilters>(defaultMomentUserFilters);
+  const [momentLikeFilters, setMomentLikeFilters] = useState<MomentUserFilters>(defaultMomentUserFilters);
+  const [momentDetailLoading, setMomentDetailLoading] = useState(false);
   const [selectedUser, setSelectedUser] = useState<UserDetailPayload | null>(null);
   const [disableReason, setDisableReason] = useState("");
   const [userOperationLoading, setUserOperationLoading] = useState(false);
@@ -653,6 +745,7 @@ export default function App({ fetcher }: AppProps) {
       (page === "chat" && !chatSessions) ||
       (page === "contacts" && (!contactFriendRequests || !contactFriendships)) ||
       (page === "groups" && !groups) ||
+      (page === "moments" && !moments) ||
       (page === "users" && !users) ||
       (page === "database" && !databaseStatus) ||
       (page === "files" && (!fileStorageStatus || !fileStorageIssues)) ||
@@ -683,6 +776,9 @@ export default function App({ fetcher }: AppProps) {
       }
       if (page === "groups" && !groups) {
         setGroups(await loadGroups(client, groupFilters));
+      }
+      if (page === "moments" && !moments) {
+        setMoments(await loadMoments(client, momentFilters));
       }
       if (page === "users" && !users) {
         setUsers(await loadUsers(client, keyword));
@@ -740,6 +836,12 @@ export default function App({ fetcher }: AppProps) {
         setGroups(await loadGroups(client, groupFilters));
         setSelectedGroup(null);
         setGroupMembers(null);
+      }
+      if (activePage === "moments") {
+        setMoments(await loadMoments(client, momentFilters));
+        setSelectedMoment(null);
+        setMomentComments(null);
+        setMomentLikes(null);
       }
       if (activePage === "users") {
         setUsers(await loadUsers(client, keyword));
@@ -934,6 +1036,76 @@ export default function App({ fetcher }: AppProps) {
       setError(readableError(currentError));
     } finally {
       setGroupDetailLoading(false);
+    }
+  }
+
+  async function searchMoments() {
+    if (!client) {
+      return;
+    }
+    setLoading(true);
+    setError("");
+    try {
+      setMoments(await loadMoments(client, momentFilters));
+      setSelectedMoment(null);
+      setMomentComments(null);
+      setMomentLikes(null);
+    } catch (currentError) {
+      setError(readableError(currentError));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function openMomentDetail(momentId: string) {
+    if (!client) {
+      return;
+    }
+    setMomentDetailLoading(true);
+    setError("");
+    try {
+      const [detail, comments, likes] = await Promise.all([
+        client.getMoment<MomentItem>(momentId),
+        loadMomentComments(client, momentId, momentCommentFilters),
+        loadMomentLikes(client, momentId, momentLikeFilters)
+      ]);
+      setSelectedMoment(detail);
+      setMomentComments(comments);
+      setMomentLikes(likes);
+    } catch (currentError) {
+      setError(readableError(currentError));
+    } finally {
+      setMomentDetailLoading(false);
+    }
+  }
+
+  async function searchMomentComments() {
+    if (!client || !selectedMoment) {
+      return;
+    }
+    setMomentDetailLoading(true);
+    setError("");
+    try {
+      setMomentComments(await loadMomentComments(client, selectedMoment.id, momentCommentFilters));
+    } catch (currentError) {
+      setError(readableError(currentError));
+    } finally {
+      setMomentDetailLoading(false);
+    }
+  }
+
+  async function searchMomentLikes() {
+    if (!client || !selectedMoment) {
+      return;
+    }
+    setMomentDetailLoading(true);
+    setError("");
+    try {
+      setMomentLikes(await loadMomentLikes(client, selectedMoment.id, momentLikeFilters));
+    } catch (currentError) {
+      setError(readableError(currentError));
+    } finally {
+      setMomentDetailLoading(false);
     }
   }
 
@@ -1268,6 +1440,25 @@ export default function App({ fetcher }: AppProps) {
             detailLoading={groupDetailLoading}
             openGroup={(groupId) => void openGroupDetail(groupId)}
             searchMembers={() => void searchGroupMembers()}
+          />
+        ) : null}
+        {activePage === "moments" ? (
+          <MomentsPage
+            payload={moments}
+            filters={momentFilters}
+            setFilter={(key, value) => setMomentFilters((current) => ({ ...current, [key]: value }))}
+            search={() => void searchMoments()}
+            selectedMoment={selectedMoment}
+            comments={momentComments}
+            likes={momentLikes}
+            commentFilters={momentCommentFilters}
+            likeFilters={momentLikeFilters}
+            setCommentFilter={(key, value) => setMomentCommentFilters((current) => ({ ...current, [key]: value }))}
+            setLikeFilter={(key, value) => setMomentLikeFilters((current) => ({ ...current, [key]: value }))}
+            detailLoading={momentDetailLoading}
+            openMoment={(momentId) => void openMomentDetail(momentId)}
+            searchComments={() => void searchMomentComments()}
+            searchLikes={() => void searchMomentLikes()}
           />
         ) : null}
         {activePage === "users" ? (
@@ -2262,6 +2453,289 @@ function GroupDetailPanel({
   );
 }
 
+function MomentsPage({
+  payload,
+  filters,
+  setFilter,
+  search,
+  selectedMoment,
+  comments,
+  likes,
+  commentFilters,
+  likeFilters,
+  setCommentFilter,
+  setLikeFilter,
+  detailLoading,
+  openMoment,
+  searchComments,
+  searchLikes
+}: {
+  payload: MomentListPayload | null;
+  filters: MomentFilters;
+  setFilter: (key: keyof MomentFilters, value: string) => void;
+  search: () => void;
+  selectedMoment: MomentItem | null;
+  comments: MomentCommentListPayload | null;
+  likes: MomentLikeListPayload | null;
+  commentFilters: MomentUserFilters;
+  likeFilters: MomentUserFilters;
+  setCommentFilter: (key: keyof MomentUserFilters, value: string) => void;
+  setLikeFilter: (key: keyof MomentUserFilters, value: string) => void;
+  detailLoading: boolean;
+  openMoment: (momentId: string) => void;
+  searchComments: () => void;
+  searchLikes: () => void;
+}) {
+  const items = payload?.items ?? [];
+
+  function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    search();
+  }
+
+  return (
+    <section className="page-section">
+      <PageTitle title="朋友圈" subtitle={`共 ${payload?.total ?? 0} 条动态`} />
+      <form className="filter-panel" onSubmit={submit}>
+        <label>
+          <span>动态关键词</span>
+          <input
+            value={filters.keyword}
+            onChange={(event) => setFilter("keyword", event.target.value)}
+            placeholder="内容、动态 ID 或发布人 ID"
+          />
+        </label>
+        <label>
+          <span>发布人 ID</span>
+          <input
+            value={filters.user_id}
+            onChange={(event) => setFilter("user_id", event.target.value)}
+            placeholder="user id"
+          />
+        </label>
+        <button className="secondary-button" type="submit">
+          <Search size={17} />
+          筛选动态
+        </button>
+      </form>
+      <div className="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>动态 ID</th>
+              <th>发布人</th>
+              <th>发布人 ID</th>
+              <th>内容</th>
+              <th>评论</th>
+              <th>点赞</th>
+              <th>创建时间</th>
+              <th>更新时间</th>
+              <th>详情</th>
+            </tr>
+          </thead>
+          <tbody>
+            {items.map((moment) => (
+              <tr key={moment.id}>
+                <td>{moment.id}</td>
+                <td>{momentUserName(moment.author, moment.user_id)}</td>
+                <td>{String(moment.user_id ?? moment.author?.id ?? "")}</td>
+                <td className="message-cell">{String(moment.content ?? "")}</td>
+                <td>{displayValue(moment.comment_count)}</td>
+                <td>{displayValue(moment.like_count)}</td>
+                <td>{String(moment.created_at ?? "")}</td>
+                <td>{String(moment.updated_at ?? "")}</td>
+                <td>
+                  <button
+                    className="table-action-button"
+                    type="button"
+                    onClick={() => openMoment(moment.id)}
+                    aria-label="查看动态详情"
+                  >
+                    查看
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {detailLoading ? <p className="empty-text">正在读取动态详情...</p> : null}
+      {selectedMoment ? (
+        <MomentDetailPanel
+          moment={selectedMoment}
+          comments={comments}
+          likes={likes}
+          commentFilters={commentFilters}
+          likeFilters={likeFilters}
+          setCommentFilter={setCommentFilter}
+          setLikeFilter={setLikeFilter}
+          searchComments={searchComments}
+          searchLikes={searchLikes}
+        />
+      ) : null}
+    </section>
+  );
+}
+
+function MomentDetailPanel({
+  moment,
+  comments,
+  likes,
+  commentFilters,
+  likeFilters,
+  setCommentFilter,
+  setLikeFilter,
+  searchComments,
+  searchLikes
+}: {
+  moment: MomentItem;
+  comments: MomentCommentListPayload | null;
+  likes: MomentLikeListPayload | null;
+  commentFilters: MomentUserFilters;
+  likeFilters: MomentUserFilters;
+  setCommentFilter: (key: keyof MomentUserFilters, value: string) => void;
+  setLikeFilter: (key: keyof MomentUserFilters, value: string) => void;
+  searchComments: () => void;
+  searchLikes: () => void;
+}) {
+  const commentItems = comments?.items ?? [];
+  const likeItems = likes?.items ?? [];
+
+  function submitComments(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    searchComments();
+  }
+
+  function submitLikes(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    searchLikes();
+  }
+
+  return (
+    <>
+      <article className="detail-panel">
+      <div className="detail-header">
+        <div>
+          <h2>{moment.id}</h2>
+          <p>{String(moment.created_at ?? "")}</p>
+        </div>
+        <span className="status-badge ok">moment</span>
+      </div>
+      <div className="info-grid">
+        <InfoBlock title="动态" rows={[
+          ["动态 ID", moment.id],
+          ["发布人", momentUserName(moment.author, moment.user_id)],
+          ["发布人 ID", moment.user_id],
+          ["内容", moment.content],
+          ["评论数", moment.comment_count],
+          ["点赞数", moment.like_count],
+          ["创建时间", moment.created_at],
+          ["更新时间", moment.updated_at]
+        ]} />
+        <InfoBlock title="作者" rows={[
+          ["用户名", moment.author?.username],
+          ["昵称", moment.author?.nickname],
+          ["用户存在", boolLabel(moment.author?.exists)],
+          ["账号禁用", boolLabel(moment.author?.is_disabled)]
+        ]} />
+      </div>
+      </article>
+      <article className="detail-panel">
+        <div className="detail-header">
+          <div>
+            <h2>评论列表</h2>
+            <p>{`共 ${comments?.total ?? 0} 条评论`}</p>
+          </div>
+        </div>
+        <form className="filter-panel" onSubmit={submitComments}>
+          <label>
+            <span>评论用户 ID</span>
+            <input
+              value={commentFilters.user_id}
+              onChange={(event) => setCommentFilter("user_id", event.target.value)}
+              placeholder="user id"
+            />
+          </label>
+          <button className="secondary-button" type="submit">
+            <Search size={17} />
+            查询评论
+          </button>
+        </form>
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>评论 ID</th>
+                <th>用户</th>
+                <th>用户 ID</th>
+                <th>内容</th>
+                <th>创建时间</th>
+                <th>更新时间</th>
+              </tr>
+            </thead>
+            <tbody>
+              {commentItems.map((comment) => (
+                <tr key={comment.id}>
+                  <td>{comment.id}</td>
+                  <td>{momentUserName(comment.user, comment.user_id)}</td>
+                  <td>{String(comment.user_id ?? comment.user?.id ?? "")}</td>
+                  <td className="message-cell">{String(comment.content ?? "")}</td>
+                  <td>{String(comment.created_at ?? "")}</td>
+                  <td>{String(comment.updated_at ?? "")}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </article>
+      <article className="detail-panel">
+        <div className="detail-header">
+          <div>
+            <h2>点赞列表</h2>
+            <p>{`共 ${likes?.total ?? 0} 个点赞`}</p>
+          </div>
+        </div>
+        <form className="filter-panel" onSubmit={submitLikes}>
+          <label>
+            <span>点赞用户 ID</span>
+            <input
+              value={likeFilters.user_id}
+              onChange={(event) => setLikeFilter("user_id", event.target.value)}
+              placeholder="user id"
+            />
+          </label>
+          <button className="secondary-button" type="submit">
+            <Search size={17} />
+            查询点赞
+          </button>
+        </form>
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>用户</th>
+                <th>用户 ID</th>
+                <th>创建时间</th>
+                <th>更新时间</th>
+              </tr>
+            </thead>
+            <tbody>
+              {likeItems.map((like) => (
+                <tr key={`${String(like.moment_id ?? moment.id)}-${String(like.user_id ?? "")}`}>
+                  <td>{momentUserName(like.user, like.user_id)}</td>
+                  <td>{String(like.user_id ?? like.user?.id ?? "")}</td>
+                  <td>{String(like.created_at ?? "")}</td>
+                  <td>{String(like.updated_at ?? "")}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </article>
+    </>
+  );
+}
+
 function UsersPage({
   payload,
   keyword,
@@ -3147,6 +3621,40 @@ function loadGroupMembers(
   return client.listGroupMembers<GroupMemberListPayload>(groupId, params);
 }
 
+function loadMoments(client: AdminApiClient, filters: MomentFilters): Promise<MomentListPayload> {
+  const params: ListMomentsParams = { page: 1, size: 20 };
+  for (const key of ["keyword", "user_id"] as const) {
+    if (filters[key].trim()) {
+      params[key] = filters[key].trim();
+    }
+  }
+  return client.listMoments<MomentListPayload>(params);
+}
+
+function loadMomentComments(
+  client: AdminApiClient,
+  momentId: string,
+  filters: MomentUserFilters
+): Promise<MomentCommentListPayload> {
+  const params: ListMomentCommentsParams = { page: 1, size: 20 };
+  if (filters.user_id.trim()) {
+    params.user_id = filters.user_id.trim();
+  }
+  return client.listMomentComments<MomentCommentListPayload>(momentId, params);
+}
+
+function loadMomentLikes(
+  client: AdminApiClient,
+  momentId: string,
+  filters: MomentUserFilters
+): Promise<MomentLikeListPayload> {
+  const params: ListMomentLikesParams = { page: 1, size: 20 };
+  if (filters.user_id.trim()) {
+    params.user_id = filters.user_id.trim();
+  }
+  return client.listMomentLikes<MomentLikeListPayload>(momentId, params);
+}
+
 async function loadFileStorageInspection(client: AdminApiClient): Promise<{
   status: FileStorageStatusPayload;
   issues: FileStorageIssuesPayload;
@@ -3377,6 +3885,10 @@ function contactUserName(user?: ContactUserSummary, fallbackId?: string): string
 }
 
 function groupUserName(user?: GroupUserSummary, fallbackId?: string): string {
+  return String(user?.username || user?.nickname || user?.id || fallbackId || "");
+}
+
+function momentUserName(user?: MomentUserSummary, fallbackId?: string): string {
   return String(user?.username || user?.nickname || user?.id || fallbackId || "");
 }
 

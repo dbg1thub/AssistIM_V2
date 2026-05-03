@@ -344,6 +344,53 @@ function mockFetch() {
         items: [groupSummary()]
       });
     }
+    if (url.includes("/api/v1/admin/moments/moment-1/comments")) {
+      return jsonResponse({
+        total: 1,
+        page: 1,
+        size: 20,
+        moment: { id: "moment-1", user_id: "user-3", content: "今天完成语音消息测试" },
+        items: [
+          {
+            id: "comment-1",
+            moment_id: "moment-1",
+            user_id: "user-1",
+            user: userSummary("user-1", "test1", "测试一"),
+            content: "收到",
+            created_at: "2026-05-03T10:05:00+00:00",
+            updated_at: "2026-05-03T10:05:00+00:00"
+          }
+        ]
+      });
+    }
+    if (url.includes("/api/v1/admin/moments/moment-1/likes")) {
+      return jsonResponse({
+        total: 1,
+        page: 1,
+        size: 20,
+        moment: { id: "moment-1", user_id: "user-3", content: "今天完成语音消息测试" },
+        items: [
+          {
+            moment_id: "moment-1",
+            user_id: "user-1",
+            user: userSummary("user-1", "test1", "测试一"),
+            created_at: "2026-05-03T10:06:00+00:00",
+            updated_at: "2026-05-03T10:06:00+00:00"
+          }
+        ]
+      });
+    }
+    if (url.endsWith("/api/v1/admin/moments/moment-1")) {
+      return jsonResponse(momentSummary());
+    }
+    if (url.includes("/api/v1/admin/moments?") || url.endsWith("/api/v1/admin/moments")) {
+      return jsonResponse({
+        total: 1,
+        page: 1,
+        size: 20,
+        items: [momentSummary()]
+      });
+    }
     if (url.endsWith("/api/v1/admin/chat/health")) {
       return jsonResponse({
         status: "warning",
@@ -582,6 +629,19 @@ function groupDetail() {
         }
       }
     ]
+  };
+}
+
+function momentSummary() {
+  return {
+    id: "moment-1",
+    user_id: "user-3",
+    author: userSummary("user-3", "test3", "测试三"),
+    content: "今天完成语音消息测试",
+    comment_count: 1,
+    like_count: 1,
+    created_at: "2026-05-03T10:00:00+00:00",
+    updated_at: "2026-05-03T10:00:00+00:00"
   };
 }
 
@@ -1018,6 +1078,63 @@ describe("Admin web shell", () => {
       expect(requestedUrls.some((url) => url.includes("/api/v1/admin/groups/group-1/members"))).toBe(true);
       expect(requestedUrls.some((url) => url.includes("role=owner"))).toBe(true);
       expect(requestedUrls.some((url) => url.includes("user_id=user-1"))).toBe(true);
+    });
+  });
+
+  it("loads moments, moment detail, comments, and likes with filters", async () => {
+    const fetchMock = mockFetch();
+    render(<App fetcher={fetchMock} />);
+
+    fireEvent.change(screen.getByLabelText("服务端地址"), {
+      target: { value: "http://localhost:8000" }
+    });
+    fireEvent.change(screen.getByLabelText("访问令牌"), {
+      target: { value: "admin-token" }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "连接" }));
+    await screen.findByRole("heading", { name: "概览" });
+
+    fireEvent.click(screen.getByRole("button", { name: "朋友圈" }));
+    expect(await screen.findByRole("heading", { name: "朋友圈" })).toBeInTheDocument();
+    expect(screen.getByText("今天完成语音消息测试")).toBeInTheDocument();
+    expect(screen.getAllByText("test3").length).toBeGreaterThan(0);
+
+    fireEvent.change(screen.getByLabelText("动态关键词"), {
+      target: { value: "语音" }
+    });
+    fireEvent.change(screen.getByLabelText("发布人 ID"), {
+      target: { value: "user-3" }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "筛选动态" }));
+
+    await waitFor(() => {
+      const requestedUrls = fetchMock.mock.calls.map(([input]) => String(input));
+      expect(requestedUrls.some((url) => url.includes("keyword=%E8%AF%AD%E9%9F%B3"))).toBe(true);
+      expect(requestedUrls.some((url) => url.includes("user_id=user-3"))).toBe(true);
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "查看动态详情" }));
+    expect(await screen.findByRole("heading", { name: "moment-1" })).toBeInTheDocument();
+    expect(screen.getByText("评论列表")).toBeInTheDocument();
+    expect(screen.getByText("点赞列表")).toBeInTheDocument();
+    expect(screen.getByText("收到")).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("评论用户 ID"), {
+      target: { value: "user-1" }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "查询评论" }));
+
+    fireEvent.change(screen.getByLabelText("点赞用户 ID"), {
+      target: { value: "user-1" }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "查询点赞" }));
+
+    await waitFor(() => {
+      const requestedUrls = fetchMock.mock.calls.map(([input]) => String(input));
+      expect(requestedUrls.some((url) => url.includes("/api/v1/admin/moments/moment-1/comments"))).toBe(true);
+      expect(requestedUrls.some((url) => url.includes("/api/v1/admin/moments/moment-1/likes"))).toBe(true);
+      expect(requestedUrls.some((url) => url.includes("comments?user_id=user-1"))).toBe(true);
+      expect(requestedUrls.some((url) => url.includes("likes?user_id=user-1"))).toBe(true);
     });
   });
 

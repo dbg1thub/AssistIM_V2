@@ -326,6 +326,51 @@ describe("AdminApiClient", () => {
     );
   });
 
+  it("loads admin moments, moment detail, comments, and likes", async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(JSON.stringify({ code: 0, message: "success", data: { items: [] } }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" }
+      })
+    );
+    const client = new AdminApiClient({
+      baseUrl: "http://localhost:8000",
+      token: "token-value",
+      fetcher: fetchMock
+    });
+
+    await client.listMoments({ keyword: "语音", user_id: "user-3", page: 2, size: 10 });
+    await client.getMoment("moment-1");
+    await client.listMomentComments("moment-1", { user_id: "user-1", page: 1, size: 20 });
+    await client.listMomentLikes("moment-1", { user_id: "user-1", page: 1, size: 20 });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://localhost:8000/api/v1/admin/moments?keyword=%E8%AF%AD%E9%9F%B3&user_id=user-3&page=2&size=10",
+      {
+        headers: { Authorization: "Bearer token-value" },
+        method: "GET"
+      }
+    );
+    expect(fetchMock).toHaveBeenCalledWith("http://localhost:8000/api/v1/admin/moments/moment-1", {
+      headers: { Authorization: "Bearer token-value" },
+      method: "GET"
+    });
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://localhost:8000/api/v1/admin/moments/moment-1/comments?user_id=user-1&page=1&size=20",
+      {
+        headers: { Authorization: "Bearer token-value" },
+        method: "GET"
+      }
+    );
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://localhost:8000/api/v1/admin/moments/moment-1/likes?user_id=user-1&page=1&size=20",
+      {
+        headers: { Authorization: "Bearer token-value" },
+        method: "GET"
+      }
+    );
+  });
+
   it("builds query strings for audit log filters and loads detail", async () => {
     const fetchMock = vi.fn(async () =>
       new Response(JSON.stringify({ code: 0, message: "success", data: { items: [] } }), {

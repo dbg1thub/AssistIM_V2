@@ -69,6 +69,25 @@ export interface ListGroupMembersParams extends Record<string, unknown> {
   size?: number;
 }
 
+export interface ListMomentsParams extends Record<string, unknown> {
+  keyword?: string;
+  user_id?: string;
+  page?: number;
+  size?: number;
+}
+
+export interface ListMomentCommentsParams extends Record<string, unknown> {
+  user_id?: string;
+  page?: number;
+  size?: number;
+}
+
+export interface ListMomentLikesParams extends Record<string, unknown> {
+  user_id?: string;
+  page?: number;
+  size?: number;
+}
+
 export interface ListDatabaseBackupsParams extends Record<string, unknown> {
   page?: number;
   size?: number;
@@ -215,6 +234,22 @@ export class AdminApiClient {
 
   listGroupMembers<T = unknown>(groupId: string, params: ListGroupMembersParams = {}): Promise<T> {
     return this.get<T>(`/api/v1/admin/groups/${encodeURIComponent(groupId)}/members`, params);
+  }
+
+  listMoments<T = unknown>(params: ListMomentsParams = {}): Promise<T> {
+    return this.get<T>("/api/v1/admin/moments", params);
+  }
+
+  getMoment<T = unknown>(momentId: string): Promise<T> {
+    return this.get<T>(`/api/v1/admin/moments/${encodeURIComponent(momentId)}`);
+  }
+
+  listMomentComments<T = unknown>(momentId: string, params: ListMomentCommentsParams = {}): Promise<T> {
+    return this.get<T>(`/api/v1/admin/moments/${encodeURIComponent(momentId)}/comments`, params);
+  }
+
+  listMomentLikes<T = unknown>(momentId: string, params: ListMomentLikesParams = {}): Promise<T> {
+    return this.get<T>(`/api/v1/admin/moments/${encodeURIComponent(momentId)}/likes`, params);
   }
 
   getDatabaseStatus<T = unknown>(): Promise<T> {
