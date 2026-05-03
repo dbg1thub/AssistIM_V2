@@ -58,6 +58,8 @@ Thumbs.db
 .pytest_cache/
 .pytest-tmp/
 .mypy_cache/
+node_modules/
+coverage/
 
 # demo 文件
 demo
