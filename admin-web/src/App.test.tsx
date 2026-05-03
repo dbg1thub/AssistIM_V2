@@ -17,10 +17,67 @@ const dashboardPayload = {
 };
 
 function mockFetch() {
-  return vi.fn(async (input: RequestInfo | URL) => {
+  return vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
     const url = String(input);
     if (url.endsWith("/api/v1/admin/dashboard")) {
       return jsonResponse(dashboardPayload);
+    }
+    if (url.endsWith("/api/v1/admin/users/user-1")) {
+      return jsonResponse({
+        id: "user-1",
+        username: "test1",
+        nickname: "测试一",
+        display_name: "测试一",
+        email: "test1@example.com",
+        phone: "13800000001",
+        role: "admin",
+        is_disabled: false,
+        disabled_reason: "",
+        status: "online",
+        counts: { devices: 1, sessions: 2, friends: 3, files: 4 },
+        devices: [
+          {
+            device_id: "device-1",
+            device_name: "Windows",
+            is_active: true,
+            last_seen_at: "2026-05-03T10:00:00+00:00"
+          }
+        ]
+      });
+    }
+    if (url.endsWith("/api/v1/admin/users/user-1/role")) {
+      return jsonResponse({
+        id: "user-1",
+        username: "test1",
+        nickname: "测试一",
+        role: "user",
+        is_disabled: false,
+        status: "online"
+      });
+    }
+    if (url.endsWith("/api/v1/admin/users/user-1/disable")) {
+      return jsonResponse({
+        id: "user-1",
+        username: "test1",
+        nickname: "测试一",
+        role: "admin",
+        is_disabled: true,
+        disabled_reason: "manual check",
+        status: "offline"
+      });
+    }
+    if (url.endsWith("/api/v1/admin/users/user-1/enable")) {
+      return jsonResponse({
+        id: "user-1",
+        username: "test1",
+        nickname: "测试一",
+        role: "admin",
+        is_disabled: false,
+        status: "offline"
+      });
+    }
+    if (url.endsWith("/api/v1/admin/users/user-1/force-logout")) {
+      return jsonResponse({ user_id: "user-1", username: "test1", disconnected: true });
     }
     if (url.includes("/api/v1/admin/users")) {
       return jsonResponse({
@@ -202,6 +259,73 @@ describe("Admin web shell", () => {
     fireEvent.click(screen.getByRole("button", { name: "日志" }));
     expect(await screen.findByRole("heading", { name: "日志" })).toBeInTheDocument();
     expect(screen.getByText("assistim.log")).toBeInTheDocument();
+  });
+
+  it("loads user detail and performs confirmed account operations", async () => {
+    const fetchMock = mockFetch();
+    const confirmMock = vi.spyOn(window, "confirm").mockReturnValue(true);
+    render(<App fetcher={fetchMock} />);
+
+    fireEvent.change(screen.getByLabelText("服务端地址"), {
+      target: { value: "http://localhost:8000" }
+    });
+    fireEvent.change(screen.getByLabelText("访问令牌"), {
+      target: { value: "admin-token" }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "连接" }));
+    await screen.findByRole("heading", { name: "概览" });
+
+    fireEvent.click(screen.getByRole("button", { name: "用户" }));
+    expect(await screen.findByRole("heading", { name: "用户" })).toBeInTheDocument();
+    fireEvent.click(await screen.findByRole("button", { name: "查看 test1 详情" }));
+
+    expect(await screen.findByRole("heading", { name: "test1" })).toBeInTheDocument();
+    expect(screen.getByText("test1@example.com")).toBeInTheDocument();
+    expect(screen.getByText("device-1")).toBeInTheDocument();
+    expect(screen.getByText("Windows")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "设为普通用户" }));
+    await waitFor(() => {
+      expect(
+        fetchMock.mock.calls.some(
+          ([input, init]) => String(input).endsWith("/api/v1/admin/users/user-1/role") && init?.method === "PATCH"
+        )
+      ).toBe(true);
+    });
+
+    fireEvent.change(screen.getByLabelText("禁用原因"), {
+      target: { value: "manual check" }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "禁用用户" }));
+    await waitFor(() => {
+      expect(
+        fetchMock.mock.calls.some(
+          ([input, init]) => String(input).endsWith("/api/v1/admin/users/user-1/disable") && init?.method === "POST"
+        )
+      ).toBe(true);
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "启用用户" }));
+    await waitFor(() => {
+      expect(
+        fetchMock.mock.calls.some(
+          ([input, init]) => String(input).endsWith("/api/v1/admin/users/user-1/enable") && init?.method === "POST"
+        )
+      ).toBe(true);
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "强制下线" }));
+
+    await waitFor(() => {
+      expect(
+        fetchMock.mock.calls.some(
+          ([input, init]) =>
+            String(input).endsWith("/api/v1/admin/users/user-1/force-logout") && init?.method === "POST"
+        )
+      ).toBe(true);
+    });
+    expect(confirmMock).toHaveBeenCalled();
+    confirmMock.mockRestore();
   });
 
   it("loads health inspection modules and expands issue details", async () => {

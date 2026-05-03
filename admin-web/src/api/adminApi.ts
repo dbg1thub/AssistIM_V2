@@ -82,6 +82,36 @@ export class AdminApiClient {
     return this.get<T>("/api/v1/admin/users", params);
   }
 
+  getUserDetail<T = unknown>(userId: string): Promise<T> {
+    return this.get<T>(`/api/v1/admin/users/${encodeURIComponent(userId)}`);
+  }
+
+  setUserRole<T = unknown>(userId: string, role: string): Promise<T> {
+    return this.request<T>(`/api/v1/admin/users/${encodeURIComponent(userId)}/role`, {
+      body: { role },
+      method: "PATCH"
+    });
+  }
+
+  disableUser<T = unknown>(userId: string, reason: string): Promise<T> {
+    return this.request<T>(`/api/v1/admin/users/${encodeURIComponent(userId)}/disable`, {
+      body: { reason },
+      method: "POST"
+    });
+  }
+
+  enableUser<T = unknown>(userId: string): Promise<T> {
+    return this.request<T>(`/api/v1/admin/users/${encodeURIComponent(userId)}/enable`, {
+      method: "POST"
+    });
+  }
+
+  forceLogoutUser<T = unknown>(userId: string): Promise<T> {
+    return this.request<T>(`/api/v1/admin/users/${encodeURIComponent(userId)}/force-logout`, {
+      method: "POST"
+    });
+  }
+
   listAuditLogs<T = unknown>(params: ListAuditLogsParams = {}): Promise<T> {
     return this.get<T>("/api/v1/admin/audit-logs", params);
   }
@@ -103,10 +133,23 @@ export class AdminApiClient {
   }
 
   private async get<T>(path: string, params?: Record<string, unknown>): Promise<T> {
-    const response = await this.fetcher(this.url(path, params), {
-      headers: { Authorization: `Bearer ${this.token}` },
-      method: "GET"
-    });
+    return this.request<T>(path, { method: "GET", params });
+  }
+
+  private async request<T>(
+    path: string,
+    options: { body?: Record<string, unknown>; method: string; params?: Record<string, unknown> }
+  ): Promise<T> {
+    const headers: Record<string, string> = { Authorization: `Bearer ${this.token}` };
+    const init: RequestInit = {
+      headers,
+      method: options.method
+    };
+    if (options.body !== undefined) {
+      headers["Content-Type"] = "application/json";
+      init.body = JSON.stringify(options.body);
+    }
+    const response = await this.fetcher(this.url(path, options.params), init);
     const payload = await parseEnvelope<T>(response);
     if (!response.ok || payload.code !== 0) {
       throw new ApiError(payload.message || `HTTP ${response.status}`, {

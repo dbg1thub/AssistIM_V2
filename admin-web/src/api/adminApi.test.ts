@@ -46,6 +46,49 @@ describe("AdminApiClient", () => {
     );
   });
 
+  it("loads user detail and sends user-management operations", async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(JSON.stringify({ code: 0, message: "success", data: { ok: true } }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" }
+      })
+    );
+    const client = new AdminApiClient({
+      baseUrl: "http://localhost:8000",
+      token: "token-value",
+      fetcher: fetchMock
+    });
+
+    await client.getUserDetail("user-1");
+    await client.setUserRole("user-1", "user");
+    await client.disableUser("user-1", "manual check");
+    await client.enableUser("user-1");
+    await client.forceLogoutUser("user-1");
+
+    expect(fetchMock).toHaveBeenCalledWith("http://localhost:8000/api/v1/admin/users/user-1", {
+      headers: { Authorization: "Bearer token-value" },
+      method: "GET"
+    });
+    expect(fetchMock).toHaveBeenCalledWith("http://localhost:8000/api/v1/admin/users/user-1/role", {
+      body: JSON.stringify({ role: "user" }),
+      headers: { Authorization: "Bearer token-value", "Content-Type": "application/json" },
+      method: "PATCH"
+    });
+    expect(fetchMock).toHaveBeenCalledWith("http://localhost:8000/api/v1/admin/users/user-1/disable", {
+      body: JSON.stringify({ reason: "manual check" }),
+      headers: { Authorization: "Bearer token-value", "Content-Type": "application/json" },
+      method: "POST"
+    });
+    expect(fetchMock).toHaveBeenCalledWith("http://localhost:8000/api/v1/admin/users/user-1/enable", {
+      headers: { Authorization: "Bearer token-value" },
+      method: "POST"
+    });
+    expect(fetchMock).toHaveBeenCalledWith("http://localhost:8000/api/v1/admin/users/user-1/force-logout", {
+      headers: { Authorization: "Bearer token-value" },
+      method: "POST"
+    });
+  });
+
   it("builds query strings for audit log filters and loads detail", async () => {
     const fetchMock = vi.fn(async () =>
       new Response(JSON.stringify({ code: 0, message: "success", data: { items: [] } }), {

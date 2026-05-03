@@ -122,7 +122,8 @@ p {
 .login-form textarea,
 .search-field input,
 .filter-panel input,
-.filter-panel select {
+.filter-panel select,
+.inline-field input {
   background: #f8fbfb;
   border: 1px solid #cfdcde;
   border-radius: 6px;
@@ -142,13 +143,15 @@ p {
 .login-form textarea:focus,
 .search-field input:focus,
 .filter-panel input:focus,
-.filter-panel select:focus {
+.filter-panel select:focus,
+.inline-field input:focus {
   border-color: #0f6b6b;
   box-shadow: 0 0 0 3px rgb(15 107 107 / 14%);
 }
 
 .primary-button,
 .secondary-button,
+.danger-button,
 .icon-button,
 .nav-button {
   border: 0;
@@ -169,6 +172,21 @@ p {
   color: #0c5d5d;
   min-height: 40px;
   padding: 0 14px;
+}
+
+.danger-button {
+  background: #fff1ee;
+  color: #9a331f;
+  min-height: 40px;
+  padding: 0 14px;
+}
+
+.primary-button:disabled,
+.secondary-button:disabled,
+.danger-button:disabled,
+.icon-button:disabled {
+  cursor: default;
+  opacity: 0.6;
 }
 
 .icon-button {
@@ -489,6 +507,25 @@ p {
   display: grid;
   gap: 14px;
   padding: 16px;
+}
+
+.account-actions {
+  align-items: end;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.inline-field {
+  display: grid;
+  gap: 7px;
+  min-width: 220px;
+}
+
+.inline-field span {
+  color: #596a70;
+  font-size: 12px;
+  font-weight: 700;
 }
 
 .detail-header {

@@ -55,6 +55,21 @@ interface UserListPayload {
   items: Array<Record<string, unknown>>;
 }
 
+interface UserDetailPayload extends Record<string, unknown> {
+  id: string;
+  username?: string;
+  nickname?: string;
+  display_name?: string;
+  email?: string;
+  phone?: string;
+  role?: string;
+  status?: string;
+  is_disabled?: boolean;
+  disabled_reason?: string;
+  counts?: Record<string, unknown>;
+  devices?: Array<Record<string, unknown>>;
+}
+
 interface DatabaseStatusPayload {
   status?: string;
   dialect?: string;
@@ -183,6 +198,9 @@ export default function App({ fetcher }: AppProps) {
   const [auditFilters, setAuditFilters] = useState<AuditFilters>(defaultAuditFilters);
   const [selectedAuditLog, setSelectedAuditLog] = useState<AuditLogItem | null>(null);
   const [auditDetailLoading, setAuditDetailLoading] = useState(false);
+  const [selectedUser, setSelectedUser] = useState<UserDetailPayload | null>(null);
+  const [disableReason, setDisableReason] = useState("");
+  const [userOperationLoading, setUserOperationLoading] = useState(false);
   const [keyword, setKeyword] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -242,7 +260,7 @@ export default function App({ fetcher }: AppProps) {
         setAuditLogs(await loadAuditLogs(client, auditFilters));
       }
       if (page === "users" && !users) {
-        setUsers(await client.listUsers<UserListPayload>({ page: 1, size: 20 }));
+        setUsers(await loadUsers(client, keyword));
       }
       if (page === "database" && !databaseStatus) {
         setDatabaseStatus(await client.getDatabaseStatus<DatabaseStatusPayload>());
@@ -276,11 +294,7 @@ export default function App({ fetcher }: AppProps) {
         setSelectedAuditLog(null);
       }
       if (activePage === "users") {
-        const params: ListUsersParams = { page: 1, size: 20 };
-        if (keyword.trim()) {
-          params.keyword = keyword.trim();
-        }
-        setUsers(await client.listUsers<UserListPayload>(params));
+        setUsers(await loadUsers(client, keyword));
       }
       if (activePage === "database") {
         setDatabaseStatus(await client.getDatabaseStatus<DatabaseStatusPayload>());
@@ -323,6 +337,57 @@ export default function App({ fetcher }: AppProps) {
       setError(readableError(currentError));
     } finally {
       setAuditDetailLoading(false);
+    }
+  }
+
+  async function openUserDetail(userId: string) {
+    if (!client) {
+      return;
+    }
+    setLoading(true);
+    setError("");
+    try {
+      setSelectedUser(await client.getUserDetail<UserDetailPayload>(userId));
+    } catch (currentError) {
+      setError(readableError(currentError));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function runUserOperation(operation: "role" | "disable" | "enable" | "forceLogout", role?: string) {
+    if (!client || !selectedUser) {
+      return;
+    }
+    const userId = selectedUser.id;
+    const username = String(selectedUser.username ?? selectedUser.display_name ?? userId);
+    const message = userOperationConfirmMessage(operation, username, role);
+    if (!window.confirm(message)) {
+      return;
+    }
+    setUserOperationLoading(true);
+    setError("");
+    try {
+      if (operation === "role" && role) {
+        setSelectedUser(mergeUserDetail(selectedUser, await client.setUserRole<UserDetailPayload>(userId, role)));
+      }
+      if (operation === "disable") {
+        setSelectedUser(
+          mergeUserDetail(selectedUser, await client.disableUser<UserDetailPayload>(userId, disableReason))
+        );
+      }
+      if (operation === "enable") {
+        setSelectedUser(mergeUserDetail(selectedUser, await client.enableUser<UserDetailPayload>(userId)));
+      }
+      if (operation === "forceLogout") {
+        await client.forceLogoutUser(userId);
+        setSelectedUser(await client.getUserDetail<UserDetailPayload>(userId));
+      }
+      setUsers(await loadUsers(client, keyword));
+    } catch (currentError) {
+      setError(readableError(currentError));
+    } finally {
+      setUserOperationLoading(false);
     }
   }
 
@@ -436,6 +501,12 @@ export default function App({ fetcher }: AppProps) {
             keyword={keyword}
             setKeyword={setKeyword}
             search={() => void refreshPage()}
+            selectedUser={selectedUser}
+            disableReason={disableReason}
+            setDisableReason={setDisableReason}
+            operationLoading={userOperationLoading}
+            openUserDetail={(userId) => void openUserDetail(userId)}
+            runUserOperation={(operation, role) => void runUserOperation(operation, role)}
           />
         ) : null}
         {activePage === "database" ? <DatabasePage payload={databaseStatus} /> : null}
@@ -730,12 +801,24 @@ function UsersPage({
   payload,
   keyword,
   setKeyword,
-  search
+  search,
+  selectedUser,
+  disableReason,
+  setDisableReason,
+  operationLoading,
+  openUserDetail,
+  runUserOperation
 }: {
   payload: UserListPayload | null;
   keyword: string;
   setKeyword: (value: string) => void;
   search: () => void;
+  selectedUser: UserDetailPayload | null;
+  disableReason: string;
+  setDisableReason: (value: string) => void;
+  operationLoading: boolean;
+  openUserDetail: (userId: string) => void;
+  runUserOperation: (operation: "role" | "disable" | "enable" | "forceLogout", role?: string) => void;
 }) {
   return (
     <section className="page-section">
@@ -759,6 +842,7 @@ function UsersPage({
               <th>角色</th>
               <th>状态</th>
               <th>账号</th>
+              <th>详情</th>
             </tr>
           </thead>
           <tbody>
@@ -769,12 +853,136 @@ function UsersPage({
                 <td>{String(user.role ?? "")}</td>
                 <td>{String(user.status ?? "")}</td>
                 <td>{user.is_disabled ? "已禁用" : "正常"}</td>
+                <td>
+                  <button
+                    className="table-action-button"
+                    type="button"
+                    onClick={() => openUserDetail(String(user.id ?? ""))}
+                    aria-label={`查看 ${String(user.username ?? user.display_name ?? user.id)} 详情`}
+                  >
+                    查看
+                  </button>
+                </td>
               </tr>
             ))}
           </tbody>
         </table>
       </div>
+      {selectedUser ? (
+        <UserDetailPanel
+          user={selectedUser}
+          disableReason={disableReason}
+          setDisableReason={setDisableReason}
+          operationLoading={operationLoading}
+          runUserOperation={runUserOperation}
+        />
+      ) : null}
     </section>
+  );
+}
+
+function UserDetailPanel({
+  user,
+  disableReason,
+  setDisableReason,
+  operationLoading,
+  runUserOperation
+}: {
+  user: UserDetailPayload;
+  disableReason: string;
+  setDisableReason: (value: string) => void;
+  operationLoading: boolean;
+  runUserOperation: (operation: "role" | "disable" | "enable" | "forceLogout", role?: string) => void;
+}) {
+  const isDisabled = Boolean(user.is_disabled);
+  const role = String(user.role ?? "user");
+  const nextRole = role === "admin" ? "user" : "admin";
+  const devices = Array.isArray(user.devices) ? user.devices : [];
+  return (
+    <article className="detail-panel">
+      <div className="detail-header">
+        <div>
+          <h2>{String(user.username ?? user.display_name ?? user.id)}</h2>
+          <p>{String(user.display_name ?? user.nickname ?? "")}</p>
+        </div>
+        <span className={`status-badge ${isDisabled ? "error" : "ok"}`}>{isDisabled ? "已禁用" : "正常"}</span>
+      </div>
+      <div className="info-grid">
+        <InfoBlock title="基础信息" rows={[
+          ["用户名", user.username],
+          ["昵称", user.nickname],
+          ["邮箱", user.email],
+          ["手机号", user.phone],
+          ["角色", user.role],
+          ["状态", user.status]
+        ]} />
+        <InfoBlock title="业务计数" rows={Object.entries(user.counts ?? {})} />
+      </div>
+      <div className="account-actions">
+        <button
+          className="secondary-button"
+          type="button"
+          disabled={operationLoading}
+          onClick={() => runUserOperation("role", nextRole)}
+        >
+          {nextRole === "admin" ? "设为管理员" : "设为普通用户"}
+        </button>
+        <label className="inline-field">
+          <span>禁用原因</span>
+          <input
+            value={disableReason}
+            onChange={(event) => setDisableReason(event.target.value)}
+            placeholder="可选"
+          />
+        </label>
+        <button
+          className="danger-button"
+          type="button"
+          disabled={operationLoading || isDisabled}
+          onClick={() => runUserOperation("disable")}
+        >
+          禁用用户
+        </button>
+        <button
+          className="secondary-button"
+          type="button"
+          disabled={operationLoading || !isDisabled}
+          onClick={() => runUserOperation("enable")}
+        >
+          启用用户
+        </button>
+        <button
+          className="danger-button"
+          type="button"
+          disabled={operationLoading}
+          onClick={() => runUserOperation("forceLogout")}
+        >
+          强制下线
+        </button>
+      </div>
+      <div className="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>设备 ID</th>
+              <th>设备名</th>
+              <th>状态</th>
+              <th>最后在线</th>
+            </tr>
+          </thead>
+          <tbody>
+            {devices.map((device) => (
+              <tr key={String(device.device_id)}>
+                <td>{String(device.device_id ?? "")}</td>
+                <td>{String(device.device_name ?? "")}</td>
+                <td>{device.is_active ? "活跃" : "停用"}</td>
+                <td>{String(device.last_seen_at ?? "")}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </article>
   );
 }
 
@@ -891,6 +1099,40 @@ function readableError(error: unknown): string {
     return error.message;
   }
   return "请求失败";
+}
+
+function loadUsers(client: AdminApiClient, keyword: string): Promise<UserListPayload> {
+  const params: ListUsersParams = { page: 1, size: 20 };
+  if (keyword.trim()) {
+    params.keyword = keyword.trim();
+  }
+  return client.listUsers<UserListPayload>(params);
+}
+
+function mergeUserDetail(current: UserDetailPayload, next: UserDetailPayload): UserDetailPayload {
+  return {
+    ...current,
+    ...next,
+    counts: next.counts ?? current.counts,
+    devices: next.devices ?? current.devices
+  };
+}
+
+function userOperationConfirmMessage(
+  operation: "role" | "disable" | "enable" | "forceLogout",
+  username: string,
+  role?: string
+): string {
+  if (operation === "role") {
+    return `确认将 ${username} 的角色修改为 ${role === "admin" ? "管理员" : "普通用户"}？`;
+  }
+  if (operation === "disable") {
+    return `确认禁用 ${username}？禁用后该用户将无法登录，现有登录状态也会失效。`;
+  }
+  if (operation === "forceLogout") {
+    return `确认强制 ${username} 下线？该操作会断开实时连接并让旧 token 失效。`;
+  }
+  return `确认启用 ${username}？`;
 }
 
 function loadAuditLogs(client: AdminApiClient, filters: AuditFilters): Promise<AuditLogListPayload> {
