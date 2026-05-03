@@ -22,6 +22,62 @@ function mockFetch() {
     if (url.endsWith("/api/v1/admin/dashboard")) {
       return jsonResponse(dashboardPayload);
     }
+    if (url.endsWith("/api/v1/admin/database/backups/prune")) {
+      return jsonResponse({
+        keep_last: 1,
+        older_than_days: 30,
+        include_failed: true,
+        include_deleted: false,
+        dry_run: readRequestBody(_init).dry_run,
+        candidate_count: 1,
+        processed_count: readRequestBody(_init).dry_run ? 0 : 1,
+        file_deleted_count: readRequestBody(_init).dry_run ? 0 : 1,
+        file_missing_count: 0,
+        items: [
+          {
+            id: "backup-1",
+            action: readRequestBody(_init).dry_run ? "would_delete" : "deleted",
+            status_before: "completed",
+            status_after: readRequestBody(_init).dry_run ? "completed" : "deleted",
+            file_name: "backup.sqlite3"
+          }
+        ]
+      });
+    }
+    if (url.endsWith("/api/v1/admin/database/backups/backup-1/verify")) {
+      return jsonResponse({
+        ...backupItem(),
+        verification_status: "passed",
+        verification_message: "sqlite integrity_check ok"
+      });
+    }
+    if (url.endsWith("/api/v1/admin/database/backups/backup-1") && _init?.method === "DELETE") {
+      return jsonResponse({
+        ...backupItem(),
+        status: "deleted",
+        file_deleted: true,
+        file_missing: false
+      });
+    }
+    if (url.endsWith("/api/v1/admin/database/backups/backup-1")) {
+      return jsonResponse(backupItem());
+    }
+    if (url.endsWith("/api/v1/admin/database/backups") && _init?.method === "POST") {
+      return jsonResponse({
+        ...backupItem(),
+        id: "backup-2",
+        file_name: "backup-new.sqlite3",
+        created_at: "2026-05-03T11:00:00+00:00"
+      });
+    }
+    if (url.includes("/api/v1/admin/database/backups")) {
+      return jsonResponse({
+        total: 1,
+        page: 1,
+        size: 20,
+        items: [backupItem()]
+      });
+    }
     if (url.endsWith("/api/v1/admin/users/user-1")) {
       return jsonResponse({
         id: "user-1",
@@ -202,6 +258,35 @@ function mockFetch() {
   });
 }
 
+function backupItem() {
+  return {
+    id: "backup-1",
+    created_by_username: "admin",
+    status: "completed",
+    database_dialect: "sqlite",
+    backup_format: "sqlite",
+    storage_key: "database_backups/backup.sqlite3",
+    file_name: "backup.sqlite3",
+    size_bytes: 2048,
+    checksum_sha256: "abc123",
+    error_message: "",
+    verification_status: "pending",
+    verification_message: "",
+    verified_at: "",
+    started_at: "2026-05-03T10:00:00+00:00",
+    finished_at: "2026-05-03T10:00:01+00:00",
+    duration_ms: 1000,
+    created_at: "2026-05-03T10:00:00+00:00"
+  };
+}
+
+function readRequestBody(init?: RequestInit): Record<string, unknown> {
+  if (typeof init?.body !== "string") {
+    return {};
+  }
+  return JSON.parse(init.body) as Record<string, unknown>;
+}
+
 function jsonResponse(data: unknown, status = 200, code = 0, message = "success") {
   return Promise.resolve(
     new Response(JSON.stringify({ code, message, data }), {
@@ -321,6 +406,82 @@ describe("Admin web shell", () => {
         fetchMock.mock.calls.some(
           ([input, init]) =>
             String(input).endsWith("/api/v1/admin/users/user-1/force-logout") && init?.method === "POST"
+        )
+      ).toBe(true);
+    });
+    expect(confirmMock).toHaveBeenCalled();
+    confirmMock.mockRestore();
+  });
+
+  it("manages database backups with confirmed actions and prune preview", async () => {
+    const fetchMock = mockFetch();
+    const confirmMock = vi.spyOn(window, "confirm").mockReturnValue(true);
+    render(<App fetcher={fetchMock} />);
+
+    fireEvent.change(screen.getByLabelText("服务端地址"), {
+      target: { value: "http://localhost:8000" }
+    });
+    fireEvent.change(screen.getByLabelText("访问令牌"), {
+      target: { value: "admin-token" }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "连接" }));
+    await screen.findByRole("heading", { name: "概览" });
+
+    fireEvent.click(screen.getByRole("button", { name: "备份" }));
+    expect(await screen.findByRole("heading", { name: "备份" })).toBeInTheDocument();
+    expect(await screen.findByText("backup.sqlite3")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "创建备份" }));
+    await waitFor(() => {
+      expect(
+        fetchMock.mock.calls.some(
+          ([input, init]) => String(input).endsWith("/api/v1/admin/database/backups") && init?.method === "POST"
+        )
+      ).toBe(true);
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "查看备份详情" }));
+    expect(await screen.findByText("checksum_sha256")).toBeInTheDocument();
+    expect(screen.getByText("abc123")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "验证备份" }));
+    await waitFor(() => {
+      expect(
+        fetchMock.mock.calls.some(
+          ([input, init]) =>
+            String(input).endsWith("/api/v1/admin/database/backups/backup-1/verify") && init?.method === "POST"
+        )
+      ).toBe(true);
+    });
+
+    fireEvent.change(screen.getByLabelText("保留最近"), {
+      target: { value: "1" }
+    });
+    fireEvent.change(screen.getByLabelText("早于天数"), {
+      target: { value: "30" }
+    });
+    fireEvent.click(screen.getByLabelText("包含失败备份"));
+    fireEvent.click(screen.getByRole("button", { name: "预览清理" }));
+    expect(await screen.findByText("would_delete")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "执行清理" }));
+    await waitFor(() => {
+      expect(
+        fetchMock.mock.calls.some(
+          ([input, init]) =>
+            String(input).endsWith("/api/v1/admin/database/backups/prune") &&
+            init?.method === "POST" &&
+            readRequestBody(init).dry_run === false
+        )
+      ).toBe(true);
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "删除备份" }));
+    await waitFor(() => {
+      expect(
+        fetchMock.mock.calls.some(
+          ([input, init]) =>
+            String(input).endsWith("/api/v1/admin/database/backups/backup-1") && init?.method === "DELETE"
         )
       ).toBe(true);
     });

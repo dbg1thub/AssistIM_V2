@@ -26,6 +26,19 @@ export interface ListAuditLogsParams extends Record<string, unknown> {
   size?: number;
 }
 
+export interface ListDatabaseBackupsParams extends Record<string, unknown> {
+  page?: number;
+  size?: number;
+}
+
+export interface PruneDatabaseBackupsParams extends Record<string, unknown> {
+  dry_run: boolean;
+  include_deleted: boolean;
+  include_failed: boolean;
+  keep_last?: number;
+  older_than_days?: number;
+}
+
 export const ADMIN_HEALTH_REQUESTS = [
   { key: "auth", path: "/api/v1/admin/auth/health" },
   { key: "database", path: "/api/v1/admin/database/health" },
@@ -122,6 +135,41 @@ export class AdminApiClient {
 
   getDatabaseStatus<T = unknown>(): Promise<T> {
     return this.get<T>("/api/v1/admin/database/status");
+  }
+
+  listDatabaseBackups<T = unknown>(params: ListDatabaseBackupsParams = {}): Promise<T> {
+    return this.get<T>("/api/v1/admin/database/backups", params);
+  }
+
+  getDatabaseBackup<T = unknown>(backupId: string): Promise<T> {
+    return this.get<T>(`/api/v1/admin/database/backups/${encodeURIComponent(backupId)}`);
+  }
+
+  createDatabaseBackup<T = unknown>(): Promise<T> {
+    return this.request<T>("/api/v1/admin/database/backups", { method: "POST" });
+  }
+
+  verifyDatabaseBackup<T = unknown>(backupId: string): Promise<T> {
+    return this.request<T>(`/api/v1/admin/database/backups/${encodeURIComponent(backupId)}/verify`, {
+      method: "POST"
+    });
+  }
+
+  deleteDatabaseBackup<T = unknown>(backupId: string): Promise<T> {
+    return this.request<T>(`/api/v1/admin/database/backups/${encodeURIComponent(backupId)}`, {
+      method: "DELETE"
+    });
+  }
+
+  pruneDatabaseBackups<T = unknown>(params: PruneDatabaseBackupsParams): Promise<T> {
+    return this.request<T>("/api/v1/admin/database/backups/prune", {
+      body: params,
+      method: "POST"
+    });
+  }
+
+  getDatabaseBackupDownloadUrl(backupId: string): string {
+    return this.url(`/api/v1/admin/database/backups/${encodeURIComponent(backupId)}/download`);
   }
 
   listLogFiles<T = unknown>(): Promise<T> {

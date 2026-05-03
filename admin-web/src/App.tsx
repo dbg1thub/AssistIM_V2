@@ -1,6 +1,7 @@
 import {
   Activity,
   AlertCircle,
+  Archive,
   CheckCircle2,
   ClipboardList,
   Database,
@@ -22,11 +23,12 @@ import {
   ApiError,
   Fetcher,
   ListAuditLogsParams,
-  ListUsersParams
+  ListUsersParams,
+  PruneDatabaseBackupsParams
 } from "./api/adminApi";
 import "./styles.css";
 
-type PageKey = "overview" | "health" | "audit" | "users" | "database" | "logs";
+type PageKey = "overview" | "health" | "audit" | "users" | "database" | "backups" | "logs";
 type HealthStatus = "ok" | "warning" | "error" | "unknown";
 
 interface AppProps {
@@ -76,6 +78,46 @@ interface DatabaseStatusPayload {
   runtime_schema_complete?: boolean;
   runtime_schema_revision?: string;
   required_tables?: Record<string, boolean>;
+}
+
+interface DatabaseBackupItem extends Record<string, unknown> {
+  id: string;
+  created_by_username?: string;
+  status?: string;
+  database_dialect?: string;
+  backup_format?: string;
+  storage_key?: string;
+  file_name?: string;
+  size_bytes?: number;
+  checksum_sha256?: string;
+  error_message?: string;
+  verification_status?: string;
+  verification_message?: string;
+  created_at?: string;
+  duration_ms?: number;
+}
+
+interface DatabaseBackupListPayload {
+  total: number;
+  page: number;
+  size: number;
+  items: DatabaseBackupItem[];
+}
+
+interface DatabaseBackupPruneResult {
+  candidate_count?: number;
+  processed_count?: number;
+  file_deleted_count?: number;
+  file_missing_count?: number;
+  dry_run?: boolean;
+  items?: Array<Record<string, unknown>>;
+}
+
+interface BackupPruneForm {
+  keep_last: string;
+  older_than_days: string;
+  include_failed: boolean;
+  include_deleted: boolean;
 }
 
 interface LogFilesPayload {
@@ -148,6 +190,7 @@ const navItems: Array<{ key: PageKey; label: string; icon: ReactNode }> = [
   { key: "audit", label: "审计", icon: <ClipboardList size={18} /> },
   { key: "users", label: "用户", icon: <Users size={18} /> },
   { key: "database", label: "数据库", icon: <Database size={18} /> },
+  { key: "backups", label: "备份", icon: <Archive size={18} /> },
   { key: "logs", label: "日志", icon: <FileText size={18} /> }
 ];
 
@@ -159,6 +202,13 @@ const defaultAuditFilters: AuditFilters = {
   success: "",
   created_from: "",
   created_to: ""
+};
+
+const defaultBackupPruneForm: BackupPruneForm = {
+  keep_last: "",
+  older_than_days: "",
+  include_failed: false,
+  include_deleted: false
 };
 
 const healthModuleDefinitions: Array<{
@@ -201,6 +251,12 @@ export default function App({ fetcher }: AppProps) {
   const [selectedUser, setSelectedUser] = useState<UserDetailPayload | null>(null);
   const [disableReason, setDisableReason] = useState("");
   const [userOperationLoading, setUserOperationLoading] = useState(false);
+  const [databaseBackups, setDatabaseBackups] = useState<DatabaseBackupListPayload | null>(null);
+  const [selectedBackup, setSelectedBackup] = useState<DatabaseBackupItem | null>(null);
+  const [backupOperationLoading, setBackupOperationLoading] = useState(false);
+  const [backupPruneForm, setBackupPruneForm] = useState<BackupPruneForm>(defaultBackupPruneForm);
+  const [backupPruneResult, setBackupPruneResult] = useState<DatabaseBackupPruneResult | null>(null);
+  const [backupDownloadUrl, setBackupDownloadUrl] = useState("");
   const [keyword, setKeyword] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -243,6 +299,7 @@ export default function App({ fetcher }: AppProps) {
       (page === "audit" && !auditLogs) ||
       (page === "users" && !users) ||
       (page === "database" && !databaseStatus) ||
+      (page === "backups" && !databaseBackups) ||
       (page === "logs" && !logFiles);
     if (!shouldLoad) {
       return;
@@ -264,6 +321,9 @@ export default function App({ fetcher }: AppProps) {
       }
       if (page === "database" && !databaseStatus) {
         setDatabaseStatus(await client.getDatabaseStatus<DatabaseStatusPayload>());
+      }
+      if (page === "backups" && !databaseBackups) {
+        setDatabaseBackups(await loadDatabaseBackups(client));
       }
       if (page === "logs" && !logFiles) {
         setLogFiles(await client.listLogFiles<LogFilesPayload>());
@@ -298,6 +358,12 @@ export default function App({ fetcher }: AppProps) {
       }
       if (activePage === "database") {
         setDatabaseStatus(await client.getDatabaseStatus<DatabaseStatusPayload>());
+      }
+      if (activePage === "backups") {
+        setDatabaseBackups(await loadDatabaseBackups(client));
+        setSelectedBackup(null);
+        setBackupPruneResult(null);
+        setBackupDownloadUrl("");
       }
       if (activePage === "logs") {
         setLogFiles(await client.listLogFiles<LogFilesPayload>());
@@ -389,6 +455,106 @@ export default function App({ fetcher }: AppProps) {
     } finally {
       setUserOperationLoading(false);
     }
+  }
+
+  async function createBackup() {
+    if (!client || !window.confirm("确认现在创建数据库备份？该操作会在服务端本地写入备份文件。")) {
+      return;
+    }
+    setBackupOperationLoading(true);
+    setError("");
+    try {
+      const backup = await client.createDatabaseBackup<DatabaseBackupItem>();
+      setSelectedBackup(backup);
+      setDatabaseBackups(await loadDatabaseBackups(client));
+      setBackupDownloadUrl("");
+    } catch (currentError) {
+      setError(readableError(currentError));
+    } finally {
+      setBackupOperationLoading(false);
+    }
+  }
+
+  async function openBackupDetail(backupId: string) {
+    if (!client) {
+      return;
+    }
+    setBackupOperationLoading(true);
+    setError("");
+    try {
+      setSelectedBackup(await client.getDatabaseBackup<DatabaseBackupItem>(backupId));
+      setBackupDownloadUrl("");
+    } catch (currentError) {
+      setError(readableError(currentError));
+    } finally {
+      setBackupOperationLoading(false);
+    }
+  }
+
+  async function verifyBackup(backupId: string) {
+    if (!client || !window.confirm("确认验证该数据库备份？验证会读取服务端备份文件但不会恢复数据库。")) {
+      return;
+    }
+    setBackupOperationLoading(true);
+    setError("");
+    try {
+      setSelectedBackup(await client.verifyDatabaseBackup<DatabaseBackupItem>(backupId));
+      setDatabaseBackups(await loadDatabaseBackups(client));
+    } catch (currentError) {
+      setError(readableError(currentError));
+    } finally {
+      setBackupOperationLoading(false);
+    }
+  }
+
+  async function deleteBackup(backupId: string) {
+    if (!client || !window.confirm("确认删除该数据库备份？这会删除服务端本地备份文件并标记记录为 deleted。")) {
+      return;
+    }
+    setBackupOperationLoading(true);
+    setError("");
+    try {
+      setSelectedBackup(await client.deleteDatabaseBackup<DatabaseBackupItem>(backupId));
+      setDatabaseBackups(await loadDatabaseBackups(client));
+      setBackupDownloadUrl("");
+    } catch (currentError) {
+      setError(readableError(currentError));
+    } finally {
+      setBackupOperationLoading(false);
+    }
+  }
+
+  async function pruneBackups(dryRun: boolean) {
+    if (!client) {
+      return;
+    }
+    const params = backupPruneParams(backupPruneForm, dryRun);
+    if (params.keep_last === undefined && params.older_than_days === undefined) {
+      setError("清理条件需要填写保留最近或早于天数");
+      return;
+    }
+    if (!dryRun && !window.confirm("确认执行数据库备份清理？该操作会删除符合条件的服务端本地备份文件。")) {
+      return;
+    }
+    setBackupOperationLoading(true);
+    setError("");
+    try {
+      setBackupPruneResult(await client.pruneDatabaseBackups<DatabaseBackupPruneResult>(params));
+      if (!dryRun) {
+        setDatabaseBackups(await loadDatabaseBackups(client));
+      }
+    } catch (currentError) {
+      setError(readableError(currentError));
+    } finally {
+      setBackupOperationLoading(false);
+    }
+  }
+
+  function showBackupDownloadUrl(backupId: string) {
+    if (!client) {
+      return;
+    }
+    setBackupDownloadUrl(client.getDatabaseBackupDownloadUrl(backupId));
   }
 
   if (!session || !client) {
@@ -510,6 +676,23 @@ export default function App({ fetcher }: AppProps) {
           />
         ) : null}
         {activePage === "database" ? <DatabasePage payload={databaseStatus} /> : null}
+        {activePage === "backups" ? (
+          <BackupsPage
+            payload={databaseBackups}
+            selectedBackup={selectedBackup}
+            pruneForm={backupPruneForm}
+            setPruneForm={(patch) => setBackupPruneForm((current) => ({ ...current, ...patch }))}
+            pruneResult={backupPruneResult}
+            downloadUrl={backupDownloadUrl}
+            operationLoading={backupOperationLoading}
+            createBackup={() => void createBackup()}
+            openBackupDetail={(backupId) => void openBackupDetail(backupId)}
+            verifyBackup={(backupId) => void verifyBackup(backupId)}
+            deleteBackup={(backupId) => void deleteBackup(backupId)}
+            pruneBackups={(dryRun) => void pruneBackups(dryRun)}
+            showDownloadUrl={showBackupDownloadUrl}
+          />
+        ) : null}
         {activePage === "logs" ? <LogsPage payload={logFiles} /> : null}
       </main>
     </div>
@@ -1018,6 +1201,249 @@ function DatabasePage({ payload }: { payload: DatabaseStatusPayload | null }) {
   );
 }
 
+function BackupsPage({
+  payload,
+  selectedBackup,
+  pruneForm,
+  setPruneForm,
+  pruneResult,
+  downloadUrl,
+  operationLoading,
+  createBackup,
+  openBackupDetail,
+  verifyBackup,
+  deleteBackup,
+  pruneBackups,
+  showDownloadUrl
+}: {
+  payload: DatabaseBackupListPayload | null;
+  selectedBackup: DatabaseBackupItem | null;
+  pruneForm: BackupPruneForm;
+  setPruneForm: (patch: Partial<BackupPruneForm>) => void;
+  pruneResult: DatabaseBackupPruneResult | null;
+  downloadUrl: string;
+  operationLoading: boolean;
+  createBackup: () => void;
+  openBackupDetail: (backupId: string) => void;
+  verifyBackup: (backupId: string) => void;
+  deleteBackup: (backupId: string) => void;
+  pruneBackups: (dryRun: boolean) => void;
+  showDownloadUrl: (backupId: string) => void;
+}) {
+  const backups = payload?.items ?? [];
+  return (
+    <section className="page-section">
+      <PageTitle title="备份" subtitle={`共 ${payload?.total ?? 0} 个备份记录`} />
+      <div className="toolbar">
+        <button className="primary-button compact-action" type="button" disabled={operationLoading} onClick={createBackup}>
+          <Archive size={17} />
+          创建备份
+        </button>
+      </div>
+      <div className="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>备份 ID</th>
+              <th>状态</th>
+              <th>文件名</th>
+              <th>大小</th>
+              <th>创建人</th>
+              <th>创建时间</th>
+              <th>验证</th>
+              <th>错误</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            {backups.map((backup) => (
+              <tr key={backup.id}>
+                <td>{backup.id}</td>
+                <td>{String(backup.status ?? "")}</td>
+                <td>{String(backup.file_name ?? "")}</td>
+                <td>{formatBytes(backup.size_bytes)}</td>
+                <td>{String(backup.created_by_username ?? "")}</td>
+                <td>{String(backup.created_at ?? "")}</td>
+                <td>{String(backup.verification_status ?? "")}</td>
+                <td>{String(backup.error_message ?? "")}</td>
+                <td>
+                  <div className="table-actions">
+                    <button
+                      className="table-action-button"
+                      type="button"
+                      onClick={() => openBackupDetail(backup.id)}
+                      aria-label="查看备份详情"
+                    >
+                      查看
+                    </button>
+                    <button
+                      className="table-action-button"
+                      type="button"
+                      disabled={operationLoading || backup.status !== "completed"}
+                      onClick={() => verifyBackup(backup.id)}
+                      aria-label="验证备份"
+                    >
+                      验证
+                    </button>
+                    <button
+                      className="table-action-button danger-link"
+                      type="button"
+                      disabled={operationLoading}
+                      onClick={() => deleteBackup(backup.id)}
+                      aria-label="删除备份"
+                    >
+                      删除
+                    </button>
+                  </div>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <form className="filter-panel" onSubmit={(event) => event.preventDefault()}>
+        <label>
+          <span>保留最近</span>
+          <input
+            inputMode="numeric"
+            value={pruneForm.keep_last}
+            onChange={(event) => setPruneForm({ keep_last: event.target.value })}
+            placeholder="例如 3"
+          />
+        </label>
+        <label>
+          <span>早于天数</span>
+          <input
+            inputMode="numeric"
+            value={pruneForm.older_than_days}
+            onChange={(event) => setPruneForm({ older_than_days: event.target.value })}
+            placeholder="例如 30"
+          />
+        </label>
+        <label className="checkbox-field">
+          <input
+            checked={pruneForm.include_failed}
+            onChange={(event) => setPruneForm({ include_failed: event.target.checked })}
+            type="checkbox"
+          />
+          <span>包含失败备份</span>
+        </label>
+        <label className="checkbox-field">
+          <input
+            checked={pruneForm.include_deleted}
+            onChange={(event) => setPruneForm({ include_deleted: event.target.checked })}
+            type="checkbox"
+          />
+          <span>包含已删除记录</span>
+        </label>
+        <button className="secondary-button" type="button" disabled={operationLoading} onClick={() => pruneBackups(true)}>
+          预览清理
+        </button>
+        <button className="danger-button" type="button" disabled={operationLoading} onClick={() => pruneBackups(false)}>
+          执行清理
+        </button>
+      </form>
+      {pruneResult ? <BackupPruneResultPanel result={pruneResult} /> : null}
+      {selectedBackup ? (
+        <BackupDetailPanel
+          backup={selectedBackup}
+          downloadUrl={downloadUrl}
+          showDownloadUrl={() => showDownloadUrl(selectedBackup.id)}
+        />
+      ) : null}
+    </section>
+  );
+}
+
+function BackupPruneResultPanel({ result }: { result: DatabaseBackupPruneResult }) {
+  const items = result.items ?? [];
+  return (
+    <article className="detail-panel">
+      <div className="detail-header">
+        <div>
+          <h2>{result.dry_run ? "清理预览" : "清理结果"}</h2>
+          <p>{`候选 ${result.candidate_count ?? 0} · 已处理 ${result.processed_count ?? 0}`}</p>
+        </div>
+        <span className="status-badge warning">{result.dry_run ? "预览" : "已执行"}</span>
+      </div>
+      <div className="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>备份 ID</th>
+              <th>动作</th>
+              <th>原状态</th>
+              <th>新状态</th>
+              <th>文件名</th>
+            </tr>
+          </thead>
+          <tbody>
+            {items.map((item) => (
+              <tr key={String(item.id)}>
+                <td>{String(item.id ?? "")}</td>
+                <td>{String(item.action ?? "")}</td>
+                <td>{String(item.status_before ?? "")}</td>
+                <td>{String(item.status_after ?? "")}</td>
+                <td>{String(item.file_name ?? "")}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </article>
+  );
+}
+
+function BackupDetailPanel({
+  backup,
+  downloadUrl,
+  showDownloadUrl
+}: {
+  backup: DatabaseBackupItem;
+  downloadUrl: string;
+  showDownloadUrl: () => void;
+}) {
+  return (
+    <article className="detail-panel">
+      <div className="detail-header">
+        <div>
+          <h2>{String(backup.file_name ?? backup.id)}</h2>
+          <p>{String(backup.created_at ?? "")}</p>
+        </div>
+        <span className={`status-badge ${backup.status === "completed" ? "ok" : "warning"}`}>
+          {String(backup.status ?? "")}
+        </span>
+      </div>
+      <div className="info-grid">
+        <InfoBlock title="备份" rows={[
+          ["备份 ID", backup.id],
+          ["数据库", backup.database_dialect],
+          ["格式", backup.backup_format],
+          ["大小", formatBytes(backup.size_bytes)],
+          ["创建人", backup.created_by_username],
+          ["耗时", backup.duration_ms]
+        ]} />
+        <InfoBlock title="验证" rows={[
+          ["验证状态", backup.verification_status],
+          ["验证信息", backup.verification_message],
+          ["错误信息", backup.error_message],
+          ["存储键", backup.storage_key],
+          ["checksum_sha256", backup.checksum_sha256]
+        ]} />
+      </div>
+      <button className="secondary-button compact-action" type="button" onClick={showDownloadUrl}>
+        生成下载地址
+      </button>
+      {downloadUrl ? (
+        <div className="json-block">
+          <span>download_url</span>
+          <pre>{downloadUrl}</pre>
+        </div>
+      ) : null}
+    </article>
+  );
+}
+
 function LogsPage({ payload }: { payload: LogFilesPayload | null }) {
   const files = payload?.files ?? payload?.items ?? [];
   return (
@@ -1107,6 +1533,32 @@ function loadUsers(client: AdminApiClient, keyword: string): Promise<UserListPay
     params.keyword = keyword.trim();
   }
   return client.listUsers<UserListPayload>(params);
+}
+
+function loadDatabaseBackups(client: AdminApiClient): Promise<DatabaseBackupListPayload> {
+  return client.listDatabaseBackups<DatabaseBackupListPayload>({ page: 1, size: 20 });
+}
+
+function backupPruneParams(form: BackupPruneForm, dryRun: boolean): PruneDatabaseBackupsParams {
+  return {
+    dry_run: dryRun,
+    include_deleted: form.include_deleted,
+    include_failed: form.include_failed,
+    keep_last: parseOptionalPositiveInt(form.keep_last),
+    older_than_days: parseOptionalPositiveInt(form.older_than_days)
+  };
+}
+
+function parseOptionalPositiveInt(value: string): number | undefined {
+  const normalized = String(value || "").trim();
+  if (!normalized) {
+    return undefined;
+  }
+  const parsed = Number(normalized);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    return undefined;
+  }
+  return Math.floor(parsed);
 }
 
 function mergeUserDetail(current: UserDetailPayload, next: UserDetailPayload): UserDetailPayload {

@@ -89,6 +89,68 @@ describe("AdminApiClient", () => {
     });
   });
 
+  it("manages database backup API calls", async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(JSON.stringify({ code: 0, message: "success", data: { ok: true } }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" }
+      })
+    );
+    const client = new AdminApiClient({
+      baseUrl: "http://localhost:8000",
+      token: "token-value",
+      fetcher: fetchMock
+    });
+
+    await client.listDatabaseBackups({ page: 2, size: 10 });
+    await client.getDatabaseBackup("backup-1");
+    await client.createDatabaseBackup();
+    await client.verifyDatabaseBackup("backup-1");
+    await client.deleteDatabaseBackup("backup-1");
+    await client.pruneDatabaseBackups({
+      keep_last: 3,
+      older_than_days: 30,
+      include_failed: true,
+      include_deleted: false,
+      dry_run: true
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith("http://localhost:8000/api/v1/admin/database/backups?page=2&size=10", {
+      headers: { Authorization: "Bearer token-value" },
+      method: "GET"
+    });
+    expect(fetchMock).toHaveBeenCalledWith("http://localhost:8000/api/v1/admin/database/backups/backup-1", {
+      headers: { Authorization: "Bearer token-value" },
+      method: "GET"
+    });
+    expect(fetchMock).toHaveBeenCalledWith("http://localhost:8000/api/v1/admin/database/backups", {
+      headers: { Authorization: "Bearer token-value" },
+      method: "POST"
+    });
+    expect(fetchMock).toHaveBeenCalledWith("http://localhost:8000/api/v1/admin/database/backups/backup-1/verify", {
+      headers: { Authorization: "Bearer token-value" },
+      method: "POST"
+    });
+    expect(fetchMock).toHaveBeenCalledWith("http://localhost:8000/api/v1/admin/database/backups/backup-1", {
+      headers: { Authorization: "Bearer token-value" },
+      method: "DELETE"
+    });
+    expect(fetchMock).toHaveBeenCalledWith("http://localhost:8000/api/v1/admin/database/backups/prune", {
+      body: JSON.stringify({
+        keep_last: 3,
+        older_than_days: 30,
+        include_failed: true,
+        include_deleted: false,
+        dry_run: true
+      }),
+      headers: { Authorization: "Bearer token-value", "Content-Type": "application/json" },
+      method: "POST"
+    });
+    expect(client.getDatabaseBackupDownloadUrl("backup-1")).toBe(
+      "http://localhost:8000/api/v1/admin/database/backups/backup-1/download"
+    );
+  });
+
   it("builds query strings for audit log filters and loads detail", async () => {
     const fetchMock = vi.fn(async () =>
       new Response(JSON.stringify({ code: 0, message: "success", data: { items: [] } }), {

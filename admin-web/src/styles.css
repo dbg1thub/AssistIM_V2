@@ -368,10 +368,23 @@ p {
   min-width: 0;
 }
 
-.filter-panel label span {
+.filter-panel label span,
+.checkbox-field span {
   color: #596a70;
   font-size: 12px;
   font-weight: 700;
+}
+
+.checkbox-field {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+  min-height: 40px;
+}
+
+.checkbox-field input {
+  height: 16px;
+  width: 16px;
 }
 
 .search-field {
@@ -501,6 +514,26 @@ p {
   font-weight: 700;
   min-height: 30px;
   padding: 0 10px;
+}
+
+.table-action-button:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.table-action-button.danger-link {
+  background: #fff1ee;
+  color: #9a331f;
+}
+
+.table-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.compact-action {
+  justify-self: flex-start;
+  width: auto;
 }
 
 .detail-panel {
