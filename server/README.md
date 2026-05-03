@@ -137,6 +137,10 @@ The same admin role also unlocks backend-only user-management APIs:
 - `GET /api/v1/admin/logs/files/{file_name}/download`: download one sanitized server log file as a text attachment.
 - `GET /api/v1/admin/files/storage/status`: inspect local upload storage database/disk consistency summary.
 - `GET /api/v1/admin/files/storage/issues`: list missing disk files, orphan disk files, invalid storage keys, and metadata mismatches.
+- `GET /api/v1/admin/chat/sessions`: list chat sessions with `type`, `keyword`, `user_id`, `page`, and `size` filters.
+- `GET /api/v1/admin/chat/sessions/{session_id}`: inspect one chat session, including members, counters, encryption mode, and the latest message.
+- `GET /api/v1/admin/chat/sessions/{session_id}/messages`: inspect one session's messages with `type`, `page`, and `size` filters.
+- `GET /api/v1/admin/chat/health`: inspect chat data consistency issues such as orphan messages, missing members, `session_seq` gaps or duplicates, and `last_message_seq` drift.
 - `GET /api/v1/admin/database/status`: inspect database connection status, dialect, Alembic revision state, runtime schema completeness, and required table presence.
 - `GET /api/v1/admin/database/tables`: inspect table row counts and required index presence.
 - `GET /api/v1/admin/database/health`: inspect read-only database health checks and schema issues.
@@ -165,7 +169,10 @@ directory, reject path traversal, and redact sensitive values such as tokens,
 passwords, secrets, credentials, and authorization headers before returning
 query or download content. File storage inspection APIs scan only the configured
 local upload directory, report relative `storage_key` values, and do not return
-or audit local filesystem paths. Database backup files are written to a
+or audit local filesystem paths. Chat inspection APIs are read-only and expose
+server-visible chat metadata and message content for administrator diagnostics;
+they do not expose passwords, tokens, private keys, device keys, or E2EE key
+material. Database backup files are written to a
 server-controlled local directory and are not exposed through public upload URLs.
 Backup downloads are admin-only, require a completed backup record, and verify
 the file remains inside the configured backup directory before streaming it.

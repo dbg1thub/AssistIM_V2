@@ -14,6 +14,7 @@ from app.dependencies.settings_dependency import get_request_settings
 from app.models.user import User
 from app.schemas.admin import AdminDatabaseBackupPruneRequest, AdminDisableUserRequest, AdminSetUserRoleRequest
 from app.services.admin_audit_service import AdminAuditService
+from app.services.admin_chat_inspection_service import AdminChatInspectionService
 from app.services.admin_database_backup_service import AdminDatabaseBackupService
 from app.services.admin_database_service import AdminDatabaseService
 from app.services.admin_dashboard_service import AdminDashboardService
@@ -220,6 +221,90 @@ def list_admin_file_storage_issues(
 ) -> dict:
     """Return local file records or disk objects that need admin attention."""
     payload = AdminFileStorageService(db, settings).list_issues(
+        actor=current_user,
+        request_path=str(request.url.path),
+        request_method=request.method,
+        client_ip=_client_ip(request),
+    )
+    return success_response(payload)
+
+
+@router.get("/chat/sessions")
+def list_admin_chat_sessions(
+    request: Request,
+    type: str = "",
+    keyword: str = "",
+    user_id: str = "",
+    page: int = 1,
+    size: int = 20,
+    current_user: User = Depends(get_current_admin_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    """List chat sessions for backend admin tooling."""
+    payload = AdminChatInspectionService(db).list_sessions(
+        actor=current_user,
+        session_type=type,
+        keyword=keyword,
+        user_id=user_id,
+        page=page,
+        size=size,
+        request_path=str(request.url.path),
+        request_method=request.method,
+        client_ip=_client_ip(request),
+    )
+    return success_response(payload)
+
+
+@router.get("/chat/health")
+def get_admin_chat_health(
+    request: Request,
+    current_user: User = Depends(get_current_admin_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Return read-only chat data consistency checks."""
+    payload = AdminChatInspectionService(db).build_health(
+        actor=current_user,
+        request_path=str(request.url.path),
+        request_method=request.method,
+        client_ip=_client_ip(request),
+    )
+    return success_response(payload)
+
+
+@router.get("/chat/sessions/{session_id}/messages")
+def list_admin_chat_messages(
+    session_id: str,
+    request: Request,
+    type: str = "",
+    page: int = 1,
+    size: int = 50,
+    current_user: User = Depends(get_current_admin_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    """List messages in one chat session for backend admin tooling."""
+    payload = AdminChatInspectionService(db).list_messages(
+        session_id,
+        actor=current_user,
+        message_type=type,
+        page=page,
+        size=size,
+        request_path=str(request.url.path),
+        request_method=request.method,
+        client_ip=_client_ip(request),
+    )
+    return success_response(payload)
+
+
+@router.get("/chat/sessions/{session_id}")
+def get_admin_chat_session(
+    session_id: str,
+    request: Request,
+    current_user: User = Depends(get_current_admin_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Return one chat session detail for backend admin tooling."""
+    payload = AdminChatInspectionService(db).get_session(
+        session_id,
         actor=current_user,
         request_path=str(request.url.path),
         request_method=request.method,
