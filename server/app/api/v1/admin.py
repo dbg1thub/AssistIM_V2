@@ -17,6 +17,7 @@ from app.services.admin_audit_service import AdminAuditService
 from app.services.admin_database_backup_service import AdminDatabaseBackupService
 from app.services.admin_database_service import AdminDatabaseService
 from app.services.admin_dashboard_service import AdminDashboardService
+from app.services.admin_file_storage_service import AdminFileStorageService
 from app.services.admin_log_service import AdminLogService
 from app.services.admin_user_service import AdminUserService
 from app.utils.response import success_response
@@ -185,6 +186,40 @@ def list_admin_log_files(
 ) -> dict:
     """List server-controlled log files."""
     payload = AdminLogService(db, settings).list_files(
+        actor=current_user,
+        request_path=str(request.url.path),
+        request_method=request.method,
+        client_ip=_client_ip(request),
+    )
+    return success_response(payload)
+
+
+@router.get("/files/storage/status")
+def get_admin_file_storage_status(
+    request: Request,
+    current_user: User = Depends(get_current_admin_user),
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_request_settings),
+) -> dict:
+    """Return a read-only local file storage consistency summary."""
+    payload = AdminFileStorageService(db, settings).build_status(
+        actor=current_user,
+        request_path=str(request.url.path),
+        request_method=request.method,
+        client_ip=_client_ip(request),
+    )
+    return success_response(payload)
+
+
+@router.get("/files/storage/issues")
+def list_admin_file_storage_issues(
+    request: Request,
+    current_user: User = Depends(get_current_admin_user),
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_request_settings),
+) -> dict:
+    """Return local file records or disk objects that need admin attention."""
+    payload = AdminFileStorageService(db, settings).list_issues(
         actor=current_user,
         request_path=str(request.url.path),
         request_method=request.method,

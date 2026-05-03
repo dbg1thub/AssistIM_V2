@@ -135,6 +135,8 @@ The same admin role also unlocks backend-only user-management APIs:
 - `GET /api/v1/admin/logs/files`: list server log files under the configured log directory.
 - `GET /api/v1/admin/logs`: query sanitized server log entries with `file_name`, `level`, `keyword`, `created_from`, `created_to`, and `limit` filters.
 - `GET /api/v1/admin/logs/files/{file_name}/download`: download one sanitized server log file as a text attachment.
+- `GET /api/v1/admin/files/storage/status`: inspect local upload storage database/disk consistency summary.
+- `GET /api/v1/admin/files/storage/issues`: list missing disk files, orphan disk files, invalid storage keys, and metadata mismatches.
 - `GET /api/v1/admin/database/status`: inspect database connection status, dialect, Alembic revision state, runtime schema completeness, and required table presence.
 - `GET /api/v1/admin/database/tables`: inspect table row counts and required index presence.
 - `GET /api/v1/admin/database/health`: inspect read-only database health checks and schema issues.
@@ -161,7 +163,9 @@ passwords. Server logs are written to `LOG_DIR` (`data/logs` by default) with a
 rotating `assistim.log` file. Admin log APIs read only that configured log
 directory, reject path traversal, and redact sensitive values such as tokens,
 passwords, secrets, credentials, and authorization headers before returning
-query or download content. Database backup files are written to a
+query or download content. File storage inspection APIs scan only the configured
+local upload directory, report relative `storage_key` values, and do not return
+or audit local filesystem paths. Database backup files are written to a
 server-controlled local directory and are not exposed through public upload URLs.
 Backup downloads are admin-only, require a completed backup record, and verify
 the file remains inside the configured backup directory before streaming it.
