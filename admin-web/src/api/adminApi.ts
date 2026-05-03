@@ -39,6 +39,15 @@ export interface PruneDatabaseBackupsParams extends Record<string, unknown> {
   older_than_days?: number;
 }
 
+export interface QueryLogsParams extends Record<string, unknown> {
+  file_name?: string;
+  level?: string;
+  keyword?: string;
+  created_from?: string;
+  created_to?: string;
+  limit?: number;
+}
+
 export const ADMIN_HEALTH_REQUESTS = [
   { key: "auth", path: "/api/v1/admin/auth/health" },
   { key: "database", path: "/api/v1/admin/database/health" },
@@ -182,6 +191,29 @@ export class AdminApiClient {
 
   listLogFiles<T = unknown>(): Promise<T> {
     return this.get<T>("/api/v1/admin/logs/files");
+  }
+
+  queryLogs<T = unknown>(params: QueryLogsParams = {}): Promise<T> {
+    return this.get<T>("/api/v1/admin/logs", params);
+  }
+
+  async downloadLogFile(fileName: string): Promise<string> {
+    const headers: Record<string, string> = { Authorization: `Bearer ${this.token}` };
+    const response = await this.fetcher(
+      this.url(`/api/v1/admin/logs/files/${encodeURIComponent(fileName)}/download`),
+      {
+        headers,
+        method: "GET"
+      }
+    );
+    const text = await response.text();
+    if (!response.ok) {
+      throw new ApiError(text || `HTTP ${response.status}`, {
+        status: response.status,
+        code: response.status
+      });
+    }
+    return text;
   }
 
   getHealthCheck<T = unknown>(path: AdminHealthPath): Promise<T> {

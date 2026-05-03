@@ -212,6 +212,29 @@ function mockFetch() {
         ]
       });
     }
+    if (url.endsWith("/api/v1/admin/logs/files/assistim.log/download")) {
+      return Promise.resolve(
+        new Response("downloaded log content", {
+          status: 200,
+          headers: { "Content-Type": "text/plain; charset=utf-8" }
+        })
+      );
+    }
+    if (url.includes("/api/v1/admin/logs?")) {
+      return jsonResponse({
+        total: 1,
+        limit: 50,
+        items: [
+          {
+            file_name: "assistim.log",
+            timestamp: "2026-05-03T10:00:00+00:00",
+            level: "ERROR",
+            logger: "client.network.http_client",
+            message: "Network error: connection refused"
+          }
+        ]
+      });
+    }
     if (url.endsWith("/api/v1/admin/chat/health")) {
       return jsonResponse({
         status: "warning",
@@ -553,6 +576,46 @@ describe("Admin web shell", () => {
     const requestedUrls = fetchMock.mock.calls.map(([input]) => String(input));
     expect(requestedUrls).toContain("http://localhost:8000/api/v1/admin/files/storage/status");
     expect(requestedUrls).toContain("http://localhost:8000/api/v1/admin/files/storage/issues");
+  });
+
+  it("queries server log entries and downloads a selected log file", async () => {
+    const fetchMock = mockFetch();
+    render(<App fetcher={fetchMock} />);
+
+    fireEvent.change(screen.getByLabelText("服务端地址"), {
+      target: { value: "http://localhost:8000" }
+    });
+    fireEvent.change(screen.getByLabelText("访问令牌"), {
+      target: { value: "admin-token" }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "连接" }));
+    await screen.findByRole("heading", { name: "概览" });
+
+    fireEvent.click(screen.getByRole("button", { name: "日志" }));
+    expect(await screen.findByRole("heading", { name: "日志" })).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("日志文件"), {
+      target: { value: "assistim.log" }
+    });
+    fireEvent.change(screen.getByLabelText("日志级别"), {
+      target: { value: "ERROR" }
+    });
+    fireEvent.change(screen.getByLabelText("关键词"), {
+      target: { value: "Network error" }
+    });
+    fireEvent.change(screen.getByLabelText("返回条数"), {
+      target: { value: "50" }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "查询日志" }));
+
+    expect(await screen.findByText("Network error: connection refused")).toBeInTheDocument();
+    expect(screen.getByText("client.network.http_client")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "下载 assistim.log" }));
+    expect(await screen.findByText("已下载 assistim.log")).toBeInTheDocument();
+
+    const requestedUrls = fetchMock.mock.calls.map(([input]) => String(input));
+    expect(requestedUrls.some((url) => url.includes("/api/v1/admin/logs?"))).toBe(true);
+    expect(requestedUrls.some((url) => url.endsWith("/api/v1/admin/logs/files/assistim.log/download"))).toBe(true);
   });
 
   it("loads health inspection modules and expands issue details", async () => {

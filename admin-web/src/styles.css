@@ -362,6 +362,10 @@ p {
   padding: 14px;
 }
 
+.log-filter-panel {
+  grid-template-columns: repeat(6, minmax(0, 1fr)) auto;
+}
+
 .filter-panel label {
   display: grid;
   gap: 7px;
@@ -671,6 +675,12 @@ th {
 
 td {
   color: #1c2930;
+}
+
+.message-cell {
+  max-width: 680px;
+  white-space: normal;
+  word-break: break-word;
 }
 
 .spin {

@@ -12,7 +12,7 @@
 - 数据库页：读取 `/api/v1/admin/database/status`。
 - 文件页：读取 `/api/v1/admin/files/storage/status` 和 `/api/v1/admin/files/storage/issues`，用于查看本地上传文件记录与磁盘文件一致性问题。
 - 备份页：读取和管理 `/api/v1/admin/database/backups*`，支持创建、查看、验证、删除、清理预览和执行清理。
-- 日志页：读取 `/api/v1/admin/logs/files`。
+- 日志页：读取 `/api/v1/admin/logs/files`、`/api/v1/admin/logs` 和 `/api/v1/admin/logs/files/{file_name}/download`，支持文件列表、日志查询和脱敏日志下载。
 
 ## 本地运行
 

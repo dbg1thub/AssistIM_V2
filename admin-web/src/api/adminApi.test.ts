@@ -177,6 +177,49 @@ describe("AdminApiClient", () => {
     });
   });
 
+  it("queries and downloads server logs with bearer token", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/api/v1/admin/logs/files/assistim.log/download")) {
+        return new Response("downloaded log content", {
+          status: 200,
+          headers: { "Content-Type": "text/plain; charset=utf-8" }
+        });
+      }
+      return new Response(JSON.stringify({ code: 0, message: "success", data: { items: [] } }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" }
+      });
+    });
+    const client = new AdminApiClient({
+      baseUrl: "http://localhost:8000",
+      token: "token-value",
+      fetcher: fetchMock
+    });
+
+    await client.queryLogs({
+      file_name: "assistim.log",
+      level: "ERROR",
+      keyword: "Network error",
+      created_from: "2026-05-03T00:00:00+00:00",
+      created_to: "2026-05-03T23:59:59+00:00",
+      limit: 50
+    });
+    await expect(client.downloadLogFile("assistim.log")).resolves.toBe("downloaded log content");
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://localhost:8000/api/v1/admin/logs?file_name=assistim.log&level=ERROR&keyword=Network+error&created_from=2026-05-03T00%3A00%3A00%2B00%3A00&created_to=2026-05-03T23%3A59%3A59%2B00%3A00&limit=50",
+      {
+        headers: { Authorization: "Bearer token-value" },
+        method: "GET"
+      }
+    );
+    expect(fetchMock).toHaveBeenCalledWith("http://localhost:8000/api/v1/admin/logs/files/assistim.log/download", {
+      headers: { Authorization: "Bearer token-value" },
+      method: "GET"
+    });
+  });
+
   it("builds query strings for audit log filters and loads detail", async () => {
     const fetchMock = vi.fn(async () =>
       new Response(JSON.stringify({ code: 0, message: "success", data: { items: [] } }), {

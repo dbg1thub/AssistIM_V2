@@ -25,7 +25,8 @@ import {
   Fetcher,
   ListAuditLogsParams,
   ListUsersParams,
-  PruneDatabaseBackupsParams
+  PruneDatabaseBackupsParams,
+  QueryLogsParams
 } from "./api/adminApi";
 import "./styles.css";
 
@@ -152,6 +153,29 @@ interface LogFilesPayload {
   items?: Array<Record<string, unknown>>;
 }
 
+interface LogEntryItem extends Record<string, unknown> {
+  file_name?: string;
+  timestamp?: string | null;
+  level?: string;
+  logger?: string;
+  message?: string;
+}
+
+interface LogQueryPayload {
+  total: number;
+  limit: number;
+  items: LogEntryItem[];
+}
+
+interface LogFilters {
+  file_name: string;
+  level: string;
+  keyword: string;
+  created_from: string;
+  created_to: string;
+  limit: string;
+}
+
 interface HealthModulePayload {
   status?: string;
   issue_count?: number;
@@ -238,6 +262,15 @@ const defaultBackupPruneForm: BackupPruneForm = {
   include_deleted: false
 };
 
+const defaultLogFilters: LogFilters = {
+  file_name: "",
+  level: "",
+  keyword: "",
+  created_from: "",
+  created_to: "",
+  limit: "100"
+};
+
 const healthModuleDefinitions: Array<{
   key: string;
   label: string;
@@ -271,6 +304,9 @@ export default function App({ fetcher }: AppProps) {
   const [fileStorageIssues, setFileStorageIssues] = useState<FileStorageIssuesPayload | null>(null);
   const [fileStorageIssueType, setFileStorageIssueType] = useState("");
   const [logFiles, setLogFiles] = useState<LogFilesPayload | null>(null);
+  const [logEntries, setLogEntries] = useState<LogQueryPayload | null>(null);
+  const [logFilters, setLogFilters] = useState<LogFilters>(defaultLogFilters);
+  const [logDownloadStatus, setLogDownloadStatus] = useState("");
   const [healthReports, setHealthReports] = useState<HealthModuleReport[] | null>(null);
   const [healthRefreshedAt, setHealthRefreshedAt] = useState("");
   const [expandedHealthModules, setExpandedHealthModules] = useState<Record<string, boolean>>({});
@@ -408,6 +444,10 @@ export default function App({ fetcher }: AppProps) {
       }
       if (activePage === "logs") {
         setLogFiles(await client.listLogFiles<LogFilesPayload>());
+        if (logEntries) {
+          setLogEntries(await loadLogEntries(client, logFilters));
+        }
+        setLogDownloadStatus("");
       }
     } catch (currentError) {
       setError(readableError(currentError));
@@ -598,6 +638,40 @@ export default function App({ fetcher }: AppProps) {
     setBackupDownloadUrl(client.getDatabaseBackupDownloadUrl(backupId));
   }
 
+  async function searchLogs() {
+    if (!client) {
+      return;
+    }
+    setLoading(true);
+    setError("");
+    setLogDownloadStatus("");
+    try {
+      setLogEntries(await loadLogEntries(client, logFilters));
+    } catch (currentError) {
+      setError(readableError(currentError));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function downloadLogFile(fileName: string) {
+    if (!client) {
+      return;
+    }
+    setLoading(true);
+    setError("");
+    setLogDownloadStatus("");
+    try {
+      const content = await client.downloadLogFile(fileName);
+      triggerTextDownload(fileName, content);
+      setLogDownloadStatus(`已下载 ${fileName}`);
+    } catch (currentError) {
+      setError(readableError(currentError));
+    } finally {
+      setLoading(false);
+    }
+  }
+
   if (!session || !client) {
     return (
       <main className="login-shell">
@@ -742,7 +816,17 @@ export default function App({ fetcher }: AppProps) {
             showDownloadUrl={showBackupDownloadUrl}
           />
         ) : null}
-        {activePage === "logs" ? <LogsPage payload={logFiles} /> : null}
+        {activePage === "logs" ? (
+          <LogsPage
+            payload={logFiles}
+            entries={logEntries}
+            filters={logFilters}
+            setFilter={(key, value) => setLogFilters((current) => ({ ...current, [key]: value }))}
+            search={() => void searchLogs()}
+            downloadStatus={logDownloadStatus}
+            downloadLogFile={(fileName) => void downloadLogFile(fileName)}
+          />
+        ) : null}
       </main>
     </div>
   );
@@ -1615,11 +1699,98 @@ function BackupDetailPanel({
   );
 }
 
-function LogsPage({ payload }: { payload: LogFilesPayload | null }) {
+function LogsPage({
+  payload,
+  entries,
+  filters,
+  setFilter,
+  search,
+  downloadStatus,
+  downloadLogFile
+}: {
+  payload: LogFilesPayload | null;
+  entries: LogQueryPayload | null;
+  filters: LogFilters;
+  setFilter: (key: keyof LogFilters, value: string) => void;
+  search: () => void;
+  downloadStatus: string;
+  downloadLogFile: (fileName: string) => void;
+}) {
   const files = payload?.files ?? payload?.items ?? [];
+  const logItems = entries?.items ?? [];
+
+  function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    search();
+  }
+
   return (
     <section className="page-section">
       <PageTitle title="日志" subtitle={`共 ${payload?.total ?? files.length} 个文件`} />
+      <form className="filter-panel log-filter-panel" onSubmit={submit}>
+        <label>
+          <span>日志文件</span>
+          <select value={filters.file_name} onChange={(event) => setFilter("file_name", event.target.value)}>
+            <option value="">全部</option>
+            {files.map((file) => {
+              const fileName = String(file.file_name ?? file.name ?? "");
+              return (
+                <option value={fileName} key={fileName}>
+                  {fileName}
+                </option>
+              );
+            })}
+          </select>
+        </label>
+        <label>
+          <span>日志级别</span>
+          <select value={filters.level} onChange={(event) => setFilter("level", event.target.value)}>
+            <option value="">全部</option>
+            <option value="DEBUG">DEBUG</option>
+            <option value="INFO">INFO</option>
+            <option value="WARNING">WARNING</option>
+            <option value="ERROR">ERROR</option>
+            <option value="CRITICAL">CRITICAL</option>
+          </select>
+        </label>
+        <label>
+          <span>关键词</span>
+          <input
+            value={filters.keyword}
+            onChange={(event) => setFilter("keyword", event.target.value)}
+            placeholder="message 关键词"
+          />
+        </label>
+        <label>
+          <span>开始时间</span>
+          <input
+            value={filters.created_from}
+            onChange={(event) => setFilter("created_from", event.target.value)}
+            placeholder="2026-05-03T00:00:00+00:00"
+          />
+        </label>
+        <label>
+          <span>结束时间</span>
+          <input
+            value={filters.created_to}
+            onChange={(event) => setFilter("created_to", event.target.value)}
+            placeholder="2026-05-03T23:59:59+00:00"
+          />
+        </label>
+        <label>
+          <span>返回条数</span>
+          <input
+            inputMode="numeric"
+            value={filters.limit}
+            onChange={(event) => setFilter("limit", event.target.value)}
+            placeholder="100"
+          />
+        </label>
+        <button className="secondary-button" type="submit">
+          <Search size={17} />
+          查询日志
+        </button>
+      </form>
       <div className="table-wrap">
         <table>
           <thead>
@@ -1627,6 +1798,7 @@ function LogsPage({ payload }: { payload: LogFilesPayload | null }) {
               <th>文件名</th>
               <th>大小</th>
               <th>更新时间</th>
+              <th>下载</th>
             </tr>
           </thead>
           <tbody>
@@ -1635,11 +1807,47 @@ function LogsPage({ payload }: { payload: LogFilesPayload | null }) {
                 <td>{String(file.file_name ?? file.name ?? "")}</td>
                 <td>{formatBytes(file.size_bytes)}</td>
                 <td>{String(file.modified_at ?? "")}</td>
+                <td>
+                  <button
+                    className="table-action-button"
+                    type="button"
+                    onClick={() => downloadLogFile(String(file.file_name ?? file.name ?? ""))}
+                    aria-label={`下载 ${String(file.file_name ?? file.name ?? "")}`}
+                  >
+                    下载
+                  </button>
+                </td>
               </tr>
             ))}
           </tbody>
         </table>
       </div>
+      {downloadStatus ? <p className="empty-text" role="status">{downloadStatus}</p> : null}
+      <div className="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>时间</th>
+              <th>级别</th>
+              <th>Logger</th>
+              <th>文件</th>
+              <th>消息</th>
+            </tr>
+          </thead>
+          <tbody>
+            {logItems.map((entry, index) => (
+              <tr key={`${String(entry.file_name ?? "log")}-${String(entry.timestamp ?? index)}-${index}`}>
+                <td>{String(entry.timestamp ?? "")}</td>
+                <td>{String(entry.level ?? "")}</td>
+                <td>{String(entry.logger ?? "")}</td>
+                <td>{String(entry.file_name ?? "")}</td>
+                <td className="message-cell">{String(entry.message ?? "")}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {entries ? <p className="empty-text">{`匹配 ${entries.total ?? logItems.length} 条，限制 ${entries.limit ?? "-"}`}</p> : null}
     </section>
   );
 }
@@ -1715,6 +1923,24 @@ async function loadFileStorageInspection(client: AdminApiClient): Promise<{
     client.listFileStorageIssues<FileStorageIssuesPayload>()
   ]);
   return { status, issues };
+}
+
+function loadLogEntries(client: AdminApiClient, filters: LogFilters): Promise<LogQueryPayload> {
+  return client.queryLogs<LogQueryPayload>(logQueryParams(filters));
+}
+
+function logQueryParams(filters: LogFilters): QueryLogsParams {
+  const params: QueryLogsParams = {};
+  for (const key of ["file_name", "level", "keyword", "created_from", "created_to"] as const) {
+    if (filters[key].trim()) {
+      params[key] = filters[key].trim();
+    }
+  }
+  const limit = parseOptionalPositiveInt(filters.limit);
+  if (limit !== undefined) {
+    params.limit = limit;
+  }
+  return params;
 }
 
 function loadDatabaseBackups(client: AdminApiClient): Promise<DatabaseBackupListPayload> {
@@ -1921,6 +2147,22 @@ function boolLabel(value: unknown): string {
     return "否";
   }
   return "-";
+}
+
+function triggerTextDownload(fileName: string, content: string): void {
+  if (typeof document === "undefined" || typeof URL === "undefined" || typeof URL.createObjectURL !== "function") {
+    return;
+  }
+  const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = fileName;
+  anchor.style.display = "none";
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  URL.revokeObjectURL(url);
 }
 
 function auditTarget(log: AuditLogItem): string {
