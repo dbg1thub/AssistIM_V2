@@ -391,6 +391,76 @@ function mockFetch() {
         items: [momentSummary()]
       });
     }
+    if (url.includes("/api/v1/admin/realtime/connections")) {
+      return jsonResponse({
+        snapshot: {
+          hub: "InMemoryRealtimeHub",
+          raw_connections: 1,
+          bound_connections: 1,
+          online_users: 1
+        },
+        total_users: 1,
+        total_connections: 1,
+        items: [
+          {
+            user_id: "user-1",
+            user: userSummary("user-1", "test1", "测试一"),
+            connection_count: 1,
+            connections: [
+              {
+                connection_id: "connection-1",
+                user_id: "user-1",
+                bound: true,
+                has_socket: true,
+                connected_at: "2026-05-03T10:00:00+00:00",
+                bound_at: "2026-05-03T10:00:01+00:00",
+                client_host: "127.0.0.1",
+                client_port: 52345,
+                user_agent: "AssistIM"
+              }
+            ]
+          }
+        ]
+      });
+    }
+    if (url.includes("/api/v1/admin/calls/active")) {
+      return jsonResponse({
+        snapshot: {
+          active: 1,
+          by_media_type: { audio: 1 }
+        },
+        total: 1,
+        items: [
+          {
+            call_id: "call-1",
+            session_id: "session-1",
+            session: {
+              id: "session-1",
+              exists: true,
+              type: "private",
+              name: "test1, test3",
+              is_ai_session: false,
+              encryption_mode: "e2ee_private"
+            },
+            initiator_id: "user-1",
+            initiator: userSummary("user-1", "test1", "测试一"),
+            recipient_id: "user-3",
+            recipient: userSummary("user-3", "test3", "测试三"),
+            participants: [
+              { role: "initiator", user_id: "user-1", user: userSummary("user-1", "test1", "测试一"), online: true },
+              { role: "recipient", user_id: "user-3", user: userSummary("user-3", "test3", "测试三"), online: true }
+            ],
+            media_type: "audio",
+            status: "accepted",
+            created_at: "2026-05-03T10:02:00+00:00",
+            answered_at: "2026-05-03T10:02:05+00:00",
+            ended_at: "",
+            ended_by: "",
+            reason: ""
+          }
+        ]
+      });
+    }
     if (url.endsWith("/api/v1/admin/chat/health")) {
       return jsonResponse({
         status: "warning",
@@ -1135,6 +1205,44 @@ describe("Admin web shell", () => {
       expect(requestedUrls.some((url) => url.includes("/api/v1/admin/moments/moment-1/likes"))).toBe(true);
       expect(requestedUrls.some((url) => url.includes("comments?user_id=user-1"))).toBe(true);
       expect(requestedUrls.some((url) => url.includes("likes?user_id=user-1"))).toBe(true);
+    });
+  });
+
+  it("loads realtime connections and active calls with user filters", async () => {
+    const fetchMock = mockFetch();
+    render(<App fetcher={fetchMock} />);
+
+    fireEvent.change(screen.getByLabelText("服务端地址"), {
+      target: { value: "http://localhost:8000" }
+    });
+    fireEvent.change(screen.getByLabelText("访问令牌"), {
+      target: { value: "admin-token" }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "连接" }));
+    await screen.findByRole("heading", { name: "概览" });
+
+    fireEvent.click(screen.getByRole("button", { name: "实时" }));
+    expect(await screen.findByRole("heading", { name: "实时" })).toBeInTheDocument();
+    expect(screen.getByText("connection-1")).toBeInTheDocument();
+    expect(screen.getByText("call-1")).toBeInTheDocument();
+    expect(screen.getByText("accepted")).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("连接用户 ID"), {
+      target: { value: "user-1" }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "查询连接" }));
+
+    fireEvent.change(screen.getByLabelText("通话用户 ID"), {
+      target: { value: "user-1" }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "查询通话" }));
+
+    await waitFor(() => {
+      const requestedUrls = fetchMock.mock.calls.map(([input]) => String(input));
+      expect(requestedUrls.some((url) => url.includes("/api/v1/admin/realtime/connections"))).toBe(true);
+      expect(requestedUrls.some((url) => url.includes("/api/v1/admin/calls/active"))).toBe(true);
+      expect(requestedUrls.some((url) => url.includes("connections?user_id=user-1"))).toBe(true);
+      expect(requestedUrls.some((url) => url.includes("active?user_id=user-1"))).toBe(true);
     });
   });
 

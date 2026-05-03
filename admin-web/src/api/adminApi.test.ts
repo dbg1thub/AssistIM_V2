@@ -371,6 +371,35 @@ describe("AdminApiClient", () => {
     );
   });
 
+  it("loads realtime connections and active calls", async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(JSON.stringify({ code: 0, message: "success", data: { items: [] } }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" }
+      })
+    );
+    const client = new AdminApiClient({
+      baseUrl: "http://localhost:8000",
+      token: "token-value",
+      fetcher: fetchMock
+    });
+
+    await client.listRealtimeConnections({ user_id: "user-1" });
+    await client.listActiveCalls({ user_id: "user-1" });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://localhost:8000/api/v1/admin/realtime/connections?user_id=user-1",
+      {
+        headers: { Authorization: "Bearer token-value" },
+        method: "GET"
+      }
+    );
+    expect(fetchMock).toHaveBeenCalledWith("http://localhost:8000/api/v1/admin/calls/active?user_id=user-1", {
+      headers: { Authorization: "Bearer token-value" },
+      method: "GET"
+    });
+  });
+
   it("builds query strings for audit log filters and loads detail", async () => {
     const fetchMock = vi.fn(async () =>
       new Response(JSON.stringify({ code: 0, message: "success", data: { items: [] } }), {

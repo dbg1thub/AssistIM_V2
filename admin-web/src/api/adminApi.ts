@@ -88,6 +88,14 @@ export interface ListMomentLikesParams extends Record<string, unknown> {
   size?: number;
 }
 
+export interface ListRealtimeConnectionsParams extends Record<string, unknown> {
+  user_id?: string;
+}
+
+export interface ListActiveCallsParams extends Record<string, unknown> {
+  user_id?: string;
+}
+
 export interface ListDatabaseBackupsParams extends Record<string, unknown> {
   page?: number;
   size?: number;
@@ -250,6 +258,14 @@ export class AdminApiClient {
 
   listMomentLikes<T = unknown>(momentId: string, params: ListMomentLikesParams = {}): Promise<T> {
     return this.get<T>(`/api/v1/admin/moments/${encodeURIComponent(momentId)}/likes`, params);
+  }
+
+  listRealtimeConnections<T = unknown>(params: ListRealtimeConnectionsParams = {}): Promise<T> {
+    return this.get<T>("/api/v1/admin/realtime/connections", params);
+  }
+
+  listActiveCalls<T = unknown>(params: ListActiveCallsParams = {}): Promise<T> {
+    return this.get<T>("/api/v1/admin/calls/active", params);
   }
 
   getDatabaseStatus<T = unknown>(): Promise<T> {

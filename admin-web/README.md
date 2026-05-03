@@ -12,6 +12,7 @@
 - 联系人页：读取 `/api/v1/admin/contacts/friend-requests` 和 `/api/v1/admin/contacts/friendships`，用于按用户和状态查看好友请求、好友关系。
 - 群组页：读取 `/api/v1/admin/groups`、`/api/v1/admin/groups/{group_id}` 和 `/api/v1/admin/groups/{group_id}/members`，用于查看群资料、群会话、群成员和公告入库情况。
 - 朋友圈页：读取 `/api/v1/admin/moments`、`/api/v1/admin/moments/{moment_id}`、`/api/v1/admin/moments/{moment_id}/comments` 和 `/api/v1/admin/moments/{moment_id}/likes`，用于查看动态、评论和点赞入库情况。
+- 实时页：读取 `/api/v1/admin/realtime/connections` 和 `/api/v1/admin/calls/active`，用于查看当前 WebSocket 连接、在线用户绑定和活跃通话。
 - 用户页：读取 `/api/v1/admin/users` 和 `/api/v1/admin/users/{user_id}`，支持改角色、禁用、启用、强制下线等需要确认的账号管理操作。
 - 数据库页：读取 `/api/v1/admin/database/status`。
 - 文件页：读取 `/api/v1/admin/files/storage/status` 和 `/api/v1/admin/files/storage/issues`，用于查看本地上传文件记录与磁盘文件一致性问题。

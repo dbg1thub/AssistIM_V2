@@ -35,6 +35,8 @@ import {
   ListMomentCommentsParams,
   ListMomentLikesParams,
   ListMomentsParams,
+  ListActiveCallsParams,
+  ListRealtimeConnectionsParams,
   ListUsersParams,
   PruneDatabaseBackupsParams,
   QueryLogsParams
@@ -49,6 +51,7 @@ type PageKey =
   | "contacts"
   | "groups"
   | "moments"
+  | "realtime"
   | "users"
   | "database"
   | "files"
@@ -538,6 +541,84 @@ interface MomentUserFilters {
   user_id: string;
 }
 
+interface RuntimeUserSummary extends Record<string, unknown> {
+  id?: string;
+  username?: string;
+  nickname?: string;
+  exists?: boolean;
+  is_disabled?: boolean;
+}
+
+interface RealtimeConnectionItem extends Record<string, unknown> {
+  connection_id?: string;
+  user_id?: string;
+  bound?: boolean;
+  has_socket?: boolean;
+  connected_at?: string;
+  bound_at?: string;
+  client_host?: string;
+  client_port?: number;
+  user_agent?: string;
+}
+
+interface RealtimeConnectionUserItem extends Record<string, unknown> {
+  user_id?: string;
+  user?: RuntimeUserSummary;
+  connection_count?: number;
+  connections?: RealtimeConnectionItem[];
+}
+
+interface RealtimeConnectionsPayload {
+  snapshot?: Record<string, unknown>;
+  total_users: number;
+  total_connections: number;
+  items: RealtimeConnectionUserItem[];
+}
+
+interface RuntimeSessionSummary extends Record<string, unknown> {
+  id?: string;
+  exists?: boolean;
+  type?: string;
+  name?: string;
+  is_ai_session?: boolean;
+  encryption_mode?: string;
+}
+
+interface ActiveCallParticipant extends Record<string, unknown> {
+  role?: string;
+  user_id?: string;
+  user?: RuntimeUserSummary;
+  online?: boolean;
+}
+
+interface ActiveCallItem extends Record<string, unknown> {
+  call_id?: string;
+  session_id?: string;
+  session?: RuntimeSessionSummary;
+  initiator_id?: string;
+  initiator?: RuntimeUserSummary;
+  recipient_id?: string;
+  recipient?: RuntimeUserSummary;
+  participants?: ActiveCallParticipant[];
+  media_type?: string;
+  status?: string;
+  created_at?: string;
+  answered_at?: string;
+  ended_at?: string;
+  ended_by?: string;
+  reason?: string;
+}
+
+interface ActiveCallsPayload {
+  snapshot?: Record<string, unknown>;
+  total: number;
+  items: ActiveCallItem[];
+}
+
+interface RuntimeUserFilter {
+  user_id: string;
+}
+
 interface SessionState {
   baseUrl: string;
   token: string;
@@ -551,6 +632,7 @@ const navItems: Array<{ key: PageKey; label: string; icon: ReactNode }> = [
   { key: "contacts", label: "联系人", icon: <Users size={18} /> },
   { key: "groups", label: "群组", icon: <Users size={18} /> },
   { key: "moments", label: "朋友圈", icon: <Heart size={18} /> },
+  { key: "realtime", label: "实时", icon: <Activity size={18} /> },
   { key: "users", label: "用户", icon: <Users size={18} /> },
   { key: "database", label: "数据库", icon: <Database size={18} /> },
   { key: "files", label: "文件", icon: <HardDrive size={18} /> },
@@ -624,6 +706,10 @@ const defaultMomentUserFilters: MomentUserFilters = {
   user_id: ""
 };
 
+const defaultRuntimeUserFilter: RuntimeUserFilter = {
+  user_id: ""
+};
+
 const healthModuleDefinitions: Array<{
   key: string;
   label: string;
@@ -693,6 +779,10 @@ export default function App({ fetcher }: AppProps) {
   const [momentCommentFilters, setMomentCommentFilters] = useState<MomentUserFilters>(defaultMomentUserFilters);
   const [momentLikeFilters, setMomentLikeFilters] = useState<MomentUserFilters>(defaultMomentUserFilters);
   const [momentDetailLoading, setMomentDetailLoading] = useState(false);
+  const [realtimeConnections, setRealtimeConnections] = useState<RealtimeConnectionsPayload | null>(null);
+  const [activeCalls, setActiveCalls] = useState<ActiveCallsPayload | null>(null);
+  const [realtimeFilters, setRealtimeFilters] = useState<RuntimeUserFilter>(defaultRuntimeUserFilter);
+  const [activeCallFilters, setActiveCallFilters] = useState<RuntimeUserFilter>(defaultRuntimeUserFilter);
   const [selectedUser, setSelectedUser] = useState<UserDetailPayload | null>(null);
   const [disableReason, setDisableReason] = useState("");
   const [userOperationLoading, setUserOperationLoading] = useState(false);
@@ -746,6 +836,7 @@ export default function App({ fetcher }: AppProps) {
       (page === "contacts" && (!contactFriendRequests || !contactFriendships)) ||
       (page === "groups" && !groups) ||
       (page === "moments" && !moments) ||
+      (page === "realtime" && (!realtimeConnections || !activeCalls)) ||
       (page === "users" && !users) ||
       (page === "database" && !databaseStatus) ||
       (page === "files" && (!fileStorageStatus || !fileStorageIssues)) ||
@@ -779,6 +870,11 @@ export default function App({ fetcher }: AppProps) {
       }
       if (page === "moments" && !moments) {
         setMoments(await loadMoments(client, momentFilters));
+      }
+      if (page === "realtime" && (!realtimeConnections || !activeCalls)) {
+        const payload = await loadRealtimeData(client, realtimeFilters, activeCallFilters);
+        setRealtimeConnections(payload.connections);
+        setActiveCalls(payload.calls);
       }
       if (page === "users" && !users) {
         setUsers(await loadUsers(client, keyword));
@@ -842,6 +938,11 @@ export default function App({ fetcher }: AppProps) {
         setSelectedMoment(null);
         setMomentComments(null);
         setMomentLikes(null);
+      }
+      if (activePage === "realtime") {
+        const payload = await loadRealtimeData(client, realtimeFilters, activeCallFilters);
+        setRealtimeConnections(payload.connections);
+        setActiveCalls(payload.calls);
       }
       if (activePage === "users") {
         setUsers(await loadUsers(client, keyword));
@@ -1106,6 +1207,36 @@ export default function App({ fetcher }: AppProps) {
       setError(readableError(currentError));
     } finally {
       setMomentDetailLoading(false);
+    }
+  }
+
+  async function searchRealtimeConnections() {
+    if (!client) {
+      return;
+    }
+    setLoading(true);
+    setError("");
+    try {
+      setRealtimeConnections(await loadRealtimeConnections(client, realtimeFilters));
+    } catch (currentError) {
+      setError(readableError(currentError));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function searchActiveCalls() {
+    if (!client) {
+      return;
+    }
+    setLoading(true);
+    setError("");
+    try {
+      setActiveCalls(await loadActiveCalls(client, activeCallFilters));
+    } catch (currentError) {
+      setError(readableError(currentError));
+    } finally {
+      setLoading(false);
     }
   }
 
@@ -1459,6 +1590,18 @@ export default function App({ fetcher }: AppProps) {
             openMoment={(momentId) => void openMomentDetail(momentId)}
             searchComments={() => void searchMomentComments()}
             searchLikes={() => void searchMomentLikes()}
+          />
+        ) : null}
+        {activePage === "realtime" ? (
+          <RealtimePage
+            connections={realtimeConnections}
+            calls={activeCalls}
+            connectionFilters={realtimeFilters}
+            callFilters={activeCallFilters}
+            setConnectionFilter={(key, value) => setRealtimeFilters((current) => ({ ...current, [key]: value }))}
+            setCallFilter={(key, value) => setActiveCallFilters((current) => ({ ...current, [key]: value }))}
+            searchConnections={() => void searchRealtimeConnections()}
+            searchCalls={() => void searchActiveCalls()}
           />
         ) : null}
         {activePage === "users" ? (
@@ -2736,6 +2879,169 @@ function MomentDetailPanel({
   );
 }
 
+function RealtimePage({
+  connections,
+  calls,
+  connectionFilters,
+  callFilters,
+  setConnectionFilter,
+  setCallFilter,
+  searchConnections,
+  searchCalls
+}: {
+  connections: RealtimeConnectionsPayload | null;
+  calls: ActiveCallsPayload | null;
+  connectionFilters: RuntimeUserFilter;
+  callFilters: RuntimeUserFilter;
+  setConnectionFilter: (key: keyof RuntimeUserFilter, value: string) => void;
+  setCallFilter: (key: keyof RuntimeUserFilter, value: string) => void;
+  searchConnections: () => void;
+  searchCalls: () => void;
+}) {
+  const connectionRows = (connections?.items ?? []).flatMap((item) =>
+    (item.connections ?? []).map((connection) => ({
+      ...connection,
+      owner: item.user,
+      connection_count: item.connection_count
+    }))
+  );
+  const callItems = calls?.items ?? [];
+
+  function submitConnections(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    searchConnections();
+  }
+
+  function submitCalls(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    searchCalls();
+  }
+
+  return (
+    <section className="page-section">
+      <PageTitle title="实时" subtitle="查看当前 WebSocket 连接和活跃通话" />
+      <div className="metric-grid compact-grid">
+        <MetricCard label="在线用户" value={connections?.snapshot?.online_users ?? connections?.total_users} />
+        <MetricCard
+          label="绑定连接"
+          value={connections?.snapshot?.bound_connections ?? connections?.total_connections}
+        />
+        <MetricCard label="活跃通话" value={calls?.snapshot?.active ?? calls?.total} />
+      </div>
+      <article className="detail-panel">
+        <div className="detail-header">
+          <div>
+            <h2>实时连接</h2>
+            <p>{`用户 ${connections?.total_users ?? 0} 个 · 连接 ${connections?.total_connections ?? 0} 个`}</p>
+          </div>
+        </div>
+        <form className="filter-panel" onSubmit={submitConnections}>
+          <label>
+            <span>连接用户 ID</span>
+            <input
+              value={connectionFilters.user_id}
+              onChange={(event) => setConnectionFilter("user_id", event.target.value)}
+              placeholder="user id"
+            />
+          </label>
+          <button className="secondary-button" type="submit">
+            <Search size={17} />
+            查询连接
+          </button>
+        </form>
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>连接 ID</th>
+                <th>用户</th>
+                <th>用户 ID</th>
+                <th>已绑定</th>
+                <th>Socket</th>
+                <th>客户端</th>
+                <th>连接时间</th>
+                <th>绑定时间</th>
+                <th>User-Agent</th>
+              </tr>
+            </thead>
+            <tbody>
+              {connectionRows.map((connection) => (
+                <tr key={String(connection.connection_id ?? "")}>
+                  <td>{String(connection.connection_id ?? "")}</td>
+                  <td>{runtimeUserName(connection.owner, connection.user_id)}</td>
+                  <td>{String(connection.user_id ?? connection.owner?.id ?? "")}</td>
+                  <td>{boolLabel(connection.bound)}</td>
+                  <td>{boolLabel(connection.has_socket)}</td>
+                  <td>{runtimeClientLabel(connection)}</td>
+                  <td>{String(connection.connected_at ?? "")}</td>
+                  <td>{String(connection.bound_at ?? "")}</td>
+                  <td>{String(connection.user_agent ?? "")}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        {!connectionRows.length ? <p className="empty-text">暂无实时连接</p> : null}
+      </article>
+      <article className="detail-panel">
+        <div className="detail-header">
+          <div>
+            <h2>活跃通话</h2>
+            <p>{`共 ${calls?.total ?? 0} 个活跃通话`}</p>
+          </div>
+        </div>
+        <form className="filter-panel" onSubmit={submitCalls}>
+          <label>
+            <span>通话用户 ID</span>
+            <input
+              value={callFilters.user_id}
+              onChange={(event) => setCallFilter("user_id", event.target.value)}
+              placeholder="user id"
+            />
+          </label>
+          <button className="secondary-button" type="submit">
+            <Search size={17} />
+            查询通话
+          </button>
+        </form>
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>通话 ID</th>
+                <th>会话 ID</th>
+                <th>发起人</th>
+                <th>接收人</th>
+                <th>媒体</th>
+                <th>状态</th>
+                <th>参与者</th>
+                <th>创建时间</th>
+                <th>接听时间</th>
+              </tr>
+            </thead>
+            <tbody>
+              {callItems.map((call) => (
+                <tr key={String(call.call_id ?? "")}>
+                  <td>{String(call.call_id ?? "")}</td>
+                  <td>{String(call.session_id ?? call.session?.id ?? "")}</td>
+                  <td>{runtimeUserName(call.initiator, call.initiator_id)}</td>
+                  <td>{runtimeUserName(call.recipient, call.recipient_id)}</td>
+                  <td>{String(call.media_type ?? "")}</td>
+                  <td>{String(call.status ?? "")}</td>
+                  <td className="message-cell">{callParticipantsLabel(call.participants ?? [])}</td>
+                  <td>{String(call.created_at ?? "")}</td>
+                  <td>{String(call.answered_at ?? "")}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        {!callItems.length ? <p className="empty-text">暂无活跃通话</p> : null}
+      </article>
+    </section>
+  );
+}
+
 function UsersPage({
   payload,
   keyword,
@@ -3655,6 +3961,37 @@ function loadMomentLikes(
   return client.listMomentLikes<MomentLikeListPayload>(momentId, params);
 }
 
+async function loadRealtimeData(
+  client: AdminApiClient,
+  connectionFilters: RuntimeUserFilter,
+  callFilters: RuntimeUserFilter
+): Promise<{ connections: RealtimeConnectionsPayload; calls: ActiveCallsPayload }> {
+  const [connections, calls] = await Promise.all([
+    loadRealtimeConnections(client, connectionFilters),
+    loadActiveCalls(client, callFilters)
+  ]);
+  return { connections, calls };
+}
+
+function loadRealtimeConnections(
+  client: AdminApiClient,
+  filters: RuntimeUserFilter
+): Promise<RealtimeConnectionsPayload> {
+  const params: ListRealtimeConnectionsParams = {};
+  if (filters.user_id.trim()) {
+    params.user_id = filters.user_id.trim();
+  }
+  return client.listRealtimeConnections<RealtimeConnectionsPayload>(params);
+}
+
+function loadActiveCalls(client: AdminApiClient, filters: RuntimeUserFilter): Promise<ActiveCallsPayload> {
+  const params: ListActiveCallsParams = {};
+  if (filters.user_id.trim()) {
+    params.user_id = filters.user_id.trim();
+  }
+  return client.listActiveCalls<ActiveCallsPayload>(params);
+}
+
 async function loadFileStorageInspection(client: AdminApiClient): Promise<{
   status: FileStorageStatusPayload;
   issues: FileStorageIssuesPayload;
@@ -3890,6 +4227,32 @@ function groupUserName(user?: GroupUserSummary, fallbackId?: string): string {
 
 function momentUserName(user?: MomentUserSummary, fallbackId?: string): string {
   return String(user?.username || user?.nickname || user?.id || fallbackId || "");
+}
+
+function runtimeUserName(user?: RuntimeUserSummary, fallbackId?: string): string {
+  return String(user?.username || user?.nickname || user?.id || fallbackId || "");
+}
+
+function runtimeClientLabel(connection: RealtimeConnectionItem): string {
+  const host = String(connection.client_host ?? "");
+  const port = connection.client_port;
+  if (!host && !port) {
+    return "-";
+  }
+  return port ? `${host}:${port}` : host;
+}
+
+function callParticipantsLabel(participants: ActiveCallParticipant[]): string {
+  if (!participants.length) {
+    return "-";
+  }
+  return participants
+    .map((participant) => {
+      const name = runtimeUserName(participant.user, participant.user_id);
+      const online = participant.online ? "在线" : "离线";
+      return `${String(participant.role ?? "")}:${name}(${online})`;
+    })
+    .join(" · ");
 }
 
 function contactStatusTone(status: unknown): HealthStatus {
