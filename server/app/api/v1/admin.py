@@ -14,6 +14,7 @@ from app.dependencies.settings_dependency import get_request_settings
 from app.models.user import User
 from app.schemas.admin import AdminDatabaseBackupPruneRequest, AdminDisableUserRequest, AdminSetUserRoleRequest
 from app.services.admin_audit_service import AdminAuditService
+from app.services.admin_auth_inspection_service import AdminAuthInspectionService
 from app.services.admin_chat_inspection_service import AdminChatInspectionService
 from app.services.admin_contacts_inspection_service import AdminContactsInspectionService
 from app.services.admin_database_backup_service import AdminDatabaseBackupService
@@ -69,6 +70,40 @@ def get_admin_dashboard(
         detail={"sections": sorted(snapshot.keys())},
     )
     return success_response(snapshot)
+
+
+@router.get("/auth/status")
+def get_admin_auth_status(
+    request: Request,
+    current_user: User = Depends(get_current_admin_user),
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_request_settings),
+) -> dict:
+    """Return read-only authentication configuration and runtime status."""
+    payload = AdminAuthInspectionService(db, settings).build_status(
+        actor=current_user,
+        request_path=str(request.url.path),
+        request_method=request.method,
+        client_ip=_client_ip(request),
+    )
+    return success_response(payload)
+
+
+@router.get("/auth/health")
+def get_admin_auth_health(
+    request: Request,
+    current_user: User = Depends(get_current_admin_user),
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_request_settings),
+) -> dict:
+    """Return read-only authentication and account-security checks."""
+    payload = AdminAuthInspectionService(db, settings).build_health(
+        actor=current_user,
+        request_path=str(request.url.path),
+        request_method=request.method,
+        client_ip=_client_ip(request),
+    )
+    return success_response(payload)
 
 
 @router.get("/audit-logs")

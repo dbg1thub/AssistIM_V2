@@ -132,6 +132,8 @@ The same admin role also unlocks backend-only user-management APIs:
 
 - `GET /api/v1/admin/audit-logs`: list audit logs with `actor_username`, `action`, `target_type`, `target_id`, `success`, `created_from`, `created_to`, `page`, and `size` filters.
 - `GET /api/v1/admin/audit-logs/{log_id}`: inspect one audit log.
+- `GET /api/v1/admin/auth/status`: inspect authentication configuration, JWT/session invalidation strategy, user/admin counts, realtime online counts, and recent auth-related admin audit counts.
+- `GET /api/v1/admin/auth/health`: inspect authentication and account-security issues such as missing enabled administrators, disabled users still online, invalid roles, missing password credentials, and invalid session versions.
 - `GET /api/v1/admin/logs/files`: list server log files under the configured log directory.
 - `GET /api/v1/admin/logs`: query sanitized server log entries with `file_name`, `level`, `keyword`, `created_from`, `created_to`, and `limit` filters.
 - `GET /api/v1/admin/logs/files/{file_name}/download`: download one sanitized server log file as a text attachment.
@@ -187,7 +189,11 @@ responses redact sensitive detail keys such as passwords, tokens, credentials,
 authorization headers, and secrets. The API does not expose password hashes,
 tokens, private keys, or E2EE public key material in admin list/detail
 responses. Database inspection APIs are read-only and redact database URL
-passwords. Server logs are written to `LOG_DIR` (`data/logs` by default) with a
+passwords. Auth inspection APIs are read-only and expose token lifetime
+configuration, the JWT/session invalidation strategy, account counters, online
+counts, and auth-related audit counts; they do not expose access token values,
+refresh token values, password hashes, password values, or server secrets.
+Server logs are written to `LOG_DIR` (`data/logs` by default) with a
 rotating `assistim.log` file. Admin log APIs read only that configured log
 directory, reject path traversal, and redact sensitive values such as tokens,
 passwords, secrets, credentials, and authorization headers before returning
