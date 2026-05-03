@@ -8,6 +8,8 @@ from collections import defaultdict
 
 from fastapi import WebSocket, WebSocketDisconnect
 
+from app.utils.time import isoformat_utc, utcnow
+
 
 class RealtimeHub(ABC):
     """Abstract connection/presence/fanout boundary."""
@@ -81,6 +83,10 @@ class RealtimeHub(ABC):
     def snapshot(self) -> dict:
         """Return one read-only runtime diagnostics snapshot."""
 
+    @abstractmethod
+    def connection_diagnostics(self) -> dict:
+        """Return detailed read-only connection diagnostics."""
+
 
 class InMemoryRealtimeHub(RealtimeHub):
     """Single-process in-memory realtime hub."""
@@ -90,12 +96,23 @@ class InMemoryRealtimeHub(RealtimeHub):
         self._user_by_connection: dict[str, str] = {}
         self._connection_by_socket: dict[int, str] = {}
         self._connections_by_user: dict[str, set[str]] = defaultdict(set)
+        self._connection_meta: dict[str, dict] = {}
 
     async def connect(self, websocket: WebSocket) -> str:
         await websocket.accept()
         connection_id = str(uuid.uuid4())
         self._connections[connection_id] = websocket
         self._connection_by_socket[id(websocket)] = connection_id
+        client = getattr(websocket, "client", None)
+        headers = getattr(websocket, "headers", {}) or {}
+        self._connection_meta[connection_id] = {
+            "connection_id": connection_id,
+            "connected_at": utcnow(),
+            "bound_at": None,
+            "client_host": str(getattr(client, "host", "") or ""),
+            "client_port": int(getattr(client, "port", 0) or 0),
+            "user_agent": str(headers.get("user-agent", "") or "") if hasattr(headers, "get") else "",
+        }
         return connection_id
 
     def bind_user(self, connection_id: str, user_id: str) -> None:
@@ -106,6 +123,18 @@ class InMemoryRealtimeHub(RealtimeHub):
                 self._connections_by_user.pop(previous, None)
         self._user_by_connection[connection_id] = user_id
         self._connections_by_user[user_id].add(connection_id)
+        meta = self._connection_meta.setdefault(
+            connection_id,
+            {
+                "connection_id": connection_id,
+                "connected_at": None,
+                "bound_at": None,
+                "client_host": "",
+                "client_port": 0,
+                "user_agent": "",
+            },
+        )
+        meta["bound_at"] = utcnow()
 
     def get_user_id(self, connection_id: str) -> str | None:
         return self._user_by_connection.get(connection_id)
@@ -120,6 +149,7 @@ class InMemoryRealtimeHub(RealtimeHub):
         websocket = self._connections.pop(connection_id, None)
         if websocket is not None:
             self._connection_by_socket.pop(id(websocket), None)
+        self._connection_meta.pop(connection_id, None)
         user_id = self._user_by_connection.pop(connection_id, None)
         if user_id:
             self._connections_by_user[user_id].discard(connection_id)
@@ -220,6 +250,7 @@ class InMemoryRealtimeHub(RealtimeHub):
         self._user_by_connection.clear()
         self._connection_by_socket.clear()
         self._connections_by_user.clear()
+        self._connection_meta.clear()
 
     def snapshot(self) -> dict:
         return {
@@ -227,6 +258,39 @@ class InMemoryRealtimeHub(RealtimeHub):
             "raw_connections": len(self._connections),
             "bound_connections": sum(len(connection_ids) for connection_ids in self._connections_by_user.values()),
             "online_users": len(self._connections_by_user),
+        }
+
+    def connection_diagnostics(self) -> dict:
+        connection_ids = sorted(
+            set(self._connections)
+            | set(self._user_by_connection)
+            | set(self._connection_meta)
+        )
+        connections = []
+        for connection_id in connection_ids:
+            meta = self._connection_meta.get(connection_id, {})
+            user_id = str(self._user_by_connection.get(connection_id) or "")
+            connections.append(
+                {
+                    "connection_id": connection_id,
+                    "user_id": user_id,
+                    "bound": bool(user_id),
+                    "has_socket": connection_id in self._connections,
+                    "connected_at": isoformat_utc(meta.get("connected_at")),
+                    "bound_at": isoformat_utc(meta.get("bound_at")),
+                    "client_host": str(meta.get("client_host") or ""),
+                    "client_port": int(meta.get("client_port") or 0),
+                    "user_agent": str(meta.get("user_agent") or ""),
+                }
+            )
+
+        return {
+            "snapshot": self.snapshot(),
+            "connections": connections,
+            "connections_by_user": {
+                user_id: sorted(connection_ids)
+                for user_id, connection_ids in sorted(self._connections_by_user.items())
+            },
         }
 
 

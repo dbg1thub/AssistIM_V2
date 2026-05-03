@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 
-from app.utils.time import utcnow
+from app.utils.time import isoformat_utc, utcnow
 
 
 CALL_STATUS_INVITED = "invited"
@@ -165,6 +165,37 @@ class InMemoryCallRegistry:
         return {
             "active": len(active_calls),
             "by_media_type": dict(sorted(by_media_type.items())),
+        }
+
+    def list_calls(self, *, include_inactive: bool = False) -> list[ActiveCall]:
+        """Return runtime call records without mutating registry state."""
+        calls = list(self._calls.values())
+        if not include_inactive:
+            calls = [call for call in calls if call.status in ACTIVE_CALL_STATUSES]
+        return sorted(calls, key=lambda call: (call.created_at, call.call_id))
+
+    def diagnostics(self) -> dict:
+        """Return detailed read-only active-call registry diagnostics."""
+        return {
+            "snapshot": self.snapshot(),
+            "calls": [self._serialize_call(call) for call in self.list_calls(include_inactive=True)],
+            "user_call_mappings": dict(sorted(self._call_id_by_user_id.items())),
+        }
+
+    def _serialize_call(self, call: ActiveCall) -> dict:
+        return {
+            "call_id": str(call.call_id or ""),
+            "session_id": str(call.session_id or ""),
+            "initiator_id": str(call.initiator_id or ""),
+            "recipient_id": str(call.recipient_id or ""),
+            "participant_ids": call.participant_ids(),
+            "media_type": str(call.media_type or ""),
+            "status": str(call.status or ""),
+            "created_at": isoformat_utc(call.created_at),
+            "answered_at": isoformat_utc(call.answered_at),
+            "ended_at": isoformat_utc(call.ended_at),
+            "ended_by": str(call.ended_by or ""),
+            "reason": str(call.reason or ""),
         }
 
     def _drop_user_mappings_for_call(self, call: ActiveCall) -> None:

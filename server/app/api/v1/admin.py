@@ -23,6 +23,7 @@ from app.services.admin_file_storage_service import AdminFileStorageService
 from app.services.admin_groups_inspection_service import AdminGroupsInspectionService
 from app.services.admin_log_service import AdminLogService
 from app.services.admin_moments_inspection_service import AdminMomentsInspectionService
+from app.services.admin_realtime_call_inspection_service import AdminRealtimeCallInspectionService
 from app.services.admin_user_service import AdminUserService
 from app.utils.response import success_response
 from app.websocket.manager import connection_manager
@@ -564,6 +565,74 @@ def get_admin_moment(
     """Return one moment detail for backend admin tooling."""
     payload = AdminMomentsInspectionService(db).get_moment(
         moment_id,
+        actor=current_user,
+        request_path=str(request.url.path),
+        request_method=request.method,
+        client_ip=_client_ip(request),
+    )
+    return success_response(payload)
+
+
+@router.get("/realtime/connections")
+def list_admin_realtime_connections(
+    request: Request,
+    user_id: str = "",
+    current_user: User = Depends(get_current_admin_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    """List currently bound realtime websocket connections."""
+    payload = AdminRealtimeCallInspectionService(db).list_realtime_connections(
+        actor=current_user,
+        user_id=user_id,
+        request_path=str(request.url.path),
+        request_method=request.method,
+        client_ip=_client_ip(request),
+    )
+    return success_response(payload)
+
+
+@router.get("/realtime/health")
+def get_admin_realtime_health(
+    request: Request,
+    current_user: User = Depends(get_current_admin_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Return read-only realtime connection integrity checks."""
+    payload = AdminRealtimeCallInspectionService(db).build_realtime_health(
+        actor=current_user,
+        request_path=str(request.url.path),
+        request_method=request.method,
+        client_ip=_client_ip(request),
+    )
+    return success_response(payload)
+
+
+@router.get("/calls/active")
+def list_admin_active_calls(
+    request: Request,
+    user_id: str = "",
+    current_user: User = Depends(get_current_admin_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    """List active in-memory calls for backend admin tooling."""
+    payload = AdminRealtimeCallInspectionService(db).list_active_calls(
+        actor=current_user,
+        user_id=user_id,
+        request_path=str(request.url.path),
+        request_method=request.method,
+        client_ip=_client_ip(request),
+    )
+    return success_response(payload)
+
+
+@router.get("/calls/health")
+def get_admin_calls_health(
+    request: Request,
+    current_user: User = Depends(get_current_admin_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Return read-only active call registry integrity checks."""
+    payload = AdminRealtimeCallInspectionService(db).build_calls_health(
         actor=current_user,
         request_path=str(request.url.path),
         request_method=request.method,
