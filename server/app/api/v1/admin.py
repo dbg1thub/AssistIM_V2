@@ -22,6 +22,7 @@ from app.services.admin_dashboard_service import AdminDashboardService
 from app.services.admin_file_storage_service import AdminFileStorageService
 from app.services.admin_groups_inspection_service import AdminGroupsInspectionService
 from app.services.admin_log_service import AdminLogService
+from app.services.admin_moments_inspection_service import AdminMomentsInspectionService
 from app.services.admin_user_service import AdminUserService
 from app.utils.response import success_response
 from app.websocket.manager import connection_manager
@@ -457,6 +458,112 @@ def get_admin_group(
     """Return one group detail for backend admin tooling."""
     payload = AdminGroupsInspectionService(db).get_group(
         group_id,
+        actor=current_user,
+        request_path=str(request.url.path),
+        request_method=request.method,
+        client_ip=_client_ip(request),
+    )
+    return success_response(payload)
+
+
+@router.get("/moments")
+def list_admin_moments(
+    request: Request,
+    keyword: str = "",
+    user_id: str = "",
+    page: int = 1,
+    size: int = 20,
+    current_user: User = Depends(get_current_admin_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    """List moments for backend admin tooling."""
+    payload = AdminMomentsInspectionService(db).list_moments(
+        actor=current_user,
+        keyword=keyword,
+        user_id=user_id,
+        page=page,
+        size=size,
+        request_path=str(request.url.path),
+        request_method=request.method,
+        client_ip=_client_ip(request),
+    )
+    return success_response(payload)
+
+
+@router.get("/moments/health")
+def get_admin_moments_health(
+    request: Request,
+    current_user: User = Depends(get_current_admin_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Return read-only moments data consistency checks."""
+    payload = AdminMomentsInspectionService(db).build_health(
+        actor=current_user,
+        request_path=str(request.url.path),
+        request_method=request.method,
+        client_ip=_client_ip(request),
+    )
+    return success_response(payload)
+
+
+@router.get("/moments/{moment_id}/comments")
+def list_admin_moment_comments(
+    moment_id: str,
+    request: Request,
+    user_id: str = "",
+    page: int = 1,
+    size: int = 20,
+    current_user: User = Depends(get_current_admin_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    """List comments on one moment for backend admin tooling."""
+    payload = AdminMomentsInspectionService(db).list_comments(
+        moment_id,
+        actor=current_user,
+        user_id=user_id,
+        page=page,
+        size=size,
+        request_path=str(request.url.path),
+        request_method=request.method,
+        client_ip=_client_ip(request),
+    )
+    return success_response(payload)
+
+
+@router.get("/moments/{moment_id}/likes")
+def list_admin_moment_likes(
+    moment_id: str,
+    request: Request,
+    user_id: str = "",
+    page: int = 1,
+    size: int = 20,
+    current_user: User = Depends(get_current_admin_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    """List likes on one moment for backend admin tooling."""
+    payload = AdminMomentsInspectionService(db).list_likes(
+        moment_id,
+        actor=current_user,
+        user_id=user_id,
+        page=page,
+        size=size,
+        request_path=str(request.url.path),
+        request_method=request.method,
+        client_ip=_client_ip(request),
+    )
+    return success_response(payload)
+
+
+@router.get("/moments/{moment_id}")
+def get_admin_moment(
+    moment_id: str,
+    request: Request,
+    current_user: User = Depends(get_current_admin_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Return one moment detail for backend admin tooling."""
+    payload = AdminMomentsInspectionService(db).get_moment(
+        moment_id,
         actor=current_user,
         request_path=str(request.url.path),
         request_method=request.method,
