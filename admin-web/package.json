@@ -4,8 +4,9 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "node --require ./scripts/vite-windows-spawn-patch.cjs ./node_modules/vite/bin/vite.js --configLoader native --host 127.0.0.1 --port 5174",
+    "dev": "node --require ./scripts/vite-windows-spawn-patch.cjs ./node_modules/vite/bin/vite.js --configLoader native --host 127.0.0.1 --port 5173",
     "build": "tsc --noEmit && node --require ./scripts/vite-windows-spawn-patch.cjs ./node_modules/vite/bin/vite.js build --configLoader native",
+    "doctor": "node ./scripts/doctor.cjs",
     "preview": "vite preview --host 127.0.0.1 --port 4174",
     "test": "node --require ./scripts/vite-windows-spawn-patch.cjs ./node_modules/vitest/vitest.mjs run --configLoader runner --pool=threads"
   },
