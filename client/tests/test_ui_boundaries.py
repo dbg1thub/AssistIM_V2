@@ -756,6 +756,26 @@ def test_chat_search_and_call_entry_points_hide_unwired_actions_and_keep_direct_
     assert 'meta=tr("search.message.total"' not in search_panel
 
 
+def test_contact_detail_call_entry_opens_direct_chat_before_starting_call() -> None:
+    contact_interface = Path('client/ui/windows/contact_interface.py').read_text(encoding='utf-8')
+    main_window = Path('client/ui/windows/main_window.py').read_text(encoding='utf-8')
+    chat_interface = Path('client/ui/windows/chat_interface.py').read_text(encoding='utf-8')
+
+    assert 'call_requested = Signal(object, str)' in contact_interface
+    assert 'self.voice_button.clicked.connect(lambda _checked=False: self._emit_call_request("voice"))' in contact_interface
+    assert 'self.video_button.clicked.connect(lambda _checked=False: self._emit_call_request("video"))' in contact_interface
+    assert 'def _set_call_buttons_available(self, available: bool) -> None:' in contact_interface
+    assert 'self._set_call_buttons_available(True)' in contact_interface
+    assert contact_interface.count('self._set_call_buttons_available(False)') >= 4
+    assert 'self.detail_panel.call_requested.connect(self.call_requested.emit)' in contact_interface
+    assert 'self.contact_interface.call_requested.connect(self._on_contact_call_requested)' in main_window
+    assert 'def _on_contact_call_requested(self, payload: object, media_type: str) -> None:' in main_window
+    assert '"_call_media_type": media_type' in main_window
+    assert 'call_media_type = str(payload.get("_call_media_type", "") or "")' in main_window
+    assert 'self.chat_interface.start_current_session_call(call_media_type)' in main_window
+    assert 'def start_current_session_call(self, media_type: str) -> None:' in chat_interface
+
+
 def test_main_window_tray_alerts_respect_authoritative_mute_state() -> None:
     main_window = Path('client/ui/windows/main_window.py').read_text(encoding='utf-8')
 

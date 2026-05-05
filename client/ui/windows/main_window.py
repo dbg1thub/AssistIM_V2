@@ -140,6 +140,7 @@ class MainWindow(FluentWindow):
         self.user_profile = UserProfileCoordinator(self)
         self.settingsInterface = SettingsInterface(self)
         self.contact_interface.message_requested.connect(self._on_contact_message_requested)
+        self.contact_interface.call_requested.connect(self._on_contact_call_requested)
         self.user_profile.logoutRequested.connect(self.logoutRequested.emit)
         self.user_profile.profileChanged.connect(self._on_profile_changed)
         self.settingsInterface.micaChanged.connect(self._on_mica_changed)
@@ -541,6 +542,16 @@ class MainWindow(FluentWindow):
         """Open the selected contact or group in the chat interface."""
         generation = self._ui_callback_generation
         self._set_contact_open_task(self._open_contact_target(payload, generation), generation=generation)
+
+    def _on_contact_call_requested(self, payload: object, media_type: str) -> None:
+        """Open one direct contact chat and then start a call from the chat page."""
+        call_payload = (
+            {**dict(payload), "_call_media_type": media_type}
+            if isinstance(payload, dict)
+            else {"data": payload, "_call_media_type": media_type}
+        )
+        generation = self._ui_callback_generation
+        self._set_contact_open_task(self._open_contact_target(call_payload, generation), generation=generation)
 
     def _on_destroyed(self, *_args) -> None:
         """Cancel outstanding UI tasks when the window is torn down."""
@@ -1145,6 +1156,10 @@ class MainWindow(FluentWindow):
             self.switchTo(self.chat_interface)
         else:
             self.stackedWidget.setCurrentWidget(self.chat_interface)
+
+        call_media_type = str(payload.get("_call_media_type", "") or "") if isinstance(payload, dict) else ""
+        if call_media_type:
+            self.chat_interface.start_current_session_call(call_media_type)
 
         if isinstance(payload, dict) and payload.get("_clear_contact_search"):
             self.contact_interface.clear_search()

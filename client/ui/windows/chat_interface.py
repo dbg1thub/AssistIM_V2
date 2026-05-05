@@ -3595,19 +3595,24 @@ class ChatInterface(QWidget):
         finally:
             self._screenshot_dialogs.discard(dialog)
 
+    def start_current_session_call(self, media_type: str) -> None:
+        """Start one call for the selected direct session from an external UI entry."""
+        normalized_media_type = str(media_type or "").strip().lower()
+        if normalized_media_type not in {CallMediaType.VOICE.value, CallMediaType.VIDEO.value}:
+            logger.warning("[call-diag] ignored invalid current-session call media_type=%s", media_type)
+            return
+        self._schedule_ui_task(
+            self._start_current_session_call(normalized_media_type),
+            f"start {normalized_media_type} call",
+        )
+
     def _on_voice_call_requested(self) -> None:
         """Start one voice call for the selected direct session."""
-        self._schedule_ui_task(
-            self._start_current_session_call(CallMediaType.VOICE.value),
-            "start voice call",
-        )
+        self.start_current_session_call(CallMediaType.VOICE.value)
 
     def _on_video_call_requested(self) -> None:
         """Start one video call for the selected direct session."""
-        self._schedule_ui_task(
-            self._start_current_session_call(CallMediaType.VIDEO.value),
-            "start video call",
-        )
+        self.start_current_session_call(CallMediaType.VIDEO.value)
 
     async def _start_current_session_call(self, media_type: str) -> None:
         """Validate the selected session and send one outbound call invite."""

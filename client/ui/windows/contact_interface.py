@@ -971,6 +971,7 @@ class ContactWelcomeWidget(QWidget):
 class GalleryContactDetailPanel(QWidget):
     message_requested = Signal(object)
     remove_requested = Signal(object)
+    call_requested = Signal(object, str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1032,10 +1033,9 @@ class GalleryContactDetailPanel(QWidget):
 
         self.message_button.clicked.connect(self._emit_message_request)
         self.remove_friend_button.clicked.connect(self._emit_remove_request)
-        self.voice_button.clicked.connect(self._show_unavailable)
-        self.video_button.clicked.connect(self._show_unavailable)
-        self.voice_button.hide()
-        self.video_button.hide()
+        self.voice_button.clicked.connect(lambda _checked=False: self._emit_call_request("voice"))
+        self.video_button.clicked.connect(lambda _checked=False: self._emit_call_request("video"))
+        self._set_call_buttons_available(False)
         self.remove_friend_button.hide()
 
         self.moments_panel = ContactMomentsFlowPanel(self)
@@ -1051,8 +1051,7 @@ class GalleryContactDetailPanel(QWidget):
         self.subtitle_label.clear()
         self.meta_primary_label.clear()
         self.message_button.setEnabled(False)
-        self.voice_button.setEnabled(False)
-        self.video_button.setEnabled(False)
+        self._set_call_buttons_available(False)
         self.remove_friend_button.setEnabled(False)
         self.remove_friend_button.hide()
         self.moments_panel.show_placeholder(tr("contact.moments.detail_empty", "There is nothing to display right now."))
@@ -1089,8 +1088,7 @@ class GalleryContactDetailPanel(QWidget):
             or tr("contact.relationship.established", "Friend relationship established")
         )
         self.message_button.setEnabled(True)
-        self.voice_button.setEnabled(False)
-        self.video_button.setEnabled(False)
+        self._set_call_buttons_available(True)
         self.remove_friend_button.setEnabled(True)
         self.remove_friend_button.show()
         self.moments_panel.set_moments(
@@ -1126,8 +1124,7 @@ class GalleryContactDetailPanel(QWidget):
             or tr("contact.relationship.blocked", "Blocked contact")
         )
         self.message_button.setEnabled(False)
-        self.voice_button.setEnabled(False)
-        self.video_button.setEnabled(False)
+        self._set_call_buttons_available(False)
         self.remove_friend_button.setEnabled(False)
         self.remove_friend_button.hide()
         self.moments_panel.set_moments([], tr("contact.moments.blocked_empty", "Moments are hidden for blocked contacts."))
@@ -1150,8 +1147,7 @@ class GalleryContactDetailPanel(QWidget):
             )
         )
         self.message_button.setEnabled(True)
-        self.voice_button.setEnabled(False)
-        self.video_button.setEnabled(False)
+        self._set_call_buttons_available(False)
         self.remove_friend_button.setEnabled(False)
         self.remove_friend_button.hide()
         self.moments_panel.set_moments(
@@ -1203,8 +1199,7 @@ class GalleryContactDetailPanel(QWidget):
             )
         )
         self.message_button.setEnabled(self._entity is not None)
-        self.voice_button.setEnabled(False)
-        self.video_button.setEnabled(False)
+        self._set_call_buttons_available(False)
         self.remove_friend_button.setEnabled(False)
         self.remove_friend_button.hide()
         self.moments_panel.set_moments(
@@ -1219,6 +1214,15 @@ class GalleryContactDetailPanel(QWidget):
     def _emit_remove_request(self) -> None:
         if self._entity and self._entity.get("type") == "friend":
             self.remove_requested.emit(self._entity)
+
+    def _emit_call_request(self, media_type: str) -> None:
+        if self._entity and self._entity.get("type") == "friend":
+            self.call_requested.emit(self._entity, media_type)
+
+    def _set_call_buttons_available(self, available: bool) -> None:
+        for button in (self.voice_button, self.video_button):
+            button.setVisible(available)
+            button.setEnabled(available)
 
     def _show_unavailable(self) -> None:
         InfoBar.info(
@@ -1676,6 +1680,7 @@ class AddFriendDialog(FluentWidget):
 
 class ContactInterface(QWidget):
     message_requested = Signal(object)
+    call_requested = Signal(object, str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1825,6 +1830,7 @@ class ContactInterface(QWidget):
         self.add_button.clicked.connect(self._show_add_placeholder)
         self.search_box.textChanged.connect(self._on_search_text_changed)
         self.detail_panel.message_requested.connect(self.message_requested.emit)
+        self.detail_panel.call_requested.connect(self.call_requested.emit)
         self.detail_panel.remove_requested.connect(self._on_remove_friend_requested)
         self._event_bus.subscribe_sync(ContactEvent.SYNC_REQUIRED, self._on_contact_sync_required)
         self._event_bus.subscribe_sync(MomentEvent.SYNC_REQUIRED, self._on_moment_sync_required)
