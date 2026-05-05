@@ -7,7 +7,24 @@ from unittest.mock import AsyncMock
 from fastapi.testclient import TestClient
 
 from app.api.v1 import moments as moment_routes
+from app.core.errors import ErrorCode
 from app.schemas.moment import MAX_MOMENT_COMMENT_LENGTH, MAX_MOMENT_CONTENT_LENGTH, MAX_MOMENT_MEDIA_ITEMS
+
+
+def _make_friends(client: TestClient, auth_header, requester: dict, receiver: dict) -> None:
+    send_response = client.post(
+        "/api/v1/friends/requests",
+        json={"target_user_id": receiver["user"]["id"], "message": "moment visibility"},
+        headers=auth_header(requester["access_token"]),
+    )
+    assert send_response.status_code == 200
+    request_id = send_response.json()["data"]["request"]["request_id"]
+
+    accept_response = client.post(
+        f"/api/v1/friends/requests/{request_id}/accept",
+        headers=auth_header(receiver["access_token"]),
+    )
+    assert accept_response.status_code == 200
 
 
 def test_moment_like_and_unlike_echo_state_changes(
@@ -62,6 +79,7 @@ def test_moment_mutations_broadcast_realtime_refresh_notifications(
 ) -> None:
     alice = user_factory("moment_refresh_alice", "Moment Refresh Alice")
     bob = user_factory("moment_refresh_bob", "Moment Refresh Bob")
+    _make_friends(client, auth_header, alice, bob)
     alice_headers = auth_header(alice["access_token"])
     bob_headers = auth_header(bob["access_token"])
     send_json_to_users = AsyncMock(return_value=set())
@@ -143,6 +161,7 @@ def test_moment_and_comment_author_payloads_are_canonical(
 ) -> None:
     alice = user_factory("moment_author_alice", "Moment Author Alice")
     bob = user_factory("moment_author_bob", "Moment Author Bob")
+    _make_friends(client, auth_header, alice, bob)
 
     create_response = client.post(
         "/api/v1/moments",
@@ -183,6 +202,130 @@ def test_moment_and_comment_author_payloads_are_canonical(
     assert "avatar" not in listed
     assert listed["author"]["id"] == alice["user"]["id"]
     assert listed["comments"][0]["author"]["id"] == bob["user"]["id"]
+
+
+def test_moment_feed_is_limited_to_self_and_friends(
+    client: TestClient,
+    user_factory,
+    auth_header,
+) -> None:
+    alice = user_factory("moment_feed_alice", "Moment Feed Alice")
+    bob = user_factory("moment_feed_bob", "Moment Feed Bob")
+    charlie = user_factory("moment_feed_charlie", "Moment Feed Charlie")
+    _make_friends(client, auth_header, alice, bob)
+
+    alice_headers = auth_header(alice["access_token"])
+    bob_headers = auth_header(bob["access_token"])
+    charlie_headers = auth_header(charlie["access_token"])
+
+    alice_moment = client.post(
+        "/api/v1/moments",
+        json={"content": "alice visible"},
+        headers=alice_headers,
+    ).json()["data"]
+    bob_moment = client.post(
+        "/api/v1/moments",
+        json={"content": "bob visible"},
+        headers=bob_headers,
+    ).json()["data"]
+    charlie_moment = client.post(
+        "/api/v1/moments",
+        json={"content": "charlie hidden"},
+        headers=charlie_headers,
+    ).json()["data"]
+
+    alice_feed = client.get("/api/v1/moments", headers=alice_headers)
+    assert alice_feed.status_code == 200
+    alice_payload = alice_feed.json()["data"]
+    assert alice_payload["total"] == 2
+    assert {item["id"] for item in alice_payload["items"]} == {alice_moment["id"], bob_moment["id"]}
+
+    charlie_feed = client.get("/api/v1/moments", headers=charlie_headers)
+    assert charlie_feed.status_code == 200
+    charlie_payload = charlie_feed.json()["data"]
+    assert charlie_payload["total"] == 1
+    assert {item["id"] for item in charlie_payload["items"]} == {charlie_moment["id"]}
+
+
+def test_moment_user_feed_requires_self_or_friend(
+    client: TestClient,
+    user_factory,
+    auth_header,
+) -> None:
+    alice = user_factory("moment_user_feed_alice", "Moment User Feed Alice")
+    bob = user_factory("moment_user_feed_bob", "Moment User Feed Bob")
+    charlie = user_factory("moment_user_feed_charlie", "Moment User Feed Charlie")
+    _make_friends(client, auth_header, alice, bob)
+
+    alice_headers = auth_header(alice["access_token"])
+    bob_headers = auth_header(bob["access_token"])
+    charlie_headers = auth_header(charlie["access_token"])
+
+    bob_moment = client.post(
+        "/api/v1/moments",
+        json={"content": "bob friend feed"},
+        headers=bob_headers,
+    ).json()["data"]
+    client.post(
+        "/api/v1/moments",
+        json={"content": "charlie non-friend feed"},
+        headers=charlie_headers,
+    )
+
+    friend_feed = client.get(
+        f"/api/v1/moments?user_id={bob['user']['id']}",
+        headers=alice_headers,
+    )
+    assert friend_feed.status_code == 200
+    friend_payload = friend_feed.json()["data"]
+    assert friend_payload["total"] == 1
+    assert [item["id"] for item in friend_payload["items"]] == [bob_moment["id"]]
+
+    hidden_feed = client.get(
+        f"/api/v1/moments?user_id={charlie['user']['id']}",
+        headers=alice_headers,
+    )
+    assert hidden_feed.status_code == 403
+    assert hidden_feed.json()["code"] == ErrorCode.FORBIDDEN
+
+
+def test_moment_detail_and_interactions_require_visibility(
+    client: TestClient,
+    user_factory,
+    auth_header,
+) -> None:
+    alice = user_factory("moment_private_alice", "Moment Private Alice")
+    charlie = user_factory("moment_private_charlie", "Moment Private Charlie")
+    alice_headers = auth_header(alice["access_token"])
+    charlie_headers = auth_header(charlie["access_token"])
+
+    create_response = client.post(
+        "/api/v1/moments",
+        json={"content": "charlie private moment"},
+        headers=charlie_headers,
+    )
+    assert create_response.status_code == 200
+    moment_id = create_response.json()["data"]["id"]
+
+    detail_response = client.get(f"/api/v1/moments/{moment_id}", headers=alice_headers)
+    assert detail_response.status_code == 403
+    assert detail_response.json()["code"] == ErrorCode.FORBIDDEN
+
+    like_response = client.post(f"/api/v1/moments/{moment_id}/likes", headers=alice_headers)
+    assert like_response.status_code == 403
+    assert like_response.json()["code"] == ErrorCode.FORBIDDEN
+
+    unlike_response = client.delete(f"/api/v1/moments/{moment_id}/likes", headers=alice_headers)
+    assert unlike_response.status_code == 403
+    assert unlike_response.json()["code"] == ErrorCode.FORBIDDEN
+
+    comment_response = client.post(
+        f"/api/v1/moments/{moment_id}/comments",
+        json={"content": "hidden comment"},
+        headers=alice_headers,
+    )
+    assert comment_response.status_code == 403
+    assert comment_response.json()["code"] == ErrorCode.FORBIDDEN
 
 
 def test_moment_create_schema_strips_content_and_rejects_invalid_payloads(
@@ -425,6 +568,7 @@ def test_moment_comment_accepts_one_image(
 ) -> None:
     alice = user_factory("moment_comment_image_alice", "Moment Comment Image Alice")
     bob = user_factory("moment_comment_image_bob", "Moment Comment Image Bob")
+    _make_friends(client, auth_header, alice, bob)
     alice_headers = auth_header(alice["access_token"])
     bob_headers = auth_header(bob["access_token"])
     create_response = client.post(
@@ -506,6 +650,7 @@ def test_moment_list_returns_paged_summary_without_liker_roster(
 ) -> None:
     alice = user_factory("moment_paged_alice", "Moment Paged Alice")
     bob = user_factory("moment_paged_bob", "Moment Paged Bob")
+    _make_friends(client, auth_header, alice, bob)
     alice_headers = auth_header(alice["access_token"])
     bob_headers = auth_header(bob["access_token"])
 

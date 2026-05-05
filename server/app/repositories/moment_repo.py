@@ -15,19 +15,36 @@ class MomentRepository:
     def __init__(self, db: Session) -> None:
         self.db = db
 
-    def list_moments(self, user_id: str | None = None, *, offset: int = 0, limit: int | None = None) -> list[Moment]:
+    def list_moments(
+        self,
+        user_id: str | None = None,
+        *,
+        user_ids: list[str] | None = None,
+        offset: int = 0,
+        limit: int | None = None,
+    ) -> list[Moment]:
         stmt = select(Moment)
         if user_id:
             stmt = stmt.where(Moment.user_id == user_id)
+        elif user_ids is not None:
+            normalized_user_ids = [item for item in dict.fromkeys(user_ids) if item]
+            if not normalized_user_ids:
+                return []
+            stmt = stmt.where(Moment.user_id.in_(normalized_user_ids))
         stmt = stmt.order_by(desc(Moment.created_at))
         if limit is not None:
             stmt = stmt.offset(max(0, offset)).limit(max(0, limit))
         return list(self.db.execute(stmt).scalars().all())
 
-    def count_moments(self, user_id: str | None = None) -> int:
+    def count_moments(self, user_id: str | None = None, *, user_ids: list[str] | None = None) -> int:
         stmt = select(func.count()).select_from(Moment)
         if user_id:
             stmt = stmt.where(Moment.user_id == user_id)
+        elif user_ids is not None:
+            normalized_user_ids = [item for item in dict.fromkeys(user_ids) if item]
+            if not normalized_user_ids:
+                return 0
+            stmt = stmt.where(Moment.user_id.in_(normalized_user_ids))
         return int(self.db.execute(stmt).scalar_one() or 0)
 
     def get_comments_map(

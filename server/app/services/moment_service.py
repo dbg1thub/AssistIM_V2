@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.core.errors import AppError, ErrorCode
 from app.models.user import User
+from app.repositories.friend_repo import FriendRepository
 from app.repositories.moment_repo import MomentRepository
 from app.services.user_service import UserService
 
@@ -19,6 +20,7 @@ MOMENT_COMMENT_PREVIEW_LIMIT = 3
 class MomentService:
     def __init__(self, db: Session) -> None:
         self.moments = MomentRepository(db)
+        self.friends = FriendRepository(db)
         self.user_payloads = UserService(db)
 
     def list_moments(
@@ -31,9 +33,16 @@ class MomentService:
     ) -> dict:
         normalized_page = max(1, page)
         normalized_size = max(1, size)
-        total = self.moments.count_moments(user_id=user_id)
+        visible_user_ids: list[str] | None = None
+        if current_user is not None:
+            if user_id:
+                self._ensure_can_view_author(current_user, user_id)
+            else:
+                visible_user_ids = self._visible_author_ids(current_user)
+        total = self.moments.count_moments(user_id=user_id, user_ids=visible_user_ids)
         moments = self.moments.list_moments(
             user_id=user_id,
+            user_ids=visible_user_ids,
             offset=(normalized_page - 1) * normalized_size,
             limit=normalized_size,
         )
@@ -80,6 +89,7 @@ class MomentService:
         moment = self.moments.get_by_id(moment_id)
         if moment is None:
             raise AppError(ErrorCode.RESOURCE_NOT_FOUND, "moment not found", 404)
+        self._ensure_can_view_author(current_user, moment.user_id)
 
         comments_map = self.moments.get_comments_map([moment_id])
         like_counts_map = self.moments.get_like_counts_map([moment_id])
@@ -117,17 +127,17 @@ class MomentService:
         )
 
     def like(self, current_user: User, moment_id: str) -> dict:
-        self._ensure_exists(moment_id)
+        self._get_visible_moment(current_user, moment_id)
         changed = self.moments.like(moment_id, current_user.id)
         return {"liked": True, "changed": changed}
 
     def unlike(self, current_user: User, moment_id: str) -> dict:
-        self._ensure_exists(moment_id)
+        self._get_visible_moment(current_user, moment_id)
         changed = self.moments.unlike(moment_id, current_user.id)
         return {"liked": False, "changed": changed}
 
     def comment(self, current_user: User, moment_id: str, content: str, image: object | None = None) -> dict:
-        self._ensure_exists(moment_id)
+        self._get_visible_moment(current_user, moment_id)
         comment = self.moments.comment(
             moment_id,
             current_user.id,
@@ -136,9 +146,26 @@ class MomentService:
         )
         return self.serialize_comment(comment, current_user)
 
-    def _ensure_exists(self, moment_id: str) -> None:
-        if self.moments.get_by_id(moment_id) is None:
+    def _get_visible_moment(self, current_user: User, moment_id: str):
+        moment = self.moments.get_by_id(moment_id)
+        if moment is None:
             raise AppError(ErrorCode.RESOURCE_NOT_FOUND, "moment not found", 404)
+        self._ensure_can_view_author(current_user, moment.user_id)
+        return moment
+
+    def _visible_author_ids(self, current_user: User) -> list[str]:
+        friend_ids = [friendship.friend_id for friendship in self.friends.list_friends(current_user.id)]
+        return [current_user.id, *friend_ids]
+
+    def _ensure_can_view_author(self, current_user: User, author_user_id: str | None) -> None:
+        normalized_author_id = str(author_user_id or "").strip()
+        if not normalized_author_id:
+            raise AppError(ErrorCode.FORBIDDEN, "moment not visible", 403)
+        if normalized_author_id == current_user.id:
+            return
+        if self.friends.is_friend(current_user.id, normalized_author_id):
+            return
+        raise AppError(ErrorCode.FORBIDDEN, "moment not visible", 403)
 
     def serialize_moment(
         self,
