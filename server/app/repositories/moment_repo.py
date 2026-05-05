@@ -7,7 +7,7 @@ from collections import defaultdict
 from sqlalchemy import desc, func, select
 from sqlalchemy.orm import Session
 
-from app.models.moment import Moment, MomentComment, MomentLike
+from app.models.moment import Moment, MomentComment, MomentLike, MomentPrivacySetting
 from app.models.user import User
 
 
@@ -131,8 +131,22 @@ class MomentRepository:
         stmt = select(User).where(User.id.in_(user_ids))
         return {user.id: user for user in self.db.execute(stmt).scalars().all()}
 
-    def create(self, user_id: str, content: str, *, media_json: str = "[]") -> Moment:
-        moment = Moment(user_id=user_id, content=content, media_json=media_json)
+    def create(
+        self,
+        user_id: str,
+        content: str,
+        *,
+        media_json: str = "[]",
+        visibility_scope: str = "public",
+        visibility_user_ids_json: str = "[]",
+    ) -> Moment:
+        moment = Moment(
+            user_id=user_id,
+            content=content,
+            media_json=media_json,
+            visibility_scope=visibility_scope,
+            visibility_user_ids_json=visibility_user_ids_json,
+        )
         self.db.add(moment)
         self.db.commit()
         self.db.refresh(moment)
@@ -163,3 +177,33 @@ class MomentRepository:
         self.db.commit()
         self.db.refresh(comment)
         return comment
+
+    def get_privacy_setting(self, user_id: str) -> MomentPrivacySetting | None:
+        stmt = select(MomentPrivacySetting).where(MomentPrivacySetting.user_id == user_id)
+        return self.db.execute(stmt).scalar_one_or_none()
+
+    def get_privacy_settings_map(self, user_ids: list[str]) -> dict[str, MomentPrivacySetting]:
+        normalized_user_ids = [item for item in dict.fromkeys(user_ids) if item]
+        if not normalized_user_ids:
+            return {}
+        stmt = select(MomentPrivacySetting).where(MomentPrivacySetting.user_id.in_(normalized_user_ids))
+        return {item.user_id: item for item in self.db.execute(stmt).scalars().all()}
+
+    def save_privacy_setting(
+        self,
+        user_id: str,
+        *,
+        hide_my_moments_user_ids_json: str,
+        hide_their_moments_user_ids_json: str,
+        visible_time_scope: str,
+    ) -> MomentPrivacySetting:
+        setting = self.get_privacy_setting(user_id)
+        if setting is None:
+            setting = MomentPrivacySetting(user_id=user_id)
+        setting.hide_my_moments_user_ids_json = hide_my_moments_user_ids_json
+        setting.hide_their_moments_user_ids_json = hide_their_moments_user_ids_json
+        setting.visible_time_scope = visible_time_scope
+        self.db.add(setting)
+        self.db.commit()
+        self.db.refresh(setting)
+        return setting

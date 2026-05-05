@@ -27,7 +27,7 @@ def test_discovery_ui_wires_moment_media_and_comment_image_boundaries() -> None:
     assert 'class CreateMomentDialog' in discovery_interface
     assert 'QFileDialog.getOpenFileNames' in discovery_interface
     assert 'QFileDialog.getOpenFileName' in discovery_interface
-    assert 'submitted = Signal(str, list)' in discovery_interface
+    assert 'submitted = Signal(str, list, str, list)' in discovery_interface
     assert 'comment_submitted = Signal(str, object)' in discovery_interface
     assert 'upload_moment_media' in discovery_interface
     assert 'upload_comment_image' in discovery_interface
@@ -37,6 +37,19 @@ def test_discovery_ui_wires_moment_media_and_comment_image_boundaries() -> None:
     assert 'def _sync_media_preview(self) -> None:' in discovery_interface
     assert 'self.image_preview = MomentMediaGrid([], self.surface, compact=True)' in discovery_interface
     assert 'def _sync_comment_image_preview(self) -> None:' in discovery_interface
+
+
+def test_discovery_ui_exposes_moment_privacy_entry_points() -> None:
+    discovery_interface = Path('client/ui/windows/discovery_interface.py').read_text(encoding='utf-8')
+
+    assert 'class MomentVisibilitySelectDialog(QDialog):' in discovery_interface
+    assert 'class MomentPrivacySettingsDialog(QDialog):' in discovery_interface
+    assert 'self.visibility_button = PushButton(tr("discovery.dialog.visibility_title", "Who can see this"), self)' in discovery_interface
+    assert 'self.privacy_button = PushButton(tr("discovery.feed.privacy_button", "Moment Privacy"), self.hero_card)' in discovery_interface
+    assert 'dialog.submitted.connect(self._create_moment)' in discovery_interface
+    assert 'def _create_moment(self, content: str, media_paths: list | None = None, visibility_scope: str = "public", visibility_user_ids: list | None = None) -> None:' in discovery_interface
+    assert 'await self._controller.update_moment_privacy_settings(' in discovery_interface
+    assert 'tr("discovery.privacy.visible_time_scope", "Allow friends to view moments from")' in discovery_interface
 
 
 def test_discovery_ui_loads_full_comments_from_moment_detail() -> None:

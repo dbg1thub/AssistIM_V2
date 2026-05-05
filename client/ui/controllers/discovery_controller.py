@@ -73,6 +73,8 @@ class MomentRecord:
     media: list[MomentMediaRecord] = field(default_factory=list)
     images: list[str] = field(default_factory=list)
     videos: list[str] = field(default_factory=list)
+    visibility_scope: str = "public"
+    visibility_user_ids: list[str] = field(default_factory=list)
     comments: list[MomentCommentRecord] = field(default_factory=list)
     like_count: int = 0
     comment_count: int = 0
@@ -84,6 +86,15 @@ class MomentRecord:
     def display_name(self) -> str:
         """Return the best display name."""
         return self.nickname or self.username or self.user_id or "Unknown User"
+
+
+@dataclass
+class MomentPrivacySettings:
+    """Normalized moments privacy settings for the current user."""
+
+    hide_my_moments_user_ids: list[str] = field(default_factory=list)
+    hide_their_moments_user_ids: list[str] = field(default_factory=list)
+    visible_time_scope: str = "all"
 
 
 class DiscoveryController:
@@ -186,13 +197,55 @@ class DiscoveryController:
         self._ensure_runtime_user_id(owner_user_id)
         return self._normalize_moment(data)
 
-    async def create_moment(self, content: str, *, media: list[dict[str, Any]] | None = None) -> MomentRecord:
+    async def create_moment(
+        self,
+        content: str,
+        *,
+        media: list[dict[str, Any]] | None = None,
+        visibility_scope: str = "public",
+        visibility_user_ids: list[str] | None = None,
+    ) -> MomentRecord:
         """Create a new moment."""
         owner_user_id = self._capture_runtime_user_id()
         self._sync_cache_scope(owner_user_id)
-        payload = await self._discovery_service.create_moment(content, media=media or [])
+        payload = await self._discovery_service.create_moment(
+            content,
+            media=media or [],
+            visibility_scope=visibility_scope,
+            visibility_user_ids=self._normalize_user_id_list(visibility_user_ids),
+        )
         self._ensure_runtime_user_id(owner_user_id)
         return self._normalize_moment(payload or {})
+
+    async def load_moment_privacy_settings(self) -> MomentPrivacySettings:
+        """Load the current user's moments privacy settings."""
+        owner_user_id = self._capture_runtime_user_id()
+        self._sync_cache_scope(owner_user_id)
+        payload = await self._discovery_service.fetch_moment_privacy_settings()
+        self._ensure_runtime_user_id(owner_user_id)
+        return self._normalize_privacy_settings(payload)
+
+    async def update_moment_privacy_settings(
+        self,
+        *,
+        hide_my_moments_user_ids: list[str] | None = None,
+        hide_their_moments_user_ids: list[str] | None = None,
+        visible_time_scope: str | None = None,
+    ) -> MomentPrivacySettings:
+        """Persist the current user's moments privacy settings."""
+        owner_user_id = self._capture_runtime_user_id()
+        self._sync_cache_scope(owner_user_id)
+        payload = await self._discovery_service.update_moment_privacy_settings(
+            hide_my_moments_user_ids=self._normalize_user_id_list(hide_my_moments_user_ids)
+            if hide_my_moments_user_ids is not None
+            else None,
+            hide_their_moments_user_ids=self._normalize_user_id_list(hide_their_moments_user_ids)
+            if hide_their_moments_user_ids is not None
+            else None,
+            visible_time_scope=visible_time_scope,
+        )
+        self._ensure_runtime_user_id(owner_user_id)
+        return self._normalize_privacy_settings(payload)
 
     async def set_liked(self, moment_id: str, liked: bool, like_count: Optional[int] = None) -> bool:
         """Update like state for a moment."""
@@ -285,6 +338,8 @@ class DiscoveryController:
             media=media,
             images=images,
             videos=videos,
+            visibility_scope=self._normalize_visibility_scope(data.get("visibility_scope")),
+            visibility_user_ids=self._normalize_user_id_list(data.get("visibility_user_ids")),
             comments=normalized_comments,
             like_count=like_count,
             comment_count=max(int(data.get("comment_count", len(normalized_comments)) or 0), len(normalized_comments)),
@@ -321,6 +376,14 @@ class DiscoveryController:
             avatar=str(author.get("avatar", "") or cached_user.get("avatar", "") or ""),
             gender=str(author.get("gender", "") or cached_user.get("gender", "") or ""),
             image=self._normalize_media_item(data.get("image")),
+        )
+
+    def _normalize_privacy_settings(self, payload: dict[str, Any]) -> MomentPrivacySettings:
+        data = dict(payload or {})
+        return MomentPrivacySettings(
+            hide_my_moments_user_ids=self._normalize_user_id_list(data.get("hide_my_moments_user_ids")),
+            hide_their_moments_user_ids=self._normalize_user_id_list(data.get("hide_their_moments_user_ids")),
+            visible_time_scope=self._normalize_visible_time_scope(data.get("visible_time_scope")),
         )
 
     def _normalize_media_items(self, payload: object) -> list[MomentMediaRecord]:
@@ -365,6 +428,30 @@ class DiscoveryController:
             size_bytes=size_bytes,
             local_path=str(payload.get("local_path") or "").strip(),
         )
+
+    @staticmethod
+    def _normalize_user_id_list(payload: object) -> list[str]:
+        if not isinstance(payload, list):
+            return []
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for raw_user_id in payload:
+            user_id = str(raw_user_id or "").strip()
+            if not user_id or user_id in seen:
+                continue
+            normalized.append(user_id)
+            seen.add(user_id)
+        return normalized
+
+    @staticmethod
+    def _normalize_visibility_scope(payload: object) -> str:
+        value = str(payload or "public").strip().lower()
+        return value if value in {"public", "private", "include", "exclude"} else "public"
+
+    @staticmethod
+    def _normalize_visible_time_scope(payload: object) -> str:
+        value = str(payload or "all").strip().lower()
+        return value if value in {"all", "half_year", "month", "three_days"} else "all"
 
     @staticmethod
     def _looks_like_video(url: str, mime_type: str = "") -> bool:

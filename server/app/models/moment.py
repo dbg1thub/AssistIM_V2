@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from sqlalchemy import ForeignKey, Index, Text, UniqueConstraint, Uuid
+from sqlalchemy import ForeignKey, Index, String, Text, UniqueConstraint, Uuid
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base, IdMixin, TimestampMixin
@@ -17,6 +17,21 @@ class Moment(IdMixin, TimestampMixin, Base):
     user_id: Mapped[str] = mapped_column(Uuid(as_uuid=False), ForeignKey("users.id"), nullable=False)
     content: Mapped[str] = mapped_column(Text, default="")
     media_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    visibility_scope: Mapped[str] = mapped_column(String(16), nullable=False, default="public")
+    visibility_user_ids_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+
+
+class MomentPrivacySetting(IdMixin, TimestampMixin, Base):
+    __tablename__ = "moment_privacy_settings"
+    __table_args__ = (
+        UniqueConstraint("user_id", name="uq_moment_privacy_settings_user_id"),
+        Index("idx_moment_privacy_settings_user_id", "user_id"),
+    )
+
+    user_id: Mapped[str] = mapped_column(Uuid(as_uuid=False), ForeignKey("users.id"), nullable=False)
+    hide_my_moments_user_ids_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    hide_their_moments_user_ids_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    visible_time_scope: Mapped[str] = mapped_column(String(16), nullable=False, default="all")
 
 
 class MomentLike(TimestampMixin, Base):

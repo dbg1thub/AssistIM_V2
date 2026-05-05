@@ -383,6 +383,7 @@ class AdminMomentsInspectionService:
             "user_id": user_id,
             "author": self._serialize_user_summary(context["users_by_id"].get(user_id), fallback_id=user_id),
             "content": str(moment.content or ""),
+            "visibility_scope": str(getattr(moment, "visibility_scope", "") or "public"),
             "comment_count": int(context["comment_counts"].get(moment_id, 0) or 0),
             "like_count": int(context["like_counts"].get(moment_id, 0) or 0),
             "created_at": isoformat_utc(moment.created_at),
@@ -416,6 +417,7 @@ class AdminMomentsInspectionService:
             "id": str(moment.id or ""),
             "user_id": str(moment.user_id or ""),
             "content": str(moment.content or ""),
+            "visibility_scope": str(getattr(moment, "visibility_scope", "") or "public"),
         }
 
     def _serialize_user_summary(self, user: User | None, *, fallback_id: str = "") -> dict[str, Any]:

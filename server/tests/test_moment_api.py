@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock
 
 from fastapi.testclient import TestClient
 
 from app.api.v1 import moments as moment_routes
+from app.core.database import SessionLocal
 from app.core.errors import ErrorCode
+from app.models.moment import Moment
 from app.schemas.moment import MAX_MOMENT_COMMENT_LENGTH, MAX_MOMENT_CONTENT_LENGTH, MAX_MOMENT_MEDIA_ITEMS
 
 
@@ -326,6 +329,204 @@ def test_moment_detail_and_interactions_require_visibility(
     )
     assert comment_response.status_code == 403
     assert comment_response.json()["code"] == ErrorCode.FORBIDDEN
+
+
+def test_moment_per_post_visibility_scopes_control_feed_detail_and_interactions(
+    client: TestClient,
+    user_factory,
+    auth_header,
+) -> None:
+    alice = user_factory("moment_scope_alice", "Moment Scope Alice")
+    bob = user_factory("moment_scope_bob", "Moment Scope Bob")
+    charlie = user_factory("moment_scope_charlie", "Moment Scope Charlie")
+    stranger = user_factory("moment_scope_stranger", "Moment Scope Stranger")
+    _make_friends(client, auth_header, alice, bob)
+    _make_friends(client, auth_header, alice, charlie)
+
+    alice_headers = auth_header(alice["access_token"])
+    bob_headers = auth_header(bob["access_token"])
+    charlie_headers = auth_header(charlie["access_token"])
+
+    private_response = client.post(
+        "/api/v1/moments",
+        json={"content": "only me", "visibility_scope": "private"},
+        headers=alice_headers,
+    )
+    assert private_response.status_code == 200
+    private_moment = private_response.json()["data"]
+    assert private_moment["visibility_scope"] == "private"
+    assert private_moment["visibility_user_ids"] == []
+
+    include_response = client.post(
+        "/api/v1/moments",
+        json={
+            "content": "bob only",
+            "visibility_scope": "include",
+            "visibility_user_ids": [bob["user"]["id"]],
+        },
+        headers=alice_headers,
+    )
+    assert include_response.status_code == 200
+    include_moment = include_response.json()["data"]
+    assert include_moment["visibility_scope"] == "include"
+    assert include_moment["visibility_user_ids"] == [bob["user"]["id"]]
+
+    exclude_response = client.post(
+        "/api/v1/moments",
+        json={
+            "content": "not bob",
+            "visibility_scope": "exclude",
+            "visibility_user_ids": [bob["user"]["id"]],
+        },
+        headers=alice_headers,
+    )
+    assert exclude_response.status_code == 200
+    exclude_moment = exclude_response.json()["data"]
+
+    bob_feed = client.get("/api/v1/moments", headers=bob_headers)
+    assert bob_feed.status_code == 200
+    assert {item["id"] for item in bob_feed.json()["data"]["items"]} == {include_moment["id"]}
+
+    charlie_feed = client.get("/api/v1/moments", headers=charlie_headers)
+    assert charlie_feed.status_code == 200
+    assert {item["id"] for item in charlie_feed.json()["data"]["items"]} == {exclude_moment["id"]}
+
+    alice_feed = client.get("/api/v1/moments", headers=alice_headers)
+    assert alice_feed.status_code == 200
+    assert {item["id"] for item in alice_feed.json()["data"]["items"]} == {
+        private_moment["id"],
+        include_moment["id"],
+        exclude_moment["id"],
+    }
+
+    visible_detail = client.get(f"/api/v1/moments/{include_moment['id']}", headers=bob_headers)
+    assert visible_detail.status_code == 200
+    assert visible_detail.json()["data"]["visibility_user_ids"] == []
+
+    hidden_detail = client.get(f"/api/v1/moments/{exclude_moment['id']}", headers=bob_headers)
+    assert hidden_detail.status_code == 403
+    assert hidden_detail.json()["code"] == ErrorCode.FORBIDDEN
+
+    hidden_like = client.post(f"/api/v1/moments/{exclude_moment['id']}/likes", headers=bob_headers)
+    assert hidden_like.status_code == 403
+    assert hidden_like.json()["code"] == ErrorCode.FORBIDDEN
+
+    hidden_comment = client.post(
+        f"/api/v1/moments/{exclude_moment['id']}/comments",
+        json={"content": "hidden comment"},
+        headers=bob_headers,
+    )
+    assert hidden_comment.status_code == 403
+    assert hidden_comment.json()["code"] == ErrorCode.FORBIDDEN
+
+    invalid_target = client.post(
+        "/api/v1/moments",
+        json={
+            "content": "invalid target",
+            "visibility_scope": "include",
+            "visibility_user_ids": [stranger["user"]["id"]],
+        },
+        headers=alice_headers,
+    )
+    assert invalid_target.status_code == 400
+    assert invalid_target.json()["code"] == ErrorCode.INVALID_REQUEST
+
+
+def test_moment_privacy_settings_filter_feed_detail_interactions_and_time_scope(
+    client: TestClient,
+    user_factory,
+    auth_header,
+) -> None:
+    alice = user_factory("moment_privacy_alice", "Moment Privacy Alice")
+    bob = user_factory("moment_privacy_bob", "Moment Privacy Bob")
+    _make_friends(client, auth_header, alice, bob)
+
+    alice_headers = auth_header(alice["access_token"])
+    bob_headers = auth_header(bob["access_token"])
+
+    recent = client.post(
+        "/api/v1/moments",
+        json={"content": "recent public"},
+        headers=alice_headers,
+    ).json()["data"]
+    old = client.post(
+        "/api/v1/moments",
+        json={"content": "old public"},
+        headers=alice_headers,
+    ).json()["data"]
+    with SessionLocal() as db:
+        old_moment = db.get(Moment, old["id"])
+        assert old_moment is not None
+        old_moment.created_at = datetime.now(timezone.utc) - timedelta(days=10)
+        db.add(old_moment)
+        db.commit()
+
+    default_settings = client.get("/api/v1/moments/privacy", headers=alice_headers)
+    assert default_settings.status_code == 200
+    assert default_settings.json()["data"] == {
+        "hide_my_moments_user_ids": [],
+        "hide_their_moments_user_ids": [],
+        "visible_time_scope": "all",
+    }
+
+    bob_initial_feed = client.get("/api/v1/moments", headers=bob_headers)
+    assert bob_initial_feed.status_code == 200
+    assert {item["id"] for item in bob_initial_feed.json()["data"]["items"]} == {recent["id"], old["id"]}
+
+    time_update = client.patch(
+        "/api/v1/moments/privacy",
+        json={"visible_time_scope": "three_days"},
+        headers=alice_headers,
+    )
+    assert time_update.status_code == 200
+    assert time_update.json()["data"]["visible_time_scope"] == "three_days"
+
+    bob_time_limited_feed = client.get("/api/v1/moments", headers=bob_headers)
+    assert bob_time_limited_feed.status_code == 200
+    assert {item["id"] for item in bob_time_limited_feed.json()["data"]["items"]} == {recent["id"]}
+
+    old_detail = client.get(f"/api/v1/moments/{old['id']}", headers=bob_headers)
+    assert old_detail.status_code == 403
+    assert old_detail.json()["code"] == ErrorCode.FORBIDDEN
+
+    alice_own_feed = client.get("/api/v1/moments", headers=alice_headers)
+    assert alice_own_feed.status_code == 200
+    assert {item["id"] for item in alice_own_feed.json()["data"]["items"]} == {recent["id"], old["id"]}
+
+    hide_from_bob = client.patch(
+        "/api/v1/moments/privacy",
+        json={"hide_my_moments_user_ids": [bob["user"]["id"]], "visible_time_scope": "all"},
+        headers=alice_headers,
+    )
+    assert hide_from_bob.status_code == 200
+    assert hide_from_bob.json()["data"]["hide_my_moments_user_ids"] == [bob["user"]["id"]]
+
+    bob_hidden_feed = client.get("/api/v1/moments", headers=bob_headers)
+    assert bob_hidden_feed.status_code == 200
+    assert bob_hidden_feed.json()["data"]["items"] == []
+
+    recent_like = client.post(f"/api/v1/moments/{recent['id']}/likes", headers=bob_headers)
+    assert recent_like.status_code == 403
+    assert recent_like.json()["code"] == ErrorCode.FORBIDDEN
+
+    reset_alice = client.patch(
+        "/api/v1/moments/privacy",
+        json={"hide_my_moments_user_ids": [], "visible_time_scope": "all"},
+        headers=alice_headers,
+    )
+    assert reset_alice.status_code == 200
+
+    bob_hides_alice = client.patch(
+        "/api/v1/moments/privacy",
+        json={"hide_their_moments_user_ids": [alice["user"]["id"]]},
+        headers=bob_headers,
+    )
+    assert bob_hides_alice.status_code == 200
+    assert bob_hides_alice.json()["data"]["hide_their_moments_user_ids"] == [alice["user"]["id"]]
+
+    bob_filtered_feed = client.get("/api/v1/moments", headers=bob_headers)
+    assert bob_filtered_feed.status_code == 200
+    assert bob_filtered_feed.json()["data"]["items"] == []
 
 
 def test_moment_create_schema_strips_content_and_rejects_invalid_payloads(

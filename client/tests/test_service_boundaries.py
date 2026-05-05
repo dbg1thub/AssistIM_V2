@@ -1026,7 +1026,9 @@ class FakeDiscoveryService:
     def __init__(self) -> None:
         self.fetch_moments_calls: list[str | None] = []
         self.get_moment_calls: list[str] = []
-        self.create_moment_calls: list[tuple[str, list[dict]]] = []
+        self.create_moment_calls: list[tuple[str, list[dict], str, list[str]]] = []
+        self.fetch_privacy_settings_calls = 0
+        self.update_privacy_settings_calls: list[dict] = []
         self.like_calls: list[str] = []
         self.unlike_calls: list[str] = []
         self.comment_calls: list[tuple[str, str, dict | None]] = []
@@ -1034,6 +1036,11 @@ class FakeDiscoveryService:
         self.moment_detail_payloads: dict[str, dict] = {}
         self.created_moment_payload: dict = {}
         self.comment_payload: dict = {}
+        self.privacy_settings_payload: dict = {
+            'hide_my_moments_user_ids': [],
+            'hide_their_moments_user_ids': [],
+            'visible_time_scope': 'all',
+        }
 
     async def fetch_moments(self, *, user_id: str | None = None) -> list[dict]:
         self.fetch_moments_calls.append(user_id)
@@ -1043,9 +1050,47 @@ class FakeDiscoveryService:
         self.get_moment_calls.append(moment_id)
         return dict(self.moment_detail_payloads.get(moment_id, {}))
 
-    async def create_moment(self, content: str, *, media: list[dict] | None = None) -> dict:
-        self.create_moment_calls.append((content, [dict(item) for item in (media or [])]))
+    async def create_moment(
+        self,
+        content: str,
+        *,
+        media: list[dict] | None = None,
+        visibility_scope: str = 'public',
+        visibility_user_ids: list[str] | None = None,
+    ) -> dict:
+        self.create_moment_calls.append(
+            (
+                content,
+                [dict(item) for item in (media or [])],
+                visibility_scope,
+                [str(item) for item in (visibility_user_ids or [])],
+            )
+        )
         return dict(self.created_moment_payload or {'id': 'moment-created', 'content': content, 'media': media or []})
+
+    async def fetch_moment_privacy_settings(self) -> dict:
+        self.fetch_privacy_settings_calls += 1
+        return dict(self.privacy_settings_payload)
+
+    async def update_moment_privacy_settings(
+        self,
+        *,
+        hide_my_moments_user_ids: list[str] | None = None,
+        hide_their_moments_user_ids: list[str] | None = None,
+        visible_time_scope: str | None = None,
+    ) -> dict:
+        payload = {
+            'hide_my_moments_user_ids': list(hide_my_moments_user_ids or []),
+            'hide_their_moments_user_ids': list(hide_their_moments_user_ids or []),
+            'visible_time_scope': visible_time_scope,
+        }
+        self.update_privacy_settings_calls.append(payload)
+        self.privacy_settings_payload = {
+            'hide_my_moments_user_ids': payload['hide_my_moments_user_ids'],
+            'hide_their_moments_user_ids': payload['hide_their_moments_user_ids'],
+            'visible_time_scope': payload['visible_time_scope'] or 'all',
+        }
+        return dict(self.privacy_settings_payload)
 
     async def like_moment(self, moment_id: str) -> None:
         self.like_calls.append(moment_id)
@@ -2981,6 +3026,8 @@ def test_discovery_controller_mutations_use_discovery_service(monkeypatch) -> No
         'user_id': 'user-1',
         'content': 'new post',
         'media': [{'type': 'image', 'url': '/uploads/new-photo.png'}],
+        'visibility_scope': 'include',
+        'visibility_user_ids': ['user-2'],
         'created_at': '2026-03-23T11:00:00Z',
     }
     fake_discovery_service.comment_payload = {
@@ -2998,15 +3045,22 @@ def test_discovery_controller_mutations_use_discovery_service(monkeypatch) -> No
 
     async def scenario() -> None:
         controller = discovery_controller_module.DiscoveryController()
-        moment = await controller.create_moment('new post', media=[{'type': 'image', 'url': '/uploads/new-photo.png'}])
+        moment = await controller.create_moment(
+            'new post',
+            media=[{'type': 'image', 'url': '/uploads/new-photo.png'}],
+            visibility_scope='exclude',
+            visibility_user_ids=['user-2'],
+        )
         liked = await controller.set_liked('moment-2', True, like_count=3)
         unliked = await controller.set_liked('moment-2', False, like_count=2)
         comment = await controller.add_comment('moment-2', 'thanks', image={'type': 'image', 'url': '/uploads/comment-photo.png'})
 
         assert fake_discovery_service.create_moment_calls == [
-            ('new post', [{'type': 'image', 'url': '/uploads/new-photo.png'}])
+            ('new post', [{'type': 'image', 'url': '/uploads/new-photo.png'}], 'exclude', ['user-2'])
         ]
         assert moment.id == 'moment-2'
+        assert moment.visibility_scope == 'include'
+        assert moment.visibility_user_ids == ['user-2']
         assert moment.images == ['/uploads/new-photo.png']
         assert liked is True
         assert unliked is False
@@ -3018,6 +3072,46 @@ def test_discovery_controller_mutations_use_discovery_service(monkeypatch) -> No
         assert comment.content == 'thanks'
         assert comment.image is not None
         assert comment.image.url == '/uploads/comment-photo.png'
+
+    asyncio.run(scenario())
+
+
+def test_discovery_controller_round_trips_moment_privacy_settings(monkeypatch) -> None:
+    fake_discovery_service = FakeDiscoveryService()
+    fake_user_service = FakeUserService()
+    fake_auth_context = FakeAuthContext({'id': 'user-1', 'username': 'alice'})
+    fake_discovery_service.privacy_settings_payload = {
+        'hide_my_moments_user_ids': ['user-2'],
+        'hide_their_moments_user_ids': ['user-3'],
+        'visible_time_scope': 'month',
+    }
+
+    monkeypatch.setattr(discovery_controller_module, 'get_discovery_service', lambda: fake_discovery_service)
+    monkeypatch.setattr(discovery_controller_module, 'get_user_service', lambda: fake_user_service)
+    monkeypatch.setattr(discovery_controller_module, 'get_auth_controller', lambda: fake_auth_context)
+
+    async def scenario() -> None:
+        controller = discovery_controller_module.DiscoveryController()
+
+        loaded = await controller.load_moment_privacy_settings()
+        updated = await controller.update_moment_privacy_settings(
+            hide_my_moments_user_ids=['user-2'],
+            hide_their_moments_user_ids=['user-3'],
+            visible_time_scope='three_days',
+        )
+
+        assert fake_discovery_service.fetch_privacy_settings_calls == 1
+        assert loaded.hide_my_moments_user_ids == ['user-2']
+        assert loaded.hide_their_moments_user_ids == ['user-3']
+        assert loaded.visible_time_scope == 'month'
+        assert fake_discovery_service.update_privacy_settings_calls == [
+            {
+                'hide_my_moments_user_ids': ['user-2'],
+                'hide_their_moments_user_ids': ['user-3'],
+                'visible_time_scope': 'three_days',
+            }
+        ]
+        assert updated.visible_time_scope == 'three_days'
 
     asyncio.run(scenario())
 

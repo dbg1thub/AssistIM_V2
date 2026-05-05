@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 from app.core.database import get_db
 from app.dependencies.auth_dependency import get_current_user
 from app.models.user import User
-from app.schemas.moment import MomentCommentCreate, MomentCreate
+from app.schemas.moment import MomentCommentCreate, MomentCreate, MomentPrivacySettingsUpdate
 from app.services.moment_service import MomentService
 from app.utils.response import success_response
 from app.websocket.manager import connection_manager
@@ -103,6 +103,37 @@ def list_moments(
     )
 
 
+@router.get("/privacy")
+def get_moment_privacy_settings(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    return success_response(MomentService(db).get_privacy_settings(current_user))
+
+
+@router.patch("/privacy")
+async def update_moment_privacy_settings(
+    payload: MomentPrivacySettingsUpdate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    service = MomentService(db)
+    result = service.update_privacy_settings(
+        current_user,
+        hide_my_moments_user_ids=payload.hide_my_moments_user_ids,
+        hide_their_moments_user_ids=payload.hide_their_moments_user_ids,
+        visible_time_scope=payload.visible_time_scope,
+    )
+    await _broadcast_moment_refresh(
+        action="moment_privacy_updated",
+        moment_id="",
+        actor_user_id=current_user.id,
+        owner_user_id=current_user.id,
+        changed=True,
+    )
+    return success_response(result)
+
+
 @router.get("/{moment_id}")
 def get_moment(moment_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
     return success_response(MomentService(db).get_moment(current_user, moment_id))
@@ -111,7 +142,13 @@ def get_moment(moment_id: str, current_user: User = Depends(get_current_user), d
 @router.post("")
 async def create_moment(payload: MomentCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
     service = MomentService(db)
-    result = service.create_moment(current_user, payload.content, payload.media)
+    result = service.create_moment(
+        current_user,
+        payload.content,
+        payload.media,
+        visibility_scope=payload.visibility_scope,
+        visibility_user_ids=payload.visibility_user_ids,
+    )
     await _broadcast_moment_refresh(
         action="moment_created",
         moment_id=str(result.get("id", "") or ""),

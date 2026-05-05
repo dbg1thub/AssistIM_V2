@@ -40,9 +40,50 @@ class DiscoveryService:
             return {}
         return dict(payload)
 
-    async def create_moment(self, content: str, *, media: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    async def create_moment(
+        self,
+        content: str,
+        *,
+        media: list[dict[str, Any]] | None = None,
+        visibility_scope: str = "public",
+        visibility_user_ids: list[str] | None = None,
+    ) -> dict[str, Any]:
         """Create one moment."""
-        payload = await self._http.post("/moments", json={"content": content, "media": media or []})
+        payload = await self._http.post(
+            "/moments",
+            json={
+                "content": content,
+                "media": media or [],
+                "visibility_scope": visibility_scope,
+                "visibility_user_ids": list(visibility_user_ids or []),
+            },
+        )
+        return dict(payload or {})
+
+    async def fetch_moment_privacy_settings(self) -> dict[str, Any]:
+        """Fetch the current user's moments privacy settings."""
+        payload = await self._http.get("/moments/privacy")
+        if not isinstance(payload, dict):
+            logger.warning("Unexpected moment privacy settings payload: %r", payload)
+            return {}
+        return dict(payload)
+
+    async def update_moment_privacy_settings(
+        self,
+        *,
+        hide_my_moments_user_ids: list[str] | None = None,
+        hide_their_moments_user_ids: list[str] | None = None,
+        visible_time_scope: str | None = None,
+    ) -> dict[str, Any]:
+        """Update the current user's moments privacy settings."""
+        body: dict[str, Any] = {}
+        if hide_my_moments_user_ids is not None:
+            body["hide_my_moments_user_ids"] = list(hide_my_moments_user_ids)
+        if hide_their_moments_user_ids is not None:
+            body["hide_their_moments_user_ids"] = list(hide_their_moments_user_ids)
+        if visible_time_scope is not None:
+            body["visible_time_scope"] = visible_time_scope
+        payload = await self._http.patch("/moments/privacy", json=body)
         return dict(payload or {})
 
     async def like_moment(self, moment_id: str) -> None:

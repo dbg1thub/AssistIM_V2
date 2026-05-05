@@ -90,10 +90,22 @@ FILE_COLUMN_DDL: dict[str, str] = {
 
 MOMENT_COLUMN_DDL: dict[str, str] = {
     "media_json": "TEXT NOT NULL DEFAULT '[]'",
+    "visibility_scope": "VARCHAR(16) NOT NULL DEFAULT 'public'",
+    "visibility_user_ids_json": "TEXT NOT NULL DEFAULT '[]'",
 }
 
 MOMENT_COMMENT_COLUMN_DDL: dict[str, str] = {
     "image_json": "TEXT NOT NULL DEFAULT '{}'",
+}
+
+MOMENT_PRIVACY_SETTINGS_COLUMN_DDL: dict[str, str] = {
+    "hide_my_moments_user_ids_json": "TEXT NOT NULL DEFAULT '[]'",
+    "hide_their_moments_user_ids_json": "TEXT NOT NULL DEFAULT '[]'",
+    "visible_time_scope": "VARCHAR(16) NOT NULL DEFAULT 'all'",
+}
+
+MOMENT_PRIVACY_SETTINGS_INDEX_DDL: dict[str, str] = {
+    "idx_moment_privacy_settings_user_id": "CREATE INDEX IF NOT EXISTS idx_moment_privacy_settings_user_id ON moment_privacy_settings (user_id)",
 }
 
 CHAT_INDEX_DDL: dict[str, str] = {
@@ -193,7 +205,7 @@ def _has_indexes(bind: Engine | Connection, table_name: str, required_indexes: I
     return all(index_name in indexes for index_name in required_indexes)
 
 
-RUNTIME_SCHEMA_ALEMBIC_REVISION = "20260505_0020"
+RUNTIME_SCHEMA_ALEMBIC_REVISION = "20260505_0022"
 
 def _parse_revision(revision: str) -> tuple[int, int] | None:
     candidate = str(revision or "").strip()
@@ -242,6 +254,7 @@ def _has_current_runtime_schema(bind: Engine | Connection) -> bool:
         "admin_database_backups",
         "email_verification_codes",
         "user_blocks",
+        "moment_privacy_settings",
     }
     if required_tables - _get_table_names(bind):
         return False
@@ -262,6 +275,8 @@ def _has_current_runtime_schema(bind: Engine | Connection) -> bool:
         and _has_indexes(bind, "files", FILE_INDEX_DDL)
         and _has_columns(bind, "moments", MOMENT_COLUMN_DDL)
         and _has_columns(bind, "moment_comments", MOMENT_COMMENT_COLUMN_DDL)
+        and _has_columns(bind, "moment_privacy_settings", MOMENT_PRIVACY_SETTINGS_COLUMN_DDL)
+        and _has_indexes(bind, "moment_privacy_settings", MOMENT_PRIVACY_SETTINGS_INDEX_DDL)
         and _has_columns(bind, "groups", GROUP_AVATAR_COLUMN_DDL)
         and _has_columns(bind, "group_members", GROUP_MEMBER_PROFILE_COLUMN_DDL)
         and _has_indexes(bind, "session_events", SESSION_EVENT_INDEX_DDL)
@@ -412,6 +427,30 @@ def _ensure_email_verification_codes_table(connection: Connection, applied: list
         )
     )
     applied.append("email_verification_codes.create")
+
+
+def _ensure_moment_privacy_settings_table(connection: Connection, applied: list[str]) -> None:
+    table_names = _get_table_names(connection)
+    if "moment_privacy_settings" in table_names:
+        return
+
+    connection.execute(
+        text(
+            """
+            CREATE TABLE moment_privacy_settings (
+                id VARCHAR(36) PRIMARY KEY,
+                created_at TIMESTAMP NOT NULL,
+                updated_at TIMESTAMP NOT NULL,
+                user_id VARCHAR(36) NOT NULL,
+                hide_my_moments_user_ids_json TEXT NOT NULL DEFAULT '[]',
+                hide_their_moments_user_ids_json TEXT NOT NULL DEFAULT '[]',
+                visible_time_scope VARCHAR(16) NOT NULL DEFAULT 'all',
+                UNIQUE (user_id)
+            )
+            """
+        )
+    )
+    applied.append("moment_privacy_settings.create")
 
 
 def _ensure_email_lower_index(connection: Connection, applied: list[str]) -> None:
@@ -1275,6 +1314,8 @@ def ensure_schema_compatibility(engine: Engine) -> list[str]:
         _ensure_columns(connection, "files", FILE_COLUMN_DDL, applied)
         _ensure_columns(connection, "moments", MOMENT_COLUMN_DDL, applied)
         _ensure_columns(connection, "moment_comments", MOMENT_COMMENT_COLUMN_DDL, applied)
+        _ensure_moment_privacy_settings_table(connection, applied)
+        _ensure_columns(connection, "moment_privacy_settings", MOMENT_PRIVACY_SETTINGS_COLUMN_DDL, applied)
         _ensure_columns(connection, "groups", GROUP_AVATAR_COLUMN_DDL, applied)
         _ensure_columns(connection, "group_members", GROUP_MEMBER_PROFILE_COLUMN_DDL, applied)
 
@@ -1306,6 +1347,7 @@ def ensure_schema_compatibility(engine: Engine) -> list[str]:
         _ensure_indexes(connection, "admin_database_backups", ADMIN_DATABASE_BACKUP_INDEX_DDL, applied)
         _ensure_email_verification_codes_table(connection, applied)
         _ensure_indexes(connection, "email_verification_codes", EMAIL_VERIFICATION_INDEX_DDL, applied)
+        _ensure_indexes(connection, "moment_privacy_settings", MOMENT_PRIVACY_SETTINGS_INDEX_DDL, applied)
 
     return applied
 

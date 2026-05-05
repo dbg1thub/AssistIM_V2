@@ -10,6 +10,7 @@ class FakeHttpClient:
         self.payload = payload
         self.get_calls: list[tuple[str, dict | None]] = []
         self.post_calls: list[tuple[str, dict | None]] = []
+        self.patch_calls: list[tuple[str, dict | None]] = []
 
     async def get(self, path: str, params: dict | None = None):
         self.get_calls.append((path, params))
@@ -17,6 +18,10 @@ class FakeHttpClient:
 
     async def post(self, path: str, json: dict | None = None):
         self.post_calls.append((path, json))
+        return self.payload
+
+    async def patch(self, path: str, json: dict | None = None):
+        self.patch_calls.append((path, json))
         return self.payload
 
 
@@ -103,10 +108,61 @@ def test_discovery_service_create_moment_posts_media_items(monkeypatch) -> None:
 
     async def scenario() -> None:
         service = discovery_service_module.DiscoveryService()
-        payload = await service.create_moment("caption", media=media)
+        payload = await service.create_moment(
+            "caption",
+            media=media,
+            visibility_scope="include",
+            visibility_user_ids=["user-2", "user-3"],
+        )
 
-        assert fake_http.post_calls == [("/moments", {"content": "caption", "media": media})]
+        assert fake_http.post_calls == [
+            (
+                "/moments",
+                {
+                    "content": "caption",
+                    "media": media,
+                    "visibility_scope": "include",
+                    "visibility_user_ids": ["user-2", "user-3"],
+                },
+            )
+        ]
         assert payload == {"id": "moment-1", "content": "caption"}
+
+    asyncio.run(scenario())
+
+
+def test_discovery_service_fetches_and_updates_moment_privacy_settings(monkeypatch) -> None:
+    fake_http = FakeHttpClient(
+        {
+            "hide_my_moments_user_ids": ["user-2"],
+            "hide_their_moments_user_ids": ["user-3"],
+            "visible_time_scope": "month",
+        }
+    )
+    monkeypatch.setattr(discovery_service_module, "get_http_client", lambda: fake_http)
+
+    async def scenario() -> None:
+        service = discovery_service_module.DiscoveryService()
+        loaded = await service.fetch_moment_privacy_settings()
+        updated = await service.update_moment_privacy_settings(
+            hide_my_moments_user_ids=["user-2"],
+            hide_their_moments_user_ids=["user-3"],
+            visible_time_scope="month",
+        )
+
+        assert fake_http.get_calls == [("/moments/privacy", None)]
+        assert fake_http.patch_calls == [
+            (
+                "/moments/privacy",
+                {
+                    "hide_my_moments_user_ids": ["user-2"],
+                    "hide_their_moments_user_ids": ["user-3"],
+                    "visible_time_scope": "month",
+                },
+            )
+        ]
+        assert loaded["visible_time_scope"] == "month"
+        assert updated["hide_my_moments_user_ids"] == ["user-2"]
 
     asyncio.run(scenario())
 

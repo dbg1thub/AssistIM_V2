@@ -27,6 +27,8 @@ from qfluentwidgets import (
     BodyLabel,
     CaptionLabel,
     CardWidget,
+    CheckBox,
+    ComboBox,
     IconWidget,
     InfoBar,
     isDarkTheme,
@@ -54,9 +56,11 @@ from client.services.file_service import get_file_service
 from client.ui.controllers.discovery_controller import (
     MomentCommentRecord,
     MomentMediaRecord,
+    MomentPrivacySettings,
     MomentRecord,
     get_discovery_controller,
 )
+from client.ui.controllers.contact_controller import ContactRecord, get_contact_controller
 from client.ui.styles import StyleSheet
 from client.ui.widgets.image_viewer import ImageViewer
 
@@ -655,15 +659,236 @@ class AnimatedCommentSection(QWidget):
         self.image_preview.show()
 
 
+def _contact_display_name(contact: ContactRecord | None) -> str:
+    if contact is None:
+        return ""
+    return str(getattr(contact, "display_name", "") or getattr(contact, "username", "") or getattr(contact, "id", "") or "")
+
+
+def _contact_id(contact: ContactRecord | None) -> str:
+    if contact is None:
+        return ""
+    return str(getattr(contact, "id", "") or "").strip()
+
+
+class MomentVisibilitySelectDialog(QDialog):
+    """Dialog for selecting one post's visibility scope."""
+
+    submitted = Signal(str, list)
+
+    def __init__(
+        self,
+        contacts: list[ContactRecord],
+        *,
+        current_scope: str = "public",
+        current_user_ids: list[str] | None = None,
+        parent=None,
+    ) -> None:
+        super().__init__(parent)
+        self._contacts = [contact for contact in contacts if _contact_id(contact)]
+        self._current_user_ids = set(str(item or "").strip() for item in (current_user_ids or []) if str(item or "").strip())
+        self._target_checkboxes: dict[str, CheckBox] = {}
+        self.setWindowTitle(tr("discovery.visibility.window_title", "Who can see this"))
+        self.setModal(True)
+        self.resize(480, 560)
+        _apply_themed_dialog_surface(self, "MomentVisibilitySelectDialog")
+        self._setup_ui(current_scope)
+
+    def _setup_ui(self, current_scope: str) -> None:
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 24, 24, 20)
+        layout.setSpacing(14)
+
+        layout.addWidget(TitleLabel(tr("discovery.visibility.title", "Who can see this"), self))
+        self.scope_combo = ComboBox(self)
+        self.scope_combo.addItem(tr("discovery.visibility.public", "Public"), userData="public")
+        self.scope_combo.addItem(tr("discovery.visibility.private", "Private"), userData="private")
+        self.scope_combo.addItem(tr("discovery.visibility.include", "Selected friends"), userData="include")
+        self.scope_combo.addItem(tr("discovery.visibility.exclude", "Do not show to selected friends"), userData="exclude")
+        for index in range(self.scope_combo.count()):
+            if self.scope_combo.itemData(index) == current_scope:
+                self.scope_combo.setCurrentIndex(index)
+                break
+        self.scope_combo.currentIndexChanged.connect(self._sync_contacts_enabled)
+        layout.addWidget(self.scope_combo)
+
+        layout.addWidget(BodyLabel(tr("discovery.visibility.contacts_title", "Friends"), self))
+
+        scroll_area = ScrollArea(self)
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+        _prepare_transparent_scroll_area(scroll_area)
+        contacts_widget = QWidget(scroll_area)
+        contacts_layout = QVBoxLayout(contacts_widget)
+        contacts_layout.setContentsMargins(0, 0, 0, 0)
+        contacts_layout.setSpacing(8)
+        for contact in self._contacts:
+            user_id = _contact_id(contact)
+            checkbox = CheckBox(_contact_display_name(contact), contacts_widget)
+            checkbox.setChecked(user_id in self._current_user_ids)
+            contacts_layout.addWidget(checkbox)
+            self._target_checkboxes[user_id] = checkbox
+        contacts_layout.addStretch(1)
+        scroll_area.setWidget(contacts_widget)
+        layout.addWidget(scroll_area, 1)
+
+        footer = QHBoxLayout()
+        footer.addStretch(1)
+        cancel_button = PushButton(tr("common.cancel", "Cancel"), self)
+        save_button = PrimaryPushButton(tr("common.confirm", "Confirm"), self)
+        cancel_button.clicked.connect(self.reject)
+        save_button.clicked.connect(self._submit)
+        footer.addWidget(cancel_button)
+        footer.addWidget(save_button)
+        layout.addLayout(footer)
+        self._sync_contacts_enabled()
+
+    def _sync_contacts_enabled(self) -> None:
+        enabled = self.selected_scope() in {"include", "exclude"}
+        for checkbox in self._target_checkboxes.values():
+            checkbox.setEnabled(enabled)
+
+    def selected_scope(self) -> str:
+        return str(self.scope_combo.currentData() or "public")
+
+    def selected_user_ids(self) -> list[str]:
+        if self.selected_scope() not in {"include", "exclude"}:
+            return []
+        return [user_id for user_id, checkbox in self._target_checkboxes.items() if checkbox.isChecked()]
+
+    def _submit(self) -> None:
+        scope = self.selected_scope()
+        user_ids = self.selected_user_ids()
+        if scope in {"include", "exclude"} and not user_ids:
+            InfoBar.warning(
+                tr("discovery.visibility.title", "Who can see this"),
+                tr("discovery.visibility.empty_warning", "Select at least one friend."),
+                parent=self,
+                duration=1800,
+            )
+            return
+        self.submitted.emit(scope, user_ids)
+        self.accept()
+
+
+class MomentPrivacySettingsDialog(QDialog):
+    """Dialog for long-term moments privacy settings."""
+
+    submitted = Signal(list, list, str)
+
+    def __init__(
+        self,
+        contacts: list[ContactRecord],
+        settings: MomentPrivacySettings,
+        parent=None,
+    ) -> None:
+        super().__init__(parent)
+        self._contacts = [contact for contact in contacts if _contact_id(contact)]
+        self._settings = settings
+        self._hide_my_checkboxes: dict[str, CheckBox] = {}
+        self._hide_their_checkboxes: dict[str, CheckBox] = {}
+        self.setWindowTitle(tr("discovery.privacy.window_title", "Moment Privacy"))
+        self.setModal(True)
+        self.resize(560, 640)
+        _apply_themed_dialog_surface(self, "MomentPrivacySettingsDialog")
+        self._setup_ui()
+
+    def _setup_ui(self) -> None:
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 24, 24, 20)
+        layout.setSpacing(14)
+
+        layout.addWidget(TitleLabel(tr("discovery.privacy.title", "Moment Privacy"), self))
+        layout.addWidget(CaptionLabel(tr("discovery.privacy.visible_time_scope", "Allow friends to view moments from"), self))
+        self.visible_time_combo = ComboBox(self)
+        self.visible_time_combo.addItem(tr("discovery.privacy.time_all", "All time"), userData="all")
+        self.visible_time_combo.addItem(tr("discovery.privacy.time_half_year", "Last half year"), userData="half_year")
+        self.visible_time_combo.addItem(tr("discovery.privacy.time_month", "Last month"), userData="month")
+        self.visible_time_combo.addItem(tr("discovery.privacy.time_three_days", "Last three days"), userData="three_days")
+        for index in range(self.visible_time_combo.count()):
+            if self.visible_time_combo.itemData(index) == self._settings.visible_time_scope:
+                self.visible_time_combo.setCurrentIndex(index)
+                break
+        layout.addWidget(self.visible_time_combo)
+
+        scroll_area = ScrollArea(self)
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+        _prepare_transparent_scroll_area(scroll_area)
+        content = QWidget(scroll_area)
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(16)
+        self._add_contact_section(
+            content_layout,
+            tr("discovery.privacy.hide_my_title", "Do not show my moments to"),
+            set(self._settings.hide_my_moments_user_ids),
+            self._hide_my_checkboxes,
+        )
+        self._add_contact_section(
+            content_layout,
+            tr("discovery.privacy.hide_their_title", "Do not view their moments"),
+            set(self._settings.hide_their_moments_user_ids),
+            self._hide_their_checkboxes,
+        )
+        content_layout.addStretch(1)
+        scroll_area.setWidget(content)
+        layout.addWidget(scroll_area, 1)
+
+        footer = QHBoxLayout()
+        footer.addStretch(1)
+        cancel_button = PushButton(tr("common.cancel", "Cancel"), self)
+        save_button = PrimaryPushButton(tr("common.save", "Save"), self)
+        cancel_button.clicked.connect(self.reject)
+        save_button.clicked.connect(self._submit)
+        footer.addWidget(cancel_button)
+        footer.addWidget(save_button)
+        layout.addLayout(footer)
+
+    def _add_contact_section(
+        self,
+        layout: QVBoxLayout,
+        title: str,
+        selected_ids: set[str],
+        target: dict[str, CheckBox],
+    ) -> None:
+        layout.addWidget(BodyLabel(title, self))
+        if not self._contacts:
+            empty_label = CaptionLabel(tr("discovery.privacy.no_friends", "No friends available."), self)
+            empty_label.setWordWrap(True)
+            layout.addWidget(empty_label)
+            return
+        for contact in self._contacts:
+            user_id = _contact_id(contact)
+            checkbox = CheckBox(_contact_display_name(contact), self)
+            checkbox.setChecked(user_id in selected_ids)
+            layout.addWidget(checkbox)
+            target[user_id] = checkbox
+
+    def _checked_user_ids(self, checkboxes: dict[str, CheckBox]) -> list[str]:
+        return [user_id for user_id, checkbox in checkboxes.items() if checkbox.isChecked()]
+
+    def _submit(self) -> None:
+        self.submitted.emit(
+            self._checked_user_ids(self._hide_my_checkboxes),
+            self._checked_user_ids(self._hide_their_checkboxes),
+            str(self.visible_time_combo.currentData() or "all"),
+        )
+        self.accept()
+
+
 class CreateMomentDialog(QDialog):
     """Dialog for publishing a moment with text, images, or video."""
 
-    submitted = Signal(str, list)
+    submitted = Signal(str, list, str, list)
     MAX_MEDIA_ITEMS = 9
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, *, contacts: list[ContactRecord] | None = None):
         super().__init__(parent)
         self._media_paths: list[str] = []
+        self._contacts = list(contacts or [])
+        self._visibility_scope = "public"
+        self._visibility_user_ids: list[str] = []
         self.setWindowTitle(tr("discovery.dialog.window_title", "Publish Moment"))
         self.setModal(True)
         self.resize(600, 460)
@@ -718,6 +943,18 @@ class CreateMomentDialog(QDialog):
         self._sync_media_hint()
         self._sync_media_preview()
 
+        visibility_row = QHBoxLayout()
+        visibility_row.setContentsMargins(0, 0, 0, 0)
+        visibility_row.setSpacing(10)
+        self.visibility_button = PushButton(tr("discovery.dialog.visibility_title", "Who can see this"), self)
+        self.visibility_value_label = CaptionLabel("", self)
+        self.visibility_value_label.setWordWrap(True)
+        self.visibility_button.clicked.connect(self._open_visibility_dialog)
+        visibility_row.addWidget(self.visibility_button, 0)
+        visibility_row.addWidget(self.visibility_value_label, 1)
+        layout.addLayout(visibility_row)
+        self._sync_visibility_summary()
+
         footer = QHBoxLayout()
         footer.setContentsMargins(0, 0, 0, 0)
         footer.setSpacing(10)
@@ -750,8 +987,44 @@ class CreateMomentDialog(QDialog):
                 duration=1800,
             )
             return
-        self.submitted.emit(text, list(self._media_paths))
+        self.submitted.emit(text, list(self._media_paths), self._visibility_scope, list(self._visibility_user_ids))
         self.accept()
+
+    def _open_visibility_dialog(self) -> None:
+        dialog = MomentVisibilitySelectDialog(
+            self._contacts,
+            current_scope=self._visibility_scope,
+            current_user_ids=self._visibility_user_ids,
+            parent=self,
+        )
+        dialog.submitted.connect(self._apply_visibility_selection)
+        dialog.exec()
+
+    def _apply_visibility_selection(self, visibility_scope: str, visibility_user_ids: list[str]) -> None:
+        self._visibility_scope = visibility_scope
+        self._visibility_user_ids = list(visibility_user_ids or [])
+        self._sync_visibility_summary()
+
+    def _sync_visibility_summary(self) -> None:
+        labels = {
+            "public": tr("discovery.visibility.public", "Public"),
+            "private": tr("discovery.visibility.private", "Private"),
+            "include": tr("discovery.visibility.include", "Selected friends"),
+            "exclude": tr("discovery.visibility.exclude", "Do not show to selected friends"),
+        }
+        if self._visibility_scope in {"include", "exclude"} and self._visibility_user_ids:
+            names = self._names_for_user_ids(self._visibility_user_ids)
+            label = labels.get(self._visibility_scope, labels["public"])
+            self.visibility_value_label.setText(f"{label}: {', '.join(names)}")
+            return
+        self.visibility_value_label.setText(labels.get(self._visibility_scope, labels["public"]))
+
+    def _names_for_user_ids(self, user_ids: list[str]) -> list[str]:
+        contacts_by_id = {_contact_id(contact): contact for contact in self._contacts}
+        return [
+            _contact_display_name(contacts_by_id.get(user_id)) or user_id
+            for user_id in user_ids
+        ]
 
     def _select_images(self) -> None:
         file_paths, _ = QFileDialog.getOpenFileNames(
@@ -1056,6 +1329,7 @@ class DiscoveryInterface(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, False)
         self.setAutoFillBackground(False)
         self._controller = get_discovery_controller()
+        self._contact_controller = get_contact_controller()
         self._event_bus = get_event_bus()
         self._moments: list[MomentRecord] = []
         self._cards: dict[str, MomentCard] = {}
@@ -1143,10 +1417,12 @@ class DiscoveryInterface(QWidget):
         self.refresh_button = TransparentToolButton(AppIcon.SYNC, self.hero_card)
         self.refresh_button.setToolTip(tr("discovery.feed.refresh_tooltip", "Refresh feed"))
         _apply_safe_button_font(self.refresh_button)
+        self.privacy_button = PushButton(tr("discovery.feed.privacy_button", "Moment Privacy"), self.hero_card)
         self.publish_button = PrimaryPushButton(tr("discovery.feed.publish_button", "Publish Moment"), self.hero_card)
 
         top_row.addLayout(title_stack, 1)
         top_row.addWidget(self.refresh_button, 0)
+        top_row.addWidget(self.privacy_button, 0)
         top_row.addWidget(self.publish_button, 0)
 
         self.summary_label = BodyLabel(tr("discovery.feed.loading", "Loading moments..."), self.hero_card)
@@ -1174,6 +1450,7 @@ class DiscoveryInterface(QWidget):
 
     def _connect_signals(self) -> None:
         self.refresh_button.clicked.connect(self.reload_data)
+        self.privacy_button.clicked.connect(self._open_privacy_settings_dialog)
         self.publish_button.clicked.connect(self._open_publish_dialog)
         self._event_bus.subscribe_sync(MomentEvent.SYNC_REQUIRED, self._on_moment_sync_required)
 
@@ -1265,7 +1542,15 @@ class DiscoveryInterface(QWidget):
         return card
 
     def _open_publish_dialog(self) -> None:
-        dialog = CreateMomentDialog(self.window())
+        self._create_ui_task(self._open_publish_dialog_async(), "open publish moment dialog")
+
+    async def _open_publish_dialog_async(self) -> None:
+        try:
+            contacts = await self._contact_controller.load_contacts()
+        except Exception:
+            logger.exception("Failed to load contacts for moment visibility selector")
+            contacts = []
+        dialog = CreateMomentDialog(self.window(), contacts=contacts)
         dialog.submitted.connect(self._create_moment)
         self._dialog_refs.add(dialog)
         dialog.finished.connect(lambda _result=0, dlg=dialog: self._dialog_refs.discard(dlg))
@@ -1274,20 +1559,63 @@ class DiscoveryInterface(QWidget):
         dialog.raise_()
         dialog.activateWindow()
 
-    def _create_moment(self, content: str, media_paths: list | None = None) -> None:
+    def _open_privacy_settings_dialog(self) -> None:
+        self._create_ui_task(self._open_privacy_settings_dialog_async(), "open moment privacy settings dialog")
+
+    async def _open_privacy_settings_dialog_async(self) -> None:
+        contacts_result, settings = await asyncio.gather(
+            self._contact_controller.load_contacts(),
+            self._controller.load_moment_privacy_settings(),
+            return_exceptions=True,
+        )
+        contacts = []
+        if isinstance(contacts_result, Exception):
+            logger.error(
+                "Failed to load contacts for moment privacy settings",
+                exc_info=(type(contacts_result), contacts_result, contacts_result.__traceback__),
+            )
+        else:
+            contacts = list(contacts_result)
+        if isinstance(settings, Exception):
+            raise settings
+        dialog = MomentPrivacySettingsDialog(contacts, settings, self.window())
+        dialog.submitted.connect(self._save_moment_privacy_settings)
+        self._dialog_refs.add(dialog)
+        dialog.finished.connect(lambda _result=0, dlg=dialog: self._dialog_refs.discard(dlg))
+        dialog.finished.connect(dialog.deleteLater)
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def _create_moment(self, content: str, media_paths: list | None = None, visibility_scope: str = "public", visibility_user_ids: list | None = None) -> None:
         if self._teardown_started:
             return
         if self._publish_task is not None and not self._publish_task.done():
             return
-        self._set_publish_task(self._create_moment_async(content, media_paths or []))
+        self._set_publish_task(
+            self._create_moment_async(
+                content,
+                media_paths or [],
+                visibility_scope,
+                visibility_user_ids or [],
+            )
+        )
 
-    async def _create_moment_async(self, content: str, media_paths: list[str]) -> None:
+    async def _create_moment_async(
+        self,
+        content: str,
+        media_paths: list[str],
+        visibility_scope: str = "public",
+        visibility_user_ids: list[str] | None = None,
+    ) -> None:
         self.publish_button.setEnabled(False)
         try:
             uploaded_media = await self.upload_moment_media(media_paths)
             moment = await self._controller.create_moment(
                 content,
                 media=[self._server_media_payload(item) for item in uploaded_media],
+                visibility_scope=visibility_scope,
+                visibility_user_ids=list(visibility_user_ids or []),
             )
             self._attach_local_media_previews(moment, uploaded_media)
         except Exception:
@@ -1314,6 +1642,40 @@ class DiscoveryInterface(QWidget):
         InfoBar.success(
             tr("discovery.publish.title", "Publish Moment"),
             tr("discovery.publish.success", "Moment published."),
+            parent=self.window(),
+            duration=1800,
+        )
+
+    def _save_moment_privacy_settings(
+        self,
+        hide_my_moments_user_ids: list,
+        hide_their_moments_user_ids: list,
+        visible_time_scope: str,
+    ) -> None:
+        self._create_ui_task(
+            self._save_moment_privacy_settings_async(
+                [str(item) for item in hide_my_moments_user_ids],
+                [str(item) for item in hide_their_moments_user_ids],
+                visible_time_scope,
+            ),
+            "save moment privacy settings",
+        )
+
+    async def _save_moment_privacy_settings_async(
+        self,
+        hide_my_moments_user_ids: list[str],
+        hide_their_moments_user_ids: list[str],
+        visible_time_scope: str,
+    ) -> None:
+        await self._controller.update_moment_privacy_settings(
+            hide_my_moments_user_ids=hide_my_moments_user_ids,
+            hide_their_moments_user_ids=hide_their_moments_user_ids,
+            visible_time_scope=visible_time_scope,
+        )
+        self.reload_data()
+        InfoBar.success(
+            tr("discovery.privacy.title", "Moment Privacy"),
+            tr("discovery.privacy.saved", "Moment privacy settings saved."),
             parent=self.window(),
             duration=1800,
         )
