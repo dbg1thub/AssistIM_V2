@@ -7,7 +7,7 @@ import os
 import re
 from typing import Optional
 
-from PySide6.QtCore import QDate, QEvent, Qt, Signal
+from PySide6.QtCore import QDate, QEvent, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QPalette
 from PySide6.QtWidgets import (
     QComboBox,
@@ -128,11 +128,20 @@ class LogoutConfirmDialog(MessageBoxBase):
 class ProfileEditDialog(QDialog):
     """Profile editor for public identity fields."""
 
-    def __init__(self, user: dict, parent=None):
+    def __init__(self, user: dict, parent=None, auth_controller=None):
         super().__init__(parent)
         self._user = dict(user or {})
+        self._auth_controller = auth_controller or get_auth_controller()
+        self._original_email = str(self._user.get("email", "") or "").strip().lower()
         self._avatar_file_path = ""
         self._reset_avatar_requested = False
+        self._email_code_task: asyncio.Task | None = None
+        self._email_code_busy = False
+        self._email_countdown = 0
+        self._email_timer = QTimer(self)
+        self._email_timer.setInterval(1000)
+        self._email_timer.timeout.connect(self._tick_email_countdown)
+        self.finished.connect(lambda _result: self._cancel_email_code_task())
 
         self.setWindowTitle(tr("profile.edit.window_title", "Edit Profile"))
         self.setMinimumWidth(520)
@@ -208,6 +217,19 @@ class ProfileEditDialog(QDialog):
         self.email_edit.setPlaceholderText(tr("profile.edit.email.placeholder", "Email"))
         self.email_edit.setClearButtonEnabled(True)
         self.email_edit.setMaxLength(255)
+        self.email_edit.textChanged.connect(self._sync_email_code_visibility)
+
+        self.email_code_row = QWidget(self)
+        email_code_layout = QHBoxLayout(self.email_code_row)
+        email_code_layout.setContentsMargins(0, 0, 0, 0)
+        email_code_layout.setSpacing(8)
+        self.email_code_edit = LineEdit(self)
+        self.email_code_edit.setPlaceholderText(tr("auth.field.email_code", "Email Verification Code"))
+        self.email_code_edit.setMaxLength(6)
+        self.email_send_code_button = PushButton(tr("auth.button.send_email_code", "Send Code"), self)
+        self.email_send_code_button.clicked.connect(self._submit_email_code)
+        email_code_layout.addWidget(self.email_code_edit, 1)
+        email_code_layout.addWidget(self.email_send_code_button, 0)
 
         self.phone_edit = LineEdit(self)
         self.phone_edit.setText(str(self._user.get("phone", "") or ""))
@@ -246,6 +268,8 @@ class ProfileEditDialog(QDialog):
         form.addRow(tr("contact.detail.label.signature", "Signature"), self.signature_edit)
         form.addRow(tr("contact.detail.label.region", "Region"), self.region_edit)
         form.addRow(tr("contact.detail.label.email", "Email"), self.email_edit)
+        form.addRow(tr("auth.field.email_code", "Email Verification Code"), self.email_code_row)
+        self.email_code_label = form.labelForField(self.email_code_row)
         form.addRow(tr("contact.detail.label.phone", "Phone"), self.phone_edit)
         form.addRow(tr("contact.detail.label.birthday", "Birthday"), birthday_row)
         form.addRow(tr("contact.detail.label.gender", "Gender"), self.gender_combo)
@@ -268,6 +292,7 @@ class ProfileEditDialog(QDialog):
         layout.addLayout(form)
         layout.addStretch(1)
         layout.addLayout(button_row)
+        self._sync_email_code_visibility()
 
     def changeEvent(self, event) -> None:
         super().changeEvent(event)
@@ -277,6 +302,10 @@ class ProfileEditDialog(QDialog):
             QEvent.Type.StyleChange,
         }:
             _apply_themed_dialog_surface(self, "ProfileEditDialog")
+
+    def closeEvent(self, event) -> None:
+        self._cancel_email_code_task()
+        super().closeEvent(event)
 
     def profile_payload(self) -> dict[str, str | bool | None]:
         """Return dialog values after acceptance."""
@@ -289,6 +318,7 @@ class ProfileEditDialog(QDialog):
             "signature": self.signature_edit.text().strip(),
             "region": self.region_edit.text().strip(),
             "email": self.email_edit.text().strip(),
+            "email_code": self.email_code_edit.text().strip() if self._email_changed() and self.email_edit.text().strip() else None,
             "phone": self.phone_edit.text().strip(),
             "birthday": birthday_value,
             "gender": str(self.gender_combo.currentData() or ""),
@@ -339,6 +369,106 @@ class ProfileEditDialog(QDialog):
             tr("profile.edit.avatar.reset_pending", "Will restore the server default avatar after saving")
         )
 
+    def _email_changed(self) -> bool:
+        return self.email_edit.text().strip().lower() != self._original_email
+
+    def _sync_email_code_visibility(self, *_args) -> None:
+        email_value = self.email_edit.text().strip().lower()
+        show_code = self._email_changed() and bool(email_value)
+        self.email_code_row.setVisible(show_code)
+        if self.email_code_label is not None:
+            self.email_code_label.setVisible(show_code)
+        if not show_code:
+            self.email_code_edit.clear()
+        self._sync_email_send_button()
+
+    def _sync_email_send_button(self) -> None:
+        email_value = self.email_edit.text().strip().lower()
+        valid_email = bool(email_value and _EMAIL_PATTERN.fullmatch(email_value))
+        if self._email_code_busy:
+            self.email_send_code_button.setDisabled(True)
+            self.email_send_code_button.setText(tr("auth.button.send_email_code_busy", "Sending..."))
+        elif self._email_countdown > 0:
+            self.email_send_code_button.setDisabled(True)
+            self.email_send_code_button.setText(
+                tr("auth.button.send_email_code_countdown", "Resend ({seconds}s)", seconds=self._email_countdown)
+            )
+        else:
+            self.email_send_code_button.setDisabled(not (self._email_changed() and valid_email))
+            self.email_send_code_button.setText(tr("auth.button.send_email_code", "Send Code"))
+
+    def _submit_email_code(self) -> None:
+        email = self.email_edit.text().strip().lower()
+        if not self._email_changed() or not email:
+            return
+        if not _EMAIL_PATTERN.fullmatch(email):
+            InfoBar.warning(
+                tr("profile.edit.title", "Edit Profile"),
+                tr("profile.edit.email.invalid", "Please enter a valid email address."),
+                parent=self,
+                duration=1800,
+            )
+            self.email_edit.setFocus()
+            return
+        self._set_email_code_task(self._send_email_code_async(email))
+
+    async def _send_email_code_async(self, email: str) -> None:
+        self._email_code_busy = True
+        self._sync_email_send_button()
+        try:
+            payload = await self._auth_controller.send_email_verification(email, purpose="profile_email")
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Profile email verification request failed")
+            InfoBar.error(
+                tr("profile.edit.title", "Edit Profile"),
+                tr("profile.edit.email_code_failed", "Unable to send the email verification code."),
+                parent=self,
+                duration=2400,
+            )
+        else:
+            self._email_countdown = max(1, int(payload.get("cooldown_seconds") or 60))
+            self._email_timer.start()
+            InfoBar.success(
+                tr("profile.edit.title", "Edit Profile"),
+                tr("auth.success.email_code_sent", "Verification code sent."),
+                parent=self,
+                duration=1800,
+            )
+        finally:
+            self._email_code_busy = False
+            self._sync_email_send_button()
+
+    def _tick_email_countdown(self) -> None:
+        if self._email_countdown > 0:
+            self._email_countdown -= 1
+        if self._email_countdown <= 0:
+            self._email_timer.stop()
+        self._sync_email_send_button()
+
+    def _set_email_code_task(self, coro) -> None:
+        self._cancel_email_code_task()
+        task = asyncio.create_task(coro)
+        self._email_code_task = task
+        task.add_done_callback(self._clear_email_code_task)
+
+    def _clear_email_code_task(self, task: asyncio.Task) -> None:
+        if self._email_code_task is task:
+            self._email_code_task = None
+        if task.cancelled():
+            return
+        try:
+            task.result()
+        except Exception:
+            pass
+
+    def _cancel_email_code_task(self) -> None:
+        self._email_timer.stop()
+        if self._email_code_task is not None and not self._email_code_task.done():
+            self._email_code_task.cancel()
+        self._email_code_task = None
+
     def _submit(self) -> None:
         if not self.nickname_edit.text().strip():
             InfoBar.warning(
@@ -360,6 +490,18 @@ class ProfileEditDialog(QDialog):
             )
             self.email_edit.setFocus()
             return
+
+        if self._email_changed() and email_value:
+            email_code = self.email_code_edit.text().strip()
+            if len(email_code) != 6 or not email_code.isdigit():
+                InfoBar.warning(
+                    tr("profile.edit.title", "Edit Profile"),
+                    tr("profile.edit.email_code.required", "Enter the 6-digit email verification code."),
+                    parent=self,
+                    duration=1800,
+                )
+                self.email_code_edit.setFocus()
+                return
 
         phone_value = self.phone_edit.text().strip()
         if phone_value and not _PHONE_PATTERN.fullmatch(phone_value):
@@ -525,7 +667,7 @@ class UserProfileCoordinator(QWidget):
         if not user or self._save_task is not None:
             return
 
-        dialog = ProfileEditDialog(user, self.window())
+        dialog = ProfileEditDialog(user, self.window(), auth_controller=self._auth_controller)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
 
@@ -564,6 +706,7 @@ class UserProfileCoordinator(QWidget):
                 signature=str(payload.get("signature", "") or "").strip(),
                 region=str(payload.get("region", "") or "").strip(),
                 email=str(payload.get("email", "") or "").strip(),
+                email_code=str(payload.get("email_code", "") or "").strip() or None,
                 phone=str(payload.get("phone", "") or "").strip(),
                 birthday=payload.get("birthday"),
                 gender=normalize_profile_gender(payload.get("gender")),

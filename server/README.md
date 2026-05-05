@@ -99,6 +99,7 @@ The current test suite covers:
 - auth register/login/refresh/me
 - registration email verification
 - password reset by email verification
+- profile email changes by email verification
 - friend request accept flow
 - direct session creation and message read flow
 - group permission and ownership transfer
@@ -283,6 +284,10 @@ Invoke-RestMethod -Method Post `
 
 For local development, `EMAIL_PROVIDER=console` writes the code to the API log.
 Production deployments should use `EMAIL_PROVIDER=smtp` with SMTP settings.
+
+Changing the profile email uses the same send endpoint with purpose
+`profile_email`, and the `/api/v1/users/me` update must include the received
+`email_code` together with the new `email`.
 
 After registration, use the normal client flows to add friends, create direct sessions, create groups, and upload files.
 

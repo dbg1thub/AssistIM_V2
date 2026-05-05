@@ -321,6 +321,8 @@
   "profile.edit.birthday.clear": "Clear",
   "profile.edit.nickname.required": "Nickname cannot be empty.",
   "profile.edit.email.invalid": "Please enter a valid email address.",
+  "profile.edit.email_code.required": "Enter the 6-digit email verification code.",
+  "profile.edit.email_code_failed": "Unable to send the email verification code.",
   "profile.edit.phone.invalid": "Please enter a valid phone number.",
   "profile.edit.birthday.invalid": "Birthday must use YYYY-MM-DD format.",
   "profile.edit.avatar.current": "Using current avatar",

@@ -36,6 +36,7 @@ class UserUpdateRequest(BaseModel):
 
     nickname: str | None = Field(default=None, min_length=1, max_length=64)
     email: str | None = Field(default=None, max_length=255)
+    email_code: str | None = Field(default=None, min_length=6, max_length=6)
     phone: str | None = Field(default=None, max_length=32)
     birthday: date | None = None
     region: str | None = Field(default=None, max_length=128)
@@ -43,14 +44,14 @@ class UserUpdateRequest(BaseModel):
     gender: str | None = Field(default=None, max_length=32)
     status: str | None = Field(default=None, max_length=32)
 
-    @field_validator("nickname", "email", "phone", "region", "signature", "gender", "status", mode="before")
+    @field_validator("nickname", "email", "email_code", "phone", "region", "signature", "gender", "status", mode="before")
     @classmethod
     def _strip_string_fields(cls, value):
         if isinstance(value, str):
             return value.strip()
         return value
 
-    @field_validator("email", "phone", "region", "signature", "gender", mode="before")
+    @field_validator("email", "email_code", "phone", "region", "signature", "gender", mode="before")
     @classmethod
     def _empty_string_to_none(cls, value):
         if isinstance(value, str) and not value.strip():
@@ -71,6 +72,15 @@ class UserUpdateRequest(BaseModel):
             return None
         if not cls._EMAIL_PATTERN.fullmatch(value):
             raise ValueError("invalid email format")
+        return value
+
+    @field_validator("email_code")
+    @classmethod
+    def _validate_email_code(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if not value.isdigit():
+            raise ValueError("invalid email verification code")
         return value
 
     @field_validator("phone")

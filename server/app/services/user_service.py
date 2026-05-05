@@ -12,7 +12,7 @@ from app.repositories.message_repo import MessageRepository
 from app.repositories.session_repo import SessionRepository
 from app.repositories.user_repo import UserRepository
 from app.services.avatar_service import AvatarService
-from app.services.email_verification_service import normalize_email_address
+from app.services.email_verification_service import EmailVerificationService, normalize_email_address
 
 
 class UserService:
@@ -52,6 +52,7 @@ class UserService:
         }
 
     def update_me(self, current_user: User, **fields: object) -> tuple[dict, bool]:
+        email_code = fields.pop("email_code", None)
         normalized_fields: dict[str, object] = {}
         for key, value in fields.items():
             if key in self._NULLABLE_FIELDS and isinstance(value, str) and not value.strip():
@@ -67,7 +68,16 @@ class UserService:
                 if existing is not None and existing.id != current_user.id:
                     raise AppError(ErrorCode.USER_EXISTS, "email already registered", 409)
             if getattr(current_user, "email", None) != next_email:
-                normalized_fields["email_verified"] = False
+                if next_email:
+                    verified_email = EmailVerificationService(self.db).consume_profile_email_code(
+                        str(next_email),
+                        str(email_code or ""),
+                        commit=False,
+                    )
+                    normalized_fields["email"] = verified_email
+                    normalized_fields["email_verified"] = True
+                else:
+                    normalized_fields["email_verified"] = False
         if all(getattr(current_user, key, None) == value for key, value in normalized_fields.items()):
             return self.serialize_user(current_user), False
         user = self.users.update(current_user, **normalized_fields)

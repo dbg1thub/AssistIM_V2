@@ -336,6 +336,8 @@
   "profile.edit.birthday.clear": "清空",
   "profile.edit.nickname.required": "昵称不能为空。",
   "profile.edit.email.invalid": "请输入有效的邮箱地址。",
+  "profile.edit.email_code.required": "请输入 6 位邮箱验证码。",
+  "profile.edit.email_code_failed": "暂时无法发送邮箱验证码。",
   "profile.edit.phone.invalid": "请输入有效的手机号或电话号码。",
   "profile.edit.birthday.invalid": "生日需要使用 YYYY-MM-DD 格式。",
   "profile.edit.avatar.current": "使用当前头像",

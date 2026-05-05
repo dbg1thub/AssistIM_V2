@@ -112,7 +112,7 @@ class EmailVerificationSendRequest(BaseModel):
     @field_validator("purpose")
     @classmethod
     def _validate_purpose(cls, value: str) -> str:
-        if value != "register":
+        if value not in {"register", "profile_email"}:
             raise ValueError("unsupported email verification purpose")
         return value
 

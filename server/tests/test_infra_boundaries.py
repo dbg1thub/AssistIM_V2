@@ -763,6 +763,7 @@ def test_schema_compatibility_repairs_missing_group_announcement_columns_even_at
 
 def test_auth_schema_contracts_are_strict_and_match_runtime_payloads() -> None:
     from app.schemas.auth import (
+        EmailVerificationSendRequest,
         LoginRequest,
         PasswordResetConfirmRequest,
         PasswordResetSendRequest,
@@ -774,6 +775,8 @@ def test_auth_schema_contracts_are_strict_and_match_runtime_payloads() -> None:
     assert RegisterRequest.model_config.get("extra") == "forbid"
     assert "email" in RegisterRequest.model_fields
     assert "email_code" in RegisterRequest.model_fields
+    assert EmailVerificationSendRequest.model_config.get("extra") == "forbid"
+    assert EmailVerificationSendRequest(email="profile@example.test", purpose="profile_email").purpose == "profile_email"
     assert PasswordResetSendRequest.model_config.get("extra") == "forbid"
     assert PasswordResetConfirmRequest.model_config.get("extra") == "forbid"
     assert LoginRequest.model_config.get("extra") == "forbid"

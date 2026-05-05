@@ -339,7 +339,7 @@ def test_auth_commit_is_two_phase_and_login_close_is_blocked_during_commit() -> 
     assert 'async def request_login_payload(self, username: str, password: str, *, force: bool = False) -> dict[str, Any]:' in auth_controller
     assert 'async def request_register_payload(' in auth_controller
     assert 'email_code: str,' in auth_controller
-    assert 'async def send_email_verification(self, email: str) -> dict[str, Any]:' in auth_controller
+    assert 'async def send_email_verification(self, email: str, *, purpose: str = "register") -> dict[str, Any]:' in auth_controller
     assert 'async def send_password_reset_code(self, email: str) -> dict[str, Any]:' in auth_controller
     assert 'async def reset_password(self, email: str, email_code: str, new_password: str) -> dict[str, Any]:' in auth_controller
     assert 'async def commit_auth_payload(' in auth_controller
@@ -412,6 +412,20 @@ def test_user_profile_flyout_surfaces_degraded_session_snapshot_after_profile_sa
     assert 'InfoBar.warning(' in save_block
     assert 'InfoBar.info(' in save_block
     assert 'InfoBar.success(' in save_block
+
+
+def test_user_profile_flyout_requires_email_code_for_changed_email() -> None:
+    flyout = Path('client/ui/widgets/user_profile_flyout.py').read_text(encoding='utf-8')
+    dialog_block = flyout.split('class ProfileEditDialog', 1)[1].split('class ProfileCard', 1)[0]
+    save_block = flyout.split('async def _save_profile_async', 1)[1].split('def _emit_profile_changed', 1)[0]
+
+    assert 'self.email_code_edit = LineEdit(self)' in dialog_block
+    assert 'self.email_send_code_button.clicked.connect(self._submit_email_code)' in dialog_block
+    assert 'def _email_changed(self) -> bool:' in dialog_block
+    assert 'await self._auth_controller.send_email_verification(email, purpose="profile_email")' in dialog_block
+    assert 'if self._email_changed() and email_value:' in dialog_block
+    assert '"email_code": self.email_code_edit.text().strip() if self._email_changed() and self.email_edit.text().strip() else None' in dialog_block
+    assert 'email_code=str(payload.get("email_code", "") or "").strip() or None' in save_block
 
 
 

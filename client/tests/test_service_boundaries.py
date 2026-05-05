@@ -583,6 +583,7 @@ class FakeAuthService:
     def __init__(self) -> None:
         self.login_calls: list[tuple[str, str, bool]] = []
         self.register_calls: list[tuple[str, str, str, str, str]] = []
+        self.email_verification_calls: list[tuple[str, str]] = []
         self.password_reset_code_calls: list[str] = []
         self.password_reset_calls: list[tuple[str, str, str]] = []
         self.logout_calls = 0
@@ -623,6 +624,7 @@ class FakeAuthService:
         return dict(self.login_payload)
 
     async def send_email_verification(self, email: str, *, purpose: str = "register") -> dict:
+        self.email_verification_calls.append((email, purpose))
         return {"sent": True, "purpose": purpose, "email": email}
 
     async def register(self, username: str, nickname: str, password: str, email: str, email_code: str) -> dict:
@@ -1642,6 +1644,38 @@ def test_auth_controller_update_profile_uploads_avatar_via_file_service(monkeypa
         assert fake_chat_controller.user_ids == []
         assert fake_chat_controller.refresh_calls == 1
         assert fake_db.app_state[controller.USER_ID_KEY] == 'user-1'
+
+    asyncio.run(scenario())
+
+
+def test_auth_controller_update_profile_passes_email_code_for_profile_email_change(monkeypatch) -> None:
+    fake_auth_service = FakeAuthService()
+    fake_user_service = FakeUserService()
+    fake_db = FakeDatabase()
+    fake_message_manager = FakeMessageManager()
+    fake_chat_controller = FakeChatControllerContext()
+
+    monkeypatch.setattr(auth_controller_module, 'get_auth_service', lambda: fake_auth_service)
+    monkeypatch.setattr(auth_controller_module, 'get_user_service', lambda: fake_user_service)
+    monkeypatch.setattr(auth_controller_module, 'get_database', lambda: fake_db)
+    monkeypatch.setattr(auth_controller_module, 'get_message_manager', lambda: fake_message_manager)
+    monkeypatch.setattr(auth_controller_module, 'peek_message_manager', lambda: fake_message_manager)
+    monkeypatch.setattr(auth_controller_module, 'get_chat_controller', lambda: fake_chat_controller)
+    monkeypatch.setattr(auth_controller_module, 'peek_chat_controller', lambda: fake_chat_controller)
+    monkeypatch.setattr(auth_controller_module, 'get_file_service', lambda: FakeFileService())
+
+    async def scenario() -> None:
+        controller = auth_controller_module.AuthController()
+        await controller.send_email_verification('next@example.test', purpose='profile_email')
+        await controller.update_profile(email='next@example.test', email_code='123456')
+
+        assert fake_auth_service.email_verification_calls == [('next@example.test', 'profile_email')]
+        assert fake_user_service.update_calls == [
+            {
+                'email': 'next@example.test',
+                'email_code': '123456',
+            }
+        ]
 
     asyncio.run(scenario())
 

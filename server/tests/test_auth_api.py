@@ -5,11 +5,25 @@ from __future__ import annotations
 from unittest.mock import AsyncMock
 
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 
+from app.core.database import SessionLocal
 from auth_test_helpers import issue_register_email_code, register_user, register_user_response
 from app.core.errors import ErrorCode
+from app.models.user import User
 from app.services.email_verification_service import EmailVerificationService
 from app.websocket.manager import connection_manager
+
+
+def issue_profile_email_code(client: TestClient, email: str) -> str:
+    response = client.post(
+        "/api/v1/auth/email-verification/send",
+        json={"email": email, "purpose": "profile_email"},
+    )
+    assert response.status_code == 200, response.text
+    code = str(response.json()["data"].get("debug_code") or "").strip()
+    assert code, response.text
+    return code
 
 
 def test_auth_register_login_refresh_and_me(client: TestClient, auth_header) -> None:
@@ -212,10 +226,84 @@ def test_password_reset_send_does_not_reveal_unknown_email(client: TestClient) -
     assert "debug_code" not in payload
 
 
+def test_password_reset_send_does_not_reveal_unverified_email(client: TestClient) -> None:
+    register_user(
+        client,
+        "unverified-reset-owner",
+        nickname="Unverified Reset Owner",
+        email="unverified-reset-owner@example.test",
+    )
+    with SessionLocal() as db:
+        user = db.execute(select(User).where(User.username == "unverified-reset-owner")).scalar_one()
+        user.email_verified = False
+        db.add(user)
+        db.commit()
+
+    send_response = client.post(
+        "/api/v1/auth/password-reset/send",
+        json={"email": "unverified-reset-owner@example.test"},
+    )
+    assert send_response.status_code == 200
+    payload = send_response.json()["data"]
+    assert payload["sent"] is True
+    assert payload["purpose"] == "password_reset"
+    assert "debug_code" not in payload
+
+
+def test_update_me_requires_email_code_when_email_changes(client: TestClient, auth_header) -> None:
+    register_response = register_user_response(client, "profile-email-owner", nickname="Profile Email Owner")
+    assert register_response.status_code == 200
+    access_token = register_response.json()["data"]["access_token"]
+
+    missing_code_response = client.put(
+        "/api/v1/users/me",
+        headers=auth_header(access_token),
+        json={"email": "profile-email-next@example.test"},
+    )
+    assert missing_code_response.status_code == 400
+    assert missing_code_response.json()["code"] == ErrorCode.INVALID_REQUEST
+
+    code = issue_profile_email_code(client, "profile-email-next@example.test")
+    wrong_code = "000000" if code != "000000" else "111111"
+    wrong_code_response = client.put(
+        "/api/v1/users/me",
+        headers=auth_header(access_token),
+        json={"email": "profile-email-next@example.test", "email_code": wrong_code},
+    )
+    assert wrong_code_response.status_code == 400
+    assert wrong_code_response.json()["code"] == ErrorCode.INVALID_REQUEST
+
+    update_response = client.put(
+        "/api/v1/users/me",
+        headers=auth_header(access_token),
+        json={"email": "profile-email-next@example.test", "email_code": code},
+    )
+    assert update_response.status_code == 200
+    payload = update_response.json()["data"]
+    assert payload["email"] == "profile-email-next@example.test"
+    assert payload["email_verified"] is True
+
+
+def test_update_me_rejects_email_owned_by_another_user(client: TestClient, auth_header) -> None:
+    owner = register_user(client, "profile-email-taken-owner", email="profile-email-taken@example.test")
+    register_response = register_user_response(client, "profile-email-taken-target", nickname="Target")
+    assert register_response.status_code == 200
+    access_token = register_response.json()["data"]["access_token"]
+
+    update_response = client.put(
+        "/api/v1/users/me",
+        headers=auth_header(access_token),
+        json={"email": owner["user"]["email"], "email_code": "123456"},
+    )
+    assert update_response.status_code == 409
+    assert update_response.json()["code"] == ErrorCode.USER_EXISTS
+
+
 def test_update_me_extended_profile_fields(client: TestClient, auth_header) -> None:
     register_response = register_user_response(client, "carla", nickname="Carla")
     assert register_response.status_code == 200
     access_token = register_response.json()["data"]["access_token"]
+    email_code = issue_profile_email_code(client, "carla@example.com")
 
     update_response = client.put(
         "/api/v1/users/me",
@@ -223,6 +311,7 @@ def test_update_me_extended_profile_fields(client: TestClient, auth_header) -> N
         json={
             "nickname": "Carla QA",
             "email": "carla@example.com",
+            "email_code": email_code,
             "phone": "+82-10-1111-2222",
             "birthday": "1996-02-21",
             "region": "Seoul",
@@ -235,7 +324,7 @@ def test_update_me_extended_profile_fields(client: TestClient, auth_header) -> N
     payload = update_response.json()["data"]
     assert payload["nickname"] == "Carla QA"
     assert payload["email"] == "carla@example.com"
-    assert payload["email_verified"] is False
+    assert payload["email_verified"] is True
     assert payload["phone"] == "+82-10-1111-2222"
     assert payload["birthday"] == "1996-02-21"
     assert payload["region"] == "Seoul"
@@ -758,11 +847,13 @@ def test_user_routes_use_collection_and_public_detail_contracts(client: TestClie
 def test_user_search_requires_non_blank_keyword_and_matches_public_fields_only(client: TestClient, user_factory, auth_header) -> None:
     alice = user_factory("user_search_guard_alice", "User Search Guard Alice")
     bob = user_factory("user_search_guard_bob", "User Search Guard Bob")
+    bob_email_code = issue_profile_email_code(client, "bob@example.com")
 
     update_response = client.put(
         "/api/v1/users/me",
         json={
             "email": "bob@example.com",
+            "email_code": bob_email_code,
             "phone": "+82-10-3333-4444",
             "region": "Busan",
             "signature": "Profile details should stay private",

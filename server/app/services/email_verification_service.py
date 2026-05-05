@@ -21,6 +21,7 @@ from app.utils.time import utcnow
 
 EMAIL_PATTERN = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 REGISTER_PURPOSE = "register"
+PROFILE_EMAIL_PURPOSE = "profile_email"
 PASSWORD_RESET_PURPOSE = "password_reset"
 
 
@@ -49,10 +50,16 @@ class EmailVerificationService:
             raise AppError(ErrorCode.USER_EXISTS, "email already registered", 409)
         return self._issue_code(normalized_email, REGISTER_PURPOSE, request_ip=request_ip)
 
+    def send_profile_email_code(self, email: str, *, request_ip: str = "") -> dict[str, object]:
+        normalized_email = normalize_email_address(email)
+        if self.users.get_by_email(normalized_email) is not None:
+            raise AppError(ErrorCode.USER_EXISTS, "email already registered", 409)
+        return self._issue_code(normalized_email, PROFILE_EMAIL_PURPOSE, request_ip=request_ip)
+
     def send_password_reset_code(self, email: str, *, request_ip: str = "") -> dict[str, object]:
         normalized_email = normalize_email_address(email)
         user = self.users.get_by_email(normalized_email)
-        if user is None:
+        if user is None or not bool(getattr(user, "email_verified", False)):
             return self._generic_send_payload(normalized_email, PASSWORD_RESET_PURPOSE)
 
         return self._issue_code(normalized_email, PASSWORD_RESET_PURPOSE, request_ip=request_ip)
@@ -132,6 +139,22 @@ class EmailVerificationService:
             email,
             code,
             purpose=REGISTER_PURPOSE,
+            commit=commit,
+            commit_failed_attempt=commit_failed_attempt,
+        )
+
+    def consume_profile_email_code(
+        self,
+        email: str,
+        code: str,
+        *,
+        commit: bool = True,
+        commit_failed_attempt: bool = True,
+    ) -> str:
+        return self._consume_code(
+            email,
+            code,
+            purpose=PROFILE_EMAIL_PURPOSE,
             commit=commit,
             commit_failed_attempt=commit_failed_attempt,
         )

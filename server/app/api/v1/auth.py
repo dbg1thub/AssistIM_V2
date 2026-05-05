@@ -82,7 +82,11 @@ async def send_email_verification(
     settings: Settings = Depends(get_request_settings),
 ) -> dict:
     client_host = request.client.host if request.client else ""
-    result = EmailVerificationService(db, settings).send_register_code(payload.email, request_ip=client_host)
+    email_service = EmailVerificationService(db, settings)
+    if payload.purpose == "profile_email":
+        result = email_service.send_profile_email_code(payload.email, request_ip=client_host)
+    else:
+        result = email_service.send_register_code(payload.email, request_ip=client_host)
     return success_response(result)
 
 

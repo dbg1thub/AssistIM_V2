@@ -389,9 +389,9 @@ class AuthController:
         """Fetch one backend login payload without mutating local runtime/auth state yet."""
         return await self._auth_service.login(username, password, force=force)
 
-    async def send_email_verification(self, email: str) -> dict[str, Any]:
+    async def send_email_verification(self, email: str, *, purpose: str = "register") -> dict[str, Any]:
         """Request one registration email verification code without mutating auth state."""
-        return await self._auth_service.send_email_verification(email)
+        return await self._auth_service.send_email_verification(email, purpose=purpose)
 
     async def send_password_reset_code(self, email: str) -> dict[str, Any]:
         """Request one password-reset code without mutating auth state."""
@@ -439,6 +439,7 @@ class AuthController:
         avatar_file_path: str | None = None,
         reset_avatar: bool = False,
         email: str | None = None,
+        email_code: str | None = None,
         phone: str | None = None,
         birthday: str | None = None,
         region: str | None = None,
@@ -455,6 +456,7 @@ class AuthController:
             for key, value in {
                 "nickname": nickname,
                 "email": email,
+                "email_code": email_code,
                 "phone": phone,
                 "birthday": birthday,
                 "region": region,

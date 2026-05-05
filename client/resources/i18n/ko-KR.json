@@ -321,6 +321,8 @@
   "profile.edit.birthday.clear": "지우기",
   "profile.edit.nickname.required": "닉네임은 비워 둘 수 없습니다.",
   "profile.edit.email.invalid": "유효한 이메일 주소를 입력하세요.",
+  "profile.edit.email_code.required": "6자리 이메일 인증 코드를 입력하세요.",
+  "profile.edit.email_code_failed": "이메일 인증 코드를 보낼 수 없습니다.",
   "profile.edit.phone.invalid": "유효한 전화번호를 입력하세요.",
   "profile.edit.birthday.invalid": "생일은 YYYY-MM-DD 형식을 사용해야 합니다.",
   "profile.edit.avatar.current": "현재 아바타 사용 중",
