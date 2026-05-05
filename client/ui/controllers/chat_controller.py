@@ -102,6 +102,10 @@ class ChatController:
         """Execute one non-UI E2EE recovery action for a specific session."""
         return await self._session_manager.recover_session_crypto(session_id)
 
+    async def recover_imported_history_recovery_package(self) -> dict[str, Any]:
+        """Retry cached E2EE message decryption after importing history recovery material."""
+        return await self._session_manager.recover_imported_history_recovery_package()
+
     async def recover_current_session_crypto(self) -> dict[str, Any]:
         """Execute one non-UI E2EE recovery action for the currently selected session."""
         session_id = str(self._session_manager.current_session_id or "").strip()

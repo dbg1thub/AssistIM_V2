@@ -453,6 +453,12 @@ class FakeSessionManager:
         self.current_session = None
         self.recover_calls: list[str] = []
         self.recover_result: dict[str, object] = {'performed': True, 'session_id': 'session-1'}
+        self.recover_imported_history_recovery_calls = 0
+        self.recover_imported_history_recovery_result: dict[str, object] = {
+            'performed': True,
+            'session_count': 1,
+            'updated': 1,
+        }
         self.trust_calls: list[str] = []
         self.trust_result: dict[str, object] = {'performed': True, 'session_id': 'session-1'}
         self.security_summary_calls: list[str] = []
@@ -484,6 +490,10 @@ class FakeSessionManager:
     async def recover_session_crypto(self, session_id: str) -> dict:
         self.recover_calls.append(session_id)
         return dict(self.recover_result)
+
+    async def recover_imported_history_recovery_package(self) -> dict:
+        self.recover_imported_history_recovery_calls += 1
+        return dict(self.recover_imported_history_recovery_result)
 
     async def trust_session_identities(self, session_id: str) -> dict:
         self.trust_calls.append(session_id)
@@ -731,6 +741,12 @@ class FakeChatControllerContext:
         self.recover_calls: list[str] = []
         self.recover_current_calls = 0
         self.recover_result: dict[str, object] = {'performed': True, 'session_id': 'session-1'}
+        self.recover_imported_history_recovery_calls = 0
+        self.recover_imported_history_recovery_result: dict[str, object] = {
+            'performed': True,
+            'session_count': 1,
+            'updated': 1,
+        }
         self.identity_verification_calls: list[str] = []
         self.identity_verification_current_calls = 0
         self.identity_verification_result: dict[str, object] = {
@@ -778,6 +794,10 @@ class FakeChatControllerContext:
     async def recover_current_session_crypto(self) -> dict:
         self.recover_current_calls += 1
         return dict(self.recover_result)
+
+    async def recover_imported_history_recovery_package(self) -> dict:
+        self.recover_imported_history_recovery_calls += 1
+        return dict(self.recover_imported_history_recovery_result)
 
     async def get_session_identity_verification(self, session_id: str) -> dict:
         self.identity_verification_calls.append(session_id)
@@ -2139,6 +2159,33 @@ def test_chat_controller_recover_session_crypto_delegates_to_session_manager(mon
 
         assert result == {'performed': True, 'session_id': 'session-2', 'recovery_action': 'reprovision_device'}
         assert fake_session_manager.recover_calls == ['session-2']
+
+    asyncio.run(scenario())
+
+
+def test_chat_controller_recover_imported_history_recovery_delegates_to_session_manager(monkeypatch) -> None:
+    fake_message_manager = FakeMessageManager()
+    fake_session_manager = FakeSessionManager()
+    fake_session_manager.recover_imported_history_recovery_result = {
+        'performed': True,
+        'session_count': 2,
+        'updated': 3,
+    }
+
+    monkeypatch.setattr(chat_controller_module, 'get_message_manager', lambda: fake_message_manager)
+    monkeypatch.setattr(chat_controller_module, 'get_session_manager', lambda: fake_session_manager)
+    monkeypatch.setattr(chat_controller_module, 'get_file_service', lambda: FakeFileService())
+
+    async def scenario() -> None:
+        controller = chat_controller_module.ChatController()
+        result = await controller.recover_imported_history_recovery_package()
+
+        assert result == {
+            'performed': True,
+            'session_count': 2,
+            'updated': 3,
+        }
+        assert fake_session_manager.recover_imported_history_recovery_calls == 1
 
     asyncio.run(scenario())
 
@@ -4427,6 +4474,101 @@ def test_session_manager_recover_session_crypto_reprovisions_local_device(monkey
         }
         assert 'last_message_recovery_at' in session.extra['session_crypto_state']
         assert len(fake_db.replaced_sessions) == 1
+        assert any(event == session_manager_module.SessionEvent.UPDATED for event, _ in fake_event_bus.events)
+
+    asyncio.run(scenario())
+
+
+def test_session_manager_recover_imported_history_recovery_retries_cached_e2ee_sessions(monkeypatch) -> None:
+    fake_event_bus = FakeEventBus()
+    fake_db = FakeSessionProfileDatabase()
+    fake_e2ee_service = FakeE2EEService({'device_id': 'device-local-1', 'has_local_bundle': True})
+    fake_message_manager = FakeMessageManager()
+    fake_message_manager.recover_session_messages_result = {
+        'scanned': 3,
+        'updated': 1,
+        'message_ids': ['m-1'],
+        'remote_fetched': 2,
+        'remote_pages_fetched': 1,
+        'recovery_stats': {
+            'cached': {
+                'text': 1,
+                'attachments': 0,
+                'direct_text': 1,
+                'group_text': 0,
+                'direct_attachments': 0,
+                'group_attachments': 0,
+                'other': 0,
+            },
+            'remote': {
+                'text': 2,
+                'attachments': 0,
+                'direct_text': 2,
+                'group_text': 0,
+                'direct_attachments': 0,
+                'group_attachments': 0,
+                'other': 0,
+            },
+        },
+    }
+
+    monkeypatch.setattr(session_manager_module, 'get_session_service', lambda: FakeSessionService())
+    monkeypatch.setattr(session_manager_module, 'get_e2ee_service', lambda: fake_e2ee_service)
+    monkeypatch.setattr(session_manager_module, 'get_event_bus', lambda: fake_event_bus)
+    monkeypatch.setattr(session_manager_module, 'get_message_manager', lambda: fake_message_manager)
+    monkeypatch.setattr(session_manager_module, 'get_database', lambda: fake_db)
+
+    async def scenario() -> None:
+        manager = session_manager_module.SessionManager()
+        direct_session = Session(
+            session_id='direct-1',
+            name='Bob',
+            session_type='direct',
+            participant_ids=['user-1', 'user-2'],
+        )
+        direct_session.extra['encryption_mode'] = 'e2ee_private'
+        direct_session.extra['session_crypto_state'] = {
+            'enabled': True,
+            'ready': False,
+            'can_decrypt': False,
+            'device_registered': True,
+            'decryption_state': 'not_for_current_device',
+            'recovery_action': 'switch_device',
+        }
+        group_session = Session(
+            session_id='group-1',
+            name='Core Team',
+            session_type='group',
+            participant_ids=['user-1', 'user-2'],
+        )
+        group_session.extra['encryption_mode'] = 'e2ee_group'
+        plain_session = Session(
+            session_id='plain-1',
+            name='Plain',
+            session_type='direct',
+            participant_ids=['user-1', 'user-3'],
+        )
+        plain_session.extra['encryption_mode'] = 'plain'
+        manager._sessions = {
+            direct_session.session_id: direct_session,
+            group_session.session_id: group_session,
+            plain_session.session_id: plain_session,
+        }
+
+        result = await manager.recover_imported_history_recovery_package()
+
+        assert fake_message_manager.recover_session_messages_calls == ['direct-1', 'group-1']
+        assert result['performed'] is True
+        assert result['session_count'] == 2
+        assert result['updated'] == 2
+        assert result['remote_fetched'] == 4
+        assert result['failed_session_count'] == 0
+        assert [item['session_id'] for item in result['sessions']] == ['direct-1', 'group-1']
+        assert direct_session.extra['session_crypto_state']['last_message_recovery']['updated'] == 1
+        assert group_session.extra['session_crypto_state']['last_message_recovery']['remote_fetched'] == 2
+        assert plain_session.extra['session_crypto_state']['enabled'] is False
+        assert fake_e2ee_service.reprovision_calls == 0
+        assert len(fake_db.replaced_sessions) >= 1
         assert any(event == session_manager_module.SessionEvent.UPDATED for event, _ in fake_event_bus.events)
 
     asyncio.run(scenario())

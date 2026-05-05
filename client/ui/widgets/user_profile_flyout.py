@@ -581,25 +581,49 @@ class DeviceSecurityDialog(QDialog):
                 duration=2400,
             )
         else:
-            source_device_id = str(result.get("source_device_id", "") or "").strip()
             InfoBar.success(
                 tr("profile.security.import.title", "Import Recovery Package"),
-                tr(
-                    "profile.security.import.success",
-                    "Recovery package imported.",
-                )
-                if not source_device_id
-                else tr(
-                    "profile.security.import.success_from",
-                    "Recovery package imported from {device_id}.",
-                    device_id=source_device_id,
-                ),
+                self._format_recovery_import_success(result),
                 parent=self,
                 duration=2200,
             )
             self.reload_devices()
         finally:
             self._set_action_busy(False)
+
+    @staticmethod
+    def _format_recovery_import_success(result: dict[str, Any]) -> str:
+        source_device_id = str(result.get("source_device_id", "") or "").strip()
+        base_message = (
+            tr("profile.security.import.success", "Recovery package imported.")
+            if not source_device_id
+            else tr(
+                "profile.security.import.success_from",
+                "Recovery package imported from {device_id}.",
+                device_id=source_device_id,
+            )
+        )
+        session_recovery = dict(result.get("session_recovery") or {})
+        session_count = int(session_recovery.get("session_count", 0) or 0)
+        updated = int(session_recovery.get("updated", 0) or 0)
+        failed = int(session_recovery.get("failed_session_count", 0) or 0)
+        if session_count <= 0:
+            return base_message
+        if failed:
+            return tr(
+                "profile.security.import.success_with_failures",
+                "{message} Retried {count} encrypted chats; {failed} failed.",
+                message=base_message,
+                count=session_count,
+                failed=failed,
+            )
+        return tr(
+            "profile.security.import.success_with_recovery",
+            "{message} Retried {count} encrypted chats and updated {updated} messages.",
+            message=base_message,
+            count=session_count,
+            updated=updated,
+        )
 
     @staticmethod
     def _extract_recovery_package(payload: object) -> dict[str, Any]:

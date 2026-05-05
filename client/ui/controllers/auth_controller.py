@@ -158,13 +158,18 @@ class AuthController:
         current_user_id = str((self._current_user or {}).get("id", "") or "").strip()
         if not current_user_id:
             raise RuntimeError("authentication required")
-        return dict(
+        result = dict(
             await self._e2ee_service.import_history_recovery_package(
                 package,
                 expected_source_user_id=current_user_id,
             )
             or {}
         )
+        session_recovery = await self._require_chat_controller().recover_imported_history_recovery_package()
+        snapshot = await self._refresh_session_snapshot(reason="history recovery import")
+        result["session_recovery"] = dict(session_recovery or {})
+        result["session_snapshot"] = self._session_snapshot_payload(snapshot)
+        return result
 
     async def get_e2ee_diagnostics(self) -> dict[str, Any]:
         """Return one authenticated E2EE diagnostics snapshot for runtime, device recovery, and session state."""

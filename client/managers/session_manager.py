@@ -2308,6 +2308,86 @@ class SessionManager:
             "message_recovery": message_recovery,
         }
 
+    async def recover_imported_history_recovery_package(self) -> dict[str, Any]:
+        """Retry decryption for cached E2EE sessions after importing device history material."""
+        owner_user_id = self._capture_runtime_user_id()
+        self._ensure_runtime_user_id(owner_user_id)
+        async with self._lock:
+            session_ids = [
+                str(session.session_id or "").strip()
+                for session in self._sessions.values()
+                if session.uses_e2ee() and str(session.session_id or "").strip()
+            ]
+
+        totals = {
+            "updated": 0,
+            "remote_fetched": 0,
+            "remote_pages_fetched": 0,
+            "message_count": 0,
+            "failed_session_count": 0,
+        }
+        session_results: list[dict[str, Any]] = []
+
+        for session_id in session_ids:
+            message_recovery: dict[str, Any] = {
+                "session_id": session_id,
+                "attempted": False,
+                "updated": 0,
+                "message_ids": [],
+                "remote_fetched": 0,
+                "remote_pages_fetched": 0,
+            }
+            try:
+                message_recovery = dict(await self._msg_manager.recover_session_messages(session_id))
+                message_recovery["attempted"] = True
+            except Exception as exc:
+                logger.warning("Failed to retry imported history recovery for %s: %s", session_id, exc)
+                message_recovery["attempted"] = True
+                message_recovery["error"] = str(exc)
+                totals["failed_session_count"] += 1
+
+            self._ensure_runtime_user_id(owner_user_id)
+            await self._record_session_message_recovery(
+                session_id,
+                message_recovery,
+                owner_user_id=owner_user_id,
+            )
+
+            updated = int(message_recovery.get("updated", 0) or 0)
+            remote_fetched = int(message_recovery.get("remote_fetched", 0) or 0)
+            remote_pages_fetched = int(message_recovery.get("remote_pages_fetched", 0) or 0)
+            message_count = len(list(message_recovery.get("message_ids") or []))
+            totals["updated"] += updated
+            totals["remote_fetched"] += remote_fetched
+            totals["remote_pages_fetched"] += remote_pages_fetched
+            totals["message_count"] += message_count
+
+            session_result = {
+                "session_id": session_id,
+                "attempted": bool(message_recovery.get("attempted")),
+                "updated": updated,
+                "remote_fetched": remote_fetched,
+                "remote_pages_fetched": remote_pages_fetched,
+                "message_count": message_count,
+            }
+            if message_recovery.get("error"):
+                session_result["error"] = str(message_recovery.get("error") or "")
+            session_results.append(session_result)
+
+        self._ensure_runtime_user_id(owner_user_id)
+        await self._refresh_cached_session_crypto_state(owner_user_id=owner_user_id)
+
+        return {
+            "performed": bool(session_ids),
+            "session_count": len(session_ids),
+            "updated": totals["updated"],
+            "remote_fetched": totals["remote_fetched"],
+            "remote_pages_fetched": totals["remote_pages_fetched"],
+            "message_count": totals["message_count"],
+            "failed_session_count": totals["failed_session_count"],
+            "sessions": session_results,
+        }
+
     async def trust_session_identities(self, session_id: str) -> dict[str, Any]:
         normalized_session_id = str(session_id or "").strip()
         if not normalized_session_id:

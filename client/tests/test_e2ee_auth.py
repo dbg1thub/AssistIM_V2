@@ -1184,6 +1184,12 @@ def test_auth_controller_import_history_recovery_package_returns_import_result(m
     fake_db = boundaries.FakeDatabase()
     fake_message_manager = boundaries.FakeMessageManager()
     fake_chat_controller = boundaries.FakeChatControllerContext()
+    fake_chat_controller.recover_imported_history_recovery_result = {
+        'performed': True,
+        'session_count': 2,
+        'updated': 3,
+        'failed_session_count': 0,
+    }
     fake_file_service = boundaries.FakeFileService()
     fake_e2ee_service = FakeE2EEService()
     fake_e2ee_service.import_history_recovery_package_result = {
@@ -1215,7 +1221,19 @@ def test_auth_controller_import_history_recovery_package_returns_import_result(m
         assert result == {
             'source_device_id': 'device-old-1',
             'available': True,
+            'session_recovery': {
+                'performed': True,
+                'session_count': 2,
+                'updated': 3,
+                'failed_session_count': 0,
+            },
+            'session_snapshot': {
+                'authoritative': True,
+                'unread_synchronized': True,
+            },
         }
+        assert fake_chat_controller.recover_imported_history_recovery_calls == 1
+        assert fake_chat_controller.refresh_calls == 1
         assert fake_e2ee_service.history_recovery_diagnostics_calls == 0
 
     asyncio.run(scenario())
