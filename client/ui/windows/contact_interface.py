@@ -1074,6 +1074,40 @@ class GalleryContactDetailPanel(QWidget):
             tr("contact.moments.contact_empty", "This contact has no moments yet."),
         )
 
+    def set_blocked_contact(self, contact: ContactRecord) -> None:
+        self._entity = {"type": "blocked", "data": contact}
+        self.avatar.set_avatar(
+            contact.avatar,
+            contact.display_name,
+            gender=contact.gender,
+            seed=profile_avatar_seed(user_id=contact.id, username=contact.username, display_name=contact.display_name),
+        )
+        self.title_label.setText(contact.display_name)
+        self.subtitle_label.setText(
+            f"{tr('contact.detail.label.assistim_id', 'AssistIM ID')} {contact.assistim_id or contact.username or '-'}"
+        )
+        self.meta_primary_label.setText(
+            " │ ".join(
+                filter(
+                    None,
+                    [
+                        tr("contact.relationship.blocked", "Blocked contact"),
+                        f"{tr('contact.detail.label.nickname', 'Nickname')}：{contact.nickname}" if contact.nickname else "",
+                        f"{tr('contact.detail.label.region', 'Region')}：{contact.region}" if contact.region else "",
+                        f"{tr('contact.detail.label.signature', 'Signature')}：{contact.signature}" if contact.signature else "",
+                        f"{tr('contact.detail.label.status', 'Status')}：{localize_profile_status(contact.status)}" if localize_profile_status(contact.status) else "",
+                    ],
+                )
+            )
+            or tr("contact.relationship.blocked", "Blocked contact")
+        )
+        self.message_button.setEnabled(False)
+        self.voice_button.setEnabled(False)
+        self.video_button.setEnabled(False)
+        self.remove_friend_button.setEnabled(False)
+        self.remove_friend_button.hide()
+        self.moments_panel.set_moments([], tr("contact.moments.blocked_empty", "Moments are hidden for blocked contacts."))
+
     def set_group(self, group: GroupRecord, moments: Optional[list[MomentRecord]] = None) -> None:
         self._entity = {"type": "group", "data": group}
         self.avatar.set_avatar(group.avatar, fallback=group.name)
@@ -1625,10 +1659,12 @@ class ContactInterface(QWidget):
         self._controller = get_contact_controller()
         self._discovery_controller = get_discovery_controller()
         self._contacts: list[ContactRecord] = []
+        self._blocked_contacts: list[ContactRecord] = []
         self._groups: list[GroupRecord] = []
         self._requests: list[FriendRequestRecord] = []
         self._moments: list[MomentRecord] = []
         self._friend_items: dict[str, ContactListItem] = {}
+        self._blocked_items: dict[str, ContactListItem] = {}
         self._group_items: dict[str, ContactListItem] = {}
         self._request_items: dict[str, RequestListItem] = {}
         self._current_page = "friends"
@@ -1709,15 +1745,18 @@ class ContactInterface(QWidget):
         self.segmented.addItem("friends", tr("contact.sidebar.tab.friends", "Friends"), lambda: self._switch_page("friends"))
         self.segmented.addItem("groups", tr("contact.sidebar.tab.groups", "Groups"), lambda: self._switch_page("groups"))
         self.segmented.addItem("requests", tr("contact.sidebar.tab.requests", "New Friends"), lambda: self._switch_page("requests"))
+        self.segmented.addItem("blocked", tr("contact.sidebar.tab.blocked", "Blocked"), lambda: self._switch_page("blocked"))
         self.segmented.setMinimumHeight(36)
 
         self.page_stack = QStackedWidget(sidebar)
         self.friends_page, self.friends_container, self.friends_layout = self._create_scroll_page()
         self.groups_page, self.groups_container, self.groups_layout = self._create_scroll_page()
         self.requests_page, self.requests_container, self.requests_layout = self._create_scroll_page()
+        self.blocked_page, self.blocked_container, self.blocked_layout = self._create_scroll_page()
         self.page_stack.addWidget(self.friends_page)
         self.page_stack.addWidget(self.groups_page)
         self.page_stack.addWidget(self.requests_page)
+        self.page_stack.addWidget(self.blocked_page)
 
         segmented_row = QWidget(sidebar)
         segmented_layout = QHBoxLayout(segmented_row)
@@ -1793,7 +1832,7 @@ class ContactInterface(QWidget):
     def _activate_page(self, key: str) -> None:
         self._current_page = key
         self.segmented.setCurrentItem(key)
-        self.page_stack.setCurrentIndex({"friends": 0, "groups": 1, "requests": 2}[key])
+        self.page_stack.setCurrentIndex({"friends": 0, "groups": 1, "requests": 2, "blocked": 3}[key])
 
     def _switch_page(self, key: str) -> None:
         if key != self._current_page:
@@ -1894,17 +1933,20 @@ class ContactInterface(QWidget):
         self._refresh_search_surface()
 
     async def _refresh_contacts_and_requests_slices_async(self) -> None:
-        contacts, requests = await asyncio.gather(
+        contacts, requests, blocked = await asyncio.gather(
             self._controller.load_contacts(),
             self._controller.load_requests(),
+            self._controller.load_blocked_contacts(),
         )
         self._contacts = contacts
         self._requests = requests
+        self._blocked_contacts = blocked
         if self._destroyed:
             return
         self._update_summary_counts()
         self._build_friends_page()
         self._build_requests_page()
+        self._build_blocked_page()
         self._restore_selection(full_reload=False)
         self._refresh_search_surface()
 
@@ -1919,20 +1961,23 @@ class ContactInterface(QWidget):
         )
 
     async def _refresh_profile_related_slices_async(self) -> None:
-        contacts, groups, requests = await asyncio.gather(
+        contacts, groups, requests, blocked = await asyncio.gather(
             self._controller.load_contacts(),
             self._controller.load_groups(),
             self._controller.load_requests(),
+            self._controller.load_blocked_contacts(),
         )
         self._contacts = contacts
         self._groups = groups
         self._requests = requests
+        self._blocked_contacts = blocked
         if self._destroyed:
             return
         self._update_summary_counts()
         self._build_friends_page()
         self._build_groups_page()
         self._build_requests_page()
+        self._build_blocked_page()
         self._restore_selection(full_reload=False)
         self._refresh_search_surface()
 
@@ -2032,6 +2077,62 @@ class ContactInterface(QWidget):
                 AppIcon.PEOPLE,
                 tr("contact.sidebar.empty_friends", "No friends yet"),
             )
+
+    def _update_blocked_item_view(self, contact: ContactRecord) -> None:
+        item = self._blocked_items.get(contact.id)
+        if item is None:
+            return
+        item.update_content(
+            title=contact.display_name,
+            subtitle=self._friend_assistim_line(contact),
+            avatar=contact.avatar,
+            gender=contact.gender,
+            seed_user_id=contact.id,
+            seed_username=contact.username,
+        )
+
+    def _create_blocked_item(self, contact: ContactRecord) -> ContactListItem:
+        item = ContactListItem(
+            contact.id,
+            contact.display_name,
+            self._friend_assistim_line(contact),
+            "",
+            contact.avatar,
+        )
+        item.clicked.connect(self._select_blocked)
+        item.context_requested.connect(self._show_blocked_context_menu)
+        return item
+
+    def _insert_blocked_item_view(self, contact: ContactRecord) -> None:
+        if contact.id in self._blocked_items:
+            self._update_blocked_item_view(contact)
+            return
+        if not self._blocked_items:
+            self._clear_layout(self.blocked_layout)
+            item = self._create_blocked_item(contact)
+            self.blocked_layout.addWidget(item)
+            self.blocked_layout.addStretch(1)
+            self._blocked_items[contact.id] = item
+            return
+        ordered_ids = [item.id for item in self._blocked_contacts]
+        insert_at = ordered_ids.index(contact.id)
+        item = self._create_blocked_item(contact)
+        self.blocked_layout.insertWidget(insert_at, item)
+        self._blocked_items[contact.id] = item
+
+    def _remove_blocked_item_view(self, contact_id: str) -> None:
+        item = self._blocked_items.pop(contact_id, None)
+        if item is not None:
+            self.blocked_layout.removeWidget(item)
+            item.deleteLater()
+        if self._blocked_items:
+            return
+        self._clear_layout(self.blocked_layout)
+        self._add_empty_state(
+            self.blocked_layout,
+            AppIcon.PEOPLE,
+            tr("contact.sidebar.empty_blocked", "No blocked contacts"),
+        )
 
     def _update_group_item_view(self, group: GroupRecord) -> None:
         item = self._group_items.get(group.id)
@@ -2268,6 +2369,39 @@ class ContactInterface(QWidget):
             self._restore_selection(full_reload=False)
         self._schedule_contacts_cache_persist()
 
+    def _upsert_blocked_contact_record(self, contact: ContactRecord) -> None:
+        """Insert or replace one blocked contact in the current in-memory snapshot."""
+        blocked_contact = ContactRecord(
+            id=contact.id,
+            name=contact.name,
+            username=contact.username,
+            nickname=contact.nickname,
+            avatar=contact.avatar,
+            remark=contact.remark,
+            assistim_id=contact.assistim_id,
+            region=contact.region,
+            signature=contact.signature,
+            email=contact.email,
+            phone=contact.phone,
+            birthday=contact.birthday,
+            gender=contact.gender,
+            status=contact.status,
+            category="blocked",
+            extra=dict(contact.extra or {}),
+        )
+        for index, existing in enumerate(list(self._blocked_contacts)):
+            if existing.id == blocked_contact.id:
+                self._blocked_contacts[index] = blocked_contact
+                break
+        else:
+            self._blocked_contacts.append(blocked_contact)
+        self._blocked_contacts.sort(key=self._friend_sort_key)
+        self._update_summary_counts()
+        if self._blocked_items or self._current_page == "blocked":
+            self._insert_blocked_item_view(blocked_contact)
+        if self._selected_key == ("blocked", blocked_contact.id):
+            self.detail_panel.set_blocked_contact(blocked_contact)
+
     def _friend_sort_key(self, contact: ContactRecord) -> tuple[str, str]:
         """Return the sidebar ordering key for one friend entry."""
         display_name = contact.display_name
@@ -2397,6 +2531,33 @@ class ContactInterface(QWidget):
         if contacts_changed and self._current_page == "friends":
             self._restore_selection(full_reload=False)
 
+        for index, contact in enumerate(list(self._blocked_contacts)):
+            if contact.id != user_id:
+                continue
+            updated = ContactRecord(
+                id=contact.id,
+                name=str(profile.get("username", "") or contact.name or contact.username),
+                username=str(profile.get("username", "") or contact.username),
+                nickname=str(profile.get("nickname", "") or contact.nickname),
+                avatar=str(profile.get("avatar", "") or contact.avatar),
+                remark=contact.remark,
+                assistim_id=contact.assistim_id,
+                region=str(profile.get("region", "") or contact.region),
+                signature=str(profile.get("signature", "") or contact.signature),
+                email=contact.email,
+                phone=contact.phone,
+                birthday=contact.birthday,
+                gender=str(profile.get("gender", "") or contact.gender),
+                status=str(profile.get("status", "") or contact.status),
+                category="blocked",
+                extra={**dict(contact.extra or {}), **profile},
+            )
+            self._blocked_contacts[index] = updated
+            self._blocked_contacts.sort(key=self._friend_sort_key)
+            self._update_blocked_item_view(updated)
+            if self._selected_key == ("blocked", updated.id):
+                self.detail_panel.set_blocked_contact(updated)
+
         for index, group in enumerate(list(self._groups)):
             group_changed = False
             avatar_changed = bool(session_id and group.session_id == session_id and session_avatar and group.avatar != session_avatar)
@@ -2513,6 +2674,10 @@ class ContactInterface(QWidget):
                 return
             await asyncio.sleep(0)
             requests = await self._controller.load_requests()
+            if self._destroyed:
+                return
+            await asyncio.sleep(0)
+            blocked = await self._controller.load_blocked_contacts()
             moments: list[MomentRecord] = []
         except asyncio.CancelledError:
             raise
@@ -2527,18 +2692,21 @@ class ContactInterface(QWidget):
         self._contacts = contacts
         self._groups = groups
         self._requests = requests
+        self._blocked_contacts = blocked
         self._moments = moments
         logger.info(
-            "Contact interface reload fetched %d friends, %d groups, %d requests",
+            "Contact interface reload fetched %d friends, %d groups, %d requests, %d blocked contacts",
             len(self._contacts),
             len(self._groups),
             len(self._requests),
+            len(self._blocked_contacts),
         )
         self._update_summary_counts()
         logger.info("Contact interface rebuilding sidebar pages")
         self._build_friends_page()
         self._build_groups_page()
         self._build_requests_page()
+        self._build_blocked_page()
         logger.info("Contact interface restoring selection")
         self._restore_selection(full_reload=True)
         keyword = self.search_box.text().strip()
@@ -2555,8 +2723,10 @@ class ContactInterface(QWidget):
             self._build_friends_page()
         elif self._current_page == "groups":
             self._build_groups_page()
-        else:
+        elif self._current_page == "requests":
             self._build_requests_page()
+        else:
+            self._build_blocked_page()
         self._restore_selection(full_reload=False)
 
     def _update_summary_counts(self) -> None:
@@ -2565,10 +2735,11 @@ class ContactInterface(QWidget):
         self.summary_label.setText(
             tr(
                 "contact.sidebar.summary",
-                "{friends} friends · {groups} groups · {requests} requests",
+                "{friends} friends · {groups} groups · {requests} requests · {blocked} blocked",
                 friends=len(self._contacts),
                 groups=len(self._groups),
                 requests=len(self._visible_requests()),
+                blocked=len(self._blocked_contacts),
             )
         )
 
@@ -2577,12 +2748,15 @@ class ContactInterface(QWidget):
         keyword = str(text or "").strip()
         self._pending_search_keyword = keyword
 
-        if self._current_page == "requests":
+        if self._current_page in {"requests", "blocked"}:
             self._search_timer.stop()
             self._cancel_pending_task(self._search_task)
             self._search_task = None
             self._dismiss_search_flyout(clear_results=True)
-            self._build_requests_page()
+            if self._current_page == "requests":
+                self._build_requests_page()
+            else:
+                self._build_blocked_page()
             self._restore_selection(full_reload=False)
             return
 
@@ -2598,7 +2772,7 @@ class ContactInterface(QWidget):
     def _trigger_global_search(self) -> None:
         """Run the latest pending grouped sidebar search request."""
         keyword = self._pending_search_keyword
-        if not keyword or self._current_page == "requests":
+        if not keyword or self._current_page in {"requests", "blocked"}:
             return
         self._search_generation += 1
         generation = self._search_generation
@@ -2614,7 +2788,7 @@ class ContactInterface(QWidget):
             self._destroyed
             or self.search_box.text().strip() != keyword
             or generation != self._search_generation
-            or self._current_page == "requests"
+            or self._current_page in {"requests", "blocked"}
         ):
             return
         flyout_view = self._show_search_flyout()
@@ -2697,6 +2871,19 @@ class ContactInterface(QWidget):
 
         menu.exec(global_pos)
 
+    def _show_blocked_context_menu(self, contact_id: str, global_pos: QPoint) -> None:
+        """Show block-list actions for one sidebar contact item."""
+        contact = next((item for item in self._blocked_contacts if item.id == contact_id), None)
+        if contact is None:
+            return
+
+        menu = RoundMenu(parent=self)
+        menu.setMinimumWidth(148)
+        unblock_action = Action(tr("contact.context.unblock", "Unblock"), self)
+        menu.addAction(unblock_action)
+        unblock_action.triggered.connect(lambda _checked=False, cid=contact_id: self._on_unblock_contact_requested(cid))
+        menu.exec(global_pos)
+
     def _on_block_friend_requested(self, contact_id: str) -> None:
         """Confirm and block one selected friend from the contact list."""
         contact = next((item for item in self._contacts if item.id == contact_id), None)
@@ -2709,6 +2896,17 @@ class ContactInterface(QWidget):
             ("block_friend", contact_id),
             self._block_friend_async(contact_id, contact.display_name),
             f"block friend {contact_id}",
+        )
+
+    def _on_unblock_contact_requested(self, contact_id: str) -> None:
+        """Unblock one contact from the block-list page."""
+        contact = next((item for item in self._blocked_contacts if item.id == contact_id), None)
+        if contact is None:
+            return
+        self._schedule_keyed_ui_task(
+            ("unblock_contact", contact_id),
+            self._unblock_contact_async(contact_id, contact.display_name),
+            f"unblock contact {contact_id}",
         )
 
     async def _remove_friend_async(self, contact_id: str, display_name: str) -> None:
@@ -2743,6 +2941,7 @@ class ContactInterface(QWidget):
         )
 
     async def _block_friend_async(self, contact_id: str, display_name: str) -> None:
+        blocked_contact = next((item for item in self._contacts if item.id == contact_id), None)
         try:
             await self._controller.block_user(contact_id)
         except Exception:
@@ -2756,6 +2955,8 @@ class ContactInterface(QWidget):
 
         self._contacts = [item for item in self._contacts if item.id != contact_id]
         self._remove_friend_item_view(contact_id)
+        if blocked_contact is not None:
+            self._upsert_blocked_contact_record(blocked_contact)
         self._update_summary_counts()
         self._schedule_contacts_cache_persist()
         self._refresh_search_surface()
@@ -2767,6 +2968,36 @@ class ContactInterface(QWidget):
             tr(
                 "contact.detail.block_friend.success",
                 "{name} has been blocked.",
+                name=display_name or contact_id,
+            ),
+            parent=self.window(),
+            duration=1800,
+        )
+
+    async def _unblock_contact_async(self, contact_id: str, display_name: str) -> None:
+        try:
+            await self._controller.unblock_user(contact_id)
+        except Exception:
+            InfoBar.error(
+                tr("contact.detail.unblock_contact.title", "Unblock Contact"),
+                tr("contact.detail.unblock_contact.failed", "Unable to unblock this contact right now."),
+                parent=self.window(),
+                duration=2400,
+            )
+            raise
+
+        self._blocked_contacts = [item for item in self._blocked_contacts if item.id != contact_id]
+        self._remove_blocked_item_view(contact_id)
+        self._update_summary_counts()
+        self._refresh_search_surface()
+        if self._selected_key == ("blocked", contact_id):
+            self._clear_active_selection()
+
+        InfoBar.success(
+            tr("contact.detail.unblock_contact.title", "Unblock Contact"),
+            tr(
+                "contact.detail.unblock_contact.success",
+                "{name} has been unblocked.",
                 name=display_name or contact_id,
             ),
             parent=self.window(),
@@ -2815,9 +3046,12 @@ class ContactInterface(QWidget):
 
     def _refresh_search_surface(self) -> None:
         keyword = self.search_box.text().strip()
-        if self._current_page == "requests":
+        if self._current_page in {"requests", "blocked"}:
             if keyword:
-                self._build_requests_page()
+                if self._current_page == "requests":
+                    self._build_requests_page()
+                else:
+                    self._build_blocked_page()
                 self._restore_selection(full_reload=False)
             return
         if not keyword or self._search_flyout_view is None:
@@ -2859,7 +3093,7 @@ class ContactInterface(QWidget):
             logger.debug("Contact detail moments load failed for %s", user_id, exc_info=True)
             moments = []
 
-        current_category = {"friends": "friend", "groups": "group", "requests": "request"}[self._current_page]
+        current_category = {"friends": "friend", "groups": "group", "requests": "request", "blocked": "blocked"}[self._current_page]
         if self._selected_key != (kind, selection_id) or kind != current_category:
             return
 
@@ -2875,6 +3109,8 @@ class ContactInterface(QWidget):
         """Resolve the latest selected record before re-painting the detail panel."""
         if kind == "friend":
             return next((item for item in self._contacts if item.id == selection_id), None)
+        if kind == "blocked":
+            return next((item for item in self._blocked_contacts if item.id == selection_id), None)
         if kind == "request":
             return next((item for item in self._requests if item.id == selection_id), None)
         return None
@@ -2949,13 +3185,42 @@ class ContactInterface(QWidget):
             self._request_items[request.id] = item
         self.requests_layout.addStretch(1)
 
+    def _build_blocked_page(self) -> None:
+        self._clear_layout(self.blocked_layout)
+        self._blocked_items.clear()
+        contacts = list(self._blocked_contacts)
+        keyword = self.search_box.text().strip().lower() if self._current_page == "blocked" else ""
+        if keyword:
+            contacts = [
+                item
+                for item in contacts
+                if keyword in str(item.display_name or "").lower()
+                or keyword in str(item.username or "").lower()
+                or keyword in str(item.assistim_id or "").lower()
+            ]
+        if not contacts:
+            self._add_empty_state(
+                self.blocked_layout,
+                AppIcon.PEOPLE,
+                tr("contact.sidebar.empty_blocked", "No blocked contacts")
+                if not keyword
+                else tr("contact.blocked.empty_results", "No matching blocked contacts."),
+            )
+            return
+        for contact in contacts:
+            item = self._create_blocked_item(contact)
+            self.blocked_layout.addWidget(item)
+            self._blocked_items[contact.id] = item
+        self.blocked_layout.addStretch(1)
+
     def _restore_selection(self, full_reload: bool) -> None:
         current_map = {
             "friends": self._friend_items,
             "groups": self._group_items,
             "requests": self._request_items,
+            "blocked": self._blocked_items,
         }
-        current_category = {"friends": "friend", "groups": "group", "requests": "request"}[self._current_page]
+        current_category = {"friends": "friend", "groups": "group", "requests": "request", "blocked": "blocked"}[self._current_page]
         if self._selected_key:
             category, item_id = self._selected_key
             if category != current_category:
@@ -2969,6 +3234,9 @@ class ContactInterface(QWidget):
                 return
             if category == "request" and item_id in self._request_items:
                 self._select_request(item_id, force=True)
+                return
+            if category == "blocked" and item_id in self._blocked_items:
+                self._select_blocked(item_id, force=True)
                 return
             if not full_reload and item_id in current_map[self._current_page]:
                 return
@@ -3013,6 +3281,19 @@ class ContactInterface(QWidget):
         self.detail_panel.set_request(selected, self._current_user_id, [])
         self._show_detail_panel()
         self._load_detail_moments(counterpart_id, "request", request_id)
+
+    def _select_blocked(self, contact_id: str, force: bool = False) -> None:
+        selected = next((item for item in self._blocked_contacts if item.id == contact_id), None)
+        if not selected:
+            return
+        if not force and self._selected_key == ("blocked", contact_id):
+            return
+        self._selected_key = ("blocked", contact_id)
+        self._cancel_moment_load()
+        self._clear_selection()
+        self._blocked_items[contact_id].set_selected(True)
+        self.detail_panel.set_blocked_contact(selected)
+        self._show_detail_panel()
 
     def _accept_request(self, request_id: str) -> None:
         request = next((item for item in self._requests if item.id == request_id), None)
@@ -3091,9 +3372,18 @@ class ContactInterface(QWidget):
             self._show_dialog(dialog)
             return
 
+        if self._current_page == "requests":
+            InfoBar.info(
+                tr("contact.detail.unavailable_title", "Notice"),
+                tr("contact.sidebar.requests_inline_hint", "The request list is already available on this page."),
+                parent=self.window(),
+                duration=1800,
+            )
+            return
+
         InfoBar.info(
             tr("contact.detail.unavailable_title", "Notice"),
-            tr("contact.sidebar.requests_inline_hint", "The request list is already available on this page."),
+            tr("contact.sidebar.blocked_inline_hint", "Use the block list context menu to unblock contacts."),
             parent=self.window(),
             duration=1800,
         )
@@ -3199,6 +3489,8 @@ class ContactInterface(QWidget):
 
     def _clear_selection(self) -> None:
         for item in self._friend_items.values():
+            item.set_selected(False)
+        for item in self._blocked_items.values():
             item.set_selected(False)
         for item in self._group_items.values():
             item.set_selected(False)

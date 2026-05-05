@@ -834,6 +834,7 @@ class FakeContactService:
         self.fetch_friends_calls = 0
         self.fetch_groups_calls = 0
         self.fetch_friend_requests_calls = 0
+        self.fetch_blocks_calls = 0
         self.fetch_group_calls: list[str] = []
         self.send_friend_request_calls: list[tuple[str, str]] = []
         self.create_group_calls: list[tuple[str, list[str]]] = []
@@ -853,6 +854,7 @@ class FakeContactService:
         self.friends_payload: list[dict] = []
         self.groups_payload: list[dict] = []
         self.requests_payload: list[dict] = []
+        self.blocks_payload: list[dict] = []
         self.group_members: list[dict] = [
             {'id': 'user-1', 'username': 'alice', 'nickname': 'Alice', 'role': 'owner'},
             {'id': 'user-2', 'username': 'bob', 'nickname': 'Bob', 'role': 'member'},
@@ -892,6 +894,10 @@ class FakeContactService:
     async def fetch_friend_requests(self) -> list[dict]:
         self.fetch_friend_requests_calls += 1
         return [dict(item) for item in self.requests_payload]
+
+    async def fetch_blocks(self) -> list[dict]:
+        self.fetch_blocks_calls += 1
+        return [dict(item) for item in self.blocks_payload]
 
     async def send_friend_request(self, user_id: str, message: str = '') -> dict:
         self.send_friend_request_calls.append((user_id, message))
@@ -2833,7 +2839,25 @@ def test_contact_controller_mutations_use_contact_service(monkeypatch) -> None:
 
     async def scenario() -> None:
         controller = contact_controller_module.ContactController()
+        fake_contact_service.blocks_payload = [
+            {
+                'user': {
+                    'id': 'user-5',
+                    'username': 'blocked-user',
+                    'nickname': 'Blocked User',
+                    'avatar': '/avatars/blocked.png',
+                    'gender': 'female',
+                    'status': 'offline',
+                },
+                'block': {
+                    'is_blocked': True,
+                    'blocked_user_id': 'user-5',
+                    'created_at': '2026-05-01T10:00:00Z',
+                },
+            }
+        ]
         request_payload = await controller.send_friend_request('user-2', 'hello')
+        blocked_contacts = await controller.load_blocked_contacts()
         group = await controller.create_group('Core Team', ['user-2', 'user-3'])
         fetched_group = await controller.fetch_group('group-1')
         shared_group = await controller.update_group_profile('group-1', name='Renamed Team', announcement='Ship tonight')
@@ -2851,6 +2875,12 @@ def test_contact_controller_mutations_use_contact_service(monkeypatch) -> None:
         unblock_result = await controller.unblock_user('user-3')
 
         assert request_payload['request']['status'] == 'pending'
+        assert fake_contact_service.fetch_blocks_calls == 1
+        assert len(blocked_contacts) == 1
+        assert blocked_contacts[0].id == 'user-5'
+        assert blocked_contacts[0].display_name == 'Blocked User'
+        assert blocked_contacts[0].category == 'blocked'
+        assert blocked_contacts[0].extra['block']['is_blocked'] is True
         assert fake_contact_service.send_friend_request_calls == [('user-2', 'hello')]
         assert fake_contact_service.create_group_calls == [('Core Team', ['user-2', 'user-3'])]
         assert group.session_id == 'session-group-1'

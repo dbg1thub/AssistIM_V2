@@ -50,8 +50,15 @@ from client.services import contact_service as contact_service_module
 
 class FakeHTTPClient:
     def __init__(self) -> None:
+        self.get_calls: list[tuple[str, object]] = []
         self.post_calls: list[dict] = []
         self.delete_calls: list[str] = []
+
+    async def get(self, path: str, params=None):
+        self.get_calls.append((path, params))
+        if path == "/blocks":
+            return [{"user": {"id": "user-2", "username": "bob"}, "block": {"is_blocked": True}}]
+        return {}
 
     async def post(self, path: str, json=None):
         self.post_calls.append({"path": path, "json": json})
@@ -107,5 +114,19 @@ def test_contact_service_block_and_unblock_use_blocks_endpoint(monkeypatch) -> N
             }
         ]
         assert fake_http.delete_calls == ["/blocks/user-2"]
+
+    asyncio.run(scenario())
+
+
+def test_contact_service_fetch_blocks_uses_blocks_endpoint(monkeypatch) -> None:
+    async def scenario() -> None:
+        fake_http = FakeHTTPClient()
+        monkeypatch.setattr(contact_service_module, "get_http_client", lambda: fake_http)
+
+        service = contact_service_module.ContactService()
+        payload = await service.fetch_blocks()
+
+        assert payload == [{"user": {"id": "user-2", "username": "bob"}, "block": {"is_blocked": True}}]
+        assert fake_http.get_calls == [("/blocks", None)]
 
     asyncio.run(scenario())

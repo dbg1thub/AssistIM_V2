@@ -1153,6 +1153,25 @@ def test_contact_friend_item_context_menu_wires_block_action() -> None:
     assert 'async def block_user(self, target_user_id: str) -> dict[str, Any]:' in contact_service
 
 
+def test_contact_block_list_tab_wires_unblock_flow() -> None:
+    contact_interface = Path('client/ui/windows/contact_interface.py').read_text(encoding='utf-8')
+    contact_controller = Path('client/ui/controllers/contact_controller.py').read_text(encoding='utf-8')
+    contact_service = Path('client/services/contact_service.py').read_text(encoding='utf-8')
+
+    assert 'self._blocked_contacts: list[ContactRecord] = []' in contact_interface
+    assert 'self._blocked_items: dict[str, ContactListItem] = {}' in contact_interface
+    assert 'self.segmented.addItem("blocked", tr("contact.sidebar.tab.blocked", "Blocked"), lambda: self._switch_page("blocked"))' in contact_interface
+    assert 'self.blocked_page, self.blocked_container, self.blocked_layout = self._create_scroll_page()' in contact_interface
+    assert 'blocked = await self._controller.load_blocked_contacts()' in contact_interface
+    assert 'self._build_blocked_page()' in contact_interface
+    assert 'def _show_blocked_context_menu(self, contact_id: str, global_pos: QPoint) -> None:' in contact_interface
+    assert 'unblock_action = Action(tr("contact.context.unblock", "Unblock"), self)' in contact_interface
+    assert 'async def _unblock_contact_async(self, contact_id: str, display_name: str) -> None:' in contact_interface
+    assert 'await self._controller.unblock_user(contact_id)' in contact_interface
+    assert 'async def load_blocked_contacts(self) -> list[ContactRecord]:' in contact_controller
+    assert 'async def fetch_blocks(self) -> list[dict[str, Any]]:' in contact_service
+
+
 def test_contact_controller_owns_group_record_merge_rules() -> None:
     contact_controller = Path('client/ui/controllers/contact_controller.py').read_text(encoding='utf-8')
     contact_interface = Path('client/ui/windows/contact_interface.py').read_text(encoding='utf-8')

@@ -46,6 +46,14 @@ class ContactService:
             return []
         return [dict(item) for item in payload if isinstance(item, dict)]
 
+    async def fetch_blocks(self) -> list[dict[str, Any]]:
+        """Fetch users blocked by the current user."""
+        payload = await self._http.get("/blocks")
+        if not isinstance(payload, list):
+            logger.warning("Unexpected blocks payload: %r", payload)
+            return []
+        return [dict(item) for item in payload if isinstance(item, dict)]
+
     async def send_friend_request(self, user_id: str, message: str = "") -> dict[str, Any]:
         """Create one friend request."""
         payload = await self._http.post(
