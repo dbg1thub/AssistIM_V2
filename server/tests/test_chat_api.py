@@ -33,6 +33,17 @@ def authenticate_ws(ws, token: str, *, msg_id: str = "ws-auth") -> dict:
     return payload
 
 
+def issue_profile_email_code(client: TestClient, email: str) -> str:
+    response = client.post(
+        "/api/v1/auth/email-verification/send",
+        json={"email": email, "purpose": "profile_email"},
+    )
+    assert response.status_code == 200, response.text
+    code = str(response.json()["data"].get("debug_code") or "").strip()
+    assert code, response.text
+    return code
+
+
 def test_friend_request_private_session_and_message_flow(
     client: TestClient,
     user_factory,
@@ -77,10 +88,12 @@ def test_friend_request_private_session_and_message_flow(
     assert friendship_check_response.status_code == 200
     assert friendship_check_response.json()["data"]["friendship"]["is_friend"] is True
 
+    email_code = issue_profile_email_code(client, "bob@example.com")
     update_profile_response = client.put(
         "/api/v1/users/me",
         json={
             "email": "bob@example.com",
+            "email_code": email_code,
             "phone": "+82-10-0000-0002",
             "birthday": "1992-08-04",
             "region": "Busan",
