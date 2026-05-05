@@ -22,6 +22,37 @@ function mockFetch() {
     if (url.endsWith("/api/v1/admin/dashboard")) {
       return jsonResponse(dashboardPayload);
     }
+    if (url.endsWith("/api/v1/admin/auth/status")) {
+      return jsonResponse({
+        token: {
+          token_storage: "stateless_jwt",
+          access_token_expire_minutes: 60,
+          refresh_token_expire_days: 7
+        },
+        session: {
+          invalidation_strategy: "auth_session_version",
+          server_persisted_sessions: false,
+          refresh_tokens_persisted: false
+        },
+        users: {
+          total: 3,
+          admins: 1,
+          enabled_admins: 1,
+          disabled_admins: 0,
+          disabled: 0
+        },
+        runtime: {
+          online_users: 2,
+          bound_connections: 2,
+          raw_connections: 2
+        },
+        audit: {
+          tracked_actions: ["admin.user.force_logout"],
+          recent_auth_audit_logs: 1,
+          recent_auth_actions: { "admin.user.force_logout": 1 }
+        }
+      });
+    }
     if (url.endsWith("/api/v1/admin/database/backups/prune")) {
       return jsonResponse({
         keep_last: 1,
@@ -198,6 +229,29 @@ function mockFetch() {
         runtime_schema_complete: true,
         runtime_schema_revision: "runtime-revision",
         required_tables: { users: true, messages: true }
+      });
+    }
+    if (url.endsWith("/api/v1/admin/database/tables")) {
+      return jsonResponse({
+        total_tables: 2,
+        tables: [
+          {
+            name: "users",
+            row_count: 3,
+            indexes: ["idx_users_username", "uq_users_username_lower"],
+            required_indexes: {
+              uq_users_username_lower: true
+            }
+          },
+          {
+            name: "messages",
+            row_count: 8,
+            indexes: ["idx_messages_session_seq"],
+            required_indexes: {
+              idx_messages_session_seq: true
+            }
+          }
+        ]
       });
     }
     if (url.endsWith("/api/v1/admin/logs/files")) {
@@ -493,6 +547,77 @@ function mockFetch() {
               device_name: "Windows",
               is_active: true
             }
+          }
+        ]
+      });
+    }
+    if (url.includes("/api/v1/admin/http/requests")) {
+      return jsonResponse({
+        total: 1,
+        limit: 50,
+        retention_limit: 200,
+        filters: {
+          method: "",
+          path_contains: "",
+          status_code: null,
+          user_id: ""
+        },
+        counters: {
+          total_requests: 2,
+          error_requests: 1,
+          slow_requests: 0
+        },
+        items: [
+          {
+            method: "POST",
+            path: "/api/v1/auth/login",
+            status_code: 401,
+            duration_ms: 34,
+            user_id: "anonymous",
+            timestamp: "2026-05-03T10:00:00+00:00"
+          }
+        ]
+      });
+    }
+    if (url.includes("/api/v1/admin/rate-limits/status")) {
+      return jsonResponse({
+        backend: {
+          configured: "memory",
+          active_store: "InMemoryRateLimitStore"
+        },
+        limits: {
+          login: { limit: 5, window_seconds: 60 }
+        },
+        filters: {
+          key_prefix: "",
+          limit: 100
+        },
+        store: {
+          supported: true,
+          status: "ok",
+          scope: "memory",
+          bucket_count: 1,
+          hit_count: 3,
+          active_hit_count: 3,
+          stale_hit_count: 0
+        },
+        by_key_prefix: {
+          login: {
+            bucket_count: 1,
+            hit_count: 3,
+            active_hit_count: 3,
+            stale_hit_count: 0
+          }
+        },
+        items: [
+          {
+            key: "login:127.0.0.1:anonymous",
+            key_prefix: "login",
+            hit_count: 3,
+            active_hit_count: 3,
+            stale_hit_count: 0,
+            oldest_hit_at: "2026-05-03T09:59:00+00:00",
+            newest_hit_at: "2026-05-03T10:00:00+00:00"
           }
         ]
       });
@@ -808,6 +933,8 @@ describe("Admin web shell", () => {
 
     expect(await screen.findByRole("heading", { name: "概览" })).toBeInTheDocument();
     expect(screen.getByText("AssistIM Test API")).toBeInTheDocument();
+    expect(screen.getByText("stateless_jwt")).toBeInTheDocument();
+    expect(screen.getByText("auth_session_version")).toBeInTheDocument();
     expect(screen.getByText("用户总数")).toBeInTheDocument();
     expect(screen.getByText("3")).toBeInTheDocument();
     expect(fetchMock).toHaveBeenCalledWith("http://localhost:8000/api/v1/admin/dashboard", {
@@ -836,7 +963,13 @@ describe("Admin web shell", () => {
     fireEvent.click(screen.getByRole("button", { name: "数据库" }));
     expect(await screen.findByRole("heading", { name: "数据库" })).toBeInTheDocument();
     expect(screen.getByText("runtime-revision")).toBeInTheDocument();
+    expect(screen.getByText("总表数")).toBeInTheDocument();
     expect(screen.getByText("users")).toBeInTheDocument();
+    expect(screen.getByText("idx_messages_session_seq")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "查看 users 表详情" }));
+    expect(screen.getByRole("heading", { name: "users" })).toBeInTheDocument();
+    expect(screen.getByText("uq_users_username_lower")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "日志" }));
     expect(await screen.findByRole("heading", { name: "日志" })).toBeInTheDocument();
@@ -1362,6 +1495,59 @@ describe("Admin web shell", () => {
       expect(requestedUrls.some((url) => url.includes("/api/v1/admin/e2ee/prekeys"))).toBe(true);
       expect(requestedUrls.some((url) => url.includes("device_id=device-1"))).toBe(true);
       expect(requestedUrls.some((url) => url.includes("consumed=false"))).toBe(true);
+    });
+  });
+
+  it("loads HTTP request diagnostics and rate-limit status with filters", async () => {
+    const fetchMock = mockFetch();
+    render(<App fetcher={fetchMock} />);
+
+    fireEvent.change(screen.getByLabelText("服务端地址"), {
+      target: { value: "http://localhost:8000" }
+    });
+    fireEvent.change(screen.getByLabelText("访问令牌"), {
+      target: { value: "admin-token" }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "连接" }));
+    await screen.findByRole("heading", { name: "概览" });
+
+    fireEvent.click(screen.getByRole("button", { name: "HTTP" }));
+    expect(await screen.findByRole("heading", { name: "HTTP" })).toBeInTheDocument();
+    expect(screen.getByText("/api/v1/auth/login")).toBeInTheDocument();
+    expect(screen.getByText("InMemoryRateLimitStore")).toBeInTheDocument();
+    expect(screen.getByText("login:127.0.0.1:anonymous")).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("请求方法"), {
+      target: { value: "POST" }
+    });
+    fireEvent.change(screen.getByLabelText("路径包含"), {
+      target: { value: "/api/v1/auth" }
+    });
+    fireEvent.change(screen.getByLabelText("状态码"), {
+      target: { value: "401" }
+    });
+    fireEvent.change(screen.getByLabelText("请求用户 ID"), {
+      target: { value: "anonymous" }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "筛选请求" }));
+
+    await waitFor(() => {
+      const requestedUrls = fetchMock.mock.calls.map(([input]) => String(input));
+      expect(requestedUrls.some((url) => url.includes("/api/v1/admin/http/requests"))).toBe(true);
+      expect(requestedUrls.some((url) => url.includes("method=POST"))).toBe(true);
+      expect(requestedUrls.some((url) => url.includes("path_contains=%2Fapi%2Fv1%2Fauth"))).toBe(true);
+      expect(requestedUrls.some((url) => url.includes("status_code=401"))).toBe(true);
+    });
+
+    fireEvent.change(screen.getByLabelText("限流 Key 前缀"), {
+      target: { value: "login" }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "筛选限流" }));
+
+    await waitFor(() => {
+      const requestedUrls = fetchMock.mock.calls.map(([input]) => String(input));
+      expect(requestedUrls.some((url) => url.includes("/api/v1/admin/rate-limits/status"))).toBe(true);
+      expect(requestedUrls.some((url) => url.includes("key_prefix=login"))).toBe(true);
     });
   });
 

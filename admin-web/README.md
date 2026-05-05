@@ -5,7 +5,7 @@
 ## 功能范围
 
 - 登录页：输入服务端地址和管理员访问令牌。
-- 概览页：读取 `/api/v1/admin/dashboard`。
+- 概览页：读取 `/api/v1/admin/dashboard` 和 `/api/v1/admin/auth/status`，用于查看运行概况和认证状态。
 - 巡检页：读取认证、数据库、聊天、联系人、群组、朋友圈、实时连接、通话、HTTP、限流、E2EE、文件存储等只读健康检查接口。
 - 审计页：读取 `/api/v1/admin/audit-logs` 和 `/api/v1/admin/audit-logs/{log_id}`，用于查看管理员操作记录与脱敏详情。
 - 聊天页：读取 `/api/v1/admin/chat/sessions`、`/api/v1/admin/chat/sessions/{session_id}` 和 `/api/v1/admin/chat/sessions/{session_id}/messages`，用于查看会话、成员和消息入库情况。
@@ -15,9 +15,10 @@
 - 实时页：读取 `/api/v1/admin/realtime/connections` 和 `/api/v1/admin/calls/active`，用于查看当前 WebSocket 连接、在线用户绑定和活跃通话。
 - E2EE 页：读取 `/api/v1/admin/e2ee/devices`、`/api/v1/admin/e2ee/devices/{device_id}` 和 `/api/v1/admin/e2ee/prekeys`，用于查看端到端加密设备、身份密钥和 Prekey 库存。
 - 用户页：读取 `/api/v1/admin/users` 和 `/api/v1/admin/users/{user_id}`，支持改角色、禁用、启用、强制下线等需要确认的账号管理操作。
-- 数据库页：读取 `/api/v1/admin/database/status`。
+- 数据库页：读取 `/api/v1/admin/database/status` 和 `/api/v1/admin/database/tables`，用于查看数据库状态、表行数、索引和必需索引检查结果。
 - 文件页：读取 `/api/v1/admin/files/storage/status` 和 `/api/v1/admin/files/storage/issues`，用于查看本地上传文件记录与磁盘文件一致性问题。
 - 备份页：读取和管理 `/api/v1/admin/database/backups*`，支持创建、查看、验证、删除、清理预览和执行清理。
+- HTTP 页：读取 `/api/v1/admin/http/requests` 和 `/api/v1/admin/rate-limits/status`，用于查看 HTTP 请求诊断和限流桶状态。
 - 日志页：读取 `/api/v1/admin/logs/files`、`/api/v1/admin/logs` 和 `/api/v1/admin/logs/files/{file_name}/download`，支持文件列表、日志查询和脱敏日志下载。
 
 ## 本地运行

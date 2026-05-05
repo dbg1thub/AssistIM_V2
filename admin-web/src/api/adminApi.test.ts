@@ -443,6 +443,54 @@ describe("AdminApiClient", () => {
     );
   });
 
+  it("loads remaining admin diagnostics endpoints", async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(JSON.stringify({ code: 0, message: "success", data: {} }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" }
+      })
+    );
+    const client = new AdminApiClient({
+      baseUrl: "http://localhost:8000",
+      token: "token-value",
+      fetcher: fetchMock
+    });
+
+    await client.getAuthStatus();
+    await client.getDatabaseTables();
+    await client.listHttpRequests({
+      method: "POST",
+      path_contains: "/api/v1/auth",
+      status_code: 401,
+      user_id: "anonymous",
+      limit: 25
+    });
+    await client.getRateLimitStatus({ key_prefix: "login", limit: 10 });
+
+    expect(fetchMock).toHaveBeenCalledWith("http://localhost:8000/api/v1/admin/auth/status", {
+      headers: { Authorization: "Bearer token-value" },
+      method: "GET"
+    });
+    expect(fetchMock).toHaveBeenCalledWith("http://localhost:8000/api/v1/admin/database/tables", {
+      headers: { Authorization: "Bearer token-value" },
+      method: "GET"
+    });
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://localhost:8000/api/v1/admin/http/requests?method=POST&path_contains=%2Fapi%2Fv1%2Fauth&status_code=401&user_id=anonymous&limit=25",
+      {
+        headers: { Authorization: "Bearer token-value" },
+        method: "GET"
+      }
+    );
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://localhost:8000/api/v1/admin/rate-limits/status?key_prefix=login&limit=10",
+      {
+        headers: { Authorization: "Bearer token-value" },
+        method: "GET"
+      }
+    );
+  });
+
   it("builds query strings for audit log filters and loads detail", async () => {
     const fetchMock = vi.fn(async () =>
       new Response(JSON.stringify({ code: 0, message: "success", data: { items: [] } }), {

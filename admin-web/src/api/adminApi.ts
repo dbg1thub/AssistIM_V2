@@ -111,6 +111,19 @@ export interface ListE2EEPrekeysParams extends Record<string, unknown> {
   size?: number;
 }
 
+export interface ListHttpRequestsParams extends Record<string, unknown> {
+  method?: string;
+  path_contains?: string;
+  status_code?: number;
+  user_id?: string;
+  limit?: number;
+}
+
+export interface RateLimitStatusParams extends Record<string, unknown> {
+  key_prefix?: string;
+  limit?: number;
+}
+
 export interface ListDatabaseBackupsParams extends Record<string, unknown> {
   page?: number;
   size?: number;
@@ -183,6 +196,10 @@ export class AdminApiClient {
 
   getDashboard<T = unknown>(): Promise<T> {
     return this.get<T>("/api/v1/admin/dashboard");
+  }
+
+  getAuthStatus<T = unknown>(): Promise<T> {
+    return this.get<T>("/api/v1/admin/auth/status");
   }
 
   listUsers<T = unknown>(params: ListUsersParams = {}): Promise<T> {
@@ -297,6 +314,18 @@ export class AdminApiClient {
 
   getDatabaseStatus<T = unknown>(): Promise<T> {
     return this.get<T>("/api/v1/admin/database/status");
+  }
+
+  getDatabaseTables<T = unknown>(): Promise<T> {
+    return this.get<T>("/api/v1/admin/database/tables");
+  }
+
+  listHttpRequests<T = unknown>(params: ListHttpRequestsParams = {}): Promise<T> {
+    return this.get<T>("/api/v1/admin/http/requests", params);
+  }
+
+  getRateLimitStatus<T = unknown>(params: RateLimitStatusParams = {}): Promise<T> {
+    return this.get<T>("/api/v1/admin/rate-limits/status", params);
   }
 
   getFileStorageStatus<T = unknown>(): Promise<T> {

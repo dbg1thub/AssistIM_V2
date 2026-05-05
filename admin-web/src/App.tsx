@@ -38,10 +38,12 @@ import {
   ListActiveCallsParams,
   ListE2EEDevicesParams,
   ListE2EEPrekeysParams,
+  ListHttpRequestsParams,
   ListRealtimeConnectionsParams,
   ListUsersParams,
   PruneDatabaseBackupsParams,
-  QueryLogsParams
+  QueryLogsParams,
+  RateLimitStatusParams
 } from "./api/adminApi";
 import "./styles.css";
 
@@ -55,6 +57,7 @@ type PageKey =
   | "moments"
   | "realtime"
   | "e2ee"
+  | "http"
   | "users"
   | "database"
   | "files"
@@ -108,7 +111,29 @@ interface DatabaseStatusPayload {
   dialect?: string;
   runtime_schema_complete?: boolean;
   runtime_schema_revision?: string;
+  database_url?: string;
+  alembic?: Record<string, unknown>;
   required_tables?: Record<string, boolean>;
+}
+
+interface AuthStatusPayload {
+  token?: Record<string, unknown>;
+  session?: Record<string, unknown>;
+  users?: Record<string, unknown>;
+  runtime?: Record<string, unknown>;
+  audit?: Record<string, unknown>;
+}
+
+interface DatabaseTableItem {
+  name: string;
+  row_count?: number;
+  indexes?: string[];
+  required_indexes?: Record<string, boolean>;
+}
+
+interface DatabaseTablesPayload {
+  total_tables: number;
+  tables: DatabaseTableItem[];
 }
 
 interface FileStorageStatusPayload {
@@ -686,6 +711,56 @@ interface E2EEPrekeyFilters {
   consumed: "" | "true" | "false";
 }
 
+interface HttpRequestItem extends Record<string, unknown> {
+  method?: string;
+  path?: string;
+  status_code?: number;
+  duration_ms?: number;
+  user_id?: string;
+  timestamp?: string;
+}
+
+interface HttpRequestsPayload {
+  total: number;
+  limit: number;
+  retention_limit?: number;
+  filters?: Record<string, unknown>;
+  counters?: Record<string, unknown>;
+  items: HttpRequestItem[];
+}
+
+interface RateLimitBucketItem extends Record<string, unknown> {
+  key?: string;
+  key_prefix?: string;
+  hit_count?: number;
+  active_hit_count?: number;
+  stale_hit_count?: number;
+  oldest_hit_at?: string | null;
+  newest_hit_at?: string | null;
+}
+
+interface RateLimitStatusPayload {
+  backend?: Record<string, unknown>;
+  limits?: Record<string, unknown>;
+  filters?: Record<string, unknown>;
+  store?: Record<string, unknown>;
+  by_key_prefix?: Record<string, Record<string, unknown>>;
+  items?: RateLimitBucketItem[];
+}
+
+interface HttpRequestFilters {
+  method: string;
+  path_contains: string;
+  status_code: string;
+  user_id: string;
+  limit: string;
+}
+
+interface RateLimitFilters {
+  key_prefix: string;
+  limit: string;
+}
+
 interface SessionState {
   baseUrl: string;
   token: string;
@@ -701,6 +776,7 @@ const navItems: Array<{ key: PageKey; label: string; icon: ReactNode }> = [
   { key: "moments", label: "朋友圈", icon: <Heart size={18} /> },
   { key: "realtime", label: "实时", icon: <Activity size={18} /> },
   { key: "e2ee", label: "E2EE", icon: <CheckCircle2 size={18} /> },
+  { key: "http", label: "HTTP", icon: <Activity size={18} /> },
   { key: "users", label: "用户", icon: <Users size={18} /> },
   { key: "database", label: "数据库", icon: <Database size={18} /> },
   { key: "files", label: "文件", icon: <HardDrive size={18} /> },
@@ -789,6 +865,19 @@ const defaultE2EEPrekeyFilters: E2EEPrekeyFilters = {
   consumed: ""
 };
 
+const defaultHttpRequestFilters: HttpRequestFilters = {
+  method: "",
+  path_contains: "",
+  status_code: "",
+  user_id: "",
+  limit: "50"
+};
+
+const defaultRateLimitFilters: RateLimitFilters = {
+  key_prefix: "",
+  limit: "100"
+};
+
 const healthModuleDefinitions: Array<{
   key: string;
   label: string;
@@ -816,8 +905,11 @@ export default function App({ fetcher }: AppProps) {
   const [token, setToken] = useState("");
   const [activePage, setActivePage] = useState<PageKey>("overview");
   const [dashboard, setDashboard] = useState<DashboardPayload | null>(null);
+  const [authStatus, setAuthStatus] = useState<AuthStatusPayload | null>(null);
   const [users, setUsers] = useState<UserListPayload | null>(null);
   const [databaseStatus, setDatabaseStatus] = useState<DatabaseStatusPayload | null>(null);
+  const [databaseTables, setDatabaseTables] = useState<DatabaseTablesPayload | null>(null);
+  const [selectedDatabaseTable, setSelectedDatabaseTable] = useState<DatabaseTableItem | null>(null);
   const [fileStorageStatus, setFileStorageStatus] = useState<FileStorageStatusPayload | null>(null);
   const [fileStorageIssues, setFileStorageIssues] = useState<FileStorageIssuesPayload | null>(null);
   const [fileStorageIssueType, setFileStorageIssueType] = useState("");
@@ -868,6 +960,10 @@ export default function App({ fetcher }: AppProps) {
   const [e2eePrekeyFilters, setE2EEPrekeyFilters] = useState<E2EEPrekeyFilters>(defaultE2EEPrekeyFilters);
   const [selectedE2EEDevice, setSelectedE2EEDevice] = useState<E2EEDeviceItem | null>(null);
   const [e2eeDetailLoading, setE2EEDetailLoading] = useState(false);
+  const [httpRequests, setHttpRequests] = useState<HttpRequestsPayload | null>(null);
+  const [rateLimitStatus, setRateLimitStatus] = useState<RateLimitStatusPayload | null>(null);
+  const [httpRequestFilters, setHttpRequestFilters] = useState<HttpRequestFilters>(defaultHttpRequestFilters);
+  const [rateLimitFilters, setRateLimitFilters] = useState<RateLimitFilters>(defaultRateLimitFilters);
   const [selectedUser, setSelectedUser] = useState<UserDetailPayload | null>(null);
   const [disableReason, setDisableReason] = useState("");
   const [userOperationLoading, setUserOperationLoading] = useState(false);
@@ -895,8 +991,9 @@ export default function App({ fetcher }: AppProps) {
     setLoading(true);
     setError("");
     try {
-      const payload = await nextClient.getDashboard<DashboardPayload>();
-      setDashboard(payload);
+      const payload = await loadOverviewData(nextClient);
+      setDashboard(payload.dashboard);
+      setAuthStatus(payload.authStatus);
       setSession(nextSession);
       setActivePage("overview");
     } catch (currentError) {
@@ -914,7 +1011,7 @@ export default function App({ fetcher }: AppProps) {
     setActivePage(page);
     setError("");
     const shouldLoad =
-      (page === "overview" && !dashboard) ||
+      (page === "overview" && (!dashboard || !authStatus)) ||
       (page === "health" && !healthReports) ||
       (page === "audit" && !auditLogs) ||
       (page === "chat" && !chatSessions) ||
@@ -923,8 +1020,9 @@ export default function App({ fetcher }: AppProps) {
       (page === "moments" && !moments) ||
       (page === "realtime" && (!realtimeConnections || !activeCalls)) ||
       (page === "e2ee" && (!e2eeDevices || !e2eePrekeys)) ||
+      (page === "http" && (!httpRequests || !rateLimitStatus)) ||
       (page === "users" && !users) ||
-      (page === "database" && !databaseStatus) ||
+      (page === "database" && (!databaseStatus || !databaseTables)) ||
       (page === "files" && (!fileStorageStatus || !fileStorageIssues)) ||
       (page === "backups" && !databaseBackups) ||
       (page === "logs" && !logFiles);
@@ -933,8 +1031,10 @@ export default function App({ fetcher }: AppProps) {
     }
     setLoading(true);
     try {
-      if (page === "overview" && !dashboard) {
-        setDashboard(await client.getDashboard<DashboardPayload>());
+      if (page === "overview" && (!dashboard || !authStatus)) {
+        const payload = await loadOverviewData(client);
+        setDashboard(payload.dashboard);
+        setAuthStatus(payload.authStatus);
       }
       if (page === "health" && !healthReports) {
         setHealthReports(await loadHealthReports(client));
@@ -967,11 +1067,19 @@ export default function App({ fetcher }: AppProps) {
         setE2EEDevices(payload.devices);
         setE2EEPrekeys(payload.prekeys);
       }
+      if (page === "http" && (!httpRequests || !rateLimitStatus)) {
+        const payload = await loadHttpDiagnostics(client, httpRequestFilters, rateLimitFilters);
+        setHttpRequests(payload.requests);
+        setRateLimitStatus(payload.rateLimits);
+      }
       if (page === "users" && !users) {
         setUsers(await loadUsers(client, keyword));
       }
-      if (page === "database" && !databaseStatus) {
-        setDatabaseStatus(await client.getDatabaseStatus<DatabaseStatusPayload>());
+      if (page === "database" && (!databaseStatus || !databaseTables)) {
+        const payload = await loadDatabaseInspection(client);
+        setDatabaseStatus(payload.status);
+        setDatabaseTables(payload.tables);
+        setSelectedDatabaseTable(payload.tables.tables[0] ?? null);
       }
       if (page === "files" && (!fileStorageStatus || !fileStorageIssues)) {
         const payload = await loadFileStorageInspection(client);
@@ -999,7 +1107,9 @@ export default function App({ fetcher }: AppProps) {
     setError("");
     try {
       if (activePage === "overview") {
-        setDashboard(await client.getDashboard<DashboardPayload>());
+        const payload = await loadOverviewData(client);
+        setDashboard(payload.dashboard);
+        setAuthStatus(payload.authStatus);
       }
       if (activePage === "health") {
         setHealthReports(await loadHealthReports(client));
@@ -1041,11 +1151,19 @@ export default function App({ fetcher }: AppProps) {
         setE2EEPrekeys(payload.prekeys);
         setSelectedE2EEDevice(null);
       }
+      if (activePage === "http") {
+        const payload = await loadHttpDiagnostics(client, httpRequestFilters, rateLimitFilters);
+        setHttpRequests(payload.requests);
+        setRateLimitStatus(payload.rateLimits);
+      }
       if (activePage === "users") {
         setUsers(await loadUsers(client, keyword));
       }
       if (activePage === "database") {
-        setDatabaseStatus(await client.getDatabaseStatus<DatabaseStatusPayload>());
+        const payload = await loadDatabaseInspection(client);
+        setDatabaseStatus(payload.status);
+        setDatabaseTables(payload.tables);
+        setSelectedDatabaseTable(payload.tables.tables[0] ?? null);
       }
       if (activePage === "files") {
         const payload = await loadFileStorageInspection(client);
@@ -1383,6 +1501,36 @@ export default function App({ fetcher }: AppProps) {
     }
   }
 
+  async function searchHttpRequests() {
+    if (!client) {
+      return;
+    }
+    setLoading(true);
+    setError("");
+    try {
+      setHttpRequests(await loadHttpRequests(client, httpRequestFilters));
+    } catch (currentError) {
+      setError(readableError(currentError));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function searchRateLimits() {
+    if (!client) {
+      return;
+    }
+    setLoading(true);
+    setError("");
+    try {
+      setRateLimitStatus(await loadRateLimitStatus(client, rateLimitFilters));
+    } catch (currentError) {
+      setError(readableError(currentError));
+    } finally {
+      setLoading(false);
+    }
+  }
+
   async function openUserDetail(userId: string) {
     if (!client) {
       return;
@@ -1650,7 +1798,7 @@ export default function App({ fetcher }: AppProps) {
           </button>
         </header>
         {error ? <ErrorBanner message={error} /> : null}
-        {activePage === "overview" ? <OverviewPage dashboard={dashboard} /> : null}
+        {activePage === "overview" ? <OverviewPage dashboard={dashboard} authStatus={authStatus} /> : null}
         {activePage === "health" ? (
           <HealthPage
             reports={healthReports}
@@ -1762,6 +1910,18 @@ export default function App({ fetcher }: AppProps) {
             searchPrekeys={() => void searchE2EEPrekeys()}
           />
         ) : null}
+        {activePage === "http" ? (
+          <HttpDiagnosticsPage
+            requests={httpRequests}
+            rateLimits={rateLimitStatus}
+            requestFilters={httpRequestFilters}
+            rateLimitFilters={rateLimitFilters}
+            setRequestFilter={(key, value) => setHttpRequestFilters((current) => ({ ...current, [key]: value }))}
+            setRateLimitFilter={(key, value) => setRateLimitFilters((current) => ({ ...current, [key]: value }))}
+            searchRequests={() => void searchHttpRequests()}
+            searchRateLimits={() => void searchRateLimits()}
+          />
+        ) : null}
         {activePage === "users" ? (
           <UsersPage
             payload={users}
@@ -1776,7 +1936,14 @@ export default function App({ fetcher }: AppProps) {
             runUserOperation={(operation, role) => void runUserOperation(operation, role)}
           />
         ) : null}
-        {activePage === "database" ? <DatabasePage payload={databaseStatus} /> : null}
+        {activePage === "database" ? (
+          <DatabasePage
+            status={databaseStatus}
+            tables={databaseTables}
+            selectedTable={selectedDatabaseTable}
+            selectTable={setSelectedDatabaseTable}
+          />
+        ) : null}
         {activePage === "files" ? (
           <FilesPage
             status={fileStorageStatus}
@@ -1818,7 +1985,7 @@ export default function App({ fetcher }: AppProps) {
   );
 }
 
-function OverviewPage({ dashboard }: { dashboard: DashboardPayload | null }) {
+function OverviewPage({ dashboard, authStatus }: { dashboard: DashboardPayload | null; authStatus: AuthStatusPayload | null }) {
   const system = dashboard?.system ?? {};
   const users = dashboard?.users ?? {};
   const database = dashboard?.database ?? {};
@@ -1828,6 +1995,10 @@ function OverviewPage({ dashboard }: { dashboard: DashboardPayload | null }) {
   const calls = dashboard?.calls ?? {};
   const e2ee = dashboard?.e2ee ?? {};
   const http = dashboard?.http ?? {};
+  const authToken = authStatus?.token ?? {};
+  const authSession = authStatus?.session ?? {};
+  const authUsers = authStatus?.users ?? {};
+  const authRuntime = authStatus?.runtime ?? {};
   return (
     <section className="page-section">
       <PageTitle title="概览" subtitle={String(system.app_name ?? "AssistIM API")} />
@@ -1851,6 +2022,14 @@ function OverviewPage({ dashboard }: { dashboard: DashboardPayload | null }) {
           ["在线用户", realtime.online_users],
           ["连接数", realtime.bound_connections],
           ["请求数", http.total_requests]
+        ]} />
+        <InfoBlock title="认证" rows={[
+          ["Token", authToken.token_storage],
+          ["Access 分钟", authToken.access_token_expire_minutes],
+          ["Refresh 天数", authToken.refresh_token_expire_days],
+          ["会话失效", authSession.invalidation_strategy],
+          ["管理员", authUsers.admins],
+          ["认证在线", authRuntime.online_users]
         ]} />
       </div>
     </section>
@@ -3631,34 +3810,328 @@ function UserDetailPanel({
   );
 }
 
-function DatabasePage({ payload }: { payload: DatabaseStatusPayload | null }) {
-  const tables = Object.entries(payload?.required_tables ?? {});
+function DatabasePage({
+  status,
+  tables,
+  selectedTable,
+  selectTable
+}: {
+  status: DatabaseStatusPayload | null;
+  tables: DatabaseTablesPayload | null;
+  selectedTable: DatabaseTableItem | null;
+  selectTable: (table: DatabaseTableItem) => void;
+}) {
+  const requiredTables = Object.entries(status?.required_tables ?? {});
+  const tableItems = tables?.tables ?? [];
+  const missingRequiredIndexes = tableItems.filter((table) =>
+    Object.values(table.required_indexes ?? {}).some((exists) => !exists)
+  ).length;
   return (
     <section className="page-section">
-      <PageTitle title="数据库" subtitle={String(payload?.dialect ?? "")} />
-      <div className="metric-grid compact-grid">
-        <MetricCard label="状态" value={payload?.status} tone={payload?.status === "ok" ? "ok" : "warn"} />
-        <MetricCard label="Schema" value={payload?.runtime_schema_complete ? "完整" : "需检查"} tone={payload?.runtime_schema_complete ? "ok" : "warn"} />
-        <MetricCard label="Revision" value={payload?.runtime_schema_revision} />
+      <PageTitle title="数据库" subtitle={String(status?.dialect ?? "")} />
+      <div className="metric-grid">
+        <MetricCard label="状态" value={status?.status} tone={status?.status === "ok" ? "ok" : "warn"} />
+        <MetricCard
+          label="Schema"
+          value={status?.runtime_schema_complete ? "完整" : "需检查"}
+          tone={status?.runtime_schema_complete ? "ok" : "warn"}
+        />
+        <MetricCard label="Revision" value={status?.runtime_schema_revision} />
+        <MetricCard label="总表数" value={tables?.total_tables ?? tableItems.length} />
       </div>
       <div className="table-wrap">
         <table>
           <thead>
             <tr>
               <th>表</th>
+              <th>行数</th>
+              <th>索引数</th>
+              <th>必需索引</th>
               <th>状态</th>
+              <th>详情</th>
             </tr>
           </thead>
           <tbody>
-            {tables.map(([table, exists]) => (
-              <tr key={table}>
-                <td>{table}</td>
-                <td>{exists ? "存在" : "缺失"}</td>
-              </tr>
-            ))}
+            {tableItems.map((table) => {
+              const requiredIndexNames = Object.keys(table.required_indexes ?? {});
+              const requiredIndexesComplete = Object.values(table.required_indexes ?? {}).every(Boolean);
+              return (
+                <tr key={table.name}>
+                  <td>{table.name}</td>
+                  <td>{displayValue(table.row_count)}</td>
+                  <td>{table.indexes?.length ?? 0}</td>
+                  <td>{requiredIndexNames.length ? requiredIndexNames.join(" · ") : "-"}</td>
+                  <td>
+                    <span className={`status-badge ${requiredIndexesComplete ? "ok" : "warning"}`}>
+                      {requiredIndexesComplete ? "完整" : "需检查"}
+                    </span>
+                  </td>
+                  <td>
+                    <button
+                      className="table-action-button"
+                      type="button"
+                      onClick={() => selectTable(table)}
+                      aria-label={`查看 ${table.name} 表详情`}
+                    >
+                      查看
+                    </button>
+                  </td>
+                </tr>
+              );
+            })}
+            {!tableItems.length
+              ? requiredTables.map(([table, exists]) => (
+                  <tr key={table}>
+                    <td>{table}</td>
+                    <td>-</td>
+                    <td>-</td>
+                    <td>-</td>
+                    <td>{exists ? "存在" : "缺失"}</td>
+                    <td>-</td>
+                  </tr>
+                ))
+              : null}
           </tbody>
         </table>
       </div>
+      {selectedTable ? <DatabaseTableDetail table={selectedTable} /> : null}
+      <div className="info-grid">
+        <InfoBlock title="数据库连接" rows={[
+          ["URL", status?.database_url],
+          ["Dialect", status?.dialect],
+          ["Alembic", compactValue(status?.alembic)],
+          ["缺失必需索引表", missingRequiredIndexes]
+        ]} />
+        <InfoBlock title="必需表" rows={requiredTables} />
+      </div>
+    </section>
+  );
+}
+
+function DatabaseTableDetail({ table }: { table: DatabaseTableItem }) {
+  const indexes = table.indexes ?? [];
+  const requiredIndexes = Object.entries(table.required_indexes ?? {});
+  return (
+    <article className="detail-panel">
+      <div className="detail-header">
+        <div>
+          <h2>{table.name}</h2>
+          <p>{`行数 ${displayValue(table.row_count)} · 索引 ${indexes.length} 个`}</p>
+        </div>
+      </div>
+      <div className="info-grid">
+        <InfoBlock title="索引" rows={indexes.length ? indexes.map((index) => [index, "存在"]) : [["索引", "-"]]} />
+        <InfoBlock
+          title="必需索引"
+          rows={
+            requiredIndexes.length
+              ? requiredIndexes.map(([index, exists]) => [index, exists ? "存在" : "缺失"])
+              : [["必需索引", "-"]]
+          }
+        />
+      </div>
+    </article>
+  );
+}
+
+function HttpDiagnosticsPage({
+  requests,
+  rateLimits,
+  requestFilters,
+  rateLimitFilters,
+  setRequestFilter,
+  setRateLimitFilter,
+  searchRequests,
+  searchRateLimits
+}: {
+  requests: HttpRequestsPayload | null;
+  rateLimits: RateLimitStatusPayload | null;
+  requestFilters: HttpRequestFilters;
+  rateLimitFilters: RateLimitFilters;
+  setRequestFilter: (key: keyof HttpRequestFilters, value: string) => void;
+  setRateLimitFilter: (key: keyof RateLimitFilters, value: string) => void;
+  searchRequests: () => void;
+  searchRateLimits: () => void;
+}) {
+  const requestItems = requests?.items ?? [];
+  const rateLimitItems = rateLimits?.items ?? [];
+  const store = rateLimits?.store ?? {};
+  const backend = rateLimits?.backend ?? {};
+
+  function submitRequests(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    searchRequests();
+  }
+
+  function submitRateLimits(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    searchRateLimits();
+  }
+
+  return (
+    <section className="page-section">
+      <PageTitle title="HTTP" subtitle="查看 HTTP 请求诊断和限流状态" />
+      <div className="metric-grid">
+        <MetricCard label="请求总数" value={requests?.counters?.total_requests} />
+        <MetricCard
+          label="错误请求"
+          value={requests?.counters?.error_requests}
+          tone={numberValue(requests?.counters?.error_requests) > 0 ? "warn" : "ok"}
+        />
+        <MetricCard label="慢请求" value={requests?.counters?.slow_requests} />
+        <MetricCard label="限流桶" value={store.bucket_count} />
+      </div>
+      <article className="detail-panel">
+        <div className="detail-header">
+          <div>
+            <h2>HTTP 请求</h2>
+            <p>{`匹配 ${requests?.total ?? 0} 条 · 保留上限 ${requests?.retention_limit ?? "-"}`}</p>
+          </div>
+        </div>
+        <form className="filter-panel log-filter-panel" onSubmit={submitRequests}>
+          <label>
+            <span>请求方法</span>
+            <input
+              value={requestFilters.method}
+              onChange={(event) => setRequestFilter("method", event.target.value)}
+              placeholder="GET / POST"
+            />
+          </label>
+          <label>
+            <span>路径包含</span>
+            <input
+              value={requestFilters.path_contains}
+              onChange={(event) => setRequestFilter("path_contains", event.target.value)}
+              placeholder="/api/v1"
+            />
+          </label>
+          <label>
+            <span>状态码</span>
+            <input
+              value={requestFilters.status_code}
+              onChange={(event) => setRequestFilter("status_code", event.target.value)}
+              placeholder="401"
+            />
+          </label>
+          <label>
+            <span>请求用户 ID</span>
+            <input
+              value={requestFilters.user_id}
+              onChange={(event) => setRequestFilter("user_id", event.target.value)}
+              placeholder="user id"
+            />
+          </label>
+          <label>
+            <span>请求条数</span>
+            <input
+              value={requestFilters.limit}
+              onChange={(event) => setRequestFilter("limit", event.target.value)}
+              placeholder="50"
+            />
+          </label>
+          <button className="secondary-button" type="submit">
+            <Search size={17} />
+            筛选请求
+          </button>
+        </form>
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>方法</th>
+                <th>路径</th>
+                <th>状态码</th>
+                <th>耗时 ms</th>
+                <th>用户 ID</th>
+                <th>时间</th>
+              </tr>
+            </thead>
+            <tbody>
+              {requestItems.map((item, index) => (
+                <tr key={`${String(item.timestamp ?? "")}-${index}`}>
+                  <td>{String(item.method ?? "")}</td>
+                  <td>{String(item.path ?? "")}</td>
+                  <td>{displayValue(item.status_code)}</td>
+                  <td>{displayValue(item.duration_ms)}</td>
+                  <td>{String(item.user_id ?? "")}</td>
+                  <td>{String(item.timestamp ?? "")}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        {!requestItems.length ? <p className="empty-text">暂无 HTTP 请求记录</p> : null}
+      </article>
+      <article className="detail-panel">
+        <div className="detail-header">
+          <div>
+            <h2>限流</h2>
+            <p>{String(backend.active_store ?? "限流存储状态")}</p>
+          </div>
+        </div>
+        <div className="info-grid">
+          <InfoBlock title="限流存储" rows={[
+            ["配置", backend.configured],
+            ["实现", backend.active_store],
+            ["状态", store.status],
+            ["作用域", store.scope],
+            ["支持诊断", boolLabel(store.supported)],
+            ["命中数", store.hit_count]
+          ]} />
+          <InfoBlock title="限流规则" rows={Object.entries(rateLimits?.limits ?? {})} />
+        </div>
+        <form className="filter-panel" onSubmit={submitRateLimits}>
+          <label>
+            <span>限流 Key 前缀</span>
+            <input
+              value={rateLimitFilters.key_prefix}
+              onChange={(event) => setRateLimitFilter("key_prefix", event.target.value)}
+              placeholder="login"
+            />
+          </label>
+          <label>
+            <span>限流条数</span>
+            <input
+              value={rateLimitFilters.limit}
+              onChange={(event) => setRateLimitFilter("limit", event.target.value)}
+              placeholder="100"
+            />
+          </label>
+          <button className="secondary-button" type="submit">
+            <Search size={17} />
+            筛选限流
+          </button>
+        </form>
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Key</th>
+                <th>前缀</th>
+                <th>总命中</th>
+                <th>活跃命中</th>
+                <th>过期命中</th>
+                <th>最早命中</th>
+                <th>最近命中</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rateLimitItems.map((item) => (
+                <tr key={String(item.key ?? "")}>
+                  <td>{String(item.key ?? "")}</td>
+                  <td>{String(item.key_prefix ?? "")}</td>
+                  <td>{displayValue(item.hit_count)}</td>
+                  <td>{displayValue(item.active_hit_count)}</td>
+                  <td>{displayValue(item.stale_hit_count)}</td>
+                  <td>{String(item.oldest_hit_at ?? "")}</td>
+                  <td>{String(item.newest_hit_at ?? "")}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        {!rateLimitItems.length ? <p className="empty-text">暂无限流桶记录</p> : null}
+      </article>
     </section>
   );
 }
@@ -4235,6 +4708,16 @@ function readableError(error: unknown): string {
   return "请求失败";
 }
 
+async function loadOverviewData(
+  client: AdminApiClient
+): Promise<{ dashboard: DashboardPayload; authStatus: AuthStatusPayload }> {
+  const [dashboard, authStatus] = await Promise.all([
+    client.getDashboard<DashboardPayload>(),
+    client.getAuthStatus<AuthStatusPayload>()
+  ]);
+  return { dashboard, authStatus };
+}
+
 function loadUsers(client: AdminApiClient, keyword: string): Promise<UserListPayload> {
   const params: ListUsersParams = { page: 1, size: 20 };
   if (keyword.trim()) {
@@ -4429,6 +4912,62 @@ function loadE2EEPrekeys(client: AdminApiClient, filters: E2EEPrekeyFilters): Pr
     params.consumed = consumed;
   }
   return client.listE2EEPrekeys<E2EEPrekeyListPayload>(params);
+}
+
+async function loadDatabaseInspection(
+  client: AdminApiClient
+): Promise<{ status: DatabaseStatusPayload; tables: DatabaseTablesPayload }> {
+  const [status, tables] = await Promise.all([
+    client.getDatabaseStatus<DatabaseStatusPayload>(),
+    client.getDatabaseTables<DatabaseTablesPayload>()
+  ]);
+  return { status, tables };
+}
+
+async function loadHttpDiagnostics(
+  client: AdminApiClient,
+  requestFilters: HttpRequestFilters,
+  rateLimitFilters: RateLimitFilters
+): Promise<{ requests: HttpRequestsPayload; rateLimits: RateLimitStatusPayload }> {
+  const [requests, rateLimits] = await Promise.all([
+    loadHttpRequests(client, requestFilters),
+    loadRateLimitStatus(client, rateLimitFilters)
+  ]);
+  return { requests, rateLimits };
+}
+
+function loadHttpRequests(client: AdminApiClient, filters: HttpRequestFilters): Promise<HttpRequestsPayload> {
+  const params: ListHttpRequestsParams = {};
+  if (filters.method.trim()) {
+    params.method = filters.method.trim().toUpperCase();
+  }
+  if (filters.path_contains.trim()) {
+    params.path_contains = filters.path_contains.trim();
+  }
+  const statusCode = parseOptionalPositiveInt(filters.status_code);
+  if (statusCode !== undefined) {
+    params.status_code = statusCode;
+  }
+  if (filters.user_id.trim()) {
+    params.user_id = filters.user_id.trim();
+  }
+  const limit = parseOptionalPositiveInt(filters.limit);
+  if (limit !== undefined) {
+    params.limit = limit;
+  }
+  return client.listHttpRequests<HttpRequestsPayload>(params);
+}
+
+function loadRateLimitStatus(client: AdminApiClient, filters: RateLimitFilters): Promise<RateLimitStatusPayload> {
+  const params: RateLimitStatusParams = {};
+  if (filters.key_prefix.trim()) {
+    params.key_prefix = filters.key_prefix.trim();
+  }
+  const limit = parseOptionalPositiveInt(filters.limit);
+  if (limit !== undefined) {
+    params.limit = limit;
+  }
+  return client.getRateLimitStatus<RateLimitStatusPayload>(params);
 }
 
 async function loadFileStorageInspection(client: AdminApiClient): Promise<{
