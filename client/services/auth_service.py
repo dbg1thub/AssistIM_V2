@@ -132,6 +132,17 @@ class AuthService:
         )
         return dict(payload or {})
 
+    async def change_password(self, current_password: str, new_password: str) -> dict[str, Any]:
+        """Change the current authenticated user's password and return rotated auth tokens."""
+        payload = await self._http.post(
+            "/auth/password/change",
+            json={
+                "current_password": current_password,
+                "new_password": new_password,
+            },
+        )
+        return dict(payload or {})
+
     async def logout(self) -> None:
         """Best-effort backend logout."""
         await self._http.delete("/auth/session")

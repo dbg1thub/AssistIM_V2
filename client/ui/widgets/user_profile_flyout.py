@@ -28,6 +28,7 @@ from qfluentwidgets import (
     InfoBar,
     LineEdit,
     MessageBoxBase,
+    PasswordLineEdit,
     PrimaryPushButton,
     PushButton,
     SubtitleLabel,
@@ -123,6 +124,98 @@ class LogoutConfirmDialog(MessageBoxBase):
         self.yesButton.setText(tr("profile.logout.confirm_action", "Sign Out"))
         self.cancelButton.setText(tr("common.cancel", "Cancel"))
         self.widget.setMinimumWidth(360)
+
+
+class ChangePasswordDialog(QDialog):
+    """Dialog for changing the current authenticated user's password."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(tr("profile.password.change.title", "Change Password"))
+        self.setMinimumWidth(420)
+        self.setModal(True)
+        _apply_themed_dialog_surface(self, "ChangePasswordDialog")
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 24, 24, 24)
+        layout.setSpacing(14)
+
+        title = SubtitleLabel(tr("profile.password.change.title", "Change Password"), self)
+        subtitle = CaptionLabel(
+            tr("profile.password.change.subtitle", "Enter your current password before setting a new one."),
+            self,
+        )
+        subtitle.setWordWrap(True)
+
+        self.current_password_edit = PasswordLineEdit(self)
+        self.current_password_edit.setPlaceholderText(
+            tr("profile.password.change.current.placeholder", "Current Password")
+        )
+        self.current_password_edit.setMinimumHeight(40)
+
+        self.new_password_edit = PasswordLineEdit(self)
+        self.new_password_edit.setPlaceholderText(tr("profile.password.change.new.placeholder", "New Password"))
+        self.new_password_edit.setMinimumHeight(40)
+
+        self.confirm_password_edit = PasswordLineEdit(self)
+        self.confirm_password_edit.setPlaceholderText(
+            tr("profile.password.change.confirm.placeholder", "Confirm New Password")
+        )
+        self.confirm_password_edit.setMinimumHeight(40)
+
+        button_row = QHBoxLayout()
+        button_row.addStretch(1)
+        self.cancel_button = PushButton(tr("common.cancel", "Cancel"), self)
+        self.submit_button = PrimaryPushButton(tr("profile.password.change.action", "Change Password"), self)
+        self.cancel_button.clicked.connect(self.reject)
+        self.submit_button.clicked.connect(self._submit)
+        button_row.addWidget(self.cancel_button, 0)
+        button_row.addWidget(self.submit_button, 0)
+
+        layout.addWidget(title)
+        layout.addWidget(subtitle)
+        layout.addWidget(self.current_password_edit)
+        layout.addWidget(self.new_password_edit)
+        layout.addWidget(self.confirm_password_edit)
+        layout.addSpacing(4)
+        layout.addLayout(button_row)
+
+    def password_payload(self) -> tuple[str, str]:
+        return self.current_password_edit.text(), self.new_password_edit.text()
+
+    def _submit(self) -> None:
+        current_password = self.current_password_edit.text()
+        new_password = self.new_password_edit.text()
+        confirm_password = self.confirm_password_edit.text()
+
+        if len(current_password) < 6:
+            InfoBar.warning(
+                tr("profile.password.change.title", "Change Password"),
+                tr("profile.password.change.current.required", "Enter your current password."),
+                parent=self,
+                duration=1800,
+            )
+            self.current_password_edit.setFocus()
+            return
+        if len(new_password) < 6:
+            InfoBar.warning(
+                tr("profile.password.change.title", "Change Password"),
+                tr("profile.password.change.new.required", "New password must be at least 6 characters."),
+                parent=self,
+                duration=1800,
+            )
+            self.new_password_edit.setFocus()
+            return
+        if new_password != confirm_password:
+            InfoBar.warning(
+                tr("profile.password.change.title", "Change Password"),
+                tr("profile.password.change.mismatch", "New passwords do not match."),
+                parent=self,
+                duration=1800,
+            )
+            self.confirm_password_edit.setFocus()
+            return
+        self.accept()
 
 
 class ProfileEditDialog(QDialog):
@@ -521,6 +614,7 @@ class ProfileCard(QWidget):
     """Compact profile summary used at the top of the acrylic flyout."""
 
     editRequested = Signal()
+    passwordChangeRequested = Signal()
     logoutRequested = Signal()
 
     def __init__(self, user: dict, parent=None):
@@ -555,10 +649,13 @@ class ProfileCard(QWidget):
         action_row.setContentsMargins(0, 0, 0, 0)
         action_row.setSpacing(12)
         self.edit_link = HyperlinkLabel(tr("profile.quick.action.edit", "Edit Profile"), self)
+        self.change_password_link = HyperlinkLabel(tr("profile.password.change.link", "Change Password"), self)
         self.logout_link = HyperlinkLabel(tr("profile.quick.action.logout", "Sign Out"), self)
         self.edit_link.clicked.connect(self.editRequested.emit)
+        self.change_password_link.clicked.connect(self.passwordChangeRequested.emit)
         self.logout_link.clicked.connect(self.logoutRequested.emit)
         action_row.addWidget(self.edit_link, 0)
+        action_row.addWidget(self.change_password_link, 0)
         action_row.addWidget(self.logout_link, 0)
         action_row.addStretch(1)
 
@@ -591,6 +688,7 @@ class AcrylicUserProfileFlyoutView(AcrylicFlyoutViewBase):
     """Acrylic profile flyout with a compact card and reserved blank space."""
 
     editRequested = Signal()
+    passwordChangeRequested = Signal()
     logoutRequested = Signal()
 
     def __init__(self, user: dict, parent=None):
@@ -603,6 +701,7 @@ class AcrylicUserProfileFlyoutView(AcrylicFlyoutViewBase):
 
         self.profile_card = ProfileCard(self._user, self)
         self.profile_card.editRequested.connect(self.editRequested.emit)
+        self.profile_card.passwordChangeRequested.connect(self.passwordChangeRequested.emit)
         self.profile_card.logoutRequested.connect(self.logoutRequested.emit)
 
         self.divider = FluentDivider(self, variant=FluentDivider.INSET, inset=12)
@@ -630,6 +729,7 @@ class UserProfileCoordinator(QWidget):
         super().__init__(parent)
         self._auth_controller = get_auth_controller()
         self._save_task: Optional[asyncio.Task] = None
+        self._password_task: Optional[asyncio.Task] = None
         self._ui_tasks: set[asyncio.Task] = set()
         self._flyout = None
         self._auth_listener_attached = False
@@ -651,6 +751,7 @@ class UserProfileCoordinator(QWidget):
 
         view = AcrylicUserProfileFlyoutView(self.current_user_snapshot(), parent)
         view.editRequested.connect(self._handle_edit_from_flyout)
+        view.passwordChangeRequested.connect(self._handle_password_change_from_flyout)
         view.logoutRequested.connect(self._handle_logout_from_flyout)
 
         self._flyout = AcrylicFlyout.make(
@@ -673,6 +774,17 @@ class UserProfileCoordinator(QWidget):
 
         self._set_save_task(self._save_profile_async(dialog.profile_payload()))
 
+    def open_password_change_dialog(self) -> None:
+        """Open the authenticated password-change dialog."""
+        if not self.current_user_snapshot() or self._password_task is not None:
+            return
+
+        dialog = ChangePasswordDialog(self.window())
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        self._set_password_task(self._change_password_async(dialog.password_payload()))
+
     def request_logout(self) -> None:
         """Confirm and emit a logout request."""
         if not self.current_user_snapshot():
@@ -692,9 +804,38 @@ class UserProfileCoordinator(QWidget):
         self._close_flyout()
         self.open_profile_editor()
 
+    def _handle_password_change_from_flyout(self) -> None:
+        self._close_flyout()
+        self.open_password_change_dialog()
+
     def _handle_logout_from_flyout(self) -> None:
         self._close_flyout()
         self.request_logout()
+
+    async def _change_password_async(self, payload: tuple[str, str]) -> None:
+        current_password, new_password = payload
+        try:
+            await self._auth_controller.change_password(current_password, new_password)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            InfoBar.error(
+                tr("profile.password.change.title", "Change Password"),
+                tr(
+                    "profile.password.change.failed",
+                    "Unable to change password. Check the current password and try again.",
+                ),
+                parent=self.window(),
+                duration=2400,
+            )
+            raise
+        else:
+            InfoBar.success(
+                tr("profile.password.change.title", "Change Password"),
+                tr("profile.password.change.success", "Password changed."),
+                parent=self.window(),
+                duration=1800,
+            )
 
     async def _save_profile_async(self, payload: dict[str, str | bool | None]) -> None:
         avatar_file_path = str(payload.get("avatar_file_path", "") or "").strip()
@@ -805,11 +946,21 @@ class UserProfileCoordinator(QWidget):
         if self._save_task is task:
             self._save_task = None
 
+    def _set_password_task(self, coro) -> None:
+        self._cancel_pending_task(self._password_task)
+        self._password_task = self._create_ui_task(coro, "change password", on_done=self._clear_password_task)
+
+    def _clear_password_task(self, task: asyncio.Task) -> None:
+        if self._password_task is task:
+            self._password_task = None
+
     def quiesce(self) -> None:
         """Cancel logout-sensitive UI work before the shell is destroyed."""
         self._detach_auth_state_listener()
         self._cancel_pending_task(self._save_task)
         self._save_task = None
+        self._cancel_pending_task(self._password_task)
+        self._password_task = None
         self._close_flyout()
         for task in list(self._ui_tasks):
             if not task.done():

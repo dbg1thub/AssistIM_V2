@@ -401,6 +401,11 @@ class AuthController:
         """Reset one account password without committing a login session."""
         return await self._auth_service.reset_password(email, email_code, new_password)
 
+    async def change_password(self, current_password: str, new_password: str) -> dict[str, Any]:
+        """Change the current user's password and commit the rotated auth payload."""
+        payload = await self._auth_service.change_password(current_password, new_password)
+        return await self.commit_auth_payload(payload, reset_local_chat_state=False)
+
     async def request_register_payload(
         self,
         username: str,

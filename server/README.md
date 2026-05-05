@@ -100,6 +100,7 @@ The current test suite covers:
 - registration email verification
 - password reset by email verification
 - profile email changes by email verification
+- authenticated password change with token rotation
 - friend request accept flow
 - direct session creation and message read flow
 - group permission and ownership transfer
@@ -305,6 +306,21 @@ Invoke-RestMethod -Method Post `
   -Body (@{
     email = "bob@example.test"
     email_code = "<6-digit-code>"
+    new_password = "NewPassw0rd!"
+  } | ConvertTo-Json)
+```
+
+Authenticated users can change their password with their current password. The
+response is a fresh auth payload; clients should replace the stored access and
+refresh tokens because older tokens are invalidated.
+
+```powershell
+Invoke-RestMethod -Method Post `
+  -Uri "http://127.0.0.1:8000/api/v1/auth/password/change" `
+  -Headers @{ Authorization = "Bearer <access_token>" } `
+  -ContentType "application/json" `
+  -Body (@{
+    current_password = "Passw0rd!"
     new_password = "NewPassw0rd!"
   } | ConvertTo-Json)
 ```

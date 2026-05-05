@@ -17,6 +17,7 @@ from app.models.user import User
 from app.schemas.auth import (
     EmailVerificationSendRequest,
     LoginRequest,
+    PasswordChangeRequest,
     PasswordResetConfirmRequest,
     PasswordResetSendRequest,
     RefreshTokenRequest,
@@ -116,6 +117,21 @@ async def confirm_password_reset(
     if user_id:
         await _disconnect_auth_connections(user_id, reason="password_reset", strict_disconnect=False)
     return success_response({"reset": True})
+
+
+@router.post("/password/change")
+async def change_password(
+    payload: PasswordChangeRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_request_settings),
+) -> dict:
+    auth_payload = AuthService(db, settings).change_password(
+        current_user,
+        payload.current_password,
+        payload.new_password,
+    )
+    return success_response(auth_payload)
 
 
 @router.post("/register", dependencies=[Depends(rate_limiter.dynamic_dependency("register", _register_limit))])

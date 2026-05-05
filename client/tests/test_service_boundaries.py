@@ -586,6 +586,7 @@ class FakeAuthService:
         self.email_verification_calls: list[tuple[str, str]] = []
         self.password_reset_code_calls: list[str] = []
         self.password_reset_calls: list[tuple[str, str, str]] = []
+        self.password_change_calls: list[tuple[str, str]] = []
         self.logout_calls = 0
         self.listeners = []
         self.access_token = None
@@ -638,6 +639,10 @@ class FakeAuthService:
     async def reset_password(self, email: str, email_code: str, new_password: str) -> dict:
         self.password_reset_calls.append((email, email_code, new_password))
         return {"reset": True}
+
+    async def change_password(self, current_password: str, new_password: str) -> dict:
+        self.password_change_calls.append((current_password, new_password))
+        return dict(self.login_payload)
 
     async def logout(self) -> None:
         self.logout_calls += 1
@@ -1676,6 +1681,36 @@ def test_auth_controller_update_profile_passes_email_code_for_profile_email_chan
                 'email_code': '123456',
             }
         ]
+
+    asyncio.run(scenario())
+
+
+def test_auth_controller_change_password_commits_rotated_auth_payload(monkeypatch) -> None:
+    fake_auth_service = FakeAuthService()
+    fake_user_service = FakeUserService()
+    fake_db = FakeDatabase()
+    fake_message_manager = FakeMessageManager()
+    fake_chat_controller = FakeChatControllerContext()
+
+    monkeypatch.setattr(auth_controller_module, 'get_auth_service', lambda: fake_auth_service)
+    monkeypatch.setattr(auth_controller_module, 'get_user_service', lambda: fake_user_service)
+    monkeypatch.setattr(auth_controller_module, 'get_database', lambda: fake_db)
+    monkeypatch.setattr(auth_controller_module, 'get_message_manager', lambda: fake_message_manager)
+    monkeypatch.setattr(auth_controller_module, 'peek_message_manager', lambda: fake_message_manager)
+    monkeypatch.setattr(auth_controller_module, 'get_chat_controller', lambda: fake_chat_controller)
+    monkeypatch.setattr(auth_controller_module, 'peek_chat_controller', lambda: fake_chat_controller)
+    monkeypatch.setattr(auth_controller_module, 'get_file_service', lambda: FakeFileService())
+
+    async def scenario() -> None:
+        controller = auth_controller_module.AuthController()
+        user = await controller.change_password('oldsecret', 'newsecret')
+
+        assert fake_auth_service.password_change_calls == [('oldsecret', 'newsecret')]
+        assert user['id'] == 'user-1'
+        assert controller.current_user == fake_auth_service.login_payload['user']
+        assert fake_auth_service.access_token == 'access-token'
+        assert fake_auth_service.refresh_token == 'refresh-token'
+        assert fake_db.app_state[controller.USER_ID_KEY] == 'user-1'
 
     asyncio.run(scenario())
 

@@ -214,6 +214,76 @@ def test_password_reset_uses_email_code_and_invalidates_existing_sessions(client
     assert stale_refresh_response.status_code == 401
 
 
+def test_authenticated_password_change_rotates_tokens_and_invalidates_old_sessions(
+    client: TestClient,
+    auth_header,
+) -> None:
+    auth_payload = register_user(
+        client,
+        "change-password-owner",
+        nickname="Change Password Owner",
+        password="oldsecret",
+        email="change-password-owner@example.test",
+    )
+
+    unauthenticated_response = client.post(
+        "/api/v1/auth/password/change",
+        json={"current_password": "oldsecret", "new_password": "newsecret"},
+    )
+    assert unauthenticated_response.status_code == 401
+
+    wrong_password_response = client.post(
+        "/api/v1/auth/password/change",
+        headers=auth_header(auth_payload["access_token"]),
+        json={"current_password": "wrongsecret", "new_password": "newsecret"},
+    )
+    assert wrong_password_response.status_code == 401
+    assert wrong_password_response.json()["code"] == ErrorCode.INVALID_CREDENTIALS
+
+    change_response = client.post(
+        "/api/v1/auth/password/change",
+        headers=auth_header(auth_payload["access_token"]),
+        json={"current_password": "oldsecret", "new_password": "newsecret"},
+    )
+    assert change_response.status_code == 200
+    changed_payload = change_response.json()["data"]
+    assert changed_payload["access_token"]
+    assert changed_payload["refresh_token"]
+    assert changed_payload["access_token"] != auth_payload["access_token"]
+    assert changed_payload["refresh_token"] != auth_payload["refresh_token"]
+    assert changed_payload["user"]["username"] == "change-password-owner"
+
+    stale_me_response = client.get(
+        "/api/v1/auth/me",
+        headers=auth_header(auth_payload["access_token"]),
+    )
+    assert stale_me_response.status_code == 401
+
+    stale_refresh_response = client.post(
+        "/api/v1/auth/refresh",
+        json={"refresh_token": auth_payload["refresh_token"]},
+    )
+    assert stale_refresh_response.status_code == 401
+
+    changed_me_response = client.get(
+        "/api/v1/auth/me",
+        headers=auth_header(changed_payload["access_token"]),
+    )
+    assert changed_me_response.status_code == 200
+
+    old_password_login = client.post(
+        "/api/v1/auth/login",
+        json={"username": "change-password-owner", "password": "oldsecret"},
+    )
+    assert old_password_login.status_code == 401
+
+    new_password_login = client.post(
+        "/api/v1/auth/login",
+        json={"username": "change-password-owner", "password": "newsecret"},
+    )
+    assert new_password_login.status_code == 200
+
+
 def test_password_reset_send_does_not_reveal_unknown_email(client: TestClient) -> None:
     send_response = client.post(
         "/api/v1/auth/password-reset/send",

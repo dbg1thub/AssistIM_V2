@@ -765,6 +765,7 @@ def test_auth_schema_contracts_are_strict_and_match_runtime_payloads() -> None:
     from app.schemas.auth import (
         EmailVerificationSendRequest,
         LoginRequest,
+        PasswordChangeRequest,
         PasswordResetConfirmRequest,
         PasswordResetSendRequest,
         RefreshTokenRequest,
@@ -779,6 +780,9 @@ def test_auth_schema_contracts_are_strict_and_match_runtime_payloads() -> None:
     assert EmailVerificationSendRequest(email="profile@example.test", purpose="profile_email").purpose == "profile_email"
     assert PasswordResetSendRequest.model_config.get("extra") == "forbid"
     assert PasswordResetConfirmRequest.model_config.get("extra") == "forbid"
+    assert PasswordChangeRequest.model_config.get("extra") == "forbid"
+    assert "current_password" in PasswordChangeRequest.model_fields
+    assert "new_password" in PasswordChangeRequest.model_fields
     assert LoginRequest.model_config.get("extra") == "forbid"
     assert RefreshTokenRequest.model_config.get("extra") == "forbid"
     assert TokenPair.model_fields["token_type"].default == "Bearer"

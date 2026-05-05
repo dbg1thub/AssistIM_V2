@@ -428,6 +428,18 @@ def test_user_profile_flyout_requires_email_code_for_changed_email() -> None:
     assert 'email_code=str(payload.get("email_code", "") or "").strip() or None' in save_block
 
 
+def test_user_profile_flyout_exposes_authenticated_password_change() -> None:
+    flyout = Path('client/ui/widgets/user_profile_flyout.py').read_text(encoding='utf-8')
+
+    assert 'class ChangePasswordDialog(QDialog):' in flyout
+    assert 'self.change_password_link = HyperlinkLabel(tr("profile.password.change.link", "Change Password"), self)' in flyout
+    assert 'self.change_password_link.clicked.connect(self.passwordChangeRequested.emit)' in flyout
+    assert 'view.passwordChangeRequested.connect(self._handle_password_change_from_flyout)' in flyout
+    assert 'dialog = ChangePasswordDialog(self.window())' in flyout
+    assert 'await self._auth_controller.change_password(current_password, new_password)' in flyout
+    assert 'self._set_password_task(self._change_password_async(dialog.password_payload()))' in flyout
+
+
 
 def test_message_delegate_uses_live_auth_profile_for_self_avatar_rendering() -> None:
     message_delegate = Path('client/delegates/message_delegate.py').read_text(encoding='utf-8')

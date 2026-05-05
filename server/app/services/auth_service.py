@@ -93,6 +93,19 @@ class AuthService:
             raise
         return {"reset": True, "user_id": str(user.id or "")}
 
+    def change_password(self, user: User, current_password: str, new_password: str) -> dict:
+        if not verify_password(current_password, user.password_hash):
+            raise AppError(ErrorCode.INVALID_CREDENTIALS, "invalid credentials", 401)
+        try:
+            user = self.users.update(user, password_hash=hash_password(new_password), commit=False)
+            user = self.users.advance_auth_session_version(user, commit=False)
+            self.db.commit()
+            self.db.refresh(user)
+        except Exception:
+            self.db.rollback()
+            raise
+        return self._serialize_auth_payload(user)
+
     def authenticate_credentials(self, username: str, password: str) -> User:
         user = self.users.get_by_username(canonicalize_username(username))
         if user is None or not verify_password(password, user.password_hash):

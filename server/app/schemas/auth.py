@@ -175,6 +175,13 @@ class PasswordResetConfirmRequest(BaseModel):
         return value
 
 
+class PasswordChangeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    current_password: str = Field(min_length=PASSWORD_MIN_LENGTH, max_length=PASSWORD_MAX_LENGTH)
+    new_password: str = Field(min_length=PASSWORD_MIN_LENGTH, max_length=PASSWORD_MAX_LENGTH)
+
+
 class LoginRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
