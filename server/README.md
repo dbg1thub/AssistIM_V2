@@ -161,7 +161,7 @@ The same admin role also unlocks backend-only user-management APIs:
 - `GET /api/v1/admin/contacts/friend-requests`: list friend requests with `status`, `sender_id`, `receiver_id`, `page`, and `size` filters.
 - `GET /api/v1/admin/contacts/friendships`: list friendship rows with `user_id`, `friend_id`, `page`, and `size` filters.
 - `GET /api/v1/admin/contacts/blocks`: list block rows with `user_id`, `blocked_user_id`, `page`, and `size` filters.
-- `GET /api/v1/admin/contacts/health`: inspect contact data consistency issues such as one-way friendships, self-friend rows, missing users, duplicate requests, invalid request statuses, and block-row drift.
+- `GET /api/v1/admin/contacts/health`: inspect contact data consistency issues such as one-way friendships, self-friend rows, missing users, duplicate requests, invalid request statuses, and block-row or block/conflict drift.
 - `GET /api/v1/admin/groups`: list groups with `keyword`, `owner_id`, `page`, and `size` filters.
 - `GET /api/v1/admin/groups/{group_id}`: inspect one group, including owner, session, members, announcement, and avatar metadata.
 - `GET /api/v1/admin/groups/{group_id}/members`: inspect group members with `role`, `user_id`, `page`, and `size` filters.

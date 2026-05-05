@@ -233,6 +233,7 @@ def test_admin_contacts_health_reports_relationship_request_integrity_issues(cli
     _seed_block(user_id=charlie["user"]["id"], blocked_user_id=charlie["user"]["id"])
     _seed_block(user_id=MISSING_USER_ID, blocked_user_id=alice["user"]["id"])
     _seed_block(user_id=alice["user"]["id"], blocked_user_id=MISSING_FRIEND_ID)
+    _seed_friend_request(sender_id=bob["user"]["id"], receiver_id=alice["user"]["id"], status="pending")
 
     response = client.get(
         "/api/v1/admin/contacts/health",
@@ -255,6 +256,8 @@ def test_admin_contacts_health_reports_relationship_request_integrity_issues(cli
     assert "block_user_missing" in issue_types
     assert "block_blocked_user_missing" in issue_types
     assert "self_block" in issue_types
+    assert "blocked_friendship_conflict" in issue_types
+    assert "blocked_friend_request_conflict" in issue_types
     assert any(
         item["issue_type"] == "friendship_missing_reverse"
         and item["user_id"] == alice["user"]["id"]
@@ -267,6 +270,19 @@ def test_admin_contacts_health_reports_relationship_request_integrity_issues(cli
         and item["receiver_id"] == bob["user"]["id"]
         and item["status"] == "pending"
         and item["count"] == 2
+        for item in payload["issues"]
+    )
+    assert any(
+        item["issue_type"] == "blocked_friendship_conflict"
+        and item["user_id"] == alice["user"]["id"]
+        and item["friend_id"] == bob["user"]["id"]
+        for item in payload["issues"]
+    )
+    assert any(
+        item["issue_type"] == "blocked_friend_request_conflict"
+        and item["sender_id"] == bob["user"]["id"]
+        and item["receiver_id"] == alice["user"]["id"]
+        and item["status"] == "pending"
         for item in payload["issues"]
     )
 

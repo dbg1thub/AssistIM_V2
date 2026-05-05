@@ -395,6 +395,11 @@ class AdminContactsInspectionService:
             (str(item.user_id or ""), str(item.blocked_user_id or ""))
             for item in blocks
         )
+        blocked_pairs = {
+            frozenset((str(item.user_id or ""), str(item.blocked_user_id or "")))
+            for item in blocks
+            if str(item.user_id or "").strip() and str(item.blocked_user_id or "").strip()
+        }
         emitted_duplicate_block_keys: set[tuple[str, str]] = set()
         for block in blocks:
             user_id = str(block.user_id or "")
@@ -441,6 +446,36 @@ class AdminContactsInspectionService:
                         "user_id": user_id,
                         "blocked_user_id": blocked_user_id,
                         "count": duplicate_count,
+                    }
+                )
+
+        for friendship in friendships:
+            user_id = str(friendship.user_id or "")
+            friend_id = str(friendship.friend_id or "")
+            if user_id and friend_id and frozenset((user_id, friend_id)) in blocked_pairs:
+                issues.append(
+                    {
+                        "issue_type": "blocked_friendship_conflict",
+                        "severity": "error",
+                        "friendship_id": str(friendship.id or ""),
+                        "user_id": user_id,
+                        "friend_id": friend_id,
+                    }
+                )
+
+        for request in requests:
+            sender_id = str(request.sender_id or "")
+            receiver_id = str(request.receiver_id or "")
+            status = str(request.status or "")
+            if status == "pending" and sender_id and receiver_id and frozenset((sender_id, receiver_id)) in blocked_pairs:
+                issues.append(
+                    {
+                        "issue_type": "blocked_friend_request_conflict",
+                        "severity": "error",
+                        "request_id": str(request.id or ""),
+                        "sender_id": sender_id,
+                        "receiver_id": receiver_id,
+                        "status": status,
                     }
                 )
 
