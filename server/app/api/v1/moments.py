@@ -159,6 +159,20 @@ async def create_moment(payload: MomentCreate, current_user: User = Depends(get_
     return success_response(result)
 
 
+@router.delete("/{moment_id}")
+async def delete_moment(moment_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
+    service = MomentService(db)
+    result = service.delete_moment(current_user, moment_id)
+    await _broadcast_moment_refresh(
+        action="moment_deleted",
+        moment_id=moment_id,
+        actor_user_id=current_user.id,
+        owner_user_id=str(result.get("owner_user_id", "") or current_user.id),
+        changed=True,
+    )
+    return success_response(result)
+
+
 @router.post("/{moment_id}/likes")
 async def like_moment(moment_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
     service = MomentService(db)
@@ -169,6 +183,25 @@ async def like_moment(moment_id: str, current_user: User = Depends(get_current_u
         actor_user_id=current_user.id,
         owner_user_id=_moment_owner_user_id(service, moment_id),
         changed=bool(result.get("changed")),
+    )
+    return success_response(result)
+
+
+@router.delete("/{moment_id}/comments/{comment_id}")
+async def delete_moment_comment(
+    moment_id: str,
+    comment_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    service = MomentService(db)
+    result = service.delete_comment(current_user, moment_id, comment_id)
+    await _broadcast_moment_refresh(
+        action="moment_comment_deleted",
+        moment_id=moment_id,
+        actor_user_id=current_user.id,
+        owner_user_id=str(result.get("owner_user_id", "") or ""),
+        changed=True,
     )
     return success_response(result)
 

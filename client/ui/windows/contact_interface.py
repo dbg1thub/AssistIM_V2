@@ -57,7 +57,7 @@ from client.ui.controllers.contact_controller import (
 )
 
 from client.ui.controllers.discovery_controller import MomentRecord, get_discovery_controller
-from client.ui.windows.discovery_interface import MomentCard
+from client.ui.windows.discovery_interface import DeleteCommentConfirmDialog, DeleteMomentConfirmDialog, MomentCard
 from client.ui.styles import StyleSheet
 from client.ui.widgets.chat_info_drawer import AcrylicDrawerSurface
 from client.ui.widgets.global_search_panel import GlobalSearchPopupOverlay
@@ -738,6 +738,8 @@ class ContactDetailPanel(QWidget):
 class ContactMomentsFlowPanel(QWidget):
     like_requested = Signal(str, bool, int)
     comment_requested = Signal(str, str)
+    moment_delete_requested = Signal(str)
+    comment_delete_requested = Signal(str, str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -841,6 +843,8 @@ class ContactMomentsFlowPanel(QWidget):
             card.setMaximumWidth(380)
             card.like_requested.connect(self.like_requested.emit)
             card.comment_requested.connect(self.comment_requested.emit)
+            card.delete_requested.connect(self.moment_delete_requested.emit)
+            card.comment_delete_requested.connect(self.comment_delete_requested.emit)
             self.flow_layout.addWidget(card)
             self._cards[moment.id] = card
 
@@ -866,6 +870,17 @@ class ContactMomentsFlowPanel(QWidget):
             card.append_comment(comment)
         self._sync_moment_comment(moment_id, comment)
 
+    def remove_moment(self, moment_id: str) -> None:
+        self._moments = [moment for moment in self._moments if moment.id != moment_id]
+        self._rebuild_flow()
+
+    def remove_comment(self, moment_id: str, comment_id: str) -> None:
+        card = self._cards.get(moment_id)
+        if card is not None:
+            card.remove_comment(comment_id)
+            return
+        self._sync_moment_comment_delete(moment_id, comment_id)
+
     def _sync_moment_like_state(self, moment_id: str, liked: bool, like_count: int) -> None:
         for moment in self._moments:
             if moment.id == moment_id:
@@ -885,6 +900,15 @@ class ContactMomentsFlowPanel(QWidget):
                     return
                 moment.comments.append(comment)
                 moment.comment_count = max(moment.comment_count + 1, len(moment.comments))
+                return
+
+    def _sync_moment_comment_delete(self, moment_id: str, comment_id: str) -> None:
+        for moment in self._moments:
+            if moment.id == moment_id:
+                previous_count = len(moment.comments)
+                moment.comments = [comment for comment in moment.comments if comment.id != comment_id]
+                if len(moment.comments) != previous_count:
+                    moment.comment_count = max(0, moment.comment_count - 1, len(moment.comments))
                 return
 
 
@@ -1807,6 +1831,8 @@ class ContactInterface(QWidget):
         self._connection_manager.add_state_listener(self._on_connection_state_changed)
         self.detail_panel.moments_panel.like_requested.connect(self._request_detail_like_toggle)
         self.detail_panel.moments_panel.comment_requested.connect(self._request_detail_comment_create)
+        self.detail_panel.moments_panel.moment_delete_requested.connect(self._request_detail_moment_delete)
+        self.detail_panel.moments_panel.comment_delete_requested.connect(self._request_detail_comment_delete)
 
     def _create_scroll_page(self) -> tuple[ScrollArea, QWidget, QVBoxLayout]:
         area = ScrollArea(self)
@@ -3472,6 +3498,77 @@ class ContactInterface(QWidget):
             parent=self.window(),
             duration=1400,
         )
+
+    def _request_detail_moment_delete(self, moment_id: str) -> None:
+        moment = next((item for item in self._current_detail_moments() if item.id == moment_id), None)
+        if moment is None or not moment.is_self:
+            return
+        dialog = DeleteMomentConfirmDialog(self.window())
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        self._schedule_keyed_ui_task(
+            ("moment_delete", moment_id),
+            self._request_detail_moment_delete_async(moment_id),
+            f"delete moment {moment_id}",
+        )
+
+    async def _request_detail_moment_delete_async(self, moment_id: str) -> None:
+        try:
+            await self._discovery_controller.delete_moment(moment_id)
+        except Exception:
+            InfoBar.error(
+                tr("discovery.delete_moment.title", "Delete Moment"),
+                tr("discovery.delete_moment.failed", "Delete failed. Please try again later."),
+                parent=self.window(),
+                duration=2200,
+            )
+            raise
+        self.detail_panel.moments_panel.remove_moment(moment_id)
+        InfoBar.success(
+            tr("discovery.delete_moment.title", "Delete Moment"),
+            tr("discovery.delete_moment.success", "Moment deleted."),
+            parent=self.window(),
+            duration=1600,
+        )
+
+    def _request_detail_comment_delete(self, moment_id: str, comment_id: str) -> None:
+        comment = self._find_detail_comment(moment_id, comment_id)
+        if comment is None or not getattr(comment, "can_delete", False):
+            return
+        dialog = DeleteCommentConfirmDialog(self.window())
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        self._schedule_keyed_ui_task(
+            ("moment_comment_delete", comment_id),
+            self._request_detail_comment_delete_async(moment_id, comment_id),
+            f"delete moment comment {comment_id}",
+        )
+
+    async def _request_detail_comment_delete_async(self, moment_id: str, comment_id: str) -> None:
+        try:
+            await self._discovery_controller.delete_comment(moment_id, comment_id)
+        except Exception:
+            InfoBar.error(
+                tr("discovery.delete_comment.title", "Delete Comment"),
+                tr("discovery.delete_comment.failed", "Delete failed. Please try again later."),
+                parent=self.window(),
+                duration=2200,
+            )
+            raise
+        self.detail_panel.moments_panel.remove_comment(moment_id, comment_id)
+        InfoBar.success(
+            tr("discovery.delete_comment.title", "Delete Comment"),
+            tr("discovery.delete_comment.success", "Comment deleted."),
+            parent=self.window(),
+            duration=1400,
+        )
+
+    def _find_detail_comment(self, moment_id: str, comment_id: str):
+        for moment in self._current_detail_moments():
+            if moment.id != moment_id:
+                continue
+            return next((comment for comment in moment.comments if comment.id == comment_id), None)
+        return None
 
     def _add_empty_state(self, layout: QVBoxLayout, icon: AppIcon, text: str) -> None:
         holder = QWidget(self)

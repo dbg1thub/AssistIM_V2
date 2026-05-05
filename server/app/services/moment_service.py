@@ -209,6 +209,39 @@ class MomentService:
         )
         return self.serialize_comment(comment, current_user)
 
+    def delete_moment(self, current_user: User, moment_id: str) -> dict:
+        moment = self.moments.get_by_id(moment_id)
+        if moment is None:
+            raise AppError(ErrorCode.RESOURCE_NOT_FOUND, "moment not found", 404)
+        owner_user_id = str(getattr(moment, "user_id", "") or "")
+        if owner_user_id != current_user.id:
+            raise AppError(ErrorCode.FORBIDDEN, "moment delete forbidden", 403)
+        self.moments.delete_moment(moment)
+        return {
+            "deleted": True,
+            "moment_id": moment_id,
+            "owner_user_id": owner_user_id,
+        }
+
+    def delete_comment(self, current_user: User, moment_id: str, comment_id: str) -> dict:
+        moment = self.moments.get_by_id(moment_id)
+        if moment is None:
+            raise AppError(ErrorCode.RESOURCE_NOT_FOUND, "moment not found", 404)
+        comment = self.moments.get_comment_by_id(comment_id)
+        if comment is None or str(getattr(comment, "moment_id", "") or "") != moment_id:
+            raise AppError(ErrorCode.RESOURCE_NOT_FOUND, "moment comment not found", 404)
+        owner_user_id = str(getattr(moment, "user_id", "") or "")
+        comment_author_id = str(getattr(comment, "user_id", "") or "")
+        if current_user.id not in {owner_user_id, comment_author_id}:
+            raise AppError(ErrorCode.FORBIDDEN, "moment comment delete forbidden", 403)
+        self.moments.delete_comment(comment)
+        return {
+            "deleted": True,
+            "moment_id": moment_id,
+            "comment_id": comment_id,
+            "owner_user_id": owner_user_id,
+        }
+
     def _get_visible_moment(self, current_user: User, moment_id: str):
         moment = self.moments.get_by_id(moment_id)
         if moment is None:

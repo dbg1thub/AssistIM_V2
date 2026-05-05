@@ -11,6 +11,7 @@ class FakeHttpClient:
         self.get_calls: list[tuple[str, dict | None]] = []
         self.post_calls: list[tuple[str, dict | None]] = []
         self.patch_calls: list[tuple[str, dict | None]] = []
+        self.delete_calls: list[str] = []
 
     async def get(self, path: str, params: dict | None = None):
         self.get_calls.append((path, params))
@@ -22,6 +23,10 @@ class FakeHttpClient:
 
     async def patch(self, path: str, json: dict | None = None):
         self.patch_calls.append((path, json))
+        return self.payload
+
+    async def delete(self, path: str):
+        self.delete_calls.append(path)
         return self.payload
 
 
@@ -186,5 +191,23 @@ def test_discovery_service_add_comment_posts_optional_image(monkeypatch) -> None
             ("/moments/moment-1/comments", {"content": "nice", "image": image})
         ]
         assert payload == {"id": "comment-1", "content": "nice"}
+
+    asyncio.run(scenario())
+
+
+def test_discovery_service_deletes_moment_and_comment(monkeypatch) -> None:
+    fake_http = FakeHttpClient({"deleted": True})
+    monkeypatch.setattr(discovery_service_module, "get_http_client", lambda: fake_http)
+
+    async def scenario() -> None:
+        service = discovery_service_module.DiscoveryService()
+
+        await service.delete_moment("moment-1")
+        await service.delete_comment("moment-1", "comment-1")
+
+        assert fake_http.delete_calls == [
+            "/moments/moment-1",
+            "/moments/moment-1/comments/comment-1",
+        ]
 
     asyncio.run(scenario())

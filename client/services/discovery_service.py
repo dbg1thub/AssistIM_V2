@@ -94,6 +94,11 @@ class DiscoveryService:
         """Unlike one moment."""
         await self._http.delete(f"/moments/{moment_id}/likes")
 
+    async def delete_moment(self, moment_id: str) -> dict[str, Any]:
+        """Delete one moment owned by the current user."""
+        payload = await self._http.delete(f"/moments/{moment_id}")
+        return dict(payload or {})
+
     async def add_comment(
         self,
         moment_id: str,
@@ -109,6 +114,11 @@ class DiscoveryService:
             f"/moments/{moment_id}/comments",
             json=body,
         )
+        return dict(payload or {})
+
+    async def delete_comment(self, moment_id: str, comment_id: str) -> dict[str, Any]:
+        """Delete one moment comment when permitted."""
+        payload = await self._http.delete(f"/moments/{moment_id}/comments/{comment_id}")
         return dict(payload or {})
 
 

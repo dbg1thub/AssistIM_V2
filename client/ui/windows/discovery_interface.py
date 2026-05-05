@@ -33,6 +33,7 @@ from qfluentwidgets import (
     InfoBar,
     isDarkTheme,
     LineEdit,
+    MessageBoxBase,
     PrimaryPushButton,
     PushButton,
     ScrollArea,
@@ -108,6 +109,47 @@ def _apply_themed_dialog_surface(dialog: QDialog, object_name: str, *, radius: i
     palette.setColor(QPalette.ColorRole.Window, background)
     palette.setColor(QPalette.ColorRole.Base, background)
     dialog.setPalette(palette)
+
+
+class DeleteMomentConfirmDialog(MessageBoxBase):
+    """Ask before deleting one moment."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent=parent)
+        title = SubtitleLabel(tr("discovery.delete_moment.title", "Delete Moment"), self.widget)
+        content = BodyLabel(
+            tr(
+                "discovery.delete_moment.confirm",
+                "Delete this moment? Comments and likes on it will also be removed.",
+            ),
+            self.widget,
+        )
+        content.setWordWrap(True)
+        self.viewLayout.addWidget(title)
+        self.viewLayout.addWidget(content)
+        self.viewLayout.addStretch(1)
+        self.yesButton.setText(tr("common.delete", "Delete"))
+        self.cancelButton.setText(tr("common.cancel", "Cancel"))
+        self.widget.setMinimumWidth(380)
+
+
+class DeleteCommentConfirmDialog(MessageBoxBase):
+    """Ask before deleting one moment comment."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent=parent)
+        title = SubtitleLabel(tr("discovery.delete_comment.title", "Delete Comment"), self.widget)
+        content = BodyLabel(
+            tr("discovery.delete_comment.confirm", "Delete this comment?"),
+            self.widget,
+        )
+        content.setWordWrap(True)
+        self.viewLayout.addWidget(title)
+        self.viewLayout.addWidget(content)
+        self.viewLayout.addStretch(1)
+        self.yesButton.setText(tr("common.delete", "Delete"))
+        self.cancelButton.setText(tr("common.cancel", "Cancel"))
+        self.widget.setMinimumWidth(360)
 
 
 def _clear_layout(layout: QVBoxLayout | QHBoxLayout | QGridLayout) -> None:
@@ -373,6 +415,8 @@ class MomentMediaGrid(QWidget):
 class MomentCommentItem(QWidget):
     """A single comment row."""
 
+    delete_requested = Signal(str)
+
     def __init__(self, comment: MomentCommentRecord, parent=None):
         super().__init__(parent)
         self.comment = comment
@@ -385,10 +429,22 @@ class MomentCommentItem(QWidget):
         self.text_label.setTextFormat(Qt.TextFormat.RichText)
         self._apply_comment_text()
 
+        header_row = QHBoxLayout()
+        header_row.setContentsMargins(0, 0, 0, 0)
+        header_row.setSpacing(8)
+
+        self.delete_button = PushButton(tr("common.delete", "Delete"), self)
+        self.delete_button.setObjectName("momentCommentDeleteButton")
+        self.delete_button.setFixedHeight(24)
+        self.delete_button.setVisible(comment.can_delete)
+        self.delete_button.clicked.connect(self._request_delete)
+
         time_label = CaptionLabel(format_relative_time(comment.created_at), self)
         time_label.setObjectName("momentCommentTimeLabel")
 
-        layout.addWidget(self.text_label)
+        header_row.addWidget(self.text_label, 1)
+        header_row.addWidget(self.delete_button, 0, Qt.AlignmentFlag.AlignTop)
+        layout.addLayout(header_row)
         if comment.image is not None:
             self.image_grid = MomentMediaGrid([comment.image], self)
             self.image_grid.image_requested.connect(self._open_image)
@@ -424,12 +480,16 @@ class MomentCommentItem(QWidget):
         viewer.raise_()
         viewer.activateWindow()
 
+    def _request_delete(self) -> None:
+        self.delete_requested.emit(self.comment.id)
+
 
 class AnimatedCommentSection(QWidget):
     """Comment block with ExpandSettingCard-like expansion animation."""
 
     comment_submitted = Signal(str, object)
     detail_requested = Signal(str)
+    comment_delete_requested = Signal(str, str)
 
     COLLAPSED_COUNT = 2
 
@@ -540,6 +600,14 @@ class AnimatedCommentSection(QWidget):
         self._comments.append(comment)
         self._rebuild()
 
+    def remove_comment(self, comment_id: str) -> None:
+        """Remove one comment and keep the current expansion state."""
+        normalized_id = str(comment_id or "").strip()
+        if not normalized_id:
+            return
+        self._comments = [comment for comment in self._comments if comment.id != normalized_id]
+        self._rebuild()
+
     def open_editor(self) -> None:
         """Reveal the inline editor and focus it."""
         self._editor_visible = True
@@ -555,10 +623,10 @@ class AnimatedCommentSection(QWidget):
         extra = self._comments[self.COLLAPSED_COUNT :]
 
         for comment in preview:
-            self.preview_layout.addWidget(MomentCommentItem(comment, self.preview_widget))
+            self.preview_layout.addWidget(self._create_comment_item(comment, self.preview_widget))
 
         for comment in extra:
-            self.extra_layout.addWidget(MomentCommentItem(comment, self.extra_widget))
+            self.extra_layout.addWidget(self._create_comment_item(comment, self.extra_widget))
 
         self.toggle_button.setVisible(bool(extra) or self._comments_truncated)
         self._update_toggle_text()
@@ -567,6 +635,11 @@ class AnimatedCommentSection(QWidget):
         self.extra_widget.setMaximumHeight(target_height)
         self.extra_opacity.setOpacity(1.0 if self._expanded and extra else 0.0)
         self._sync_visibility()
+
+    def _create_comment_item(self, comment: MomentCommentRecord, parent: QWidget) -> MomentCommentItem:
+        item = MomentCommentItem(comment, parent)
+        item.delete_requested.connect(lambda comment_id, moment_id=self._moment_id: self.comment_delete_requested.emit(moment_id, comment_id))
+        return item
 
     def _expanded_height(self) -> int:
         """Measure the fully expanded comment height."""
@@ -1098,6 +1171,8 @@ class MomentCard(CardWidget):
     like_requested = Signal(str, bool, int)
     comment_requested = Signal(str, str, object)
     detail_requested = Signal(str)
+    delete_requested = Signal(str)
+    comment_delete_requested = Signal(str, str)
 
     CONTENT_PREVIEW_LENGTH = 180
 
@@ -1131,9 +1206,9 @@ class MomentCard(CardWidget):
         info_layout.addWidget(self.name_label)
         info_layout.addWidget(self.time_label)
 
-        self.more_button = TransparentToolButton(AppIcon.INFO, self)
-        self.more_button.setToolTip(tr("discovery.card.more_tooltip", "More"))
-        self.more_button.clicked.connect(self._show_more_placeholder)
+        self.more_button = TransparentToolButton(AppIcon.CANCEL_MEDIUM, self)
+        self.more_button.setToolTip(tr("discovery.card.delete_tooltip", "Delete moment"))
+        self.more_button.clicked.connect(self._request_delete)
         _apply_safe_button_font(self.more_button)
 
         header_row.addWidget(self.avatar, 0, Qt.AlignmentFlag.AlignTop)
@@ -1182,6 +1257,7 @@ class MomentCard(CardWidget):
         self.comment_section = AnimatedCommentSection([], self, moment_id=self.moment.id, comments_truncated=self.moment.comments_truncated)
         self.comment_section.comment_submitted.connect(self._submit_comment)
         self.comment_section.detail_requested.connect(self._request_detail)
+        self.comment_section.comment_delete_requested.connect(self._request_comment_delete)
         layout.addWidget(self.comment_section)
 
     def _apply_moment(self) -> None:
@@ -1237,6 +1313,7 @@ class MomentCard(CardWidget):
         self.comment_button.setText(
             f"{comment_prefix} {self.moment.comment_count}" if self.moment.comment_count else comment_prefix
         )
+        self.more_button.setVisible(self.moment.is_self)
 
         if self.moment.like_count or self.moment.comment_count:
             self.stats_label.setText(
@@ -1261,6 +1338,19 @@ class MomentCard(CardWidget):
         self.moment.comments.append(comment)
         self.moment.comment_count = max(self.moment.comment_count + 1, len(self.moment.comments))
         self.comment_section.append_comment(comment)
+        self._refresh_actions()
+
+    def remove_comment(self, comment_id: str) -> None:
+        """Remove one comment from the card."""
+        normalized_id = str(comment_id or "").strip()
+        if not normalized_id:
+            return
+        previous_count = len(self.moment.comments)
+        self.moment.comments = [comment for comment in self.moment.comments if comment.id != normalized_id]
+        if len(self.moment.comments) == previous_count:
+            return
+        self.moment.comment_count = max(0, self.moment.comment_count - 1, len(self.moment.comments))
+        self.comment_section.remove_comment(normalized_id)
         self._refresh_actions()
 
     def apply_detail(self, moment: MomentRecord) -> None:
@@ -1295,13 +1385,11 @@ class MomentCard(CardWidget):
     def _request_detail(self, moment_id: str) -> None:
         self.detail_requested.emit(moment_id)
 
-    def _show_more_placeholder(self) -> None:
-        InfoBar.info(
-            tr("discovery.feed.title", "Moments"),
-            tr("discovery.card.more_placeholder", "More actions are still a placeholder for now."),
-            parent=self.window(),
-            duration=1800,
-        )
+    def _request_delete(self) -> None:
+        self.delete_requested.emit(self.moment.id)
+
+    def _request_comment_delete(self, moment_id: str, comment_id: str) -> None:
+        self.comment_delete_requested.emit(moment_id, comment_id)
 
     def _open_image(self, image_path: str) -> None:
         viewer = ImageViewer(image_path, self.window())
@@ -1510,6 +1598,8 @@ class DiscoveryInterface(QWidget):
             card.like_requested.connect(self._request_like_toggle)
             card.comment_requested.connect(self._request_comment_create)
             card.detail_requested.connect(self._request_moment_detail)
+            card.delete_requested.connect(self._request_moment_delete)
+            card.comment_delete_requested.connect(self._request_comment_delete)
             self.feed_layout.addWidget(card)
             self._cards[moment.id] = card
 
@@ -1764,6 +1854,107 @@ class DiscoveryInterface(QWidget):
             return
         moment.comments.append(comment)
         moment.comment_count = max(moment.comment_count + 1, len(moment.comments))
+
+    def _request_moment_delete(self, moment_id: str) -> None:
+        moment = next((item for item in self._moments if item.id == moment_id), None)
+        if moment is None or not moment.is_self:
+            return
+        dialog = DeleteMomentConfirmDialog(self.window())
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        self._schedule_keyed_ui_task(
+            ("moment_delete", moment_id),
+            self._request_moment_delete_async(moment_id),
+            f"delete moment {moment_id}",
+        )
+
+    async def _request_moment_delete_async(self, moment_id: str) -> None:
+        try:
+            await self._controller.delete_moment(moment_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            InfoBar.error(
+                tr("discovery.delete_moment.title", "Delete Moment"),
+                tr("discovery.delete_moment.failed", "Delete failed. Please try again later."),
+                parent=self.window(),
+                duration=2200,
+            )
+            raise
+        self._apply_local_moment_delete(moment_id)
+        InfoBar.success(
+            tr("discovery.delete_moment.title", "Delete Moment"),
+            tr("discovery.delete_moment.success", "Moment deleted."),
+            parent=self.window(),
+            duration=1600,
+        )
+
+    def _apply_local_moment_delete(self, moment_id: str) -> None:
+        """Remove one deleted moment from the feed backing records."""
+        normalized_id = str(moment_id or "").strip()
+        self._moments = [moment for moment in self._moments if moment.id != normalized_id]
+        self.summary_label.setText(
+            tr(
+                "discovery.feed.summary",
+                "{count} moments total. Click comment to expand the inline editor.",
+                count=len(self._moments),
+            )
+        )
+        self._rebuild_feed()
+
+    def _request_comment_delete(self, moment_id: str, comment_id: str) -> None:
+        comment = self._find_comment(moment_id, comment_id)
+        if comment is None or not comment.can_delete:
+            return
+        dialog = DeleteCommentConfirmDialog(self.window())
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        self._schedule_keyed_ui_task(
+            ("moment_comment_delete", comment_id),
+            self._request_comment_delete_async(moment_id, comment_id),
+            f"delete moment comment {comment_id}",
+        )
+
+    async def _request_comment_delete_async(self, moment_id: str, comment_id: str) -> None:
+        try:
+            await self._controller.delete_comment(moment_id, comment_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            InfoBar.error(
+                tr("discovery.delete_comment.title", "Delete Comment"),
+                tr("discovery.delete_comment.failed", "Delete failed. Please try again later."),
+                parent=self.window(),
+                duration=2200,
+            )
+            raise
+        self._apply_local_comment_delete(moment_id, comment_id)
+        InfoBar.success(
+            tr("discovery.delete_comment.title", "Delete Comment"),
+            tr("discovery.delete_comment.success", "Comment deleted."),
+            parent=self.window(),
+            duration=1400,
+        )
+
+    def _apply_local_comment_delete(self, moment_id: str, comment_id: str) -> None:
+        """Remove one deleted comment from the feed backing records."""
+        card = self._cards.get(moment_id)
+        if card is not None:
+            card.remove_comment(comment_id)
+            return
+        moment = next((item for item in self._moments if item.id == moment_id), None)
+        if moment is None:
+            return
+        previous_count = len(moment.comments)
+        moment.comments = [comment for comment in moment.comments if comment.id != comment_id]
+        if len(moment.comments) != previous_count:
+            moment.comment_count = max(0, moment.comment_count - 1, len(moment.comments))
+
+    def _find_comment(self, moment_id: str, comment_id: str) -> MomentCommentRecord | None:
+        moment = next((item for item in self._moments if item.id == moment_id), None)
+        if moment is None:
+            return None
+        return next((comment for comment in moment.comments if comment.id == comment_id), None)
 
     async def upload_moment_media(self, file_paths: list[str]) -> list[dict[str, object]]:
         """Upload selected moment media files and return normalized client-side payloads."""

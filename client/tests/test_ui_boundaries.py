@@ -80,6 +80,30 @@ def test_moment_ui_mutations_keep_backing_records_in_sync() -> None:
     assert 'self._sync_moment_comment(moment_id, comment)' in contact_interface
 
 
+def test_discovery_ui_wires_moment_delete_actions() -> None:
+    discovery_interface = Path('client/ui/windows/discovery_interface.py').read_text(encoding='utf-8')
+    contact_interface = Path('client/ui/windows/contact_interface.py').read_text(encoding='utf-8')
+
+    assert 'class DeleteMomentConfirmDialog(MessageBoxBase):' in discovery_interface
+    assert 'class DeleteCommentConfirmDialog(MessageBoxBase):' in discovery_interface
+    assert 'delete_requested = Signal(str)' in discovery_interface
+    assert 'comment_delete_requested = Signal(str, str)' in discovery_interface
+    assert 'self.delete_requested.emit(self.moment.id)' in discovery_interface
+    assert 'self.comment_delete_requested.emit(moment_id, comment_id)' in discovery_interface
+    assert 'card.delete_requested.connect(self._request_moment_delete)' in discovery_interface
+    assert 'card.comment_delete_requested.connect(self._request_comment_delete)' in discovery_interface
+    assert 'await self._controller.delete_moment(moment_id)' in discovery_interface
+    assert 'await self._controller.delete_comment(moment_id, comment_id)' in discovery_interface
+    assert 'self._apply_local_moment_delete(moment_id)' in discovery_interface
+    assert 'self._apply_local_comment_delete(moment_id, comment_id)' in discovery_interface
+    assert 'moment_delete_requested = Signal(str)' in contact_interface
+    assert 'comment_delete_requested = Signal(str, str)' in contact_interface
+    assert 'card.delete_requested.connect(self.moment_delete_requested.emit)' in contact_interface
+    assert 'card.comment_delete_requested.connect(self.comment_delete_requested.emit)' in contact_interface
+    assert 'self.detail_panel.moments_panel.moment_delete_requested.connect(self._request_detail_moment_delete)' in contact_interface
+    assert 'self.detail_panel.moments_panel.comment_delete_requested.connect(self._request_detail_comment_delete)' in contact_interface
+
+
 def test_moment_realtime_refresh_is_wired_to_visible_pages() -> None:
     discovery_interface = Path('client/ui/windows/discovery_interface.py').read_text(encoding='utf-8')
     contact_interface = Path('client/ui/windows/contact_interface.py').read_text(encoding='utf-8')

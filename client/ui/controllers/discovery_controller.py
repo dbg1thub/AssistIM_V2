@@ -51,6 +51,7 @@ class MomentCommentRecord:
     avatar: str = ""
     gender: str = ""
     image: MomentMediaRecord | None = None
+    can_delete: bool = False
 
     @property
     def display_name(self) -> str:
@@ -80,6 +81,7 @@ class MomentRecord:
     comment_count: int = 0
     is_liked: bool = False
     comments_truncated: bool = False
+    is_self: bool = False
     extra: dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -272,6 +274,22 @@ class DiscoveryController:
         self._ensure_runtime_user_id(owner_user_id)
         return self._normalize_comment(payload or {}, moment_id=moment_id)
 
+    async def delete_moment(self, moment_id: str) -> dict[str, Any]:
+        """Delete one moment owned by the current user."""
+        owner_user_id = self._capture_runtime_user_id()
+        self._sync_cache_scope(owner_user_id)
+        payload = await self._discovery_service.delete_moment(moment_id)
+        self._ensure_runtime_user_id(owner_user_id)
+        return dict(payload or {})
+
+    async def delete_comment(self, moment_id: str, comment_id: str) -> dict[str, Any]:
+        """Delete one moment comment when permitted."""
+        owner_user_id = self._capture_runtime_user_id()
+        self._sync_cache_scope(owner_user_id)
+        payload = await self._discovery_service.delete_comment(moment_id, comment_id)
+        self._ensure_runtime_user_id(owner_user_id)
+        return dict(payload or {})
+
     async def _ensure_user_loaded(self, user_id: str, *, owner_user_id: str) -> None:
         """Load a user profile into cache if absent."""
         if not user_id or user_id in self._user_cache:
@@ -304,7 +322,9 @@ class DiscoveryController:
         user_id = str(data.get("user_id", "") or author.get("id", "") or "")
         cached_user = self._user_cache.get(user_id, {})
         current_user = self._auth.current_user or {}
-        if user_id and user_id == str(current_user.get("id", "") or ""):
+        current_user_id = str(current_user.get("id", "") or "")
+        is_self = bool(user_id and user_id == current_user_id)
+        if is_self:
             cached_user = {
                 **cached_user,
                 "username": current_user.get("username", cached_user.get("username", "")),
@@ -316,7 +336,7 @@ class DiscoveryController:
         moment_id = str(data.get("id", "") or "")
         comments_payload = list(data.get("comments") or [])
         normalized_comments = [
-            self._normalize_comment(comment, moment_id=moment_id)
+            self._normalize_comment(comment, moment_id=moment_id, moment_owner_user_id=user_id)
             for comment in comments_payload
         ]
 
@@ -345,18 +365,26 @@ class DiscoveryController:
             comment_count=max(int(data.get("comment_count", len(normalized_comments)) or 0), len(normalized_comments)),
             is_liked=is_liked,
             comments_truncated=bool(data.get("comments_truncated", False)),
+            is_self=is_self,
             extra=data,
         )
 
-    def _normalize_comment(self, payload: dict[str, Any], moment_id: str = "") -> MomentCommentRecord:
+    def _normalize_comment(
+        self,
+        payload: dict[str, Any],
+        moment_id: str = "",
+        *,
+        moment_owner_user_id: str = "",
+    ) -> MomentCommentRecord:
         """Convert backend payload to comment UI model."""
         data = dict(payload or {})
         author = dict(data.get("author") or {})
         user_id = str(data.get("user_id", "") or author.get("id", "") or "")
         cached_user = self._user_cache.get(user_id, {})
         current_user = self._auth.current_user or {}
+        current_user_id = str(current_user.get("id", "") or "")
 
-        if user_id and user_id == str(current_user.get("id", "") or ""):
+        if user_id and user_id == current_user_id:
             cached_user = {
                 **cached_user,
                 "username": current_user.get("username", cached_user.get("username", "")),
@@ -376,6 +404,14 @@ class DiscoveryController:
             avatar=str(author.get("avatar", "") or cached_user.get("avatar", "") or ""),
             gender=str(author.get("gender", "") or cached_user.get("gender", "") or ""),
             image=self._normalize_media_item(data.get("image")),
+            can_delete=bool(
+                current_user_id
+                and current_user_id
+                in {
+                    user_id,
+                    str(moment_owner_user_id or ""),
+                }
+            ),
         )
 
     def _normalize_privacy_settings(self, payload: dict[str, Any]) -> MomentPrivacySettings:

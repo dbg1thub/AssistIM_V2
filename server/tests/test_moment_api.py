@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient
 from app.api.v1 import moments as moment_routes
 from app.core.database import SessionLocal
 from app.core.errors import ErrorCode
-from app.models.moment import Moment
+from app.models.moment import Moment, MomentComment, MomentLike
 from app.schemas.moment import MAX_MOMENT_COMMENT_LENGTH, MAX_MOMENT_CONTENT_LENGTH, MAX_MOMENT_MEDIA_ITEMS
 
 
@@ -155,6 +155,125 @@ def test_moment_mutations_broadcast_realtime_refresh_notifications(
     assert comment_payload["data"]["actor_user_id"] == bob["user"]["id"]
     assert comment_payload["data"]["owner_user_id"] == alice["user"]["id"]
     assert comment_payload["data"]["changed"] is True
+
+
+def test_moment_owner_can_delete_moment_and_cascade_interactions(
+    client: TestClient,
+    user_factory,
+    auth_header,
+) -> None:
+    alice = user_factory("moment_delete_alice", "Moment Delete Alice")
+    bob = user_factory("moment_delete_bob", "Moment Delete Bob")
+    _make_friends(client, auth_header, alice, bob)
+    alice_headers = auth_header(alice["access_token"])
+    bob_headers = auth_header(bob["access_token"])
+
+    create_response = client.post(
+        "/api/v1/moments",
+        json={"content": "delete me"},
+        headers=alice_headers,
+    )
+    assert create_response.status_code == 200
+    moment_id = create_response.json()["data"]["id"]
+
+    assert client.post(f"/api/v1/moments/{moment_id}/likes", headers=bob_headers).status_code == 200
+    comment_response = client.post(
+        f"/api/v1/moments/{moment_id}/comments",
+        json={"content": "delete cascade"},
+        headers=bob_headers,
+    )
+    assert comment_response.status_code == 200
+    comment_id = comment_response.json()["data"]["id"]
+
+    forbidden_delete = client.delete(f"/api/v1/moments/{moment_id}", headers=bob_headers)
+    assert forbidden_delete.status_code == 403
+    assert forbidden_delete.json()["code"] == ErrorCode.FORBIDDEN
+
+    delete_response = client.delete(f"/api/v1/moments/{moment_id}", headers=alice_headers)
+    assert delete_response.status_code == 200
+    assert delete_response.json()["data"] == {
+        "deleted": True,
+        "moment_id": moment_id,
+        "owner_user_id": alice["user"]["id"],
+    }
+
+    detail_response = client.get(f"/api/v1/moments/{moment_id}", headers=alice_headers)
+    assert detail_response.status_code == 404
+    assert detail_response.json()["code"] == ErrorCode.RESOURCE_NOT_FOUND
+
+    db = SessionLocal()
+    try:
+        assert db.get(Moment, moment_id) is None
+        assert db.get(MomentLike, {"moment_id": moment_id, "user_id": bob["user"]["id"]}) is None
+        assert db.get(MomentComment, comment_id) is None
+    finally:
+        db.close()
+
+
+def test_moment_comment_delete_permissions_update_detail_counts(
+    client: TestClient,
+    user_factory,
+    auth_header,
+) -> None:
+    alice = user_factory("moment_comment_delete_alice", "Moment Comment Delete Alice")
+    bob = user_factory("moment_comment_delete_bob", "Moment Comment Delete Bob")
+    charlie = user_factory("moment_comment_delete_charlie", "Moment Comment Delete Charlie")
+    _make_friends(client, auth_header, alice, bob)
+    _make_friends(client, auth_header, alice, charlie)
+    alice_headers = auth_header(alice["access_token"])
+    bob_headers = auth_header(bob["access_token"])
+    charlie_headers = auth_header(charlie["access_token"])
+
+    create_response = client.post(
+        "/api/v1/moments",
+        json={"content": "comment delete"},
+        headers=alice_headers,
+    )
+    assert create_response.status_code == 200
+    moment_id = create_response.json()["data"]["id"]
+
+    first_comment = client.post(
+        f"/api/v1/moments/{moment_id}/comments",
+        json={"content": "bob comment"},
+        headers=bob_headers,
+    ).json()["data"]
+    second_comment = client.post(
+        f"/api/v1/moments/{moment_id}/comments",
+        json={"content": "bob second comment"},
+        headers=bob_headers,
+    ).json()["data"]
+
+    forbidden_delete = client.delete(
+        f"/api/v1/moments/{moment_id}/comments/{first_comment['id']}",
+        headers=charlie_headers,
+    )
+    assert forbidden_delete.status_code == 403
+    assert forbidden_delete.json()["code"] == ErrorCode.FORBIDDEN
+
+    own_delete = client.delete(
+        f"/api/v1/moments/{moment_id}/comments/{first_comment['id']}",
+        headers=bob_headers,
+    )
+    assert own_delete.status_code == 200
+    assert own_delete.json()["data"] == {
+        "deleted": True,
+        "moment_id": moment_id,
+        "comment_id": first_comment["id"],
+        "owner_user_id": alice["user"]["id"],
+    }
+
+    owner_delete = client.delete(
+        f"/api/v1/moments/{moment_id}/comments/{second_comment['id']}",
+        headers=alice_headers,
+    )
+    assert owner_delete.status_code == 200
+    assert owner_delete.json()["data"]["comment_id"] == second_comment["id"]
+
+    detail_response = client.get(f"/api/v1/moments/{moment_id}", headers=alice_headers)
+    assert detail_response.status_code == 200
+    detail = detail_response.json()["data"]
+    assert detail["comments"] == []
+    assert detail["comment_count"] == 0
 
 
 def test_moment_and_comment_author_payloads_are_canonical(

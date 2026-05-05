@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 
-from sqlalchemy import desc, func, select
+from sqlalchemy import delete, desc, func, select
 from sqlalchemy.orm import Session
 
 from app.models.moment import Moment, MomentComment, MomentLike, MomentPrivacySetting
@@ -155,6 +155,9 @@ class MomentRepository:
     def get_by_id(self, moment_id: str) -> Moment | None:
         return self.db.get(Moment, moment_id)
 
+    def get_comment_by_id(self, comment_id: str) -> MomentComment | None:
+        return self.db.get(MomentComment, comment_id)
+
     def like(self, moment_id: str, user_id: str) -> bool:
         existing = self.db.get(MomentLike, {"moment_id": moment_id, "user_id": user_id})
         if existing is not None:
@@ -177,6 +180,17 @@ class MomentRepository:
         self.db.commit()
         self.db.refresh(comment)
         return comment
+
+    def delete_moment(self, moment: Moment) -> None:
+        moment_id = str(moment.id or "")
+        self.db.execute(delete(MomentLike).where(MomentLike.moment_id == moment_id))
+        self.db.execute(delete(MomentComment).where(MomentComment.moment_id == moment_id))
+        self.db.delete(moment)
+        self.db.commit()
+
+    def delete_comment(self, comment: MomentComment) -> None:
+        self.db.delete(comment)
+        self.db.commit()
 
     def get_privacy_setting(self, user_id: str) -> MomentPrivacySetting | None:
         stmt = select(MomentPrivacySetting).where(MomentPrivacySetting.user_id == user_id)

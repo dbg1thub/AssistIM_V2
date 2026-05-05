@@ -1032,6 +1032,8 @@ class FakeDiscoveryService:
         self.like_calls: list[str] = []
         self.unlike_calls: list[str] = []
         self.comment_calls: list[tuple[str, str, dict | None]] = []
+        self.delete_moment_calls: list[str] = []
+        self.delete_comment_calls: list[tuple[str, str]] = []
         self.moments_payload: list[dict] = []
         self.moment_detail_payloads: dict[str, dict] = {}
         self.created_moment_payload: dict = {}
@@ -1101,6 +1103,14 @@ class FakeDiscoveryService:
     async def add_comment(self, moment_id: str, content: str, *, image: dict | None = None) -> dict:
         self.comment_calls.append((moment_id, content, dict(image) if image else None))
         return dict(self.comment_payload or {'id': 'comment-1', 'moment_id': moment_id, 'content': content, 'image': image})
+
+    async def delete_moment(self, moment_id: str) -> dict:
+        self.delete_moment_calls.append(moment_id)
+        return {'deleted': True, 'moment_id': moment_id}
+
+    async def delete_comment(self, moment_id: str, comment_id: str) -> dict:
+        self.delete_comment_calls.append((moment_id, comment_id))
+        return {'deleted': True, 'moment_id': moment_id, 'comment_id': comment_id}
 
 
 class FakeSearchDatabase:
@@ -3054,11 +3064,14 @@ def test_discovery_controller_mutations_use_discovery_service(monkeypatch) -> No
         liked = await controller.set_liked('moment-2', True, like_count=3)
         unliked = await controller.set_liked('moment-2', False, like_count=2)
         comment = await controller.add_comment('moment-2', 'thanks', image={'type': 'image', 'url': '/uploads/comment-photo.png'})
+        await controller.delete_comment('moment-2', 'comment-2')
+        await controller.delete_moment('moment-2')
 
         assert fake_discovery_service.create_moment_calls == [
             ('new post', [{'type': 'image', 'url': '/uploads/new-photo.png'}], 'exclude', ['user-2'])
         ]
         assert moment.id == 'moment-2'
+        assert moment.is_self is True
         assert moment.visibility_scope == 'include'
         assert moment.visibility_user_ids == ['user-2']
         assert moment.images == ['/uploads/new-photo.png']
@@ -3070,8 +3083,11 @@ def test_discovery_controller_mutations_use_discovery_service(monkeypatch) -> No
             ('moment-2', 'thanks', {'type': 'image', 'url': '/uploads/comment-photo.png'})
         ]
         assert comment.content == 'thanks'
+        assert comment.can_delete is True
         assert comment.image is not None
         assert comment.image.url == '/uploads/comment-photo.png'
+        assert fake_discovery_service.delete_comment_calls == [('moment-2', 'comment-2')]
+        assert fake_discovery_service.delete_moment_calls == ['moment-2']
 
     asyncio.run(scenario())
 
