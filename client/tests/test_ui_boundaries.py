@@ -39,6 +39,20 @@ def test_discovery_ui_wires_moment_media_and_comment_image_boundaries() -> None:
     assert 'def _sync_comment_image_preview(self) -> None:' in discovery_interface
 
 
+def test_discovery_video_tiles_use_existing_thumbnail_cache() -> None:
+    discovery_interface = Path('client/ui/windows/discovery_interface.py').read_text(encoding='utf-8')
+
+    assert 'from client.core.video_thumbnail_cache import get_video_thumbnail_cache' in discovery_interface
+    assert 'self._video_thumbnail_cache = get_video_thumbnail_cache()' in discovery_interface
+    assert 'self._video_thumbnail_cache.signals.thumbnail_ready.connect(self._on_video_thumbnail_ready)' in discovery_interface
+    assert 'self._video_labels_by_source: dict[str, QLabel] = {}' in discovery_interface
+    assert 'def _apply_video_placeholder(self, label: QLabel, width: int, height: int) -> None:' in discovery_interface
+    assert 'def _apply_video_thumbnail(self, label: QLabel, pixmap: QPixmap, width: int, height: int) -> None:' in discovery_interface
+    assert 'def _on_video_thumbnail_ready(self, source: str) -> None:' in discovery_interface
+    assert 'self._video_thumbnail_cache.request_thumbnail(source)' in discovery_interface
+    assert 'if source and Path(source).exists():' in discovery_interface
+
+
 def test_discovery_ui_exposes_moment_privacy_entry_points() -> None:
     discovery_interface = Path('client/ui/windows/discovery_interface.py').read_text(encoding='utf-8')
 

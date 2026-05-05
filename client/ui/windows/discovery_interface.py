@@ -51,6 +51,7 @@ from client.core.config_backend import get_config
 from client.core.exceptions import APIError, NetworkError
 from client.core.i18n import format_relative_time, tr
 from client.core.logging import setup_logging
+from client.core.video_thumbnail_cache import get_video_thumbnail_cache
 from client.events.event_bus import get_event_bus
 from client.events.moment_events import MomentEvent
 from client.services.file_service import get_file_service
@@ -288,6 +289,9 @@ class MomentMediaGrid(QWidget):
         self._network_manager = QNetworkAccessManager(self)
         self._network_manager.finished.connect(self._on_image_loaded)
         self._pending_replies: dict[QNetworkReply, QLabel] = {}
+        self._video_thumbnail_cache = get_video_thumbnail_cache()
+        self._video_thumbnail_cache.signals.thumbnail_ready.connect(self._on_video_thumbnail_ready)
+        self._video_labels_by_source: dict[str, QLabel] = {}
         self._layout = QGridLayout(self)
         self._layout.setContentsMargins(0, 0, 0, 0)
         self._layout.setHorizontalSpacing(8)
@@ -303,6 +307,7 @@ class MomentMediaGrid(QWidget):
                 pass
             reply.deleteLater()
         self._pending_replies.clear()
+        self._video_labels_by_source.clear()
         _clear_layout(self._layout)
         self._media = list(media[:9])
         self._build()
@@ -337,8 +342,18 @@ class MomentMediaGrid(QWidget):
 
     def _load_media(self, label: QLabel, media: MomentMediaRecord, width: int, height: int) -> None:
         if media.is_video:
-            label.setText(tr("discovery.video.placeholder", "Video"))
             label.setProperty("momentMediaKind", "video")
+            source = self._resolve_media_source(media)
+            if source:
+                self._video_labels_by_source[source] = label
+                label.setProperty("momentVideoSource", source)
+                thumbnail = self._video_thumbnail_cache.get_thumbnail(source)
+                if thumbnail is not None:
+                    self._apply_video_thumbnail(label, thumbnail, width, height)
+                    return
+            self._apply_video_placeholder(label, width, height)
+            if source and Path(source).exists():
+                self._video_thumbnail_cache.request_thumbnail(source)
             return
 
         source = self._resolve_media_source(media)
@@ -375,6 +390,18 @@ class MomentMediaGrid(QWidget):
         finally:
             reply.deleteLater()
 
+    def _on_video_thumbnail_ready(self, source: str) -> None:
+        label = self._video_labels_by_source.get(source)
+        if label is None:
+            return
+        thumbnail = self._video_thumbnail_cache.get_thumbnail(source)
+        if thumbnail is None:
+            return
+        try:
+            self._apply_video_thumbnail(label, thumbnail, label.width(), label.height())
+        except RuntimeError:
+            self._video_labels_by_source.pop(source, None)
+
     @staticmethod
     def _apply_scaled_pixmap(label: QLabel, pixmap: QPixmap, width: int, height: int) -> None:
         scaled = pixmap.scaled(
@@ -385,6 +412,75 @@ class MomentMediaGrid(QWidget):
         )
         label.setPixmap(scaled)
         label.setText("")
+
+    def _apply_video_placeholder(self, label: QLabel, width: int, height: int) -> None:
+        pixmap = QPixmap(width, height)
+        pixmap.fill(QColor(37, 43, 51) if isDarkTheme() else QColor(224, 232, 240))
+        painter = QPainter(pixmap)
+        try:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            self._draw_video_overlay(painter, width, height, show_label=True)
+        finally:
+            painter.end()
+        label.setPixmap(pixmap)
+        label.setText("")
+
+    def _apply_video_thumbnail(self, label: QLabel, pixmap: QPixmap, width: int, height: int) -> None:
+        target = QPixmap(width, height)
+        target.fill(Qt.GlobalColor.transparent)
+        scaled = pixmap.scaled(
+            width,
+            height,
+            Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        painter = QPainter(target)
+        try:
+            painter.drawPixmap((width - scaled.width()) // 2, (height - scaled.height()) // 2, scaled)
+            painter.fillRect(0, 0, width, height, QColor(0, 0, 0, 30))
+            self._draw_video_overlay(painter, width, height, show_label=False)
+        finally:
+            painter.end()
+        label.setPixmap(target)
+        label.setText("")
+
+    @staticmethod
+    def _draw_video_overlay(painter: QPainter, width: int, height: int, *, show_label: bool) -> None:
+        circle_size = max(28, min(54, width // 3, height // 3))
+        circle_x = (width - circle_size) / 2
+        circle_y = (height - circle_size) / 2
+        circle_path = QPainterPath()
+        circle_path.addEllipse(circle_x, circle_y, circle_size, circle_size)
+        painter.fillPath(circle_path, QColor(0, 0, 0, 145))
+
+        triangle_width = circle_size * 0.34
+        triangle_height = circle_size * 0.42
+        center_x = width / 2 + circle_size * 0.04
+        center_y = height / 2
+        triangle = QPainterPath()
+        triangle.moveTo(center_x - triangle_width / 2, center_y - triangle_height / 2)
+        triangle.lineTo(center_x - triangle_width / 2, center_y + triangle_height / 2)
+        triangle.lineTo(center_x + triangle_width / 2, center_y)
+        triangle.closeSubpath()
+        painter.fillPath(triangle, QColor(255, 255, 255, 235))
+
+        if not show_label:
+            return
+
+        font = painter.font()
+        font.setPixelSize(max(11, min(15, height // 7)))
+        font.setBold(True)
+        painter.setFont(font)
+        painter.setPen(QColor(255, 255, 255, 230) if isDarkTheme() else QColor(46, 58, 74))
+        text_top = int(circle_y + circle_size + 8)
+        painter.drawText(
+            0,
+            text_top,
+            width,
+            max(18, height - text_top),
+            int(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop),
+            tr("discovery.video.placeholder", "Video"),
+        )
 
     def _emit_media_request(self, media: object) -> None:
         if not isinstance(media, MomentMediaRecord):
