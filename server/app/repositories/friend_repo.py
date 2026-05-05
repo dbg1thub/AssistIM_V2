@@ -95,3 +95,29 @@ class FriendRepository:
         if commit:
             self.db.commit()
         return removed
+
+    def delete_requests_between(
+        self,
+        user_id: str,
+        other_user_id: str,
+        *,
+        status: str | None = None,
+        commit: bool = True,
+    ) -> int:
+        stmt = select(FriendRequest).where(
+            or_(
+                and_(FriendRequest.sender_id == user_id, FriendRequest.receiver_id == other_user_id),
+                and_(FriendRequest.sender_id == other_user_id, FriendRequest.receiver_id == user_id),
+            )
+        )
+        if status is not None:
+            stmt = stmt.where(FriendRequest.status == status)
+
+        removed = 0
+        for request in self.db.execute(stmt).scalars().all():
+            self.db.delete(request)
+            removed += 1
+        self.db.flush()
+        if commit:
+            self.db.commit()
+        return removed

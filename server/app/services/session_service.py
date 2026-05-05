@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 
 from app.core.errors import AppError, ErrorCode
 from app.models.user import User
+from app.repositories.block_repo import BlockRepository
 from app.repositories.group_repo import GroupRepository
 from app.repositories.message_repo import MessageRepository
 from app.repositories.session_repo import SessionRepository
@@ -48,6 +49,7 @@ class SessionService:
         self.sessions = SessionRepository(db)
         self.messages = MessageRepository(db)
         self.users = UserRepository(db)
+        self.blocks = BlockRepository(db)
         self.groups = GroupRepository(db)
         self.avatars = AvatarService(db)
 
@@ -84,7 +86,7 @@ class SessionService:
         for item in session_items:
             session_members = members_by_session.get(item.id, [])
             member_ids = [str(member.user_id or "") for member in session_members if str(member.user_id or "")]
-            if not self._is_visible_private_session(item, member_ids):
+            if not self._is_visible_private_session(item, member_ids, current_user.id):
                 continue
             normalized_session_type = str(getattr(item, "type", "") or "").strip().lower()
             payload.append(
@@ -113,6 +115,7 @@ class SessionService:
         encryption_mode: str = 'plain',
     ) -> dict:
         members = self._normalize_private_members(current_user, participant_ids)
+        self._ensure_private_chat_allowed(current_user.id, members[1])
         direct_key = self.sessions.build_private_direct_key(members)
         normalized_encryption_mode = (
             self.ENCRYPTION_MODE_E2EE_PRIVATE
@@ -123,7 +126,7 @@ class SessionService:
         if existing is not None:
             existing_member_ids = self.sessions.list_member_ids(existing.id)
             if (
-                not self._is_visible_private_session(existing, existing_member_ids)
+                not self._is_visible_private_session(existing, existing_member_ids, current_user.id)
                 or set(existing_member_ids) != set(members)
             ):
                 raise AppError(ErrorCode.RESOURCE_NOT_FOUND, "session not found", 404)
@@ -190,7 +193,7 @@ class SessionService:
         member_ids = self.sessions.list_member_ids(session_id)
         if current_user.id not in member_ids:
             raise AppError(ErrorCode.FORBIDDEN, "not a session member", 403)
-        if not self._is_visible_private_session(session, member_ids):
+        if not self._is_visible_private_session(session, member_ids, current_user.id):
             raise AppError(ErrorCode.RESOURCE_NOT_FOUND, "session not found", 404)
         unread_count = self._unread_counts_by_session(current_user.id).get(str(session.id or ""), 0)
         session_type = "direct" if session.type == "private" else session.type
@@ -439,15 +442,24 @@ class SessionService:
         self._require_existing_user(normalized_targets[0])
         return [current_user.id, normalized_targets[0]]
 
+    def _ensure_private_chat_allowed(self, current_user_id: str, target_user_id: str) -> None:
+        if self.blocks.has_block_relation(current_user_id, target_user_id):
+            raise AppError(ErrorCode.FORBIDDEN, "blocked relationship", 403)
+
     def _require_existing_user(self, user_id: str) -> None:
         if self.users.get_by_id(user_id) is None:
             raise AppError(ErrorCode.RESOURCE_NOT_FOUND, "user not found", 404)
 
-    @staticmethod
-    def _is_visible_private_session(session, member_ids: list[str]) -> bool:
+    def _is_visible_private_session(self, session, member_ids: list[str], current_user_id: str) -> bool:
         if session.type != "private" or session.is_ai_session:
             return True
-        return len(set(member_ids)) >= 2
+        normalized_member_ids = [str(member_id or "").strip() for member_id in member_ids if str(member_id or "").strip()]
+        if len(set(normalized_member_ids)) < 2:
+            return False
+        other_member_ids = [member_id for member_id in normalized_member_ids if member_id != current_user_id]
+        if not other_member_ids:
+            return False
+        return not any(self.blocks.has_block_relation(current_user_id, other_member_id) for other_member_id in other_member_ids)
 
     @staticmethod
     def _group_member_version(member_ids: list[str]) -> int:

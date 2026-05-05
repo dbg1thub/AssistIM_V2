@@ -37,6 +37,7 @@ RUNTIME_SCHEMA_REQUIRED_TABLES = frozenset(
         "admin_audit_logs",
         "admin_database_backups",
         "email_verification_codes",
+        "user_blocks",
         "user_devices",
         "user_prekeys",
         "user_signed_prekeys",

@@ -323,6 +323,10 @@ def test_create_app_only_mounts_canonical_chat_endpoints() -> None:
         assert app.state.settings is settings
         assert "/api/v1/auth/register" in http_paths
         assert "/api/v1/files/upload" in http_paths
+        assert ("/api/v1/blocks", "GET") in http_route_methods
+        assert ("/api/v1/blocks", "POST") in http_route_methods
+        assert ("/api/v1/blocks/{user_id}", "DELETE") in http_route_methods
+        assert ("/api/v1/blocks/check/{user_id}", "GET") in http_route_methods
         assert ("/api/v1/sessions", "GET") in http_route_methods
         assert ("/api/v1/sessions/direct", "POST") in http_route_methods
         assert ("/api/v1/sessions/group", "POST") not in http_route_methods

@@ -6,7 +6,7 @@ This backend implements the sections 1-127 from `backend_architecture.md`:
 
 - FastAPI app entrypoint
 - Core/config/database/security/logging modules
-- API routers for auth, users, friends, sessions, messages, groups, moments, files
+- API routers for auth, users, friends, blocks, sessions, messages, groups, moments, files
 - Repository and service layers
 - WebSocket endpoints for chat and presence
 - Unified API response format
@@ -291,6 +291,10 @@ Changing the profile email uses the same send endpoint with purpose
 `email_code` together with the new `email`.
 
 After registration, use the normal client flows to add friends, create direct sessions, create groups, and upload files.
+`/api/v1/blocks` manages one-way user blocks. Blocking removes the friendship,
+clears pending friend requests between the two users, hides existing private
+chat sessions from both sides, and prevents new friend requests or direct
+sessions until the block is removed.
 
 Password reset uses the same email-code delivery configuration:
 

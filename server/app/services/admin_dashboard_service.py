@@ -23,7 +23,7 @@ from app.models.group import Group, GroupMember
 from app.models.message import Message, MessageRead
 from app.models.moment import Moment, MomentComment, MomentLike
 from app.models.session import ChatSession, SessionEvent
-from app.models.user import FriendRequest, Friendship, User
+from app.models.user import FriendRequest, Friendship, User, UserBlock
 from app.realtime.call_registry import get_call_registry
 from app.websocket.manager import connection_manager
 
@@ -107,6 +107,7 @@ class AdminDashboardService:
     def _contact_snapshot(self) -> dict[str, int]:
         return {
             "friendships": self._count(Friendship),
+            "blocks": self._count(UserBlock),
             "pending_friend_requests": self._count(FriendRequest, FriendRequest.status == "pending"),
         }
 

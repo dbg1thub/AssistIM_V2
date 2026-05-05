@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from app.core.errors import AppError, ErrorCode
 from app.models.session import SessionEvent
 from app.models.user import User
+from app.repositories.block_repo import BlockRepository
 from app.repositories.device_repo import DeviceRepository
 from app.repositories.group_repo import GroupRepository
 from app.repositories.message_repo import MessageIdConflictError, MessageRepository
@@ -83,6 +84,7 @@ class MessageService:
         self.db = db
         self.messages = MessageRepository(db)
         self.sessions = SessionRepository(db)
+        self.blocks = BlockRepository(db)
         self.devices = DeviceRepository(db)
         self.groups = GroupRepository(db)
         self.users = UserRepository(db)
@@ -420,7 +422,7 @@ class MessageService:
             if not session_id or session_id not in unread_by_session:
                 continue
             member_ids = self.sessions.list_member_ids(session_id)
-            if not self._is_visible_private_session(session, member_ids):
+            if not self._is_visible_private_session(session, member_ids, current_user.id):
                 continue
             visible_counts.append({"session_id": session_id, "unread": unread_by_session[session_id]})
         return visible_counts
@@ -446,7 +448,7 @@ class MessageService:
         member_ids = self.sessions.list_member_ids(session_id)
         if user_id is not None and user_id not in member_ids:
             raise AppError(ErrorCode.FORBIDDEN, "not a session member", 403)
-        if not self._is_visible_private_session(session, member_ids):
+        if not self._is_visible_private_session(session, member_ids, user_id or ""):
             raise AppError(ErrorCode.RESOURCE_NOT_FOUND, "session not found", 404)
         return member_ids
 
@@ -475,7 +477,7 @@ class MessageService:
         if user_id not in member_ids:
             raise AppError(ErrorCode.FORBIDDEN, "not a session member", 403)
 
-        if not self._is_visible_private_session(session, member_ids):
+        if not self._is_visible_private_session(session, member_ids, user_id):
             raise AppError(ErrorCode.RESOURCE_NOT_FOUND, "session not found", 404)
         return session, member_ids
 
@@ -486,7 +488,7 @@ class MessageService:
         if user_id not in member_ids:
             raise AppError(ErrorCode.FORBIDDEN, "not a session member", 403)
 
-        if not self._is_visible_private_session(session, member_ids):
+        if not self._is_visible_private_session(session, member_ids, user_id):
             raise AppError(ErrorCode.RESOURCE_NOT_FOUND, "session not found", 404)
         return session, session_members
 
@@ -511,11 +513,20 @@ class MessageService:
 
         return visible_items
 
-    @staticmethod
-    def _is_visible_private_session(session, member_ids: list[str]) -> bool:
+    def _is_visible_private_session(self, session, member_ids: list[str], current_user_id: str) -> bool:
         if getattr(session, "type", "") != "private" or bool(getattr(session, "is_ai_session", False)):
             return True
-        return len(set(str(member_id or "") for member_id in member_ids if str(member_id or ""))) >= 2
+        normalized_member_ids = [
+            str(member_id or "").strip()
+            for member_id in member_ids
+            if str(member_id or "").strip()
+        ]
+        if len(set(normalized_member_ids)) < 2:
+            return False
+        other_member_ids = [member_id for member_id in normalized_member_ids if member_id != current_user_id]
+        if not other_member_ids:
+            return False
+        return not any(self.blocks.has_block_relation(current_user_id, other_member_id) for other_member_id in other_member_ids)
 
     @staticmethod
     def _call_capabilities(*, session_type: str, is_ai_session: bool) -> dict[str, bool]:

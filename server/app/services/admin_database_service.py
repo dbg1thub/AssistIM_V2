@@ -32,6 +32,7 @@ REQUIRED_INDEXES_BY_TABLE: dict[str, tuple[str, ...]] = {
     "files": tuple(FILE_INDEX_DDL),
     "session_events": tuple(SESSION_EVENT_INDEX_DDL),
     "user_session_events": tuple(USER_SESSION_EVENT_INDEX_DDL),
+    "user_blocks": ("idx_user_blocks_user_id", "idx_user_blocks_blocked_user_id"),
     "admin_audit_logs": tuple(ADMIN_AUDIT_INDEX_DDL),
     "admin_database_backups": tuple(ADMIN_DATABASE_BACKUP_INDEX_DDL),
 }

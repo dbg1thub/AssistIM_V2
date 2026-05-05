@@ -241,6 +241,7 @@ def _has_current_runtime_schema(bind: Engine | Connection) -> bool:
         "admin_audit_logs",
         "admin_database_backups",
         "email_verification_codes",
+        "user_blocks",
     }
     if required_tables - _get_table_names(bind):
         return False

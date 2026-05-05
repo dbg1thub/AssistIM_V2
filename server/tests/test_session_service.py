@@ -160,8 +160,22 @@ class FakeAvatarService:
         return getattr(group, 'avatar', None)
 
 
-def test_session_service_list_sessions_uses_batch_repository_loaders() -> None:
+class FakeBlockRepo:
+    def __init__(self, blocked_pairs: set[frozenset[str]] | None = None) -> None:
+        self.blocked_pairs = blocked_pairs or set()
+
+    def has_block_relation(self, user_id: str, other_user_id: str) -> bool:
+        return frozenset({str(user_id), str(other_user_id)}) in self.blocked_pairs
+
+
+def _session_service_without_blocks() -> SessionService:
     service = SessionService(db=None)
+    service.blocks = FakeBlockRepo()
+    return service
+
+
+def test_session_service_list_sessions_uses_batch_repository_loaders() -> None:
+    service = _session_service_without_blocks()
     fake_sessions = FakeSessionRepo()
     fake_messages = FakeMessageRepo()
     fake_users = FakeUserRepo()
@@ -325,7 +339,7 @@ def test_session_service_serialize_session_uses_persisted_encryption_mode() -> N
         SimpleNamespace(session_id='direct-1', user_id='alice', joined_at=now),
         SimpleNamespace(session_id='direct-1', user_id='bob', joined_at=now),
     ]
-    service = SessionService(db=None)
+    service = _session_service_without_blocks()
     service.messages = SimpleNamespace(list_session_messages=lambda session_id, limit=1: [])
     service.sessions = SimpleNamespace(
         list_member_ids=lambda session_id: ['alice', 'bob'],
@@ -387,7 +401,7 @@ def test_session_service_serialize_session_uses_persisted_encryption_mode() -> N
 
 
 def test_session_service_create_private_rejects_hidden_existing_direct_session() -> None:
-    service = SessionService(db=None)
+    service = _session_service_without_blocks()
     fake_sessions = _HiddenPrivateSessionRepo()
     service.sessions = fake_sessions
     service.groups = _NullGroupRepo()
@@ -433,7 +447,7 @@ def test_session_service_create_private_existing_session_uses_authoritative_memb
                 SimpleNamespace(session_id='session-existing', user_id='alice', joined_at=now),
             ]
 
-    service = SessionService(db=None)
+    service = _session_service_without_blocks()
     service.sessions = _ExistingDirectRepo()
     service.groups = _NullGroupRepo()
     service.messages = SimpleNamespace(
@@ -497,7 +511,7 @@ def test_session_service_create_private_upgrades_reused_plain_session_to_e2ee() 
             return self.existing
 
     fake_sessions = _ExistingPlainDirectRepo()
-    service = SessionService(db=None)
+    service = _session_service_without_blocks()
     service.sessions = fake_sessions
     service.groups = _NullGroupRepo()
     service.messages = SimpleNamespace(
@@ -558,7 +572,7 @@ def test_session_service_create_private_does_not_downgrade_reused_e2ee_session()
         def set_encryption_mode(self, *_args, **_kwargs):
             raise AssertionError('existing e2ee direct sessions must not be downgraded')
 
-    service = SessionService(db=None)
+    service = _session_service_without_blocks()
     service.sessions = _ExistingE2EEDirectRepo()
     service.groups = _NullGroupRepo()
     service.messages = SimpleNamespace(

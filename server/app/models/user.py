@@ -70,3 +70,15 @@ class Friendship(IdMixin, TimestampMixin, Base):
 
     user_id: Mapped[str] = mapped_column(Uuid(as_uuid=False), ForeignKey("users.id"), nullable=False)
     friend_id: Mapped[str] = mapped_column(Uuid(as_uuid=False), ForeignKey("users.id"), nullable=False)
+
+
+class UserBlock(IdMixin, TimestampMixin, Base):
+    __tablename__ = "user_blocks"
+    __table_args__ = (
+        UniqueConstraint("user_id", "blocked_user_id", name="uq_user_block_pair"),
+        Index("idx_user_blocks_user_id", "user_id"),
+        Index("idx_user_blocks_blocked_user_id", "blocked_user_id"),
+    )
+
+    user_id: Mapped[str] = mapped_column(Uuid(as_uuid=False), ForeignKey("users.id"), nullable=False)
+    blocked_user_id: Mapped[str] = mapped_column(Uuid(as_uuid=False), ForeignKey("users.id"), nullable=False)

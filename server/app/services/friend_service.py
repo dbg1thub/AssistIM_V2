@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from app.core.errors import AppError, ErrorCode
 from app.models.user import FriendRequest, User
+from app.repositories.block_repo import BlockRepository
 from app.repositories.friend_repo import FriendRepository
 from app.repositories.user_repo import UserRepository
 from app.services.user_service import UserService
@@ -18,6 +19,7 @@ class FriendService:
 
     def __init__(self, db: Session) -> None:
         self.db = db
+        self.blocks = BlockRepository(db)
         self.friends = FriendRepository(db)
         self.users = UserRepository(db)
         self.user_payloads = UserService(db)
@@ -32,6 +34,8 @@ class FriendService:
         receiver = self.users.get_by_id(receiver_id)
         if receiver is None:
             raise AppError(ErrorCode.USER_NOT_FOUND, "receiver not found", 404)
+        if self.blocks.has_block_relation(current_user.id, receiver_id):
+            raise AppError(ErrorCode.FORBIDDEN, "blocked relationship", 403)
         if self.friends.is_friend(current_user.id, receiver_id):
             raise AppError(ErrorCode.INVALID_REQUEST, "users are already friends", 409)
 
@@ -101,6 +105,8 @@ class FriendService:
             raise AppError(ErrorCode.RESOURCE_NOT_FOUND, "friend request not found", 404)
         if request.receiver_id != current_user.id:
             raise AppError(ErrorCode.FORBIDDEN, "cannot accept this request", 403)
+        if self.blocks.has_block_relation(request.sender_id, request.receiver_id):
+            raise AppError(ErrorCode.FORBIDDEN, "blocked relationship", 403)
         self._raise_if_request_not_pending(request)
         request = self.friends.update_request_status(request, "accepted", commit=False)
         self.friends.create_friendship_pair(request.sender_id, request.receiver_id, commit=False)
