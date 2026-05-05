@@ -10,6 +10,7 @@ from PySide6.QtCore import QEvent, QPoint, QRect, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPalette, QPixmap
 from PySide6.QtWidgets import QLabel, QDialog, QFrame, QHBoxLayout, QSizePolicy, QSplitter, QStackedWidget, QVBoxLayout, QWidget
 from qfluentwidgets import (
+    Action,
     BodyLabel,
     CaptionLabel,
     CardWidget,
@@ -26,6 +27,7 @@ from qfluentwidgets import (
     SearchLineEdit,
     SegmentedWidget,
     SubtitleLabel,
+    RoundMenu,
     ToolButton,
     TitleLabel,
     isDarkTheme,
@@ -132,8 +134,32 @@ class RemoveFriendConfirmDialog(MessageBoxBase):
         self.widget.setMinimumWidth(380)
 
 
+class BlockFriendConfirmDialog(MessageBoxBase):
+    """Ask for confirmation before blocking one friend."""
+
+    def __init__(self, display_name: str, parent=None):
+        super().__init__(parent=parent)
+        title = SubtitleLabel(tr("contact.detail.block_friend.title", "Block Contact"), self.widget)
+        content = BodyLabel(
+            tr(
+                "contact.detail.block_friend.confirm",
+                "Block {name}? This removes the friendship and blocks new messages and friend requests until you unblock them.",
+                name=display_name or tr("session.unnamed", "Untitled Session"),
+            ),
+            self.widget,
+        )
+        content.setWordWrap(True)
+        self.viewLayout.addWidget(title)
+        self.viewLayout.addWidget(content)
+        self.viewLayout.addStretch(1)
+        self.yesButton.setText(tr("contact.detail.block_friend.action", "Block"))
+        self.cancelButton.setText(tr("common.cancel", "Cancel"))
+        self.widget.setMinimumWidth(420)
+
+
 class ContactListItem(QWidget):
     clicked = Signal(str)
+    context_requested = Signal(str, QPoint)
 
     def __init__(
         self,
@@ -227,6 +253,12 @@ class ContactListItem(QWidget):
     def mousePressEvent(self, event) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
             self.clicked.emit(self.item_id)
+            super().mousePressEvent(event)
+            return
+        if event.button() == Qt.MouseButton.RightButton:
+            self.context_requested.emit(self.item_id, event.globalPosition().toPoint())
+            event.accept()
+            return
         super().mousePressEvent(event)
 
     def paintEvent(self, event) -> None:
@@ -1933,6 +1965,7 @@ class ContactInterface(QWidget):
             left_padding=CONTACT_SECTION_INSET,
         )
         item.clicked.connect(self._select_friend)
+        item.context_requested.connect(self._show_friend_context_menu)
         return item
 
     def _ensure_friend_section_view(self, letter: str) -> QVBoxLayout:
@@ -2632,6 +2665,52 @@ class ContactInterface(QWidget):
             f"remove friend {contact_id}",
         )
 
+    def _show_friend_context_menu(self, contact_id: str, global_pos: QPoint) -> None:
+        """Show friend management actions for one sidebar contact item."""
+        contact = next((item for item in self._contacts if item.id == contact_id), None)
+        if contact is None:
+            return
+
+        menu = RoundMenu(parent=self)
+        menu.setMinimumWidth(148)
+        message_action = Action(tr("contact.detail.action.message", "Message"), self)
+        block_action = Action(tr("contact.context.block", "Block"), self)
+        remove_action = Action(tr("contact.detail.action.remove_friend", "Remove Friend"), self)
+
+        menu.addAction(message_action)
+        menu.addSeparator()
+        menu.addAction(block_action)
+        menu.addAction(remove_action)
+
+        for action in (block_action, remove_action):
+            action_item = action.property("item")
+            if action_item is not None:
+                action_item.setForeground(QColor("#d13438"))
+
+        message_action.triggered.connect(
+            lambda _checked=False, item=contact: self.message_requested.emit({"type": "friend", "data": item})
+        )
+        block_action.triggered.connect(lambda _checked=False, cid=contact_id: self._on_block_friend_requested(cid))
+        remove_action.triggered.connect(
+            lambda _checked=False, item=contact: self._on_remove_friend_requested({"type": "friend", "data": item})
+        )
+
+        menu.exec(global_pos)
+
+    def _on_block_friend_requested(self, contact_id: str) -> None:
+        """Confirm and block one selected friend from the contact list."""
+        contact = next((item for item in self._contacts if item.id == contact_id), None)
+        if contact is None:
+            return
+        dialog = BlockFriendConfirmDialog(contact.display_name, self.window())
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        self._schedule_keyed_ui_task(
+            ("block_friend", contact_id),
+            self._block_friend_async(contact_id, contact.display_name),
+            f"block friend {contact_id}",
+        )
+
     async def _remove_friend_async(self, contact_id: str, display_name: str) -> None:
         try:
             await self._controller.remove_friend(contact_id)
@@ -2657,6 +2736,37 @@ class ContactInterface(QWidget):
             tr(
                 "contact.detail.remove_friend.success",
                 "{name} has been removed.",
+                name=display_name or contact_id,
+            ),
+            parent=self.window(),
+            duration=1800,
+        )
+
+    async def _block_friend_async(self, contact_id: str, display_name: str) -> None:
+        try:
+            await self._controller.block_user(contact_id)
+        except Exception:
+            InfoBar.error(
+                tr("contact.detail.block_friend.title", "Block Contact"),
+                tr("contact.detail.block_friend.failed", "Unable to block this contact right now."),
+                parent=self.window(),
+                duration=2400,
+            )
+            raise
+
+        self._contacts = [item for item in self._contacts if item.id != contact_id]
+        self._remove_friend_item_view(contact_id)
+        self._update_summary_counts()
+        self._schedule_contacts_cache_persist()
+        self._refresh_search_surface()
+        if self._selected_key == ("friend", contact_id):
+            self._clear_active_selection()
+
+        InfoBar.success(
+            tr("contact.detail.block_friend.title", "Block Contact"),
+            tr(
+                "contact.detail.block_friend.success",
+                "{name} has been blocked.",
                 name=display_name or contact_id,
             ),
             parent=self.window(),

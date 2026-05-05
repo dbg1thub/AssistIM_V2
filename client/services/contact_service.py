@@ -116,6 +116,21 @@ class ContactService:
         """Remove one existing friend."""
         await self._http.delete(f"/friends/{friend_id}")
 
+    async def block_user(self, target_user_id: str) -> dict[str, Any]:
+        """Block one user and remove the friendship server-side."""
+        payload = await self._http.post(
+            "/blocks",
+            json={
+                "target_user_id": target_user_id,
+            },
+        )
+        return dict(payload or {})
+
+    async def unblock_user(self, user_id: str) -> dict[str, Any]:
+        """Remove one user from the current user's block list."""
+        payload = await self._http.delete(f"/blocks/{user_id}")
+        return dict(payload or {})
+
     async def leave_group(self, group_id: str) -> dict[str, Any]:
         """Leave one joined group."""
         payload = await self._http.post(f"/groups/{group_id}/leave", json={})

@@ -51,10 +51,17 @@ from client.services import contact_service as contact_service_module
 class FakeHTTPClient:
     def __init__(self) -> None:
         self.post_calls: list[dict] = []
+        self.delete_calls: list[str] = []
 
     async def post(self, path: str, json=None):
         self.post_calls.append({"path": path, "json": json})
+        if path == "/blocks":
+            return {"block": {"is_blocked": True, "blocked_user_id": str((json or {}).get("target_user_id") or "")}}
         return {"group": {"id": "group-1", "name": "Core Team"}}
+
+    async def delete(self, path: str):
+        self.delete_calls.append(path)
+        return {"block": {"is_blocked": False}}
 
 
 def test_contact_service_create_group_defaults_to_e2ee_group(monkeypatch) -> None:
@@ -76,5 +83,29 @@ def test_contact_service_create_group_defaults_to_e2ee_group(monkeypatch) -> Non
                 },
             }
         ]
+
+    asyncio.run(scenario())
+
+
+def test_contact_service_block_and_unblock_use_blocks_endpoint(monkeypatch) -> None:
+    async def scenario() -> None:
+        fake_http = FakeHTTPClient()
+        monkeypatch.setattr(contact_service_module, "get_http_client", lambda: fake_http)
+
+        service = contact_service_module.ContactService()
+        block_payload = await service.block_user("user-2")
+        unblock_payload = await service.unblock_user("user-2")
+
+        assert block_payload == {"block": {"is_blocked": True, "blocked_user_id": "user-2"}}
+        assert unblock_payload == {"block": {"is_blocked": False}}
+        assert fake_http.post_calls == [
+            {
+                "path": "/blocks",
+                "json": {
+                    "target_user_id": "user-2",
+                },
+            }
+        ]
+        assert fake_http.delete_calls == ["/blocks/user-2"]
 
     asyncio.run(scenario())

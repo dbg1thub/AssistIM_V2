@@ -1135,6 +1135,24 @@ def test_chat_info_group_delete_and_contact_remove_entries_are_wired() -> None:
     assert 'async def delete_group(self, group_id: str) -> dict[str, Any]:' in contact_service
 
 
+def test_contact_friend_item_context_menu_wires_block_action() -> None:
+    contact_interface = Path('client/ui/windows/contact_interface.py').read_text(encoding='utf-8')
+    contact_controller = Path('client/ui/controllers/contact_controller.py').read_text(encoding='utf-8')
+    contact_service = Path('client/services/contact_service.py').read_text(encoding='utf-8')
+
+    assert 'class BlockFriendConfirmDialog(MessageBoxBase):' in contact_interface
+    assert 'context_requested = Signal(str, QPoint)' in contact_interface
+    assert 'item.context_requested.connect(self._show_friend_context_menu)' in contact_interface
+    assert 'def _show_friend_context_menu(self, contact_id: str, global_pos: QPoint) -> None:' in contact_interface
+    assert 'block_action = Action(tr("contact.context.block", "Block"), self)' in contact_interface
+    assert 'self._on_block_friend_requested(cid)' in contact_interface
+    assert 'async def _block_friend_async(self, contact_id: str, display_name: str) -> None:' in contact_interface
+    assert 'await self._controller.block_user(contact_id)' in contact_interface
+    assert 'self._remove_friend_item_view(contact_id)' in contact_interface
+    assert 'async def block_user(self, target_user_id: str) -> dict:' in contact_controller
+    assert 'async def block_user(self, target_user_id: str) -> dict[str, Any]:' in contact_service
+
+
 def test_contact_controller_owns_group_record_merge_rules() -> None:
     contact_controller = Path('client/ui/controllers/contact_controller.py').read_text(encoding='utf-8')
     contact_interface = Path('client/ui/windows/contact_interface.py').read_text(encoding='utf-8')

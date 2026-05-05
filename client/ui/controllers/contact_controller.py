@@ -629,6 +629,14 @@ class ContactController:
         """Remove an existing friend."""
         await self._contact_service.remove_friend(friend_id)
 
+    async def block_user(self, target_user_id: str) -> dict:
+        """Block one user through the contact service."""
+        return await self._contact_service.block_user(target_user_id)
+
+    async def unblock_user(self, user_id: str) -> dict:
+        """Unblock one user through the contact service."""
+        return await self._contact_service.unblock_user(user_id)
+
     async def leave_group(self, group_id: str) -> dict:
         """Leave one existing group."""
         return await self._contact_service.leave_group(group_id)

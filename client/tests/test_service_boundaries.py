@@ -848,6 +848,8 @@ class FakeContactService:
         self.accept_calls: list[str] = []
         self.reject_calls: list[str] = []
         self.remove_calls: list[str] = []
+        self.block_calls: list[str] = []
+        self.unblock_calls: list[str] = []
         self.friends_payload: list[dict] = []
         self.groups_payload: list[dict] = []
         self.requests_payload: list[dict] = []
@@ -996,6 +998,22 @@ class FakeContactService:
 
     async def remove_friend(self, friend_id: str) -> None:
         self.remove_calls.append(friend_id)
+
+    async def block_user(self, target_user_id: str) -> dict:
+        self.block_calls.append(target_user_id)
+        return {
+            'mutation': {'action': 'block_created', 'changed': True, 'created': True},
+            'user': {'id': target_user_id},
+            'block': {'is_blocked': True, 'blocked_user_id': target_user_id},
+        }
+
+    async def unblock_user(self, user_id: str) -> dict:
+        self.unblock_calls.append(user_id)
+        return {
+            'mutation': {'action': 'block_removed', 'changed': True, 'created': False},
+            'user': {'id': user_id},
+            'block': {'is_blocked': False, 'blocked_user_id': None},
+        }
 
 
 class FakeDiscoveryService:
@@ -2829,6 +2847,8 @@ def test_contact_controller_mutations_use_contact_service(monkeypatch) -> None:
         accepted = await controller.accept_request('req-1')
         rejected = await controller.reject_request('req-2')
         await controller.remove_friend('user-2')
+        block_result = await controller.block_user('user-3')
+        unblock_result = await controller.unblock_user('user-3')
 
         assert request_payload['request']['status'] == 'pending'
         assert fake_contact_service.send_friend_request_calls == [('user-2', 'hello')]
@@ -2861,6 +2881,10 @@ def test_contact_controller_mutations_use_contact_service(monkeypatch) -> None:
         assert fake_contact_service.accept_calls == ['req-1']
         assert fake_contact_service.reject_calls == ['req-2']
         assert fake_contact_service.remove_calls == ['user-2']
+        assert block_result['block']['is_blocked'] is True
+        assert unblock_result['block']['is_blocked'] is False
+        assert fake_contact_service.block_calls == ['user-3']
+        assert fake_contact_service.unblock_calls == ['user-3']
 
     asyncio.run(scenario())
 
