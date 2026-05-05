@@ -531,6 +531,26 @@ def test_user_profile_flyout_exposes_authenticated_password_change() -> None:
     assert 'self._set_password_task(self._change_password_async(dialog.password_payload()))' in flyout
 
 
+def test_user_profile_flyout_exposes_readonly_e2ee_device_security() -> None:
+    flyout = Path('client/ui/widgets/user_profile_flyout.py').read_text(encoding='utf-8')
+    auth_controller = Path('client/ui/controllers/auth_controller.py').read_text(encoding='utf-8')
+
+    assert 'class DeviceSecurityDialog(QDialog):' in flyout
+    assert 'self.refresh_button.clicked.connect(self.reload_devices)' in flyout
+    assert 'devices = await self._auth_controller.list_my_e2ee_devices()' in flyout
+    assert 'diagnostics = await self._auth_controller.get_history_recovery_diagnostics()' in flyout
+    assert 'local_device_id = str(diagnostics.get("local_device_id", "") or "").strip()' in flyout
+    assert 'self._render_devices(devices, local_device_id=local_device_id)' in flyout
+    assert 'securityRequested = Signal()' in flyout
+    assert 'self.security_link = HyperlinkLabel(tr("profile.security.link", "Account Security"), self)' in flyout
+    assert 'self.security_link.clicked.connect(self.securityRequested.emit)' in flyout
+    assert 'view.securityRequested.connect(self._handle_security_from_flyout)' in flyout
+    assert 'def open_device_security_dialog(self) -> None:' in flyout
+    assert 'dialog = DeviceSecurityDialog(self.window(), auth_controller=self._auth_controller)' in flyout
+    assert 'async def list_my_e2ee_devices(self) -> list[dict[str, Any]]:' in auth_controller
+    assert 'async def get_history_recovery_diagnostics(self) -> dict[str, Any]:' in auth_controller
+
+
 
 def test_message_delegate_uses_live_auth_profile_for_self_avatar_rendering() -> None:
     message_delegate = Path('client/delegates/message_delegate.py').read_text(encoding='utf-8')

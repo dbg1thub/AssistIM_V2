@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import re
-from typing import Optional
+from typing import Any, Optional
 
 from PySide6.QtCore import QDate, QEvent, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QPalette
@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QDialog,
     QFileDialog,
     QFormLayout,
+    QFrame,
     QHBoxLayout,
     QVBoxLayout,
     QWidget,
@@ -31,6 +32,7 @@ from qfluentwidgets import (
     PasswordLineEdit,
     PrimaryPushButton,
     PushButton,
+    SingleDirectionScrollArea,
     SubtitleLabel,
     isDarkTheme,
 )
@@ -216,6 +218,244 @@ class ChangePasswordDialog(QDialog):
             self.confirm_password_edit.setFocus()
             return
         self.accept()
+
+
+class DeviceSecurityDialog(QDialog):
+    """Read-only E2EE device inventory for the current account."""
+
+    def __init__(self, parent=None, auth_controller=None):
+        super().__init__(parent)
+        self._auth_controller = auth_controller or get_auth_controller()
+        self._load_task: Optional[asyncio.Task] = None
+
+        self.setWindowTitle(tr("profile.security.title", "Account Security"))
+        self.setMinimumSize(560, 500)
+        self.setModal(False)
+        _apply_themed_dialog_surface(self, "DeviceSecurityDialog")
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 24, 24, 24)
+        layout.setSpacing(14)
+
+        title = SubtitleLabel(tr("profile.security.title", "Account Security"), self)
+        subtitle = CaptionLabel(
+            tr(
+                "profile.security.subtitle",
+                "Review the E2EE devices registered to this account.",
+            ),
+            self,
+        )
+        subtitle.setWordWrap(True)
+
+        self.status_label = CaptionLabel("", self)
+        self.status_label.setWordWrap(True)
+
+        self.scroll_area = SingleDirectionScrollArea(self, orient=Qt.Orientation.Vertical)
+        self.scroll_area.setObjectName("DeviceSecurityScrollArea")
+        self.scroll_area.setWidgetResizable(True)
+        self.scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+        self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+
+        self.device_container = QWidget(self.scroll_area)
+        self.device_container.setObjectName("DeviceSecurityDeviceContainer")
+        self.device_layout = QVBoxLayout(self.device_container)
+        self.device_layout.setContentsMargins(0, 0, 0, 0)
+        self.device_layout.setSpacing(10)
+        self.scroll_area.setWidget(self.device_container)
+
+        button_row = QHBoxLayout()
+        button_row.addStretch(1)
+        self.refresh_button = PushButton(tr("common.refresh", "Refresh"), self)
+        self.close_button = PrimaryPushButton(tr("common.close", "Close"), self)
+        self.refresh_button.clicked.connect(self.reload_devices)
+        self.close_button.clicked.connect(self.close)
+        button_row.addWidget(self.refresh_button, 0)
+        button_row.addWidget(self.close_button, 0)
+
+        layout.addWidget(title)
+        layout.addWidget(subtitle)
+        layout.addWidget(self.status_label)
+        layout.addWidget(self.scroll_area, 1)
+        layout.addLayout(button_row)
+
+        self.finished.connect(lambda _result: self._cancel_load_task())
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        if self._load_task is None:
+            self.reload_devices()
+
+    def closeEvent(self, event) -> None:
+        self._cancel_load_task()
+        super().closeEvent(event)
+
+    def reload_devices(self) -> None:
+        """Refresh the readonly device snapshot."""
+        self._cancel_load_task()
+        self._load_task = asyncio.create_task(self._load_devices_async())
+        self._load_task.add_done_callback(self._finalize_load_task)
+
+    async def _load_devices_async(self) -> None:
+        self.refresh_button.setEnabled(False)
+        self.status_label.setText(tr("profile.security.loading", "Loading registered devices..."))
+        self._render_loading()
+        try:
+            devices = await self._auth_controller.list_my_e2ee_devices()
+            diagnostics = await self._auth_controller.get_history_recovery_diagnostics()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Failed to load E2EE devices for profile security dialog")
+            self.status_label.setText(
+                tr("profile.security.load_failed", "Unable to load registered devices right now.")
+            )
+            self._render_empty(tr("profile.security.load_failed_hint", "Try refreshing again later."))
+        else:
+            local_device_id = str(diagnostics.get("local_device_id", "") or "").strip()
+            self._render_devices(devices, local_device_id=local_device_id)
+            self.status_label.setText(
+                tr(
+                    "profile.security.summary",
+                    "{count} registered devices.",
+                    count=len([item for item in devices if isinstance(item, dict)]),
+                )
+            )
+        finally:
+            self.refresh_button.setEnabled(True)
+
+    def _finalize_load_task(self, task: asyncio.Task) -> None:
+        if self._load_task is task:
+            self._load_task = None
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            logger.exception("Device security dialog task failed")
+
+    def _cancel_load_task(self) -> None:
+        if self._load_task is not None and not self._load_task.done():
+            self._load_task.cancel()
+        self._load_task = None
+
+    def _clear_device_layout(self) -> None:
+        while self.device_layout.count():
+            item = self.device_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+
+    def _render_loading(self) -> None:
+        self._render_empty(tr("profile.security.loading", "Loading registered devices..."))
+
+    def _render_empty(self, text: str) -> None:
+        self._clear_device_layout()
+        label = BodyLabel(text, self.device_container)
+        label.setWordWrap(True)
+        self.device_layout.addWidget(label)
+        self.device_layout.addStretch(1)
+
+    def _render_devices(self, devices: list[dict[str, Any]], *, local_device_id: str) -> None:
+        normalized_devices = [dict(item) for item in devices if isinstance(item, dict)]
+        normalized_devices.sort(
+            key=lambda item: (
+                str(item.get("device_id", "") or "").strip() != local_device_id,
+                not bool(item.get("is_active", True)),
+                str(item.get("device_name", "") or "").lower(),
+                str(item.get("device_id", "") or ""),
+            )
+        )
+        self._clear_device_layout()
+        if not normalized_devices:
+            self._render_empty(tr("profile.security.empty", "No registered E2EE devices were found."))
+            return
+
+        for device in normalized_devices:
+            device_id = str(device.get("device_id", "") or "").strip()
+            self.device_layout.addWidget(
+                self._create_device_card(
+                    device,
+                    is_local=bool(local_device_id and device_id == local_device_id),
+                )
+            )
+        self.device_layout.addStretch(1)
+
+    def _create_device_card(self, device: dict[str, Any], *, is_local: bool) -> QWidget:
+        card = QWidget(self.device_container)
+        card.setObjectName("DeviceSecurityDeviceCard")
+        card.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        card.setStyleSheet(
+            "QWidget#DeviceSecurityDeviceCard {"
+            f"background: {'rgba(255,255,255,0.06)' if isDarkTheme() else 'rgba(0,0,0,0.035)'};"
+            "border-radius: 8px;"
+            "}"
+        )
+
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(14, 12, 14, 12)
+        layout.setSpacing(6)
+
+        device_name = str(device.get("device_name", "") or "").strip() or tr(
+            "profile.security.device.unnamed",
+            "Unnamed Device",
+        )
+        if is_local:
+            device_name = tr(
+                "profile.security.device.current",
+                "{name} · This device",
+                name=device_name,
+            )
+        title = BodyLabel(device_name, card)
+        title.setWordWrap(True)
+        layout.addWidget(title)
+
+        layout.addWidget(
+            self._device_detail_label(
+                tr(
+                    "profile.security.device.id",
+                    "Device ID: {device_id}",
+                    device_id=str(device.get("device_id", "") or "-"),
+                ),
+                card,
+            )
+        )
+        layout.addWidget(
+            self._device_detail_label(
+                tr(
+                    "profile.security.device.prekeys",
+                    "Available one-time prekeys: {count}",
+                    count=int(device.get("available_prekey_count") or 0),
+                ),
+                card,
+            )
+        )
+        layout.addWidget(
+            self._device_detail_label(
+                tr(
+                    "profile.security.device.status",
+                    "Status: {status}",
+                    status=tr("profile.security.device.active", "Active")
+                    if bool(device.get("is_active", True))
+                    else tr("profile.security.device.inactive", "Inactive"),
+                ),
+                card,
+            )
+        )
+        timestamp = str(device.get("last_seen_at") or device.get("updated_at") or device.get("created_at") or "").strip()
+        if timestamp:
+            layout.addWidget(
+                self._device_detail_label(
+                    tr("profile.security.device.last_seen", "Last activity: {time}", time=timestamp),
+                    card,
+                )
+            )
+        return card
+
+    @staticmethod
+    def _device_detail_label(text: str, parent: QWidget) -> CaptionLabel:
+        label = CaptionLabel(text, parent)
+        label.setWordWrap(True)
+        return label
 
 
 class ProfileEditDialog(QDialog):
@@ -615,6 +855,7 @@ class ProfileCard(QWidget):
 
     editRequested = Signal()
     passwordChangeRequested = Signal()
+    securityRequested = Signal()
     logoutRequested = Signal()
 
     def __init__(self, user: dict, parent=None):
@@ -650,12 +891,15 @@ class ProfileCard(QWidget):
         action_row.setSpacing(12)
         self.edit_link = HyperlinkLabel(tr("profile.quick.action.edit", "Edit Profile"), self)
         self.change_password_link = HyperlinkLabel(tr("profile.password.change.link", "Change Password"), self)
+        self.security_link = HyperlinkLabel(tr("profile.security.link", "Account Security"), self)
         self.logout_link = HyperlinkLabel(tr("profile.quick.action.logout", "Sign Out"), self)
         self.edit_link.clicked.connect(self.editRequested.emit)
         self.change_password_link.clicked.connect(self.passwordChangeRequested.emit)
+        self.security_link.clicked.connect(self.securityRequested.emit)
         self.logout_link.clicked.connect(self.logoutRequested.emit)
         action_row.addWidget(self.edit_link, 0)
         action_row.addWidget(self.change_password_link, 0)
+        action_row.addWidget(self.security_link, 0)
         action_row.addWidget(self.logout_link, 0)
         action_row.addStretch(1)
 
@@ -689,6 +933,7 @@ class AcrylicUserProfileFlyoutView(AcrylicFlyoutViewBase):
 
     editRequested = Signal()
     passwordChangeRequested = Signal()
+    securityRequested = Signal()
     logoutRequested = Signal()
 
     def __init__(self, user: dict, parent=None):
@@ -702,6 +947,7 @@ class AcrylicUserProfileFlyoutView(AcrylicFlyoutViewBase):
         self.profile_card = ProfileCard(self._user, self)
         self.profile_card.editRequested.connect(self.editRequested.emit)
         self.profile_card.passwordChangeRequested.connect(self.passwordChangeRequested.emit)
+        self.profile_card.securityRequested.connect(self.securityRequested.emit)
         self.profile_card.logoutRequested.connect(self.logoutRequested.emit)
 
         self.divider = FluentDivider(self, variant=FluentDivider.INSET, inset=12)
@@ -732,6 +978,7 @@ class UserProfileCoordinator(QWidget):
         self._password_task: Optional[asyncio.Task] = None
         self._ui_tasks: set[asyncio.Task] = set()
         self._flyout = None
+        self._device_dialog: Optional[DeviceSecurityDialog] = None
         self._auth_listener_attached = False
         self.hide()
         self._auth_controller.add_auth_state_listener(self._handle_auth_state_changed)
@@ -752,6 +999,7 @@ class UserProfileCoordinator(QWidget):
         view = AcrylicUserProfileFlyoutView(self.current_user_snapshot(), parent)
         view.editRequested.connect(self._handle_edit_from_flyout)
         view.passwordChangeRequested.connect(self._handle_password_change_from_flyout)
+        view.securityRequested.connect(self._handle_security_from_flyout)
         view.logoutRequested.connect(self._handle_logout_from_flyout)
 
         self._flyout = AcrylicFlyout.make(
@@ -785,6 +1033,23 @@ class UserProfileCoordinator(QWidget):
 
         self._set_password_task(self._change_password_async(dialog.password_payload()))
 
+    def open_device_security_dialog(self) -> None:
+        """Open the readonly E2EE device inventory dialog."""
+        if not self.current_user_snapshot():
+            return
+        if self._device_dialog is not None and self._device_dialog.isVisible():
+            self._device_dialog.raise_()
+            self._device_dialog.activateWindow()
+            return
+
+        dialog = DeviceSecurityDialog(self.window(), auth_controller=self._auth_controller)
+        self._device_dialog = dialog
+        dialog.finished.connect(lambda _result=0, dlg=dialog: self._clear_device_dialog(dlg))
+        dialog.destroyed.connect(lambda *_args, dlg=dialog: self._clear_device_dialog(dlg))
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
     def request_logout(self) -> None:
         """Confirm and emit a logout request."""
         if not self.current_user_snapshot():
@@ -807,6 +1072,10 @@ class UserProfileCoordinator(QWidget):
     def _handle_password_change_from_flyout(self) -> None:
         self._close_flyout()
         self.open_password_change_dialog()
+
+    def _handle_security_from_flyout(self) -> None:
+        self._close_flyout()
+        self.open_device_security_dialog()
 
     def _handle_logout_from_flyout(self) -> None:
         self._close_flyout()
@@ -914,6 +1183,10 @@ class UserProfileCoordinator(QWidget):
     def _clear_flyout(self) -> None:
         self._flyout = None
 
+    def _clear_device_dialog(self, dialog: DeviceSecurityDialog) -> None:
+        if self._device_dialog is dialog:
+            self._device_dialog = None
+
     def _cancel_pending_task(self, task: Optional[asyncio.Task]) -> None:
         if task is not None and not task.done():
             task.cancel()
@@ -962,6 +1235,9 @@ class UserProfileCoordinator(QWidget):
         self._cancel_pending_task(self._password_task)
         self._password_task = None
         self._close_flyout()
+        if self._device_dialog is not None:
+            self._device_dialog.close()
+            self._device_dialog = None
         for task in list(self._ui_tasks):
             if not task.done():
                 task.cancel()
