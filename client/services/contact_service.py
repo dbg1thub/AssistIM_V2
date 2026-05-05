@@ -121,6 +121,11 @@ class ContactService:
         payload = await self._http.post(f"/groups/{group_id}/leave", json={})
         return dict(payload or {})
 
+    async def delete_group(self, group_id: str) -> dict[str, Any]:
+        """Delete one owned group."""
+        payload = await self._http.delete(f"/groups/{group_id}")
+        return dict(payload or {})
+
     async def add_group_member(self, group_id: str, user_id: str, *, role: str = "member") -> dict[str, Any]:
         """Add one member to a group."""
         payload = await self._http.post(

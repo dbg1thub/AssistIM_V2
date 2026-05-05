@@ -103,6 +103,15 @@ QPushButton#requestStatusButton {
     border-radius: {{RADIUS_PILL}};
 }
 
+QPushButton#contactDangerButton {
+    color: #d13438;
+    border: 1px solid rgba(209, 52, 56, 0.28);
+}
+
+QPushButton#contactDangerButton:hover {
+    background: rgba(209, 52, 56, 0.08);
+}
+
 QAbstractScrollArea {
     background: transparent;
     border: none;

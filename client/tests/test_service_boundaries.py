@@ -310,6 +310,7 @@ from client.managers import search_manager as search_manager_module
 from client.managers import sound_manager as sound_manager_module
 from client.core import profile_fields as profile_fields_module
 from client.models.message import ChatMessage, MessageStatus, MessageType, Session, build_remote_attachment_extra
+from client.services import contact_service as contact_service_module
 from client.services import file_service as file_service_module
 from client.storage import database as database_module
 from client.ui.controllers import auth_controller as auth_controller_module
@@ -819,6 +820,7 @@ class FakeContactService:
         self.update_group_profile_calls: list[tuple[str, str | None, str | None]] = []
         self.update_my_group_profile_calls: list[tuple[str, str | None, str | None]] = []
         self.leave_group_calls: list[str] = []
+        self.delete_group_calls: list[str] = []
         self.add_group_member_calls: list[tuple[str, str, str]] = []
         self.remove_group_member_calls: list[tuple[str, str]] = []
         self.update_group_member_role_calls: list[tuple[str, str, str]] = []
@@ -922,6 +924,10 @@ class FakeContactService:
     async def leave_group(self, group_id: str) -> dict:
         self.leave_group_calls.append(group_id)
         return {'group': None, 'mutation': {'action': 'left', 'changed': True, 'group_id': group_id}}
+
+    async def delete_group(self, group_id: str) -> dict:
+        self.delete_group_calls.append(group_id)
+        return {'group': None, 'mutation': {'action': 'deleted', 'changed': True, 'group_id': group_id}}
 
     async def add_group_member(self, group_id: str, user_id: str, *, role: str = 'member') -> dict:
         self.add_group_member_calls.append((group_id, user_id, role))
@@ -2409,6 +2415,28 @@ def test_file_service_rejects_upload_payload_without_url(monkeypatch) -> None:
     asyncio.run(scenario())
 
 
+def test_contact_service_delete_group_uses_group_endpoint(monkeypatch) -> None:
+    class FakeHttpClient:
+        def __init__(self) -> None:
+            self.delete_calls: list[str] = []
+
+        async def delete(self, path: str) -> dict:
+            self.delete_calls.append(path)
+            return {'group': None, 'mutation': {'action': 'deleted', 'group_id': 'group-1'}}
+
+    fake_http = FakeHttpClient()
+    monkeypatch.setattr(contact_service_module, 'get_http_client', lambda: fake_http)
+
+    async def scenario() -> None:
+        service = contact_service_module.ContactService()
+        payload = await service.delete_group('group-1')
+
+        assert fake_http.delete_calls == ['/groups/group-1']
+        assert payload['mutation']['action'] == 'deleted'
+
+    asyncio.run(scenario())
+
+
 def test_contact_controller_load_contacts_and_search_users_use_services(monkeypatch) -> None:
     fake_contact_service = FakeContactService()
     fake_user_service = FakeUserService()
@@ -2676,6 +2704,7 @@ def test_contact_controller_mutations_use_contact_service(monkeypatch) -> None:
         group_after_remove = await controller.remove_group_member('group-1', 'user-4')
         group_after_transfer = await controller.transfer_group_ownership('group-1', 'user-2')
         leave_result = await controller.leave_group('group-1')
+        delete_result = await controller.delete_group('group-1')
         accepted = await controller.accept_request('req-1')
         rejected = await controller.reject_request('req-2')
         await controller.remove_friend('user-2')
@@ -2696,6 +2725,7 @@ def test_contact_controller_mutations_use_contact_service(monkeypatch) -> None:
         assert all(member.get('id') != 'user-4' for member in group_after_remove.extra['members'])
         assert group_after_transfer.owner_id == 'user-2'
         assert leave_result['mutation']['action'] == 'left'
+        assert delete_result['mutation']['action'] == 'deleted'
         assert fake_contact_service.fetch_group_calls == ['group-1']
         assert fake_contact_service.update_group_profile_calls == [('group-1', 'Renamed Team', 'Ship tonight')]
         assert fake_contact_service.update_my_group_profile_calls == [('group-1', 'private note', 'lead')]
@@ -2704,6 +2734,7 @@ def test_contact_controller_mutations_use_contact_service(monkeypatch) -> None:
         assert fake_contact_service.remove_group_member_calls == [('group-1', 'user-4')]
         assert fake_contact_service.transfer_group_ownership_calls == [('group-1', 'user-2')]
         assert fake_contact_service.leave_group_calls == ['group-1']
+        assert fake_contact_service.delete_group_calls == ['group-1']
         assert accepted['request']['status'] == 'accepted'
         assert rejected['request']['status'] == 'rejected'
         assert fake_contact_service.accept_calls == ['req-1']

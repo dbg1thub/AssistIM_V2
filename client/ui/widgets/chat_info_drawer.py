@@ -699,6 +699,7 @@ class ChatInfoGroupContent(QWidget):
     searchRequested = Signal()
     clearRequested = Signal()
     leaveRequested = Signal()
+    deleteGroupRequested = Signal()
     muteToggled = Signal(bool)
     pinToggled = Signal(bool)
     showNicknameToggled = Signal(bool)
@@ -762,6 +763,9 @@ class ChatInfoGroupContent(QWidget):
         self.leave_button = StaticHyperlinkButton(parent=self)
         self.leave_button.setObjectName("chatInfoDangerLink")
         self.leave_button.setText(tr("chat.info.group.leave", "Leave Group Chat"))
+        self.delete_group_button = StaticHyperlinkButton(parent=self)
+        self.delete_group_button.setObjectName("chatInfoDangerLink")
+        self.delete_group_button.setText(tr("chat.info.group.delete", "Delete Group Chat"))
 
         self.content_stack = QStackedWidget(self)
         self.default_page = QWidget(self)
@@ -794,6 +798,7 @@ class ChatInfoGroupContent(QWidget):
         default_layout.addWidget(self.clear_button, 0, Qt.AlignmentFlag.AlignHCenter)
         default_layout.addWidget(FluentDivider(self.default_page, variant=FluentDivider.INSET, inset=12))
         default_layout.addWidget(self.leave_button, 0, Qt.AlignmentFlag.AlignHCenter)
+        default_layout.addWidget(self.delete_group_button, 0, Qt.AlignmentFlag.AlignHCenter)
         default_layout.addStretch(1)
 
         search_layout = QVBoxLayout(self.search_page)
@@ -819,6 +824,7 @@ class ChatInfoGroupContent(QWidget):
         self.view_more_button.clicked.connect(lambda: self._emit_member_management_request("browse"))
         self.clear_button.clicked.connect(self.clearRequested.emit)
         self.leave_button.clicked.connect(self.leaveRequested.emit)
+        self.delete_group_button.clicked.connect(self.deleteGroupRequested.emit)
         self.search_row.hide()
         self.search_divider.hide()
         self.clear_button.hide()
@@ -1092,7 +1098,10 @@ class ChatInfoGroupContent(QWidget):
             self.show_nickname_row.set_checked(True)
             self.view_more_button.setVisible(False)
             self.leave_button.setEnabled(False)
+            self.leave_button.setVisible(True)
             self.leave_button.setToolTip("")
+            self.delete_group_button.setEnabled(False)
+            self.delete_group_button.setVisible(False)
             return
 
         self.setEnabled(True)
@@ -1125,9 +1134,17 @@ class ChatInfoGroupContent(QWidget):
         self.mute_row.set_checked(bool(extra.get("is_muted", False)))
         self.pin_row.set_checked(bool(getattr(session, "is_pinned", False) or extra.get("is_pinned", False)))
         self.show_nickname_row.set_checked(bool(extra.get("show_member_nickname", True)))
+        self.leave_button.setVisible(not is_owner)
         self.leave_button.setEnabled(not is_owner)
         self.leave_button.setToolTip(
             "" if not is_owner else tr("chat.info.group.leave.owner_blocked", "Transfer ownership before leaving this group.")
+        )
+        self.delete_group_button.setVisible(is_owner)
+        self.delete_group_button.setEnabled(is_owner)
+        self.delete_group_button.setToolTip(
+            tr("chat.info.group.delete.owner_only", "Only the group owner can delete this group.")
+            if not is_owner
+            else ""
         )
 
         self._render_member_grid()
@@ -1167,6 +1184,7 @@ class ChatInfoDrawerContent(QWidget):
     identityReviewRequested = Signal()
     clearRequested = Signal()
     leaveRequested = Signal()
+    deleteGroupRequested = Signal()
     muteToggled = Signal(bool)
     pinToggled = Signal(bool)
     showNicknameToggled = Signal(bool)
@@ -1200,6 +1218,7 @@ class ChatInfoDrawerContent(QWidget):
         self.group_content.searchRequested.connect(self.searchRequested.emit)
         self.group_content.clearRequested.connect(self.clearRequested.emit)
         self.group_content.leaveRequested.connect(self.leaveRequested.emit)
+        self.group_content.deleteGroupRequested.connect(self.deleteGroupRequested.emit)
         self.group_content.muteToggled.connect(self.muteToggled.emit)
         self.group_content.pinToggled.connect(self.pinToggled.emit)
         self.group_content.showNicknameToggled.connect(self.showNicknameToggled.emit)
@@ -1358,6 +1377,7 @@ class ChatInfoDrawerOverlay(QWidget):
     identityReviewRequested = Signal()
     clearRequested = Signal()
     leaveRequested = Signal()
+    deleteGroupRequested = Signal()
     muteToggled = Signal(bool)
     pinToggled = Signal(bool)
     showNicknameToggled = Signal(bool)
@@ -1413,6 +1433,7 @@ class ChatInfoDrawerOverlay(QWidget):
         self.content_widget.identityReviewRequested.connect(self.identityReviewRequested.emit)
         self.content_widget.clearRequested.connect(self.clearRequested.emit)
         self.content_widget.leaveRequested.connect(self.leaveRequested.emit)
+        self.content_widget.deleteGroupRequested.connect(self.deleteGroupRequested.emit)
         self.content_widget.muteToggled.connect(self.muteToggled.emit)
         self.content_widget.pinToggled.connect(self.pinToggled.emit)
         self.content_widget.showNicknameToggled.connect(self.showNicknameToggled.emit)

@@ -633,6 +633,10 @@ class ContactController:
         """Leave one existing group."""
         return await self._contact_service.leave_group(group_id)
 
+    async def delete_group(self, group_id: str) -> dict:
+        """Delete one group owned by the current user."""
+        return await self._contact_service.delete_group(group_id)
+
     async def add_group_member(self, group_id: str, user_id: str, *, role: str = "member") -> GroupRecord:
         """Add one member to the group and return the updated snapshot."""
         payload = await self._contact_service.add_group_member(group_id, user_id, role=role)

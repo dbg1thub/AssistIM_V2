@@ -19,6 +19,7 @@ from qfluentwidgets import (
     IconWidget,
     InfoBar,
     LineEdit,
+    MessageBoxBase,
     PrimaryPushButton,
     PushButton,
     ScrollArea,
@@ -105,6 +106,30 @@ def _request_message_text(request: FriendRequestRecord, current_user_id: str) ->
     if request.is_outgoing(current_user_id):
         return request.message or tr("contact.request.default_outgoing", "You sent a friend request.")
     return request.message or tr("contact.request.default_incoming", "The other user sent you a friend request.")
+
+
+class RemoveFriendConfirmDialog(MessageBoxBase):
+    """Ask for confirmation before removing one friend."""
+
+    def __init__(self, display_name: str, parent=None):
+        super().__init__(parent=parent)
+        title = SubtitleLabel(tr("contact.detail.remove_friend.title", "Remove Friend"), self.widget)
+        content = BodyLabel(
+            tr(
+                "contact.detail.remove_friend.confirm",
+                "Remove {name} from your friends?",
+                name=display_name or tr("session.unnamed", "Untitled Session"),
+            ),
+            self.widget,
+        )
+        content.setWordWrap(True)
+        self.viewLayout.addWidget(title)
+        self.viewLayout.addWidget(content)
+        self.viewLayout.addStretch(1)
+        self.yesButton.setText(tr("contact.detail.remove_friend.action", "Remove"))
+        self.cancelButton.setText(tr("common.cancel", "Cancel"))
+        self.widget.setMinimumWidth(380)
+
 
 class ContactListItem(QWidget):
     clicked = Signal(str)
@@ -865,6 +890,7 @@ class ContactWelcomeWidget(QWidget):
 
 class GalleryContactDetailPanel(QWidget):
     message_requested = Signal(object)
+    remove_requested = Signal(object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -904,12 +930,17 @@ class GalleryContactDetailPanel(QWidget):
         self.message_button = PrimaryPushButton(tr("contact.detail.action.message", "Message"), self.header)
         self.voice_button = PushButton(tr("contact.detail.action.voice_call", "Voice Call"), self.header)
         self.video_button = PushButton(tr("contact.detail.action.video_call", "Video Call"), self.header)
+        self.remove_friend_button = PushButton(tr("contact.detail.action.remove_friend", "Remove Friend"), self.header)
+        self.remove_friend_button.setObjectName("contactDangerButton")
         for button in (self.message_button, self.voice_button, self.video_button):
             button.setFixedWidth(112)
             button.setMinimumHeight(36)
+        self.remove_friend_button.setFixedWidth(112)
+        self.remove_friend_button.setMinimumHeight(36)
         action_row.addWidget(self.message_button)
         action_row.addWidget(self.voice_button)
         action_row.addWidget(self.video_button)
+        action_row.addWidget(self.remove_friend_button)
         action_row.addStretch(1)
 
         header_layout.addWidget(self.avatar, 0, Qt.AlignmentFlag.AlignLeft)
@@ -920,10 +951,12 @@ class GalleryContactDetailPanel(QWidget):
         header_layout.addStretch(1)
 
         self.message_button.clicked.connect(self._emit_message_request)
+        self.remove_friend_button.clicked.connect(self._emit_remove_request)
         self.voice_button.clicked.connect(self._show_unavailable)
         self.video_button.clicked.connect(self._show_unavailable)
         self.voice_button.hide()
         self.video_button.hide()
+        self.remove_friend_button.hide()
 
         self.moments_panel = ContactMomentsFlowPanel(self)
 
@@ -940,6 +973,8 @@ class GalleryContactDetailPanel(QWidget):
         self.message_button.setEnabled(False)
         self.voice_button.setEnabled(False)
         self.video_button.setEnabled(False)
+        self.remove_friend_button.setEnabled(False)
+        self.remove_friend_button.hide()
         self.moments_panel.show_placeholder(tr("contact.moments.detail_empty", "There is nothing to display right now."))
 
     def set_contact(self, contact: ContactRecord, moments: Optional[list[MomentRecord]] = None) -> None:
@@ -976,6 +1011,8 @@ class GalleryContactDetailPanel(QWidget):
         self.message_button.setEnabled(True)
         self.voice_button.setEnabled(False)
         self.video_button.setEnabled(False)
+        self.remove_friend_button.setEnabled(True)
+        self.remove_friend_button.show()
         self.moments_panel.set_moments(
             moments or [],
             tr("contact.moments.contact_empty", "This contact has no moments yet."),
@@ -1001,6 +1038,8 @@ class GalleryContactDetailPanel(QWidget):
         self.message_button.setEnabled(True)
         self.voice_button.setEnabled(False)
         self.video_button.setEnabled(False)
+        self.remove_friend_button.setEnabled(False)
+        self.remove_friend_button.hide()
         self.moments_panel.set_moments(
             moments or [],
             tr("contact.moments.group_empty", "There are no group moments to display yet."),
@@ -1052,6 +1091,8 @@ class GalleryContactDetailPanel(QWidget):
         self.message_button.setEnabled(self._entity is not None)
         self.voice_button.setEnabled(False)
         self.video_button.setEnabled(False)
+        self.remove_friend_button.setEnabled(False)
+        self.remove_friend_button.hide()
         self.moments_panel.set_moments(
             moments or [],
             tr("contact.moments.contact_empty", "This contact has no moments yet."),
@@ -1060,6 +1101,10 @@ class GalleryContactDetailPanel(QWidget):
     def _emit_message_request(self) -> None:
         if self._entity:
             self.message_requested.emit(self._entity)
+
+    def _emit_remove_request(self) -> None:
+        if self._entity and self._entity.get("type") == "friend":
+            self.remove_requested.emit(self._entity)
 
     def _show_unavailable(self) -> None:
         InfoBar.info(
@@ -1661,6 +1706,7 @@ class ContactInterface(QWidget):
         self.add_button.clicked.connect(self._show_add_placeholder)
         self.search_box.textChanged.connect(self._on_search_text_changed)
         self.detail_panel.message_requested.connect(self.message_requested.emit)
+        self.detail_panel.remove_requested.connect(self._on_remove_friend_requested)
         self._event_bus.subscribe_sync(ContactEvent.SYNC_REQUIRED, self._on_contact_sync_required)
         self._connection_manager.add_state_listener(self._on_connection_state_changed)
         self.detail_panel.moments_panel.like_requested.connect(self._request_detail_like_toggle)
@@ -2516,6 +2562,56 @@ class ContactInterface(QWidget):
         routed_payload = dict(payload)
         routed_payload["_clear_contact_search"] = True
         self.message_requested.emit(routed_payload)
+
+    def _on_remove_friend_requested(self, payload: object) -> None:
+        """Confirm and remove one selected friend from the contact page."""
+        if not isinstance(payload, dict):
+            return
+        contact = payload.get("data")
+        if not isinstance(contact, ContactRecord):
+            return
+        contact_id = str(contact.id or "").strip()
+        if not contact_id:
+            return
+        dialog = RemoveFriendConfirmDialog(contact.display_name, self.window())
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        self._schedule_keyed_ui_task(
+            ("remove_friend", contact_id),
+            self._remove_friend_async(contact_id, contact.display_name),
+            f"remove friend {contact_id}",
+        )
+
+    async def _remove_friend_async(self, contact_id: str, display_name: str) -> None:
+        try:
+            await self._controller.remove_friend(contact_id)
+        except Exception:
+            InfoBar.error(
+                tr("contact.detail.remove_friend.title", "Remove Friend"),
+                tr("contact.detail.remove_friend.failed", "Unable to remove this friend right now."),
+                parent=self.window(),
+                duration=2400,
+            )
+            raise
+
+        self._contacts = [item for item in self._contacts if item.id != contact_id]
+        self._remove_friend_item_view(contact_id)
+        self._update_summary_counts()
+        self._schedule_contacts_cache_persist()
+        self._refresh_search_surface()
+        if self._selected_key == ("friend", contact_id):
+            self._clear_active_selection()
+
+        InfoBar.success(
+            tr("contact.detail.remove_friend.title", "Remove Friend"),
+            tr(
+                "contact.detail.remove_friend.success",
+                "{name} has been removed.",
+                name=display_name or contact_id,
+            ),
+            parent=self.window(),
+            duration=1800,
+        )
 
     def clear_search(self) -> None:
         """Clear the shared sidebar search box and anchored results flyout."""

@@ -1001,6 +1001,41 @@ def test_chat_info_member_management_uses_formal_dialog_boundary() -> None:
     assert 'self._session_manager.set_user_id(user_id)' in Path('client/ui/controllers/chat_controller.py').read_text(encoding='utf-8')
 
 
+def test_chat_info_group_delete_and_contact_remove_entries_are_wired() -> None:
+    chat_interface = Path('client/ui/windows/chat_interface.py').read_text(encoding='utf-8')
+    chat_panel = Path('client/ui/widgets/chat_panel.py').read_text(encoding='utf-8')
+    drawer = Path('client/ui/widgets/chat_info_drawer.py').read_text(encoding='utf-8')
+    contact_interface = Path('client/ui/windows/contact_interface.py').read_text(encoding='utf-8')
+    contact_controller = Path('client/ui/controllers/contact_controller.py').read_text(encoding='utf-8')
+    contact_service = Path('client/services/contact_service.py').read_text(encoding='utf-8')
+
+    assert 'class DeleteGroupConfirmDialog(MessageBoxBase):' in chat_interface
+    assert 'chat_info_delete_group_requested = Signal()' in chat_panel
+    assert 'self._chat_info_overlay.deleteGroupRequested.connect(self.chat_info_delete_group_requested.emit)' in chat_panel
+    assert 'self.chat_panel.chat_info_delete_group_requested.connect(self._on_chat_info_delete_group_requested)' in chat_interface
+    assert 'async def _delete_group_async(self, session_id: str, group_id: str, group_name: str) -> None:' in chat_interface
+    assert 'await self._contact_controller.delete_group(group_id)' in chat_interface
+    assert 'DeleteGroupConfirmDialog(session.chat_title() or session.display_name(), self.window())' in chat_interface
+
+    assert 'deleteGroupRequested = Signal()' in drawer
+    assert 'self.delete_group_button = StaticHyperlinkButton(parent=self)' in drawer
+    assert 'self.delete_group_button.clicked.connect(self.deleteGroupRequested.emit)' in drawer
+    assert 'self.delete_group_button.setVisible(is_owner)' in drawer
+    assert 'self.leave_button.setVisible(not is_owner)' in drawer
+    assert 'self.view_more_button.clicked.connect(lambda: self._emit_member_management_request("browse"))' in drawer
+    assert 'add_tile.clicked.connect(lambda: self._emit_member_management_request("add"))' in drawer
+    assert 'remove_tile.clicked.connect(lambda: self._emit_member_management_request("remove"))' in drawer
+
+    assert 'class RemoveFriendConfirmDialog(MessageBoxBase):' in contact_interface
+    assert 'remove_requested = Signal(object)' in contact_interface
+    assert 'self.remove_friend_button = PushButton(tr("contact.detail.action.remove_friend", "Remove Friend"), self.header)' in contact_interface
+    assert 'self.detail_panel.remove_requested.connect(self._on_remove_friend_requested)' in contact_interface
+    assert 'async def _remove_friend_async(self, contact_id: str, display_name: str) -> None:' in contact_interface
+    assert 'await self._controller.remove_friend(contact_id)' in contact_interface
+    assert 'async def delete_group(self, group_id: str) -> dict:' in contact_controller
+    assert 'async def delete_group(self, group_id: str) -> dict[str, Any]:' in contact_service
+
+
 def test_contact_controller_owns_group_record_merge_rules() -> None:
     contact_controller = Path('client/ui/controllers/contact_controller.py').read_text(encoding='utf-8')
     contact_interface = Path('client/ui/windows/contact_interface.py').read_text(encoding='utf-8')

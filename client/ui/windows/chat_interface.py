@@ -210,6 +210,29 @@ class LeaveGroupConfirmDialog(MessageBoxBase):
         self.widget.setMinimumWidth(380)
 
 
+class DeleteGroupConfirmDialog(MessageBoxBase):
+    """Ask for confirmation before deleting one owned group chat."""
+
+    def __init__(self, group_name: str, parent=None):
+        super().__init__(parent=parent)
+        title = SubtitleLabel(tr("chat.info.group.delete.title", "Delete Group Chat"), self.widget)
+        content = BodyLabel(
+            tr(
+                "chat.info.group.delete.confirm",
+                "Delete {name}? This will dissolve the group for all members.",
+                name=group_name or tr("session.unnamed", "Untitled Session"),
+            ),
+            self.widget,
+        )
+        content.setWordWrap(True)
+        self.viewLayout.addWidget(title)
+        self.viewLayout.addWidget(content)
+        self.viewLayout.addStretch(1)
+        self.yesButton.setText(tr("chat.info.group.delete.action", "Delete"))
+        self.cancelButton.setText(tr("common.cancel", "Cancel"))
+        self.widget.setMinimumWidth(400)
+
+
 class IdentityReviewDialog(QDialog):
     """Desktop dialog that exposes one direct-session safety code and trust action."""
 
@@ -580,6 +603,7 @@ class ChatInterface(QWidget):
         self.chat_panel.chat_info_identity_review_requested.connect(self._on_chat_info_identity_review_requested)
         self.chat_panel.chat_info_clear_requested.connect(self._on_chat_info_clear_requested)
         self.chat_panel.chat_info_leave_requested.connect(self._on_chat_info_leave_requested)
+        self.chat_panel.chat_info_delete_group_requested.connect(self._on_chat_info_delete_group_requested)
         self.chat_panel.chat_info_mute_toggled.connect(self._on_chat_info_mute_toggled)
         self.chat_panel.chat_info_pin_toggled.connect(self._on_chat_info_pin_toggled)
         self.chat_panel.chat_info_show_nickname_toggled.connect(self._on_chat_info_show_nickname_toggled)
@@ -4357,6 +4381,25 @@ class ChatInterface(QWidget):
             f"leave group {session.session_id}",
         )
 
+    def _on_chat_info_delete_group_requested(self) -> None:
+        """Confirm and delete the currently opened owned group chat."""
+        session = self._session_controller.get_current_session()
+        if session is None or getattr(session, "session_type", "") != "group":
+            return
+
+        group_id = session.authoritative_group_id()
+        if not group_id:
+            return
+
+        dialog = DeleteGroupConfirmDialog(session.chat_title() or session.display_name(), self.window())
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        self._schedule_ui_task(
+            self._delete_group_async(session.session_id, group_id, session.chat_title() or session.display_name()),
+            f"delete group {session.session_id}",
+        )
+
     def _on_chat_info_mute_toggled(self, muted: bool) -> None:
         """Route local do-not-disturb changes through the session controller only."""
         session_id = self._current_session_id
@@ -4551,6 +4594,31 @@ class ChatInterface(QWidget):
             tr(
                 "chat.info.group.leave.success",
                 "You left {name}.",
+                name=group_name or tr("session.unnamed", "Untitled Session"),
+            ),
+            parent=self.window(),
+            duration=2000,
+        )
+
+    async def _delete_group_async(self, session_id: str, group_id: str, group_name: str) -> None:
+        try:
+            await self._contact_controller.delete_group(group_id)
+            await self._session_controller.remove_session(session_id)
+            await self._event_bus.emit(ContactEvent.SYNC_REQUIRED, {"reason": "group_deleted"})
+        except Exception:
+            InfoBar.error(
+                tr("chat.info.group.delete.title", "Delete Group Chat"),
+                tr("chat.info.group.delete.failed", "Unable to delete this group right now."),
+                parent=self.window(),
+                duration=2400,
+            )
+            raise
+
+        InfoBar.success(
+            tr("chat.info.group.delete.title", "Delete Group Chat"),
+            tr(
+                "chat.info.group.delete.success",
+                "{name} has been deleted.",
                 name=group_name or tr("session.unnamed", "Untitled Session"),
             ),
             parent=self.window(),
