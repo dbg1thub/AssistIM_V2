@@ -46,6 +46,22 @@ def test_discovery_ui_loads_full_comments_from_moment_detail() -> None:
     assert 'card.apply_detail(moment)' in discovery_interface
 
 
+def test_moment_ui_mutations_keep_backing_records_in_sync() -> None:
+    discovery_interface = Path('client/ui/windows/discovery_interface.py').read_text(encoding='utf-8')
+    contact_interface = Path('client/ui/windows/contact_interface.py').read_text(encoding='utf-8')
+
+    assert 'def _apply_local_comment(self, moment_id: str, comment) -> None:' in discovery_interface
+    assert 'existing is comment' in discovery_interface
+    assert 'moment.comments.append(comment)' in discovery_interface
+    assert 'moment.comment_count = max(moment.comment_count + 1, len(moment.comments))' in discovery_interface
+    assert 'self._apply_local_comment(moment_id, comment)' in discovery_interface
+    assert 'def _sync_moment_like_state(self, moment_id: str, liked: bool, like_count: int) -> None:' in contact_interface
+    assert 'def _sync_moment_comment(self, moment_id: str, comment) -> None:' in contact_interface
+    assert 'existing is comment' in contact_interface
+    assert 'self._sync_moment_like_state(moment_id, liked, like_count)' in contact_interface
+    assert 'self._sync_moment_comment(moment_id, comment)' in contact_interface
+
+
 def test_group_flow_no_longer_writes_local_group_avatar_metadata() -> None:
     chat_interface = Path('client/ui/windows/chat_interface.py').read_text(encoding='utf-8')
     group_flow = Path('client/ui/windows/chat_group_flow.py').read_text(encoding='utf-8')

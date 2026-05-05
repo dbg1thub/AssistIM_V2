@@ -822,6 +822,7 @@ class ContactMomentsFlowPanel(QWidget):
             widget.deleteLater()
 
     def set_like_state(self, moment_id: str, liked: bool, like_count: int) -> None:
+        self._sync_moment_like_state(moment_id, liked, like_count)
         card = self._cards.get(moment_id)
         if card is not None:
             card.set_like_state(liked, like_count)
@@ -830,6 +831,28 @@ class ContactMomentsFlowPanel(QWidget):
         card = self._cards.get(moment_id)
         if card is not None:
             card.append_comment(comment)
+        self._sync_moment_comment(moment_id, comment)
+
+    def _sync_moment_like_state(self, moment_id: str, liked: bool, like_count: int) -> None:
+        for moment in self._moments:
+            if moment.id == moment_id:
+                moment.is_liked = liked
+                moment.like_count = like_count
+                return
+
+    def _sync_moment_comment(self, moment_id: str, comment) -> None:
+        for moment in self._moments:
+            if moment.id == moment_id:
+                comment_id = str(getattr(comment, "id", "") or "")
+                if any(
+                    existing is comment or (comment_id and getattr(existing, "id", "") == comment_id)
+                    for existing in moment.comments
+                ):
+                    moment.comment_count = max(moment.comment_count, len(moment.comments))
+                    return
+                moment.comments.append(comment)
+                moment.comment_count = max(moment.comment_count + 1, len(moment.comments))
+                return
 
 
 class ContactWelcomeWidget(QWidget):

@@ -1303,6 +1303,7 @@ class DiscoveryInterface(QWidget):
         card = self._cards.get(moment_id)
         if card is not None:
             card.append_comment(comment)
+        self._apply_local_comment(moment_id, comment)
 
         InfoBar.success(
             tr("discovery.comment.title", "Post Comment"),
@@ -1310,6 +1311,21 @@ class DiscoveryInterface(QWidget):
             parent=self.window(),
             duration=1400,
         )
+
+    def _apply_local_comment(self, moment_id: str, comment) -> None:
+        """Keep the backing moment record aligned with the visible card."""
+        moment = next((item for item in self._moments if item.id == moment_id), None)
+        if moment is None:
+            return
+        comment_id = str(getattr(comment, "id", "") or "")
+        if any(
+            existing is comment or (comment_id and getattr(existing, "id", "") == comment_id)
+            for existing in moment.comments
+        ):
+            moment.comment_count = max(moment.comment_count, len(moment.comments))
+            return
+        moment.comments.append(comment)
+        moment.comment_count = max(moment.comment_count + 1, len(moment.comments))
 
     async def upload_moment_media(self, file_paths: list[str]) -> list[dict[str, object]]:
         """Upload selected moment media files and return normalized client-side payloads."""

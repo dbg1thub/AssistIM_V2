@@ -94,9 +94,6 @@ class DiscoveryController:
         self._user_service = get_user_service()
         self._auth = get_auth_controller()
         self._user_cache: dict[str, dict[str, Any]] = {}
-        self._comment_cache: dict[str, list[MomentCommentRecord]] = {}
-        self._like_state_cache: dict[str, bool] = {}
-        self._like_count_cache: dict[str, int] = {}
         self._cache_owner_user_id = ""
         self._closed = False
 
@@ -108,9 +105,6 @@ class DiscoveryController:
     def _clear_caches(self) -> None:
         """Drop all account-scoped discovery caches."""
         self._user_cache.clear()
-        self._comment_cache.clear()
-        self._like_state_cache.clear()
-        self._like_count_cache.clear()
 
     def _capture_runtime_user_id(self) -> str:
         """Capture the live account id for one discovery task."""
@@ -209,9 +203,6 @@ class DiscoveryController:
         else:
             await self._discovery_service.unlike_moment(moment_id)
         self._ensure_runtime_user_id(owner_user_id)
-        self._like_state_cache[moment_id] = liked
-        if like_count is not None:
-            self._like_count_cache[moment_id] = max(0, like_count)
         return liked
 
     async def add_comment(
@@ -226,10 +217,7 @@ class DiscoveryController:
         self._sync_cache_scope(owner_user_id)
         payload = await self._discovery_service.add_comment(moment_id, content, image=image)
         self._ensure_runtime_user_id(owner_user_id)
-        comment = self._normalize_comment(payload or {}, moment_id=moment_id)
-        self._comment_cache.setdefault(moment_id, []).append(comment)
-        self._like_count_cache.setdefault(moment_id, self._like_count_cache.get(moment_id, 0))
-        return comment
+        return self._normalize_comment(payload or {}, moment_id=moment_id)
 
     async def _ensure_user_loaded(self, user_id: str, *, owner_user_id: str) -> None:
         """Load a user profile into cache if absent."""
@@ -278,22 +266,12 @@ class DiscoveryController:
             self._normalize_comment(comment, moment_id=moment_id)
             for comment in comments_payload
         ]
-        cached_comments = list(self._comment_cache.get(moment_id, []))
-        if cached_comments:
-            known_ids = {item.id for item in normalized_comments if item.id}
-            normalized_comments.extend(
-                item for item in cached_comments if not item.id or item.id not in known_ids
-            )
 
         media = self._normalize_media_items(data.get("media") or data.get("images") or [])
         images = [item.url for item in media if item.is_image]
         videos = [item.url for item in media if item.is_video]
         like_count = int(data.get("like_count", 0) or 0)
-        if moment_id in self._like_count_cache:
-            like_count = self._like_count_cache[moment_id]
         is_liked = bool(data.get("is_liked", False))
-        if moment_id in self._like_state_cache:
-            is_liked = self._like_state_cache[moment_id]
 
         return MomentRecord(
             id=moment_id,

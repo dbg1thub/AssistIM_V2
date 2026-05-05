@@ -2968,6 +2968,67 @@ def test_discovery_controller_mutations_use_discovery_service(monkeypatch) -> No
     asyncio.run(scenario())
 
 
+def test_discovery_controller_reloads_authoritative_moment_state_after_mutations(monkeypatch) -> None:
+    fake_discovery_service = FakeDiscoveryService()
+    fake_user_service = FakeUserService()
+    fake_auth_context = FakeAuthContext({'id': 'user-1', 'username': 'alice', 'nickname': 'Alice', 'avatar': '/avatars/alice.png'})
+    fake_discovery_service.moments_payload = [
+        {
+            'id': 'moment-3',
+            'user_id': 'user-2',
+            'content': 'server state',
+            'created_at': '2026-03-23T12:00:00Z',
+            'like_count': 1,
+            'is_liked': False,
+            'comments': [
+                {'id': 'comment-server-1', 'user_id': 'user-2', 'content': 'server first'},
+            ],
+        }
+    ]
+    fake_discovery_service.comment_payload = {
+        'id': 'comment-local',
+        'moment_id': 'moment-3',
+        'user_id': 'user-1',
+        'content': 'local optimistic comment',
+    }
+    fake_user_service.user_payloads = {
+        'user-2': {'id': 'user-2', 'username': 'bob', 'nickname': 'Bob'},
+    }
+
+    monkeypatch.setattr(discovery_controller_module, 'get_discovery_service', lambda: fake_discovery_service)
+    monkeypatch.setattr(discovery_controller_module, 'get_user_service', lambda: fake_user_service)
+    monkeypatch.setattr(discovery_controller_module, 'get_auth_controller', lambda: fake_auth_context)
+
+    async def scenario() -> None:
+        controller = discovery_controller_module.DiscoveryController()
+
+        await controller.set_liked('moment-3', True, like_count=2)
+        await controller.add_comment('moment-3', 'local optimistic comment')
+        fake_discovery_service.moments_payload = [
+            {
+                'id': 'moment-3',
+                'user_id': 'user-2',
+                'content': 'server state updated elsewhere',
+                'created_at': '2026-03-23T12:00:00Z',
+                'like_count': 7,
+                'is_liked': False,
+                'comments': [
+                    {'id': 'comment-server-2', 'user_id': 'user-2', 'content': 'server refreshed'},
+                ],
+            }
+        ]
+
+        moments = await controller.load_moments()
+
+        assert len(moments) == 1
+        assert moments[0].content == 'server state updated elsewhere'
+        assert moments[0].is_liked is False
+        assert moments[0].like_count == 7
+        assert [comment.id for comment in moments[0].comments] == ['comment-server-2']
+
+    asyncio.run(scenario())
+
+
 def test_search_manager_uses_database_search_boundary(monkeypatch) -> None:
     fake_db = FakeSearchDatabase(
         [
@@ -6005,17 +6066,11 @@ def test_discovery_controller_clears_caches_on_close(monkeypatch) -> None:
     async def scenario() -> None:
         controller = discovery_controller_module.DiscoveryController()
         controller._user_cache['user-2'] = {'id': 'user-2'}
-        controller._comment_cache['moment-1'] = []
-        controller._like_state_cache['moment-1'] = True
-        controller._like_count_cache['moment-1'] = 3
         discovery_controller_module._discovery_controller = controller
 
         await controller.close()
 
         assert controller._user_cache == {}
-        assert controller._comment_cache == {}
-        assert controller._like_state_cache == {}
-        assert controller._like_count_cache == {}
         assert discovery_controller_module.peek_discovery_controller() is None
 
     asyncio.run(scenario())
@@ -6051,9 +6106,6 @@ def test_discovery_controller_ignores_late_results_after_auth_context_change(mon
             raise AssertionError('stale discovery load must be cancelled')
 
         assert controller._user_cache == {}
-        assert controller._comment_cache == {}
-        assert controller._like_state_cache == {}
-        assert controller._like_count_cache == {}
 
     asyncio.run(scenario())
 
