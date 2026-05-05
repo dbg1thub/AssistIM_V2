@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import re
 from typing import Any, Optional
@@ -227,6 +228,7 @@ class DeviceSecurityDialog(QDialog):
         super().__init__(parent)
         self._auth_controller = auth_controller or get_auth_controller()
         self._load_task: Optional[asyncio.Task] = None
+        self._action_task: Optional[asyncio.Task] = None
 
         self.setWindowTitle(tr("profile.security.title", "Account Security"))
         self.setMinimumSize(560, 500)
@@ -264,6 +266,9 @@ class DeviceSecurityDialog(QDialog):
         self.scroll_area.setWidget(self.device_container)
 
         button_row = QHBoxLayout()
+        self.import_button = PushButton(tr("profile.security.import", "Import Recovery Package"), self)
+        self.import_button.clicked.connect(self._select_recovery_package_import)
+        button_row.addWidget(self.import_button, 0)
         button_row.addStretch(1)
         self.refresh_button = PushButton(tr("common.refresh", "Refresh"), self)
         self.close_button = PrimaryPushButton(tr("common.close", "Close"), self)
@@ -278,7 +283,7 @@ class DeviceSecurityDialog(QDialog):
         layout.addWidget(self.scroll_area, 1)
         layout.addLayout(button_row)
 
-        self.finished.connect(lambda _result: self._cancel_load_task())
+        self.finished.connect(lambda _result: self._cancel_pending_tasks())
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
@@ -286,7 +291,7 @@ class DeviceSecurityDialog(QDialog):
             self.reload_devices()
 
     def closeEvent(self, event) -> None:
-        self._cancel_load_task()
+        self._cancel_pending_tasks()
         super().closeEvent(event)
 
     def reload_devices(self) -> None:
@@ -297,6 +302,7 @@ class DeviceSecurityDialog(QDialog):
 
     async def _load_devices_async(self) -> None:
         self.refresh_button.setEnabled(False)
+        self.import_button.setEnabled(False)
         self.status_label.setText(tr("profile.security.loading", "Loading registered devices..."))
         self._render_loading()
         try:
@@ -322,6 +328,7 @@ class DeviceSecurityDialog(QDialog):
             )
         finally:
             self.refresh_button.setEnabled(True)
+            self.import_button.setEnabled(True)
 
     def _finalize_load_task(self, task: asyncio.Task) -> None:
         if self._load_task is task:
@@ -337,6 +344,36 @@ class DeviceSecurityDialog(QDialog):
         if self._load_task is not None and not self._load_task.done():
             self._load_task.cancel()
         self._load_task = None
+
+    def _cancel_action_task(self) -> None:
+        if self._action_task is not None and not self._action_task.done():
+            self._action_task.cancel()
+        self._action_task = None
+
+    def _cancel_pending_tasks(self) -> None:
+        self._cancel_load_task()
+        self._cancel_action_task()
+
+    def _set_action_task(self, coro) -> None:
+        self._cancel_action_task()
+        self._action_task = asyncio.create_task(coro)
+        self._action_task.add_done_callback(self._finalize_action_task)
+
+    def _finalize_action_task(self, task: asyncio.Task) -> None:
+        if self._action_task is task:
+            self._action_task = None
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            logger.exception("Device security action task failed")
+
+    def _set_action_busy(self, busy: bool, status: str = "") -> None:
+        self.refresh_button.setEnabled(not busy)
+        self.import_button.setEnabled(not busy)
+        if status:
+            self.status_label.setText(status)
 
     def _clear_device_layout(self) -> None:
         while self.device_layout.count():
@@ -449,6 +486,15 @@ class DeviceSecurityDialog(QDialog):
                     card,
                 )
             )
+        device_id = str(device.get("device_id", "") or "").strip()
+        if device_id and not is_local:
+            action_row = QHBoxLayout()
+            action_row.setContentsMargins(0, 6, 0, 0)
+            action_row.addStretch(1)
+            export_button = PushButton(tr("profile.security.export", "Export Recovery Package"), card)
+            export_button.clicked.connect(lambda _checked=False, did=device_id: self._select_recovery_package_export(did))
+            action_row.addWidget(export_button, 0)
+            layout.addLayout(action_row)
         return card
 
     @staticmethod
@@ -456,6 +502,113 @@ class DeviceSecurityDialog(QDialog):
         label = CaptionLabel(text, parent)
         label.setWordWrap(True)
         return label
+
+    def _select_recovery_package_export(self, device_id: str) -> None:
+        normalized_device_id = str(device_id or "").strip()
+        if not normalized_device_id or self._action_task is not None:
+            return
+        default_name = f"assistim-recovery-{normalized_device_id}.json"
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            tr("profile.security.export.title", "Export Recovery Package"),
+            default_name,
+            tr("profile.security.recovery_filter", "JSON Files (*.json);;All Files (*.*)"),
+        )
+        if not file_path:
+            return
+        self._set_action_task(self._export_recovery_package_async(normalized_device_id, file_path))
+
+    async def _export_recovery_package_async(self, device_id: str, file_path: str) -> None:
+        self._set_action_busy(
+            True,
+            tr("profile.security.export.running", "Exporting recovery package..."),
+        )
+        try:
+            result = await self._auth_controller.export_history_recovery_package(device_id)
+            with open(file_path, "w", encoding="utf-8") as handle:
+                json.dump(result, handle, ensure_ascii=False, indent=2)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Failed to export E2EE history recovery package")
+            InfoBar.error(
+                tr("profile.security.export.title", "Export Recovery Package"),
+                tr("profile.security.export.failed", "Unable to export the recovery package."),
+                parent=self,
+                duration=2400,
+            )
+        else:
+            InfoBar.success(
+                tr("profile.security.export.title", "Export Recovery Package"),
+                tr("profile.security.export.success", "Recovery package exported."),
+                parent=self,
+                duration=2000,
+            )
+            self.reload_devices()
+        finally:
+            self._set_action_busy(False)
+
+    def _select_recovery_package_import(self) -> None:
+        if self._action_task is not None:
+            return
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            tr("profile.security.import.title", "Import Recovery Package"),
+            "",
+            tr("profile.security.recovery_filter", "JSON Files (*.json);;All Files (*.*)"),
+        )
+        if not file_path:
+            return
+        self._set_action_task(self._import_recovery_package_async(file_path))
+
+    async def _import_recovery_package_async(self, file_path: str) -> None:
+        self._set_action_busy(
+            True,
+            tr("profile.security.import.running", "Importing recovery package..."),
+        )
+        try:
+            with open(file_path, "r", encoding="utf-8") as handle:
+                package = self._extract_recovery_package(json.load(handle))
+            result = await self._auth_controller.import_history_recovery_package(package)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Failed to import E2EE history recovery package")
+            InfoBar.error(
+                tr("profile.security.import.title", "Import Recovery Package"),
+                tr("profile.security.import.failed", "Unable to import the recovery package."),
+                parent=self,
+                duration=2400,
+            )
+        else:
+            source_device_id = str(result.get("source_device_id", "") or "").strip()
+            InfoBar.success(
+                tr("profile.security.import.title", "Import Recovery Package"),
+                tr(
+                    "profile.security.import.success",
+                    "Recovery package imported.",
+                )
+                if not source_device_id
+                else tr(
+                    "profile.security.import.success_from",
+                    "Recovery package imported from {device_id}.",
+                    device_id=source_device_id,
+                ),
+                parent=self,
+                duration=2200,
+            )
+            self.reload_devices()
+        finally:
+            self._set_action_busy(False)
+
+    @staticmethod
+    def _extract_recovery_package(payload: object) -> dict[str, Any]:
+        if not isinstance(payload, dict):
+            raise ValueError("recovery package must be a JSON object")
+        package = payload.get("package")
+        if isinstance(package, dict):
+            return dict(package)
+        return dict(payload)
 
 
 class ProfileEditDialog(QDialog):

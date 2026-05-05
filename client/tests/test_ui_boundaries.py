@@ -535,6 +535,7 @@ def test_user_profile_flyout_exposes_readonly_e2ee_device_security() -> None:
     flyout = Path('client/ui/widgets/user_profile_flyout.py').read_text(encoding='utf-8')
     auth_controller = Path('client/ui/controllers/auth_controller.py').read_text(encoding='utf-8')
 
+    assert 'import json' in flyout
     assert 'class DeviceSecurityDialog(QDialog):' in flyout
     assert 'self.refresh_button.clicked.connect(self.reload_devices)' in flyout
     assert 'devices = await self._auth_controller.list_my_e2ee_devices()' in flyout
@@ -549,6 +550,28 @@ def test_user_profile_flyout_exposes_readonly_e2ee_device_security() -> None:
     assert 'dialog = DeviceSecurityDialog(self.window(), auth_controller=self._auth_controller)' in flyout
     assert 'async def list_my_e2ee_devices(self) -> list[dict[str, Any]]:' in auth_controller
     assert 'async def get_history_recovery_diagnostics(self) -> dict[str, Any]:' in auth_controller
+
+
+def test_user_profile_flyout_wires_history_recovery_import_export() -> None:
+    flyout = Path('client/ui/widgets/user_profile_flyout.py').read_text(encoding='utf-8')
+    auth_controller = Path('client/ui/controllers/auth_controller.py').read_text(encoding='utf-8')
+
+    assert 'self._action_task: Optional[asyncio.Task] = None' in flyout
+    assert 'self.import_button = PushButton(tr("profile.security.import", "Import Recovery Package"), self)' in flyout
+    assert 'self.import_button.clicked.connect(self._select_recovery_package_import)' in flyout
+    assert 'export_button = PushButton(tr("profile.security.export", "Export Recovery Package"), card)' in flyout
+    assert 'export_button.clicked.connect(lambda _checked=False, did=device_id: self._select_recovery_package_export(did))' in flyout
+    assert 'def _select_recovery_package_export(self, device_id: str) -> None:' in flyout
+    assert 'QFileDialog.getSaveFileName(' in flyout
+    assert 'result = await self._auth_controller.export_history_recovery_package(device_id)' in flyout
+    assert 'json.dump(result, handle, ensure_ascii=False, indent=2)' in flyout
+    assert 'def _select_recovery_package_import(self) -> None:' in flyout
+    assert 'QFileDialog.getOpenFileName(' in flyout
+    assert 'package = self._extract_recovery_package(json.load(handle))' in flyout
+    assert 'result = await self._auth_controller.import_history_recovery_package(package)' in flyout
+    assert 'self.reload_devices()' in flyout
+    assert 'async def export_history_recovery_package(' in auth_controller
+    assert 'async def import_history_recovery_package(self, package: dict[str, Any] | None) -> dict[str, Any]:' in auth_controller
 
 
 
