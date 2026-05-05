@@ -72,6 +72,27 @@ class AuthService:
         user = self.authenticate_credentials(username, password)
         return self.login_user(user, rotate_session=True)
 
+    def reset_password(self, email: str, email_code: str, new_password: str) -> dict:
+        normalized_email = normalize_email_address(email)
+        user = self.users.get_by_email(normalized_email)
+        if user is None:
+            raise AppError(ErrorCode.INVALID_REQUEST, "invalid email verification code", 400)
+
+        try:
+            self.email_verification.consume_password_reset_code(
+                normalized_email,
+                email_code,
+                commit=False,
+            )
+            user = self.users.update(user, password_hash=hash_password(new_password), commit=False)
+            user = self.users.advance_auth_session_version(user, commit=False)
+            self.db.commit()
+            self.db.refresh(user)
+        except Exception:
+            self.db.rollback()
+            raise
+        return {"reset": True, "user_id": str(user.id or "")}
+
     def authenticate_credentials(self, username: str, password: str) -> User:
         user = self.users.get_by_username(canonicalize_username(username))
         if user is None or not verify_password(password, user.password_hash):

@@ -21,6 +21,7 @@ from app.utils.time import utcnow
 
 EMAIL_PATTERN = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 REGISTER_PURPOSE = "register"
+PASSWORD_RESET_PURPOSE = "password_reset"
 
 
 def normalize_email_address(value: str) -> str:
@@ -46,7 +47,17 @@ class EmailVerificationService:
         normalized_email = normalize_email_address(email)
         if self.users.get_by_email(normalized_email) is not None:
             raise AppError(ErrorCode.USER_EXISTS, "email already registered", 409)
+        return self._issue_code(normalized_email, REGISTER_PURPOSE, request_ip=request_ip)
 
+    def send_password_reset_code(self, email: str, *, request_ip: str = "") -> dict[str, object]:
+        normalized_email = normalize_email_address(email)
+        user = self.users.get_by_email(normalized_email)
+        if user is None:
+            return self._generic_send_payload(normalized_email, PASSWORD_RESET_PURPOSE)
+
+        return self._issue_code(normalized_email, PASSWORD_RESET_PURPOSE, request_ip=request_ip)
+
+    def _issue_code(self, normalized_email: str, purpose: str, *, request_ip: str = "") -> dict[str, object]:
         now = utcnow()
         cooldown_seconds = max(0, int(self.settings.email_verification_resend_cooldown_seconds or 0))
         if cooldown_seconds:
@@ -55,7 +66,7 @@ class EmailVerificationService:
                 select(EmailVerificationCode)
                 .where(
                     EmailVerificationCode.email == normalized_email,
-                    EmailVerificationCode.purpose == REGISTER_PURPOSE,
+                    EmailVerificationCode.purpose == purpose,
                     EmailVerificationCode.consumed_at.is_(None),
                     EmailVerificationCode.created_at >= cutoff,
                 )
@@ -69,8 +80,8 @@ class EmailVerificationService:
         code = self._generate_code()
         record = EmailVerificationCode(
             email=normalized_email,
-            purpose=REGISTER_PURPOSE,
-            code_hash=self._hash_code(normalized_email, REGISTER_PURPOSE, code),
+            purpose=purpose,
+            code_hash=self._hash_code(normalized_email, purpose, code),
             expires_at=now + timedelta(seconds=ttl_seconds),
             request_ip=str(request_ip or "")[:64],
         )
@@ -80,7 +91,7 @@ class EmailVerificationService:
             self.email_service.send_verification_code(
                 email=normalized_email,
                 code=code,
-                purpose=REGISTER_PURPOSE,
+                purpose=purpose,
                 expires_in_seconds=ttl_seconds,
             )
             self.db.commit()
@@ -92,13 +103,22 @@ class EmailVerificationService:
         payload: dict[str, object] = {
             "sent": True,
             "email": normalized_email,
-            "purpose": REGISTER_PURPOSE,
+            "purpose": purpose,
             "expires_in": ttl_seconds,
             "cooldown_seconds": cooldown_seconds,
         }
         if bool(self.settings.email_verification_expose_code):
             payload["debug_code"] = code
         return payload
+
+    def _generic_send_payload(self, normalized_email: str, purpose: str) -> dict[str, object]:
+        return {
+            "sent": True,
+            "email": normalized_email,
+            "purpose": purpose,
+            "expires_in": max(60, int(self.settings.email_verification_ttl_seconds or 600)),
+            "cooldown_seconds": max(0, int(self.settings.email_verification_resend_cooldown_seconds or 0)),
+        }
 
     def consume_register_code(
         self,
@@ -108,17 +128,49 @@ class EmailVerificationService:
         commit: bool = True,
         commit_failed_attempt: bool = True,
     ) -> str:
+        return self._consume_code(
+            email,
+            code,
+            purpose=REGISTER_PURPOSE,
+            commit=commit,
+            commit_failed_attempt=commit_failed_attempt,
+        )
+
+    def consume_password_reset_code(
+        self,
+        email: str,
+        code: str,
+        *,
+        commit: bool = True,
+        commit_failed_attempt: bool = True,
+    ) -> str:
+        return self._consume_code(
+            email,
+            code,
+            purpose=PASSWORD_RESET_PURPOSE,
+            commit=commit,
+            commit_failed_attempt=commit_failed_attempt,
+        )
+
+    def _consume_code(
+        self,
+        email: str,
+        code: str,
+        *,
+        purpose: str,
+        commit: bool,
+        commit_failed_attempt: bool,
+    ) -> str:
         normalized_email = normalize_email_address(email)
         normalized_code = str(code or "").strip()
         if len(normalized_code) != 6 or not normalized_code.isdigit():
             raise AppError(ErrorCode.INVALID_REQUEST, "invalid email verification code", 400)
-
         now = utcnow()
         record = self.db.execute(
             select(EmailVerificationCode)
             .where(
                 EmailVerificationCode.email == normalized_email,
-                EmailVerificationCode.purpose == REGISTER_PURPOSE,
+                EmailVerificationCode.purpose == purpose,
                 EmailVerificationCode.consumed_at.is_(None),
                 EmailVerificationCode.expires_at > now,
             )
@@ -132,7 +184,7 @@ class EmailVerificationService:
         if int(record.attempt_count or 0) >= max_attempts:
             raise AppError(ErrorCode.INVALID_REQUEST, "invalid email verification code", 400)
 
-        expected_hash = self._hash_code(normalized_email, REGISTER_PURPOSE, normalized_code)
+        expected_hash = self._hash_code(normalized_email, purpose, normalized_code)
         if not hmac.compare_digest(str(record.code_hash or ""), expected_hash):
             record.attempt_count = int(record.attempt_count or 0) + 1
             self.db.add(record)

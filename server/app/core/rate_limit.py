@@ -235,6 +235,7 @@ class RateLimiter:
         "login": ("username",),
         "register": ("username",),
         "email-verification": ("email",),
+        "password-reset": ("email",),
         "friend-request": ("target_user_id",),
     }
 
@@ -380,6 +381,10 @@ class RateLimiter:
                 "window_seconds": 60,
             },
             "email-verification": {
+                "limit": max(1, int(getattr(settings, "rate_limit_email_verification", 5) if settings else 5)),
+                "window_seconds": 60,
+            },
+            "password-reset": {
                 "limit": max(1, int(getattr(settings, "rate_limit_email_verification", 5) if settings else 5)),
                 "window_seconds": 60,
             },

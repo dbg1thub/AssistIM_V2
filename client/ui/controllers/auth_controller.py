@@ -393,6 +393,14 @@ class AuthController:
         """Request one registration email verification code without mutating auth state."""
         return await self._auth_service.send_email_verification(email)
 
+    async def send_password_reset_code(self, email: str) -> dict[str, Any]:
+        """Request one password-reset code without mutating auth state."""
+        return await self._auth_service.send_password_reset_code(email)
+
+    async def reset_password(self, email: str, email_code: str, new_password: str) -> dict[str, Any]:
+        """Reset one account password without committing a login session."""
+        return await self._auth_service.reset_password(email, email_code, new_password)
+
     async def request_register_payload(
         self,
         username: str,

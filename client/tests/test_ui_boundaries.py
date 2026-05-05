@@ -331,12 +331,17 @@ def test_auth_commit_is_two_phase_and_login_close_is_blocked_during_commit() -> 
     assert 'user = await self._auth_controller.commit_auth_payload(payload, reset_local_chat_state=True)' in auth_interface
     assert 'payload = await self._auth_controller.request_register_payload(username, nickname, password, email, email_code)' in auth_interface
     assert 'payload = await self._auth_controller.send_email_verification(email)' in auth_interface
+    assert 'self.forgot_password_button.clicked.connect(self._show_password_reset_dialog)' in auth_interface
+    assert 'await self._auth_controller.send_password_reset_code(email)' in auth_interface
+    assert 'await self._auth_controller.reset_password(email, email_code, new_password)' in auth_interface
     assert 'if self._submit_commit_in_progress:' in auth_interface
     assert 'event.ignore()' in auth_interface
     assert 'async def request_login_payload(self, username: str, password: str, *, force: bool = False) -> dict[str, Any]:' in auth_controller
     assert 'async def request_register_payload(' in auth_controller
     assert 'email_code: str,' in auth_controller
     assert 'async def send_email_verification(self, email: str) -> dict[str, Any]:' in auth_controller
+    assert 'async def send_password_reset_code(self, email: str) -> dict[str, Any]:' in auth_controller
+    assert 'async def reset_password(self, email: str, email_code: str, new_password: str) -> dict[str, Any]:' in auth_controller
     assert 'async def commit_auth_payload(' in auth_controller
 
 

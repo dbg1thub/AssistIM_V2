@@ -75,6 +75,118 @@ class SessionConflictDialog(MessageBoxBase):
         self.widget.setMinimumWidth(400)
 
 
+class PasswordResetDialog(QDialog):
+    """Password-reset dialog driven by email verification."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._countdown = 0
+        self._timer = QTimer(self)
+        self._timer.setInterval(1000)
+        self._timer.timeout.connect(self._tick_countdown)
+        self.finished.connect(lambda _result: self._timer.stop())
+
+        self.setWindowTitle(tr("auth.password_reset.title", "Reset Password"))
+        self.setModal(True)
+        self.setMinimumWidth(420)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 24, 24, 24)
+        layout.setSpacing(12)
+
+        title = SubtitleLabel(tr("auth.password_reset.title", "Reset Password"), self)
+        copy = CaptionLabel(
+            tr("auth.password_reset.copy", "Use your verified email to reset the account password."),
+            self,
+        )
+        copy.setWordWrap(True)
+
+        self.email_edit = LineEdit(self)
+        self.email_edit.setPlaceholderText(tr("auth.field.email", "Email"))
+        self.email_edit.setMinimumHeight(40)
+
+        code_row = QWidget(self)
+        code_layout = QHBoxLayout(code_row)
+        code_layout.setContentsMargins(0, 0, 0, 0)
+        code_layout.setSpacing(8)
+        self.code_edit = LineEdit(code_row)
+        self.code_edit.setPlaceholderText(tr("auth.field.email_code", "Email Verification Code"))
+        self.code_edit.setMaxLength(6)
+        self.code_edit.setMinimumHeight(40)
+        self.send_code_button = PushButton(tr("auth.button.send_email_code", "Send Code"), code_row)
+        self.send_code_button.setMinimumHeight(40)
+        code_layout.addWidget(self.code_edit, 1)
+        code_layout.addWidget(self.send_code_button, 0)
+
+        self.password_edit = PasswordLineEdit(self)
+        self.password_edit.setPlaceholderText(tr("auth.field.new_password", "New Password"))
+        self.password_edit.setMinimumHeight(40)
+
+        self.confirm_edit = PasswordLineEdit(self)
+        self.confirm_edit.setPlaceholderText(tr("auth.field.confirm_password", "Confirm Password"))
+        self.confirm_edit.setMinimumHeight(40)
+
+        button_row = QWidget(self)
+        button_layout = QHBoxLayout(button_row)
+        button_layout.setContentsMargins(0, 0, 0, 0)
+        button_layout.setSpacing(8)
+        button_layout.addStretch(1)
+        self.cancel_button = PushButton(tr("common.cancel", "Cancel"), button_row)
+        self.reset_button = PrimaryPushButton(tr("auth.password_reset.confirm", "Reset Password"), button_row)
+        self.cancel_button.setMinimumHeight(36)
+        self.reset_button.setMinimumHeight(36)
+        button_layout.addWidget(self.cancel_button)
+        button_layout.addWidget(self.reset_button)
+
+        layout.addWidget(title)
+        layout.addWidget(copy)
+        layout.addWidget(self.email_edit)
+        layout.addWidget(code_row)
+        layout.addWidget(self.password_edit)
+        layout.addWidget(self.confirm_edit)
+        layout.addSpacing(4)
+        layout.addWidget(button_row)
+
+    def set_send_busy(self, busy: bool) -> None:
+        self.send_code_button.setDisabled(busy)
+        self.send_code_button.setText(
+            tr("auth.button.send_email_code_busy", "Sending...")
+            if busy
+            else tr("auth.button.send_email_code", "Send Code")
+        )
+
+    def set_reset_busy(self, busy: bool) -> None:
+        for widget in (self.email_edit, self.code_edit, self.password_edit, self.confirm_edit, self.reset_button):
+            widget.setDisabled(busy)
+        if busy:
+            self.send_code_button.setDisabled(True)
+            self.reset_button.setText(tr("auth.password_reset.busy", "Resetting..."))
+        else:
+            self.reset_button.setText(tr("auth.password_reset.confirm", "Reset Password"))
+            self._sync_send_button()
+
+    def start_countdown(self, seconds: int) -> None:
+        self._countdown = max(1, int(seconds or 60))
+        self._timer.start()
+        self._sync_send_button()
+
+    def _tick_countdown(self) -> None:
+        if self._countdown > 0:
+            self._countdown -= 1
+        if self._countdown <= 0:
+            self._timer.stop()
+        self._sync_send_button()
+
+    def _sync_send_button(self) -> None:
+        if self._countdown > 0:
+            self.send_code_button.setDisabled(True)
+            self.send_code_button.setText(
+                tr("auth.button.send_email_code_countdown", "Resend ({seconds}s)", seconds=self._countdown)
+            )
+        else:
+            self.send_code_button.setDisabled(False)
+            self.send_code_button.setText(tr("auth.button.send_email_code", "Send Code"))
+
 
 
 class AuthInterface(FluentWidget):
@@ -245,6 +357,13 @@ class AuthInterface(FluentWidget):
         self.login_button = PrimaryPushButton(tr("auth.button.sign_in", "Sign In"), page)
         self.login_button.setMinimumHeight(40)
 
+        forgot_row = QWidget(page)
+        forgot_layout = QHBoxLayout(forgot_row)
+        forgot_layout.setContentsMargins(0, 0, 0, 0)
+        forgot_layout.addStretch(1)
+        self.forgot_password_button = PushButton(tr("auth.password_reset.link", "Forgot Password"), forgot_row)
+        forgot_layout.addWidget(self.forgot_password_button)
+
         self.login_hint = CaptionLabel(
             tr(
                 "auth.login.hint",
@@ -261,6 +380,7 @@ class AuthInterface(FluentWidget):
         layout.addWidget(self.login_password_edit)
         layout.addSpacing(8)
         layout.addWidget(self.login_button)
+        layout.addWidget(forgot_row)
         layout.addStretch(1)
         layout.addWidget(self.login_hint)
         return page
@@ -349,6 +469,7 @@ class AuthInterface(FluentWidget):
     def _connect_signals(self) -> None:
         self.form_pages.currentChanged.connect(self._sync_switcher)
         self.login_button.clicked.connect(self._submit_login)
+        self.forgot_password_button.clicked.connect(self._show_password_reset_dialog)
         self.register_button.clicked.connect(self._submit_register)
         self.register_send_code_button.clicked.connect(self._submit_register_email_code)
 
@@ -396,6 +517,7 @@ class AuthInterface(FluentWidget):
             self.page_switcher,
             self.login_username_edit,
             self.login_password_edit,
+            self.forgot_password_button,
             self.register_username_edit,
             self.register_nickname_edit,
             self.register_email_edit,
@@ -470,6 +592,59 @@ class AuthInterface(FluentWidget):
             return
 
         self._create_ui_task(self._perform_send_register_code(email), "send register email code")
+
+    def _show_password_reset_dialog(self) -> None:
+        if self._busy_mode:
+            return
+        dialog = PasswordResetDialog(self)
+        candidate_email = self.login_username_edit.text().strip().lower()
+        if EMAIL_PATTERN.fullmatch(candidate_email):
+            dialog.email_edit.setText(candidate_email)
+        self._transient_dialogs.add(dialog)
+        dialog.finished.connect(lambda _result, item=dialog: self._transient_dialogs.discard(item))
+        dialog.cancel_button.clicked.connect(dialog.reject)
+        dialog.send_code_button.clicked.connect(lambda _checked=False, item=dialog: self._submit_password_reset_code(item))
+        dialog.reset_button.clicked.connect(lambda _checked=False, item=dialog: self._submit_password_reset(item))
+        dialog.open()
+
+    def _submit_password_reset_code(self, dialog: PasswordResetDialog) -> None:
+        email = dialog.email_edit.text().strip().lower()
+        if not EMAIL_PATTERN.fullmatch(email):
+            self._mark_invalid(dialog.email_edit, tr("auth.validation.email_invalid", "Enter a valid email address."))
+            return
+        self._create_ui_task(self._perform_send_password_reset_code(dialog, email), "send password reset code")
+
+    def _submit_password_reset(self, dialog: PasswordResetDialog) -> None:
+        email = dialog.email_edit.text().strip().lower()
+        email_code = dialog.code_edit.text().strip()
+        new_password = dialog.password_edit.text()
+        confirm = dialog.confirm_edit.text()
+
+        if not EMAIL_PATTERN.fullmatch(email):
+            self._mark_invalid(dialog.email_edit, tr("auth.validation.email_invalid", "Enter a valid email address."))
+            return
+        if len(email_code) != 6 or not email_code.isdigit():
+            self._mark_invalid(
+                dialog.code_edit,
+                tr("auth.validation.email_code_required", "Enter the 6-digit email verification code."),
+            )
+            return
+        if len(new_password) < 6:
+            self._mark_invalid(
+                dialog.password_edit,
+                tr("auth.validation.password_min_length", "Password must be at least 6 characters."),
+            )
+            return
+        if new_password != confirm:
+            self._mark_invalid(
+                dialog.confirm_edit,
+                tr("auth.validation.password_mismatch", "Passwords do not match."),
+            )
+            return
+        self._create_ui_task(
+            self._perform_password_reset(dialog, email, email_code, new_password),
+            "password reset",
+        )
 
     def _submit_register(self) -> None:
         if self._busy_mode:
@@ -620,6 +795,75 @@ class AuthInterface(FluentWidget):
                 tr("auth.success.email_code_sent", "Verification code sent."),
                 parent=self.form_card,
             )
+
+    async def _perform_send_password_reset_code(self, dialog: PasswordResetDialog, email: str) -> None:
+        dialog.set_send_busy(True)
+        try:
+            payload = await self._auth_controller.send_password_reset_code(email)
+        except asyncio.CancelledError:
+            raise
+        except NetworkError as exc:
+            logger.warning("Password reset code request failed: %s", exc)
+            self._show_error(tr("auth.error.network", "Unable to connect right now. Please try again later."))
+            dialog.set_send_busy(False)
+        except APIError as exc:
+            logger.warning("Password reset code request failed: %s", exc)
+            self._show_error(
+                tr(
+                    "auth.error.email_code_failed",
+                    "Unable to send the email verification code. Check the email address and try again.",
+                )
+            )
+            dialog.set_send_busy(False)
+        except Exception:
+            logger.exception("Unexpected password reset code error")
+            self._show_error(tr("auth.error.email_code_unexpected", "Unexpected error while sending email code."))
+            dialog.set_send_busy(False)
+        else:
+            cooldown = int(payload.get("cooldown_seconds") or 60)
+            dialog.start_countdown(cooldown)
+            InfoBar.success(
+                tr("auth.feedback.title", "Authentication"),
+                tr("auth.success.email_code_sent", "Verification code sent."),
+                parent=self.form_card,
+            )
+
+    async def _perform_password_reset(
+        self,
+        dialog: PasswordResetDialog,
+        email: str,
+        email_code: str,
+        new_password: str,
+    ) -> None:
+        dialog.set_reset_busy(True)
+        try:
+            await self._auth_controller.reset_password(email, email_code, new_password)
+        except asyncio.CancelledError:
+            raise
+        except NetworkError as exc:
+            logger.warning("Password reset failed: %s", exc)
+            self._show_error(tr("auth.error.network", "Unable to connect right now. Please try again later."))
+            dialog.set_reset_busy(False)
+        except APIError as exc:
+            logger.warning("Password reset failed: %s", exc)
+            self._show_error(
+                tr(
+                    "auth.error.password_reset_failed",
+                    "Unable to reset the password. Check the code and try again.",
+                )
+            )
+            dialog.set_reset_busy(False)
+        except Exception:
+            logger.exception("Unexpected password reset error")
+            self._show_error(tr("auth.error.password_reset_unexpected", "Unexpected error while resetting password."))
+            dialog.set_reset_busy(False)
+        else:
+            InfoBar.success(
+                tr("auth.feedback.title", "Authentication"),
+                tr("auth.success.password_reset", "Password reset. Sign in with the new password."),
+                parent=self.form_card,
+            )
+            dialog.accept()
 
     async def _perform_register(self, username: str, nickname: str, password: str, email: str, email_code: str) -> None:
         self._set_busy("register")

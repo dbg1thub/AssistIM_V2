@@ -117,6 +117,64 @@ class EmailVerificationSendRequest(BaseModel):
         return value
 
 
+class PasswordResetSendRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    _EMAIL_PATTERN: ClassVar[re.Pattern[str]] = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+    email: str = Field(min_length=3, max_length=255)
+
+    @field_validator("email", mode="before")
+    @classmethod
+    def _normalize_email(cls, value):
+        if isinstance(value, str):
+            return value.strip().lower()
+        return value
+
+    @field_validator("email")
+    @classmethod
+    def _validate_email(cls, value: str) -> str:
+        if not cls._EMAIL_PATTERN.fullmatch(value):
+            raise ValueError("invalid email format")
+        return value
+
+
+class PasswordResetConfirmRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    _EMAIL_PATTERN: ClassVar[re.Pattern[str]] = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+    email: str = Field(min_length=3, max_length=255)
+    email_code: str = Field(min_length=6, max_length=6)
+    new_password: str = Field(min_length=PASSWORD_MIN_LENGTH, max_length=PASSWORD_MAX_LENGTH)
+
+    @field_validator("email", mode="before")
+    @classmethod
+    def _normalize_email(cls, value):
+        if isinstance(value, str):
+            return value.strip().lower()
+        return value
+
+    @field_validator("email")
+    @classmethod
+    def _validate_email(cls, value: str) -> str:
+        if not cls._EMAIL_PATTERN.fullmatch(value):
+            raise ValueError("invalid email format")
+        return value
+
+    @field_validator("email_code", mode="before")
+    @classmethod
+    def _normalize_email_code(cls, value):
+        if isinstance(value, str):
+            return value.strip()
+        return value
+
+    @field_validator("email_code")
+    @classmethod
+    def _validate_email_code(cls, value: str) -> str:
+        if not value.isdigit():
+            raise ValueError("invalid email verification code")
+        return value
+
+
 class LoginRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

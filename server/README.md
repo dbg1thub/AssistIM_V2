@@ -98,6 +98,7 @@ The current test suite covers:
 
 - auth register/login/refresh/me
 - registration email verification
+- password reset by email verification
 - friend request accept flow
 - direct session creation and message read flow
 - group permission and ownership transfer
@@ -284,6 +285,24 @@ For local development, `EMAIL_PROVIDER=console` writes the code to the API log.
 Production deployments should use `EMAIL_PROVIDER=smtp` with SMTP settings.
 
 After registration, use the normal client flows to add friends, create direct sessions, create groups, and upload files.
+
+Password reset uses the same email-code delivery configuration:
+
+```powershell
+Invoke-RestMethod -Method Post `
+  -Uri "http://127.0.0.1:8000/api/v1/auth/password-reset/send" `
+  -ContentType "application/json" `
+  -Body (@{ email = "bob@example.test" } | ConvertTo-Json)
+
+Invoke-RestMethod -Method Post `
+  -Uri "http://127.0.0.1:8000/api/v1/auth/password-reset/confirm" `
+  -ContentType "application/json" `
+  -Body (@{
+    email = "bob@example.test"
+    email_code = "<6-digit-code>"
+    new_password = "NewPassw0rd!"
+  } | ConvertTo-Json)
+```
 
 ## Alternative without `.env`
 

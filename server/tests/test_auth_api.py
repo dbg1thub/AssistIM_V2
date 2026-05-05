@@ -133,6 +133,85 @@ def test_register_rejects_duplicate_verified_email(client: TestClient) -> None:
     assert send_response.json()["code"] == ErrorCode.USER_EXISTS
 
 
+def test_password_reset_uses_email_code_and_invalidates_existing_sessions(client: TestClient, auth_header) -> None:
+    auth_payload = register_user(
+        client,
+        "reset-owner",
+        nickname="Reset Owner",
+        password="oldsecret",
+        email="reset-owner@example.test",
+    )
+
+    send_response = client.post(
+        "/api/v1/auth/password-reset/send",
+        json={"email": " RESET-OWNER@example.test "},
+    )
+    assert send_response.status_code == 200
+    send_payload = send_response.json()["data"]
+    assert send_payload["sent"] is True
+    assert send_payload["purpose"] == "password_reset"
+    reset_code = send_payload["debug_code"]
+    wrong_code = "000000" if reset_code != "000000" else "111111"
+
+    wrong_code_response = client.post(
+        "/api/v1/auth/password-reset/confirm",
+        json={
+            "email": "reset-owner@example.test",
+            "email_code": wrong_code,
+            "new_password": "newsecret",
+        },
+    )
+    assert wrong_code_response.status_code == 400
+    assert wrong_code_response.json()["code"] == ErrorCode.INVALID_REQUEST
+
+    reset_response = client.post(
+        "/api/v1/auth/password-reset/confirm",
+        json={
+            "email": "reset-owner@example.test",
+            "email_code": reset_code,
+            "new_password": "newsecret",
+        },
+    )
+    assert reset_response.status_code == 200
+    assert reset_response.json()["data"] == {"reset": True}
+
+    old_password_login = client.post(
+        "/api/v1/auth/login",
+        json={"username": "reset-owner", "password": "oldsecret"},
+    )
+    assert old_password_login.status_code == 401
+
+    new_password_login = client.post(
+        "/api/v1/auth/login",
+        json={"username": "reset-owner", "password": "newsecret"},
+    )
+    assert new_password_login.status_code == 200
+
+    stale_me_response = client.get(
+        "/api/v1/auth/me",
+        headers=auth_header(auth_payload["access_token"]),
+    )
+    assert stale_me_response.status_code == 401
+
+    stale_refresh_response = client.post(
+        "/api/v1/auth/refresh",
+        json={"refresh_token": auth_payload["refresh_token"]},
+    )
+    assert stale_refresh_response.status_code == 401
+
+
+def test_password_reset_send_does_not_reveal_unknown_email(client: TestClient) -> None:
+    send_response = client.post(
+        "/api/v1/auth/password-reset/send",
+        json={"email": "missing-account@example.test"},
+    )
+    assert send_response.status_code == 200
+    payload = send_response.json()["data"]
+    assert payload["sent"] is True
+    assert payload["purpose"] == "password_reset"
+    assert "debug_code" not in payload
+
+
 def test_update_me_extended_profile_fields(client: TestClient, auth_header) -> None:
     register_response = register_user_response(client, "carla", nickname="Carla")
     assert register_response.status_code == 200

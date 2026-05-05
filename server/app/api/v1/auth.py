@@ -14,7 +14,14 @@ from app.core.rate_limit import rate_limiter
 from app.dependencies.auth_dependency import get_current_user
 from app.dependencies.settings_dependency import get_request_settings
 from app.models.user import User
-from app.schemas.auth import EmailVerificationSendRequest, LoginRequest, RefreshTokenRequest, RegisterRequest
+from app.schemas.auth import (
+    EmailVerificationSendRequest,
+    LoginRequest,
+    PasswordResetConfirmRequest,
+    PasswordResetSendRequest,
+    RefreshTokenRequest,
+    RegisterRequest,
+)
 from app.services.auth_service import AuthService
 from app.services.email_verification_service import EmailVerificationService
 from app.services.user_service import UserService
@@ -39,6 +46,11 @@ def _login_limit(request: Request) -> int:
 
 def _email_verification_limit(request: Request) -> int:
     """Return the current email-code request rate limit for this app snapshot."""
+    return get_request_settings(request).rate_limit_email_verification
+
+
+def _password_reset_limit(request: Request) -> int:
+    """Return the current password-reset email-code request rate limit."""
     return get_request_settings(request).rate_limit_email_verification
 
 
@@ -72,6 +84,34 @@ async def send_email_verification(
     client_host = request.client.host if request.client else ""
     result = EmailVerificationService(db, settings).send_register_code(payload.email, request_ip=client_host)
     return success_response(result)
+
+
+@router.post(
+    "/password-reset/send",
+    dependencies=[Depends(rate_limiter.dynamic_dependency("password-reset", _password_reset_limit))],
+)
+async def send_password_reset_code(
+    payload: PasswordResetSendRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_request_settings),
+) -> dict:
+    client_host = request.client.host if request.client else ""
+    result = EmailVerificationService(db, settings).send_password_reset_code(payload.email, request_ip=client_host)
+    return success_response(result)
+
+
+@router.post("/password-reset/confirm")
+async def confirm_password_reset(
+    payload: PasswordResetConfirmRequest,
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_request_settings),
+) -> dict:
+    result = AuthService(db, settings).reset_password(payload.email, payload.email_code, payload.new_password)
+    user_id = str(result.get("user_id") or "")
+    if user_id:
+        await _disconnect_auth_connections(user_id, reason="password_reset", strict_disconnect=False)
+    return success_response({"reset": True})
 
 
 @router.post("/register", dependencies=[Depends(rate_limiter.dynamic_dependency("register", _register_limit))])

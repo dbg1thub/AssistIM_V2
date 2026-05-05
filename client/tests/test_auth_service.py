@@ -34,6 +34,8 @@ def test_auth_service_login_and_register_do_not_inherit_existing_app_auth(monkey
         await service.login("alice", "secret", force=True)
         await service.send_email_verification("bob@example.test")
         await service.register("bob", "Bob", "secret", "bob@example.test", "123456")
+        await service.send_password_reset_code("bob@example.test")
+        await service.reset_password("bob@example.test", "654321", "newsecret")
 
         assert fake_http.post_calls == [
             {
@@ -67,6 +69,28 @@ def test_auth_service_login_and_register_do_not_inherit_existing_app_auth(monkey
                     "nickname": "Bob",
                     "email": "bob@example.test",
                     "email_code": "123456",
+                },
+                "kwargs": {
+                    "use_auth": False,
+                    "retry_on_401": False,
+                },
+            },
+            {
+                "path": "/auth/password-reset/send",
+                "json": {
+                    "email": "bob@example.test",
+                },
+                "kwargs": {
+                    "use_auth": False,
+                    "retry_on_401": False,
+                },
+            },
+            {
+                "path": "/auth/password-reset/confirm",
+                "json": {
+                    "email": "bob@example.test",
+                    "email_code": "654321",
+                    "new_password": "newsecret",
                 },
                 "kwargs": {
                     "use_auth": False,

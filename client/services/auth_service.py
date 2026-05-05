@@ -108,6 +108,30 @@ class AuthService:
         )
         return dict(payload or {})
 
+    async def send_password_reset_code(self, email: str) -> dict[str, Any]:
+        """Request one password-reset email verification code."""
+        payload = await self._http.post(
+            "/auth/password-reset/send",
+            json={"email": email},
+            use_auth=False,
+            retry_on_401=False,
+        )
+        return dict(payload or {})
+
+    async def reset_password(self, email: str, email_code: str, new_password: str) -> dict[str, Any]:
+        """Reset one account password with an email verification code."""
+        payload = await self._http.post(
+            "/auth/password-reset/confirm",
+            json={
+                "email": email,
+                "email_code": email_code,
+                "new_password": new_password,
+            },
+            use_auth=False,
+            retry_on_401=False,
+        )
+        return dict(payload or {})
+
     async def logout(self) -> None:
         """Best-effort backend logout."""
         await self._http.delete("/auth/session")
