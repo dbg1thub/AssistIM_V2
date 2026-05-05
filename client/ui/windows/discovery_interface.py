@@ -118,6 +118,23 @@ def _clear_layout(layout: QVBoxLayout | QHBoxLayout | QGridLayout) -> None:
             _clear_layout(child_layout)
 
 
+def _build_local_media_record(file_path: str, *, media_type: str | None = None) -> MomentMediaRecord:
+    """Build one preview-only media record from a local file path."""
+    normalized_path = str(file_path or "").strip()
+    guessed_mime, _ = mimetypes.guess_type(normalized_path)
+    inferred_type = str(media_type or "").strip().lower()
+    if inferred_type not in {"image", "video"}:
+        inferred_type = "video" if str(guessed_mime or "").lower().startswith("video/") else "image"
+    return MomentMediaRecord(
+        media_type=inferred_type,
+        url=normalized_path,
+        original_name=Path(normalized_path).name,
+        mime_type=str(guessed_mime or ""),
+        size_bytes=0,
+        local_path=normalized_path,
+    )
+
+
 class DiscoveryAvatar(QWidget):
     """Circular avatar used by the discovery feed."""
 
@@ -218,9 +235,10 @@ class MomentMediaGrid(QWidget):
     image_requested = Signal(str)
     video_requested = Signal(str)
 
-    def __init__(self, media: list[MomentMediaRecord], parent=None):
+    def __init__(self, media: list[MomentMediaRecord], parent=None, *, compact: bool = False):
         super().__init__(parent)
-        self._media = media[:9]
+        self._compact = compact
+        self._media: list[MomentMediaRecord] = []
         self._network_manager = QNetworkAccessManager(self)
         self._network_manager.finished.connect(self._on_image_loaded)
         self._pending_replies: dict[QNetworkReply, QLabel] = {}
@@ -228,6 +246,19 @@ class MomentMediaGrid(QWidget):
         self._layout.setContentsMargins(0, 0, 0, 0)
         self._layout.setHorizontalSpacing(8)
         self._layout.setVerticalSpacing(8)
+        self.set_media(media)
+
+    def set_media(self, media: list[MomentMediaRecord]) -> None:
+        """Replace the preview media set and rebuild the grid."""
+        for reply in list(self._pending_replies):
+            try:
+                reply.abort()
+            except RuntimeError:
+                pass
+            reply.deleteLater()
+        self._pending_replies.clear()
+        _clear_layout(self._layout)
+        self._media = list(media[:9])
         self._build()
 
     def _build(self) -> None:
@@ -237,17 +268,17 @@ class MomentMediaGrid(QWidget):
 
         count = len(self._media)
         if count == 1:
-            sizes = [(0, 0, 1, 1, 360, 220)]
+            sizes = [(0, 0, 1, 1, 200, 140) if self._compact else (0, 0, 1, 1, 360, 220)]
         elif count in (2, 4):
-            sizes = [
-                (index // 2, index % 2, 1, 1, 172, 132)
-                for index in range(count)
-            ]
+            if self._compact:
+                sizes = [(index // 2, index % 2, 1, 1, 112, 84) for index in range(count)]
+            else:
+                sizes = [(index // 2, index % 2, 1, 1, 172, 132) for index in range(count)]
         else:
-            sizes = [
-                (index // 3, index % 3, 1, 1, 112, 112)
-                for index in range(count)
-            ]
+            if self._compact:
+                sizes = [(index // 3, index % 3, 1, 1, 84, 84) for index in range(count)]
+            else:
+                sizes = [(index // 3, index % 3, 1, 1, 112, 112) for index in range(count)]
 
         for index, media in enumerate(self._media):
             row, col, row_span, col_span, width, height = sizes[index]
@@ -478,6 +509,9 @@ class AnimatedCommentSection(QWidget):
         surface_layout.addWidget(self.toggle_button, 0, Qt.AlignmentFlag.AlignLeft)
         surface_layout.addWidget(self.editor_widget)
         surface_layout.addWidget(self.image_hint)
+        self.image_preview = MomentMediaGrid([], self.surface, compact=True)
+        self.image_preview.setVisible(False)
+        surface_layout.addWidget(self.image_preview)
         layout.addWidget(self.surface)
 
         self.setObjectName("MomentCommentSection")
@@ -596,7 +630,7 @@ class AnimatedCommentSection(QWidget):
         self.comment_submitted.emit(text, self._selected_image_path or None)
         self.comment_edit.clear()
         self._selected_image_path = ""
-        self.image_hint.setText("")
+        self._sync_comment_image_preview()
 
     def _select_comment_image(self) -> None:
         file_path, _ = QFileDialog.getOpenFileName(
@@ -608,7 +642,17 @@ class AnimatedCommentSection(QWidget):
         if not file_path:
             return
         self._selected_image_path = file_path
-        self.image_hint.setText(Path(file_path).name)
+        self._sync_comment_image_preview()
+
+    def _sync_comment_image_preview(self) -> None:
+        if not self._selected_image_path:
+            self.image_hint.setText("")
+            self.image_preview.set_media([])
+            self.image_preview.hide()
+            return
+        self.image_hint.setText(Path(self._selected_image_path).name)
+        self.image_preview.set_media([_build_local_media_record(self._selected_image_path, media_type="image")])
+        self.image_preview.show()
 
 
 class CreateMomentDialog(QDialog):
@@ -668,7 +712,11 @@ class CreateMomentDialog(QDialog):
         self.media_hint = CaptionLabel("", self)
         self.media_hint.setWordWrap(True)
         layout.addWidget(self.media_hint)
+        self.media_preview = MomentMediaGrid([], self, compact=True)
+        self.media_preview.setVisible(False)
+        layout.addWidget(self.media_preview)
         self._sync_media_hint()
+        self._sync_media_preview()
 
         footer = QHBoxLayout()
         footer.setContentsMargins(0, 0, 0, 0)
@@ -718,6 +766,7 @@ class CreateMomentDialog(QDialog):
             self._media_paths.clear()
         self._media_paths = (self._media_paths + list(file_paths))[: self.MAX_MEDIA_ITEMS]
         self._sync_media_hint()
+        self._sync_media_preview()
 
     def _select_video(self) -> None:
         file_paths, _ = QFileDialog.getOpenFileNames(
@@ -730,10 +779,12 @@ class CreateMomentDialog(QDialog):
             return
         self._media_paths = [file_paths[0]]
         self._sync_media_hint()
+        self._sync_media_preview()
 
     def _clear_media(self) -> None:
         self._media_paths.clear()
         self._sync_media_hint()
+        self._sync_media_preview()
 
     def _sync_media_hint(self) -> None:
         if not self._media_paths:
@@ -751,6 +802,14 @@ class CreateMomentDialog(QDialog):
                 names=names,
             )
         )
+
+    def _sync_media_preview(self) -> None:
+        if not self._media_paths:
+            self.media_preview.set_media([])
+            self.media_preview.hide()
+            return
+        self.media_preview.set_media([_build_local_media_record(path) for path in self._media_paths])
+        self.media_preview.show()
 
     @staticmethod
     def _is_video_path(path: str) -> bool:

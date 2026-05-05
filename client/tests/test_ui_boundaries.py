@@ -32,6 +32,11 @@ def test_discovery_ui_wires_moment_media_and_comment_image_boundaries() -> None:
     assert 'upload_moment_media' in discovery_interface
     assert 'upload_comment_image' in discovery_interface
     assert 'MomentMediaGrid(self.moment.media' in discovery_interface
+    assert 'def set_media(self, media: list[MomentMediaRecord]) -> None:' in discovery_interface
+    assert 'self.media_preview = MomentMediaGrid([], self, compact=True)' in discovery_interface
+    assert 'def _sync_media_preview(self) -> None:' in discovery_interface
+    assert 'self.image_preview = MomentMediaGrid([], self.surface, compact=True)' in discovery_interface
+    assert 'def _sync_comment_image_preview(self) -> None:' in discovery_interface
 
 
 def test_discovery_ui_loads_full_comments_from_moment_detail() -> None:
