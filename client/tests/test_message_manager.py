@@ -292,6 +292,7 @@ if 'qfluentwidgets' not in sys.modules:
     sys.modules['qfluentwidgets'] = qfluentwidgets
 
 from client.events.contact_events import ContactEvent
+from client.events.moment_events import MomentEvent
 from client.core.message_translation import AI_TRANSLATION_EXTRA_KEY
 from client.core.voice_transcription import VOICE_TRANSCRIPT_EXTRA_KEY
 from client.core.file_text_extraction import FILE_SUMMARY_EXTRA_KEY, FILE_TEXT_EXTRACT_EXTRA_KEY
@@ -1133,6 +1134,67 @@ def test_message_manager_bridges_contact_refresh_events(monkeypatch) -> None:
                                 'request_id': 'req-1',
                                 'sender_id': 'bob',
                                 'receiver_id': 'alice',
+                            },
+                        },
+                    },
+                )
+            ]
+        finally:
+            await manager.close()
+
+    asyncio.run(scenario())
+
+
+def test_message_manager_bridges_moment_refresh_events(monkeypatch) -> None:
+    fake_event_bus = FakeEventBus()
+    fake_conn_manager = FakeConnectionManager([])
+    fake_db = FakeDatabase()
+
+    monkeypatch.setattr(message_manager_module, 'get_event_bus', lambda: fake_event_bus)
+    monkeypatch.setattr(message_manager_module, 'get_connection_manager', lambda: fake_conn_manager)
+    monkeypatch.setattr(message_manager_module, 'get_database', lambda: fake_db)
+
+    async def scenario() -> None:
+        manager = message_manager_module.MessageManager()
+        manager.set_user_id('alice')
+        await manager.initialize()
+        try:
+            await manager._handle_ws_message(
+                {
+                    'type': 'moment_refresh',
+                    'data': {
+                        'reason': 'moment_commented',
+                        'action': 'moment_commented',
+                        'moment_id': 'moment-1',
+                        'actor_user_id': 'bob',
+                        'owner_user_id': 'alice',
+                        'changed': True,
+                    },
+                }
+            )
+
+            assert fake_event_bus.events == [
+                (
+                    MomentEvent.SYNC_REQUIRED,
+                    {
+                        'reason': 'moment_commented',
+                        'payload': {
+                            'reason': 'moment_commented',
+                            'action': 'moment_commented',
+                            'moment_id': 'moment-1',
+                            'actor_user_id': 'bob',
+                            'owner_user_id': 'alice',
+                            'changed': True,
+                        },
+                        'message': {
+                            'type': 'moment_refresh',
+                            'data': {
+                                'reason': 'moment_commented',
+                                'action': 'moment_commented',
+                                'moment_id': 'moment-1',
+                                'actor_user_id': 'bob',
+                                'owner_user_id': 'alice',
+                                'changed': True,
                             },
                         },
                     },

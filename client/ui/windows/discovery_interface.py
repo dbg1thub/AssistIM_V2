@@ -48,6 +48,8 @@ from client.core.config_backend import get_config
 from client.core.exceptions import APIError, NetworkError
 from client.core.i18n import format_relative_time, tr
 from client.core.logging import setup_logging
+from client.events.event_bus import get_event_bus
+from client.events.moment_events import MomentEvent
 from client.services.file_service import get_file_service
 from client.ui.controllers.discovery_controller import (
     MomentCommentRecord,
@@ -995,6 +997,7 @@ class DiscoveryInterface(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, False)
         self.setAutoFillBackground(False)
         self._controller = get_discovery_controller()
+        self._event_bus = get_event_bus()
         self._moments: list[MomentRecord] = []
         self._cards: dict[str, MomentCard] = {}
         self._load_task: Optional[asyncio.Task] = None
@@ -1113,12 +1116,26 @@ class DiscoveryInterface(QWidget):
     def _connect_signals(self) -> None:
         self.refresh_button.clicked.connect(self.reload_data)
         self.publish_button.clicked.connect(self._open_publish_dialog)
+        self._event_bus.subscribe_sync(MomentEvent.SYNC_REQUIRED, self._on_moment_sync_required)
 
     def reload_data(self) -> None:
         """Refresh the feed from the backend."""
         if self._teardown_started:
             return
         self._set_load_task(self._reload_data_async())
+
+    def _on_moment_sync_required(self, payload: object) -> None:
+        """Refresh the visible feed after a realtime moment mutation hint."""
+        if self._teardown_started or not self._initial_load_done or not self.isVisible():
+            return
+        event_payload = dict(payload or {}) if isinstance(payload, dict) else {}
+        moment_payload = dict(event_payload.get("payload") or {}) if isinstance(event_payload.get("payload"), dict) else {}
+        logger.info(
+            "Discovery moment refresh requested action=%s moment_id=%s",
+            moment_payload.get("action") or event_payload.get("reason"),
+            moment_payload.get("moment_id"),
+        )
+        self.reload_data()
 
     async def _reload_data_async(self) -> None:
         self.refresh_button.setEnabled(False)
@@ -1400,6 +1417,7 @@ class DiscoveryInterface(QWidget):
         if self._teardown_started:
             return
         self._teardown_started = True
+        self._event_bus.unsubscribe_sync(MomentEvent.SYNC_REQUIRED, self._on_moment_sync_required)
         self._cancel_pending_task(self._load_task)
         self._load_task = None
         self._cancel_pending_task(self._publish_task)

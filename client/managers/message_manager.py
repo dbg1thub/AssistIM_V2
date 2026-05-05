@@ -23,6 +23,7 @@ from client.core.logging import setup_logging
 from client.core.voice_transcription import VOICE_TRANSCRIPT_EXTRA_KEY
 from client.events.contact_events import ContactEvent
 from client.events.event_bus import get_event_bus
+from client.events.moment_events import MomentEvent
 from client.managers.connection_manager import get_connection_manager
 from client.models.message import ChatMessage, MessageStatus, MessageType, build_attachment_extra, build_recall_notice, merge_sender_profile_extra, resolve_recall_notice, sanitize_outbound_message_extra
 from client.services.chat_service import get_chat_service
@@ -537,6 +538,9 @@ class MessageManager:
 
         elif msg_type == "contact_refresh":
             await self._process_contact_refresh(data)
+
+        elif msg_type == "moment_refresh":
+            await self._process_moment_refresh(data)
 
         elif msg_type == "user_profile_update":
             await self._process_user_profile_update(data)
@@ -2028,6 +2032,18 @@ class MessageManager:
             ContactEvent.SYNC_REQUIRED,
             {
                 "reason": str(payload.get("reason", "") or "contact_refresh"),
+                "payload": dict(payload),
+                "message": dict(data or {}),
+            },
+        )
+
+    async def _process_moment_refresh(self, data: dict) -> None:
+        """Process realtime moment-domain mutations that require UI refresh."""
+        payload = data.get("data", {}) if isinstance(data.get("data"), dict) else {}
+        await self._event_bus.emit(
+            MomentEvent.SYNC_REQUIRED,
+            {
+                "reason": str(payload.get("reason", "") or "moment_refresh"),
                 "payload": dict(payload),
                 "message": dict(data or {}),
             },

@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+from unittest.mock import AsyncMock
+
 from fastapi.testclient import TestClient
 
+from app.api.v1 import moments as moment_routes
 from app.schemas.moment import MAX_MOMENT_COMMENT_LENGTH, MAX_MOMENT_CONTENT_LENGTH, MAX_MOMENT_MEDIA_ITEMS
 
 
@@ -49,6 +52,88 @@ def test_moment_like_and_unlike_echo_state_changes(
     )
     assert second_unlike.status_code == 200
     assert second_unlike.json()["data"] == {"liked": False, "changed": False}
+
+
+def test_moment_mutations_broadcast_realtime_refresh_notifications(
+    client: TestClient,
+    user_factory,
+    auth_header,
+    monkeypatch,
+) -> None:
+    alice = user_factory("moment_refresh_alice", "Moment Refresh Alice")
+    bob = user_factory("moment_refresh_bob", "Moment Refresh Bob")
+    alice_headers = auth_header(alice["access_token"])
+    bob_headers = auth_header(bob["access_token"])
+    send_json_to_users = AsyncMock(return_value=set())
+    online_user_ids = [alice["user"]["id"], bob["user"]["id"]]
+
+    monkeypatch.setattr(moment_routes.connection_manager, "online_user_ids", lambda: list(online_user_ids))
+    monkeypatch.setattr(moment_routes.connection_manager, "send_json_to_users", send_json_to_users)
+
+    create_response = client.post(
+        "/api/v1/moments",
+        json={"content": "realtime moment"},
+        headers=alice_headers,
+    )
+    assert create_response.status_code == 200
+    moment_id = create_response.json()["data"]["id"]
+    assert send_json_to_users.await_count == 1
+    assert send_json_to_users.await_args_list[-1].args[0] == online_user_ids
+    create_payload = send_json_to_users.await_args_list[-1].args[1]
+    assert create_payload["type"] == "moment_refresh"
+    assert create_payload["data"] == {
+        "reason": "moment_created",
+        "action": "moment_created",
+        "moment_id": moment_id,
+        "actor_user_id": alice["user"]["id"],
+        "owner_user_id": alice["user"]["id"],
+        "changed": True,
+    }
+
+    like_response = client.post(
+        f"/api/v1/moments/{moment_id}/likes",
+        headers=bob_headers,
+    )
+    assert like_response.status_code == 200
+    assert send_json_to_users.await_count == 2
+    like_payload = send_json_to_users.await_args_list[-1].args[1]
+    assert like_payload["data"]["action"] == "moment_liked"
+    assert like_payload["data"]["actor_user_id"] == bob["user"]["id"]
+    assert like_payload["data"]["owner_user_id"] == alice["user"]["id"]
+    assert like_payload["data"]["changed"] is True
+
+    duplicate_like = client.post(
+        f"/api/v1/moments/{moment_id}/likes",
+        headers=bob_headers,
+    )
+    assert duplicate_like.status_code == 200
+    assert duplicate_like.json()["data"]["changed"] is False
+    assert send_json_to_users.await_count == 2
+
+    unlike_response = client.delete(
+        f"/api/v1/moments/{moment_id}/likes",
+        headers=bob_headers,
+    )
+    assert unlike_response.status_code == 200
+    assert send_json_to_users.await_count == 3
+    unlike_payload = send_json_to_users.await_args_list[-1].args[1]
+    assert unlike_payload["data"]["action"] == "moment_unliked"
+    assert unlike_payload["data"]["actor_user_id"] == bob["user"]["id"]
+    assert unlike_payload["data"]["owner_user_id"] == alice["user"]["id"]
+    assert unlike_payload["data"]["changed"] is True
+
+    comment_response = client.post(
+        f"/api/v1/moments/{moment_id}/comments",
+        json={"content": "refresh comment"},
+        headers=bob_headers,
+    )
+    assert comment_response.status_code == 200
+    assert send_json_to_users.await_count == 4
+    comment_payload = send_json_to_users.await_args_list[-1].args[1]
+    assert comment_payload["data"]["action"] == "moment_commented"
+    assert comment_payload["data"]["actor_user_id"] == bob["user"]["id"]
+    assert comment_payload["data"]["owner_user_id"] == alice["user"]["id"]
+    assert comment_payload["data"]["changed"] is True
 
 
 def test_moment_and_comment_author_payloads_are_canonical(

@@ -42,6 +42,7 @@ from client.core.profile_fields import format_profile_birthday, localize_profile
 from client.core.logging import setup_logging
 from client.events.contact_events import ContactEvent
 from client.events.event_bus import get_event_bus
+from client.events.moment_events import MomentEvent
 from client.managers.connection_manager import get_connection_manager
 from client.managers.search_manager import search_all
 from client.network.websocket_client import ConnectionState
@@ -1731,6 +1732,7 @@ class ContactInterface(QWidget):
         self.detail_panel.message_requested.connect(self.message_requested.emit)
         self.detail_panel.remove_requested.connect(self._on_remove_friend_requested)
         self._event_bus.subscribe_sync(ContactEvent.SYNC_REQUIRED, self._on_contact_sync_required)
+        self._event_bus.subscribe_sync(MomentEvent.SYNC_REQUIRED, self._on_moment_sync_required)
         self._connection_manager.add_state_listener(self._on_connection_state_changed)
         self.detail_panel.moments_panel.like_requested.connect(self._request_detail_like_toggle)
         self.detail_panel.moments_panel.comment_requested.connect(self._request_detail_comment_create)
@@ -1808,6 +1810,31 @@ class ContactInterface(QWidget):
             )
             return
         self.reload_data()
+
+    def _on_moment_sync_required(self, payload: object) -> None:
+        """Refresh selected contact moments after realtime moment mutations."""
+        if self._destroyed or not self._initial_load_done or not self.isVisible():
+            return
+        if not self._selected_key:
+            return
+        event_payload = dict(payload or {}) if isinstance(payload, dict) else {}
+        moment_payload = dict(event_payload.get("payload") or {}) if isinstance(event_payload.get("payload"), dict) else {}
+        owner_user_id = str(moment_payload.get("owner_user_id", "") or "").strip()
+        category, item_id = self._selected_key
+        if category == "friend":
+            contact_id = item_id
+            if owner_user_id and owner_user_id != contact_id:
+                return
+            self._load_detail_moments(contact_id, "friend", contact_id)
+            return
+        if category == "request":
+            request = next((item for item in self._requests if item.id == item_id), None)
+            if request is None:
+                return
+            counterpart_id = request.counterpart_id(self._current_user_id)
+            if owner_user_id and owner_user_id != counterpart_id:
+                return
+            self._load_detail_moments(counterpart_id, "request", item_id)
 
     def _on_connection_state_changed(self, old_state: ConnectionState, new_state: ConnectionState) -> None:
         """Refresh contact-domain truth after reconnect because contact_refresh is not replayed."""
@@ -3086,6 +3113,7 @@ class ContactInterface(QWidget):
         self._teardown_started = True
         self._destroyed = True
         self._event_bus.unsubscribe_sync(ContactEvent.SYNC_REQUIRED, self._on_contact_sync_required)
+        self._event_bus.unsubscribe_sync(MomentEvent.SYNC_REQUIRED, self._on_moment_sync_required)
         self._connection_manager.remove_state_listener(self._on_connection_state_changed)
         self._search_timer.stop()
         self._cancel_pending_task(self._search_task)

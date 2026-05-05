@@ -62,6 +62,25 @@ def test_moment_ui_mutations_keep_backing_records_in_sync() -> None:
     assert 'self._sync_moment_comment(moment_id, comment)' in contact_interface
 
 
+def test_moment_realtime_refresh_is_wired_to_visible_pages() -> None:
+    discovery_interface = Path('client/ui/windows/discovery_interface.py').read_text(encoding='utf-8')
+    contact_interface = Path('client/ui/windows/contact_interface.py').read_text(encoding='utf-8')
+    message_manager = Path('client/managers/message_manager.py').read_text(encoding='utf-8')
+
+    assert 'from client.events.moment_events import MomentEvent' in discovery_interface
+    assert 'from client.events.moment_events import MomentEvent' in contact_interface
+    assert 'from client.events.moment_events import MomentEvent' in message_manager
+    assert 'elif msg_type == "moment_refresh":' in message_manager
+    assert 'async def _process_moment_refresh(self, data: dict) -> None:' in message_manager
+    assert 'self._event_bus.subscribe_sync(MomentEvent.SYNC_REQUIRED, self._on_moment_sync_required)' in discovery_interface
+    assert 'self._event_bus.unsubscribe_sync(MomentEvent.SYNC_REQUIRED, self._on_moment_sync_required)' in discovery_interface
+    assert 'def _on_moment_sync_required(self, payload: object) -> None:' in discovery_interface
+    assert 'self._event_bus.subscribe_sync(MomentEvent.SYNC_REQUIRED, self._on_moment_sync_required)' in contact_interface
+    assert 'self._event_bus.unsubscribe_sync(MomentEvent.SYNC_REQUIRED, self._on_moment_sync_required)' in contact_interface
+    assert 'def _on_moment_sync_required(self, payload: object) -> None:' in contact_interface
+    assert 'self._load_detail_moments(contact_id, "friend", contact_id)' in contact_interface
+
+
 def test_group_flow_no_longer_writes_local_group_avatar_metadata() -> None:
     chat_interface = Path('client/ui/windows/chat_interface.py').read_text(encoding='utf-8')
     group_flow = Path('client/ui/windows/chat_group_flow.py').read_text(encoding='utf-8')
