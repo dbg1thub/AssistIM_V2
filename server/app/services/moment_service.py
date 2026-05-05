@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+from typing import Any
+
 from sqlalchemy.orm import Session
 
 from app.core.errors import AppError, ErrorCode
@@ -97,8 +100,12 @@ class MomentService:
             comments_truncated=False,
         )
 
-    def create_moment(self, current_user: User, content: str) -> dict:
-        moment = self.moments.create(current_user.id, content)
+    def create_moment(self, current_user: User, content: str, media: list | None = None) -> dict:
+        moment = self.moments.create(
+            current_user.id,
+            content,
+            media_json=self._dump_media_items(media or []),
+        )
         return self.serialize_moment(
             moment,
             author=current_user,
@@ -119,9 +126,14 @@ class MomentService:
         changed = self.moments.unlike(moment_id, current_user.id)
         return {"liked": False, "changed": changed}
 
-    def comment(self, current_user: User, moment_id: str, content: str) -> dict:
+    def comment(self, current_user: User, moment_id: str, content: str, image: object | None = None) -> dict:
         self._ensure_exists(moment_id)
-        comment = self.moments.comment(moment_id, current_user.id, content)
+        comment = self.moments.comment(
+            moment_id,
+            current_user.id,
+            content,
+            image_json=self._dump_image_item(image),
+        )
         return self.serialize_comment(comment, current_user)
 
     def _ensure_exists(self, moment_id: str) -> None:
@@ -143,10 +155,14 @@ class MomentService:
         author = author or (users_map or {}).get(moment.user_id)
         comments = comments or []
         users_map = users_map or {}
+        media = self._load_media_items(getattr(moment, "media_json", "[]"))
         return {
             "id": moment.id,
             "user_id": moment.user_id,
             "content": moment.content,
+            "media": media,
+            "images": [item["url"] for item in media if item.get("type") == "image"],
+            "videos": [item["url"] for item in media if item.get("type") == "video"],
             "created_at": moment.created_at.isoformat() if moment.created_at else None,
             "author": self.user_payloads.serialize_public_user(author) if author else None,
             "comments": [
@@ -165,6 +181,64 @@ class MomentService:
             "moment_id": comment.moment_id,
             "user_id": comment.user_id,
             "content": comment.content,
+            "image": self._load_image_item(getattr(comment, "image_json", "{}")),
             "created_at": comment.created_at.isoformat() if comment.created_at else None,
             "author": self.user_payloads.serialize_public_user(user) if user else None,
         }
+
+    @classmethod
+    def _dump_media_items(cls, media: list | None) -> str:
+        items = [cls._normalize_media_item(item) for item in (media or [])]
+        return json.dumps(items, ensure_ascii=False, separators=(",", ":"))
+
+    @classmethod
+    def _dump_image_item(cls, image: object | None) -> str:
+        if image is None:
+            return "{}"
+        return json.dumps(cls._normalize_media_item(image), ensure_ascii=False, separators=(",", ":"))
+
+    @staticmethod
+    def _normalize_media_item(item: object) -> dict[str, Any]:
+        if hasattr(item, "model_dump"):
+            data = dict(item.model_dump())
+        elif isinstance(item, dict):
+            data = dict(item)
+        else:
+            data = {}
+        return {
+            "type": str(data.get("type") or "").strip().lower(),
+            "url": str(data.get("url") or "").strip(),
+            "original_name": str(data.get("original_name") or "").strip(),
+            "mime_type": str(data.get("mime_type") or "").strip(),
+            "size_bytes": max(0, int(data.get("size_bytes") or 0)),
+        }
+
+    @classmethod
+    def _load_media_items(cls, raw_value: str | None) -> list[dict[str, Any]]:
+        try:
+            payload = json.loads(raw_value or "[]")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return []
+        if not isinstance(payload, list):
+            return []
+        items: list[dict[str, Any]] = []
+        for item in payload:
+            if not isinstance(item, dict):
+                continue
+            normalized = cls._normalize_media_item(item)
+            if normalized["type"] in {"image", "video"} and normalized["url"]:
+                items.append(normalized)
+        return items
+
+    @classmethod
+    def _load_image_item(cls, raw_value: str | None) -> dict[str, Any] | None:
+        try:
+            payload = json.loads(raw_value or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return None
+        if not isinstance(payload, dict) or not payload:
+            return None
+        normalized = cls._normalize_media_item(payload)
+        if normalized["type"] != "image" or not normalized["url"]:
+            return None
+        return normalized

@@ -21,6 +21,19 @@ def test_group_creation_dialogs_are_split_out_of_contact_interface() -> None:
     assert 'from client.ui.windows.chat_group_flow import ChatGroupFlowCoordinator' in chat_interface
 
 
+def test_discovery_ui_wires_moment_media_and_comment_image_boundaries() -> None:
+    discovery_interface = Path('client/ui/windows/discovery_interface.py').read_text(encoding='utf-8')
+
+    assert 'class CreateMomentDialog' in discovery_interface
+    assert 'QFileDialog.getOpenFileNames' in discovery_interface
+    assert 'QFileDialog.getOpenFileName' in discovery_interface
+    assert 'submitted = Signal(str, list)' in discovery_interface
+    assert 'comment_submitted = Signal(str, object)' in discovery_interface
+    assert 'upload_moment_media' in discovery_interface
+    assert 'upload_comment_image' in discovery_interface
+    assert 'MomentMediaGrid(self.moment.media' in discovery_interface
+
+
 def test_group_flow_no_longer_writes_local_group_avatar_metadata() -> None:
     chat_interface = Path('client/ui/windows/chat_interface.py').read_text(encoding='utf-8')
     group_flow = Path('client/ui/windows/chat_group_flow.py').read_text(encoding='utf-8')

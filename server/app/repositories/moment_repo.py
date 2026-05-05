@@ -114,8 +114,8 @@ class MomentRepository:
         stmt = select(User).where(User.id.in_(user_ids))
         return {user.id: user for user in self.db.execute(stmt).scalars().all()}
 
-    def create(self, user_id: str, content: str) -> Moment:
-        moment = Moment(user_id=user_id, content=content)
+    def create(self, user_id: str, content: str, *, media_json: str = "[]") -> Moment:
+        moment = Moment(user_id=user_id, content=content, media_json=media_json)
         self.db.add(moment)
         self.db.commit()
         self.db.refresh(moment)
@@ -140,8 +140,8 @@ class MomentRepository:
         self.db.commit()
         return True
 
-    def comment(self, moment_id: str, user_id: str, content: str) -> MomentComment:
-        comment = MomentComment(moment_id=moment_id, user_id=user_id, content=content)
+    def comment(self, moment_id: str, user_id: str, content: str, *, image_json: str = "{}") -> MomentComment:
+        comment = MomentComment(moment_id=moment_id, user_id=user_id, content=content, image_json=image_json)
         self.db.add(comment)
         self.db.commit()
         self.db.refresh(comment)

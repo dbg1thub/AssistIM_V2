@@ -32,9 +32,9 @@ class DiscoveryService:
         payload = payload["items"]
         return [dict(item) for item in payload if isinstance(item, dict)]
 
-    async def create_moment(self, content: str) -> dict[str, Any]:
+    async def create_moment(self, content: str, *, media: list[dict[str, Any]] | None = None) -> dict[str, Any]:
         """Create one moment."""
-        payload = await self._http.post("/moments", json={"content": content})
+        payload = await self._http.post("/moments", json={"content": content, "media": media or []})
         return dict(payload or {})
 
     async def like_moment(self, moment_id: str) -> None:
@@ -45,11 +45,20 @@ class DiscoveryService:
         """Unlike one moment."""
         await self._http.delete(f"/moments/{moment_id}/likes")
 
-    async def add_comment(self, moment_id: str, content: str) -> dict[str, Any]:
+    async def add_comment(
+        self,
+        moment_id: str,
+        content: str,
+        *,
+        image: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         """Create one moment comment."""
+        body: dict[str, Any] = {"content": content}
+        if image:
+            body["image"] = dict(image)
         payload = await self._http.post(
             f"/moments/{moment_id}/comments",
-            json={"content": content},
+            json=body,
         )
         return dict(payload or {})
 

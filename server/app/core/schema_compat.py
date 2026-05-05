@@ -85,6 +85,14 @@ FILE_COLUMN_DDL: dict[str, str] = {
     "checksum_sha256": "VARCHAR(64) NOT NULL DEFAULT ''",
 }
 
+MOMENT_COLUMN_DDL: dict[str, str] = {
+    "media_json": "TEXT NOT NULL DEFAULT '[]'",
+}
+
+MOMENT_COMMENT_COLUMN_DDL: dict[str, str] = {
+    "image_json": "TEXT NOT NULL DEFAULT '{}'",
+}
+
 CHAT_INDEX_DDL: dict[str, str] = {
     "idx_messages_session_seq": "CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_session_seq ON messages (session_id, session_seq)",
 }
@@ -165,7 +173,7 @@ def _has_indexes(bind: Engine | Connection, table_name: str, required_indexes: I
     return all(index_name in indexes for index_name in required_indexes)
 
 
-RUNTIME_SCHEMA_ALEMBIC_REVISION = "20260503_0018"
+RUNTIME_SCHEMA_ALEMBIC_REVISION = "20260505_0019"
 
 def _parse_revision(revision: str) -> tuple[int, int] | None:
     candidate = str(revision or "").strip()
@@ -198,7 +206,21 @@ def _has_runtime_schema_migration(bind: Engine | Connection) -> bool:
 
 
 def _has_current_runtime_schema(bind: Engine | Connection) -> bool:
-    required_tables = {"users", "messages", "sessions", "session_members", "files", "session_events", "groups", "group_members", "user_session_events", "admin_audit_logs", "admin_database_backups"}
+    required_tables = {
+        "users",
+        "messages",
+        "sessions",
+        "session_members",
+        "files",
+        "moments",
+        "moment_comments",
+        "session_events",
+        "groups",
+        "group_members",
+        "user_session_events",
+        "admin_audit_logs",
+        "admin_database_backups",
+    }
     if required_tables - _get_table_names(bind):
         return False
 
@@ -215,6 +237,8 @@ def _has_current_runtime_schema(bind: Engine | Connection) -> bool:
         and _has_indexes(bind, "messages", CHAT_INDEX_DDL)
         and _has_indexes(bind, "sessions", SESSION_INDEX_DDL)
         and _has_indexes(bind, "files", FILE_INDEX_DDL)
+        and _has_columns(bind, "moments", MOMENT_COLUMN_DDL)
+        and _has_columns(bind, "moment_comments", MOMENT_COMMENT_COLUMN_DDL)
         and _has_columns(bind, "groups", GROUP_AVATAR_COLUMN_DDL)
         and _has_columns(bind, "group_members", GROUP_MEMBER_PROFILE_COLUMN_DDL)
         and _has_indexes(bind, "session_events", SESSION_EVENT_INDEX_DDL)
@@ -1191,6 +1215,8 @@ def ensure_schema_compatibility(engine: Engine) -> list[str]:
         _ensure_columns(connection, "sessions", SESSION_COLUMN_DDL, applied)
         _ensure_columns(connection, "session_members", SESSION_MEMBER_COLUMN_DDL, applied)
         _ensure_columns(connection, "files", FILE_COLUMN_DDL, applied)
+        _ensure_columns(connection, "moments", MOMENT_COLUMN_DDL, applied)
+        _ensure_columns(connection, "moment_comments", MOMENT_COMMENT_COLUMN_DDL, applied)
         _ensure_columns(connection, "groups", GROUP_AVATAR_COLUMN_DDL, applied)
         _ensure_columns(connection, "group_members", GROUP_MEMBER_PROFILE_COLUMN_DDL, applied)
 

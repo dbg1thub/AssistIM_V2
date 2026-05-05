@@ -981,10 +981,10 @@ class FakeContactService:
 class FakeDiscoveryService:
     def __init__(self) -> None:
         self.fetch_moments_calls: list[str | None] = []
-        self.create_moment_calls: list[str] = []
+        self.create_moment_calls: list[tuple[str, list[dict]]] = []
         self.like_calls: list[str] = []
         self.unlike_calls: list[str] = []
-        self.comment_calls: list[tuple[str, str]] = []
+        self.comment_calls: list[tuple[str, str, dict | None]] = []
         self.moments_payload: list[dict] = []
         self.created_moment_payload: dict = {}
         self.comment_payload: dict = {}
@@ -993,9 +993,9 @@ class FakeDiscoveryService:
         self.fetch_moments_calls.append(user_id)
         return [dict(item) for item in self.moments_payload]
 
-    async def create_moment(self, content: str) -> dict:
-        self.create_moment_calls.append(content)
-        return dict(self.created_moment_payload or {'id': 'moment-created', 'content': content})
+    async def create_moment(self, content: str, *, media: list[dict] | None = None) -> dict:
+        self.create_moment_calls.append((content, [dict(item) for item in (media or [])]))
+        return dict(self.created_moment_payload or {'id': 'moment-created', 'content': content, 'media': media or []})
 
     async def like_moment(self, moment_id: str) -> None:
         self.like_calls.append(moment_id)
@@ -1003,9 +1003,9 @@ class FakeDiscoveryService:
     async def unlike_moment(self, moment_id: str) -> None:
         self.unlike_calls.append(moment_id)
 
-    async def add_comment(self, moment_id: str, content: str) -> dict:
-        self.comment_calls.append((moment_id, content))
-        return dict(self.comment_payload or {'id': 'comment-1', 'moment_id': moment_id, 'content': content})
+    async def add_comment(self, moment_id: str, content: str, *, image: dict | None = None) -> dict:
+        self.comment_calls.append((moment_id, content, dict(image) if image else None))
+        return dict(self.comment_payload or {'id': 'comment-1', 'moment_id': moment_id, 'content': content, 'image': image})
 
 
 class FakeSearchDatabase:
@@ -2753,9 +2753,19 @@ def test_discovery_controller_load_moments_uses_services(monkeypatch) -> None:
             'id': 'moment-1',
             'user_id': 'user-2',
             'content': 'hello',
+            'media': [
+                {'type': 'image', 'url': '/uploads/moment-photo.png', 'original_name': 'moment-photo.png'},
+                {'type': 'video', 'url': '/uploads/moment-video.mp4', 'original_name': 'moment-video.mp4'},
+            ],
             'created_at': '2026-03-23T10:00:00Z',
             'comments': [
-                {'id': 'comment-1', 'user_id': 'user-3', 'content': 'nice', 'created_at': '2026-03-23T10:01:00Z'},
+                {
+                    'id': 'comment-1',
+                    'user_id': 'user-3',
+                    'content': 'nice',
+                    'created_at': '2026-03-23T10:01:00Z',
+                    'image': {'type': 'image', 'url': '/uploads/comment-photo.png'},
+                },
             ],
         }
     ]
@@ -2776,7 +2786,13 @@ def test_discovery_controller_load_moments_uses_services(monkeypatch) -> None:
         assert set(fake_user_service.fetch_user_calls) == {'user-2', 'user-3'}
         assert len(moments) == 1
         assert moments[0].display_name == 'Bob'
+        assert moments[0].media[0].media_type == 'image'
+        assert moments[0].media[1].media_type == 'video'
+        assert moments[0].images == ['/uploads/moment-photo.png']
+        assert moments[0].videos == ['/uploads/moment-video.mp4']
         assert moments[0].comments[0].display_name == 'Charlie'
+        assert moments[0].comments[0].image is not None
+        assert moments[0].comments[0].image.url == '/uploads/comment-photo.png'
 
     asyncio.run(scenario())
 
@@ -2789,6 +2805,7 @@ def test_discovery_controller_mutations_use_discovery_service(monkeypatch) -> No
         'id': 'moment-2',
         'user_id': 'user-1',
         'content': 'new post',
+        'media': [{'type': 'image', 'url': '/uploads/new-photo.png'}],
         'created_at': '2026-03-23T11:00:00Z',
     }
     fake_discovery_service.comment_payload = {
@@ -2796,6 +2813,7 @@ def test_discovery_controller_mutations_use_discovery_service(monkeypatch) -> No
         'moment_id': 'moment-2',
         'user_id': 'user-1',
         'content': 'thanks',
+        'image': {'type': 'image', 'url': '/uploads/comment-photo.png'},
         'created_at': '2026-03-23T11:01:00Z',
     }
 
@@ -2805,19 +2823,26 @@ def test_discovery_controller_mutations_use_discovery_service(monkeypatch) -> No
 
     async def scenario() -> None:
         controller = discovery_controller_module.DiscoveryController()
-        moment = await controller.create_moment('new post')
+        moment = await controller.create_moment('new post', media=[{'type': 'image', 'url': '/uploads/new-photo.png'}])
         liked = await controller.set_liked('moment-2', True, like_count=3)
         unliked = await controller.set_liked('moment-2', False, like_count=2)
-        comment = await controller.add_comment('moment-2', 'thanks')
+        comment = await controller.add_comment('moment-2', 'thanks', image={'type': 'image', 'url': '/uploads/comment-photo.png'})
 
-        assert fake_discovery_service.create_moment_calls == ['new post']
+        assert fake_discovery_service.create_moment_calls == [
+            ('new post', [{'type': 'image', 'url': '/uploads/new-photo.png'}])
+        ]
         assert moment.id == 'moment-2'
+        assert moment.images == ['/uploads/new-photo.png']
         assert liked is True
         assert unliked is False
         assert fake_discovery_service.like_calls == ['moment-2']
         assert fake_discovery_service.unlike_calls == ['moment-2']
-        assert fake_discovery_service.comment_calls == [('moment-2', 'thanks')]
+        assert fake_discovery_service.comment_calls == [
+            ('moment-2', 'thanks', {'type': 'image', 'url': '/uploads/comment-photo.png'})
+        ]
         assert comment.content == 'thanks'
+        assert comment.image is not None
+        assert comment.image.url == '/uploads/comment-photo.png'
 
     asyncio.run(scenario())
 

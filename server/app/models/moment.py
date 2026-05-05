@@ -16,6 +16,7 @@ class Moment(IdMixin, TimestampMixin, Base):
 
     user_id: Mapped[str] = mapped_column(Uuid(as_uuid=False), ForeignKey("users.id"), nullable=False)
     content: Mapped[str] = mapped_column(Text, default="")
+    media_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
 
 
 class MomentLike(TimestampMixin, Base):
@@ -38,3 +39,4 @@ class MomentComment(IdMixin, TimestampMixin, Base):
     moment_id: Mapped[str] = mapped_column(Uuid(as_uuid=False), ForeignKey("moments.id"), nullable=False)
     user_id: Mapped[str] = mapped_column(Uuid(as_uuid=False), ForeignKey("users.id"), nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
+    image_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")

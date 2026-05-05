@@ -4,13 +4,16 @@ from __future__ import annotations
 
 import asyncio
 import html
+import mimetypes
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import QEvent, QEasingCurve, QParallelAnimationGroup, QPropertyAnimation, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPalette, QPixmap
+from PySide6.QtCore import QEvent, QEasingCurve, QParallelAnimationGroup, QPropertyAnimation, Qt, QTimer, QUrl, Signal
+from PySide6.QtGui import QColor, QDesktopServices, QFont, QPainter, QPainterPath, QPalette, QPixmap
+from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 from PySide6.QtWidgets import (
     QDialog,
+    QFileDialog,
     QFrame,
     QGraphicsOpacityEffect,
     QGridLayout,
@@ -41,11 +44,14 @@ from client.core.app_icons import AppIcon
 from client.core import logging
 from client.core.avatar_rendering import get_avatar_image_store
 from client.core.avatar_utils import avatar_seed, profile_avatar_seed
+from client.core.config_backend import get_config
 from client.core.exceptions import APIError, NetworkError
 from client.core.i18n import format_relative_time, tr
 from client.core.logging import setup_logging
+from client.services.file_service import get_file_service
 from client.ui.controllers.discovery_controller import (
     MomentCommentRecord,
+    MomentMediaRecord,
     MomentRecord,
     get_discovery_controller,
 )
@@ -187,31 +193,35 @@ class DiscoveryAvatar(QWidget):
         painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, self._fallback)
 
 
-class ClickableImageLabel(QLabel):
-    """Simple clickable image tile."""
+class ClickableMediaLabel(QLabel):
+    """Simple clickable moment media tile."""
 
-    clicked = Signal(str)
+    clicked = Signal(object)
 
-    def __init__(self, image_path: str, parent=None):
+    def __init__(self, media: MomentMediaRecord, parent=None):
         super().__init__(parent)
-        self.image_path = image_path
+        self.media = media
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
     def mousePressEvent(self, event) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
-            self.clicked.emit(self.image_path)
+            self.clicked.emit(self.media)
         super().mousePressEvent(event)
 
 
 class MomentMediaGrid(QWidget):
-    """Responsive grid for moment images."""
+    """Responsive grid for moment image and video attachments."""
 
     image_requested = Signal(str)
+    video_requested = Signal(str)
 
-    def __init__(self, images: list[str], parent=None):
+    def __init__(self, media: list[MomentMediaRecord], parent=None):
         super().__init__(parent)
-        self._images = images[:9]
+        self._media = media[:9]
+        self._network_manager = QNetworkAccessManager(self)
+        self._network_manager.finished.connect(self._on_image_loaded)
+        self._pending_replies: dict[QNetworkReply, QLabel] = {}
         self._layout = QGridLayout(self)
         self._layout.setContentsMargins(0, 0, 0, 0)
         self._layout.setHorizontalSpacing(8)
@@ -219,11 +229,11 @@ class MomentMediaGrid(QWidget):
         self._build()
 
     def _build(self) -> None:
-        if not self._images:
+        if not self._media:
             self.hide()
             return
 
-        count = len(self._images)
+        count = len(self._media)
         if count == 1:
             sizes = [(0, 0, 1, 1, 360, 220)]
         elif count in (2, 4):
@@ -237,27 +247,57 @@ class MomentMediaGrid(QWidget):
                 for index in range(count)
             ]
 
-        for index, image_path in enumerate(self._images):
+        for index, media in enumerate(self._media):
             row, col, row_span, col_span, width, height = sizes[index]
-            label = ClickableImageLabel(image_path, self)
+            label = ClickableMediaLabel(media, self)
             label.setObjectName("momentMediaTile")
             label.setFixedSize(width, height)
-            self._load_image(label, image_path, width, height)
-            label.clicked.connect(self.image_requested.emit)
+            self._load_media(label, media, width, height)
+            label.clicked.connect(self._emit_media_request)
             self._layout.addWidget(label, row, col, row_span, col_span)
 
-    def _load_image(self, label: QLabel, image_path: str, width: int, height: int) -> None:
-        """Try to render a local image file, otherwise keep the placeholder."""
-        path = Path(image_path)
-        if not path.exists():
+    def _load_media(self, label: QLabel, media: MomentMediaRecord, width: int, height: int) -> None:
+        if media.is_video:
+            label.setText(tr("discovery.video.placeholder", "Video"))
+            label.setProperty("momentMediaKind", "video")
+            return
+
+        source = self._resolve_media_source(media)
+        if not source:
             label.setText(tr("discovery.image.placeholder", "Image"))
             return
 
-        pixmap = QPixmap(str(path))
-        if pixmap.isNull():
-            label.setText(tr("discovery.image.placeholder", "Image"))
+        pixmap = QPixmap(source)
+        if not pixmap.isNull():
+            self._apply_scaled_pixmap(label, pixmap, width, height)
             return
 
+        if source.startswith(("http://", "https://")):
+            reply = self._network_manager.get(QNetworkRequest(QUrl(source)))
+            self._pending_replies[reply] = label
+            label.setText(tr("discovery.image.loading", "Loading..."))
+            return
+
+        label.setText(tr("discovery.image.placeholder", "Image"))
+
+    def _on_image_loaded(self, reply: QNetworkReply) -> None:
+        label = self._pending_replies.pop(reply, None)
+        try:
+            if label is None:
+                return
+            if reply.error() != QNetworkReply.NetworkError.NoError:
+                label.setText(tr("discovery.image.placeholder", "Image"))
+                return
+            pixmap = QPixmap()
+            if not pixmap.loadFromData(bytes(reply.readAll())):
+                label.setText(tr("discovery.image.placeholder", "Image"))
+                return
+            self._apply_scaled_pixmap(label, pixmap, label.width(), label.height())
+        finally:
+            reply.deleteLater()
+
+    @staticmethod
+    def _apply_scaled_pixmap(label: QLabel, pixmap: QPixmap, width: int, height: int) -> None:
         scaled = pixmap.scaled(
             width,
             height,
@@ -266,6 +306,31 @@ class MomentMediaGrid(QWidget):
         )
         label.setPixmap(scaled)
         label.setText("")
+
+    def _emit_media_request(self, media: object) -> None:
+        if not isinstance(media, MomentMediaRecord):
+            return
+        source = self._resolve_media_source(media)
+        if media.is_video:
+            self.video_requested.emit(source)
+        else:
+            self.image_requested.emit(source)
+
+    @staticmethod
+    def _resolve_media_source(media: MomentMediaRecord) -> str:
+        for value in (media.local_path, media.url):
+            source = str(value or "").strip()
+            if not source:
+                continue
+            if Path(source).exists():
+                return source
+            if source.startswith(("http://", "https://")):
+                return source
+            if source.startswith("/"):
+                origin_base = get_config().server.origin_url.rstrip("/")
+                return f"{origin_base}{source}"
+            return source
+        return ""
 
 
 class MomentCommentItem(QWidget):
@@ -287,6 +352,10 @@ class MomentCommentItem(QWidget):
         time_label.setObjectName("momentCommentTimeLabel")
 
         layout.addWidget(self.text_label)
+        if comment.image is not None:
+            self.image_grid = MomentMediaGrid([comment.image], self)
+            self.image_grid.image_requested.connect(self._open_image)
+            layout.addWidget(self.image_grid)
         layout.addWidget(time_label)
 
     def changeEvent(self, event) -> None:
@@ -312,11 +381,17 @@ class MomentCommentItem(QWidget):
             f"<span style='color:{body_color}'>：{html.escape(self.comment.content)}</span>"
         )
 
+    def _open_image(self, image_path: str) -> None:
+        viewer = ImageViewer(image_path, self.window())
+        viewer.show()
+        viewer.raise_()
+        viewer.activateWindow()
+
 
 class AnimatedCommentSection(QWidget):
     """Comment block with ExpandSettingCard-like expansion animation."""
 
-    comment_submitted = Signal(str)
+    comment_submitted = Signal(str, object)
 
     COLLAPSED_COUNT = 2
 
@@ -325,6 +400,7 @@ class AnimatedCommentSection(QWidget):
         self._comments = list(comments)
         self._expanded = False
         self._editor_visible = False
+        self._selected_image_path = ""
         self._animation: Optional[QParallelAnimationGroup] = None
 
         self._setup_ui()
@@ -369,12 +445,19 @@ class AnimatedCommentSection(QWidget):
 
         self.comment_edit = LineEdit(self.editor_widget)
         self.comment_edit.setPlaceholderText(tr("discovery.comments.placeholder", "Write a comment"))
+        self.image_button = PushButton(tr("discovery.comments.add_image", "Image"), self.editor_widget)
+        self.image_button.setFixedWidth(72)
         self.send_button = PrimaryPushButton(tr("common.send", "Send"), self.editor_widget)
         self.send_button.setFixedWidth(70)
 
         editor_layout.addWidget(self.comment_edit, 1)
+        editor_layout.addWidget(self.image_button, 0)
         editor_layout.addWidget(self.send_button, 0)
 
+        self.image_hint = CaptionLabel("", self.surface)
+        self.image_hint.setObjectName("momentCommentImageHint")
+
+        self.image_button.clicked.connect(self._select_comment_image)
         self.send_button.clicked.connect(self._submit_comment)
         self.comment_edit.returnPressed.connect(self._submit_comment)
 
@@ -382,6 +465,7 @@ class AnimatedCommentSection(QWidget):
         surface_layout.addWidget(self.extra_widget)
         surface_layout.addWidget(self.toggle_button, 0, Qt.AlignmentFlag.AlignLeft)
         surface_layout.addWidget(self.editor_widget)
+        surface_layout.addWidget(self.image_hint)
         layout.addWidget(self.surface)
 
         self.setObjectName("MomentCommentSection")
@@ -480,22 +564,38 @@ class AnimatedCommentSection(QWidget):
 
     def _submit_comment(self) -> None:
         text = self.comment_edit.text().strip()
-        if not text:
+        if not text and not self._selected_image_path:
             return
-        self.comment_submitted.emit(text)
+        self.comment_submitted.emit(text, self._selected_image_path or None)
         self.comment_edit.clear()
+        self._selected_image_path = ""
+        self.image_hint.setText("")
+
+    def _select_comment_image(self) -> None:
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            tr("discovery.comments.select_image", "Select comment image"),
+            "",
+            tr("discovery.dialog.image_filter", "Images (*.png *.jpg *.jpeg *.bmp *.gif *.webp);;All Files (*.*)"),
+        )
+        if not file_path:
+            return
+        self._selected_image_path = file_path
+        self.image_hint.setText(Path(file_path).name)
 
 
 class CreateMomentDialog(QDialog):
-    """Dialog for publishing a text moment."""
+    """Dialog for publishing a moment with text, images, or video."""
 
-    submitted = Signal(str)
+    submitted = Signal(str, list)
+    MAX_MEDIA_ITEMS = 9
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._media_paths: list[str] = []
         self.setWindowTitle(tr("discovery.dialog.window_title", "Publish Moment"))
         self.setModal(True)
-        self.resize(560, 360)
+        self.resize(600, 460)
         _apply_themed_dialog_surface(self, "CreateMomentDialog")
         self._setup_ui()
 
@@ -508,7 +608,7 @@ class CreateMomentDialog(QDialog):
         hint = CaptionLabel(
             tr(
                 "discovery.dialog.hint",
-                "Text-only moments are supported for now. Image posting will be added soon.",
+                "Share text, up to 9 images, or one video.",
             ),
             self,
         )
@@ -522,6 +622,26 @@ class CreateMomentDialog(QDialog):
         )
         self.editor.setMinimumHeight(200)
         layout.addWidget(self.editor, 1)
+
+        media_row = QHBoxLayout()
+        media_row.setContentsMargins(0, 0, 0, 0)
+        media_row.setSpacing(8)
+        self.add_images_button = PushButton(tr("discovery.dialog.add_images", "Add Images"), self)
+        self.add_video_button = PushButton(tr("discovery.dialog.add_video", "Add Video"), self)
+        self.clear_media_button = PushButton(tr("common.clear", "Clear"), self)
+        self.add_images_button.clicked.connect(self._select_images)
+        self.add_video_button.clicked.connect(self._select_video)
+        self.clear_media_button.clicked.connect(self._clear_media)
+        media_row.addWidget(self.add_images_button, 0)
+        media_row.addWidget(self.add_video_button, 0)
+        media_row.addWidget(self.clear_media_button, 0)
+        media_row.addStretch(1)
+        layout.addLayout(media_row)
+
+        self.media_hint = CaptionLabel("", self)
+        self.media_hint.setWordWrap(True)
+        layout.addWidget(self.media_hint)
+        self._sync_media_hint()
 
         footer = QHBoxLayout()
         footer.setContentsMargins(0, 0, 0, 0)
@@ -547,7 +667,7 @@ class CreateMomentDialog(QDialog):
 
     def _submit(self) -> None:
         text = self.editor.toPlainText().strip()
-        if not text:
+        if not text and not self._media_paths:
             InfoBar.warning(
                 tr("discovery.publish.title", "Publish Moment"),
                 tr("discovery.dialog.empty_warning", "Please enter something to post."),
@@ -555,15 +675,69 @@ class CreateMomentDialog(QDialog):
                 duration=1800,
             )
             return
-        self.submitted.emit(text)
+        self.submitted.emit(text, list(self._media_paths))
         self.accept()
+
+    def _select_images(self) -> None:
+        file_paths, _ = QFileDialog.getOpenFileNames(
+            self,
+            tr("discovery.dialog.select_images", "Select Images"),
+            "",
+            tr("discovery.dialog.image_filter", "Images (*.png *.jpg *.jpeg *.bmp *.gif *.webp);;All Files (*.*)"),
+        )
+        if not file_paths:
+            return
+        if any(self._is_video_path(path) for path in self._media_paths):
+            self._media_paths.clear()
+        self._media_paths = (self._media_paths + list(file_paths))[: self.MAX_MEDIA_ITEMS]
+        self._sync_media_hint()
+
+    def _select_video(self) -> None:
+        file_paths, _ = QFileDialog.getOpenFileNames(
+            self,
+            tr("discovery.dialog.select_video", "Select Video"),
+            "",
+            tr("discovery.dialog.video_filter", "Videos (*.mp4 *.mov *.m4v *.avi *.mkv *.webm);;All Files (*.*)"),
+        )
+        if not file_paths:
+            return
+        self._media_paths = [file_paths[0]]
+        self._sync_media_hint()
+
+    def _clear_media(self) -> None:
+        self._media_paths.clear()
+        self._sync_media_hint()
+
+    def _sync_media_hint(self) -> None:
+        if not self._media_paths:
+            self.media_hint.setText(tr("discovery.dialog.media_empty", "No media selected."))
+            return
+        names = ", ".join(Path(path).name for path in self._media_paths[:3])
+        remaining = max(0, len(self._media_paths) - 3)
+        if remaining:
+            names = f"{names} +{remaining}"
+        self.media_hint.setText(
+            tr(
+                "discovery.dialog.media_selected",
+                "{count} selected: {names}",
+                count=len(self._media_paths),
+                names=names,
+            )
+        )
+
+    @staticmethod
+    def _is_video_path(path: str) -> bool:
+        mime_type, _ = mimetypes.guess_type(path)
+        if str(mime_type or "").lower().startswith("video/"):
+            return True
+        return str(path or "").lower().endswith((".mp4", ".mov", ".m4v", ".avi", ".mkv", ".webm"))
 
 
 class MomentCard(CardWidget):
     """Single moment card in the timeline."""
 
     like_requested = Signal(str, bool, int)
-    comment_requested = Signal(str, str)
+    comment_requested = Signal(str, str, object)
 
     CONTENT_PREVIEW_LENGTH = 180
 
@@ -619,6 +793,7 @@ class MomentCard(CardWidget):
 
         self.media_grid = MomentMediaGrid([], self)
         self.media_grid.image_requested.connect(self._open_image)
+        self.media_grid.video_requested.connect(self._open_video)
         layout.addWidget(self.media_grid)
 
         self.stats_label = CaptionLabel("", self)
@@ -660,9 +835,10 @@ class MomentCard(CardWidget):
         self._refresh_content()
         self.layout().removeWidget(self.media_grid)
         self.media_grid.deleteLater()
-        if self.moment.images:
-            self.media_grid = MomentMediaGrid(self.moment.images, self)
+        if self.moment.media:
+            self.media_grid = MomentMediaGrid(self.moment.media, self)
             self.media_grid.image_requested.connect(self._open_image)
+            self.media_grid.video_requested.connect(self._open_video)
             self.layout().insertWidget(3, self.media_grid)
         else:
             self.media_grid = MomentMediaGrid([], self)
@@ -735,8 +911,8 @@ class MomentCard(CardWidget):
     def _open_comment_editor(self) -> None:
         self.comment_section.open_editor()
 
-    def _submit_comment(self, content: str) -> None:
-        self.comment_requested.emit(self.moment.id, content)
+    def _submit_comment(self, content: str, image_path: object = None) -> None:
+        self.comment_requested.emit(self.moment.id, content, image_path)
 
     def _show_more_placeholder(self) -> None:
         InfoBar.info(
@@ -747,31 +923,20 @@ class MomentCard(CardWidget):
         )
 
     def _open_image(self, image_path: str) -> None:
-        if image_path.startswith("http://") or image_path.startswith("https://"):
-            InfoBar.info(
-                tr("common.image", "Image"),
-                tr("discovery.image.remote_pending", "Remote image preview is coming soon."),
-                parent=self.window(),
-                duration=1800,
-            )
-            return
-
-        path = Path(image_path)
-        if not path.exists():
-            InfoBar.warning(
-                tr("common.image", "Image"),
-                tr("discovery.image.not_found", "Image file not found."),
-                parent=self.window(),
-                duration=1800,
-            )
-            return
-
-        viewer = ImageViewer(str(path), self.window())
+        viewer = ImageViewer(image_path, self.window())
         self._image_dialogs.add(viewer)
         viewer.finished.connect(lambda _result=0, dlg=viewer: self._image_dialogs.discard(dlg))
         viewer.show()
         viewer.raise_()
         viewer.activateWindow()
+
+    def _open_video(self, video_source: str) -> None:
+        if not video_source:
+            return
+        if Path(video_source).exists():
+            QDesktopServices.openUrl(QUrl.fromLocalFile(video_source))
+            return
+        QDesktopServices.openUrl(QUrl(video_source))
 
 
 class DiscoveryInterface(QWidget):
@@ -985,17 +1150,30 @@ class DiscoveryInterface(QWidget):
         dialog.raise_()
         dialog.activateWindow()
 
-    def _create_moment(self, content: str) -> None:
+    def _create_moment(self, content: str, media_paths: list | None = None) -> None:
         if self._teardown_started:
             return
         if self._publish_task is not None and not self._publish_task.done():
             return
-        self._set_publish_task(self._create_moment_async(content))
+        self._set_publish_task(self._create_moment_async(content, media_paths or []))
 
-    async def _create_moment_async(self, content: str) -> None:
+    async def _create_moment_async(self, content: str, media_paths: list[str]) -> None:
         self.publish_button.setEnabled(False)
         try:
-            moment = await self._controller.create_moment(content)
+            uploaded_media = await self.upload_moment_media(media_paths)
+            moment = await self._controller.create_moment(
+                content,
+                media=[self._server_media_payload(item) for item in uploaded_media],
+            )
+            self._attach_local_media_previews(moment, uploaded_media)
+        except Exception:
+            InfoBar.error(
+                tr("discovery.publish.title", "Publish Moment"),
+                tr("discovery.publish.failed", "Publish failed. Please try again later."),
+                parent=self.window(),
+                duration=2200,
+            )
+            raise
         finally:
             self.publish_button.setEnabled(True)
 
@@ -1041,15 +1219,21 @@ class DiscoveryInterface(QWidget):
             moment.is_liked = liked
             moment.like_count = like_count
 
-    def _request_comment_create(self, moment_id: str, content: str) -> None:
+    def _request_comment_create(self, moment_id: str, content: str, image_path: object = None) -> None:
         self._schedule_keyed_ui_task(
             ("moment_comment", moment_id),
-            self._request_comment_create_async(moment_id, content),
+            self._request_comment_create_async(moment_id, content, image_path),
             f"create moment comment {moment_id}",
         )
 
-    async def _request_comment_create_async(self, moment_id: str, content: str) -> None:
-        comment = await self._controller.add_comment(moment_id, content)
+    async def _request_comment_create_async(self, moment_id: str, content: str, image_path: object = None) -> None:
+        image_payload = None
+        if isinstance(image_path, str) and image_path:
+            uploaded_image = await self.upload_comment_image(image_path)
+            image_payload = self._server_media_payload(uploaded_image)
+        comment = await self._controller.add_comment(moment_id, content, image=image_payload)
+        if image_payload is not None and comment.image is not None and isinstance(image_path, str):
+            comment.image.local_path = image_path
 
         card = self._cards.get(moment_id)
         if card is not None:
@@ -1061,6 +1245,70 @@ class DiscoveryInterface(QWidget):
             parent=self.window(),
             duration=1400,
         )
+
+    async def upload_moment_media(self, file_paths: list[str]) -> list[dict[str, object]]:
+        """Upload selected moment media files and return normalized client-side payloads."""
+        uploaded: list[dict[str, object]] = []
+        for file_path in file_paths[: CreateMomentDialog.MAX_MEDIA_ITEMS]:
+            media = await self._upload_media_file(file_path)
+            uploaded.append(media)
+        return uploaded
+
+    async def upload_comment_image(self, file_path: str) -> dict[str, object]:
+        """Upload one comment image using the shared file service."""
+        media = await self._upload_media_file(file_path)
+        media["type"] = "image"
+        return media
+
+    async def _upload_media_file(self, file_path: str) -> dict[str, object]:
+        payload = await get_file_service().upload_file(file_path)
+        media = dict(payload.get("media") or payload)
+        url = str(media.get("url") or payload.get("url") or "").strip()
+        mime_type = str(media.get("mime_type") or payload.get("mime_type") or "").strip()
+        original_name = str(media.get("original_name") or payload.get("original_name") or Path(file_path).name).strip()
+        try:
+            size_bytes = max(0, int(media.get("size_bytes") or payload.get("size_bytes") or 0))
+        except (TypeError, ValueError):
+            size_bytes = 0
+        return {
+            "type": self._media_type_for_path(file_path, mime_type),
+            "url": url,
+            "original_name": original_name,
+            "mime_type": mime_type,
+            "size_bytes": size_bytes,
+            "local_path": file_path,
+        }
+
+    @staticmethod
+    def _server_media_payload(media: dict[str, object]) -> dict[str, object]:
+        return {
+            "type": str(media.get("type") or "").strip(),
+            "url": str(media.get("url") or "").strip(),
+            "original_name": str(media.get("original_name") or "").strip(),
+            "mime_type": str(media.get("mime_type") or "").strip(),
+            "size_bytes": max(0, int(media.get("size_bytes") or 0)),
+        }
+
+    @staticmethod
+    def _media_type_for_path(file_path: str, mime_type: str = "") -> str:
+        lowered_mime = str(mime_type or "").strip().lower()
+        if not lowered_mime:
+            guessed, _ = mimetypes.guess_type(file_path)
+            lowered_mime = str(guessed or "").lower()
+        if lowered_mime.startswith("video/"):
+            return "video"
+        return "image"
+
+    @staticmethod
+    def _attach_local_media_previews(moment: MomentRecord, uploaded_media: list[dict[str, object]]) -> None:
+        local_paths_by_url = {
+            str(item.get("url") or "").strip(): str(item.get("local_path") or "").strip()
+            for item in uploaded_media
+            if item.get("url") and item.get("local_path")
+        }
+        for item in moment.media:
+            if item.url in local_paths_by_url:
+                item.local_path = local_paths_by_url[item.url]
 
     def _on_destroyed(self, *_args) -> None:
         """Cancel outstanding async work when the page is torn down."""

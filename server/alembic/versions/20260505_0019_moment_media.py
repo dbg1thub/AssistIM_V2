@@ -1,9 +1,4 @@
-"""add missing group announcement reference columns
-
-Revision ID: 20260421_0013
-Revises: 20260413_0012
-Create Date: 2026-04-21 21:40:00.000000
-"""
+"""Add media fields for moments."""
 
 from __future__ import annotations
 
@@ -11,8 +6,8 @@ from alembic import op
 import sqlalchemy as sa
 
 
-revision = "20260421_0013"
-down_revision = "20260413_0012"
+revision = "20260505_0019"
+down_revision = "20260503_0018"
 branch_labels = None
 depends_on = None
 
@@ -36,16 +31,12 @@ def _add_column_if_missing(table_name: str, column: sa.Column) -> None:
 
 def upgrade() -> None:
     _add_column_if_missing(
-        "groups",
-        sa.Column("announcement_message_id", sa.Uuid(as_uuid=False), nullable=True),
+        "moments",
+        sa.Column("media_json", sa.Text(), nullable=False, server_default=sa.text("'[]'")),
     )
     _add_column_if_missing(
-        "groups",
-        sa.Column("announcement_author_id", sa.Uuid(as_uuid=False), nullable=True),
-    )
-    _add_column_if_missing(
-        "groups",
-        sa.Column("announcement_published_at", sa.DateTime(), nullable=True),
+        "moment_comments",
+        sa.Column("image_json", sa.Text(), nullable=False, server_default=sa.text("'{}'")),
     )
 
 

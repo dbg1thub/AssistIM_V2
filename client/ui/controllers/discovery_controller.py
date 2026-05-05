@@ -18,6 +18,26 @@ logger = logging.get_logger(__name__)
 
 
 @dataclass
+class MomentMediaRecord:
+    """Normalized moment media attachment."""
+
+    media_type: str
+    url: str
+    original_name: str = ""
+    mime_type: str = ""
+    size_bytes: int = 0
+    local_path: str = ""
+
+    @property
+    def is_image(self) -> bool:
+        return self.media_type == "image"
+
+    @property
+    def is_video(self) -> bool:
+        return self.media_type == "video"
+
+
+@dataclass
 class MomentCommentRecord:
     """Normalized comment data."""
 
@@ -30,6 +50,7 @@ class MomentCommentRecord:
     nickname: str = ""
     avatar: str = ""
     gender: str = ""
+    image: MomentMediaRecord | None = None
 
     @property
     def display_name(self) -> str:
@@ -49,7 +70,9 @@ class MomentRecord:
     nickname: str = ""
     avatar: str = ""
     gender: str = ""
+    media: list[MomentMediaRecord] = field(default_factory=list)
     images: list[str] = field(default_factory=list)
+    videos: list[str] = field(default_factory=list)
     comments: list[MomentCommentRecord] = field(default_factory=list)
     like_count: int = 0
     comment_count: int = 0
@@ -140,11 +163,11 @@ class DiscoveryController:
         moments.sort(key=lambda item: item.created_at, reverse=True)
         return moments
 
-    async def create_moment(self, content: str) -> MomentRecord:
+    async def create_moment(self, content: str, *, media: list[dict[str, Any]] | None = None) -> MomentRecord:
         """Create a new moment."""
         owner_user_id = self._capture_runtime_user_id()
         self._sync_cache_scope(owner_user_id)
-        payload = await self._discovery_service.create_moment(content)
+        payload = await self._discovery_service.create_moment(content, media=media or [])
         self._ensure_runtime_user_id(owner_user_id)
         return self._normalize_moment(payload or {})
 
@@ -162,11 +185,17 @@ class DiscoveryController:
             self._like_count_cache[moment_id] = max(0, like_count)
         return liked
 
-    async def add_comment(self, moment_id: str, content: str) -> MomentCommentRecord:
+    async def add_comment(
+        self,
+        moment_id: str,
+        content: str,
+        *,
+        image: dict[str, Any] | None = None,
+    ) -> MomentCommentRecord:
         """Add a new comment to a moment."""
         owner_user_id = self._capture_runtime_user_id()
         self._sync_cache_scope(owner_user_id)
-        payload = await self._discovery_service.add_comment(moment_id, content)
+        payload = await self._discovery_service.add_comment(moment_id, content, image=image)
         self._ensure_runtime_user_id(owner_user_id)
         comment = self._normalize_comment(payload or {}, moment_id=moment_id)
         self._comment_cache.setdefault(moment_id, []).append(comment)
@@ -227,7 +256,9 @@ class DiscoveryController:
                 item for item in cached_comments if not item.id or item.id not in known_ids
             )
 
-        images = list(data.get("images") or data.get("media") or [])
+        media = self._normalize_media_items(data.get("media") or data.get("images") or [])
+        images = [item.url for item in media if item.is_image]
+        videos = [item.url for item in media if item.is_video]
         like_count = int(data.get("like_count", 0) or 0)
         if moment_id in self._like_count_cache:
             like_count = self._like_count_cache[moment_id]
@@ -244,7 +275,9 @@ class DiscoveryController:
             nickname=str(author.get("nickname", "") or cached_user.get("nickname", "") or ""),
             avatar=str(author.get("avatar", "") or cached_user.get("avatar", "") or ""),
             gender=str(author.get("gender", "") or cached_user.get("gender", "") or ""),
+            media=media,
             images=images,
+            videos=videos,
             comments=normalized_comments,
             like_count=like_count,
             comment_count=max(int(data.get("comment_count", len(normalized_comments)) or 0), len(normalized_comments)),
@@ -279,7 +312,59 @@ class DiscoveryController:
             nickname=str(author.get("nickname", "") or cached_user.get("nickname", "") or ""),
             avatar=str(author.get("avatar", "") or cached_user.get("avatar", "") or ""),
             gender=str(author.get("gender", "") or cached_user.get("gender", "") or ""),
+            image=self._normalize_media_item(data.get("image")),
         )
+
+    def _normalize_media_items(self, payload: object) -> list[MomentMediaRecord]:
+        """Convert backend media payloads into normalized attachment records."""
+        if not isinstance(payload, list):
+            return []
+        items: list[MomentMediaRecord] = []
+        for item in payload:
+            normalized = self._normalize_media_item(item)
+            if normalized is not None:
+                items.append(normalized)
+        return items
+
+    def _normalize_media_item(self, payload: object) -> MomentMediaRecord | None:
+        """Normalize one media object or legacy string image URL."""
+        if isinstance(payload, str):
+            url = payload.strip()
+            if not url:
+                return None
+            return MomentMediaRecord(media_type="image", url=url)
+
+        if not isinstance(payload, dict):
+            return None
+
+        media_type = str(payload.get("type") or payload.get("media_type") or "").strip().lower()
+        url = str(payload.get("url") or "").strip()
+        if not url:
+            return None
+        if media_type not in {"image", "video"}:
+            media_type = "video" if self._looks_like_video(url, str(payload.get("mime_type") or "")) else "image"
+
+        try:
+            size_bytes = max(0, int(payload.get("size_bytes") or 0))
+        except (TypeError, ValueError):
+            size_bytes = 0
+
+        return MomentMediaRecord(
+            media_type=media_type,
+            url=url,
+            original_name=str(payload.get("original_name") or payload.get("name") or "").strip(),
+            mime_type=str(payload.get("mime_type") or "").strip(),
+            size_bytes=size_bytes,
+            local_path=str(payload.get("local_path") or "").strip(),
+        )
+
+    @staticmethod
+    def _looks_like_video(url: str, mime_type: str = "") -> bool:
+        lowered_mime = str(mime_type or "").strip().lower()
+        if lowered_mime.startswith("video/"):
+            return True
+        lowered_url = str(url or "").strip().lower()
+        return lowered_url.endswith((".mp4", ".mov", ".m4v", ".avi", ".mkv", ".webm"))
 
 
 _discovery_controller: Optional[DiscoveryController] = None

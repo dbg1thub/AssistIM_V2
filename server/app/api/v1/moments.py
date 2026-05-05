@@ -41,7 +41,7 @@ def get_moment(moment_id: str, current_user: User = Depends(get_current_user), d
 
 @router.post("")
 def create_moment(payload: MomentCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
-    return success_response(MomentService(db).create_moment(current_user, payload.content))
+    return success_response(MomentService(db).create_moment(current_user, payload.content, payload.media))
 
 
 @router.post("/{moment_id}/likes")
@@ -61,4 +61,4 @@ def comment_moment(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> dict:
-    return success_response(MomentService(db).comment(current_user, moment_id, payload.content))
+    return success_response(MomentService(db).comment(current_user, moment_id, payload.content, payload.image))
