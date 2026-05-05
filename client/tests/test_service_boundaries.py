@@ -981,17 +981,23 @@ class FakeContactService:
 class FakeDiscoveryService:
     def __init__(self) -> None:
         self.fetch_moments_calls: list[str | None] = []
+        self.get_moment_calls: list[str] = []
         self.create_moment_calls: list[tuple[str, list[dict]]] = []
         self.like_calls: list[str] = []
         self.unlike_calls: list[str] = []
         self.comment_calls: list[tuple[str, str, dict | None]] = []
         self.moments_payload: list[dict] = []
+        self.moment_detail_payloads: dict[str, dict] = {}
         self.created_moment_payload: dict = {}
         self.comment_payload: dict = {}
 
     async def fetch_moments(self, *, user_id: str | None = None) -> list[dict]:
         self.fetch_moments_calls.append(user_id)
         return [dict(item) for item in self.moments_payload]
+
+    async def get_moment(self, moment_id: str) -> dict:
+        self.get_moment_calls.append(moment_id)
+        return dict(self.moment_detail_payloads.get(moment_id, {}))
 
     async def create_moment(self, content: str, *, media: list[dict] | None = None) -> dict:
         self.create_moment_calls.append((content, [dict(item) for item in (media or [])]))
@@ -3293,6 +3299,57 @@ def test_session_manager_refresh_remote_sessions_prefers_counterpart_profile(mon
             display_name='Bobby',
         )
         assert len(fake_db.replaced_sessions) == 1
+
+    asyncio.run(scenario())
+
+
+def test_discovery_controller_load_moment_detail_uses_service(monkeypatch) -> None:
+    fake_discovery_service = FakeDiscoveryService()
+    fake_user_service = FakeUserService()
+    fake_auth_context = FakeAuthContext({'id': 'user-1', 'username': 'alice', 'nickname': 'Alice', 'avatar': '/avatars/alice.png'})
+    fake_discovery_service.moment_detail_payloads = {
+        'moment-1': {
+            'id': 'moment-1',
+            'user_id': 'user-2',
+            'content': 'full detail',
+            'created_at': '2026-03-23T12:00:00Z',
+            'comments': [
+                {'id': 'comment-1', 'user_id': 'user-3', 'content': 'first'},
+                {
+                    'id': 'comment-2',
+                    'user_id': 'user-4',
+                    'content': 'second',
+                    'image': {'type': 'image', 'url': '/uploads/detail-comment.png'},
+                },
+            ],
+            'comment_count': 2,
+            'comments_truncated': False,
+        }
+    }
+    fake_user_service.user_payloads = {
+        'user-2': {'id': 'user-2', 'username': 'bob', 'nickname': 'Bob'},
+        'user-3': {'id': 'user-3', 'username': 'charlie', 'nickname': 'Charlie'},
+        'user-4': {'id': 'user-4', 'username': 'dora', 'nickname': 'Dora'},
+    }
+
+    monkeypatch.setattr(discovery_controller_module, 'get_discovery_service', lambda: fake_discovery_service)
+    monkeypatch.setattr(discovery_controller_module, 'get_user_service', lambda: fake_user_service)
+    monkeypatch.setattr(discovery_controller_module, 'get_auth_controller', lambda: fake_auth_context)
+
+    async def scenario() -> None:
+        controller = discovery_controller_module.DiscoveryController()
+        moment = await controller.load_moment_detail('moment-1')
+
+        assert fake_discovery_service.get_moment_calls == ['moment-1']
+        assert set(fake_user_service.fetch_user_calls) == {'user-2', 'user-3', 'user-4'}
+        assert moment.id == 'moment-1'
+        assert moment.display_name == 'Bob'
+        assert moment.comment_count == 2
+        assert len(moment.comments) == 2
+        assert moment.comments[1].display_name == 'Dora'
+        assert moment.comments[1].image is not None
+        assert moment.comments[1].image.url == '/uploads/detail-comment.png'
+        assert moment.comments_truncated is False
 
     asyncio.run(scenario())
 

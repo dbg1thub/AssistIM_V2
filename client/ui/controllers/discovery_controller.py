@@ -77,6 +77,7 @@ class MomentRecord:
     like_count: int = 0
     comment_count: int = 0
     is_liked: bool = False
+    comments_truncated: bool = False
     extra: dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -162,6 +163,34 @@ class DiscoveryController:
         moments = [self._normalize_moment(item) for item in items]
         moments.sort(key=lambda item: item.created_at, reverse=True)
         return moments
+
+    async def load_moment_detail(self, moment_id: str) -> MomentRecord:
+        """Load one moment detail payload with full comments."""
+        owner_user_id = self._capture_runtime_user_id()
+        self._sync_cache_scope(owner_user_id)
+        payload = await self._discovery_service.get_moment(moment_id)
+        self._ensure_runtime_user_id(owner_user_id)
+        data = dict(payload or {})
+        author_ids = {
+            str(data.get("user_id", "") or ""),
+            str((data.get("author") or {}).get("id", "") or "") if isinstance(data.get("author"), dict) else "",
+        }
+        for comment in data.get("comments") or []:
+            if isinstance(comment, dict):
+                author_ids.add(str(comment.get("user_id", "") or ""))
+                author = comment.get("author")
+                if isinstance(author, dict):
+                    author_ids.add(str(author.get("id", "") or ""))
+        await asyncio.gather(
+            *[
+                self._ensure_user_loaded(user_id, owner_user_id=owner_user_id)
+                for user_id in author_ids
+                if user_id
+            ],
+            return_exceptions=True,
+        )
+        self._ensure_runtime_user_id(owner_user_id)
+        return self._normalize_moment(data)
 
     async def create_moment(self, content: str, *, media: list[dict[str, Any]] | None = None) -> MomentRecord:
         """Create a new moment."""
@@ -282,6 +311,7 @@ class DiscoveryController:
             like_count=like_count,
             comment_count=max(int(data.get("comment_count", len(normalized_comments)) or 0), len(normalized_comments)),
             is_liked=is_liked,
+            comments_truncated=bool(data.get("comments_truncated", False)),
             extra=data,
         )
 

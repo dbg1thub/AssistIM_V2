@@ -55,6 +55,32 @@ def test_discovery_service_fetch_moments_rejects_legacy_list_payload(monkeypatch
     asyncio.run(scenario())
 
 
+def test_discovery_service_get_moment_fetches_detail(monkeypatch) -> None:
+    fake_http = FakeHttpClient(
+        {
+            "id": "moment-1",
+            "content": "full detail",
+            "comments": [
+                {"id": "comment-1", "content": "preview"},
+                {"id": "comment-2", "content": "full"},
+            ],
+            "comments_truncated": False,
+        }
+    )
+    monkeypatch.setattr(discovery_service_module, "get_http_client", lambda: fake_http)
+
+    async def scenario() -> None:
+        service = discovery_service_module.DiscoveryService()
+        payload = await service.get_moment("moment-1")
+
+        assert fake_http.get_calls == [("/moments/moment-1", None)]
+        assert payload["id"] == "moment-1"
+        assert len(payload["comments"]) == 2
+        assert payload["comments_truncated"] is False
+
+    asyncio.run(scenario())
+
+
 def test_discovery_service_create_moment_posts_media_items(monkeypatch) -> None:
     fake_http = FakeHttpClient({"id": "moment-1", "content": "caption"})
     monkeypatch.setattr(discovery_service_module, "get_http_client", lambda: fake_http)

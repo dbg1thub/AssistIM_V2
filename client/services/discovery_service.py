@@ -32,6 +32,14 @@ class DiscoveryService:
         payload = payload["items"]
         return [dict(item) for item in payload if isinstance(item, dict)]
 
+    async def get_moment(self, moment_id: str) -> dict[str, Any]:
+        """Fetch one full moment detail payload."""
+        payload = await self._http.get(f"/moments/{moment_id}")
+        if not isinstance(payload, dict):
+            logger.warning("Unexpected moment detail payload for %s: %r", moment_id, payload)
+            return {}
+        return dict(payload)
+
     async def create_moment(self, content: str, *, media: list[dict[str, Any]] | None = None) -> dict[str, Any]:
         """Create one moment."""
         payload = await self._http.post("/moments", json={"content": content, "media": media or []})

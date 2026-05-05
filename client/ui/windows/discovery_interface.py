@@ -392,12 +392,22 @@ class AnimatedCommentSection(QWidget):
     """Comment block with ExpandSettingCard-like expansion animation."""
 
     comment_submitted = Signal(str, object)
+    detail_requested = Signal(str)
 
     COLLAPSED_COUNT = 2
 
-    def __init__(self, comments: list[MomentCommentRecord], parent=None):
+    def __init__(
+        self,
+        comments: list[MomentCommentRecord],
+        parent=None,
+        *,
+        moment_id: str = "",
+        comments_truncated: bool = False,
+    ):
         super().__init__(parent)
+        self._moment_id = moment_id
         self._comments = list(comments)
+        self._comments_truncated = comments_truncated
         self._expanded = False
         self._editor_visible = False
         self._selected_image_path = ""
@@ -470,8 +480,18 @@ class AnimatedCommentSection(QWidget):
 
         self.setObjectName("MomentCommentSection")
 
-    def set_comments(self, comments: list[MomentCommentRecord]) -> None:
+    def set_comments(
+        self,
+        comments: list[MomentCommentRecord],
+        *,
+        moment_id: str | None = None,
+        comments_truncated: bool | None = None,
+    ) -> None:
         """Replace the comment list and rebuild the section."""
+        if moment_id is not None:
+            self._moment_id = moment_id
+        if comments_truncated is not None:
+            self._comments_truncated = comments_truncated
         self._comments = list(comments)
         self._rebuild()
 
@@ -500,7 +520,7 @@ class AnimatedCommentSection(QWidget):
         for comment in extra:
             self.extra_layout.addWidget(MomentCommentItem(comment, self.extra_widget))
 
-        self.toggle_button.setVisible(bool(extra))
+        self.toggle_button.setVisible(bool(extra) or self._comments_truncated)
         self._update_toggle_text()
 
         target_height = self._expanded_height() if self._expanded and extra else 0
@@ -514,6 +534,9 @@ class AnimatedCommentSection(QWidget):
         return max(0, hint)
 
     def _toggle_expanded(self) -> None:
+        if self._comments_truncated and not self._expanded:
+            self.detail_requested.emit(self._moment_id)
+            return
         self._set_expanded(not self._expanded)
 
     def _set_expanded(self, expanded: bool) -> None:
@@ -550,6 +573,8 @@ class AnimatedCommentSection(QWidget):
 
     def _update_toggle_text(self) -> None:
         hidden_count = max(0, len(self._comments) - self.COLLAPSED_COUNT)
+        if self._comments_truncated:
+            hidden_count = max(hidden_count, 1)
         if not hidden_count:
             self.toggle_button.setText("")
             return
@@ -738,6 +763,7 @@ class MomentCard(CardWidget):
 
     like_requested = Signal(str, bool, int)
     comment_requested = Signal(str, str, object)
+    detail_requested = Signal(str)
 
     CONTENT_PREVIEW_LENGTH = 180
 
@@ -819,8 +845,9 @@ class MomentCard(CardWidget):
         action_row.addStretch(1)
         layout.addLayout(action_row)
 
-        self.comment_section = AnimatedCommentSection([], self)
+        self.comment_section = AnimatedCommentSection([], self, moment_id=self.moment.id, comments_truncated=self.moment.comments_truncated)
         self.comment_section.comment_submitted.connect(self._submit_comment)
+        self.comment_section.detail_requested.connect(self._request_detail)
         layout.addWidget(self.comment_section)
 
     def _apply_moment(self) -> None:
@@ -844,7 +871,11 @@ class MomentCard(CardWidget):
             self.media_grid = MomentMediaGrid([], self)
             self.media_grid.hide()
             self.layout().insertWidget(3, self.media_grid)
-        self.comment_section.set_comments(self.moment.comments)
+        self.comment_section.set_comments(
+            self.moment.comments,
+            moment_id=self.moment.id,
+            comments_truncated=self.moment.comments_truncated,
+        )
         self._refresh_actions()
 
     def _refresh_content(self) -> None:
@@ -898,6 +929,19 @@ class MomentCard(CardWidget):
         self.comment_section.append_comment(comment)
         self._refresh_actions()
 
+    def apply_detail(self, moment: MomentRecord) -> None:
+        """Refresh the card with one full moment detail payload."""
+        self.moment.comments = list(moment.comments)
+        self.moment.comment_count = max(moment.comment_count, len(moment.comments))
+        self.moment.comments_truncated = moment.comments_truncated
+        self.comment_section.set_comments(
+            self.moment.comments,
+            moment_id=self.moment.id,
+            comments_truncated=self.moment.comments_truncated,
+        )
+        self.comment_section._set_expanded(True)
+        self._refresh_actions()
+
     def _toggle_content(self) -> None:
         self._content_expanded = not self._content_expanded
         self._refresh_content()
@@ -913,6 +957,9 @@ class MomentCard(CardWidget):
 
     def _submit_comment(self, content: str, image_path: object = None) -> None:
         self.comment_requested.emit(self.moment.id, content, image_path)
+
+    def _request_detail(self, moment_id: str) -> None:
+        self.detail_requested.emit(moment_id)
 
     def _show_more_placeholder(self) -> None:
         InfoBar.info(
@@ -1109,6 +1156,7 @@ class DiscoveryInterface(QWidget):
             card = MomentCard(moment, self.feed_container)
             card.like_requested.connect(self._request_like_toggle)
             card.comment_requested.connect(self._request_comment_create)
+            card.detail_requested.connect(self._request_moment_detail)
             self.feed_layout.addWidget(card)
             self._cards[moment.id] = card
 
@@ -1218,6 +1266,23 @@ class DiscoveryInterface(QWidget):
         if moment is not None:
             moment.is_liked = liked
             moment.like_count = like_count
+
+    def _request_moment_detail(self, moment_id: str) -> None:
+        self._schedule_keyed_ui_task(
+            ("moment_detail", moment_id),
+            self._request_moment_detail_async(moment_id),
+            f"load moment detail {moment_id}",
+        )
+
+    async def _request_moment_detail_async(self, moment_id: str) -> None:
+        moment = await self._controller.load_moment_detail(moment_id)
+        existing_index = next((index for index, item in enumerate(self._moments) if item.id == moment_id), None)
+        if existing_index is not None:
+            self._moments[existing_index] = moment
+
+        card = self._cards.get(moment_id)
+        if card is not None:
+            card.apply_detail(moment)
 
     def _request_comment_create(self, moment_id: str, content: str, image_path: object = None) -> None:
         self._schedule_keyed_ui_task(

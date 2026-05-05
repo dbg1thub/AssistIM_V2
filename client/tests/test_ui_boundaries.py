@@ -34,6 +34,18 @@ def test_discovery_ui_wires_moment_media_and_comment_image_boundaries() -> None:
     assert 'MomentMediaGrid(self.moment.media' in discovery_interface
 
 
+def test_discovery_ui_loads_full_comments_from_moment_detail() -> None:
+    discovery_interface = Path('client/ui/windows/discovery_interface.py').read_text(encoding='utf-8')
+
+    assert 'detail_requested = Signal(str)' in discovery_interface
+    assert 'comments_truncated' in discovery_interface
+    assert 'self.comment_section.detail_requested.connect(self._request_detail)' in discovery_interface
+    assert 'card.detail_requested.connect(self._request_moment_detail)' in discovery_interface
+    assert 'async def _request_moment_detail_async(self, moment_id: str)' in discovery_interface
+    assert 'await self._controller.load_moment_detail(moment_id)' in discovery_interface
+    assert 'card.apply_detail(moment)' in discovery_interface
+
+
 def test_group_flow_no_longer_writes_local_group_avatar_metadata() -> None:
     chat_interface = Path('client/ui/windows/chat_interface.py').read_text(encoding='utf-8')
     group_flow = Path('client/ui/windows/chat_group_flow.py').read_text(encoding='utf-8')
