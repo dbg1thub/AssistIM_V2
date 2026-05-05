@@ -126,6 +126,7 @@ def test_admin_dashboard_reports_runtime_business_and_diagnostic_counts(monkeypa
     assert payload["admin"]["admin_users"] == 1
     assert payload["admin"]["audit_logs"] == 0
     assert payload["contacts"]["friendships"] == 2
+    assert payload["contacts"]["blocks"] == 0
     assert payload["contacts"]["pending_friend_requests"] == 1
 
     assert payload["chat"]["sessions"]["total"] == 3

@@ -404,6 +404,30 @@ def list_admin_contact_friendships(
     return success_response(payload)
 
 
+@router.get("/contacts/blocks")
+def list_admin_contact_blocks(
+    request: Request,
+    user_id: str = "",
+    blocked_user_id: str = "",
+    page: int = 1,
+    size: int = 20,
+    current_user: User = Depends(get_current_admin_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    """List block rows for backend admin tooling."""
+    payload = AdminContactsInspectionService(db).list_blocks(
+        actor=current_user,
+        user_id=user_id,
+        blocked_user_id=blocked_user_id,
+        page=page,
+        size=size,
+        request_path=str(request.url.path),
+        request_method=request.method,
+        client_ip=_client_ip(request),
+    )
+    return success_response(payload)
+
+
 @router.get("/contacts/health")
 def get_admin_contacts_health(
     request: Request,

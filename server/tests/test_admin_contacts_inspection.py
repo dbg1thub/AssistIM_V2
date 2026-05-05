@@ -8,7 +8,7 @@ from auth_test_helpers import register_user
 from app.core.database import SessionLocal
 from app.core.errors import ErrorCode
 from app.models.admin import AdminAuditLog
-from app.models.user import FriendRequest, Friendship, User
+from app.models.user import FriendRequest, Friendship, User, UserBlock
 from app.utils.time import utcnow
 
 
@@ -60,6 +60,14 @@ def _seed_friendship(*, user_id: str, friend_id: str) -> str:
         return str(friendship.id)
 
 
+def _seed_block(*, user_id: str, blocked_user_id: str) -> str:
+    with SessionLocal() as db:
+        block = UserBlock(user_id=user_id, blocked_user_id=blocked_user_id)
+        db.add(block)
+        db.commit()
+        return str(block.id)
+
+
 def test_admin_contacts_forbids_non_admin(client: TestClient) -> None:
     auth_payload = _register(client, "contacts-normal", "Contacts Normal")
 
@@ -71,6 +79,10 @@ def test_admin_contacts_forbids_non_admin(client: TestClient) -> None:
         "/api/v1/admin/contacts/friendships",
         headers=_auth_header(auth_payload["access_token"]),
     )
+    blocks_response = client.get(
+        "/api/v1/admin/contacts/blocks",
+        headers=_auth_header(auth_payload["access_token"]),
+    )
     health_response = client.get(
         "/api/v1/admin/contacts/health",
         headers=_auth_header(auth_payload["access_token"]),
@@ -80,6 +92,8 @@ def test_admin_contacts_forbids_non_admin(client: TestClient) -> None:
     assert requests_response.json()["code"] == ErrorCode.FORBIDDEN
     assert friendships_response.status_code == 403
     assert friendships_response.json()["code"] == ErrorCode.FORBIDDEN
+    assert blocks_response.status_code == 403
+    assert blocks_response.json()["code"] == ErrorCode.FORBIDDEN
     assert health_response.status_code == 403
     assert health_response.json()["code"] == ErrorCode.FORBIDDEN
 
@@ -167,6 +181,38 @@ def test_admin_friendships_support_filters_profiles_and_audit(client: TestClient
         assert audit.success is True
 
 
+def test_admin_blocks_support_filters_profiles_and_audit(client: TestClient) -> None:
+    admin_auth = _register(client, "contacts-blocks-admin", "Contacts Blocks Admin")
+    alice = _register(client, "contacts-blocks-alice", "Contacts Blocks Alice")
+    bob = _register(client, "contacts-blocks-bob", "Contacts Blocks Bob")
+    charlie = _register(client, "contacts-blocks-charlie", "Contacts Blocks Charlie")
+    _set_role(admin_auth["user"]["id"], "admin")
+    bob_block_id = _seed_block(user_id=alice["user"]["id"], blocked_user_id=bob["user"]["id"])
+    _seed_block(user_id=alice["user"]["id"], blocked_user_id=charlie["user"]["id"])
+    _seed_block(user_id=bob["user"]["id"], blocked_user_id=alice["user"]["id"])
+
+    response = client.get(
+        "/api/v1/admin/contacts/blocks",
+        headers=_auth_header(admin_auth["access_token"]),
+        params={"user_id": alice["user"]["id"], "blocked_user_id": bob["user"]["id"], "page": 1, "size": 10},
+    )
+
+    assert response.status_code == 200, response.text
+    payload = response.json()["data"]
+    assert payload["total"] == 1
+    item = payload["items"][0]
+    assert item["id"] == bob_block_id
+    assert item["user_id"] == alice["user"]["id"]
+    assert item["blocked_user_id"] == bob["user"]["id"]
+    assert item["user"]["username"] == "contacts-blocks-alice"
+    assert item["blocked_user"]["nickname"] == "Contacts Blocks Bob"
+
+    with SessionLocal() as db:
+        audit = db.query(AdminAuditLog).filter(AdminAuditLog.action == "admin.contacts.blocks.read").one()
+        assert audit.actor_user_id == admin_auth["user"]["id"]
+        assert audit.success is True
+
+
 def test_admin_contacts_health_reports_relationship_request_integrity_issues(client: TestClient) -> None:
     admin_auth = _register(client, "contacts-health-admin", "Contacts Health Admin")
     alice = _register(client, "contacts-health-alice", "Contacts Health Alice")
@@ -183,6 +229,10 @@ def test_admin_contacts_health_reports_relationship_request_integrity_issues(cli
     _seed_friend_request(sender_id=charlie["user"]["id"], receiver_id=charlie["user"]["id"], status="pending")
     _seed_friend_request(sender_id=MISSING_USER_ID, receiver_id=alice["user"]["id"], status="pending")
     _seed_friend_request(sender_id=alice["user"]["id"], receiver_id=MISSING_FRIEND_ID, status="pending")
+    _seed_block(user_id=alice["user"]["id"], blocked_user_id=bob["user"]["id"])
+    _seed_block(user_id=charlie["user"]["id"], blocked_user_id=charlie["user"]["id"])
+    _seed_block(user_id=MISSING_USER_ID, blocked_user_id=alice["user"]["id"])
+    _seed_block(user_id=alice["user"]["id"], blocked_user_id=MISSING_FRIEND_ID)
 
     response = client.get(
         "/api/v1/admin/contacts/health",
@@ -202,6 +252,9 @@ def test_admin_contacts_health_reports_relationship_request_integrity_issues(cli
     assert "self_friend_request" in issue_types
     assert "friend_request_sender_missing" in issue_types
     assert "friend_request_receiver_missing" in issue_types
+    assert "block_user_missing" in issue_types
+    assert "block_blocked_user_missing" in issue_types
+    assert "self_block" in issue_types
     assert any(
         item["issue_type"] == "friendship_missing_reverse"
         and item["user_id"] == alice["user"]["id"]
