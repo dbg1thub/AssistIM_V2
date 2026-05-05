@@ -96,6 +96,21 @@ export interface ListActiveCallsParams extends Record<string, unknown> {
   user_id?: string;
 }
 
+export interface ListE2EEDevicesParams extends Record<string, unknown> {
+  user_id?: string;
+  active?: boolean;
+  page?: number;
+  size?: number;
+}
+
+export interface ListE2EEPrekeysParams extends Record<string, unknown> {
+  device_id?: string;
+  user_id?: string;
+  consumed?: boolean;
+  page?: number;
+  size?: number;
+}
+
 export interface ListDatabaseBackupsParams extends Record<string, unknown> {
   page?: number;
   size?: number;
@@ -266,6 +281,18 @@ export class AdminApiClient {
 
   listActiveCalls<T = unknown>(params: ListActiveCallsParams = {}): Promise<T> {
     return this.get<T>("/api/v1/admin/calls/active", params);
+  }
+
+  listE2EEDevices<T = unknown>(params: ListE2EEDevicesParams = {}): Promise<T> {
+    return this.get<T>("/api/v1/admin/e2ee/devices", params);
+  }
+
+  getE2EEDevice<T = unknown>(deviceId: string): Promise<T> {
+    return this.get<T>(`/api/v1/admin/e2ee/devices/${encodeURIComponent(deviceId)}`);
+  }
+
+  listE2EEPrekeys<T = unknown>(params: ListE2EEPrekeysParams = {}): Promise<T> {
+    return this.get<T>("/api/v1/admin/e2ee/prekeys", params);
   }
 
   getDatabaseStatus<T = unknown>(): Promise<T> {

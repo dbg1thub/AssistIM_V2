@@ -461,6 +461,42 @@ function mockFetch() {
         ]
       });
     }
+    if (url.endsWith("/api/v1/admin/e2ee/devices/device-1")) {
+      return jsonResponse(e2eeDeviceItem());
+    }
+    if (url.includes("/api/v1/admin/e2ee/devices")) {
+      return jsonResponse({
+        total: 1,
+        page: 1,
+        size: 20,
+        items: [e2eeDeviceItem()]
+      });
+    }
+    if (url.includes("/api/v1/admin/e2ee/prekeys")) {
+      return jsonResponse({
+        total: 1,
+        page: 1,
+        size: 20,
+        items: [
+          {
+            id: "prekey-row-1",
+            device_id: "device-1",
+            prekey_id: 101,
+            is_consumed: false,
+            created_at: "2026-05-03T09:00:00+00:00",
+            claimed_at: "",
+            device: {
+              device_id: "device-1",
+              exists: true,
+              user_id: "user-1",
+              user: userSummary("user-1", "test1", "测试一"),
+              device_name: "Windows",
+              is_active: true
+            }
+          }
+        ]
+      });
+    }
     if (url.endsWith("/api/v1/admin/chat/health")) {
       return jsonResponse({
         status: "warning",
@@ -712,6 +748,32 @@ function momentSummary() {
     like_count: 1,
     created_at: "2026-05-03T10:00:00+00:00",
     updated_at: "2026-05-03T10:00:00+00:00"
+  };
+}
+
+function e2eeDeviceItem() {
+  return {
+    device_id: "device-1",
+    user_id: "user-1",
+    user: userSummary("user-1", "test1", "测试一"),
+    device_name: "Windows",
+    is_active: true,
+    last_seen_at: "2026-05-03T10:00:00+00:00",
+    created_at: "2026-05-03T08:00:00+00:00",
+    updated_at: "2026-05-03T10:00:00+00:00",
+    key_material: {
+      identity_key_public_present: true,
+      signing_key_public_present: true
+    },
+    signed_prekeys: {
+      total: 1,
+      active: 1
+    },
+    one_time_prekeys: {
+      total: 5,
+      available: 4,
+      consumed: 1
+    }
   };
 }
 
@@ -1243,6 +1305,63 @@ describe("Admin web shell", () => {
       expect(requestedUrls.some((url) => url.includes("/api/v1/admin/calls/active"))).toBe(true);
       expect(requestedUrls.some((url) => url.includes("connections?user_id=user-1"))).toBe(true);
       expect(requestedUrls.some((url) => url.includes("active?user_id=user-1"))).toBe(true);
+    });
+  });
+
+  it("loads E2EE devices, device detail, and filtered prekeys", async () => {
+    const fetchMock = mockFetch();
+    render(<App fetcher={fetchMock} />);
+
+    fireEvent.change(screen.getByLabelText("服务端地址"), {
+      target: { value: "http://localhost:8000" }
+    });
+    fireEvent.change(screen.getByLabelText("访问令牌"), {
+      target: { value: "admin-token" }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "连接" }));
+    await screen.findByRole("heading", { name: "概览" });
+
+    fireEvent.click(screen.getByRole("button", { name: "E2EE" }));
+    expect(await screen.findByRole("heading", { name: "E2EE" })).toBeInTheDocument();
+    expect(screen.getAllByText("device-1").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Windows").length).toBeGreaterThan(0);
+    expect(screen.getByText("101")).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("设备用户 ID"), {
+      target: { value: "user-1" }
+    });
+    fireEvent.change(screen.getByLabelText("设备状态"), {
+      target: { value: "true" }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "筛选设备" }));
+
+    await waitFor(() => {
+      const requestedUrls = fetchMock.mock.calls.map(([input]) => String(input));
+      expect(requestedUrls.some((url) => url.includes("/api/v1/admin/e2ee/devices"))).toBe(true);
+      expect(requestedUrls.some((url) => url.includes("user_id=user-1"))).toBe(true);
+      expect(requestedUrls.some((url) => url.includes("active=true"))).toBe(true);
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "查看 E2EE 设备详情" }));
+    expect(await screen.findByText("identity_key_public_present")).toBeInTheDocument();
+    expect(screen.getByText("available")).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("Prekey 设备 ID"), {
+      target: { value: "device-1" }
+    });
+    fireEvent.change(screen.getByLabelText("Prekey 用户 ID"), {
+      target: { value: "user-1" }
+    });
+    fireEvent.change(screen.getByLabelText("Prekey 状态"), {
+      target: { value: "false" }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "筛选 Prekey" }));
+
+    await waitFor(() => {
+      const requestedUrls = fetchMock.mock.calls.map(([input]) => String(input));
+      expect(requestedUrls.some((url) => url.includes("/api/v1/admin/e2ee/prekeys"))).toBe(true);
+      expect(requestedUrls.some((url) => url.includes("device_id=device-1"))).toBe(true);
+      expect(requestedUrls.some((url) => url.includes("consumed=false"))).toBe(true);
     });
   });
 

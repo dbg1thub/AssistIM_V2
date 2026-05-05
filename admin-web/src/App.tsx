@@ -36,6 +36,8 @@ import {
   ListMomentLikesParams,
   ListMomentsParams,
   ListActiveCallsParams,
+  ListE2EEDevicesParams,
+  ListE2EEPrekeysParams,
   ListRealtimeConnectionsParams,
   ListUsersParams,
   PruneDatabaseBackupsParams,
@@ -52,6 +54,7 @@ type PageKey =
   | "groups"
   | "moments"
   | "realtime"
+  | "e2ee"
   | "users"
   | "database"
   | "files"
@@ -619,6 +622,70 @@ interface RuntimeUserFilter {
   user_id: string;
 }
 
+interface E2EEUserSummary extends Record<string, unknown> {
+  id?: string;
+  username?: string;
+  nickname?: string;
+  exists?: boolean;
+  is_disabled?: boolean;
+}
+
+interface E2EEDeviceItem extends Record<string, unknown> {
+  device_id: string;
+  user_id?: string;
+  user?: E2EEUserSummary;
+  device_name?: string;
+  is_active?: boolean;
+  last_seen_at?: string;
+  created_at?: string;
+  updated_at?: string;
+  key_material?: Record<string, unknown>;
+  signed_prekeys?: Record<string, unknown>;
+  one_time_prekeys?: Record<string, unknown>;
+}
+
+interface E2EEPrekeyItem extends Record<string, unknown> {
+  id: string;
+  device_id?: string;
+  prekey_id?: number;
+  is_consumed?: boolean;
+  created_at?: string;
+  claimed_at?: string | null;
+  device?: {
+    device_id?: string;
+    exists?: boolean;
+    user_id?: string;
+    user?: E2EEUserSummary;
+    device_name?: string;
+    is_active?: boolean;
+  };
+}
+
+interface E2EEDeviceListPayload {
+  total: number;
+  page: number;
+  size: number;
+  items: E2EEDeviceItem[];
+}
+
+interface E2EEPrekeyListPayload {
+  total: number;
+  page: number;
+  size: number;
+  items: E2EEPrekeyItem[];
+}
+
+interface E2EEDeviceFilters {
+  user_id: string;
+  active: "" | "true" | "false";
+}
+
+interface E2EEPrekeyFilters {
+  device_id: string;
+  user_id: string;
+  consumed: "" | "true" | "false";
+}
+
 interface SessionState {
   baseUrl: string;
   token: string;
@@ -633,6 +700,7 @@ const navItems: Array<{ key: PageKey; label: string; icon: ReactNode }> = [
   { key: "groups", label: "群组", icon: <Users size={18} /> },
   { key: "moments", label: "朋友圈", icon: <Heart size={18} /> },
   { key: "realtime", label: "实时", icon: <Activity size={18} /> },
+  { key: "e2ee", label: "E2EE", icon: <CheckCircle2 size={18} /> },
   { key: "users", label: "用户", icon: <Users size={18} /> },
   { key: "database", label: "数据库", icon: <Database size={18} /> },
   { key: "files", label: "文件", icon: <HardDrive size={18} /> },
@@ -710,6 +778,17 @@ const defaultRuntimeUserFilter: RuntimeUserFilter = {
   user_id: ""
 };
 
+const defaultE2EEDeviceFilters: E2EEDeviceFilters = {
+  user_id: "",
+  active: ""
+};
+
+const defaultE2EEPrekeyFilters: E2EEPrekeyFilters = {
+  device_id: "",
+  user_id: "",
+  consumed: ""
+};
+
 const healthModuleDefinitions: Array<{
   key: string;
   label: string;
@@ -783,6 +862,12 @@ export default function App({ fetcher }: AppProps) {
   const [activeCalls, setActiveCalls] = useState<ActiveCallsPayload | null>(null);
   const [realtimeFilters, setRealtimeFilters] = useState<RuntimeUserFilter>(defaultRuntimeUserFilter);
   const [activeCallFilters, setActiveCallFilters] = useState<RuntimeUserFilter>(defaultRuntimeUserFilter);
+  const [e2eeDevices, setE2EEDevices] = useState<E2EEDeviceListPayload | null>(null);
+  const [e2eePrekeys, setE2EEPrekeys] = useState<E2EEPrekeyListPayload | null>(null);
+  const [e2eeDeviceFilters, setE2EEDeviceFilters] = useState<E2EEDeviceFilters>(defaultE2EEDeviceFilters);
+  const [e2eePrekeyFilters, setE2EEPrekeyFilters] = useState<E2EEPrekeyFilters>(defaultE2EEPrekeyFilters);
+  const [selectedE2EEDevice, setSelectedE2EEDevice] = useState<E2EEDeviceItem | null>(null);
+  const [e2eeDetailLoading, setE2EEDetailLoading] = useState(false);
   const [selectedUser, setSelectedUser] = useState<UserDetailPayload | null>(null);
   const [disableReason, setDisableReason] = useState("");
   const [userOperationLoading, setUserOperationLoading] = useState(false);
@@ -837,6 +922,7 @@ export default function App({ fetcher }: AppProps) {
       (page === "groups" && !groups) ||
       (page === "moments" && !moments) ||
       (page === "realtime" && (!realtimeConnections || !activeCalls)) ||
+      (page === "e2ee" && (!e2eeDevices || !e2eePrekeys)) ||
       (page === "users" && !users) ||
       (page === "database" && !databaseStatus) ||
       (page === "files" && (!fileStorageStatus || !fileStorageIssues)) ||
@@ -875,6 +961,11 @@ export default function App({ fetcher }: AppProps) {
         const payload = await loadRealtimeData(client, realtimeFilters, activeCallFilters);
         setRealtimeConnections(payload.connections);
         setActiveCalls(payload.calls);
+      }
+      if (page === "e2ee" && (!e2eeDevices || !e2eePrekeys)) {
+        const payload = await loadE2EEData(client, e2eeDeviceFilters, e2eePrekeyFilters);
+        setE2EEDevices(payload.devices);
+        setE2EEPrekeys(payload.prekeys);
       }
       if (page === "users" && !users) {
         setUsers(await loadUsers(client, keyword));
@@ -943,6 +1034,12 @@ export default function App({ fetcher }: AppProps) {
         const payload = await loadRealtimeData(client, realtimeFilters, activeCallFilters);
         setRealtimeConnections(payload.connections);
         setActiveCalls(payload.calls);
+      }
+      if (activePage === "e2ee") {
+        const payload = await loadE2EEData(client, e2eeDeviceFilters, e2eePrekeyFilters);
+        setE2EEDevices(payload.devices);
+        setE2EEPrekeys(payload.prekeys);
+        setSelectedE2EEDevice(null);
       }
       if (activePage === "users") {
         setUsers(await loadUsers(client, keyword));
@@ -1233,6 +1330,52 @@ export default function App({ fetcher }: AppProps) {
     setError("");
     try {
       setActiveCalls(await loadActiveCalls(client, activeCallFilters));
+    } catch (currentError) {
+      setError(readableError(currentError));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function searchE2EEDevices() {
+    if (!client) {
+      return;
+    }
+    setLoading(true);
+    setError("");
+    try {
+      setE2EEDevices(await loadE2EEDevices(client, e2eeDeviceFilters));
+      setSelectedE2EEDevice(null);
+    } catch (currentError) {
+      setError(readableError(currentError));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function openE2EEDeviceDetail(deviceId: string) {
+    if (!client) {
+      return;
+    }
+    setE2EEDetailLoading(true);
+    setError("");
+    try {
+      setSelectedE2EEDevice(await client.getE2EEDevice<E2EEDeviceItem>(deviceId));
+    } catch (currentError) {
+      setError(readableError(currentError));
+    } finally {
+      setE2EEDetailLoading(false);
+    }
+  }
+
+  async function searchE2EEPrekeys() {
+    if (!client) {
+      return;
+    }
+    setLoading(true);
+    setError("");
+    try {
+      setE2EEPrekeys(await loadE2EEPrekeys(client, e2eePrekeyFilters));
     } catch (currentError) {
       setError(readableError(currentError));
     } finally {
@@ -1602,6 +1745,21 @@ export default function App({ fetcher }: AppProps) {
             setCallFilter={(key, value) => setActiveCallFilters((current) => ({ ...current, [key]: value }))}
             searchConnections={() => void searchRealtimeConnections()}
             searchCalls={() => void searchActiveCalls()}
+          />
+        ) : null}
+        {activePage === "e2ee" ? (
+          <E2EEPage
+            devices={e2eeDevices}
+            prekeys={e2eePrekeys}
+            deviceFilters={e2eeDeviceFilters}
+            prekeyFilters={e2eePrekeyFilters}
+            selectedDevice={selectedE2EEDevice}
+            detailLoading={e2eeDetailLoading}
+            setDeviceFilter={(key, value) => setE2EEDeviceFilters((current) => ({ ...current, [key]: value }))}
+            setPrekeyFilter={(key, value) => setE2EEPrekeyFilters((current) => ({ ...current, [key]: value }))}
+            searchDevices={() => void searchE2EEDevices()}
+            openDevice={(deviceId) => void openE2EEDeviceDetail(deviceId)}
+            searchPrekeys={() => void searchE2EEPrekeys()}
           />
         ) : null}
         {activePage === "users" ? (
@@ -3042,6 +3200,248 @@ function RealtimePage({
   );
 }
 
+function E2EEPage({
+  devices,
+  prekeys,
+  deviceFilters,
+  prekeyFilters,
+  selectedDevice,
+  detailLoading,
+  setDeviceFilter,
+  setPrekeyFilter,
+  searchDevices,
+  openDevice,
+  searchPrekeys
+}: {
+  devices: E2EEDeviceListPayload | null;
+  prekeys: E2EEPrekeyListPayload | null;
+  deviceFilters: E2EEDeviceFilters;
+  prekeyFilters: E2EEPrekeyFilters;
+  selectedDevice: E2EEDeviceItem | null;
+  detailLoading: boolean;
+  setDeviceFilter: (key: keyof E2EEDeviceFilters, value: string) => void;
+  setPrekeyFilter: (key: keyof E2EEPrekeyFilters, value: string) => void;
+  searchDevices: () => void;
+  openDevice: (deviceId: string) => void;
+  searchPrekeys: () => void;
+}) {
+  const deviceItems = devices?.items ?? [];
+  const prekeyItems = prekeys?.items ?? [];
+  const availablePrekeys = deviceItems.reduce((total, device) => {
+    const value = Number(device.one_time_prekeys?.available ?? 0);
+    return Number.isFinite(value) ? total + value : total;
+  }, 0);
+
+  function submitDevices(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    searchDevices();
+  }
+
+  function submitPrekeys(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    searchPrekeys();
+  }
+
+  return (
+    <section className="page-section">
+      <PageTitle title="E2EE" subtitle="查看端到端加密设备、身份密钥和 Prekey 库存" />
+      <div className="metric-grid compact-grid">
+        <MetricCard label="设备" value={devices?.total ?? 0} />
+        <MetricCard label="Prekey" value={prekeys?.total ?? 0} />
+        <MetricCard label="可用 One-Time Prekey" value={availablePrekeys} />
+      </div>
+      <article className="detail-panel">
+        <div className="detail-header">
+          <div>
+            <h2>设备</h2>
+            <p>{`共 ${devices?.total ?? 0} 个 E2EE 设备`}</p>
+          </div>
+        </div>
+        <form className="filter-panel" onSubmit={submitDevices}>
+          <label>
+            <span>设备用户 ID</span>
+            <input
+              value={deviceFilters.user_id}
+              onChange={(event) => setDeviceFilter("user_id", event.target.value)}
+              placeholder="user id"
+            />
+          </label>
+          <label>
+            <span>设备状态</span>
+            <select value={deviceFilters.active} onChange={(event) => setDeviceFilter("active", event.target.value)}>
+              <option value="">全部</option>
+              <option value="true">启用</option>
+              <option value="false">停用</option>
+            </select>
+          </label>
+          <button className="secondary-button" type="submit">
+            <Search size={17} />
+            筛选设备
+          </button>
+        </form>
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>设备 ID</th>
+                <th>用户</th>
+                <th>用户 ID</th>
+                <th>设备名</th>
+                <th>状态</th>
+                <th>Identity Key</th>
+                <th>Signing Key</th>
+                <th>Signed Prekey</th>
+                <th>可用 Prekey</th>
+                <th>最后活跃</th>
+                <th>详情</th>
+              </tr>
+            </thead>
+            <tbody>
+              {deviceItems.map((device) => (
+                <tr key={String(device.device_id)}>
+                  <td>{String(device.device_id ?? "")}</td>
+                  <td>{e2eeUserName(device.user, device.user_id)}</td>
+                  <td>{String(device.user_id ?? device.user?.id ?? "")}</td>
+                  <td>{String(device.device_name ?? "")}</td>
+                  <td>
+                    <span className={`status-badge ${device.is_active ? "ok" : "warning"}`}>
+                      {device.is_active ? "启用" : "停用"}
+                    </span>
+                  </td>
+                  <td>{boolLabel(device.key_material?.identity_key_public_present)}</td>
+                  <td>{boolLabel(device.key_material?.signing_key_public_present)}</td>
+                  <td>{displayValue(device.signed_prekeys?.active)}</td>
+                  <td>{displayValue(device.one_time_prekeys?.available)}</td>
+                  <td>{String(device.last_seen_at ?? "")}</td>
+                  <td>
+                    <button
+                      className="table-action-button"
+                      type="button"
+                      disabled={detailLoading}
+                      onClick={() => openDevice(String(device.device_id ?? ""))}
+                      aria-label="查看 E2EE 设备详情"
+                    >
+                      查看
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        {!deviceItems.length ? <p className="empty-text">暂无 E2EE 设备</p> : null}
+      </article>
+      {selectedDevice ? <E2EEDeviceDetailPanel device={selectedDevice} /> : null}
+      <article className="detail-panel">
+        <div className="detail-header">
+          <div>
+            <h2>Prekey</h2>
+            <p>{`共 ${prekeys?.total ?? 0} 条 Prekey 库存记录`}</p>
+          </div>
+        </div>
+        <form className="filter-panel" onSubmit={submitPrekeys}>
+          <label>
+            <span>Prekey 设备 ID</span>
+            <input
+              value={prekeyFilters.device_id}
+              onChange={(event) => setPrekeyFilter("device_id", event.target.value)}
+              placeholder="device id"
+            />
+          </label>
+          <label>
+            <span>Prekey 用户 ID</span>
+            <input
+              value={prekeyFilters.user_id}
+              onChange={(event) => setPrekeyFilter("user_id", event.target.value)}
+              placeholder="user id"
+            />
+          </label>
+          <label>
+            <span>Prekey 状态</span>
+            <select value={prekeyFilters.consumed} onChange={(event) => setPrekeyFilter("consumed", event.target.value)}>
+              <option value="">全部</option>
+              <option value="false">未消耗</option>
+              <option value="true">已消耗</option>
+            </select>
+          </label>
+          <button className="secondary-button" type="submit">
+            <Search size={17} />
+            筛选 Prekey
+          </button>
+        </form>
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Prekey ID</th>
+                <th>设备 ID</th>
+                <th>用户</th>
+                <th>用户 ID</th>
+                <th>设备名</th>
+                <th>已消耗</th>
+                <th>创建时间</th>
+                <th>领取时间</th>
+              </tr>
+            </thead>
+            <tbody>
+              {prekeyItems.map((prekey) => (
+                <tr key={String(prekey.id)}>
+                  <td>{displayValue(prekey.prekey_id)}</td>
+                  <td>{String(prekey.device_id ?? prekey.device?.device_id ?? "")}</td>
+                  <td>{e2eeUserName(prekey.device?.user, prekey.device?.user_id)}</td>
+                  <td>{String(prekey.device?.user_id ?? prekey.device?.user?.id ?? "")}</td>
+                  <td>{String(prekey.device?.device_name ?? "")}</td>
+                  <td>{boolLabel(prekey.is_consumed)}</td>
+                  <td>{String(prekey.created_at ?? "")}</td>
+                  <td>{String(prekey.claimed_at ?? "")}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        {!prekeyItems.length ? <p className="empty-text">暂无 Prekey 库存记录</p> : null}
+      </article>
+    </section>
+  );
+}
+
+function E2EEDeviceDetailPanel({ device }: { device: E2EEDeviceItem }) {
+  return (
+    <article className="detail-panel">
+      <div className="detail-header">
+        <div>
+          <h2>{String(device.device_id)}</h2>
+          <p>{e2eeUserName(device.user, device.user_id)}</p>
+        </div>
+        <span className={`status-badge ${device.is_active ? "ok" : "warning"}`}>
+          {device.is_active ? "启用" : "停用"}
+        </span>
+      </div>
+      <div className="info-grid">
+        <InfoBlock title="设备" rows={[
+          ["设备 ID", device.device_id],
+          ["用户", e2eeUserName(device.user, device.user_id)],
+          ["用户 ID", device.user_id ?? device.user?.id],
+          ["设备名", device.device_name],
+          ["Active", boolLabel(device.is_active)],
+          ["Last seen", device.last_seen_at],
+          ["Created", device.created_at],
+          ["Updated", device.updated_at]
+        ]} />
+        <InfoBlock title="密钥材料" rows={[
+          ["identity_key_public_present", boolLabel(device.key_material?.identity_key_public_present)],
+          ["signing_key_public_present", boolLabel(device.key_material?.signing_key_public_present)],
+          ["signed total", device.signed_prekeys?.total],
+          ["signed active", device.signed_prekeys?.active],
+          ["available", device.one_time_prekeys?.available],
+          ["consumed", device.one_time_prekeys?.consumed],
+          ["one-time total", device.one_time_prekeys?.total]
+        ]} />
+      </div>
+    </article>
+  );
+}
+
 function UsersPage({
   payload,
   keyword,
@@ -3992,6 +4392,45 @@ function loadActiveCalls(client: AdminApiClient, filters: RuntimeUserFilter): Pr
   return client.listActiveCalls<ActiveCallsPayload>(params);
 }
 
+async function loadE2EEData(
+  client: AdminApiClient,
+  deviceFilters: E2EEDeviceFilters,
+  prekeyFilters: E2EEPrekeyFilters
+): Promise<{ devices: E2EEDeviceListPayload; prekeys: E2EEPrekeyListPayload }> {
+  const [devices, prekeys] = await Promise.all([
+    loadE2EEDevices(client, deviceFilters),
+    loadE2EEPrekeys(client, prekeyFilters)
+  ]);
+  return { devices, prekeys };
+}
+
+function loadE2EEDevices(client: AdminApiClient, filters: E2EEDeviceFilters): Promise<E2EEDeviceListPayload> {
+  const params: ListE2EEDevicesParams = { page: 1, size: 20 };
+  if (filters.user_id.trim()) {
+    params.user_id = filters.user_id.trim();
+  }
+  const active = parseOptionalBooleanFilter(filters.active);
+  if (active !== undefined) {
+    params.active = active;
+  }
+  return client.listE2EEDevices<E2EEDeviceListPayload>(params);
+}
+
+function loadE2EEPrekeys(client: AdminApiClient, filters: E2EEPrekeyFilters): Promise<E2EEPrekeyListPayload> {
+  const params: ListE2EEPrekeysParams = { page: 1, size: 20 };
+  if (filters.device_id.trim()) {
+    params.device_id = filters.device_id.trim();
+  }
+  if (filters.user_id.trim()) {
+    params.user_id = filters.user_id.trim();
+  }
+  const consumed = parseOptionalBooleanFilter(filters.consumed);
+  if (consumed !== undefined) {
+    params.consumed = consumed;
+  }
+  return client.listE2EEPrekeys<E2EEPrekeyListPayload>(params);
+}
+
 async function loadFileStorageInspection(client: AdminApiClient): Promise<{
   status: FileStorageStatusPayload;
   issues: FileStorageIssuesPayload;
@@ -4217,6 +4656,16 @@ function displayValue(value: unknown): string {
   return String(value);
 }
 
+function parseOptionalBooleanFilter(value: string): boolean | undefined {
+  if (value === "true") {
+    return true;
+  }
+  if (value === "false") {
+    return false;
+  }
+  return undefined;
+}
+
 function contactUserName(user?: ContactUserSummary, fallbackId?: string): string {
   return String(user?.username || user?.nickname || user?.id || fallbackId || "");
 }
@@ -4230,6 +4679,10 @@ function momentUserName(user?: MomentUserSummary, fallbackId?: string): string {
 }
 
 function runtimeUserName(user?: RuntimeUserSummary, fallbackId?: string): string {
+  return String(user?.username || user?.nickname || user?.id || fallbackId || "");
+}
+
+function e2eeUserName(user?: E2EEUserSummary, fallbackId?: string): string {
   return String(user?.username || user?.nickname || user?.id || fallbackId || "");
 }
 

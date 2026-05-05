@@ -400,6 +400,49 @@ describe("AdminApiClient", () => {
     });
   });
 
+  it("loads E2EE devices, device detail, and prekeys", async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(JSON.stringify({ code: 0, message: "success", data: { items: [] } }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" }
+      })
+    );
+    const client = new AdminApiClient({
+      baseUrl: "http://localhost:8000",
+      token: "token-value",
+      fetcher: fetchMock
+    });
+
+    await client.listE2EEDevices({ user_id: "user-1", active: true, page: 2, size: 10 });
+    await client.getE2EEDevice("device-1");
+    await client.listE2EEPrekeys({
+      device_id: "device-1",
+      user_id: "user-1",
+      consumed: false,
+      page: 1,
+      size: 20
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://localhost:8000/api/v1/admin/e2ee/devices?user_id=user-1&active=true&page=2&size=10",
+      {
+        headers: { Authorization: "Bearer token-value" },
+        method: "GET"
+      }
+    );
+    expect(fetchMock).toHaveBeenCalledWith("http://localhost:8000/api/v1/admin/e2ee/devices/device-1", {
+      headers: { Authorization: "Bearer token-value" },
+      method: "GET"
+    });
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://localhost:8000/api/v1/admin/e2ee/prekeys?device_id=device-1&user_id=user-1&consumed=false&page=1&size=20",
+      {
+        headers: { Authorization: "Bearer token-value" },
+        method: "GET"
+      }
+    );
+  });
+
   it("builds query strings for audit log filters and loads detail", async () => {
     const fetchMock = vi.fn(async () =>
       new Response(JSON.stringify({ code: 0, message: "success", data: { items: [] } }), {
