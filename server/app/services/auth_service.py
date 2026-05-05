@@ -23,6 +23,7 @@ from app.core.security import (
 from app.models.user import User
 from app.repositories.user_repo import UserRepository
 from app.services.avatar_service import AvatarService
+from app.services.email_verification_service import EmailVerificationService, normalize_email_address
 from app.services.user_service import UserService
 
 
@@ -32,18 +33,29 @@ class AuthService:
         self.db = db
         self.users = UserRepository(db)
         self.avatars = AvatarService(db, self.settings)
+        self.email_verification = EmailVerificationService(db, self.settings)
 
-    def register(self, username: str, password: str, nickname: str) -> dict:
+    def register(self, username: str, password: str, nickname: str, email: str, email_code: str) -> dict:
         canonical_username = canonicalize_username(username)
         canonical_nickname = canonicalize_nickname(nickname)
+        normalized_email = normalize_email_address(email)
         if self.users.get_by_username(canonical_username) is not None:
             raise AppError(ErrorCode.USER_EXISTS, "user already exists", 409)
+        if self.users.get_by_email(normalized_email) is not None:
+            raise AppError(ErrorCode.USER_EXISTS, "email already registered", 409)
 
         try:
+            verified_email = self.email_verification.consume_register_code(
+                normalized_email,
+                email_code,
+                commit=False,
+            )
             user = self.users.create(
                 username=canonical_username,
                 password_hash=hash_password(password),
                 nickname=canonical_nickname,
+                email=verified_email,
+                email_verified=True,
                 avatar_kind="default",
                 commit=False,
             )

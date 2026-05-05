@@ -6,26 +6,22 @@ from unittest.mock import AsyncMock
 
 from fastapi.testclient import TestClient
 
+from auth_test_helpers import issue_register_email_code, register_user, register_user_response
 from app.core.errors import ErrorCode
+from app.services.email_verification_service import EmailVerificationService
 from app.websocket.manager import connection_manager
 
 
 def test_auth_register_login_refresh_and_me(client: TestClient, auth_header) -> None:
-    register_response = client.post(
-        "/api/v1/auth/register",
-        json={
-            "username": "alice",
-            "password": "secret123",
-            "nickname": "Alice",
-        },
-    )
+    register_response = register_user_response(client, "alice", nickname="Alice", email="alice@example.test")
     assert register_response.status_code == 200
     register_payload = register_response.json()
     assert register_payload["code"] == 0
     register_user = register_payload["data"]["user"]
     assert register_user["username"] == "alice"
     assert register_payload["data"]["token_type"] == "Bearer"
-    assert register_user["email"] is None
+    assert register_user["email"] == "alice@example.test"
+    assert register_user["email_verified"] is True
     assert register_user["birthday"] is None
     assert register_user["gender"] is None
     assert register_user["avatar"].startswith("/uploads/default_avatars/avatar_default_")
@@ -89,15 +85,56 @@ def test_auth_register_login_refresh_and_me(client: TestClient, auth_header) -> 
     assert post_logout_me.status_code == 401
 
 
-def test_update_me_extended_profile_fields(client: TestClient, auth_header) -> None:
-    register_response = client.post(
+def test_register_requires_email_verification_code(client: TestClient) -> None:
+    missing_response = client.post(
         "/api/v1/auth/register",
         json={
-            "username": "carla",
+            "username": "email-required-user",
             "password": "secret123",
-            "nickname": "Carla",
+            "nickname": "Email Required",
         },
     )
+    assert missing_response.status_code == 422
+
+    email = "email-required-user@example.test"
+    code = issue_register_email_code(client, email)
+    wrong_code_response = register_user_response(
+        client,
+        "email-required-user",
+        nickname="Email Required",
+        email=email,
+        email_code="000000",
+    )
+    assert wrong_code_response.status_code == 400
+    assert wrong_code_response.json()["code"] == ErrorCode.INVALID_REQUEST
+
+    register_response = register_user_response(
+        client,
+        "email-required-user",
+        nickname="Email Required",
+        email=email,
+        email_code=code,
+    )
+    assert register_response.status_code == 200
+    user = register_response.json()["data"]["user"]
+    assert user["email"] == email
+    assert user["email_verified"] is True
+
+
+def test_register_rejects_duplicate_verified_email(client: TestClient) -> None:
+    first = register_user(client, "email-owner", nickname="Email Owner", email="shared@example.test")
+    assert first["user"]["email"] == "shared@example.test"
+
+    send_response = client.post(
+        "/api/v1/auth/email-verification/send",
+        json={"email": "shared@example.test", "purpose": "register"},
+    )
+    assert send_response.status_code == 409
+    assert send_response.json()["code"] == ErrorCode.USER_EXISTS
+
+
+def test_update_me_extended_profile_fields(client: TestClient, auth_header) -> None:
+    register_response = register_user_response(client, "carla", nickname="Carla")
     assert register_response.status_code == 200
     access_token = register_response.json()["data"]["access_token"]
 
@@ -119,6 +156,7 @@ def test_update_me_extended_profile_fields(client: TestClient, auth_header) -> N
     payload = update_response.json()["data"]
     assert payload["nickname"] == "Carla QA"
     assert payload["email"] == "carla@example.com"
+    assert payload["email_verified"] is False
     assert payload["phone"] == "+82-10-1111-2222"
     assert payload["birthday"] == "1996-02-21"
     assert payload["region"] == "Seoul"
@@ -141,6 +179,7 @@ def test_update_me_extended_profile_fields(client: TestClient, auth_header) -> N
     assert clear_response.status_code == 200
     cleared_payload = clear_response.json()["data"]
     assert cleared_payload["email"] is None
+    assert cleared_payload["email_verified"] is False
     assert cleared_payload["phone"] is None
     assert cleared_payload["birthday"] is None
     assert cleared_payload["region"] is None
@@ -154,19 +193,13 @@ def test_update_me_extended_profile_fields(client: TestClient, auth_header) -> N
     assert me_response.status_code == 200
     me_payload = me_response.json()["data"]
     assert me_payload["email"] is None
+    assert me_payload["email_verified"] is False
     assert me_payload["birthday"] is None
     assert me_payload["status"] == "online"
 
 
 def test_update_me_rejects_invalid_profile_fields(client: TestClient, auth_header) -> None:
-    register_response = client.post(
-        "/api/v1/auth/register",
-        json={
-            "username": "dylan",
-            "password": "secret123",
-            "nickname": "Dylan",
-        },
-    )
+    register_response = register_user_response(client, "dylan", nickname="Dylan")
     assert register_response.status_code == 200
     access_token = register_response.json()["data"]["access_token"]
 
@@ -192,14 +225,7 @@ def test_update_me_rejects_invalid_profile_fields(client: TestClient, auth_heade
     assert invalid_status_response.status_code == 422
 
 def test_auth_login_requires_confirmation_before_replacing_online_session(client: TestClient, auth_header) -> None:
-    register_response = client.post(
-        "/api/v1/auth/register",
-        json={
-            "username": "online-alice",
-            "password": "secret123",
-            "nickname": "Alice",
-        },
-    )
+    register_response = register_user_response(client, "online-alice", nickname="Alice")
     assert register_response.status_code == 200
     register_payload = register_response.json()["data"]
     register_user = register_payload["user"]
@@ -248,14 +274,7 @@ def test_auth_login_requires_confirmation_before_replacing_online_session(client
 
 
 def test_users_me_avatar_endpoints_replace_and_reset_avatar(client: TestClient, auth_header) -> None:
-    register_response = client.post(
-        "/api/v1/auth/register",
-        json={
-            "username": "avatar-user",
-            "password": "secret123",
-            "nickname": "Avatar User",
-        },
-    )
+    register_response = register_user_response(client, "avatar-user", nickname="Avatar User")
     assert register_response.status_code == 200
     payload = register_response.json()["data"]
     access_token = payload["access_token"]
@@ -283,22 +302,8 @@ def test_users_me_avatar_endpoints_replace_and_reset_avatar(client: TestClient, 
 
 
 def test_user_avatar_change_regenerates_generated_group_avatar(client: TestClient, auth_header) -> None:
-    owner_response = client.post(
-        "/api/v1/auth/register",
-        json={
-            "username": "group-owner-avatar-refresh",
-            "password": "secret123",
-            "nickname": "Owner",
-        },
-    )
-    member_response = client.post(
-        "/api/v1/auth/register",
-        json={
-            "username": "group-member-avatar-refresh",
-            "password": "secret123",
-            "nickname": "Member",
-        },
-    )
+    owner_response = register_user_response(client, "group-owner-avatar-refresh", nickname="Owner")
+    member_response = register_user_response(client, "group-member-avatar-refresh", nickname="Member")
     assert owner_response.status_code == 200
     assert member_response.status_code == 200
 
@@ -336,14 +341,7 @@ def test_user_avatar_change_regenerates_generated_group_avatar(client: TestClien
 
 
 def test_update_me_rejects_avatar_field_after_avatar_api_split(client: TestClient, auth_header) -> None:
-    register_response = client.post(
-        "/api/v1/auth/register",
-        json={
-            "username": "strict-avatar-user",
-            "password": "secret123",
-            "nickname": "Strict Avatar",
-        },
-    )
+    register_response = register_user_response(client, "strict-avatar-user", nickname="Strict Avatar")
     assert register_response.status_code == 200
     access_token = register_response.json()["data"]["access_token"]
 
@@ -359,14 +357,7 @@ def test_update_me_rejects_avatar_field_after_avatar_api_split(client: TestClien
 def test_update_me_succeeds_when_profile_fanout_fails(client: TestClient, auth_header, monkeypatch) -> None:
     from app.api.v1 import users as user_routes
 
-    register_response = client.post(
-        "/api/v1/auth/register",
-        json={
-            "username": "fanout-profile-user",
-            "password": "secret123",
-            "nickname": "Profile User",
-        },
-    )
+    register_response = register_user_response(client, "fanout-profile-user", nickname="Profile User")
     access_token = register_response.json()["data"]["access_token"]
 
     monkeypatch.setattr(
@@ -386,25 +377,22 @@ def test_update_me_succeeds_when_profile_fanout_fails(client: TestClient, auth_h
 
 
 def test_auth_request_models_reject_unknown_fields(client: TestClient) -> None:
+    email = "strict-register-user@example.test"
+    code = issue_register_email_code(client, email)
     register_response = client.post(
         "/api/v1/auth/register",
         json={
             "username": "strict-register-user",
             "password": "secret123",
             "nickname": "Strict Register",
+            "email": email,
+            "email_code": code,
             "unexpected": True,
         },
     )
     assert register_response.status_code == 422
 
-    seed_response = client.post(
-        "/api/v1/auth/register",
-        json={
-            "username": "strict-login-user",
-            "password": "secret123",
-            "nickname": "Strict Login",
-        },
-    )
+    seed_response = register_user_response(client, "strict-login-user", nickname="Strict Login")
     assert seed_response.status_code == 200
     refresh_token = seed_response.json()["data"]["refresh_token"]
 
@@ -429,13 +417,11 @@ def test_auth_request_models_reject_unknown_fields(client: TestClient) -> None:
 
 
 def test_auth_identity_inputs_are_canonicalized_and_validated(client: TestClient) -> None:
-    register_response = client.post(
-        "/api/v1/auth/register",
-        json={
-            "username": "  trim.user-1  ",
-            "password": "secret123",
-            "nickname": "  Trim User  ",
-        },
+    register_response = register_user_response(
+        client,
+        "  trim.user-1  ",
+        nickname="  Trim User  ",
+        email="trim.user-1@example.test",
     )
     assert register_response.status_code == 200
     payload = register_response.json()["data"]
@@ -458,24 +444,15 @@ def test_auth_identity_inputs_are_canonicalized_and_validated(client: TestClient
     )
     assert refresh_response.status_code == 200
 
-    invalid_username_response = client.post(
-        "/api/v1/auth/register",
-        json={
-            "username": "bad user",
-            "password": "secret123",
-            "nickname": "Bad User",
-        },
+    invalid_username_response = register_user_response(
+        client,
+        "bad user",
+        nickname="Bad User",
+        email="bad-user@example.test",
     )
     assert invalid_username_response.status_code == 422
 
-    invalid_nickname_response = client.post(
-        "/api/v1/auth/register",
-        json={
-            "username": "blank-nickname-user",
-            "password": "secret123",
-            "nickname": "   ",
-        },
-    )
+    invalid_nickname_response = register_user_response(client, "blank-nickname-user", nickname="   ")
     assert invalid_nickname_response.status_code == 422
 
     short_password_response = client.post(
@@ -495,14 +472,7 @@ def test_deleted_auth_subjects_return_unauthorized(client: TestClient, auth_head
     from app.models.user import User
     from app.services.auth_service import AuthService
 
-    register_response = client.post(
-        "/api/v1/auth/register",
-        json={
-            "username": "deleted-subject-user",
-            "password": "secret123",
-            "nickname": "Deleted Subject",
-        },
-    )
+    register_response = register_user_response(client, "deleted-subject-user", nickname="Deleted Subject")
     assert register_response.status_code == 200
     payload = register_response.json()["data"]
     user_id = payload["user"]["id"]
@@ -537,14 +507,7 @@ def test_deleted_auth_subjects_return_unauthorized(client: TestClient, auth_head
 def test_logout_success_does_not_depend_on_realtime_disconnect(client: TestClient, auth_header, monkeypatch) -> None:
     from app.api.v1 import auth as auth_routes
 
-    register_response = client.post(
-        "/api/v1/auth/register",
-        json={
-            "username": "logout-fanout-user",
-            "password": "secret123",
-            "nickname": "Logout Fanout",
-        },
-    )
+    register_response = register_user_response(client, "logout-fanout-user", nickname="Logout Fanout")
     assert register_response.status_code == 200
     payload = register_response.json()["data"]
 
@@ -570,14 +533,7 @@ def test_logout_success_does_not_depend_on_realtime_disconnect(client: TestClien
 def test_force_login_disconnects_existing_runtime_before_rotating_session(client: TestClient, auth_header, monkeypatch) -> None:
     from app.api.v1 import auth as auth_routes
 
-    register_response = client.post(
-        "/api/v1/auth/register",
-        json={
-            "username": "force-disconnect-user",
-            "password": "secret123",
-            "nickname": "Force Disconnect",
-        },
-    )
+    register_response = register_user_response(client, "force-disconnect-user", nickname="Force Disconnect")
     assert register_response.status_code == 200
     payload = register_response.json()["data"]
     user_id = payload["user"]["id"]
@@ -621,8 +577,17 @@ def test_register_rolls_back_user_when_default_avatar_assignment_fails(client: T
 
     with SessionLocal() as db:
         service = auth_service_module.AuthService(db)
+        email = "rollback-register-user@example.test"
+
+        code = EmailVerificationService(db, service.settings).send_register_code(email)["debug_code"]
         with pytest.raises(RuntimeError):
-            service.register("rollback-register-user", "secret123", "Rollback Register")
+            service.register(
+                "rollback-register-user",
+                "secret123",
+                "Rollback Register",
+                email,
+                code,
+            )
 
     with SessionLocal() as db:
         user = db.query(User).filter(User.username == "rollback-register-user").one_or_none()
@@ -630,25 +595,16 @@ def test_register_rolls_back_user_when_default_avatar_assignment_fails(client: T
 
 
 def test_username_identity_is_case_canonical_across_register_login_and_search(client: TestClient, auth_header) -> None:
-    register_response = client.post(
-        "/api/v1/auth/register",
-        json={
-            "username": "Case.User",
-            "password": "secret123",
-            "nickname": "Case User",
-        },
-    )
+    register_response = register_user_response(client, "Case.User", nickname="Case User", email="case.user@example.test")
     assert register_response.status_code == 200
     payload = register_response.json()["data"]
     assert payload["user"]["username"] == "case.user"
 
-    duplicate_response = client.post(
-        "/api/v1/auth/register",
-        json={
-            "username": "case.user",
-            "password": "secret123",
-            "nickname": "Duplicate Case User",
-        },
+    duplicate_response = register_user_response(
+        client,
+        "case.user",
+        nickname="Duplicate Case User",
+        email="case.user.duplicate@example.test",
     )
     assert duplicate_response.status_code == 409
 

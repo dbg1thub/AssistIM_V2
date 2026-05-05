@@ -234,6 +234,7 @@ class RateLimiter:
     _SUBJECT_FIELDS_BY_PREFIX = {
         "login": ("username",),
         "register": ("username",),
+        "email-verification": ("email",),
         "friend-request": ("target_user_id",),
     }
 
@@ -376,6 +377,10 @@ class RateLimiter:
             },
             "register": {
                 "limit": max(1, int(getattr(settings, "rate_limit_register", 3) if settings else 3)),
+                "window_seconds": 60,
+            },
+            "email-verification": {
+                "limit": max(1, int(getattr(settings, "rate_limit_email_verification", 5) if settings else 5)),
                 "window_seconds": 60,
             },
             "friend-request": {

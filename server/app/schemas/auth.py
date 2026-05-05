@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import re
+from typing import ClassVar
+
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.core.auth_contract import (
@@ -22,10 +25,13 @@ from app.core.auth_contract import (
 
 class RegisterRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    _EMAIL_PATTERN: ClassVar[re.Pattern[str]] = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
     username: str = Field(min_length=USERNAME_MIN_LENGTH, max_length=USERNAME_MAX_LENGTH)
     password: str = Field(min_length=PASSWORD_MIN_LENGTH, max_length=PASSWORD_MAX_LENGTH)
     nickname: str = Field(min_length=1, max_length=NICKNAME_MAX_LENGTH)
+    email: str = Field(min_length=3, max_length=255)
+    email_code: str = Field(min_length=6, max_length=6)
 
     @field_validator("username", mode="before")
     @classmethod
@@ -44,6 +50,70 @@ class RegisterRequest(BaseModel):
     def _normalize_nickname(cls, value):
         if isinstance(value, str):
             return canonicalize_nickname(value)
+        return value
+
+    @field_validator("email", mode="before")
+    @classmethod
+    def _normalize_email(cls, value):
+        if isinstance(value, str):
+            return value.strip().lower()
+        return value
+
+    @field_validator("email")
+    @classmethod
+    def _validate_email(cls, value: str) -> str:
+        if not cls._EMAIL_PATTERN.fullmatch(value):
+            raise ValueError("invalid email format")
+        return value
+
+    @field_validator("email_code", mode="before")
+    @classmethod
+    def _normalize_email_code(cls, value):
+        if isinstance(value, str):
+            return value.strip()
+        return value
+
+    @field_validator("email_code")
+    @classmethod
+    def _validate_email_code(cls, value: str) -> str:
+        if not value.isdigit():
+            raise ValueError("invalid email verification code")
+        return value
+
+
+class EmailVerificationSendRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    _EMAIL_PATTERN: ClassVar[re.Pattern[str]] = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+    email: str = Field(min_length=3, max_length=255)
+    purpose: str = Field(default="register", max_length=32)
+
+    @field_validator("email", mode="before")
+    @classmethod
+    def _normalize_email(cls, value):
+        if isinstance(value, str):
+            return value.strip().lower()
+        return value
+
+    @field_validator("email")
+    @classmethod
+    def _validate_email(cls, value: str) -> str:
+        if not cls._EMAIL_PATTERN.fullmatch(value):
+            raise ValueError("invalid email format")
+        return value
+
+    @field_validator("purpose", mode="before")
+    @classmethod
+    def _normalize_purpose(cls, value):
+        if isinstance(value, str):
+            return value.strip().lower()
+        return value
+
+    @field_validator("purpose")
+    @classmethod
+    def _validate_purpose(cls, value: str) -> str:
+        if value != "register":
+            raise ValueError("unsupported email verification purpose")
         return value
 
 

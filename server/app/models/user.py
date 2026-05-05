@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import date, datetime
 
-from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Index, String, Text, UniqueConstraint, Uuid, column, func
+from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Index, String, Text, UniqueConstraint, Uuid, column, func, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base, IdMixin, TimestampMixin
@@ -16,6 +16,13 @@ class User(IdMixin, TimestampMixin, Base):
         Index("idx_users_username", "username"),
         Index("uq_users_username_lower", func.lower(column("username")), unique=True),
         Index("idx_users_email", "email"),
+        Index(
+            "uq_users_email_lower",
+            func.lower(column("email")),
+            unique=True,
+            sqlite_where=text("email IS NOT NULL"),
+            postgresql_where=text("email IS NOT NULL"),
+        ),
         Index("idx_users_phone", "phone"),
     )
 
@@ -27,6 +34,7 @@ class User(IdMixin, TimestampMixin, Base):
     avatar_default_key: Mapped[str | None] = mapped_column(String(length=128), nullable=True)
     avatar_file_id: Mapped[str | None] = mapped_column(Uuid(as_uuid=False), ForeignKey("files.id"), nullable=True)
     email: Mapped[str | None] = mapped_column(String(length=255), nullable=True)
+    email_verified: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="0")
     phone: Mapped[str | None] = mapped_column(String(length=32), nullable=True)
     birthday: Mapped[date | None] = mapped_column(Date(), nullable=True)
     region: Mapped[str | None] = mapped_column(String(length=128), nullable=True)

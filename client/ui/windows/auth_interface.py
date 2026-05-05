@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from typing import Optional
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QCloseEvent, QShowEvent
 from PySide6.QtWidgets import (
     QApplication,
@@ -26,6 +27,7 @@ from qfluentwidgets import (
     MessageBoxBase,
     PasswordLineEdit,
     PrimaryPushButton,
+    PushButton,
     SegmentedWidget,
     SubtitleLabel,
     TitleLabel,
@@ -45,6 +47,7 @@ setup_logging()
 logger = logging.get_logger(__name__)
 
 SESSION_CONFLICT_ERROR_CODE = 1009
+EMAIL_PATTERN = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
 class SessionConflictDialog(MessageBoxBase):
@@ -96,6 +99,10 @@ class AuthInterface(FluentWidget):
         self._centered_once = False
         self._transient_dialogs: set[QDialog] = set()
         self._auth_committed = False
+        self._email_code_countdown = 0
+        self._email_code_timer = QTimer(self)
+        self._email_code_timer.setInterval(1000)
+        self._email_code_timer.timeout.connect(self._tick_email_code_countdown)
         self.last_success_message = ""
 
         self._setup_ui()
@@ -282,6 +289,21 @@ class AuthInterface(FluentWidget):
         self.register_nickname_edit = LineEdit(page)
         self._configure_text_field(self.register_nickname_edit, tr("auth.field.nickname", "Nickname"))
 
+        self.register_email_edit = LineEdit(page)
+        self._configure_text_field(self.register_email_edit, tr("auth.field.email", "Email"))
+
+        code_row = QWidget(page)
+        code_layout = QHBoxLayout(code_row)
+        code_layout.setContentsMargins(0, 0, 0, 0)
+        code_layout.setSpacing(8)
+        self.register_email_code_edit = LineEdit(code_row)
+        self._configure_text_field(self.register_email_code_edit, tr("auth.field.email_code", "Email Verification Code"))
+        self.register_email_code_edit.setMaxLength(6)
+        self.register_send_code_button = PushButton(tr("auth.button.send_email_code", "Send Code"), code_row)
+        self.register_send_code_button.setMinimumHeight(40)
+        code_layout.addWidget(self.register_email_code_edit, 1)
+        code_layout.addWidget(self.register_send_code_button, 0)
+
         self.register_password_edit = PasswordLineEdit(page)
         self._configure_text_field(self.register_password_edit, tr("auth.field.password", "Password"))
 
@@ -308,6 +330,8 @@ class AuthInterface(FluentWidget):
         layout.addSpacing(8)
         layout.addWidget(self.register_username_edit)
         layout.addWidget(self.register_nickname_edit)
+        layout.addWidget(self.register_email_edit)
+        layout.addWidget(code_row)
         layout.addWidget(self.register_password_edit)
         layout.addWidget(self.register_confirm_edit)
         layout.addSpacing(8)
@@ -326,12 +350,15 @@ class AuthInterface(FluentWidget):
         self.form_pages.currentChanged.connect(self._sync_switcher)
         self.login_button.clicked.connect(self._submit_login)
         self.register_button.clicked.connect(self._submit_register)
+        self.register_send_code_button.clicked.connect(self._submit_register_email_code)
 
         self.login_username_edit.returnPressed.connect(self._submit_login)
         self.login_password_edit.returnPressed.connect(self._submit_login)
 
         self.register_username_edit.returnPressed.connect(self._submit_register)
         self.register_nickname_edit.returnPressed.connect(self._submit_register)
+        self.register_email_edit.returnPressed.connect(self._submit_register_email_code)
+        self.register_email_code_edit.returnPressed.connect(self._submit_register)
         self.register_password_edit.returnPressed.connect(self._submit_register)
         self.register_confirm_edit.returnPressed.connect(self._submit_register)
 
@@ -371,8 +398,11 @@ class AuthInterface(FluentWidget):
             self.login_password_edit,
             self.register_username_edit,
             self.register_nickname_edit,
+            self.register_email_edit,
+            self.register_email_code_edit,
             self.register_password_edit,
             self.register_confirm_edit,
+            self.register_send_code_button,
             self.login_button,
             self.register_button,
         ):
@@ -388,6 +418,8 @@ class AuthInterface(FluentWidget):
             if mode == "register"
             else tr("auth.button.create_account", "Create Account")
         )
+        if not is_busy:
+            self._sync_email_code_button()
 
     def _clear_validation_state(self) -> None:
         for widget in (
@@ -395,6 +427,8 @@ class AuthInterface(FluentWidget):
             self.login_password_edit,
             self.register_username_edit,
             self.register_nickname_edit,
+            self.register_email_edit,
+            self.register_email_code_edit,
             self.register_password_edit,
             self.register_confirm_edit,
         ):
@@ -425,6 +459,18 @@ class AuthInterface(FluentWidget):
 
         self._set_submit_task(self._perform_login(username, password))
 
+    def _submit_register_email_code(self) -> None:
+        if self._busy_mode or self._email_code_countdown > 0:
+            return
+
+        self._clear_validation_state()
+        email = self.register_email_edit.text().strip().lower()
+        if not EMAIL_PATTERN.fullmatch(email):
+            self._mark_invalid(self.register_email_edit, tr("auth.validation.email_invalid", "Enter a valid email address."))
+            return
+
+        self._create_ui_task(self._perform_send_register_code(email), "send register email code")
+
     def _submit_register(self) -> None:
         if self._busy_mode:
             return
@@ -432,6 +478,8 @@ class AuthInterface(FluentWidget):
         self._clear_validation_state()
         username = self.register_username_edit.text().strip()
         nickname = self.register_nickname_edit.text().strip()
+        email = self.register_email_edit.text().strip().lower()
+        email_code = self.register_email_code_edit.text().strip()
         password = self.register_password_edit.text()
         confirm = self.register_confirm_edit.text()
 
@@ -444,6 +492,17 @@ class AuthInterface(FluentWidget):
 
         if not nickname:
             self._mark_invalid(self.register_nickname_edit, tr("auth.validation.nickname_required", "Nickname is required."))
+            return
+
+        if not EMAIL_PATTERN.fullmatch(email):
+            self._mark_invalid(self.register_email_edit, tr("auth.validation.email_invalid", "Enter a valid email address."))
+            return
+
+        if len(email_code) != 6 or not email_code.isdigit():
+            self._mark_invalid(
+                self.register_email_code_edit,
+                tr("auth.validation.email_code_required", "Enter the 6-digit email verification code."),
+            )
             return
 
         if len(password) < 6:
@@ -460,7 +519,7 @@ class AuthInterface(FluentWidget):
             )
             return
 
-        self._set_submit_task(self._perform_register(username, nickname, password))
+        self._set_submit_task(self._perform_register(username, nickname, password, email, email_code))
 
     async def _perform_login(self, username: str, password: str, *, force: bool = False) -> None:
         retry_force_login = False
@@ -529,10 +588,43 @@ class AuthInterface(FluentWidget):
         dialog.open()
         return bool(await decision)
 
-    async def _perform_register(self, username: str, nickname: str, password: str) -> None:
+    async def _perform_send_register_code(self, email: str) -> None:
+        self.register_send_code_button.setDisabled(True)
+        self.register_send_code_button.setText(tr("auth.button.send_email_code_busy", "Sending..."))
+        try:
+            payload = await self._auth_controller.send_email_verification(email)
+        except asyncio.CancelledError:
+            raise
+        except NetworkError as exc:
+            logger.warning("Email verification request failed: %s", exc)
+            self._show_error(tr("auth.error.network", "Unable to connect right now. Please try again later."))
+            self._sync_email_code_button()
+        except APIError as exc:
+            logger.warning("Email verification request failed: %s", exc)
+            self._show_error(
+                tr(
+                    "auth.error.email_code_failed",
+                    "Unable to send the email verification code. Check the email address and try again.",
+                )
+            )
+            self._sync_email_code_button()
+        except Exception:
+            logger.exception("Unexpected email verification error")
+            self._show_error(tr("auth.error.email_code_unexpected", "Unexpected error while sending email code."))
+            self._sync_email_code_button()
+        else:
+            cooldown = int(payload.get("cooldown_seconds") or 60)
+            self._start_email_code_countdown(cooldown)
+            InfoBar.success(
+                tr("auth.feedback.title", "Authentication"),
+                tr("auth.success.email_code_sent", "Verification code sent."),
+                parent=self.form_card,
+            )
+
+    async def _perform_register(self, username: str, nickname: str, password: str, email: str, email_code: str) -> None:
         self._set_busy("register")
         try:
-            payload = await self._auth_controller.request_register_payload(username, nickname, password)
+            payload = await self._auth_controller.request_register_payload(username, nickname, password, email, email_code)
             self._submit_commit_in_progress = True
             user = await self._auth_controller.commit_auth_payload(payload, reset_local_chat_state=True)
         except asyncio.CancelledError:
@@ -565,6 +657,30 @@ class AuthInterface(FluentWidget):
             self._submit_commit_in_progress = False
             if not self._auth_committed:
                 self._set_busy(None)
+
+    def _start_email_code_countdown(self, seconds: int) -> None:
+        self._email_code_countdown = max(1, int(seconds or 60))
+        self._email_code_timer.start()
+        self._sync_email_code_button()
+
+    def _tick_email_code_countdown(self) -> None:
+        if self._email_code_countdown > 0:
+            self._email_code_countdown -= 1
+        if self._email_code_countdown <= 0:
+            self._email_code_timer.stop()
+        self._sync_email_code_button()
+
+    def _sync_email_code_button(self) -> None:
+        if self._busy_mode:
+            return
+        if self._email_code_countdown > 0:
+            self.register_send_code_button.setDisabled(True)
+            self.register_send_code_button.setText(
+                tr("auth.button.send_email_code_countdown", "Resend ({seconds}s)", seconds=self._email_code_countdown)
+            )
+        else:
+            self.register_send_code_button.setDisabled(False)
+            self.register_send_code_button.setText(tr("auth.button.send_email_code", "Send Code"))
 
     def _show_error(self, message: str) -> None:
         InfoBar.error(tr("auth.feedback.title", "Authentication"), message, parent=self.form_card)
@@ -601,6 +717,7 @@ class AuthInterface(FluentWidget):
 
     def _on_destroyed(self, *_args) -> None:
         """Cancel outstanding submit work when the widget is torn down."""
+        self._email_code_timer.stop()
         self._cancel_pending_task(self._submit_task)
         self._submit_task = None
         for dialog in list(self._transient_dialogs):

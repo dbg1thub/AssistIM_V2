@@ -45,9 +45,18 @@ powershell -ExecutionPolicy Bypass -File server/scripts/migrate.ps1
 powershell -ExecutionPolicy Bypass -File server/scripts/run-api.ps1 -Reload
 ```
 
-6. Create test accounts manually from the desktop client or with `POST /api/v1/auth/register`.
+6. Create test accounts manually from the desktop client or request a registration email code, then call `POST /api/v1/auth/register`.
 
 ```powershell
+$codeResponse = Invoke-RestMethod -Method Post `
+  -Uri "http://127.0.0.1:8000/api/v1/auth/email-verification/send" `
+  -ContentType "application/json" `
+  -Body (@{
+    email = "alice@example.test"
+    purpose = "register"
+  } | ConvertTo-Json)
+
+# With EMAIL_PROVIDER=console or file, read the 6-digit code from the API log or configured file.
 Invoke-RestMethod -Method Post `
   -Uri "http://127.0.0.1:8000/api/v1/auth/register" `
   -ContentType "application/json" `
@@ -55,6 +64,8 @@ Invoke-RestMethod -Method Post `
     username = "alice"
     password = "Passw0rd!"
     nickname = "Alice"
+    email = "alice@example.test"
+    email_code = "<6-digit-code>"
   } | ConvertTo-Json)
 ```
 
@@ -86,6 +97,7 @@ powershell -ExecutionPolicy Bypass -File server/scripts/test.ps1 -VerboseOutput
 The current test suite covers:
 
 - auth register/login/refresh/me
+- registration email verification
 - friend request accept flow
 - direct session creation and message read flow
 - group permission and ownership transfer
@@ -249,14 +261,27 @@ Use the desktop client to register users normally, or create them over HTTP:
 
 ```powershell
 Invoke-RestMethod -Method Post `
+  -Uri "http://127.0.0.1:8000/api/v1/auth/email-verification/send" `
+  -ContentType "application/json" `
+  -Body (@{
+    email = "bob@example.test"
+    purpose = "register"
+  } | ConvertTo-Json)
+
+Invoke-RestMethod -Method Post `
   -Uri "http://127.0.0.1:8000/api/v1/auth/register" `
   -ContentType "application/json" `
   -Body (@{
     username = "bob"
     password = "Passw0rd!"
     nickname = "Bob"
+    email = "bob@example.test"
+    email_code = "<6-digit-code>"
   } | ConvertTo-Json)
 ```
+
+For local development, `EMAIL_PROVIDER=console` writes the code to the API log.
+Production deployments should use `EMAIL_PROVIDER=smtp` with SMTP settings.
 
 After registration, use the normal client flows to add friends, create direct sessions, create groups, and upload files.
 

@@ -14,8 +14,9 @@ from app.core.rate_limit import rate_limiter
 from app.dependencies.auth_dependency import get_current_user
 from app.dependencies.settings_dependency import get_request_settings
 from app.models.user import User
-from app.schemas.auth import LoginRequest, RefreshTokenRequest, RegisterRequest
+from app.schemas.auth import EmailVerificationSendRequest, LoginRequest, RefreshTokenRequest, RegisterRequest
 from app.services.auth_service import AuthService
+from app.services.email_verification_service import EmailVerificationService
 from app.services.user_service import UserService
 from app.utils.response import success_response
 from app.websocket.manager import connection_manager
@@ -36,6 +37,11 @@ def _login_limit(request: Request) -> int:
     return get_request_settings(request).rate_limit_login
 
 
+def _email_verification_limit(request: Request) -> int:
+    """Return the current email-code request rate limit for this app snapshot."""
+    return get_request_settings(request).rate_limit_email_verification
+
+
 async def _disconnect_auth_connections(user_id: str, *, reason: str, strict_disconnect: bool) -> None:
     """Disconnect existing realtime runtime for one committed or soon-to-be-committed auth change."""
     payload = ws_message("force_logout", {"reason": reason})
@@ -53,13 +59,34 @@ async def _disconnect_auth_connections(user_id: str, *, reason: str, strict_disc
         return
 
 
+@router.post(
+    "/email-verification/send",
+    dependencies=[Depends(rate_limiter.dynamic_dependency("email-verification", _email_verification_limit))],
+)
+async def send_email_verification(
+    payload: EmailVerificationSendRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_request_settings),
+) -> dict:
+    client_host = request.client.host if request.client else ""
+    result = EmailVerificationService(db, settings).send_register_code(payload.email, request_ip=client_host)
+    return success_response(result)
+
+
 @router.post("/register", dependencies=[Depends(rate_limiter.dynamic_dependency("register", _register_limit))])
 async def register(
     payload: RegisterRequest,
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_request_settings),
 ) -> dict:
-    auth_payload = AuthService(db, settings).register(payload.username, payload.password, payload.nickname)
+    auth_payload = AuthService(db, settings).register(
+        payload.username,
+        payload.password,
+        payload.nickname,
+        payload.email,
+        payload.email_code,
+    )
     return success_response(auth_payload)
 
 

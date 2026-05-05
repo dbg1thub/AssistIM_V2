@@ -15,6 +15,7 @@ from fastapi.testclient import TestClient
 from fastapi.routing import APIRoute
 from starlette.routing import WebSocketRoute
 
+from auth_test_helpers import register_user_response
 from app.core.config import Settings, reload_settings
 from app.core.database import Base, SessionLocal, configure_database, get_engine, init_db
 from app.core.errors import ErrorCode
@@ -383,14 +384,7 @@ def test_auth_routes_and_dependencies_use_app_settings_snapshot() -> None:
         assert app.state.settings is custom_settings
 
         with TestClient(app) as client:
-            register_response = client.post(
-                "/api/v1/auth/register",
-                json={
-                    "username": "boundary_user",
-                    "password": "secret123",
-                    "nickname": "Boundary User",
-                },
-            )
+            register_response = register_user_response(client, "boundary_user", nickname="Boundary User")
             assert register_response.status_code == 200
             access_token = register_response.json()["data"]["access_token"]
 
@@ -771,6 +765,8 @@ def test_auth_schema_contracts_are_strict_and_match_runtime_payloads() -> None:
     from app.schemas.auth import LoginRequest, RefreshTokenRequest, RegisterRequest, TokenPair
 
     assert RegisterRequest.model_config.get("extra") == "forbid"
+    assert "email" in RegisterRequest.model_fields
+    assert "email_code" in RegisterRequest.model_fields
     assert LoginRequest.model_config.get("extra") == "forbid"
     assert RefreshTokenRequest.model_config.get("extra") == "forbid"
     assert TokenPair.model_fields["token_type"].default == "Bearer"

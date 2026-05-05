@@ -32,7 +32,8 @@ def test_auth_service_login_and_register_do_not_inherit_existing_app_auth(monkey
         service = auth_service_module.AuthService()
 
         await service.login("alice", "secret", force=True)
-        await service.register("bob", "Bob", "secret")
+        await service.send_email_verification("bob@example.test")
+        await service.register("bob", "Bob", "secret", "bob@example.test", "123456")
 
         assert fake_http.post_calls == [
             {
@@ -48,11 +49,24 @@ def test_auth_service_login_and_register_do_not_inherit_existing_app_auth(monkey
                 },
             },
             {
+                "path": "/auth/email-verification/send",
+                "json": {
+                    "email": "bob@example.test",
+                    "purpose": "register",
+                },
+                "kwargs": {
+                    "use_auth": False,
+                    "retry_on_401": False,
+                },
+            },
+            {
                 "path": "/auth/register",
                 "json": {
                     "username": "bob",
                     "password": "secret",
                     "nickname": "Bob",
+                    "email": "bob@example.test",
+                    "email_code": "123456",
                 },
                 "kwargs": {
                     "use_auth": False,

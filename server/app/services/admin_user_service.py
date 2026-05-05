@@ -261,6 +261,7 @@ class AdminUserService:
             "avatar": self.avatars.resolve_user_avatar_url(user),
             "avatar_kind": str(getattr(user, "avatar_kind", "default") or "default"),
             "email": user.email,
+            "email_verified": bool(getattr(user, "email_verified", False)),
             "phone": user.phone,
             "birthday": user.birthday.isoformat() if user.birthday else None,
             "region": user.region,

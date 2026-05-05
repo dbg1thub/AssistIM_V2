@@ -6,6 +6,7 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
+from auth_test_helpers import register_user
 from app.core.config import reload_settings
 from app.core.database import SessionLocal
 from app.core.errors import ErrorCode
@@ -20,12 +21,7 @@ def _client_with_log_dir(monkeypatch, log_dir: Path) -> TestClient:
 
 
 def _register(client: TestClient, username: str, nickname: str) -> dict:
-    response = client.post(
-        "/api/v1/auth/register",
-        json={"username": username, "password": "secret123", "nickname": nickname},
-    )
-    assert response.status_code == 200, response.text
-    return response.json()["data"]
+    return register_user(client, username, nickname=nickname)
 
 
 def _auth_header(token: str) -> dict[str, str]:

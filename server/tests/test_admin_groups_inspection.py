@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from fastapi.testclient import TestClient
 
+from auth_test_helpers import register_user
 from app.core.database import SessionLocal
 from app.core.errors import ErrorCode
 from app.models.admin import AdminAuditLog
@@ -22,12 +23,7 @@ MISSING_FILE_ID = "00000000-0000-0000-0000-000000000014"
 
 
 def _register(client: TestClient, username: str, nickname: str) -> dict:
-    response = client.post(
-        "/api/v1/auth/register",
-        json={"username": username, "password": "secret123", "nickname": nickname},
-    )
-    assert response.status_code == 200, response.text
-    return response.json()["data"]
+    return register_user(client, username, nickname=nickname)
 
 
 def _auth_header(token: str) -> dict[str, str]:

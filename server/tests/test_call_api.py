@@ -12,15 +12,11 @@ from fastapi.testclient import TestClient
 
 from app.main import create_app
 from app.core.config import reload_settings
+from auth_test_helpers import register_user
 
 
 def _register_user(client: TestClient, username: str) -> dict:
-    response = client.post(
-        "/api/v1/auth/register",
-        json={"username": username, "password": "secret123", "nickname": username},
-    )
-    assert response.status_code == 200, response.text
-    return response.json()["data"]
+    return register_user(client, username, nickname=username)
 
 
 def _auth_header(access_token: str) -> dict[str, str]:

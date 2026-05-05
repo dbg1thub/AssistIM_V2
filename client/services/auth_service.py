@@ -72,7 +72,27 @@ class AuthService:
         )
         return dict(payload or {})
 
-    async def register(self, username: str, nickname: str, password: str) -> dict[str, Any]:
+    async def send_email_verification(self, email: str, *, purpose: str = "register") -> dict[str, Any]:
+        """Request one registration email verification code."""
+        payload = await self._http.post(
+            "/auth/email-verification/send",
+            json={
+                "email": email,
+                "purpose": purpose,
+            },
+            use_auth=False,
+            retry_on_401=False,
+        )
+        return dict(payload or {})
+
+    async def register(
+        self,
+        username: str,
+        nickname: str,
+        password: str,
+        email: str,
+        email_code: str,
+    ) -> dict[str, Any]:
         """Register one user and return the auth payload."""
         payload = await self._http.post(
             "/auth/register",
@@ -80,6 +100,8 @@ class AuthService:
                 "username": username,
                 "password": password,
                 "nickname": nickname,
+                "email": email,
+                "email_code": email_code,
             },
             use_auth=False,
             retry_on_401=False,

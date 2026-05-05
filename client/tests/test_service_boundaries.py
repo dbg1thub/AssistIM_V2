@@ -582,7 +582,7 @@ class FakeFileService:
 class FakeAuthService:
     def __init__(self) -> None:
         self.login_calls: list[tuple[str, str, bool]] = []
-        self.register_calls: list[tuple[str, str, str]] = []
+        self.register_calls: list[tuple[str, str, str, str, str]] = []
         self.logout_calls = 0
         self.listeners = []
         self.access_token = None
@@ -620,8 +620,11 @@ class FakeAuthService:
         self.login_calls.append((username, password, force))
         return dict(self.login_payload)
 
-    async def register(self, username: str, nickname: str, password: str) -> dict:
-        self.register_calls.append((username, nickname, password))
+    async def send_email_verification(self, email: str, *, purpose: str = "register") -> dict:
+        return {"sent": True, "purpose": purpose, "email": email}
+
+    async def register(self, username: str, nickname: str, password: str, email: str, email_code: str) -> dict:
+        self.register_calls.append((username, nickname, password, email, email_code))
         return dict(self.login_payload)
 
     async def logout(self) -> None:
@@ -1775,9 +1778,9 @@ def test_auth_controller_register_uses_backend_default_avatar_without_follow_up_
 
     async def scenario() -> None:
         controller = auth_controller_module.AuthController()
-        user = await controller.register('alice', 'Alice', 'secret')
+        user = await controller.register('alice', 'Alice', 'secret', 'alice@example.test', '123456')
 
-        assert fake_auth_service.register_calls == [('alice', 'Alice', 'secret')]
+        assert fake_auth_service.register_calls == [('alice', 'Alice', 'secret', 'alice@example.test', '123456')]
         assert fake_file_service.avatar_uploads == []
         assert fake_user_service.update_calls == []
         assert user['avatar'] == '/uploads/default_avatars/avatar_default_female_01.svg'

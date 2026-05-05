@@ -12,6 +12,7 @@ from app.repositories.message_repo import MessageRepository
 from app.repositories.session_repo import SessionRepository
 from app.repositories.user_repo import UserRepository
 from app.services.avatar_service import AvatarService
+from app.services.email_verification_service import normalize_email_address
 
 
 class UserService:
@@ -55,8 +56,18 @@ class UserService:
         for key, value in fields.items():
             if key in self._NULLABLE_FIELDS and isinstance(value, str) and not value.strip():
                 normalized_fields[key] = None
+            elif key == "email" and value is not None:
+                normalized_fields[key] = normalize_email_address(str(value))
             else:
                 normalized_fields[key] = value
+        if "email" in normalized_fields:
+            next_email = normalized_fields["email"]
+            if next_email:
+                existing = self.users.get_by_email(str(next_email))
+                if existing is not None and existing.id != current_user.id:
+                    raise AppError(ErrorCode.USER_EXISTS, "email already registered", 409)
+            if getattr(current_user, "email", None) != next_email:
+                normalized_fields["email_verified"] = False
         if all(getattr(current_user, key, None) == value for key, value in normalized_fields.items()):
             return self.serialize_user(current_user), False
         user = self.users.update(current_user, **normalized_fields)
@@ -126,6 +137,7 @@ class UserService:
         return {
             **summary,
             "email": user.email,
+            "email_verified": bool(getattr(user, "email_verified", False)),
             "phone": user.phone,
             "birthday": user.birthday.isoformat() if user.birthday else None,
             "region": user.region,

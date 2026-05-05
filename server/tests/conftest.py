@@ -17,6 +17,7 @@ SERVER_ROOT = ROOT / "server"
 TEST_STATE_DIR = SERVER_ROOT / ".testdata"
 TEST_DB_PATH = TEST_STATE_DIR / "test.db"
 TEST_UPLOAD_DIR = TEST_STATE_DIR / "uploads"
+TESTS_ROOT = SERVER_ROOT / "tests"
 
 TEST_STATE_DIR.mkdir(parents=True, exist_ok=True)
 os.environ["APP_NAME"] = "AssistIM Test API"
@@ -27,17 +28,22 @@ os.environ["DATABASE_URL"] = f"sqlite:///{TEST_DB_PATH.as_posix()}"
 os.environ["UPLOAD_DIR"] = TEST_UPLOAD_DIR.as_posix()
 os.environ["API_V1_PREFIX"] = "/api/v1"
 os.environ["CORS_ORIGINS"] = "*"
+os.environ["EMAIL_PROVIDER"] = "console"
+os.environ["EMAIL_VERIFICATION_EXPOSE_CODE"] = "true"
 
 if str(SERVER_ROOT) not in sys.path:
     sys.path.insert(0, str(SERVER_ROOT))
+if str(TESTS_ROOT) not in sys.path:
+    sys.path.insert(0, str(TESTS_ROOT))
 
 from app.core.config import reload_settings
 from app.core.database import Base, get_engine
 from app.core.rate_limit import rate_limiter
-from app.models import admin, device, file, group, message, moment, session, user  # noqa: F401
+from app.models import admin, device, email_verification, file, group, message, moment, session, user  # noqa: F401
 from app.main import create_app
 from app.realtime.call_registry import get_call_registry
 from app.websocket.manager import connection_manager
+from auth_test_helpers import register_user
 
 
 @pytest.fixture(autouse=True)
@@ -65,16 +71,7 @@ def client() -> TestClient:
 @pytest.fixture
 def user_factory(client: TestClient) -> Callable[..., dict]:
     def create_user(username: str, nickname: str | None = None, password: str = "secret123") -> dict:
-        response = client.post(
-            "/api/v1/auth/register",
-            json={
-                "username": username,
-                "password": password,
-                "nickname": nickname or username,
-            },
-        )
-        assert response.status_code == 200, response.text
-        payload = response.json()["data"]
+        payload = register_user(client, username, nickname=nickname, password=password)
         payload["password"] = password
         return payload
 

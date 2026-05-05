@@ -374,17 +374,35 @@ class AuthController:
         payload = await self.request_login_payload(username, password, force=force)
         return await self.commit_auth_payload(payload, reset_local_chat_state=True)
 
-    async def register(self, username: str, nickname: str, password: str) -> dict[str, Any]:
-        payload = await self.request_register_payload(username, nickname, password)
+    async def register(
+        self,
+        username: str,
+        nickname: str,
+        password: str,
+        email: str,
+        email_code: str,
+    ) -> dict[str, Any]:
+        payload = await self.request_register_payload(username, nickname, password, email, email_code)
         return await self.commit_auth_payload(payload, reset_local_chat_state=True)
 
     async def request_login_payload(self, username: str, password: str, *, force: bool = False) -> dict[str, Any]:
         """Fetch one backend login payload without mutating local runtime/auth state yet."""
         return await self._auth_service.login(username, password, force=force)
 
-    async def request_register_payload(self, username: str, nickname: str, password: str) -> dict[str, Any]:
+    async def send_email_verification(self, email: str) -> dict[str, Any]:
+        """Request one registration email verification code without mutating auth state."""
+        return await self._auth_service.send_email_verification(email)
+
+    async def request_register_payload(
+        self,
+        username: str,
+        nickname: str,
+        password: str,
+        email: str,
+        email_code: str,
+    ) -> dict[str, Any]:
         """Fetch one backend register payload without mutating local runtime/auth state yet."""
-        return await self._auth_service.register(username, nickname, password)
+        return await self._auth_service.register(username, nickname, password, email, email_code)
 
     async def commit_auth_payload(
         self,

@@ -21,6 +21,13 @@ class UserRepository:
         stmt = select(User).where(func.lower(User.username) == canonical_username)
         return self.db.execute(stmt).scalar_one_or_none()
 
+    def get_by_email(self, email: str) -> User | None:
+        normalized_email = str(email or "").strip().lower()
+        if not normalized_email:
+            return None
+        stmt = select(User).where(func.lower(User.email) == normalized_email)
+        return self.db.execute(stmt).scalar_one_or_none()
+
     def list_users_by_ids(self, user_ids: list[str]) -> dict[str, User]:
         normalized_user_ids = [str(user_id or "").strip() for user_id in user_ids if str(user_id or "").strip()]
         if not normalized_user_ids:
@@ -63,6 +70,8 @@ class UserRepository:
         avatar_kind: str = "default",
         avatar_default_key: str | None = None,
         avatar_file_id: str | None = None,
+        email: str | None = None,
+        email_verified: bool = False,
         commit: bool = True,
     ) -> User:
         user = User(
@@ -73,6 +82,8 @@ class UserRepository:
             avatar_kind=avatar_kind,
             avatar_default_key=avatar_default_key,
             avatar_file_id=avatar_file_id,
+            email=email,
+            email_verified=bool(email_verified),
             status="online",
         )
         self.db.add(user)

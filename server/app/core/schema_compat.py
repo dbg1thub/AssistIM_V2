@@ -15,6 +15,7 @@ from app.media.default_avatars import choose_seeded_default_avatar_key, default_
 
 USER_PROFILE_COLUMN_DDL: dict[str, str] = {
     "email": "VARCHAR(255)",
+    "email_verified": "BOOLEAN NOT NULL DEFAULT 0",
     "phone": "VARCHAR(32)",
     "birthday": "DATE",
     "region": "VARCHAR(128)",
@@ -44,6 +45,8 @@ USER_PROFILE_INDEX_DDL: dict[str, str] = {
 USERNAME_INDEX_DDL: dict[str, str] = {
     "uq_users_username_lower": "CREATE UNIQUE INDEX IF NOT EXISTS uq_users_username_lower ON users (lower(username))",
 }
+
+EMAIL_INDEX_DDL = "CREATE UNIQUE INDEX IF NOT EXISTS uq_users_email_lower ON users (lower(email)) WHERE email IS NOT NULL"
 
 GROUP_AVATAR_COLUMN_DDL: dict[str, str] = {
     "announcement": "TEXT NOT NULL DEFAULT ''",
@@ -134,6 +137,11 @@ ADMIN_DATABASE_BACKUP_VERIFICATION_COLUMN_DDL: dict[str, str] = {
     "verified_at": "TIMESTAMP",
 }
 
+EMAIL_VERIFICATION_INDEX_DDL: dict[str, str] = {
+    "idx_email_verification_email_purpose": "CREATE INDEX IF NOT EXISTS idx_email_verification_email_purpose ON email_verification_codes (email, purpose)",
+    "idx_email_verification_expires_at": "CREATE INDEX IF NOT EXISTS idx_email_verification_expires_at ON email_verification_codes (expires_at)",
+}
+
 
 def _get_table_names(bind: Engine | Connection) -> set[str]:
     return set(inspect(bind).get_table_names())
@@ -159,6 +167,18 @@ def _has_username_lower_index(bind: Engine | Connection) -> bool:
         return row is not None
     return "uq_users_username_lower" in _get_index_names(bind, "users")
 
+
+def _has_email_lower_index(bind: Engine | Connection) -> bool:
+    if "users" not in _get_table_names(bind):
+        return False
+    if bind.dialect.name == "sqlite":
+        row = bind.execute(
+            text("SELECT 1 FROM sqlite_master WHERE type = 'index' AND tbl_name = 'users' AND name = 'uq_users_email_lower'")
+        ).first()
+        return row is not None
+    return "uq_users_email_lower" in _get_index_names(bind, "users")
+
+
 def _has_columns(bind: Engine | Connection, table_name: str, required_columns: Iterable[str]) -> bool:
     if table_name not in _get_table_names(bind):
         return False
@@ -173,7 +193,7 @@ def _has_indexes(bind: Engine | Connection, table_name: str, required_indexes: I
     return all(index_name in indexes for index_name in required_indexes)
 
 
-RUNTIME_SCHEMA_ALEMBIC_REVISION = "20260505_0019"
+RUNTIME_SCHEMA_ALEMBIC_REVISION = "20260505_0020"
 
 def _parse_revision(revision: str) -> tuple[int, int] | None:
     candidate = str(revision or "").strip()
@@ -220,6 +240,7 @@ def _has_current_runtime_schema(bind: Engine | Connection) -> bool:
         "user_session_events",
         "admin_audit_logs",
         "admin_database_backups",
+        "email_verification_codes",
     }
     if required_tables - _get_table_names(bind):
         return False
@@ -234,6 +255,7 @@ def _has_current_runtime_schema(bind: Engine | Connection) -> bool:
         and _has_columns(bind, "files", FILE_COLUMN_DDL)
         and _has_indexes(bind, "users", USER_PROFILE_INDEX_DDL)
         and _has_username_lower_index(bind)
+        and _has_email_lower_index(bind)
         and _has_indexes(bind, "messages", CHAT_INDEX_DDL)
         and _has_indexes(bind, "sessions", SESSION_INDEX_DDL)
         and _has_indexes(bind, "files", FILE_INDEX_DDL)
@@ -246,6 +268,7 @@ def _has_current_runtime_schema(bind: Engine | Connection) -> bool:
         and _has_indexes(bind, "admin_audit_logs", ADMIN_AUDIT_INDEX_DDL)
         and _has_columns(bind, "admin_database_backups", ADMIN_DATABASE_BACKUP_VERIFICATION_COLUMN_DDL)
         and _has_indexes(bind, "admin_database_backups", ADMIN_DATABASE_BACKUP_INDEX_DDL)
+        and _has_indexes(bind, "email_verification_codes", EMAIL_VERIFICATION_INDEX_DDL)
     )
 
 
@@ -362,6 +385,39 @@ def _ensure_admin_database_backups_table(connection: Connection, applied: list[s
         )
     )
     applied.append("admin_database_backups.create")
+
+
+def _ensure_email_verification_codes_table(connection: Connection, applied: list[str]) -> None:
+    table_names = _get_table_names(connection)
+    if "email_verification_codes" in table_names:
+        return
+
+    connection.execute(
+        text(
+            """
+            CREATE TABLE email_verification_codes (
+                id VARCHAR(36) PRIMARY KEY,
+                email VARCHAR(255) NOT NULL,
+                purpose VARCHAR(32) NOT NULL,
+                code_hash VARCHAR(64) NOT NULL,
+                expires_at TIMESTAMP NOT NULL,
+                attempt_count INTEGER NOT NULL DEFAULT 0,
+                consumed_at TIMESTAMP,
+                request_ip VARCHAR(64) NOT NULL DEFAULT '',
+                created_at TIMESTAMP NOT NULL,
+                updated_at TIMESTAMP NOT NULL
+            )
+            """
+        )
+    )
+    applied.append("email_verification_codes.create")
+
+
+def _ensure_email_lower_index(connection: Connection, applied: list[str]) -> None:
+    if "users" not in _get_table_names(connection) or _has_email_lower_index(connection):
+        return
+    connection.execute(text(EMAIL_INDEX_DDL))
+    applied.append("uq_users_email_lower")
 
 
 def _ensure_indexes(connection: Connection, table_name: str, index_ddl: dict[str, str], applied: list[str]) -> None:
@@ -1210,6 +1266,7 @@ def ensure_schema_compatibility(engine: Engine) -> list[str]:
         _ensure_columns(connection, "users", USER_AVATAR_COLUMN_DDL, applied)
         _ensure_indexes(connection, "users", USER_PROFILE_INDEX_DDL, applied)
         _ensure_indexes(connection, "users", USERNAME_INDEX_DDL, applied)
+        _ensure_email_lower_index(connection, applied)
 
         _ensure_columns(connection, "messages", MESSAGE_COLUMN_DDL, applied)
         _ensure_columns(connection, "sessions", SESSION_COLUMN_DDL, applied)
@@ -1246,6 +1303,8 @@ def ensure_schema_compatibility(engine: Engine) -> list[str]:
             applied,
         )
         _ensure_indexes(connection, "admin_database_backups", ADMIN_DATABASE_BACKUP_INDEX_DDL, applied)
+        _ensure_email_verification_codes_table(connection, applied)
+        _ensure_indexes(connection, "email_verification_codes", EMAIL_VERIFICATION_INDEX_DDL, applied)
 
     return applied
 

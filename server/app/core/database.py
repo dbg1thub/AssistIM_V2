@@ -36,6 +36,7 @@ RUNTIME_SCHEMA_REQUIRED_TABLES = frozenset(
         "session_events",
         "admin_audit_logs",
         "admin_database_backups",
+        "email_verification_codes",
         "user_devices",
         "user_prekeys",
         "user_signed_prekeys",
@@ -103,7 +104,7 @@ def _missing_runtime_schema_tables(engine: Engine) -> set[str]:
 
 def init_db(settings: Settings | None = None) -> None:
     """Validate runtime schema presence and apply fallback-only compatibility upgrades."""
-    from app.models import admin, device, file, group, message, moment, session, user  # noqa: F401
+    from app.models import admin, device, email_verification, file, group, message, moment, session, user  # noqa: F401
 
     engine = configure_database(settings)
     missing_tables = _missing_runtime_schema_tables(engine)
