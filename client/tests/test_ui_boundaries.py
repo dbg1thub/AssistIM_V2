@@ -344,6 +344,7 @@ def test_chat_interface_async_message_action_results_are_session_generation_guar
 def test_voice_messages_have_send_open_and_click_paths_without_alt_shortcut() -> None:
     chat_interface = Path('client/ui/windows/chat_interface.py').read_text(encoding='utf-8')
     chat_panel = Path('client/ui/widgets/chat_panel.py').read_text(encoding='utf-8')
+    fluent_splitter = Path('client/ui/widgets/fluent_splitter.py').read_text(encoding='utf-8')
     message_input = Path('client/ui/widgets/message_input.py').read_text(encoding='utf-8')
     message_manager = Path('client/managers/message_manager.py').read_text(encoding='utf-8')
     message_delegate = Path('client/delegates/message_delegate.py').read_text(encoding='utf-8')
@@ -370,6 +371,7 @@ def test_voice_messages_have_send_open_and_click_paths_without_alt_shortcut() ->
 
 def test_chat_message_input_uses_floating_card_style_without_overlay_or_cursor_override() -> None:
     chat_panel = Path('client/ui/widgets/chat_panel.py').read_text(encoding='utf-8')
+    fluent_splitter = Path('client/ui/widgets/fluent_splitter.py').read_text(encoding='utf-8')
     message_input = Path('client/ui/widgets/message_input.py').read_text(encoding='utf-8')
     light_input_qss = Path('client/ui/styles/qss/light/message_input.qss').read_text(encoding='utf-8')
     dark_input_qss = Path('client/ui/styles/qss/dark/message_input.qss').read_text(encoding='utf-8')
@@ -389,15 +391,25 @@ def test_chat_message_input_uses_floating_card_style_without_overlay_or_cursor_o
     assert 'AIAssistantFloatingComposerOverlay' not in chat_panel
     assert 'chatFloatingComposerOverlay' not in chat_panel
     assert 'self.content_splitter = FluentSplitter(Qt.Orientation.Vertical, self.chat_page)' in chat_panel
+    assert 'self.content_splitter.setHandleIndicatorVisible(False)' in chat_panel
     assert 'self.content_splitter.splitterMoved.connect(self._schedule_restore_message_viewport)' in chat_panel
     assert 'composer_layout.addWidget(self.message_input, 1)' in chat_panel
+    assert 'def setHandleIndicatorVisible(self, visible: bool) -> None:' in fluent_splitter
+    assert 'def isHandleIndicatorVisible(self) -> bool:' in fluent_splitter
+    assert 'if not self.splitter().isHandleIndicatorVisible():' in fluent_splitter
 
+    assert 'self.editor_card.setMaximumWidth(1100)' not in setup_block
+    assert 'Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignBottom' not in setup_block
+    assert 'self.main_layout.addWidget(self.editor_card, 1)' in setup_block
+    assert 'self.text_input.setViewportMargins(0, 0, 0, 0)' in setup_block
     assert setup_block.index('self.composer_layout.addWidget(self.reply_suggestion_widget, 0)') < setup_block.index(
         'self.composer_layout.addWidget(self.text_input, 1)'
     )
     assert setup_block.index('self.composer_layout.addWidget(self.text_input, 1)') < setup_block.index(
         'self.composer_layout.addWidget(self.toolbar_widget, 0)'
     )
+    assert 'toolbar_rect = self.toolbar_widget.geometry()' in overlay_block
+    assert 'text_rect = self.text_input.geometry()' not in overlay_block
     assert 'self.voice_message_button.raise_()' in overlay_block
     assert 'self.send_button.raise_()' in overlay_block
 

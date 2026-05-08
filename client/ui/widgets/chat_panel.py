@@ -379,6 +379,7 @@ class ChatPanel(QWidget):
 
         self.content_splitter = FluentSplitter(Qt.Orientation.Vertical, self.chat_page)
         self.content_splitter.setObjectName("chatContentSplitter")
+        self.content_splitter.setHandleIndicatorVisible(False)
         self.content_splitter.setChildrenCollapsible(False)
         self.content_splitter.setHandleWidth(1)
         self.message_list.setMinimumHeight(0)

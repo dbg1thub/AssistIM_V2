@@ -39,6 +39,9 @@ class FluentSplitterHandle(QSplitterHandle):
         super().mouseReleaseEvent(event)
 
     def paintEvent(self, event) -> None:
+        if not self.splitter().isHandleIndicatorVisible():
+            return
+
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
 
@@ -63,5 +66,25 @@ class FluentSplitterHandle(QSplitterHandle):
 class FluentSplitter(QSplitter):
     """Splitter that uses the stable custom handle."""
 
+    def __init__(
+        self,
+        orientation: Qt.Orientation,
+        parent=None,
+        *,
+        show_handle_indicator: bool = True,
+    ):
+        super().__init__(orientation, parent)
+        self._show_handle_indicator = bool(show_handle_indicator)
+
     def createHandle(self) -> QSplitterHandle:
         return FluentSplitterHandle(self.orientation(), self)
+
+    def setHandleIndicatorVisible(self, visible: bool) -> None:
+        self._show_handle_indicator = bool(visible)
+        for index in range(1, self.count()):
+            handle = self.handle(index)
+            if handle is not None:
+                handle.update()
+
+    def isHandleIndicatorVisible(self) -> bool:
+        return self._show_handle_indicator

@@ -2629,7 +2629,6 @@ class MessageInput(QWidget):
 
         self.editor_card = QWidget(self)
         self.editor_card.setObjectName("messageInputCard")
-        self.editor_card.setMaximumWidth(1100)
         self.editor_card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
         self.card_layout = QVBoxLayout(self.editor_card)
@@ -2646,7 +2645,7 @@ class MessageInput(QWidget):
         self.toolbar_widget = QWidget(self.composer_widget)
         self.toolbar_widget.setObjectName("messageToolbar")
         self.toolbar_layout = QHBoxLayout()
-        self.toolbar_layout.setContentsMargins(4, 4, 4, 4)
+        self.toolbar_layout.setContentsMargins(8, 4, 116, 4)
         self.toolbar_layout.setSpacing(4)
 
         self.emoji_button = TransparentToolButton(AppIcon.EMOJI_TAB_SYMBOLS, self.composer_widget)
@@ -2721,7 +2720,7 @@ class MessageInput(QWidget):
         self.text_input.setPlaceholderText(tr("composer.placeholder.inactive", "Select a session to start chatting"))
         self.text_input.setAcceptRichText(False)
         self.text_input.setMinimumHeight(128)
-        self.text_input.setViewportMargins(0, 0, 150, 52)
+        self.text_input.setViewportMargins(0, 0, 0, 0)
         self._apply_editor_theme()
 
         self.voice_message_button = TransparentToolButton(AppIcon.MIC_ON, self.composer_widget)
@@ -2744,7 +2743,7 @@ class MessageInput(QWidget):
         self.composer_layout.addWidget(self.text_input, 1)
         self.composer_layout.addWidget(self.toolbar_widget, 0)
         self.card_layout.addWidget(self.composer_widget, 1)
-        self.main_layout.addWidget(self.editor_card, 1, Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignBottom)
+        self.main_layout.addWidget(self.editor_card, 1)
         self.composer_widget.installEventFilter(self)
         self.text_input.installEventFilter(self)
         StyleSheet.MESSAGE_INPUT.apply(self)
@@ -2884,27 +2883,27 @@ class MessageInput(QWidget):
         return super().eventFilter(watched, event)
 
     def _update_overlay_positions(self) -> None:
-        """Place the send and voice-message buttons inside the text input area."""
+        """Place the send and voice-message buttons on the bottom toolbar row."""
         if self.composer_layout is not None:
             self.composer_layout.activate()
         self.card_layout.activate()
         self.main_layout.activate()
-        text_rect = self.text_input.geometry()
-        if not text_rect.isValid():
+        toolbar_rect = self.toolbar_widget.geometry()
+        if not toolbar_rect.isValid():
             return
 
         button_margin_right = 14
-        button_margin_bottom = 14
         button_gap = 8
         button_row_width = self.voice_message_button.width() + button_gap + self.send_button.width()
-        voice_x = text_rect.x() + text_rect.width() - button_row_width - button_margin_right
-        send_y = text_rect.y() + text_rect.height() - self.send_button.height() - button_margin_bottom
+        voice_x = toolbar_rect.x() + toolbar_rect.width() - button_row_width - button_margin_right
         composer_rect = self.composer_widget.rect()
         voice_x = max(composer_rect.left(), min(voice_x, composer_rect.right() - button_row_width))
         send_x = voice_x + self.voice_message_button.width() + button_gap
         send_x = max(composer_rect.left(), min(send_x, composer_rect.right() - self.send_button.width()))
+        send_y = toolbar_rect.y() + max(0, (toolbar_rect.height() - self.send_button.height()) // 2)
         send_y = max(composer_rect.top(), min(send_y, composer_rect.bottom() - self.send_button.height()))
-        voice_y = send_y + max(0, (self.send_button.height() - self.voice_message_button.height()) // 2)
+        voice_y = toolbar_rect.y() + max(0, (toolbar_rect.height() - self.voice_message_button.height()) // 2)
+        voice_y = max(composer_rect.top(), min(voice_y, composer_rect.bottom() - self.voice_message_button.height()))
         self.voice_message_button.move(voice_x, voice_y)
         self.send_button.move(send_x, send_y)
 
