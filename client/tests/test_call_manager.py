@@ -124,6 +124,112 @@ def test_call_manager_tracks_incoming_invite_accept_and_ice_signal(monkeypatch) 
     assert fake_event_bus.emitted[-1][0] == CallEvent.SIGNAL
 
 
+def test_call_manager_keeps_call_active_when_media_signal_error_returns(monkeypatch) -> None:
+    fake_conn = FakeConnectionManager()
+    fake_event_bus = FakeEventBus()
+
+    monkeypatch.setattr(call_manager_module, "get_connection_manager", lambda: fake_conn)
+    monkeypatch.setattr(call_manager_module, "get_event_bus", lambda: fake_event_bus)
+
+    async def scenario() -> None:
+        manager = CallManager()
+        manager.set_user_id("bob")
+        await manager.initialize()
+
+        await fake_conn.dispatch(
+            {
+                "type": "call_invite",
+                "data": {
+                    "call_id": "call-1",
+                    "session_id": "session-1",
+                    "initiator_id": "alice",
+                    "recipient_id": "bob",
+                    "media_type": "video",
+                    "status": "invited",
+                },
+            }
+        )
+        assert await manager.accept_call("call-1") is True
+        await fake_conn.dispatch(
+            {
+                "type": "call_accept",
+                "data": {
+                    "call_id": "call-1",
+                    "session_id": "session-1",
+                    "initiator_id": "alice",
+                    "recipient_id": "bob",
+                    "media_type": "video",
+                    "status": "accepted",
+                    "actor_id": "bob",
+                },
+            }
+        )
+
+        assert await manager.send_ice_candidate(
+            "call-1",
+            {"candidate": "candidate:1 1 udp 1 127.0.0.1 5000 typ host"},
+        ) is True
+
+        ice_message = fake_conn.sent[-1]
+        assert ice_message["type"] == "call_ice"
+        assert ice_message["msg_id"]
+        assert ice_message["msg_id"] != "call-1"
+
+        await fake_conn.dispatch(
+            {
+                "type": "error",
+                "msg_id": ice_message["msg_id"],
+                "data": {"code": 422, "message": "invalid ice candidate"},
+            }
+        )
+
+        assert manager.active_call is not None
+        assert manager.active_call.call_id == "call-1"
+        assert manager.active_call.status == "accepted"
+        assert [event_type for event_type, _ in fake_event_bus.emitted].count(CallEvent.FAILED) == 0
+
+    asyncio.run(scenario())
+
+
+def test_call_manager_marks_call_failed_when_invite_error_returns(monkeypatch) -> None:
+    fake_conn = FakeConnectionManager()
+    fake_event_bus = FakeEventBus()
+
+    monkeypatch.setattr(call_manager_module, "get_connection_manager", lambda: fake_conn)
+    monkeypatch.setattr(call_manager_module, "get_event_bus", lambda: fake_event_bus)
+
+    async def scenario() -> None:
+        manager = CallManager()
+        manager.set_user_id("alice")
+        await manager.initialize()
+
+        session = Session(
+            session_id="session-1",
+            name="Bob",
+            session_type="direct",
+            participant_ids=["alice", "bob"],
+            extra={"counterpart_id": "bob"},
+        )
+
+        active_call = await manager.start_call(session, "voice")
+        invite_message = fake_conn.sent[-1]
+        await fake_conn.dispatch(
+            {
+                "type": "error",
+                "msg_id": invite_message["msg_id"],
+                "data": {"code": 409, "message": "account already in another call"},
+            }
+        )
+
+        assert manager.active_call is None
+        assert fake_event_bus.emitted[-1][0] == CallEvent.FAILED
+        assert fake_event_bus.emitted[-1][1]["call"] is active_call
+        assert fake_event_bus.emitted[-1][1]["call"].status == "failed"
+        assert fake_event_bus.emitted[-1][1]["call"].reason == "account already in another call"
+
+    asyncio.run(scenario())
+
+
 def test_call_manager_ignores_empty_or_stale_call_payloads(monkeypatch) -> None:
     fake_conn = FakeConnectionManager()
     fake_event_bus = FakeEventBus()

@@ -45,6 +45,10 @@ class CallManager:
         CallStatus.BUSY.value,
         CallStatus.TIMEOUT.value,
     }
+    FATAL_ACTION_ERROR_TYPES = {
+        "call_invite",
+        "call_accept",
+    }
 
     SIGNALING_EVENT_TYPES = {
         "call_invite",
@@ -68,6 +72,7 @@ class CallManager:
         self._initialized = False
         self._timing_origins: dict[str, float] = {}
         self._local_accepting_call_ids: set[str] = set()
+        self._pending_call_actions: dict[str, tuple[str, str]] = {}
 
     @property
     def active_call(self) -> Optional[ActiveCallState]:
@@ -89,6 +94,7 @@ class CallManager:
         self._user_id = ""
         self._active_call = None
         self._timing_origins.clear()
+        self._pending_call_actions.clear()
         self._initialized = False
         global _call_manager
         if _call_manager is self:
@@ -100,6 +106,7 @@ class CallManager:
         if not self._user_id:
             self._cancel_unanswered_timeout()
             self._active_call = None
+            self._pending_call_actions.clear()
 
     async def start_call(self, session: Session, media_type: str) -> ActiveCallState:
         """Start one outbound voice or video call invite."""
@@ -119,6 +126,7 @@ class CallManager:
             self._user_id,
             session.supports_call() if hasattr(session, "supports_call") else None,
         )
+        msg_id = self._register_pending_call_action(call_id, "call_invite")
         sent = await self._conn_manager.send_call_event(
             "call_invite",
             {
@@ -127,9 +135,10 @@ class CallManager:
                 "media_type": normalized_media_type,
                 "target_user_id": peer_user_id,
             },
-            msg_id=call_id,
+            msg_id=msg_id,
         )
         if not sent:
+            self._pending_call_actions.pop(msg_id, None)
             logger.warning(
                 "[call-diag] start_call_transport_failed session_id=%s call_id=%s media_type=%s",
                 session.session_id,
@@ -164,12 +173,14 @@ class CallManager:
             raise ValidationError("call is not waiting for acceptance")
         self._log_timing(normalized_call_id, "accept_requested")
         self._local_accepting_call_ids.add(normalized_call_id)
+        msg_id = self._register_pending_call_action(normalized_call_id, "call_accept")
         sent = await self._conn_manager.send_call_event(
             "call_accept",
             {"call_id": normalized_call_id},
-            msg_id=normalized_call_id,
+            msg_id=msg_id,
         )
         if not sent:
+            self._pending_call_actions.pop(msg_id, None)
             self._local_accepting_call_ids.discard(normalized_call_id)
         return sent
 
@@ -183,11 +194,15 @@ class CallManager:
             raise ValidationError("only incoming calls can be rejected")
         if active_call.status not in {CallStatus.INVITING.value, "invited", CallStatus.RINGING.value}:
             raise ValidationError("call is no longer rejectable")
-        return await self._conn_manager.send_call_event(
+        msg_id = self._register_pending_call_action(normalized_call_id, "call_reject")
+        sent = await self._conn_manager.send_call_event(
             "call_reject",
             {"call_id": normalized_call_id},
-            msg_id=normalized_call_id,
+            msg_id=msg_id,
         )
+        if not sent:
+            self._pending_call_actions.pop(msg_id, None)
+        return sent
 
     async def hangup_call(self, call_id: str, *, reason: str | None = None) -> bool:
         """Hang up one current call."""
@@ -199,11 +214,15 @@ class CallManager:
         normalized_reason = str(reason or "").strip().lower()
         if normalized_reason:
             payload["reason"] = normalized_reason
-        return await self._conn_manager.send_call_event(
+        msg_id = self._register_pending_call_action(normalized_call_id, "call_hangup")
+        sent = await self._conn_manager.send_call_event(
             "call_hangup",
             payload,
-            msg_id=normalized_call_id,
+            msg_id=msg_id,
         )
+        if not sent:
+            self._pending_call_actions.pop(msg_id, None)
+        return sent
 
     async def send_ringing(self, call_id: str) -> bool:
         """Notify the caller that the local user is being alerted."""
@@ -216,11 +235,15 @@ class CallManager:
         if active_call.status not in {CallStatus.INVITING.value, "invited", CallStatus.RINGING.value}:
             raise ValidationError("call is no longer ringable")
         self._log_timing(normalized_call_id, "ringing_requested")
-        return await self._conn_manager.send_call_event(
+        msg_id = self._register_pending_call_action(normalized_call_id, "call_ringing")
+        sent = await self._conn_manager.send_call_event(
             "call_ringing",
             {"call_id": normalized_call_id},
-            msg_id=normalized_call_id,
+            msg_id=msg_id,
         )
+        if not sent:
+            self._pending_call_actions.pop(msg_id, None)
+        return sent
 
     async def send_offer(self, call_id: str, sdp: dict[str, Any]) -> bool:
         """Forward one WebRTC offer."""
@@ -252,7 +275,11 @@ class CallManager:
             active_call.status,
             sorted(list(payload.keys())),
         )
-        return await self._conn_manager.send_call_event(event_type, payload, msg_id=normalized_call_id)
+        msg_id = self._register_pending_call_action(normalized_call_id, event_type)
+        sent = await self._conn_manager.send_call_event(event_type, payload, msg_id=msg_id)
+        if not sent:
+            self._pending_call_actions.pop(msg_id, None)
+        return sent
 
     async def _handle_ws_message(self, message: dict[str, Any]) -> None:
         """React to websocket signaling events relevant to calls."""
@@ -331,6 +358,7 @@ class CallManager:
         local_media_endpoint = self._is_local_media_endpoint_for_accept(state)
         if status == CallStatus.ACCEPTED and not local_media_endpoint:
             self._active_call = None
+            self._clear_pending_call_actions(state.call_id)
         await self._event_bus.emit(
             event_type,
             {"call": state, "payload": payload, "is_local_media_endpoint": local_media_endpoint},
@@ -346,6 +374,7 @@ class CallManager:
         await self._event_bus.emit(event_type, {"call": state, "payload": payload})
         self._timing_origins.pop(state.call_id, None)
         self._local_accepting_call_ids.discard(state.call_id)
+        self._clear_pending_call_actions(state.call_id)
         self._active_call = None
 
     async def _handle_busy(self, payload: dict[str, Any]) -> None:
@@ -355,6 +384,7 @@ class CallManager:
         self._cancel_unanswered_timeout()
         await self._event_bus.emit(CallEvent.BUSY, {"call": state, "payload": payload})
         self._timing_origins.pop(state.call_id, None)
+        self._clear_pending_call_actions(state.call_id)
         self._active_call = None
 
     async def _handle_error_message(self, message: dict[str, Any]) -> None:
@@ -363,15 +393,43 @@ class CallManager:
         payload = message.get("data", {}) if isinstance(message.get("data"), dict) else {}
         payload_call_id = str(payload.get("call_id") or "").strip()
         msg_id = str(message.get("msg_id") or "").strip()
-        if payload_call_id != self._active_call.call_id and msg_id != self._active_call.call_id:
+        pending_action = self._pending_call_actions.pop(msg_id, None) if msg_id else None
+        pending_call_id = pending_action[0] if pending_action is not None else ""
+        pending_event_type = pending_action[1] if pending_action is not None else ""
+        active_call = self._active_call
+        if pending_action is not None and pending_call_id != active_call.call_id:
+            logger.warning(
+                "[call-diag] stale_call_action_error call_id=%s active_call_id=%s msg_id=%s action=%s code=%s payload=%s",
+                pending_call_id,
+                active_call.call_id,
+                msg_id,
+                pending_event_type,
+                payload.get("code"),
+                payload,
+            )
             return
-        failed_call = self._active_call
+        if pending_action is None and payload_call_id != active_call.call_id and msg_id != active_call.call_id:
+            return
+        reason = str(payload.get("message") or "Call signaling failed")
+        if pending_event_type and pending_event_type not in self.FATAL_ACTION_ERROR_TYPES:
+            logger.warning(
+                "[call-diag] nonfatal_call_action_error call_id=%s msg_id=%s action=%s code=%s reason=%s payload=%s",
+                active_call.call_id,
+                msg_id,
+                pending_event_type,
+                payload.get("code"),
+                reason,
+                payload,
+            )
+            return
+        failed_call = active_call
         failed_call.status = CallStatus.FAILED.value
-        failed_call.reason = str(payload.get("message") or "Call signaling failed")
+        failed_call.reason = reason
         logger.warning(
-            "[call-diag] inbound_call_error call_id=%s msg_id=%s code=%s reason=%s payload=%s",
+            "[call-diag] inbound_call_error call_id=%s msg_id=%s action=%s code=%s reason=%s payload=%s",
             payload_call_id or failed_call.call_id,
             msg_id,
+            pending_event_type,
             payload.get("code"),
             failed_call.reason,
             payload,
@@ -380,7 +438,27 @@ class CallManager:
         await self._event_bus.emit(CallEvent.FAILED, {"call": failed_call, "payload": payload})
         self._timing_origins.pop(failed_call.call_id, None)
         self._local_accepting_call_ids.discard(failed_call.call_id)
+        self._clear_pending_call_actions(failed_call.call_id)
         self._active_call = None
+
+    def _register_pending_call_action(self, call_id: str, event_type: str) -> str:
+        normalized_call_id = str(call_id or "").strip()
+        normalized_event_type = str(event_type or "").strip()
+        msg_id = f"{normalized_call_id}:{normalized_event_type}:{uuid.uuid4().hex}"
+        self._pending_call_actions[msg_id] = (normalized_call_id, normalized_event_type)
+        return msg_id
+
+    def _clear_pending_call_actions(self, call_id: str) -> None:
+        normalized_call_id = str(call_id or "").strip()
+        if not normalized_call_id:
+            return
+        stale_msg_ids = [
+            msg_id
+            for msg_id, (pending_call_id, _) in self._pending_call_actions.items()
+            if pending_call_id == normalized_call_id
+        ]
+        for msg_id in stale_msg_ids:
+            self._pending_call_actions.pop(msg_id, None)
 
     def _arm_unanswered_timeout(self, call_id: str) -> None:
         self._cancel_unanswered_timeout()
