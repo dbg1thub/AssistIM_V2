@@ -4,10 +4,9 @@ from __future__ import annotations
 
 from PySide6.QtCore import QEvent, QPoint, Qt
 from PySide6.QtGui import QColor
-from PySide6.QtWidgets import QDialog, QFrame, QGraphicsDropShadowEffect, QHBoxLayout, QSizePolicy, QVBoxLayout, QWidget
-from qfluentwidgets import SubtitleLabel, TransparentToolButton, isDarkTheme, qconfig
-
-from client.core.app_icons import AppIcon
+from PySide6.QtWidgets import QDialog, QFrame, QHBoxLayout, QSizePolicy, QVBoxLayout, QWidget
+from qfluentwidgets import SubtitleLabel, isDarkTheme, qconfig
+from qframelesswindow.titlebar.title_bar_buttons import CloseButton
 
 
 class FluentDialog(QDialog):
@@ -32,19 +31,13 @@ class FluentDialog(QDialog):
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
 
         self.shell_layout = QVBoxLayout(self)
-        self.shell_layout.setContentsMargins(16, 16, 16, 16)
+        self.shell_layout.setContentsMargins(0, 0, 0, 0)
         self.shell_layout.setSpacing(0)
 
         self.surface = QFrame(self)
         self.surface.setObjectName("fluentDialogSurface")
         self.surface.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.shell_layout.addWidget(self.surface)
-
-        shadow = QGraphicsDropShadowEffect(self.surface)
-        shadow.setBlurRadius(36)
-        shadow.setOffset(0, 12)
-        shadow.setColor(QColor(0, 0, 0, 72))
-        self.surface.setGraphicsEffect(shadow)
 
         self.surface_layout = QVBoxLayout(self.surface)
         self.surface_layout.setContentsMargins(0, 0, 0, 0)
@@ -56,7 +49,7 @@ class FluentDialog(QDialog):
         self.title_bar.installEventFilter(self)
 
         title_layout = QHBoxLayout(self.title_bar)
-        title_layout.setContentsMargins(20, 0, 8, 0)
+        title_layout.setContentsMargins(20, 0, 0, 0)
         title_layout.setSpacing(8)
 
         self.title_label = SubtitleLabel(str(title or ""), self.title_bar)
@@ -64,13 +57,12 @@ class FluentDialog(QDialog):
         self.title_label.setMinimumWidth(0)
         self.title_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
 
-        self.close_button = TransparentToolButton(AppIcon.CLOSE, self.title_bar)
+        self.close_button = CloseButton(self.title_bar)
         self.close_button.setObjectName("fluentDialogCloseButton")
-        self.close_button.setFixedSize(36, 36)
         self.close_button.clicked.connect(self.close)
 
         title_layout.addWidget(self.title_label, 1, Qt.AlignmentFlag.AlignVCenter)
-        title_layout.addWidget(self.close_button, 0, Qt.AlignmentFlag.AlignVCenter)
+        title_layout.addWidget(self.close_button, 0, Qt.AlignmentFlag.AlignTop)
 
         self.content_widget = QWidget(self.surface)
         self.content_widget.setObjectName("fluentDialogContent")
@@ -111,8 +103,12 @@ class FluentDialog(QDialog):
 
     def _apply_fluent_surface(self) -> None:
         dark = isDarkTheme()
-        border = "rgba(255, 255, 255, 34)" if dark else "rgba(15, 23, 42, 24)"
-        background = "rgba(32, 32, 32, 210)" if dark else "rgba(240, 244, 249, 226)"
+        border = "#3A3A3A" if dark else "#D1D5DB"
+        background = "#202020" if dark else "#FFFFFF"
+        text_color = QColor(255, 255, 255) if dark else QColor(0, 0, 0)
+        self.close_button.setNormalColor(text_color)
+        self.close_button.setHoverColor(QColor(255, 255, 255))
+        self.close_button.setPressedColor(QColor(255, 255, 255))
         self.surface.setStyleSheet(
             f"""
             QFrame#fluentDialogSurface {{

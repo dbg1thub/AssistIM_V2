@@ -85,6 +85,12 @@ def test_add_friend_dialog_uses_fluent_dialog_without_frameless_window() -> None
     assert dialog_source_path.exists()
     dialog_source = dialog_source_path.read_text(encoding="utf-8")
     assert "class FluentDialog(QDialog):" in dialog_source
+    assert "CloseButton" in dialog_source
+    assert "self.close_button = CloseButton" in dialog_source
+    assert "TransparentToolButton" not in dialog_source
+    assert "QGraphicsDropShadowEffect" not in dialog_source
+    assert "rgba(" not in dialog_source
+    assert 'background = "#202020" if dark else "#FFFFFF"' in dialog_source
     assert "def nativeEvent(" not in dialog_source
     assert "WindowsFramelessWindow" not in dialog_source
     assert "setMicaEffect" not in dialog_source
