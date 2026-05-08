@@ -62,6 +62,8 @@ class MessageEvent:
     DECRYPTION_STATE_CHANGED = "message_decryption_state_changed"
     RECOVERED = "message_recovered"
     SECURITY_PENDING = "message_security_pending"
+    HISTORY_CLEARING = "message_history_clearing"
+    HISTORY_CLEARED = "message_history_cleared"
 
 
 class MessageFailureCode:
@@ -3180,8 +3182,8 @@ class MessageManager:
         })
         return result
 
-    async def remove_session_local_state(self, session_id: str, history_cutoff: Optional[float] = None) -> None:
-        """Cancel message-side local state for one removed session."""
+    async def _release_session_message_runtime_state(self, session_id: str) -> None:
+        """Cancel runtime-only message state and cached attachment files for one session."""
         normalized_session_id = str(session_id or "").strip()
         if not normalized_session_id:
             return
@@ -3228,6 +3230,44 @@ class MessageManager:
             except OSError as exc:
                 logger.debug("Failed to remove cached attachment %s: %s", local_path, exc)
 
+    async def clear_session_history(self, session_id: str, history_cutoff: Optional[float] = None) -> dict[str, object]:
+        """Clear local message history for one session while keeping the session itself."""
+        normalized_session_id = str(session_id or "").strip()
+        if not normalized_session_id:
+            return {"session_id": "", "history_cutoff": None, "cleared": False}
+
+        cutoff = float(history_cutoff if history_cutoff is not None else time.time())
+        await self._release_session_message_runtime_state(normalized_session_id)
+
+        await self._event_bus.emit(
+            MessageEvent.HISTORY_CLEARING,
+            {
+                "session_id": normalized_session_id,
+                "history_cutoff": cutoff,
+            },
+        )
+
+        if self._db.is_connected:
+            await self._db.delete_session_messages(normalized_session_id)
+
+        await self._set_session_history_cutoff(normalized_session_id, cutoff)
+        await self._event_bus.emit(
+            MessageEvent.HISTORY_CLEARED,
+            {
+                "session_id": normalized_session_id,
+                "history_cutoff": cutoff,
+            },
+        )
+        logger.info("Local session history cleared: %s", normalized_session_id)
+        return {"session_id": normalized_session_id, "history_cutoff": cutoff, "cleared": True}
+
+    async def remove_session_local_state(self, session_id: str, history_cutoff: Optional[float] = None) -> None:
+        """Cancel message-side local state for one removed session."""
+        normalized_session_id = str(session_id or "").strip()
+        if not normalized_session_id:
+            return
+
+        await self._release_session_message_runtime_state(normalized_session_id)
         if history_cutoff is not None:
             await self._set_session_history_cutoff(normalized_session_id, float(history_cutoff))
 

@@ -100,6 +100,8 @@ class ConversationSummaryManager:
         await self._subscribe(MessageEvent.EDITED, self._on_message_event)
         await self._subscribe(MessageEvent.RECALLED, self._on_message_event)
         await self._subscribe(MessageEvent.DELETED, self._on_message_event)
+        await self._subscribe(MessageEvent.HISTORY_CLEARING, self._on_session_history_clearing)
+        await self._subscribe(MessageEvent.HISTORY_CLEARED, self._on_session_history_cleared)
         await self._subscribe(SessionEvent.DELETED, self._on_session_deleted)
         self._initialized = True
 
@@ -144,6 +146,43 @@ class ConversationSummaryManager:
         if not session_id:
             return
         self._deleted_session_ids.add(session_id)
+        self._cancel_session_tasks(session_id)
+
+    async def _on_session_history_clearing(self, payload: dict[str, Any] | None) -> None:
+        """Drop local AI memory for a session before its summary rows are removed."""
+        session_id = str(dict(payload or {}).get("session_id") or "").strip()
+        if not session_id:
+            return
+        self._cancel_session_tasks(session_id)
+        if not self._db.is_connected:
+            return
+
+        list_bucket_keys = getattr(self._db, "list_conversation_summary_bucket_keys", None)
+        if not callable(list_bucket_keys):
+            return
+        try:
+            bucket_start_values = await list_bucket_keys(session_id)
+        except Exception:
+            logger.exception(
+                "Failed to list conversation summary buckets before clearing local history session_id=%s",
+                session_id,
+            )
+            return
+
+        for bucket_start_ts in bucket_start_values:
+            try:
+                normalized_bucket_start_ts = int(bucket_start_ts or 0)
+            except (TypeError, ValueError):
+                continue
+            if normalized_bucket_start_ts <= 0:
+                continue
+            await self._delete_memory_item_for_bucket(session_id, normalized_bucket_start_ts)
+
+    async def _on_session_history_cleared(self, payload: dict[str, Any] | None) -> None:
+        """Cancel queued summary work after local history is cleared."""
+        session_id = str(dict(payload or {}).get("session_id") or "").strip()
+        if not session_id:
+            return
         self._cancel_session_tasks(session_id)
 
     async def _process_message(self, session_id: str, message: ChatMessage) -> None:

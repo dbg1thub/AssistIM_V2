@@ -1516,6 +1516,23 @@ class Database:
         rows = await cursor.fetchall()
         return [dict(row) for row in rows]
 
+    async def list_conversation_summary_bucket_keys(self, session_id: str) -> list[int]:
+        """Return all summary bucket start timestamps for one session."""
+        normalized_session_id = str(session_id or "").strip()
+        if not normalized_session_id:
+            return []
+        cursor = await self._db.execute(
+            """
+            SELECT bucket_start_ts
+            FROM conversation_summary_buckets
+            WHERE session_id = ?
+            ORDER BY bucket_start_ts ASC
+            """,
+            (normalized_session_id,),
+        )
+        rows = await cursor.fetchall()
+        return [int(row["bucket_start_ts"] or 0) for row in rows if int(row["bucket_start_ts"] or 0) > 0]
+
     async def list_conversation_summary_buckets_for_rebuild(
         self,
         *,
@@ -4014,6 +4031,26 @@ class Database:
             )
             await self._db.execute(
                 "DELETE FROM session_read_cursors WHERE session_id = ?",
+                (session_id,),
+            )
+            await self._db.execute(
+                "DELETE FROM conversation_summary_buckets WHERE session_id = ?",
+                (session_id,),
+            )
+            await self._db.execute(
+                "DELETE FROM conversation_summary_media_cache WHERE session_id = ?",
+                (session_id,),
+            )
+            await self._db.execute(
+                "DELETE FROM conversation_memory_index WHERE session_id = ?",
+                (session_id,),
+            )
+            await self._db.execute(
+                "DELETE FROM conversation_memory_embeddings WHERE session_id = ?",
+                (session_id,),
+            )
+            await self._db.execute(
+                "DELETE FROM conversation_memory_ann_buckets WHERE session_id = ?",
                 (session_id,),
             )
         logger.debug(f"Messages deleted for session: {session_id}")

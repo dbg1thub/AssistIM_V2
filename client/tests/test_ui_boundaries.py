@@ -1179,8 +1179,12 @@ def test_chat_info_member_management_uses_formal_dialog_boundary() -> None:
     assert 'self.chat_panel.chat_info_clear_requested.connect(self._on_chat_info_clear_requested)' in chat_interface
     assert 'self.chat_panel.chat_info_show_nickname_toggled.connect(self._on_chat_info_show_nickname_toggled)' in chat_interface
     assert 'self.chat_panel.chat_info_member_management_requested.connect(self._on_chat_info_member_management_requested)' in chat_interface
+    assert 'class ClearChatHistoryConfirmDialog(MessageBoxBase):' in chat_interface
+    assert 'self._subscribe_sync(MessageEvent.HISTORY_CLEARED, self._on_history_cleared_event)' in chat_interface
+    assert 'self._session_controller.clear_session_history(session_id)' in chat_interface
     assert 'dialog = GroupMemberManagementDialog(' in chat_interface
     assert 'def _show_dialog(self, dialog: QDialog) -> None:' in chat_interface
+    assert 'async def clear_session_history(self, session_id: str) -> dict[str, Any]:' in session_controller
     assert 'self._session_controller.set_group_member_nickname_visibility(session_id, _enabled)' in chat_interface
     assert 'def _group_record_payload(record) -> dict[str, object]:' in chat_interface
     assert 'class GroupManagementPermissions:' in dialogs

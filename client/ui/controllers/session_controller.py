@@ -68,6 +68,10 @@ class SessionController:
         """Remove a session."""
         await self._session_manager.remove_session(session_id)
 
+    async def clear_session_history(self, session_id: str) -> dict[str, Any]:
+        """Clear local messages for a session while keeping the conversation visible."""
+        return await self._session_manager.clear_session_history(session_id)
+
     async def set_pinned(self, session_id: str, pinned: bool) -> None:
         """Persist pinned state for a session."""
         await self._session_manager.set_pinned(session_id, pinned)

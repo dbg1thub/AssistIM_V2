@@ -2884,6 +2884,47 @@ class SessionManager:
 
             logger.info(f"Session removed: {session_id}")
 
+    async def clear_session_history(self, session_id: str) -> dict[str, object]:
+        """Clear one session's local chat history without hiding the session."""
+        normalized_session_id = str(session_id or "").strip()
+        if not normalized_session_id:
+            return {"session_id": "", "history_cutoff": None, "cleared": False}
+
+        owner_user_id = self._capture_runtime_user_id()
+        async with self._lock:
+            session = self._sessions.get(normalized_session_id)
+            cutoff = max(
+                self._session_activity_timestamp(session) if session is not None else 0.0,
+                time.time(),
+            )
+
+        if session is None:
+            return {"session_id": normalized_session_id, "history_cutoff": None, "cleared": False}
+
+        self._ensure_runtime_user_id(owner_user_id)
+        result = await self._msg_manager.clear_session_history(normalized_session_id, history_cutoff=cutoff)
+
+        changed_session: Session | None = None
+        async with self._lock:
+            session = self._sessions.get(normalized_session_id)
+            if session is not None:
+                await self._apply_local_history_cutoff_presentation(session)
+                changed_session = session
+
+        if changed_session is not None:
+            db = get_database()
+            if db.is_connected:
+                self._ensure_runtime_user_id(owner_user_id)
+                await db.save_session(changed_session)
+
+            self._ensure_runtime_user_id(owner_user_id)
+            await self._event_bus.emit(SessionEvent.UPDATED, {
+                "session": changed_session,
+            })
+
+        logger.info("Session local history cleared: %s", normalized_session_id)
+        return result
+
     async def set_pinned(self, session_id: str, pinned: bool) -> None:
         """Persist pinned state for a session and refresh the list."""
         async with self._lock:

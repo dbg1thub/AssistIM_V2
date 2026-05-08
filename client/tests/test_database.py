@@ -2442,6 +2442,16 @@ def test_database_summary_tables_follow_session_delete_and_clear_chat_state() ->
                 assert ann_rows["count"] == 0
 
                 await database.save_session(session)
+                await database.save_message(
+                    ChatMessage(
+                        message_id="m-clear-1",
+                        session_id="session-1",
+                        sender_id="user-2",
+                        content="clear me",
+                        message_type=MessageType.TEXT,
+                        status=MessageStatus.RECEIVED,
+                    )
+                )
                 await database.upsert_conversation_summary_bucket(
                     {
                         "session_id": "session-1",
@@ -2464,6 +2474,103 @@ def test_database_summary_tables_follow_session_delete_and_clear_chat_state() ->
                         "updated_at": now + 1,
                     }
                 )
+                await database.upsert_conversation_memory_item(
+                    {
+                        "session_id": "session-1",
+                        "source_type": "summary",
+                        "source_id": "summary:clear",
+                        "source_version": 1,
+                        "start_ts": now + 1,
+                        "end_ts": now + 1,
+                        "title": "待清理摘要",
+                        "text": "待清理摘要正文",
+                        "keywords": ["清理"],
+                        "participants": ["Bob"],
+                        "embedding_id": "session-1|summary|summary:clear",
+                        "embedding_model": "fake-embedding-model",
+                        "created_at": now + 1,
+                        "updated_at": now + 1,
+                    }
+                )
+                await database.upsert_conversation_memory_embedding(
+                    {
+                        "session_id": "session-1",
+                        "source_type": "summary",
+                        "source_id": "summary:clear",
+                        "source_version": 1,
+                        "embedding_model": "fake-embedding-model",
+                        "content_hash": "hash-clear",
+                        "embedding_vector": [1.0, 2.0, 3.0],
+                        "created_at": now + 1,
+                        "updated_at": now + 1,
+                    }
+                )
+                await database.replace_conversation_memory_ann_buckets(
+                    embedding_id="session-1|summary|summary:clear",
+                    session_id="session-1",
+                    source_type="summary",
+                    source_id="summary:clear",
+                    ann_namespace="srp-lsh-v1:test:8x8",
+                    buckets=[(0, "0c")],
+                    created_at=now + 1,
+                    updated_at=now + 1,
+                )
+
+                assert await database.list_conversation_summary_bucket_keys("session-1") == [now + 1]
+
+                await database.delete_session_messages("session-1")
+
+                session_after_clear = await database.get_session("session-1")
+                assert session_after_clear is not None
+                message_rows_after_clear_history = await (await database._db.execute(
+                    "SELECT COUNT(*) AS count FROM messages WHERE session_id = ?",
+                    ("session-1",),
+                )).fetchone()
+                bucket_rows_after_clear_history = await (await database._db.execute(
+                    "SELECT COUNT(*) AS count FROM conversation_summary_buckets WHERE session_id = ?",
+                    ("session-1",),
+                )).fetchone()
+                memory_rows_after_clear_history = await (await database._db.execute(
+                    "SELECT COUNT(*) AS count FROM conversation_memory_index WHERE session_id = ?",
+                    ("session-1",),
+                )).fetchone()
+                embedding_rows_after_clear_history = await (await database._db.execute(
+                    "SELECT COUNT(*) AS count FROM conversation_memory_embeddings WHERE session_id = ?",
+                    ("session-1",),
+                )).fetchone()
+                ann_rows_after_clear_history = await (await database._db.execute(
+                    "SELECT COUNT(*) AS count FROM conversation_memory_ann_buckets WHERE session_id = ?",
+                    ("session-1",),
+                )).fetchone()
+                assert message_rows_after_clear_history["count"] == 0
+                assert bucket_rows_after_clear_history["count"] == 0
+                assert memory_rows_after_clear_history["count"] == 0
+                assert embedding_rows_after_clear_history["count"] == 0
+                assert ann_rows_after_clear_history["count"] == 0
+
+                await database.upsert_conversation_summary_bucket(
+                    {
+                        "session_id": "session-1",
+                        "bucket_start_ts": now + 2,
+                        "bucket_end_ts": now + 2,
+                        "bucket_rule_version": 1,
+                        "is_open": True,
+                        "anchor_message_id": "m-3",
+                        "last_message_id": "m-3",
+                        "last_message_ts": now + 2,
+                        "message_count": 1,
+                        "summary_status": "ready",
+                        "summary_text_ciphertext": "enc:summary-3",
+                        "summary_json_ciphertext": "",
+                        "summary_version": 1,
+                        "media_item_count": 0,
+                        "error_code": "",
+                        "notified_at": None,
+                        "created_at": now + 2,
+                        "updated_at": now + 2,
+                    }
+                )
+
                 await database.clear_chat_state()
 
                 bucket_rows = await (await database._db.execute(

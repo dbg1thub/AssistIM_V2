@@ -261,6 +261,13 @@ class _FakeDatabase:
         items.sort(key=lambda item: (int(item.get("end_ts") or 0), int(item.get("start_ts") or 0)), reverse=True)
         return items[: max(1, int(limit or 1))]
 
+    async def list_conversation_summary_bucket_keys(self, session_id: str) -> list[int]:
+        return sorted(
+            int(bucket_start_ts)
+            for (bucket_session_id, bucket_start_ts) in self.buckets
+            if bucket_session_id == session_id
+        )
+
     async def get_app_state(self, key: str):
         return self.app_state.get(str(key or ""))
 
@@ -578,6 +585,65 @@ def test_conversation_summary_manager_deletes_summary_from_ai_memory_store() -> 
                 "conversation:session-1:summary:1776583200",
             )
         ]
+
+    asyncio.run(scenario())
+
+
+def test_conversation_summary_manager_deletes_ai_memory_before_history_clear() -> None:
+    session = Session(session_id="session-1", name="Bob", session_type="direct")
+    fake_db = _FakeDatabase(session)
+    fake_task_manager = _FakeTaskManager()
+    event_bus = EventBus()
+    fake_ai_memory_store = _FakeAIMemoryStore()
+    bucket_start_values = [1776583200, 1776586800]
+    for bucket_start_ts in bucket_start_values:
+        fake_db.buckets[("session-1", bucket_start_ts)] = {
+            "session_id": "session-1",
+            "bucket_start_ts": bucket_start_ts,
+            "bucket_end_ts": bucket_start_ts + 60,
+            "is_open": False,
+            "summary_status": "ready",
+            "bucket_rule_version": 1,
+        }
+        fake_db.memory_items[("session-1", "summary", f"summary:{bucket_start_ts}")] = {
+            "session_id": "session-1",
+            "source_type": "summary",
+            "source_id": f"summary:{bucket_start_ts}",
+        }
+
+    async def scenario() -> None:
+        manager = _make_manager(
+            fake_db,
+            event_bus,
+            fake_task_manager,
+            ai_memory_store=fake_ai_memory_store,
+        )
+        await manager.initialize()
+        try:
+            await event_bus.emit(
+                MessageEvent.HISTORY_CLEARING,
+                {"session_id": "session-1", "history_cutoff": 1776590000.0},
+            )
+
+            assert fake_db.deleted_memory_sources == [
+                ("session-1", "summary", "summary:1776583200"),
+                ("session-1", "summary", "summary:1776586800"),
+            ]
+            assert fake_ai_memory_store.deleted_sources == [
+                (
+                    "account:test1",
+                    ConversationSummaryManager.AI_MEMORY_SOURCE_TYPE_SUMMARY,
+                    "conversation:session-1:summary:1776583200",
+                ),
+                (
+                    "account:test1",
+                    ConversationSummaryManager.AI_MEMORY_SOURCE_TYPE_SUMMARY,
+                    "conversation:session-1:summary:1776586800",
+                ),
+            ]
+            assert fake_db.memory_items == {}
+        finally:
+            await manager.close()
 
     asyncio.run(scenario())
 

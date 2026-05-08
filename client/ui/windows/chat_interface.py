@@ -187,6 +187,30 @@ class DeleteMessageConfirmDialog(MessageBoxBase):
         self.widget.setMinimumWidth(360)
 
 
+class ClearChatHistoryConfirmDialog(MessageBoxBase):
+    """Ask for confirmation before clearing local chat history."""
+
+    def __init__(self, session_name: str, parent=None):
+        super().__init__(parent=parent)
+        display_name = (session_name or "").strip() or tr("session.unnamed", "Untitled Session")
+        title = SubtitleLabel(tr("chat.info.clear.title", "Clear Chat History"), self.widget)
+        content = BodyLabel(
+            tr(
+                "chat.info.clear.confirm",
+                "Clear local chat history for {name}? This only affects the current device.",
+                name=display_name,
+            ),
+            self.widget,
+        )
+        content.setWordWrap(True)
+        self.viewLayout.addWidget(title)
+        self.viewLayout.addWidget(content)
+        self.viewLayout.addStretch(1)
+        self.yesButton.setText(tr("chat.info.clear.action", "Clear"))
+        self.cancelButton.setText(tr("common.cancel", "Cancel"))
+        self.widget.setMinimumWidth(380)
+
+
 class LeaveGroupConfirmDialog(MessageBoxBase):
     """Ask for confirmation before leaving one group chat."""
 
@@ -686,6 +710,7 @@ class ChatInterface(QWidget):
         self._subscribe_sync(MessageEvent.TRANSLATION_UPDATED, self._on_translation_updated)
         self._subscribe_sync(MessageEvent.VOICE_TRANSCRIPT_UPDATED, self._on_voice_transcript_updated)
         self._subscribe_sync(MessageEvent.FILE_ANALYSIS_UPDATED, self._on_file_analysis_updated)
+        self._subscribe_sync(MessageEvent.HISTORY_CLEARED, self._on_history_cleared_event)
         self._subscribe_sync(MessageEvent.SYNC_COMPLETED, self._on_sync_completed)
         self._subscribe_sync(MessageEvent.PROFILE_UPDATED, self._on_profile_updated)
         self._subscribe_sync(AITaskEvent.STARTED, self._on_ai_task_started)
@@ -1127,6 +1152,22 @@ class ChatInterface(QWidget):
         if session_id == self._current_session_id:
             self.chat_panel.remove_message(data.get("message_id", ""))
         self._schedule_ui_task(self._refresh_session_preview(session_id), f"refresh preview {session_id}")
+
+    def _on_history_cleared_event(self, data: dict) -> None:
+        """Drop visible and cached state after one session's local history is cleared."""
+        session_id = str(data.get("session_id", "") or "").strip()
+        if not session_id:
+            return
+        self._invalidate_session_caches(session_id)
+        self._last_read_receipts.pop(session_id, None)
+        self._pending_read_receipts = {
+            key for key in self._pending_read_receipts if key[0] != session_id
+        }
+        if session_id == self._current_session_id:
+            self._reset_reply_suggestion_flow(session_id=session_id, clear_ui=True)
+            self.chat_panel.clear_messages()
+        else:
+            self._ai_controller.clear_suggestions(session_id)
 
     def _on_media_ready(self, data: dict) -> None:
         """Refresh one visible message after its encrypted media finished downloading locally."""
@@ -4269,10 +4310,48 @@ class ChatInterface(QWidget):
         )
 
     def _on_chat_info_clear_requested(self) -> None:
-        """Keep the clear-history entry visible until durable sync-safe deletion is implemented."""
-        InfoBar.info(
+        """Confirm and clear local history for the current conversation."""
+        session = self._session_controller.get_current_session()
+        if session is None:
+            return
+
+        dialog = ClearChatHistoryConfirmDialog(session.chat_title() or session.display_name(), self.window())
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        self._schedule_ui_task(
+            self._clear_current_session_history_async(session.session_id),
+            f"clear session history {session.session_id}",
+        )
+
+    async def _clear_current_session_history_async(self, session_id: str) -> None:
+        """Clear one conversation's local history and refresh visible state."""
+        try:
+            result = await self._session_controller.clear_session_history(session_id)
+        except Exception:
+            logger.exception("Failed to clear local session history session_id=%s", session_id)
+            InfoBar.warning(
+                tr("chat.info.clear.title", "Clear Chat History"),
+                tr("chat.info.clear.failed", "Unable to clear this chat history right now."),
+                parent=self.window(),
+                duration=2400,
+            )
+            return
+        if not bool(result.get("cleared")):
+            InfoBar.warning(
+                tr("chat.info.clear.title", "Clear Chat History"),
+                tr("chat.info.clear.failed", "Unable to clear this chat history right now."),
+                parent=self.window(),
+                duration=2400,
+            )
+            return
+
+        if session_id == self._current_session_id:
+            self._invalidate_session_caches(session_id)
+            self.chat_panel.clear_messages()
+        InfoBar.success(
             tr("chat.info.clear.title", "Clear Chat History"),
-            tr("chat.info.clear.unavailable", "The clear-history entry is reserved. Durable sync-safe clearing will be connected next."),
+            tr("chat.info.clear.success", "Chat history cleared on this device."),
             parent=self.window(),
             duration=1800,
         )
