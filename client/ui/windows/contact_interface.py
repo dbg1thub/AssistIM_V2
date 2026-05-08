@@ -14,7 +14,6 @@ from qfluentwidgets import (
     BodyLabel,
     CaptionLabel,
     CardWidget,
-    FluentWidget,
     FluentStyleSheet,
     FlowLayout,
     IconWidget,
@@ -62,6 +61,7 @@ from client.ui.styles import StyleSheet
 from client.ui.widgets.chat_info_drawer import AcrylicDrawerSurface
 from client.ui.widgets.global_search_panel import GlobalSearchPopupOverlay
 from client.ui.widgets.fluent_divider import FluentDivider
+from client.ui.widgets.fluent_dialog import FluentDialog
 from client.ui.widgets.contact_shared import (
     CONTACT_SIDEBAR_AVATAR_SIZE,
     CONTACT_SIDEBAR_CONTENT_GAP,
@@ -1062,11 +1062,11 @@ class AcrylicToolWindow(QWidget):
         super().closeEvent(event)
 
 
-class AddFriendDialog(FluentWidget):
+class AddFriendDialog(FluentDialog):
     friend_request_sent = Signal(object)
 
     def __init__(self, controller, existing_ids: set[str], current_user_id: str = "", parent=None):
-        super().__init__(parent=parent)
+        super().__init__(parent=parent, title=tr("contact.add_friend.title", "Add Friend"))
         self._controller = controller
         self._current_user_id = str(current_user_id or "")
         self._existing_ids = set(existing_ids)
@@ -1078,22 +1078,17 @@ class AddFriendDialog(FluentWidget):
         self._deferred_close_requested = False
 
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
-        self.setWindowTitle("")
+        self.setWindowTitle(tr("contact.add_friend.title", "Add Friend"))
         self.setObjectName("AddFriendDialog")
         self.resize(560, 680)
         self.setFixedSize(560, 680)
-        if hasattr(self, "titleBar") and hasattr(self.titleBar, "titleLabel"):
-            self.titleBar.titleLabel.hide()
 
         self._setup_ui()
         self.destroyed.connect(self._on_destroyed)
 
     def _setup_ui(self) -> None:
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(24, 56, 24, 24)
-        layout.setSpacing(16)
+        layout = self.content_layout
 
-        layout.addWidget(TitleLabel(tr("contact.add_friend.title", "Add Friend"), self))
         subtitle = CaptionLabel(
             tr(
                 "contact.add_friend.subtitle",

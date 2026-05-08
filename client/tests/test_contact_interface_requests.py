@@ -76,3 +76,15 @@ def test_contact_interface_sidebar_does_not_render_contact_count_summary() -> No
 
     assert "contact.sidebar.summary" not in contact_interface_block
     assert "contactSummaryLabel" not in contact_interface_block
+
+
+def test_add_friend_dialog_uses_fluent_dialog_without_frameless_window() -> None:
+    contact_source = Path("client/ui/windows/contact_interface.py").read_text(encoding="utf-8")
+    dialog_source_path = Path("client/ui/widgets/fluent_dialog.py")
+
+    assert dialog_source_path.exists()
+    dialog_source = dialog_source_path.read_text(encoding="utf-8")
+    assert "class FluentDialog(QDialog):" in dialog_source
+    assert "def nativeEvent(" not in dialog_source
+    assert "WindowsFramelessWindow" not in dialog_source
+    assert "class AddFriendDialog(FluentDialog):" in contact_source
