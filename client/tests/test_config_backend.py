@@ -184,6 +184,22 @@ def test_network_config_separates_request_and_upload_timeouts(monkeypatch) -> No
     assert config.network.upload_timeout == 180.0
 
 
+def test_storage_config_defaults_to_sqlcipher_when_unconfigured(monkeypatch, tmp_path: Path) -> None:
+    for env_name in (
+        "ASSISTIM_DB_PATH",
+        "ASSISTIM_DB_ENCRYPTION_MODE",
+        "ASSISTIM_DB_ENCRYPTION_PROVIDER",
+    ):
+        monkeypatch.delenv(env_name, raising=False)
+    monkeypatch.setattr(config_backend_module, "UI_CONFIG_PATH", tmp_path / "missing-config.json")
+
+    config = reload_config()
+
+    assert config.storage.db_path == "data/assistim.db"
+    assert config.storage.db_encryption_mode == "sqlcipher"
+    assert config.storage.db_encryption_provider == "auto"
+
+
 def test_storage_config_reads_ui_settings_when_env_missing(monkeypatch, tmp_path: Path) -> None:
     ui_config_path = tmp_path / "config.json"
     ui_config_path.write_text(
@@ -261,7 +277,7 @@ def test_storage_config_rejects_internal_or_unknown_encryption_values(monkeypatc
 
     config = reload_config()
 
-    assert config.storage.db_encryption_mode == "plain"
+    assert config.storage.db_encryption_mode == "sqlcipher"
     assert config.storage.db_encryption_provider == "auto"
 
 

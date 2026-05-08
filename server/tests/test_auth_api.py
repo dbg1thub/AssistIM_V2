@@ -462,7 +462,7 @@ def test_update_me_rejects_invalid_profile_fields(client: TestClient, auth_heade
     )
     assert invalid_status_response.status_code == 422
 
-def test_auth_login_requires_confirmation_before_replacing_online_session(client: TestClient, auth_header) -> None:
+def test_auth_login_enforces_single_active_session_with_confirmed_replacement(client: TestClient, auth_header) -> None:
     register_response = register_user_response(client, "online-alice", nickname="Alice")
     assert register_response.status_code == 200
     register_payload = register_response.json()["data"]

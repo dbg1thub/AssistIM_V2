@@ -12,7 +12,7 @@
   },
   "Storage": {
     "DbPath": "data/assistim.db",
-    "DbEncryptionMode": "plain",
+    "DbEncryptionMode": "sqlcipher",
     "DbEncryptionProvider": "auto"
   },
   "QFluentWidgets": {
