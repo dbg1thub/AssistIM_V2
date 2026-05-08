@@ -1410,9 +1410,6 @@ class ContactInterface(QWidget):
         sidebar_layout.setContentsMargins(0, 0, 0, 0)
         sidebar_layout.setSpacing(0)
 
-        self.summary_label = CaptionLabel(tr("contact.sidebar.loading", "Loading contacts..."), sidebar)
-        self.summary_label.setObjectName("contactSummaryLabel")
-
         self.search_bar = QWidget(sidebar)
         self.search_bar.setObjectName("sessionSearchBar")
         search_row = QHBoxLayout(self.search_bar)
@@ -1609,8 +1606,8 @@ class ContactInterface(QWidget):
         """Return whether sidebar/detail widgets are still safe to touch."""
         if self._destroyed or not is_valid_qt_object(self):
             return False
-        summary_label = getattr(self, "summary_label", None)
-        return summary_label is not None and is_valid_qt_object(summary_label)
+        page_stack = getattr(self, "page_stack", None)
+        return page_stack is not None and is_valid_qt_object(page_stack)
 
     async def _refresh_requests_slice_async(self) -> None:
         self._requests = await self._controller.load_requests()
@@ -1845,7 +1842,10 @@ class ContactInterface(QWidget):
         return sorted(self._requests, key=self._request_sort_key)
 
     def _visible_requests(self) -> list[FriendRequestRecord]:
-        return [request for request in self._ordered_requests() if request.status == "pending"]
+        return [request for request in self._ordered_requests() if self._is_visible_request(request)]
+
+    def _is_visible_request(self, request: FriendRequestRecord) -> bool:
+        return request.status == "pending" and request.is_incoming(self._current_user_id)
 
     def _request_sort_key(self, request: FriendRequestRecord) -> tuple[int, float, str]:
         """Keep request ordering stable across reload and realtime upsert paths."""
@@ -1918,6 +1918,8 @@ class ContactInterface(QWidget):
         )
 
     def _insert_request_item_view(self, request: FriendRequestRecord) -> None:
+        if not self._is_visible_request(request):
+            return
         if request.id in self._request_items:
             self._update_request_item_view(request)
             return
@@ -1928,7 +1930,7 @@ class ContactInterface(QWidget):
             self.requests_layout.addStretch(1)
             self._request_items[request.id] = item
             return
-        ordered_ids = [item.id for item in self._ordered_requests()]
+        ordered_ids = [item.id for item in self._visible_requests()]
         insert_at = ordered_ids.index(request.id)
         item = self._create_request_item(request)
         self.requests_layout.insertWidget(insert_at, item)
@@ -1957,7 +1959,7 @@ class ContactInterface(QWidget):
         )
 
     def _upsert_request_record(self, request: FriendRequestRecord) -> None:
-        previous_order = [item.id for item in self._ordered_requests()]
+        previous_order = [item.id for item in self._visible_requests()]
         for index, existing in enumerate(list(self._requests)):
             if existing.id != request.id:
                 continue
@@ -1967,11 +1969,15 @@ class ContactInterface(QWidget):
             self._requests.append(request)
         self._requests = self._ordered_requests()
         self._update_summary_counts()
-        current_order = [item.id for item in self._requests]
+        current_order = [item.id for item in self._visible_requests()]
         if previous_order != current_order and (self._request_items or self._current_page == "requests"):
             self._build_requests_page()
             if self._current_page == "requests" and request.id in self._request_items:
                 self._select_request(request.id, force=True)
+            return
+        if not self._is_visible_request(request):
+            if request.id in self._request_items:
+                self._build_requests_page()
             return
         self._update_request_item_view(request)
         if self._selected_key == ("request", request.id):
@@ -2353,7 +2359,6 @@ class ContactInterface(QWidget):
         if not self._can_update_contact_ui():
             return
         logger.info("Contact interface reload started")
-        self.summary_label.setText(tr("contact.sidebar.syncing", "Syncing contact data..."))
         try:
             contacts = await self._controller.load_contacts()
             if self._destroyed:
@@ -2374,7 +2379,6 @@ class ContactInterface(QWidget):
         except Exception:
             if not self._can_update_contact_ui():
                 return
-            self.summary_label.setText(tr("contact.sidebar.load_failed", "Failed to load contacts."))
             raise
 
         if not self._can_update_contact_ui():
@@ -2420,18 +2424,7 @@ class ContactInterface(QWidget):
         self._restore_selection(full_reload=False)
 
     def _update_summary_counts(self) -> None:
-        if not self._can_update_contact_ui():
-            return
-        self.summary_label.setText(
-            tr(
-                "contact.sidebar.summary",
-                "{friends} friends · {groups} groups · {requests} requests · {blocked} blocked",
-                friends=len(self._contacts),
-                groups=len(self._groups),
-                requests=len(self._visible_requests()),
-                blocked=len(self._blocked_contacts),
-            )
-        )
+        return
 
     def _on_search_text_changed(self, text: str) -> None:
         """Open or update the anchored search flyout for the current keyword."""
@@ -3104,6 +3097,8 @@ class ContactInterface(QWidget):
         if not request_payload:
             return
         request = self._request_record_from_payload(request_payload)
+        if request.is_outgoing(self._current_user_id):
+            return
         self._upsert_request_record(request)
         self._update_summary_counts()
         if request.status == "accepted":
