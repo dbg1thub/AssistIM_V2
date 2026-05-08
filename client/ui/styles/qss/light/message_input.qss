@@ -1,15 +1,26 @@
-QWidget#messageInput,
-QWidget#messageComposer,
-QWidget#messageToolbar {
+QWidget#messageInput {
     background: transparent;
     border: none;
-    border-radius: 0;
 }
 
 QWidget#messageInputCard {
+    background: rgba(255, 255, 255, 0.96);
+    border: 1px solid rgba(15, 23, 42, 0.08);
+    border-radius: 8px;
+}
+
+QWidget#messageComposer {
     background: transparent;
     border: none;
-    border-radius: 0;
+    border-radius: 8px;
+}
+
+QWidget#messageToolbar {
+    background: transparent;
+    border: none;
+    border-top: 1px solid rgba(15, 23, 42, 0.08);
+    border-bottom-left-radius: 8px;
+    border-bottom-right-radius: 8px;
 }
 
 QWidget#pendingAttachmentArea,
@@ -43,14 +54,16 @@ TransparentToolButton#pendingAttachmentRemoveButton:hover {
     background: rgba(0, 0, 0, 0.08);
 }
 
-QTextEdit#chatMessageEdit,
-QWidget#chatMessageViewport,
-QTextEdit#chatMessageEdit QFrame,
-QTextEdit#chatMessageEdit QWidget {
+QTextEdit#chatMessageEdit {
     background: transparent;
     border: none;
     border-radius: 0;
-    padding: 6px 4px;
+    padding: 10px 12px;
+}
+
+QWidget#chatMessageViewport {
+    background: transparent;
+    border: none;
 }
 
 QTextEdit#chatMessageEdit:hover,
@@ -59,29 +72,28 @@ QWidget#chatMessageViewport:hover,
 QWidget#chatMessageViewport:focus {
     background: transparent;
     border: none;
-    border-radius: 0;
 }
 
 PushButton#composerSendButton {
-    background: transparent;
+    background: rgb(0, 120, 212);
     border: none;
-    color: {{TEXT_PRIMARY}};
-    border-radius: 0;
+    color: white;
+    border-radius: 8px;
     padding-left: 18px;
     padding-right: 18px;
 }
 
 PushButton#composerSendButton:disabled {
-    color: rgba(0, 0, 0, 0.32);
-    background: transparent;
+    color: rgba(255, 255, 255, 0.72);
+    background: rgba(0, 120, 212, 0.45);
 }
 
 PushButton#composerSendButton:hover {
-    background: rgba(0, 0, 0, 0.05);
+    background: rgb(16, 137, 229);
 }
 
 PushButton#composerSendButton:pressed {
-    background: rgba(0, 0, 0, 0.08);
+    background: rgb(0, 102, 180);
 }
 
 QWidget#emojiPickerFlyout,

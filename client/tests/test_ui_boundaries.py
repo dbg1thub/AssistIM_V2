@@ -368,6 +368,59 @@ def test_voice_messages_have_send_open_and_click_paths_without_alt_shortcut() ->
     assert 'MessageType.VOICE' in message_delegate
 
 
+def test_chat_message_input_uses_floating_card_style_without_overlay_or_cursor_override() -> None:
+    chat_panel = Path('client/ui/widgets/chat_panel.py').read_text(encoding='utf-8')
+    message_input = Path('client/ui/widgets/message_input.py').read_text(encoding='utf-8')
+    light_input_qss = Path('client/ui/styles/qss/light/message_input.qss').read_text(encoding='utf-8')
+    dark_input_qss = Path('client/ui/styles/qss/dark/message_input.qss').read_text(encoding='utf-8')
+    light_chat_qss = Path('client/ui/styles/qss/light/chat_panel.qss').read_text(encoding='utf-8')
+    dark_chat_qss = Path('client/ui/styles/qss/dark/chat_panel.qss').read_text(encoding='utf-8')
+
+    message_input_class = message_input.split('class MessageInput(QWidget):', 1)[1]
+    setup_block = message_input_class.split('def _setup_ui(self) -> None:', 1)[1].split(
+        'def _apply_safe_button_font',
+        1,
+    )[0]
+    overlay_block = message_input_class.split('def _update_overlay_positions(self) -> None:', 1)[1].split(
+        'def _update_send_button_state',
+        1,
+    )[0]
+
+    assert 'AIAssistantFloatingComposerOverlay' not in chat_panel
+    assert 'chatFloatingComposerOverlay' not in chat_panel
+    assert 'self.content_splitter = FluentSplitter(Qt.Orientation.Vertical, self.chat_page)' in chat_panel
+    assert 'self.content_splitter.splitterMoved.connect(self._schedule_restore_message_viewport)' in chat_panel
+    assert 'composer_layout.addWidget(self.message_input, 1)' in chat_panel
+
+    assert setup_block.index('self.composer_layout.addWidget(self.reply_suggestion_widget, 0)') < setup_block.index(
+        'self.composer_layout.addWidget(self.text_input, 1)'
+    )
+    assert setup_block.index('self.composer_layout.addWidget(self.text_input, 1)') < setup_block.index(
+        'self.composer_layout.addWidget(self.toolbar_widget, 0)'
+    )
+    assert 'self.voice_message_button.raise_()' in overlay_block
+    assert 'self.send_button.raise_()' in overlay_block
+
+    assert 'setCursorWidth' not in message_input
+    assert 'background-color: transparent !important' not in message_input
+    assert 'transparent_base' not in message_input
+    assert '_apply_editor_theme' in message_input
+    assert '_apply_editor_transparency' not in message_input
+
+    for qss in (light_input_qss, dark_input_qss):
+        assert 'QWidget#messageInputCard {' in qss
+        assert 'border-radius: 8px;' in qss
+        assert 'QWidget#messageInput,\nQWidget#messageComposer,\nQWidget#messageToolbar' not in qss
+        assert 'QTextEdit#chatMessageEdit,\nQWidget#chatMessageViewport,\nQTextEdit#chatMessageEdit QFrame' not in qss
+        assert 'QWidget#messageToolbar {' in qss
+        assert 'border-top:' in qss
+
+    for qss in (light_chat_qss, dark_chat_qss):
+        assert 'QSplitter#chatContentSplitter::handle:vertical' in qss
+        assert 'background: transparent;' in qss.split('QSplitter#chatContentSplitter::handle:vertical', 1)[1].split('}', 1)[0]
+        assert 'border: none;' in qss.split('QSplitter#chatContentSplitter::handle:vertical', 1)[1].split('}', 1)[0]
+
+
 def test_contact_interface_request_and_group_actions_avoid_full_reload() -> None:
     contact_interface = Path('client/ui/windows/contact_interface.py').read_text(encoding='utf-8')
 

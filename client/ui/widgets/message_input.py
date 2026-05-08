@@ -2614,7 +2614,7 @@ class MessageInput(QWidget):
         self._reply_suggestion_status_text = ""
         self._setup_ui()
         self._connect_signals()
-        qconfig.themeChanged.connect(lambda *_args: (self._apply_editor_transparency(), self.text_input._refresh_mention_selections()))
+        qconfig.themeChanged.connect(lambda *_args: (self._apply_editor_theme(), self.text_input._refresh_mention_selections()))
         self.set_session_active(False)
         QTimer.singleShot(0, self._update_overlay_positions)
 
@@ -2624,11 +2624,12 @@ class MessageInput(QWidget):
         self.setMinimumHeight(0)
 
         self.main_layout = QVBoxLayout(self)
-        self.main_layout.setContentsMargins(0, 0, 0, 0)
+        self.main_layout.setContentsMargins(24, 8, 24, 16)
         self.main_layout.setSpacing(0)
 
         self.editor_card = QWidget(self)
         self.editor_card.setObjectName("messageInputCard")
+        self.editor_card.setMaximumWidth(1100)
         self.editor_card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
         self.card_layout = QVBoxLayout(self.editor_card)
@@ -2721,7 +2722,7 @@ class MessageInput(QWidget):
         self.text_input.setAcceptRichText(False)
         self.text_input.setMinimumHeight(128)
         self.text_input.setViewportMargins(0, 0, 150, 52)
-        self._apply_editor_transparency()
+        self._apply_editor_theme()
 
         self.voice_message_button = TransparentToolButton(AppIcon.MIC_ON, self.composer_widget)
         self.voice_message_button.setObjectName("composerVoiceMessageButton")
@@ -2739,15 +2740,15 @@ class MessageInput(QWidget):
 
         self.toolbar_widget.setLayout(self.toolbar_layout)
 
-        self.composer_layout.addWidget(self.toolbar_widget, 0)
         self.composer_layout.addWidget(self.reply_suggestion_widget, 0)
         self.composer_layout.addWidget(self.text_input, 1)
+        self.composer_layout.addWidget(self.toolbar_widget, 0)
         self.card_layout.addWidget(self.composer_widget, 1)
-        self.main_layout.addWidget(self.editor_card, 1)
+        self.main_layout.addWidget(self.editor_card, 1, Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignBottom)
         self.composer_widget.installEventFilter(self)
         self.text_input.installEventFilter(self)
         StyleSheet.MESSAGE_INPUT.apply(self)
-        self._apply_editor_transparency()
+        self._apply_editor_theme()
 
         self._update_overlay_positions()
 
@@ -2774,13 +2775,13 @@ class MessageInput(QWidget):
         """Return whether the current widget palette is using a dark window color."""
         return isDarkTheme()
 
-    def _apply_editor_transparency(self) -> None:
-        """Force the text editor and its viewport to render with a transparent background."""
+    def _apply_editor_theme(self) -> None:
+        """Refresh text editor palette while leaving cursor styling to Qt defaults."""
         text_color = QColor("#FFFFFF") if self._is_dark() else QColor("#000000")
         placeholder_color = QColor(255, 255, 255, 138) if self._is_dark() else QColor(20, 20, 20, 118)
         selection_color = QColor(255, 255, 255) if self._is_dark() else QColor("#000000")
         selection_background = QColor(255, 255, 255, 48) if self._is_dark() else QColor(0, 0, 0, 32)
-        transparent_base = QColor(0, 0, 0, 10) if self._is_dark() else QColor(255, 255, 255, 18)
+        editor_base = QColor(31, 31, 31) if self._is_dark() else QColor(255, 255, 255)
 
         self.text_input.setFrameShape(QFrame.Shape.NoFrame)
         self.text_input.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
@@ -2790,27 +2791,14 @@ class MessageInput(QWidget):
         self.text_input.viewport().setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, False)
         self.text_input.setAutoFillBackground(False)
         self.text_input.viewport().setAutoFillBackground(False)
-        self.text_input.setCursorWidth(3)
         self.text_input.setFont(self.text_input._editor_font)
         self.text_input.document().setDefaultFont(self.text_input._editor_font)
-        self.text_input.setStyleSheet(
-            f"QTextEdit#chatMessageEdit {{"
-            " border: none !important;"
-            " background-color: transparent !important;"
-            " border-radius: 0;"
-            f" color: {text_color.name()};"
-            f" selection-background-color: {selection_background.name(QColor.NameFormat.HexArgb)};"
-            f" selection-color: {selection_color.name()};"
-            "}"
-            "QTextEdit#chatMessageEdit:hover { background-color: transparent !important; border: none !important; }"
-            "QTextEdit#chatMessageEdit:focus { background-color: transparent !important; border: none !important; }"
-            "QWidget#chatMessageViewport { background-color: transparent !important; border: none !important; }"
-        )
-        self.text_input.viewport().setStyleSheet("border: none !important; background-color: transparent !important;")
+        self.text_input.setStyleSheet("")
+        self.text_input.viewport().setStyleSheet("")
 
         palette = self.text_input.palette()
-        palette.setColor(QPalette.ColorRole.Base, transparent_base)
-        palette.setColor(QPalette.ColorRole.Window, transparent_base)
+        palette.setColor(QPalette.ColorRole.Base, editor_base)
+        palette.setColor(QPalette.ColorRole.Window, editor_base)
         palette.setColor(QPalette.ColorRole.Text, text_color)
         palette.setColor(QPalette.ColorRole.WindowText, text_color)
         palette.setColor(QPalette.ColorRole.PlaceholderText, placeholder_color)
@@ -2820,8 +2808,8 @@ class MessageInput(QWidget):
         self.text_input.setTextColor(text_color)
 
         viewport_palette = self.text_input.viewport().palette()
-        viewport_palette.setColor(QPalette.ColorRole.Base, transparent_base)
-        viewport_palette.setColor(QPalette.ColorRole.Window, transparent_base)
+        viewport_palette.setColor(QPalette.ColorRole.Base, editor_base)
+        viewport_palette.setColor(QPalette.ColorRole.Window, editor_base)
         viewport_palette.setColor(QPalette.ColorRole.Text, text_color)
         viewport_palette.setColor(QPalette.ColorRole.WindowText, text_color)
         viewport_palette.setColor(QPalette.ColorRole.PlaceholderText, placeholder_color)
@@ -2863,7 +2851,7 @@ class MessageInput(QWidget):
     def showEvent(self, event) -> None:
         """Refresh overlay positions once the widget is shown."""
         super().showEvent(event)
-        self._apply_editor_transparency()
+        self._apply_editor_theme()
         QTimer.singleShot(0, self._update_overlay_positions)
 
     def eventFilter(self, watched, event) -> bool:
@@ -3377,7 +3365,7 @@ class MessageInput(QWidget):
             self.clear_reply_suggestions()
             self.clear_draft()
 
-        self._apply_editor_transparency()
+        self._apply_editor_theme()
         self._update_call_buttons()
         self._update_send_button_state()
         self._update_voice_message_button_state()
