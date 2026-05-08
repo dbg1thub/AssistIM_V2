@@ -843,6 +843,10 @@ def test_contact_detail_call_entry_opens_direct_chat_before_starting_call() -> N
     main_window = Path('client/ui/windows/main_window.py').read_text(encoding='utf-8')
     chat_interface = Path('client/ui/windows/chat_interface.py').read_text(encoding='utf-8')
 
+    assert 'class ContactDetailPanel(QWidget):' not in contact_interface
+    assert 'contact.detail.unavailable_content' not in contact_interface
+    assert 'self.voice_button.clicked.connect(self._show_unavailable)' not in contact_interface
+    assert 'self.video_button.clicked.connect(self._show_unavailable)' not in contact_interface
     assert 'call_requested = Signal(object, str)' in contact_interface
     assert 'self.voice_button.clicked.connect(lambda _checked=False: self._emit_call_request("voice"))' in contact_interface
     assert 'self.video_button.clicked.connect(lambda _checked=False: self._emit_call_request("video"))' in contact_interface
@@ -1410,6 +1414,48 @@ def test_chat_error_i18n_keys_exist() -> None:
         payload = json.loads(Path(f"client/resources/i18n/{language}.json").read_text(encoding="utf-8"))
         missing = sorted(required_keys - set(payload))
         assert missing == []
+
+
+def test_completed_feature_i18n_no_longer_marks_wired_entries_as_unavailable() -> None:
+    stale_keys = {
+        "chat.voice_call.unavailable",
+        "chat.video_call.unavailable",
+        "contact.detail.unavailable_content",
+        "chat.info.group.content",
+        "chat.info.group.leave.unavailable",
+        "chat.info.group.remove.unavailable",
+        "chat.info.group.show_member_nickname.unavailable",
+        "chat.info.history.unavailable",
+        "chat.info.search.unavailable",
+        "chat.info.add.unavailable",
+    }
+
+    for language in ("zh-CN", "en-US", "ko-KR"):
+        payload = json.loads(Path(f"client/resources/i18n/{language}.json").read_text(encoding="utf-8"))
+        present = sorted(stale_keys & set(payload))
+        assert present == []
+
+
+def test_completed_feature_docs_use_current_implemented_baseline() -> None:
+    paths = {
+        "ai_feature_design": Path('docs/design/ai_feature_detailed_design.md'),
+        "summary_design": Path('docs/design/chat_local_summary_design.md'),
+        "backend_architecture": Path('docs/architecture/backend_architecture.md'),
+        "action_design": Path('docs/design/ai_action_workflow_design.md'),
+    }
+    if not all(path.exists() for path in paths.values()):
+        return
+
+    ai_feature_design = paths["ai_feature_design"].read_text(encoding='utf-8')
+    summary_design = paths["summary_design"].read_text(encoding='utf-8')
+    backend_architecture = paths["backend_architecture"].read_text(encoding='utf-8')
+    action_design = paths["action_design"].read_text(encoding='utf-8')
+
+    assert "本地 GGUF Provider 尚未落地" not in ai_feature_design
+    assert "RAG、本地知识库、多模态推理、多模型自动路由。" not in ai_feature_design
+    assert "本文档只输出设计，不包含本轮代码改动。" not in summary_design
+    assert "后续接入私聊 E2EE 与 1:1 通话后" not in backend_architecture
+    assert "当前真实发送未接入时" not in action_design
 
 
 def test_message_delegate_media_state_text_is_internationalized() -> None:
