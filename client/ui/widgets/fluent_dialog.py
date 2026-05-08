@@ -2,11 +2,53 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QEvent, QPoint, Qt
-from PySide6.QtGui import QColor
+from PySide6.QtCore import QEvent, QPoint, QRectF, Qt
+from PySide6.QtGui import QColor, QPainter, QPainterPath
+from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import QDialog, QFrame, QHBoxLayout, QSizePolicy, QVBoxLayout, QWidget
 from qfluentwidgets import SubtitleLabel, isDarkTheme, qconfig
 from qframelesswindow.titlebar.title_bar_buttons import CloseButton
+
+
+class FluentDialogCloseButton(CloseButton):
+    """Close button that keeps the dialog's top-right rounded corner."""
+
+    def __init__(self, parent=None, *, corner_radius: int = 12) -> None:
+        super().__init__(parent)
+        self._corner_radius = max(0, int(corner_radius or 0))
+
+    def setCornerRadius(self, radius: int) -> None:
+        self._corner_radius = max(0, int(radius or 0))
+        self.update()
+
+    def _background_path(self) -> QPainterPath:
+        rect = QRectF(self.rect())
+        radius = min(float(self._corner_radius), rect.width(), rect.height())
+        path = QPainterPath()
+        path.moveTo(rect.left(), rect.top())
+        path.lineTo(rect.right() - radius, rect.top())
+        path.quadTo(rect.right(), rect.top(), rect.right(), rect.top() + radius)
+        path.lineTo(rect.right(), rect.bottom())
+        path.lineTo(rect.left(), rect.bottom())
+        path.closeSubpath()
+        return path
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHints(QPainter.RenderHint.Antialiasing | QPainter.RenderHint.SmoothPixmapTransform)
+        color, bg_color = self._getColors()
+
+        painter.setBrush(bg_color)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.drawPath(self._background_path())
+
+        path_nodes = self._svgDom.elementsByTagName("path")
+        for index in range(path_nodes.length()):
+            element = path_nodes.at(index).toElement()
+            element.setAttribute("stroke", color.name())
+
+        renderer = QSvgRenderer(self._svgDom.toByteArray())
+        renderer.render(painter, QRectF(self.rect()))
 
 
 class FluentDialog(QDialog):
@@ -57,7 +99,7 @@ class FluentDialog(QDialog):
         self.title_label.setMinimumWidth(0)
         self.title_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
 
-        self.close_button = CloseButton(self.title_bar)
+        self.close_button = FluentDialogCloseButton(self.title_bar, corner_radius=self._radius)
         self.close_button.setObjectName("fluentDialogCloseButton")
         self.close_button.clicked.connect(self.close)
 

@@ -86,7 +86,11 @@ def test_add_friend_dialog_uses_fluent_dialog_without_frameless_window() -> None
     dialog_source = dialog_source_path.read_text(encoding="utf-8")
     assert "class FluentDialog(QDialog):" in dialog_source
     assert "CloseButton" in dialog_source
-    assert "self.close_button = CloseButton" in dialog_source
+    assert "class FluentDialogCloseButton(CloseButton):" in dialog_source
+    assert "self.close_button = FluentDialogCloseButton" in dialog_source
+    assert "self.close_button = CloseButton" not in dialog_source
+    assert "painter.drawPath" in dialog_source
+    assert "drawRect(self.rect())" not in dialog_source
     assert "TransparentToolButton" not in dialog_source
     assert "QGraphicsDropShadowEffect" not in dialog_source
     assert "rgba(" not in dialog_source
