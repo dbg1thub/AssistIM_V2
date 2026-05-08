@@ -84,7 +84,10 @@ def _is_default_thread_title(value: str) -> bool:
 class AIAssistantStore:
     """Small persistence boundary for local AI assistant threads/messages."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, owner_user_id: str) -> None:
+        self._owner_user_id = str(owner_user_id or "").strip()
+        if not self._owner_user_id:
+            raise ValueError("AI assistant store requires owner_user_id")
         self._db = get_database()
         self._schema_ready = False
         self._startup_recovery_done = False
@@ -99,6 +102,7 @@ class AIAssistantStore:
                 """
                 CREATE TABLE IF NOT EXISTS ai_threads (
                     thread_id TEXT PRIMARY KEY,
+                    owner_user_id TEXT NOT NULL DEFAULT '',
                     title TEXT NOT NULL,
                     model TEXT NOT NULL DEFAULT '',
                     last_message TEXT NOT NULL DEFAULT '',
@@ -112,6 +116,7 @@ class AIAssistantStore:
                 CREATE TABLE IF NOT EXISTS ai_messages (
                     message_id TEXT PRIMARY KEY,
                     thread_id TEXT NOT NULL,
+                    owner_user_id TEXT NOT NULL DEFAULT '',
                     role TEXT NOT NULL,
                     content TEXT NOT NULL DEFAULT '',
                     status TEXT NOT NULL DEFAULT 'done',
@@ -129,6 +134,15 @@ class AIAssistantStore:
                     ON ai_messages(thread_id, created_at ASC);
                 """
             )
+            await self._ensure_owner_columns()
+            await connection.executescript(
+                """
+                CREATE INDEX IF NOT EXISTS idx_ai_threads_owner_updated
+                    ON ai_threads(owner_user_id, updated_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_ai_messages_owner_thread_created
+                    ON ai_messages(owner_user_id, thread_id, created_at ASC);
+                """
+            )
             await connection.commit()
             self._schema_ready = True
         if not self._startup_recovery_done:
@@ -141,10 +155,10 @@ class AIAssistantStore:
         cursor = await self._connection().execute(
             """
             SELECT * FROM ai_threads
-            WHERE status != ?
+            WHERE owner_user_id = ? AND status != ?
             ORDER BY updated_at DESC, created_at DESC
             """,
-            (AIThreadStatus.DELETED.value,),
+            (self._owner_user_id, AIThreadStatus.DELETED.value),
         )
         return [self._row_to_thread(row) for row in await cursor.fetchall()]
 
@@ -152,8 +166,8 @@ class AIAssistantStore:
         """Return one active thread by id."""
         await self.initialize()
         cursor = await self._connection().execute(
-            "SELECT * FROM ai_threads WHERE thread_id = ? AND status != ?",
-            (thread_id, AIThreadStatus.DELETED.value),
+            "SELECT * FROM ai_threads WHERE thread_id = ? AND owner_user_id = ? AND status != ?",
+            (thread_id, self._owner_user_id, AIThreadStatus.DELETED.value),
         )
         row = await cursor.fetchone()
         return self._row_to_thread(row) if row else None
@@ -173,11 +187,12 @@ class AIAssistantStore:
         await self._connection().execute(
             """
             INSERT INTO ai_threads
-            (thread_id, title, model, last_message, last_message_time, status, extra, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (thread_id, owner_user_id, title, model, last_message, last_message_time, status, extra, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 thread.thread_id,
+                self._owner_user_id,
                 thread.title,
                 thread.model,
                 thread.last_message,
@@ -196,8 +211,8 @@ class AIAssistantStore:
         await self.initialize()
         normalized = str(title or "").strip() or tr("ai_assistant.thread.new", "New Chat")
         await self._connection().execute(
-            "UPDATE ai_threads SET title = ?, updated_at = ? WHERE thread_id = ?",
-            (normalized, time.time(), thread_id),
+            "UPDATE ai_threads SET title = ?, updated_at = ? WHERE thread_id = ? AND owner_user_id = ?",
+            (normalized, time.time(), thread_id, self._owner_user_id),
         )
         await self._connection().commit()
         return await self.get_thread(thread_id)
@@ -205,27 +220,37 @@ class AIAssistantStore:
     async def delete_thread(self, thread_id: str) -> None:
         """Soft-delete a thread and remove its messages."""
         await self.initialize()
+        if not await self._thread_belongs_to_owner(thread_id):
+            return
         connection = self._connection()
-        await connection.execute("DELETE FROM ai_messages WHERE thread_id = ?", (thread_id,))
         await connection.execute(
-            "UPDATE ai_threads SET status = ?, updated_at = ? WHERE thread_id = ?",
-            (AIThreadStatus.DELETED.value, time.time(), thread_id),
+            "DELETE FROM ai_messages WHERE thread_id = ? AND owner_user_id = ?",
+            (thread_id, self._owner_user_id),
+        )
+        await connection.execute(
+            "UPDATE ai_threads SET status = ?, updated_at = ? WHERE thread_id = ? AND owner_user_id = ?",
+            (AIThreadStatus.DELETED.value, time.time(), thread_id, self._owner_user_id),
         )
         await connection.commit()
 
     async def clear_thread_messages(self, thread_id: str) -> None:
         """Remove all messages from one thread while keeping the thread."""
         await self.initialize()
+        if not await self._thread_belongs_to_owner(thread_id):
+            return
         now = time.time()
         connection = self._connection()
-        await connection.execute("DELETE FROM ai_messages WHERE thread_id = ?", (thread_id,))
+        await connection.execute(
+            "DELETE FROM ai_messages WHERE thread_id = ? AND owner_user_id = ?",
+            (thread_id, self._owner_user_id),
+        )
         await connection.execute(
             """
             UPDATE ai_threads
             SET last_message = '', last_message_time = ?, updated_at = ?
-            WHERE thread_id = ?
+            WHERE thread_id = ? AND owner_user_id = ?
             """,
-            (now, now, thread_id),
+            (now, now, thread_id, self._owner_user_id),
         )
         await connection.commit()
 
@@ -234,14 +259,17 @@ class AIAssistantStore:
         await self.initialize()
         connection = self._connection()
         cursor = await connection.execute(
-            "SELECT thread_id FROM ai_messages WHERE message_id = ?",
-            (message_id,),
+            "SELECT thread_id FROM ai_messages WHERE message_id = ? AND owner_user_id = ?",
+            (message_id, self._owner_user_id),
         )
         row = await cursor.fetchone()
         if row is None:
             return
         thread_id = str(row["thread_id"] or "")
-        await connection.execute("DELETE FROM ai_messages WHERE message_id = ?", (message_id,))
+        await connection.execute(
+            "DELETE FROM ai_messages WHERE message_id = ? AND owner_user_id = ?",
+            (message_id, self._owner_user_id),
+        )
         await self._refresh_thread_preview(thread_id)
         await connection.commit()
 
@@ -253,13 +281,13 @@ class AIAssistantStore:
             """
             SELECT * FROM (
                 SELECT * FROM ai_messages
-                WHERE thread_id = ?
+                WHERE thread_id = ? AND owner_user_id = ?
                 ORDER BY created_at DESC, message_id DESC
                 LIMIT ?
             )
             ORDER BY created_at ASC, message_id ASC
             """,
-            (thread_id, normalized_limit),
+            (thread_id, self._owner_user_id, normalized_limit),
         )
         return [self._row_to_message(row) for row in await cursor.fetchall()]
 
@@ -276,6 +304,8 @@ class AIAssistantStore:
     ) -> AIMessage:
         """Create one message and update the owning thread preview."""
         await self.initialize()
+        if not await self._thread_belongs_to_owner(thread_id):
+            raise ValueError("AI assistant thread does not belong to current user")
         message = AIMessage(
             message_id=str(uuid.uuid4()),
             thread_id=thread_id,
@@ -302,6 +332,8 @@ class AIAssistantStore:
     ) -> AIMessage:
         """Persist changes to one message and refresh thread preview."""
         await self.initialize()
+        if not await self._message_belongs_to_owner(message.message_id):
+            raise ValueError("AI assistant message does not belong to current user")
         if content is not None:
             message.content = str(content or "")
         if status is not None:
@@ -334,16 +366,44 @@ class AIAssistantStore:
             raise RuntimeError("database is not connected")
         return connection
 
+    async def _ensure_owner_columns(self) -> None:
+        await self._ensure_column("ai_threads", "owner_user_id", "TEXT NOT NULL DEFAULT ''")
+        await self._ensure_column("ai_messages", "owner_user_id", "TEXT NOT NULL DEFAULT ''")
+
+    async def _ensure_column(self, table_name: str, column_name: str, ddl: str) -> None:
+        cursor = await self._connection().execute(f"PRAGMA table_info({table_name})")
+        existing = {str(row["name"]) for row in await cursor.fetchall()}
+        if column_name not in existing:
+            await self._connection().execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {ddl}")
+
+    async def _thread_belongs_to_owner(self, thread_id: str) -> bool:
+        cursor = await self._connection().execute(
+            """
+            SELECT 1 FROM ai_threads
+            WHERE thread_id = ? AND owner_user_id = ? AND status != ?
+            """,
+            (thread_id, self._owner_user_id, AIThreadStatus.DELETED.value),
+        )
+        return await cursor.fetchone() is not None
+
+    async def _message_belongs_to_owner(self, message_id: str) -> bool:
+        cursor = await self._connection().execute(
+            "SELECT 1 FROM ai_messages WHERE message_id = ? AND owner_user_id = ?",
+            (message_id, self._owner_user_id),
+        )
+        return await cursor.fetchone() is not None
+
     async def _insert_or_replace_message(self, message: AIMessage) -> None:
         await self._connection().execute(
             """
             INSERT OR REPLACE INTO ai_messages
-            (message_id, thread_id, role, content, status, task_id, model, extra, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (message_id, thread_id, owner_user_id, role, content, status, task_id, model, extra, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 message.message_id,
                 message.thread_id,
+                self._owner_user_id,
                 message.role.value if isinstance(message.role, AIMessageRole) else str(message.role),
                 message.content,
                 message.status.value if isinstance(message.status, AIMessageStatus) else str(message.status),
@@ -367,9 +427,9 @@ class AIAssistantStore:
             """
             UPDATE ai_threads
             SET last_message = ?, last_message_time = ?, updated_at = ?
-            WHERE thread_id = ?
+            WHERE thread_id = ? AND owner_user_id = ?
             """,
-            (preview, timestamp, timestamp, message.thread_id),
+            (preview, timestamp, timestamp, message.thread_id, self._owner_user_id),
         )
         await self._connection().commit()
 
@@ -377,11 +437,11 @@ class AIAssistantStore:
         cursor = await self._connection().execute(
             """
             SELECT role, content, status, updated_at FROM ai_messages
-            WHERE thread_id = ?
+            WHERE thread_id = ? AND owner_user_id = ?
             ORDER BY updated_at DESC, created_at DESC
             LIMIT 1
             """,
-            (thread_id,),
+            (thread_id, self._owner_user_id),
         )
         row = await cursor.fetchone()
         now = time.time()
@@ -390,9 +450,9 @@ class AIAssistantStore:
                 """
                 UPDATE ai_threads
                 SET last_message = '', last_message_time = ?, updated_at = ?
-                WHERE thread_id = ?
+                WHERE thread_id = ? AND owner_user_id = ?
                 """,
-                (now, now, thread_id),
+                (now, now, thread_id, self._owner_user_id),
             )
             return
         updated_at = float(row["updated_at"] or now)
@@ -400,7 +460,7 @@ class AIAssistantStore:
             """
             UPDATE ai_threads
             SET last_message = ?, last_message_time = ?, updated_at = ?
-            WHERE thread_id = ?
+            WHERE thread_id = ? AND owner_user_id = ?
             """,
             (
                 _message_preview(
@@ -411,6 +471,7 @@ class AIAssistantStore:
                 updated_at,
                 updated_at,
                 thread_id,
+                self._owner_user_id,
             ),
         )
 
@@ -419,10 +480,10 @@ class AIAssistantStore:
         cursor = await connection.execute(
             """
             SELECT * FROM ai_messages
-            WHERE status IN (?, ?)
+            WHERE owner_user_id = ? AND status IN (?, ?)
             ORDER BY updated_at ASC, created_at ASC
             """,
-            (AIMessageStatus.PENDING.value, AIMessageStatus.STREAMING.value),
+            (self._owner_user_id, AIMessageStatus.PENDING.value, AIMessageStatus.STREAMING.value),
         )
         rows = await cursor.fetchall()
         if not rows:
@@ -440,12 +501,13 @@ class AIAssistantStore:
             await connection.execute(
                 """
                 INSERT OR REPLACE INTO ai_messages
-                (message_id, thread_id, role, content, status, task_id, model, extra, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (message_id, thread_id, owner_user_id, role, content, status, task_id, model, extra, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     message.message_id,
                     message.thread_id,
+                    self._owner_user_id,
                     message.role.value if isinstance(message.role, AIMessageRole) else str(message.role),
                     message.content,
                     message.status.value if isinstance(message.status, AIMessageStatus) else str(message.status),
@@ -492,12 +554,16 @@ class AIAssistantStore:
         )
 
 
-_ai_assistant_store: AIAssistantStore | None = None
+_ai_assistant_stores: dict[str, AIAssistantStore] = {}
 
 
-def get_ai_assistant_store() -> AIAssistantStore:
-    """Return the global AI assistant store."""
-    global _ai_assistant_store
-    if _ai_assistant_store is None:
-        _ai_assistant_store = AIAssistantStore()
-    return _ai_assistant_store
+def get_ai_assistant_store(owner_user_id: str) -> AIAssistantStore:
+    """Return the AI assistant store scoped to one authenticated user."""
+    normalized_owner = str(owner_user_id or "").strip()
+    if not normalized_owner:
+        raise ValueError("AI assistant store requires owner_user_id")
+    store = _ai_assistant_stores.get(normalized_owner)
+    if store is None:
+        store = AIAssistantStore(owner_user_id=normalized_owner)
+        _ai_assistant_stores[normalized_owner] = store
+    return store

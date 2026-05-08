@@ -30,6 +30,7 @@ from client.core.avatar_rendering import get_avatar_image_store
 from client.core.avatar_utils import avatar_seed, profile_avatar_seed
 from client.events.event_bus import get_event_bus
 from client.managers.session_manager import SessionEvent, peek_session_manager
+from client.ui.controllers.auth_controller import get_auth_controller
 from client.ui.windows.ai_assistant_interface import AIAssistantInterface
 from client.ui.windows.chat_interface import ChatInterface
 from client.ui.windows.contact_interface import ContactInterface
@@ -133,8 +134,12 @@ class MainWindow(FluentWindow):
         self._theme_poll_timer.timeout.connect(self._poll_system_theme)
         self._last_system_theme = ""
 
+        current_user_id = str((get_auth_controller().current_user or {}).get("id", "") or "").strip()
+        if not current_user_id:
+            raise RuntimeError("MainWindow requires current user before creating authenticated pages")
+
         self.chat_interface = ChatInterface(self)
-        self.ai_assistant_interface = AIAssistantInterface(self)
+        self.ai_assistant_interface = AIAssistantInterface(self, owner_user_id=current_user_id)
         self.contact_interface = ContactInterface(self)
         self.discovery_interface = DiscoveryInterface(self)
         self.user_profile = UserProfileCoordinator(self)

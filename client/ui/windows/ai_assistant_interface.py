@@ -275,10 +275,13 @@ class AIAssistantInterface(QWidget):
     INPUT_SAFE_AREA_HEIGHT = 196
     MESSAGE_BOTTOM_MARGIN = 26
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, *, owner_user_id: str):
         super().__init__(parent)
         self.setObjectName("AIAssistantInterface")
-        self._store = get_ai_assistant_store()
+        self._owner_user_id = str(owner_user_id or "").strip()
+        if not self._owner_user_id:
+            raise ValueError("AIAssistantInterface requires owner_user_id")
+        self._store = get_ai_assistant_store(self._owner_user_id)
         self._task_manager = get_ai_task_manager()
         self._prompt_builder = AIPromptBuilder()
         self._memory_manager = ConversationMemoryManager()

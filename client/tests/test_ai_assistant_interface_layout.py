@@ -93,7 +93,7 @@ def _rect_in_panel(widget: AIAssistantInterface, child) -> QRect:
 
 def test_ai_assistant_streaming_layout_keeps_bottom_gap_stable() -> None:
     app = QApplication.instance() or QApplication([])
-    widget = AIAssistantInterface()
+    widget = AIAssistantInterface(owner_user_id="user-a")
     widget.resize(1200, 900)
     widget.show()
     app.processEvents()
@@ -126,7 +126,7 @@ def test_ai_assistant_streaming_layout_keeps_bottom_gap_stable() -> None:
 
 def test_ai_assistant_message_track_follows_composer_edges() -> None:
     app = QApplication.instance() or QApplication([])
-    widget = AIAssistantInterface()
+    widget = AIAssistantInterface(owner_user_id="user-a")
     widget.resize(1400, 900)
     widget.show()
     app.processEvents()
@@ -217,7 +217,7 @@ def test_ai_assistant_message_delegate_reserves_full_height_for_korean_text() ->
         "한국어로 자기소개를 드리겠습니다. "
         "사용자님의 메시지를 이해하고 요약, 정리, 답변 생성을 도와드립니다. "
     ) * 5
-    widget = AIAssistantInterface()
+    widget = AIAssistantInterface(owner_user_id="user-a")
     widget.resize(900, 720)
     widget.show()
     widget._append_message(_message("korean", AIMessageRole.ASSISTANT, text.strip()))
@@ -239,7 +239,7 @@ def test_ai_assistant_message_delegate_reserves_full_height_for_korean_text() ->
 
 def test_ai_assistant_message_delegate_hits_action_confirmation_controls() -> None:
     app = QApplication.instance() or QApplication([])
-    widget = AIAssistantInterface()
+    widget = AIAssistantInterface(owner_user_id="user-a")
     widget.resize(900, 720)
     widget.show()
     widget._append_message(_action_confirmation_message())
@@ -275,7 +275,7 @@ def test_ai_assistant_message_delegate_hits_action_confirmation_controls() -> No
 
 def test_ai_assistant_action_status_collapses_and_expands_steps() -> None:
     app = QApplication.instance() or QApplication([])
-    widget = AIAssistantInterface()
+    widget = AIAssistantInterface(owner_user_id="user-a")
     widget.resize(900, 720)
     widget.show()
     widget._append_message(_action_running_message())
@@ -318,7 +318,7 @@ def test_ai_assistant_action_status_collapses_and_expands_steps() -> None:
 
 def test_ai_assistant_thinking_placeholder_uses_stable_delegate_text() -> None:
     app = QApplication.instance() or QApplication([])
-    widget = AIAssistantInterface()
+    widget = AIAssistantInterface(owner_user_id="user-a")
     widget.resize(900, 720)
     widget.show()
     widget._append_message(_thinking_message())
@@ -343,7 +343,7 @@ def test_ai_assistant_thinking_placeholder_uses_stable_delegate_text() -> None:
 
 def test_ai_assistant_message_copy_uses_bubble_text() -> None:
     app = QApplication.instance() or QApplication([])
-    widget = AIAssistantInterface()
+    widget = AIAssistantInterface(owner_user_id="user-a")
     widget.resize(900, 720)
     widget.show()
     widget._append_message(_message("copy-me", AIMessageRole.USER, "给 test3 说我晚点联系他"))
