@@ -6,13 +6,14 @@ from datetime import datetime
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont
-from PySide6.QtWidgets import QDialog, QFrame, QHBoxLayout, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QFrame, QHBoxLayout, QVBoxLayout, QWidget
 from qfluentwidgets import BodyLabel, CaptionLabel, PrimaryPushButton, PushButton, SingleDirectionScrollArea, TextEdit
 
 from client.core.avatar_utils import profile_avatar_seed
 from client.core.i18n import tr
 from client.models.message import Session
-from client.ui.widgets.contact_shared import ContactAvatar, apply_themed_dialog_surface, prepare_transparent_scroll_area
+from client.ui.widgets.contact_shared import ContactAvatar, prepare_transparent_scroll_area
+from client.ui.widgets.fluent_dialog import FluentDialog
 
 
 def _member_display_name(member: dict[str, object]) -> str:
@@ -54,7 +55,7 @@ def _format_announcement_time(value: datetime | None) -> str:
     return value.strftime("%Y.%m.%d %H:%M")
 
 
-class GroupAnnouncementDialog(QDialog):
+class GroupAnnouncementDialog(FluentDialog):
     """View one group announcement and optionally switch into edit mode."""
 
     def __init__(self, session: Session, current_user: dict[str, object] | None = None, parent=None) -> None:
@@ -75,9 +76,9 @@ class GroupAnnouncementDialog(QDialog):
                 name=session.chat_title() or session.display_name() or tr("session.unnamed", "Untitled Session"),
             )
         )
-        apply_themed_dialog_surface(self, "GroupAnnouncementDialog")
+        self.setObjectName("GroupAnnouncementDialog")
 
-        root = QVBoxLayout(self)
+        root = self.content_layout
         root.setContentsMargins(20, 20, 20, 20)
         root.setSpacing(10)
 

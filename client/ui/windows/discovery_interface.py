@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Optional
 
 from PySide6.QtCore import QEvent, QEasingCurve, QParallelAnimationGroup, QPropertyAnimation, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import QColor, QDesktopServices, QFont, QPainter, QPainterPath, QPalette, QPixmap
+from PySide6.QtGui import QColor, QDesktopServices, QFont, QPainter, QPainterPath, QPixmap
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 from PySide6.QtWidgets import (
     QDialog,
@@ -64,6 +64,7 @@ from client.ui.controllers.discovery_controller import (
 )
 from client.ui.controllers.contact_controller import ContactRecord, get_contact_controller
 from client.ui.styles import StyleSheet
+from client.ui.widgets.fluent_dialog import FluentDialog
 from client.ui.widgets.image_viewer import ImageViewer
 
 
@@ -98,18 +99,6 @@ def _prepare_transparent_scroll_area(area: ScrollArea) -> None:
         viewport.setStyleSheet("background: transparent; border: none;")
     if hasattr(area, "enableTransparentBackground"):
         area.enableTransparentBackground()
-
-
-def _apply_themed_dialog_surface(dialog: QDialog, object_name: str, *, radius: int = 14) -> None:
-    """Apply one stable theme-aware palette to plain discovery dialogs."""
-    dialog.setObjectName(object_name)
-    dialog.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, False)
-    dialog.setAutoFillBackground(True)
-    background = QColor(39, 43, 48) if isDarkTheme() else QColor(255, 255, 255)
-    palette = dialog.palette()
-    palette.setColor(QPalette.ColorRole.Window, background)
-    palette.setColor(QPalette.ColorRole.Base, background)
-    dialog.setPalette(palette)
 
 
 class DeleteMomentConfirmDialog(MessageBoxBase):
@@ -840,7 +829,7 @@ def _contact_id(contact: ContactRecord | None) -> str:
     return str(getattr(contact, "id", "") or "").strip()
 
 
-class MomentVisibilitySelectDialog(QDialog):
+class MomentVisibilitySelectDialog(FluentDialog):
     """Dialog for selecting one post's visibility scope."""
 
     submitted = Signal(str, list)
@@ -853,18 +842,18 @@ class MomentVisibilitySelectDialog(QDialog):
         current_user_ids: list[str] | None = None,
         parent=None,
     ) -> None:
-        super().__init__(parent)
+        super().__init__(parent, title=tr("discovery.visibility.window_title", "Who can see this"))
         self._contacts = [contact for contact in contacts if _contact_id(contact)]
         self._current_user_ids = set(str(item or "").strip() for item in (current_user_ids or []) if str(item or "").strip())
         self._target_checkboxes: dict[str, CheckBox] = {}
         self.setWindowTitle(tr("discovery.visibility.window_title", "Who can see this"))
         self.setModal(True)
         self.resize(480, 560)
-        _apply_themed_dialog_surface(self, "MomentVisibilitySelectDialog")
+        self.setObjectName("MomentVisibilitySelectDialog")
         self._setup_ui(current_scope)
 
     def _setup_ui(self, current_scope: str) -> None:
-        layout = QVBoxLayout(self)
+        layout = self.content_layout
         layout.setContentsMargins(24, 24, 24, 20)
         layout.setSpacing(14)
 
@@ -940,7 +929,7 @@ class MomentVisibilitySelectDialog(QDialog):
         self.accept()
 
 
-class MomentPrivacySettingsDialog(QDialog):
+class MomentPrivacySettingsDialog(FluentDialog):
     """Dialog for long-term moments privacy settings."""
 
     submitted = Signal(list, list, str)
@@ -951,7 +940,7 @@ class MomentPrivacySettingsDialog(QDialog):
         settings: MomentPrivacySettings,
         parent=None,
     ) -> None:
-        super().__init__(parent)
+        super().__init__(parent, title=tr("discovery.privacy.window_title", "Moment Privacy"))
         self._contacts = [contact for contact in contacts if _contact_id(contact)]
         self._settings = settings
         self._hide_my_checkboxes: dict[str, CheckBox] = {}
@@ -959,11 +948,11 @@ class MomentPrivacySettingsDialog(QDialog):
         self.setWindowTitle(tr("discovery.privacy.window_title", "Moment Privacy"))
         self.setModal(True)
         self.resize(560, 640)
-        _apply_themed_dialog_surface(self, "MomentPrivacySettingsDialog")
+        self.setObjectName("MomentPrivacySettingsDialog")
         self._setup_ui()
 
     def _setup_ui(self) -> None:
-        layout = QVBoxLayout(self)
+        layout = self.content_layout
         layout.setContentsMargins(24, 24, 24, 20)
         layout.setSpacing(14)
 
@@ -1046,14 +1035,14 @@ class MomentPrivacySettingsDialog(QDialog):
         self.accept()
 
 
-class CreateMomentDialog(QDialog):
+class CreateMomentDialog(FluentDialog):
     """Dialog for publishing a moment with text, images, or video."""
 
     submitted = Signal(str, list, str, list)
     MAX_MEDIA_ITEMS = 9
 
     def __init__(self, parent=None, *, contacts: list[ContactRecord] | None = None):
-        super().__init__(parent)
+        super().__init__(parent, title=tr("discovery.dialog.window_title", "Publish Moment"))
         self._media_paths: list[str] = []
         self._contacts = list(contacts or [])
         self._visibility_scope = "public"
@@ -1061,11 +1050,11 @@ class CreateMomentDialog(QDialog):
         self.setWindowTitle(tr("discovery.dialog.window_title", "Publish Moment"))
         self.setModal(True)
         self.resize(600, 460)
-        _apply_themed_dialog_surface(self, "CreateMomentDialog")
+        self.setObjectName("CreateMomentDialog")
         self._setup_ui()
 
     def _setup_ui(self) -> None:
-        layout = QVBoxLayout(self)
+        layout = self.content_layout
         layout.setContentsMargins(24, 24, 24, 20)
         layout.setSpacing(14)
 
@@ -1144,7 +1133,7 @@ class CreateMomentDialog(QDialog):
             QEvent.Type.ApplicationPaletteChange,
             QEvent.Type.StyleChange,
         }:
-            _apply_themed_dialog_surface(self, "CreateMomentDialog")
+            self._apply_fluent_surface()
 
     def _submit(self) -> None:
         text = self.editor.toPlainText().strip()

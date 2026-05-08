@@ -11,8 +11,8 @@ from collections import OrderedDict, deque
 from datetime import datetime
 from typing import Optional
 
-from PySide6.QtCore import QEvent, Qt, QTimer
-from PySide6.QtGui import QColor, QGuiApplication, QPalette, QPixmap
+from PySide6.QtCore import Qt, QTimer
+from PySide6.QtGui import QColor, QGuiApplication, QPixmap
 from PySide6.QtWidgets import QDialog, QFrame, QHBoxLayout, QLabel, QScrollArea, QSizePolicy, QVBoxLayout, QWidget
 from shiboken6 import isValid as is_valid_qt_object
 
@@ -27,7 +27,6 @@ from qfluentwidgets import (
     RoundMenu,
     SearchLineEdit,
     SubtitleLabel,
-    isDarkTheme,
 )
 from qfluentwidgets.components.widgets.menu import MenuAnimationType
 
@@ -75,6 +74,7 @@ from client.ui.styles import StyleSheet
 from client.ui.windows.chat_group_flow import ChatGroupFlowCoordinator
 from client.ui.windows.call_window import CallWindow
 from client.ui.widgets.chat_panel import ChatPanel
+from client.ui.widgets.fluent_dialog import FluentDialog
 from client.ui.widgets.global_search_panel import GlobalSearchResultsPanel
 from client.ui.widgets.incoming_call_toast import IncomingCallToast
 from client.ui.widgets.chat_info_drawer import (
@@ -92,18 +92,6 @@ from client.ui.windows.group_announcement_dialog import GroupAnnouncementDialog
 logger = logging.getLogger(__name__)
 
 
-def _apply_themed_dialog_surface(dialog: QDialog, object_name: str, *, radius: int = 14) -> None:
-    """Apply one stable theme-aware palette to plain chat dialogs."""
-    dialog.setObjectName(object_name)
-    dialog.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, False)
-    dialog.setAutoFillBackground(True)
-    background = QColor(39, 43, 48) if isDarkTheme() else QColor(255, 255, 255)
-    palette = dialog.palette()
-    palette.setColor(QPalette.ColorRole.Window, background)
-    palette.setColor(QPalette.ColorRole.Base, background)
-    dialog.setPalette(palette)
-
-
 def _prepare_transparent_scroll_area(area: QScrollArea) -> None:
     """Keep plain Qt scroll areas transparent so dialog surfaces show through."""
     area.setFrameShape(QFrame.Shape.NoFrame)
@@ -117,18 +105,18 @@ def _prepare_transparent_scroll_area(area: QScrollArea) -> None:
         viewport.setStyleSheet("background: transparent; border: none;")
 
 
-class ScreenshotPreviewDialog(QDialog):
+class ScreenshotPreviewDialog(FluentDialog):
     """Preview a captured screenshot before sending it."""
 
     def __init__(self, file_path: str, parent=None):
-        super().__init__(parent)
+        super().__init__(parent, title=tr("chat.screenshot.preview_title", "Preview Screenshot"))
         self.file_path = file_path
         self.setWindowTitle(tr("chat.screenshot.preview_title", "Preview Screenshot"))
         self.resize(760, 560)
         self.setModal(True)
-        _apply_themed_dialog_surface(self, "ScreenshotPreviewDialog")
+        self.setObjectName("ScreenshotPreviewDialog")
 
-        layout = QVBoxLayout(self)
+        layout = self.content_layout
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(12)
 
@@ -157,16 +145,6 @@ class ScreenshotPreviewDialog(QDialog):
         pixmap = QPixmap(file_path)
         if not pixmap.isNull():
             self.image_label.setPixmap(pixmap)
-
-    def changeEvent(self, event) -> None:
-        super().changeEvent(event)
-        if event.type() in {
-            QEvent.Type.PaletteChange,
-            QEvent.Type.ApplicationPaletteChange,
-            QEvent.Type.StyleChange,
-        }:
-            _apply_themed_dialog_surface(self, "ScreenshotPreviewDialog")
-
 
 class DeleteMessageConfirmDialog(MessageBoxBase):
     """Ask for confirmation before deleting one local chat message."""
@@ -214,14 +192,14 @@ class ClearChatHistoryConfirmDialog(MessageBoxBase):
         self.widget.setMinimumWidth(380)
 
 
-class ChatSessionSearchDialog(QDialog):
+class ChatSessionSearchDialog(FluentDialog):
     """Search local chat history inside one selected conversation."""
 
     SEARCH_LIMIT = 80
     SEARCH_DEBOUNCE_MS = 160
 
     def __init__(self, session, *, result_activated=None, parent=None):
-        super().__init__(parent)
+        super().__init__(parent, title=tr("chat.info.search.title", "Find Chat Content"))
         self._session_id = str(getattr(session, "session_id", "") or "").strip()
         self._session_name = (
             str(session.chat_title() or session.display_name() or "").strip()
@@ -236,9 +214,9 @@ class ChatSessionSearchDialog(QDialog):
         self.setWindowTitle(tr("chat.info.search.title", "Find Chat Content"))
         self.resize(560, 620)
         self.setMinimumSize(420, 420)
-        _apply_themed_dialog_surface(self, "ChatSessionSearchDialog")
+        self.setObjectName("ChatSessionSearchDialog")
 
-        layout = QVBoxLayout(self)
+        layout = self.content_layout
         layout.setContentsMargins(18, 18, 18, 18)
         layout.setSpacing(12)
 
@@ -279,15 +257,6 @@ class ChatSessionSearchDialog(QDialog):
         self._search_timer.stop()
         self._cancel_search_task()
         super().closeEvent(event)
-
-    def changeEvent(self, event) -> None:
-        super().changeEvent(event)
-        if event.type() in {
-            QEvent.Type.PaletteChange,
-            QEvent.Type.ApplicationPaletteChange,
-            QEvent.Type.StyleChange,
-        }:
-            _apply_themed_dialog_surface(self, "ChatSessionSearchDialog")
 
     def _on_search_text_changed(self, text: str) -> None:
         keyword = str(text or "").strip()
@@ -401,18 +370,18 @@ class DeleteGroupConfirmDialog(MessageBoxBase):
         self.widget.setMinimumWidth(400)
 
 
-class IdentityReviewDialog(QDialog):
+class IdentityReviewDialog(FluentDialog):
     """Desktop dialog that exposes one direct-session safety code and trust action."""
 
     def __init__(self, session_name: str, parent=None) -> None:
-        super().__init__(parent)
+        super().__init__(parent, title=tr("chat.security.review.title", "Identity Verification"))
         self._details: dict[str, object] = {}
         self._session_name = str(session_name or "").strip()
         self.setWindowTitle(tr("chat.security.review.title", "Identity Verification"))
         self.resize(440, 520)
-        _apply_themed_dialog_surface(self, "IdentityReviewDialog")
+        self.setObjectName("IdentityReviewDialog")
 
-        layout = QVBoxLayout(self)
+        layout = self.content_layout
         layout.setContentsMargins(18, 18, 18, 18)
         layout.setSpacing(12)
 
@@ -595,16 +564,6 @@ class IdentityReviewDialog(QDialog):
 
         recommended_action = str(self._details.get("recommended_action") or "").strip()
         self.trust_button.setVisible(recommended_action == "trust_peer_identity")
-
-    def changeEvent(self, event) -> None:
-        super().changeEvent(event)
-        if event.type() in {
-            QEvent.Type.PaletteChange,
-            QEvent.Type.ApplicationPaletteChange,
-            QEvent.Type.StyleChange,
-        }:
-            _apply_themed_dialog_surface(self, "IdentityReviewDialog")
-
 
 class IncomingCallDialog(MessageBoxBase):
     """Prompt the user to accept or reject one incoming call invite."""

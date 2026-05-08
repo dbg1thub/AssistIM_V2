@@ -91,8 +91,17 @@ def test_add_friend_dialog_uses_fluent_dialog_without_frameless_window() -> None
     assert "self.close_button = CloseButton" not in dialog_source
     assert "painter.drawPath" in dialog_source
     assert "drawRect(self.rect())" not in dialog_source
+    assert "CompositionMode_Source" in dialog_source
+    assert "def setWindowTitle(self, title: str) -> None:" in dialog_source
     assert "TransparentToolButton" not in dialog_source
     assert "QGraphicsDropShadowEffect" not in dialog_source
+    assert "QPropertyAnimation" in dialog_source
+    assert "QParallelAnimationGroup" in dialog_source
+    assert "QEasingCurve.Type.OutCubic" in dialog_source
+    assert "def showEvent(self, event) -> None:" in dialog_source
+    assert "self._start_show_animation()" in dialog_source
+    assert "b\"windowOpacity\"" in dialog_source
+    assert "b\"pos\"" in dialog_source
     assert "rgba(" not in dialog_source
     assert 'background = "#202020" if dark else "#FFFFFF"' in dialog_source
     assert "def nativeEvent(" not in dialog_source
@@ -100,3 +109,40 @@ def test_add_friend_dialog_uses_fluent_dialog_without_frameless_window() -> None
     assert "setMicaEffect" not in dialog_source
     assert "WindowsWindowEffect" not in dialog_source
     assert "class AddFriendDialog(FluentDialog):" in contact_source
+
+
+def test_custom_dialogs_use_fluent_dialog_shell() -> None:
+    expected_dialogs = {
+        "client/ui/windows/auth_interface.py": ["PasswordResetDialog"],
+        "client/ui/windows/chat_interface.py": [
+            "ScreenshotPreviewDialog",
+            "ChatSessionSearchDialog",
+            "IdentityReviewDialog",
+        ],
+        "client/ui/windows/discovery_interface.py": [
+            "MomentVisibilitySelectDialog",
+            "MomentPrivacySettingsDialog",
+            "CreateMomentDialog",
+        ],
+        "client/ui/windows/group_announcement_dialog.py": ["GroupAnnouncementDialog"],
+        "client/ui/windows/group_creation_dialogs.py": ["CreateGroupDialog"],
+        "client/ui/windows/group_member_management_dialogs.py": [
+            "GroupMemberPickerDialog",
+            "GroupMemberManagementDialog",
+        ],
+        "client/ui/windows/settings_interface.py": ["LocalModelResourcesDialog"],
+        "client/ui/widgets/chat_info_drawer.py": ["ChatInfoAnnouncementDialog"],
+        "client/ui/widgets/image_viewer.py": ["ImageViewer"],
+        "client/ui/widgets/user_profile_flyout.py": [
+            "ChangePasswordDialog",
+            "DeviceSecurityDialog",
+            "ProfileEditDialog",
+        ],
+    }
+
+    for source_path, class_names in expected_dialogs.items():
+        source = Path(source_path).read_text(encoding="utf-8")
+        assert "from client.ui.widgets.fluent_dialog import FluentDialog" in source
+        for class_name in class_names:
+            assert f"class {class_name}(FluentDialog):" in source
+            assert f"class {class_name}(QDialog):" not in source

@@ -5,8 +5,8 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPalette, QPixmap
-from PySide6.QtWidgets import QDialog, QHBoxLayout, QLabel, QSizePolicy, QVBoxLayout, QWidget
+from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPixmap
+from PySide6.QtWidgets import QHBoxLayout, QLabel, QSizePolicy, QVBoxLayout, QWidget
 from qfluentwidgets import BodyLabel, CaptionLabel, CardWidget, ScrollArea, SingleDirectionScrollArea, ToolButton, isDarkTheme
 
 from client.core.app_icons import AppIcon
@@ -27,19 +27,6 @@ CONTACT_SIDEBAR_TEXT_SPACING = 4
 CONTACT_SIDEBAR_TITLE_FONT_SIZE = 16
 CONTACT_SECTION_INSET = 32
 CONTACT_SECTION_LABEL_GAP = 8
-
-
-def apply_themed_dialog_surface(dialog: QDialog, object_name: str, *, radius: int = 14) -> None:
-    """Apply one stable theme-aware palette to a plain dialog surface."""
-    del radius
-    dialog.setObjectName(object_name)
-    dialog.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, False)
-    dialog.setAutoFillBackground(True)
-    background = QColor(39, 43, 48) if isDarkTheme() else QColor(255, 255, 255)
-    palette = dialog.palette()
-    palette.setColor(QPalette.ColorRole.Window, background)
-    palette.setColor(QPalette.ColorRole.Base, background)
-    dialog.setPalette(palette)
 
 
 def prepare_transparent_scroll_area(area: ScrollArea | SingleDirectionScrollArea) -> None:

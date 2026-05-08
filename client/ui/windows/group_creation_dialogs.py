@@ -7,7 +7,7 @@ from typing import Optional
 
 from PySide6.QtCore import QEvent, Qt, Signal
 from PySide6.QtGui import QColor, QFont
-from PySide6.QtWidgets import QDialog, QFrame, QHBoxLayout, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QFrame, QHBoxLayout, QVBoxLayout, QWidget
 from qfluentwidgets import (
     BodyLabel,
     CaptionLabel,
@@ -33,10 +33,10 @@ from client.ui.widgets.contact_shared import (
     GroupMemberItem,
     SelectableContactListItem,
     SelectedContactSummaryItem,
-    apply_themed_dialog_surface,
     prepare_transparent_scroll_area,
 )
 from client.ui.widgets.fluent_divider import FluentDivider
+from client.ui.widgets.fluent_dialog import FluentDialog
 from client.ui.widgets.fluent_splitter import FluentSplitter
 
 setup_logging()
@@ -530,11 +530,11 @@ class StartGroupChatDialog(MaskDialogBase):
                 widget.deleteLater()
 
 
-class CreateGroupDialog(QDialog):
+class CreateGroupDialog(FluentDialog):
     group_created = Signal(object)
 
     def __init__(self, controller, contacts: list[ContactRecord], parent=None):
-        super().__init__(parent)
+        super().__init__(parent, title=tr("contact.create_group.window_title", "Create Group"))
         self._controller = controller
         self._contacts = list(contacts)
         self._selected_ids: set[str] = set()
@@ -546,7 +546,7 @@ class CreateGroupDialog(QDialog):
         self.setWindowTitle(tr("contact.create_group.window_title", "Create Group"))
         self.setModal(True)
         self.resize(580, 720)
-        apply_themed_dialog_surface(self, "CreateGroupDialog")
+        self.setObjectName("CreateGroupDialog")
 
         self._setup_ui()
         self._rebuild_member_list()
@@ -554,7 +554,7 @@ class CreateGroupDialog(QDialog):
         self.destroyed.connect(self._on_destroyed)
 
     def _setup_ui(self) -> None:
-        layout = QVBoxLayout(self)
+        layout = self.content_layout
         layout.setContentsMargins(24, 24, 24, 24)
         layout.setSpacing(16)
 
@@ -632,7 +632,7 @@ class CreateGroupDialog(QDialog):
             QEvent.Type.ApplicationPaletteChange,
             QEvent.Type.StyleChange,
         }:
-            apply_themed_dialog_surface(self, "CreateGroupDialog")
+            self._apply_fluent_surface()
 
     def _rebuild_member_list(self) -> None:
         self._clear_layout(self.member_layout)

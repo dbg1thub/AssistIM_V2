@@ -31,10 +31,10 @@ from client.ui.widgets.contact_shared import (
     ElidedBodyLabel,
     ElidedCaptionLabel,
     SelectableContactListItem,
-    apply_themed_dialog_surface,
     prepare_transparent_scroll_area,
 )
 from client.ui.widgets.fluent_divider import FluentDivider
+from client.ui.widgets.fluent_dialog import FluentDialog
 
 setup_logging()
 logger = logging.get_logger(__name__)
@@ -191,11 +191,11 @@ class GroupMemberActionConfirmDialog(MessageBoxBase):
         self.widget.setMinimumWidth(380)
 
 
-class GroupMemberPickerDialog(QDialog):
+class GroupMemberPickerDialog(FluentDialog):
     """Select contacts to add into one existing group."""
 
     def __init__(self, contacts: list[ContactRecord], parent=None) -> None:
-        super().__init__(parent)
+        super().__init__(parent, title=tr("chat.group.manage.add.title", "Add Group Members"))
         self._contacts = list(contacts)
         self._selected_ids: set[str] = set()
         self._member_items: dict[str, SelectableContactListItem] = {}
@@ -203,9 +203,9 @@ class GroupMemberPickerDialog(QDialog):
         self.setWindowTitle(tr("chat.group.manage.add.title", "Add Group Members"))
         self.setModal(True)
         self.resize(520, 620)
-        apply_themed_dialog_surface(self, "GroupMemberPickerDialog")
+        self.setObjectName("GroupMemberPickerDialog")
 
-        root = QVBoxLayout(self)
+        root = self.content_layout
         root.setContentsMargins(20, 20, 20, 20)
         root.setSpacing(12)
 
@@ -427,7 +427,7 @@ class GroupMemberManageRow(QWidget):
         )
 
 
-class GroupMemberManagementDialog(QDialog):
+class GroupMemberManagementDialog(FluentDialog):
     """Formal member-management dialog for one group."""
 
     groupRecordChanged = Signal(object)
@@ -441,7 +441,7 @@ class GroupMemberManagementDialog(QDialog):
         preferred_mode: str = "browse",
         parent=None,
     ) -> None:
-        super().__init__(parent)
+        super().__init__(parent, title=tr("chat.group.manage.title", "Group Members"))
         self._controller = controller
         self._group_id = str(group_id or "").strip()
         self._session_id = str(session_id or "").strip()
@@ -456,9 +456,9 @@ class GroupMemberManagementDialog(QDialog):
         self.setWindowTitle(tr("chat.group.manage.title", "Group Members"))
         self.setModal(False)
         self.resize(720, 620)
-        apply_themed_dialog_surface(self, "GroupMemberManagementDialog")
+        self.setObjectName("GroupMemberManagementDialog")
 
-        root = QVBoxLayout(self)
+        root = self.content_layout
         root.setContentsMargins(20, 20, 20, 20)
         root.setSpacing(0)
 
@@ -543,7 +543,7 @@ class GroupMemberManagementDialog(QDialog):
             QEvent.Type.ApplicationPaletteChange,
             QEvent.Type.StyleChange,
         }:
-            apply_themed_dialog_surface(self, "GroupMemberManagementDialog")
+            self._apply_fluent_surface()
             _apply_management_dialog_styles(self)
 
     def _current_user_id(self) -> str:

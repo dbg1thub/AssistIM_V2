@@ -8,8 +8,7 @@ import os
 import re
 from typing import Any, Optional
 
-from PySide6.QtCore import QDate, QEvent, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QPalette
+from PySide6.QtCore import QDate, Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QComboBox,
     QDateEdit,
@@ -35,7 +34,6 @@ from qfluentwidgets import (
     PushButton,
     SingleDirectionScrollArea,
     SubtitleLabel,
-    isDarkTheme,
 )
 from qfluentwidgets.components.material import AcrylicFlyout, AcrylicFlyoutViewBase
 
@@ -53,6 +51,7 @@ from client.core.profile_fields import (
 )
 from client.ui.controllers.auth_controller import get_auth_controller
 from client.ui.widgets.fluent_divider import FluentDivider
+from client.ui.widgets.fluent_dialog import FluentDialog
 
 
 setup_logging()
@@ -61,18 +60,6 @@ logger = logging.get_logger(__name__)
 _EMAIL_PATTERN = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 _PHONE_PATTERN = re.compile(r"^\+?[0-9][0-9()\-\.\s]{5,31}$")
 _EMPTY_BIRTHDAY = QDate(1900, 1, 1)
-
-
-def _apply_themed_dialog_surface(dialog: QDialog, object_name: str, *, radius: int = 14) -> None:
-    """Apply one stable theme-aware palette to profile dialogs."""
-    dialog.setObjectName(object_name)
-    dialog.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, False)
-    dialog.setAutoFillBackground(True)
-    background = QColor(39, 43, 48) if isDarkTheme() else QColor(255, 255, 255)
-    palette = dialog.palette()
-    palette.setColor(QPalette.ColorRole.Window, background)
-    palette.setColor(QPalette.ColorRole.Base, background)
-    dialog.setPalette(palette)
 
 
 def _avatar_initials(name: str) -> str:
@@ -129,17 +116,17 @@ class LogoutConfirmDialog(MessageBoxBase):
         self.widget.setMinimumWidth(360)
 
 
-class ChangePasswordDialog(QDialog):
+class ChangePasswordDialog(FluentDialog):
     """Dialog for changing the current authenticated user's password."""
 
     def __init__(self, parent=None):
-        super().__init__(parent)
+        super().__init__(parent, title=tr("profile.password.change.title", "Change Password"))
         self.setWindowTitle(tr("profile.password.change.title", "Change Password"))
         self.setMinimumWidth(420)
         self.setModal(True)
-        _apply_themed_dialog_surface(self, "ChangePasswordDialog")
+        self.setObjectName("ChangePasswordDialog")
 
-        layout = QVBoxLayout(self)
+        layout = self.content_layout
         layout.setContentsMargins(24, 24, 24, 24)
         layout.setSpacing(14)
 
@@ -221,11 +208,11 @@ class ChangePasswordDialog(QDialog):
         self.accept()
 
 
-class DeviceSecurityDialog(QDialog):
+class DeviceSecurityDialog(FluentDialog):
     """Read-only E2EE device inventory for the current account."""
 
     def __init__(self, parent=None, auth_controller=None):
-        super().__init__(parent)
+        super().__init__(parent, title=tr("profile.security.title", "Account Security"))
         self._auth_controller = auth_controller or get_auth_controller()
         self._load_task: Optional[asyncio.Task] = None
         self._action_task: Optional[asyncio.Task] = None
@@ -233,9 +220,9 @@ class DeviceSecurityDialog(QDialog):
         self.setWindowTitle(tr("profile.security.title", "Account Security"))
         self.setMinimumSize(560, 500)
         self.setModal(False)
-        _apply_themed_dialog_surface(self, "DeviceSecurityDialog")
+        self.setObjectName("DeviceSecurityDialog")
 
-        layout = QVBoxLayout(self)
+        layout = self.content_layout
         layout.setContentsMargins(24, 24, 24, 24)
         layout.setSpacing(14)
 
@@ -635,11 +622,11 @@ class DeviceSecurityDialog(QDialog):
         return dict(payload)
 
 
-class ProfileEditDialog(QDialog):
+class ProfileEditDialog(FluentDialog):
     """Profile editor for public identity fields."""
 
     def __init__(self, user: dict, parent=None, auth_controller=None):
-        super().__init__(parent)
+        super().__init__(parent, title=tr("profile.edit.window_title", "Edit Profile"))
         self._user = dict(user or {})
         self._auth_controller = auth_controller or get_auth_controller()
         self._original_email = str(self._user.get("email", "") or "").strip().lower()
@@ -656,9 +643,9 @@ class ProfileEditDialog(QDialog):
         self.setWindowTitle(tr("profile.edit.window_title", "Edit Profile"))
         self.setMinimumWidth(520)
         self.setModal(True)
-        _apply_themed_dialog_surface(self, "ProfileEditDialog")
+        self.setObjectName("ProfileEditDialog")
 
-        layout = QVBoxLayout(self)
+        layout = self.content_layout
         layout.setContentsMargins(24, 24, 24, 24)
         layout.setSpacing(16)
 
@@ -803,15 +790,6 @@ class ProfileEditDialog(QDialog):
         layout.addStretch(1)
         layout.addLayout(button_row)
         self._sync_email_code_visibility()
-
-    def changeEvent(self, event) -> None:
-        super().changeEvent(event)
-        if event.type() in {
-            QEvent.Type.PaletteChange,
-            QEvent.Type.ApplicationPaletteChange,
-            QEvent.Type.StyleChange,
-        }:
-            _apply_themed_dialog_surface(self, "ProfileEditDialog")
 
     def closeEvent(self, event) -> None:
         self._cancel_email_code_task()

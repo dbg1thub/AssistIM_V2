@@ -75,7 +75,6 @@ from client.ui.widgets.contact_shared import (
     ContactSectionHeader,
     ElidedBodyLabel,
     ElidedCaptionLabel,
-    apply_themed_dialog_surface as _apply_themed_dialog_surface,
     prepare_transparent_scroll_area as _prepare_transparent_scroll_area,
 )
 from client.ui.windows.group_creation_dialogs import CreateGroupDialog

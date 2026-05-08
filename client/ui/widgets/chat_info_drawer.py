@@ -31,8 +31,8 @@ from client.core.avatar_rendering import get_avatar_image_store
 from client.core.avatar_utils import profile_avatar_seed
 from client.core.i18n import tr
 from client.models.message import Session
-from client.ui.widgets.contact_shared import apply_themed_dialog_surface
 from client.ui.widgets.fluent_divider import FluentDivider
+from client.ui.widgets.fluent_dialog import FluentDialog
 
 
 @dataclass(frozen=True)
@@ -156,18 +156,18 @@ class ChatInfoAvatarWidget(QWidget):
             self.update()
 
 
-class ChatInfoAnnouncementDialog(QDialog):
+class ChatInfoAnnouncementDialog(FluentDialog):
     """Modal editor used for group announcements."""
 
     def __init__(self, initial_text: str, parent=None) -> None:
-        super().__init__(parent)
+        super().__init__(parent, title=tr("chat.info.group.announcement", "Announcement"))
         self.setWindowTitle(tr("chat.info.group.announcement", "Announcement"))
         self.setModal(True)
         self.resize(360, 260)
-        apply_themed_dialog_surface(self, "ChatInfoAnnouncementDialog")
+        self.setObjectName("ChatInfoAnnouncementDialog")
         self._value = str(initial_text or "").strip()
 
-        layout = QVBoxLayout(self)
+        layout = self.content_layout
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(12)
 

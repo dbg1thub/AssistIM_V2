@@ -41,6 +41,7 @@ from client.core.i18n import tr
 from client.core.logging import setup_logging
 from client.ui.styles import StyleSheet
 from client.ui.controllers.auth_controller import get_auth_controller
+from client.ui.widgets.fluent_dialog import FluentDialog
 
 
 setup_logging()
@@ -75,11 +76,11 @@ class SessionConflictDialog(MessageBoxBase):
         self.widget.setMinimumWidth(400)
 
 
-class PasswordResetDialog(QDialog):
+class PasswordResetDialog(FluentDialog):
     """Password-reset dialog driven by email verification."""
 
     def __init__(self, parent=None):
-        super().__init__(parent)
+        super().__init__(parent, title=tr("auth.password_reset.title", "Reset Password"))
         self._countdown = 0
         self._timer = QTimer(self)
         self._timer.setInterval(1000)
@@ -90,7 +91,7 @@ class PasswordResetDialog(QDialog):
         self.setModal(True)
         self.setMinimumWidth(420)
 
-        layout = QVBoxLayout(self)
+        layout = self.content_layout
         layout.setContentsMargins(24, 24, 24, 24)
         layout.setSpacing(12)
 

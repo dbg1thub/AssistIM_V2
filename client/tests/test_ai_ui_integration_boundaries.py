@@ -43,7 +43,7 @@ def test_ai_settings_are_exposed_in_settings_interface() -> None:
 
     assert "class AIModelSettingCard(SettingCard):" in settings_interface
     assert "class LocalModelResourcesSettingCard(SettingCard):" in settings_interface
-    assert "class LocalModelResourcesDialog(QDialog):" in settings_interface
+    assert "class LocalModelResourcesDialog(FluentDialog):" in settings_interface
     assert "class LocalModelImportWorker(QObject):" in settings_interface
     assert "probe_local_model_resources" in settings_interface
     assert "LocalModelResourceImporter" in settings_interface
@@ -811,3 +811,4 @@ def test_ai_assistant_image_attachment_flow_is_wired() -> None:
     assert "request.attachments" in ai_service
     assert "LocalVisionGGUFRuntime" in ai_service
     assert "attachments=attachments" in prompt_builder
+

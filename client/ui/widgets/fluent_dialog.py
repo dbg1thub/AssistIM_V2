@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QEvent, QPoint, QRectF, Qt
+from PySide6.QtCore import QEasingCurve, QEvent, QPoint, QParallelAnimationGroup, QPropertyAnimation, QRectF, Qt
 from PySide6.QtGui import QColor, QPainter, QPainterPath
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import QDialog, QFrame, QHBoxLayout, QSizePolicy, QVBoxLayout, QWidget
@@ -16,6 +16,9 @@ class FluentDialogCloseButton(CloseButton):
     def __init__(self, parent=None, *, corner_radius: int = 12) -> None:
         super().__init__(parent)
         self._corner_radius = max(0, int(corner_radius or 0))
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, False)
+        self.setAutoFillBackground(False)
 
     def setCornerRadius(self, radius: int) -> None:
         self._corner_radius = max(0, int(radius or 0))
@@ -38,6 +41,9 @@ class FluentDialogCloseButton(CloseButton):
         painter.setRenderHints(QPainter.RenderHint.Antialiasing | QPainter.RenderHint.SmoothPixmapTransform)
         color, bg_color = self._getColors()
 
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Source)
+        painter.fillRect(self.rect(), QColor(0, 0, 0, 0))
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
         painter.setBrush(bg_color)
         painter.setPen(Qt.PenStyle.NoPen)
         painter.drawPath(self._background_path())
@@ -67,6 +73,7 @@ class FluentDialog(QDialog):
         self._radius = max(6, int(radius or 12))
         self._drag_active = False
         self._drag_offset = QPoint()
+        self._show_animation_group: QParallelAnimationGroup | None = None
 
         self.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
@@ -119,8 +126,13 @@ class FluentDialog(QDialog):
         self._apply_fluent_surface()
 
     def setTitleText(self, title: str) -> None:
-        self.title_label.setText(str(title or ""))
         self.setWindowTitle(str(title or ""))
+
+    def setWindowTitle(self, title: str) -> None:
+        normalized = str(title or "")
+        super().setWindowTitle(normalized)
+        if hasattr(self, "title_label"):
+            self.title_label.setText(normalized)
 
     def eventFilter(self, watched, event) -> bool:
         if watched is self.title_bar:
@@ -142,6 +154,47 @@ class FluentDialog(QDialog):
     def closeEvent(self, event) -> None:
         self._drag_active = False
         super().closeEvent(event)
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        self._start_show_animation()
+
+    def _start_show_animation(self) -> None:
+        if self._show_animation_group is not None:
+            self._show_animation_group.stop()
+            self._show_animation_group.deleteLater()
+
+        final_pos = self.pos()
+        start_pos = final_pos + QPoint(0, 8)
+        self.setWindowOpacity(0.0)
+        self.move(start_pos)
+
+        opacity_animation = QPropertyAnimation(self, b"windowOpacity", self)
+        opacity_animation.setDuration(150)
+        opacity_animation.setStartValue(0.0)
+        opacity_animation.setEndValue(1.0)
+        opacity_animation.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+        position_animation = QPropertyAnimation(self, b"pos", self)
+        position_animation.setDuration(150)
+        position_animation.setStartValue(start_pos)
+        position_animation.setEndValue(final_pos)
+        position_animation.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+        group = QParallelAnimationGroup(self)
+        group.addAnimation(opacity_animation)
+        group.addAnimation(position_animation)
+
+        def finish_animation() -> None:
+            self.setWindowOpacity(1.0)
+            self.move(final_pos)
+            if self._show_animation_group is group:
+                self._show_animation_group = None
+            group.deleteLater()
+
+        group.finished.connect(finish_animation)
+        self._show_animation_group = group
+        group.start()
 
     def _apply_fluent_surface(self) -> None:
         dark = isDarkTheme()

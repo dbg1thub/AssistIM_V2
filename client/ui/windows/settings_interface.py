@@ -7,7 +7,7 @@ from typing import Callable
 
 from PySide6.QtCore import QObject, QSignalBlocker, Qt, QThread, QUrl, Signal
 from PySide6.QtGui import QDesktopServices
-from PySide6.QtWidgets import QFileDialog, QDialog, QFrame, QHBoxLayout, QLabel, QScrollArea, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QFileDialog, QFrame, QHBoxLayout, QLabel, QScrollArea, QVBoxLayout, QWidget
 from qfluentwidgets import (
     BodyLabel,
     CaptionLabel,
@@ -48,6 +48,7 @@ from client.services.local_model_resource_importer import (
     LocalModelImportResult,
     LocalModelResourceImporter,
 )
+from client.ui.widgets.fluent_dialog import FluentDialog
 from client.ui.styles import StyleSheet
 
 
@@ -121,7 +122,7 @@ class LocalModelImportWorker(QObject):
             self.failed.emit("IMPORT_FAILED", str(exc))
 
 
-class LocalModelResourcesDialog(QDialog):
+class LocalModelResourcesDialog(FluentDialog):
     """Read-only local model/dependency report."""
 
     def __init__(
@@ -131,7 +132,7 @@ class LocalModelResourcesDialog(QDialog):
         on_imported: Callable[[LocalModelImportResult], None] | None = None,
         parent=None,
     ) -> None:
-        super().__init__(parent)
+        super().__init__(parent, title=tr("settings.local_model_resources.title", "本地模型资源"))
         self._report_provider = report_provider
         self._importer = importer or LocalModelResourceImporter()
         self._on_imported = on_imported
@@ -141,7 +142,7 @@ class LocalModelResourcesDialog(QDialog):
         self.setWindowTitle(tr("settings.local_model_resources.title", "本地模型资源"))
         self.resize(720, 580)
 
-        root = QVBoxLayout(self)
+        root = self.content_layout
         root.setContentsMargins(24, 24, 24, 20)
         root.setSpacing(16)
 

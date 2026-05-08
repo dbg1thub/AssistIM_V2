@@ -66,8 +66,8 @@ def test_discovery_video_tiles_use_existing_thumbnail_cache() -> None:
 def test_discovery_ui_exposes_moment_privacy_entry_points() -> None:
     discovery_interface = Path('client/ui/windows/discovery_interface.py').read_text(encoding='utf-8')
 
-    assert 'class MomentVisibilitySelectDialog(QDialog):' in discovery_interface
-    assert 'class MomentPrivacySettingsDialog(QDialog):' in discovery_interface
+    assert 'class MomentVisibilitySelectDialog(FluentDialog):' in discovery_interface
+    assert 'class MomentPrivacySettingsDialog(FluentDialog):' in discovery_interface
     assert 'self.visibility_button = PushButton(tr("discovery.dialog.visibility_title", "Who can see this"), self)' in discovery_interface
     assert 'self.privacy_button = PushButton(tr("discovery.feed.privacy_button", "Moment Privacy"), self.hero_card)' in discovery_interface
     assert 'dialog.submitted.connect(self._create_moment)' in discovery_interface
@@ -532,7 +532,7 @@ def test_user_profile_flyout_requires_email_code_for_changed_email() -> None:
 def test_user_profile_flyout_exposes_authenticated_password_change() -> None:
     flyout = Path('client/ui/widgets/user_profile_flyout.py').read_text(encoding='utf-8')
 
-    assert 'class ChangePasswordDialog(QDialog):' in flyout
+    assert 'class ChangePasswordDialog(FluentDialog):' in flyout
     assert 'self.change_password_link = HyperlinkLabel(tr("profile.password.change.link", "Change Password"), self)' in flyout
     assert 'self.change_password_link.clicked.connect(self.passwordChangeRequested.emit)' in flyout
     assert 'view.passwordChangeRequested.connect(self._handle_password_change_from_flyout)' in flyout
@@ -546,7 +546,7 @@ def test_user_profile_flyout_exposes_readonly_e2ee_device_security() -> None:
     auth_controller = Path('client/ui/controllers/auth_controller.py').read_text(encoding='utf-8')
 
     assert 'import json' in flyout
-    assert 'class DeviceSecurityDialog(QDialog):' in flyout
+    assert 'class DeviceSecurityDialog(FluentDialog):' in flyout
     assert 'self.refresh_button.clicked.connect(self.reload_devices)' in flyout
     assert 'devices = await self._auth_controller.list_my_e2ee_devices()' in flyout
     assert 'diagnostics = await self._auth_controller.get_history_recovery_diagnostics()' in flyout
@@ -808,7 +808,7 @@ def test_chat_search_and_call_entry_points_use_wired_actions_and_keep_direct_con
     assert 'self.history_button.setEnabled(enabled)' in chat_header
     assert 'self.search_row.hide()' not in chat_info_drawer
     assert 'self.clear_button.hide()' not in chat_info_drawer
-    assert 'class ChatSessionSearchDialog(QDialog):' in chat_interface
+    assert 'class ChatSessionSearchDialog(FluentDialog):' in chat_interface
     assert 'self.chat_panel.chat_history_requested.connect(self._on_chat_history_requested)' in chat_interface
     assert 'self.chat_panel.chat_info_search_requested.connect(self._on_chat_info_search_requested)' in chat_interface
     assert 'self._open_session_search_dialog(source="header")' in chat_interface
@@ -1092,7 +1092,7 @@ def test_chat_info_detail_field_styles_match_drawer_requirements() -> None:
     light_qss = Path('client/ui/styles/qss/light/chat_panel.qss').read_text(encoding='utf-8')
     dark_qss = Path('client/ui/styles/qss/dark/chat_panel.qss').read_text(encoding='utf-8')
 
-    assert 'class ChatInfoAnnouncementDialog(QDialog):' in drawer
+    assert 'class ChatInfoAnnouncementDialog(FluentDialog):' in drawer
     assert 'class ChatInfoAnnouncementPreview(CaptionLabel):' in drawer
     assert 'class ChatInfoAnnouncementField(QWidget):' in drawer
     assert 'valueCommitted = Signal(str)' in drawer
@@ -1227,7 +1227,7 @@ def test_chat_info_member_management_uses_formal_dialog_boundary() -> None:
     assert 'self._session_controller.set_group_member_nickname_visibility(session_id, _enabled)' in chat_interface
     assert 'def _group_record_payload(record) -> dict[str, object]:' in chat_interface
     assert 'class GroupManagementPermissions:' in dialogs
-    assert 'class GroupMemberManagementDialog(QDialog):' in dialogs
+    assert 'class GroupMemberManagementDialog(FluentDialog):' in dialogs
     assert 'can_add_members=is_owner' in dialogs
     assert 'can_manage_member_roles=is_owner' in dialogs
     assert 'can_transfer_owner=is_owner' in dialogs
@@ -1247,7 +1247,7 @@ def test_chat_info_member_management_uses_formal_dialog_boundary() -> None:
     assert 'chat_info_clear_requested = Signal()' in chat_panel
     assert 'chat_info_show_nickname_toggled = Signal(bool)' in chat_panel
     assert 'chat_info_member_management_requested = Signal(object)' in chat_panel
-    assert 'class IdentityReviewDialog(QDialog):' in chat_interface
+    assert 'class IdentityReviewDialog(FluentDialog):' in chat_interface
     assert 'self.identity_row.setVisible(str(security_summary.get("encryption_mode") or "") == "e2ee_private")' in drawer
     assert 'def restore_recalled_message_to_composer(self, message_id: str) -> bool:' in chat_panel
     assert 'def replace_message(self, message: ChatMessage) -> None:' in chat_panel
@@ -1371,7 +1371,7 @@ def test_group_announcement_flow_uses_formal_banner_dialog_and_version_state() -
     assert 'async def mark_group_announcement_viewed(self, session_id: str, announcement_message_id: str)' in session_controller
     assert 'async def mark_group_announcement_viewed(self, session_id: str, announcement_message_id: str) -> Optional[Session]:' in session_manager
     assert 'class GroupAnnouncementBanner(CardWidget):' in banner
-    assert 'class GroupAnnouncementDialog(QDialog):' in dialog
+    assert 'class GroupAnnouncementDialog(FluentDialog):' in dialog
     assert 'async def _broadcast_group_announcement_message(' in groups_api
     assert 'announcement_message_id' in group_service
     assert '"announcement_message_id": announcement_message_id or None' in session_service
@@ -1483,3 +1483,4 @@ def test_discovery_interface_tracks_image_dialogs_for_runtime_teardown() -> None
     assert 'self._image_dialogs: set[QDialog] = set()' in discovery_interface
     assert 'for dialog in list(getattr(self, "_image_dialogs", ())):' in discovery_interface
     assert 'self._image_dialogs.clear()' in discovery_interface
+
