@@ -16,9 +16,6 @@ class FluentDialogCloseButton(CloseButton):
     def __init__(self, parent=None, *, corner_radius: int = 12) -> None:
         super().__init__(parent)
         self._corner_radius = max(0, int(corner_radius or 0))
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, False)
-        self.setAutoFillBackground(False)
 
     def setCornerRadius(self, radius: int) -> None:
         self._corner_radius = max(0, int(radius or 0))
@@ -41,9 +38,6 @@ class FluentDialogCloseButton(CloseButton):
         painter.setRenderHints(QPainter.RenderHint.Antialiasing | QPainter.RenderHint.SmoothPixmapTransform)
         color, bg_color = self._getColors()
 
-        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Source)
-        painter.fillRect(self.rect(), QColor(0, 0, 0, 0))
-        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
         painter.setBrush(bg_color)
         painter.setPen(Qt.PenStyle.NoPen)
         painter.drawPath(self._background_path())
