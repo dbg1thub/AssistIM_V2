@@ -149,6 +149,17 @@ def test_server_readme_describes_current_api_router_domains() -> None:
         assert domain in readme
 
 
+def test_admin_web_readme_matches_current_spawn_patch_scripts() -> None:
+    readme = Path("admin-web/README.md").read_text(encoding="utf-8")
+    package = Path("admin-web/package.json").read_text(encoding="utf-8")
+
+    assert '"dev": "node --require ./scripts/vite-windows-spawn-patch.cjs' in package
+    assert '"build": "tsc --noEmit && node --require ./scripts/vite-windows-spawn-patch.cjs' in package
+    assert '"test": "node --require ./scripts/vite-windows-spawn-patch.cjs' in package
+    assert "当前开发机存在一个 Node 子进程限制" not in readme
+    assert "vite-windows-spawn-patch.cjs" in readme
+
+
 def test_shared_ws_message_uses_type_only() -> None:
     from app.websocket.payloads import ws_message
 

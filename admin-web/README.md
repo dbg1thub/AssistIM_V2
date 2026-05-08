@@ -43,4 +43,4 @@ npm.cmd test
 node_modules\.bin\tsc.cmd --noEmit
 ```
 
-当前开发机存在一个 Node 子进程限制：Vite/Vitest 调用 esbuild 时使用 pipe，会触发 `spawn EPERM`。因此在该机器上已验证 `tsc --noEmit`，但 `doctor/build/test/dev` 会被本机进程策略阻断。换到允许 Node 子进程 pipe 的环境后，应继续执行完整 `doctor/build/test`。
+当前 `dev`、`build`、`test` 脚本已为 Vite/Vitest 加载 `scripts/vite-windows-spawn-patch.cjs`。本机已验证 `npm.cmd run doctor` 和 `node_modules\.bin\tsc.cmd --noEmit` 可以通过；如果 `doctor` 仍报 `spawn EPERM`，说明当前终端或安全策略不允许 Node 使用子进程 pipe，需要先换到允许该能力的终端或调整本机安全策略，再继续执行 `build/test/dev`。
