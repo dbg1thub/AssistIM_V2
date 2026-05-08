@@ -13,7 +13,7 @@ from typing import Optional
 
 from PySide6.QtCore import QEvent, Qt, QTimer
 from PySide6.QtGui import QColor, QGuiApplication, QPalette, QPixmap
-from PySide6.QtWidgets import QDialog, QFrame, QHBoxLayout, QLabel, QScrollArea, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QDialog, QFrame, QHBoxLayout, QLabel, QScrollArea, QSizePolicy, QVBoxLayout, QWidget
 from shiboken6 import isValid as is_valid_qt_object
 
 from qfluentwidgets import (
@@ -25,6 +25,7 @@ from qfluentwidgets import (
     PrimaryPushButton,
     PushButton,
     RoundMenu,
+    SearchLineEdit,
     SubtitleLabel,
     isDarkTheme,
 )
@@ -56,6 +57,7 @@ from client.managers.call_manager import CallEvent
 from client.managers.conversation_summary_manager import ConversationSummaryEvent, get_conversation_summary_manager
 from client.managers.ai_task_manager import AITaskEvent, AITaskState
 from client.managers.message_manager import MessageEvent
+from client.managers.search_manager import SearchCatalogResults, search_message_hits
 from client.managers.session_manager import SessionEvent
 from client.managers.sound_manager import AppSound, get_sound_manager
 from client.models.call import ActiveCallState, CallMediaType
@@ -73,6 +75,7 @@ from client.ui.styles import StyleSheet
 from client.ui.windows.chat_group_flow import ChatGroupFlowCoordinator
 from client.ui.windows.call_window import CallWindow
 from client.ui.widgets.chat_panel import ChatPanel
+from client.ui.widgets.global_search_panel import GlobalSearchResultsPanel
 from client.ui.widgets.incoming_call_toast import IncomingCallToast
 from client.ui.widgets.chat_info_drawer import (
     GroupMemberManagementRequest,
@@ -209,6 +212,147 @@ class ClearChatHistoryConfirmDialog(MessageBoxBase):
         self.yesButton.setText(tr("chat.info.clear.action", "Clear"))
         self.cancelButton.setText(tr("common.cancel", "Cancel"))
         self.widget.setMinimumWidth(380)
+
+
+class ChatSessionSearchDialog(QDialog):
+    """Search local chat history inside one selected conversation."""
+
+    SEARCH_LIMIT = 80
+    SEARCH_DEBOUNCE_MS = 160
+
+    def __init__(self, session, *, result_activated=None, parent=None):
+        super().__init__(parent)
+        self._session_id = str(getattr(session, "session_id", "") or "").strip()
+        self._session_name = (
+            str(session.chat_title() or session.display_name() or "").strip()
+            if session is not None
+            else ""
+        ) or tr("session.unnamed", "Untitled Session")
+        self._result_activated = result_activated
+        self._search_task: asyncio.Task | None = None
+        self._search_generation = 0
+        self._closed = False
+
+        self.setWindowTitle(tr("chat.info.search.title", "Find Chat Content"))
+        self.resize(560, 620)
+        self.setMinimumSize(420, 420)
+        _apply_themed_dialog_surface(self, "ChatSessionSearchDialog")
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(18, 18, 18, 18)
+        layout.setSpacing(12)
+
+        title = SubtitleLabel(tr("chat.info.search.title", "Find Chat Content"), self)
+        subtitle = CaptionLabel(
+            tr("chat.info.search.scope", "Search in {name}", name=self._session_name),
+            self,
+        )
+        subtitle.setWordWrap(True)
+
+        self.search_box = SearchLineEdit(self)
+        self.search_box.setPlaceholderText(tr("chat.info.search.placeholder", "Search this chat"))
+        self.search_box.setFixedHeight(36)
+        self.search_box.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+        self.results_panel = GlobalSearchResultsPanel(self)
+        self.results_panel.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+
+        layout.addWidget(title)
+        layout.addWidget(subtitle)
+        layout.addWidget(self.search_box)
+        layout.addWidget(self.results_panel, 1)
+
+        self._search_timer = QTimer(self)
+        self._search_timer.setSingleShot(True)
+        self._search_timer.setInterval(self.SEARCH_DEBOUNCE_MS)
+        self._search_timer.timeout.connect(self._trigger_search)
+
+        self.search_box.textChanged.connect(self._on_search_text_changed)
+        self.results_panel.resultActivated.connect(self._on_result_activated)
+        self.results_panel.clear_results()
+
+    def focus_search_box(self) -> None:
+        self.search_box.setFocus()
+
+    def closeEvent(self, event) -> None:
+        self._closed = True
+        self._search_timer.stop()
+        self._cancel_search_task()
+        super().closeEvent(event)
+
+    def changeEvent(self, event) -> None:
+        super().changeEvent(event)
+        if event.type() in {
+            QEvent.Type.PaletteChange,
+            QEvent.Type.ApplicationPaletteChange,
+            QEvent.Type.StyleChange,
+        }:
+            _apply_themed_dialog_surface(self, "ChatSessionSearchDialog")
+
+    def _on_search_text_changed(self, text: str) -> None:
+        keyword = str(text or "").strip()
+        self._search_generation += 1
+        if not keyword:
+            self._search_timer.stop()
+            self._cancel_search_task()
+            self.results_panel.clear_results()
+            return
+        self._search_timer.start()
+
+    def _trigger_search(self) -> None:
+        keyword = self.search_box.text().strip()
+        if not keyword or not self._session_id:
+            self.results_panel.clear_results()
+            return
+
+        self._cancel_search_task()
+        self._search_generation += 1
+        generation = self._search_generation
+        self.results_panel.set_loading(keyword)
+        task = asyncio.create_task(self._run_search(keyword, generation))
+        self._search_task = task
+        task.add_done_callback(self._on_search_task_done)
+
+    async def _run_search(self, keyword: str, generation: int) -> None:
+        try:
+            results = await search_message_hits(keyword, session_id=self._session_id, limit=self.SEARCH_LIMIT)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception(
+                "Failed to search local chat history session_id=%s keyword=%s",
+                self._session_id,
+                keyword,
+            )
+            results = []
+
+        if self._closed or generation != self._search_generation or self.search_box.text().strip() != keyword:
+            return
+        self.results_panel.set_results(
+            keyword,
+            SearchCatalogResults(messages=results, contacts=[], groups=[], message_total=len(results)),
+        )
+
+    def _on_search_task_done(self, task: asyncio.Task) -> None:
+        if self._search_task is task:
+            self._search_task = None
+        if task.cancelled():
+            return
+        try:
+            task.result()
+        except Exception:
+            logger.exception("Unhandled local chat search task failure")
+
+    def _cancel_search_task(self) -> None:
+        task = self._search_task
+        if task is not None and not task.done():
+            task.cancel()
+        self._search_task = None
+
+    def _on_result_activated(self, payload: object) -> None:
+        if callable(self._result_activated):
+            self._result_activated(payload)
+        self.accept()
 
 
 class LeaveGroupConfirmDialog(MessageBoxBase):
@@ -514,6 +658,7 @@ class ChatInterface(QWidget):
         self._screenshot_overlays: set[ScreenshotOverlay] = set()
         self._screenshot_dialogs: set[ScreenshotPreviewDialog] = set()
         self._dialog_refs: set[QWidget] = set()
+        self._chat_search_dialog: ChatSessionSearchDialog | None = None
         self._incoming_call_toasts: dict[str, IncomingCallToast] = {}
         self._call_window: CallWindow | None = None
         self._call_result_messages_sent: OrderedDict[str, float] = OrderedDict()
@@ -4269,13 +4414,8 @@ class ChatInterface(QWidget):
         return f"{minutes:02d}:{seconds:02d}"
 
     def _on_chat_history_requested(self) -> None:
-        """Show placeholder feedback for the reserved chat-history entry point."""
-        InfoBar.info(
-            tr("chat.info.history.title", "Chat History"),
-            tr("chat.info.history.unavailable", "The chat history entry is reserved and will be connected next."),
-            parent=self.window(),
-            duration=1800,
-        )
+        """Open the current-conversation local history search dialog."""
+        self._open_session_search_dialog(source="header")
 
     def _on_chat_info_add_requested(self) -> None:
         """Open the contact selector used to turn the current private chat into a new group."""
@@ -4289,12 +4429,40 @@ class ChatInterface(QWidget):
         )
 
     def _on_chat_info_search_requested(self) -> None:
-        """Keep the reserved chat-search entry visible until the real flow lands."""
-        InfoBar.info(
-            tr("chat.info.search.title", "Find Chat Content"),
-            tr("chat.info.search.unavailable", "The in-chat search feature will be connected next."),
+        """Open the current-conversation local history search dialog from chat info."""
+        self._open_session_search_dialog(source="info_drawer")
+
+    def _open_session_search_dialog(self, *, source: str) -> None:
+        """Show a single local search dialog scoped to the selected conversation."""
+        del source
+        session = self._session_controller.get_current_session()
+        if session is None or not str(session.session_id or "").strip():
+            return
+
+        existing = self._chat_search_dialog
+        if existing is not None and is_valid_qt_object(existing):
+            existing.close()
+
+        dialog = ChatSessionSearchDialog(
+            session,
+            result_activated=self._on_chat_session_search_result_activated,
             parent=self.window(),
-            duration=1800,
+        )
+        self._chat_search_dialog = dialog
+        dialog.destroyed.connect(lambda *_args, dlg=dialog: self._clear_chat_search_dialog_ref(dlg))
+        self._show_dialog(dialog)
+        dialog.focus_search_box()
+
+    def _clear_chat_search_dialog_ref(self, dialog: ChatSessionSearchDialog) -> None:
+        if self._chat_search_dialog is dialog:
+            self._chat_search_dialog = None
+
+    def _on_chat_session_search_result_activated(self, payload: object) -> None:
+        """Route one current-session search hit through the existing chat-open path."""
+        generation = self._advance_session_focus_generation()
+        self._schedule_ui_task(
+            self._open_sidebar_search_result(payload, generation),
+            "open chat history search result",
         )
 
     def _on_chat_info_identity_review_requested(self) -> None:

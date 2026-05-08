@@ -3337,6 +3337,43 @@ def test_search_manager_uses_database_search_boundary(monkeypatch) -> None:
     asyncio.run(scenario())
 
 
+def test_search_manager_session_message_hits_keep_multiple_hits_in_same_session(monkeypatch) -> None:
+    fake_db = FakeSearchDatabase(
+        [
+            ChatMessage(
+                message_id='msg-1',
+                session_id='session-1',
+                sender_id='user-1',
+                content='roadmap first hit',
+                message_type=MessageType.TEXT,
+                status=MessageStatus.SENT,
+                is_self=True,
+            ),
+            ChatMessage(
+                message_id='msg-2',
+                session_id='session-1',
+                sender_id='user-2',
+                content='second roadmap hit',
+                message_type=MessageType.TEXT,
+                status=MessageStatus.RECEIVED,
+                is_self=False,
+            ),
+        ]
+    )
+
+    monkeypatch.setattr(search_manager_module, 'get_database', lambda: fake_db)
+
+    async def scenario() -> None:
+        manager = search_manager_module.SearchManager()
+        results = await manager.search_message_hits('roadmap', session_id='session-1', limit=5)
+
+        assert fake_db.search_calls == [('roadmap', 'session-1', 5)]
+        assert [result.message.message_id for result in results] == ['msg-1', 'msg-2']
+        assert [result.match_count for result in results] == [1, 1]
+
+    asyncio.run(scenario())
+
+
 def test_search_manager_search_all_uses_storage_boundaries(monkeypatch) -> None:
     fake_db = FakeSearchDatabase(
         [

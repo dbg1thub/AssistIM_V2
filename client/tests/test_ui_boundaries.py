@@ -777,9 +777,10 @@ def test_request_detail_and_dialog_entry_points_use_authoritative_contact_semant
     assert 'if self._raise_existing_dialog(self._create_group_dialog):' in contact_interface
 
 
-def test_chat_search_and_call_entry_points_hide_unwired_actions_and_keep_direct_context() -> None:
+def test_chat_search_and_call_entry_points_use_wired_actions_and_keep_direct_context() -> None:
     chat_header = Path('client/ui/widgets/chat_header.py').read_text(encoding='utf-8')
     chat_info_drawer = Path('client/ui/widgets/chat_info_drawer.py').read_text(encoding='utf-8')
+    chat_interface = Path('client/ui/windows/chat_interface.py').read_text(encoding='utf-8')
     contact_interface = Path('client/ui/windows/contact_interface.py').read_text(encoding='utf-8')
     message_input = Path('client/ui/widgets/message_input.py').read_text(encoding='utf-8')
     group_dialogs = Path('client/ui/windows/group_creation_dialogs.py').read_text(encoding='utf-8')
@@ -787,9 +788,17 @@ def test_chat_search_and_call_entry_points_hide_unwired_actions_and_keep_direct_
     search_manager = Path('client/managers/search_manager.py').read_text(encoding='utf-8')
     search_panel = Path('client/ui/widgets/global_search_panel.py').read_text(encoding='utf-8')
 
-    assert 'self.history_button.hide()' in chat_header
-    assert 'self.search_row.hide()' in chat_info_drawer
-    assert 'self.clear_button.hide()' in chat_info_drawer
+    assert 'self.history_button.hide()' not in chat_header
+    assert 'self.history_button.setEnabled(enabled)' in chat_header
+    assert 'self.search_row.hide()' not in chat_info_drawer
+    assert 'self.clear_button.hide()' not in chat_info_drawer
+    assert 'class ChatSessionSearchDialog(QDialog):' in chat_interface
+    assert 'self.chat_panel.chat_history_requested.connect(self._on_chat_history_requested)' in chat_interface
+    assert 'self.chat_panel.chat_info_search_requested.connect(self._on_chat_info_search_requested)' in chat_interface
+    assert 'self._open_session_search_dialog(source="header")' in chat_interface
+    assert 'self._open_session_search_dialog(source="info_drawer")' in chat_interface
+    assert 'search_message_hits(keyword, session_id=self._session_id, limit=self.SEARCH_LIMIT)' in chat_interface
+    assert 'SearchCatalogResults(messages=results, contacts=[], groups=[], message_total=len(results))' in chat_interface
     assert 'self.summary_label.hide()' not in contact_interface
     assert 'def _update_call_buttons(self) -> None:' in message_input
     assert 'session.session_type == "direct"' in message_input

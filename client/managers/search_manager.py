@@ -165,6 +165,36 @@ class SearchManager:
         )
         return catalog
 
+    async def search_message_hits(
+        self,
+        keyword: str,
+        *,
+        session_id: str,
+        limit: int = 100,
+    ) -> list[SearchResult]:
+        """Search individual message hits inside one session without grouping by session."""
+        if not keyword or not keyword.strip() or not str(session_id or "").strip():
+            return []
+
+        normalized_keyword = keyword.strip()
+        normalized_session_id = str(session_id or "").strip()
+        normalized_limit = max(1, int(limit or 0))
+        messages = await self._search_messages(normalized_keyword, normalized_session_id, normalized_limit)
+        metadata = (await self._resolve_message_session_metadata_bulk([normalized_session_id])).get(normalized_session_id, {})
+        results: list[SearchResult] = []
+        for message in messages:
+            result = self._highlight_message_matches(
+                message,
+                normalized_keyword,
+                session_name=metadata.get("session_name", ""),
+                session_avatar=metadata.get("session_avatar", ""),
+                session_type=metadata.get("session_type", ""),
+            )
+            if result is not None:
+                results.append(result)
+        self._message_results = results
+        return results
+
     async def _search_message_sessions(
         self,
         keyword: str,
@@ -493,6 +523,17 @@ async def search_messages(
     """Search messages by keyword."""
     manager = get_search_manager()
     return await manager.search(keyword, session_id, limit)
+
+
+async def search_message_hits(
+    keyword: str,
+    *,
+    session_id: str,
+    limit: int = 100,
+) -> list[SearchResult]:
+    """Search individual messages by keyword inside one session."""
+    manager = get_search_manager()
+    return await manager.search_message_hits(keyword, session_id=session_id, limit=limit)
 
 
 async def search_all(

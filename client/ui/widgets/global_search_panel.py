@@ -456,6 +456,7 @@ class GlobalSearchResultsPanel(QWidget):
             payload=payload,
             title=title,
             subtitle=result.matched_text,
+            meta=self._message_meta(result),
             keyword=self._keyword,
             avatar=result.session_avatar,
             seed=profile_avatar_seed(
@@ -464,6 +465,19 @@ class GlobalSearchResultsPanel(QWidget):
             ),
             parent=self.scroll_widget,
         )
+
+    @staticmethod
+    def _message_meta(result: SearchResult) -> str:
+        message = result.message
+        timestamp = getattr(message, "timestamp", None)
+        time_text = timestamp.strftime("%Y-%m-%d %H:%M") if timestamp is not None else ""
+        extra = dict(getattr(message, "extra", {}) or {})
+        sender = (
+            tr("search.message.sender.self", "我")
+            if bool(getattr(message, "is_self", False))
+            else str(extra.get("sender_name", "") or extra.get("sender_display_name", "") or getattr(message, "sender_id", "") or "").strip()
+        )
+        return " · ".join(part for part in (time_text, sender) if part)
 
     @staticmethod
     def _contact_subtitle(result: ContactSearchResult) -> str:
