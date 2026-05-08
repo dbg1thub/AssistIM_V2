@@ -10,6 +10,16 @@ def test_ui_does_not_emit_session_updated_events_directly() -> None:
     assert 'emit_sync(SessionEvent.UPDATED' not in chat_interface
 
 
+def test_client_feature_backlog_keeps_completed_work_out_of_next_candidates() -> None:
+    backlog = Path('CLIENT_FEATURE_BACKLOG.md').read_text(encoding='utf-8')
+
+    completed_section = backlog.split('## 已完成收口', 1)[1].split('## 下一步候选', 1)[0]
+    next_candidates = backlog.split('## 下一步候选', 1)[1]
+
+    assert '联系人详情页语音 / 视频通话入口' in completed_section
+    assert '联系人详情页语音 / 视频通话入口' not in next_candidates
+
+
 def test_group_creation_dialogs_are_split_out_of_contact_interface() -> None:
     contact_interface = Path('client/ui/windows/contact_interface.py').read_text(encoding='utf-8')
     chat_interface = Path('client/ui/windows/chat_interface.py').read_text(encoding='utf-8')

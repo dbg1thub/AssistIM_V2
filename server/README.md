@@ -2,16 +2,16 @@
 
 ## What is included
 
-This backend implements the sections 1-127 from `backend_architecture.md`:
+This backend implements the current single-instance backend baseline:
 
 - FastAPI app entrypoint
 - Core/config/database/security/logging modules
-- API routers for auth, users, friends, blocks, sessions, messages, groups, moments, files
+- API routers for admin, auth, blocks, calls, devices, files, friends, groups, keys, messages, moments, sessions, users
 - Repository and service layers
 - WebSocket endpoints for chat and presence
 - Unified API response format
-- JWT auth, password hashing, request logging, basic rate limiting, file upload
-- Database schema layer aligned to sections 27-47
+- JWT auth, password hashing, email verification, request logging, basic rate limiting, file upload
+- Database schema layer for users, devices, contacts, sessions, messages, groups, moments, files, admin audit, and local backup metadata
 - Alembic bootstrap and initial migration
 - Current client-facing compatibility routes:
   - `POST /api/v1/auth/refresh`
@@ -101,9 +101,12 @@ The current test suite covers:
 - password reset by email verification
 - profile email changes by email verification
 - authenticated password change with token rotation
-- friend request accept flow
-- direct session creation and message read flow
-- group permission and ownership transfer
+- friend request, friendship, block, and unblock flows
+- direct session creation, message read/edit/recall/delete, media, and E2EE envelope flows
+- group creation, profile, member, role, ownership transfer, leave, and delete flows
+- moment media, comments, likes, privacy, and visibility flows
+- device/prekey APIs and 1:1 call signaling APIs
+- development admin inspection, health, audit, log, backup, and user-management APIs
 
 ## Development diagnostics dashboard
 

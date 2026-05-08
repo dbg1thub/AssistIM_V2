@@ -124,6 +124,31 @@ def test_run_api_reload_watches_server_directory_only() -> None:
     assert script.index("--reload-dir") > script.index("if ($Reload)")
 
 
+def test_server_readme_describes_current_api_router_domains() -> None:
+    readme = Path("server/README.md").read_text(encoding="utf-8")
+    router = Path("server/app/api/v1/router.py").read_text(encoding="utf-8")
+
+    assert "sections 1-127" not in readme
+    expected_domains = (
+        "admin",
+        "auth",
+        "blocks",
+        "calls",
+        "devices",
+        "files",
+        "friends",
+        "groups",
+        "keys",
+        "messages",
+        "moments",
+        "sessions",
+        "users",
+    )
+    for domain in expected_domains:
+        assert f"include_router({domain}.router" in router
+        assert domain in readme
+
+
 def test_shared_ws_message_uses_type_only() -> None:
     from app.websocket.payloads import ws_message
 
