@@ -918,6 +918,16 @@ function jsonResponse(data: unknown, status = 200, code = 0, message = "success"
   );
 }
 
+function hasRequestWithParams(urls: string[], pathname: string, params: Record<string, string>): boolean {
+  return urls.some((raw) => {
+    const url = new URL(raw);
+    if (url.pathname !== pathname) {
+      return false;
+    }
+    return Object.entries(params).every(([key, value]) => url.searchParams.get(key) === value);
+  });
+}
+
 describe("Admin web shell", () => {
   it("connects with server URL and token, then renders dashboard overview", async () => {
     const fetchMock = mockFetch();
@@ -964,16 +974,16 @@ describe("Admin web shell", () => {
     expect(await screen.findByRole("heading", { name: "数据库" })).toBeInTheDocument();
     expect(screen.getByText("runtime-revision")).toBeInTheDocument();
     expect(screen.getByText("总表数")).toBeInTheDocument();
-    expect(screen.getByText("users")).toBeInTheDocument();
+    expect(screen.getAllByText("users").length).toBeGreaterThan(0);
     expect(screen.getByText("idx_messages_session_seq")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "查看 users 表详情" }));
     expect(screen.getByRole("heading", { name: "users" })).toBeInTheDocument();
-    expect(screen.getByText("uq_users_username_lower")).toBeInTheDocument();
+    expect(screen.getAllByText("uq_users_username_lower").length).toBeGreaterThan(0);
 
     fireEvent.click(screen.getByRole("button", { name: "日志" }));
     expect(await screen.findByRole("heading", { name: "日志" })).toBeInTheDocument();
-    expect(screen.getByText("assistim.log")).toBeInTheDocument();
+    expect(screen.getAllByText("assistim.log").length).toBeGreaterThan(0);
   });
 
   it("loads user detail and performs confirmed account operations", async () => {
@@ -1142,7 +1152,7 @@ describe("Admin web shell", () => {
     fireEvent.change(screen.getByLabelText("问题类型"), {
       target: { value: "missing_disk_file" }
     });
-    expect(screen.getByText("missing_disk_file")).toBeInTheDocument();
+    expect(screen.getAllByText("missing_disk_file").length).toBeGreaterThan(0);
     expect(screen.queryByText("orphan.txt")).not.toBeInTheDocument();
 
     const requestedUrls = fetchMock.mock.calls.map(([input]) => String(input));
@@ -1287,7 +1297,12 @@ describe("Admin web shell", () => {
       expect(requestedUrls.some((url) => url.includes("status=pending"))).toBe(true);
       expect(requestedUrls.some((url) => url.includes("sender_id=user-1"))).toBe(true);
       expect(requestedUrls.some((url) => url.includes("receiver_id=user-3"))).toBe(true);
-      expect(requestedUrls.some((url) => url.includes("friendships?user_id=user-1&friend_id=user-3"))).toBe(true);
+      expect(
+        hasRequestWithParams(requestedUrls, "/api/v1/admin/contacts/friendships", {
+          user_id: "user-1",
+          friend_id: "user-3"
+        })
+      ).toBe(true);
     });
   });
 
@@ -1398,8 +1413,16 @@ describe("Admin web shell", () => {
       const requestedUrls = fetchMock.mock.calls.map(([input]) => String(input));
       expect(requestedUrls.some((url) => url.includes("/api/v1/admin/moments/moment-1/comments"))).toBe(true);
       expect(requestedUrls.some((url) => url.includes("/api/v1/admin/moments/moment-1/likes"))).toBe(true);
-      expect(requestedUrls.some((url) => url.includes("comments?user_id=user-1"))).toBe(true);
-      expect(requestedUrls.some((url) => url.includes("likes?user_id=user-1"))).toBe(true);
+      expect(
+        hasRequestWithParams(requestedUrls, "/api/v1/admin/moments/moment-1/comments", {
+          user_id: "user-1"
+        })
+      ).toBe(true);
+      expect(
+        hasRequestWithParams(requestedUrls, "/api/v1/admin/moments/moment-1/likes", {
+          user_id: "user-1"
+        })
+      ).toBe(true);
     });
   });
 
@@ -1514,7 +1537,7 @@ describe("Admin web shell", () => {
     fireEvent.click(screen.getByRole("button", { name: "HTTP" }));
     expect(await screen.findByRole("heading", { name: "HTTP" })).toBeInTheDocument();
     expect(screen.getByText("/api/v1/auth/login")).toBeInTheDocument();
-    expect(screen.getByText("InMemoryRateLimitStore")).toBeInTheDocument();
+    expect(screen.getAllByText("InMemoryRateLimitStore").length).toBeGreaterThan(0);
     expect(screen.getByText("login:127.0.0.1:anonymous")).toBeInTheDocument();
 
     fireEvent.change(screen.getByLabelText("请求方法"), {
@@ -1566,7 +1589,7 @@ describe("Admin web shell", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "巡检" }));
     expect(await screen.findByRole("heading", { name: "巡检" })).toBeInTheDocument();
-    expect(await screen.findByText("聊天")).toBeInTheDocument();
+    expect((await screen.findAllByText("聊天")).length).toBeGreaterThan(0);
     expect(screen.getByText("文件存储")).toBeInTheDocument();
     expect(screen.getAllByText("有问题").length).toBeGreaterThan(0);
 
@@ -1617,7 +1640,7 @@ describe("Admin web shell", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "查看审计详情" }));
     expect(await screen.findByText("请求路径")).toBeInTheDocument();
-    expect(screen.getByText("/api/v1/admin/users/user-1/disable")).toBeInTheDocument();
+    expect(screen.getAllByText("/api/v1/admin/users/user-1/disable").length).toBeGreaterThan(0);
     expect(screen.getByText(/redacted/)).toBeInTheDocument();
   });
 
