@@ -484,6 +484,22 @@ class ChatController:
             before_timestamp=before_timestamp,
         )
 
+    async def load_cached_message_context(
+        self,
+        session_id: str,
+        message_id: str,
+        *,
+        before_limit: int = 30,
+        after_limit: int = 30,
+    ) -> list[ChatMessage]:
+        """Load a local-only message window around a target message."""
+        return await self._msg_manager.get_cached_message_context(
+            session_id=session_id,
+            message_id=message_id,
+            before_limit=before_limit,
+            after_limit=after_limit,
+        )
+
     async def select_session(self, session_id: str) -> None:
         """Select a session."""
         await self._session_manager.select_session(session_id)

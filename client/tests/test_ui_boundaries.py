@@ -781,6 +781,12 @@ def test_chat_search_and_call_entry_points_use_wired_actions_and_keep_direct_con
     chat_header = Path('client/ui/widgets/chat_header.py').read_text(encoding='utf-8')
     chat_info_drawer = Path('client/ui/widgets/chat_info_drawer.py').read_text(encoding='utf-8')
     chat_interface = Path('client/ui/windows/chat_interface.py').read_text(encoding='utf-8')
+    chat_panel = Path('client/ui/widgets/chat_panel.py').read_text(encoding='utf-8')
+    chat_controller = Path('client/ui/controllers/chat_controller.py').read_text(encoding='utf-8')
+    message_manager = Path('client/managers/message_manager.py').read_text(encoding='utf-8')
+    message_model = Path('client/models/message_model.py').read_text(encoding='utf-8')
+    message_delegate = Path('client/delegates/message_delegate.py').read_text(encoding='utf-8')
+    database = Path('client/storage/database.py').read_text(encoding='utf-8')
     contact_interface = Path('client/ui/windows/contact_interface.py').read_text(encoding='utf-8')
     message_input = Path('client/ui/widgets/message_input.py').read_text(encoding='utf-8')
     group_dialogs = Path('client/ui/windows/group_creation_dialogs.py').read_text(encoding='utf-8')
@@ -799,6 +805,16 @@ def test_chat_search_and_call_entry_points_use_wired_actions_and_keep_direct_con
     assert 'self._open_session_search_dialog(source="info_drawer")' in chat_interface
     assert 'search_message_hits(keyword, session_id=self._session_id, limit=self.SEARCH_LIMIT)' in chat_interface
     assert 'SearchCatalogResults(messages=results, contacts=[], groups=[], message_total=len(results))' in chat_interface
+    assert 'self._open_chat_search_result(payload, generation)' in chat_interface
+    assert 'self.chat_panel.scroll_to_message(message_id, flash=True)' in chat_interface
+    assert 'await self._chat_controller.load_cached_message_context(' in chat_interface
+    assert 'tr("chat.info.search.result_missing"' in chat_interface
+    assert 'def scroll_to_message(self, message_id: str, *, flash: bool = True) -> bool:' in chat_panel
+    assert 'def display_row_for_message(self, message_id: str) -> int:' in message_model
+    assert 'def flash_message(self, view, message_id: str, *, duration_ms: int = 1400) -> None:' in message_delegate
+    assert 'async def load_cached_message_context(' in chat_controller
+    assert 'async def get_cached_message_context(' in message_manager
+    assert 'async def get_message_context(' in database
     assert 'self.summary_label.hide()' not in contact_interface
     assert 'def _update_call_buttons(self) -> None:' in message_input
     assert 'session.session_type == "direct"' in message_input

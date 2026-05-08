@@ -325,6 +325,7 @@ class FakeMessageManager:
         self.failed: list[tuple[str, str]] = []
         self.sent_messages: list[ChatMessage] = []
         self.cached_messages_calls: list[tuple[str, int, object]] = []
+        self.cached_message_context_calls: list[tuple[str, str, int, int]] = []
         self.cached_messages_result: list[ChatMessage] = [
             ChatMessage(
                 message_id='cached-1',
@@ -414,6 +415,35 @@ class FakeMessageManager:
             cloned.session_id = session_id
             messages.append(cloned)
         return messages
+
+    async def get_cached_message_context(
+        self,
+        session_id: str,
+        message_id: str,
+        *,
+        before_limit: int = 30,
+        after_limit: int = 30,
+    ) -> list[ChatMessage]:
+        self.cached_message_context_calls.append((session_id, message_id, before_limit, after_limit))
+        return [
+            ChatMessage(
+                message_id='context-before',
+                session_id=session_id,
+                sender_id='bob',
+                content='before',
+                message_type=MessageType.TEXT,
+                status=MessageStatus.RECEIVED,
+            ),
+            ChatMessage(
+                message_id=message_id,
+                session_id=session_id,
+                sender_id='alice',
+                content='target',
+                message_type=MessageType.TEXT,
+                status=MessageStatus.SENT,
+                is_self=True,
+            ),
+        ]
 
     async def get_session_history_cutoff(self, session_id: str):
         return self.history_cutoffs.get(session_id)
@@ -2832,6 +2862,30 @@ def test_chat_controller_load_cached_messages_uses_message_manager_boundary(monk
         assert fake_message_manager.cached_messages_calls == [('session-42', 12, None)]
         assert len(messages) == 1
         assert messages[0].message_id == 'cached-1'
+
+    asyncio.run(scenario())
+
+
+def test_chat_controller_load_cached_message_context_uses_message_manager_boundary(monkeypatch) -> None:
+    fake_message_manager = FakeMessageManager()
+    fake_session_manager = FakeSessionManager()
+    fake_file_service = FakeFileService()
+
+    monkeypatch.setattr(chat_controller_module, 'get_message_manager', lambda: fake_message_manager)
+    monkeypatch.setattr(chat_controller_module, 'get_session_manager', lambda: fake_session_manager)
+    monkeypatch.setattr(chat_controller_module, 'get_file_service', lambda: fake_file_service)
+
+    async def scenario() -> None:
+        controller = chat_controller_module.ChatController()
+        messages = await controller.load_cached_message_context(
+            'session-42',
+            'target-7',
+            before_limit=4,
+            after_limit=5,
+        )
+
+        assert fake_message_manager.cached_message_context_calls == [('session-42', 'target-7', 4, 5)]
+        assert [message.message_id for message in messages] == ['context-before', 'target-7']
 
     asyncio.run(scenario())
 

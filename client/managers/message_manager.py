@@ -2928,6 +2928,28 @@ class MessageManager:
         messages = await self._filter_session_history(session_id, messages)
         return await self._rehydrate_cached_messages_for_display(messages)
 
+    async def get_cached_message_context(
+        self,
+        session_id: str,
+        message_id: str,
+        *,
+        before_limit: int = 30,
+        after_limit: int = 30,
+    ) -> list[ChatMessage]:
+        """Get one local-only message window around a target message."""
+        normalized_session_id = str(session_id or "").strip()
+        normalized_message_id = str(message_id or "").strip()
+        if not normalized_session_id or not normalized_message_id:
+            return []
+        messages = await self._db.get_message_context(
+            normalized_session_id,
+            normalized_message_id,
+            before_limit=before_limit,
+            after_limit=after_limit,
+        )
+        messages = await self._filter_session_history(normalized_session_id, messages)
+        return await self._rehydrate_cached_messages_for_display(messages)
+
     async def update_message_translation(self, message_id: str, translation: dict[str, Any]) -> Optional[ChatMessage]:
         """Persist one local AI translation payload on a message and notify visible views."""
         normalized_message_id = str(message_id or "").strip()

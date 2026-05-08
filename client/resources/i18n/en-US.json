@@ -601,6 +601,7 @@
   "chat.info.search.title": "Find Chat Content",
   "chat.info.search.scope": "Search in {name}",
   "chat.info.search.placeholder": "Search this chat",
+  "chat.info.search.result_missing": "This message is no longer available in local chat history.",
   "chat.info.search.unavailable": "The in-chat search feature will be connected next.",
   "chat.info.add.title": "Add",
   "chat.info.add.unavailable": "This entry is reserved for future group-chat expansion.",

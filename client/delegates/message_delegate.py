@@ -155,6 +155,11 @@ class MessageDelegate(QStyledItemDelegate):
         self._video_thumbnail_cache.signals.thumbnail_ready.connect(self._on_video_thumbnail_ready)
         self._refresh_scheduled = False
         self._context_menu_message_id: str | None = None
+        self._flash_message_id: str | None = None
+        self._flash_view = None
+        self._flash_timer = QTimer(self)
+        self._flash_timer.setSingleShot(True)
+        self._flash_timer.timeout.connect(self._clear_flash_message)
         self._hovered_time_separator_id: str | None = None
         self._hovered_recall_notice_action_id: str | None = None
         self._text_measure_cache: OrderedDict[str, QSize] = OrderedDict()
@@ -670,6 +675,24 @@ class MessageDelegate(QStyledItemDelegate):
         if view is not None:
             view.viewport().repaint()
 
+    def flash_message(self, view, message_id: str, *, duration_ms: int = 1400) -> None:
+        """Temporarily highlight one message bubble/card."""
+        normalized = str(message_id or "").strip()
+        if not normalized:
+            return
+        self._flash_message_id = normalized
+        self._flash_view = view
+        self._flash_timer.start(max(200, int(duration_ms or 1400)))
+        if view is not None:
+            view.viewport().update()
+
+    def _clear_flash_message(self) -> None:
+        view = self._flash_view
+        self._flash_message_id = None
+        self._flash_view = None
+        if view is not None:
+            view.viewport().update()
+
     def toggle_time_separator_expanded_at(self, view, index: QModelIndex, position: QPoint) -> bool:
         """Toggle the display format of a clicked time separator row."""
         source_message_id = self._time_separator_source_at(view, index, position)
@@ -902,6 +925,7 @@ class MessageDelegate(QStyledItemDelegate):
                 self._draw_file_content(painter, rect, message)
             else:
                 self._draw_video_content(painter, rect, message)
+            self._draw_search_flash(painter, rect, message)
             return
 
         path = self._bubble_path(rect, message.is_self, avatar_rect.center().y())
@@ -913,6 +937,7 @@ class MessageDelegate(QStyledItemDelegate):
         )
 
         painter.fillPath(path, bubble_color)
+        self._draw_search_flash(painter, rect, message, path=path)
         painter.setPen(Qt.PenStyle.NoPen)
 
         content_rect = self._content_rect(rect, message)
@@ -929,6 +954,26 @@ class MessageDelegate(QStyledItemDelegate):
             self._draw_voice_content(painter, content_rect, message)
         else:
             self._draw_text_content(painter, content_rect, message, bubble_color)
+
+    def _draw_search_flash(self, painter: QPainter, rect: QRect, message: ChatMessage, *, path: QPainterPath | None = None) -> None:
+        """Draw a transient search-hit highlight around the rendered message."""
+        if message.message_id != self._flash_message_id:
+            return
+        highlight = QColor(themeColor())
+        fill = QColor(highlight)
+        fill.setAlpha(38)
+        pen = QColor(highlight)
+        pen.setAlpha(210)
+        draw_path = path
+        if draw_path is None:
+            draw_path = QPainterPath()
+            draw_path.addRoundedRect(QRectF(rect.adjusted(-3, -3, 3, 3)), 10, 10)
+        painter.save()
+        painter.fillPath(draw_path, fill)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(pen)
+        painter.drawPath(draw_path)
+        painter.restore()
 
     def _draw_text_content(self, painter: QPainter, rect: QRect, message: ChatMessage, background_fill: QColor) -> None:
         """Draw wrapped text content."""

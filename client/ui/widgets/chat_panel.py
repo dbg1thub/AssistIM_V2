@@ -682,6 +682,24 @@ class ChatPanel(QWidget):
         """Return message delegate."""
         return self._message_delegate
 
+    def scroll_to_message(self, message_id: str, *, flash: bool = True) -> bool:
+        """Scroll the message list to one visible message row."""
+        if not self._message_model or not message_id:
+            return False
+
+        row = self._message_model.display_row_for_message(message_id)
+        if row < 0:
+            return False
+
+        index = self._message_model.index(row, 0)
+        if not index.isValid():
+            return False
+
+        self.message_list.scrollTo(index, QAbstractItemView.ScrollHint.PositionAtCenter)
+        if flash and self._message_delegate:
+            self._message_delegate.flash_message(self.message_list, message_id)
+        return True
+
     def capture_composer_draft(self) -> list[dict]:
         """Return the current message composer draft without clearing it."""
         return self.message_input.capture_draft_segments()

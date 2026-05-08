@@ -499,6 +499,70 @@ def test_database_contacts_cache_index_version_is_owner_scoped() -> None:
         shutil.rmtree(temp_root, ignore_errors=True)
 
 
+def test_database_get_message_context_returns_target_window() -> None:
+    temp_root = (Path.cwd() / "client/tests/.pytest_tmp").resolve()
+    temp_root.mkdir(parents=True, exist_ok=True)
+    db_path = temp_root / "database-message-context.db"
+    try:
+        db_path.unlink(missing_ok=True)
+
+        async def scenario() -> None:
+            database = Database(db_path=str(db_path))
+            await database.connect()
+            try:
+                base = datetime(2026, 5, 8, 9, 0, 0)
+                for index in range(5):
+                    when = base.replace(minute=index)
+                    await database.save_message(
+                        ChatMessage(
+                            message_id=f"m-{index}",
+                            session_id="session-1",
+                            sender_id=f"user-{index % 2}",
+                            content=f"message {index}",
+                            message_type=MessageType.TEXT,
+                            status=MessageStatus.SENT,
+                            timestamp=when,
+                            order_ts=when,
+                            updated_at=when,
+                            is_self=index % 2 == 0,
+                        )
+                    )
+                await database.save_message(
+                    ChatMessage(
+                        message_id="m-other",
+                        session_id="session-2",
+                        sender_id="user-9",
+                        content="other session",
+                        message_type=MessageType.TEXT,
+                        status=MessageStatus.SENT,
+                        timestamp=base,
+                        order_ts=base,
+                        updated_at=base,
+                    )
+                )
+
+                context = await database.get_message_context(
+                    "session-1",
+                    "m-2",
+                    before_limit=1,
+                    after_limit=2,
+                )
+
+                assert [message.message_id for message in context] == ["m-1", "m-2", "m-3", "m-4"]
+                missing = await database.get_message_context("session-1", "m-other", before_limit=2, after_limit=2)
+                assert missing == []
+            finally:
+                await database.close()
+
+        asyncio.run(scenario())
+    finally:
+        try:
+            db_path.unlink(missing_ok=True)
+        except PermissionError:
+            pass
+        shutil.rmtree(temp_root, ignore_errors=True)
+
+
 def test_database_lists_conversation_memory_ann_candidates() -> None:
     temp_root = (Path.cwd() / "client/tests/.pytest_tmp").resolve()
     temp_root.mkdir(parents=True, exist_ok=True)

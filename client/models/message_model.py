@@ -183,6 +183,10 @@ class MessageModel(QAbstractListModel):
         """Check whether a message already exists in the real message list."""
         return self.get_message_by_id(message_id) is not None
 
+    def display_row_for_message(self, message_id: str) -> int:
+        """Return the visible display row for one real message id, or -1."""
+        return self._find_display_row_for_message(message_id)
+
     def get_messages(self) -> list[ChatMessage]:
         """Return real messages only."""
         return self._messages

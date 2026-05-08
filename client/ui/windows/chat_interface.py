@@ -627,6 +627,8 @@ class ChatInterface(QWidget):
 
     SESSION_PANEL_WIDTH = 300
     MESSAGE_PAGE_SIZE = 50
+    SEARCH_RESULT_CONTEXT_BEFORE_LIMIT = 30
+    SEARCH_RESULT_CONTEXT_AFTER_LIMIT = 30
     HISTORY_PAGE_CACHE_LIMIT = 12
     INITIAL_HISTORY_WARM_CONCURRENCY = 2
     INITIAL_HISTORY_WARM_SESSION_LIMIT = 6
@@ -833,6 +835,90 @@ class ChatInterface(QWidget):
             )
             return
         self.session_panel.clear_search()
+
+    async def _open_chat_search_result(self, payload: object, generation: int) -> None:
+        """Open a current-chat search hit and jump to the exact local message."""
+        if not isinstance(payload, dict):
+            return
+
+        target_type = str(payload.get("type", "") or "")
+        data = payload.get("data") or {}
+        if target_type != "message" or not isinstance(data, dict):
+            return
+
+        session_id = str(data.get("session_id", "") or "").strip()
+        message_id = str(data.get("message_id", "") or "").strip()
+        if not session_id or not message_id:
+            return
+
+        if session_id != self._current_session_id:
+            opened = await self.open_session(session_id)
+            if not opened:
+                self._show_chat_search_result_missing()
+                return
+            generation = self._session_focus_generation
+        elif not self._is_session_focus_generation_current(generation):
+            return
+
+        if not self._is_current_session_context(session_id, generation):
+            return
+
+        if self.chat_panel.scroll_to_message(message_id, flash=True):
+            return
+
+        self._cancel_pending_task(self._load_task)
+        self._cancel_pending_task(self._history_load_task)
+        self._load_task = None
+        self._history_load_task = None
+        self.chat_panel.set_history_loading(False)
+
+        try:
+            messages = await self._chat_controller.load_cached_message_context(
+                session_id,
+                message_id,
+                before_limit=self.SEARCH_RESULT_CONTEXT_BEFORE_LIMIT,
+                after_limit=self.SEARCH_RESULT_CONTEXT_AFTER_LIMIT,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception(
+                "Failed to load local chat search context session_id=%s message_id=%s",
+                session_id,
+                message_id,
+            )
+            self._show_chat_search_result_missing()
+            return
+
+        if not self._is_current_session_context(session_id, generation):
+            return
+
+        if not any(getattr(message, "message_id", "") == message_id for message in messages):
+            self._show_chat_search_result_missing()
+            return
+
+        self.chat_panel.set_messages(messages, scroll_to_bottom=False)
+        self._oldest_loaded_timestamp = self._extract_oldest_timestamp(messages)
+        self._oldest_loaded_session_seq = self._extract_oldest_session_seq(messages)
+        self._has_more_history = self._oldest_loaded_session_seq is not None
+        self.chat_panel.set_has_more_history(self._has_more_history)
+        self.chat_panel.set_history_loading(False)
+        self._store_session_view_state(session_id)
+
+        def scroll_target() -> None:
+            if self._is_current_session_context(session_id, generation):
+                self.chat_panel.scroll_to_message(message_id, flash=True)
+
+        self._schedule_ui_single_shot(0, scroll_target)
+
+    def _show_chat_search_result_missing(self) -> None:
+        """Show the search-result stale/missing message warning."""
+        InfoBar.warning(
+            tr("chat.info.search.title", "Find Chat Content"),
+            tr("chat.info.search.result_missing", "This message is no longer available in local chat history."),
+            parent=self.window(),
+            duration=2200,
+        )
 
     def _subscribe_to_events(self) -> None:
         """Subscribe to session and message events for real-time UI updates."""
@@ -4461,7 +4547,7 @@ class ChatInterface(QWidget):
         """Route one current-session search hit through the existing chat-open path."""
         generation = self._advance_session_focus_generation()
         self._schedule_ui_task(
-            self._open_sidebar_search_result(payload, generation),
+            self._open_chat_search_result(payload, generation),
             "open chat history search result",
         )
 

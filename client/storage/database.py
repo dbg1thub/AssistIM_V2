@@ -2727,6 +2727,94 @@ class Database:
         read_cursors = await self._load_session_read_cursors(message.session_id)
         return self._overlay_read_cursors_on_message(message, read_cursors)
 
+    async def get_message_context(
+        self,
+        session_id: str,
+        message_id: str,
+        *,
+        before_limit: int = 30,
+        after_limit: int = 30,
+    ) -> list[ChatMessage]:
+        """Return a local ordered message window around one target message."""
+        normalized_session_id = str(session_id or "").strip()
+        normalized_message_id = str(message_id or "").strip()
+        if not normalized_session_id or not normalized_message_id:
+            return []
+
+        target_cursor = await self._db.execute(
+            """
+            SELECT rowid, *, COALESCE(order_ts, timestamp, 0) AS sort_ts
+            FROM messages
+            WHERE session_id = ? AND message_id = ?
+            LIMIT 1
+            """,
+            (normalized_session_id, normalized_message_id),
+        )
+        target_row = await target_cursor.fetchone()
+        if target_row is None:
+            return []
+
+        target_sort_ts = float(target_row["sort_ts"] or 0)
+        target_rowid = int(target_row["rowid"] or 0)
+        normalized_before_limit = max(0, int(before_limit or 0))
+        normalized_after_limit = max(0, int(after_limit or 0))
+
+        before_rows = []
+        if normalized_before_limit > 0:
+            before_cursor = await self._db.execute(
+                """
+                SELECT rowid, *
+                FROM messages
+                WHERE session_id = ?
+                  AND (
+                    COALESCE(order_ts, timestamp, 0) < ?
+                    OR (COALESCE(order_ts, timestamp, 0) = ? AND rowid < ?)
+                  )
+                ORDER BY COALESCE(order_ts, timestamp, 0) DESC, rowid DESC
+                LIMIT ?
+                """,
+                (
+                    normalized_session_id,
+                    target_sort_ts,
+                    target_sort_ts,
+                    target_rowid,
+                    normalized_before_limit,
+                ),
+            )
+            before_rows = list(await before_cursor.fetchall())
+            before_rows.reverse()
+
+        after_rows = []
+        if normalized_after_limit > 0:
+            after_cursor = await self._db.execute(
+                """
+                SELECT rowid, *
+                FROM messages
+                WHERE session_id = ?
+                  AND (
+                    COALESCE(order_ts, timestamp, 0) > ?
+                    OR (COALESCE(order_ts, timestamp, 0) = ? AND rowid > ?)
+                  )
+                ORDER BY COALESCE(order_ts, timestamp, 0) ASC, rowid ASC
+                LIMIT ?
+                """,
+                (
+                    normalized_session_id,
+                    target_sort_ts,
+                    target_sort_ts,
+                    target_rowid,
+                    normalized_after_limit,
+                ),
+            )
+            after_rows = list(await after_cursor.fetchall())
+
+        rows = [*before_rows, target_row, *after_rows]
+        read_cursors = await self._load_session_read_cursors(normalized_session_id)
+        return [
+            self._overlay_read_cursors_on_message(self._row_to_message(row), read_cursors)
+            for row in rows
+        ]
+
     async def get_existing_message_ids(self, message_ids: list[str]) -> set[str]:
         """
         Return the subset of provided message ids that already exist.
