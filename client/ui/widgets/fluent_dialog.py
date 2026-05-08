@@ -2,19 +2,12 @@
 
 from __future__ import annotations
 
-import sys
-
-from PySide6.QtCore import QEvent, QPoint, Qt, QTimer
+from PySide6.QtCore import QEvent, QPoint, Qt
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import QDialog, QFrame, QGraphicsDropShadowEffect, QHBoxLayout, QSizePolicy, QVBoxLayout, QWidget
 from qfluentwidgets import SubtitleLabel, TransparentToolButton, isDarkTheme, qconfig
 
 from client.core.app_icons import AppIcon
-
-try:
-    from qframelesswindow.windows.window_effect import WindowsWindowEffect
-except Exception:  # pragma: no cover - unavailable on non-Windows platforms
-    WindowsWindowEffect = None
 
 
 class FluentDialog(QDialog):
@@ -28,14 +21,11 @@ class FluentDialog(QDialog):
         *,
         title: str = "",
         radius: int = 12,
-        mica_enabled: bool = True,
     ) -> None:
         super().__init__(parent)
         self._radius = max(6, int(radius or 12))
-        self._mica_enabled = bool(mica_enabled)
         self._drag_active = False
         self._drag_offset = QPoint()
-        self._window_effect = WindowsWindowEffect(self) if WindowsWindowEffect is not None and sys.platform == "win32" else None
 
         self.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
@@ -98,10 +88,6 @@ class FluentDialog(QDialog):
         self.title_label.setText(str(title or ""))
         self.setWindowTitle(str(title or ""))
 
-    def showEvent(self, event) -> None:
-        super().showEvent(event)
-        self._apply_mica_effect()
-
     def eventFilter(self, watched, event) -> bool:
         if watched is self.title_bar:
             if event.type() == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
@@ -144,14 +130,3 @@ class FluentDialog(QDialog):
             }}
             """
         )
-        QTimer.singleShot(0, self._apply_mica_effect)
-
-    def _apply_mica_effect(self) -> None:
-        if not self._mica_enabled or self._window_effect is None:
-            return
-        if sys.platform != "win32" or sys.getwindowsversion().build < 22000:
-            return
-        try:
-            self._window_effect.setMicaEffect(self.winId(), isDarkTheme())
-        except Exception:
-            return

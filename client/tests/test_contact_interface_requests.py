@@ -87,4 +87,6 @@ def test_add_friend_dialog_uses_fluent_dialog_without_frameless_window() -> None
     assert "class FluentDialog(QDialog):" in dialog_source
     assert "def nativeEvent(" not in dialog_source
     assert "WindowsFramelessWindow" not in dialog_source
+    assert "setMicaEffect" not in dialog_source
+    assert "WindowsWindowEffect" not in dialog_source
     assert "class AddFriendDialog(FluentDialog):" in contact_source
