@@ -18,7 +18,7 @@ if __package__ in {None, ""}:
 # Preload dateutil before PySide installs shiboken import hooks; LanceDB imports it later.
 import dateutil.tz  # noqa: F401
 
-from PySide6.QtCore import QLockFile, QTimer
+from PySide6.QtCore import QLockFile, Qt, QTimer
 from PySide6.QtWidgets import QApplication, QMessageBox, QPushButton
 from qasync import QEventLoop
 from qfluentwidgets import FluentTranslator, InfoBar, setTheme, setThemeColor
@@ -94,6 +94,21 @@ def _parse_runtime_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--profile", default=os.getenv("ASSISTIM_PROFILE", "").strip())
     return parser.parse_known_args(argv[1:])
+
+
+def _apply_startup_dpi_scale() -> None:
+    """Apply the configured display scale before QApplication is created."""
+    dpi_scale = cfg.get(cfg.dpiScale)
+    if dpi_scale == "Auto":
+        QApplication.setHighDpiScaleFactorRoundingPolicy(
+            Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
+        )
+        QApplication.setAttribute(Qt.ApplicationAttribute.AA_EnableHighDpiScaling)
+    else:
+        os.environ["QT_ENABLE_HIGHDPI_SCALING"] = "0"
+        os.environ["QT_SCALE_FACTOR"] = str(dpi_scale)
+
+    QApplication.setAttribute(Qt.ApplicationAttribute.AA_UseHighDpiPixmaps)
 
 
 def _configure_runtime_profile(profile: str) -> str:
@@ -1383,6 +1398,7 @@ def main() -> int:
     setup_logging()
     logger.info("Starting AssistIM...")
 
+    _apply_startup_dpi_scale()
     qt_app = QApplication([sys.argv[0], *qt_unknown_args])
     initialize_i18n(cfg.get(cfg.language))
     fluent_translator = FluentTranslator(current_locale())

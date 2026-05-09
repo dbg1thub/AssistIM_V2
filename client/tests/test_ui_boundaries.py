@@ -87,6 +87,22 @@ def test_main_installs_fluentwidgets_translator_after_i18n_initialization() -> N
     assert 'qt_app._assistim_fluent_translator = fluent_translator' in main_py
 
 
+def test_main_applies_dpi_scale_before_qapplication_is_created() -> None:
+    main_py = Path('client/main.py').read_text(encoding='utf-8')
+    main_body = main_py.split('def main() -> int:', 1)[1]
+
+    assert 'from PySide6.QtCore import QLockFile, Qt, QTimer' in main_py
+    assert 'def _apply_startup_dpi_scale() -> None:' in main_py
+    assert 'dpi_scale = cfg.get(cfg.dpiScale)' in main_py
+    assert 'QApplication.setHighDpiScaleFactorRoundingPolicy(' in main_py
+    assert 'Qt.HighDpiScaleFactorRoundingPolicy.PassThrough' in main_py
+    assert 'QApplication.setAttribute(Qt.ApplicationAttribute.AA_EnableHighDpiScaling)' in main_py
+    assert 'os.environ["QT_ENABLE_HIGHDPI_SCALING"] = "0"' in main_py
+    assert 'os.environ["QT_SCALE_FACTOR"] = str(dpi_scale)' in main_py
+    assert 'QApplication.setAttribute(Qt.ApplicationAttribute.AA_UseHighDpiPixmaps)' in main_py
+    assert main_body.index('_apply_startup_dpi_scale()') < main_body.index('qt_app = QApplication(')
+
+
 def test_discovery_ui_wires_moment_media_and_comment_image_boundaries() -> None:
     discovery_interface = Path('client/ui/windows/discovery_interface.py').read_text(encoding='utf-8')
 
