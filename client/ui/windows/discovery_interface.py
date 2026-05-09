@@ -55,6 +55,7 @@ from client.core.logging import setup_logging
 from client.core.video_thumbnail_cache import get_video_thumbnail_cache
 from client.events.event_bus import get_event_bus
 from client.events.moment_events import MomentEvent
+from client.network.http_client import get_http_client
 from client.services.file_service import get_file_service
 from client.ui.controllers.discovery_controller import (
     MomentCommentRecord,
@@ -391,7 +392,7 @@ class MomentMediaGrid(QWidget):
             return
 
         if source.startswith(("http://", "https://")):
-            reply = self._network_manager.get(QNetworkRequest(QUrl(source)))
+            reply = self._network_manager.get(self._build_media_request(source))
             self._pending_replies[reply] = label
             label.setText(tr("discovery.image.loading", "Loading..."))
             return
@@ -504,6 +505,32 @@ class MomentMediaGrid(QWidget):
             max(18, height - text_top),
             int(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop),
             tr("discovery.video.placeholder", "Video"),
+        )
+
+    def _build_media_request(self, source: str) -> QNetworkRequest:
+        request = QNetworkRequest(QUrl(source))
+        token = str(get_http_client().access_token or "").strip()
+        if token and self._should_authenticate_media_source(source):
+            request.setRawHeader(b"Authorization", f"Bearer {token}".encode("utf-8"))
+        return request
+
+    @staticmethod
+    def _should_authenticate_media_source(source: str) -> bool:
+        source_text = str(source or "").strip()
+        if not source_text:
+            return False
+        split_result = urlsplit(source_text)
+        if not split_result.scheme and source_text.startswith("/"):
+            return source_text.startswith("/uploads/")
+
+        config = get_config()
+        origin = urlsplit(config.server.origin_url)
+        if not split_result.scheme or not split_result.netloc:
+            return False
+        return (
+            split_result.scheme == origin.scheme
+            and split_result.netloc == origin.netloc
+            and split_result.path.startswith("/uploads/")
         )
 
     def _emit_media_request(self, media: object) -> None:

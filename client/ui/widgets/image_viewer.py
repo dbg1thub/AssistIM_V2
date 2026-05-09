@@ -5,6 +5,7 @@ Dialog for viewing full-size images.
 """
 
 import os
+from urllib.parse import urlsplit
 
 from PySide6.QtCore import Qt, QUrl
 from PySide6.QtGui import QPixmap
@@ -13,6 +14,7 @@ from PySide6.QtWidgets import QVBoxLayout, QScrollArea, QLabel, QPushButton, QHB
 
 from client.core.config_backend import get_config
 from client.core.i18n import tr
+from client.network.http_client import get_http_client
 from client.ui.widgets.fluent_dialog import FluentDialog
 
 
@@ -87,7 +89,7 @@ class ImageViewer(FluentDialog):
 
         if pixmap.isNull():
             if source.startswith(("http://", "https://")):
-                reply = self._network_manager.get(QNetworkRequest(QUrl(source)))
+                reply = self._network_manager.get(self._build_image_request(source))
                 reply.setProperty("image_source", source)
                 self.image_label.setText(tr("image_viewer.loading", "Loading image..."))
                 return
@@ -109,6 +111,32 @@ class ImageViewer(FluentDialog):
             origin_base = get_config().server.origin_url.rstrip("/")
             return f"{origin_base}{value}"
         return value
+
+    def _build_image_request(self, source: str) -> QNetworkRequest:
+        request = QNetworkRequest(QUrl(source))
+        token = str(get_http_client().access_token or "").strip()
+        if token and self._should_authenticate_image_source(source):
+            request.setRawHeader(b"Authorization", f"Bearer {token}".encode("utf-8"))
+        return request
+
+    @staticmethod
+    def _should_authenticate_image_source(source: str) -> bool:
+        source_text = str(source or "").strip()
+        if not source_text:
+            return False
+        split_result = urlsplit(source_text)
+        if not split_result.scheme and source_text.startswith("/"):
+            return source_text.startswith("/uploads/")
+
+        config = get_config()
+        origin = urlsplit(config.server.origin_url)
+        if not split_result.scheme or not split_result.netloc:
+            return False
+        return (
+            split_result.scheme == origin.scheme
+            and split_result.netloc == origin.netloc
+            and split_result.path.startswith("/uploads/")
+        )
 
     def _on_image_loaded(self, reply: QNetworkReply) -> None:
         """Handle async remote image loading."""

@@ -64,6 +64,30 @@ def test_discovery_ui_wires_moment_media_and_comment_image_boundaries() -> None:
     assert 'def _sync_comment_image_preview(self) -> None:' in discovery_interface
 
 
+def test_discovery_media_grid_loads_remote_media_with_auth_header() -> None:
+    discovery_interface = Path('client/ui/windows/discovery_interface.py').read_text(encoding='utf-8')
+    media_grid_block = discovery_interface.split('class MomentMediaGrid(QWidget):', 1)[1].split(
+        'class MomentCommentItem(QWidget):',
+        1,
+    )[0]
+
+    assert 'from client.network.http_client import get_http_client' in discovery_interface
+    assert 'def _build_media_request(self, source: str) -> QNetworkRequest:' in media_grid_block
+    assert 'token = str(get_http_client().access_token or "").strip()' in media_grid_block
+    assert 'request.setRawHeader(b"Authorization", f"Bearer {token}".encode("utf-8"))' in media_grid_block
+    assert 'reply = self._network_manager.get(self._build_media_request(source))' in media_grid_block
+
+
+def test_image_viewer_loads_protected_uploads_with_auth_header() -> None:
+    image_viewer = Path('client/ui/widgets/image_viewer.py').read_text(encoding='utf-8')
+
+    assert 'from client.network.http_client import get_http_client' in image_viewer
+    assert 'def _build_image_request(self, source: str) -> QNetworkRequest:' in image_viewer
+    assert 'token = str(get_http_client().access_token or "").strip()' in image_viewer
+    assert 'request.setRawHeader(b"Authorization", f"Bearer {token}".encode("utf-8"))' in image_viewer
+    assert 'reply = self._network_manager.get(self._build_image_request(source))' in image_viewer
+
+
 def test_moment_comment_editor_can_close_without_breaking_image_picker() -> None:
     discovery_interface = Path('client/ui/windows/discovery_interface.py').read_text(encoding='utf-8')
 
