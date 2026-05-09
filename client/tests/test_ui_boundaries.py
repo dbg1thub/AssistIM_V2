@@ -749,6 +749,34 @@ def test_user_profile_flyout_requires_email_code_for_changed_email() -> None:
     assert 'email_code=str(payload.get("email_code", "") or "").strip() or None' in save_block
 
 
+def test_user_profile_edit_dialog_uses_fluent_controls_and_profile_only_fields() -> None:
+    flyout = Path('client/ui/widgets/user_profile_flyout.py').read_text(encoding='utf-8')
+    dialog_block = flyout.split('class ProfileEditDialog', 1)[1].split('class ProfileCard', 1)[0]
+    profile_fields = Path('client/core/profile_fields.py').read_text(encoding='utf-8')
+
+    assert 'DateEdit' in dialog_block
+    assert 'ComboBox' in dialog_block
+    assert 'QFormLayout' not in dialog_block
+    assert 'QDateEdit' not in dialog_block
+    assert 'QComboBox' not in dialog_block
+    assert 'self.status_combo' not in dialog_block
+    assert '"status":' not in dialog_block
+    assert 'title = SubtitleLabel(tr("profile.edit.title"' not in dialog_block
+    assert 'self.region_country_combo = ComboBox(self)' in dialog_block
+    assert 'self.region_area_combo = ComboBox(self)' in dialog_block
+    assert 'form_layout.addWidget(self._create_form_row(' in dialog_block
+    assert 'PROFILE_GENDER_VALUES = ("female", "male")' in profile_fields
+
+
+def test_fluent_dialog_title_is_centered() -> None:
+    dialog = Path('client/ui/widgets/fluent_dialog.py').read_text(encoding='utf-8')
+
+    assert 'self.title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)' in dialog
+    assert 'title_layout.addWidget(self.title_left_spacer, 0)' in dialog
+    assert 'title_layout.addWidget(self.title_label, 1, Qt.AlignmentFlag.AlignVCenter)' in dialog
+    assert 'title_layout.addWidget(self.close_button, 0, Qt.AlignmentFlag.AlignTop)' in dialog
+
+
 def test_user_profile_flyout_exposes_authenticated_password_change() -> None:
     flyout = Path('client/ui/widgets/user_profile_flyout.py').read_text(encoding='utf-8')
 

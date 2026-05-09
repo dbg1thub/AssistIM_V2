@@ -326,6 +326,8 @@
   "profile.edit.nickname.placeholder": "昵称",
   "profile.edit.signature.placeholder": "个性签名",
   "profile.edit.region.placeholder": "地区",
+  "profile.edit.region.empty": "未设置",
+  "profile.edit.region.area_empty": "未设置",
   "profile.edit.email.placeholder": "邮箱",
   "profile.edit.phone.placeholder": "手机号",
   "profile.edit.birthday.placeholder": "YYYY-MM-DD",

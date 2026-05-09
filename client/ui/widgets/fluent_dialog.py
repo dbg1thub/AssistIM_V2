@@ -91,19 +91,24 @@ class FluentDialog(QDialog):
         self.title_bar.setFixedHeight(self.TITLE_BAR_HEIGHT)
         self.title_bar.installEventFilter(self)
 
-        title_layout = QHBoxLayout(self.title_bar)
-        title_layout.setContentsMargins(20, 0, 0, 0)
-        title_layout.setSpacing(8)
-
-        self.title_label = SubtitleLabel(str(title or ""), self.title_bar)
-        self.title_label.setObjectName("fluentDialogTitleLabel")
-        self.title_label.setMinimumWidth(0)
-        self.title_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-
         self.close_button = FluentDialogCloseButton(self.title_bar, corner_radius=self._radius)
         self.close_button.setObjectName("fluentDialogCloseButton")
         self.close_button.clicked.connect(self.close)
 
+        title_layout = QHBoxLayout(self.title_bar)
+        title_layout.setContentsMargins(0, 0, 0, 0)
+        title_layout.setSpacing(0)
+
+        self.title_left_spacer = QWidget(self.title_bar)
+        self.title_left_spacer.setFixedSize(self.close_button.sizeHint())
+
+        self.title_label = SubtitleLabel(str(title or ""), self.title_bar)
+        self.title_label.setObjectName("fluentDialogTitleLabel")
+        self.title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.title_label.setMinimumWidth(0)
+        self.title_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+
+        title_layout.addWidget(self.title_left_spacer, 0)
         title_layout.addWidget(self.title_label, 1, Qt.AlignmentFlag.AlignVCenter)
         title_layout.addWidget(self.close_button, 0, Qt.AlignmentFlag.AlignTop)
 

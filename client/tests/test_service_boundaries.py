@@ -5928,11 +5928,11 @@ def test_session_manager_activating_selected_session_clears_unread(monkeypatch) 
     asyncio.run(scenario())
 
 
-def test_normalize_profile_gender_preserves_supported_values() -> None:
+def test_normalize_profile_gender_keeps_only_displayed_profile_values() -> None:
     assert profile_fields_module.normalize_profile_gender('female') == 'female'
     assert profile_fields_module.normalize_profile_gender('male') == 'male'
-    assert profile_fields_module.normalize_profile_gender('non_binary') == 'non_binary'
-    assert profile_fields_module.normalize_profile_gender('OTHER') == 'other'
+    assert profile_fields_module.normalize_profile_gender('non_binary') == ''
+    assert profile_fields_module.normalize_profile_gender('OTHER') == ''
     assert profile_fields_module.normalize_profile_gender('  ') == ''
     assert profile_fields_module.normalize_profile_gender('woman') == ''
 

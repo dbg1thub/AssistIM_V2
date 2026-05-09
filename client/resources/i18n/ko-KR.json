@@ -311,6 +311,8 @@
   "profile.edit.nickname.placeholder": "닉네임",
   "profile.edit.signature.placeholder": "소개 문구",
   "profile.edit.region.placeholder": "지역",
+  "profile.edit.region.empty": "미설정",
+  "profile.edit.region.area_empty": "미설정",
   "profile.edit.email.placeholder": "이메일",
   "profile.edit.phone.placeholder": "전화번호",
   "profile.edit.birthday.placeholder": "YYYY-MM-DD",

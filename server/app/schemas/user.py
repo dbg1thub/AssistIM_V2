@@ -31,7 +31,7 @@ class UserUpdateRequest(BaseModel):
     model_config = ConfigDict(extra='forbid')
     _EMAIL_PATTERN: ClassVar[re.Pattern[str]] = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
     _PHONE_PATTERN: ClassVar[re.Pattern[str]] = re.compile(r"^\+?[0-9][0-9()\-\.\s]{5,31}$")
-    _GENDER_VALUES: ClassVar[set[str]] = {"female", "male", "non_binary", "other"}
+    _GENDER_VALUES: ClassVar[set[str]] = {"female", "male"}
     _STATUS_VALUES: ClassVar[set[str]] = {"online", "busy", "away", "invisible", "offline"}
 
     nickname: str | None = Field(default=None, min_length=1, max_length=64)

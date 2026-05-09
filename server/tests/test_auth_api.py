@@ -455,6 +455,13 @@ def test_update_me_rejects_invalid_profile_fields(client: TestClient, auth_heade
     )
     assert invalid_phone_response.status_code == 422
 
+    invalid_gender_response = client.put(
+        "/api/v1/users/me",
+        headers=auth_header(access_token),
+        json={"gender": "other"},
+    )
+    assert invalid_gender_response.status_code == 422
+
     invalid_status_response = client.put(
         "/api/v1/users/me",
         headers=auth_header(access_token),

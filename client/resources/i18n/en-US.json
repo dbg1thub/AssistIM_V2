@@ -311,6 +311,8 @@
   "profile.edit.nickname.placeholder": "Nickname",
   "profile.edit.signature.placeholder": "Signature",
   "profile.edit.region.placeholder": "Region",
+  "profile.edit.region.empty": "Not set",
+  "profile.edit.region.area_empty": "Not set",
   "profile.edit.email.placeholder": "Email",
   "profile.edit.phone.placeholder": "Phone",
   "profile.edit.birthday.placeholder": "YYYY-MM-DD",

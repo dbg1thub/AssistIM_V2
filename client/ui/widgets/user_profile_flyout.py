@@ -10,13 +10,11 @@ from typing import Any, Optional
 
 from PySide6.QtCore import QDate, Qt, QTimer, Signal
 from PySide6.QtWidgets import (
-    QComboBox,
-    QDateEdit,
     QDialog,
     QFileDialog,
-    QFormLayout,
     QFrame,
     QHBoxLayout,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
@@ -24,6 +22,8 @@ from qfluentwidgets import (
     AvatarWidget,
     BodyLabel,
     CaptionLabel,
+    ComboBox,
+    DateEdit,
     FlyoutAnimationType,
     HyperlinkLabel,
     InfoBar,
@@ -47,7 +47,6 @@ from client.core.profile_fields import (
     normalize_profile_choice,
     normalize_profile_gender,
     profile_gender_options,
-    profile_status_options,
     qdate_from_profile_birthday,
 )
 from client.ui.controllers.auth_controller import get_auth_controller
@@ -61,6 +60,53 @@ logger = logging.get_logger(__name__)
 _EMAIL_PATTERN = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 _PHONE_PATTERN = re.compile(r"^\+?[0-9][0-9()\-\.\s]{5,31}$")
 _EMPTY_BIRTHDAY = QDate(1900, 1, 1)
+_REGION_OPTIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("", ("",)),
+    (
+        "中国大陆",
+        (
+            "",
+            "北京",
+            "上海",
+            "天津",
+            "重庆",
+            "河北",
+            "山西",
+            "辽宁",
+            "吉林",
+            "黑龙江",
+            "江苏",
+            "浙江",
+            "安徽",
+            "福建",
+            "江西",
+            "山东",
+            "河南",
+            "湖北",
+            "湖南",
+            "广东",
+            "海南",
+            "四川",
+            "贵州",
+            "云南",
+            "陕西",
+            "甘肃",
+            "青海",
+            "内蒙古",
+            "广西",
+            "西藏",
+            "宁夏",
+            "新疆",
+        ),
+    ),
+    ("中国香港", ("",)),
+    ("中国澳门", ("",)),
+    ("中国台湾", ("",)),
+    ("韩国", ("", "首尔", "釜山", "大邱", "仁川", "光州", "大田", "蔚山", "世宗", "京畿道", "江原道", "忠清北道", "忠清南道", "全罗北道", "全罗南道", "庆尚北道", "庆尚南道", "济州")),
+    ("美国", ("",)),
+    ("日本", ("",)),
+    ("其他", ("",)),
+)
 
 
 def _avatar_initials(name: str) -> str:
@@ -647,10 +693,9 @@ class ProfileEditDialog(FluentDialog):
         self.setObjectName("ProfileEditDialog")
 
         layout = self.content_layout
-        layout.setContentsMargins(24, 24, 24, 24)
+        layout.setContentsMargins(24, 10, 24, 24)
         layout.setSpacing(16)
 
-        title = SubtitleLabel(tr("profile.edit.title", "Edit Profile"), self)
         subtitle = CaptionLabel(
             tr("profile.edit.subtitle", "Update your public nickname, avatar, and profile details."),
             self,
@@ -685,12 +730,10 @@ class ProfileEditDialog(FluentDialog):
         avatar_actions.addWidget(reset_button, 0)
         avatar_actions.addStretch(1)
 
-        form = QFormLayout()
-        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
-        form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-        form.setFormAlignment(Qt.AlignmentFlag.AlignTop)
-        form.setHorizontalSpacing(14)
-        form.setVerticalSpacing(12)
+        form_widget = QWidget(self)
+        form_layout = QVBoxLayout(form_widget)
+        form_layout.setContentsMargins(0, 0, 0, 0)
+        form_layout.setSpacing(12)
 
         self.nickname_edit = LineEdit(self)
         self.nickname_edit.setText(str(self._user.get("nickname", "") or ""))
@@ -704,11 +747,10 @@ class ProfileEditDialog(FluentDialog):
         self.signature_edit.setClearButtonEnabled(True)
         self.signature_edit.setMaxLength(255)
 
-        self.region_edit = LineEdit(self)
-        self.region_edit.setText(str(self._user.get("region", "") or ""))
-        self.region_edit.setPlaceholderText(tr("profile.edit.region.placeholder", "Region"))
-        self.region_edit.setClearButtonEnabled(True)
-        self.region_edit.setMaxLength(128)
+        self.region_country_combo = ComboBox(self)
+        self.region_area_combo = ComboBox(self)
+        self._populate_region_country_combo(str(self._user.get("region", "") or ""))
+        self.region_country_combo.currentIndexChanged.connect(lambda _index: self._sync_region_area_options())
 
         self.email_edit = LineEdit(self)
         self.email_edit.setText(str(self._user.get("email", "") or ""))
@@ -735,7 +777,7 @@ class ProfileEditDialog(FluentDialog):
         self.phone_edit.setClearButtonEnabled(True)
         self.phone_edit.setMaxLength(32)
 
-        self.birthday_edit = QDateEdit(self)
+        self.birthday_edit = DateEdit(self)
         self.birthday_edit.setCalendarPopup(True)
         self.birthday_edit.setDisplayFormat("yyyy-MM-dd")
         self.birthday_edit.setMinimumDate(_EMPTY_BIRTHDAY)
@@ -752,26 +794,20 @@ class ProfileEditDialog(FluentDialog):
         birthday_clear_button.clicked.connect(lambda: self.birthday_edit.setDate(_EMPTY_BIRTHDAY))
         birthday_layout.addWidget(birthday_clear_button, 0)
 
-        self.gender_combo = QComboBox(self)
+        self.gender_combo = ComboBox(self)
         for value, label in profile_gender_options(include_blank=True):
-            self.gender_combo.addItem(label, value)
+            self.gender_combo.addItem(label, userData=value)
         self._set_combo_value(self.gender_combo, self._user.get("gender", ""))
 
-        self.status_combo = QComboBox(self)
-        for value, label in profile_status_options():
-            self.status_combo.addItem(label, value)
-        self._set_combo_value(self.status_combo, self._user.get("status", "online") or "online")
-
-        form.addRow(tr("contact.detail.label.nickname", "Nickname"), self.nickname_edit)
-        form.addRow(tr("contact.detail.label.signature", "Signature"), self.signature_edit)
-        form.addRow(tr("contact.detail.label.region", "Region"), self.region_edit)
-        form.addRow(tr("contact.detail.label.email", "Email"), self.email_edit)
-        form.addRow(tr("auth.field.email_code", "Email Verification Code"), self.email_code_row)
-        self.email_code_label = form.labelForField(self.email_code_row)
-        form.addRow(tr("contact.detail.label.phone", "Phone"), self.phone_edit)
-        form.addRow(tr("contact.detail.label.birthday", "Birthday"), birthday_row)
-        form.addRow(tr("contact.detail.label.gender", "Gender"), self.gender_combo)
-        form.addRow(tr("contact.detail.label.status", "Status"), self.status_combo)
+        form_layout.addWidget(self._create_form_row(tr("contact.detail.label.nickname", "Nickname"), self.nickname_edit))
+        form_layout.addWidget(self._create_form_row(tr("contact.detail.label.signature", "Signature"), self.signature_edit))
+        form_layout.addWidget(self._create_form_row(tr("contact.detail.label.region", "Region"), self._create_region_row()))
+        form_layout.addWidget(self._create_form_row(tr("contact.detail.label.email", "Email"), self.email_edit))
+        self.email_code_label = CaptionLabel(tr("auth.field.email_code", "Email Verification Code"), self)
+        form_layout.addWidget(self._create_form_row(self.email_code_label, self.email_code_row))
+        form_layout.addWidget(self._create_form_row(tr("contact.detail.label.phone", "Phone"), self.phone_edit))
+        form_layout.addWidget(self._create_form_row(tr("contact.detail.label.birthday", "Birthday"), birthday_row))
+        form_layout.addWidget(self._create_form_row(tr("contact.detail.label.gender", "Gender"), self.gender_combo))
 
         button_row = QHBoxLayout()
         button_row.addStretch(1)
@@ -782,12 +818,11 @@ class ProfileEditDialog(FluentDialog):
         button_row.addWidget(self.cancel_button, 0)
         button_row.addWidget(self.save_button, 0)
 
-        layout.addWidget(title)
         layout.addWidget(subtitle)
         layout.addWidget(self.avatar_preview, 0, Qt.AlignmentFlag.AlignLeft)
         layout.addLayout(avatar_actions)
         layout.addWidget(self.avatar_path_label)
-        layout.addLayout(form)
+        layout.addWidget(form_widget)
         layout.addStretch(1)
         layout.addLayout(button_row)
         self._sync_email_code_visibility()
@@ -805,18 +840,17 @@ class ProfileEditDialog(FluentDialog):
         return {
             "nickname": self.nickname_edit.text().strip(),
             "signature": self.signature_edit.text().strip(),
-            "region": self.region_edit.text().strip(),
+            "region": self._region_value(),
             "email": self.email_edit.text().strip(),
             "email_code": self.email_code_edit.text().strip() if self._email_changed() and self.email_edit.text().strip() else None,
             "phone": self.phone_edit.text().strip(),
             "birthday": birthday_value,
             "gender": str(self.gender_combo.currentData() or ""),
-            "status": str(self.status_combo.currentData() or "online"),
             "avatar_file_path": self._avatar_file_path,
             "reset_avatar": self._reset_avatar_requested,
         }
 
-    def _set_combo_value(self, combo: QComboBox, value: object) -> None:
+    def _set_combo_value(self, combo: ComboBox, value: object) -> None:
         normalized = normalize_profile_choice(value)
         for index in range(combo.count()):
             if normalize_profile_choice(combo.itemData(index)) == normalized:
@@ -824,6 +858,76 @@ class ProfileEditDialog(FluentDialog):
                 return
         if combo.count() > 0:
             combo.setCurrentIndex(0)
+
+    def _create_form_row(self, label: str | CaptionLabel, field: QWidget) -> QWidget:
+        row = QWidget(self)
+        row_layout = QHBoxLayout(row)
+        row_layout.setContentsMargins(0, 0, 0, 0)
+        row_layout.setSpacing(14)
+        label_widget = label if isinstance(label, CaptionLabel) else CaptionLabel(label, row)
+        label_widget.setFixedWidth(76)
+        label_widget.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        field.setSizePolicy(QSizePolicy.Policy.Expanding, field.sizePolicy().verticalPolicy())
+        row_layout.addWidget(label_widget, 0, Qt.AlignmentFlag.AlignVCenter)
+        row_layout.addWidget(field, 1)
+        return row
+
+    def _create_region_row(self) -> QWidget:
+        row = QWidget(self)
+        row_layout = QHBoxLayout(row)
+        row_layout.setContentsMargins(0, 0, 0, 0)
+        row_layout.setSpacing(8)
+        row_layout.addWidget(self.region_country_combo, 1)
+        row_layout.addWidget(self.region_area_combo, 1)
+        return row
+
+    def _populate_region_country_combo(self, region: str) -> None:
+        country, area = self._split_region_value(region)
+        known_countries = {item[0] for item in _REGION_OPTIONS}
+        for value, _areas in _REGION_OPTIONS:
+            label = value or tr("profile.edit.region.empty", "Not set")
+            self.region_country_combo.addItem(label, userData=value)
+        if country and country not in known_countries:
+            self.region_country_combo.addItem(country, userData=country)
+        self._set_combo_value(self.region_country_combo, country)
+        self._sync_region_area_options(area)
+
+    def _sync_region_area_options(self, selected_area: str = "") -> None:
+        country = str(self.region_country_combo.currentData() or "")
+        previous_area = selected_area or str(self.region_area_combo.currentData() or "")
+        areas = next((item_areas for item_country, item_areas in _REGION_OPTIONS if item_country == country), ("",))
+        known_areas = set(areas)
+        self.region_area_combo.clear()
+        for value in areas:
+            label = value or tr("profile.edit.region.area_empty", "Not set")
+            self.region_area_combo.addItem(label, userData=value)
+        if previous_area and previous_area not in known_areas:
+            self.region_area_combo.addItem(previous_area, userData=previous_area)
+        self._set_combo_value(self.region_area_combo, previous_area)
+
+    @staticmethod
+    def _split_region_value(region: str) -> tuple[str, str]:
+        text = str(region or "").strip()
+        if not text:
+            return "", ""
+        for country, areas in _REGION_OPTIONS:
+            if not country:
+                continue
+            if text == country:
+                return country, ""
+            prefix = f"{country} "
+            if text.startswith(prefix):
+                return country, text[len(prefix) :].strip()
+            if text in areas:
+                return country, text
+        return text, ""
+
+    def _region_value(self) -> str:
+        country = str(self.region_country_combo.currentData() or "").strip()
+        area = str(self.region_area_combo.currentData() or "").strip()
+        if country and area:
+            return f"{country} {area}"
+        return country or area
 
     def _choose_avatar(self) -> None:
         file_path, _selected_filter = QFileDialog.getOpenFileName(
@@ -1276,7 +1380,6 @@ class UserProfileCoordinator(QWidget):
                 phone=str(payload.get("phone", "") or "").strip(),
                 birthday=payload.get("birthday"),
                 gender=normalize_profile_gender(payload.get("gender")),
-                status=str(payload.get("status", "") or "").strip(),
                 avatar_file_path=avatar_file_path or None,
                 reset_avatar=reset_avatar and not avatar_file_path,
             )

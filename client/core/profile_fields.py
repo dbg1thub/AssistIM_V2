@@ -10,7 +10,7 @@ from PySide6.QtCore import QDate
 from client.core.i18n import tr
 
 
-PROFILE_GENDER_VALUES = ("female", "male", "non_binary", "other")
+PROFILE_GENDER_VALUES = ("female", "male")
 PROFILE_STATUS_VALUES = ("online", "busy", "away", "invisible", "offline")
 
 
