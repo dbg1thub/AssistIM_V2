@@ -903,6 +903,7 @@ class FakeContactService:
         self.remove_group_member_calls: list[tuple[str, str]] = []
         self.update_group_member_role_calls: list[tuple[str, str, str]] = []
         self.transfer_group_ownership_calls: list[tuple[str, str]] = []
+        self.update_friend_remark_calls: list[tuple[str, str]] = []
         self.accept_calls: list[str] = []
         self.reject_calls: list[str] = []
         self.remove_calls: list[str] = []
@@ -960,8 +961,19 @@ class FakeContactService:
         self.send_friend_request_calls.append((user_id, message))
         return {
             'mutation': {'action': 'request_created', 'changed': True, 'created': True},
-            'relationship': {'user': {'id': user_id}, 'friendship': {'is_friend': False, 'friend_id': None}},
+            'relationship': {'user': {'id': user_id}, 'friendship': {'is_friend': False, 'friend_id': None, 'remark': ''}},
             'request': {'request_id': 'req-created', 'status': 'pending'},
+        }
+
+    async def update_friend_remark(self, friend_id: str, remark: str) -> dict:
+        self.update_friend_remark_calls.append((friend_id, remark))
+        return {
+            'mutation': {'action': 'friend_remark_updated', 'changed': True, 'created': False},
+            'relationship': {
+                'user': {'id': friend_id, 'username': 'zoe', 'nickname': 'Zoe', 'avatar': '', 'region': 'Seoul'},
+                'friendship': {'is_friend': True, 'friend_id': friend_id, 'remark': remark},
+            },
+            'request': None,
         }
 
     async def create_group(self, name: str, member_ids: list[str]) -> dict:
@@ -1047,7 +1059,7 @@ class FakeContactService:
         self.accept_calls.append(request_id)
         return {
             'mutation': {'action': 'friendship_created', 'changed': True, 'created': False},
-            'relationship': {'user': {'id': 'user-2'}, 'friendship': {'is_friend': True, 'friend_id': 'user-2'}},
+            'relationship': {'user': {'id': 'user-2'}, 'friendship': {'is_friend': True, 'friend_id': 'user-2', 'remark': ''}},
             'request': {'request_id': request_id, 'status': 'accepted'},
         }
 
@@ -1055,7 +1067,7 @@ class FakeContactService:
         self.reject_calls.append(request_id)
         return {
             'mutation': {'action': 'request_rejected', 'changed': True, 'created': False},
-            'relationship': {'user': {'id': 'user-2'}, 'friendship': {'is_friend': False, 'friend_id': None}},
+            'relationship': {'user': {'id': 'user-2'}, 'friendship': {'is_friend': False, 'friend_id': None, 'remark': ''}},
             'request': {'request_id': request_id, 'status': 'rejected'},
         }
 
@@ -2781,13 +2793,42 @@ def test_contact_service_delete_group_uses_group_endpoint(monkeypatch) -> None:
     asyncio.run(scenario())
 
 
+def test_contact_service_update_friend_remark_uses_friend_endpoint(monkeypatch) -> None:
+    class FakeHttpClient:
+        def __init__(self) -> None:
+            self.patch_calls: list[tuple[str, dict]] = []
+
+        async def patch(self, path: str, *, json: dict) -> dict:
+            self.patch_calls.append((path, dict(json)))
+            return {
+                'mutation': {'action': 'friend_remark_updated', 'changed': True, 'created': False},
+                'relationship': {
+                    'user': {'id': 'user-2'},
+                    'friendship': {'is_friend': True, 'friend_id': 'user-2', 'remark': json['remark']},
+                },
+                'request': None,
+            }
+
+    fake_http = FakeHttpClient()
+    monkeypatch.setattr(contact_service_module, 'get_http_client', lambda: fake_http)
+
+    async def scenario() -> None:
+        service = contact_service_module.ContactService()
+        payload = await service.update_friend_remark('user-2', '小王')
+
+        assert fake_http.patch_calls == [('/friends/user-2/remark', {'remark': '小王'})]
+        assert payload['relationship']['friendship']['remark'] == '小王'
+
+    asyncio.run(scenario())
+
+
 def test_contact_controller_load_contacts_and_search_users_use_services(monkeypatch) -> None:
     fake_contact_service = FakeContactService()
     fake_user_service = FakeUserService()
     fake_auth_context = FakeAuthContext()
     fake_contact_service.friends_payload = [
-        {'user': {'id': 'user-2', 'username': 'zoe', 'nickname': 'Zoe', 'remark': '', 'avatar': ''}, 'friendship': {'is_friend': True, 'friend_id': 'user-2'}},
-        {'user': {'id': 'user-1', 'username': 'alice', 'nickname': 'Alice', 'remark': 'A Friend', 'avatar': ''}, 'friendship': {'is_friend': True, 'friend_id': 'user-1'}},
+        {'user': {'id': 'user-2', 'username': 'zoe', 'nickname': 'Zoe', 'remark': 'stale user remark', 'avatar': ''}, 'friendship': {'is_friend': True, 'friend_id': 'user-2', 'remark': ''}},
+        {'user': {'id': 'user-1', 'username': 'alice', 'nickname': 'Alice', 'remark': '', 'avatar': ''}, 'friendship': {'is_friend': True, 'friend_id': 'user-1', 'remark': 'A Friend'}},
     ]
     fake_user_service.search_payload = {
         'items': [
@@ -2866,6 +2907,29 @@ def test_chat_controller_load_cached_messages_uses_message_manager_boundary(monk
     asyncio.run(scenario())
 
 
+def test_contact_controller_update_friend_remark_returns_relationship_record(monkeypatch) -> None:
+    fake_contact_service = FakeContactService()
+    fake_user_service = FakeUserService()
+    fake_auth_context = FakeAuthContext()
+
+    monkeypatch.setattr(contact_controller_module, 'get_contact_service', lambda: fake_contact_service)
+    monkeypatch.setattr(contact_controller_module, 'get_user_service', lambda: fake_user_service)
+    monkeypatch.setattr(contact_controller_module, 'get_auth_controller', lambda: fake_auth_context)
+
+    async def scenario() -> None:
+        controller = contact_controller_module.ContactController()
+        contact = await controller.update_friend_remark('user-2', '小王')
+
+        assert fake_contact_service.update_friend_remark_calls == [('user-2', '小王')]
+        assert contact.id == 'user-2'
+        assert contact.remark == '小王'
+        assert contact.display_name == '小王'
+        assert contact.extra['friendship']['remark'] == '小王'
+
+    asyncio.run(scenario())
+
+
+
 def test_chat_controller_load_cached_message_context_uses_message_manager_boundary(monkeypatch) -> None:
     fake_message_manager = FakeMessageManager()
     fake_session_manager = FakeSessionManager()
@@ -2897,8 +2961,8 @@ def test_contact_controller_load_contacts_and_groups_persist_local_search_cache(
     fake_db = FakeDatabase()
     fake_db.is_connected = True
     fake_contact_service.friends_payload = [
-        {'user': {'id': 'user-2', 'username': 'zoe', 'nickname': 'Zoe', 'remark': '', 'avatar': '', 'region': 'Seoul'}, 'friendship': {'is_friend': True, 'friend_id': 'user-2'}},
-        {'user': {'id': 'user-1', 'username': 'alice', 'nickname': 'Alice', 'remark': 'A Friend', 'avatar': '', 'region': 'Shenzhen'}, 'friendship': {'is_friend': True, 'friend_id': 'user-1'}},
+        {'user': {'id': 'user-2', 'username': 'zoe', 'nickname': 'Zoe', 'remark': '', 'avatar': '', 'region': 'Seoul'}, 'friendship': {'is_friend': True, 'friend_id': 'user-2', 'remark': ''}},
+        {'user': {'id': 'user-1', 'username': 'alice', 'nickname': 'Alice', 'remark': '', 'avatar': '', 'region': 'Shenzhen'}, 'friendship': {'is_friend': True, 'friend_id': 'user-1', 'remark': 'A Friend'}},
     ]
     fake_contact_service.groups_payload = [
         {'id': 'group-2', 'name': 'Zeta Squad', 'member_count': 8, 'session_id': 'session-group-2'},
@@ -6473,7 +6537,7 @@ def test_contact_controller_group_merge_helpers_preserve_extra_and_sort(monkeypa
 
 def test_contact_controller_skips_cache_writes_when_auth_context_changes(monkeypatch) -> None:
     fake_contact_service = FakeContactService()
-    fake_contact_service.friends_payload = [{'user': {'id': 'user-2', 'username': 'bob', 'nickname': 'Bob'}, 'friendship': {'is_friend': True, 'friend_id': 'user-2'}}]
+    fake_contact_service.friends_payload = [{'user': {'id': 'user-2', 'username': 'bob', 'nickname': 'Bob'}, 'friendship': {'is_friend': True, 'friend_id': 'user-2', 'remark': ''}}]
     fake_contact_service.groups_payload = [{'id': 'group-1', 'name': 'Core Team'}]
     fake_user_service = FakeUserService()
     fake_auth_context = FakeAuthContext()

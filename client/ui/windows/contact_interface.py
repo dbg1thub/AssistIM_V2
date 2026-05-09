@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
+from urllib.parse import urlsplit
 
-from PySide6.QtCore import QEvent, QPoint, QRect, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QPoint, QRect, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPalette, QPixmap
+from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 from PySide6.QtWidgets import QLabel, QDialog, QFrame, QHBoxLayout, QSizePolicy, QSplitter, QStackedWidget, QVBoxLayout, QWidget
 from qfluentwidgets import (
     Action,
@@ -36,6 +39,7 @@ from shiboken6 import isValid as is_valid_qt_object
 from client.core.app_icons import AppIcon
 from client.core import logging
 from client.core.avatar_utils import profile_avatar_seed
+from client.core.config_backend import get_config
 from client.core.i18n import tr
 from client.core.profile_fields import format_profile_birthday, localize_profile_gender, localize_profile_status
 from client.core.logging import setup_logging
@@ -43,7 +47,9 @@ from client.events.contact_events import ContactEvent
 from client.events.event_bus import get_event_bus
 from client.managers.connection_manager import get_connection_manager
 from client.managers.search_manager import search_all
+from client.network.http_client import get_http_client
 from client.network.websocket_client import ConnectionState
+from client.ui.controllers.discovery_controller import MomentMediaRecord, get_discovery_controller
 from client.ui.controllers.contact_controller import (
     ContactRecord,
     FriendRequestRecord,
@@ -149,6 +155,48 @@ class BlockFriendConfirmDialog(MessageBoxBase):
         self.yesButton.setText(tr("contact.detail.block_friend.action", "Block"))
         self.cancelButton.setText(tr("common.cancel", "Cancel"))
         self.widget.setMinimumWidth(420)
+
+
+class EditFriendRemarkDialog(FluentDialog):
+    submitted = Signal(str, str)
+
+    def __init__(self, contact: ContactRecord, parent=None):
+        super().__init__(parent=parent, title=tr("contact.detail.edit_remark.title", "Edit Remark"))
+        self._contact_id = contact.id
+        self.setFixedWidth(420)
+
+        hint = BodyLabel(
+            tr(
+                "contact.detail.edit_remark.hint",
+                "Set a private remark for this friend. Only you can see it.",
+            ),
+            self.content_widget,
+        )
+        hint.setWordWrap(True)
+        self.remark_edit = LineEdit(self.content_widget)
+        self.remark_edit.setMaxLength(64)
+        self.remark_edit.setPlaceholderText(tr("contact.detail.edit_remark.placeholder", "Friend remark"))
+        self.remark_edit.setText(contact.remark)
+
+        button_row = QHBoxLayout()
+        button_row.setContentsMargins(0, 8, 0, 0)
+        button_row.setSpacing(10)
+        button_row.addStretch(1)
+        self.cancel_button = PushButton(tr("common.cancel", "Cancel"), self.content_widget)
+        self.save_button = PrimaryPushButton(tr("common.save", "Save"), self.content_widget)
+        button_row.addWidget(self.cancel_button)
+        button_row.addWidget(self.save_button)
+
+        self.content_layout.addWidget(hint)
+        self.content_layout.addWidget(self.remark_edit)
+        self.content_layout.addLayout(button_row)
+
+        self.cancel_button.clicked.connect(self.reject)
+        self.save_button.clicked.connect(self._submit)
+
+    def _submit(self) -> None:
+        self.submitted.emit(self._contact_id, self.remark_edit.text().strip())
+        self.accept()
 
 
 class ContactListItem(QWidget):
@@ -452,10 +500,191 @@ class ContactWelcomeWidget(QWidget):
         layout.addStretch(1)
 
 
+class FriendMomentPreviewStrip(QWidget):
+    clicked = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._network_manager = QNetworkAccessManager(self)
+        self._pending_replies: list[QNetworkReply] = []
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFixedHeight(42)
+        self.setMinimumWidth(0)
+
+        self.layout = QHBoxLayout(self)
+        self.layout.setContentsMargins(0, 0, 0, 0)
+        self.layout.setSpacing(4)
+        self._tiles: list[QLabel] = []
+        for _index in range(5):
+            tile = QLabel(self)
+            tile.setObjectName("friendMomentPreviewTile")
+            tile.setFixedSize(42, 42)
+            tile.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            tile.hide()
+            self.layout.addWidget(tile)
+            self._tiles.append(tile)
+        self.layout.addStretch(1)
+
+    def set_media(self, media: list[MomentMediaRecord]) -> None:
+        self._cancel_pending_replies()
+        images = [item for item in media if item.is_image][: len(self._tiles)]
+        for index, tile in enumerate(self._tiles):
+            if index >= len(images):
+                tile.clear()
+                tile.hide()
+                continue
+            tile.show()
+            tile.setText(tr("contact.detail.moment_image_placeholder", "Image"))
+            self._load_tile(tile, images[index])
+
+    def clear(self) -> None:
+        self._cancel_pending_replies()
+        for tile in self._tiles:
+            tile.clear()
+            tile.hide()
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+        super().mousePressEvent(event)
+
+    def _load_tile(self, tile: QLabel, media: MomentMediaRecord) -> None:
+        source = self._resolve_media_source(media)
+        if not source:
+            return
+        if Path(source).exists():
+            self._apply_pixmap(tile, QPixmap(source))
+            return
+        if source.startswith(("http://", "https://")):
+            reply = self._network_manager.get(self._build_media_request(source))
+            self._pending_replies.append(reply)
+            reply.finished.connect(lambda current=reply, target=tile: self._finish_network_tile(current, target))
+
+    def _finish_network_tile(self, reply: QNetworkReply, tile: QLabel) -> None:
+        if reply in self._pending_replies:
+            self._pending_replies.remove(reply)
+        data = reply.readAll()
+        pixmap = QPixmap()
+        pixmap.loadFromData(bytes(data))
+        self._apply_pixmap(tile, pixmap)
+        reply.deleteLater()
+
+    @staticmethod
+    def _apply_pixmap(tile: QLabel, pixmap: QPixmap) -> None:
+        if pixmap.isNull():
+            return
+        scaled = pixmap.scaled(tile.size(), Qt.AspectRatioMode.KeepAspectRatioByExpanding, Qt.TransformationMode.SmoothTransformation)
+        tile.setPixmap(scaled)
+        tile.setText("")
+
+    def _cancel_pending_replies(self) -> None:
+        for reply in list(self._pending_replies):
+            reply.abort()
+            reply.deleteLater()
+        self._pending_replies.clear()
+
+    @staticmethod
+    def _resolve_media_source(media: MomentMediaRecord) -> str:
+        for value in (media.local_path, media.url):
+            source = str(value or "").strip()
+            if not source:
+                continue
+            if Path(source).exists() or source.startswith(("http://", "https://")):
+                return source
+            if source.startswith("/"):
+                return f"{get_config().server.origin_url.rstrip('/')}{source}"
+            return source
+        return ""
+
+    def _build_media_request(self, source: str) -> QNetworkRequest:
+        request = QNetworkRequest(QUrl(source))
+        token = str(get_http_client().access_token or "").strip()
+        if token and self._should_authenticate_media_source(source):
+            request.setRawHeader(b"Authorization", f"Bearer {token}".encode("utf-8"))
+        return request
+
+    @staticmethod
+    def _should_authenticate_media_source(source: str) -> bool:
+        source_text = str(source or "").strip()
+        if not source_text:
+            return False
+        split_result = urlsplit(source_text)
+        if not split_result.scheme and source_text.startswith("/"):
+            return source_text.startswith("/uploads/")
+        origin = urlsplit(get_config().server.origin_url)
+        return (
+            split_result.scheme == origin.scheme
+            and split_result.netloc == origin.netloc
+            and split_result.path.startswith("/uploads/")
+        )
+
+
+class ContactDetailRow(QWidget):
+    clicked = Signal()
+
+    def __init__(self, label: str, parent=None, *, editable: bool = False, clickable: bool = False):
+        super().__init__(parent)
+        self._clickable = clickable or editable
+        if self._clickable:
+            self.setCursor(Qt.CursorShape.PointingHandCursor)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 12, 0, 12)
+        layout.setSpacing(16)
+        self.label = CaptionLabel(label, self)
+        self.label.setObjectName("contactDetailFieldLabel")
+        self.label.setFixedWidth(58)
+        self.value = BodyLabel("", self)
+        self.value.setWordWrap(True)
+        self.value.setMinimumWidth(0)
+        layout.addWidget(self.label, 0, Qt.AlignmentFlag.AlignTop)
+        layout.addWidget(self.value, 1)
+        if editable:
+            self.edit_button = ToolButton(AppIcon.EDIT, self)
+            self.edit_button.setFixedSize(28, 28)
+            self.edit_button.clicked.connect(self.clicked.emit)
+            layout.addWidget(self.edit_button, 0, Qt.AlignmentFlag.AlignTop)
+
+    def set_value(self, value: str) -> None:
+        self.value.setText(str(value or ""))
+
+    def mousePressEvent(self, event) -> None:
+        if self._clickable and event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+        super().mousePressEvent(event)
+
+
+class ContactActionButton(QWidget):
+    clicked = Signal()
+
+    def __init__(self, icon: AppIcon, text: str, parent=None):
+        super().__init__(parent)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+        self.icon = IconWidget(icon, self)
+        self.icon.setFixedSize(26, 26)
+        self.label = CaptionLabel(text, self)
+        self.label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.icon, 0, Qt.AlignmentFlag.AlignHCenter)
+        layout.addWidget(self.label, 0, Qt.AlignmentFlag.AlignHCenter)
+
+    def setEnabled(self, enabled: bool) -> None:
+        super().setEnabled(enabled)
+        self.setCursor(Qt.CursorShape.PointingHandCursor if enabled else Qt.CursorShape.ArrowCursor)
+
+    def mousePressEvent(self, event) -> None:
+        if self.isEnabled() and event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+        super().mousePressEvent(event)
+
+
 class GalleryContactDetailPanel(QWidget):
     message_requested = Signal(object)
     remove_requested = Signal(object)
     call_requested = Signal(object, str)
+    remark_edit_requested = Signal(object)
+    friend_moments_requested = Signal(object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -464,8 +693,9 @@ class GalleryContactDetailPanel(QWidget):
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
         root_layout = QVBoxLayout(self)
-        root_layout.setContentsMargins(0, 0, 0, 0)
+        root_layout.setContentsMargins(24, 24, 24, 24)
         root_layout.setSpacing(0)
+        root_layout.addStretch(1)
 
         self.header = CardWidget(self)
         self.header.setObjectName("ContactDetailHeader")
@@ -474,64 +704,101 @@ class GalleryContactDetailPanel(QWidget):
         self.header.setMaximumWidth(460)
         self.header.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
         header_layout = QVBoxLayout(self.header)
-        header_layout.setContentsMargins(30, 28, 30, 24)
-        header_layout.setSpacing(16)
+        header_layout.setContentsMargins(28, 26, 28, 26)
+        header_layout.setSpacing(0)
 
-        self.avatar = ContactAvatar(88, self.header)
-
-        self.title_label = TitleLabel(tr("contact.detail.title", "Contact Details"), self.header)
+        top_row = QHBoxLayout()
+        top_row.setContentsMargins(0, 0, 0, 0)
+        top_row.setSpacing(14)
+        self.avatar = ContactAvatar(72, self.header)
+        info_layout = QVBoxLayout()
+        info_layout.setContentsMargins(0, 0, 0, 0)
+        info_layout.setSpacing(4)
+        name_row = QHBoxLayout()
+        name_row.setContentsMargins(0, 0, 0, 0)
+        name_row.setSpacing(6)
+        self.title_label = SubtitleLabel(tr("contact.detail.title", "Contact Details"), self.header)
+        self.gender_icon = IconWidget(AppIcon.GENDER_MALE, self.header)
+        self.gender_icon.setFixedSize(16, 16)
+        self.gender_icon.hide()
+        name_row.addWidget(self.title_label, 0, Qt.AlignmentFlag.AlignVCenter)
+        name_row.addWidget(self.gender_icon, 0, Qt.AlignmentFlag.AlignVCenter)
+        name_row.addStretch(1)
         self.subtitle_label = CaptionLabel("", self.header)
         self.subtitle_label.setObjectName("contactMetaLabel")
-        self.meta_primary_label = CaptionLabel("", self.header)
-        self.meta_primary_label.setObjectName("contactMetaLabel")
-        self.meta_primary_label.setWordWrap(True)
-        self.meta_secondary_label = CaptionLabel("", self.header)
-        self.meta_secondary_label.setObjectName("contactMetaLabel")
-        self.meta_secondary_label.hide()
+        self.region_label = CaptionLabel("", self.header)
+        self.region_label.setObjectName("contactMetaLabel")
+        info_layout.addLayout(name_row)
+        info_layout.addWidget(self.subtitle_label)
+        info_layout.addWidget(self.region_label)
+        self.more_button = ToolButton(AppIcon.MORE_HORIZONTAL, self.header)
+        self.more_button.setFixedSize(30, 30)
+
+        top_row.addWidget(self.avatar, 0, Qt.AlignmentFlag.AlignTop)
+        top_row.addLayout(info_layout, 1)
+        top_row.addWidget(self.more_button, 0, Qt.AlignmentFlag.AlignTop)
+
+        self.remark_row = ContactDetailRow(tr("contact.detail.label.remark", "Remark"), self.header, editable=True)
+        self.moments_row = ContactDetailRow(tr("contact.detail.label.moments", "Moments"), self.header, clickable=True)
+        self.moment_strip = FriendMomentPreviewStrip(self.moments_row)
+        self.moments_row.layout().replaceWidget(self.moments_row.value, self.moment_strip)
+        self.moments_row.value.deleteLater()
+        self.signature_row = ContactDetailRow(tr("contact.detail.label.signature", "Signature"), self.header)
 
         action_row = QHBoxLayout()
-        action_row.setContentsMargins(0, 0, 0, 0)
-        action_row.setSpacing(10)
-        self.message_button = PrimaryPushButton(tr("contact.detail.action.message", "Message"), self.header)
-        self.voice_button = PushButton(tr("contact.detail.action.voice_call", "Voice Call"), self.header)
-        self.video_button = PushButton(tr("contact.detail.action.video_call", "Video Call"), self.header)
+        action_row.setContentsMargins(32, 26, 32, 0)
+        action_row.setSpacing(42)
+        self.message_button = ContactActionButton(AppIcon.CHAT, tr("contact.detail.action.message", "Message"), self.header)
+        self.voice_button = ContactActionButton(AppIcon.PHONE, tr("contact.detail.action.voice_call", "Voice Call"), self.header)
+        self.video_button = ContactActionButton(AppIcon.VIDEO, tr("contact.detail.action.video_call", "Video Call"), self.header)
         self.remove_friend_button = PushButton(tr("contact.detail.action.remove_friend", "Remove Friend"), self.header)
         self.remove_friend_button.setObjectName("contactDangerButton")
-        for button in (self.message_button, self.voice_button, self.video_button):
-            button.setFixedWidth(112)
-            button.setMinimumHeight(36)
-        self.remove_friend_button.setFixedWidth(112)
-        self.remove_friend_button.setMinimumHeight(36)
+        self.remove_friend_button.hide()
         action_row.addWidget(self.message_button)
         action_row.addWidget(self.voice_button)
         action_row.addWidget(self.video_button)
-        action_row.addWidget(self.remove_friend_button)
-        action_row.addStretch(1)
 
-        header_layout.addWidget(self.avatar, 0, Qt.AlignmentFlag.AlignLeft)
-        header_layout.addWidget(self.title_label, 0, Qt.AlignmentFlag.AlignLeft)
-        header_layout.addWidget(self.subtitle_label, 0, Qt.AlignmentFlag.AlignLeft)
-        header_layout.addWidget(self.meta_primary_label, 0, Qt.AlignmentFlag.AlignLeft)
-        header_layout.addLayout(action_row, 0)
-        header_layout.addStretch(1)
+        header_layout.addLayout(top_row)
+        self._add_divider(header_layout)
+        header_layout.addWidget(self.remark_row)
+        self._add_divider(header_layout)
+        header_layout.addWidget(self.moments_row)
+        self._add_divider(header_layout)
+        header_layout.addWidget(self.signature_row)
+        self._add_divider(header_layout)
+        header_layout.addLayout(action_row)
 
         self.message_button.clicked.connect(self._emit_message_request)
         self.remove_friend_button.clicked.connect(self._emit_remove_request)
         self.voice_button.clicked.connect(lambda _checked=False: self._emit_call_request("voice"))
         self.video_button.clicked.connect(lambda _checked=False: self._emit_call_request("video"))
+        self.remark_row.clicked.connect(self._emit_remark_edit_request)
+        self.moments_row.clicked.connect(self._emit_friend_moments_request)
+        self.moment_strip.clicked.connect(self._emit_friend_moments_request)
         self._set_call_buttons_available(False)
-        self.remove_friend_button.hide()
 
-        root_layout.addWidget(self.header, 0, Qt.AlignmentFlag.AlignTop)
+        root_layout.addWidget(self.header, 0, Qt.AlignmentFlag.AlignHCenter)
         root_layout.addStretch(1)
         self.show_placeholder()
+
+    @staticmethod
+    def _add_divider(layout: QVBoxLayout) -> None:
+        line = QFrame()
+        line.setObjectName("ContactDetailDivider")
+        line.setFrameShape(QFrame.Shape.HLine)
+        line.setFixedHeight(1)
+        layout.addWidget(line)
 
     def show_placeholder(self) -> None:
         self._entity = None
         self.avatar.set_avatar(fallback="CT")
         self.title_label.setText(tr("contact.detail.title", "Contact Details"))
         self.subtitle_label.clear()
-        self.meta_primary_label.clear()
+        self.region_label.clear()
+        self.gender_icon.hide()
+        self.remark_row.set_value("")
+        self.signature_row.set_value("")
+        self.moment_strip.clear()
         self.message_button.setEnabled(False)
         self._set_call_buttons_available(False)
         self.remove_friend_button.setEnabled(False)
@@ -549,29 +816,29 @@ class GalleryContactDetailPanel(QWidget):
         self.subtitle_label.setText(
             f"{tr('contact.detail.label.assistim_id', 'AssistIM ID')} {contact.assistim_id or contact.username or '-'}"
         )
-        self.meta_primary_label.setText(
-            " │ ".join(
-                filter(
-                    None,
-                    [
-                        f"{tr('contact.detail.label.nickname', 'Nickname')}：{contact.nickname}" if contact.nickname else "",
-                        f"{tr('contact.detail.label.remark', 'Remark')}：{contact.remark}" if contact.remark else "",
-                        f"{tr('contact.detail.label.region', 'Region')}：{contact.region}" if contact.region else "",
-                        f"{tr('contact.detail.label.signature', 'Signature')}：{contact.signature}" if contact.signature else "",
-                        f"{tr('contact.detail.label.email', 'Email')}：{contact.email}" if contact.email else "",
-                        f"{tr('contact.detail.label.phone', 'Phone')}：{contact.phone}" if contact.phone else "",
-                        f"{tr('contact.detail.label.birthday', 'Birthday')}：{format_profile_birthday(contact.birthday)}" if format_profile_birthday(contact.birthday) else "",
-                        f"{tr('contact.detail.label.gender', 'Gender')}：{localize_profile_gender(contact.gender)}" if localize_profile_gender(contact.gender) else "",
-                        f"{tr('contact.detail.label.status', 'Status')}：{localize_profile_status(contact.status)}" if localize_profile_status(contact.status) else "",
-                    ],
-                )
-            )
-            or tr("contact.relationship.established", "Friend relationship established")
-        )
+        self.region_label.setText(f"{tr('contact.detail.label.region', 'Region')} {contact.region or '-'}")
+        self._set_gender_icon(contact.gender)
+        self.remark_row.set_value(contact.remark or tr("contact.detail.remark_empty", "Add remark"))
+        self.signature_row.set_value(contact.signature or tr("contact.detail.empty_value", "Not set"))
         self.message_button.setEnabled(True)
         self._set_call_buttons_available(True)
         self.remove_friend_button.setEnabled(True)
         self.remove_friend_button.show()
+
+    def _set_gender_icon(self, gender: str) -> None:
+        normalized = str(gender or "").strip().lower()
+        if normalized in {"male", "m", "男"}:
+            self.gender_icon.setIcon(AppIcon.GENDER_MALE)
+            self.gender_icon.show()
+            return
+        if normalized in {"female", "f", "女"}:
+            self.gender_icon.setIcon(AppIcon.GENDER_FEMALE)
+            self.gender_icon.show()
+            return
+        self.gender_icon.hide()
+
+    def set_friend_moment_images(self, media: list[MomentMediaRecord]) -> None:
+        self.moment_strip.set_media(media)
 
     def set_blocked_contact(self, contact: ContactRecord) -> None:
         self._entity = {"type": "blocked", "data": contact}
@@ -585,21 +852,11 @@ class GalleryContactDetailPanel(QWidget):
         self.subtitle_label.setText(
             f"{tr('contact.detail.label.assistim_id', 'AssistIM ID')} {contact.assistim_id or contact.username or '-'}"
         )
-        self.meta_primary_label.setText(
-            " │ ".join(
-                filter(
-                    None,
-                    [
-                        tr("contact.relationship.blocked", "Blocked contact"),
-                        f"{tr('contact.detail.label.nickname', 'Nickname')}：{contact.nickname}" if contact.nickname else "",
-                        f"{tr('contact.detail.label.region', 'Region')}：{contact.region}" if contact.region else "",
-                        f"{tr('contact.detail.label.signature', 'Signature')}：{contact.signature}" if contact.signature else "",
-                        f"{tr('contact.detail.label.status', 'Status')}：{localize_profile_status(contact.status)}" if localize_profile_status(contact.status) else "",
-                    ],
-                )
-            )
-            or tr("contact.relationship.blocked", "Blocked contact")
-        )
+        self.region_label.setText(f"{tr('contact.detail.label.region', 'Region')} {contact.region or '-'}")
+        self._set_gender_icon(contact.gender)
+        self.remark_row.set_value(tr("contact.relationship.blocked", "Blocked contact"))
+        self.signature_row.set_value(contact.signature or tr("contact.detail.empty_value", "Not set"))
+        self.moment_strip.clear()
         self.message_button.setEnabled(False)
         self._set_call_buttons_available(False)
         self.remove_friend_button.setEnabled(False)
@@ -610,18 +867,11 @@ class GalleryContactDetailPanel(QWidget):
         self.avatar.set_avatar(group.avatar, fallback=group.name)
         self.title_label.setText(group.name)
         self.subtitle_label.setText(f"{tr('contact.detail.label.group_id', 'Group ID')} {group.id or '-'}")
-        self.meta_primary_label.setText(
-            " │ ".join(
-                filter(
-                    None,
-                    [
-                        tr("contact.group.member_summary", "{count} members", count=group.member_count),
-                        f"{tr('contact.detail.label.session_id', 'Session ID')}：{group.session_id}" if group.session_id else "",
-                        f"{tr('contact.detail.label.created_at', 'Created At')}：{group.created_at}" if group.created_at else "",
-                    ],
-                )
-            )
-        )
+        self.region_label.setText(tr("contact.group.member_summary", "{count} members", count=group.member_count))
+        self.gender_icon.hide()
+        self.remark_row.set_value(group.session_id or tr("contact.detail.empty_value", "Not set"))
+        self.signature_row.set_value(group.created_at or tr("contact.detail.empty_value", "Not set"))
+        self.moment_strip.clear()
         self.message_button.setEnabled(True)
         self._set_call_buttons_available(False)
         self.remove_friend_button.setEnabled(False)
@@ -658,18 +908,11 @@ class GalleryContactDetailPanel(QWidget):
         self.subtitle_label.setText(
             f"{tr('contact.detail.label.assistim_id', 'AssistIM ID')} {counterpart_username or counterpart_id or '-'}"
         )
-        self.meta_primary_label.setText(
-            " │ ".join(
-                filter(
-                    None,
-                    [
-                        f"{tr('contact.detail.label.request_status', 'Request Status')}：{_request_status_text(request.status)}",
-                        f"{tr('contact.detail.label.time', 'Time')}：{request.created_at}" if request.created_at else "",
-                        request.message or "",
-                    ],
-                )
-            )
-        )
+        self.region_label.setText(f"{tr('contact.detail.label.request_status', 'Request Status')} {_request_status_text(request.status)}")
+        self.gender_icon.hide()
+        self.remark_row.set_value(request.message or tr("contact.detail.empty_value", "Not set"))
+        self.signature_row.set_value(request.created_at or tr("contact.detail.empty_value", "Not set"))
+        self.moment_strip.clear()
         self.message_button.setEnabled(self._entity is not None)
         self._set_call_buttons_available(False)
         self.remove_friend_button.setEnabled(False)
@@ -686,6 +929,14 @@ class GalleryContactDetailPanel(QWidget):
     def _emit_call_request(self, media_type: str) -> None:
         if self._entity and self._entity.get("type") == "friend":
             self.call_requested.emit(self._entity, media_type)
+
+    def _emit_remark_edit_request(self) -> None:
+        if self._entity and self._entity.get("type") == "friend":
+            self.remark_edit_requested.emit(self._entity)
+
+    def _emit_friend_moments_request(self) -> None:
+        if self._entity and self._entity.get("type") == "friend":
+            self.friend_moments_requested.emit(self._entity)
 
     def _set_call_buttons_available(self, available: bool) -> None:
         for button in (self.voice_button, self.video_button):
@@ -1140,6 +1391,7 @@ class ContactInterface(QWidget):
         super().__init__(parent)
         self.setObjectName("ContactInterface")
         self._controller = get_contact_controller()
+        self._discovery_controller = get_discovery_controller()
         self._contacts: list[ContactRecord] = []
         self._blocked_contacts: list[ContactRecord] = []
         self._groups: list[GroupRecord] = []
@@ -1151,6 +1403,7 @@ class ContactInterface(QWidget):
         self._current_page = "friends"
         self._selected_key: tuple[str, str] | None = None
         self._load_task: Optional[asyncio.Task] = None
+        self._friend_moment_task: Optional[asyncio.Task] = None
         self._search_task: Optional[asyncio.Task] = None
         self._search_flyout = None
         self._search_flyout_view: Optional[GlobalSearchPopupOverlay] = None
@@ -1280,6 +1533,8 @@ class ContactInterface(QWidget):
         self.detail_panel.message_requested.connect(self.message_requested.emit)
         self.detail_panel.call_requested.connect(self.call_requested.emit)
         self.detail_panel.remove_requested.connect(self._on_remove_friend_requested)
+        self.detail_panel.remark_edit_requested.connect(self._on_friend_remark_edit_requested)
+        self.detail_panel.friend_moments_requested.connect(self._on_friend_moments_requested)
         self._event_bus.subscribe_sync(ContactEvent.SYNC_REQUIRED, self._on_contact_sync_required)
         self._connection_manager.add_state_listener(self._on_connection_state_changed)
 
@@ -1355,6 +1610,12 @@ class ContactInterface(QWidget):
                 f"refresh contacts and requests after {reason}",
             )
             return
+        if reason == "friend_remark_updated":
+            record = self._contact_record_from_relationship_payload(dict(event_payload.get("payload") or {}))
+            if record is not None:
+                self._upsert_contact_record(record)
+                self._refresh_search_surface()
+                return
         self.reload_data()
 
     def _on_connection_state_changed(self, old_state: ConnectionState, new_state: ConnectionState) -> None:
@@ -1694,6 +1955,40 @@ class ContactInterface(QWidget):
         self._request_items[request.id] = item
 
     @staticmethod
+    def _contact_record_from_relationship_payload(payload: dict[str, object]) -> ContactRecord | None:
+        relationship = dict(payload.get("relationship") or {}) if isinstance(payload.get("relationship"), dict) else dict(payload or {})
+        user = dict(relationship.get("user") or {}) if isinstance(relationship.get("user"), dict) else {}
+        friendship = dict(relationship.get("friendship") or {}) if isinstance(relationship.get("friendship"), dict) else {}
+        contact_id = str(user.get("id", "") or friendship.get("friend_id", "") or "").strip()
+        if not contact_id:
+            return None
+        username = str(user.get("username", "") or "")
+        nickname = str(user.get("nickname", "") or "")
+        remark = (
+            str(friendship.get("remark", "") or "")
+            if "remark" in friendship
+            else str(user.get("remark", "") or "")
+        )
+        return ContactRecord(
+            id=contact_id,
+            name=username or nickname,
+            username=username,
+            nickname=nickname,
+            avatar=str(user.get("avatar", "") or ""),
+            remark=remark,
+            assistim_id=username,
+            region=str(user.get("region", "") or ""),
+            signature=str(user.get("signature", "") or ""),
+            email=str(user.get("email", "") or ""),
+            phone=str(user.get("phone", "") or ""),
+            birthday=str(user.get("birthday", "") or ""),
+            gender=str(user.get("gender", "") or ""),
+            status=str(user.get("status", "") or ""),
+            category="friend",
+            extra=relationship,
+        )
+
+    @staticmethod
     def _request_record_from_payload(payload: dict[str, object]) -> FriendRequestRecord:
         request_payload = dict(payload.get("request") or {}) if isinstance(payload.get("request"), dict) else dict(payload or {})
         from_user = dict(request_payload.get("sender") or {}) if isinstance(request_payload.get("sender"), dict) else {}
@@ -1781,7 +2076,7 @@ class ContactInterface(QWidget):
                 username=contact.username or existing.username,
                 nickname=contact.nickname or existing.nickname,
                 avatar=contact.avatar or existing.avatar,
-                remark=existing.remark,
+                remark=contact.remark,
                 assistim_id=contact.assistim_id or existing.assistim_id,
                 region=contact.region or existing.region,
                 signature=contact.signature or existing.signature,
@@ -2276,6 +2571,55 @@ class ContactInterface(QWidget):
             f"remove friend {contact_id}",
         )
 
+    def _on_friend_remark_edit_requested(self, payload: object) -> None:
+        if not isinstance(payload, dict):
+            return
+        contact = payload.get("data")
+        if not isinstance(contact, ContactRecord):
+            return
+        dialog = EditFriendRemarkDialog(contact, self.window())
+        dialog.submitted.connect(self._request_friend_remark_update)
+        self._show_dialog(dialog)
+
+    def _request_friend_remark_update(self, contact_id: str, remark: str) -> None:
+        normalized_contact_id = str(contact_id or "").strip()
+        if not normalized_contact_id:
+            return
+        self._schedule_keyed_ui_task(
+            ("friend_remark", normalized_contact_id),
+            self._update_friend_remark_async(normalized_contact_id, str(remark or "").strip()),
+            f"update friend remark {normalized_contact_id}",
+        )
+
+    async def _update_friend_remark_async(self, contact_id: str, remark: str) -> None:
+        try:
+            contact = await self._controller.update_friend_remark(contact_id, remark)
+        except Exception:
+            InfoBar.error(
+                tr("contact.detail.edit_remark.title", "Edit Remark"),
+                tr("contact.detail.edit_remark.failed", "Unable to update the remark right now."),
+                parent=self.window(),
+                duration=2200,
+            )
+            raise
+        self._upsert_contact_record(contact)
+        if self._selected_key == ("friend", contact.id):
+            self.detail_panel.set_contact(contact)
+        self._refresh_search_surface()
+
+    def _on_friend_moments_requested(self, payload: object) -> None:
+        if not isinstance(payload, dict):
+            return
+        contact = payload.get("data")
+        if not isinstance(contact, ContactRecord):
+            return
+        InfoBar.info(
+            tr("contact.detail.moments", "Moments"),
+            tr("contact.detail.moments_coming_soon", "Friend timeline view will open here later."),
+            parent=self.window(),
+            duration=1600,
+        )
+
     def _show_friend_context_menu(self, contact_id: str, global_pos: QPoint) -> None:
         """Show friend management actions for one sidebar contact item."""
         contact = next((item for item in self._contacts if item.id == contact_id), None)
@@ -2506,6 +2850,7 @@ class ContactInterface(QWidget):
 
     def _clear_active_selection(self) -> None:
         self._selected_key = None
+        self._cancel_friend_moment_task()
         self._clear_selection()
         self.detail_panel.show_placeholder()
         self._show_welcome_panel()
@@ -2658,6 +3003,7 @@ class ContactInterface(QWidget):
         self._friend_items[contact_id].set_selected(True)
         self.detail_panel.set_contact(selected)
         self._show_detail_panel()
+        self._load_friend_moment_images(selected.id)
 
     def _select_group(self, group_id: str, force: bool = False) -> None:
         selected = next((item for item in self._groups if item.id == group_id), None)
@@ -2666,6 +3012,7 @@ class ContactInterface(QWidget):
         if not force and self._selected_key == ("group", group_id):
             return
         self._selected_key = ("group", group_id)
+        self._cancel_friend_moment_task()
         self._clear_selection()
         self._group_items[group_id].set_selected(True)
         self.detail_panel.set_group(selected)
@@ -2678,6 +3025,7 @@ class ContactInterface(QWidget):
         if not force and self._selected_key == ("request", request_id):
             return
         self._selected_key = ("request", request_id)
+        self._cancel_friend_moment_task()
         self._clear_selection()
         self._request_items[request_id].set_selected(True)
         self.detail_panel.set_request(selected, self._current_user_id)
@@ -2690,10 +3038,49 @@ class ContactInterface(QWidget):
         if not force and self._selected_key == ("blocked", contact_id):
             return
         self._selected_key = ("blocked", contact_id)
+        self._cancel_friend_moment_task()
         self._clear_selection()
         self._blocked_items[contact_id].set_selected(True)
         self.detail_panel.set_blocked_contact(selected)
         self._show_detail_panel()
+
+    def _load_friend_moment_images(self, contact_id: str) -> None:
+        self._cancel_friend_moment_task()
+        normalized_contact_id = str(contact_id or "").strip()
+        if not normalized_contact_id:
+            self.detail_panel.set_friend_moment_images([])
+            return
+        self.detail_panel.set_friend_moment_images([])
+        self._friend_moment_task = self._create_ui_task(
+            self._load_friend_moment_images_async(normalized_contact_id),
+            f"load friend moment images {normalized_contact_id}",
+            on_done=self._clear_friend_moment_task,
+        )
+
+    async def _load_friend_moment_images_async(self, contact_id: str) -> None:
+        moments = await self._discovery_controller.load_moments(user_id=contact_id)
+        if self._destroyed or self._selected_key != ("friend", contact_id):
+            return
+        media: list[MomentMediaRecord] = []
+        for moment in moments:
+            for item in moment.media:
+                if item.is_image:
+                    media.append(item)
+                if len(media) >= 5:
+                    break
+            if len(media) >= 5:
+                break
+        self.detail_panel.set_friend_moment_images(media)
+
+    def _cancel_friend_moment_task(self) -> None:
+        self._cancel_pending_task(self._friend_moment_task)
+        self._friend_moment_task = None
+        if hasattr(self, "detail_panel"):
+            self.detail_panel.set_friend_moment_images([])
+
+    def _clear_friend_moment_task(self, task: asyncio.Task) -> None:
+        if self._friend_moment_task is task:
+            self._friend_moment_task = None
 
     def _accept_request(self, request_id: str) -> None:
         request = next((item for item in self._requests if item.id == request_id), None)
@@ -2890,6 +3277,8 @@ class ContactInterface(QWidget):
         self._dismiss_search_flyout(clear_results=False)
         self._cancel_pending_task(self._load_task)
         self._load_task = None
+        self._cancel_pending_task(self._friend_moment_task)
+        self._friend_moment_task = None
         for task in list(self._keyed_ui_tasks.values()):
             if not task.done():
                 task.cancel()

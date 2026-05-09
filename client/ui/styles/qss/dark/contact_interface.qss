@@ -36,6 +36,13 @@ QFrame#DetailDivider {
     border: none;
 }
 
+QFrame#ContactDetailDivider {
+    background: {{BORDER_COLOR}};
+    min-height: 1px;
+    max-height: 1px;
+    border: none;
+}
+
 QLabel#elidedCaptionLabel,
 QLabel#elidedBodyLabel,
 QLabel#contactMetaLabel,
@@ -97,6 +104,20 @@ QLabel#momentMediaTile {
     border-radius: {{RADIUS_CARD}};
     color: {{TILE_TEXT}};
     font: 12px "Segoe UI", "Microsoft YaHei", "PingFang SC";
+}
+
+QLabel#friendMomentPreviewTile {
+    background: {{TILE_BG}};
+    border: 1px solid {{TILE_BORDER}};
+    border-radius: 4px;
+    color: {{TILE_TEXT}};
+    font: 11px "Segoe UI", "Microsoft YaHei", "PingFang SC";
+}
+
+QLabel#contactDetailFieldLabel {
+    color: {{TEXT_SECONDARY}};
+    font: 13px "Segoe UI", "Microsoft YaHei", "PingFang SC";
+    background: transparent;
 }
 
 QPushButton#requestStatusButton {

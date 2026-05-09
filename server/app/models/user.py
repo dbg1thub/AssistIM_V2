@@ -70,6 +70,7 @@ class Friendship(IdMixin, TimestampMixin, Base):
 
     user_id: Mapped[str] = mapped_column(Uuid(as_uuid=False), ForeignKey("users.id"), nullable=False)
     friend_id: Mapped[str] = mapped_column(Uuid(as_uuid=False), ForeignKey("users.id"), nullable=False)
+    remark: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default="")
 
 
 class UserBlock(IdMixin, TimestampMixin, Base):

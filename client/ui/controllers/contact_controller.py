@@ -230,33 +230,49 @@ class ContactController:
 
         for item in payload or []:
             relationship = dict(item or {})
-            user = dict(relationship.get("user") or {})
-            username = str(user.get("username", "") or "")
-            nickname = str(user.get("nickname", "") or "")
-            contacts.append(
-                ContactRecord(
-                    id=str(user.get("id", "") or ""),
-                    name=username or nickname,
-                    username=username,
-                    nickname=nickname,
-                    avatar=str(user.get("avatar", "") or ""),
-                    remark=str(user.get("remark", "") or ""),
-                    assistim_id=username,
-                    region=str(user.get("region", "") or ""),
-                    signature=str(user.get("signature", "") or ""),
-                    email=str(user.get("email", "") or ""),
-                    phone=str(user.get("phone", "") or ""),
-                    birthday=str(user.get("birthday", "") or ""),
-                    gender=str(user.get("gender", "") or ""),
-                    status=str(user.get("status", "") or ""),
-                    category="friend",
-                    extra=relationship,
-                )
-            )
+            contacts.append(self._contact_record_from_relationship(relationship))
 
         contacts.sort(key=lambda item: (self.sort_letter(item.display_name), item.display_name.lower()))
         await self._persist_contacts_cache(contacts, owner_user_id=owner_user_id)
         return contacts
+
+    async def update_friend_remark(self, friend_id: str, remark: str) -> ContactRecord:
+        """Update and normalize the current user's private remark for a friend."""
+        owner_user_id = self._capture_runtime_user_id()
+        payload = await self._contact_service.update_friend_remark(friend_id, remark)
+        self._ensure_runtime_user_id(owner_user_id)
+        relationship = dict(payload.get("relationship") or {})
+        return self._contact_record_from_relationship(relationship)
+
+    @staticmethod
+    def _contact_record_from_relationship(relationship: dict) -> ContactRecord:
+        user = dict(relationship.get("user") or {})
+        friendship = dict(relationship.get("friendship") or {})
+        username = str(user.get("username", "") or "")
+        nickname = str(user.get("nickname", "") or "")
+        remark = (
+            str(friendship.get("remark", "") or "")
+            if "remark" in friendship
+            else str(user.get("remark", "") or "")
+        )
+        return ContactRecord(
+            id=str(user.get("id", "") or friendship.get("friend_id", "") or ""),
+            name=username or nickname,
+            username=username,
+            nickname=nickname,
+            avatar=str(user.get("avatar", "") or ""),
+            remark=remark,
+            assistim_id=username,
+            region=str(user.get("region", "") or ""),
+            signature=str(user.get("signature", "") or ""),
+            email=str(user.get("email", "") or ""),
+            phone=str(user.get("phone", "") or ""),
+            birthday=str(user.get("birthday", "") or ""),
+            gender=str(user.get("gender", "") or ""),
+            status=str(user.get("status", "") or ""),
+            category="friend",
+            extra=relationship,
+        )
 
     async def load_blocked_contacts(self) -> list[ContactRecord]:
         """Load and normalize the current user's block list."""

@@ -224,7 +224,7 @@ def test_remove_friend_returns_changed_flag_and_skips_noop_fanout(
     removed_payload = removed_response.json()["data"]
     assert removed_payload["mutation"]["changed"] is True
     assert removed_payload["mutation"]["action"] == "friendship_removed"
-    assert removed_payload["relationship"]["friendship"] == {"is_friend": False, "friend_id": None}
+    assert removed_payload["relationship"]["friendship"] == {"is_friend": False, "friend_id": None, "remark": ""}
     assert send_json.await_count == 1
 
     missing_response = client.delete(
@@ -287,7 +287,11 @@ def test_friend_request_create_echoes_reused_and_auto_accept_actions(
     assert auto_payload["request"]["status"] == "accepted"
     assert auto_payload["mutation"]["action"] == "friendship_created"
     assert auto_payload["mutation"]["changed"] is True
-    assert auto_payload["relationship"]["friendship"] == {"is_friend": True, "friend_id": charlie["user"]["id"]}
+    assert auto_payload["relationship"]["friendship"] == {
+        "is_friend": True,
+        "friend_id": charlie["user"]["id"],
+        "remark": "",
+    }
 
     friendship_check = client.get(
         f"/api/v1/friends/check/{charlie['user']['id']}",
@@ -295,6 +299,65 @@ def test_friend_request_create_echoes_reused_and_auto_accept_actions(
     )
     assert friendship_check.status_code == 200
     assert friendship_check.json()["data"]["friendship"]["is_friend"] is True
+
+
+def test_friend_remark_is_owned_by_current_user_relationship(
+    client: TestClient,
+    user_factory,
+    auth_header,
+) -> None:
+    alice = user_factory("alice_friend_remark", "Alice Friend Remark")
+    bob = user_factory("bob_friend_remark", "Bob Friend Remark")
+    charlie = user_factory("charlie_friend_remark", "Charlie Friend Remark")
+
+    request_response = client.post(
+        "/api/v1/friends/requests",
+        json={"target_user_id": bob["user"]["id"], "message": "hello"},
+        headers=auth_header(alice["access_token"]),
+    )
+    request_id = request_response.json()["data"]["request"]["request_id"]
+    accept_response = client.post(
+        f"/api/v1/friends/requests/{request_id}/accept",
+        headers=auth_header(bob["access_token"]),
+    )
+    assert accept_response.status_code == 200
+
+    update_response = client.patch(
+        f"/api/v1/friends/{bob['user']['id']}/remark",
+        json={"remark": "小张"},
+        headers=auth_header(alice["access_token"]),
+    )
+    assert update_response.status_code == 200
+    updated = update_response.json()["data"]
+    assert updated["relationship"]["friendship"] == {
+        "is_friend": True,
+        "friend_id": bob["user"]["id"],
+        "remark": "小张",
+    }
+
+    alice_friends = client.get("/api/v1/friends", headers=auth_header(alice["access_token"]))
+    assert alice_friends.status_code == 200
+    alice_bob = next(item for item in alice_friends.json()["data"] if item["user"]["id"] == bob["user"]["id"])
+    assert alice_bob["friendship"]["remark"] == "小张"
+
+    bob_friends = client.get("/api/v1/friends", headers=auth_header(bob["access_token"]))
+    assert bob_friends.status_code == 200
+    bob_alice = next(item for item in bob_friends.json()["data"] if item["user"]["id"] == alice["user"]["id"])
+    assert bob_alice["friendship"]["remark"] == ""
+
+    friendship_check = client.get(
+        f"/api/v1/friends/check/{bob['user']['id']}",
+        headers=auth_header(alice["access_token"]),
+    )
+    assert friendship_check.status_code == 200
+    assert friendship_check.json()["data"]["friendship"]["remark"] == "小张"
+
+    non_friend_update = client.patch(
+        f"/api/v1/friends/{charlie['user']['id']}/remark",
+        json={"remark": "不是好友"},
+        headers=auth_header(alice["access_token"]),
+    )
+    assert non_friend_update.status_code == 404
 
 
 def test_create_direct_session_is_idempotent_and_reuses_same_session(

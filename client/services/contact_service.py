@@ -65,6 +65,14 @@ class ContactService:
         )
         return dict(payload or {})
 
+    async def update_friend_remark(self, friend_id: str, remark: str) -> dict[str, Any]:
+        """Update the current user's private remark for one friend."""
+        payload = await self._http.patch(
+            f"/friends/{friend_id}/remark",
+            json={"remark": remark},
+        )
+        return dict(payload or {})
+
     async def create_group(self, name: str, member_ids: list[str]) -> dict[str, Any]:
         """Create one group."""
         payload = await self._http.post(

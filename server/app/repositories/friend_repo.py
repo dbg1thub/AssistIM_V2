@@ -65,6 +65,31 @@ class FriendRepository:
         stmt = select(Friendship).where(Friendship.user_id == user_id)
         return list(self.db.execute(stmt).scalars().all())
 
+    def get_friendship(self, user_id: str, friend_id: str) -> Friendship | None:
+        stmt = select(Friendship).where(
+            and_(Friendship.user_id == user_id, Friendship.friend_id == friend_id)
+        )
+        return self.db.execute(stmt).scalar_one_or_none()
+
+    def update_friend_remark(
+        self,
+        user_id: str,
+        friend_id: str,
+        remark: str,
+        *,
+        commit: bool = True,
+    ) -> Friendship | None:
+        friendship = self.get_friendship(user_id, friend_id)
+        if friendship is None:
+            return None
+        friendship.remark = remark
+        self.db.add(friendship)
+        self.db.flush()
+        if commit:
+            self.db.commit()
+            self.db.refresh(friendship)
+        return friendship
+
     def update_request_status(self, request: FriendRequest, status: str, *, commit: bool = True) -> FriendRequest:
         request.status = status
         self.db.add(request)

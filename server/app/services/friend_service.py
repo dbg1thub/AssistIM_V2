@@ -160,6 +160,7 @@ class FriendService:
                         user=friend,
                         friendship_user_id=str(friend.id or ""),
                         is_friend=True,
+                        remark=str(friendship.remark or ""),
                     )
                 )
         return items
@@ -183,11 +184,33 @@ class FriendService:
         user = self.users.get_by_id(normalized_user_id)
         if user is None:
             raise AppError(ErrorCode.USER_NOT_FOUND, "user not found", 404)
-        is_friend = self.friends.is_friend(current_user.id, normalized_user_id)
+        friendship = self.friends.get_friendship(current_user.id, normalized_user_id)
         return self._serialize_relationship(
             user=user,
             friendship_user_id=normalized_user_id,
-            is_friend=is_friend,
+            is_friend=friendship is not None,
+            remark=str(friendship.remark or "") if friendship is not None else "",
+        )
+
+    def update_friend_remark(self, current_user: User, friend_id: str, remark: str) -> dict:
+        normalized_friend_id = str(friend_id or "").strip()
+        if not normalized_friend_id:
+            raise AppError(ErrorCode.INVALID_REQUEST, "friend_id is required", 422)
+        friend = self.users.get_by_id(normalized_friend_id)
+        if friend is None:
+            raise AppError(ErrorCode.USER_NOT_FOUND, "friend not found", 404)
+        friendship = self.friends.update_friend_remark(current_user.id, normalized_friend_id, str(remark or ""))
+        if friendship is None:
+            raise AppError(ErrorCode.RESOURCE_NOT_FOUND, "friendship not found", 404)
+        return self._serialize_relationship_mutation(
+            action="friend_remark_updated",
+            changed=True,
+            created=False,
+            user=friend,
+            friendship_user_id=normalized_friend_id,
+            is_friend=True,
+            request=None,
+            remark=str(friendship.remark or ""),
         )
 
     def _persist_expired_requests(self, requests: list[FriendRequest]) -> None:
@@ -251,7 +274,14 @@ class FriendService:
             return {}
         return self.user_payloads.serialize_public_user(user)
 
-    def _serialize_relationship(self, *, user: User | None, friendship_user_id: str, is_friend: bool) -> dict:
+    def _serialize_relationship(
+        self,
+        *,
+        user: User | None,
+        friendship_user_id: str,
+        is_friend: bool,
+        remark: str = "",
+    ) -> dict:
         normalized_friendship_user_id = str(friendship_user_id or "").strip()
         payload = self.user_payloads.serialize_public_user(user) if user is not None else {"id": normalized_friendship_user_id}
         return {
@@ -259,6 +289,7 @@ class FriendService:
             "friendship": {
                 "is_friend": bool(is_friend),
                 "friend_id": normalized_friendship_user_id if is_friend else None,
+                "remark": str(remark or ""),
             },
         }
 
@@ -272,6 +303,7 @@ class FriendService:
         friendship_user_id: str,
         is_friend: bool,
         request: dict | None,
+        remark: str = "",
     ) -> dict:
         return {
             "mutation": {
@@ -283,6 +315,7 @@ class FriendService:
                 user=user,
                 friendship_user_id=friendship_user_id,
                 is_friend=is_friend,
+                remark=remark,
             ),
             "request": dict(request or {}) if request is not None else None,
         }

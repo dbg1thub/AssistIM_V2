@@ -28,6 +28,17 @@ class FriendRequestCreate(BaseModel):
         return normalized or None
 
 
+class FriendRemarkUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    remark: str = Field(default="", max_length=64)
+
+    @field_validator("remark", mode="before")
+    @classmethod
+    def _normalize_remark(cls, value: object) -> str:
+        return str(value or "").strip()
+
+
 class FriendRequestOut(ORMModel):
     request_id: str
     sender_id: str
@@ -47,6 +58,7 @@ class FriendOut(BaseModel):
 class FriendshipOut(ORMModel):
     is_friend: bool = False
     friend_id: str | None = None
+    remark: str = ""
 
 
 class RelationshipOut(ORMModel):

@@ -221,9 +221,29 @@ def test_contact_interface_no_longer_embeds_moments_panel() -> None:
 
     assert 'ContactMomentsFlowPanel' not in contact_interface
     assert 'moments_panel' not in contact_interface
-    assert 'get_discovery_controller' not in contact_interface
     assert '_load_detail_moments' not in contact_interface
     assert 'contact.moments' not in contact_interface
+    assert 'class FriendMomentPreviewStrip(QWidget):' in contact_interface
+    assert 'self._discovery_controller = get_discovery_controller()' in contact_interface
+    assert 'def _load_friend_moment_images(self, contact_id: str) -> None:' in contact_interface
+    assert 'MomentEvent' not in contact_interface
+
+
+def test_contact_detail_card_uses_wechat_like_profile_layout() -> None:
+    contact_interface = Path('client/ui/windows/contact_interface.py').read_text(encoding='utf-8')
+    app_icons = Path('client/core/app_icons.py').read_text(encoding='utf-8')
+
+    assert 'root_layout.addWidget(self.header, 0, Qt.AlignmentFlag.AlignHCenter)' in contact_interface
+    assert 'self.gender_icon = IconWidget(AppIcon.GENDER_MALE, self.header)' in contact_interface
+    assert 'self.more_button = ToolButton(AppIcon.MORE_HORIZONTAL, self.header)' in contact_interface
+    assert 'self.remark_row = ContactDetailRow' in contact_interface
+    assert 'self.signature_row.set_value(contact.signature or tr("contact.detail.empty_value", "Not set"))' in contact_interface
+    assert 'class EditFriendRemarkDialog(FluentDialog):' in contact_interface
+    assert 'self.detail_panel.remark_edit_requested.connect(self._on_friend_remark_edit_requested)' in contact_interface
+    assert 'async def _update_friend_remark_async(self, contact_id: str, remark: str) -> None:' in contact_interface
+    assert 'GENDER_MALE = "gender_male"' in app_icons
+    assert 'GENDER_FEMALE = "gender_female"' in app_icons
+    assert 'MORE_HORIZONTAL = "more_horizontal"' in app_icons
 
 
 def test_group_flow_no_longer_writes_local_group_avatar_metadata() -> None:

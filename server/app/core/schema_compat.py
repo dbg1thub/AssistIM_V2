@@ -108,6 +108,10 @@ MOMENT_PRIVACY_SETTINGS_INDEX_DDL: dict[str, str] = {
     "idx_moment_privacy_settings_user_id": "CREATE INDEX IF NOT EXISTS idx_moment_privacy_settings_user_id ON moment_privacy_settings (user_id)",
 }
 
+FRIEND_COLUMN_DDL: dict[str, str] = {
+    "remark": "TEXT NOT NULL DEFAULT ''",
+}
+
 CHAT_INDEX_DDL: dict[str, str] = {
     "idx_messages_session_seq": "CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_session_seq ON messages (session_id, session_seq)",
 }
@@ -1312,6 +1316,7 @@ def ensure_schema_compatibility(engine: Engine) -> list[str]:
         _ensure_columns(connection, "sessions", SESSION_COLUMN_DDL, applied)
         _ensure_columns(connection, "session_members", SESSION_MEMBER_COLUMN_DDL, applied)
         _ensure_columns(connection, "files", FILE_COLUMN_DDL, applied)
+        _ensure_columns(connection, "friends", FRIEND_COLUMN_DDL, applied)
         _ensure_columns(connection, "moments", MOMENT_COLUMN_DDL, applied)
         _ensure_columns(connection, "moment_comments", MOMENT_COMMENT_COLUMN_DDL, applied)
         _ensure_moment_privacy_settings_table(connection, applied)

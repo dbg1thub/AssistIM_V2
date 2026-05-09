@@ -13,7 +13,7 @@ from app.core.rate_limit import rate_limiter
 from app.dependencies.auth_dependency import get_current_user
 from app.dependencies.settings_dependency import get_request_settings
 from app.models.user import User
-from app.schemas.friend import FriendRequestCreate
+from app.schemas.friend import FriendRemarkUpdate, FriendRequestCreate
 from app.services.friend_service import FriendService
 from app.utils.response import success_response
 from app.websocket.manager import connection_manager
@@ -70,6 +70,18 @@ def list_friends(current_user: User = Depends(get_current_user), db: Session = D
 @router.get("/check/{user_id}")
 def check_friendship(user_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> dict:
     return success_response(FriendService(db).check_relationship(current_user, user_id))
+
+
+@router.patch("/{friend_id}/remark")
+async def update_friend_remark(
+    friend_id: str,
+    payload: FriendRemarkUpdate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    result = FriendService(db).update_friend_remark(current_user, friend_id, payload.remark)
+    await _broadcast_contact_refresh([current_user.id], "friend_remark_updated", result)
+    return success_response(result)
 
 
 @router.post("/requests", dependencies=[Depends(rate_limiter.dynamic_dependency("friend-request", _friend_request_limit))])
