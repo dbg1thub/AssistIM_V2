@@ -2570,6 +2570,8 @@ class MessageInput(QWidget):
     IMAGE_FILTER = "Images (*.png *.jpg *.jpeg *.gif *.bmp *.webp)"
     FILE_FILTER = "All Files (*.*)"
     TYPING_THROTTLE = 1.0
+    TOOLBAR_ICON_BUTTON_SIZE = 28
+    TOOLBAR_ICON_SPACING = 6
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -2651,35 +2653,40 @@ class MessageInput(QWidget):
 
         self.toolbar_layout = QHBoxLayout()
         self.toolbar_layout.setContentsMargins(0, 0, 0, 0)
-        self.toolbar_layout.setSpacing(4)
+        self.toolbar_layout.setSpacing(self.TOOLBAR_ICON_SPACING)
+        self.toolbar_layout.setAlignment(Qt.AlignmentFlag.AlignVCenter)
 
         self.emoji_button = TransparentToolButton(AppIcon.EMOJI_TAB_SYMBOLS, self.composer_widget)
-        self.emoji_button.setFixedSize(24, 24)
         self.emoji_button.setToolTip(tr("composer.toolbar.emoji", "Emoji"))
 
         self.image_button = TransparentToolButton(AppIcon.PHOTO, self.composer_widget)
-        self.image_button.setFixedSize(24, 24)
         self.image_button.setToolTip(tr("composer.toolbar.image", "Send Image"))
 
         self.file_button = TransparentToolButton(AppIcon.FOLDER, self.composer_widget)
-        self.file_button.setFixedSize(24, 24)
         self.file_button.setToolTip(tr("composer.toolbar.file", "Send File"))
 
         self.cut_button = TransparentToolButton(AppIcon.CUT, self.composer_widget)
-        self.cut_button.setFixedSize(24, 24)
         self.cut_button.setToolTip(tr("composer.toolbar.screenshot", "Screenshot"))
 
         self.voice_button = TransparentToolButton(AppIcon.PHONE, self.composer_widget)
-        self.voice_button.setFixedSize(24, 24)
         self.voice_button.setToolTip(tr("composer.toolbar.voice_call", "Voice Call"))
 
         self.video_button = TransparentToolButton(AppIcon.VIDEO, self.composer_widget)
-        self.video_button.setFixedSize(24, 24)
         self.video_button.setToolTip(tr("composer.toolbar.video_call", "Video Call"))
 
         self.ai_button = TransparentToolButton(AppIcon.ROBOT, self.composer_widget)
-        self.ai_button.setFixedSize(24, 24)
         self.ai_button.setToolTip(tr("composer.toolbar.ai", "AI 助手"))
+
+        for button in (
+            self.emoji_button,
+            self.image_button,
+            self.file_button,
+            self.cut_button,
+            self.voice_button,
+            self.video_button,
+            self.ai_button,
+        ):
+            button.setFixedSize(self.TOOLBAR_ICON_BUTTON_SIZE, self.TOOLBAR_ICON_BUTTON_SIZE)
 
         self._apply_safe_button_font(
             self.emoji_button,
@@ -2729,7 +2736,7 @@ class MessageInput(QWidget):
 
         self.voice_message_button = TransparentToolButton(AppIcon.MIC_ON, self.composer_widget)
         self.voice_message_button.setObjectName("composerVoiceMessageButton")
-        self.voice_message_button.setFixedSize(32, 28)
+        self.voice_message_button.setFixedSize(self.TOOLBAR_ICON_BUTTON_SIZE, self.TOOLBAR_ICON_BUTTON_SIZE)
         self.voice_message_button.setToolTip(tr("composer.voice.hold_to_talk", "Hold to talk"))
         self.voice_message_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.voice_message_button.setMouseTracking(True)
@@ -2745,7 +2752,8 @@ class MessageInput(QWidget):
         self.message_sendbar_widget.setObjectName("messageSendBar")
         self.message_sendbar_layout = QHBoxLayout(self.message_sendbar_widget)
         self.message_sendbar_layout.setContentsMargins(0, 0, 0, 0)
-        self.message_sendbar_layout.setSpacing(8)
+        self.message_sendbar_layout.setSpacing(self.TOOLBAR_ICON_SPACING)
+        self.message_sendbar_layout.setAlignment(Qt.AlignmentFlag.AlignVCenter)
         self.message_sendbar_layout.addWidget(self.voice_message_button)
         self.message_sendbar_layout.addWidget(self.send_button)
 

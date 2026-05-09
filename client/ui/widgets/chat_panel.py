@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from typing import Callable, Optional
 
-from PySide6.QtCore import QEvent, Qt, QTimer, Signal, QUrl
+from PySide6.QtCore import QEvent, QPoint, Qt, QTimer, Signal, QUrl
 from PySide6.QtGui import QDesktopServices, QGuiApplication, QKeySequence
 from PySide6.QtWidgets import QAbstractItemView, QFrame, QHBoxLayout, QListView, QStackedWidget, QVBoxLayout, QWidget
 
@@ -1135,10 +1135,23 @@ class ChatPanel(QWidget):
         if self.composer_resize_handle is not None:
             handle_height = self.COMPOSER_RESIZE_HANDLE_HEIGHT
             self.composer_resize_handle.setGeometry(x, y - handle_height // 2, width, handle_height)
+        self._layout_message_scrollbar(input_top_y=y)
         self.message_input.setGeometry(x, y, width, height)
         self.message_input.raise_()
         if self.composer_resize_handle is not None:
             self.composer_resize_handle.raise_()
+
+    def _layout_message_scrollbar(self, *, input_top_y: int) -> None:
+        """Keep the Fluent scrollbar above the floating composer without changing the viewport."""
+        if self._scroll_delegate is None or self.chat_page is None:
+            return
+        bar = self._scroll_delegate.vScrollBar
+        input_top_in_list = self.message_list.mapFrom(self.chat_page, QPoint(0, input_top_y)).y()
+        bar_height = max(0, input_top_in_list - 2)
+        bar_x = max(0, self.message_list.width() - 13)
+        bar.setGeometry(bar_x, 1, 12, bar_height)
+        bar._adjustHandleSize()
+        bar._adjustHandlePos()
 
     def _sync_message_scrollbar_visibility(self) -> None:
         if not self._scroll_delegate:

@@ -617,11 +617,20 @@ def test_chat_message_input_uses_floating_card_style_without_overlay_or_cursor_o
     assert 'content_rect = self.chat_content_area.geometry()' in chat_panel
     assert 'height = max(self.COMPOSER_MIN_HEIGHT, min(self.COMPOSER_MAX_HEIGHT, self._composer_height))' in chat_panel
     assert 'y = content_rect.bottom() - height + 1' in chat_panel
+    assert 'self._layout_message_scrollbar(input_top_y=y)' in chat_panel
+    assert 'def _layout_message_scrollbar(self, *, input_top_y: int) -> None:' in chat_panel
+    assert 'self.message_list.mapFrom(self.chat_page, QPoint(0, input_top_y)).y()' in chat_panel
+    assert 'bar.setGeometry(bar_x, 1, 12, bar_height)' in chat_panel
+    assert 'bar._adjustHandleSize()' in chat_panel
+    assert 'bar._adjustHandlePos()' in chat_panel
     assert 'self.composer_resize_handle.setGeometry(x, y - handle_height // 2, width, handle_height)' in chat_panel
     assert 'self.message_input.raise_()' in chat_panel
     assert 'self.composer_resize_handle.raise_()' in chat_panel
     assert 'self.message_input.setMinimumHeight(0)' not in chat_panel
     assert 'self.message_input.setMaximumHeight(' not in chat_panel
+    assert 'self.message_list.setViewportMargins(0, 0, 0, self.MESSAGE_LIST_BOTTOM_MARGIN)' in chat_panel
+    assert 'self.chat_content_layout.setContentsMargins(0, 0, 0, 0)' in chat_panel
+    assert 'self.chat_content_layout.setContentsMargins(0, 0, 0, height)' not in chat_panel
 
     assert 'self.editor_card.setMaximumWidth(1100)' not in setup_block
     assert 'Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignBottom' not in setup_block
@@ -630,12 +639,16 @@ def test_chat_message_input_uses_floating_card_style_without_overlay_or_cursor_o
     assert 'self.text_input.setViewportMargins(0, 0, 0, 0)' in setup_block
     assert 'self.input_border.setObjectName("messageInputBorder")' in setup_block
     assert 'self.input_border.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)' in setup_block
+    assert 'TOOLBAR_ICON_BUTTON_SIZE = 28' in message_input
+    assert 'TOOLBAR_ICON_SPACING = 6' in message_input
     assert 'self.toolbar_root_layout.setContentsMargins(8, 4, 8, 8)' in setup_block
     assert 'self.toolbar_layout.setContentsMargins(0, 0, 0, 0)' in setup_block
+    assert 'self.toolbar_layout.setSpacing(self.TOOLBAR_ICON_SPACING)' in setup_block
     assert 'self.message_sendbar_layout.setContentsMargins(0, 0, 0, 0)' in setup_block
-    assert setup_block.count('setFixedSize(24, 24)') >= 7
-    assert 'self.voice_message_button.setFixedSize(32, 28)' in setup_block
+    assert 'button.setFixedSize(self.TOOLBAR_ICON_BUTTON_SIZE, self.TOOLBAR_ICON_BUTTON_SIZE)' in setup_block
+    assert 'self.voice_message_button.setFixedSize(self.TOOLBAR_ICON_BUTTON_SIZE, self.TOOLBAR_ICON_BUTTON_SIZE)' in setup_block
     assert 'self.send_button.setFixedSize(62, 28)' in setup_block
+    assert 'self.message_sendbar_layout.setSpacing(self.TOOLBAR_ICON_SPACING)' in setup_block
     assert 'self.message_sendbar_layout.addWidget(self.voice_message_button)' in setup_block
     assert 'self.message_sendbar_layout.addWidget(self.send_button)' in setup_block
     assert setup_block.index('self.composer_layout.addWidget(self.reply_suggestion_widget, 0)') < setup_block.index(
