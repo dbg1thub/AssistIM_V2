@@ -2649,31 +2649,31 @@ class MessageInput(QWidget):
         self.toolbar_layout.setSpacing(4)
 
         self.emoji_button = TransparentToolButton(AppIcon.EMOJI_TAB_SYMBOLS, self.composer_widget)
-        self.emoji_button.setFixedSize(28, 28)
+        self.emoji_button.setFixedSize(24, 24)
         self.emoji_button.setToolTip(tr("composer.toolbar.emoji", "Emoji"))
 
         self.image_button = TransparentToolButton(AppIcon.PHOTO, self.composer_widget)
-        self.image_button.setFixedSize(28, 28)
+        self.image_button.setFixedSize(24, 24)
         self.image_button.setToolTip(tr("composer.toolbar.image", "Send Image"))
 
         self.file_button = TransparentToolButton(AppIcon.FOLDER, self.composer_widget)
-        self.file_button.setFixedSize(28, 28)
+        self.file_button.setFixedSize(24, 24)
         self.file_button.setToolTip(tr("composer.toolbar.file", "Send File"))
 
         self.cut_button = TransparentToolButton(AppIcon.CUT, self.composer_widget)
-        self.cut_button.setFixedSize(28, 28)
+        self.cut_button.setFixedSize(24, 24)
         self.cut_button.setToolTip(tr("composer.toolbar.screenshot", "Screenshot"))
 
         self.voice_button = TransparentToolButton(AppIcon.PHONE, self.composer_widget)
-        self.voice_button.setFixedSize(28, 28)
+        self.voice_button.setFixedSize(24, 24)
         self.voice_button.setToolTip(tr("composer.toolbar.voice_call", "Voice Call"))
 
         self.video_button = TransparentToolButton(AppIcon.VIDEO, self.composer_widget)
-        self.video_button.setFixedSize(28, 28)
+        self.video_button.setFixedSize(24, 24)
         self.video_button.setToolTip(tr("composer.toolbar.video_call", "Video Call"))
 
         self.ai_button = TransparentToolButton(AppIcon.ROBOT, self.composer_widget)
-        self.ai_button.setFixedSize(28, 28)
+        self.ai_button.setFixedSize(24, 24)
         self.ai_button.setToolTip(tr("composer.toolbar.ai", "AI 助手"))
 
         self._apply_safe_button_font(
@@ -2725,7 +2725,7 @@ class MessageInput(QWidget):
 
         self.voice_message_button = TransparentToolButton(AppIcon.MIC_ON, self.composer_widget)
         self.voice_message_button.setObjectName("composerVoiceMessageButton")
-        self.voice_message_button.setFixedSize(34, 30)
+        self.voice_message_button.setFixedSize(30, 24)
         self.voice_message_button.setToolTip(tr("composer.voice.hold_to_talk", "Hold to talk"))
         self.voice_message_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.voice_message_button.setMouseTracking(True)
@@ -2735,7 +2735,7 @@ class MessageInput(QWidget):
 
         self.send_button = PushButton(tr("composer.button.send", "Send"), self.composer_widget)
         self.send_button.setObjectName("composerSendButton")
-        self.send_button.setFixedSize(76, 30)
+        self.send_button.setFixedSize(58, 24)
 
         self.toolbar_widget.setLayout(self.toolbar_layout)
 
