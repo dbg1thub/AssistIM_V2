@@ -159,9 +159,13 @@ class LocalEmbeddingGGUFRuntime:
             embedder = await asyncio.to_thread(self._load_sync, model_path)
         except Exception:
             logger.exception(
-                "[ai-perf] local_embedding_model_load_failed provider=local_gguf_embedding model=%s path=%s",
+                "[ai-perf] local_embedding_model_load_failed provider=local_gguf_embedding model=%s path=%s n_ctx=%s n_batch=%s gpu_layers=%s cpu_threads=%s",
                 self._config.model_id,
                 model_path,
+                self._config.context_size,
+                batch_size,
+                self._config.gpu_layers,
+                self._config.cpu_threads,
             )
             raise
         if self._closed:
@@ -202,6 +206,9 @@ class LocalEmbeddingGGUFRuntime:
         }
         if self._config.cpu_threads > 0:
             kwargs["n_threads"] = self._config.cpu_threads
+        if self._config.gpu_layers <= 0:
+            kwargs["offload_kqv"] = False
+            kwargs["op_offload"] = False
         try:
             return LlamaEmbedding(**kwargs)
         except MemoryError as exc:

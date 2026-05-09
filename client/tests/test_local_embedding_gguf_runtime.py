@@ -113,3 +113,73 @@ def test_local_embedding_gguf_runtime_batch_size_covers_context_window(monkeypat
         assert captured_kwargs["n_ubatch"] == 1024
 
     asyncio.run(scenario())
+
+
+def test_local_embedding_gguf_runtime_disables_cuda_compute_for_cpu_mode(monkeypatch, tmp_path) -> None:
+    model_path = tmp_path / "embedding.gguf"
+    model_path.write_bytes(b"fake")
+    captured_kwargs = {}
+
+    class StubLlamaEmbedding:
+        def __init__(self, **kwargs) -> None:
+            captured_kwargs.update(kwargs)
+
+        def embed(self, texts):
+            return [[1.0] for _text in list(texts or [])]
+
+    llama_embedding_module = types.ModuleType("llama_cpp.llama_embedding")
+    llama_embedding_module.LlamaEmbedding = StubLlamaEmbedding
+    monkeypatch.setitem(sys.modules, "llama_cpp.llama_embedding", llama_embedding_module)
+
+    runtime = runtime_module.LocalEmbeddingGGUFRuntime(
+        runtime_module.LocalEmbeddingGGUFConfig(
+            model_path=str(model_path),
+            gpu_layers=0,
+            verbose=False,
+        )
+    )
+
+    async def scenario() -> None:
+        vectors = await runtime.embed_texts(["hello"])
+
+        assert vectors == [(1.0,)]
+        assert captured_kwargs["n_gpu_layers"] == 0
+        assert captured_kwargs["offload_kqv"] is False
+        assert captured_kwargs["op_offload"] is False
+
+    asyncio.run(scenario())
+
+
+def test_local_embedding_gguf_runtime_keeps_cuda_compute_available_for_gpu_mode(monkeypatch, tmp_path) -> None:
+    model_path = tmp_path / "embedding.gguf"
+    model_path.write_bytes(b"fake")
+    captured_kwargs = {}
+
+    class StubLlamaEmbedding:
+        def __init__(self, **kwargs) -> None:
+            captured_kwargs.update(kwargs)
+
+        def embed(self, texts):
+            return [[1.0] for _text in list(texts or [])]
+
+    llama_embedding_module = types.ModuleType("llama_cpp.llama_embedding")
+    llama_embedding_module.LlamaEmbedding = StubLlamaEmbedding
+    monkeypatch.setitem(sys.modules, "llama_cpp.llama_embedding", llama_embedding_module)
+
+    runtime = runtime_module.LocalEmbeddingGGUFRuntime(
+        runtime_module.LocalEmbeddingGGUFConfig(
+            model_path=str(model_path),
+            gpu_layers=4,
+            verbose=False,
+        )
+    )
+
+    async def scenario() -> None:
+        vectors = await runtime.embed_texts(["hello"])
+
+        assert vectors == [(1.0,)]
+        assert captured_kwargs["n_gpu_layers"] == 4
+        assert "offload_kqv" not in captured_kwargs
+        assert "op_offload" not in captured_kwargs
+
+    asyncio.run(scenario())
