@@ -64,6 +64,43 @@ def test_discovery_ui_wires_moment_media_and_comment_image_boundaries() -> None:
     assert 'def _sync_comment_image_preview(self) -> None:' in discovery_interface
 
 
+def test_moment_comment_editor_can_close_without_breaking_image_picker() -> None:
+    discovery_interface = Path('client/ui/windows/discovery_interface.py').read_text(encoding='utf-8')
+
+    section_block = discovery_interface.split('class AnimatedCommentSection(QWidget):', 1)[1].split(
+        'def _contact_display_name',
+        1,
+    )[0]
+    open_editor_block = section_block.split('def open_editor(self) -> None:', 1)[1].split('def hide_editor', 1)[0]
+    hide_editor_block = section_block.split('def hide_editor(self', 1)[1].split('def _rebuild', 1)[0]
+    submit_block = section_block.split('def _submit_comment(self) -> None:', 1)[1].split(
+        'def _select_comment_image',
+        1,
+    )[0]
+    event_filter_block = section_block.split('def eventFilter(self, watched, event) -> bool:', 1)[1].split(
+        'def _submit_comment',
+        1,
+    )[0]
+
+    assert 'self.editor_widget.installEventFilter(self)' in section_block
+    assert 'self.comment_edit.installEventFilter(self)' in section_block
+    assert 'self.image_button.installEventFilter(self)' in section_block
+    assert 'self.send_button.installEventFilter(self)' in section_block
+    assert 'if self._editor_visible:' in open_editor_block
+    assert 'self.hide_editor(clear_draft=False)' in open_editor_block
+    assert 'def hide_editor(self, *, clear_draft: bool = False) -> None:' in section_block
+    assert 'self._editor_visible = False' in hide_editor_block
+    assert 'if clear_draft:' in hide_editor_block
+    assert 'self.comment_edit.clear()' in hide_editor_block
+    assert 'self._selected_image_path = ""' in hide_editor_block
+    assert 'self.hide_editor(clear_draft=True)' in submit_block
+    assert 'QEvent.Type.KeyPress' in event_filter_block
+    assert 'Qt.Key.Key_Escape' in event_filter_block
+    assert 'QEvent.Type.FocusOut' in event_filter_block
+    assert 'self._is_focus_inside_editor()' in event_filter_block
+    assert 'self.hide_editor(clear_draft=False)' in event_filter_block
+
+
 def test_discovery_video_tiles_use_existing_thumbnail_cache() -> None:
     discovery_interface = Path('client/ui/windows/discovery_interface.py').read_text(encoding='utf-8')
 

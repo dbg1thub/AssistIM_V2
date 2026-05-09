@@ -10,7 +10,7 @@ from typing import Optional
 from urllib.parse import urlsplit
 
 from PySide6.QtCore import QEvent, QEasingCurve, QParallelAnimationGroup, QPropertyAnimation, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import QColor, QDesktopServices, QFont, QPainter, QPainterPath, QPixmap
+from PySide6.QtGui import QColor, QDesktopServices, QFont, QKeyEvent, QPainter, QPainterPath, QPixmap
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 from PySide6.QtWidgets import (
     QDialog,
@@ -687,6 +687,10 @@ class AnimatedCommentSection(QWidget):
         self.image_button.clicked.connect(self._select_comment_image)
         self.send_button.clicked.connect(self._submit_comment)
         self.comment_edit.returnPressed.connect(self._submit_comment)
+        self.editor_widget.installEventFilter(self)
+        self.comment_edit.installEventFilter(self)
+        self.image_button.installEventFilter(self)
+        self.send_button.installEventFilter(self)
 
         surface_layout.addWidget(self.preview_widget)
         surface_layout.addWidget(self.extra_widget)
@@ -730,10 +734,23 @@ class AnimatedCommentSection(QWidget):
 
     def open_editor(self) -> None:
         """Reveal the inline editor and focus it."""
+        if self._editor_visible:
+            self.hide_editor(clear_draft=False)
+            return
         self._editor_visible = True
         self.editor_widget.setVisible(True)
         self._sync_visibility()
         self.comment_edit.setFocus()
+
+    def hide_editor(self, *, clear_draft: bool = False) -> None:
+        """Hide the inline editor, optionally discarding the current draft."""
+        self._editor_visible = False
+        self.editor_widget.setVisible(False)
+        if clear_draft:
+            self.comment_edit.clear()
+            self._selected_image_path = ""
+            self._sync_comment_image_preview()
+        self._sync_visibility()
 
     def _rebuild(self) -> None:
         _clear_layout(self.preview_layout)
@@ -820,6 +837,29 @@ class AnimatedCommentSection(QWidget):
     def _sync_visibility(self) -> None:
         self.setVisible(bool(self._comments) or self._editor_visible)
 
+    def eventFilter(self, watched, event) -> bool:
+        if self._editor_visible and event.type() == QEvent.Type.KeyPress:
+            key_event = event if isinstance(event, QKeyEvent) else None
+            if key_event is not None and key_event.key() == Qt.Key.Key_Escape:
+                self.hide_editor(clear_draft=True)
+                event.accept()
+                return True
+        if self._editor_visible and event.type() == QEvent.Type.FocusOut:
+            QTimer.singleShot(0, self._close_editor_if_focus_left)
+        return super().eventFilter(watched, event)
+
+    def _close_editor_if_focus_left(self) -> None:
+        if self._editor_visible and not self._is_focus_inside_editor():
+            self.hide_editor(clear_draft=False)
+
+    def _is_focus_inside_editor(self) -> bool:
+        focus_widget = self.window().focusWidget() if self.window() is not None else None
+        while focus_widget is not None:
+            if focus_widget is self.editor_widget:
+                return True
+            focus_widget = focus_widget.parentWidget()
+        return False
+
     def _submit_comment(self) -> None:
         text = self.comment_edit.text().strip()
         if not text and not self._selected_image_path:
@@ -837,9 +877,7 @@ class AnimatedCommentSection(QWidget):
             )
             return
         self.comment_submitted.emit(text, self._selected_image_path or None)
-        self.comment_edit.clear()
-        self._selected_image_path = ""
-        self._sync_comment_image_preview()
+        self.hide_editor(clear_draft=True)
 
     def _select_comment_image(self) -> None:
         file_path, _ = QFileDialog.getOpenFileName(
