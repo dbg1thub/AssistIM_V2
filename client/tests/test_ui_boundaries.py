@@ -45,6 +45,10 @@ def test_discovery_ui_wires_moment_media_and_comment_image_boundaries() -> None:
     assert 'discovery.comments.image_too_large' in discovery_interface
     assert 'exc.status_code == 413' in discovery_interface
     assert 'discovery.publish.too_large' in discovery_interface
+    assert 'from urllib.parse import urlsplit' in discovery_interface
+    assert 'def _normalize_media_url_key(value: object) -> str:' in discovery_interface
+    assert '_normalize_media_url_key(item.get("url")): str(item.get("local_path") or "").strip()' in discovery_interface
+    assert 'normalized_url = _normalize_media_url_key(item.url)' in discovery_interface
     assert 'class CreateMomentDialog' in discovery_interface
     assert 'QFileDialog.getOpenFileNames' in discovery_interface
     assert 'QFileDialog.getOpenFileName' in discovery_interface
@@ -411,6 +415,7 @@ def test_chat_message_input_uses_floating_card_style_without_overlay_or_cursor_o
 
     assert 'self.editor_card.setMaximumWidth(1100)' not in setup_block
     assert 'Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignBottom' not in setup_block
+    assert 'self.main_layout.setContentsMargins(8, 0, 8, 8)' in setup_block
     assert 'self.main_layout.addWidget(self.editor_card, 1)' in setup_block
     assert 'self.text_input.setViewportMargins(0, 0, 0, 0)' in setup_block
     assert setup_block.index('self.composer_layout.addWidget(self.reply_suggestion_widget, 0)') < setup_block.index(
@@ -436,7 +441,8 @@ def test_chat_message_input_uses_floating_card_style_without_overlay_or_cursor_o
         assert 'QWidget#messageInput,\nQWidget#messageComposer,\nQWidget#messageToolbar' not in qss
         assert 'QTextEdit#chatMessageEdit,\nQWidget#chatMessageViewport,\nQTextEdit#chatMessageEdit QFrame' not in qss
         assert 'QWidget#messageToolbar {' in qss
-        assert 'border-top:' in qss
+        message_toolbar_block = qss.split('QWidget#messageToolbar {', 1)[1].split('}', 1)[0]
+        assert 'border-top:' not in message_toolbar_block
 
     for qss in (light_chat_qss, dark_chat_qss):
         assert 'QSplitter#chatContentSplitter::handle:vertical' in qss

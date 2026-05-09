@@ -2624,7 +2624,7 @@ class MessageInput(QWidget):
         self.setMinimumHeight(0)
 
         self.main_layout = QVBoxLayout(self)
-        self.main_layout.setContentsMargins(24, 8, 24, 16)
+        self.main_layout.setContentsMargins(8, 0, 8, 8)
         self.main_layout.setSpacing(0)
 
         self.editor_card = QWidget(self)

@@ -7,6 +7,7 @@ import html
 import mimetypes
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlsplit
 
 from PySide6.QtCore import QEvent, QEasingCurve, QParallelAnimationGroup, QPropertyAnimation, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QColor, QDesktopServices, QFont, QPainter, QPainterPath, QPixmap
@@ -91,6 +92,19 @@ def _is_file_over_upload_limit(file_path: str) -> bool:
         return Path(file_path).stat().st_size > MOMENT_MEDIA_MAX_UPLOAD_BYTES
     except OSError:
         return False
+
+
+def _normalize_media_url_key(value: object) -> str:
+    """Normalize relative and absolute media URLs to one comparable path key."""
+    raw_value = str(value or "").strip()
+    if not raw_value:
+        return ""
+    split_result = urlsplit(raw_value)
+    if split_result.scheme and split_result.netloc:
+        return split_result.path.rstrip("/") or "/"
+    if raw_value.startswith("/"):
+        return raw_value.rstrip("/") or "/"
+    return raw_value
 
 
 def _apply_safe_button_font(*buttons: TransparentToolButton) -> None:
@@ -2211,13 +2225,14 @@ class DiscoveryInterface(QWidget):
     @staticmethod
     def _attach_local_media_previews(moment: MomentRecord, uploaded_media: list[dict[str, object]]) -> None:
         local_paths_by_url = {
-            str(item.get("url") or "").strip(): str(item.get("local_path") or "").strip()
+            _normalize_media_url_key(item.get("url")): str(item.get("local_path") or "").strip()
             for item in uploaded_media
             if item.get("url") and item.get("local_path")
         }
         for item in moment.media:
-            if item.url in local_paths_by_url:
-                item.local_path = local_paths_by_url[item.url]
+            normalized_url = _normalize_media_url_key(item.url)
+            if normalized_url in local_paths_by_url:
+                item.local_path = local_paths_by_url[normalized_url]
 
     def _on_destroyed(self, *_args) -> None:
         """Cancel outstanding async work when the page is torn down."""
