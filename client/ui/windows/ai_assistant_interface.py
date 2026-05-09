@@ -652,6 +652,7 @@ class AIAssistantInterface(QWidget):
         self.thread_tab_bar.blockSignals(False)
 
     def _on_thread_tab_moved(self, _from_index: int, _to_index: int) -> None:
+        self._sync_thread_order_from_tab_keys(self._current_thread_tab_order())
         self._persist_thread_order_timer.start()
 
     def _current_thread_tab_order(self) -> list[str]:
@@ -670,6 +671,7 @@ class AIAssistantInterface(QWidget):
         thread_ids = self._current_thread_tab_order()
         if len(thread_ids) <= 1:
             return
+        self._sync_thread_order_from_tab_keys(thread_ids)
         self._create_ui_task(
             self._persist_thread_tab_order(thread_ids),
             "persist AI assistant thread tab order",
@@ -678,6 +680,23 @@ class AIAssistantInterface(QWidget):
     async def _persist_thread_tab_order(self, thread_ids: list[str]) -> None:
         await self._store.update_thread_order(thread_ids)
         await self._refresh_threads()
+
+    def _sync_thread_order_from_tab_keys(self, thread_ids: list[str]) -> None:
+        if not thread_ids:
+            return
+        by_id = {thread.thread_id: thread for thread in self._threads}
+        ordered: list[AIThread] = []
+        seen: set[str] = set()
+        for thread_id in thread_ids:
+            thread = by_id.get(thread_id)
+            if thread is None or thread_id in seen:
+                continue
+            ordered.append(thread)
+            seen.add(thread_id)
+        ordered.extend(thread for thread in self._threads if thread.thread_id not in seen)
+        for sort_order, thread in enumerate(ordered):
+            thread.sort_order = sort_order
+        self._threads = ordered
 
     def _render_messages(self) -> None:
         if self._message_model is not None:
