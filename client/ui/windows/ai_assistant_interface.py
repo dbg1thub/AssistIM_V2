@@ -339,10 +339,6 @@ class AIAssistantInterface(QWidget):
         self.header_layout.setContentsMargins(16, 6, 16, 6)
         self.header_layout.setSpacing(12)
 
-        self.product_label = BodyLabel("AssistIM AI", self.header)
-        self.product_label.setObjectName("aiAssistantProductTitle")
-        self.product_label.setFixedWidth(104)
-
         self.title_label = BodyLabel(tr("ai_assistant.thread.new", "New Chat"), self.header)
         self.title_label.setObjectName("aiAssistantThreadTitle")
         self.title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -360,7 +356,6 @@ class AIAssistantInterface(QWidget):
         self.thread_tab_bar.tabAddRequested.connect(self._on_new_thread_clicked)
         self.thread_tab_bar.tabCloseRequested.connect(self._on_thread_tab_close_requested)
 
-        self.header_layout.addWidget(self.product_label, 0, Qt.AlignmentFlag.AlignVCenter)
         self.header_layout.addWidget(self.thread_tab_bar, 1, Qt.AlignmentFlag.AlignVCenter)
 
         self.message_list = QListView(self.content_panel)
@@ -1225,6 +1220,8 @@ class AIAssistantInterface(QWidget):
         if not normalized_thread_id:
             return
         current_thread = next((thread for thread in self._threads if thread.thread_id == normalized_thread_id), None)
+        if not self._can_delete_thread(current_thread):
+            return
         dialog = DeleteAIThreadConfirmDialog(
             current_thread.title if current_thread is not None else tr("ai_assistant.thread.new", "New Chat"),
             self.window(),
@@ -1254,6 +1251,14 @@ class AIAssistantInterface(QWidget):
             await self._reload_threads(select_first=True)
             return
         await self._reload_threads(select_thread_id=self._current_thread_id)
+
+    def _can_delete_thread(self, thread: AIThread | None) -> bool:
+        if thread is None or len(self._threads) <= 1:
+            return False
+        default_title = tr("ai_assistant.thread.new", "New Chat")
+        title = str(thread.title or "").strip()
+        has_messages = bool(str(thread.last_message or "").strip())
+        return has_messages or title != default_title
 
     def _set_generating(self, generating: bool) -> None:
         self._is_generating = bool(generating)
@@ -1649,10 +1654,6 @@ class AIAssistantInterface(QWidget):
                 QFrame#aiAssistantHeader {{
                     background: transparent;
                     border: none;
-                }}
-                QLabel#aiAssistantProductTitle {{
-                    color: {text};
-                    font: 16px "Segoe UI Semibold", "Microsoft YaHei", "PingFang SC";
                 }}
                 QLabel#aiAssistantThreadTitle {{
                     color: {text};

@@ -442,6 +442,8 @@ def test_ai_assistant_thread_navigation_uses_fluent_tabbar() -> None:
     assert "TabBar" in assistant_interface
     assert "TabCloseButtonDisplayMode" in assistant_interface
     assert "self.thread_tab_bar = TabBar(self.header)" in assistant_interface
+    assert "aiAssistantProductTitle" not in assistant_interface
+    assert 'BodyLabel("AssistIM AI", self.header)' not in assistant_interface
     assert "self.thread_tab_bar.setMovable(True)" in assistant_interface
     assert "self.thread_tab_bar.setScrollable(True)" in assistant_interface
     assert "self.thread_tab_bar.setTabShadowEnabled(True)" in assistant_interface
@@ -452,6 +454,8 @@ def test_ai_assistant_thread_navigation_uses_fluent_tabbar() -> None:
     assert "self.thread_tab_bar.addTab(" in assistant_interface
     assert "self.thread_tab_bar.setCurrentTab(self._current_thread_id)" in assistant_interface
     assert "def _on_thread_tab_close_requested(self, index: int) -> None:" in assistant_interface
+    assert "def _can_delete_thread(self, thread: AIThread | None) -> bool:" in assistant_interface
+    assert "if not self._can_delete_thread(current_thread):" in assistant_interface
     assert "QListWidget" not in assistant_interface
     assert "thread_list" not in assistant_interface
 
