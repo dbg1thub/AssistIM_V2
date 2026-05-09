@@ -15,7 +15,6 @@ from qfluentwidgets import (
     CaptionLabel,
     CardWidget,
     FluentStyleSheet,
-    FlowLayout,
     IconWidget,
     InfoBar,
     LineEdit,
@@ -37,13 +36,11 @@ from shiboken6 import isValid as is_valid_qt_object
 from client.core.app_icons import AppIcon
 from client.core import logging
 from client.core.avatar_utils import profile_avatar_seed
-from client.core.exceptions import APIError, NetworkError
-from client.core.i18n import format_relative_time, tr
+from client.core.i18n import tr
 from client.core.profile_fields import format_profile_birthday, localize_profile_gender, localize_profile_status
 from client.core.logging import setup_logging
 from client.events.contact_events import ContactEvent
 from client.events.event_bus import get_event_bus
-from client.events.moment_events import MomentEvent
 from client.managers.connection_manager import get_connection_manager
 from client.managers.search_manager import search_all
 from client.network.websocket_client import ConnectionState
@@ -55,8 +52,6 @@ from client.ui.controllers.contact_controller import (
     get_contact_controller,
 )
 
-from client.ui.controllers.discovery_controller import MomentRecord, get_discovery_controller
-from client.ui.windows.discovery_interface import DeleteCommentConfirmDialog, DeleteMomentConfirmDialog, MomentCard
 from client.ui.styles import StyleSheet
 from client.ui.widgets.chat_info_drawer import AcrylicDrawerSurface
 from client.ui.widgets.global_search_panel import GlobalSearchPopupOverlay
@@ -401,183 +396,6 @@ class RequestListItem(QWidget):
             painter.fillRect(self.rect(), QColor(255, 255, 255, 24) if dark else QColor(0, 0, 0, 10))
 
 
-class ContactMomentsFlowPanel(QWidget):
-    like_requested = Signal(str, bool, int)
-    comment_requested = Signal(str, str)
-    moment_delete_requested = Signal(str)
-    comment_delete_requested = Signal(str, str)
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setObjectName("ContactMomentsSection")
-        self._cards: dict[str, MomentCard] = {}
-        self._featured_widget: Optional[QWidget] = None
-        self._moments: list[MomentRecord] = []
-        self._empty_text = tr("contact.moments.empty", "No moments available")
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
-
-        self.section_title = SubtitleLabel(tr("contact.moments.title", "Moments"), self)
-        self.section_caption = CaptionLabel(
-            tr("contact.moments.flow_subtitle", "Scroll through the latest updates"),
-            self,
-        )
-        self.section_caption.setObjectName("contactSectionCaption")
-        self.section_title.hide()
-        self.section_caption.hide()
-
-        self.scroll_area = ScrollArea(self)
-        self.scroll_area.setWidgetResizable(True)
-        self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.scroll_area.setFrameShape(QFrame.Shape.NoFrame)
-
-        self.scroll_widget = QWidget(self.scroll_area)
-        self.scroll_widget.setObjectName("contactDetailScrollWidget")
-        self.scroll_layout = QVBoxLayout(self.scroll_widget)
-        self.scroll_layout.setContentsMargins(12, 8, 12, 16)
-        self.scroll_layout.setSpacing(18)
-
-        self.placeholder_label = BodyLabel(tr("contact.moments.empty", "No moments available"), self.scroll_widget)
-        self.placeholder_label.setObjectName("contactMomentsPlaceholder")
-        self.placeholder_label.setWordWrap(True)
-
-        self.flow_host = QWidget(self.scroll_widget)
-        self.flow_host.setObjectName("contactMomentFlowWidget")
-        self.flow_layout = FlowLayout(self.flow_host, needAni=True)
-        self.flow_layout.setContentsMargins(0, 2, 0, 2)
-        self.flow_layout.setHorizontalSpacing(18)
-        self.flow_layout.setVerticalSpacing(18)
-
-        self.scroll_layout.addWidget(self.placeholder_label)
-        self.scroll_layout.addWidget(self.flow_host)
-        self.scroll_layout.addStretch(1)
-        self.scroll_area.setWidget(self.scroll_widget)
-
-        layout.addWidget(self.section_title)
-        layout.addWidget(self.section_caption)
-        layout.addWidget(self.scroll_area, 1)
-
-        self.set_section(
-            tr("contact.moments.title", "Moments"),
-            tr("contact.moments.flow_subtitle", "Scroll through the latest updates"),
-        )
-        self.show_placeholder()
-
-    def set_section(self, title: str, subtitle: str) -> None:
-        self.section_title.setText(title)
-        self.section_caption.setText(subtitle)
-
-    def show_placeholder(self, text: str | None = None) -> None:
-        self._moments = []
-        self._empty_text = text or tr("contact.moments.empty", "No moments available")
-        self._rebuild_flow()
-
-    def set_moments(self, moments: list[MomentRecord], empty_text: str | None = None) -> None:
-        self._moments = list(moments)
-        self._empty_text = empty_text or tr("contact.moments.empty", "No moments available")
-        self._rebuild_flow()
-
-    def set_featured_widget(self, widget: QWidget | None) -> None:
-        self._featured_widget = widget
-        if widget is not None and widget.parent() is not self.flow_host:
-            widget.setParent(self.flow_host)
-        self._rebuild_flow()
-
-    def _rebuild_flow(self) -> None:
-        self._clear_flow_widgets()
-        self._cards.clear()
-
-        if self._featured_widget is not None:
-            if self._featured_widget.parent() is not self.flow_host:
-                self._featured_widget.setParent(self.flow_host)
-            self._featured_widget.show()
-            self.flow_layout.addWidget(self._featured_widget)
-
-        if not self._moments:
-            self.placeholder_label.setText(self._empty_text)
-            self.placeholder_label.show()
-            self.flow_host.setVisible(self._featured_widget is not None)
-            return
-
-        self.placeholder_label.hide()
-        self.flow_host.show()
-        for moment in self._moments:
-            card = MomentCard(moment, self.flow_host)
-            card.setMinimumWidth(320)
-            card.setMaximumWidth(380)
-            card.like_requested.connect(self.like_requested.emit)
-            card.comment_requested.connect(self.comment_requested.emit)
-            card.delete_requested.connect(self.moment_delete_requested.emit)
-            card.comment_delete_requested.connect(self.comment_delete_requested.emit)
-            self.flow_layout.addWidget(card)
-            self._cards[moment.id] = card
-
-    def _clear_flow_widgets(self) -> None:
-        while self.flow_layout.count():
-            widget = self.flow_layout.takeAt(0)
-            if widget is None:
-                continue
-            if widget is self._featured_widget:
-                widget.hide()
-                continue
-            widget.deleteLater()
-
-    def set_like_state(self, moment_id: str, liked: bool, like_count: int) -> None:
-        self._sync_moment_like_state(moment_id, liked, like_count)
-        card = self._cards.get(moment_id)
-        if card is not None:
-            card.set_like_state(liked, like_count)
-
-    def append_comment(self, moment_id: str, comment) -> None:
-        card = self._cards.get(moment_id)
-        if card is not None:
-            card.append_comment(comment)
-        self._sync_moment_comment(moment_id, comment)
-
-    def remove_moment(self, moment_id: str) -> None:
-        self._moments = [moment for moment in self._moments if moment.id != moment_id]
-        self._rebuild_flow()
-
-    def remove_comment(self, moment_id: str, comment_id: str) -> None:
-        card = self._cards.get(moment_id)
-        if card is not None:
-            card.remove_comment(comment_id)
-            return
-        self._sync_moment_comment_delete(moment_id, comment_id)
-
-    def _sync_moment_like_state(self, moment_id: str, liked: bool, like_count: int) -> None:
-        for moment in self._moments:
-            if moment.id == moment_id:
-                moment.is_liked = liked
-                moment.like_count = like_count
-                return
-
-    def _sync_moment_comment(self, moment_id: str, comment) -> None:
-        for moment in self._moments:
-            if moment.id == moment_id:
-                comment_id = str(getattr(comment, "id", "") or "")
-                if any(
-                    existing is comment or (comment_id and getattr(existing, "id", "") == comment_id)
-                    for existing in moment.comments
-                ):
-                    moment.comment_count = max(moment.comment_count, len(moment.comments))
-                    return
-                moment.comments.append(comment)
-                moment.comment_count = max(moment.comment_count + 1, len(moment.comments))
-                return
-
-    def _sync_moment_comment_delete(self, moment_id: str, comment_id: str) -> None:
-        for moment in self._moments:
-            if moment.id == moment_id:
-                previous_count = len(moment.comments)
-                moment.comments = [comment for comment in moment.comments if comment.id != comment_id]
-                if len(moment.comments) != previous_count:
-                    moment.comment_count = max(0, moment.comment_count - 1, len(moment.comments))
-                return
-
-
 class ContactWelcomeWidget(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -704,10 +522,8 @@ class GalleryContactDetailPanel(QWidget):
         self._set_call_buttons_available(False)
         self.remove_friend_button.hide()
 
-        self.moments_panel = ContactMomentsFlowPanel(self)
-
         root_layout.addWidget(self.header, 0, Qt.AlignmentFlag.AlignTop)
-        root_layout.addWidget(self.moments_panel, 1)
+        root_layout.addStretch(1)
         self.show_placeholder()
 
     def show_placeholder(self) -> None:
@@ -720,9 +536,8 @@ class GalleryContactDetailPanel(QWidget):
         self._set_call_buttons_available(False)
         self.remove_friend_button.setEnabled(False)
         self.remove_friend_button.hide()
-        self.moments_panel.show_placeholder(tr("contact.moments.detail_empty", "There is nothing to display right now."))
 
-    def set_contact(self, contact: ContactRecord, moments: Optional[list[MomentRecord]] = None) -> None:
+    def set_contact(self, contact: ContactRecord) -> None:
         self._entity = {"type": "friend", "data": contact}
         self.avatar.set_avatar(
             contact.avatar,
@@ -757,10 +572,6 @@ class GalleryContactDetailPanel(QWidget):
         self._set_call_buttons_available(True)
         self.remove_friend_button.setEnabled(True)
         self.remove_friend_button.show()
-        self.moments_panel.set_moments(
-            moments or [],
-            tr("contact.moments.contact_empty", "This contact has no moments yet."),
-        )
 
     def set_blocked_contact(self, contact: ContactRecord) -> None:
         self._entity = {"type": "blocked", "data": contact}
@@ -793,9 +604,8 @@ class GalleryContactDetailPanel(QWidget):
         self._set_call_buttons_available(False)
         self.remove_friend_button.setEnabled(False)
         self.remove_friend_button.hide()
-        self.moments_panel.set_moments([], tr("contact.moments.blocked_empty", "Moments are hidden for blocked contacts."))
 
-    def set_group(self, group: GroupRecord, moments: Optional[list[MomentRecord]] = None) -> None:
+    def set_group(self, group: GroupRecord) -> None:
         self._entity = {"type": "group", "data": group}
         self.avatar.set_avatar(group.avatar, fallback=group.name)
         self.title_label.setText(group.name)
@@ -816,12 +626,8 @@ class GalleryContactDetailPanel(QWidget):
         self._set_call_buttons_available(False)
         self.remove_friend_button.setEnabled(False)
         self.remove_friend_button.hide()
-        self.moments_panel.set_moments(
-            moments or [],
-            tr("contact.moments.group_empty", "There are no group moments to display yet."),
-        )
 
-    def set_request(self, request: FriendRequestRecord, current_user_id: str = "", moments: Optional[list[MomentRecord]] = None) -> None:
+    def set_request(self, request: FriendRequestRecord, current_user_id: str = "") -> None:
         counterpart_id = request.counterpart_id(current_user_id)
         counterpart_name = request.counterpart_name(current_user_id)
         counterpart_username = (
@@ -868,10 +674,6 @@ class GalleryContactDetailPanel(QWidget):
         self._set_call_buttons_available(False)
         self.remove_friend_button.setEnabled(False)
         self.remove_friend_button.hide()
-        self.moments_panel.set_moments(
-            moments or [],
-            tr("contact.moments.contact_empty", "This contact has no moments yet."),
-        )
 
     def _emit_message_request(self) -> None:
         if self._entity:
@@ -1338,12 +1140,10 @@ class ContactInterface(QWidget):
         super().__init__(parent)
         self.setObjectName("ContactInterface")
         self._controller = get_contact_controller()
-        self._discovery_controller = get_discovery_controller()
         self._contacts: list[ContactRecord] = []
         self._blocked_contacts: list[ContactRecord] = []
         self._groups: list[GroupRecord] = []
         self._requests: list[FriendRequestRecord] = []
-        self._moments: list[MomentRecord] = []
         self._friend_items: dict[str, ContactListItem] = {}
         self._blocked_items: dict[str, ContactListItem] = {}
         self._group_items: dict[str, ContactListItem] = {}
@@ -1351,7 +1151,6 @@ class ContactInterface(QWidget):
         self._current_page = "friends"
         self._selected_key: tuple[str, str] | None = None
         self._load_task: Optional[asyncio.Task] = None
-        self._moment_load_task: Optional[asyncio.Task] = None
         self._search_task: Optional[asyncio.Task] = None
         self._search_flyout = None
         self._search_flyout_view: Optional[GlobalSearchPopupOverlay] = None
@@ -1482,12 +1281,7 @@ class ContactInterface(QWidget):
         self.detail_panel.call_requested.connect(self.call_requested.emit)
         self.detail_panel.remove_requested.connect(self._on_remove_friend_requested)
         self._event_bus.subscribe_sync(ContactEvent.SYNC_REQUIRED, self._on_contact_sync_required)
-        self._event_bus.subscribe_sync(MomentEvent.SYNC_REQUIRED, self._on_moment_sync_required)
         self._connection_manager.add_state_listener(self._on_connection_state_changed)
-        self.detail_panel.moments_panel.like_requested.connect(self._request_detail_like_toggle)
-        self.detail_panel.moments_panel.comment_requested.connect(self._request_detail_comment_create)
-        self.detail_panel.moments_panel.moment_delete_requested.connect(self._request_detail_moment_delete)
-        self.detail_panel.moments_panel.comment_delete_requested.connect(self._request_detail_comment_delete)
 
     def _create_scroll_page(self) -> tuple[ScrollArea, QWidget, QVBoxLayout]:
         area = ScrollArea(self)
@@ -1563,31 +1357,6 @@ class ContactInterface(QWidget):
             return
         self.reload_data()
 
-    def _on_moment_sync_required(self, payload: object) -> None:
-        """Refresh selected contact moments after realtime moment mutations."""
-        if self._destroyed or not self._initial_load_done or not self.isVisible():
-            return
-        if not self._selected_key:
-            return
-        event_payload = dict(payload or {}) if isinstance(payload, dict) else {}
-        moment_payload = dict(event_payload.get("payload") or {}) if isinstance(event_payload.get("payload"), dict) else {}
-        owner_user_id = str(moment_payload.get("owner_user_id", "") or "").strip()
-        category, item_id = self._selected_key
-        if category == "friend":
-            contact_id = item_id
-            if owner_user_id and owner_user_id != contact_id:
-                return
-            self._load_detail_moments(contact_id, "friend", contact_id)
-            return
-        if category == "request":
-            request = next((item for item in self._requests if item.id == item_id), None)
-            if request is None:
-                return
-            counterpart_id = request.counterpart_id(self._current_user_id)
-            if owner_user_id and owner_user_id != counterpart_id:
-                return
-            self._load_detail_moments(counterpart_id, "request", item_id)
-
     def _on_connection_state_changed(self, old_state: ConnectionState, new_state: ConnectionState) -> None:
         """Refresh contact-domain truth after reconnect because contact_refresh is not replayed."""
         if self._destroyed or not self._initial_load_done:
@@ -1661,12 +1430,6 @@ class ContactInterface(QWidget):
         self._build_blocked_page()
         self._restore_selection(full_reload=False)
         self._refresh_search_surface()
-
-    def _current_detail_moments(self) -> list[MomentRecord]:
-        moments_panel = getattr(self.detail_panel, "moments_panel", None)
-        if moments_panel is None:
-            return []
-        return list(getattr(moments_panel, "_moments", []) or [])
 
     def _update_friend_item_view(self, contact: ContactRecord) -> None:
         item = self._friend_items.get(contact.id)
@@ -1975,7 +1738,7 @@ class ContactInterface(QWidget):
             return
         self._update_request_item_view(request)
         if self._selected_key == ("request", request.id):
-            self.detail_panel.set_request(request, self._current_user_id, self._current_detail_moments())
+            self.detail_panel.set_request(request, self._current_user_id)
 
     def _contact_record_from_request(self, request: FriendRequestRecord) -> ContactRecord:
         counterpart_id = request.counterpart_id(self._current_user_id)
@@ -2145,7 +1908,7 @@ class ContactInterface(QWidget):
             self._restore_selection(full_reload=False)
 
         if self._selected_key == ("group", group.id):
-            self.detail_panel.set_group(group, self._current_detail_moments())
+            self.detail_panel.set_group(group)
 
     def _apply_group_update_payload(self, payload: dict[str, object]) -> None:
         """Apply one realtime shared group-profile update without reloading the contact page."""
@@ -2175,7 +1938,6 @@ class ContactInterface(QWidget):
         profile = dict(payload.get("profile") or {}) if isinstance(payload.get("profile"), dict) else {}
         session_id = str(payload.get("session_id", "") or "").strip()
         session_avatar = str(payload.get("session_avatar", "") or "").strip()
-        current_moments = self._current_detail_moments()
         profile_display_name = (
             str(profile.get("display_name", "") or "").strip()
             or str(profile.get("nickname", "") or "").strip()
@@ -2216,7 +1978,7 @@ class ContactInterface(QWidget):
             else:
                 self._update_friend_item_view(updated)
             if self._selected_key == ("friend", updated.id):
-                self.detail_panel.set_contact(updated, current_moments)
+                self.detail_panel.set_contact(updated)
 
         if contacts_changed and self._current_page == "friends":
             self._restore_selection(full_reload=False)
@@ -2289,7 +2051,7 @@ class ContactInterface(QWidget):
             if avatar_changed:
                 self._update_group_item_view(updated)
             if self._selected_key == ("group", updated.id):
-                self.detail_panel.set_group(updated, current_moments)
+                self.detail_panel.set_group(updated)
 
         for index, request in enumerate(list(self._requests)):
             updated_request = request
@@ -2343,7 +2105,7 @@ class ContactInterface(QWidget):
             self._requests[index] = updated_request
             self._update_request_item_view(updated_request)
             if self._selected_key == ("request", updated_request.id):
-                self.detail_panel.set_request(updated_request, self._current_user_id, current_moments)
+                self.detail_panel.set_request(updated_request, self._current_user_id)
         if contacts_changed:
             self._schedule_contacts_cache_persist()
         if groups_changed:
@@ -2367,7 +2129,6 @@ class ContactInterface(QWidget):
                 return
             await asyncio.sleep(0)
             blocked = await self._controller.load_blocked_contacts()
-            moments: list[MomentRecord] = []
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -2381,7 +2142,6 @@ class ContactInterface(QWidget):
         self._groups = groups
         self._requests = requests
         self._blocked_contacts = blocked
-        self._moments = moments
         logger.info(
             "Contact interface reload fetched %d friends, %d groups, %d requests, %d blocked contacts",
             len(self._contacts),
@@ -2744,43 +2504,11 @@ class ContactInterface(QWidget):
     def _friend_assistim_line(contact: ContactRecord) -> str:
         return str(contact.assistim_id or contact.username or "").strip() or "-"
 
-    def _cancel_moment_load(self) -> None:
-        self._cancel_pending_task(self._moment_load_task)
-        self._moment_load_task = None
-
     def _clear_active_selection(self) -> None:
-        self._cancel_moment_load()
         self._selected_key = None
         self._clear_selection()
         self.detail_panel.show_placeholder()
         self._show_welcome_panel()
-
-    def _load_detail_moments(self, user_id: str, kind: str, selection_id: str) -> None:
-        self._cancel_moment_load()
-        if not user_id:
-            return
-        self._set_moment_load_task(self._load_detail_moments_async(user_id, kind, selection_id))
-
-    async def _load_detail_moments_async(self, user_id: str, kind: str, selection_id: str) -> None:
-        try:
-            moments = await self._discovery_controller.load_moments(user_id=user_id)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            logger.debug("Contact detail moments load failed for %s", user_id, exc_info=True)
-            moments = []
-
-        current_category = {"friends": "friend", "groups": "group", "requests": "request", "blocked": "blocked"}[self._current_page]
-        if self._selected_key != (kind, selection_id) or kind != current_category:
-            return
-
-        payload = self._resolve_detail_selection_payload(kind, selection_id)
-        if payload is None:
-            return
-        if kind == "friend":
-            self.detail_panel.set_contact(payload, moments)
-        elif kind == "request":
-            self.detail_panel.set_request(payload, self._current_user_id, moments)
 
     def _resolve_detail_selection_payload(self, kind: str, selection_id: str) -> ContactRecord | FriendRequestRecord | None:
         """Resolve the latest selected record before re-painting the detail panel."""
@@ -2928,9 +2656,8 @@ class ContactInterface(QWidget):
         self._selected_key = ("friend", contact_id)
         self._clear_selection()
         self._friend_items[contact_id].set_selected(True)
-        self.detail_panel.set_contact(selected, [])
+        self.detail_panel.set_contact(selected)
         self._show_detail_panel()
-        self._load_detail_moments(contact_id, "friend", contact_id)
 
     def _select_group(self, group_id: str, force: bool = False) -> None:
         selected = next((item for item in self._groups if item.id == group_id), None)
@@ -2939,10 +2666,9 @@ class ContactInterface(QWidget):
         if not force and self._selected_key == ("group", group_id):
             return
         self._selected_key = ("group", group_id)
-        self._cancel_moment_load()
         self._clear_selection()
         self._group_items[group_id].set_selected(True)
-        self.detail_panel.set_group(selected, [])
+        self.detail_panel.set_group(selected)
         self._show_detail_panel()
 
     def _select_request(self, request_id: str, force: bool = False) -> None:
@@ -2954,10 +2680,8 @@ class ContactInterface(QWidget):
         self._selected_key = ("request", request_id)
         self._clear_selection()
         self._request_items[request_id].set_selected(True)
-        counterpart_id = selected.counterpart_id(self._current_user_id)
-        self.detail_panel.set_request(selected, self._current_user_id, [])
+        self.detail_panel.set_request(selected, self._current_user_id)
         self._show_detail_panel()
-        self._load_detail_moments(counterpart_id, "request", request_id)
 
     def _select_blocked(self, contact_id: str, force: bool = False) -> None:
         selected = next((item for item in self._blocked_contacts if item.id == contact_id), None)
@@ -2966,7 +2690,6 @@ class ContactInterface(QWidget):
         if not force and self._selected_key == ("blocked", contact_id):
             return
         self._selected_key = ("blocked", contact_id)
-        self._cancel_moment_load()
         self._clear_selection()
         self._blocked_items[contact_id].set_selected(True)
         self.detail_panel.set_blocked_contact(selected)
@@ -3118,111 +2841,6 @@ class ContactInterface(QWidget):
             self._restore_selection(full_reload=False)
         self.message_requested.emit({"type": "group", "data": created_group})
 
-    def _request_detail_like_toggle(self, moment_id: str, liked: bool, like_count: int) -> None:
-        self._schedule_keyed_ui_task(
-            ("moment_like", moment_id),
-            self._request_detail_like_toggle_async(moment_id, liked, like_count),
-            f"toggle moment like {moment_id}",
-        )
-
-    async def _request_detail_like_toggle_async(self, moment_id: str, liked: bool, like_count: int) -> None:
-        previous_liked = not liked
-        previous_count = like_count - 1 if liked else like_count + 1
-        try:
-            await self._discovery_controller.set_liked(moment_id, liked, like_count)
-        except Exception:
-            self.detail_panel.moments_panel.set_like_state(moment_id, previous_liked, previous_count)
-            raise
-
-    def _request_detail_comment_create(self, moment_id: str, content: str) -> None:
-        self._schedule_keyed_ui_task(
-            ("moment_comment", moment_id),
-            self._request_detail_comment_create_async(moment_id, content),
-            f"create moment comment {moment_id}",
-        )
-
-    async def _request_detail_comment_create_async(self, moment_id: str, content: str) -> None:
-        comment = await self._discovery_controller.add_comment(moment_id, content)
-
-        self.detail_panel.moments_panel.append_comment(moment_id, comment)
-        InfoBar.success(
-            tr("discovery.comment.title", "Post Comment"),
-            tr("discovery.comment.success", "Comment sent."),
-            parent=self.window(),
-            duration=1400,
-        )
-
-    def _request_detail_moment_delete(self, moment_id: str) -> None:
-        moment = next((item for item in self._current_detail_moments() if item.id == moment_id), None)
-        if moment is None or not moment.is_self:
-            return
-        dialog = DeleteMomentConfirmDialog(self.window())
-        if dialog.exec() != QDialog.DialogCode.Accepted:
-            return
-        self._schedule_keyed_ui_task(
-            ("moment_delete", moment_id),
-            self._request_detail_moment_delete_async(moment_id),
-            f"delete moment {moment_id}",
-        )
-
-    async def _request_detail_moment_delete_async(self, moment_id: str) -> None:
-        try:
-            await self._discovery_controller.delete_moment(moment_id)
-        except Exception:
-            InfoBar.error(
-                tr("discovery.delete_moment.title", "Delete Moment"),
-                tr("discovery.delete_moment.failed", "Delete failed. Please try again later."),
-                parent=self.window(),
-                duration=2200,
-            )
-            raise
-        self.detail_panel.moments_panel.remove_moment(moment_id)
-        InfoBar.success(
-            tr("discovery.delete_moment.title", "Delete Moment"),
-            tr("discovery.delete_moment.success", "Moment deleted."),
-            parent=self.window(),
-            duration=1600,
-        )
-
-    def _request_detail_comment_delete(self, moment_id: str, comment_id: str) -> None:
-        comment = self._find_detail_comment(moment_id, comment_id)
-        if comment is None or not getattr(comment, "can_delete", False):
-            return
-        dialog = DeleteCommentConfirmDialog(self.window())
-        if dialog.exec() != QDialog.DialogCode.Accepted:
-            return
-        self._schedule_keyed_ui_task(
-            ("moment_comment_delete", comment_id),
-            self._request_detail_comment_delete_async(moment_id, comment_id),
-            f"delete moment comment {comment_id}",
-        )
-
-    async def _request_detail_comment_delete_async(self, moment_id: str, comment_id: str) -> None:
-        try:
-            await self._discovery_controller.delete_comment(moment_id, comment_id)
-        except Exception:
-            InfoBar.error(
-                tr("discovery.delete_comment.title", "Delete Comment"),
-                tr("discovery.delete_comment.failed", "Delete failed. Please try again later."),
-                parent=self.window(),
-                duration=2200,
-            )
-            raise
-        self.detail_panel.moments_panel.remove_comment(moment_id, comment_id)
-        InfoBar.success(
-            tr("discovery.delete_comment.title", "Delete Comment"),
-            tr("discovery.delete_comment.success", "Comment deleted."),
-            parent=self.window(),
-            duration=1400,
-        )
-
-    def _find_detail_comment(self, moment_id: str, comment_id: str):
-        for moment in self._current_detail_moments():
-            if moment.id != moment_id:
-                continue
-            return next((comment for comment in moment.comments if comment.id == comment_id), None)
-        return None
-
     def _add_empty_state(self, layout: QVBoxLayout, icon: AppIcon, text: str) -> None:
         holder = QWidget(self)
         holder_layout = QVBoxLayout(holder)
@@ -3265,7 +2883,6 @@ class ContactInterface(QWidget):
         self._teardown_started = True
         self._destroyed = True
         self._event_bus.unsubscribe_sync(ContactEvent.SYNC_REQUIRED, self._on_contact_sync_required)
-        self._event_bus.unsubscribe_sync(MomentEvent.SYNC_REQUIRED, self._on_moment_sync_required)
         self._connection_manager.remove_state_listener(self._on_connection_state_changed)
         self._search_timer.stop()
         self._cancel_pending_task(self._search_task)
@@ -3273,8 +2890,6 @@ class ContactInterface(QWidget):
         self._dismiss_search_flyout(clear_results=False)
         self._cancel_pending_task(self._load_task)
         self._load_task = None
-        self._cancel_pending_task(self._moment_load_task)
-        self._moment_load_task = None
         for task in list(self._keyed_ui_tasks.values()):
             if not task.done():
                 task.cancel()
@@ -3336,16 +2951,6 @@ class ContactInterface(QWidget):
         """Clear the active reload task reference when it finishes."""
         if self._load_task is task:
             self._load_task = None
-
-    def _set_moment_load_task(self, coro) -> None:
-        """Replace the active detail-moments load task."""
-        self._cancel_pending_task(self._moment_load_task)
-        self._moment_load_task = self._create_ui_task(coro, "load contact moments", on_done=self._clear_moment_load_task)
-
-    def _clear_moment_load_task(self, task: asyncio.Task) -> None:
-        """Clear the tracked moments task when it finishes."""
-        if self._moment_load_task is task:
-            self._moment_load_task = None
 
     def _schedule_keyed_ui_task(self, key: tuple[str, str], coro, context: str) -> None:
         """Prevent duplicate actions for the same target while one is still running."""

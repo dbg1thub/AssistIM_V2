@@ -173,11 +173,8 @@ def test_moment_ui_mutations_keep_backing_records_in_sync() -> None:
     assert 'moment.comments.append(comment)' in discovery_interface
     assert 'moment.comment_count = max(moment.comment_count + 1, len(moment.comments))' in discovery_interface
     assert 'self._apply_local_comment(moment_id, comment)' in discovery_interface
-    assert 'def _sync_moment_like_state(self, moment_id: str, liked: bool, like_count: int) -> None:' in contact_interface
-    assert 'def _sync_moment_comment(self, moment_id: str, comment) -> None:' in contact_interface
-    assert 'existing is comment' in contact_interface
-    assert 'self._sync_moment_like_state(moment_id, liked, like_count)' in contact_interface
-    assert 'self._sync_moment_comment(moment_id, comment)' in contact_interface
+    assert 'def _sync_moment_like_state(self, moment_id: str, liked: bool, like_count: int) -> None:' not in contact_interface
+    assert 'def _sync_moment_comment(self, moment_id: str, comment) -> None:' not in contact_interface
 
 
 def test_discovery_ui_wires_moment_delete_actions() -> None:
@@ -196,12 +193,9 @@ def test_discovery_ui_wires_moment_delete_actions() -> None:
     assert 'await self._controller.delete_comment(moment_id, comment_id)' in discovery_interface
     assert 'self._apply_local_moment_delete(moment_id)' in discovery_interface
     assert 'self._apply_local_comment_delete(moment_id, comment_id)' in discovery_interface
-    assert 'moment_delete_requested = Signal(str)' in contact_interface
-    assert 'comment_delete_requested = Signal(str, str)' in contact_interface
-    assert 'card.delete_requested.connect(self.moment_delete_requested.emit)' in contact_interface
-    assert 'card.comment_delete_requested.connect(self.comment_delete_requested.emit)' in contact_interface
-    assert 'self.detail_panel.moments_panel.moment_delete_requested.connect(self._request_detail_moment_delete)' in contact_interface
-    assert 'self.detail_panel.moments_panel.comment_delete_requested.connect(self._request_detail_comment_delete)' in contact_interface
+    assert 'moment_delete_requested = Signal(str)' not in contact_interface
+    assert 'comment_delete_requested = Signal(str, str)' not in contact_interface
+    assert 'self.detail_panel.moments_panel' not in contact_interface
 
 
 def test_moment_realtime_refresh_is_wired_to_visible_pages() -> None:
@@ -210,17 +204,26 @@ def test_moment_realtime_refresh_is_wired_to_visible_pages() -> None:
     message_manager = Path('client/managers/message_manager.py').read_text(encoding='utf-8')
 
     assert 'from client.events.moment_events import MomentEvent' in discovery_interface
-    assert 'from client.events.moment_events import MomentEvent' in contact_interface
+    assert 'from client.events.moment_events import MomentEvent' not in contact_interface
     assert 'from client.events.moment_events import MomentEvent' in message_manager
     assert 'elif msg_type == "moment_refresh":' in message_manager
     assert 'async def _process_moment_refresh(self, data: dict) -> None:' in message_manager
     assert 'self._event_bus.subscribe_sync(MomentEvent.SYNC_REQUIRED, self._on_moment_sync_required)' in discovery_interface
     assert 'self._event_bus.unsubscribe_sync(MomentEvent.SYNC_REQUIRED, self._on_moment_sync_required)' in discovery_interface
     assert 'def _on_moment_sync_required(self, payload: object) -> None:' in discovery_interface
-    assert 'self._event_bus.subscribe_sync(MomentEvent.SYNC_REQUIRED, self._on_moment_sync_required)' in contact_interface
-    assert 'self._event_bus.unsubscribe_sync(MomentEvent.SYNC_REQUIRED, self._on_moment_sync_required)' in contact_interface
-    assert 'def _on_moment_sync_required(self, payload: object) -> None:' in contact_interface
-    assert 'self._load_detail_moments(contact_id, "friend", contact_id)' in contact_interface
+    assert 'self._event_bus.subscribe_sync(MomentEvent.SYNC_REQUIRED, self._on_moment_sync_required)' not in contact_interface
+    assert 'self._event_bus.unsubscribe_sync(MomentEvent.SYNC_REQUIRED, self._on_moment_sync_required)' not in contact_interface
+    assert 'def _on_moment_sync_required(self, payload: object) -> None:' not in contact_interface
+
+
+def test_contact_interface_no_longer_embeds_moments_panel() -> None:
+    contact_interface = Path('client/ui/windows/contact_interface.py').read_text(encoding='utf-8')
+
+    assert 'ContactMomentsFlowPanel' not in contact_interface
+    assert 'moments_panel' not in contact_interface
+    assert 'get_discovery_controller' not in contact_interface
+    assert '_load_detail_moments' not in contact_interface
+    assert 'contact.moments' not in contact_interface
 
 
 def test_group_flow_no_longer_writes_local_group_avatar_metadata() -> None:
