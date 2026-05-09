@@ -34,6 +34,7 @@ from qfluentwidgets import (
     PushButton,
     SingleDirectionScrollArea,
     SubtitleLabel,
+    isDarkTheme,
 )
 from qfluentwidgets.components.material import AcrylicFlyout, AcrylicFlyoutViewBase
 

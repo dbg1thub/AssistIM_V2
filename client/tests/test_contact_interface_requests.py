@@ -145,3 +145,11 @@ def test_custom_dialogs_use_fluent_dialog_shell() -> None:
         for class_name in class_names:
             assert f"class {class_name}(FluentDialog):" in source
             assert f"class {class_name}(QDialog):" not in source
+
+
+def test_user_profile_device_security_imports_theme_helper() -> None:
+    source = Path("client/ui/widgets/user_profile_flyout.py").read_text(encoding="utf-8")
+
+    assert "isDarkTheme" in source
+    qfluentwidgets_import = source.split("from qfluentwidgets import (", 1)[1].split(")", 1)[0]
+    assert "isDarkTheme" in qfluentwidgets_import
