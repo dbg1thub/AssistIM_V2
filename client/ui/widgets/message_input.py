@@ -2626,6 +2626,12 @@ class MessageInput(QWidget):
         self.editor_card.setObjectName("messageInputCard")
         self.editor_card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
+        self.input_border = QFrame(self.editor_card)
+        self.input_border.setObjectName("messageInputBorder")
+        self.input_border.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.input_border.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.input_border.show()
+
         self.card_layout = QVBoxLayout(self.editor_card)
         self.card_layout.setContentsMargins(0, 0, 0, 0)
         self.card_layout.setSpacing(0)
@@ -2639,8 +2645,12 @@ class MessageInput(QWidget):
 
         self.toolbar_widget = QWidget(self.composer_widget)
         self.toolbar_widget.setObjectName("messageToolbar")
+        self.toolbar_root_layout = QHBoxLayout(self.toolbar_widget)
+        self.toolbar_root_layout.setContentsMargins(8, 4, 8, 8)
+        self.toolbar_root_layout.setSpacing(0)
+
         self.toolbar_layout = QHBoxLayout()
-        self.toolbar_layout.setContentsMargins(8, 4, 110, 8)
+        self.toolbar_layout.setContentsMargins(0, 0, 0, 0)
         self.toolbar_layout.setSpacing(4)
 
         self.emoji_button = TransparentToolButton(AppIcon.EMOJI_TAB_SYMBOLS, self.composer_widget)
@@ -2697,7 +2707,6 @@ class MessageInput(QWidget):
         self.toolbar_layout.addWidget(self.voice_button)
         self.toolbar_layout.addWidget(self.video_button)
         self.toolbar_layout.addWidget(self.ai_button)
-        self.toolbar_layout.addStretch(1)
 
         self.reply_suggestion_widget = QWidget(self.composer_widget)
         self.reply_suggestion_widget.setObjectName("aiReplySuggestionBar")
@@ -2732,7 +2741,17 @@ class MessageInput(QWidget):
         self.send_button.setObjectName("composerSendButton")
         self.send_button.setFixedSize(62, 28)
 
-        self.toolbar_widget.setLayout(self.toolbar_layout)
+        self.message_sendbar_widget = QWidget(self.toolbar_widget)
+        self.message_sendbar_widget.setObjectName("messageSendBar")
+        self.message_sendbar_layout = QHBoxLayout(self.message_sendbar_widget)
+        self.message_sendbar_layout.setContentsMargins(0, 0, 0, 0)
+        self.message_sendbar_layout.setSpacing(8)
+        self.message_sendbar_layout.addWidget(self.voice_message_button)
+        self.message_sendbar_layout.addWidget(self.send_button)
+
+        self.toolbar_root_layout.addLayout(self.toolbar_layout, 0)
+        self.toolbar_root_layout.addStretch(1)
+        self.toolbar_root_layout.addWidget(self.message_sendbar_widget, 0, Qt.AlignmentFlag.AlignVCenter)
 
         self.composer_layout.addWidget(self.reply_suggestion_widget, 0)
         self.composer_layout.addWidget(self.text_input, 1)
@@ -2878,33 +2897,18 @@ class MessageInput(QWidget):
         return super().eventFilter(watched, event)
 
     def _update_overlay_positions(self) -> None:
-        """Place the send and voice-message buttons on the bottom toolbar row."""
+        """Refresh composer layout details after resize/theme/layout changes."""
         if self.composer_layout is not None:
             self.composer_layout.activate()
         self.card_layout.activate()
         self.main_layout.activate()
-        toolbar_rect = self.toolbar_widget.geometry()
-        if not toolbar_rect.isValid():
+        self._update_input_border_geometry()
+
+    def _update_input_border_geometry(self) -> None:
+        if not hasattr(self, "input_border"):
             return
-
-        button_margin_right = 8
-        button_margin_bottom = 8
-        button_gap = 8
-        button_row_width = self.voice_message_button.width() + button_gap + self.send_button.width()
-        voice_x = toolbar_rect.x() + toolbar_rect.width() - button_row_width - button_margin_right
-        composer_rect = self.composer_widget.rect()
-        voice_x = max(composer_rect.left(), min(voice_x, composer_rect.right() - button_row_width))
-        send_x = voice_x + self.voice_message_button.width() + button_gap
-        send_x = max(composer_rect.left(), min(send_x, composer_rect.right() - self.send_button.width()))
-        send_y = composer_rect.bottom() - button_margin_bottom - self.send_button.height()
-        send_y = max(composer_rect.top(), min(send_y, composer_rect.bottom() - self.send_button.height()))
-        voice_y = composer_rect.bottom() - button_margin_bottom - self.voice_message_button.height()
-        voice_y = max(composer_rect.top(), min(voice_y, composer_rect.bottom() - self.voice_message_button.height()))
-        self.voice_message_button.move(voice_x, voice_y)
-        self.send_button.move(send_x, send_y)
-
-        self.voice_message_button.raise_()
-        self.send_button.raise_()
+        self.input_border.setGeometry(self.editor_card.rect())
+        self.input_border.raise_()
 
     def _update_send_button_state(self) -> None:
         """Enable the send button only when the active session has draft content."""

@@ -626,24 +626,30 @@ def test_chat_message_input_uses_floating_card_style_without_overlay_or_cursor_o
     assert 'self.main_layout.setContentsMargins(8, 0, 8, 8)' in setup_block
     assert 'self.main_layout.addWidget(self.editor_card, 1)' in setup_block
     assert 'self.text_input.setViewportMargins(0, 0, 0, 0)' in setup_block
-    assert 'self.toolbar_layout.setContentsMargins(8, 4, 110, 8)' in setup_block
+    assert 'self.input_border.setObjectName("messageInputBorder")' in setup_block
+    assert 'self.input_border.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)' in setup_block
+    assert 'self.toolbar_root_layout.setContentsMargins(8, 4, 8, 8)' in setup_block
+    assert 'self.toolbar_layout.setContentsMargins(0, 0, 0, 0)' in setup_block
+    assert 'self.message_sendbar_layout.setContentsMargins(0, 0, 0, 0)' in setup_block
     assert setup_block.count('setFixedSize(24, 24)') >= 7
     assert 'self.voice_message_button.setFixedSize(32, 28)' in setup_block
     assert 'self.send_button.setFixedSize(62, 28)' in setup_block
+    assert 'self.message_sendbar_layout.addWidget(self.voice_message_button)' in setup_block
+    assert 'self.message_sendbar_layout.addWidget(self.send_button)' in setup_block
     assert setup_block.index('self.composer_layout.addWidget(self.reply_suggestion_widget, 0)') < setup_block.index(
         'self.composer_layout.addWidget(self.text_input, 1)'
     )
     assert setup_block.index('self.composer_layout.addWidget(self.text_input, 1)') < setup_block.index(
         'self.composer_layout.addWidget(self.toolbar_widget, 0)'
     )
-    assert 'toolbar_rect = self.toolbar_widget.geometry()' in overlay_block
-    assert 'text_rect = self.text_input.geometry()' not in overlay_block
-    assert 'button_margin_right = 8' in overlay_block
-    assert 'button_margin_bottom = 8' in overlay_block
-    assert 'send_y = composer_rect.bottom() - button_margin_bottom - self.send_button.height()' in overlay_block
-    assert 'voice_y = composer_rect.bottom() - button_margin_bottom - self.voice_message_button.height()' in overlay_block
-    assert 'self.voice_message_button.raise_()' in overlay_block
-    assert 'self.send_button.raise_()' in overlay_block
+    assert 'self._update_input_border_geometry()' in overlay_block
+    assert '.move(' not in overlay_block
+    assert 'button_margin_right' not in overlay_block
+    assert 'button_margin_bottom' not in overlay_block
+    assert 'send_y =' not in overlay_block
+    assert 'voice_y =' not in overlay_block
+    assert 'self.voice_message_button.raise_()' not in overlay_block
+    assert 'self.send_button.raise_()' not in overlay_block
 
     assert 'setCursorWidth' not in message_input
     assert 'background-color: transparent !important' not in message_input
@@ -658,10 +664,17 @@ def test_chat_message_input_uses_floating_card_style_without_overlay_or_cursor_o
     dark_input_card_block = dark_input_qss.split('QWidget#messageInputCard {', 1)[1].split('}', 1)[0]
     assert 'background: rgba(255, 255, 255, 0.96);' in light_input_card_block
     assert 'background: rgba(31, 31, 31, 0.96);' in dark_input_card_block
+    assert 'border: none;' in light_input_card_block
+    assert 'border: none;' in dark_input_card_block
+    assert 'QFrame#messageInputBorder {' in light_input_qss
+    assert 'QFrame#messageInputBorder {' in dark_input_qss
+    assert 'border: 1px solid rgb(229, 229, 229);' in light_input_qss
+    assert 'border: 1px solid rgb(57, 57, 57);' in dark_input_qss
 
     for qss in (light_input_qss, dark_input_qss):
         assert 'QWidget#messageInputCard {' in qss
         assert 'border-radius: 8px;' in qss
+        assert 'QWidget#messageSendBar {' in qss
         assert 'QWidget#messageInput,\nQWidget#messageComposer,\nQWidget#messageToolbar' not in qss
         assert 'QTextEdit#chatMessageEdit,\nQWidget#chatMessageViewport,\nQTextEdit#chatMessageEdit QFrame' not in qss
         assert 'QWidget#messageToolbar {' in qss

@@ -5,7 +5,13 @@ QWidget#messageInput {
 
 QWidget#messageInputCard {
     background: rgba(31, 31, 31, 0.96);
-    border: 1px solid rgba(255, 255, 255, 0.08);
+    border: none;
+    border-radius: 8px;
+}
+
+QFrame#messageInputBorder {
+    background: transparent;
+    border: 1px solid rgb(57, 57, 57);
     border-radius: 8px;
 }
 
@@ -20,6 +26,11 @@ QWidget#messageToolbar {
     border: none;
     border-bottom-left-radius: 8px;
     border-bottom-right-radius: 8px;
+}
+
+QWidget#messageSendBar {
+    background: transparent;
+    border: none;
 }
 
 QWidget#pendingAttachmentArea,
