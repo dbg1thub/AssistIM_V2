@@ -2645,7 +2645,7 @@ class MessageInput(QWidget):
         self.toolbar_widget = QWidget(self.composer_widget)
         self.toolbar_widget.setObjectName("messageToolbar")
         self.toolbar_layout = QHBoxLayout()
-        self.toolbar_layout.setContentsMargins(8, 4, 110, 4)
+        self.toolbar_layout.setContentsMargins(8, 4, 110, 8)
         self.toolbar_layout.setSpacing(4)
 
         self.emoji_button = TransparentToolButton(AppIcon.EMOJI_TAB_SYMBOLS, self.composer_widget)
@@ -2893,6 +2893,7 @@ class MessageInput(QWidget):
             return
 
         button_margin_right = 8
+        button_margin_bottom = 8
         button_gap = 8
         button_row_width = self.voice_message_button.width() + button_gap + self.send_button.width()
         voice_x = toolbar_rect.x() + toolbar_rect.width() - button_row_width - button_margin_right
@@ -2900,9 +2901,9 @@ class MessageInput(QWidget):
         voice_x = max(composer_rect.left(), min(voice_x, composer_rect.right() - button_row_width))
         send_x = voice_x + self.voice_message_button.width() + button_gap
         send_x = max(composer_rect.left(), min(send_x, composer_rect.right() - self.send_button.width()))
-        send_y = toolbar_rect.y() + max(0, (toolbar_rect.height() - self.send_button.height()) // 2)
+        send_y = composer_rect.bottom() - button_margin_bottom - self.send_button.height()
         send_y = max(composer_rect.top(), min(send_y, composer_rect.bottom() - self.send_button.height()))
-        voice_y = toolbar_rect.y() + max(0, (toolbar_rect.height() - self.voice_message_button.height()) // 2)
+        voice_y = composer_rect.bottom() - button_margin_bottom - self.voice_message_button.height()
         voice_y = max(composer_rect.top(), min(voice_y, composer_rect.bottom() - self.voice_message_button.height()))
         self.voice_message_button.move(voice_x, voice_y)
         self.send_button.move(send_x, send_y)
