@@ -2725,7 +2725,7 @@ class MessageInput(QWidget):
 
         self.voice_message_button = TransparentToolButton(AppIcon.MIC_ON, self.composer_widget)
         self.voice_message_button.setObjectName("composerVoiceMessageButton")
-        self.voice_message_button.setFixedSize(38, 34)
+        self.voice_message_button.setFixedSize(34, 30)
         self.voice_message_button.setToolTip(tr("composer.voice.hold_to_talk", "Hold to talk"))
         self.voice_message_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.voice_message_button.setMouseTracking(True)
@@ -2735,7 +2735,7 @@ class MessageInput(QWidget):
 
         self.send_button = PushButton(tr("composer.button.send", "Send"), self.composer_widget)
         self.send_button.setObjectName("composerSendButton")
-        self.send_button.setFixedSize(84, 34)
+        self.send_button.setFixedSize(76, 30)
 
         self.toolbar_widget.setLayout(self.toolbar_layout)
 

@@ -410,9 +410,8 @@ def test_chat_message_input_uses_floating_card_style_without_overlay_or_cursor_o
     assert 'self.content_splitter.splitterMoved.connect(self._schedule_restore_message_viewport)' in chat_panel
     assert 'composer_layout.addWidget(self.message_input, 1)' in chat_panel
     assert 'self.message_input.setMaximumHeight(' not in chat_panel
-    assert 'self._composer_resize_handle = _ComposerResizeHandle(' in chat_panel
-    assert 'self._composer_resize_handle.raise_()' in chat_panel
-    assert 'self._splitter.setSizes([new_top, new_bottom])' in chat_panel
+    assert 'composer_container.setMaximumHeight(340)' in chat_panel
+    assert '_ComposerResizeHandle' not in chat_panel
     assert 'def setHandleIndicatorVisible(self, visible: bool) -> None:' in fluent_splitter
     assert 'def isHandleIndicatorVisible(self) -> bool:' in fluent_splitter
     assert 'if not self.splitter().isHandleIndicatorVisible():' in fluent_splitter
@@ -422,6 +421,8 @@ def test_chat_message_input_uses_floating_card_style_without_overlay_or_cursor_o
     assert 'self.main_layout.setContentsMargins(8, 0, 8, 8)' in setup_block
     assert 'self.main_layout.addWidget(self.editor_card, 1)' in setup_block
     assert 'self.text_input.setViewportMargins(0, 0, 0, 0)' in setup_block
+    assert 'self.voice_message_button.setFixedSize(34, 30)' in setup_block
+    assert 'self.send_button.setFixedSize(76, 30)' in setup_block
     assert setup_block.index('self.composer_layout.addWidget(self.reply_suggestion_widget, 0)') < setup_block.index(
         'self.composer_layout.addWidget(self.text_input, 1)'
     )

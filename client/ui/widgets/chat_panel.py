@@ -35,60 +35,6 @@ from qfluentwidgets.multimedia import VideoWidget
 logger = logging.get_logger(__name__)
 
 
-class _ComposerResizeHandle(QWidget):
-    """Transparent resize hit area aligned with the composer top edge."""
-
-    HANDLE_HEIGHT = 8
-
-    def __init__(
-        self,
-        splitter: FluentSplitter,
-        parent: QWidget,
-        moved_callback: Callable[[], None],
-    ):
-        super().__init__(parent)
-        self._splitter = splitter
-        self._moved_callback = moved_callback
-        self._drag_start_y: Optional[int] = None
-        self._drag_start_sizes: list[int] = []
-        self.setObjectName("chatComposerResizeHandle")
-        self.setFixedHeight(self.HANDLE_HEIGHT)
-        self.setMouseTracking(True)
-        self.setCursor(Qt.CursorShape.SizeVerCursor)
-        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, False)
-
-    def mousePressEvent(self, event) -> None:
-        if event.button() != Qt.MouseButton.LeftButton:
-            return super().mousePressEvent(event)
-        self._drag_start_y = self._event_global_y(event)
-        self._drag_start_sizes = self._splitter.sizes()
-        event.accept()
-
-    def mouseMoveEvent(self, event) -> None:
-        if self._drag_start_y is None or len(self._drag_start_sizes) < 2:
-            return super().mouseMoveEvent(event)
-
-        delta_y = self._event_global_y(event) - self._drag_start_y
-        top_size, bottom_size = self._drag_start_sizes[:2]
-        total_size = top_size + bottom_size
-        new_top = max(0, min(total_size, top_size + delta_y))
-        new_bottom = max(0, total_size - new_top)
-        self._splitter.setSizes([new_top, new_bottom])
-        self._moved_callback()
-        event.accept()
-
-    def mouseReleaseEvent(self, event) -> None:
-        self._drag_start_y = None
-        self._drag_start_sizes = []
-        event.accept()
-
-    @staticmethod
-    def _event_global_y(event) -> int:
-        if hasattr(event, "globalPosition"):
-            return int(event.globalPosition().y())
-        return int(event.globalPos().y())
-
-
 def _session_status_text(session: Session | None) -> str:
     """Return the header secondary text for the active session."""
     if session is None:
@@ -356,7 +302,6 @@ class ChatPanel(QWidget):
         self.message_input: Optional[MessageInput] = None
         self.content_splitter: Optional[FluentSplitter] = None
         self._composer_container: Optional[QWidget] = None
-        self._composer_resize_handle: Optional[_ComposerResizeHandle] = None
         self._chat_info_overlay: Optional[ChatInfoDrawerOverlay] = None
         self._security_pending_banner: Optional[SecurityPendingBanner] = None
         self._recall_action_refresh_timer = QTimer(self)
@@ -440,18 +385,13 @@ class ChatPanel(QWidget):
         self.message_list.setMinimumHeight(0)
         self.content_splitter.addWidget(self.message_list)
         composer_container = QWidget(self.chat_page)
+        composer_container.setMaximumHeight(340)
         self._composer_container = composer_container
         composer_layout = QVBoxLayout(composer_container)
         composer_layout.setContentsMargins(0, 0, 0, 0)
         composer_layout.setSpacing(0)
         composer_layout.addWidget(self._security_pending_banner, 0)
         composer_layout.addWidget(self.message_input, 1)
-        self._composer_resize_handle = _ComposerResizeHandle(
-            self.content_splitter,
-            composer_container,
-            self._schedule_restore_message_viewport,
-        )
-        self._composer_resize_handle.raise_()
         self.content_splitter.addWidget(composer_container)
         self.content_splitter.setStretchFactor(0, 1)
         self.content_splitter.setStretchFactor(1, 0)
@@ -460,7 +400,6 @@ class ChatPanel(QWidget):
         self.content_splitter.installEventFilter(self)
         composer_container.installEventFilter(self)
         self.message_input.installEventFilter(self)
-        QTimer.singleShot(0, self._layout_composer_resize_handle)
 
         self.chat_layout.addWidget(self.chat_header, 0)
         self.chat_layout.addWidget(self.content_splitter, 1)
@@ -1111,7 +1050,6 @@ class ChatPanel(QWidget):
             QEvent.Type.LayoutRequest,
             QEvent.Type.Show,
         }:
-            self._layout_composer_resize_handle()
             self._remember_message_scroll_gap()
             self._layout_chat_info_overlay()
             self._relayout_message_list()
@@ -1132,14 +1070,6 @@ class ChatPanel(QWidget):
                     return True
 
         return super().eventFilter(watched, event)
-
-    def _layout_composer_resize_handle(self) -> None:
-        container = getattr(self, "_composer_container", None)
-        handle = getattr(self, "_composer_resize_handle", None)
-        if container is None or handle is None:
-            return
-        handle.setGeometry(0, 0, container.width(), handle.HANDLE_HEIGHT)
-        self._composer_resize_handle.raise_()
 
     def _sync_message_scrollbar_visibility(self) -> None:
         if not self._scroll_delegate:
