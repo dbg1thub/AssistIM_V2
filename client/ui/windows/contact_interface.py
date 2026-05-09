@@ -1795,21 +1795,23 @@ class ContactInterface(QWidget):
     def _remove_friend_item_view(self, contact_id: str) -> None:
         item = self._friend_items.pop(contact_id, None)
         letter = self._friend_item_sections.pop(contact_id, "")
+        section_layout = self._friend_section_layouts.get(letter)
         if item is not None:
+            if section_layout is not None:
+                section_layout.removeWidget(item)
             item.deleteLater()
         if not letter:
             return
-        section_layout = self._friend_section_layouts.get(letter)
-        if section_layout is None or section_layout.count() > 1:
-            if section_layout is None:
-                return
-            remaining_items = [widget_id for widget_id, widget_letter in self._friend_item_sections.items() if widget_letter == letter]
-            if remaining_items:
-                return
+        if section_layout is None:
+            return
+        remaining_items = [widget_id for widget_id, widget_letter in self._friend_item_sections.items() if widget_letter == letter]
+        if remaining_items:
+            return
         section = self._friend_section_widgets.pop(letter, None)
         self._friend_section_headers.pop(letter, None)
         self._friend_section_layouts.pop(letter, None)
         if section is not None:
+            self.friends_layout.removeWidget(section)
             section.deleteLater()
         if not self._friend_items:
             self._add_empty_state(
@@ -2885,7 +2887,7 @@ class ContactInterface(QWidget):
 
     @staticmethod
     def _friend_sidebar_title(contact: ContactRecord) -> str:
-        return str(contact.username or "").strip() or contact.display_name
+        return str(contact.remark or "").strip() or str(contact.username or "").strip() or contact.display_name
 
     def _clear_active_selection(self) -> None:
         self._selected_key = None
