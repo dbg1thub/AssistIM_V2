@@ -9,7 +9,7 @@ from PySide6.QtWidgets import QHBoxLayout, QLabel, QSizePolicy, QVBoxLayout, QWi
 from qfluentwidgets import HyperlinkButton, isDarkTheme
 from qfluentwidgets.components.material import AcrylicFlyoutViewBase
 
-from client.core.avatar_rendering import get_avatar_image_store
+from client.core.avatar_rendering import draw_avatar_pixmap, get_avatar_image_store
 from client.core.avatar_utils import profile_avatar_seed
 from client.core.i18n import tr
 from client.ui.widgets.fluent_divider import FluentDivider
@@ -83,12 +83,7 @@ class TrayAlertAvatar(QWidget):
         painter.setClipPath(clip)
 
         if self._pixmap is not None:
-            scaled = self._pixmap.scaled(
-                avatar_rect.size(),
-                Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-                Qt.TransformationMode.SmoothTransformation,
-            )
-            painter.drawPixmap(avatar_rect, scaled)
+            draw_avatar_pixmap(painter, avatar_rect, self._pixmap)
         else:
             painter.fillPath(clip, QColor("#626B76") if isDarkTheme() else QColor("#D7DEE8"))
             painter.setClipping(False)

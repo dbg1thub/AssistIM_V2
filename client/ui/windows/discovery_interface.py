@@ -46,7 +46,7 @@ from qfluentwidgets import (
 
 from client.core.app_icons import AppIcon
 from client.core import logging
-from client.core.avatar_rendering import get_avatar_image_store
+from client.core.avatar_rendering import draw_avatar_pixmap, get_avatar_image_store
 from client.core.avatar_utils import avatar_seed, profile_avatar_seed
 from client.core.config_backend import get_config
 from client.core.exceptions import APIError, NetworkError
@@ -261,12 +261,7 @@ class DiscoveryAvatar(QWidget):
         painter.setClipPath(clip)
 
         if self._pixmap:
-            scaled = self._pixmap.scaled(
-                rect.size(),
-                Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-                Qt.TransformationMode.SmoothTransformation,
-            )
-            painter.drawPixmap(rect, scaled)
+            draw_avatar_pixmap(painter, rect, self._pixmap)
             return
 
         if isDarkTheme():

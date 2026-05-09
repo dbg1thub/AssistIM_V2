@@ -27,7 +27,7 @@ from qfluentwidgets import (
 from qfluentwidgets.components.widgets.acrylic_label import AcrylicBrush
 
 from client.core.app_icons import AppIcon, CollectionIcon
-from client.core.avatar_rendering import get_avatar_image_store
+from client.core.avatar_rendering import draw_avatar_pixmap, get_avatar_image_store
 from client.core.avatar_utils import profile_avatar_seed
 from client.core.i18n import tr
 from client.models.message import Session
@@ -131,12 +131,7 @@ class ChatInfoAvatarWidget(QWidget):
         _source, display_path = self._store.resolve_display_path(self._source, gender=self._gender, seed=self._seed)
         pixmap = QPixmap(display_path) if display_path else QPixmap()
         if not pixmap.isNull():
-            scaled = pixmap.scaled(
-                self.size(),
-                Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-                Qt.TransformationMode.SmoothTransformation,
-            )
-            painter.drawPixmap(self.rect(), scaled)
+            draw_avatar_pixmap(painter, self.rect(), pixmap)
         else:
             painter.fillPath(path, QColor("#626B76") if isDarkTheme() else QColor("#D7DEE8"))
 

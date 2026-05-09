@@ -10,7 +10,7 @@ from PySide6.QtWidgets import QHBoxLayout, QLabel, QSizePolicy, QVBoxLayout, QWi
 from qfluentwidgets import BodyLabel, CaptionLabel, CardWidget, ScrollArea, SingleDirectionScrollArea, ToolButton, isDarkTheme
 
 from client.core.app_icons import AppIcon
-from client.core.avatar_rendering import get_avatar_image_store
+from client.core.avatar_rendering import draw_avatar_pixmap, get_avatar_image_store
 from client.core.i18n import tr
 from client.core.avatar_utils import avatar_seed, profile_avatar_seed
 from client.ui.widgets.fluent_divider import FluentDivider
@@ -98,12 +98,7 @@ class ContactAvatar(QWidget):
         painter.setClipPath(clip)
 
         if self._pixmap is not None:
-            scaled = self._pixmap.scaled(
-                rect.size(),
-                Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-                Qt.TransformationMode.SmoothTransformation,
-            )
-            painter.drawPixmap(rect, scaled)
+            draw_avatar_pixmap(painter, rect, self._pixmap)
             return
 
         painter.fillPath(clip, QColor("#626B76") if isDarkTheme() else QColor("#D7DEE8"))

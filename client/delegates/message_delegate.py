@@ -23,7 +23,7 @@ from qfluentwidgets import Theme, isDarkTheme, themeColor
 
 from client.core import logging
 from client.core.app_icons import AppIcon
-from client.core.avatar_rendering import get_avatar_image_store
+from client.core.avatar_rendering import draw_avatar_pixmap, get_avatar_image_store
 from client.core.avatar_utils import profile_avatar_seed
 from client.core.config_backend import get_config
 from client.core.file_text_extraction import FILE_SUMMARY_EXTRA_KEY, file_summary_display_text
@@ -858,13 +858,7 @@ class MessageDelegate(QStyledItemDelegate):
             painter.save()
             painter.setClipPath(path)
             pixmap = QPixmap(avatar_path)
-            if not pixmap.isNull():
-                scaled = pixmap.scaled(
-                    rect.size(),
-                    Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-                    Qt.TransformationMode.SmoothTransformation,
-                )
-                painter.drawPixmap(rect, scaled)
+            if draw_avatar_pixmap(painter, rect, pixmap):
                 painter.restore()
                 return
             painter.restore()

@@ -11,7 +11,7 @@ from PySide6.QtWidgets import QStyle, QStyledItemDelegate, QStyleOptionViewItem
 from qfluentwidgets import isDarkTheme
 
 from client.core.app_icons import CollectionIcon
-from client.core.avatar_rendering import get_avatar_image_store
+from client.core.avatar_rendering import draw_avatar_pixmap, get_avatar_image_store
 from client.core.avatar_utils import profile_avatar_seed
 from client.core.datetime_utils import coerce_local_datetime
 from client.core.i18n import format_session_timestamp, tr
@@ -257,14 +257,7 @@ class SessionDelegate(QStyledItemDelegate):
             from PySide6.QtGui import QPixmap
 
             pixmap = QPixmap(avatar_path)
-            if not pixmap.isNull():
-                scaled = pixmap.scaled(
-                    rect.size(),
-                    Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-                    Qt.TransformationMode.SmoothTransformation,
-                )
-                painter.drawPixmap(rect, scaled)
-            else:
+            if not draw_avatar_pixmap(painter, rect, pixmap):
                 painter.fillPath(path, QColor("#626B76") if isDarkTheme() else QColor("#D7DEE8"))
         else:
             painter.fillPath(path, QColor("#626B76") if isDarkTheme() else QColor("#D7DEE8"))

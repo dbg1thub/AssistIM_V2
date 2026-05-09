@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import time
 import weakref
+from math import ceil
 from pathlib import Path
 
-from PySide6.QtCore import QObject, Signal, QUrl
-from PySide6.QtGui import QPixmap
+from PySide6.QtCore import QObject, QRect, QSize, Signal, Qt, QUrl
+from PySide6.QtGui import QPainter, QPixmap
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 
 from client.core.avatar_utils import default_avatar_path, resolve_avatar_source
@@ -108,6 +109,58 @@ def get_avatar_image_store() -> AvatarImageStore:
     if _avatar_image_store is None:
         _avatar_image_store = AvatarImageStore()
     return _avatar_image_store
+
+
+def scaled_avatar_pixmap_for_device(
+    pixmap: QPixmap,
+    logical_size: QSize,
+    device_pixel_ratio: float,
+) -> QPixmap:
+    """Return a center-cropped avatar pixmap scaled in physical pixels."""
+    if pixmap.isNull() or logical_size.width() <= 0 or logical_size.height() <= 0:
+        return QPixmap()
+
+    try:
+        dpr = float(device_pixel_ratio)
+    except (TypeError, ValueError):
+        dpr = 1.0
+    if dpr <= 0:
+        dpr = 1.0
+
+    physical_size = QSize(
+        max(1, ceil(logical_size.width() * dpr)),
+        max(1, ceil(logical_size.height() * dpr)),
+    )
+    scaled = pixmap.scaled(
+        physical_size,
+        Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+        Qt.TransformationMode.SmoothTransformation,
+    )
+    if scaled.isNull():
+        return QPixmap()
+
+    crop_x = max(0, (scaled.width() - physical_size.width()) // 2)
+    crop_y = max(0, (scaled.height() - physical_size.height()) // 2)
+    cropped = scaled.copy(QRect(crop_x, crop_y, physical_size.width(), physical_size.height()))
+    cropped.setDevicePixelRatio(dpr)
+    return cropped
+
+
+def draw_avatar_pixmap(painter: QPainter, rect: QRect, pixmap: QPixmap) -> bool:
+    """Draw a high-DPI aware center-cropped avatar pixmap into a logical rect."""
+    if pixmap.isNull() or rect.width() <= 0 or rect.height() <= 0:
+        return False
+
+    device = painter.device()
+    dpr_getter = getattr(device, "devicePixelRatioF", None)
+    dpr = dpr_getter() if callable(dpr_getter) else 1.0
+    scaled = scaled_avatar_pixmap_for_device(pixmap, rect.size(), dpr)
+    if scaled.isNull():
+        return False
+
+    painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+    painter.drawPixmap(rect, scaled)
+    return True
 
 
 def apply_avatar_widget_image(widget, avatar: object = "", *, gender: object = "", seed: object = "") -> bool:
