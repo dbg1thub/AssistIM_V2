@@ -421,9 +421,10 @@ def test_chat_message_input_uses_floating_card_style_without_overlay_or_cursor_o
     assert 'self.main_layout.setContentsMargins(8, 0, 8, 8)' in setup_block
     assert 'self.main_layout.addWidget(self.editor_card, 1)' in setup_block
     assert 'self.text_input.setViewportMargins(0, 0, 0, 0)' in setup_block
+    assert 'self.toolbar_layout.setContentsMargins(8, 4, 110, 4)' in setup_block
     assert setup_block.count('setFixedSize(24, 24)') >= 7
-    assert 'self.voice_message_button.setFixedSize(30, 24)' in setup_block
-    assert 'self.send_button.setFixedSize(58, 24)' in setup_block
+    assert 'self.voice_message_button.setFixedSize(32, 28)' in setup_block
+    assert 'self.send_button.setFixedSize(62, 28)' in setup_block
     assert setup_block.index('self.composer_layout.addWidget(self.reply_suggestion_widget, 0)') < setup_block.index(
         'self.composer_layout.addWidget(self.text_input, 1)'
     )
@@ -432,6 +433,7 @@ def test_chat_message_input_uses_floating_card_style_without_overlay_or_cursor_o
     )
     assert 'toolbar_rect = self.toolbar_widget.geometry()' in overlay_block
     assert 'text_rect = self.text_input.geometry()' not in overlay_block
+    assert 'button_margin_right = 8' in overlay_block
     assert 'self.voice_message_button.raise_()' in overlay_block
     assert 'self.send_button.raise_()' in overlay_block
 

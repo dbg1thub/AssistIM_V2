@@ -2645,7 +2645,7 @@ class MessageInput(QWidget):
         self.toolbar_widget = QWidget(self.composer_widget)
         self.toolbar_widget.setObjectName("messageToolbar")
         self.toolbar_layout = QHBoxLayout()
-        self.toolbar_layout.setContentsMargins(8, 4, 116, 4)
+        self.toolbar_layout.setContentsMargins(8, 4, 110, 4)
         self.toolbar_layout.setSpacing(4)
 
         self.emoji_button = TransparentToolButton(AppIcon.EMOJI_TAB_SYMBOLS, self.composer_widget)
@@ -2725,7 +2725,7 @@ class MessageInput(QWidget):
 
         self.voice_message_button = TransparentToolButton(AppIcon.MIC_ON, self.composer_widget)
         self.voice_message_button.setObjectName("composerVoiceMessageButton")
-        self.voice_message_button.setFixedSize(30, 24)
+        self.voice_message_button.setFixedSize(32, 28)
         self.voice_message_button.setToolTip(tr("composer.voice.hold_to_talk", "Hold to talk"))
         self.voice_message_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.voice_message_button.setMouseTracking(True)
@@ -2735,7 +2735,7 @@ class MessageInput(QWidget):
 
         self.send_button = PushButton(tr("composer.button.send", "Send"), self.composer_widget)
         self.send_button.setObjectName("composerSendButton")
-        self.send_button.setFixedSize(58, 24)
+        self.send_button.setFixedSize(62, 28)
 
         self.toolbar_widget.setLayout(self.toolbar_layout)
 
@@ -2892,7 +2892,7 @@ class MessageInput(QWidget):
         if not toolbar_rect.isValid():
             return
 
-        button_margin_right = 14
+        button_margin_right = 8
         button_gap = 8
         button_row_width = self.voice_message_button.width() + button_gap + self.send_button.width()
         voice_x = toolbar_rect.x() + toolbar_rect.width() - button_row_width - button_margin_right
