@@ -110,6 +110,8 @@
   "ai_assistant.delete.confirm_title": "删除聊天",
   "ai_assistant.delete.confirm_content": "从当前设备删除 {name}，并移除这条 AI 聊天的本地消息记录？",
   "ai_assistant.delete.confirm_action": "删除",
+  "ai_assistant.delete.unavailable_title": "无法删除聊天",
+  "ai_assistant.delete.unavailable_content": "这条聊天已经不存在，聊天列表已刷新。",
   "ai_assistant.error.context_too_long": "当前对话太长，请新建聊天或清空上下文。",
   "ai_assistant.error.model_missing": "本地 AI 模型不存在。",
   "ai_assistant.error.vision_projector_missing": "未找到视觉投影模型文件，请把 mmproj 文件放到 models 目录或配置 ASSISTIM_AI_VISION_MMPROJ_PATH。",

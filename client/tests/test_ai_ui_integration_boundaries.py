@@ -438,6 +438,9 @@ def test_ai_assistant_delete_uses_confirmation_dialog() -> None:
 
 def test_ai_assistant_thread_navigation_uses_fluent_tabbar() -> None:
     assistant_interface = Path("client/ui/windows/ai_assistant_interface.py").read_text(encoding="utf-8")
+    reload_block = assistant_interface.split("async def _reload_threads", 1)[1].split("async def _select_thread", 1)[0]
+    create_block = assistant_interface.split("async def _create_and_select_thread", 1)[1].split("def rename_current_thread", 1)[0]
+    delete_request_block = assistant_interface.split("async def _request_thread_delete_async", 1)[1].split("def _on_delete_clicked", 1)[0]
 
     assert "TabBar" in assistant_interface
     assert "TabCloseButtonDisplayMode" in assistant_interface
@@ -454,8 +457,13 @@ def test_ai_assistant_thread_navigation_uses_fluent_tabbar() -> None:
     assert "self.thread_tab_bar.addTab(" in assistant_interface
     assert "self.thread_tab_bar.setCurrentTab(self._current_thread_id)" in assistant_interface
     assert "def _on_thread_tab_close_requested(self, index: int) -> None:" in assistant_interface
-    assert "def _can_delete_thread(self, thread: AIThread | None) -> bool:" in assistant_interface
-    assert "if not self._can_delete_thread(current_thread):" in assistant_interface
+    assert "await self._store.find_empty_thread()" in create_block
+    assert "await self._store.thread_has_messages(normalized_thread_id)" in delete_request_block
+    assert "dialog = DeleteAIThreadConfirmDialog(" in delete_request_block
+    assert delete_request_block.index("has_messages = await self._store.thread_has_messages") < delete_request_block.index("dialog = DeleteAIThreadConfirmDialog(")
+    assert "self._threads = [await self._store.create_thread()]" not in reload_block
+    assert "self._messages = []" in reload_block
+    assert "_can_delete_thread" not in assistant_interface
     assert "QListWidget" not in assistant_interface
     assert "thread_list" not in assistant_interface
 

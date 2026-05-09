@@ -206,6 +206,44 @@ class AIAssistantStore:
         await self._connection().commit()
         return thread
 
+    async def thread_has_messages(self, thread_id: str) -> bool:
+        """Return whether one active thread contains any stored messages."""
+        await self.initialize()
+        if not await self._thread_belongs_to_owner(thread_id):
+            return False
+        cursor = await self._connection().execute(
+            """
+            SELECT 1 FROM ai_messages
+            WHERE thread_id = ? AND owner_user_id = ?
+            LIMIT 1
+            """,
+            (thread_id, self._owner_user_id),
+        )
+        return await cursor.fetchone() is not None
+
+    async def find_empty_thread(self) -> AIThread | None:
+        """Return one active thread that has no messages, if one exists."""
+        await self.initialize()
+        cursor = await self._connection().execute(
+            """
+            SELECT t.*
+            FROM ai_threads AS t
+            WHERE t.owner_user_id = ?
+              AND t.status != ?
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM ai_messages AS m
+                  WHERE m.thread_id = t.thread_id
+                    AND m.owner_user_id = t.owner_user_id
+              )
+            ORDER BY t.updated_at DESC, t.created_at DESC
+            LIMIT 1
+            """,
+            (self._owner_user_id, AIThreadStatus.DELETED.value),
+        )
+        row = await cursor.fetchone()
+        return self._row_to_thread(row) if row else None
+
     async def update_thread_title(self, thread_id: str, title: str) -> AIThread | None:
         """Update one thread title."""
         await self.initialize()

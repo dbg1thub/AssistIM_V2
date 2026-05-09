@@ -113,6 +113,36 @@ def test_ai_assistant_store_manual_title_blocks_auto_title(tmp_path, monkeypatch
     asyncio.run(run())
 
 
+def test_ai_assistant_store_empty_thread_detection_uses_messages_not_title(tmp_path, monkeypatch):
+    async def run():
+        db = Database(str(tmp_path / "assistant.db"))
+        monkeypatch.setattr(store_module, "get_database", lambda: db)
+        store = store_module.AIAssistantStore(owner_user_id="user-a")
+        try:
+            thread = await store.create_thread(title="新聊天", model="gemma")
+            assert await store.thread_has_messages(thread.thread_id) is False
+            empty_thread = await store.find_empty_thread()
+            assert empty_thread is not None
+            assert empty_thread.thread_id == thread.thread_id
+
+            await store.create_message(
+                thread_id=thread.thread_id,
+                role=AIMessageRole.USER,
+                content="新聊天",
+            )
+            assert await store.thread_has_messages(thread.thread_id) is True
+            assert await store.find_empty_thread() is None
+
+            renamed_empty = await store.create_thread(title="手动标题", model="gemma")
+            empty_thread = await store.find_empty_thread()
+            assert empty_thread is not None
+            assert empty_thread.thread_id == renamed_empty.thread_id
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
 def test_ai_assistant_store_is_scoped_by_owner_user_id(tmp_path, monkeypatch):
     async def run():
         db = Database(str(tmp_path / "assistant.db"))

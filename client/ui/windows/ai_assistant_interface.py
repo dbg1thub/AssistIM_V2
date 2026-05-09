@@ -27,6 +27,7 @@ from qfluentwidgets import (
     BodyLabel,
     CaptionLabel,
     IconWidget,
+    InfoBar,
     MessageBoxBase,
     Action,
     MenuAnimationType,
@@ -540,6 +541,10 @@ class AIAssistantInterface(QWidget):
 
     async def _create_and_select_thread(self) -> None:
         await self._stop_active_generation()
+        empty_thread = await self._store.find_empty_thread()
+        if empty_thread is not None:
+            await self._reload_threads(select_thread_id=empty_thread.thread_id)
+            return
         thread = await self._store.create_thread(model="")
         await self._reload_threads(select_thread_id=thread.thread_id)
 
@@ -582,12 +587,18 @@ class AIAssistantInterface(QWidget):
 
     async def _reload_threads(self, *, select_first: bool = False, select_thread_id: str = "") -> None:
         self._threads = await self._store.list_threads()
-        if not self._threads:
-            self._threads = [await self._store.create_thread()]
+        if self._current_thread_id and all(thread.thread_id != self._current_thread_id for thread in self._threads):
+            self._current_thread_id = ""
         self._render_thread_tabs()
         target_id = select_thread_id or (self._threads[0].thread_id if select_first and self._threads else "")
         if target_id:
             await self._select_thread(target_id, stop_generation=False)
+            return
+        if not self._current_thread_id:
+            self.title_label.setText(tr("ai_assistant.thread.new", "New Chat"))
+            self._messages = []
+            self._render_messages()
+            self._set_generating(bool(self._active_task_id or self._active_action_plan_id))
 
     async def _select_thread(self, thread_id: str, *, stop_generation: bool = True) -> None:
         if stop_generation:
@@ -1219,15 +1230,25 @@ class AIAssistantInterface(QWidget):
         normalized_thread_id = str(thread_id or "").strip()
         if not normalized_thread_id:
             return
-        current_thread = next((thread for thread in self._threads if thread.thread_id == normalized_thread_id), None)
-        if not self._can_delete_thread(current_thread):
-            return
-        dialog = DeleteAIThreadConfirmDialog(
-            current_thread.title if current_thread is not None else tr("ai_assistant.thread.new", "New Chat"),
-            self.window(),
+        self._create_ui_task(
+            self._request_thread_delete_async(normalized_thread_id),
+            "request AI assistant thread delete",
         )
-        if dialog.exec() != QDialog.DialogCode.Accepted:
+
+    async def _request_thread_delete_async(self, normalized_thread_id: str) -> None:
+        current_thread = next((thread for thread in self._threads if thread.thread_id == normalized_thread_id), None)
+        if current_thread is None:
+            self._show_thread_delete_unavailable()
+            await self._reload_threads(select_first=True)
             return
+        has_messages = await self._store.thread_has_messages(normalized_thread_id)
+        if has_messages:
+            dialog = DeleteAIThreadConfirmDialog(
+                current_thread.title or tr("ai_assistant.thread.new", "New Chat"),
+                self.window(),
+            )
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return
         self._create_ui_task(self._delete_thread(normalized_thread_id), "delete AI assistant thread")
 
     def _on_delete_clicked(self) -> None:
@@ -1252,13 +1273,16 @@ class AIAssistantInterface(QWidget):
             return
         await self._reload_threads(select_thread_id=self._current_thread_id)
 
-    def _can_delete_thread(self, thread: AIThread | None) -> bool:
-        if thread is None or len(self._threads) <= 1:
-            return False
-        default_title = tr("ai_assistant.thread.new", "New Chat")
-        title = str(thread.title or "").strip()
-        has_messages = bool(str(thread.last_message or "").strip())
-        return has_messages or title != default_title
+    def _show_thread_delete_unavailable(self) -> None:
+        InfoBar.warning(
+            tr("ai_assistant.delete.unavailable_title", "Unable to delete chat"),
+            tr(
+                "ai_assistant.delete.unavailable_content",
+                "This chat no longer exists. The chat list has been refreshed.",
+            ),
+            parent=self.window(),
+            duration=2500,
+        )
 
     def _set_generating(self, generating: bool) -> None:
         self._is_generating = bool(generating)

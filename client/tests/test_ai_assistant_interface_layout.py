@@ -1,3 +1,4 @@
+import asyncio
 import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -5,7 +6,8 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QPoint, QRect, Qt
 from PySide6.QtWidgets import QApplication, QStyleOptionViewItem
 
-from client.models.ai_assistant import AIMessage, AIMessageRole, AIMessageStatus
+from client.models.ai_assistant import AIMessage, AIMessageRole, AIMessageStatus, AIThread
+import client.ui.windows.ai_assistant_interface as assistant_interface_module
 from client.ui.windows.ai_assistant_interface import AIAssistantInterface
 
 
@@ -89,6 +91,81 @@ def _thinking_message(message_id: str = "thinking") -> AIMessage:
 def _rect_in_panel(widget: AIAssistantInterface, child) -> QRect:
     top_left = widget.content_panel.mapFromGlobal(child.mapToGlobal(QPoint(0, 0)))
     return QRect(top_left, child.size())
+
+
+class _FakeAssistantStore:
+    def __init__(self) -> None:
+        self.threads: list[AIThread] = []
+        self.messages: dict[str, list[AIMessage]] = {}
+        self.created = 0
+
+    async def initialize(self) -> None:
+        return None
+
+    async def list_threads(self) -> list[AIThread]:
+        return list(self.threads)
+
+    async def create_thread(self, *, title: str = "", model: str = "") -> AIThread:
+        self.created += 1
+        thread = AIThread(thread_id=f"thread-{self.created}", title=title or "New Chat", model=model)
+        self.threads.insert(0, thread)
+        self.messages[thread.thread_id] = []
+        return thread
+
+    async def get_thread(self, thread_id: str) -> AIThread | None:
+        return next((thread for thread in self.threads if thread.thread_id == thread_id), None)
+
+    async def list_messages(self, thread_id: str, *, limit: int = 200) -> list[AIMessage]:
+        return list(self.messages.get(thread_id, []))[:limit]
+
+    async def find_empty_thread(self) -> AIThread | None:
+        for thread in self.threads:
+            if not self.messages.get(thread.thread_id):
+                return thread
+        return None
+
+    async def thread_has_messages(self, thread_id: str) -> bool:
+        return bool(self.messages.get(thread_id))
+
+    async def delete_thread(self, thread_id: str) -> None:
+        self.threads = [thread for thread in self.threads if thread.thread_id != thread_id]
+        self.messages.pop(thread_id, None)
+
+
+def test_ai_assistant_empty_tabs_are_user_created_unique_and_deletable(monkeypatch) -> None:
+    app = QApplication.instance() or QApplication([])
+    store = _FakeAssistantStore()
+    monkeypatch.setattr(assistant_interface_module, "get_ai_assistant_store", lambda _owner_user_id: store)
+    widget = AIAssistantInterface(owner_user_id="user-a")
+    widget.resize(1000, 700)
+    widget.show()
+    app.processEvents()
+
+    async def scenario() -> None:
+        await widget._reload_threads(select_first=True)
+        assert store.created == 0
+        assert widget._threads == []
+        assert widget._current_thread_id == ""
+
+        await widget._create_and_select_thread()
+        assert store.created == 1
+        assert widget._current_thread_id == "thread-1"
+
+        await widget._create_and_select_thread()
+        assert store.created == 1
+        assert widget._current_thread_id == "thread-1"
+
+        await widget._delete_thread("thread-1")
+        assert store.threads == []
+        assert widget._threads == []
+        assert widget._current_thread_id == ""
+        assert widget.empty_widget.isVisible()
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        widget.close()
+        app.processEvents()
 
 
 def test_ai_assistant_streaming_layout_keeps_bottom_gap_stable() -> None:

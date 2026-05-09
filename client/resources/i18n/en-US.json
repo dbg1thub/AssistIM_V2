@@ -110,6 +110,8 @@
   "ai_assistant.delete.confirm_title": "Delete Chat",
   "ai_assistant.delete.confirm_content": "Delete {name} and remove its local AI messages from this device?",
   "ai_assistant.delete.confirm_action": "Delete",
+  "ai_assistant.delete.unavailable_title": "Unable to delete chat",
+  "ai_assistant.delete.unavailable_content": "This chat no longer exists. The chat list has been refreshed.",
   "ai_assistant.error.context_too_long": "The conversation is too long. Start a new chat or clear context.",
   "ai_assistant.error.model_missing": "Local AI model was not found.",
   "ai_assistant.error.vision_projector_missing": "Vision projector file was not found. Put the mmproj file in the models folder or set ASSISTIM_AI_VISION_MMPROJ_PATH.",
