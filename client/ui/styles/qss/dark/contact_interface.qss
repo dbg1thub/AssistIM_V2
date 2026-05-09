@@ -120,17 +120,13 @@ QLabel#contactDetailFieldLabel {
     background: transparent;
 }
 
+QLabel#friendMomentEmptyLabel {
+    color: {{TEXT_PRIMARY}};
+    background: transparent;
+}
+
 QPushButton#requestStatusButton {
     border-radius: {{RADIUS_PILL}};
-}
-
-QPushButton#contactDangerButton {
-    color: #ff6b6b;
-    border: 1px solid rgba(255, 107, 107, 0.34);
-}
-
-QPushButton#contactDangerButton:hover {
-    background: rgba(255, 107, 107, 0.12);
 }
 
 QAbstractScrollArea {

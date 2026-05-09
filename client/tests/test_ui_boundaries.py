@@ -237,7 +237,13 @@ def test_contact_detail_card_uses_wechat_like_profile_layout() -> None:
     assert 'self.gender_icon = IconWidget(AppIcon.GENDER_MALE, self.header)' in contact_interface
     assert 'self.more_button = ToolButton(AppIcon.MORE_HORIZONTAL, self.header)' in contact_interface
     assert 'self.remark_row = ContactDetailRow' in contact_interface
-    assert 'self.signature_row.set_value(contact.signature or tr("contact.detail.empty_value", "Not set"))' in contact_interface
+    assert 'self.signature_row.set_value(contact.signature or "-")' in contact_interface
+    assert 'self.subtitle_label.setText(\n            f"{tr(\'contact.detail.label.assistim_id\', \'AssistIM ID\')}: ' in contact_interface
+    assert 'self.region_label.setText(f"{tr(\'contact.detail.label.region\', \'Region\')}: ' in contact_interface
+    assert 'self.remove_friend_button' not in contact_interface
+    assert 'remove_requested = Signal(object)' not in contact_interface
+    assert 'def enterEvent(self, event) -> None:' in contact_interface
+    assert 'def paintEvent(self, event) -> None:' in contact_interface
     assert 'class EditFriendRemarkDialog(FluentDialog):' in contact_interface
     assert 'self.detail_panel.remark_edit_requested.connect(self._on_friend_remark_edit_requested)' in contact_interface
     assert 'async def _update_friend_remark_async(self, contact_id: str, remark: str) -> None:' in contact_interface
@@ -1486,9 +1492,10 @@ def test_chat_info_group_delete_and_contact_remove_entries_are_wired() -> None:
     assert 'remove_tile.clicked.connect(lambda: self._emit_member_management_request("remove"))' in drawer
 
     assert 'class RemoveFriendConfirmDialog(MessageBoxBase):' in contact_interface
-    assert 'remove_requested = Signal(object)' in contact_interface
-    assert 'self.remove_friend_button = PushButton(tr("contact.detail.action.remove_friend", "Remove Friend"), self.header)' in contact_interface
-    assert 'self.detail_panel.remove_requested.connect(self._on_remove_friend_requested)' in contact_interface
+    assert 'remove_action = Action(tr("contact.detail.action.remove_friend", "Remove Friend"), self)' in contact_interface
+    assert 'remove_action.triggered.connect(' in contact_interface
+    assert 'self.remove_friend_button' not in contact_interface
+    assert 'self.detail_panel.remove_requested.connect(self._on_remove_friend_requested)' not in contact_interface
     assert 'async def _remove_friend_async(self, contact_id: str, display_name: str) -> None:' in contact_interface
     assert 'await self._controller.remove_friend(contact_id)' in contact_interface
     assert 'async def delete_group(self, group_id: str) -> dict:' in contact_controller
