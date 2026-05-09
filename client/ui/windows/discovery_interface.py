@@ -71,6 +71,27 @@ from client.ui.widgets.image_viewer import ImageViewer
 setup_logging()
 logger = logging.get_logger(__name__)
 
+MOMENT_MEDIA_MAX_UPLOAD_BYTES = 100 * 1024 * 1024
+
+
+def _format_file_size(size_bytes: int) -> str:
+    """Format a file size for concise user-facing upload limit messages."""
+    size = max(0, int(size_bytes or 0))
+    if size >= 1024 * 1024 * 1024:
+        return f"{size / (1024 * 1024 * 1024):.1f} GB"
+    if size >= 1024 * 1024:
+        return f"{size / (1024 * 1024):.0f} MB"
+    if size >= 1024:
+        return f"{size / 1024:.0f} KB"
+    return f"{size} B"
+
+
+def _is_file_over_upload_limit(file_path: str) -> bool:
+    try:
+        return Path(file_path).stat().st_size > MOMENT_MEDIA_MAX_UPLOAD_BYTES
+    except OSError:
+        return False
+
 
 def _apply_safe_button_font(*buttons: TransparentToolButton) -> None:
     """Ensure tooltip rendering gets a valid point-size font."""
@@ -789,6 +810,18 @@ class AnimatedCommentSection(QWidget):
         text = self.comment_edit.text().strip()
         if not text and not self._selected_image_path:
             return
+        if self._selected_image_path and _is_file_over_upload_limit(self._selected_image_path):
+            InfoBar.warning(
+                tr("discovery.comment.title", "Post Comment"),
+                tr(
+                    "discovery.comments.image_too_large",
+                    "Image exceeds {limit}. Please choose a smaller image.",
+                    limit=_format_file_size(MOMENT_MEDIA_MAX_UPLOAD_BYTES),
+                ),
+                parent=self.window(),
+                duration=2200,
+            )
+            return
         self.comment_submitted.emit(text, self._selected_image_path or None)
         self.comment_edit.clear()
         self._selected_image_path = ""
@@ -802,6 +835,20 @@ class AnimatedCommentSection(QWidget):
             tr("discovery.dialog.image_filter", "Images (*.png *.jpg *.jpeg *.bmp *.gif *.webp);;All Files (*.*)"),
         )
         if not file_path:
+            return
+        if _is_file_over_upload_limit(file_path):
+            self._selected_image_path = ""
+            self._sync_comment_image_preview()
+            InfoBar.warning(
+                tr("discovery.comment.title", "Post Comment"),
+                tr(
+                    "discovery.comments.image_too_large",
+                    "Image exceeds {limit}. Please choose a smaller image.",
+                    limit=_format_file_size(MOMENT_MEDIA_MAX_UPLOAD_BYTES),
+                ),
+                parent=self.window(),
+                duration=2200,
+            )
             return
         self._selected_image_path = file_path
         self._sync_comment_image_preview()
@@ -1098,8 +1145,6 @@ class CreateMomentDialog(FluentDialog):
         self.media_preview = MomentMediaGrid([], self, compact=True)
         self.media_preview.setVisible(False)
         layout.addWidget(self.media_preview)
-        self._sync_media_hint()
-        self._sync_media_preview()
 
         visibility_row = QHBoxLayout()
         visibility_row.setContentsMargins(0, 0, 0, 0)
@@ -1119,12 +1164,14 @@ class CreateMomentDialog(FluentDialog):
         footer.addStretch(1)
 
         cancel_button = PushButton(tr("common.cancel", "Cancel"), self)
-        publish_button = PrimaryPushButton(tr("common.publish", "Publish"), self)
+        self.publish_button = PrimaryPushButton(tr("common.publish", "Publish"), self)
         cancel_button.clicked.connect(self.reject)
-        publish_button.clicked.connect(self._submit)
+        self.publish_button.clicked.connect(self._submit)
         footer.addWidget(cancel_button)
-        footer.addWidget(publish_button)
+        footer.addWidget(self.publish_button)
         layout.addLayout(footer)
+        self._sync_media_hint()
+        self._sync_media_preview()
 
     def changeEvent(self, event) -> None:
         super().changeEvent(event)
@@ -1144,6 +1191,10 @@ class CreateMomentDialog(FluentDialog):
                 parent=self,
                 duration=1800,
             )
+            return
+        oversized = self._oversized_media_paths()
+        if oversized:
+            self._show_media_too_large_warning(oversized)
             return
         self.submitted.emit(text, list(self._media_paths), self._visibility_scope, list(self._visibility_user_ids))
         self.accept()
@@ -1198,6 +1249,9 @@ class CreateMomentDialog(FluentDialog):
         self._media_paths = (self._media_paths + list(file_paths))[: self.MAX_MEDIA_ITEMS]
         self._sync_media_hint()
         self._sync_media_preview()
+        oversized = self._oversized_media_paths()
+        if oversized:
+            self._show_media_too_large_warning(oversized)
 
     def _select_video(self) -> None:
         file_paths, _ = QFileDialog.getOpenFileNames(
@@ -1211,6 +1265,9 @@ class CreateMomentDialog(FluentDialog):
         self._media_paths = [file_paths[0]]
         self._sync_media_hint()
         self._sync_media_preview()
+        oversized = self._oversized_media_paths()
+        if oversized:
+            self._show_media_too_large_warning(oversized)
 
     def _clear_media(self) -> None:
         self._media_paths.clear()
@@ -1218,8 +1275,24 @@ class CreateMomentDialog(FluentDialog):
         self._sync_media_preview()
 
     def _sync_media_hint(self) -> None:
+        self._sync_publish_button()
         if not self._media_paths:
             self.media_hint.setText(tr("discovery.dialog.media_empty", "No media selected."))
+            return
+        oversized = self._oversized_media_paths()
+        if oversized:
+            names = ", ".join(Path(path).name for path in oversized[:3])
+            remaining = max(0, len(oversized) - 3)
+            if remaining:
+                names = f"{names} +{remaining}"
+            self.media_hint.setText(
+                tr(
+                    "discovery.dialog.media_too_large_details",
+                    "{names} exceed {limit}. Please compress or choose smaller files.",
+                    names=names,
+                    limit=_format_file_size(MOMENT_MEDIA_MAX_UPLOAD_BYTES),
+                )
+            )
             return
         names = ", ".join(Path(path).name for path in self._media_paths[:3])
         remaining = max(0, len(self._media_paths) - 3)
@@ -1241,6 +1314,27 @@ class CreateMomentDialog(FluentDialog):
             return
         self.media_preview.set_media([_build_local_media_record(path) for path in self._media_paths])
         self.media_preview.show()
+
+    def _sync_publish_button(self) -> None:
+        if hasattr(self, "publish_button"):
+            self.publish_button.setEnabled(not self._oversized_media_paths())
+
+    def _oversized_media_paths(self) -> list[str]:
+        return [path for path in self._media_paths if _is_file_over_upload_limit(path)]
+
+    def _show_media_too_large_warning(self, paths: list[str]) -> None:
+        if not paths:
+            return
+        InfoBar.warning(
+            tr("discovery.publish.title", "Publish Moment"),
+            tr(
+                "discovery.dialog.media_too_large",
+                "Selected media exceeds {limit}. Please compress it before publishing.",
+                limit=_format_file_size(MOMENT_MEDIA_MAX_UPLOAD_BYTES),
+            ),
+            parent=self,
+            duration=2400,
+        )
 
     @staticmethod
     def _is_video_path(path: str) -> bool:
@@ -1793,6 +1887,26 @@ class DiscoveryInterface(QWidget):
                 visibility_user_ids=list(visibility_user_ids or []),
             )
             self._attach_local_media_previews(moment, uploaded_media)
+        except APIError as exc:
+            if exc.status_code == 413:
+                InfoBar.error(
+                    tr("discovery.publish.title", "Publish Moment"),
+                    tr(
+                        "discovery.publish.too_large",
+                        "Selected media exceeds {limit}. Please compress it before publishing.",
+                        limit=_format_file_size(MOMENT_MEDIA_MAX_UPLOAD_BYTES),
+                    ),
+                    parent=self.window(),
+                    duration=2600,
+                )
+            else:
+                InfoBar.error(
+                    tr("discovery.publish.title", "Publish Moment"),
+                    tr("discovery.publish.failed", "Publish failed. Please try again later."),
+                    parent=self.window(),
+                    duration=2200,
+                )
+            raise
         except Exception:
             InfoBar.error(
                 tr("discovery.publish.title", "Publish Moment"),

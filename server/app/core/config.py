@@ -60,7 +60,7 @@ class Settings:
     admin_backup_dir: str = field(default_factory=lambda: _env_str("ADMIN_BACKUP_DIR", ""))
     media_storage_backend: str = field(default_factory=lambda: _env_str("MEDIA_STORAGE_BACKEND", "local"))
     media_public_base_url: str = field(default_factory=lambda: _env_str("MEDIA_PUBLIC_BASE_URL", "/uploads"))
-    max_upload_bytes: int = field(default_factory=lambda: _env_int("MAX_UPLOAD_BYTES", 25 * 1024 * 1024))
+    max_upload_bytes: int = field(default_factory=lambda: _env_int("MAX_UPLOAD_BYTES", 100 * 1024 * 1024))
     api_v1_prefix: str = field(default_factory=lambda: _env_str("API_V1_PREFIX", "/api/v1"))
     cors_origins: tuple[str, ...] = field(default_factory=lambda: _env_csv("CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173"))
     rate_limit_login: int = field(default_factory=lambda: _env_int("RATE_LIMIT_LOGIN", 5))

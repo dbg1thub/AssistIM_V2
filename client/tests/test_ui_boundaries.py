@@ -34,6 +34,17 @@ def test_group_creation_dialogs_are_split_out_of_contact_interface() -> None:
 def test_discovery_ui_wires_moment_media_and_comment_image_boundaries() -> None:
     discovery_interface = Path('client/ui/windows/discovery_interface.py').read_text(encoding='utf-8')
 
+    assert 'from client.core.exceptions import APIError' in discovery_interface
+    assert 'MOMENT_MEDIA_MAX_UPLOAD_BYTES = 100 * 1024 * 1024' in discovery_interface
+    assert 'def _format_file_size(size_bytes: int) -> str:' in discovery_interface
+    assert 'def _is_file_over_upload_limit(file_path: str) -> bool:' in discovery_interface
+    assert 'def _oversized_media_paths(self) -> list[str]:' in discovery_interface
+    assert 'self.publish_button.setEnabled(not self._oversized_media_paths())' in discovery_interface
+    assert 'discovery.dialog.media_too_large' in discovery_interface
+    assert 'discovery.dialog.media_too_large_details' in discovery_interface
+    assert 'discovery.comments.image_too_large' in discovery_interface
+    assert 'exc.status_code == 413' in discovery_interface
+    assert 'discovery.publish.too_large' in discovery_interface
     assert 'class CreateMomentDialog' in discovery_interface
     assert 'QFileDialog.getOpenFileNames' in discovery_interface
     assert 'QFileDialog.getOpenFileName' in discovery_interface

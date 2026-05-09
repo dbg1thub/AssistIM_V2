@@ -93,6 +93,21 @@ def test_reload_settings_rebuilds_from_current_environment() -> None:
 
         reload_settings()
 
+
+def test_upload_size_limit_defaults_to_moment_video_budget(monkeypatch) -> None:
+    monkeypatch.delenv("MAX_UPLOAD_BYTES", raising=False)
+
+    assert Settings().max_upload_bytes == 100 * 1024 * 1024
+
+    env_files = (
+        Path("server/.env.example"),
+        Path("server/.env.production.example"),
+        Path("deploy/docker/server.env.example"),
+    )
+    for env_file in env_files:
+        assert "MAX_UPLOAD_BYTES=104857600" in env_file.read_text(encoding="utf-8")
+
+
 def test_security_helpers_use_explicit_settings_snapshot() -> None:
     custom_settings = Settings(secret_key="runtime-boundary-secret")
     token = create_access_token("user-1", "alice", settings=custom_settings)
