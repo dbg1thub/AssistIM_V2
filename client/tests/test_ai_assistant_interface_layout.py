@@ -264,6 +264,52 @@ def test_ai_assistant_tab_move_updates_memory_before_deferred_save(monkeypatch) 
         app.processEvents()
 
 
+def test_ai_assistant_pending_tab_order_survives_refresh_before_save(monkeypatch) -> None:
+    app = QApplication.instance() or QApplication([])
+    store = _FakeAssistantStore()
+    store.threads = [
+        AIThread(thread_id="thread-a", title="A", sort_order=0),
+        AIThread(thread_id="thread-b", title="B", sort_order=1),
+        AIThread(thread_id="thread-c", title="C", sort_order=2),
+    ]
+    store.messages = {
+        "thread-a": [_message("a-user", AIMessageRole.USER, "A prompt")],
+        "thread-b": [_message("b-user", AIMessageRole.USER, "B prompt")],
+        "thread-c": [_message("c-user", AIMessageRole.USER, "C prompt")],
+    }
+    monkeypatch.setattr(assistant_interface_module, "get_ai_assistant_store", lambda _owner_user_id: store)
+    widget = AIAssistantInterface(owner_user_id="user-a")
+    widget.resize(1000, 700)
+    widget.show()
+    app.processEvents()
+
+    async def scenario() -> None:
+        await widget._reload_threads(select_first=True)
+        assert _tab_route_keys(widget) == ["thread-a", "thread-b", "thread-c"]
+
+        widget._set_pending_thread_tab_order(["thread-c", "thread-a", "thread-b"])
+        assert [thread.thread_id for thread in widget._threads] == ["thread-c", "thread-a", "thread-b"]
+
+        await widget._refresh_threads()
+        widget._render_thread_tabs()
+        assert _tab_route_keys(widget) == ["thread-c", "thread-a", "thread-b"]
+        assert store.saved_orders == []
+
+        await widget._persist_thread_tab_order(
+            list(widget._pending_thread_tab_order),
+            version=widget._thread_tab_order_version,
+        )
+        assert store.saved_orders[-1] == ["thread-c", "thread-a", "thread-b"]
+        assert widget._pending_thread_tab_order == []
+        assert _tab_route_keys(widget) == ["thread-c", "thread-a", "thread-b"]
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        widget.close()
+        app.processEvents()
+
+
 def test_ai_assistant_streaming_layout_keeps_bottom_gap_stable() -> None:
     app = QApplication.instance() or QApplication([])
     widget = AIAssistantInterface(owner_user_id="user-a")

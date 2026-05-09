@@ -296,6 +296,8 @@ class AIAssistantInterface(QWidget):
         self._teardown_started = False
         self._threads: list[AIThread] = []
         self._empty_thread_id = ""
+        self._pending_thread_tab_order: list[str] = []
+        self._thread_tab_order_version = 0
         self._current_thread_id = ""
         self._messages: list[AIMessage] = []
         self._message_model: AIAssistantMessageModel | None = None
@@ -626,6 +628,8 @@ class AIAssistantInterface(QWidget):
         self._threads = await self._store.list_threads()
         empty_thread = await self._store.find_empty_thread()
         self._empty_thread_id = empty_thread.thread_id if empty_thread is not None else ""
+        if self._pending_thread_tab_order:
+            self._sync_thread_order_from_tab_keys(self._pending_thread_tab_order)
 
     def _threads_for_tab_display(self) -> list[AIThread]:
         if not self._empty_thread_id:
@@ -652,7 +656,7 @@ class AIAssistantInterface(QWidget):
         self.thread_tab_bar.blockSignals(False)
 
     def _on_thread_tab_moved(self, _from_index: int, _to_index: int) -> None:
-        self._sync_thread_order_from_tab_keys(self._current_thread_tab_order())
+        self._set_pending_thread_tab_order(self._current_thread_tab_order())
         self._persist_thread_order_timer.start()
 
     def _current_thread_tab_order(self) -> list[str]:
@@ -668,26 +672,52 @@ class AIAssistantInterface(QWidget):
         return thread_ids
 
     def _persist_current_thread_tab_order(self) -> None:
-        thread_ids = self._current_thread_tab_order()
+        thread_ids = list(self._pending_thread_tab_order or self._current_thread_tab_order())
         if len(thread_ids) <= 1:
             return
-        self._sync_thread_order_from_tab_keys(thread_ids)
+        version = self._thread_tab_order_version
         self._create_ui_task(
-            self._persist_thread_tab_order(thread_ids),
+            self._persist_thread_tab_order(thread_ids, version=version),
             "persist AI assistant thread tab order",
         )
 
-    async def _persist_thread_tab_order(self, thread_ids: list[str]) -> None:
+    async def _persist_thread_tab_order(self, thread_ids: list[str], *, version: int | None = None) -> None:
         await self._store.update_thread_order(thread_ids)
+        if version is None or version == self._thread_tab_order_version:
+            self._pending_thread_tab_order = []
         await self._refresh_threads()
 
+    def _set_pending_thread_tab_order(self, thread_ids: list[str]) -> None:
+        normalized = self._normalized_thread_tab_order(thread_ids)
+        if len(normalized) <= 1:
+            return
+        self._pending_thread_tab_order = normalized
+        self._thread_tab_order_version += 1
+        self._sync_thread_order_from_tab_keys(normalized)
+
+    def _normalized_thread_tab_order(self, thread_ids: list[str]) -> list[str]:
+        known_ids = {thread.thread_id for thread in self._threads}
+        ordered: list[str] = []
+        seen: set[str] = set()
+        for thread_id in thread_ids:
+            normalized = str(thread_id or "").strip()
+            if normalized and normalized in known_ids and normalized not in seen:
+                ordered.append(normalized)
+                seen.add(normalized)
+        ordered.extend(thread.thread_id for thread in self._threads if thread.thread_id not in seen)
+        if self._empty_thread_id in ordered:
+            ordered = [thread_id for thread_id in ordered if thread_id != self._empty_thread_id]
+            ordered.append(self._empty_thread_id)
+        return ordered
+
     def _sync_thread_order_from_tab_keys(self, thread_ids: list[str]) -> None:
-        if not thread_ids:
+        normalized = self._normalized_thread_tab_order(thread_ids)
+        if not normalized:
             return
         by_id = {thread.thread_id: thread for thread in self._threads}
         ordered: list[AIThread] = []
         seen: set[str] = set()
-        for thread_id in thread_ids:
+        for thread_id in normalized:
             thread = by_id.get(thread_id)
             if thread is None or thread_id in seen:
                 continue
