@@ -780,8 +780,26 @@ def test_fluent_dialog_title_is_centered() -> None:
     assert 'title_layout.addWidget(self.title_label, 1, Qt.AlignmentFlag.AlignVCenter)' in dialog
     assert 'title_layout.addWidget(self.close_button, 0, Qt.AlignmentFlag.AlignTop)' in dialog
     assert 'def _sync_title_left_spacer_width(self) -> None:' in dialog
-    assert 'self.title_left_spacer.setFixedWidth(self.close_button.width())' in dialog
+    assert 'width = self.close_button.width() if self.close_button.width() > 0 else self.CLOSE_BUTTON_WIDTH' in dialog
+    assert 'self.title_left_spacer.setFixedWidth(width)' in dialog
+    assert 'sizeHint().width()' not in dialog
+    assert 'sizeHint().height()' not in dialog
     assert 'self._sync_title_left_spacer_width()' in dialog
+
+
+def test_fluent_exec_dialogs_cache_payload_before_accepting() -> None:
+    flyout = Path('client/ui/widgets/user_profile_flyout.py').read_text(encoding='utf-8')
+    profile_block = flyout.split('class ProfileEditDialog', 1)[1].split('class ProfileCard', 1)[0]
+    password_block = flyout.split('class ChangePasswordDialog', 1)[1].split('class DeviceSecurityDialog', 1)[0]
+    profile_open_block = flyout.split('def open_profile_editor', 1)[1].split('def open_password_change_dialog', 1)[0]
+    password_open_block = flyout.split('def open_password_change_dialog', 1)[1].split('def open_device_security_dialog', 1)[0]
+
+    assert 'self._submitted_payload: dict[str, str | bool | None] | None = None' in profile_block
+    assert 'self._submitted_payload = self.profile_payload()' in profile_block
+    assert 'dialog._submitted_payload or dialog.profile_payload()' in profile_open_block
+    assert 'self._submitted_payload: tuple[str, str] | None = None' in password_block
+    assert 'self._submitted_payload = (current_password, new_password)' in password_block
+    assert 'dialog._submitted_payload or dialog.password_payload()' in password_open_block
 
 
 def test_user_profile_flyout_exposes_authenticated_password_change() -> None:
@@ -793,7 +811,7 @@ def test_user_profile_flyout_exposes_authenticated_password_change() -> None:
     assert 'view.passwordChangeRequested.connect(self._handle_password_change_from_flyout)' in flyout
     assert 'dialog = ChangePasswordDialog(self.window())' in flyout
     assert 'await self._auth_controller.change_password(current_password, new_password)' in flyout
-    assert 'self._set_password_task(self._change_password_async(dialog.password_payload()))' in flyout
+    assert 'self._set_password_task(self._change_password_async(dialog._submitted_payload or dialog.password_payload()))' in flyout
 
 
 def test_user_profile_flyout_exposes_readonly_e2ee_device_security() -> None:

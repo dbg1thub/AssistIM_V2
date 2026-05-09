@@ -55,6 +55,7 @@ class FluentDialog(QDialog):
     """A frameless Fluent visual shell that keeps Qt's standard dialog ownership."""
 
     TITLE_BAR_HEIGHT = 48
+    CLOSE_BUTTON_WIDTH = 48
 
     def __init__(
         self,
@@ -100,8 +101,7 @@ class FluentDialog(QDialog):
         title_layout.setSpacing(0)
 
         self.title_left_spacer = QWidget(self.title_bar)
-        self.title_left_spacer.setFixedHeight(self.close_button.sizeHint().height())
-        self.title_left_spacer.setFixedWidth(self.close_button.sizeHint().width())
+        self.title_left_spacer.setFixedWidth(self.CLOSE_BUTTON_WIDTH)
 
         self.title_label = SubtitleLabel(str(title or ""), self.title_bar)
         self.title_label.setObjectName("fluentDialogTitleLabel")
@@ -166,8 +166,8 @@ class FluentDialog(QDialog):
         self._start_show_animation()
 
     def _sync_title_left_spacer_width(self) -> None:
-        if self.close_button.width() > 0:
-            self.title_left_spacer.setFixedWidth(self.close_button.width())
+        width = self.close_button.width() if self.close_button.width() > 0 else self.CLOSE_BUTTON_WIDTH
+        self.title_left_spacer.setFixedWidth(width)
 
     def _start_show_animation(self) -> None:
         if self._show_animation_group is not None:

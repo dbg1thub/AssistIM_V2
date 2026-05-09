@@ -164,6 +164,7 @@ class ChangePasswordDialog(FluentDialog):
 
     def __init__(self, parent=None):
         super().__init__(parent, title=tr("profile.password.change.title", "Change Password"))
+        self._submitted_payload: tuple[str, str] | None = None
         self.setWindowTitle(tr("profile.password.change.title", "Change Password"))
         self.setMinimumWidth(420)
         self.setModal(True)
@@ -248,6 +249,7 @@ class ChangePasswordDialog(FluentDialog):
             )
             self.confirm_password_edit.setFocus()
             return
+        self._submitted_payload = (current_password, new_password)
         self.accept()
 
 
@@ -676,6 +678,7 @@ class ProfileEditDialog(FluentDialog):
         self._avatar_file_path = ""
         self._reset_avatar_requested = False
         self._email_code_task: asyncio.Task | None = None
+        self._submitted_payload: dict[str, str | bool | None] | None = None
         self._email_code_busy = False
         self._email_countdown = 0
         self._email_timer = QTimer(self)
@@ -1061,6 +1064,7 @@ class ProfileEditDialog(FluentDialog):
                 self.email_code_edit.setFocus()
                 return
 
+        self._submitted_payload = self.profile_payload()
         self.accept()
 
 
@@ -1234,7 +1238,7 @@ class UserProfileCoordinator(QWidget):
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
 
-        self._set_save_task(self._save_profile_async(dialog.profile_payload()))
+        self._set_save_task(self._save_profile_async(dialog._submitted_payload or dialog.profile_payload()))
 
     def open_password_change_dialog(self) -> None:
         """Open the authenticated password-change dialog."""
@@ -1245,7 +1249,7 @@ class UserProfileCoordinator(QWidget):
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
 
-        self._set_password_task(self._change_password_async(dialog.password_payload()))
+        self._set_password_task(self._change_password_async(dialog._submitted_payload or dialog.password_payload()))
 
     def open_device_security_dialog(self) -> None:
         """Open the readonly E2EE device inventory dialog."""
