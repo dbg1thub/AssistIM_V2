@@ -76,6 +76,17 @@ def test_sidebar_items_use_compact_consistent_spacing() -> None:
     assert 'self._friend_sidebar_title(contact),' in create_blocked_block
 
 
+def test_main_installs_fluentwidgets_translator_after_i18n_initialization() -> None:
+    main_py = Path('client/main.py').read_text(encoding='utf-8')
+
+    assert 'from qfluentwidgets import FluentTranslator, InfoBar, setTheme, setThemeColor' in main_py
+    assert 'from client.core.i18n import current_locale, initialize_i18n, tr' in main_py
+    assert 'initialize_i18n(cfg.get(cfg.language))' in main_py
+    assert 'fluent_translator = FluentTranslator(current_locale())' in main_py
+    assert 'qt_app.installTranslator(fluent_translator)' in main_py
+    assert 'qt_app._assistim_fluent_translator = fluent_translator' in main_py
+
+
 def test_discovery_ui_wires_moment_media_and_comment_image_boundaries() -> None:
     discovery_interface = Path('client/ui/windows/discovery_interface.py').read_text(encoding='utf-8')
 

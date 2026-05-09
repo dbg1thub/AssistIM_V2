@@ -21,12 +21,12 @@ import dateutil.tz  # noqa: F401
 from PySide6.QtCore import QLockFile, QTimer
 from PySide6.QtWidgets import QApplication, QMessageBox, QPushButton
 from qasync import QEventLoop
-from qfluentwidgets import InfoBar, setTheme, setThemeColor
+from qfluentwidgets import FluentTranslator, InfoBar, setTheme, setThemeColor
 
 from client.core import logging
 from client.core.config_backend import UI_CONFIG_PATH, get_config
 from client.core.config import cfg
-from client.core.i18n import initialize_i18n, tr
+from client.core.i18n import current_locale, initialize_i18n, tr
 from client.core.logging import setup_logging
 from client.storage.database import get_database, peek_database
 from client.network.http_client import get_http_client, peek_http_client
@@ -1385,6 +1385,9 @@ def main() -> int:
 
     qt_app = QApplication([sys.argv[0], *qt_unknown_args])
     initialize_i18n(cfg.get(cfg.language))
+    fluent_translator = FluentTranslator(current_locale())
+    qt_app.installTranslator(fluent_translator)
+    qt_app._assistim_fluent_translator = fluent_translator
     qt_app.setApplicationName(tr("common.app_name", "AssistIM"))
     setTheme(cfg.get(cfg.themeMode), lazy=True)
     setThemeColor(cfg.get(cfg.themeColor))
