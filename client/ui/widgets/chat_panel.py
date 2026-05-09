@@ -395,7 +395,7 @@ class ChatPanel(QWidget):
 
         self.composer_resize_handle = QFrame(self.chat_page)
         self.composer_resize_handle.setObjectName("chatComposerResizeHandle")
-        self.composer_resize_handle.setCursor(Qt.CursorShape.SizeVerCursor)
+        self.composer_resize_handle.setCursor(Qt.CursorShape.SplitVCursor)
         self.composer_resize_handle.setMouseTracking(True)
         self.composer_resize_handle.installEventFilter(self)
         self.message_input.installEventFilter(self)
@@ -1136,10 +1136,23 @@ class ChatPanel(QWidget):
             handle_height = self.COMPOSER_RESIZE_HANDLE_HEIGHT
             self.composer_resize_handle.setGeometry(x, y - handle_height // 2, width, handle_height)
         self._layout_message_scrollbar(input_top_y=y)
+        self._sync_message_bottom_reserved_height(height)
         self.message_input.setGeometry(x, y, width, height)
         self.message_input.raise_()
         if self.composer_resize_handle is not None:
             self.composer_resize_handle.raise_()
+
+    def _sync_message_bottom_reserved_height(self, height: int) -> None:
+        if self._message_delegate is None or self._message_model is None:
+            return
+        if not self._message_delegate.set_bottom_reserved_height(height):
+            return
+        row = self._message_model.rowCount() - 1
+        if row < 0:
+            return
+        last_index = self._message_model.index(row, 0)
+        self._message_delegate.sizeHintChanged.emit(last_index)
+        self.message_list.updateGeometries()
 
     def _layout_message_scrollbar(self, *, input_top_y: int) -> None:
         """Keep the Fluent scrollbar above the floating composer without changing the viewport."""

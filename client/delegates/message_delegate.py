@@ -170,6 +170,7 @@ class MessageDelegate(QStyledItemDelegate):
         self._active_session_type = ""
         self._show_group_member_nickname = True
         self._group_members_by_id: dict[str, dict[str, object]] = {}
+        self._bottom_reserved_height = 0
 
     def set_session(self, session) -> bool:
         """Update the active session context used for group sender-label rendering."""
@@ -201,6 +202,18 @@ class MessageDelegate(QStyledItemDelegate):
         self._group_members_by_id = next_members_by_id
         return changed
 
+    def set_bottom_reserved_height(self, height: int) -> bool:
+        """Reserve scrollable space below the last visible row for the floating composer."""
+        normalized = max(0, int(height or 0))
+        if normalized == self._bottom_reserved_height:
+            return False
+        self._bottom_reserved_height = normalized
+        return True
+
+    def _is_last_display_row(self, index: QModelIndex) -> bool:
+        model = index.model()
+        return index.isValid() and model is not None and index.row() == model.rowCount() - 1
+
     def sizeHint(self, option: QStyleOptionViewItem, index: QModelIndex) -> QSize:
         """Return message item size based on type and timestamp visibility."""
         message = index.data(Qt.ItemDataRole.UserRole)
@@ -208,14 +221,16 @@ class MessageDelegate(QStyledItemDelegate):
             return QSize(option.rect.width(), 0)
 
         display_kind = self._display_kind(index, message)
+        reserved_height = self._bottom_reserved_height if self._is_last_display_row(index) else 0
         if display_kind == MessageModel.DISPLAY_TIME_SEPARATOR:
-            return QSize(option.rect.width(), self.TIME_BLOCK_HEIGHT + self.TIME_SPACING * 2)
+            return QSize(option.rect.width(), self.TIME_BLOCK_HEIGHT + self.TIME_SPACING * 2 + reserved_height)
         if display_kind == MessageModel.DISPLAY_RECALL_NOTICE:
-            return QSize(option.rect.width(), self.TIME_BLOCK_HEIGHT + self.TIME_SPACING * 2)
+            return QSize(option.rect.width(), self.TIME_BLOCK_HEIGHT + self.TIME_SPACING * 2 + reserved_height)
 
         content_size = self._bubble_size(message, option.rect.width())
         sender_label_block_height = self._group_sender_label_block_height(message)
         total_height = max(content_size.height(), self.AVATAR_SIZE) + sender_label_block_height + 18
+        total_height += reserved_height
         return QSize(option.rect.width(), total_height)
 
     def paint(self, painter: QPainter, option: QStyleOptionViewItem, index: QModelIndex) -> None:

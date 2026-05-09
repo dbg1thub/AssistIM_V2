@@ -577,6 +577,7 @@ def test_chat_message_input_uses_floating_card_style_without_overlay_or_cursor_o
     chat_panel = Path('client/ui/widgets/chat_panel.py').read_text(encoding='utf-8')
     fluent_splitter = Path('client/ui/widgets/fluent_splitter.py').read_text(encoding='utf-8')
     message_input = Path('client/ui/widgets/message_input.py').read_text(encoding='utf-8')
+    message_delegate = Path('client/delegates/message_delegate.py').read_text(encoding='utf-8')
     light_input_qss = Path('client/ui/styles/qss/light/message_input.qss').read_text(encoding='utf-8')
     dark_input_qss = Path('client/ui/styles/qss/dark/message_input.qss').read_text(encoding='utf-8')
     light_chat_qss = Path('client/ui/styles/qss/light/chat_panel.qss').read_text(encoding='utf-8')
@@ -609,7 +610,7 @@ def test_chat_message_input_uses_floating_card_style_without_overlay_or_cursor_o
     assert 'composer_container' not in chat_panel
     assert 'self.composer_resize_handle = QFrame(self.chat_page)' in chat_panel
     assert 'self.composer_resize_handle.setObjectName("chatComposerResizeHandle")' in chat_panel
-    assert 'self.composer_resize_handle.setCursor(Qt.CursorShape.SizeVerCursor)' in chat_panel
+    assert 'self.composer_resize_handle.setCursor(Qt.CursorShape.SplitVCursor)' in chat_panel
     assert 'self.composer_resize_handle.installEventFilter(self)' in chat_panel
     assert 'def _handle_composer_resize_handle_event(self, event) -> bool:' in chat_panel
     assert 'self._composer_height = max(self.COMPOSER_MIN_HEIGHT, min(self.COMPOSER_MAX_HEIGHT, height))' in chat_panel
@@ -618,6 +619,10 @@ def test_chat_message_input_uses_floating_card_style_without_overlay_or_cursor_o
     assert 'height = max(self.COMPOSER_MIN_HEIGHT, min(self.COMPOSER_MAX_HEIGHT, self._composer_height))' in chat_panel
     assert 'y = content_rect.bottom() - height + 1' in chat_panel
     assert 'self._layout_message_scrollbar(input_top_y=y)' in chat_panel
+    assert 'self._sync_message_bottom_reserved_height(height)' in chat_panel
+    assert 'def _sync_message_bottom_reserved_height(self, height: int) -> None:' in chat_panel
+    assert 'self._message_delegate.set_bottom_reserved_height(height)' in chat_panel
+    assert 'self._message_delegate.sizeHintChanged.emit(last_index)' in chat_panel
     assert 'def _layout_message_scrollbar(self, *, input_top_y: int) -> None:' in chat_panel
     assert 'self.message_list.mapFrom(self.chat_page, QPoint(0, input_top_y)).y()' in chat_panel
     assert 'bar.setGeometry(bar_x, 1, 12, bar_height)' in chat_panel
@@ -631,6 +636,12 @@ def test_chat_message_input_uses_floating_card_style_without_overlay_or_cursor_o
     assert 'self.message_list.setViewportMargins(0, 0, 0, self.MESSAGE_LIST_BOTTOM_MARGIN)' in chat_panel
     assert 'self.chat_content_layout.setContentsMargins(0, 0, 0, 0)' in chat_panel
     assert 'self.chat_content_layout.setContentsMargins(0, 0, 0, height)' not in chat_panel
+    assert 'def set_bottom_reserved_height(self, height: int) -> bool:' in message_delegate
+    assert 'self._bottom_reserved_height = 0' in message_delegate
+    assert 'reserved_height = self._bottom_reserved_height if self._is_last_display_row(index) else 0' in message_delegate
+    assert 'self.TIME_BLOCK_HEIGHT + self.TIME_SPACING * 2 + reserved_height' in message_delegate
+    assert 'total_height += reserved_height' in message_delegate
+    assert 'def _is_last_display_row(self, index: QModelIndex) -> bool:' in message_delegate
 
     assert 'self.editor_card.setMaximumWidth(1100)' not in setup_block
     assert 'Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignBottom' not in setup_block
