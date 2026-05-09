@@ -815,6 +815,35 @@ def test_schema_compatibility_repairs_missing_group_announcement_columns_even_at
     assert {"announcement_message_id", "announcement_author_id", "announcement_published_at"}.issubset(group_columns)
 
 
+def test_schema_compatibility_repairs_missing_friend_remark_column_at_runtime_head() -> None:
+    from sqlalchemy import create_engine, inspect, text
+
+    from app.core import schema_compat as schema_compat_module
+    from app.core.database import Base
+    from app.models import admin, device, email_verification, file, group, message, moment, session, user  # noqa: F401
+
+    engine = create_engine("sqlite+pysqlite:///:memory:", future=True)
+    try:
+        Base.metadata.create_all(bind=engine)
+        with engine.begin() as connection:
+            connection.execute(text("CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL)"))
+            connection.execute(
+                text("INSERT INTO alembic_version (version_num) VALUES (:revision)"),
+                {"revision": schema_compat_module.RUNTIME_SCHEMA_ALEMBIC_REVISION},
+            )
+            connection.execute(text("ALTER TABLE friends DROP COLUMN remark"))
+
+        assert schema_compat_module.has_current_runtime_schema(engine) is False
+        applied = schema_compat_module.ensure_schema_compatibility(engine)
+        friend_columns = {column["name"] for column in inspect(engine).get_columns("friends")}
+
+        assert "friends.remark" in applied
+        assert "remark" in friend_columns
+        assert schema_compat_module.has_current_runtime_schema(engine) is True
+    finally:
+        engine.dispose()
+
+
 
 def test_auth_schema_contracts_are_strict_and_match_runtime_payloads() -> None:
     from app.schemas.auth import (

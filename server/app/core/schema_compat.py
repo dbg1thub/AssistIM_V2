@@ -209,7 +209,7 @@ def _has_indexes(bind: Engine | Connection, table_name: str, required_indexes: I
     return all(index_name in indexes for index_name in required_indexes)
 
 
-RUNTIME_SCHEMA_ALEMBIC_REVISION = "20260505_0022"
+RUNTIME_SCHEMA_ALEMBIC_REVISION = "20260509_0023"
 
 def _parse_revision(revision: str) -> tuple[int, int] | None:
     candidate = str(revision or "").strip()
@@ -271,6 +271,7 @@ def _has_current_runtime_schema(bind: Engine | Connection) -> bool:
         and _has_columns(bind, "sessions", SESSION_COLUMN_DDL)
         and _has_columns(bind, "session_members", SESSION_MEMBER_COLUMN_DDL)
         and _has_columns(bind, "files", FILE_COLUMN_DDL)
+        and _has_columns(bind, "friends", FRIEND_COLUMN_DDL)
         and _has_indexes(bind, "users", USER_PROFILE_INDEX_DDL)
         and _has_username_lower_index(bind)
         and _has_email_lower_index(bind)
