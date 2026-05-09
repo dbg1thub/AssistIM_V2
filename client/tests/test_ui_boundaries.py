@@ -754,13 +754,17 @@ def test_user_profile_edit_dialog_uses_fluent_controls_and_profile_only_fields()
     dialog_block = flyout.split('class ProfileEditDialog', 1)[1].split('class ProfileCard', 1)[0]
     profile_fields = Path('client/core/profile_fields.py').read_text(encoding='utf-8')
 
-    assert 'DateEdit' in dialog_block
     assert 'ComboBox' in dialog_block
     assert 'QFormLayout' not in dialog_block
     assert 'QDateEdit' not in dialog_block
     assert 'QComboBox' not in dialog_block
+    assert 'DateEdit' not in dialog_block
+    assert 'self.phone_edit' not in dialog_block
+    assert 'self.birthday_edit' not in dialog_block
     assert 'self.status_combo' not in dialog_block
     assert '"status":' not in dialog_block
+    assert '"phone":' not in dialog_block
+    assert '"birthday":' not in dialog_block
     assert 'title = SubtitleLabel(tr("profile.edit.title"' not in dialog_block
     assert 'self.region_country_combo = ComboBox(self)' in dialog_block
     assert 'self.region_area_combo = ComboBox(self)' in dialog_block
@@ -775,6 +779,9 @@ def test_fluent_dialog_title_is_centered() -> None:
     assert 'title_layout.addWidget(self.title_left_spacer, 0)' in dialog
     assert 'title_layout.addWidget(self.title_label, 1, Qt.AlignmentFlag.AlignVCenter)' in dialog
     assert 'title_layout.addWidget(self.close_button, 0, Qt.AlignmentFlag.AlignTop)' in dialog
+    assert 'def _sync_title_left_spacer_width(self) -> None:' in dialog
+    assert 'self.title_left_spacer.setFixedWidth(self.close_button.width())' in dialog
+    assert 'self._sync_title_left_spacer_width()' in dialog
 
 
 def test_user_profile_flyout_exposes_authenticated_password_change() -> None:

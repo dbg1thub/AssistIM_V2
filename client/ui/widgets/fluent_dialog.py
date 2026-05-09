@@ -100,7 +100,8 @@ class FluentDialog(QDialog):
         title_layout.setSpacing(0)
 
         self.title_left_spacer = QWidget(self.title_bar)
-        self.title_left_spacer.setFixedSize(self.close_button.sizeHint())
+        self.title_left_spacer.setFixedHeight(self.close_button.sizeHint().height())
+        self.title_left_spacer.setFixedWidth(self.close_button.sizeHint().width())
 
         self.title_label = SubtitleLabel(str(title or ""), self.title_bar)
         self.title_label.setObjectName("fluentDialogTitleLabel")
@@ -123,6 +124,7 @@ class FluentDialog(QDialog):
 
         qconfig.themeChangedFinished.connect(self._apply_fluent_surface)
         self._apply_fluent_surface()
+        self._sync_title_left_spacer_width()
 
     def setTitleText(self, title: str) -> None:
         self.setWindowTitle(str(title or ""))
@@ -154,9 +156,18 @@ class FluentDialog(QDialog):
         self._drag_active = False
         super().closeEvent(event)
 
+    def resizeEvent(self, event) -> None:
+        self._sync_title_left_spacer_width()
+        super().resizeEvent(event)
+
     def showEvent(self, event) -> None:
         super().showEvent(event)
+        self._sync_title_left_spacer_width()
         self._start_show_animation()
+
+    def _sync_title_left_spacer_width(self) -> None:
+        if self.close_button.width() > 0:
+            self.title_left_spacer.setFixedWidth(self.close_button.width())
 
     def _start_show_animation(self) -> None:
         if self._show_animation_group is not None:

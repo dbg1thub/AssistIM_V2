@@ -8,7 +8,7 @@ import os
 import re
 from typing import Any, Optional
 
-from PySide6.QtCore import QDate, Qt, QTimer, Signal
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QDialog,
     QFileDialog,
@@ -23,7 +23,6 @@ from qfluentwidgets import (
     BodyLabel,
     CaptionLabel,
     ComboBox,
-    DateEdit,
     FlyoutAnimationType,
     HyperlinkLabel,
     InfoBar,
@@ -47,7 +46,6 @@ from client.core.profile_fields import (
     normalize_profile_choice,
     normalize_profile_gender,
     profile_gender_options,
-    qdate_from_profile_birthday,
 )
 from client.ui.controllers.auth_controller import get_auth_controller
 from client.ui.widgets.fluent_divider import FluentDivider
@@ -58,8 +56,6 @@ setup_logging()
 logger = logging.get_logger(__name__)
 
 _EMAIL_PATTERN = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
-_PHONE_PATTERN = re.compile(r"^\+?[0-9][0-9()\-\.\s]{5,31}$")
-_EMPTY_BIRTHDAY = QDate(1900, 1, 1)
 _REGION_OPTIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("", ("",)),
     (
@@ -771,29 +767,6 @@ class ProfileEditDialog(FluentDialog):
         email_code_layout.addWidget(self.email_code_edit, 1)
         email_code_layout.addWidget(self.email_send_code_button, 0)
 
-        self.phone_edit = LineEdit(self)
-        self.phone_edit.setText(str(self._user.get("phone", "") or ""))
-        self.phone_edit.setPlaceholderText(tr("profile.edit.phone.placeholder", "Phone"))
-        self.phone_edit.setClearButtonEnabled(True)
-        self.phone_edit.setMaxLength(32)
-
-        self.birthday_edit = DateEdit(self)
-        self.birthday_edit.setCalendarPopup(True)
-        self.birthday_edit.setDisplayFormat("yyyy-MM-dd")
-        self.birthday_edit.setMinimumDate(_EMPTY_BIRTHDAY)
-        self.birthday_edit.setMaximumDate(QDate.currentDate())
-        self.birthday_edit.setSpecialValueText(tr("profile.edit.birthday.empty", "Not set"))
-        self.birthday_edit.setDate(qdate_from_profile_birthday(self._user.get("birthday"), _EMPTY_BIRTHDAY))
-
-        birthday_row = QWidget(self)
-        birthday_layout = QHBoxLayout(birthday_row)
-        birthday_layout.setContentsMargins(0, 0, 0, 0)
-        birthday_layout.setSpacing(8)
-        birthday_layout.addWidget(self.birthday_edit, 1)
-        birthday_clear_button = PushButton(tr("profile.edit.birthday.clear", "Clear"), self)
-        birthday_clear_button.clicked.connect(lambda: self.birthday_edit.setDate(_EMPTY_BIRTHDAY))
-        birthday_layout.addWidget(birthday_clear_button, 0)
-
         self.gender_combo = ComboBox(self)
         for value, label in profile_gender_options(include_blank=True):
             self.gender_combo.addItem(label, userData=value)
@@ -805,8 +778,6 @@ class ProfileEditDialog(FluentDialog):
         form_layout.addWidget(self._create_form_row(tr("contact.detail.label.email", "Email"), self.email_edit))
         self.email_code_label = CaptionLabel(tr("auth.field.email_code", "Email Verification Code"), self)
         form_layout.addWidget(self._create_form_row(self.email_code_label, self.email_code_row))
-        form_layout.addWidget(self._create_form_row(tr("contact.detail.label.phone", "Phone"), self.phone_edit))
-        form_layout.addWidget(self._create_form_row(tr("contact.detail.label.birthday", "Birthday"), birthday_row))
         form_layout.addWidget(self._create_form_row(tr("contact.detail.label.gender", "Gender"), self.gender_combo))
 
         button_row = QHBoxLayout()
@@ -833,18 +804,12 @@ class ProfileEditDialog(FluentDialog):
 
     def profile_payload(self) -> dict[str, str | bool | None]:
         """Return dialog values after acceptance."""
-        birthday_value = ""
-        if self.birthday_edit.date() != _EMPTY_BIRTHDAY:
-            birthday_value = self.birthday_edit.date().toString("yyyy-MM-dd")
-
         return {
             "nickname": self.nickname_edit.text().strip(),
             "signature": self.signature_edit.text().strip(),
             "region": self._region_value(),
             "email": self.email_edit.text().strip(),
             "email_code": self.email_code_edit.text().strip() if self._email_changed() and self.email_edit.text().strip() else None,
-            "phone": self.phone_edit.text().strip(),
-            "birthday": birthday_value,
             "gender": str(self.gender_combo.currentData() or ""),
             "avatar_file_path": self._avatar_file_path,
             "reset_avatar": self._reset_avatar_requested,
@@ -1095,17 +1060,6 @@ class ProfileEditDialog(FluentDialog):
                 )
                 self.email_code_edit.setFocus()
                 return
-
-        phone_value = self.phone_edit.text().strip()
-        if phone_value and not _PHONE_PATTERN.fullmatch(phone_value):
-            InfoBar.warning(
-                tr("profile.edit.title", "Edit Profile"),
-                tr("profile.edit.phone.invalid", "Please enter a valid phone number."),
-                parent=self,
-                duration=1800,
-            )
-            self.phone_edit.setFocus()
-            return
 
         self.accept()
 
@@ -1377,8 +1331,6 @@ class UserProfileCoordinator(QWidget):
                 region=str(payload.get("region", "") or "").strip(),
                 email=str(payload.get("email", "") or "").strip(),
                 email_code=str(payload.get("email_code", "") or "").strip() or None,
-                phone=str(payload.get("phone", "") or "").strip(),
-                birthday=payload.get("birthday"),
                 gender=normalize_profile_gender(payload.get("gender")),
                 avatar_file_path=avatar_file_path or None,
                 reset_avatar=reset_avatar and not avatar_file_path,
