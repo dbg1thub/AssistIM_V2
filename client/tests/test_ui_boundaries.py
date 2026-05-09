@@ -549,7 +549,6 @@ def test_chat_interface_async_message_action_results_are_session_generation_guar
 def test_voice_messages_have_send_open_and_click_paths_without_alt_shortcut() -> None:
     chat_interface = Path('client/ui/windows/chat_interface.py').read_text(encoding='utf-8')
     chat_panel = Path('client/ui/widgets/chat_panel.py').read_text(encoding='utf-8')
-    fluent_splitter = Path('client/ui/widgets/fluent_splitter.py').read_text(encoding='utf-8')
     message_input = Path('client/ui/widgets/message_input.py').read_text(encoding='utf-8')
     message_manager = Path('client/managers/message_manager.py').read_text(encoding='utf-8')
     message_delegate = Path('client/delegates/message_delegate.py').read_text(encoding='utf-8')
@@ -595,31 +594,34 @@ def test_chat_message_input_uses_floating_card_style_without_overlay_or_cursor_o
 
     assert 'AIAssistantFloatingComposerOverlay' not in chat_panel
     assert 'chatFloatingComposerOverlay' not in chat_panel
-    assert 'self.content_splitter = FluentSplitter(Qt.Orientation.Vertical, self.chat_page)' in chat_panel
-    assert 'self.content_splitter.setHandleIndicatorVisible(False)' in chat_panel
-    assert 'self.content_splitter.splitterMoved.connect(self._schedule_restore_message_viewport)' in chat_panel
+    assert 'FluentSplitter' not in chat_panel
+    assert 'chatContentSplitter' not in chat_panel
+    assert 'self.chat_content_area = QWidget(self.chat_page)' in chat_panel
+    assert 'self.chat_content_area.setObjectName("chatContentArea")' in chat_panel
+    assert 'self.chat_content_layout.addWidget(self.message_list, 1)' in chat_panel
+    assert 'self.chat_layout.addWidget(self.chat_content_area, 1)' in chat_panel
     assert 'MESSAGE_INPUT_FLOAT_OVERLAP' not in chat_panel
     assert 'MESSAGE_LIST_BOTTOM_MARGIN = 8' in chat_panel
     assert 'COMPOSER_MIN_HEIGHT = 180' in chat_panel
-    assert 'composer_container.setObjectName("chatInputSafeArea")' in chat_panel
-    assert 'composer_container.setMinimumHeight(self.COMPOSER_MIN_HEIGHT)' in chat_panel
-    assert 'self._composer_input_slot.setObjectName("chatInputSlot")' in chat_panel
-    assert 'self._composer_input_slot.setMinimumHeight(self.COMPOSER_MIN_HEIGHT)' in chat_panel
+    assert 'COMPOSER_MAX_HEIGHT = 340' in chat_panel
     assert 'self.message_input.setMinimumHeight(self.COMPOSER_MIN_HEIGHT)' in chat_panel
-    assert 'composer_layout.addWidget(self._composer_input_slot, 1)' in chat_panel
     assert 'composer_layout.addWidget(self.message_input, 1)' not in chat_panel
-    assert 'self.content_splitter.splitterMoved.connect(self._on_content_splitter_moved)' in chat_panel
+    assert 'composer_container' not in chat_panel
+    assert 'self.composer_resize_handle = QFrame(self.chat_page)' in chat_panel
+    assert 'self.composer_resize_handle.setObjectName("chatComposerResizeHandle")' in chat_panel
+    assert 'self.composer_resize_handle.setCursor(Qt.CursorShape.SizeVerCursor)' in chat_panel
+    assert 'self.composer_resize_handle.installEventFilter(self)' in chat_panel
+    assert 'def _handle_composer_resize_handle_event(self, event) -> bool:' in chat_panel
+    assert 'self._composer_height = max(self.COMPOSER_MIN_HEIGHT, min(self.COMPOSER_MAX_HEIGHT, height))' in chat_panel
     assert 'def _layout_message_input_overlay(self) -> None:' in chat_panel
-    assert 'y = splitter_rect.y() + composer_rect.y() + banner_height' in chat_panel
-    assert 'height = max(self.COMPOSER_MIN_HEIGHT, composer_rect.height() - banner_height)' in chat_panel
+    assert 'content_rect = self.chat_content_area.geometry()' in chat_panel
+    assert 'height = max(self.COMPOSER_MIN_HEIGHT, min(self.COMPOSER_MAX_HEIGHT, self._composer_height))' in chat_panel
+    assert 'y = content_rect.bottom() - height + 1' in chat_panel
+    assert 'self.composer_resize_handle.setGeometry(x, y - handle_height // 2, width, handle_height)' in chat_panel
     assert 'self.message_input.raise_()' in chat_panel
+    assert 'self.composer_resize_handle.raise_()' in chat_panel
     assert 'self.message_input.setMinimumHeight(0)' not in chat_panel
     assert 'self.message_input.setMaximumHeight(' not in chat_panel
-    assert 'composer_container.setMaximumHeight(340)' in chat_panel
-    assert '_ComposerResizeHandle' not in chat_panel
-    assert 'def setHandleIndicatorVisible(self, visible: bool) -> None:' in fluent_splitter
-    assert 'def isHandleIndicatorVisible(self) -> bool:' in fluent_splitter
-    assert 'if not self.splitter().isHandleIndicatorVisible():' in fluent_splitter
 
     assert 'self.editor_card.setMaximumWidth(1100)' not in setup_block
     assert 'Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignBottom' not in setup_block
@@ -682,11 +684,12 @@ def test_chat_message_input_uses_floating_card_style_without_overlay_or_cursor_o
         assert 'border-top:' not in message_toolbar_block
 
     for qss in (light_chat_qss, dark_chat_qss):
-        assert 'QSplitter#chatContentSplitter::handle:vertical' in qss
-        assert 'background: transparent;' in qss.split('QSplitter#chatContentSplitter::handle:vertical', 1)[1].split('}', 1)[0]
-        assert 'border: none;' in qss.split('QSplitter#chatContentSplitter::handle:vertical', 1)[1].split('}', 1)[0]
-        assert 'QWidget#chatInputSafeArea' in qss
-        assert 'QWidget#chatInputSlot' in qss
+        assert 'QSplitter#chatContentSplitter' not in qss
+        assert 'QWidget#chatContentArea' in qss
+        assert 'QFrame#chatComposerResizeHandle' in qss
+        resize_handle_block = qss.split('QFrame#chatComposerResizeHandle {', 1)[1].split('}', 1)[0]
+        assert 'background: transparent;' in resize_handle_block
+        assert 'border: none;' in resize_handle_block
 
 
 def test_contact_interface_request_and_group_actions_avoid_full_reload() -> None:

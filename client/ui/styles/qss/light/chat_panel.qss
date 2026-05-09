@@ -1,6 +1,7 @@
 QWidget#ChatPanel,
 QWidget#chatWelcomeWidget,
-QWidget#chatPage {
+QWidget#chatPage,
+QWidget#chatContentArea {
     background: transparent;
 }
 
@@ -9,28 +10,9 @@ QListView#messageListView {
     border: none;
 }
 
-QWidget#chatInputSafeArea,
-QWidget#chatInputSlot {
+QFrame#chatComposerResizeHandle {
     background: transparent;
     border: none;
-}
-
-QSplitter#chatContentSplitter::handle:vertical {
-    background: transparent;
-    border: none;
-    margin: 0;
-}
-
-QSplitter#chatContentSplitter::handle:vertical:hover {
-    background: transparent;
-    border: none;
-    margin: 0;
-}
-
-QSplitter#chatContentSplitter::handle:vertical:pressed {
-    background: transparent;
-    border: none;
-    margin: 0;
 }
 
 QLabel#chatWelcomeTitle {

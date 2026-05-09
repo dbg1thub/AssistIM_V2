@@ -28,7 +28,6 @@ from client.models.message_model import MessageModel
 from client.ui.styles import StyleSheet
 from client.ui.widgets.chat_header import ChatHeader
 from client.ui.widgets.chat_info_drawer import ChatInfoDrawerOverlay
-from client.ui.widgets.fluent_splitter import FluentSplitter
 from client.ui.widgets.message_input import MessageInput
 from qfluentwidgets.multimedia import VideoWidget
 
@@ -255,6 +254,8 @@ class ChatPanel(QWidget):
 
     MESSAGE_LIST_BOTTOM_MARGIN = 8
     COMPOSER_MIN_HEIGHT = 180
+    COMPOSER_MAX_HEIGHT = 340
+    COMPOSER_RESIZE_HANDLE_HEIGHT = 8
 
     file_upload_requested = Signal(str)
     screenshot_requested = Signal()
@@ -301,11 +302,14 @@ class ChatPanel(QWidget):
         self._history_request_pending = False
         self._has_more_history = True
         self.message_input: Optional[MessageInput] = None
-        self.content_splitter: Optional[FluentSplitter] = None
-        self._composer_container: Optional[QWidget] = None
-        self._composer_input_slot: Optional[QWidget] = None
+        self.chat_content_area: Optional[QWidget] = None
+        self.composer_resize_handle: Optional[QFrame] = None
         self._chat_info_overlay: Optional[ChatInfoDrawerOverlay] = None
         self._security_pending_banner: Optional[SecurityPendingBanner] = None
+        self._composer_height = self.COMPOSER_MIN_HEIGHT
+        self._composer_resize_dragging = False
+        self._composer_resize_start_y = 0
+        self._composer_resize_start_height = self.COMPOSER_MIN_HEIGHT
         self._recall_action_refresh_timer = QTimer(self)
         self._recall_action_refresh_timer.setSingleShot(True)
         self._recall_action_refresh_timer.timeout.connect(self._on_recall_action_refresh_timeout)
@@ -334,7 +338,13 @@ class ChatPanel(QWidget):
 
         self.chat_header.group_announcement_widget().clicked.connect(self.group_announcement_requested.emit)
 
-        self.message_list = QListView(self.chat_page)
+        self.chat_content_area = QWidget(self.chat_page)
+        self.chat_content_area.setObjectName("chatContentArea")
+        self.chat_content_layout = QVBoxLayout(self.chat_content_area)
+        self.chat_content_layout.setContentsMargins(0, 0, 0, 0)
+        self.chat_content_layout.setSpacing(0)
+
+        self.message_list = QListView(self.chat_content_area)
         self.message_list.setObjectName("messageListView")
         self.message_list.setMinimumWidth(0)
         self.message_list.setFrameShape(QFrame.Shape.NoFrame)
@@ -379,40 +389,20 @@ class ChatPanel(QWidget):
         self._security_pending_banner.confirm_requested.connect(self._on_security_pending_confirm_requested)
         self._security_pending_banner.discard_requested.connect(self._on_security_pending_discard_requested)
 
-        self.content_splitter = FluentSplitter(Qt.Orientation.Vertical, self.chat_page)
-        self.content_splitter.setObjectName("chatContentSplitter")
-        self.content_splitter.setHandleIndicatorVisible(False)
-        self.content_splitter.setChildrenCollapsible(False)
-        self.content_splitter.setHandleWidth(1)
         self.message_list.setMinimumHeight(0)
-        self.content_splitter.addWidget(self.message_list)
-        composer_container = QWidget(self.chat_page)
-        composer_container.setObjectName("chatInputSafeArea")
-        composer_container.setMinimumHeight(self.COMPOSER_MIN_HEIGHT)
-        composer_container.setMaximumHeight(340)
-        self._composer_container = composer_container
-        composer_layout = QVBoxLayout(composer_container)
-        composer_layout.setContentsMargins(0, 0, 0, 0)
-        composer_layout.setSpacing(0)
-        composer_layout.addWidget(self._security_pending_banner, 0)
-        self._composer_input_slot = QWidget(composer_container)
-        self._composer_input_slot.setObjectName("chatInputSlot")
-        self._composer_input_slot.setMinimumHeight(self.COMPOSER_MIN_HEIGHT)
-        composer_layout.addWidget(self._composer_input_slot, 1)
-        self.content_splitter.addWidget(composer_container)
-        self.content_splitter.setStretchFactor(0, 1)
-        self.content_splitter.setStretchFactor(1, 0)
-        self.content_splitter.setSizes([560, 220])
-        self.content_splitter.splitterMoved.connect(self._schedule_restore_message_viewport)
-        self.content_splitter.splitterMoved.connect(self._on_content_splitter_moved)
-        self.content_splitter.installEventFilter(self)
-        composer_container.installEventFilter(self)
-        self._composer_input_slot.installEventFilter(self)
+        self.chat_content_layout.addWidget(self.message_list, 1)
+        self.chat_content_area.installEventFilter(self)
+
+        self.composer_resize_handle = QFrame(self.chat_page)
+        self.composer_resize_handle.setObjectName("chatComposerResizeHandle")
+        self.composer_resize_handle.setCursor(Qt.CursorShape.SizeVerCursor)
+        self.composer_resize_handle.setMouseTracking(True)
+        self.composer_resize_handle.installEventFilter(self)
         self.message_input.installEventFilter(self)
         QTimer.singleShot(0, self._layout_message_input_overlay)
 
         self.chat_layout.addWidget(self.chat_header, 0)
-        self.chat_layout.addWidget(self.content_splitter, 1)
+        self.chat_layout.addWidget(self.chat_content_area, 1)
 
         self._chat_info_overlay = ChatInfoDrawerOverlay(self.chat_page)
         self._chat_info_overlay.searchRequested.connect(self.chat_info_search_requested.emit)
@@ -455,10 +445,12 @@ class ChatPanel(QWidget):
             return
         if self._current_session is None:
             self._security_pending_banner.hide()
+            self._layout_message_input_overlay()
             return
         pending_messages = self._pending_security_messages()
         if not pending_messages:
             self._security_pending_banner.hide()
+            self._layout_message_input_overlay()
             return
         summary = self._current_session.security_summary()
         self._security_pending_banner.set_pending_state(
@@ -466,6 +458,7 @@ class ChatPanel(QWidget):
             action_id=str(summary.get("recommended_action") or "trust_peer_identity"),
             summary=summary,
         )
+        self._layout_message_input_overlay()
 
     def _schedule_recall_action_refresh(self) -> None:
         """Refresh recall direct-edit affordances when their two-minute window expires."""
@@ -958,8 +951,11 @@ class ChatPanel(QWidget):
 
     def eventFilter(self, watched, event) -> bool:
         """Only open attachments when the click lands inside the rendered content area."""
-        content_splitter = getattr(self, "content_splitter", None)
         message_input = getattr(self, "message_input", None)
+        composer_resize_handle = getattr(self, "composer_resize_handle", None)
+
+        if watched is composer_resize_handle and self._handle_composer_resize_handle_event(event):
+            return True
 
         if self._scroll_delegate and watched in {
             self.message_list,
@@ -1051,11 +1047,11 @@ class ChatPanel(QWidget):
                     self.handle_message_click(index)
                     return True
 
-        composer_container = getattr(self, "_composer_container", None)
-        composer_input_slot = getattr(self, "_composer_input_slot", None)
+        chat_content_area = getattr(self, "chat_content_area", None)
+        security_pending_banner = getattr(self, "_security_pending_banner", None)
         tracked_resize_widgets = {
             widget
-            for widget in (content_splitter, message_input, composer_container, composer_input_slot)
+            for widget in (chat_content_area, message_input, security_pending_banner)
             if widget is not None
         }
         if watched in tracked_resize_widgets and event.type() in {
@@ -1085,25 +1081,64 @@ class ChatPanel(QWidget):
 
         return super().eventFilter(watched, event)
 
-    def _on_content_splitter_moved(self, _pos: int, _index: int) -> None:
+    def _handle_composer_resize_handle_event(self, event) -> bool:
+        if self.composer_resize_handle is None:
+            return False
+
+        if event.type() == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
+            self._composer_resize_dragging = True
+            self._composer_resize_start_y = self._event_global_y(event)
+            self._composer_resize_start_height = self._composer_height
+            self.composer_resize_handle.grabMouse()
+            return True
+
+        if event.type() == QEvent.Type.MouseMove and self._composer_resize_dragging:
+            delta = self._composer_resize_start_y - self._event_global_y(event)
+            self._set_composer_height(self._composer_resize_start_height + delta)
+            return True
+
+        if event.type() == QEvent.Type.MouseButtonRelease and self._composer_resize_dragging:
+            self._composer_resize_dragging = False
+            self.composer_resize_handle.releaseMouse()
+            self._schedule_restore_message_viewport()
+            return True
+
+        return False
+
+    def _event_global_y(self, event) -> int:
+        if hasattr(event, "globalPosition"):
+            return int(event.globalPosition().y())
+        return int(event.globalPos().y())
+
+    def _set_composer_height(self, height: int) -> None:
+        self._composer_height = max(self.COMPOSER_MIN_HEIGHT, min(self.COMPOSER_MAX_HEIGHT, height))
         self._layout_message_input_overlay()
 
     def _layout_message_input_overlay(self) -> None:
-        if self.content_splitter is None or self.message_input is None or self._composer_container is None:
+        if self.chat_content_area is None or self.message_input is None:
             return
-        splitter_rect = self.content_splitter.geometry()
-        composer_rect = self._composer_container.geometry()
+        content_rect = self.chat_content_area.geometry()
+        height = max(self.COMPOSER_MIN_HEIGHT, min(self.COMPOSER_MAX_HEIGHT, self._composer_height))
         banner_height = (
-            self._security_pending_banner.height()
+            max(self._security_pending_banner.height(), self._security_pending_banner.sizeHint().height())
             if self._security_pending_banner is not None and self._security_pending_banner.isVisible()
             else 0
         )
-        x = splitter_rect.x() + composer_rect.x()
-        y = splitter_rect.y() + composer_rect.y() + banner_height
-        width = composer_rect.width()
-        height = max(self.COMPOSER_MIN_HEIGHT, composer_rect.height() - banner_height)
+        x = content_rect.x()
+        y = content_rect.bottom() - height + 1
+        width = content_rect.width()
+        if self._security_pending_banner is not None:
+            if banner_height > 0:
+                banner_y = max(content_rect.y(), y - banner_height)
+                self._security_pending_banner.setGeometry(x, banner_y, width, banner_height)
+                self._security_pending_banner.raise_()
+        if self.composer_resize_handle is not None:
+            handle_height = self.COMPOSER_RESIZE_HANDLE_HEIGHT
+            self.composer_resize_handle.setGeometry(x, y - handle_height // 2, width, handle_height)
         self.message_input.setGeometry(x, y, width, height)
         self.message_input.raise_()
+        if self.composer_resize_handle is not None:
+            self.composer_resize_handle.raise_()
 
     def _sync_message_scrollbar_visibility(self) -> None:
         if not self._scroll_delegate:
