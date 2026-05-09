@@ -232,10 +232,16 @@ def test_contact_interface_no_longer_embeds_moments_panel() -> None:
 def test_contact_detail_card_uses_wechat_like_profile_layout() -> None:
     contact_interface = Path('client/ui/windows/contact_interface.py').read_text(encoding='utf-8')
     app_icons = Path('client/core/app_icons.py').read_text(encoding='utf-8')
+    zh_cn = json.loads(Path('client/resources/i18n/zh-CN.json').read_text(encoding='utf-8'))
+    en_us = json.loads(Path('client/resources/i18n/en-US.json').read_text(encoding='utf-8'))
+    ko_kr = json.loads(Path('client/resources/i18n/ko-KR.json').read_text(encoding='utf-8'))
 
     assert 'root_layout.addWidget(self.header, 0, Qt.AlignmentFlag.AlignHCenter)' in contact_interface
     assert 'self.gender_icon = IconWidget(AppIcon.GENDER_MALE, self.header)' in contact_interface
-    assert 'self.more_button = ToolButton(AppIcon.MORE_HORIZONTAL, self.header)' in contact_interface
+    assert 'self.gender_label = CaptionLabel("", self.header)' in contact_interface
+    assert 'self.gender_label.show()' in contact_interface
+    assert 'self.more_button = TransparentToolButton(AppIcon.MORE_HORIZONTAL, self.header)' in contact_interface
+    assert 'self.edit_button = TransparentToolButton(AppIcon.EDIT, self)' in contact_interface
     assert 'self.remark_row = ContactDetailRow' in contact_interface
     assert 'self.signature_row.set_value(contact.signature or "-")' in contact_interface
     assert 'self.subtitle_label.setText(\n            f"{tr(\'contact.detail.label.assistim_id\', \'AssistIM ID\')}: ' in contact_interface
@@ -251,6 +257,11 @@ def test_contact_detail_card_uses_wechat_like_profile_layout() -> None:
     assert 'GENDER_FEMALE = "gender_female"' in app_icons
     assert 'MORE_HORIZONTAL = "more_horizontal"' in app_icons
     assert 'EDIT = "edit"' in app_icons
+    assert zh_cn['contact.detail.label.moments'] == '朋友圈'
+    assert zh_cn['contact.detail.edit_remark.title'] == '修改备注'
+    assert zh_cn['contact.detail.moment_image_placeholder'] == '图片'
+    assert en_us['contact.detail.label.moments'] == 'Moments'
+    assert ko_kr['contact.detail.label.moments'] == '친구 소식'
 
 
 def test_group_flow_no_longer_writes_local_group_avatar_metadata() -> None:

@@ -29,6 +29,7 @@ from qfluentwidgets import (
     SegmentedWidget,
     SubtitleLabel,
     RoundMenu,
+    TransparentToolButton,
     ToolButton,
     TitleLabel,
     isDarkTheme,
@@ -644,8 +645,9 @@ class ContactDetailRow(QWidget):
         layout.addWidget(self.label, 0, Qt.AlignmentFlag.AlignVCenter)
         layout.addWidget(self.value, 1, Qt.AlignmentFlag.AlignVCenter)
         if editable:
-            self.edit_button = ToolButton(AppIcon.EDIT, self)
-            self.edit_button.setFixedSize(28, 28)
+            self.edit_button = TransparentToolButton(AppIcon.EDIT, self)
+            self.edit_button.setFixedSize(24, 24)
+            self.edit_button.setToolTip(tr("contact.detail.edit_remark.title", "Edit Remark"))
             self.edit_button.clicked.connect(self.clicked.emit)
             layout.addWidget(self.edit_button, 0, Qt.AlignmentFlag.AlignVCenter)
 
@@ -748,8 +750,12 @@ class GalleryContactDetailPanel(QWidget):
         self.gender_icon = IconWidget(AppIcon.GENDER_MALE, self.header)
         self.gender_icon.setFixedSize(16, 16)
         self.gender_icon.hide()
+        self.gender_label = CaptionLabel("", self.header)
+        self.gender_label.setObjectName("contactGenderLabel")
+        self.gender_label.hide()
         name_row.addWidget(self.title_label, 0, Qt.AlignmentFlag.AlignVCenter)
         name_row.addWidget(self.gender_icon, 0, Qt.AlignmentFlag.AlignVCenter)
+        name_row.addWidget(self.gender_label, 0, Qt.AlignmentFlag.AlignVCenter)
         name_row.addStretch(1)
         self.subtitle_label = CaptionLabel("", self.header)
         self.subtitle_label.setObjectName("contactMetaLabel")
@@ -758,8 +764,9 @@ class GalleryContactDetailPanel(QWidget):
         info_layout.addLayout(name_row)
         info_layout.addWidget(self.subtitle_label)
         info_layout.addWidget(self.region_label)
-        self.more_button = ToolButton(AppIcon.MORE_HORIZONTAL, self.header)
-        self.more_button.setFixedSize(30, 30)
+        self.more_button = TransparentToolButton(AppIcon.MORE_HORIZONTAL, self.header)
+        self.more_button.setFixedSize(24, 24)
+        self.more_button.setToolTip(tr("contact.detail.more", "More"))
 
         top_row.addWidget(self.avatar, 0, Qt.AlignmentFlag.AlignTop)
         top_row.addLayout(info_layout, 1)
@@ -821,6 +828,7 @@ class GalleryContactDetailPanel(QWidget):
         self.subtitle_label.clear()
         self.region_label.clear()
         self.gender_icon.hide()
+        self.gender_label.hide()
         self.remark_row.set_value("")
         self.signature_row.set_value("")
         self.moment_strip.clear()
@@ -848,15 +856,30 @@ class GalleryContactDetailPanel(QWidget):
 
     def _set_gender_icon(self, gender: str) -> None:
         normalized = str(gender or "").strip().lower()
-        if normalized in {"male", "m", "男"}:
-            self.gender_icon.setIcon(AppIcon.GENDER_MALE)
-            self.gender_icon.show()
-            return
-        if normalized in {"female", "f", "女"}:
-            self.gender_icon.setIcon(AppIcon.GENDER_FEMALE)
-            self.gender_icon.show()
-            return
+        canonical = {
+            "m": "male",
+            "男": "male",
+            "male": "male",
+            "f": "female",
+            "女": "female",
+            "female": "female",
+        }.get(normalized, normalized)
+        label = localize_profile_gender(canonical)
         self.gender_icon.hide()
+        self.gender_label.hide()
+        if canonical == "male":
+            self.gender_icon.setIcon(AppIcon.GENDER_MALE)
+            self.gender_icon.setToolTip(label)
+            self.gender_icon.show()
+            return
+        if canonical == "female":
+            self.gender_icon.setIcon(AppIcon.GENDER_FEMALE)
+            self.gender_icon.setToolTip(label)
+            self.gender_icon.show()
+            return
+        if canonical:
+            self.gender_label.setText(label or str(gender))
+            self.gender_label.show()
 
     def set_friend_moment_images(self, media: list[MomentMediaRecord]) -> None:
         self.moment_strip.set_media(media)
@@ -888,6 +911,7 @@ class GalleryContactDetailPanel(QWidget):
         self.subtitle_label.setText(f"{tr('contact.detail.label.group_id', 'Group ID')} {group.id or '-'}")
         self.region_label.setText(tr("contact.group.member_summary", "{count} members", count=group.member_count))
         self.gender_icon.hide()
+        self.gender_label.hide()
         self.remark_row.set_value(group.session_id or "-")
         self.signature_row.set_value(group.created_at or "-")
         self.moment_strip.clear()
@@ -927,6 +951,7 @@ class GalleryContactDetailPanel(QWidget):
         )
         self.region_label.setText(f"{tr('contact.detail.label.request_status', 'Request Status')} {_request_status_text(request.status)}")
         self.gender_icon.hide()
+        self.gender_label.hide()
         self.remark_row.set_value(request.message or "-")
         self.signature_row.set_value(request.created_at or "-")
         self.moment_strip.clear()

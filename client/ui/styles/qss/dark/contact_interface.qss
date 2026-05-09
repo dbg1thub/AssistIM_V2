@@ -120,6 +120,12 @@ QLabel#contactDetailFieldLabel {
     background: transparent;
 }
 
+QLabel#contactGenderLabel {
+    color: {{TEXT_SECONDARY}};
+    font: 12px "Segoe UI", "Microsoft YaHei", "PingFang SC";
+    background: transparent;
+}
+
 QLabel#friendMomentEmptyLabel {
     color: {{TEXT_PRIMARY}};
     background: transparent;
