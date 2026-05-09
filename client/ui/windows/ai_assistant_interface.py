@@ -295,6 +295,7 @@ class AIAssistantInterface(QWidget):
         self._initialized = False
         self._teardown_started = False
         self._threads: list[AIThread] = []
+        self._empty_thread_id = ""
         self._current_thread_id = ""
         self._messages: list[AIMessage] = []
         self._message_model: AIAssistantMessageModel | None = None
@@ -315,6 +316,10 @@ class AIAssistantInterface(QWidget):
         self._thinking_animation_timer = QTimer(self)
         self._thinking_animation_timer.setInterval(420)
         self._thinking_animation_timer.timeout.connect(self._advance_thinking_animation)
+        self._persist_thread_order_timer = QTimer(self)
+        self._persist_thread_order_timer.setSingleShot(True)
+        self._persist_thread_order_timer.setInterval(250)
+        self._persist_thread_order_timer.timeout.connect(self._persist_current_thread_tab_order)
 
         self._setup_ui()
         self._subscribe_to_events()
@@ -356,6 +361,7 @@ class AIAssistantInterface(QWidget):
         self.thread_tab_bar.setCloseButtonDisplayMode(TabCloseButtonDisplayMode.ON_HOVER)
         self.thread_tab_bar.tabAddRequested.connect(self._on_new_thread_clicked)
         self.thread_tab_bar.tabCloseRequested.connect(self._on_thread_tab_close_requested)
+        self.thread_tab_bar.tabMoved.connect(self._on_thread_tab_moved)
 
         self.header_layout.addWidget(self.thread_tab_bar, 1, Qt.AlignmentFlag.AlignVCenter)
 
@@ -565,7 +571,7 @@ class AIAssistantInterface(QWidget):
         updated = await self._store.update_thread_title(normalized_thread_id, title)
         if updated is None:
             return None
-        self._threads = await self._store.list_threads()
+        await self._refresh_threads()
         if normalized_thread_id == self._current_thread_id:
             self.title_label.setText(updated.title or tr("ai_assistant.thread.new", "New Chat"))
         self._render_thread_tabs()
@@ -586,11 +592,12 @@ class AIAssistantInterface(QWidget):
             self._create_ui_task(self._select_thread(thread_id), f"select AI assistant thread {thread_id}")
 
     async def _reload_threads(self, *, select_first: bool = False, select_thread_id: str = "") -> None:
-        self._threads = await self._store.list_threads()
+        await self._refresh_threads()
         if self._current_thread_id and all(thread.thread_id != self._current_thread_id for thread in self._threads):
             self._current_thread_id = ""
         self._render_thread_tabs()
-        target_id = select_thread_id or (self._threads[0].thread_id if select_first and self._threads else "")
+        ordered_threads = self._threads_for_tab_display()
+        target_id = select_thread_id or (ordered_threads[0].thread_id if select_first and ordered_threads else "")
         if target_id:
             await self._select_thread(target_id, stop_generation=False)
             return
@@ -615,10 +622,22 @@ class AIAssistantInterface(QWidget):
         self._set_generating(bool(self._active_task_id or self._active_action_plan_id))
         self.prompt_edit.setFocus()
 
+    async def _refresh_threads(self) -> None:
+        self._threads = await self._store.list_threads()
+        empty_thread = await self._store.find_empty_thread()
+        self._empty_thread_id = empty_thread.thread_id if empty_thread is not None else ""
+
+    def _threads_for_tab_display(self) -> list[AIThread]:
+        if not self._empty_thread_id:
+            return list(self._threads)
+        normal_threads = [thread for thread in self._threads if thread.thread_id != self._empty_thread_id]
+        empty_threads = [thread for thread in self._threads if thread.thread_id == self._empty_thread_id]
+        return normal_threads + empty_threads
+
     def _render_thread_tabs(self) -> None:
         self.thread_tab_bar.blockSignals(True)
         self.thread_tab_bar.clear()
-        for thread in self._threads:
+        for thread in self._threads_for_tab_display():
             preview = str(thread.last_message or "").strip()
             title = str(thread.title or tr("ai_assistant.thread.new", "New Chat")).strip()
             tooltip = title if not preview else f"{title}\n{preview}"
@@ -631,6 +650,34 @@ class AIAssistantInterface(QWidget):
         if self._current_thread_id:
             self.thread_tab_bar.setCurrentTab(self._current_thread_id)
         self.thread_tab_bar.blockSignals(False)
+
+    def _on_thread_tab_moved(self, _from_index: int, _to_index: int) -> None:
+        self._persist_thread_order_timer.start()
+
+    def _current_thread_tab_order(self) -> list[str]:
+        thread_ids: list[str] = []
+        for index in range(self.thread_tab_bar.count()):
+            tab = self.thread_tab_bar.tabItem(index)
+            thread_id = str(tab.routeKey() or "").strip() if tab is not None else ""
+            if thread_id:
+                thread_ids.append(thread_id)
+        if self._empty_thread_id in thread_ids:
+            thread_ids = [thread_id for thread_id in thread_ids if thread_id != self._empty_thread_id]
+            thread_ids.append(self._empty_thread_id)
+        return thread_ids
+
+    def _persist_current_thread_tab_order(self) -> None:
+        thread_ids = self._current_thread_tab_order()
+        if len(thread_ids) <= 1:
+            return
+        self._create_ui_task(
+            self._persist_thread_tab_order(thread_ids),
+            "persist AI assistant thread tab order",
+        )
+
+    async def _persist_thread_tab_order(self, thread_ids: list[str]) -> None:
+        await self._store.update_thread_order(thread_ids)
+        await self._refresh_threads()
 
     def _render_messages(self) -> None:
         if self._message_model is not None:
@@ -954,7 +1001,7 @@ class AIAssistantInterface(QWidget):
                 extra=action_result.message_extra,
             )
             self._append_message(assistant_message)
-            self._threads = await self._store.list_threads()
+            await self._refresh_threads()
             self._render_thread_tabs()
             return
 
@@ -1041,7 +1088,7 @@ class AIAssistantInterface(QWidget):
             task_id=message.task_id,
             extra=message.extra,
         )
-        self._threads = await self._store.list_threads()
+        await self._refresh_threads()
         self._render_thread_tabs()
 
     async def _finalize_snapshot(self, snapshot: AITaskSnapshot) -> None:

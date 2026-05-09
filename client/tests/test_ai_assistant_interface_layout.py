@@ -93,11 +93,19 @@ def _rect_in_panel(widget: AIAssistantInterface, child) -> QRect:
     return QRect(top_left, child.size())
 
 
+def _tab_route_keys(widget: AIAssistantInterface) -> list[str]:
+    return [
+        str(widget.thread_tab_bar.tabItem(index).routeKey())
+        for index in range(widget.thread_tab_bar.count())
+    ]
+
+
 class _FakeAssistantStore:
     def __init__(self) -> None:
         self.threads: list[AIThread] = []
         self.messages: dict[str, list[AIMessage]] = {}
         self.created = 0
+        self.saved_orders: list[list[str]] = []
 
     async def initialize(self) -> None:
         return None
@@ -107,7 +115,12 @@ class _FakeAssistantStore:
 
     async def create_thread(self, *, title: str = "", model: str = "") -> AIThread:
         self.created += 1
-        thread = AIThread(thread_id=f"thread-{self.created}", title=title or "New Chat", model=model)
+        thread = AIThread(
+            thread_id=f"thread-{self.created}",
+            title=title or "New Chat",
+            model=model,
+            sort_order=len(self.threads),
+        )
         self.threads.insert(0, thread)
         self.messages[thread.thread_id] = []
         return thread
@@ -130,6 +143,13 @@ class _FakeAssistantStore:
     async def delete_thread(self, thread_id: str) -> None:
         self.threads = [thread for thread in self.threads if thread.thread_id != thread_id]
         self.messages.pop(thread_id, None)
+
+    async def update_thread_order(self, thread_ids: list[str]) -> None:
+        self.saved_orders.append(list(thread_ids))
+        order = {thread_id: index for index, thread_id in enumerate(thread_ids)}
+        self.threads.sort(key=lambda thread: order.get(thread.thread_id, len(order)))
+        for index, thread in enumerate(self.threads):
+            thread.sort_order = index
 
 
 def test_ai_assistant_empty_tabs_are_user_created_unique_and_deletable(monkeypatch) -> None:
@@ -160,6 +180,45 @@ def test_ai_assistant_empty_tabs_are_user_created_unique_and_deletable(monkeypat
         assert widget._threads == []
         assert widget._current_thread_id == ""
         assert widget.empty_widget.isVisible()
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        widget.close()
+        app.processEvents()
+
+
+def test_ai_assistant_empty_new_thread_stays_right_and_order_is_saved(monkeypatch) -> None:
+    app = QApplication.instance() or QApplication([])
+    store = _FakeAssistantStore()
+    first = AIThread(thread_id="thread-a", title="A", sort_order=0)
+    second = AIThread(thread_id="thread-b", title="B", sort_order=1)
+    store.threads = [first, second]
+    store.messages = {
+        "thread-a": [_message("a-user", AIMessageRole.USER, "A prompt")],
+        "thread-b": [_message("b-user", AIMessageRole.USER, "B prompt")],
+    }
+    monkeypatch.setattr(assistant_interface_module, "get_ai_assistant_store", lambda _owner_user_id: store)
+    widget = AIAssistantInterface(owner_user_id="user-a")
+    widget.resize(1000, 700)
+    widget.show()
+    app.processEvents()
+
+    async def scenario() -> None:
+        await widget._reload_threads(select_first=True)
+        assert _tab_route_keys(widget) == ["thread-a", "thread-b"]
+
+        await widget._create_and_select_thread()
+        assert widget._current_thread_id == "thread-1"
+        assert _tab_route_keys(widget) == ["thread-a", "thread-b", "thread-1"]
+
+        await widget._persist_thread_tab_order(["thread-b", "thread-a", "thread-1"])
+        assert store.saved_orders[-1] == ["thread-b", "thread-a", "thread-1"]
+        assert [thread.thread_id for thread in await store.list_threads()] == [
+            "thread-b",
+            "thread-a",
+            "thread-1",
+        ]
 
     try:
         asyncio.run(scenario())

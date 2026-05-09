@@ -453,7 +453,11 @@ def test_ai_assistant_thread_navigation_uses_fluent_tabbar() -> None:
     assert "self.thread_tab_bar.setCloseButtonDisplayMode(TabCloseButtonDisplayMode.ON_HOVER)" in assistant_interface
     assert "self.thread_tab_bar.tabAddRequested.connect(self._on_new_thread_clicked)" in assistant_interface
     assert "self.thread_tab_bar.tabCloseRequested.connect(self._on_thread_tab_close_requested)" in assistant_interface
+    assert "self.thread_tab_bar.tabMoved.connect(self._on_thread_tab_moved)" in assistant_interface
     assert "def _render_thread_tabs(self) -> None:" in assistant_interface
+    assert "def _threads_for_tab_display(self) -> list[AIThread]:" in assistant_interface
+    assert "def _persist_thread_tab_order(self, thread_ids: list[str]) -> None:" in assistant_interface
+    assert "await self._store.update_thread_order(thread_ids)" in assistant_interface
     assert "self.thread_tab_bar.addTab(" in assistant_interface
     assert "self.thread_tab_bar.setCurrentTab(self._current_thread_id)" in assistant_interface
     assert "def _on_thread_tab_close_requested(self, index: int) -> None:" in assistant_interface

@@ -143,6 +143,111 @@ def test_ai_assistant_store_empty_thread_detection_uses_messages_not_title(tmp_p
     asyncio.run(run())
 
 
+def test_ai_assistant_store_persists_manual_thread_order(tmp_path, monkeypatch):
+    async def run():
+        db = Database(str(tmp_path / "assistant.db"))
+        monkeypatch.setattr(store_module, "get_database", lambda: db)
+        store = store_module.AIAssistantStore(owner_user_id="user-a")
+        try:
+            first = await store.create_thread(title="First", model="gemma")
+            second = await store.create_thread(title="Second", model="gemma")
+            third = await store.create_thread(title="Third", model="gemma")
+
+            assert [thread.thread_id for thread in await store.list_threads()] == [
+                first.thread_id,
+                second.thread_id,
+                third.thread_id,
+            ]
+            assert [thread.sort_order for thread in await store.list_threads()] == [0, 1, 2]
+
+            await store.update_thread_order([third.thread_id, first.thread_id, second.thread_id])
+            assert [thread.thread_id for thread in await store.list_threads()] == [
+                third.thread_id,
+                first.thread_id,
+                second.thread_id,
+            ]
+            assert [thread.sort_order for thread in await store.list_threads()] == [0, 1, 2]
+
+            fourth = await store.create_thread(title="Fourth", model="gemma")
+            assert [thread.thread_id for thread in await store.list_threads()] == [
+                third.thread_id,
+                first.thread_id,
+                second.thread_id,
+                fourth.thread_id,
+            ]
+            assert fourth.sort_order == 3
+
+            await store.delete_thread(first.thread_id)
+            assert [thread.thread_id for thread in await store.list_threads()] == [
+                third.thread_id,
+                second.thread_id,
+                fourth.thread_id,
+            ]
+            assert [thread.sort_order for thread in await store.list_threads()] == [0, 1, 2]
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
+def test_ai_assistant_store_migrates_legacy_thread_order_from_recency(tmp_path, monkeypatch):
+    async def run():
+        db = Database(str(tmp_path / "assistant.db"))
+        monkeypatch.setattr(store_module, "get_database", lambda: db)
+        try:
+            await db.connect()
+            connection = getattr(db, "_db")
+            await connection.executescript(
+                """
+                CREATE TABLE ai_threads (
+                    thread_id TEXT PRIMARY KEY,
+                    owner_user_id TEXT NOT NULL DEFAULT '',
+                    title TEXT NOT NULL,
+                    model TEXT NOT NULL DEFAULT '',
+                    last_message TEXT NOT NULL DEFAULT '',
+                    last_message_time INTEGER NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'active',
+                    extra TEXT NOT NULL DEFAULT '{}',
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL
+                );
+
+                CREATE TABLE ai_messages (
+                    message_id TEXT PRIMARY KEY,
+                    thread_id TEXT NOT NULL,
+                    owner_user_id TEXT NOT NULL DEFAULT '',
+                    role TEXT NOT NULL,
+                    content TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT 'done',
+                    task_id TEXT NOT NULL DEFAULT '',
+                    model TEXT NOT NULL DEFAULT '',
+                    extra TEXT NOT NULL DEFAULT '{}',
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL
+                );
+
+                INSERT INTO ai_threads
+                (thread_id, owner_user_id, title, model, last_message, last_message_time, status, extra, created_at, updated_at)
+                VALUES
+                ('oldest', 'user-a', 'Oldest', '', '', 10, 'active', '{}', 10, 10),
+                ('newest', 'user-a', 'Newest', '', '', 30, 'active', '{}', 30, 30),
+                ('middle', 'user-a', 'Middle', '', '', 20, 'active', '{}', 20, 20);
+                """
+            )
+            await connection.commit()
+
+            store = store_module.AIAssistantStore(owner_user_id="user-a")
+            await store.initialize()
+
+            threads = await store.list_threads()
+            assert [thread.thread_id for thread in threads] == ["newest", "middle", "oldest"]
+            assert [thread.sort_order for thread in threads] == [0, 1, 2]
+        finally:
+            await db.close()
+
+    asyncio.run(run())
+
+
 def test_ai_assistant_store_is_scoped_by_owner_user_id(tmp_path, monkeypatch):
     async def run():
         db = Database(str(tmp_path / "assistant.db"))
@@ -259,6 +364,7 @@ def test_ai_assistant_store_migrates_existing_unowned_schema(tmp_path, monkeypat
             message_columns = {str(row["name"]) for row in await (await connection.execute("PRAGMA table_info(ai_messages)")).fetchall()}
             assert "owner_user_id" in thread_columns
             assert "owner_user_id" in message_columns
+            assert "sort_order" in thread_columns
 
             thread = await store.create_thread(title="Migrated", model="gemma")
             assert await store.get_thread(thread.thread_id) is not None

@@ -51,6 +51,7 @@ class AIThread:
     last_message_time: datetime | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
+    sort_order: int = 0
     status: AIThreadStatus = AIThreadStatus.ACTIVE
     extra: dict[str, Any] = field(default_factory=dict)
 
@@ -65,6 +66,10 @@ class AIThread:
         )
         if not isinstance(self.status, AIThreadStatus):
             self.status = AIThreadStatus(str(self.status or AIThreadStatus.ACTIVE.value))
+        try:
+            self.sort_order = int(self.sort_order or 0)
+        except (TypeError, ValueError):
+            self.sort_order = 0
 
 
 @dataclass(slots=True)

@@ -108,6 +108,7 @@ class AIAssistantStore:
                     last_message TEXT NOT NULL DEFAULT '',
                     last_message_time INTEGER NOT NULL,
                     status TEXT NOT NULL DEFAULT 'active',
+                    sort_order INTEGER NOT NULL DEFAULT 0,
                     extra TEXT NOT NULL DEFAULT '{}',
                     created_at INTEGER NOT NULL,
                     updated_at INTEGER NOT NULL
@@ -139,10 +140,13 @@ class AIAssistantStore:
                 """
                 CREATE INDEX IF NOT EXISTS idx_ai_threads_owner_updated
                     ON ai_threads(owner_user_id, updated_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_ai_threads_owner_sort_order
+                    ON ai_threads(owner_user_id, status, sort_order ASC);
                 CREATE INDEX IF NOT EXISTS idx_ai_messages_owner_thread_created
                     ON ai_messages(owner_user_id, thread_id, created_at ASC);
                 """
             )
+            await self._initialize_thread_sort_order()
             await connection.commit()
             self._schema_ready = True
         if not self._startup_recovery_done:
@@ -150,13 +154,13 @@ class AIAssistantStore:
             self._startup_recovery_done = True
 
     async def list_threads(self) -> list[AIThread]:
-        """Return active assistant threads ordered by recent activity."""
+        """Return active assistant threads ordered by the persisted tab order."""
         await self.initialize()
         cursor = await self._connection().execute(
             """
             SELECT * FROM ai_threads
             WHERE owner_user_id = ? AND status != ?
-            ORDER BY updated_at DESC, created_at DESC
+            ORDER BY sort_order ASC, updated_at DESC, created_at DESC
             """,
             (self._owner_user_id, AIThreadStatus.DELETED.value),
         )
@@ -176,6 +180,7 @@ class AIAssistantStore:
         """Create one local assistant thread."""
         await self.initialize()
         now = datetime.now()
+        sort_order = await self._next_thread_sort_order()
         thread = AIThread(
             thread_id=str(uuid.uuid4()),
             title=(title or tr("ai_assistant.thread.new", "New Chat")).strip(),
@@ -183,12 +188,13 @@ class AIAssistantStore:
             created_at=now,
             updated_at=now,
             last_message_time=now,
+            sort_order=sort_order,
         )
         await self._connection().execute(
             """
             INSERT INTO ai_threads
-            (thread_id, owner_user_id, title, model, last_message, last_message_time, status, extra, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (thread_id, owner_user_id, title, model, last_message, last_message_time, status, sort_order, extra, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 thread.thread_id,
@@ -198,6 +204,7 @@ class AIAssistantStore:
                 thread.last_message,
                 _ts(thread.last_message_time),
                 thread.status.value,
+                thread.sort_order,
                 json.dumps(thread.extra, ensure_ascii=False),
                 _ts(thread.created_at),
                 _ts(thread.updated_at),
@@ -236,7 +243,7 @@ class AIAssistantStore:
                   WHERE m.thread_id = t.thread_id
                     AND m.owner_user_id = t.owner_user_id
               )
-            ORDER BY t.updated_at DESC, t.created_at DESC
+            ORDER BY t.sort_order ASC, t.updated_at DESC, t.created_at DESC
             LIMIT 1
             """,
             (self._owner_user_id, AIThreadStatus.DELETED.value),
@@ -269,7 +276,26 @@ class AIAssistantStore:
             "UPDATE ai_threads SET status = ?, updated_at = ? WHERE thread_id = ? AND owner_user_id = ?",
             (AIThreadStatus.DELETED.value, time.time(), thread_id, self._owner_user_id),
         )
+        await self._compact_thread_sort_order()
         await connection.commit()
+
+    async def update_thread_order(self, thread_ids: list[str]) -> None:
+        """Persist the visible assistant-thread tab order for this owner."""
+        await self.initialize()
+        current = await self._active_thread_ids_in_sort_order()
+        if not current:
+            return
+        current_set = set(current)
+        ordered: list[str] = []
+        seen: set[str] = set()
+        for thread_id in thread_ids:
+            normalized = str(thread_id or "").strip()
+            if normalized in current_set and normalized not in seen:
+                ordered.append(normalized)
+                seen.add(normalized)
+        ordered.extend(thread_id for thread_id in current if thread_id not in seen)
+        await self._write_thread_sort_order(ordered)
+        await self._connection().commit()
 
     async def clear_thread_messages(self, thread_id: str) -> None:
         """Remove all messages from one thread while keeping the thread."""
@@ -406,6 +432,7 @@ class AIAssistantStore:
 
     async def _ensure_owner_columns(self) -> None:
         await self._ensure_column("ai_threads", "owner_user_id", "TEXT NOT NULL DEFAULT ''")
+        await self._ensure_column("ai_threads", "sort_order", "INTEGER NOT NULL DEFAULT 0")
         await self._ensure_column("ai_messages", "owner_user_id", "TEXT NOT NULL DEFAULT ''")
 
     async def _ensure_column(self, table_name: str, column_name: str, ddl: str) -> None:
@@ -453,6 +480,69 @@ class AIAssistantStore:
             ),
         )
         await self._connection().commit()
+
+    async def _active_thread_ids_in_sort_order(self) -> list[str]:
+        cursor = await self._connection().execute(
+            """
+            SELECT thread_id FROM ai_threads
+            WHERE owner_user_id = ? AND status != ?
+            ORDER BY sort_order ASC, updated_at DESC, created_at DESC
+            """,
+            (self._owner_user_id, AIThreadStatus.DELETED.value),
+        )
+        return [str(row["thread_id"] or "") for row in await cursor.fetchall()]
+
+    async def _next_thread_sort_order(self) -> int:
+        cursor = await self._connection().execute(
+            """
+            SELECT COALESCE(MAX(sort_order) + 1, 0) AS next_order
+            FROM ai_threads
+            WHERE owner_user_id = ? AND status != ?
+            """,
+            (self._owner_user_id, AIThreadStatus.DELETED.value),
+        )
+        row = await cursor.fetchone()
+        try:
+            return int(row["next_order"] or 0) if row else 0
+        except (TypeError, ValueError):
+            return 0
+
+    async def _initialize_thread_sort_order(self) -> None:
+        cursor = await self._connection().execute(
+            """
+            SELECT thread_id, sort_order FROM ai_threads
+            WHERE owner_user_id = ? AND status != ?
+            ORDER BY sort_order ASC, updated_at DESC, created_at DESC
+            """,
+            (self._owner_user_id, AIThreadStatus.DELETED.value),
+        )
+        rows = await cursor.fetchall()
+        if len(rows) <= 1:
+            return
+        orders: list[int] = []
+        for row in rows:
+            try:
+                orders.append(int(row["sort_order"] or 0))
+            except (TypeError, ValueError):
+                orders.append(0)
+        expected = list(range(len(rows)))
+        if orders == expected and len(set(orders)) == len(orders):
+            return
+        await self._write_thread_sort_order([str(row["thread_id"] or "") for row in rows])
+
+    async def _compact_thread_sort_order(self) -> None:
+        await self._write_thread_sort_order(await self._active_thread_ids_in_sort_order())
+
+    async def _write_thread_sort_order(self, thread_ids: list[str]) -> None:
+        for sort_order, thread_id in enumerate(thread_ids):
+            await self._connection().execute(
+                """
+                UPDATE ai_threads
+                SET sort_order = ?
+                WHERE thread_id = ? AND owner_user_id = ? AND status != ?
+                """,
+                (sort_order, thread_id, self._owner_user_id, AIThreadStatus.DELETED.value),
+            )
 
     async def _touch_thread_from_message(self, message: AIMessage) -> None:
         preview = _message_preview(
@@ -572,9 +662,17 @@ class AIAssistantStore:
             last_message_time=_dt(row["last_message_time"]),
             created_at=_dt(row["created_at"]),
             updated_at=_dt(row["updated_at"]),
+            sort_order=AIAssistantStore._row_int(row, "sort_order"),
             status=AIThreadStatus(str(row["status"] or AIThreadStatus.ACTIVE.value)),
             extra=_json_loads(row["extra"]),
         )
+
+    @staticmethod
+    def _row_int(row, key: str, default: int = 0) -> int:
+        try:
+            return int(row[key] or default)
+        except (IndexError, KeyError, TypeError, ValueError):
+            return default
 
     @staticmethod
     def _row_to_message(row) -> AIMessage:
