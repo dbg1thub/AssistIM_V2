@@ -1,6 +1,7 @@
 import asyncio
 import sys
 from collections import OrderedDict
+from pathlib import Path
 
 import darkdetect
 from PySide6.QtCore import QEvent, QPoint, QRect, QSize, Qt, QTimer, Signal
@@ -45,6 +46,7 @@ from qfluentwidgets.components.widgets.flyout import FlyoutAnimationType
 
 setup_logging()
 logger = logging.get_logger(__name__)
+_TRAY_LOGO_PATH = Path(__file__).resolve().parents[2] / "resources" / "logo.png"
 
 
 class ExitConfirmDialog(MessageBoxBase):
@@ -86,8 +88,6 @@ class MainWindow(FluentWindow):
     def __init__(self):
         super().__init__()
         self.resize(self.DEFAULT_WIDTH, self.DEFAULT_HEIGHT)
-        self.setWindowTitle(tr("common.app_name", "AssistIM"))
-        self.setWindowIcon(AppIcon.CHAT.icon())
 
         self._allow_exit = False
         self._tray_message_shown = False
@@ -96,7 +96,7 @@ class MainWindow(FluentWindow):
         self._tray_alert_entries: OrderedDict[str, TrayAlertEntry] = OrderedDict()
         self._tray_attention_enabled = False
         self._tray_flash_on = False
-        self._tray_normal_icon: QIcon = self.windowIcon()
+        self._tray_normal_icon: QIcon = self._tray_logo_icon()
         self._tray_attention_icon: QIcon = self._build_attention_tray_icon(self._tray_normal_icon)
         self._tray_flyout = None
         self._tray_flyout_view: TrayMessageFlyoutView | None = None
@@ -833,9 +833,13 @@ class MainWindow(FluentWindow):
             self._tray_icon.setIcon(self._tray_normal_icon)
 
     def _refresh_tray_icons(self) -> None:
-        self._tray_normal_icon = self.windowIcon()
+        self._tray_normal_icon = self._tray_logo_icon()
         self._tray_attention_icon = self._build_attention_tray_icon(self._tray_normal_icon)
         self._apply_tray_icon()
+
+    @staticmethod
+    def _tray_logo_icon() -> QIcon:
+        return QIcon(str(_TRAY_LOGO_PATH))
 
     @staticmethod
     def _build_attention_tray_icon(base_icon: QIcon) -> QIcon:

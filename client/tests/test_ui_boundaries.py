@@ -103,6 +103,22 @@ def test_main_applies_dpi_scale_before_qapplication_is_created() -> None:
     assert main_body.index('_apply_startup_dpi_scale()') < main_body.index('qt_app = QApplication(')
 
 
+def test_main_window_does_not_set_window_title_or_icon_and_tray_uses_logo() -> None:
+    main_window = Path('client/ui/windows/main_window.py').read_text(encoding='utf-8')
+    init_block = main_window.split('class MainWindow(FluentWindow):', 1)[1].split('def restore_default_geometry', 1)[0]
+    refresh_block = main_window.split('def _refresh_tray_icons(self) -> None:', 1)[1].split('def _build_attention_tray_icon', 1)[0]
+
+    assert Path('client/resources/logo.png').is_file()
+    assert 'self.setWindowTitle(' not in init_block
+    assert 'self.setWindowIcon(' not in init_block
+    assert '_TRAY_LOGO_PATH = Path(__file__).resolve().parents[2] / "resources" / "logo.png"' in main_window
+    assert 'self._tray_normal_icon: QIcon = self._tray_logo_icon()' in init_block
+    assert 'self._tray_icon.setIcon(self._tray_normal_icon)' in main_window
+    assert 'self._tray_normal_icon = self._tray_logo_icon()' in refresh_block
+    assert 'self.windowIcon()' not in init_block
+    assert 'self.windowIcon()' not in refresh_block
+
+
 def test_discovery_ui_wires_moment_media_and_comment_image_boundaries() -> None:
     discovery_interface = Path('client/ui/windows/discovery_interface.py').read_text(encoding='utf-8')
 
