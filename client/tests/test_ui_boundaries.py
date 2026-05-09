@@ -31,6 +31,39 @@ def test_group_creation_dialogs_are_split_out_of_contact_interface() -> None:
     assert 'from client.ui.windows.chat_group_flow import ChatGroupFlowCoordinator' in chat_interface
 
 
+def test_sidebar_items_use_compact_consistent_spacing() -> None:
+    session_delegate = Path('client/delegates/session_delegate.py').read_text(encoding='utf-8')
+    contact_shared = Path('client/ui/widgets/contact_shared.py').read_text(encoding='utf-8')
+    contact_interface = Path('client/ui/windows/contact_interface.py').read_text(encoding='utf-8')
+    update_friend_block = contact_interface.split('def _update_friend_item_view', 1)[1].split('def _create_friend_item', 1)[0]
+    create_friend_block = contact_interface.split('def _create_friend_item', 1)[1].split('def _ensure_friend_section_view', 1)[0]
+    update_blocked_block = contact_interface.split('def _update_blocked_item_view', 1)[1].split('def _create_blocked_item', 1)[0]
+    create_blocked_block = contact_interface.split('def _create_blocked_item', 1)[1].split('def _insert_blocked_item_view', 1)[0]
+
+    assert 'AVATAR_SIZE = 36' in session_delegate
+    assert 'ITEM_HEIGHT = 64' in session_delegate
+    assert 'ITEM_PADDING = 8' in session_delegate
+    assert 'CONTENT_GAP = 8' in session_delegate
+    assert 'card_rect.x() + self.ITEM_PADDING' in session_delegate
+    assert 'avatar_rect.right() + self.CONTENT_GAP' in session_delegate
+    assert 'card_rect.right() - self.ITEM_PADDING' in session_delegate
+    assert 'CONTACT_SIDEBAR_AVATAR_SIZE = 36' in contact_shared
+    assert 'CONTACT_SIDEBAR_ITEM_HEIGHT = 56' in contact_shared
+    assert 'CONTACT_SIDEBAR_ITEM_PADDING = 8' in contact_shared
+    assert 'CONTACT_SIDEBAR_CONTENT_GAP = 8' in contact_shared
+    assert 'CONTACT_SIDEBAR_TEXT_TOP_OFFSET = 0' in contact_shared
+    assert 'CONTACT_SIDEBAR_TEXT_SPACING = 0' in contact_shared
+    assert 'title=self._friend_sidebar_title(contact)' in update_friend_block
+    assert 'subtitle=""' in update_friend_block
+    assert 'self._friend_assistim_line(contact)' not in update_friend_block
+    assert 'self._friend_sidebar_title(contact),' in create_friend_block
+    assert 'self._friend_assistim_line(contact)' not in create_friend_block
+    assert 'left_padding=CONTACT_SECTION_INSET' in create_friend_block
+    assert 'title=self._friend_sidebar_title(contact)' in update_blocked_block
+    assert 'subtitle=""' in update_blocked_block
+    assert 'self._friend_sidebar_title(contact),' in create_blocked_block
+
+
 def test_discovery_ui_wires_moment_media_and_comment_image_boundaries() -> None:
     discovery_interface = Path('client/ui/windows/discovery_interface.py').read_text(encoding='utf-8')
 

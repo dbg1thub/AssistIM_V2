@@ -39,8 +39,10 @@ class _PreviewRun:
 class SessionDelegate(QStyledItemDelegate):
     """Render chat sessions with avatar, preview, time, and unread badge."""
 
-    AVATAR_SIZE = 44
-    ITEM_HEIGHT = 80
+    AVATAR_SIZE = 36
+    ITEM_HEIGHT = 64
+    ITEM_PADDING = 8
+    CONTENT_GAP = 8
     H_MARGIN = 0
     V_MARGIN = 0
 
@@ -68,15 +70,15 @@ class SessionDelegate(QStyledItemDelegate):
         self._draw_background(painter, card_rect, option)
 
         avatar_rect = QRect(
-            card_rect.x() + 12,
+            card_rect.x() + self.ITEM_PADDING,
             card_rect.y() + (card_rect.height() - self.AVATAR_SIZE) // 2,
             self.AVATAR_SIZE,
             self.AVATAR_SIZE,
         )
         self._draw_avatar(painter, avatar_rect, session)
 
-        content_left = avatar_rect.right() + 12
-        content_right = card_rect.right() - 12
+        content_left = avatar_rect.right() + self.CONTENT_GAP
+        content_right = card_rect.right() - self.ITEM_PADDING
         content_width = max(0, content_right - content_left)
 
         name_font = self._ui_font(16)
@@ -110,7 +112,7 @@ class SessionDelegate(QStyledItemDelegate):
         )
         preview_available = max(0, content_width - mute_slot_width)
 
-        name_y = card_rect.y() + 14
+        name_y = card_rect.y() + 8
         preview_y = name_y + 24
 
         secondary_text = QColor(216, 216, 216) if isDarkTheme() else QColor(95, 95, 95)

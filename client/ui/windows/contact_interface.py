@@ -1732,8 +1732,8 @@ class ContactInterface(QWidget):
         if item is None:
             return
         item.update_content(
-            title=contact.display_name,
-            subtitle=self._friend_assistim_line(contact),
+            title=self._friend_sidebar_title(contact),
+            subtitle="",
             avatar=contact.avatar,
             gender=contact.gender,
             seed_user_id=contact.id,
@@ -1743,8 +1743,8 @@ class ContactInterface(QWidget):
     def _create_friend_item(self, contact: ContactRecord) -> ContactListItem:
         item = ContactListItem(
             contact.id,
-            contact.display_name,
-            self._friend_assistim_line(contact),
+            self._friend_sidebar_title(contact),
+            "",
             "",
             contact.avatar,
             left_padding=CONTACT_SECTION_INSET,
@@ -1823,8 +1823,8 @@ class ContactInterface(QWidget):
         if item is None:
             return
         item.update_content(
-            title=contact.display_name,
-            subtitle=self._friend_assistim_line(contact),
+            title=self._friend_sidebar_title(contact),
+            subtitle="",
             avatar=contact.avatar,
             gender=contact.gender,
             seed_user_id=contact.id,
@@ -1834,8 +1834,8 @@ class ContactInterface(QWidget):
     def _create_blocked_item(self, contact: ContactRecord) -> ContactListItem:
         item = ContactListItem(
             contact.id,
-            contact.display_name,
-            self._friend_assistim_line(contact),
+            self._friend_sidebar_title(contact),
+            "",
             "",
             contact.avatar,
         )
@@ -2882,6 +2882,10 @@ class ContactInterface(QWidget):
     @staticmethod
     def _friend_assistim_line(contact: ContactRecord) -> str:
         return str(contact.assistim_id or contact.username or "").strip() or "-"
+
+    @staticmethod
+    def _friend_sidebar_title(contact: ContactRecord) -> str:
+        return str(contact.username or "").strip() or contact.display_name
 
     def _clear_active_selection(self) -> None:
         self._selected_key = None
