@@ -254,6 +254,7 @@ class ChatPanel(QWidget):
     """Chat panel composed of welcome page and active conversation page."""
 
     MESSAGE_LIST_BOTTOM_MARGIN = 8
+    COMPOSER_MIN_HEIGHT = 180
 
     file_upload_requested = Signal(str)
     screenshot_requested = Signal()
@@ -362,7 +363,7 @@ class ChatPanel(QWidget):
 
         self.message_input = MessageInput(self.chat_page)
         self.message_input.setMinimumWidth(0)
-        self.message_input.setMinimumHeight(0)
+        self.message_input.setMinimumHeight(self.COMPOSER_MIN_HEIGHT)
         self.message_input.segments_submitted.connect(self._on_segments_submitted)
         self.message_input.attachment_open_requested.connect(self._on_attachment_open_requested)
         self.message_input.screenshot_requested.connect(self.screenshot_requested.emit)
@@ -387,6 +388,7 @@ class ChatPanel(QWidget):
         self.content_splitter.addWidget(self.message_list)
         composer_container = QWidget(self.chat_page)
         composer_container.setObjectName("chatInputSafeArea")
+        composer_container.setMinimumHeight(self.COMPOSER_MIN_HEIGHT)
         composer_container.setMaximumHeight(340)
         self._composer_container = composer_container
         composer_layout = QVBoxLayout(composer_container)
@@ -395,7 +397,7 @@ class ChatPanel(QWidget):
         composer_layout.addWidget(self._security_pending_banner, 0)
         self._composer_input_slot = QWidget(composer_container)
         self._composer_input_slot.setObjectName("chatInputSlot")
-        self._composer_input_slot.setMinimumHeight(0)
+        self._composer_input_slot.setMinimumHeight(self.COMPOSER_MIN_HEIGHT)
         composer_layout.addWidget(self._composer_input_slot, 1)
         self.content_splitter.addWidget(composer_container)
         self.content_splitter.setStretchFactor(0, 1)
@@ -1099,7 +1101,7 @@ class ChatPanel(QWidget):
         x = splitter_rect.x() + composer_rect.x()
         y = splitter_rect.y() + composer_rect.y() + banner_height
         width = composer_rect.width()
-        height = max(0, composer_rect.height() - banner_height)
+        height = max(self.COMPOSER_MIN_HEIGHT, composer_rect.height() - banner_height)
         self.message_input.setGeometry(x, y, width, height)
         self.message_input.raise_()
 

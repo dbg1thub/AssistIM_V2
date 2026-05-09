@@ -410,15 +410,20 @@ def test_chat_message_input_uses_floating_card_style_without_overlay_or_cursor_o
     assert 'self.content_splitter.splitterMoved.connect(self._schedule_restore_message_viewport)' in chat_panel
     assert 'MESSAGE_INPUT_FLOAT_OVERLAP' not in chat_panel
     assert 'MESSAGE_LIST_BOTTOM_MARGIN = 8' in chat_panel
+    assert 'COMPOSER_MIN_HEIGHT = 180' in chat_panel
     assert 'composer_container.setObjectName("chatInputSafeArea")' in chat_panel
+    assert 'composer_container.setMinimumHeight(self.COMPOSER_MIN_HEIGHT)' in chat_panel
     assert 'self._composer_input_slot.setObjectName("chatInputSlot")' in chat_panel
+    assert 'self._composer_input_slot.setMinimumHeight(self.COMPOSER_MIN_HEIGHT)' in chat_panel
+    assert 'self.message_input.setMinimumHeight(self.COMPOSER_MIN_HEIGHT)' in chat_panel
     assert 'composer_layout.addWidget(self._composer_input_slot, 1)' in chat_panel
     assert 'composer_layout.addWidget(self.message_input, 1)' not in chat_panel
     assert 'self.content_splitter.splitterMoved.connect(self._on_content_splitter_moved)' in chat_panel
     assert 'def _layout_message_input_overlay(self) -> None:' in chat_panel
     assert 'y = splitter_rect.y() + composer_rect.y() + banner_height' in chat_panel
-    assert 'height = max(0, composer_rect.height() - banner_height)' in chat_panel
+    assert 'height = max(self.COMPOSER_MIN_HEIGHT, composer_rect.height() - banner_height)' in chat_panel
     assert 'self.message_input.raise_()' in chat_panel
+    assert 'self.message_input.setMinimumHeight(0)' not in chat_panel
     assert 'self.message_input.setMaximumHeight(' not in chat_panel
     assert 'composer_container.setMaximumHeight(340)' in chat_panel
     assert '_ComposerResizeHandle' not in chat_panel
