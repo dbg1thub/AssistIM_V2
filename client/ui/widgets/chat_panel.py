@@ -302,6 +302,7 @@ class ChatPanel(QWidget):
         self.message_input: Optional[MessageInput] = None
         self.content_splitter: Optional[FluentSplitter] = None
         self._composer_container: Optional[QWidget] = None
+        self._composer_input_slot: Optional[QWidget] = None
         self._chat_info_overlay: Optional[ChatInfoDrawerOverlay] = None
         self._security_pending_banner: Optional[SecurityPendingBanner] = None
         self._recall_action_refresh_timer = QTimer(self)
@@ -385,21 +386,28 @@ class ChatPanel(QWidget):
         self.message_list.setMinimumHeight(0)
         self.content_splitter.addWidget(self.message_list)
         composer_container = QWidget(self.chat_page)
+        composer_container.setObjectName("chatInputSafeArea")
         composer_container.setMaximumHeight(340)
         self._composer_container = composer_container
         composer_layout = QVBoxLayout(composer_container)
         composer_layout.setContentsMargins(0, 0, 0, 0)
         composer_layout.setSpacing(0)
         composer_layout.addWidget(self._security_pending_banner, 0)
-        composer_layout.addWidget(self.message_input, 1)
+        self._composer_input_slot = QWidget(composer_container)
+        self._composer_input_slot.setObjectName("chatInputSlot")
+        self._composer_input_slot.setMinimumHeight(0)
+        composer_layout.addWidget(self._composer_input_slot, 1)
         self.content_splitter.addWidget(composer_container)
         self.content_splitter.setStretchFactor(0, 1)
         self.content_splitter.setStretchFactor(1, 0)
         self.content_splitter.setSizes([560, 220])
         self.content_splitter.splitterMoved.connect(self._schedule_restore_message_viewport)
+        self.content_splitter.splitterMoved.connect(self._on_content_splitter_moved)
         self.content_splitter.installEventFilter(self)
         composer_container.installEventFilter(self)
+        self._composer_input_slot.installEventFilter(self)
         self.message_input.installEventFilter(self)
+        QTimer.singleShot(0, self._layout_message_input_overlay)
 
         self.chat_layout.addWidget(self.chat_header, 0)
         self.chat_layout.addWidget(self.content_splitter, 1)
@@ -1042,14 +1050,18 @@ class ChatPanel(QWidget):
                     return True
 
         composer_container = getattr(self, "_composer_container", None)
+        composer_input_slot = getattr(self, "_composer_input_slot", None)
         tracked_resize_widgets = {
-            widget for widget in (content_splitter, message_input, composer_container) if widget is not None
+            widget
+            for widget in (content_splitter, message_input, composer_container, composer_input_slot)
+            if widget is not None
         }
         if watched in tracked_resize_widgets and event.type() in {
             QEvent.Type.Resize,
             QEvent.Type.LayoutRequest,
             QEvent.Type.Show,
         }:
+            self._layout_message_input_overlay()
             self._remember_message_scroll_gap()
             self._layout_chat_info_overlay()
             self._relayout_message_list()
@@ -1070,6 +1082,26 @@ class ChatPanel(QWidget):
                     return True
 
         return super().eventFilter(watched, event)
+
+    def _on_content_splitter_moved(self, _pos: int, _index: int) -> None:
+        self._layout_message_input_overlay()
+
+    def _layout_message_input_overlay(self) -> None:
+        if self.content_splitter is None or self.message_input is None or self._composer_container is None:
+            return
+        splitter_rect = self.content_splitter.geometry()
+        composer_rect = self._composer_container.geometry()
+        banner_height = (
+            self._security_pending_banner.height()
+            if self._security_pending_banner is not None and self._security_pending_banner.isVisible()
+            else 0
+        )
+        x = splitter_rect.x() + composer_rect.x()
+        y = splitter_rect.y() + composer_rect.y() + banner_height
+        width = composer_rect.width()
+        height = max(0, composer_rect.height() - banner_height)
+        self.message_input.setGeometry(x, y, width, height)
+        self.message_input.raise_()
 
     def _sync_message_scrollbar_visibility(self) -> None:
         if not self._scroll_delegate:

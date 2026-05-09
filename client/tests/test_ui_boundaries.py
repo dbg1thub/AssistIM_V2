@@ -408,7 +408,17 @@ def test_chat_message_input_uses_floating_card_style_without_overlay_or_cursor_o
     assert 'self.content_splitter = FluentSplitter(Qt.Orientation.Vertical, self.chat_page)' in chat_panel
     assert 'self.content_splitter.setHandleIndicatorVisible(False)' in chat_panel
     assert 'self.content_splitter.splitterMoved.connect(self._schedule_restore_message_viewport)' in chat_panel
-    assert 'composer_layout.addWidget(self.message_input, 1)' in chat_panel
+    assert 'MESSAGE_INPUT_FLOAT_OVERLAP' not in chat_panel
+    assert 'MESSAGE_LIST_BOTTOM_MARGIN = 8' in chat_panel
+    assert 'composer_container.setObjectName("chatInputSafeArea")' in chat_panel
+    assert 'self._composer_input_slot.setObjectName("chatInputSlot")' in chat_panel
+    assert 'composer_layout.addWidget(self._composer_input_slot, 1)' in chat_panel
+    assert 'composer_layout.addWidget(self.message_input, 1)' not in chat_panel
+    assert 'self.content_splitter.splitterMoved.connect(self._on_content_splitter_moved)' in chat_panel
+    assert 'def _layout_message_input_overlay(self) -> None:' in chat_panel
+    assert 'y = splitter_rect.y() + composer_rect.y() + banner_height' in chat_panel
+    assert 'height = max(0, composer_rect.height() - banner_height)' in chat_panel
+    assert 'self.message_input.raise_()' in chat_panel
     assert 'self.message_input.setMaximumHeight(' not in chat_panel
     assert 'composer_container.setMaximumHeight(340)' in chat_panel
     assert '_ComposerResizeHandle' not in chat_panel
@@ -445,6 +455,14 @@ def test_chat_message_input_uses_floating_card_style_without_overlay_or_cursor_o
     assert 'transparent_base' not in message_input
     assert '_apply_editor_theme' in message_input
     assert '_apply_editor_transparency' not in message_input
+    assert 'editor_base = QColor(31, 31, 31) if self._is_dark() else QColor(255, 255, 255)' in message_input
+    assert 'self.text_input.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)' in message_input
+    assert 'self.text_input.viewport().setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)' in message_input
+
+    light_input_card_block = light_input_qss.split('QWidget#messageInputCard {', 1)[1].split('}', 1)[0]
+    dark_input_card_block = dark_input_qss.split('QWidget#messageInputCard {', 1)[1].split('}', 1)[0]
+    assert 'background: rgba(255, 255, 255, 0.96);' in light_input_card_block
+    assert 'background: rgba(31, 31, 31, 0.96);' in dark_input_card_block
 
     for qss in (light_input_qss, dark_input_qss):
         assert 'QWidget#messageInputCard {' in qss
@@ -459,6 +477,8 @@ def test_chat_message_input_uses_floating_card_style_without_overlay_or_cursor_o
         assert 'QSplitter#chatContentSplitter::handle:vertical' in qss
         assert 'background: transparent;' in qss.split('QSplitter#chatContentSplitter::handle:vertical', 1)[1].split('}', 1)[0]
         assert 'border: none;' in qss.split('QSplitter#chatContentSplitter::handle:vertical', 1)[1].split('}', 1)[0]
+        assert 'QWidget#chatInputSafeArea' in qss
+        assert 'QWidget#chatInputSlot' in qss
 
 
 def test_contact_interface_request_and_group_actions_avoid_full_reload() -> None:

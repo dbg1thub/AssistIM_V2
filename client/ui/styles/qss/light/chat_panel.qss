@@ -9,6 +9,12 @@ QListView#messageListView {
     border: none;
 }
 
+QWidget#chatInputSafeArea,
+QWidget#chatInputSlot {
+    background: transparent;
+    border: none;
+}
+
 QSplitter#chatContentSplitter::handle:vertical {
     background: transparent;
     border: none;
