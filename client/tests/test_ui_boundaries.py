@@ -38,6 +38,8 @@ def test_sidebar_items_use_compact_consistent_spacing() -> None:
     update_friend_block = contact_interface.split('def _update_friend_item_view', 1)[1].split('def _create_friend_item', 1)[0]
     create_friend_block = contact_interface.split('def _create_friend_item', 1)[1].split('def _ensure_friend_section_view', 1)[0]
     remove_friend_block = contact_interface.split('def _remove_friend_item_view', 1)[1].split('def _update_blocked_item_view', 1)[0]
+    upsert_contact_block = contact_interface.split('def _upsert_contact_record', 1)[1].split('def _upsert_blocked_contact_record', 1)[0]
+    keyed_task_block = contact_interface.split('def _schedule_keyed_ui_task', 1)[1].split('def _clear_keyed_ui_task', 1)[0]
     update_blocked_block = contact_interface.split('def _update_blocked_item_view', 1)[1].split('def _create_blocked_item', 1)[0]
     create_blocked_block = contact_interface.split('def _create_blocked_item', 1)[1].split('def _insert_blocked_item_view', 1)[0]
 
@@ -64,6 +66,11 @@ def test_sidebar_items_use_compact_consistent_spacing() -> None:
     assert 'or str(contact.username or "").strip()' in contact_interface
     assert 'section_layout.removeWidget(item)' in remove_friend_block
     assert 'self.friends_layout.removeWidget(section)' in remove_friend_block
+    assert 'self._build_friends_page()' in upsert_contact_block
+    assert 'self._restore_selection(full_reload=False)' in upsert_contact_block
+    assert 'coro_factory' in keyed_task_block
+    assert 'coro_factory()' in keyed_task_block
+    assert 'coro_factory()' not in keyed_task_block.split('if existing is not None and not existing.done():', 1)[1].split('self._keyed_ui_tasks[key]', 1)[0]
     assert 'title=self._friend_sidebar_title(contact)' in update_blocked_block
     assert 'subtitle=""' in update_blocked_block
     assert 'self._friend_sidebar_title(contact),' in create_blocked_block

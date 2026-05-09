@@ -18,8 +18,6 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QListView,
-    QListWidget,
-    QListWidgetItem,
     QSizePolicy,
     QTextEdit,
     QVBoxLayout,
@@ -36,6 +34,8 @@ from qfluentwidgets import (
     RoundMenu,
     ScrollBarHandleDisplayMode,
     SubtitleLabel,
+    TabBar,
+    TabCloseButtonDisplayMode,
     TransparentToolButton,
     isDarkTheme,
     themeColor,
@@ -269,7 +269,6 @@ class AIAssistantFloatingComposerOverlay(QWidget):
 class AIAssistantInterface(QWidget):
     """Top-level navigation page for local AI assistant threads."""
 
-    THREAD_WIDTH = 286
     MAX_CONTEXT_MESSAGES = 80
     COMPOSER_HEIGHT = 140
     INPUT_SAFE_AREA_HEIGHT = 196
@@ -328,29 +327,6 @@ class AIAssistantInterface(QWidget):
         self.main_layout.setContentsMargins(0, 0, 0, 0)
         self.main_layout.setSpacing(0)
 
-        self.thread_panel = QFrame(self)
-        self.thread_panel.setObjectName("aiAssistantThreadPanel")
-        self.thread_panel.setFixedWidth(self.THREAD_WIDTH)
-        self.thread_layout = QVBoxLayout(self.thread_panel)
-        self.thread_layout.setContentsMargins(14, 14, 14, 14)
-        self.thread_layout.setSpacing(12)
-
-        self.new_thread_button = PrimaryPushButton(
-            tr("ai_assistant.new_chat", "New Chat"),
-            self.thread_panel,
-        )
-        self.new_thread_button.setIcon(AppIcon.ADD.icon())
-        self.new_thread_button.clicked.connect(self._on_new_thread_clicked)
-        self.thread_list = QListWidget(self.thread_panel)
-        self.thread_list.setObjectName("aiAssistantThreadList")
-        self.thread_list.setFrameShape(QFrame.Shape.NoFrame)
-        self.thread_list.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.thread_list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
-        self.thread_list.itemClicked.connect(self._on_thread_item_clicked)
-
-        self.thread_layout.addWidget(self.new_thread_button)
-        self.thread_layout.addWidget(self.thread_list, 1)
-
         self.content_panel = QFrame(self)
         self.content_panel.setObjectName("aiAssistantContentPanel")
         self.content_layout = QVBoxLayout(self.content_panel)
@@ -360,36 +336,32 @@ class AIAssistantInterface(QWidget):
         self.header = QFrame(self.content_panel)
         self.header.setObjectName("aiAssistantHeader")
         self.header_layout = QHBoxLayout(self.header)
-        self.header_layout.setContentsMargins(22, 12, 22, 12)
+        self.header_layout.setContentsMargins(16, 6, 16, 6)
         self.header_layout.setSpacing(12)
 
         self.product_label = BodyLabel("AssistIM AI", self.header)
         self.product_label.setObjectName("aiAssistantProductTitle")
-        self.product_label.setMinimumWidth(0)
-        self.product_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.product_label.setFixedWidth(104)
 
         self.title_label = BodyLabel(tr("ai_assistant.thread.new", "New Chat"), self.header)
         self.title_label.setObjectName("aiAssistantThreadTitle")
         self.title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.title_label.setMinimumWidth(0)
         self.title_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.title_label.hide()
 
-        self.header_actions = QWidget(self.header)
-        self.header_actions.setObjectName("aiAssistantHeaderActions")
-        self.header_actions_layout = QHBoxLayout(self.header_actions)
-        self.header_actions_layout.setContentsMargins(0, 0, 0, 0)
-        self.header_actions_layout.setSpacing(0)
-        self.delete_button = TransparentToolButton(CollectionIcon("delete"), self.header_actions)
-        self.delete_button.setObjectName("aiAssistantHeaderDeleteButton")
-        self.delete_button.setFixedSize(36, 36)
-        self.delete_button.setToolTip(tr("common.delete", "Delete"))
-        self.delete_button.clicked.connect(self._on_delete_clicked)
-        self.header_actions_layout.addStretch(1)
-        self.header_actions_layout.addWidget(self.delete_button)
+        self.thread_tab_bar = TabBar(self.header)
+        self.thread_tab_bar.setObjectName("aiAssistantThreadTabBar")
+        self.thread_tab_bar.setTabMaximumWidth(220)
+        self.thread_tab_bar.setMovable(True)
+        self.thread_tab_bar.setScrollable(True)
+        self.thread_tab_bar.setTabShadowEnabled(True)
+        self.thread_tab_bar.setCloseButtonDisplayMode(TabCloseButtonDisplayMode.ON_HOVER)
+        self.thread_tab_bar.tabAddRequested.connect(self._on_new_thread_clicked)
+        self.thread_tab_bar.tabCloseRequested.connect(self._on_thread_tab_close_requested)
 
-        self.header_layout.addWidget(self.product_label, 1, Qt.AlignmentFlag.AlignVCenter)
-        self.header_layout.addWidget(self.title_label, 2, Qt.AlignmentFlag.AlignVCenter)
-        self.header_layout.addWidget(self.header_actions, 1, Qt.AlignmentFlag.AlignVCenter)
+        self.header_layout.addWidget(self.product_label, 0, Qt.AlignmentFlag.AlignVCenter)
+        self.header_layout.addWidget(self.thread_tab_bar, 1, Qt.AlignmentFlag.AlignVCenter)
 
         self.message_list = QListView(self.content_panel)
         self.message_list.setObjectName("aiAssistantMessageList")
@@ -494,7 +466,6 @@ class AIAssistantInterface(QWidget):
         self.scroll_to_bottom_button.hide()
         self.scroll_to_bottom_button.clicked.connect(self._on_scroll_to_bottom_clicked)
 
-        self.main_layout.addWidget(self.thread_panel)
         self.main_layout.addWidget(self.content_panel, 1)
         self._apply_theme()
         self._set_generating(False)
@@ -597,7 +568,7 @@ class AIAssistantInterface(QWidget):
         self._threads = await self._store.list_threads()
         if normalized_thread_id == self._current_thread_id:
             self.title_label.setText(updated.title or tr("ai_assistant.thread.new", "New Chat"))
-        self._render_thread_list()
+        self._render_thread_tabs()
         return updated
 
     def regenerate_current_thread(self) -> asyncio.Task | None:
@@ -609,8 +580,8 @@ class AIAssistantInterface(QWidget):
             f"regenerate AI assistant thread {self._current_thread_id}",
         )
 
-    def _on_thread_item_clicked(self, item: QListWidgetItem) -> None:
-        thread_id = str(item.data(Qt.ItemDataRole.UserRole) or "")
+    def _on_thread_tab_clicked(self, thread_id: str) -> None:
+        thread_id = str(thread_id or "").strip()
         if thread_id and thread_id != self._current_thread_id:
             self._create_ui_task(self._select_thread(thread_id), f"select AI assistant thread {thread_id}")
 
@@ -618,7 +589,7 @@ class AIAssistantInterface(QWidget):
         self._threads = await self._store.list_threads()
         if not self._threads:
             self._threads = [await self._store.create_thread()]
-        self._render_thread_list()
+        self._render_thread_tabs()
         target_id = select_thread_id or (self._threads[0].thread_id if select_first and self._threads else "")
         if target_id:
             await self._select_thread(target_id, stop_generation=False)
@@ -633,26 +604,27 @@ class AIAssistantInterface(QWidget):
         self._current_thread_id = thread.thread_id
         self.title_label.setText(thread.title or tr("ai_assistant.thread.new", "New Chat"))
         self._messages = await self._store.list_messages(thread.thread_id, limit=self.MAX_CONTEXT_MESSAGES)
-        self._render_thread_list()
+        self._render_thread_tabs()
         self._render_messages()
         self._set_generating(bool(self._active_task_id or self._active_action_plan_id))
         self.prompt_edit.setFocus()
 
-    def _render_thread_list(self) -> None:
-        self.thread_list.blockSignals(True)
-        self.thread_list.clear()
+    def _render_thread_tabs(self) -> None:
+        self.thread_tab_bar.blockSignals(True)
+        self.thread_tab_bar.clear()
         for thread in self._threads:
             preview = str(thread.last_message or "").strip()
             title = str(thread.title or tr("ai_assistant.thread.new", "New Chat")).strip()
-            item_text = title if not preview else f"{title}\n{preview}"
-            item = QListWidgetItem(item_text)
-            item.setData(Qt.ItemDataRole.UserRole, thread.thread_id)
-            item.setToolTip(item_text)
-            self.thread_list.addItem(item)
-            if thread.thread_id == self._current_thread_id:
-                item.setSelected(True)
-                self.thread_list.setCurrentItem(item)
-        self.thread_list.blockSignals(False)
+            tooltip = title if not preview else f"{title}\n{preview}"
+            tab = self.thread_tab_bar.addTab(
+                routeKey=thread.thread_id,
+                text=title,
+                onClick=lambda thread_id=thread.thread_id: self._on_thread_tab_clicked(thread_id),
+            )
+            tab.setToolTip(tooltip)
+        if self._current_thread_id:
+            self.thread_tab_bar.setCurrentTab(self._current_thread_id)
+        self.thread_tab_bar.blockSignals(False)
 
     def _render_messages(self) -> None:
         if self._message_model is not None:
@@ -977,7 +949,7 @@ class AIAssistantInterface(QWidget):
             )
             self._append_message(assistant_message)
             self._threads = await self._store.list_threads()
-            self._render_thread_list()
+            self._render_thread_tabs()
             return
 
         if assistant_message is None:
@@ -1064,7 +1036,7 @@ class AIAssistantInterface(QWidget):
             extra=message.extra,
         )
         self._threads = await self._store.list_threads()
-        self._render_thread_list()
+        self._render_thread_tabs()
 
     async def _finalize_snapshot(self, snapshot: AITaskSnapshot) -> None:
         if snapshot.task_id != self._active_task_id or self._active_assistant_message is None:
@@ -1241,26 +1213,47 @@ class AIAssistantInterface(QWidget):
         self._render_messages()
         await self._reload_threads(select_thread_id=self._current_thread_id)
 
-    def _on_delete_clicked(self) -> None:
-        if not self._current_thread_id:
+    def _on_thread_tab_close_requested(self, index: int) -> None:
+        tab = self.thread_tab_bar.tabItem(index)
+        if tab is None:
             return
-        current_thread = next((thread for thread in self._threads if thread.thread_id == self._current_thread_id), None)
+        thread_id = str(tab.routeKey() or "").strip()
+        self._request_thread_delete(thread_id)
+
+    def _request_thread_delete(self, thread_id: str) -> None:
+        normalized_thread_id = str(thread_id or "").strip()
+        if not normalized_thread_id:
+            return
+        current_thread = next((thread for thread in self._threads if thread.thread_id == normalized_thread_id), None)
         dialog = DeleteAIThreadConfirmDialog(
-            current_thread.title if current_thread is not None else self.title_label.text(),
+            current_thread.title if current_thread is not None else tr("ai_assistant.thread.new", "New Chat"),
             self.window(),
         )
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
-        self._create_ui_task(self._delete_current_thread(), "delete AI assistant thread")
+        self._create_ui_task(self._delete_thread(normalized_thread_id), "delete AI assistant thread")
+
+    def _on_delete_clicked(self) -> None:
+        self._request_thread_delete(self._current_thread_id)
 
     async def _delete_current_thread(self) -> None:
         if not self._current_thread_id:
             return
-        if self._active_task_id:
+        await self._delete_thread(self._current_thread_id)
+
+    async def _delete_thread(self, thread_id: str) -> None:
+        normalized_thread_id = str(thread_id or "").strip()
+        if not normalized_thread_id:
+            return
+        deleting_current = normalized_thread_id == self._current_thread_id
+        if deleting_current and self._active_task_id:
             await self._stop_active_generation()
-        await self._store.delete_thread(self._current_thread_id)
-        self._current_thread_id = ""
-        await self._reload_threads(select_first=True)
+        await self._store.delete_thread(normalized_thread_id)
+        if deleting_current:
+            self._current_thread_id = ""
+            await self._reload_threads(select_first=True)
+            return
+        await self._reload_threads(select_thread_id=self._current_thread_id)
 
     def _set_generating(self, generating: bool) -> None:
         self._is_generating = bool(generating)
@@ -1280,7 +1273,6 @@ class AIAssistantInterface(QWidget):
             self._thinking_animation_frame = 0
             if self._message_delegate is not None:
                 self._message_delegate.set_animation_frame(0, self.message_list)
-        self.delete_button.setEnabled(bool(self._current_thread_id))
         self._update_input_overlay_positions()
         self._sync_scroll_to_bottom_button()
 
@@ -1650,23 +1642,6 @@ class AIAssistantInterface(QWidget):
                 QWidget#AIAssistantInterface {{
                     background: transparent;
                     color: {text};
-                }}
-                QFrame#aiAssistantThreadPanel {{
-                    background: {panel};
-                    border-right: 1px solid {border};
-                }}
-                QListWidget#aiAssistantThreadList {{
-                    background: transparent;
-                    border: none;
-                    outline: none;
-                }}
-                QListWidget#aiAssistantThreadList::item {{
-                    padding: 10px 8px;
-                    border-radius: 8px;
-                    margin: 2px 0;
-                }}
-                QListWidget#aiAssistantThreadList::item:selected {{
-                    background: rgba(59, 130, 246, 0.18);
                 }}
                 QFrame#aiAssistantContentPanel {{
                     background: transparent;

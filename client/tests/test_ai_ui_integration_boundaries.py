@@ -436,6 +436,26 @@ def test_ai_assistant_delete_uses_confirmation_dialog() -> None:
     assert "if dialog.exec() != QDialog.DialogCode.Accepted:" in assistant_interface
 
 
+def test_ai_assistant_thread_navigation_uses_fluent_tabbar() -> None:
+    assistant_interface = Path("client/ui/windows/ai_assistant_interface.py").read_text(encoding="utf-8")
+
+    assert "TabBar" in assistant_interface
+    assert "TabCloseButtonDisplayMode" in assistant_interface
+    assert "self.thread_tab_bar = TabBar(self.header)" in assistant_interface
+    assert "self.thread_tab_bar.setMovable(True)" in assistant_interface
+    assert "self.thread_tab_bar.setScrollable(True)" in assistant_interface
+    assert "self.thread_tab_bar.setTabShadowEnabled(True)" in assistant_interface
+    assert "self.thread_tab_bar.setCloseButtonDisplayMode(TabCloseButtonDisplayMode.ON_HOVER)" in assistant_interface
+    assert "self.thread_tab_bar.tabAddRequested.connect(self._on_new_thread_clicked)" in assistant_interface
+    assert "self.thread_tab_bar.tabCloseRequested.connect(self._on_thread_tab_close_requested)" in assistant_interface
+    assert "def _render_thread_tabs(self) -> None:" in assistant_interface
+    assert "self.thread_tab_bar.addTab(" in assistant_interface
+    assert "self.thread_tab_bar.setCurrentTab(self._current_thread_id)" in assistant_interface
+    assert "def _on_thread_tab_close_requested(self, index: int) -> None:" in assistant_interface
+    assert "QListWidget" not in assistant_interface
+    assert "thread_list" not in assistant_interface
+
+
 def test_ai_action_footer_does_not_repeat_pending_response_text() -> None:
     assistant_delegate = Path("client/delegates/ai_assistant_message_delegate.py").read_text(encoding="utf-8")
     footer_function = assistant_delegate.split("def _action_footer_text", 1)[1].split(

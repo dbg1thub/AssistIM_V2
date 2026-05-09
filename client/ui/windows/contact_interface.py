@@ -1634,14 +1634,14 @@ class ContactInterface(QWidget):
         if reason in {"friend_request_created", "friend_request_updated"}:
             self._schedule_keyed_ui_task(
                 ("refresh_requests_slice", self._current_user_id or "self"),
-                self._refresh_requests_slice_async(),
+                self._refresh_requests_slice_async,
                 f"refresh requests after {reason}",
             )
             return
         if reason in {"friendship_created", "friendship_removed"}:
             self._schedule_keyed_ui_task(
                 ("refresh_contacts_requests_slices", self._current_user_id or "self"),
-                self._refresh_contacts_and_requests_slices_async(),
+                self._refresh_contacts_and_requests_slices_async,
                 f"refresh contacts and requests after {reason}",
             )
             return
@@ -1702,7 +1702,7 @@ class ContactInterface(QWidget):
             return
         self._schedule_keyed_ui_task(
             ("refresh_profile_related_slices", self._current_user_id or "self"),
-            self._refresh_profile_related_slices_async(),
+            self._refresh_profile_related_slices_async,
             "refresh profile-related contact slices",
         )
 
@@ -2137,8 +2137,9 @@ class ContactInterface(QWidget):
         if self._friend_items or self._current_page == "friends":
             current_sort_key = self._friend_sort_key(contact)
             if previous_sort_key is not None and previous_sort_key != current_sort_key:
-                self._remove_friend_item_view(contact.id)
-                self._insert_friend_item_view(contact)
+                self._build_friends_page()
+                if self._current_page == "friends":
+                    self._restore_selection(full_reload=False)
             elif previous_sort_key is None:
                 self._insert_friend_item_view(contact)
             else:
@@ -2209,7 +2210,7 @@ class ContactInterface(QWidget):
         """Persist the current normalized group snapshot after local incremental mutations."""
         self._schedule_keyed_ui_task(
             ("persist_groups_cache", "groups"),
-            self._controller.persist_groups_cache(list(self._groups)),
+            lambda: self._controller.persist_groups_cache(list(self._groups)),
             "persist groups cache",
         )
 
@@ -2217,7 +2218,7 @@ class ContactInterface(QWidget):
         """Persist the current normalized contact snapshot after local incremental mutations."""
         self._schedule_keyed_ui_task(
             ("persist_contacts_cache", "contacts"),
-            self._controller.persist_contacts_cache(list(self._contacts)),
+            lambda: self._controller.persist_contacts_cache(list(self._contacts)),
             "persist contacts cache",
         )
 
@@ -2604,7 +2605,7 @@ class ContactInterface(QWidget):
             return
         self._schedule_keyed_ui_task(
             ("remove_friend", contact_id),
-            self._remove_friend_async(contact_id, contact.display_name),
+            lambda: self._remove_friend_async(contact_id, contact.display_name),
             f"remove friend {contact_id}",
         )
 
@@ -2624,7 +2625,7 @@ class ContactInterface(QWidget):
             return
         self._schedule_keyed_ui_task(
             ("friend_remark", normalized_contact_id),
-            self._update_friend_remark_async(normalized_contact_id, str(remark or "").strip()),
+            lambda: self._update_friend_remark_async(normalized_contact_id, str(remark or "").strip()),
             f"update friend remark {normalized_contact_id}",
         )
 
@@ -2712,7 +2713,7 @@ class ContactInterface(QWidget):
             return
         self._schedule_keyed_ui_task(
             ("block_friend", contact_id),
-            self._block_friend_async(contact_id, contact.display_name),
+            lambda: self._block_friend_async(contact_id, contact.display_name),
             f"block friend {contact_id}",
         )
 
@@ -2723,7 +2724,7 @@ class ContactInterface(QWidget):
             return
         self._schedule_keyed_ui_task(
             ("unblock_contact", contact_id),
-            self._unblock_contact_async(contact_id, contact.display_name),
+            lambda: self._unblock_contact_async(contact_id, contact.display_name),
             f"unblock contact {contact_id}",
         )
 
@@ -3129,7 +3130,7 @@ class ContactInterface(QWidget):
             return
         self._schedule_keyed_ui_task(
             ("accept_request", request_id),
-            self._accept_request_async(request_id),
+            lambda: self._accept_request_async(request_id),
             f"accept request {request_id}",
         )
 
@@ -3151,7 +3152,7 @@ class ContactInterface(QWidget):
             return
         self._schedule_keyed_ui_task(
             ("reject_request", request_id),
-            self._reject_request_async(request_id),
+            lambda: self._reject_request_async(request_id),
             f"reject request {request_id}",
         )
 
@@ -3382,13 +3383,13 @@ class ContactInterface(QWidget):
         if self._load_task is task:
             self._load_task = None
 
-    def _schedule_keyed_ui_task(self, key: tuple[str, str], coro, context: str) -> None:
+    def _schedule_keyed_ui_task(self, key: tuple[str, str], coro_factory, context: str) -> None:
         """Prevent duplicate actions for the same target while one is still running."""
         existing = self._keyed_ui_tasks.get(key)
         if existing is not None and not existing.done():
             return
         self._keyed_ui_tasks[key] = self._create_ui_task(
-            coro,
+            coro_factory(),
             context,
             on_done=lambda task, task_key=key: self._clear_keyed_ui_task(task_key, task),
         )
