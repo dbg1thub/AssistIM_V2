@@ -291,6 +291,7 @@ class AppIcon(FluentIconBase, Enum):
     CLOSE = "dismiss"
     COMPLETED = "checkmark_circle"
     CUT = "cut"
+    EDIT = "edit"
     EMOJI_TAB_SYMBOLS = "emoji"
     FOLDER = "folder"
     GENDER_FEMALE = "gender_female"

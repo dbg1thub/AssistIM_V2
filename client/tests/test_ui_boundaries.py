@@ -244,6 +244,7 @@ def test_contact_detail_card_uses_wechat_like_profile_layout() -> None:
     assert 'GENDER_MALE = "gender_male"' in app_icons
     assert 'GENDER_FEMALE = "gender_female"' in app_icons
     assert 'MORE_HORIZONTAL = "more_horizontal"' in app_icons
+    assert 'EDIT = "edit"' in app_icons
 
 
 def test_group_flow_no_longer_writes_local_group_avatar_metadata() -> None:
