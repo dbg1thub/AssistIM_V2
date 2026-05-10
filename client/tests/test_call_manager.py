@@ -191,6 +191,48 @@ def test_call_manager_keeps_call_active_when_media_signal_error_returns(monkeypa
     asyncio.run(scenario())
 
 
+def test_call_manager_treats_hangup_error_as_local_terminal(monkeypatch) -> None:
+    fake_conn = FakeConnectionManager()
+    fake_event_bus = FakeEventBus()
+
+    monkeypatch.setattr(call_manager_module, "get_connection_manager", lambda: fake_conn)
+    monkeypatch.setattr(call_manager_module, "get_event_bus", lambda: fake_event_bus)
+
+    async def scenario() -> None:
+        manager = CallManager()
+        manager.set_user_id("alice")
+        await manager.initialize()
+
+        session = Session(
+            session_id="session-1",
+            name="Bob",
+            session_type="direct",
+            participant_ids=["alice", "bob"],
+            extra={"counterpart_id": "bob"},
+        )
+
+        active_call = await manager.start_call(session, "video")
+        assert await manager.hangup_call(active_call.call_id) is True
+        hangup_message = fake_conn.sent[-1]
+        assert hangup_message["type"] == "call_hangup"
+
+        await fake_conn.dispatch(
+            {
+                "type": "error",
+                "msg_id": hangup_message["msg_id"],
+                "data": {"code": 1006, "message": "call not found"},
+            }
+        )
+
+        assert manager.active_call is None
+        assert fake_event_bus.emitted[-1][0] == CallEvent.ENDED
+        assert fake_event_bus.emitted[-1][1]["call"] is active_call
+        assert fake_event_bus.emitted[-1][1]["call"].status == "ended"
+        assert fake_event_bus.emitted[-1][1]["call"].reason == "call not found"
+
+    asyncio.run(scenario())
+
+
 def test_call_manager_marks_call_failed_when_invite_error_returns(monkeypatch) -> None:
     fake_conn = FakeConnectionManager()
     fake_event_bus = FakeEventBus()

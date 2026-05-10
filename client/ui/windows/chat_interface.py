@@ -3939,6 +3939,7 @@ class ChatInterface(QWidget):
             getattr(active_call, "status", None),
         )
         if active_call is not None and active_call.session_id == session.session_id:
+            self._end_local_call_ui(active_call.call_id)
             await self._chat_controller.hangup_call(active_call.call_id)
             return
 
@@ -4285,6 +4286,12 @@ class ChatInterface(QWidget):
         self._stop_call_ring_sounds()
         window.end_call()
 
+    def _end_local_call_ui(self, call_id: str) -> None:
+        """Stop local call surfaces immediately after the user hangs up."""
+        self._close_incoming_call_toast(call_id)
+        self._close_call_window(call_id)
+        self._stop_call_ring_sounds()
+
     def _on_call_window_destroyed(self, window: CallWindow) -> None:
         """Clear the active call window reference once the widget is gone."""
         if self._call_window is window:
@@ -4296,6 +4303,7 @@ class ChatInterface(QWidget):
             return
         if source_window.call_id != call_id:
             return
+        self._end_local_call_ui(call_id)
         self._schedule_ui_task(
             self._chat_controller.hangup_call(call_id),
             f"hangup call window {call_id}",

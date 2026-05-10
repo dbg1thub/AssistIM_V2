@@ -411,6 +411,25 @@ class CallManager:
         if pending_action is None and payload_call_id != active_call.call_id and msg_id != active_call.call_id:
             return
         reason = str(payload.get("message") or "Call signaling failed")
+        if pending_event_type == "call_hangup":
+            ended_call = active_call
+            ended_call.status = CallStatus.ENDED.value
+            ended_call.reason = reason
+            logger.warning(
+                "[call-diag] hangup_action_error_treated_as_ended call_id=%s msg_id=%s code=%s reason=%s payload=%s",
+                ended_call.call_id,
+                msg_id,
+                payload.get("code"),
+                reason,
+                payload,
+            )
+            self._cancel_unanswered_timeout()
+            await self._event_bus.emit(CallEvent.ENDED, {"call": ended_call, "payload": payload})
+            self._timing_origins.pop(ended_call.call_id, None)
+            self._local_accepting_call_ids.discard(ended_call.call_id)
+            self._clear_pending_call_actions(ended_call.call_id)
+            self._active_call = None
+            return
         if pending_event_type and pending_event_type not in self.FATAL_ACTION_ERROR_TYPES:
             logger.warning(
                 "[call-diag] nonfatal_call_action_error call_id=%s msg_id=%s action=%s code=%s reason=%s payload=%s",

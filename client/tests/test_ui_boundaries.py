@@ -810,8 +810,16 @@ def test_chat_interface_call_dialog_and_menu_callbacks_are_instance_guarded() ->
     assert 'self._schedule_ui_single_shot(self.CALL_INCOMING_RING_RETRY_MS, self._retry_incoming_ring_sound)' in chat_interface
     assert '_prepare_current_call_window_media' not in chat_interface
     assert '_prepare_incoming_call_window' not in chat_interface
+    assert 'def _end_local_call_ui(self, call_id: str) -> None:' in chat_interface
+    assert 'self._end_local_call_ui(active_call.call_id)' in chat_interface
     assert 'window.hangup_requested.connect(lambda call_id, ref=window: self._on_call_window_hangup_requested(call_id, ref))' in chat_interface
     assert 'def _on_call_window_hangup_requested(self, call_id: str, source_window: CallWindow) -> None:' in chat_interface
+    hangup_block = chat_interface.split('def _on_call_window_hangup_requested', 1)[1].split(
+        'def _on_call_window_signal_generated',
+        1,
+    )[0]
+    assert 'self._end_local_call_ui(call_id)' in hangup_block
+    assert hangup_block.index('self._end_local_call_ui(call_id)') < hangup_block.index('self._chat_controller.hangup_call(call_id)')
     assert 'def _on_call_window_signal_generated(self, event_type: str, payload: object, source_window: CallWindow) -> None:' in chat_interface
     assert chat_interface.count('if self._call_window is not source_window:') == 2
     assert 'if self._message_context_menu is not menu:' in chat_interface
