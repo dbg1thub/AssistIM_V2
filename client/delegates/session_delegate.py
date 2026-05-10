@@ -41,10 +41,13 @@ class SessionDelegate(QStyledItemDelegate):
 
     AVATAR_SIZE = 36
     ITEM_HEIGHT = 64
-    ITEM_PADDING = 8
+    ITEM_PADDING = 12
     CONTENT_GAP = 8
     H_MARGIN = 0
     V_MARGIN = 0
+    TEXT_AREA_HEIGHT = 36
+    TEXT_LINE_HEIGHT = 14
+    TEXT_LINE_SPACING = 8
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -71,14 +74,14 @@ class SessionDelegate(QStyledItemDelegate):
 
         avatar_rect = QRect(
             card_rect.x() + self.ITEM_PADDING,
-            card_rect.y() + (card_rect.height() - self.AVATAR_SIZE) // 2,
+            card_rect.y() + self.ITEM_PADDING,
             self.AVATAR_SIZE,
             self.AVATAR_SIZE,
         )
         self._draw_avatar(painter, avatar_rect, session)
 
-        content_left = avatar_rect.right() + self.CONTENT_GAP
-        content_right = card_rect.right() - self.ITEM_PADDING
+        content_left = avatar_rect.x() + avatar_rect.width() + self.CONTENT_GAP
+        content_right = card_rect.x() + card_rect.width() - self.ITEM_PADDING
         content_width = max(0, content_right - content_left)
 
         name_font = self._ui_font(16)
@@ -97,14 +100,14 @@ class SessionDelegate(QStyledItemDelegate):
         time_text = time_fm.elidedText(time_text, Qt.TextElideMode.ElideRight, time_width)
         muted = bool(getattr(session, "extra", {}).get("is_muted", False))
         mute_icon_size = 10
-        mute_slot_width = mute_icon_size + 8 if muted else 0
+        mute_slot_width = mute_icon_size if muted else 0
 
         unread_text = self._format_unread(session.unread_count)
         unread_badge_font = self._unread_badge_font()
         unread_badge_fm = QFontMetrics(unread_badge_font)
         unread_width = max(20, unread_badge_fm.horizontalAdvance(unread_text) + 14) if unread_text else 0
 
-        name_available = max(0, content_width - time_width - 12)
+        name_available = max(0, content_width - time_width)
         name_text = name_fm.elidedText(
             session.display_name() or tr("session.unnamed", "Untitled Session"),
             Qt.TextElideMode.ElideRight,
@@ -112,8 +115,12 @@ class SessionDelegate(QStyledItemDelegate):
         )
         preview_available = max(0, content_width - mute_slot_width)
 
-        name_y = card_rect.y() + 8
-        preview_y = name_y + 24
+        text_top = card_rect.y() + self.ITEM_PADDING
+        name_y = text_top
+        preview_y = text_top + self.TEXT_LINE_HEIGHT + self.TEXT_LINE_SPACING
+        name_rect = QRect(content_left, name_y, name_available, self.TEXT_LINE_HEIGHT)
+        preview_rect = QRect(content_left, preview_y, preview_available, self.TEXT_LINE_HEIGHT)
+        time_rect = QRect(content_right - time_width, name_y, time_width, self.TEXT_LINE_HEIGHT)
 
         secondary_text = QColor(216, 216, 216) if isDarkTheme() else QColor(95, 95, 95)
         primary_text = QColor(255, 255, 255) if isDarkTheme() else QColor(0, 0, 0)
@@ -123,7 +130,7 @@ class SessionDelegate(QStyledItemDelegate):
         painter.setFont(name_font)
         painter.setPen(primary_text)
         painter.drawText(
-                QRect(content_left, name_y, name_available, 22),
+                name_rect,
                 Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
                 name_text,
             )
@@ -136,6 +143,8 @@ class SessionDelegate(QStyledItemDelegate):
                 18,
             )
             self._draw_unread_badge(painter, badge_rect, unread_text)
+        else:
+            badge_rect = QRect()
 
         painter.setFont(preview_font)
         if draft_preview:
@@ -149,7 +158,7 @@ class SessionDelegate(QStyledItemDelegate):
             painter.setFont(prefix_font)
             painter.setPen(prefix_color)
             painter.drawText(
-                QRect(content_left, preview_y, prefix_fm.horizontalAdvance(prefix_text) + 10, 24),
+                QRect(content_left, preview_y, prefix_fm.horizontalAdvance(prefix_text) + 10, self.TEXT_LINE_HEIGHT),
                 Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
                 prefix_text,
             )
@@ -158,7 +167,7 @@ class SessionDelegate(QStyledItemDelegate):
             painter.setPen(preview_color)
             self._draw_preview_runs(
                 painter,
-                QRect(content_left + prefix_width, preview_y - 1, body_available, 28),
+                QRect(content_left + prefix_width, preview_y, body_available, self.TEXT_LINE_HEIGHT),
                 draft_preview,
                 preview_color,
             )
@@ -173,13 +182,13 @@ class SessionDelegate(QStyledItemDelegate):
                 painter.setFont(prefix_font)
                 painter.setPen(attention_color)
                 painter.drawText(
-                    QRect(content_left, preview_y, prefix_width, 24),
+                    QRect(content_left, preview_y, prefix_width, self.TEXT_LINE_HEIGHT),
                     Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
                     attention_prefix,
                 )
                 self._draw_preview_runs(
                     painter,
-                    QRect(content_left + prefix_width, preview_y - 1, body_available, 28),
+                    QRect(content_left + prefix_width, preview_y, body_available, self.TEXT_LINE_HEIGHT),
                     preview_text,
                     attention_color,
                 )
@@ -187,7 +196,7 @@ class SessionDelegate(QStyledItemDelegate):
                 painter.setPen(preview_color)
                 self._draw_preview_runs(
                     painter,
-                    QRect(content_left, preview_y - 1, preview_available, 28),
+                    preview_rect,
                     preview_text,
                     preview_color,
                 )
@@ -195,7 +204,7 @@ class SessionDelegate(QStyledItemDelegate):
         painter.setFont(time_font)
         painter.setPen(time_color)
         painter.drawText(
-            QRect(content_right - time_width, name_y, time_width, 18),
+            time_rect,
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
             time_text,
         )
@@ -203,7 +212,7 @@ class SessionDelegate(QStyledItemDelegate):
         if muted:
             icon_rect = QRect(
                 content_right - mute_icon_size,
-                preview_y + 6,
+                preview_y + (self.TEXT_LINE_HEIGHT - mute_icon_size) // 2,
                 mute_icon_size,
                 mute_icon_size,
             )
