@@ -78,6 +78,14 @@ class AIAssistantMessageDelegate(QStyledItemDelegate):
         self._disabled_action_message_ids: set[str] = set()
         self._expanded_action_status_message_ids: set[str] = set()
         self._animation_frame = 0
+        self._bottom_reserved_height = 0
+
+    def set_bottom_reserved_height(self, height: int) -> bool:
+        next_height = max(0, int(height or 0))
+        if next_height == self._bottom_reserved_height:
+            return False
+        self._bottom_reserved_height = next_height
+        return True
 
     def sizeHint(self, option: QStyleOptionViewItem, index: QModelIndex) -> QSize:
         message = self._message(index)
@@ -85,7 +93,8 @@ class AIAssistantMessageDelegate(QStyledItemDelegate):
             return QSize(option.rect.width(), 0)
         row_width = max(option.rect.width(), self.MIN_TRACK_WIDTH + self.TRACK_HORIZONTAL_MARGIN * 2)
         layout = self._layout_rects(QRect(0, 0, row_width, 1), message, index.row())
-        return QSize(row_width, max(1, layout.bubble_rect.bottom() + 1 + self.ROW_BOTTOM_SPACING))
+        bottom_reserved = self._bottom_reserved_height if self._is_last_row(index) else 0
+        return QSize(row_width, max(1, layout.bubble_rect.bottom() + 1 + self.ROW_BOTTOM_SPACING + bottom_reserved))
 
     def paint(self, painter: QPainter, option: QStyleOptionViewItem, index: QModelIndex) -> None:
         message = self._message(index)
@@ -723,6 +732,11 @@ class AIAssistantMessageDelegate(QStyledItemDelegate):
             return None
         message = index.data(Qt.ItemDataRole.UserRole)
         return message if isinstance(message, AIMessage) else None
+
+    @staticmethod
+    def _is_last_row(index: QModelIndex) -> bool:
+        model = index.model()
+        return model is not None and index.row() == model.rowCount() - 1
 
     @staticmethod
     def _is_user(message: AIMessage) -> bool:

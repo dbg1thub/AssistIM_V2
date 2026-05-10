@@ -853,6 +853,7 @@ def test_ai_assistant_image_attachment_flow_is_wired() -> None:
 
 def test_ai_assistant_input_uses_chat_composer_layout_without_overlay() -> None:
     assistant_interface = Path("client/ui/windows/ai_assistant_interface.py").read_text(encoding="utf-8")
+    assistant_delegate = Path("client/delegates/ai_assistant_message_delegate.py").read_text(encoding="utf-8")
     setup_block = assistant_interface.split("def _setup_ui(self) -> None:", 1)[1].split(
         "\n    def ensure_initial_load",
         1,
@@ -864,10 +865,22 @@ def test_ai_assistant_input_uses_chat_composer_layout_without_overlay() -> None:
 
     assert "class AIAssistantFloatingComposerOverlay" not in assistant_interface
     assert "class AIAssistantComposerControlsOverlay" not in assistant_interface
+    assert "input_safe_area" not in assistant_interface
+    assert "COMPOSER_HEIGHT = 180" in assistant_interface
+    assert "MESSAGE_LIST_BOTTOM_MARGIN = 8" in assistant_interface
+    assert "self.message_list.setViewportMargins(0, 0, 0, self.MESSAGE_LIST_BOTTOM_MARGIN)" in setup_block
     assert "self.composer_shell = QFrame(self.content_panel)" in setup_block
-    assert "self.composer_widget = QWidget(self.composer_shell)" in setup_block
-    assert "self.composer_border = QFrame(self.composer_widget)" in setup_block
-    assert "self.composer_border.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)" in setup_block
+    assert "self.composer_shell.setMaximumWidth(1100)" not in setup_block
+    assert "self.composer_shell.setMinimumWidth(320)" not in setup_block
+    assert "self.input_widget = QWidget(self.composer_shell)" in setup_block
+    assert 'self.input_widget.setObjectName("aiAssistantInput")' in setup_block
+    assert "self.input_layout.setContentsMargins(8, 0, 8, 8)" in setup_block
+    assert "self.input_card = QWidget(self.input_widget)" in setup_block
+    assert 'self.input_card.setObjectName("aiAssistantInputCard")' in setup_block
+    assert "self.input_border = QFrame(self.input_card)" in setup_block
+    assert 'self.input_border.setObjectName("aiAssistantInputBorder")' in setup_block
+    assert "self.input_border.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)" in setup_block
+    assert "self.composer_widget = QWidget(self.input_card)" in setup_block
     assert "self.toolbar_widget = QWidget(self.composer_widget)" in setup_block
     assert "self.toolbar_root_layout = QHBoxLayout(self.toolbar_widget)" in setup_block
     assert "self.toolbar_root_layout.setContentsMargins(8, 4, 8, 8)" in setup_block
@@ -875,17 +888,38 @@ def test_ai_assistant_input_uses_chat_composer_layout_without_overlay() -> None:
     assert "self.attachment_button.setFixedSize(self.TOOLBAR_ICON_BUTTON_SIZE, self.TOOLBAR_ICON_BUTTON_SIZE)" in setup_block
     assert "self.voice_message_button.setFixedSize(self.TOOLBAR_ICON_BUTTON_SIZE, self.TOOLBAR_ICON_BUTTON_SIZE)" in setup_block
     assert "self.send_button = PushButton(" in setup_block
+    assert "self.send_button.setIcon(" not in setup_block
     assert "self.send_button.setFixedSize(62, 28)" in setup_block
     assert "self.message_sendbar_layout.addWidget(self.voice_message_button)" in setup_block
     assert "self.message_sendbar_layout.addWidget(self.send_button)" in setup_block
     assert "self.toolbar_root_layout.addLayout(self.toolbar_layout, 0)" in setup_block
     assert "self.toolbar_root_layout.addStretch(1)" in setup_block
     assert "self.toolbar_root_layout.addWidget(self.message_sendbar_widget, 0, Qt.AlignmentFlag.AlignVCenter)" in setup_block
+    assert "self.input_layout.addWidget(self.pending_attachment_preview)" in setup_block
     assert "self.composer_layout.addWidget(self.prompt_edit, 1)" in setup_block
     assert "self.composer_layout.addWidget(self.toolbar_widget, 0)" in setup_block
+    assert "self.input_card_layout.addWidget(self.composer_widget, 1)" in setup_block
+    assert "self.input_layout.addWidget(self.input_card, 1)" in setup_block
+    assert "self.composer_shell_layout.addWidget(self.input_widget, 1)" in setup_block
+    assert "self.content_layout.addWidget(self.input_safe_area)" not in setup_block
+    assert "content_rect = self.message_list.geometry() if self.message_list.isVisible() else self.empty_widget.geometry()" in layout_block
+    assert "composer_width = content_rect.width()" in layout_block
+    assert "composer_x = content_rect.x()" in layout_block
     assert "self.composer_shell.setGeometry(" in layout_block
     assert "self.composer_shell.raise_()" in layout_block
-    assert "self.composer_border.setGeometry(self.composer_widget.rect())" in layout_block
-    assert "self.composer_border.raise_()" in layout_block
+    assert "self.input_border.setGeometry(self.input_card.rect())" in layout_block
+    assert "self.input_border.raise_()" in layout_block
+    assert "self._sync_message_bottom_reserved_height(composer_height)" in layout_block
+    assert "def _sync_message_bottom_reserved_height(self, height: int) -> None:" in assistant_interface
+    assert "def _layout_message_scrollbar(self, *, input_top_y: int) -> None:" in assistant_interface
     assert "setMask(" not in assistant_interface
+    assert 'input_bg = "rgba(31, 31, 31, 0.96)"' in assistant_interface
+    assert 'input_bg = "rgba(255, 255, 255, 0.96)"' in assistant_interface
+    assert 'input_bg = "rgba(255, 255, 255, 0.06)"' not in assistant_interface
+    assert 'input_bg = "rgba(255, 255, 255, 0.92)"' not in assistant_interface
+    assert 'self.prompt_edit.setStyleSheet("")' in assistant_interface
+    assert 'self.prompt_edit.viewport().setStyleSheet("")' in assistant_interface
+    assert "self._bottom_reserved_height" in assistant_delegate
+    assert "def set_bottom_reserved_height(self, height: int) -> bool:" in assistant_delegate
+    assert "bottom_reserved = self._bottom_reserved_height if self._is_last_row(index) else 0" in assistant_delegate
 

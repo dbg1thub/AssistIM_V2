@@ -9,7 +9,7 @@ import uuid
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QGuiApplication, QKeyEvent, QPalette, QPixmap
+from PySide6.QtGui import QColor, QGuiApplication, QIcon, QKeyEvent, QPalette, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QDialog,
@@ -177,12 +177,9 @@ class AIAssistantInterface(QWidget):
     """Top-level navigation page for local AI assistant threads."""
 
     MAX_CONTEXT_MESSAGES = 80
-    COMPOSER_HEIGHT = 140
-    INPUT_SAFE_AREA_HEIGHT = 196
+    MESSAGE_LIST_BOTTOM_MARGIN = 8
+    COMPOSER_HEIGHT = 180
     MESSAGE_BOTTOM_MARGIN = 26
-    COMPOSER_HORIZONTAL_MARGIN = 28
-    COMPOSER_BOTTOM_MARGIN = 28
-    COMPOSER_MIN_WIDTH = 280
     TOOLBAR_ICON_BUTTON_SIZE = 28
     TOOLBAR_ICON_SPACING = 6
 
@@ -290,6 +287,7 @@ class AIAssistantInterface(QWidget):
         self.message_list.setResizeMode(QListView.ResizeMode.Adjust)
         self.message_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.message_list.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.message_list.setViewportMargins(0, 0, 0, self.MESSAGE_LIST_BOTTOM_MARGIN)
         self.message_list.setSpacing(0)
         self.message_list.setMouseTracking(True)
         self._message_model = AIAssistantMessageModel(self.message_list)
@@ -327,14 +325,9 @@ class AIAssistantInterface(QWidget):
         self.empty_layout.addWidget(self.empty_title, 0, Qt.AlignmentFlag.AlignCenter)
         self.empty_layout.addWidget(self.empty_subtitle, 0, Qt.AlignmentFlag.AlignCenter)
 
-        self.input_safe_area = QFrame(self.content_panel)
-        self.input_safe_area.setObjectName("aiAssistantInputSafeArea")
-        self.input_safe_area.setFixedHeight(self.INPUT_SAFE_AREA_HEIGHT)
-
         self.composer_shell = QFrame(self.content_panel)
         self.composer_shell.setObjectName("aiAssistantComposerShell")
-        self.composer_shell.setMaximumWidth(1100)
-        self.composer_shell.setMinimumWidth(320)
+        self.composer_shell.setMinimumWidth(0)
         self.composer_shell.setFixedHeight(self.COMPOSER_HEIGHT)
         self.composer_shell_layout = QVBoxLayout(self.composer_shell)
         self.composer_shell_layout.setContentsMargins(0, 0, 0, 0)
@@ -343,16 +336,30 @@ class AIAssistantInterface(QWidget):
         self.pending_attachment_preview = AIAssistantPendingAttachmentPreview(self.composer_shell)
         self.pending_attachment_preview.removed.connect(self._clear_pending_attachment)
 
-        self.composer_widget = QWidget(self.composer_shell)
+        self.input_widget = QWidget(self.composer_shell)
+        self.input_widget.setObjectName("aiAssistantInput")
+        self.input_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.input_layout = QVBoxLayout(self.input_widget)
+        self.input_layout.setContentsMargins(8, 0, 8, 8)
+        self.input_layout.setSpacing(0)
+
+        self.input_card = QWidget(self.input_widget)
+        self.input_card.setObjectName("aiAssistantInputCard")
+        self.input_card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+
+        self.input_border = QFrame(self.input_card)
+        self.input_border.setObjectName("aiAssistantInputBorder")
+        self.input_border.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.input_border.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.input_border.show()
+
+        self.input_card_layout = QVBoxLayout(self.input_card)
+        self.input_card_layout.setContentsMargins(0, 0, 0, 0)
+        self.input_card_layout.setSpacing(0)
+
+        self.composer_widget = QWidget(self.input_card)
         self.composer_widget.setObjectName("aiAssistantComposer")
         self.composer_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-
-        self.composer_border = QFrame(self.composer_widget)
-        self.composer_border.setObjectName("aiAssistantComposerBorder")
-        self.composer_border.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        self.composer_border.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
-        self.composer_border.show()
-
         self.composer_layout = QVBoxLayout(self.composer_widget)
         self.composer_layout.setContentsMargins(0, 0, 0, 0)
         self.composer_layout.setSpacing(0)
@@ -391,7 +398,6 @@ class AIAssistantInterface(QWidget):
 
         self.send_button = PushButton(tr("common.send", "Send"), self.composer_widget)
         self.send_button.setObjectName("aiAssistantSendButton")
-        self.send_button.setIcon(AppIcon.SEND_FILL.icon())
         self.send_button.setFixedSize(62, 28)
 
         self.toolbar_layout.addWidget(self.attachment_button)
@@ -411,18 +417,21 @@ class AIAssistantInterface(QWidget):
 
         self.attachment_button.clicked.connect(self._on_attachment_clicked)
         self.send_button.clicked.connect(self._on_send_clicked)
-        self.composer_shell_layout.addWidget(self.pending_attachment_preview)
+        self.input_layout.addWidget(self.pending_attachment_preview)
         self.composer_layout.addWidget(self.prompt_edit, 1)
         self.composer_layout.addWidget(self.toolbar_widget, 0)
-        self.composer_shell_layout.addWidget(self.composer_widget, 1)
+        self.input_card_layout.addWidget(self.composer_widget, 1)
+        self.input_layout.addWidget(self.input_card, 1)
+        self.composer_shell_layout.addWidget(self.input_widget, 1)
         self.composer_shell.installEventFilter(self)
+        self.input_widget.installEventFilter(self)
+        self.input_card.installEventFilter(self)
         self.composer_widget.installEventFilter(self)
         self.prompt_edit.installEventFilter(self)
 
         self.content_layout.addWidget(self.header)
         self.content_layout.addWidget(self.empty_widget, 1)
         self.content_layout.addWidget(self.message_list, 1)
-        self.content_layout.addWidget(self.input_safe_area)
         self.message_list.hide()
 
         self.scroll_to_bottom_button = PrimaryPushButton(
@@ -811,7 +820,6 @@ class AIAssistantInterface(QWidget):
         self.pending_attachment_preview.set_attachment(attachment)
         extra_height = self.pending_attachment_preview.height() + 6 if attachment else 0
         self.composer_shell.setFixedHeight(self.COMPOSER_HEIGHT + extra_height)
-        self.input_safe_area.setFixedHeight(self.INPUT_SAFE_AREA_HEIGHT + extra_height)
         self._update_input_overlay_positions()
 
     def _on_send_clicked(self) -> None:
@@ -1351,13 +1359,13 @@ class AIAssistantInterface(QWidget):
         self.attachment_button.setEnabled(not generating)
         if generating:
             self.send_button.setText(tr("ai_assistant.stop", "Stop"))
-            self.send_button.setIcon(CollectionIcon("stop").icon())
+            self.send_button.setIcon(QIcon())
             self.send_button.setToolTip(tr("ai_assistant.stop", "Stop"))
             if not self._thinking_animation_timer.isActive():
                 self._thinking_animation_timer.start()
         else:
             self.send_button.setText(tr("common.send", "Send"))
-            self.send_button.setIcon(AppIcon.SEND_FILL.icon())
+            self.send_button.setIcon(QIcon())
             self.send_button.setToolTip(tr("common.send", "Send"))
             self._thinking_animation_timer.stop()
             self._thinking_animation_frame = 0
@@ -1406,7 +1414,8 @@ class AIAssistantInterface(QWidget):
         button_width = max(112, button.sizeHint().width() + 8)
         scroll_rect = self.message_list.geometry()
         x = scroll_rect.left() + (scroll_rect.width() - button_width) // 2
-        y = scroll_rect.bottom() - button.height() - 16
+        input_top = self.composer_shell.y() if hasattr(self, "composer_shell") else scroll_rect.bottom()
+        y = min(scroll_rect.bottom(), input_top) - button.height() - 16
         button.setGeometry(max(scroll_rect.left(), x), max(scroll_rect.top(), y), button_width, button.height())
         button.raise_()
 
@@ -1425,11 +1434,8 @@ class AIAssistantInterface(QWidget):
         if hasattr(self, "message_list"):
             viewport_width = self.message_list.viewport().width()
             if viewport_width > 0:
-                return max(
-                    self.composer_shell.minimumWidth(),
-                    min(self.composer_shell.maximumWidth(), viewport_width - self.COMPOSER_HORIZONTAL_MARGIN * 2),
-                )
-        return self.composer_shell.maximumWidth()
+                return viewport_width
+        return self.content_panel.width() if hasattr(self, "content_panel") else 0
 
     def _sync_message_row_widths(self) -> None:
         if not hasattr(self, "message_list"):
@@ -1454,35 +1460,54 @@ class AIAssistantInterface(QWidget):
         if not panel_rect.isValid():
             return
 
-        safe_rect = self.input_safe_area.geometry()
-        if safe_rect.isValid() and safe_rect.height() > 0:
-            layout_rect = safe_rect
-        else:
-            overlay_y = max(0, self.header.geometry().bottom() + 1)
-            overlay_height = max(0, panel_rect.height() - overlay_y)
-            layout_rect = panel_rect.adjusted(0, overlay_y, 0, 0)
+        content_rect = self.message_list.geometry() if self.message_list.isVisible() else self.empty_widget.geometry()
+        if not content_rect.isValid():
+            content_rect = panel_rect.adjusted(0, self.header.height(), 0, 0)
 
-        available_width = max(self.COMPOSER_MIN_WIDTH, layout_rect.width() - self.COMPOSER_HORIZONTAL_MARGIN * 2)
-        composer_width = max(
-            self.composer_shell.minimumWidth(),
-            min(self.composer_shell.maximumWidth(), available_width),
-        )
+        composer_width = content_rect.width()
         composer_height = self.composer_shell.height() or self.composer_shell.sizeHint().height()
-        composer_x = layout_rect.left() + (layout_rect.width() - composer_width) // 2
-        composer_y = layout_rect.bottom() - composer_height - self.COMPOSER_BOTTOM_MARGIN + 1
-        composer_y = max(layout_rect.top(), composer_y)
+        composer_x = content_rect.x()
+        composer_y = content_rect.bottom() - composer_height + 1
+        composer_y = max(content_rect.top(), composer_y)
 
         self.composer_shell.setGeometry(composer_x, composer_y, composer_width, composer_height)
         self.composer_shell.raise_()
         self.composer_shell_layout.activate()
+        self.input_layout.activate()
+        self.input_card_layout.activate()
         self.composer_layout.activate()
-        self.composer_border.setGeometry(self.composer_widget.rect())
-        self.composer_border.raise_()
+        self.input_border.setGeometry(self.input_card.rect())
+        self.input_border.raise_()
         self._apply_prompt_editor_theme()
+        self._layout_message_scrollbar(input_top_y=composer_y)
+        self._sync_message_bottom_reserved_height(composer_height)
         self._sync_message_row_widths()
         self._position_scroll_to_bottom_button()
         if self.scroll_to_bottom_button.isVisible():
             self.scroll_to_bottom_button.raise_()
+
+    def _sync_message_bottom_reserved_height(self, height: int) -> None:
+        if self._message_delegate is None or self._message_model is None:
+            return
+        if not self._message_delegate.set_bottom_reserved_height(height):
+            return
+        row = self._message_model.rowCount() - 1
+        if row < 0:
+            return
+        last_index = self._message_model.index(row, 0)
+        self._message_delegate.sizeHintChanged.emit(last_index)
+        self.message_list.updateGeometries()
+
+    def _layout_message_scrollbar(self, *, input_top_y: int) -> None:
+        if self._scroll_delegate is None or not self.message_list.isVisible():
+            return
+        bar = self._scroll_delegate.vScrollBar
+        input_top_in_list = self.message_list.mapFrom(self.content_panel, self.composer_shell.pos()).y()
+        bar_height = max(0, min(input_top_in_list - 2, self.message_list.height() - 2))
+        bar_x = max(0, self.message_list.width() - 13)
+        bar.setGeometry(bar_x, 1, 12, bar_height)
+        bar._adjustHandleSize()
+        bar._adjustHandlePos()
 
     def _apply_prompt_editor_theme(self) -> None:
         if not hasattr(self, "prompt_edit"):
@@ -1501,6 +1526,8 @@ class AIAssistantInterface(QWidget):
         self.prompt_edit.viewport().setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, False)
         self.prompt_edit.setAutoFillBackground(False)
         self.prompt_edit.viewport().setAutoFillBackground(False)
+        self.prompt_edit.setStyleSheet("")
+        self.prompt_edit.viewport().setStyleSheet("")
 
         palette = self.prompt_edit.palette()
         palette.setColor(QPalette.ColorRole.Base, editor_base)
@@ -1739,6 +1766,8 @@ class AIAssistantInterface(QWidget):
 
         if hasattr(self, "composer_shell") and watched in {
             self.composer_shell,
+            self.input_widget,
+            self.input_card,
             self.composer_widget,
             self.toolbar_widget,
             self.pending_attachment_preview,
@@ -1768,7 +1797,7 @@ class AIAssistantInterface(QWidget):
             if isDarkTheme():
                 panel = "rgba(32, 35, 39, 0.72)"
                 border = "rgba(255,255,255,0.08)"
-                input_bg = "rgba(255, 255, 255, 0.06)"
+                input_bg = "rgba(31, 31, 31, 0.96)"
                 text = "rgb(241,245,249)"
                 muted_text = "rgba(241,245,249,0.72)"
                 hover_bg = "rgba(255,255,255,0.08)"
@@ -1779,7 +1808,7 @@ class AIAssistantInterface(QWidget):
             else:
                 panel = "rgba(255, 255, 255, 0.72)"
                 border = "rgba(15,23,42,0.08)"
-                input_bg = "rgba(255, 255, 255, 0.92)"
+                input_bg = "rgba(255, 255, 255, 0.96)"
                 text = "rgb(17,24,39)"
                 muted_text = "rgba(17,24,39,0.64)"
                 hover_bg = "rgba(0,0,0,0.05)"
@@ -1839,10 +1868,6 @@ class AIAssistantInterface(QWidget):
                 QFrame#aiAssistantEmpty {{
                     background: transparent;
                 }}
-                QFrame#aiAssistantInputSafeArea {{
-                    background: transparent;
-                    border: none;
-                }}
                 QFrame#aiAssistantComposerShell {{
                     background: transparent;
                     border: none;
@@ -1863,28 +1888,38 @@ class AIAssistantInterface(QWidget):
                     color: {muted_text};
                     background: transparent;
                 }}
-                QWidget#aiAssistantComposer {{
+                QWidget#aiAssistantInput {{
+                    background: transparent;
+                    border: none;
+                }}
+                QWidget#aiAssistantInputCard {{
                     background: {input_bg};
                     border: none;
                     border-radius: 8px;
                 }}
-                QFrame#aiAssistantComposerBorder {{
+                QFrame#aiAssistantInputBorder {{
                     background: transparent;
                     border: 1px solid {border};
                     border-radius: 8px;
                 }}
+                QWidget#aiAssistantComposer {{
+                    background: transparent;
+                    border: none;
+                    border-radius: 8px;
+                }}
                 QTextEdit#aiAssistantPromptEdit {{
-                    background: {input_bg};
+                    background: transparent;
                     color: {text};
                     border: none;
-                    padding: 10px 10px 0 10px;
+                    border-radius: 0;
+                    padding: 10px 12px;
                 }}
-                QFrame#aiAssistantPendingAttachmentPreview + QWidget#aiAssistantComposer {{
+                QFrame#aiAssistantPendingAttachmentPreview + QWidget#aiAssistantInputCard {{
                     border-top-left-radius: 0;
                     border-top-right-radius: 0;
                 }}
                 QWidget#aiAssistantPromptViewport {{
-                    background: {input_bg};
+                    background: transparent;
                     border: none;
                 }}
                 QWidget#aiAssistantToolbar,
