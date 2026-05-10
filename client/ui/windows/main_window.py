@@ -13,7 +13,6 @@ from qfluentwidgets import (
     CheckBox,
     FluentWindow,
     InfoBar,
-    MenuAnimationType,
     MessageBoxBase,
     NavigationItemPosition,
     RoundMenu,
@@ -448,14 +447,14 @@ class MainWindow(FluentWindow):
             self._show_tray_context_menu()
 
     def _show_tray_context_menu(self) -> None:
-        """Show the tray context menu with RoundMenu's own popup positioning."""
+        """Show the tray context menu at the computed tray-aligned position."""
         if self._tray_menu is None or self._tray_icon is None or not self._tray_icon.isVisible():
             return
         self._close_tray_alert_flyout()
         self._tray_menu.adjustSize()
         tray_rect = self._tray_icon.geometry()
-        pos, animation_type = self._tray_menu_position(tray_rect, self._tray_menu.sizeHint())
-        self._tray_menu.exec(pos, ani=True, aniType=animation_type)
+        pos = self._tray_menu_position(tray_rect, self._tray_menu.sizeHint())
+        self._tray_menu.popup(pos)
 
     def _close_tray_context_menu(self) -> bool:
         """Close the tray context menu if it is visible."""
@@ -464,13 +463,13 @@ class MainWindow(FluentWindow):
             return True
         return False
 
-    def _tray_menu_position(self, tray_rect: QRect, size: QSize) -> tuple[QPoint, MenuAnimationType]:
-        """Return the top-left menu anchor and animation for the current tray position."""
+    def _tray_menu_position(self, tray_rect: QRect, size: QSize) -> QPoint:
+        """Return the top-left menu position for the current tray icon."""
         fallback_pos = QCursor.pos()
         screen = QApplication.screenAt(tray_rect.center()) if tray_rect.isValid() and not tray_rect.isNull() else None
         screen = screen or QApplication.screenAt(fallback_pos) or QApplication.primaryScreen()
         if screen is None:
-            return fallback_pos, MenuAnimationType.PULL_UP
+            return fallback_pos
 
         geometry = screen.availableGeometry()
         width = max(0, size.width())
@@ -479,15 +478,13 @@ class MainWindow(FluentWindow):
 
         use_pull_up = anchor.center().y() >= geometry.center().y()
         if use_pull_up:
-            point = QPoint(anchor.center().x() - width // 2, anchor.top() - height + 6)
-            animation_type = MenuAnimationType.PULL_UP
+            point = QPoint(anchor.center().x() - width // 2, anchor.top() - height)
         else:
-            point = QPoint(anchor.center().x() - width // 2, anchor.bottom() - 6)
-            animation_type = MenuAnimationType.DROP_DOWN
+            point = QPoint(anchor.center().x() - width // 2, anchor.bottom())
 
         x = min(max(geometry.left() + 8, point.x()), geometry.right() - width - 8)
         y = min(max(geometry.top() + 8, point.y()), geometry.bottom() - height - 8)
-        return QPoint(x, y), animation_type
+        return QPoint(x, y)
 
     def show_session_replaced_warning(self) -> None:
         """Warn the user that this client was replaced by a newer login and close shortly after."""

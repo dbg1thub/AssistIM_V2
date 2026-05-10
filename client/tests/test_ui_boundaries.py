@@ -319,14 +319,15 @@ def test_main_window_tray_context_menu_uses_round_menu() -> None:
     tray_activated_block = main_window.split('def _on_tray_activated', 1)[1].split('def show_session_replaced_warning', 1)[0]
 
     assert 'RoundMenu,' in main_window
-    assert 'MenuAnimationType,' in main_window
+    assert 'MenuAnimationType,' not in main_window
     assert 'self._tray_menu: RoundMenu | None = None' in main_window
     assert 'self._tray_menu = RoundMenu(parent=self)' in init_tray_block
     assert 'self._tray_icon.setContextMenu(self._tray_menu)' not in main_window
     assert 'if self._close_tray_context_menu():' in tray_activated_block
     assert 'self._show_tray_context_menu()' in tray_activated_block
-    assert 'def _tray_menu_position(self, tray_rect: QRect, size: QSize) -> tuple[QPoint, MenuAnimationType]:' in main_window
-    assert 'self._tray_menu.exec(pos, ani=True, aniType=animation_type)' in main_window
+    assert 'def _tray_menu_position(self, tray_rect: QRect, size: QSize) -> QPoint:' in main_window
+    assert 'self._tray_menu.popup(pos)' in main_window
+    assert 'self._tray_menu.exec(pos, ani=True, aniType=animation_type)' not in main_window
     assert 'AcrylicSystemTrayMenu' not in main_window
     assert 'AcrylicMenu' not in main_window
 
