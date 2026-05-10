@@ -79,7 +79,7 @@ def test_sidebar_items_use_compact_consistent_spacing() -> None:
 def test_friend_request_review_actions_use_compact_tool_buttons() -> None:
     contact_interface = Path('client/ui/windows/contact_interface.py').read_text(encoding='utf-8')
     app_icons = Path('client/core/app_icons.py').read_text(encoding='utf-8')
-    request_item_block = contact_interface.split('class RequestListItem', 1)[1].split('class ContactWelcomePanel', 1)[0]
+    request_item_block = contact_interface.split('class RequestListItem', 1)[1].split('class ContactWelcomePanel', 1)[0].split('class FriendMomentPreviewStrip', 1)[0]
     render_actions_block = request_item_block.split('def _render_actions', 1)[1].split('def update_request', 1)[0]
 
     assert 'CHECK = "checkmark"' in app_icons
@@ -96,6 +96,17 @@ def test_friend_request_review_actions_use_compact_tool_buttons() -> None:
     assert 'ToolButton(AppIcon.COMPLETED, self)' not in render_actions_block
     assert 'PrimaryPushButton(tr("common.accept", "Accept"), self)' not in render_actions_block
     assert 'PushButton(tr("common.reject", "Reject"), self)' not in render_actions_block
+
+
+def test_contact_sidebar_items_use_arrow_cursor() -> None:
+    contact_interface = Path('client/ui/windows/contact_interface.py').read_text(encoding='utf-8')
+    contact_item_block = contact_interface.split('class ContactListItem', 1)[1].split('class RequestListItem', 1)[0]
+    request_item_block = contact_interface.split('class RequestListItem', 1)[1].split('class ContactWelcomePanel', 1)[0].split('class FriendMomentPreviewStrip', 1)[0]
+
+    assert 'self.setCursor(Qt.CursorShape.ArrowCursor)' in contact_item_block
+    assert 'self.setCursor(Qt.CursorShape.ArrowCursor)' in request_item_block
+    assert 'self.setCursor(Qt.CursorShape.PointingHandCursor)' not in contact_item_block
+    assert 'self.setCursor(Qt.CursorShape.PointingHandCursor)' not in request_item_block
 
 
 def test_contact_friend_sidebar_title_prefers_remark_then_nickname_then_username() -> None:

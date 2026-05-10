@@ -242,7 +242,7 @@ class ContactListItem(QWidget):
         self._selected = False
         self._hovered = False
         self._left_padding = int(left_padding if left_padding is not None else CONTACT_SIDEBAR_ITEM_PADDING)
-        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setCursor(Qt.CursorShape.ArrowCursor)
         self.setFixedHeight(CONTACT_SIDEBAR_ITEM_HEIGHT)
         self.setMinimumWidth(0)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
@@ -348,7 +348,7 @@ class RequestListItem(QWidget):
         self._selected = False
         self._hovered = False
         self.setObjectName("RequestListItem")
-        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setCursor(Qt.CursorShape.ArrowCursor)
         self.setMinimumWidth(0)
         self.setFixedHeight(CONTACT_SIDEBAR_ITEM_HEIGHT)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
