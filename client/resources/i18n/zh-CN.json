@@ -118,7 +118,6 @@
   "ai_assistant.error.vision_unavailable": "当前本地 AI 模型无法读取图片。",
   "ai_assistant.error.failed": "AI 无法完成这次请求。",
   "chat.welcome.title": "欢迎使用 AssistIM",
-  "chat.welcome.subtitle": "从左侧选择一个会话，继续消息同步、文件传输和 AI 辅助聊天。",
   "chat.history.loading": "加载更多消息...",
   "chat.status.ai": "AI 会话",
   "chat.status.group": "群聊",

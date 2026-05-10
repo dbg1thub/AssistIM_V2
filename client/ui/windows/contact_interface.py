@@ -62,6 +62,7 @@ from client.ui.controllers.contact_controller import (
 
 from client.ui.styles import StyleSheet
 from client.ui.widgets.chat_info_drawer import AcrylicDrawerSurface
+from client.ui.widgets.empty_state_card import EmptyStateCard
 from client.ui.widgets.global_search_panel import GlobalSearchPopupOverlay
 from client.ui.widgets.fluent_divider import FluentDivider
 from client.ui.widgets.fluent_dialog import FluentDialog
@@ -480,47 +481,23 @@ class ContactWelcomeWidget(QWidget):
         layout.setSpacing(0)
         layout.addStretch(1)
 
-        card = CardWidget(self)
-        card.setObjectName("ContactWelcomeCard")
-        card.setBorderRadius(8)
-        card.setMinimumWidth(420)
-        card.setMaximumWidth(540)
-        card_layout = QVBoxLayout(card)
-        card_layout.setContentsMargins(36, 36, 36, 36)
-        card_layout.setSpacing(14)
-
-        icon = IconWidget(AppIcon.PEOPLE, card)
-        icon.setFixedSize(52, 52)
-
-        title_label = BodyLabel(tr("contact.welcome.title", "Welcome to Contacts"), card)
-        title_font = QFont(title_label.font())
-        title_font.setPixelSize(24)
-        title_font.setBold(False)
-        title_label.setFont(title_font)
-
-        subtitle_label = CaptionLabel(
-            tr(
+        card = EmptyStateCard(
+            title=tr("contact.welcome.title", "Welcome to Contacts"),
+            subtitle=tr(
                 "contact.welcome.subtitle",
                 "Select a friend, group, or request from the left to view the profile and recent activity.",
             ),
-            card,
-        )
-        subtitle_label.setWordWrap(True)
-
-        hint_label = CaptionLabel(
-            tr(
+            hint=tr(
                 "contact.welcome.hint",
                 "You can also search above, add friends, or create groups from the sidebar.",
             ),
-            card,
+            logo_size=52,
+            title_pixel_size=24,
+            min_width=420,
+            max_width=540,
+            alignment=Qt.AlignmentFlag.AlignLeft,
+            parent=self,
         )
-        hint_label.setObjectName("contactSectionCaption")
-        hint_label.setWordWrap(True)
-
-        card_layout.addWidget(icon, 0, Qt.AlignmentFlag.AlignLeft)
-        card_layout.addWidget(title_label, 0, Qt.AlignmentFlag.AlignLeft)
-        card_layout.addWidget(subtitle_label, 0, Qt.AlignmentFlag.AlignLeft)
-        card_layout.addWidget(hint_label, 0, Qt.AlignmentFlag.AlignLeft)
 
         layout.addWidget(card, 0, Qt.AlignmentFlag.AlignHCenter)
         layout.addStretch(1)

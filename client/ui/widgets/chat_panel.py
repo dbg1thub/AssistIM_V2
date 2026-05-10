@@ -29,6 +29,7 @@ from client.models.message_model import MessageModel
 from client.ui.styles import StyleSheet
 from client.ui.widgets.chat_header import ChatHeader
 from client.ui.widgets.chat_info_drawer import ChatInfoDrawerOverlay
+from client.ui.widgets.empty_state_card import EmptyStateCard
 from client.ui.widgets.message_input import MessageInput
 from qfluentwidgets.multimedia import VideoWidget
 
@@ -153,26 +154,13 @@ class WelcomeWidget(QWidget):
         layout.setSpacing(18)
         layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-        self.icon = IconWidget(AppIcon.CHAT, self)
-        self.icon.setFixedSize(88, 88)
-
-        self.title_label = BodyLabel(tr("chat.welcome.title", "Welcome to AssistIM"), self)
-        self.subtitle_label = CaptionLabel(
-            tr(
-                "chat.welcome.subtitle",
-                "Choose a conversation on the left to continue message sync, file transfer, and AI-assisted chat.",
-            ),
-            self,
+        self.card = EmptyStateCard(
+            title=tr("chat.welcome.title", "Welcome to AssistIM"),
+            min_width=360,
+            max_width=460,
+            parent=self,
         )
-        self.subtitle_label.setWordWrap(True)
-        self.subtitle_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.subtitle_label.setMaximumWidth(380)
-        self.title_label.setObjectName("chatWelcomeTitle")
-        self.subtitle_label.setObjectName("chatWelcomeSubtitle")
-
-        layout.addWidget(self.icon, 0, Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(self.title_label, 0, Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(self.subtitle_label, 0, Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.card, 0, Qt.AlignmentFlag.AlignCenter)
 
 
 class SecurityPendingBanner(QFrame):

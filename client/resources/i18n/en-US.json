@@ -118,7 +118,6 @@
   "ai_assistant.error.vision_unavailable": "The current local AI model cannot read images.",
   "ai_assistant.error.failed": "AI could not complete this request.",
   "chat.welcome.title": "Welcome to AssistIM",
-  "chat.welcome.subtitle": "Choose a conversation on the left to continue message sync, file transfer, and AI-assisted chat.",
   "chat.history.loading": "Loading more messages...",
   "chat.status.ai": "AI Session",
   "chat.status.group": "Group Chat",

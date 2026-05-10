@@ -118,7 +118,6 @@
   "ai_assistant.error.vision_unavailable": "현재 로컬 AI 모델은 이미지를 읽을 수 없습니다.",
   "ai_assistant.error.failed": "AI가 이 요청을 완료하지 못했습니다.",
   "chat.welcome.title": "AssistIM에 오신 것을 환영합니다",
-  "chat.welcome.subtitle": "왼쪽에서 대화를 선택해 메시지 동기화, 파일 전송, AI 보조 채팅을 이어가세요.",
   "chat.history.loading": "이전 메시지를 불러오는 중...",
   "chat.status.ai": "AI 세션",
   "chat.status.group": "그룹 채팅",

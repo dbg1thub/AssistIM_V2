@@ -15,14 +15,19 @@ QFrame#chatComposerResizeHandle {
     border: none;
 }
 
-QLabel#chatWelcomeTitle {
-    color: {{TEXT_PRIMARY}};
-    font: 28px "Segoe UI Semibold", "Microsoft YaHei", "PingFang SC";
+QWidget#EmptyStateCard {
+    background: {{CARD_BG_STRONG}};
+    border: 1px solid {{BORDER_COLOR_STRONG}};
+    border-radius: {{RADIUS_CARD}};
 }
 
-QLabel#chatWelcomeSubtitle {
+QLabel#EmptyStateTitle {
+    color: {{TEXT_PRIMARY}};
+}
+
+QLabel#EmptyStateSubtitle,
+QLabel#EmptyStateHint {
     color: {{TEXT_SECONDARY}};
-    font: 14px "Segoe UI", "Microsoft YaHei", "PingFang SC";
 }
 
 QWidget#chatInfoOverlay,

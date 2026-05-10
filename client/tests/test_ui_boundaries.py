@@ -109,6 +109,33 @@ def test_contact_sidebar_items_use_arrow_cursor() -> None:
     assert 'self.setCursor(Qt.CursorShape.PointingHandCursor)' not in request_item_block
 
 
+def test_page_welcome_states_use_shared_empty_state_card() -> None:
+    chat_panel = Path('client/ui/widgets/chat_panel.py').read_text(encoding='utf-8')
+    contact_interface = Path('client/ui/windows/contact_interface.py').read_text(encoding='utf-8')
+    empty_state_card = Path('client/ui/widgets/empty_state_card.py').read_text(encoding='utf-8')
+    light_chat_qss = Path('client/ui/styles/qss/light/chat_panel.qss').read_text(encoding='utf-8')
+    dark_chat_qss = Path('client/ui/styles/qss/dark/chat_panel.qss').read_text(encoding='utf-8')
+    light_contact_qss = Path('client/ui/styles/qss/light/contact_interface.qss').read_text(encoding='utf-8')
+    zh_cn = json.loads(Path('client/resources/i18n/zh-CN.json').read_text(encoding='utf-8'))
+
+    welcome_block = chat_panel.split('class WelcomeWidget', 1)[1].split('class SecurityPendingBanner', 1)[0]
+    contact_welcome_block = contact_interface.split('class ContactWelcomeWidget', 1)[1].split('class FriendMomentPreviewStrip', 1)[0]
+
+    assert 'class EmptyStateCard(CardWidget):' in empty_state_card
+    assert 'resources" / "logo.png"' in empty_state_card
+    assert 'title_font.setBold(False)' in empty_state_card
+    assert 'EmptyStateCard(' in welcome_block
+    assert 'IconWidget(AppIcon.CHAT' not in welcome_block
+    assert 'chat.welcome.subtitle' not in welcome_block
+    assert 'EmptyStateCard(' in contact_welcome_block
+    assert 'QWidget#EmptyStateCard' in light_chat_qss
+    assert 'QWidget#EmptyStateCard' in dark_chat_qss
+    assert 'chatWelcomeTitle' not in light_chat_qss
+    assert 'chatWelcomeTitle' not in dark_chat_qss
+    assert 'ContactWelcomeCard' not in light_contact_qss
+    assert 'chat.welcome.subtitle' not in zh_cn
+
+
 def test_contact_friend_sidebar_title_prefers_remark_then_nickname_then_username() -> None:
     contact_interface = Path('client/ui/windows/contact_interface.py').read_text(encoding='utf-8')
     title_block = contact_interface.split('def _friend_sidebar_title', 1)[1].split('def _clear_active_selection', 1)[0]
