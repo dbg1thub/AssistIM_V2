@@ -134,6 +134,7 @@ class CallWindow(FluentDialog):
     ) -> None:
         self._is_video_call = call.media_type == CallMediaType.VIDEO.value
         super().__init__(parent, title="")
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, False)
         self._call = call
         self._session_title = session_title
         self._peer_label = peer_label

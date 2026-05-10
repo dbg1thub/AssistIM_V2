@@ -698,6 +698,7 @@ def test_call_window_uses_fluent_dialog_shell() -> None:
     assert 'FluentWidget,' not in call_window
     assert ', FluentWidget' not in call_window
     assert 'class CallWindow(FluentWidget):' not in call_window
+    assert 'self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, False)' in call_window
     assert 'root = self.content_layout' in call_window
     assert 'self.surface.setObjectName("callWindowSurface")' in call_window
     assert 'self.content_widget.setObjectName("callWindowContent")' in call_window
