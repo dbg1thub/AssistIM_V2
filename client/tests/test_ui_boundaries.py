@@ -173,15 +173,22 @@ def test_message_status_badges_only_show_stable_states_with_larger_icons() -> No
     message_delegate = Path('client/delegates/message_delegate.py').read_text(encoding='utf-8')
     status_block = message_delegate.split('def _status_badge_style', 1)[1].split('def _draw_media_state_overlay', 1)[0]
 
-    assert 'STATUS_BADGE_SIZE = 20' in message_delegate
-    assert 'STATUS_BADGE_ICON_SIZE = 12' in message_delegate
+    assert 'STATUS_BADGE_SIZE = 16' in message_delegate
+    assert 'STATUS_BADGE_ICON_SIZE = 10' in message_delegate
+    assert 'STATUS_BADGE_STROKE_WIDTH = 1.2' in message_delegate
     assert 'self.STATUS_BADGE_ICON_SIZE' in message_delegate
+    assert 'def _draw_status_glyph(self, painter: QPainter, rect: QRectF, status_kind: str) -> None:' in message_delegate
+    assert 'QPen(Qt.GlobalColor.white, self.STATUS_BADGE_STROKE_WIDTH)' in message_delegate
+    assert 'Qt.PenCapStyle.SquareCap' in message_delegate
+    assert 'Qt.PenJoinStyle.MiterJoin' in message_delegate
+    assert 'status_kind == "check"' in message_delegate
+    assert 'status_kind == "close"' in message_delegate
+    assert 'status_kind == "info"' in message_delegate
     assert 'MessageStatus.AWAITING_SECURITY_CONFIRMATION' in status_block
     assert 'MessageStatus.DELIVERED' in status_block
     assert 'MessageStatus.READ' in status_block
     assert 'MessageStatus.FAILED' in status_block
-    assert 'AppIcon.CHECK' in status_block
-    assert 'AppIcon.CLOSE' in status_block
+    assert 'AppIcon.' not in status_block
     assert 'MessageStatus.PENDING' not in status_block
     assert 'MessageStatus.SENDING' not in status_block
     assert 'MessageStatus.SENT' not in status_block
