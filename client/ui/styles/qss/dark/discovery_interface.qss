@@ -8,10 +8,20 @@ QWidget#discoveryFeedContainer {
 }
 
 QWidget#DiscoveryHeroCard,
+QWidget#EmptyStateCard,
 QWidget#MomentCard {
     background: {{CARD_BG_STRONG}};
     border: 1px solid {{BORDER_COLOR_STRONG}};
     border-radius: {{RADIUS_CARD}};
+}
+
+QLabel#EmptyStateTitle {
+    color: {{TEXT_PRIMARY}};
+}
+
+QLabel#EmptyStateSubtitle,
+QLabel#EmptyStateHint {
+    color: {{TEXT_SECONDARY}};
 }
 
 BodyLabel#momentContentLabel {

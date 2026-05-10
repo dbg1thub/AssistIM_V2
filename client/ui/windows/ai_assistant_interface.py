@@ -27,7 +27,6 @@ from shiboken6 import isValid as is_valid_qt_object
 from qfluentwidgets import (
     BodyLabel,
     CaptionLabel,
-    IconWidget,
     InfoBar,
     MessageBoxBase,
     Action,
@@ -60,6 +59,7 @@ from client.models.ai_assistant_message_model import AIAssistantMessageModel
 from client.services.ai_service import AIErrorCode
 from client.services.local_embedding_gguf_runtime import LocalEmbeddingGGUFRuntimeError
 from client.storage.ai_assistant_store import get_ai_assistant_store
+from client.ui.widgets.empty_state_card import EmptyStateCard
 
 logger = logging.get_logger(__name__)
 
@@ -312,19 +312,15 @@ class AIAssistantInterface(QWidget):
         self.empty_layout = QVBoxLayout(self.empty_widget)
         self.empty_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.empty_layout.setSpacing(12)
-        self.empty_icon = IconWidget(AppIcon.ROBOT, self.empty_widget)
-        self.empty_icon.setFixedSize(64, 64)
-        self.empty_title = BodyLabel(tr("ai_assistant.empty.title", "Ask the local AI assistant"), self.empty_widget)
-        self.empty_subtitle = CaptionLabel(
-            tr("ai_assistant.empty.subtitle", "Start a thread on the left or type a question below."),
-            self.empty_widget,
+        self.empty_card = EmptyStateCard(
+            title=tr("ai_assistant.empty.title", "Ask the local AI assistant"),
+            subtitle=tr("ai_assistant.empty.subtitle", "Start a thread on the left or type a question below."),
+            logo_size=64,
+            min_width=420,
+            max_width=560,
+            parent=self.empty_widget,
         )
-        self.empty_subtitle.setWordWrap(True)
-        self.empty_subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.empty_subtitle.setMaximumWidth(420)
-        self.empty_layout.addWidget(self.empty_icon, 0, Qt.AlignmentFlag.AlignCenter)
-        self.empty_layout.addWidget(self.empty_title, 0, Qt.AlignmentFlag.AlignCenter)
-        self.empty_layout.addWidget(self.empty_subtitle, 0, Qt.AlignmentFlag.AlignCenter)
+        self.empty_layout.addWidget(self.empty_card, 0, Qt.AlignmentFlag.AlignCenter)
 
         self.composer_shell = QFrame(self.content_panel)
         self.composer_shell.setObjectName("aiAssistantComposerShell")
@@ -1891,6 +1887,18 @@ class AIAssistantInterface(QWidget):
                 }}
                 QFrame#aiAssistantEmpty {{
                     background: transparent;
+                }}
+                QWidget#EmptyStateCard {{
+                    background: {panel};
+                    border: 1px solid {border};
+                    border-radius: 10px;
+                }}
+                QLabel#EmptyStateTitle {{
+                    color: {text};
+                }}
+                QLabel#EmptyStateSubtitle,
+                QLabel#EmptyStateHint {{
+                    color: {muted_text};
                 }}
                 QFrame#aiAssistantComposerShell {{
                     background: transparent;

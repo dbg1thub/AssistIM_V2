@@ -112,14 +112,19 @@ def test_contact_sidebar_items_use_arrow_cursor() -> None:
 def test_page_welcome_states_use_shared_empty_state_card() -> None:
     chat_panel = Path('client/ui/widgets/chat_panel.py').read_text(encoding='utf-8')
     contact_interface = Path('client/ui/windows/contact_interface.py').read_text(encoding='utf-8')
+    ai_assistant_interface = Path('client/ui/windows/ai_assistant_interface.py').read_text(encoding='utf-8')
+    discovery_interface = Path('client/ui/windows/discovery_interface.py').read_text(encoding='utf-8')
     empty_state_card = Path('client/ui/widgets/empty_state_card.py').read_text(encoding='utf-8')
     light_chat_qss = Path('client/ui/styles/qss/light/chat_panel.qss').read_text(encoding='utf-8')
     dark_chat_qss = Path('client/ui/styles/qss/dark/chat_panel.qss').read_text(encoding='utf-8')
     light_contact_qss = Path('client/ui/styles/qss/light/contact_interface.qss').read_text(encoding='utf-8')
+    light_discovery_qss = Path('client/ui/styles/qss/light/discovery_interface.qss').read_text(encoding='utf-8')
     zh_cn = json.loads(Path('client/resources/i18n/zh-CN.json').read_text(encoding='utf-8'))
 
     welcome_block = chat_panel.split('class WelcomeWidget', 1)[1].split('class SecurityPendingBanner', 1)[0]
     contact_welcome_block = contact_interface.split('class ContactWelcomeWidget', 1)[1].split('class FriendMomentPreviewStrip', 1)[0]
+    ai_empty_block = ai_assistant_interface.split('self.empty_widget = QFrame', 1)[1].split('self.composer_shell = QFrame', 1)[0]
+    discovery_empty_block = discovery_interface.split('def _create_empty_state', 1)[1].split('def _open_publish_dialog', 1)[0]
     light_chat_welcome_style = light_chat_qss.split('QLabel#chatWelcomeTitle', 1)[1].split('QWidget#chatInfoOverlay', 1)[0]
     dark_chat_welcome_style = dark_chat_qss.split('QLabel#chatWelcomeTitle', 1)[1].split('QWidget#chatInfoOverlay', 1)[0]
 
@@ -136,6 +141,11 @@ def test_page_welcome_states_use_shared_empty_state_card() -> None:
     assert 'IconWidget(AppIcon.CHAT' not in welcome_block
     assert 'chat.welcome.subtitle' not in welcome_block
     assert 'EmptyStateCard(' in contact_welcome_block
+    assert 'EmptyStateCard(' in ai_empty_block
+    assert 'IconWidget(AppIcon.ROBOT' not in ai_empty_block
+    assert 'self.empty_icon' not in ai_empty_block
+    assert 'EmptyStateCard(' in discovery_empty_block
+    assert 'IconWidget(AppIcon.GLOBE' not in discovery_empty_block
     assert 'QWidget#EmptyStateCard' not in light_chat_qss
     assert 'QWidget#EmptyStateCard' not in dark_chat_qss
     assert 'QLabel#chatWelcomeTitle' in light_chat_qss
@@ -143,6 +153,8 @@ def test_page_welcome_states_use_shared_empty_state_card() -> None:
     assert 'Segoe UI Semibold' not in light_chat_welcome_style
     assert 'Segoe UI Semibold' not in dark_chat_welcome_style
     assert 'ContactWelcomeCard' not in light_contact_qss
+    assert 'QWidget#EmptyStateCard' in light_contact_qss
+    assert 'QWidget#EmptyStateCard' in light_discovery_qss
     assert 'chat.welcome.subtitle' not in zh_cn
 
 

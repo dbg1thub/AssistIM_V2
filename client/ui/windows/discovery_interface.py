@@ -30,7 +30,6 @@ from qfluentwidgets import (
     CardWidget,
     CheckBox,
     ComboBox,
-    IconWidget,
     InfoBar,
     isDarkTheme,
     LineEdit,
@@ -66,6 +65,7 @@ from client.ui.controllers.discovery_controller import (
 )
 from client.ui.controllers.contact_controller import ContactRecord, get_contact_controller
 from client.ui.styles import StyleSheet
+from client.ui.widgets.empty_state_card import EmptyStateCard
 from client.ui.widgets.fluent_dialog import FluentDialog
 from client.ui.widgets.image_viewer import ImageViewer
 
@@ -1858,31 +1858,19 @@ class DiscoveryInterface(QWidget):
 
         self.feed_layout.addStretch(1)
 
-    def _create_empty_state(self) -> CardWidget:
+    def _create_empty_state(self) -> EmptyStateCard:
         """Create an empty placeholder when the feed is blank."""
-        card = CardWidget(self.feed_container)
-        card.setBorderRadius(8)
-        layout = QVBoxLayout(card)
-        layout.setContentsMargins(36, 36, 36, 36)
-        layout.setSpacing(12)
-
-        icon = IconWidget(AppIcon.GLOBE, card)
-        icon.setFixedSize(48, 48)
-        layout.addWidget(icon, 0, Qt.AlignmentFlag.AlignCenter)
-
-        title = SubtitleLabel(tr("discovery.feed.empty_title", "No moments yet"), card)
-        caption = CaptionLabel(
-            tr(
+        return EmptyStateCard(
+            title=tr("discovery.feed.empty_title", "No moments yet"),
+            subtitle=tr(
                 "discovery.feed.empty_caption",
                 "Publish the first update, or refresh to check the latest moments.",
             ),
-            card,
+            logo_size=48,
+            min_width=360,
+            max_width=560,
+            parent=self.feed_container,
         )
-        caption.setWordWrap(True)
-
-        layout.addWidget(title, 0, Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(caption, 0, Qt.AlignmentFlag.AlignCenter)
-        return card
 
     def _open_publish_dialog(self) -> None:
         self._create_ui_task(self._open_publish_dialog_async(), "open publish moment dialog")
