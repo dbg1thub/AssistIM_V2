@@ -204,6 +204,20 @@ def test_message_status_badges_only_show_stable_states_with_larger_icons() -> No
     assert 'AppIcon.CANCEL_MEDIUM' not in status_block
 
 
+def test_group_read_count_pill_font_is_not_bold() -> None:
+    message_delegate = Path('client/delegates/message_delegate.py').read_text(encoding='utf-8')
+    count_font_block = message_delegate.split('def _status_count_font', 1)[1].split('def _group_read_count_text', 1)[0]
+    complete_block = message_delegate.split('def _group_read_count_complete', 1)[1].split('def _status_badge_style', 1)[0]
+    status_style_block = message_delegate.split('def _status_badge_style', 1)[1].split('def _draw_media_state_overlay', 1)[0]
+
+    assert 'font.setPixelSize(10)' in count_font_block
+    assert 'font.setBold(False)' in count_font_block
+    assert 'font.setBold(True)' not in count_font_block
+    assert 'read_count >= read_target_count' in complete_block
+    assert 'if self._group_read_count_text(message) and self._group_read_count_complete(message):' in status_style_block
+    assert 'return success_color, "check"' in status_style_block
+
+
 def test_toolbar_icons_use_attach_and_call_glyphs() -> None:
     app_icons = Path('client/core/app_icons.py').read_text(encoding='utf-8')
     ai_assistant = Path('client/ui/windows/ai_assistant_interface.py').read_text(encoding='utf-8')

@@ -1296,7 +1296,7 @@ class MessageDelegate(QStyledItemDelegate):
         """Return the compact font used for group read-count pills."""
         font = QFont()
         font.setPixelSize(10)
-        font.setBold(True)
+        font.setBold(False)
         return font
 
     def _group_read_count_text(self, message: ChatMessage) -> str:
@@ -1315,6 +1315,17 @@ class MessageDelegate(QStyledItemDelegate):
             return ""
         return f"{read_count}/{read_target_count}"
 
+    @staticmethod
+    def _group_read_count_complete(message: ChatMessage) -> bool:
+        """Return whether all group read targets have read one self message."""
+        extra = message.extra or {}
+        try:
+            read_count = max(0, int(extra.get("read_count", 0) or 0))
+            read_target_count = max(0, int(extra.get("read_target_count", 0) or 0))
+        except (TypeError, ValueError):
+            return False
+        return read_target_count > 1 and read_count >= read_target_count
+
     def _status_badge_style(self, message: ChatMessage) -> tuple[QColor, str] | None:
         """Return badge background and icon for message status."""
         dark = isDarkTheme()
@@ -1322,6 +1333,8 @@ class MessageDelegate(QStyledItemDelegate):
         success_color = QColor(108, 203, 95) if dark else QColor(15, 123, 15)
         error_color = QColor(255, 153, 164) if dark else QColor(196, 43, 28)
 
+        if self._group_read_count_text(message) and self._group_read_count_complete(message):
+            return success_color, "check"
         if message.status == MessageStatus.AWAITING_SECURITY_CONFIRMATION:
             return QColor(230, 178, 62) if dark else QColor(161, 107, 0), "warning"
         if message.status == MessageStatus.SENT:
