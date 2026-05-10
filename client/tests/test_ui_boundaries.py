@@ -76,6 +76,18 @@ def test_sidebar_items_use_compact_consistent_spacing() -> None:
     assert 'self._friend_sidebar_title(contact),' in create_blocked_block
 
 
+def test_contact_friend_sidebar_title_prefers_remark_then_nickname_then_username() -> None:
+    contact_interface = Path('client/ui/windows/contact_interface.py').read_text(encoding='utf-8')
+    title_block = contact_interface.split('def _friend_sidebar_title', 1)[1].split('def _clear_active_selection', 1)[0]
+
+    remark_index = title_block.index('str(contact.remark or "").strip()')
+    nickname_index = title_block.index('or str(contact.nickname or "").strip()')
+    username_index = title_block.index('or str(contact.username or "").strip()')
+    display_name_index = title_block.index('or contact.display_name')
+
+    assert remark_index < nickname_index < username_index < display_name_index
+
+
 def test_main_installs_fluentwidgets_translator_after_i18n_initialization() -> None:
     main_py = Path('client/main.py').read_text(encoding='utf-8')
 

@@ -2888,7 +2888,12 @@ class ContactInterface(QWidget):
 
     @staticmethod
     def _friend_sidebar_title(contact: ContactRecord) -> str:
-        return str(contact.remark or "").strip() or str(contact.username or "").strip() or contact.display_name
+        return (
+            str(contact.remark or "").strip()
+            or str(contact.nickname or "").strip()
+            or str(contact.username or "").strip()
+            or contact.display_name
+        )
 
     def _clear_active_selection(self) -> None:
         self._selected_key = None
