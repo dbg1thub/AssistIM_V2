@@ -831,16 +831,23 @@ class MessageService:
         if recipient_user_id not in session_member_ids or recipient_user_id == sender_id:
             raise AppError(ErrorCode.INVALID_REQUEST, "recipient_user_id is not another session member", 422)
         seen_device_ids: set[str] = set()
+        has_recipient_device = False
         for item in list(envelope.get("recipients") or []):
             recipient = dict(item or {})
             item_recipient_user_id = str(recipient.get("recipient_user_id") or "").strip()
             recipient_device_id = str(recipient.get("recipient_device_id") or "").strip()
-            if item_recipient_user_id != recipient_user_id:
-                raise AppError(ErrorCode.INVALID_REQUEST, "recipient user in recipients does not match envelope recipient_user_id", 422)
+            if item_recipient_user_id not in {recipient_user_id, sender_id}:
+                raise AppError(ErrorCode.INVALID_REQUEST, "recipient user in recipients is not a session participant", 422)
+            if item_recipient_user_id == sender_id and recipient_device_id != sender_device_id:
+                raise AppError(ErrorCode.INVALID_REQUEST, "sender recipient_device_id does not match sender_device_id", 422)
+            if item_recipient_user_id == recipient_user_id:
+                has_recipient_device = True
             if recipient_device_id in seen_device_ids:
                 raise AppError(ErrorCode.INVALID_REQUEST, "duplicate recipient_device_id in recipients", 422)
             seen_device_ids.add(recipient_device_id)
             self._require_active_device_for_user(item_recipient_user_id, recipient_device_id, "recipient_device_id")
+        if not has_recipient_device:
+            raise AppError(ErrorCode.INVALID_REQUEST, "recipient device envelope is required", 422)
 
     def _validate_group_e2ee_device_binding(
         self,

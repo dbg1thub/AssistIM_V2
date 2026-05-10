@@ -438,6 +438,98 @@ def test_message_service_accepts_encrypted_text_in_e2ee_private_session() -> Non
     assert 'local_plaintext' not in payload['encryption']
 
 
+def test_message_service_accepts_direct_attachment_sender_device_copy() -> None:
+    service = MessageService(db=None)
+    service.sessions = _FakeSessionRepo(
+        session_exists=True,
+        has_member=True,
+        encryption_mode='e2ee_private',
+    )
+    service.devices = _FakeDeviceRepo()
+    extra = {
+        'attachment_encryption': {
+            'enabled': True,
+            'scheme': 'aesgcm-file+x25519-v1',
+            'sender_device_id': 'device-alice',
+            'sender_identity_key_public': 'identity-alice',
+            'recipient_user_id': 'bob',
+            'recipients': [
+                {
+                    'recipient_user_id': 'alice',
+                    'recipient_device_id': 'device-alice',
+                    'metadata_ciphertext': 'metadata-for-alice',
+                    'nonce': 'nonce-alice',
+                    'recipient_prekey_id': 1,
+                    'recipient_prekey_type': 'signed',
+                },
+                {
+                    'recipient_user_id': 'bob',
+                    'recipient_device_id': 'device-bob',
+                    'metadata_ciphertext': 'metadata-for-bob',
+                    'nonce': 'nonce-bob',
+                    'recipient_prekey_id': 1,
+                    'recipient_prekey_type': 'signed',
+                },
+            ],
+        },
+    }
+
+    payload = service._normalize_message_extra(
+        sender_id='alice',
+        session=_fake_session(encryption_mode='e2ee_private'),
+        session_member_ids=_fake_session_member_ids(),
+        content='photo.png',
+        message_type='image',
+        extra=extra,
+    )
+
+    recipients = payload['attachment_encryption']['recipients']
+    assert [item['recipient_user_id'] for item in recipients] == ['alice', 'bob']
+    assert [item['recipient_device_id'] for item in recipients] == ['device-alice', 'device-bob']
+
+
+def test_message_service_rejects_direct_attachment_without_peer_device_copy() -> None:
+    service = MessageService(db=None)
+    service.sessions = _FakeSessionRepo(
+        session_exists=True,
+        has_member=True,
+        encryption_mode='e2ee_private',
+    )
+    service.devices = _FakeDeviceRepo()
+    extra = {
+        'attachment_encryption': {
+            'enabled': True,
+            'scheme': 'aesgcm-file+x25519-v1',
+            'sender_device_id': 'device-alice',
+            'sender_identity_key_public': 'identity-alice',
+            'recipient_user_id': 'bob',
+            'recipients': [
+                {
+                    'recipient_user_id': 'alice',
+                    'recipient_device_id': 'device-alice',
+                    'metadata_ciphertext': 'metadata-for-alice',
+                    'nonce': 'nonce-alice',
+                    'recipient_prekey_id': 1,
+                    'recipient_prekey_type': 'signed',
+                },
+            ],
+        },
+    }
+
+    with pytest.raises(AppError) as exc_info:
+        service._normalize_message_extra(
+            sender_id='alice',
+            session=_fake_session(encryption_mode='e2ee_private'),
+            session_member_ids=_fake_session_member_ids(),
+            content='photo.png',
+            message_type='image',
+            extra=extra,
+        )
+
+    assert exc_info.value.status_code == 422
+    assert exc_info.value.message == 'recipient device envelope is required'
+
+
 class _UnreadSessionRepo:
     def __init__(self) -> None:
         self._sessions = [

@@ -1442,7 +1442,25 @@ class E2EEService:
         }
         serialized_metadata = json.dumps(metadata, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
         recipients: list[dict[str, Any]] = []
+        local_device_id = str(local_bundle["device_id"])
+        sender_user_id = str(
+            local_bundle.get("owner_user_id") or await self._current_state_owner_user_id() or ""
+        ).strip()
+        attachment_recipient_bundles: list[tuple[str, dict[str, Any]]] = []
+        seen_device_ids: set[str] = set()
+        if sender_user_id and local_device_id:
+            attachment_recipient_bundles.append(
+                (sender_user_id, self._local_signed_prekey_recipient_bundle(local_bundle))
+            )
+            seen_device_ids.add(local_device_id)
         for recipient_bundle in recipient_bundles:
+            recipient_device_id = str(recipient_bundle.get("device_id") or "").strip()
+            if not recipient_device_id or recipient_device_id in seen_device_ids:
+                continue
+            seen_device_ids.add(recipient_device_id)
+            attachment_recipient_bundles.append((normalized_recipient_id, dict(recipient_bundle)))
+
+        for recipient_user_id_for_envelope, recipient_bundle in attachment_recipient_bundles:
             recipient_device_id = str(recipient_bundle.get("device_id") or "").strip()
             if not recipient_device_id:
                 continue
@@ -1457,7 +1475,7 @@ class E2EEService:
             )
             recipients.append(
                 {
-                    "recipient_user_id": normalized_recipient_id,
+                    "recipient_user_id": recipient_user_id_for_envelope,
                     "recipient_device_id": recipient_device_id,
                     "recipient_prekey_type": str(key_payload["prekey_type"]),
                     "recipient_prekey_id": int(key_payload["key_id"]),
@@ -2730,6 +2748,22 @@ class E2EEService:
             "prekey_type": "signed",
             "key_id": int(signed_prekey.get("key_id") or 0),
             "public_key": signed_public,
+        }
+
+    @staticmethod
+    def _local_signed_prekey_recipient_bundle(local_bundle: dict[str, Any]) -> dict[str, Any]:
+        signed_prekey = dict(local_bundle.get("signed_prekey") or {})
+        return {
+            "device_id": str(local_bundle.get("device_id") or "").strip(),
+            "user_id": str(local_bundle.get("owner_user_id") or "").strip(),
+            "device_name": str(local_bundle.get("device_name") or "").strip(),
+            "identity_key_public": str(local_bundle.get("identity_key_public") or "").strip(),
+            "signing_key_public": str(local_bundle.get("signing_key_public") or "").strip(),
+            "signed_prekey": {
+                "key_id": int(signed_prekey.get("key_id") or 0),
+                "public_key": str(signed_prekey.get("public_key") or "").strip(),
+                "signature": str(signed_prekey.get("signature") or "").strip(),
+            },
         }
 
     async def _resolve_envelope_private_key(

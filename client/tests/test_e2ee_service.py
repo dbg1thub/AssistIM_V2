@@ -531,6 +531,72 @@ def test_e2ee_service_decrypts_attachment_bytes_for_recipient(monkeypatch) -> No
         shutil.rmtree(workspace_tmp, ignore_errors=True)
 
 
+def test_e2ee_service_decrypts_own_direct_attachment_after_restart(monkeypatch) -> None:
+    alice_db = FakeDatabase()
+    bob_db = FakeDatabase()
+    alice_db.state[e2ee_service_module.E2EEService.AUTH_USER_ID_KEY] = "alice"
+
+    monkeypatch.setattr(e2ee_service_module, "get_http_client", lambda: FakeHttpClient())
+    workspace_tmp = (Path.cwd() / "client/tests/.pytest_tmp/e2ee-service-own-direct-attachment").resolve()
+    workspace_tmp.mkdir(parents=True, exist_ok=True)
+
+    async def scenario() -> None:
+        monkeypatch.setattr(e2ee_service_module, "get_database", lambda: alice_db)
+        alice_service = e2ee_service_module.E2EEService()
+        alice_bundle = await alice_service.get_or_create_local_bundle()
+
+        monkeypatch.setattr(e2ee_service_module, "get_database", lambda: bob_db)
+        bob_service = e2ee_service_module.E2EEService()
+        bob_bundle = await bob_service.get_or_create_local_bundle()
+        remote_bundle = build_remote_bundle(bob_bundle, user_id="bob")
+
+        async def fake_fetch_prekey_bundle(user_id: str) -> list[dict]:
+            assert user_id == "bob"
+            return [dict(remote_bundle)]
+
+        async def fake_claim_prekeys(device_ids: list[str]) -> list[dict]:
+            assert device_ids == [bob_bundle["device_id"]]
+            return [dict(remote_bundle)]
+
+        alice_service.fetch_prekey_bundle = fake_fetch_prekey_bundle  # type: ignore[method-assign]
+        alice_service.claim_prekeys = fake_claim_prekeys  # type: ignore[method-assign]
+
+        source_path = workspace_tmp / "sent-photo.png"
+        plaintext_bytes = b"sender-should-open-this-after-restart"
+        source_path.write_bytes(plaintext_bytes)
+
+        encrypted = await alice_service.encrypt_attachment_for_user(
+            "bob",
+            str(source_path),
+            fallback_name="sent-photo.png",
+            size_bytes=len(plaintext_bytes),
+            mime_type="image/png",
+        )
+        ciphertext_bytes = Path(encrypted.upload_file_path).read_bytes()
+        remote_metadata = sanitize_outbound_message_extra(
+            {"attachment_encryption": dict(encrypted.attachment_encryption)}
+        )["attachment_encryption"]
+
+        restarted_alice_service = e2ee_service_module.E2EEService()
+        decrypted_bytes, metadata = await restarted_alice_service.decrypt_attachment_bytes(
+            ciphertext_bytes,
+            remote_metadata,
+        )
+        recipient_ids = [item["recipient_device_id"] for item in remote_metadata["recipients"]]
+
+        assert decrypted_bytes == plaintext_bytes
+        assert metadata["original_name"] == "sent-photo.png"
+        assert metadata["mime_type"] == "image/png"
+        assert "local_metadata" not in remote_metadata
+        assert alice_bundle["device_id"] in recipient_ids
+        assert bob_bundle["device_id"] in recipient_ids
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        shutil.rmtree(workspace_tmp, ignore_errors=True)
+
+
 def test_e2ee_service_encrypts_direct_text_for_each_recipient_device(monkeypatch) -> None:
     alice_db = FakeDatabase()
     bob_phone_db = FakeDatabase()
@@ -589,6 +655,7 @@ def test_e2ee_service_encrypts_direct_attachment_for_each_recipient_device(monke
     alice_db = FakeDatabase()
     bob_phone_db = FakeDatabase()
     bob_laptop_db = FakeDatabase()
+    alice_db.state[e2ee_service_module.E2EEService.AUTH_USER_ID_KEY] = "alice"
 
     monkeypatch.setattr(e2ee_service_module, "get_http_client", lambda: FakeHttpClient())
     workspace_tmp = (Path.cwd() / "client/tests/.pytest_tmp/e2ee-service-direct-attachment-multidevice").resolve()
@@ -597,7 +664,7 @@ def test_e2ee_service_encrypts_direct_attachment_for_each_recipient_device(monke
     async def scenario() -> None:
         monkeypatch.setattr(e2ee_service_module, "get_database", lambda: alice_db)
         alice_service = e2ee_service_module.E2EEService()
-        await alice_service.get_or_create_local_bundle()
+        alice_bundle = await alice_service.get_or_create_local_bundle()
 
         monkeypatch.setattr(e2ee_service_module, "get_database", lambda: bob_phone_db)
         bob_phone_service = e2ee_service_module.E2EEService()
@@ -647,7 +714,11 @@ def test_e2ee_service_encrypts_direct_attachment_for_each_recipient_device(monke
         assert laptop_bytes == plaintext_bytes
         assert phone_metadata["original_name"] == "direct-secret-photo.png"
         assert laptop_metadata["mime_type"] == "image/png"
-        assert recipient_ids == [bob_phone_bundle["device_id"], bob_laptop_bundle["device_id"]]
+        assert recipient_ids == [
+            alice_bundle["device_id"],
+            bob_phone_bundle["device_id"],
+            bob_laptop_bundle["device_id"],
+        ]
         assert "local_metadata" not in remote_metadata
 
     try:
