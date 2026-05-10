@@ -109,6 +109,7 @@ class FluentDialog(QDialog):
         self.title_label.setMinimumWidth(0)
         self.title_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         title_font = QFont(self.title_label.font())
+        title_font.setPixelSize(15)
         title_font.setBold(False)
         self.title_label.setFont(title_font)
 
