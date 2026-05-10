@@ -850,3 +850,42 @@ def test_ai_assistant_image_attachment_flow_is_wired() -> None:
     assert "LocalVisionGGUFRuntime" in ai_service
     assert "attachments=attachments" in prompt_builder
 
+
+def test_ai_assistant_input_uses_chat_composer_layout_without_overlay() -> None:
+    assistant_interface = Path("client/ui/windows/ai_assistant_interface.py").read_text(encoding="utf-8")
+    setup_block = assistant_interface.split("def _setup_ui(self) -> None:", 1)[1].split(
+        "\n    def ensure_initial_load",
+        1,
+    )[0]
+    layout_block = assistant_interface.split("def _update_input_overlay_positions(self) -> None:", 1)[1].split(
+        "\n    def _apply_prompt_editor_theme",
+        1,
+    )[0]
+
+    assert "class AIAssistantFloatingComposerOverlay" not in assistant_interface
+    assert "class AIAssistantComposerControlsOverlay" not in assistant_interface
+    assert "self.composer_shell = QFrame(self.content_panel)" in setup_block
+    assert "self.composer_widget = QWidget(self.composer_shell)" in setup_block
+    assert "self.composer_border = QFrame(self.composer_widget)" in setup_block
+    assert "self.composer_border.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)" in setup_block
+    assert "self.toolbar_widget = QWidget(self.composer_widget)" in setup_block
+    assert "self.toolbar_root_layout = QHBoxLayout(self.toolbar_widget)" in setup_block
+    assert "self.toolbar_root_layout.setContentsMargins(8, 4, 8, 8)" in setup_block
+    assert "self.toolbar_layout.setSpacing(self.TOOLBAR_ICON_SPACING)" in setup_block
+    assert "self.attachment_button.setFixedSize(self.TOOLBAR_ICON_BUTTON_SIZE, self.TOOLBAR_ICON_BUTTON_SIZE)" in setup_block
+    assert "self.voice_message_button.setFixedSize(self.TOOLBAR_ICON_BUTTON_SIZE, self.TOOLBAR_ICON_BUTTON_SIZE)" in setup_block
+    assert "self.send_button = PushButton(" in setup_block
+    assert "self.send_button.setFixedSize(62, 28)" in setup_block
+    assert "self.message_sendbar_layout.addWidget(self.voice_message_button)" in setup_block
+    assert "self.message_sendbar_layout.addWidget(self.send_button)" in setup_block
+    assert "self.toolbar_root_layout.addLayout(self.toolbar_layout, 0)" in setup_block
+    assert "self.toolbar_root_layout.addStretch(1)" in setup_block
+    assert "self.toolbar_root_layout.addWidget(self.message_sendbar_widget, 0, Qt.AlignmentFlag.AlignVCenter)" in setup_block
+    assert "self.composer_layout.addWidget(self.prompt_edit, 1)" in setup_block
+    assert "self.composer_layout.addWidget(self.toolbar_widget, 0)" in setup_block
+    assert "self.composer_shell.setGeometry(" in layout_block
+    assert "self.composer_shell.raise_()" in layout_block
+    assert "self.composer_border.setGeometry(self.composer_widget.rect())" in layout_block
+    assert "self.composer_border.raise_()" in layout_block
+    assert "setMask(" not in assistant_interface
+
