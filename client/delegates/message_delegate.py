@@ -7,14 +7,13 @@ from collections import OrderedDict
 from dataclasses import dataclass
 import time
 
-from PySide6.QtCore import QModelIndex, QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer, QUrl
+from PySide6.QtCore import QModelIndex, QPoint, QRect, QRectF, QSize, Qt, QTimer, QUrl
 from PySide6.QtGui import (
     QColor,
     QFont,
     QFontMetrics,
     QPainter,
     QPainterPath,
-    QPen,
     QPixmap,
     QImageReader,
 )
@@ -23,6 +22,7 @@ from PySide6.QtWidgets import QStyledItemDelegate, QStyleOptionViewItem
 from qfluentwidgets import isDarkTheme, themeColor
 
 from client.core import logging
+from client.core.app_icons import AppIcon
 from client.core.avatar_rendering import draw_avatar_pixmap, get_avatar_image_store
 from client.core.avatar_utils import profile_avatar_seed
 from client.core.config_backend import get_config
@@ -126,7 +126,6 @@ class MessageDelegate(QStyledItemDelegate):
     TIME_SPACING = 9
     STATUS_BADGE_SIZE = 16
     STATUS_BADGE_ICON_SIZE = 10
-    STATUS_BADGE_STROKE_WIDTH = 1.2
     RECALL_NOTICE_HEIGHT = TIME_BLOCK_HEIGHT
     RECALL_ACTION_GAP = 8
     TEXT_MEASURE_CACHE_LIMIT = 512
@@ -1280,46 +1279,18 @@ class MessageDelegate(QStyledItemDelegate):
         painter.restore()
 
     def _draw_status_glyph(self, painter: QPainter, rect: QRectF, status_kind: str) -> None:
-        """Draw a thick status glyph that stays legible at small sizes."""
-        pen = QPen(Qt.GlobalColor.white, self.STATUS_BADGE_STROKE_WIDTH)
-        pen.setCapStyle(Qt.PenCapStyle.SquareCap)
-        pen.setJoinStyle(Qt.PenJoinStyle.MiterJoin)
-        painter.setPen(pen)
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-
+        """Draw the status glyph inside the badge."""
         if status_kind == "check":
-            painter.drawLine(
-                QPointF(rect.left() + rect.width() * 0.18, rect.top() + rect.height() * 0.55),
-                QPointF(rect.left() + rect.width() * 0.42, rect.top() + rect.height() * 0.78),
-            )
-            painter.drawLine(
-                QPointF(rect.left() + rect.width() * 0.42, rect.top() + rect.height() * 0.78),
-                QPointF(rect.left() + rect.width() * 0.84, rect.top() + rect.height() * 0.24),
-            )
+            AppIcon.CHECK.render(painter, rect, fill="#ffffff")
             return
-
         if status_kind == "close":
-            painter.drawLine(
-                QPointF(rect.left() + rect.width() * 0.24, rect.top() + rect.height() * 0.24),
-                QPointF(rect.left() + rect.width() * 0.76, rect.top() + rect.height() * 0.76),
-            )
-            painter.drawLine(
-                QPointF(rect.left() + rect.width() * 0.76, rect.top() + rect.height() * 0.24),
-                QPointF(rect.left() + rect.width() * 0.24, rect.top() + rect.height() * 0.76),
-            )
+            AppIcon.CLOSE.render(painter, rect, fill="#ffffff")
             return
-
-        if status_kind == "info":
-            center_x = rect.center().x()
-            painter.drawLine(
-                QPointF(center_x, rect.top() + rect.height() * 0.14),
-                QPointF(center_x, rect.top() + rect.height() * 0.58),
-            )
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(Qt.GlobalColor.white)
-            dot_radius = max(1.1, self.STATUS_BADGE_STROKE_WIDTH * 0.46)
-            dot_center = QPointF(center_x, rect.top() + rect.height() * 0.84)
-            painter.drawEllipse(dot_center, dot_radius, dot_radius)
+        if status_kind == "sent":
+            AppIcon.ARROW_SORT_UP.render(painter, rect, fill="#ffffff")
+            return
+        if status_kind == "warning":
+            AppIcon.WARNING.render(painter, rect, fill="#ffffff")
 
     def _status_count_font(self) -> QFont:
         """Return the compact font used for group read-count pills."""
@@ -1352,7 +1323,9 @@ class MessageDelegate(QStyledItemDelegate):
         error_color = QColor(255, 153, 164) if dark else QColor(196, 43, 28)
 
         if message.status == MessageStatus.AWAITING_SECURITY_CONFIRMATION:
-            return QColor(230, 178, 62) if dark else QColor(161, 107, 0), "info"
+            return QColor(230, 178, 62) if dark else QColor(161, 107, 0), "warning"
+        if message.status == MessageStatus.SENT:
+            return info_color, "sent"
         if message.status == MessageStatus.DELIVERED:
             return info_color, "check"
         if message.status == MessageStatus.READ:

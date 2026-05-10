@@ -285,6 +285,7 @@ def available_collection_icon_names() -> list[str]:
 
 class AppIcon(FluentIconBase, Enum):
     ADD = "add"
+    ARROW_SORT_UP = "arrow_sort_up"
     BRUSH = "paint_brush"
     CANCEL_MEDIUM = "dismiss_circle"
     CHAT = "chat"
@@ -313,6 +314,7 @@ class AppIcon(FluentIconBase, Enum):
     SYNC = "arrow_sync"
     TRANSPARENT = "blur"
     VIDEO = "video"
+    WARNING = "warning"
     ZOOM = "zoom_in"
 
     def path(self, theme=Theme.AUTO) -> str:
