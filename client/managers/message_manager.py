@@ -118,6 +118,7 @@ class MessageSendQueue:
 
     QUEUE_TIMEOUT = 30.0
     STOP_TIMEOUT = 1.5
+    CANCEL_TIMEOUT = 0.5
 
     def __init__(
         self,
@@ -131,6 +132,7 @@ class MessageSendQueue:
         self._running = False
         self._worker_task: Optional[asyncio.Task] = None
         self._inflight: QueuedMessage | None = None
+        self._failed_on_stop: set[str] = set()
 
     async def start(self) -> None:
         """Start the queue worker."""
@@ -138,6 +140,7 @@ class MessageSendQueue:
             return
 
         self._running = True
+        self._failed_on_stop.clear()
         self._worker_task = asyncio.create_task(self._worker())
         logger.info("Message send queue started")
 
@@ -146,21 +149,52 @@ class MessageSendQueue:
         self._running = False
 
         if self._worker_task:
+            worker_task = self._worker_task
+            inflight_id = self._inflight.message_id if self._inflight is not None else ""
             try:
-                await asyncio.wait_for(asyncio.shield(self._worker_task), timeout=self.STOP_TIMEOUT)
+                await asyncio.wait_for(asyncio.shield(worker_task), timeout=self.STOP_TIMEOUT)
             except asyncio.TimeoutError:
-                logger.warning("Timed out waiting for message send queue worker to stop")
-                self._worker_task.cancel()
+                logger.warning(
+                    "Timed out waiting for message send queue worker to stop queue_size=%s inflight=%s",
+                    self._queue.qsize(),
+                    inflight_id or "-",
+                )
+                worker_task.cancel()
+                done, _pending = await asyncio.wait({worker_task}, timeout=self.CANCEL_TIMEOUT)
+                if worker_task not in done:
+                    logger.error(
+                        "Message send queue worker did not stop after cancellation queue_size=%s inflight=%s",
+                        self._queue.qsize(),
+                        inflight_id or "-",
+                    )
+                    worker_task.add_done_callback(self._log_late_worker_stop)
+                else:
+                    try:
+                        await worker_task
+                    except asyncio.CancelledError:
+                        pass
+                    except Exception:
+                        logger.exception("Message send queue worker failed while stopping")
+            except asyncio.CancelledError:
+                worker_task.cancel()
                 try:
-                    await self._worker_task
+                    await worker_task
                 except asyncio.CancelledError:
                     pass
-            except asyncio.CancelledError:
-                pass
             self._worker_task = None
 
         await self._fail_unprocessed_messages()
         logger.info("Message send queue stopped")
+
+    def _log_late_worker_stop(self, task: asyncio.Task) -> None:
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            logger.info("Message send queue worker stopped after shutdown continued")
+        except Exception:
+            logger.exception("Message send queue worker failed after shutdown continued")
+        else:
+            logger.info("Message send queue worker stopped after shutdown continued")
 
     async def enqueue(
         self,
@@ -215,21 +249,26 @@ class MessageSendQueue:
                 extra=queued.extra,
             )
         except asyncio.CancelledError:
-            await self._on_send_result(queued, False)
+            if queued.message_id not in self._failed_on_stop:
+                await self._on_send_result(queued, False)
             raise
         except Exception as e:
             logger.error(f"Send message error for {queued.message_id}: {e}")
 
+        if queued.message_id in self._failed_on_stop:
+            return
         await self._on_send_result(queued, success)
 
     async def _fail_unprocessed_messages(self) -> None:
         if self._inflight is not None:
             queued = self._inflight
             self._inflight = None
+            self._failed_on_stop.add(queued.message_id)
             await self._on_send_result(queued, False)
 
         while not self._queue.empty():
             queued = self._queue.get_nowait()
+            self._failed_on_stop.add(queued.message_id)
             await self._on_send_result(queued, False)
 
     async def drop_session(self, session_id: str) -> None:
@@ -397,7 +436,7 @@ class MessageManager:
             pending.awaiting_ack = False
             pending.last_attempt_at = 0.0
 
-            if pending.attempt_count < pending.max_attempts:
+            if pending.attempt_count < pending.max_attempts and self._running:
                 retry_pending = pending
             else:
                 failed_pending = self._pending_messages.pop(message_id)
@@ -410,6 +449,16 @@ class MessageManager:
                 message_id,
             )
             await asyncio.sleep(self._transport_retry_delay)
+            if not self._running:
+                async with self._pending_lock:
+                    current_pending = self._pending_messages.get(message_id)
+                    if current_pending is retry_pending:
+                        failed_pending = self._pending_messages.pop(message_id)
+                    else:
+                        failed_pending = None
+                if failed_pending is not None:
+                    await self._finalize_pending_failure(failed_pending, MessageFailureCode.TRANSPORT_SEND_FAILED)
+                return
             async with self._pending_lock:
                 current_pending = self._pending_messages.get(message_id)
                 if current_pending is not retry_pending:

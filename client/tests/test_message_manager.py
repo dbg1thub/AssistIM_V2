@@ -685,6 +685,91 @@ def test_message_send_queue_marks_unprocessed_message_failed_on_stop_timeout() -
     assert results == [('m-queued', False)]
 
 
+def test_message_send_queue_stop_does_not_block_when_worker_ignores_cancel() -> None:
+    results = []
+
+    async def on_send_result(queued, success: bool) -> None:
+        results.append((queued.message_id, success))
+
+    class NonResponsiveQueue(message_manager_module.MessageSendQueue):
+        def __init__(self) -> None:
+            super().__init__(object(), on_send_result)
+            self.release = asyncio.Event()
+            self.worker_ref: asyncio.Task | None = None
+
+        async def start(self) -> None:
+            await super().start()
+            self.worker_ref = self._worker_task
+
+        async def _worker(self) -> None:
+            try:
+                await asyncio.sleep(10)
+            except asyncio.CancelledError:
+                await self.release.wait()
+
+    async def scenario() -> None:
+        queue = NonResponsiveQueue()
+        queue.STOP_TIMEOUT = 0.01
+        queue.CANCEL_TIMEOUT = 0.01
+        await queue.start()
+        await asyncio.wait_for(queue.stop(), timeout=0.2)
+        assert queue.worker_ref is not None
+        assert not queue.worker_ref.done()
+        queue.release.set()
+        await asyncio.wait_for(queue.worker_ref, timeout=0.2)
+
+    asyncio.run(scenario())
+
+    assert results == []
+
+
+def test_message_manager_transport_failure_does_not_retry_during_close() -> None:
+    finalized: list[tuple[str, str]] = []
+    requeued: list[str] = []
+
+    message = ChatMessage(
+        message_id='m-closing',
+        session_id='session-1',
+        sender_id='user-1',
+        content='closing',
+        message_type=MessageType.TEXT,
+        status=MessageStatus.SENDING,
+        is_self=True,
+        extra={},
+    )
+
+    async def scenario() -> None:
+        manager = message_manager_module.MessageManager()
+        manager._running = False
+        manager._transport_retry_delay = 10.0
+        manager._pending_messages['m-closing'] = message_manager_module.PendingMessage(
+            message=message,
+            session_id='session-1',
+            content='closing',
+            message_type='text',
+            extra={},
+            created_at=time.time(),
+            attempt_count=0,
+            max_attempts=3,
+        )
+
+        async def finalize_pending_failure(pending, failure_code: str) -> None:
+            finalized.append((pending.message.message_id, failure_code))
+
+        async def enqueue_pending_message(pending) -> None:
+            requeued.append(pending.message.message_id)
+
+        manager._finalize_pending_failure = finalize_pending_failure
+        manager._enqueue_pending_message = enqueue_pending_message
+
+        await asyncio.wait_for(manager._handle_transport_failure('m-closing'), timeout=0.2)
+
+    asyncio.run(scenario())
+
+    assert finalized == [('m-closing', message_manager_module.MessageFailureCode.TRANSPORT_SEND_FAILED)]
+    assert requeued == []
+
+
 def test_message_manager_update_message_translation_persists_extra_and_emits(monkeypatch) -> None:
     fake_event_bus = FakeEventBus()
     fake_conn_manager = FakeConnectionManager([])
