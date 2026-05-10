@@ -690,6 +690,21 @@ def test_call_window_marks_connected_on_transport_connection() -> None:
     assert 'self.set_status_text("Connecting...")' not in connected_block
 
 
+def test_call_window_uses_fluent_dialog_shell() -> None:
+    call_window = Path('client/ui/windows/call_window.py').read_text(encoding='utf-8')
+
+    assert 'from client.ui.widgets.fluent_dialog import FluentDialog' in call_window
+    assert 'class CallWindow(FluentDialog):' in call_window
+    assert 'FluentWidget,' not in call_window
+    assert ', FluentWidget' not in call_window
+    assert 'class CallWindow(FluentWidget):' not in call_window
+    assert 'root = self.content_layout' in call_window
+    assert 'self.surface.setObjectName("callWindowSurface")' in call_window
+    assert 'self.content_widget.setObjectName("callWindowContent")' in call_window
+    assert 'setMicaEffectEnabled' not in call_window
+    assert 'setCustomBackgroundColor' not in call_window
+
+
 def test_chat_interface_typing_indicator_ignores_self_and_hides_on_explicit_stop() -> None:
     chat_interface = Path('client/ui/windows/chat_interface.py').read_text(encoding='utf-8')
     typing_block = chat_interface.split('def _on_typing_event', 1)[1].split('def _on_read_event', 1)[0]

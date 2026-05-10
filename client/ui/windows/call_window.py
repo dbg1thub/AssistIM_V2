@@ -6,15 +6,16 @@ from datetime import datetime
 from typing import Any
 
 from PySide6.QtCore import QTimer, Qt, Signal
-from PySide6.QtGui import QGuiApplication, QImage, QPainter, QPainterPath, QPixmap
+from PySide6.QtGui import QColor, QGuiApplication, QImage, QPainter, QPainterPath, QPixmap
 from PySide6.QtMultimedia import QMediaDevices
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QVBoxLayout, QWidget
-from qfluentwidgets import BodyLabel, CaptionLabel, FluentIcon as FIF, FluentWidget, ToggleToolButton, ToolButton
+from qfluentwidgets import BodyLabel, CaptionLabel, FluentIcon as FIF, ToggleToolButton, ToolButton
 
 from client.call.aiortc_voice_engine import AiortcVoiceEngine
 from client.models.call import ActiveCallState
 from client.models.call import CallMediaType
 from client.ui.widgets.contact_shared import ContactAvatar
+from client.ui.widgets.fluent_dialog import FluentDialog
 
 
 class _CallControl(QWidget):
@@ -111,8 +112,8 @@ class _RoundedVideoPreview(QWidget):
         painter.drawPixmap(x, y, scaled)
 
 
-class CallWindow(FluentWidget):
-    """Compact call window built with QFluentWidgets controls."""
+class CallWindow(FluentDialog):
+    """Compact call dialog built with QFluentWidgets controls."""
 
     hangup_requested = Signal(str)
     signal_generated = Signal(str, object)
@@ -132,7 +133,7 @@ class CallWindow(FluentWidget):
         parent=None,
     ) -> None:
         self._is_video_call = call.media_type == CallMediaType.VIDEO.value
-        super().__init__(parent)
+        super().__init__(parent, title="")
         self._call = call
         self._session_title = session_title
         self._peer_label = peer_label
@@ -177,34 +178,35 @@ class CallWindow(FluentWidget):
 
         self.setWindowTitle("")
         self.setObjectName("callWindow")
+        self.surface.setObjectName("callWindowSurface")
+        self.content_widget.setObjectName("callWindowContent")
         self.setFixedSize(380, 680)
-        self.setMicaEffectEnabled(False)
-        self.setCustomBackgroundColor("#272322", "#272322")
 
-        root = QVBoxLayout(self)
+        root = self.content_layout
         if self._is_video_call:
             root.setContentsMargins(0, 0, 0, 0)
         else:
             root.setContentsMargins(28, 28, 28, 28)
         root.setSpacing(0)
 
-        self.header_status = BodyLabel("", self)
+        content_host = self.content_widget
+        self.header_status = BodyLabel("", self.title_bar if self._is_video_call else content_host)
         self.header_status.setObjectName("callHeaderStatus")
         self.header_status.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.header_status.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
 
-        self.avatar_widget = ContactAvatar(100 if not self._is_video_call else 72, self)
+        self.avatar_widget = ContactAvatar(100 if not self._is_video_call else 72, content_host)
         self.avatar_widget.set_avatar(
             self._avatar,
             fallback=(peer_label or session_title or "?")[:1],
             seed=self._avatar_seed,
         )
 
-        self.name_label = BodyLabel(peer_label or session_title, self)
+        self.name_label = BodyLabel(peer_label or session_title, content_host)
         self.name_label.setObjectName("callPeerName")
         self.name_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-        self.status_label = CaptionLabel("", self)
+        self.status_label = CaptionLabel("", content_host)
         self.status_label.setObjectName("callStatus")
         self.status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.status_label.setWordWrap(True)
@@ -218,19 +220,19 @@ class CallWindow(FluentWidget):
         center.addWidget(self.status_label, 0, Qt.AlignmentFlag.AlignCenter)
 
         if self._is_video_call:
-            self.remote_video_label = QLabel(self)
+            self.remote_video_label = QLabel(content_host)
             self.remote_video_label.setObjectName("callRemoteVideo")
             self.remote_video_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
             root.addWidget(self.remote_video_label, 1)
 
-            self.remote_placeholder_avatar = ContactAvatar(88, self)
+            self.remote_placeholder_avatar = ContactAvatar(88, content_host)
             self.remote_placeholder_avatar.set_avatar(
                 self._avatar,
                 fallback=(peer_label or session_title or "?")[:1],
                 seed=self._avatar_seed,
             )
 
-            self.local_preview_container = QWidget(self)
+            self.local_preview_container = QWidget(content_host)
             self.local_preview_container.setObjectName("callLocalPreviewContainer")
             self.local_preview_container.setFixedSize(108, 144)
             preview_layout = QVBoxLayout(self.local_preview_container)
@@ -248,7 +250,7 @@ class CallWindow(FluentWidget):
                 seed=self._self_avatar_seed,
             )
 
-            self.controls_container = QWidget(self)
+            self.controls_container = QWidget(content_host)
             self.controls_container.setObjectName("callControlsContainer")
             self.avatar_widget.hide()
             self.name_label.hide()
@@ -616,14 +618,24 @@ class CallWindow(FluentWidget):
         self.set_status_text(f"{minutes:02d}:{seconds:02d}")
 
     def _apply_style(self) -> None:
+        self.close_button.setNormalColor(QColor(255, 255, 255))
+        self.close_button.setHoverColor(QColor(255, 255, 255))
+        self.close_button.setPressedColor(QColor(255, 255, 255))
         self.setStyleSheet(
             """
-            QWidget#callWindow {
+            QFrame#callWindowSurface {
                 background:
                     qradialgradient(cx:0.5, cy:0.35, radius:0.95, fx:0.5, fy:0.35,
                         stop:0 rgba(117, 109, 103, 150),
                         stop:0.56 rgba(54, 49, 47, 235),
                         stop:1 rgba(33, 31, 30, 250));
+                border: none;
+                border-radius: 12px;
+            }
+            QWidget#fluentDialogTitleBar,
+            QWidget#callWindowContent {
+                background: transparent;
+                border: none;
             }
             QLabel#callPeerName {
                 color: #F6F3F1;
@@ -704,23 +716,23 @@ class CallWindow(FluentWidget):
             )
         ):
             return
-        rect = self.rect()
-        title_bar_height = max(36, int(getattr(getattr(self, "titleBar", None), "height", lambda: 36)()))
-        content_rect = rect.adjusted(0, title_bar_height, 0, 0)
+        rect = self.content_widget.rect()
+        title_bar_rect = self.title_bar.rect()
+        content_rect = rect
         self.remote_video_label.setGeometry(content_rect)
 
         top_margin = 8
         side_margin = 18
         self.header_status.adjustSize()
         self.header_status.move(
-            max(0, (rect.width() - self.header_status.width()) // 2),
-            max(0, (title_bar_height - self.header_status.height()) // 2),
+            max(0, (title_bar_rect.width() - self.header_status.width()) // 2),
+            max(0, (title_bar_rect.height() - self.header_status.height()) // 2),
         )
         self.header_status.raise_()
 
         preview_size = self.local_preview_container.size()
         self.local_preview_container.move(
-            max(side_margin, rect.width() - preview_size.width() - side_margin),
+            max(side_margin, content_rect.width() - preview_size.width() - side_margin),
             content_rect.top() + top_margin,
         )
         self.local_preview_container.raise_()
@@ -740,16 +752,14 @@ class CallWindow(FluentWidget):
         controls_width = self.controls_container.sizeHint().width()
         controls_height = self.controls_container.sizeHint().height()
         self.controls_container.setGeometry(
-            max(0, (rect.width() - controls_width) // 2),
-            max(content_rect.top(), rect.height() - controls_height - 34),
+            max(0, (content_rect.width() - controls_width) // 2),
+            max(content_rect.top(), content_rect.height() - controls_height - 34),
             controls_width,
             controls_height,
         )
         self.controls_container.raise_()
-        title_bar = getattr(self, "titleBar", None)
-        if title_bar is not None:
-            title_bar.show()
-            title_bar.raise_()
+        self.title_bar.show()
+        self.title_bar.raise_()
 
     def _center_on_screen(self) -> None:
         screen = QGuiApplication.screenAt(self.pos())
