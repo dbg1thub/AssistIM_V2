@@ -83,7 +83,6 @@ QWidget#contactMomentCommentBox {
     border-radius: {{RADIUS_PILL}};
 }
 
-QWidget#EmptyStateCard,
 QWidget#ContactDetailHeader,
 QWidget#UserSearchItem,
 QWidget#GroupMemberItem,
@@ -98,13 +97,12 @@ QLabel#contactMomentCommentLabel {
     font: 12px "Segoe UI", "Microsoft YaHei", "PingFang SC";
 }
 
-QLabel#EmptyStateTitle {
-    color: {{TEXT_PRIMARY}};
+QWidget#ContactWelcomePlaceholder {
+    background: transparent;
 }
 
-QLabel#EmptyStateSubtitle,
-QLabel#EmptyStateHint {
-    color: {{TEXT_SECONDARY}};
+QLabel#welcomePlaceholderTitle {
+    color: {{TEXT_PRIMARY}};
 }
 
 QLabel#momentMediaTile {

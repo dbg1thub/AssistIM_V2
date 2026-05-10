@@ -59,7 +59,7 @@ from client.models.ai_assistant_message_model import AIAssistantMessageModel
 from client.services.ai_service import AIErrorCode
 from client.services.local_embedding_gguf_runtime import LocalEmbeddingGGUFRuntimeError
 from client.storage.ai_assistant_store import get_ai_assistant_store
-from client.ui.widgets.empty_state_card import EmptyStateCard
+from client.ui.widgets.welcome_placeholder import WelcomePlaceholder
 
 logger = logging.get_logger(__name__)
 
@@ -312,15 +312,12 @@ class AIAssistantInterface(QWidget):
         self.empty_layout = QVBoxLayout(self.empty_widget)
         self.empty_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.empty_layout.setSpacing(12)
-        self.empty_card = EmptyStateCard(
-            title=tr("ai_assistant.empty.title", "Ask the local AI assistant"),
-            subtitle=tr("ai_assistant.empty.subtitle", "Start a thread on the left or type a question below."),
-            logo_size=64,
-            min_width=420,
-            max_width=560,
+        self.empty_placeholder = WelcomePlaceholder(
+            title=tr("chat.welcome.title", "Welcome to AssistIM"),
+            object_name="AIAssistantWelcomePlaceholder",
             parent=self.empty_widget,
         )
-        self.empty_layout.addWidget(self.empty_card, 0, Qt.AlignmentFlag.AlignCenter)
+        self.empty_layout.addWidget(self.empty_placeholder, 1)
 
         self.composer_shell = QFrame(self.content_panel)
         self.composer_shell.setObjectName("aiAssistantComposerShell")
@@ -1492,6 +1489,7 @@ class AIAssistantInterface(QWidget):
 
         self.composer_shell.setGeometry(composer_x, composer_y, composer_width, composer_height)
         self.composer_shell.raise_()
+        self._sync_empty_placeholder_reserved_height(composer_height)
         self.composer_shell_layout.activate()
         self.input_layout.activate()
         self.input_card_layout.activate()
@@ -1505,6 +1503,15 @@ class AIAssistantInterface(QWidget):
         self._position_scroll_to_bottom_button()
         if self.scroll_to_bottom_button.isVisible():
             self.scroll_to_bottom_button.raise_()
+
+    def _sync_empty_placeholder_reserved_height(self, composer_height: int) -> None:
+        if not hasattr(self, "empty_layout"):
+            return
+        bottom_margin = max(0, int(composer_height or 0))
+        left, top, right, bottom = self.empty_layout.getContentsMargins()
+        if bottom == bottom_margin and left == 0 and top == 0 and right == 0:
+            return
+        self.empty_layout.setContentsMargins(0, 0, 0, bottom_margin)
 
     def _sync_message_bottom_reserved_height(self, height: int) -> None:
         if self._message_delegate is None or self._message_model is None:
@@ -1888,17 +1895,11 @@ class AIAssistantInterface(QWidget):
                 QFrame#aiAssistantEmpty {{
                     background: transparent;
                 }}
-                QWidget#EmptyStateCard {{
-                    background: {panel};
-                    border: 1px solid {border};
-                    border-radius: 10px;
+                QWidget#AIAssistantWelcomePlaceholder {{
+                    background: transparent;
                 }}
-                QLabel#EmptyStateTitle {{
+                QLabel#welcomePlaceholderTitle {{
                     color: {text};
-                }}
-                QLabel#EmptyStateSubtitle,
-                QLabel#EmptyStateHint {{
-                    color: {muted_text};
                 }}
                 QFrame#aiAssistantComposerShell {{
                     background: transparent;

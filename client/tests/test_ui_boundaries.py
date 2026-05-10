@@ -109,12 +109,12 @@ def test_contact_sidebar_items_use_arrow_cursor() -> None:
     assert 'self.setCursor(Qt.CursorShape.PointingHandCursor)' not in request_item_block
 
 
-def test_page_welcome_states_use_shared_empty_state_card() -> None:
+def test_page_welcome_states_use_shared_placeholder() -> None:
     chat_panel = Path('client/ui/widgets/chat_panel.py').read_text(encoding='utf-8')
     contact_interface = Path('client/ui/windows/contact_interface.py').read_text(encoding='utf-8')
     ai_assistant_interface = Path('client/ui/windows/ai_assistant_interface.py').read_text(encoding='utf-8')
     discovery_interface = Path('client/ui/windows/discovery_interface.py').read_text(encoding='utf-8')
-    empty_state_card = Path('client/ui/widgets/empty_state_card.py').read_text(encoding='utf-8')
+    welcome_placeholder = Path('client/ui/widgets/welcome_placeholder.py').read_text(encoding='utf-8')
     light_chat_qss = Path('client/ui/styles/qss/light/chat_panel.qss').read_text(encoding='utf-8')
     dark_chat_qss = Path('client/ui/styles/qss/dark/chat_panel.qss').read_text(encoding='utf-8')
     light_contact_qss = Path('client/ui/styles/qss/light/contact_interface.qss').read_text(encoding='utf-8')
@@ -124,38 +124,49 @@ def test_page_welcome_states_use_shared_empty_state_card() -> None:
     welcome_block = chat_panel.split('class WelcomeWidget', 1)[1].split('class SecurityPendingBanner', 1)[0]
     contact_welcome_block = contact_interface.split('class ContactWelcomeWidget', 1)[1].split('class FriendMomentPreviewStrip', 1)[0]
     ai_empty_block = ai_assistant_interface.split('self.empty_widget = QFrame', 1)[1].split('self.composer_shell = QFrame', 1)[0]
-    discovery_empty_block = discovery_interface.split('def _create_empty_state', 1)[1].split('def _open_publish_dialog', 1)[0]
-    light_chat_welcome_style = light_chat_qss.split('QLabel#chatWelcomeTitle', 1)[1].split('QWidget#chatInfoOverlay', 1)[0]
-    dark_chat_welcome_style = dark_chat_qss.split('QLabel#chatWelcomeTitle', 1)[1].split('QWidget#chatInfoOverlay', 1)[0]
+    light_chat_welcome_style = light_chat_qss.split('QLabel#welcomePlaceholderTitle', 1)[1].split('QWidget#chatInfoOverlay', 1)[0]
+    dark_chat_welcome_style = dark_chat_qss.split('QLabel#welcomePlaceholderTitle', 1)[1].split('QWidget#chatInfoOverlay', 1)[0]
 
-    assert 'class EmptyStateCard(CardWidget):' in empty_state_card
-    assert 'resources" / "logo.png"' in empty_state_card
-    assert 'title_font.setBold(False)' in empty_state_card
+    assert 'class WelcomePlaceholder(QWidget):' in welcome_placeholder
+    assert 'resources" / "logo.png"' in welcome_placeholder
+    assert 'logo_size: int = 160' in welcome_placeholder
+    assert 'title_pixel_size: int = 32' in welcome_placeholder
+    assert 'title_font.setBold(False)' in welcome_placeholder
     assert 'EmptyStateCard(' not in welcome_block
-    assert 'QLabel(self)' in welcome_block
-    assert 'QPixmap(str(_WELCOME_LOGO_PATH))' in welcome_block
-    assert '_WELCOME_LOGO_SIZE = 160' in chat_panel
-    assert 'setFixedSize(_WELCOME_LOGO_SIZE, _WELCOME_LOGO_SIZE)' in welcome_block
-    assert 'title_font.setPixelSize(32)' in welcome_block
-    assert 'title_font.setBold(False)' in welcome_block
+    assert 'WelcomePlaceholder' in welcome_block
     assert 'IconWidget(AppIcon.CHAT' not in welcome_block
     assert 'chat.welcome.subtitle' not in welcome_block
-    assert 'EmptyStateCard(' in contact_welcome_block
-    assert 'EmptyStateCard(' in ai_empty_block
+    assert 'WelcomePlaceholder(' in contact_welcome_block
+    assert 'EmptyStateCard(' not in contact_welcome_block
+    assert 'WelcomePlaceholder(' in ai_empty_block
     assert 'IconWidget(AppIcon.ROBOT' not in ai_empty_block
     assert 'self.empty_icon' not in ai_empty_block
-    assert 'EmptyStateCard(' in discovery_empty_block
-    assert 'IconWidget(AppIcon.GLOBE' not in discovery_empty_block
+    assert 'self._sync_empty_placeholder_reserved_height(composer_height)' in ai_assistant_interface
+    assert 'def _sync_empty_placeholder_reserved_height(self, composer_height: int) -> None:' in ai_assistant_interface
+    assert 'self.empty_layout.setContentsMargins(0, 0, 0, bottom_margin)' in ai_assistant_interface
+    assert 'def _create_empty_state' not in discovery_interface
+    assert 'feed_layout.addWidget(self._create_empty_state())' not in discovery_interface
+    assert 'IconWidget(AppIcon.GLOBE' not in discovery_interface
     assert 'QWidget#EmptyStateCard' not in light_chat_qss
     assert 'QWidget#EmptyStateCard' not in dark_chat_qss
-    assert 'QLabel#chatWelcomeTitle' in light_chat_qss
-    assert 'QLabel#chatWelcomeTitle' in dark_chat_qss
+    assert 'QLabel#welcomePlaceholderTitle' in light_chat_qss
+    assert 'QLabel#welcomePlaceholderTitle' in dark_chat_qss
     assert 'Segoe UI Semibold' not in light_chat_welcome_style
     assert 'Segoe UI Semibold' not in dark_chat_welcome_style
     assert 'ContactWelcomeCard' not in light_contact_qss
-    assert 'QWidget#EmptyStateCard' in light_contact_qss
-    assert 'QWidget#EmptyStateCard' in light_discovery_qss
+    assert 'QWidget#EmptyStateCard' not in light_contact_qss
+    assert 'QWidget#EmptyStateCard' not in light_discovery_qss
     assert 'chat.welcome.subtitle' not in zh_cn
+    assert zh_cn['chat.welcome.title'] == '欢迎使用AssistIM'
+    assert 'tr("chat.welcome.title", "Welcome to AssistIM")' in contact_welcome_block
+    assert 'tr("chat.welcome.title", "Welcome to AssistIM")' in ai_empty_block
+    assert 'ai_assistant.empty.title' not in zh_cn
+    assert 'ai_assistant.empty.subtitle' not in zh_cn
+    assert 'discovery.feed.empty_title' not in zh_cn
+    assert 'discovery.feed.empty_caption' not in zh_cn
+    assert 'contact.welcome.subtitle' not in zh_cn
+    assert 'contact.welcome.hint' not in zh_cn
+    assert 'contact.welcome.title' not in zh_cn
 
 
 def test_contact_friend_sidebar_title_prefers_remark_then_nickname_then_username() -> None:

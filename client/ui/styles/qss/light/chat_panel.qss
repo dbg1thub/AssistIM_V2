@@ -15,7 +15,7 @@ QFrame#chatComposerResizeHandle {
     border: none;
 }
 
-QLabel#chatWelcomeTitle {
+QLabel#welcomePlaceholderTitle {
     color: {{TEXT_PRIMARY}};
     font-family: "Segoe UI", "Microsoft YaHei", "PingFang SC";
 }

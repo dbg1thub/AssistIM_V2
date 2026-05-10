@@ -65,7 +65,6 @@ from client.ui.controllers.discovery_controller import (
 )
 from client.ui.controllers.contact_controller import ContactRecord, get_contact_controller
 from client.ui.styles import StyleSheet
-from client.ui.widgets.empty_state_card import EmptyStateCard
 from client.ui.widgets.fluent_dialog import FluentDialog
 from client.ui.widgets.image_viewer import ImageViewer
 
@@ -1842,7 +1841,6 @@ class DiscoveryInterface(QWidget):
         self._cards.clear()
 
         if not self._moments:
-            self.feed_layout.addWidget(self._create_empty_state())
             self.feed_layout.addStretch(1)
             return
 
@@ -1857,20 +1855,6 @@ class DiscoveryInterface(QWidget):
             self._cards[moment.id] = card
 
         self.feed_layout.addStretch(1)
-
-    def _create_empty_state(self) -> EmptyStateCard:
-        """Create an empty placeholder when the feed is blank."""
-        return EmptyStateCard(
-            title=tr("discovery.feed.empty_title", "No moments yet"),
-            subtitle=tr(
-                "discovery.feed.empty_caption",
-                "Publish the first update, or refresh to check the latest moments.",
-            ),
-            logo_size=48,
-            min_width=360,
-            max_width=560,
-            parent=self.feed_container,
-        )
 
     def _open_publish_dialog(self) -> None:
         self._create_ui_task(self._open_publish_dialog_async(), "open publish moment dialog")

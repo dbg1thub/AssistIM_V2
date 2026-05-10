@@ -62,7 +62,6 @@ from client.ui.controllers.contact_controller import (
 
 from client.ui.styles import StyleSheet
 from client.ui.widgets.chat_info_drawer import AcrylicDrawerSurface
-from client.ui.widgets.empty_state_card import EmptyStateCard
 from client.ui.widgets.global_search_panel import GlobalSearchPopupOverlay
 from client.ui.widgets.fluent_divider import FluentDivider
 from client.ui.widgets.fluent_dialog import FluentDialog
@@ -81,6 +80,7 @@ from client.ui.widgets.contact_shared import (
     ElidedCaptionLabel,
     prepare_transparent_scroll_area as _prepare_transparent_scroll_area,
 )
+from client.ui.widgets.welcome_placeholder import WelcomePlaceholder
 from client.ui.windows.group_creation_dialogs import CreateGroupDialog
 
 setup_logging()
@@ -477,30 +477,15 @@ class ContactWelcomeWidget(QWidget):
         self.setObjectName("ContactWelcomeWidget")
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(24, 24, 24, 24)
+        layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
-        layout.addStretch(1)
 
-        card = EmptyStateCard(
-            title=tr("contact.welcome.title", "Welcome to Contacts"),
-            subtitle=tr(
-                "contact.welcome.subtitle",
-                "Select a friend, group, or request from the left to view the profile and recent activity.",
-            ),
-            hint=tr(
-                "contact.welcome.hint",
-                "You can also search above, add friends, or create groups from the sidebar.",
-            ),
-            logo_size=52,
-            title_pixel_size=24,
-            min_width=420,
-            max_width=540,
-            alignment=Qt.AlignmentFlag.AlignLeft,
+        self.placeholder = WelcomePlaceholder(
+            title=tr("chat.welcome.title", "Welcome to AssistIM"),
+            object_name="ContactWelcomePlaceholder",
             parent=self,
         )
-
-        layout.addWidget(card, 0, Qt.AlignmentFlag.AlignHCenter)
-        layout.addStretch(1)
+        layout.addWidget(self.placeholder, 1)
 
 
 class FriendMomentPreviewStrip(QWidget):

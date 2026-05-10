@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
 from typing import Callable, Optional
 
 from PySide6.QtCore import QEvent, QPoint, Qt, QTimer, Signal, QUrl
-from PySide6.QtGui import QDesktopServices, QFont, QGuiApplication, QKeySequence, QPixmap
-from PySide6.QtWidgets import QLabel, QAbstractItemView, QFrame, QHBoxLayout, QListView, QStackedWidget, QVBoxLayout, QWidget
+from PySide6.QtGui import QDesktopServices, QGuiApplication, QKeySequence
+from PySide6.QtWidgets import QAbstractItemView, QFrame, QHBoxLayout, QListView, QStackedWidget, QVBoxLayout, QWidget
 from shiboken6 import isValid as is_valid_qt_object
 
 from qfluentwidgets import BodyLabel, CaptionLabel, IconWidget, PushButton, ScrollBarHandleDisplayMode
@@ -31,11 +30,10 @@ from client.ui.styles import StyleSheet
 from client.ui.widgets.chat_header import ChatHeader
 from client.ui.widgets.chat_info_drawer import ChatInfoDrawerOverlay
 from client.ui.widgets.message_input import MessageInput
+from client.ui.widgets.welcome_placeholder import WelcomePlaceholder
 from qfluentwidgets.multimedia import VideoWidget
 
 logger = logging.get_logger(__name__)
-_WELCOME_LOGO_PATH = Path(__file__).resolve().parents[2] / "resources" / "logo.png"
-_WELCOME_LOGO_SIZE = 160
 
 
 def _session_status_text(session: Session | None) -> str:
@@ -144,42 +142,15 @@ def _session_security_badges(session: Session | None) -> list[dict[str, str]]:
     return badges
 
 
-class WelcomeWidget(QWidget):
+class WelcomeWidget(WelcomePlaceholder):
     """Welcome screen shown before any session is selected."""
 
     def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setObjectName("chatWelcomeWidget")
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(18)
-        layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-
-        self.logo_label = QLabel(self)
-        self.logo_label.setObjectName("chatWelcomeLogo")
-        self.logo_label.setFixedSize(_WELCOME_LOGO_SIZE, _WELCOME_LOGO_SIZE)
-        self.logo_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        logo = QPixmap(str(_WELCOME_LOGO_PATH))
-        if not logo.isNull():
-            self.logo_label.setPixmap(
-                logo.scaled(
-                    _WELCOME_LOGO_SIZE,
-                    _WELCOME_LOGO_SIZE,
-                    Qt.AspectRatioMode.KeepAspectRatio,
-                    Qt.TransformationMode.SmoothTransformation,
-                )
-            )
-
-        self.title_label = BodyLabel(tr("chat.welcome.title", "Welcome to AssistIM"), self)
-        title_font = QFont(self.title_label.font())
-        title_font.setPixelSize(32)
-        title_font.setBold(False)
-        self.title_label.setFont(title_font)
-        self.title_label.setObjectName("chatWelcomeTitle")
-
-        layout.addWidget(self.logo_label, 0, Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(self.title_label, 0, Qt.AlignmentFlag.AlignCenter)
+        super().__init__(
+            title=tr("chat.welcome.title", "Welcome to AssistIM"),
+            object_name="chatWelcomeWidget",
+            parent=parent,
+        )
 
 
 class SecurityPendingBanner(QFrame):
