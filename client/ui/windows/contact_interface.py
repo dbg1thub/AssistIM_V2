@@ -770,7 +770,7 @@ class GalleryContactDetailPanel(QWidget):
         action_row.setContentsMargins(32, 26, 32, 0)
         action_row.setSpacing(42)
         self.message_button = ContactActionButton(AppIcon.CHAT, tr("contact.detail.action.message", "Message"), self.header)
-        self.voice_button = ContactActionButton(AppIcon.PHONE, tr("contact.detail.action.voice_call", "Voice Call"), self.header)
+        self.voice_button = ContactActionButton(AppIcon.CALL, tr("contact.detail.action.voice_call", "Voice Call"), self.header)
         self.video_button = ContactActionButton(AppIcon.VIDEO, tr("contact.detail.action.video_call", "Video Call"), self.header)
         action_row.addWidget(self.message_button)
         action_row.addWidget(self.voice_button)

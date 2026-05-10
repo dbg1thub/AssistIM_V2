@@ -378,7 +378,7 @@ class AIAssistantInterface(QWidget):
         self.toolbar_layout.setSpacing(self.TOOLBAR_ICON_SPACING)
         self.toolbar_layout.setAlignment(Qt.AlignmentFlag.AlignVCenter)
 
-        self.attachment_button = TransparentToolButton(AppIcon.ADD, self.composer_widget)
+        self.attachment_button = TransparentToolButton(AppIcon.ATTACH, self.composer_widget)
         self.attachment_button.setObjectName("aiAssistantAttachmentButton")
         self.attachment_button.setFixedSize(self.TOOLBAR_ICON_BUTTON_SIZE, self.TOOLBAR_ICON_BUTTON_SIZE)
         self.attachment_button.setEnabled(True)

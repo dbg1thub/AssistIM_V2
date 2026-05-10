@@ -286,7 +286,9 @@ def available_collection_icon_names() -> list[str]:
 class AppIcon(FluentIconBase, Enum):
     ADD = "add"
     ARROW_SORT_UP = "arrow_sort_up"
+    ATTACH = "attach"
     BRUSH = "paint_brush"
+    CALL = "call"
     CANCEL_MEDIUM = "dismiss_circle"
     CHAT = "chat"
     CHECK = "checkmark"

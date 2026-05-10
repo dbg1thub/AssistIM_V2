@@ -2668,7 +2668,7 @@ class MessageInput(QWidget):
         self.cut_button = TransparentToolButton(AppIcon.CUT, self.composer_widget)
         self.cut_button.setToolTip(tr("composer.toolbar.screenshot", "Screenshot"))
 
-        self.voice_button = TransparentToolButton(AppIcon.PHONE, self.composer_widget)
+        self.voice_button = TransparentToolButton(AppIcon.CALL, self.composer_widget)
         self.voice_button.setToolTip(tr("composer.toolbar.voice_call", "Voice Call"))
 
         self.video_button = TransparentToolButton(AppIcon.VIDEO, self.composer_widget)

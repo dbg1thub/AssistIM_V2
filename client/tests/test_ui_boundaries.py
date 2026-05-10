@@ -204,6 +204,22 @@ def test_message_status_badges_only_show_stable_states_with_larger_icons() -> No
     assert 'AppIcon.CANCEL_MEDIUM' not in status_block
 
 
+def test_toolbar_icons_use_attach_and_call_glyphs() -> None:
+    app_icons = Path('client/core/app_icons.py').read_text(encoding='utf-8')
+    ai_assistant = Path('client/ui/windows/ai_assistant_interface.py').read_text(encoding='utf-8')
+    message_input = Path('client/ui/widgets/message_input.py').read_text(encoding='utf-8')
+    contact_interface = Path('client/ui/windows/contact_interface.py').read_text(encoding='utf-8')
+
+    assert 'ATTACH = "attach"' in app_icons
+    assert 'CALL = "call"' in app_icons
+    assert 'TransparentToolButton(AppIcon.ATTACH, self.composer_widget)' in ai_assistant
+    assert 'TransparentToolButton(AppIcon.CALL, self.composer_widget)' in message_input
+    assert 'ContactActionButton(AppIcon.CALL, tr("contact.detail.action.voice_call", "Voice Call"), self.header)' in contact_interface
+    assert 'self.attachment_button = TransparentToolButton(AppIcon.ADD, self.composer_widget)' not in ai_assistant
+    assert 'self.voice_button = TransparentToolButton(AppIcon.PHONE, self.composer_widget)' not in message_input
+    assert 'self.voice_button = ContactActionButton(AppIcon.PHONE' not in contact_interface
+
+
 def test_contact_friend_sidebar_title_prefers_remark_then_nickname_then_username() -> None:
     contact_interface = Path('client/ui/windows/contact_interface.py').read_text(encoding='utf-8')
     title_block = contact_interface.split('def _friend_sidebar_title', 1)[1].split('def _clear_active_selection', 1)[0]
