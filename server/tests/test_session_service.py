@@ -88,7 +88,11 @@ class FakeMessageRepo:
 
     def list_last_messages_for_sessions(self, session_ids: list[str]):
         self.list_last_messages_for_sessions_calls.append(list(session_ids))
-        return {session_id: self.last_messages_by_session[session_id] for session_id in session_ids}
+        return {
+            session_id: message
+            for session_id in session_ids
+            if (message := self.last_messages_by_session.get(session_id)) is not None
+        }
 
     def list_session_messages(self, session_id: str, limit: int = 1):
         raise AssertionError('list_session_messages should not be used in batch list_sessions path')
@@ -107,6 +111,7 @@ class FakeUserRepo:
             'alice': SimpleNamespace(id='alice', nickname='Alice', username='alice', avatar='/uploads/alice.png', gender='female', avatar_kind='default'),
             'bob': SimpleNamespace(id='bob', nickname='Bob', username='bob', avatar='/uploads/bob.png', gender='male', avatar_kind='custom'),
             'charlie': SimpleNamespace(id='charlie', nickname='Charlie', username='charlie', avatar='/uploads/charlie.png', gender='male', avatar_kind='custom'),
+            'dave': SimpleNamespace(id='dave', nickname='Dave', username='dave', avatar='', gender='', avatar_kind='default'),
         }
         self.list_users_by_ids_calls: list[list[str]] = []
 
@@ -244,6 +249,39 @@ def test_session_service_list_sessions_uses_batch_repository_loaders() -> None:
     assert fake_sessions.list_members_for_sessions_calls == [['session-1', 'session-2']]
     assert fake_messages.list_last_messages_for_sessions_calls == [['session-1', 'session-2']]
     assert fake_users.list_users_by_ids_calls == [['alice', 'bob', 'charlie']]
+
+
+def test_session_service_list_sessions_hides_empty_private_sessions() -> None:
+    service = _session_service_without_blocks()
+    fake_sessions = FakeSessionRepo()
+    fake_messages = FakeMessageRepo()
+    now = datetime(2026, 3, 29, 12, 0, 0)
+    fake_sessions.session_items.append(
+        SimpleNamespace(
+            id='empty-private-session',
+            type='private',
+            is_ai_session=False,
+            name='Alice & Dave',
+            avatar='',
+            updated_at=now,
+            created_at=now,
+        )
+    )
+    fake_sessions.members_by_session['empty-private-session'] = [
+        SimpleNamespace(session_id='empty-private-session', user_id='alice', joined_at=now),
+        SimpleNamespace(session_id='empty-private-session', user_id='dave', joined_at=now),
+    ]
+
+    service.sessions = fake_sessions
+    service.messages = fake_messages
+    service.users = FakeUserRepo()
+    service.groups = FakeGroupRepo()
+    service.avatars = FakeAvatarService()
+
+    payload = service.list_sessions(SimpleNamespace(id='alice'))
+
+    assert 'empty-private-session' not in {item['id'] for item in payload}
+
 
 def test_session_service_recalled_last_message_preview_uses_formal_placeholder() -> None:
     last_message = SimpleNamespace(status='recalled', content='original content')

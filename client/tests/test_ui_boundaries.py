@@ -451,8 +451,17 @@ def test_chat_interface_typing_indicator_ignores_self_and_hides_on_explicit_stop
 
 def test_chat_interface_session_open_and_history_tasks_are_generation_guarded() -> None:
     chat_interface = Path('client/ui/windows/chat_interface.py').read_text(encoding='utf-8')
+    open_direct_block = chat_interface.split('async def open_direct_session', 1)[1].split(
+        'def _build_ephemeral_direct_session',
+        1,
+    )[0]
+    send_resolve_block = chat_interface.split('async def _resolve_send_session_id', 1)[1].split(
+        'def show_startup_ai_status',
+        1,
+    )[0]
 
     assert 'self._session_focus_generation = 0' in chat_interface
+    assert 'self._ephemeral_direct_sessions: dict[str, Session] = {}' in chat_interface
     assert 'def _advance_session_focus_generation(self) -> int:' in chat_interface
     assert 'def _is_session_focus_generation_current(self, generation: int) -> bool:' in chat_interface
     assert 'def _is_current_session_context(self, session_id: str, generation: int) -> bool:' in chat_interface
@@ -472,6 +481,12 @@ def test_chat_interface_session_open_and_history_tasks_are_generation_guarded() 
     assert 'async def open_group_session(self, session_id: str, *, generation: int | None = None) -> bool:' in chat_interface
     assert 'generation: int | None = None,' in chat_interface
     assert 'if not self._is_session_focus_generation_current(open_generation):' in chat_interface
+    assert 'await self._chat_controller.ensure_direct_session(' not in open_direct_block
+    assert 'return self._open_ephemeral_direct_session(session, generation=open_generation)' in open_direct_block
+    assert 'def _build_ephemeral_direct_session(self, user_id: str, *, display_name: str = "", avatar: str = "") -> Session:' in chat_interface
+    assert 'async def _resolve_send_session_id(self, session_id: str) -> str:' in chat_interface
+    assert 'await self._chat_controller.ensure_direct_session(' in send_resolve_block
+    assert 'if self._current_session_id == normalized_session_id:' in send_resolve_block
     assert chat_interface.count('if not self._is_current_session_context(session_id, generation):') >= 6
 
 

@@ -60,7 +60,7 @@ from client.managers.search_manager import SearchCatalogResults, search_message_
 from client.managers.session_manager import SessionEvent
 from client.managers.sound_manager import AppSound, get_sound_manager
 from client.models.call import ActiveCallState, CallMediaType
-from client.models.message import ChatMessage, MessageStatus, MessageType, format_message_preview
+from client.models.message import ChatMessage, MessageStatus, MessageType, Session, format_message_preview
 from client.services.local_voice_transcription_service import (
     LocalVoiceTranscriptionRuntimeError,
     get_local_voice_transcription_runtime,
@@ -646,6 +646,7 @@ class ChatInterface(QWidget):
         self._summary_notified_buckets: set[tuple[str, int]] = set()
         self._summary_info_bar_last_shown_at: dict[str, float] = {}
         self._composer_drafts: dict[str, list[dict]] = {}
+        self._ephemeral_direct_sessions: dict[str, Session] = {}
         self._ui_tasks: set[asyncio.Task] = set()
         self._message_context_menu: RoundMenu | None = None
         self._reply_suggestion_version = 0
@@ -1557,6 +1558,8 @@ class ChatInterface(QWidget):
         self._reset_reply_suggestion_flow(clear_ui=True)
         self._remember_current_session_view_state()
         self._remember_current_composer_draft()
+        if self._is_ephemeral_direct_session_id(str(self._current_session_id or "")):
+            self._current_session_active = False
 
         self._current_session_id = session_id
         session = self._get_session(session_id)
@@ -2119,6 +2122,44 @@ class ChatInterface(QWidget):
         self._store_session_draft_segments(session_id, [])
         self._set_session_draft_preview(session_id, [])
         self._schedule_ui_task(self._send_segments_async(session_id, segments), f"send segments {session_id}")
+
+    async def _resolve_send_session_id(self, session_id: str) -> str:
+        """Create the real direct session only when an ephemeral contact chat sends content."""
+        normalized_session_id = str(session_id or "").strip()
+        if not self._is_ephemeral_direct_session_id(normalized_session_id):
+            return normalized_session_id
+
+        ephemeral = self._ephemeral_direct_sessions.get(normalized_session_id)
+        target_user_id = str((ephemeral.extra if ephemeral else {}).get("counterpart_id") or "").strip()
+        if not target_user_id:
+            return ""
+
+        real_session = await self._chat_controller.ensure_direct_session(
+            target_user_id,
+            display_name=str((ephemeral.extra if ephemeral else {}).get("counterpart_name") or ""),
+            avatar=str((ephemeral.extra if ephemeral else {}).get("counterpart_avatar") or ""),
+            allow_hidden=True,
+        )
+        if real_session is None:
+            return ""
+
+        real_session_id = str(real_session.session_id or "")
+        self._ephemeral_direct_sessions.pop(normalized_session_id, None)
+        if normalized_session_id in self._composer_drafts:
+            self._composer_drafts[real_session_id] = self._composer_drafts.pop(normalized_session_id)
+        self._session_view_state.pop(normalized_session_id, None)
+
+        if self._current_session_id == normalized_session_id:
+            self._current_session_id = real_session_id
+            self._ensure_session_visible_in_sidebar(real_session)
+            self.session_panel.select_session(real_session_id, emit_signal=False)
+            self._apply_current_session_to_chat_panel(real_session, force=True)
+            self.chat_panel.clear_messages()
+            await self._chat_controller.select_session(real_session_id)
+            self._current_session_active = False
+            self._activate_selected_session_if_visible(real_session_id)
+
+        return real_session_id
 
     def show_startup_ai_status(self) -> None:
         """Show the lightweight startup AI status without loading the model."""
@@ -3710,6 +3751,15 @@ class ChatInterface(QWidget):
 
     async def _send_segments_async(self, session_id: str, segments: list[dict]) -> None:
         """Send composed editor segments sequentially so mixed content keeps order."""
+        session_id = await self._resolve_send_session_id(session_id)
+        if not session_id:
+            InfoBar.warning(
+                tr("common.chat", "Chat"),
+                tr("main_window.contact_jump.unavailable_message", "Unable to open this conversation right now."),
+                parent=self.window(),
+                duration=2200,
+            )
+            return
         for index, segment in enumerate(segments):
             segment_type = segment.get("type")
             logger.info(
@@ -3733,13 +3783,16 @@ class ChatInterface(QWidget):
 
     async def _send_image_message(self, session_id: str, file_path: str, generation: int) -> None:
         """Send an image using the optimistic media upload flow."""
+        session_id = await self._resolve_send_session_id(session_id)
+        if not session_id:
+            return
         message = await self._chat_controller.send_file(file_path, session_id=session_id)
         if message and self._is_current_session_context(session_id, generation):
             self.chat_panel.get_message_list().viewport().update()
 
     def _on_send_typing(self) -> None:
         """Send typing indicator in background."""
-        if self._current_session_id:
+        if self._current_session_id and not self._is_ephemeral_direct_session_id(self._current_session_id):
             self._schedule_ui_task(self._chat_controller.send_typing(), f"typing {self._current_session_id}")
 
     def _on_file_upload_requested(self, file_path: str) -> None:
@@ -3762,6 +3815,9 @@ class ChatInterface(QWidget):
 
     async def _send_voice_message(self, session_id: str, file_path: str, duration_seconds: int, generation: int) -> None:
         """Send a recorded voice message and refresh the visible list if still current."""
+        session_id = await self._resolve_send_session_id(session_id)
+        if not session_id:
+            return
         message = await self._chat_controller.send_voice(
             file_path,
             duration_seconds,
@@ -4928,6 +4984,9 @@ class ChatInterface(QWidget):
 
     async def _send_file_message(self, session_id: str, file_path: str) -> None:
         """Upload and send a file via ChatController."""
+        session_id = await self._resolve_send_session_id(session_id)
+        if not session_id:
+            return
         await self._chat_controller.send_file(file_path, session_id=session_id)
 
     def _on_message_context_menu(self, position) -> None:
@@ -5550,6 +5609,8 @@ class ChatInterface(QWidget):
 
     def _get_session(self, session_id: str):
         """Find session object by ID."""
+        if self._is_ephemeral_direct_session_id(session_id):
+            return self._ephemeral_direct_sessions.get(session_id)
         return self._chat_controller.get_session(session_id)
 
     def set_session_visibility_active(self, active: bool, *, schedule_idle_summary: bool = True) -> None:
@@ -5572,13 +5633,21 @@ class ChatInterface(QWidget):
     def _schedule_idle_summary_refresh_for_session(self, session_id: Optional[str], *, reason: str) -> None:
         """Ask the summary manager to refresh one open bucket after the user leaves it."""
         normalized_session_id = str(session_id or "").strip()
-        if not normalized_session_id or self._teardown_started:
+        if not normalized_session_id or self._teardown_started or self._is_ephemeral_direct_session_id(normalized_session_id):
             return
         manager = get_conversation_summary_manager()
         self._schedule_ui_task(
             manager.schedule_idle_refresh(normalized_session_id, reason=reason),
             f"idle summary refresh {normalized_session_id} {reason}",
         )
+
+    @staticmethod
+    def _ephemeral_direct_session_id(user_id: str) -> str:
+        return f"ephemeral-direct:{str(user_id or '').strip()}"
+
+    @staticmethod
+    def _is_ephemeral_direct_session_id(session_id: str) -> bool:
+        return str(session_id or "").startswith("ephemeral-direct:")
 
     def _activate_selected_session_if_visible(self, session_id: Optional[str]) -> None:
         """Promote the selected session into active/readable state when the page is visible."""
@@ -5591,6 +5660,7 @@ class ChatInterface(QWidget):
         is_active = bool(self._session_visibility_active and self._current_session_id)
         if not active:
             is_active = False
+        is_ephemeral = self._is_ephemeral_direct_session_id(str(self._current_session_id or ""))
         if self._current_session_active == is_active:
             logger.info(
                 "[chat-nav] set_current_session_active_skipped requested=%s computed=%s current_session_id=%s",
@@ -5608,6 +5678,13 @@ class ChatInterface(QWidget):
             is_active,
             current_session_id,
         )
+        if is_ephemeral:
+            if not is_active:
+                if self._is_reply_suggestion_timer_alive():
+                    self._reply_suggestion_timer.stop()
+                self._reply_suggestion_pending_context = None
+                self._reply_suggestion_rerun_context = None
+            return
         self._schedule_ui_task(
             self._chat_controller.set_current_session_active(is_active, session_id=current_session_id),
             f"set current session active {is_active}",
@@ -5707,19 +5784,69 @@ class ChatInterface(QWidget):
             self._ensure_session_visible_in_sidebar(session)
             return self.focus_session(session.session_id)
 
-        session = await self._chat_controller.ensure_direct_session(
+        session = self._build_ephemeral_direct_session(
             user_id,
             display_name=display_name,
             avatar=avatar,
-            allow_hidden=True,
         )
-        if not self._is_session_focus_generation_current(open_generation):
-            return False
-        if not session:
+        return self._open_ephemeral_direct_session(session, generation=open_generation)
+
+    def _build_ephemeral_direct_session(self, user_id: str, *, display_name: str = "", avatar: str = "") -> Session:
+        """Build one local-only direct chat target without creating a backend session."""
+        normalized_user_id = str(user_id or "").strip()
+        session_id = self._ephemeral_direct_session_id(normalized_user_id)
+        existing = self._ephemeral_direct_sessions.get(session_id)
+        if existing is not None:
+            return existing
+
+        display = str(display_name or "").strip() or tr("session.private_chat", "Private Chat")
+        session = Session(
+            session_id=session_id,
+            name=display,
+            session_type="direct",
+            participant_ids=[normalized_user_id],
+            last_message="",
+            unread_count=0,
+            avatar=avatar or None,
+            is_ai_session=False,
+            extra={
+                "ephemeral_direct": True,
+                "counterpart_id": normalized_user_id,
+                "counterpart_name": display,
+                "counterpart_avatar": str(avatar or ""),
+                "encryption_mode": "plain",
+                "call_capabilities": {"voice": False, "video": False},
+            },
+        )
+        self._ephemeral_direct_sessions[session_id] = session
+        return session
+
+    def _open_ephemeral_direct_session(self, session: Session, *, generation: int) -> bool:
+        """Open a local-only direct chat target without adding it to the session list."""
+        if not self._is_session_focus_generation_current(generation):
             return False
 
-        self._ensure_session_visible_in_sidebar(session)
-        return self.focus_session(session.session_id)
+        self._schedule_idle_summary_refresh_for_session(self._current_session_id, reason="session_switch")
+        self._reset_reply_suggestion_flow(clear_ui=True)
+        self._remember_current_session_view_state()
+        self._remember_current_composer_draft()
+        self._set_current_session_active(False)
+
+        self._current_session_id = session.session_id
+        self._apply_current_session_to_chat_panel(session, force=True)
+        self._set_session_draft_preview(session.session_id, [])
+        self.chat_panel.clear_composer_draft()
+        self.chat_panel.restore_composer_draft(self._composer_drafts.get(session.session_id, []))
+        self.chat_panel.clear_messages()
+        self.chat_panel.set_has_more_history(False)
+        self.chat_panel.set_history_loading(False)
+        self._oldest_loaded_timestamp = None
+        self._oldest_loaded_session_seq = None
+        self._has_more_history = False
+        self._cancel_pending_task(self._load_task)
+        self._cancel_pending_task(self._history_load_task)
+        self._activate_selected_session_if_visible(session.session_id)
+        return True
 
 
 
