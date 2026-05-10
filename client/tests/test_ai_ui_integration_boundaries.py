@@ -447,7 +447,8 @@ def test_ai_assistant_thread_navigation_uses_fluent_tabbar() -> None:
     assert "self.thread_tab_bar = TabBar(self.header)" in assistant_interface
     assert "aiAssistantProductTitle" not in assistant_interface
     assert 'BodyLabel("AssistIM AI", self.header)' not in assistant_interface
-    assert "self.thread_tab_bar.setMovable(True)" in assistant_interface
+    assert "self.thread_tab_bar.setMovable(False)" in assistant_interface
+    assert "self.thread_tab_bar.setMovable(True)" not in assistant_interface
     assert "self.thread_tab_bar.setScrollable(True)" in assistant_interface
     assert "self.thread_tab_bar.setTabShadowEnabled(True)" in assistant_interface
     assert "self.thread_tab_bar.setCloseButtonDisplayMode(TabCloseButtonDisplayMode.ON_HOVER)" in assistant_interface

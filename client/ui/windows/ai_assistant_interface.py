@@ -357,7 +357,7 @@ class AIAssistantInterface(QWidget):
         self.thread_tab_bar = TabBar(self.header)
         self.thread_tab_bar.setObjectName("aiAssistantThreadTabBar")
         self.thread_tab_bar.setTabMaximumWidth(220)
-        self.thread_tab_bar.setMovable(True)
+        self.thread_tab_bar.setMovable(False)
         self.thread_tab_bar.setScrollable(True)
         self.thread_tab_bar.setTabShadowEnabled(True)
         self.thread_tab_bar.setCloseButtonDisplayMode(TabCloseButtonDisplayMode.ON_HOVER)
