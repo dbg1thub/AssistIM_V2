@@ -632,6 +632,13 @@ def test_chat_message_input_uses_floating_card_style_without_overlay_or_cursor_o
     assert 'y = content_rect.bottom() - height + 1' in chat_panel
     assert 'self._layout_message_scrollbar(input_top_y=y)' in chat_panel
     assert 'self._sync_message_bottom_reserved_height(height)' in chat_panel
+    assert 'from shiboken6 import isValid as is_valid_qt_object' in chat_panel
+    assert 'def _is_message_layout_alive(self) -> bool:' in chat_panel
+    assert 'def _schedule_layout_single_shot(self, callback, delay: int = 0) -> None:' in chat_panel
+    assert 'QTimer.singleShot(0, self._layout_message_input_overlay)' not in chat_panel
+    assert 'QTimer.singleShot(0, self._relayout_message_list)' not in chat_panel
+    assert 'QTimer.singleShot(0, self._restore_message_viewport)' not in chat_panel
+    assert 'QTimer.singleShot(16, self._restore_message_viewport)' not in chat_panel
     assert 'def _sync_message_bottom_reserved_height(self, height: int) -> None:' in chat_panel
     assert 'self._message_delegate.set_bottom_reserved_height(height)' in chat_panel
     assert 'self._message_delegate.sizeHintChanged.emit(last_index)' in chat_panel
@@ -689,6 +696,11 @@ def test_chat_message_input_uses_floating_card_style_without_overlay_or_cursor_o
     assert 'self.voice_message_button.raise_()' not in overlay_block
     assert 'self.send_button.raise_()' not in overlay_block
 
+    assert 'from shiboken6 import isValid as is_valid_qt_object' in message_input
+    assert 'def _is_composer_layout_alive(self) -> bool:' in message_input
+    assert 'def _schedule_layout_single_shot(self, callback, delay: int = 0) -> None:' in message_input
+    assert 'QTimer.singleShot(0, self._update_overlay_positions)' not in message_input
+    assert 'QTimer.singleShot(0, self._reposition_mention_flyout)' not in message_input
     assert 'setCursorWidth' not in message_input
     assert 'background-color: transparent !important' not in message_input
     assert 'transparent_base' not in message_input

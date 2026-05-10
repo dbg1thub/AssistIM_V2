@@ -922,6 +922,11 @@ def test_ai_assistant_input_uses_chat_composer_layout_without_overlay() -> None:
     assert "self.input_border.setGeometry(self.input_card.rect())" in layout_block
     assert "self.input_border.raise_()" in layout_block
     assert "self._sync_message_bottom_reserved_height(composer_height)" in layout_block
+    assert "from shiboken6 import isValid as is_valid_qt_object" in assistant_interface
+    assert "def _is_input_overlay_alive(self) -> bool:" in assistant_interface
+    assert "def _schedule_single_shot(self, callback, delay: int = 0) -> None:" in assistant_interface
+    assert "QTimer.singleShot(0, self._update_input_overlay_positions)" not in assistant_interface
+    assert "QTimer.singleShot(80, self._sync_message_scrollbar_hover)" not in assistant_interface
     assert "def _sync_message_bottom_reserved_height(self, height: int) -> None:" in assistant_interface
     assert "def _layout_message_scrollbar(self, *, input_top_y: int) -> None:" in assistant_interface
     assert "setMask(" not in assistant_interface

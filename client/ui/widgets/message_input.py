@@ -44,6 +44,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+from shiboken6 import isValid as is_valid_qt_object
 from qfluentwidgets import (
     Action,
     BodyLabel,
@@ -2612,7 +2613,7 @@ class MessageInput(QWidget):
         self._connect_signals()
         qconfig.themeChanged.connect(lambda *_args: (self._apply_editor_theme(), self.text_input._refresh_mention_selections()))
         self.set_session_active(False)
-        QTimer.singleShot(0, self._update_overlay_positions)
+        self._schedule_layout_single_shot(self._update_overlay_positions)
 
     def _setup_ui(self) -> None:
         self.setObjectName("messageInput")
@@ -2872,7 +2873,7 @@ class MessageInput(QWidget):
         """Refresh overlay positions once the widget is shown."""
         super().showEvent(event)
         self._apply_editor_theme()
-        QTimer.singleShot(0, self._update_overlay_positions)
+        self._schedule_layout_single_shot(self._update_overlay_positions)
 
     def eventFilter(self, watched, event) -> bool:
         """Refresh floating controls after internal layout resizes."""
@@ -2881,9 +2882,9 @@ class MessageInput(QWidget):
             QEvent.Type.Show,
             QEvent.Type.LayoutRequest,
         }:
-            QTimer.singleShot(0, self._update_overlay_positions)
+            self._schedule_layout_single_shot(self._update_overlay_positions)
             if self._mention_flyout is not None and self._mention_flyout.isVisible():
-                QTimer.singleShot(0, self._reposition_mention_flyout)
+                self._schedule_layout_single_shot(self._reposition_mention_flyout)
         if watched is self.voice_message_button:
             if event.type() == QEvent.Type.MouseButtonPress and self._handle_voice_button_press(event):
                 return True
@@ -2905,6 +2906,8 @@ class MessageInput(QWidget):
 
     def _update_overlay_positions(self) -> None:
         """Refresh composer layout details after resize/theme/layout changes."""
+        if not self._is_composer_layout_alive():
+            return
         if self.composer_layout is not None:
             self.composer_layout.activate()
         self.card_layout.activate()
@@ -2912,10 +2915,30 @@ class MessageInput(QWidget):
         self._update_input_border_geometry()
 
     def _update_input_border_geometry(self) -> None:
-        if not hasattr(self, "input_border"):
+        if not self._is_composer_layout_alive():
             return
         self.input_border.setGeometry(self.editor_card.rect())
         self.input_border.raise_()
+
+    def _is_qt_alive(self, *widgets: object) -> bool:
+        return all(widget is not None and is_valid_qt_object(widget) for widget in widgets)
+
+    def _is_composer_layout_alive(self) -> bool:
+        return self._is_qt_alive(
+            self,
+            getattr(self, "editor_card", None),
+            getattr(self, "composer_widget", None),
+            getattr(self, "text_input", None),
+            getattr(self, "input_border", None),
+        )
+
+    def _schedule_layout_single_shot(self, callback, delay: int = 0) -> None:
+        def guarded_callback() -> None:
+            if not is_valid_qt_object(self):
+                return
+            callback()
+
+        QTimer.singleShot(delay, guarded_callback)
 
     def _update_send_button_state(self) -> None:
         """Enable the send button only when the active session has draft content."""
@@ -3574,7 +3597,7 @@ class MessageInput(QWidget):
 
     def _reposition_mention_flyout(self) -> None:
         """Move the active @ mention panel with the editor cursor and layout."""
-        if self._mention_flyout is None or not self._mention_flyout.isVisible():
+        if not self._is_composer_layout_alive() or self._mention_flyout is None or not self._mention_flyout.isVisible():
             return
         self._mention_flyout.reposition()
 

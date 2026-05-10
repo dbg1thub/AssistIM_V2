@@ -8,6 +8,7 @@ from typing import Callable, Optional
 from PySide6.QtCore import QEvent, QPoint, Qt, QTimer, Signal, QUrl
 from PySide6.QtGui import QDesktopServices, QGuiApplication, QKeySequence
 from PySide6.QtWidgets import QAbstractItemView, QFrame, QHBoxLayout, QListView, QStackedWidget, QVBoxLayout, QWidget
+from shiboken6 import isValid as is_valid_qt_object
 
 from qfluentwidgets import BodyLabel, CaptionLabel, IconWidget, PushButton, ScrollBarHandleDisplayMode
 from qfluentwidgets.components.widgets.scroll_bar import SmoothScrollDelegate
@@ -399,7 +400,7 @@ class ChatPanel(QWidget):
         self.composer_resize_handle.setMouseTracking(True)
         self.composer_resize_handle.installEventFilter(self)
         self.message_input.installEventFilter(self)
-        QTimer.singleShot(0, self._layout_message_input_overlay)
+        self._schedule_layout_single_shot(self._layout_message_input_overlay)
 
         self.chat_layout.addWidget(self.chat_header, 0)
         self.chat_layout.addWidget(self.chat_content_area, 1)
@@ -509,7 +510,7 @@ class ChatPanel(QWidget):
         self._relayout_message_list()
         self._restore_message_viewport()
         self._schedule_restore_message_viewport()
-        QTimer.singleShot(0, self._relayout_message_list)
+        self._schedule_layout_single_shot(self._relayout_message_list)
 
     def _setup_message_model(self) -> None:
         """Set up the model/delegate pair used by the message list."""
@@ -1065,7 +1066,7 @@ class ChatPanel(QWidget):
             self._relayout_message_list()
             self._restore_message_viewport()
             self._schedule_restore_message_viewport()
-            QTimer.singleShot(0, self._relayout_message_list)
+            self._schedule_layout_single_shot(self._relayout_message_list)
 
         if watched is self.message_list and event.type() == QEvent.Type.KeyPress:
             if event.matches(QKeySequence.StandardKey.Copy):
@@ -1114,8 +1115,28 @@ class ChatPanel(QWidget):
         self._composer_height = max(self.COMPOSER_MIN_HEIGHT, min(self.COMPOSER_MAX_HEIGHT, height))
         self._layout_message_input_overlay()
 
+    def _is_qt_alive(self, *widgets: object) -> bool:
+        return all(widget is not None and is_valid_qt_object(widget) for widget in widgets)
+
+    def _is_message_layout_alive(self) -> bool:
+        return self._is_qt_alive(
+            self,
+            getattr(self, "chat_page", None),
+            getattr(self, "chat_content_area", None),
+            getattr(self, "message_list", None),
+            getattr(self, "message_input", None),
+        )
+
+    def _schedule_layout_single_shot(self, callback, delay: int = 0) -> None:
+        def guarded_callback() -> None:
+            if not is_valid_qt_object(self):
+                return
+            callback()
+
+        QTimer.singleShot(delay, guarded_callback)
+
     def _layout_message_input_overlay(self) -> None:
-        if self.chat_content_area is None or self.message_input is None:
+        if not self._is_message_layout_alive():
             return
         content_rect = self.chat_content_area.geometry()
         height = max(self.COMPOSER_MIN_HEIGHT, min(self.COMPOSER_MAX_HEIGHT, self._composer_height))
@@ -1143,7 +1164,7 @@ class ChatPanel(QWidget):
             self.composer_resize_handle.raise_()
 
     def _sync_message_bottom_reserved_height(self, height: int) -> None:
-        if self._message_delegate is None or self._message_model is None:
+        if not self._is_message_layout_alive() or self._message_delegate is None or self._message_model is None:
             return
         if not self._message_delegate.set_bottom_reserved_height(height):
             return
@@ -1156,7 +1177,7 @@ class ChatPanel(QWidget):
 
     def _layout_message_scrollbar(self, *, input_top_y: int) -> None:
         """Keep the Fluent scrollbar above the floating composer without changing the viewport."""
-        if self._scroll_delegate is None or self.chat_page is None:
+        if self._scroll_delegate is None or not self._is_message_layout_alive():
             return
         bar = self._scroll_delegate.vScrollBar
         input_top_in_list = self.message_list.mapFrom(self.chat_page, QPoint(0, input_top_y)).y()
@@ -1167,7 +1188,7 @@ class ChatPanel(QWidget):
         bar._adjustHandlePos()
 
     def _sync_message_scrollbar_visibility(self) -> None:
-        if not self._scroll_delegate:
+        if not self._scroll_delegate or not self._is_message_layout_alive():
             return
         hovered = (
             self.message_list.underMouse()
@@ -1178,13 +1199,15 @@ class ChatPanel(QWidget):
 
     def _relayout_message_list(self) -> None:
         """Force message rows to recompute widths after viewport changes."""
+        if not self._is_message_layout_alive():
+            return
         self.message_list.doItemsLayout()
         self.message_list.updateGeometries()
         self.message_list.viewport().update()
 
     def _remember_message_scroll_gap(self) -> None:
         """Remember the current distance between viewport and bottom of the chat list."""
-        if self._restoring_message_view:
+        if self._restoring_message_view or not self._is_message_layout_alive():
             return
         bar = self.message_list.verticalScrollBar()
         self._message_scroll_gap = max(0, bar.maximum() - bar.value())
@@ -1202,8 +1225,8 @@ class ChatPanel(QWidget):
     def _schedule_restore_message_viewport(self, *_args) -> None:
         """Restore chat viewport position after splitter moves or list resizes."""
         self._restore_message_viewport()
-        QTimer.singleShot(0, self._restore_message_viewport)
-        QTimer.singleShot(16, self._restore_message_viewport)
+        self._schedule_layout_single_shot(self._restore_message_viewport)
+        self._schedule_layout_single_shot(self._restore_message_viewport, delay=16)
 
     def _run_restore_message_viewport(self) -> None:
         """Kept for compatibility with older queued restore hooks."""
@@ -1211,6 +1234,8 @@ class ChatPanel(QWidget):
 
     def _restore_message_viewport(self) -> None:
         """Keep the same bottom gap visible after viewport size changes."""
+        if not self._is_message_layout_alive():
+            return
         bar = self.message_list.verticalScrollBar()
         target = max(bar.minimum(), bar.maximum() - self._message_scroll_gap)
         self._restoring_message_view = True

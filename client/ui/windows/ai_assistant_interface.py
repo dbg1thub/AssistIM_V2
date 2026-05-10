@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+from shiboken6 import isValid as is_valid_qt_object
 from qfluentwidgets import (
     BodyLabel,
     CaptionLabel,
@@ -708,13 +709,13 @@ class AIAssistantInterface(QWidget):
         if not self._messages:
             self.message_list.hide()
             self.empty_widget.show()
-            QTimer.singleShot(0, self._update_input_overlay_positions)
+            self._schedule_single_shot(self._update_input_overlay_positions)
             return
         self.empty_widget.hide()
         self.message_list.show()
         if self._message_delegate is not None:
             self._message_delegate.clear_text_selection(self.message_list)
-        QTimer.singleShot(0, self._update_input_overlay_positions)
+        self._schedule_single_shot(self._update_input_overlay_positions)
         self._scroll_to_bottom()
 
     def _append_message(self, message: AIMessage) -> None:
@@ -1381,12 +1382,14 @@ class AIAssistantInterface(QWidget):
 
     def _scroll_to_bottom(self, *, passes: int = 3) -> None:
         def _scroll(remaining: int) -> None:
+            if not self._is_input_overlay_alive():
+                return
             self.message_list.doItemsLayout()
             bar = self.message_list.verticalScrollBar()
             bar.setValue(bar.maximum())
             self._sync_scroll_to_bottom_button()
             if remaining > 0:
-                QTimer.singleShot(0, lambda: _scroll(remaining - 1))
+                self._schedule_single_shot(lambda: _scroll(remaining - 1))
 
         self._schedule_single_shot(lambda: _scroll(max(0, int(passes))))
 
@@ -1398,7 +1401,7 @@ class AIAssistantInterface(QWidget):
         return bar.maximum() - bar.value() <= tolerance
 
     def _sync_scroll_to_bottom_button(self, *_args) -> None:
-        if not hasattr(self, "scroll_to_bottom_button"):
+        if not hasattr(self, "scroll_to_bottom_button") or not self._is_input_overlay_alive():
             return
         should_show = self._is_generating and self.message_list.isVisible() and not self._is_scroll_at_bottom()
         self.scroll_to_bottom_button.setVisible(should_show)
@@ -1406,7 +1409,7 @@ class AIAssistantInterface(QWidget):
             self._position_scroll_to_bottom_button()
 
     def _position_scroll_to_bottom_button(self) -> None:
-        if not hasattr(self, "scroll_to_bottom_button"):
+        if not hasattr(self, "scroll_to_bottom_button") or not self._is_input_overlay_alive():
             return
         button = self.scroll_to_bottom_button
         button.adjustSize()
@@ -1419,9 +1422,28 @@ class AIAssistantInterface(QWidget):
         button.setGeometry(max(scroll_rect.left(), x), max(scroll_rect.top(), y), button_width, button.height())
         button.raise_()
 
-    @staticmethod
-    def _schedule_single_shot(callback) -> None:
-        QTimer.singleShot(0, callback)
+    def _is_qt_alive(self, *widgets: object) -> bool:
+        return all(widget is not None and is_valid_qt_object(widget) for widget in widgets)
+
+    def _is_input_overlay_alive(self) -> bool:
+        if self._teardown_started or not is_valid_qt_object(self):
+            return False
+        return self._is_qt_alive(
+            getattr(self, "content_panel", None),
+            getattr(self, "message_list", None),
+            getattr(self, "empty_widget", None),
+            getattr(self, "composer_shell", None),
+            getattr(self, "input_card", None),
+            getattr(self, "input_border", None),
+        )
+
+    def _schedule_single_shot(self, callback, delay: int = 0) -> None:
+        def guarded_callback() -> None:
+            if self._teardown_started or not is_valid_qt_object(self):
+                return
+            callback()
+
+        QTimer.singleShot(delay, guarded_callback)
 
     def _set_message_scrollbar_visible(self, visible: bool) -> None:
         if self._scroll_delegate is None:
@@ -1444,6 +1466,8 @@ class AIAssistantInterface(QWidget):
         self.message_list.viewport().update()
 
     def _sync_message_scrollbar_hover(self) -> None:
+        if not self._is_input_overlay_alive():
+            return
         delegate_bar = self._scroll_delegate.vScrollBar if self._scroll_delegate is not None else None
         hovered = (
             self.message_list.underMouse()
@@ -1454,7 +1478,7 @@ class AIAssistantInterface(QWidget):
         self._set_message_scrollbar_visible(hovered)
 
     def _update_input_overlay_positions(self) -> None:
-        if not hasattr(self, "composer_shell"):
+        if not self._is_input_overlay_alive():
             return
         panel_rect = self.content_panel.rect()
         if not panel_rect.isValid():
@@ -1703,12 +1727,12 @@ class AIAssistantInterface(QWidget):
             if event.type() in {QEvent.Type.Enter, QEvent.Type.MouseMove}:
                 self._set_message_scrollbar_visible(True)
             elif event.type() == QEvent.Type.Leave:
-                QTimer.singleShot(80, self._sync_message_scrollbar_hover)
+                self._schedule_single_shot(self._sync_message_scrollbar_hover, delay=80)
 
         if hasattr(self, "message_list") and watched is self.message_list.viewport():
             if event.type() == QEvent.Type.Resize:
                 self.message_list.doItemsLayout()
-                QTimer.singleShot(0, self._update_input_overlay_positions)
+                self._schedule_single_shot(self._update_input_overlay_positions)
             if event.type() == QEvent.Type.Leave:
                 if self._message_delegate is not None:
                     self._message_delegate.clear_action_hover(self.message_list)
@@ -1778,16 +1802,16 @@ class AIAssistantInterface(QWidget):
                 QEvent.Type.Show,
                 QEvent.Type.LayoutRequest,
             }:
-                QTimer.singleShot(0, self._update_input_overlay_positions)
+                self._schedule_single_shot(self._update_input_overlay_positions)
         return super().eventFilter(watched, event)
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
-        QTimer.singleShot(0, self._update_input_overlay_positions)
+        self._schedule_single_shot(self._update_input_overlay_positions)
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
-        QTimer.singleShot(0, self._update_input_overlay_positions)
+        self._schedule_single_shot(self._update_input_overlay_positions)
 
     def _apply_theme(self) -> None:
         if self._applying_theme:
