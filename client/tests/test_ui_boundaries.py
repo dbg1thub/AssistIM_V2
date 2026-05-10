@@ -88,6 +88,30 @@ def test_contact_friend_sidebar_title_prefers_remark_then_nickname_then_username
     assert remark_index < nickname_index < username_index < display_name_index
 
 
+def test_contact_detail_panel_only_opens_for_friend_items() -> None:
+    contact_interface = Path('client/ui/windows/contact_interface.py').read_text(encoding='utf-8')
+    select_friend_block = contact_interface.split('def _select_friend', 1)[1].split('def _select_group', 1)[0]
+    select_group_block = contact_interface.split('def _select_group', 1)[1].split('def _select_request', 1)[0]
+    select_request_block = contact_interface.split('def _select_request', 1)[1].split('def _select_blocked', 1)[0]
+    select_blocked_block = contact_interface.split('def _select_blocked', 1)[1].split('def _load_friend_moment_images', 1)[0]
+    group_sync_block = contact_interface.split('def _sync_group_record_view', 1)[1].split('def _apply_group_update_payload', 1)[0]
+    profile_update_block = contact_interface.split('def _apply_profile_update_payload', 1)[1].split('async def _reload_data_async', 1)[0]
+
+    assert 'self.detail_panel.set_contact(selected)' in select_friend_block
+    assert 'self._show_detail_panel()' in select_friend_block
+    for block in (select_group_block, select_request_block, select_blocked_block):
+        assert '.set_group(' not in block
+        assert '.set_request(' not in block
+        assert '.set_blocked_contact(' not in block
+        assert 'self._show_detail_panel()' not in block
+        assert 'self._show_welcome_panel()' in block
+
+    assert '.set_group(' not in group_sync_block
+    assert '.set_group(' not in profile_update_block
+    assert '.set_request(' not in profile_update_block
+    assert '.set_blocked_contact(' not in profile_update_block
+
+
 def test_main_installs_fluentwidgets_translator_after_i18n_initialization() -> None:
     main_py = Path('client/main.py').read_text(encoding='utf-8')
 

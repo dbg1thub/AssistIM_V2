@@ -2242,9 +2242,6 @@ class ContactInterface(QWidget):
         if needs_selection_restore:
             self._restore_selection(full_reload=False)
 
-        if self._selected_key == ("group", group.id):
-            self.detail_panel.set_group(group)
-
     def _apply_group_update_payload(self, payload: dict[str, object]) -> None:
         """Apply one realtime shared group-profile update without reloading the contact page."""
         group_payload = dict(payload.get("group") or payload) if isinstance(payload, dict) else {}
@@ -2342,8 +2339,6 @@ class ContactInterface(QWidget):
             self._blocked_contacts[index] = updated
             self._blocked_contacts.sort(key=self._friend_sort_key)
             self._update_blocked_item_view(updated)
-            if self._selected_key == ("blocked", updated.id):
-                self.detail_panel.set_blocked_contact(updated)
 
         for index, group in enumerate(list(self._groups)):
             group_changed = False
@@ -2385,8 +2380,6 @@ class ContactInterface(QWidget):
             groups_changed = True
             if avatar_changed:
                 self._update_group_item_view(updated)
-            if self._selected_key == ("group", updated.id):
-                self.detail_panel.set_group(updated)
 
         for index, request in enumerate(list(self._requests)):
             updated_request = request
@@ -2439,8 +2432,6 @@ class ContactInterface(QWidget):
                 continue
             self._requests[index] = updated_request
             self._update_request_item_view(updated_request)
-            if self._selected_key == ("request", updated_request.id):
-                self.detail_panel.set_request(updated_request, self._current_user_id)
         if contacts_changed:
             self._schedule_contacts_cache_persist()
         if groups_changed:
@@ -3064,8 +3055,8 @@ class ContactInterface(QWidget):
         self._cancel_friend_moment_task()
         self._clear_selection()
         self._group_items[group_id].set_selected(True)
-        self.detail_panel.set_group(selected)
-        self._show_detail_panel()
+        self.detail_panel.show_placeholder()
+        self._show_welcome_panel()
 
     def _select_request(self, request_id: str, force: bool = False) -> None:
         selected = next((item for item in self._requests if item.id == request_id), None)
@@ -3077,8 +3068,8 @@ class ContactInterface(QWidget):
         self._cancel_friend_moment_task()
         self._clear_selection()
         self._request_items[request_id].set_selected(True)
-        self.detail_panel.set_request(selected, self._current_user_id)
-        self._show_detail_panel()
+        self.detail_panel.show_placeholder()
+        self._show_welcome_panel()
 
     def _select_blocked(self, contact_id: str, force: bool = False) -> None:
         selected = next((item for item in self._blocked_contacts if item.id == contact_id), None)
@@ -3090,8 +3081,8 @@ class ContactInterface(QWidget):
         self._cancel_friend_moment_task()
         self._clear_selection()
         self._blocked_items[contact_id].set_selected(True)
-        self.detail_panel.set_blocked_contact(selected)
-        self._show_detail_panel()
+        self.detail_panel.show_placeholder()
+        self._show_welcome_panel()
 
     def _load_friend_moment_images(self, contact_id: str) -> None:
         self._cancel_friend_moment_task()
