@@ -169,6 +169,29 @@ def test_page_welcome_states_use_shared_placeholder() -> None:
     assert 'contact.welcome.title' not in zh_cn
 
 
+def test_message_status_badges_only_show_stable_states_with_larger_icons() -> None:
+    message_delegate = Path('client/delegates/message_delegate.py').read_text(encoding='utf-8')
+    status_block = message_delegate.split('def _status_badge_style', 1)[1].split('def _draw_media_state_overlay', 1)[0]
+
+    assert 'STATUS_BADGE_SIZE = 20' in message_delegate
+    assert 'STATUS_BADGE_ICON_SIZE = 12' in message_delegate
+    assert 'self.STATUS_BADGE_ICON_SIZE' in message_delegate
+    assert 'MessageStatus.AWAITING_SECURITY_CONFIRMATION' in status_block
+    assert 'MessageStatus.DELIVERED' in status_block
+    assert 'MessageStatus.READ' in status_block
+    assert 'MessageStatus.FAILED' in status_block
+    assert 'AppIcon.CHECK' in status_block
+    assert 'AppIcon.CLOSE' in status_block
+    assert 'MessageStatus.PENDING' not in status_block
+    assert 'MessageStatus.SENDING' not in status_block
+    assert 'MessageStatus.SENT' not in status_block
+    assert 'self._is_uploading(message)' not in status_block
+    assert 'AppIcon.SEND_FILL' not in status_block
+    assert 'AppIcon.SYNC' not in status_block
+    assert 'AppIcon.COMPLETED' not in status_block
+    assert 'AppIcon.CANCEL_MEDIUM' not in status_block
+
+
 def test_contact_friend_sidebar_title_prefers_remark_then_nickname_then_username() -> None:
     contact_interface = Path('client/ui/windows/contact_interface.py').read_text(encoding='utf-8')
     title_block = contact_interface.split('def _friend_sidebar_title', 1)[1].split('def _clear_active_selection', 1)[0]

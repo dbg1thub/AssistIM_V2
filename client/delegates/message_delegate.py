@@ -124,7 +124,8 @@ class MessageDelegate(QStyledItemDelegate):
     TIME_BLOCK_HEIGHT = 26
     TAIL_SPACE = 8
     TIME_SPACING = 9
-    STATUS_BADGE_SIZE = 16
+    STATUS_BADGE_SIZE = 20
+    STATUS_BADGE_ICON_SIZE = 12
     RECALL_NOTICE_HEIGHT = TIME_BLOCK_HEIGHT
     RECALL_ACTION_GAP = 8
     TEXT_MEASURE_CACHE_LIMIT = 512
@@ -1269,10 +1270,10 @@ class MessageDelegate(QStyledItemDelegate):
 
         painter.drawEllipse(rect)
         icon_rect = QRectF(
-            rect.x() + (rect.width() - 8) / 2,
-            rect.y() + (rect.height() - 8) / 2,
-            8,
-            8,
+            rect.x() + (rect.width() - self.STATUS_BADGE_ICON_SIZE) / 2,
+            rect.y() + (rect.height() - self.STATUS_BADGE_ICON_SIZE) / 2,
+            self.STATUS_BADGE_ICON_SIZE,
+            self.STATUS_BADGE_ICON_SIZE,
         )
         icon.render(painter, icon_rect, Theme.DARK if not isDarkTheme() else Theme.LIGHT)
         painter.restore()
@@ -1307,20 +1308,14 @@ class MessageDelegate(QStyledItemDelegate):
         success_color = QColor(108, 203, 95) if dark else QColor(15, 123, 15)
         error_color = QColor(255, 153, 164) if dark else QColor(196, 43, 28)
 
-        if self._is_uploading(message):
-            return info_color, AppIcon.SYNC
         if message.status == MessageStatus.AWAITING_SECURITY_CONFIRMATION:
             return QColor(230, 178, 62) if dark else QColor(161, 107, 0), AppIcon.INFO
-        if message.status in (MessageStatus.PENDING, MessageStatus.SENDING):
-            return info_color, AppIcon.SEND_FILL
-        if message.status == MessageStatus.SENT:
-            return success_color, AppIcon.SEND_FILL
         if message.status == MessageStatus.DELIVERED:
-            return info_color, AppIcon.COMPLETED
+            return info_color, AppIcon.CHECK
         if message.status == MessageStatus.READ:
-            return success_color, AppIcon.COMPLETED
+            return success_color, AppIcon.CHECK
         if message.status == MessageStatus.FAILED:
-            return error_color, AppIcon.CANCEL_MEDIUM
+            return error_color, AppIcon.CLOSE
         return None
 
     def _draw_media_state_overlay(self, painter: QPainter, rect: QRect, message: ChatMessage) -> None:
