@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QEasingCurve, QEvent, QPoint, QParallelAnimationGroup, QPropertyAnimation, QRectF, Qt
-from PySide6.QtGui import QColor, QPainter, QPainterPath
+from PySide6.QtCore import QEasingCurve, QEvent, QPoint, QParallelAnimationGroup, QPropertyAnimation, QRectF, Qt, QTimer
+from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import QDialog, QFrame, QHBoxLayout, QSizePolicy, QVBoxLayout, QWidget
 from qfluentwidgets import SubtitleLabel, isDarkTheme, qconfig
@@ -108,6 +108,9 @@ class FluentDialog(QDialog):
         self.title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.title_label.setMinimumWidth(0)
         self.title_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        title_font = QFont(self.title_label.font())
+        title_font.setBold(False)
+        self.title_label.setFont(title_font)
 
         title_layout.addWidget(self.title_left_spacer, 0)
         title_layout.addWidget(self.title_label, 1, Qt.AlignmentFlag.AlignVCenter)
@@ -125,6 +128,7 @@ class FluentDialog(QDialog):
         qconfig.themeChangedFinished.connect(self._apply_fluent_surface)
         self._apply_fluent_surface()
         self._sync_title_left_spacer_width()
+        self._schedule_title_alignment_sync()
 
     def setTitleText(self, title: str) -> None:
         self.setWindowTitle(str(title or ""))
@@ -159,15 +163,28 @@ class FluentDialog(QDialog):
     def resizeEvent(self, event) -> None:
         self._sync_title_left_spacer_width()
         super().resizeEvent(event)
+        self._schedule_title_alignment_sync()
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
         self._sync_title_left_spacer_width()
+        self._schedule_title_alignment_sync()
         self._start_show_animation()
 
     def _sync_title_left_spacer_width(self) -> None:
         width = self.close_button.width() if self.close_button.width() > 0 else self.CLOSE_BUTTON_WIDTH
         self.title_left_spacer.setFixedWidth(width)
+
+    def _schedule_title_alignment_sync(self) -> None:
+        QTimer.singleShot(0, self._sync_title_label_to_close_button)
+
+    def _sync_title_label_to_close_button(self) -> None:
+        close_center_y = self.close_button.geometry().center().y()
+        if close_center_y <= 0:
+            return
+        label_rect = self.title_label.geometry()
+        label_y = max(0, close_center_y - label_rect.height() // 2)
+        self.title_label.move(self.title_label.x(), label_y)
 
     def _start_show_animation(self) -> None:
         if self._show_animation_group is not None:

@@ -986,12 +986,18 @@ def test_fluent_dialog_title_is_centered() -> None:
     assert 'title_layout.addWidget(self.title_left_spacer, 0)' in dialog
     assert 'title_layout.addWidget(self.title_label, 1, Qt.AlignmentFlag.AlignVCenter)' in dialog
     assert 'title_layout.addWidget(self.close_button, 0, Qt.AlignmentFlag.AlignTop)' in dialog
+    assert 'title_font.setBold(False)' in dialog
     assert 'def _sync_title_left_spacer_width(self) -> None:' in dialog
+    assert 'def _sync_title_label_to_close_button(self) -> None:' in dialog
     assert 'width = self.close_button.width() if self.close_button.width() > 0 else self.CLOSE_BUTTON_WIDTH' in dialog
     assert 'self.title_left_spacer.setFixedWidth(width)' in dialog
+    assert 'close_center_y = self.close_button.geometry().center().y()' in dialog
+    assert 'self.title_label.move(self.title_label.x(), label_y)' in dialog
+    assert 'self.close_button.setFixedSize(' not in dialog
     assert 'sizeHint().width()' not in dialog
     assert 'sizeHint().height()' not in dialog
     assert 'self._sync_title_left_spacer_width()' in dialog
+    assert 'QTimer.singleShot(0, self._sync_title_label_to_close_button)' in dialog
 
 
 def test_fluent_exec_dialogs_cache_payload_before_accepting() -> None:
