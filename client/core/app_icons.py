@@ -288,6 +288,7 @@ class AppIcon(FluentIconBase, Enum):
     BRUSH = "paint_brush"
     CANCEL_MEDIUM = "dismiss_circle"
     CHAT = "chat"
+    CHECK = "checkmark"
     CLOSE = "dismiss"
     COMPLETED = "checkmark_circle"
     CUT = "cut"

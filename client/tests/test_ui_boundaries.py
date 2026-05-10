@@ -78,15 +78,22 @@ def test_sidebar_items_use_compact_consistent_spacing() -> None:
 
 def test_friend_request_review_actions_use_compact_tool_buttons() -> None:
     contact_interface = Path('client/ui/windows/contact_interface.py').read_text(encoding='utf-8')
+    app_icons = Path('client/core/app_icons.py').read_text(encoding='utf-8')
     request_item_block = contact_interface.split('class RequestListItem', 1)[1].split('class ContactWelcomePanel', 1)[0]
     render_actions_block = request_item_block.split('def _render_actions', 1)[1].split('def update_request', 1)[0]
 
+    assert 'CHECK = "checkmark"' in app_icons
+    assert 'def _request_accept_button_style() -> str:' in contact_interface
+    assert 'themeColor()' in contact_interface
     assert 'self.action_layout = QHBoxLayout()' in request_item_block
-    assert 'ToolButton(AppIcon.COMPLETED, self)' in render_actions_block
+    assert 'ToolButton(AppIcon.CHECK, self)' in render_actions_block
     assert 'ToolButton(AppIcon.CLOSE, self)' in render_actions_block
+    assert 'setObjectName("requestAcceptButton")' in render_actions_block
+    assert 'setStyleSheet(_request_accept_button_style())' in render_actions_block
     assert 'setFixedSize(28, 28)' in render_actions_block
     assert 'setToolTip(tr("common.accept", "Accept"))' in render_actions_block
     assert 'setToolTip(tr("common.reject", "Reject"))' in render_actions_block
+    assert 'ToolButton(AppIcon.COMPLETED, self)' not in render_actions_block
     assert 'PrimaryPushButton(tr("common.accept", "Accept"), self)' not in render_actions_block
     assert 'PushButton(tr("common.reject", "Reject"), self)' not in render_actions_block
 

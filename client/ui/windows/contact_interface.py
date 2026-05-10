@@ -33,6 +33,7 @@ from qfluentwidgets import (
     ToolButton,
     TitleLabel,
     isDarkTheme,
+    themeColor,
 )
 from qframelesswindow.titlebar import CloseButton
 from shiboken6 import isValid as is_valid_qt_object
@@ -110,6 +111,26 @@ def _request_message_text(request: FriendRequestRecord, current_user_id: str) ->
     if request.is_outgoing(current_user_id):
         return request.message or tr("contact.request.default_outgoing", "You sent a friend request.")
     return request.message or tr("contact.request.default_incoming", "The other user sent you a friend request.")
+
+
+def _request_accept_button_style() -> str:
+    """Return a compact theme-colored style for request acceptance."""
+    base = QColor(themeColor())
+    hover = QColor(base).lighter(108)
+    pressed = QColor(base).darker(108)
+    return f"""
+        QToolButton#requestAcceptButton {{
+            background: {base.name()};
+            border: none;
+            border-radius: 6px;
+        }}
+        QToolButton#requestAcceptButton:hover {{
+            background: {hover.name()};
+        }}
+        QToolButton#requestAcceptButton:pressed {{
+            background: {pressed.name()};
+        }}
+    """
 
 
 class RemoveFriendConfirmDialog(MessageBoxBase):
@@ -385,12 +406,14 @@ class RequestListItem(QWidget):
             if widget is not None:
                 widget.deleteLater()
         if self.request.can_review(self.current_user_id):
-            accept_button = ToolButton(AppIcon.COMPLETED, self)
+            accept_button = ToolButton(AppIcon.CHECK, self)
             reject_button = ToolButton(AppIcon.CLOSE, self)
+            accept_button.setObjectName("requestAcceptButton")
             accept_button.setFixedSize(28, 28)
             reject_button.setFixedSize(28, 28)
             accept_button.setToolTip(tr("common.accept", "Accept"))
             reject_button.setToolTip(tr("common.reject", "Reject"))
+            accept_button.setStyleSheet(_request_accept_button_style())
             accept_button.clicked.connect(lambda: self.accept_clicked.emit(self.request.id))
             reject_button.clicked.connect(lambda: self.reject_clicked.emit(self.request.id))
             self.action_layout.addWidget(accept_button, 0, Qt.AlignmentFlag.AlignVCenter)
