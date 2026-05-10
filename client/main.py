@@ -1259,6 +1259,11 @@ class Application:
             self.auth_window = None
 
         if self.main_window:
+            quiesce_async = getattr(self.main_window, "quiesce_async", None)
+            if callable(quiesce_async):
+                await quiesce_async()
+            else:
+                self.main_window.quiesce()
             self.main_window.hide()
             self.main_window.deleteLater()
             self.main_window = None

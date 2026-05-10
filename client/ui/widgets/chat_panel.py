@@ -621,7 +621,7 @@ class ChatPanel(QWidget):
 
     def set_messages(self, messages: list[ChatMessage], *, scroll_to_bottom: bool = True) -> None:
         """Replace the visible message list in one model reset."""
-        if not self._message_model:
+        if not self.is_message_model_alive():
             return
 
         self.stop_voice_playback()
@@ -680,9 +680,13 @@ class ChatPanel(QWidget):
         """Return message model."""
         return self._message_model
 
+    def is_message_model_alive(self) -> bool:
+        """Return whether the message model can still receive Qt model calls."""
+        return self._message_model is not None and is_valid_qt_object(self._message_model)
+
     def get_visible_messages(self) -> list[ChatMessage]:
         """Return the messages currently materialized in the list view."""
-        if not self._message_model:
+        if not self.is_message_model_alive():
             return []
         return list(self._message_model.get_messages())
 

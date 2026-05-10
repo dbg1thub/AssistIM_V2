@@ -526,6 +526,38 @@ def test_chat_interface_session_open_and_history_tasks_are_generation_guarded() 
     assert chat_interface.count('if not self._is_current_session_context(session_id, generation):') >= 6
 
 
+def test_chat_interface_history_render_is_teardown_guarded() -> None:
+    chat_interface = Path('client/ui/windows/chat_interface.py').read_text(encoding='utf-8')
+    chat_panel = Path('client/ui/widgets/chat_panel.py').read_text(encoding='utf-8')
+    apply_block = chat_interface.split('def _apply_primary_history_page', 1)[1].split(
+        'def _merge_loaded_messages_with_visible',
+        1,
+    )[0]
+    merge_block = chat_interface.split('def _merge_loaded_messages_with_visible', 1)[1].split(
+        'def _extract_oldest_timestamp',
+        1,
+    )[0]
+
+    assert 'def _is_chat_history_renderable(self) -> bool:' in chat_interface
+    assert 'def is_message_model_alive(self) -> bool:' in chat_panel
+    assert 'self._teardown_started' in chat_interface
+    assert 'self.chat_panel.is_message_model_alive()' in chat_interface
+    assert 'if not self._is_chat_history_renderable():' in apply_block
+    assert 'if not self._is_chat_history_renderable():' in merge_block
+
+
+def test_shutdown_quiesces_main_window_tasks_before_delete_later() -> None:
+    main_py = Path('client/main.py').read_text(encoding='utf-8')
+    main_window_py = Path('client/ui/windows/main_window.py').read_text(encoding='utf-8')
+    shutdown_block = main_py.split('async def shutdown', 1)[1].split('# =========================================================', 1)[0]
+    collect_block = main_window_py.split('def _collect_ui_tasks_for_teardown', 1)[1].split('return list(dict.fromkeys(tasks))', 1)[0]
+
+    assert 'quiesce_async = getattr(self.main_window, "quiesce_async", None)' in shutdown_block
+    assert 'await quiesce_async()' in shutdown_block
+    assert shutdown_block.index('await quiesce_async()') < shutdown_block.index('self.main_window.deleteLater()')
+    assert 'self.ai_assistant_interface' in collect_block
+
+
 def test_chat_interface_call_dialog_and_menu_callbacks_are_instance_guarded() -> None:
     chat_interface = Path('client/ui/windows/chat_interface.py').read_text(encoding='utf-8')
 

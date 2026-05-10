@@ -598,6 +598,7 @@ class MainWindow(FluentWindow):
             self.user_profile,
             self.chat_interface,
             getattr(self.chat_interface, "session_panel", None),
+            self.ai_assistant_interface,
             self.contact_interface,
             self.discovery_interface,
         ]

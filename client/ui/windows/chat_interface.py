@@ -1227,6 +1227,13 @@ class ChatInterface(QWidget):
         panel = getattr(self, "chat_panel", None)
         return panel is not None and is_valid_qt_object(panel)
 
+    def _is_chat_history_renderable(self) -> bool:
+        """Return whether loaded history can still be rendered into the chat panel."""
+        if self._teardown_started or not self._is_chat_panel_alive():
+            return False
+        is_model_alive = getattr(self.chat_panel, "is_message_model_alive", None)
+        return callable(is_model_alive) and bool(self.chat_panel.is_message_model_alive())
+
     def _is_reply_suggestion_timer_alive(self) -> bool:
         """Return whether the debounce timer still exists."""
         timer = getattr(self, "_reply_suggestion_timer", None)
@@ -1654,6 +1661,8 @@ class ChatInterface(QWidget):
         generation: int | None = None,
     ) -> None:
         """Render the primary history page while preserving any live in-memory messages."""
+        if not self._is_chat_history_renderable():
+            return
         if generation is not None:
             if not self._is_current_session_context(session_id, generation):
                 return
@@ -1673,6 +1682,8 @@ class ChatInterface(QWidget):
 
     def _merge_loaded_messages_with_visible(self, loaded_messages: list) -> list:
         """Preserve live-arrived/status-updated messages while an async page load completes."""
+        if not self._is_chat_history_renderable():
+            return list(loaded_messages)
         visible_messages = list(self.chat_panel.get_visible_messages())
         if not visible_messages:
             return list(loaded_messages)
