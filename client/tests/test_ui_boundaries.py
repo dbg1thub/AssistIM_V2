@@ -76,6 +76,21 @@ def test_sidebar_items_use_compact_consistent_spacing() -> None:
     assert 'self._friend_sidebar_title(contact),' in create_blocked_block
 
 
+def test_friend_request_review_actions_use_compact_tool_buttons() -> None:
+    contact_interface = Path('client/ui/windows/contact_interface.py').read_text(encoding='utf-8')
+    request_item_block = contact_interface.split('class RequestListItem', 1)[1].split('class ContactWelcomePanel', 1)[0]
+    render_actions_block = request_item_block.split('def _render_actions', 1)[1].split('def update_request', 1)[0]
+
+    assert 'self.action_layout = QHBoxLayout()' in request_item_block
+    assert 'ToolButton(AppIcon.COMPLETED, self)' in render_actions_block
+    assert 'ToolButton(AppIcon.CLOSE, self)' in render_actions_block
+    assert 'setFixedSize(28, 28)' in render_actions_block
+    assert 'setToolTip(tr("common.accept", "Accept"))' in render_actions_block
+    assert 'setToolTip(tr("common.reject", "Reject"))' in render_actions_block
+    assert 'PrimaryPushButton(tr("common.accept", "Accept"), self)' not in render_actions_block
+    assert 'PushButton(tr("common.reject", "Reject"), self)' not in render_actions_block
+
+
 def test_contact_friend_sidebar_title_prefers_remark_then_nickname_then_username() -> None:
     contact_interface = Path('client/ui/windows/contact_interface.py').read_text(encoding='utf-8')
     title_block = contact_interface.split('def _friend_sidebar_title', 1)[1].split('def _clear_active_selection', 1)[0]

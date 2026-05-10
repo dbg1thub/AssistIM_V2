@@ -366,9 +366,9 @@ class RequestListItem(QWidget):
         text_layout.addWidget(self.title_label)
         text_layout.addWidget(self.message_label)
 
-        self.action_layout = QVBoxLayout()
+        self.action_layout = QHBoxLayout()
         self.action_layout.setContentsMargins(0, 0, 0, 0)
-        self.action_layout.setSpacing(8)
+        self.action_layout.setSpacing(6)
         self._render_actions()
 
         layout.addWidget(self.avatar, 0, Qt.AlignmentFlag.AlignVCenter)
@@ -384,23 +384,23 @@ class RequestListItem(QWidget):
             widget = item.widget()
             if widget is not None:
                 widget.deleteLater()
-        self.action_layout.addStretch(1)
         if self.request.can_review(self.current_user_id):
-            accept_button = PrimaryPushButton(tr("common.accept", "Accept"), self)
-            reject_button = PushButton(tr("common.reject", "Reject"), self)
-            accept_button.setFixedWidth(76)
-            reject_button.setFixedWidth(76)
+            accept_button = ToolButton(AppIcon.COMPLETED, self)
+            reject_button = ToolButton(AppIcon.CLOSE, self)
+            accept_button.setFixedSize(28, 28)
+            reject_button.setFixedSize(28, 28)
+            accept_button.setToolTip(tr("common.accept", "Accept"))
+            reject_button.setToolTip(tr("common.reject", "Reject"))
             accept_button.clicked.connect(lambda: self.accept_clicked.emit(self.request.id))
             reject_button.clicked.connect(lambda: self.reject_clicked.emit(self.request.id))
-            self.action_layout.addWidget(accept_button, 0, Qt.AlignmentFlag.AlignHCenter)
-            self.action_layout.addWidget(reject_button, 0, Qt.AlignmentFlag.AlignHCenter)
+            self.action_layout.addWidget(accept_button, 0, Qt.AlignmentFlag.AlignVCenter)
+            self.action_layout.addWidget(reject_button, 0, Qt.AlignmentFlag.AlignVCenter)
         else:
             status_button = PushButton(self._status_text(), self)
             status_button.setObjectName("requestStatusButton")
             status_button.setFixedWidth(88)
             status_button.setEnabled(False)
-            self.action_layout.addWidget(status_button, 0, Qt.AlignmentFlag.AlignHCenter)
-        self.action_layout.addStretch(1)
+            self.action_layout.addWidget(status_button, 0, Qt.AlignmentFlag.AlignVCenter)
 
     def update_request(self, request: FriendRequestRecord, current_user_id: str) -> None:
         self.request = request
