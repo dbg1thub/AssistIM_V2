@@ -120,18 +120,28 @@ def test_page_welcome_states_use_shared_empty_state_card() -> None:
 
     welcome_block = chat_panel.split('class WelcomeWidget', 1)[1].split('class SecurityPendingBanner', 1)[0]
     contact_welcome_block = contact_interface.split('class ContactWelcomeWidget', 1)[1].split('class FriendMomentPreviewStrip', 1)[0]
+    light_chat_welcome_style = light_chat_qss.split('QLabel#chatWelcomeTitle', 1)[1].split('QWidget#chatInfoOverlay', 1)[0]
+    dark_chat_welcome_style = dark_chat_qss.split('QLabel#chatWelcomeTitle', 1)[1].split('QWidget#chatInfoOverlay', 1)[0]
 
     assert 'class EmptyStateCard(CardWidget):' in empty_state_card
     assert 'resources" / "logo.png"' in empty_state_card
     assert 'title_font.setBold(False)' in empty_state_card
-    assert 'EmptyStateCard(' in welcome_block
+    assert 'EmptyStateCard(' not in welcome_block
+    assert 'QLabel(self)' in welcome_block
+    assert 'QPixmap(str(_WELCOME_LOGO_PATH))' in welcome_block
+    assert '_WELCOME_LOGO_SIZE = 160' in chat_panel
+    assert 'setFixedSize(_WELCOME_LOGO_SIZE, _WELCOME_LOGO_SIZE)' in welcome_block
+    assert 'title_font.setPixelSize(32)' in welcome_block
+    assert 'title_font.setBold(False)' in welcome_block
     assert 'IconWidget(AppIcon.CHAT' not in welcome_block
     assert 'chat.welcome.subtitle' not in welcome_block
     assert 'EmptyStateCard(' in contact_welcome_block
-    assert 'QWidget#EmptyStateCard' in light_chat_qss
-    assert 'QWidget#EmptyStateCard' in dark_chat_qss
-    assert 'chatWelcomeTitle' not in light_chat_qss
-    assert 'chatWelcomeTitle' not in dark_chat_qss
+    assert 'QWidget#EmptyStateCard' not in light_chat_qss
+    assert 'QWidget#EmptyStateCard' not in dark_chat_qss
+    assert 'QLabel#chatWelcomeTitle' in light_chat_qss
+    assert 'QLabel#chatWelcomeTitle' in dark_chat_qss
+    assert 'Segoe UI Semibold' not in light_chat_welcome_style
+    assert 'Segoe UI Semibold' not in dark_chat_welcome_style
     assert 'ContactWelcomeCard' not in light_contact_qss
     assert 'chat.welcome.subtitle' not in zh_cn
 

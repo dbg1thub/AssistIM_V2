@@ -15,19 +15,9 @@ QFrame#chatComposerResizeHandle {
     border: none;
 }
 
-QWidget#EmptyStateCard {
-    background: {{CARD_BG_STRONG}};
-    border: 1px solid {{BORDER_COLOR_STRONG}};
-    border-radius: {{RADIUS_CARD}};
-}
-
-QLabel#EmptyStateTitle {
+QLabel#chatWelcomeTitle {
     color: {{TEXT_PRIMARY}};
-}
-
-QLabel#EmptyStateSubtitle,
-QLabel#EmptyStateHint {
-    color: {{TEXT_SECONDARY}};
+    font-family: "Segoe UI", "Microsoft YaHei", "PingFang SC";
 }
 
 QWidget#chatInfoOverlay,
