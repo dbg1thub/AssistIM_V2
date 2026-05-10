@@ -250,8 +250,10 @@ class ContactListItem(QWidget):
 
         self.subtitle_label = ElidedCaptionLabel(subtitle, self)
         self.subtitle_label.setVisible(bool(subtitle))
+        text_layout.addStretch(1)
         text_layout.addWidget(self.title_label)
         text_layout.addWidget(self.subtitle_label)
+        text_layout.addStretch(1)
         layout.addWidget(self.avatar, 0, Qt.AlignmentFlag.AlignVCenter)
         layout.addLayout(text_layout, 1)
 

@@ -45,17 +45,17 @@ def test_sidebar_items_use_compact_consistent_spacing() -> None:
 
     assert 'AVATAR_SIZE = 36' in session_delegate
     assert 'ITEM_HEIGHT = 64' in session_delegate
-    assert 'ITEM_PADDING = 8' in session_delegate
+    assert 'ITEM_PADDING = 12' in session_delegate
     assert 'CONTENT_GAP = 8' in session_delegate
     assert 'card_rect.x() + self.ITEM_PADDING' in session_delegate
-    assert 'avatar_rect.right() + self.CONTENT_GAP' in session_delegate
-    assert 'card_rect.right() - self.ITEM_PADDING' in session_delegate
+    assert 'avatar_rect.x() + avatar_rect.width() + self.CONTENT_GAP' in session_delegate
+    assert 'card_rect.x() + card_rect.width() - self.ITEM_PADDING' in session_delegate
     assert 'CONTACT_SIDEBAR_AVATAR_SIZE = 36' in contact_shared
-    assert 'CONTACT_SIDEBAR_ITEM_HEIGHT = 56' in contact_shared
-    assert 'CONTACT_SIDEBAR_ITEM_PADDING = 8' in contact_shared
+    assert 'CONTACT_SIDEBAR_ITEM_HEIGHT = 60' in contact_shared
+    assert 'CONTACT_SIDEBAR_ITEM_PADDING = 12' in contact_shared
     assert 'CONTACT_SIDEBAR_CONTENT_GAP = 8' in contact_shared
     assert 'CONTACT_SIDEBAR_TEXT_TOP_OFFSET = 0' in contact_shared
-    assert 'CONTACT_SIDEBAR_TEXT_SPACING = 0' in contact_shared
+    assert 'CONTACT_SIDEBAR_TEXT_SPACING = 8' in contact_shared
     assert 'title=self._friend_sidebar_title(contact)' in update_friend_block
     assert 'subtitle=""' in update_friend_block
     assert 'self._friend_assistim_line(contact)' not in update_friend_block
