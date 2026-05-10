@@ -745,7 +745,6 @@ class AIAssistantMessageDelegate(QStyledItemDelegate):
     @staticmethod
     def _text_font() -> QFont:
         font = QFont()
-        font.setPixelSize(17)
         try:
             font.setFamilies(["Segoe UI", "Microsoft YaHei UI", "Segoe UI Emoji", "Noto Color Emoji"])
         except AttributeError:
@@ -755,7 +754,6 @@ class AIAssistantMessageDelegate(QStyledItemDelegate):
     @staticmethod
     def _caption_font() -> QFont:
         font = QFont()
-        font.setPixelSize(13)
         try:
             font.setFamilies(["Segoe UI", "Microsoft YaHei UI", "Segoe UI Emoji", "Noto Color Emoji"])
         except AttributeError:
@@ -765,7 +763,6 @@ class AIAssistantMessageDelegate(QStyledItemDelegate):
     @staticmethod
     def _button_font() -> QFont:
         font = QFont()
-        font.setPixelSize(13)
         font.setBold(True)
         return font
 

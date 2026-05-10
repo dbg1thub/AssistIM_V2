@@ -862,6 +862,18 @@ def test_ai_assistant_input_uses_chat_composer_layout_without_overlay() -> None:
         "\n    def _apply_prompt_editor_theme",
         1,
     )[0]
+    assistant_text_font_block = assistant_delegate.split("def _text_font() -> QFont:", 1)[1].split(
+        "\n    @staticmethod\n    def _caption_font",
+        1,
+    )[0]
+    assistant_caption_font_block = assistant_delegate.split("def _caption_font() -> QFont:", 1)[1].split(
+        "\n    @staticmethod\n    def _button_font",
+        1,
+    )[0]
+    assistant_button_font_block = assistant_delegate.split("def _button_font() -> QFont:", 1)[1].split(
+        "\n    @staticmethod\n    def _first_image_attachment",
+        1,
+    )[0]
 
     assert "class AIAssistantFloatingComposerOverlay" not in assistant_interface
     assert "class AIAssistantComposerControlsOverlay" not in assistant_interface
@@ -922,4 +934,7 @@ def test_ai_assistant_input_uses_chat_composer_layout_without_overlay() -> None:
     assert "self._bottom_reserved_height" in assistant_delegate
     assert "def set_bottom_reserved_height(self, height: int) -> bool:" in assistant_delegate
     assert "bottom_reserved = self._bottom_reserved_height if self._is_last_row(index) else 0" in assistant_delegate
+    assert "font.setPixelSize(17)" not in assistant_text_font_block
+    assert "font.setPixelSize(13)" not in assistant_caption_font_block
+    assert "font.setPixelSize(13)" not in assistant_button_font_block
 

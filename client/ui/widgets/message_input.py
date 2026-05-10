@@ -530,7 +530,6 @@ class ChatTextEdit(QTextEdit):
     def _build_editor_font() -> QFont:
         """Return the editor font with emoji-capable fallbacks."""
         font = QFont()
-        font.setPixelSize(16)
         try:
             font.setFamilies(
                 [

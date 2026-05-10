@@ -1155,7 +1155,6 @@ class MessageDelegate(QStyledItemDelegate):
         icon_rect = QRect(voice_rect.x(), voice_rect.y() + max(0, (voice_rect.height() - icon_size) // 2), icon_size, icon_size)
         duration_text = f'{duration}"'
         font = QFont()
-        font.setPixelSize(14)
         painter.setFont(font)
         metrics = QFontMetrics(font)
         text_width = metrics.horizontalAdvance(duration_text)
@@ -1202,7 +1201,6 @@ class MessageDelegate(QStyledItemDelegate):
         state_text = self._media_state_text(message)
         if state_text:
             state_font = QFont(font)
-            state_font.setPixelSize(10)
             painter.setFont(state_font)
             painter.setPen(sub_color)
             painter.drawText(voice_rect, Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignHCenter, state_text)
@@ -1797,7 +1795,6 @@ class MessageDelegate(QStyledItemDelegate):
     def _text_font() -> QFont:
         """Return the base font used for text messages."""
         font = QFont()
-        font.setPixelSize(17)
         try:
             font.setFamilies(
                 [

@@ -592,6 +592,18 @@ def test_chat_message_input_uses_floating_card_style_without_overlay_or_cursor_o
         'def _update_send_button_state',
         1,
     )[0]
+    editor_font_block = message_input.split('def _build_editor_font() -> QFont:', 1)[1].split(
+        '\n    @staticmethod\n    def _build_emoji_font',
+        1,
+    )[0]
+    message_text_font_block = message_delegate.split('def _text_font() -> QFont:', 1)[1].split(
+        '\n    @staticmethod\n    def _ranges_overlap',
+        1,
+    )[0]
+    voice_content_block = message_delegate.split('def _draw_voice_content', 1)[1].split(
+        '\n    def _draw_voice_transcript_content',
+        1,
+    )[0]
 
     assert 'AIAssistantFloatingComposerOverlay' not in chat_panel
     assert 'chatFloatingComposerOverlay' not in chat_panel
@@ -680,6 +692,10 @@ def test_chat_message_input_uses_floating_card_style_without_overlay_or_cursor_o
     assert 'setCursorWidth' not in message_input
     assert 'background-color: transparent !important' not in message_input
     assert 'transparent_base' not in message_input
+    assert 'font.setPixelSize(16)' not in editor_font_block
+    assert 'font.setPixelSize(17)' not in message_text_font_block
+    assert 'font.setPixelSize(14)' not in voice_content_block
+    assert 'state_font.setPixelSize(10)' not in voice_content_block
     assert '_apply_editor_theme' in message_input
     assert '_apply_editor_transparency' not in message_input
     assert 'editor_base = QColor(31, 31, 31) if self._is_dark() else QColor(255, 255, 255)' in message_input
