@@ -23,17 +23,17 @@ class GroupAnnouncementBanner(CardWidget):
         self.setObjectName("groupAnnouncementBannerCard")
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setMaximumWidth(180)
-        self.setMaximumHeight(32)
+        self.setFixedHeight(18)
         self.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
         self.hide()
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(10, 6, 10, 6)
-        layout.setSpacing(8)
+        layout.setContentsMargins(8, 1, 8, 1)
+        layout.setSpacing(6)
 
         self.icon_widget = IconWidget(CollectionIcon("megaphone"), self)
         self.icon_widget.setObjectName("groupAnnouncementBannerIcon")
-        self.icon_widget.setFixedSize(15, 15)
+        self.icon_widget.setFixedSize(12, 12)
 
         self.text_label = ElidedBodyLabel("", self)
         self.text_label.setObjectName("groupAnnouncementBannerText")
@@ -41,7 +41,7 @@ class GroupAnnouncementBanner(CardWidget):
 
         self.chevron_widget = IconWidget(CollectionIcon("chevron_right"), self)
         self.chevron_widget.setObjectName("groupAnnouncementBannerChevron")
-        self.chevron_widget.setFixedSize(14, 14)
+        self.chevron_widget.setFixedSize(12, 12)
 
         layout.addWidget(self.icon_widget, 0, Qt.AlignmentFlag.AlignVCenter)
         layout.addWidget(self.text_label, 1, Qt.AlignmentFlag.AlignVCenter)
