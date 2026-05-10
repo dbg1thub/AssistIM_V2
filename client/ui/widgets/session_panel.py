@@ -365,8 +365,6 @@ class SessionPanel(QWidget):
         """Open or update the anchored search flyout for the current keyword."""
         keyword = str(text or "").strip()
         self._pending_search_keyword = keyword
-        if self._proxy_model:
-            self._proxy_model.set_filter_text(keyword)
 
         if not keyword:
             self._search_timer.stop()

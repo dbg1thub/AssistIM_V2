@@ -1339,6 +1339,16 @@ def test_search_flyout_close_no_longer_clears_keywords() -> None:
     assert 'self.search_box.clear()' not in session_close_block
 
 
+def test_session_sidebar_search_only_opens_search_flyout_without_filtering_sessions() -> None:
+    session_panel = Path('client/ui/widgets/session_panel.py').read_text(encoding='utf-8')
+    search_changed_block = session_panel.split('def _on_search_text_changed', 1)[1].split('def _trigger_global_search', 1)[0]
+
+    assert 'self._pending_search_keyword = keyword' in search_changed_block
+    assert 'self._search_timer.start()' in search_changed_block
+    assert 'set_filter_text(keyword)' not in search_changed_block
+    assert 'self._proxy_model.set_filter_text' not in search_changed_block
+
+
 def test_request_list_item_rebuilds_actions_on_status_change() -> None:
     contact_interface = Path('client/ui/windows/contact_interface.py').read_text(encoding='utf-8')
 
