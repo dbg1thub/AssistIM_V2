@@ -13,14 +13,15 @@ from qfluentwidgets import (
     CheckBox,
     FluentWindow,
     InfoBar,
+    MenuAnimationType,
     MessageBoxBase,
     NavigationItemPosition,
+    RoundMenu,
     SubtitleLabel,
     Theme,
     isDarkTheme,
     setTheme,
 )
-from qfluentwidgets.components.material import AcrylicMenu, AcrylicSystemTrayMenu
 
 from client.core.app_icons import AppIcon
 from client.core import logging
@@ -92,7 +93,7 @@ class MainWindow(FluentWindow):
         self._allow_exit = False
         self._tray_message_shown = False
         self._tray_icon: QSystemTrayIcon | None = None
-        self._tray_menu: AcrylicMenu | None = None
+        self._tray_menu: RoundMenu | None = None
         self._tray_alert_entries: OrderedDict[str, TrayAlertEntry] = OrderedDict()
         self._tray_attention_enabled = False
         self._tray_flash_on = False
@@ -374,7 +375,7 @@ class MainWindow(FluentWindow):
         self._tray_icon.setToolTip(tr("common.app_name", "AssistIM"))
         self._tray_icon.activated.connect(self._on_tray_activated)
 
-        self._tray_menu = AcrylicSystemTrayMenu(parent=self)
+        self._tray_menu = RoundMenu(parent=self)
         show_action = Action(AppIcon.HOME, tr("common.show_main_window", "Show Main Window"), self)
         refresh_action = Action(AppIcon.SYNC, tr("main_window.refresh_connection", "Refresh Connection"), self)
         exit_action = Action(AppIcon.CLOSE, tr("common.exit", "Exit"), self)
@@ -384,7 +385,6 @@ class MainWindow(FluentWindow):
         self._tray_menu.addAction(show_action)
         self._tray_menu.addAction(refresh_action)
         self._tray_menu.addAction(exit_action)
-        self._tray_icon.setContextMenu(self._tray_menu)
         self._tray_icon.show()
         self._apply_tray_icon()
 
@@ -440,9 +440,54 @@ class MainWindow(FluentWindow):
 
     def _on_tray_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
         if reason in {QSystemTrayIcon.ActivationReason.Trigger, QSystemTrayIcon.ActivationReason.DoubleClick}:
+            if self._close_tray_context_menu():
+                return
             self.show_from_tray()
         elif reason == QSystemTrayIcon.ActivationReason.Context:
             self._close_tray_alert_flyout()
+            self._show_tray_context_menu()
+
+    def _show_tray_context_menu(self) -> None:
+        """Show the tray context menu with RoundMenu's own popup positioning."""
+        if self._tray_menu is None or self._tray_icon is None or not self._tray_icon.isVisible():
+            return
+        self._close_tray_alert_flyout()
+        self._tray_menu.adjustSize()
+        tray_rect = self._tray_icon.geometry()
+        pos, animation_type = self._tray_menu_position(tray_rect, self._tray_menu.sizeHint())
+        self._tray_menu.exec(pos, ani=True, aniType=animation_type)
+
+    def _close_tray_context_menu(self) -> bool:
+        """Close the tray context menu if it is visible."""
+        if self._tray_menu is not None and self._tray_menu.isVisible():
+            self._tray_menu.close()
+            return True
+        return False
+
+    def _tray_menu_position(self, tray_rect: QRect, size: QSize) -> tuple[QPoint, MenuAnimationType]:
+        """Return the top-left menu anchor and animation for the current tray position."""
+        fallback_pos = QCursor.pos()
+        screen = QApplication.screenAt(tray_rect.center()) if tray_rect.isValid() and not tray_rect.isNull() else None
+        screen = screen or QApplication.screenAt(fallback_pos) or QApplication.primaryScreen()
+        if screen is None:
+            return fallback_pos, MenuAnimationType.PULL_UP
+
+        geometry = screen.availableGeometry()
+        width = max(0, size.width())
+        height = max(0, size.height())
+        anchor = tray_rect if tray_rect.isValid() and not tray_rect.isNull() else QRect(fallback_pos, QSize(1, 1))
+
+        use_pull_up = anchor.center().y() >= geometry.center().y()
+        if use_pull_up:
+            point = QPoint(anchor.center().x() - width // 2, anchor.top() - height + 6)
+            animation_type = MenuAnimationType.PULL_UP
+        else:
+            point = QPoint(anchor.center().x() - width // 2, anchor.bottom() - 6)
+            animation_type = MenuAnimationType.DROP_DOWN
+
+        x = min(max(geometry.left() + 8, point.x()), geometry.right() - width - 8)
+        y = min(max(geometry.top() + 8, point.y()), geometry.bottom() - height - 8)
+        return QPoint(x, y), animation_type
 
     def show_session_replaced_warning(self) -> None:
         """Warn the user that this client was replaced by a newer login and close shortly after."""

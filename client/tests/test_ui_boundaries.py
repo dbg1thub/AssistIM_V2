@@ -313,6 +313,24 @@ def test_main_window_does_not_set_window_title_or_icon_and_tray_uses_logo() -> N
     assert 'self.windowIcon()' not in refresh_block
 
 
+def test_main_window_tray_context_menu_uses_round_menu() -> None:
+    main_window = Path('client/ui/windows/main_window.py').read_text(encoding='utf-8')
+    init_tray_block = main_window.split('def _init_system_tray(self) -> None:', 1)[1].split('def _onThemeChangedFinished', 1)[0]
+    tray_activated_block = main_window.split('def _on_tray_activated', 1)[1].split('def show_session_replaced_warning', 1)[0]
+
+    assert 'RoundMenu,' in main_window
+    assert 'MenuAnimationType,' in main_window
+    assert 'self._tray_menu: RoundMenu | None = None' in main_window
+    assert 'self._tray_menu = RoundMenu(parent=self)' in init_tray_block
+    assert 'self._tray_icon.setContextMenu(self._tray_menu)' not in main_window
+    assert 'if self._close_tray_context_menu():' in tray_activated_block
+    assert 'self._show_tray_context_menu()' in tray_activated_block
+    assert 'def _tray_menu_position(self, tray_rect: QRect, size: QSize) -> tuple[QPoint, MenuAnimationType]:' in main_window
+    assert 'self._tray_menu.exec(pos, ani=True, aniType=animation_type)' in main_window
+    assert 'AcrylicSystemTrayMenu' not in main_window
+    assert 'AcrylicMenu' not in main_window
+
+
 def test_discovery_ui_wires_moment_media_and_comment_image_boundaries() -> None:
     discovery_interface = Path('client/ui/windows/discovery_interface.py').read_text(encoding='utf-8')
 
