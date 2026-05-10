@@ -1,4 +1,5 @@
 import asyncio
+import ctypes
 import sys
 from collections import OrderedDict
 from pathlib import Path
@@ -6,7 +7,7 @@ from pathlib import Path
 import darkdetect
 from PySide6.QtCore import QEvent, QPoint, QRect, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QCloseEvent, QColor, QCursor, QIcon, QPainter
-from PySide6.QtWidgets import QApplication, QSystemTrayIcon
+from PySide6.QtWidgets import QApplication, QSystemTrayIcon, QWidget
 from qfluentwidgets import (
     Action,
     BodyLabel,
@@ -78,20 +79,38 @@ class ExitConfirmDialog(MessageBoxBase):
 class AssistIMSystemTrayIcon(QSystemTrayIcon):
     """System tray icon using qfluentwidgets' tray menu component."""
 
-    def __init__(self, parent: "MainWindow"):
-        super().__init__(parent=parent)
-        self.setIcon(parent._tray_normal_icon)
+    def __init__(self, tray_parent: QWidget, action_owner: "MainWindow"):
+        super().__init__(parent=tray_parent)
+        self._tray_parent = tray_parent
+        self._action_owner = action_owner
+        self.setIcon(action_owner._tray_normal_icon)
         self.setToolTip(tr("common.app_name", "AssistIM"))
 
-        self.menu = SystemTrayMenu(parent=parent)
+        self.menu = SystemTrayMenu(parent=tray_parent)
         show_action = Action(AppIcon.HOME, tr("common.show_main_window", "Show Main Window"), self)
         refresh_action = Action(AppIcon.SYNC, tr("main_window.refresh_connection", "Refresh Connection"), self)
         exit_action = Action(AppIcon.CLOSE, tr("common.exit", "Exit"), self)
-        show_action.triggered.connect(parent.show_from_tray)
-        refresh_action.triggered.connect(parent.request_runtime_refresh)
-        exit_action.triggered.connect(parent.request_exit)
+        show_action.triggered.connect(action_owner.show_from_tray)
+        refresh_action.triggered.connect(action_owner.request_runtime_refresh)
+        exit_action.triggered.connect(action_owner.request_exit)
         self.menu.addActions([show_action, refresh_action, exit_action])
-        self.setContextMenu(self.menu)
+        self.activated.connect(self._on_activated)
+
+    def _on_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
+        if reason in {QSystemTrayIcon.ActivationReason.Trigger, QSystemTrayIcon.ActivationReason.DoubleClick}:
+            self._action_owner.show_from_tray()
+            return
+        if reason != QSystemTrayIcon.ActivationReason.Context:
+            return
+        self._action_owner._close_tray_alert_flyout()
+        self._set_foreground_window()
+        self.menu.popup(QCursor.pos())
+
+    def _set_foreground_window(self) -> None:
+        try:
+            ctypes.windll.user32.SetForegroundWindow(int(self._tray_parent.winId()))
+        except Exception:
+            logger.debug("Failed to set tray host as foreground window", exc_info=True)
 
 
 class MainWindow(FluentWindow):
@@ -109,7 +128,7 @@ class MainWindow(FluentWindow):
         self.resize(self.DEFAULT_WIDTH, self.DEFAULT_HEIGHT)
 
         self._allow_exit = False
-        self._tray_message_shown = False
+        self._tray_host: QWidget | None = None
         self._tray_icon: AssistIMSystemTrayIcon | None = None
         self._tray_menu: SystemTrayMenu | None = None
         self._tray_alert_entries: OrderedDict[str, TrayAlertEntry] = OrderedDict()
@@ -388,9 +407,10 @@ class MainWindow(FluentWindow):
             logger.warning("System tray is not available on this platform")
             return
 
-        self._tray_icon = AssistIMSystemTrayIcon(self)
+        self._tray_host = QWidget()
+        self._tray_host.setWindowIcon(self._tray_normal_icon)
+        self._tray_icon = AssistIMSystemTrayIcon(self._tray_host, self)
         self._tray_menu = self._tray_icon.menu
-        self._tray_icon.activated.connect(self._on_tray_activated)
 
         self._tray_icon.show()
         self._apply_tray_icon()
@@ -444,12 +464,6 @@ class MainWindow(FluentWindow):
         """Ask the application shell to retry the authenticated runtime refresh."""
         self.show_from_tray()
         self.runtimeRefreshRequested.emit()
-
-    def _on_tray_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
-        if reason in {QSystemTrayIcon.ActivationReason.Trigger, QSystemTrayIcon.ActivationReason.DoubleClick}:
-            self.show_from_tray()
-        elif reason == QSystemTrayIcon.ActivationReason.Context:
-            self._close_tray_alert_flyout()
 
     def show_session_replaced_warning(self) -> None:
         """Warn the user that this client was replaced by a newer login and close shortly after."""
@@ -533,17 +547,6 @@ class MainWindow(FluentWindow):
             logger.info("MainWindow closeEvent, hiding to tray")
             event.ignore()
             self.hide()
-            if not self._tray_message_shown:
-                self._tray_message_shown = True
-                self._tray_icon.showMessage(
-                    tr("common.app_name", "AssistIM"),
-                    tr(
-                        "main_window.tray.background_message",
-                        "AssistIM is still running in the background. Restore or quit it from the system tray.",
-                    ),
-                    QSystemTrayIcon.MessageIcon.Information,
-                    2500,
-                )
             return
 
         logger.info("MainWindow closeEvent, tray unavailable, request exit")

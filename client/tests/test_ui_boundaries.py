@@ -313,23 +313,53 @@ def test_main_window_does_not_set_window_title_or_icon_and_tray_uses_logo() -> N
     assert 'self.windowIcon()' not in refresh_block
 
 
-def test_main_window_tray_context_menu_uses_system_tray_menu() -> None:
+def test_main_window_tray_context_menu_uses_foreground_system_tray_menu() -> None:
     main_window = Path('client/ui/windows/main_window.py').read_text(encoding='utf-8')
     tray_icon_block = main_window.split('class AssistIMSystemTrayIcon', 1)[1].split('class MainWindow', 1)[0]
     init_tray_block = main_window.split('def _init_system_tray(self) -> None:', 1)[1].split('def _onThemeChangedFinished', 1)[0]
-    tray_activated_block = main_window.split('def _on_tray_activated', 1)[1].split('def show_session_replaced_warning', 1)[0]
 
+    assert 'ctypes' in main_window
     assert 'SystemTrayMenu,' in main_window
+    assert 'QWidget' in main_window
+    assert 'QMenu' not in main_window
+    assert 'QAction' not in main_window
     assert 'MenuAnimationType,' not in main_window
     assert 'class AssistIMSystemTrayIcon(QSystemTrayIcon):' in main_window
-    assert 'self.menu = SystemTrayMenu(parent=parent)' in tray_icon_block
+    assert 'def __init__(self, tray_parent: QWidget, action_owner: "MainWindow"):' in tray_icon_block
+    assert 'super().__init__(parent=tray_parent)' in tray_icon_block
+    assert 'super().__init__()' not in tray_icon_block
+    assert 'self._tray_parent = tray_parent' in tray_icon_block
+    assert 'self._action_owner = action_owner' in tray_icon_block
+    assert 'self.menu = SystemTrayMenu(parent=tray_parent)' in tray_icon_block
+    assert 'show_action = Action(AppIcon.HOME, tr("common.show_main_window", "Show Main Window"), self)' in tray_icon_block
+    assert 'refresh_action = Action(AppIcon.SYNC, tr("main_window.refresh_connection", "Refresh Connection"), self)' in tray_icon_block
+    assert 'exit_action = Action(AppIcon.CLOSE, tr("common.exit", "Exit"), self)' in tray_icon_block
+    assert 'show_action.triggered.connect(action_owner.show_from_tray)' in tray_icon_block
+    assert 'refresh_action.triggered.connect(action_owner.request_runtime_refresh)' in tray_icon_block
+    assert 'exit_action.triggered.connect(action_owner.request_exit)' in tray_icon_block
     assert 'self.menu.addActions([show_action, refresh_action, exit_action])' in tray_icon_block
-    assert 'self.setContextMenu(self.menu)' in tray_icon_block
+    assert 'self.setContextMenu(self.menu)' not in tray_icon_block
+    assert 'self.activated.connect(self._on_activated)' in tray_icon_block
+    assert 'def _on_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:' in tray_icon_block
+    assert 'QSystemTrayIcon.ActivationReason.Trigger' in tray_icon_block
+    assert 'QSystemTrayIcon.ActivationReason.DoubleClick' in tray_icon_block
+    assert 'self._action_owner.show_from_tray()' in tray_icon_block
+    assert 'QSystemTrayIcon.ActivationReason.Context' in tray_icon_block
+    assert 'self._action_owner._close_tray_alert_flyout()' in tray_icon_block
+    assert 'self._set_foreground_window()' in tray_icon_block
+    assert 'self.menu.popup(QCursor.pos())' in tray_icon_block
+    assert 'ctypes.windll.user32.SetForegroundWindow(int(self._tray_parent.winId()))' in tray_icon_block
+    assert 'self._tray_host: QWidget | None = None' in main_window
     assert 'self._tray_icon: AssistIMSystemTrayIcon | None = None' in main_window
     assert 'self._tray_menu: SystemTrayMenu | None = None' in main_window
-    assert 'self._tray_icon = AssistIMSystemTrayIcon(self)' in init_tray_block
+    assert '_tray_message_shown' not in main_window
+    assert '.showMessage(' not in main_window
+    assert 'self._tray_host = QWidget()' in init_tray_block
+    assert 'self._tray_host.setWindowIcon(self._tray_normal_icon)' in init_tray_block
+    assert 'self._tray_icon = AssistIMSystemTrayIcon(self._tray_host, self)' in init_tray_block
     assert 'self._tray_menu = self._tray_icon.menu' in init_tray_block
-    assert 'self._close_tray_alert_flyout()' in tray_activated_block
+    assert 'def _on_tray_activated' not in main_window
+    assert 'self.menu.aboutToShow.connect(parent._close_tray_alert_flyout)' not in main_window
     assert 'self._show_tray_context_menu' not in main_window
     assert 'self._close_tray_context_menu' not in main_window
     assert 'def _tray_menu_position' not in main_window
