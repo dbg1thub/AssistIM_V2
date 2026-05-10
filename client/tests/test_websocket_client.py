@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from concurrent.futures import Future
+from pathlib import Path
 
 import pytest
 
@@ -113,6 +114,13 @@ def test_websocket_worker_loop_refuses_to_replace_stuck_thread() -> None:
 
 def test_websocket_connection_closed_details_include_code_and_reason() -> None:
     assert _connection_closed_details(_ConnectionClosedLike()) == ("1001", "server reload")
+
+
+def test_websocket_message_signal_uses_python_object_payload() -> None:
+    source = Path("client/network/websocket_client.py").read_text(encoding="utf-8")
+
+    assert "message_received = Signal(object)" in source
+    assert "message_received = Signal(dict)" not in source
 
 
 def test_websocket_unexpected_disconnect_resets_state_before_reconnect() -> None:

@@ -58,7 +58,7 @@ try:
         
         connected = Signal()
         disconnected = Signal()
-        message_received = Signal(dict)
+        message_received = Signal(object)
         state_changed = Signal(str)
         error_occurred = Signal(str)
         dispatch_requested = Signal()
