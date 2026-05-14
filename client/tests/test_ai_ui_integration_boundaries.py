@@ -293,6 +293,14 @@ def test_summary_infobar_only_targets_current_active_session() -> None:
     assert '"chat.summary.completed"' in chat_interface
 
 
+def test_conversation_summary_idle_refresh_only_runs_when_chat_hidden() -> None:
+    chat_interface = Path("client/ui/windows/chat_interface.py").read_text(encoding="utf-8")
+
+    assert 'reason="session_switch"' not in chat_interface
+    assert 'reason="chat_hidden"' in chat_interface
+    assert "delay_seconds=manager.IDLE_REFRESH_DELAY_SECONDS" in chat_interface
+
+
 def test_ai_perf_ui_logging_uses_decision_fields_without_content() -> None:
     chat_interface = Path("client/ui/windows/chat_interface.py").read_text(encoding="utf-8")
 

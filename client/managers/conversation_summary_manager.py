@@ -47,6 +47,7 @@ class ConversationSummaryManager:
     # Debounce prevents every incoming message from immediately scheduling model work.
     DEBOUNCE_SECONDS = 20.0
     CLOSE_BUCKET_REFRESH_DELAY = 0.0
+    IDLE_REFRESH_DELAY_SECONDS = 10.0
     IDLE_REFRESH_THROTTLE_SECONDS = 5.0
     MEMORY_SOURCE_TYPE_SUMMARY = "summary"
     AI_MEMORY_SOURCE_TYPE_SUMMARY = "conversation_summary"
@@ -728,8 +729,14 @@ class ConversationSummaryManager:
             self._pending_refresh_delays.pop(key, None)
             self._last_idle_refresh_requested_at.pop(key, None)
 
-    async def schedule_idle_refresh(self, session_id: str, *, reason: str = "") -> bool:
-        """Schedule an immediate low-priority summary refresh when the user leaves a chat context."""
+    async def schedule_idle_refresh(
+        self,
+        session_id: str,
+        *,
+        reason: str = "",
+        delay_seconds: float | None = None,
+    ) -> bool:
+        """Schedule a low-priority summary refresh after the user leaves a chat context."""
         normalized_session_id = str(session_id or "").strip()
         if not normalized_session_id or self._closing or self._is_task_manager_closed():
             return False
@@ -755,7 +762,11 @@ class ConversationSummaryManager:
                 updated["updated_at"] = int(time.time())
                 await self._db.upsert_conversation_summary_bucket(updated)
                 await self._delete_memory_item_for_bucket(normalized_session_id, bucket_start_ts)
-                self._schedule_refresh(normalized_session_id, bucket_start_ts, delay=0.0)
+                self._schedule_refresh(
+                    normalized_session_id,
+                    bucket_start_ts,
+                    delay=self.IDLE_REFRESH_DELAY_SECONDS if delay_seconds is None else max(float(delay_seconds), 0.0),
+                )
                 logger.info(
                     "[ai-perf] conversation_summary_schema_rebuild_scheduled session_id=%s bucket_start_ts=%s reason=%s",
                     normalized_session_id,
@@ -787,12 +798,14 @@ class ConversationSummaryManager:
             updated["bucket_end_ts"] = max(int(updated.get("bucket_end_ts") or bucket_start_ts), last_message_ts)
         await self._db.upsert_conversation_summary_bucket(updated)
         await self._delete_memory_item_for_bucket(normalized_session_id, bucket_start_ts)
-        self._schedule_refresh(normalized_session_id, bucket_start_ts, delay=0.0)
+        refresh_delay = self.IDLE_REFRESH_DELAY_SECONDS if delay_seconds is None else max(float(delay_seconds), 0.0)
+        self._schedule_refresh(normalized_session_id, bucket_start_ts, delay=refresh_delay)
         logger.info(
-            "[ai-perf] conversation_summary_idle_refresh_scheduled session_id=%s bucket_start_ts=%s reason=%s status=%s message_count=%s",
+            "[ai-perf] conversation_summary_idle_refresh_scheduled session_id=%s bucket_start_ts=%s reason=%s delay_seconds=%s status=%s message_count=%s",
             normalized_session_id,
             bucket_start_ts,
             str(reason or "idle"),
+            refresh_delay,
             str(bucket.get("summary_status") or ""),
             int(stats.get("message_count") or 0),
         )

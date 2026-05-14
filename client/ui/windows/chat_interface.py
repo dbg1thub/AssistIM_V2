@@ -1561,7 +1561,6 @@ class ChatInterface(QWidget):
             generation,
             self._session_visibility_active,
         )
-        self._schedule_idle_summary_refresh_for_session(self._current_session_id, reason="session_switch")
         self._reset_reply_suggestion_flow(clear_ui=True)
         self._remember_current_session_view_state()
         self._remember_current_composer_draft()
@@ -5656,7 +5655,11 @@ class ChatInterface(QWidget):
             return
         manager = get_conversation_summary_manager()
         self._schedule_ui_task(
-            manager.schedule_idle_refresh(normalized_session_id, reason=reason),
+            manager.schedule_idle_refresh(
+                normalized_session_id,
+                reason=reason,
+                delay_seconds=manager.IDLE_REFRESH_DELAY_SECONDS,
+            ),
             f"idle summary refresh {normalized_session_id} {reason}",
         )
 
@@ -5845,7 +5848,6 @@ class ChatInterface(QWidget):
         if not self._is_session_focus_generation_current(generation):
             return False
 
-        self._schedule_idle_summary_refresh_for_session(self._current_session_id, reason="session_switch")
         self._reset_reply_suggestion_flow(clear_ui=True)
         self._remember_current_session_view_state()
         self._remember_current_composer_draft()
