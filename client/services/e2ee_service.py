@@ -1372,7 +1372,11 @@ class E2EEService:
         if not session_id or not sender_device_id or not sender_key_id or not nonce_b64 or not ciphertext_b64:
             raise RuntimeError("incomplete encrypted group message envelope")
 
-        sender_key_record = await self.get_group_sender_key_record(session_id, owner_device_id=sender_device_id)
+        sender_key_record = await self.get_group_sender_key_record(
+            session_id,
+            owner_device_id=sender_device_id,
+            sender_key_id=sender_key_id,
+        )
         if sender_key_record is None:
             matching_fanout = self._select_group_fanout_envelope(
                 encryption.get("fanout"),
@@ -1381,7 +1385,11 @@ class E2EEService:
             )
             if matching_fanout is not None:
                 await self.apply_group_session_fanout(matching_fanout)
-                sender_key_record = await self.get_group_sender_key_record(session_id, owner_device_id=sender_device_id)
+                sender_key_record = await self.get_group_sender_key_record(
+                    session_id,
+                    owner_device_id=sender_device_id,
+                    sender_key_id=sender_key_id,
+                )
         if sender_key_record is None:
             return None
 

@@ -1556,6 +1556,64 @@ def test_e2ee_service_encrypts_group_text_with_sender_key_fanout(monkeypatch) ->
     asyncio.run(scenario())
 
 
+def test_e2ee_service_group_text_decryption_binds_sender_key_id(monkeypatch) -> None:
+    alice_db = FakeDatabase()
+    bob_db = FakeDatabase()
+
+    monkeypatch.setattr(e2ee_service_module, "get_http_client", lambda: FakeHttpClient())
+
+    async def scenario() -> None:
+        monkeypatch.setattr(e2ee_service_module, "get_database", lambda: alice_db)
+        alice_service = e2ee_service_module.E2EEService()
+        alice_bundle = await alice_service.get_or_create_local_bundle()
+
+        monkeypatch.setattr(e2ee_service_module, "get_database", lambda: bob_db)
+        bob_service = e2ee_service_module.E2EEService()
+        bob_bundle = await bob_service.get_or_create_local_bundle()
+        bob_remote_bundle = build_remote_bundle(bob_bundle, user_id="bob")
+
+        monkeypatch.setattr(e2ee_service_module, "get_database", lambda: alice_db)
+        old_ciphertext, old_encryption = await alice_service.encrypt_text_for_group_session(
+            "session-group-text-key-id",
+            "old encrypted group message",
+            [bob_remote_bundle],
+            member_version=1,
+            owner_user_id="alice",
+        )
+        _new_ciphertext, new_encryption = await alice_service.encrypt_text_for_group_session(
+            "session-group-text-key-id",
+            "new encrypted group message",
+            [bob_remote_bundle],
+            member_version=2,
+            owner_user_id="alice",
+        )
+
+        old_remote = sanitize_outbound_message_extra({"encryption": old_encryption})["encryption"]
+        new_remote = sanitize_outbound_message_extra({"encryption": new_encryption})["encryption"]
+        assert old_remote["sender_key_id"] != new_remote["sender_key_id"]
+
+        monkeypatch.setattr(e2ee_service_module, "get_database", lambda: bob_db)
+        await bob_service.apply_group_session_fanout(new_remote["fanout"][0])
+        installed_key = await bob_service.get_group_sender_key_record(
+            "session-group-text-key-id",
+            owner_device_id=alice_bundle["device_id"],
+        )
+        assert installed_key is not None
+        assert installed_key["key_id"] == new_remote["sender_key_id"]
+
+        plaintext = await bob_service.decrypt_text_content(
+            old_ciphertext,
+            {
+                "session_id": "session-group-text-key-id",
+                "encryption": old_remote,
+            },
+        )
+
+        assert plaintext is None
+
+    asyncio.run(scenario())
+
+
 def test_e2ee_service_encrypts_group_attachment_with_sender_key_fanout(monkeypatch) -> None:
     alice_db = FakeDatabase()
     bob_db = FakeDatabase()
