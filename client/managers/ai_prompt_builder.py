@@ -9,7 +9,6 @@ from enum import Enum
 from typing import Any, Sequence
 
 from client.core.file_text_extraction import extracted_file_context_text
-from client.core.image_summary import image_summary_context_text
 from client.core.message_translation import AI_TRANSLATION_NOOP_MARKER, language_name_for_code
 from client.core.voice_transcription import VOICE_TRANSCRIPT_EXTRA_KEY
 from client.models.ai_assistant import AIMessage, AIMessageRole
@@ -760,9 +759,6 @@ class AIPromptBuilder:
                 return ""
             name = self._attachment_name(message)
             return f"[文件内容: {name}: {file_text}]" if name else f"[文件内容: {file_text}]"
-        if message.message_type == MessageType.IMAGE:
-            image_summary = image_summary_context_text(message.extra, max_chars=self.MAX_MESSAGE_CHARS)
-            return f"[图片摘要: {image_summary}]" if image_summary else ""
         if message.message_type == MessageType.VOICE:
             transcript = dict((message.extra or {}).get(VOICE_TRANSCRIPT_EXTRA_KEY) or {})
             if str(transcript.get("status") or "").strip() != "ready":
@@ -867,9 +863,6 @@ def reply_anchor_text(message: ChatMessage) -> str:
             return ""
         name = AIPromptBuilder._attachment_name(message)
         return f"[文件内容: {name}: {file_text}]" if name else f"[文件内容: {file_text}]"
-    if message.message_type == MessageType.IMAGE:
-        image_summary = image_summary_context_text(message.extra, max_chars=AIPromptBuilder.MAX_MESSAGE_CHARS)
-        return f"[图片摘要: {image_summary}]" if image_summary else ""
     if message.message_type == MessageType.VOICE:
         transcript = dict((message.extra or {}).get(VOICE_TRANSCRIPT_EXTRA_KEY) or {})
         if str(transcript.get("status") or "").strip() != "ready":
