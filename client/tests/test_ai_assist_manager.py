@@ -43,6 +43,7 @@ from client.managers.ai_assist_manager import AIAssistManager, AIReplySuggestion
 from client.managers.ai_prompt_builder import AIAssistAction
 from client.managers.ai_task_manager import AITaskSnapshot, AITaskState
 from client.managers.conversation_memory_manager import ConversationMemoryContext
+from client.core.voice_transcription import VOICE_TRANSCRIPT_EXTRA_KEY
 from client.core.secure_storage import SecureStorage
 from client.models.message import ChatMessage, MessageStatus, MessageType, Session
 from client.services.ai_service import AIErrorCode, AIPrivacyScope, AITaskType
@@ -172,6 +173,28 @@ def _peer_message(message_id: str = "m1", content: str = "你看下这个？") -
         sender_id="peer",
         content=content,
         status=MessageStatus.RECEIVED,
+    )
+
+
+def _peer_voice_message(
+    message_id: str = "voice-1",
+    *,
+    transcript_text: str = "你帮我看一下这个时间行不行？",
+    transcript_status: str = "ready",
+) -> ChatMessage:
+    return ChatMessage(
+        message_id=message_id,
+        session_id="s1",
+        sender_id="peer",
+        content="[voice]",
+        message_type=MessageType.VOICE,
+        status=MessageStatus.RECEIVED,
+        extra={
+            VOICE_TRANSCRIPT_EXTRA_KEY: {
+                "status": transcript_status,
+                "text": transcript_text,
+            }
+        },
     )
 
 
@@ -555,6 +578,34 @@ def test_suggest_replies_ignores_non_text_and_invalid_peer_messages() -> None:
     )
 
     assert manager.can_suggest_replies(_session(), [image, failed]) == (
+        False,
+        "no_peer_text_message",
+    )
+
+
+def test_suggest_replies_uses_ready_voice_transcript_as_anchor() -> None:
+    async def scenario() -> None:
+        fake = FakeTaskManager(
+            content="可以，这个时间我方便。\n我看可以，咱们就按这个来。\n这会儿我不太确定。\n我晚点确认后回复你。"
+        )
+        manager = AIAssistManager(task_manager=fake)
+
+        state = await manager.suggest_replies(_session(), [_peer_voice_message()], current_user_id="me")
+
+        assert state.status == AIReplySuggestionStatus.READY
+        assert state.anchor_message_id == "voice-1"
+        prompt = fake.requests[0].messages[0]["content"]
+        assert "当前待回复消息组：" in prompt
+        assert "[语音转文字: 你帮我看一下这个时间行不行？]" in prompt
+        assert fake.requests[0].metadata["anchor_message_id"] == "voice-1"
+
+    asyncio.run(scenario())
+
+
+def test_suggest_replies_skips_voice_without_ready_transcript() -> None:
+    manager = AIAssistManager(task_manager=FakeTaskManager())
+
+    assert manager.can_suggest_replies(_session(), [_peer_voice_message(transcript_status="pending")]) == (
         False,
         "no_peer_text_message",
     )

@@ -362,9 +362,9 @@ class AIPromptBuilder:
         fallback_mode: bool = False,
     ) -> ReplySuggestionRequest:
         """Build an AI request for private reply suggestions."""
-        anchor_group = latest_peer_text_message_group(messages, current_user_id=current_user_id)
+        anchor_group = latest_peer_reply_anchor_group(messages, current_user_id=current_user_id)
         if not anchor_group:
-            raise ValueError("reply suggestions require a latest peer text message")
+            raise ValueError("reply suggestions require a latest peer text or transcribed voice message")
         anchor = anchor_group[-1]
 
         context_limit = max(1, int(max_context_messages or self.MAX_CONTEXT_MESSAGES))
@@ -372,7 +372,7 @@ class AIPromptBuilder:
         direct_context = self._format_context(direct_context_messages)
         recent_context_count = sum(1 for message in direct_context_messages if self._message_context_text(message))
         grouped_anchor_lines = [
-            _normalize_text(message.content, max_chars=self.MAX_MESSAGE_CHARS)
+            self._message_context_text(message)
             for message in anchor_group
         ]
         grouped_anchor_lines = [line for line in grouped_anchor_lines if line]
@@ -381,7 +381,7 @@ class AIPromptBuilder:
         prompt_sections[-1] += "\n" + "\n".join(
             f"{index + 1}. {line}" for index, line in enumerate(grouped_anchor_lines)
         )
-        prompt_sections[-1] += f"\n最新一句：{_normalize_text(anchor.content, max_chars=self.MAX_MESSAGE_CHARS)}"
+        prompt_sections[-1] += f"\n最新一句：{self._message_context_text(anchor)}"
         if direct_context:
             prompt_sections.append(f"最近直接上下文：\n{direct_context}")
         open_bucket_summary = _normalize_text(
@@ -503,9 +503,9 @@ class AIPromptBuilder:
         fallback_mode: bool = False,
     ) -> ReplySuggestionRequest:
         """Build one single-candidate reply request for iterative suggestion generation."""
-        anchor_group = latest_peer_text_message_group(messages, current_user_id=current_user_id)
+        anchor_group = latest_peer_reply_anchor_group(messages, current_user_id=current_user_id)
         if not anchor_group:
-            raise ValueError("reply suggestions require a latest peer text message")
+            raise ValueError("reply suggestions require a latest peer text or transcribed voice message")
         anchor = anchor_group[-1]
 
         context_limit = max(1, int(max_context_messages or self.MAX_CONTEXT_MESSAGES))
@@ -513,7 +513,7 @@ class AIPromptBuilder:
         direct_context = self._format_context(direct_context_messages)
         recent_context_count = sum(1 for message in direct_context_messages if self._message_context_text(message))
         grouped_anchor_lines = [
-            _normalize_text(message.content, max_chars=self.MAX_MESSAGE_CHARS)
+            self._message_context_text(message)
             for message in anchor_group
         ]
         grouped_anchor_lines = [line for line in grouped_anchor_lines if line]
@@ -522,7 +522,7 @@ class AIPromptBuilder:
         prompt_sections[-1] += "\n" + "\n".join(
             f"{index + 1}. {line}" for index, line in enumerate(grouped_anchor_lines)
         )
-        prompt_sections[-1] += f"\n最新一句：{_normalize_text(anchor.content, max_chars=self.MAX_MESSAGE_CHARS)}"
+        prompt_sections[-1] += f"\n最新一句：{self._message_context_text(anchor)}"
         if direct_context:
             prompt_sections.append(f"最近直接上下文：\n{direct_context}")
         open_bucket_summary = _normalize_text(
@@ -850,26 +850,75 @@ def privacy_scope_for_session(session: Session | None) -> AIPrivacyScope:
     return AIPrivacyScope.GENERAL
 
 
+def reply_anchor_text(message: ChatMessage) -> str:
+    """Return text that can safely anchor reply suggestions."""
+    status = str(getattr(message.status, "value", message.status))
+    if status in {"failed", "recalled"} or message.is_ai:
+        return ""
+    if message.message_type == MessageType.TEXT:
+        return _normalize_text(message.content, max_chars=AIPromptBuilder.MAX_MESSAGE_CHARS)
+    if message.message_type == MessageType.VOICE:
+        transcript = dict((message.extra or {}).get(VOICE_TRANSCRIPT_EXTRA_KEY) or {})
+        if str(transcript.get("status") or "").strip() != "ready":
+            return ""
+        text = _normalize_text(transcript.get("text"), max_chars=AIPromptBuilder.MAX_MESSAGE_CHARS)
+        return f"[语音转文字: {text}]" if text else ""
+    return ""
+
+
+def latest_peer_reply_anchor_message(
+    messages: Sequence[ChatMessage],
+    *,
+    current_user_id: str = "",
+) -> ChatMessage | None:
+    """Return the latest peer message that can anchor reply suggestions."""
+    normalized_current_user_id = str(current_user_id or "").strip()
+    for message in reversed(list(messages or [])):
+        if message.is_ai or message.is_self:
+            continue
+        if normalized_current_user_id and str(message.sender_id or "").strip() == normalized_current_user_id:
+            continue
+        if not reply_anchor_text(message):
+            continue
+        return message
+    return None
+
+
+def latest_peer_reply_anchor_group(
+    messages: Sequence[ChatMessage],
+    *,
+    current_user_id: str = "",
+    max_group_messages: int = 4,
+) -> tuple[ChatMessage, ...]:
+    """Return the latest consecutive peer messages used for one reply round."""
+    normalized_current_user_id = str(current_user_id or "").strip()
+    collected: list[ChatMessage] = []
+    for message in reversed(list(messages or [])):
+        if len(collected) >= max(1, int(max_group_messages or 1)):
+            break
+        if message.is_ai or message.is_self:
+            if collected:
+                break
+            continue
+        if normalized_current_user_id and str(message.sender_id or "").strip() == normalized_current_user_id:
+            if collected:
+                break
+            continue
+        if not reply_anchor_text(message):
+            if collected:
+                break
+            continue
+        collected.append(message)
+    return tuple(reversed(collected))
+
+
 def latest_peer_text_message(
     messages: Sequence[ChatMessage],
     *,
     current_user_id: str = "",
 ) -> ChatMessage | None:
-    """Return the latest text message from the peer that can anchor suggestions."""
-    normalized_current_user_id = str(current_user_id or "").strip()
-    for message in reversed(list(messages or [])):
-        if message.message_type != MessageType.TEXT:
-            continue
-        if message.is_ai or message.is_self:
-            continue
-        if normalized_current_user_id and str(message.sender_id or "").strip() == normalized_current_user_id:
-            continue
-        if str(getattr(message.status, "value", message.status)) in {"failed", "recalled"}:
-            continue
-        if not str(message.content or "").strip():
-            continue
-        return message
-    return None
+    """Backward-compatible alias for reply-suggestion anchor lookup."""
+    return latest_peer_reply_anchor_message(messages, current_user_id=current_user_id)
 
 
 def latest_peer_text_message_group(
@@ -878,34 +927,12 @@ def latest_peer_text_message_group(
     current_user_id: str = "",
     max_group_messages: int = 4,
 ) -> tuple[ChatMessage, ...]:
-    """Return the latest consecutive peer-text message burst used for one reply round."""
-    normalized_current_user_id = str(current_user_id or "").strip()
-    collected: list[ChatMessage] = []
-    for message in reversed(list(messages or [])):
-        if len(collected) >= max(1, int(max_group_messages or 1)):
-            break
-        if message.message_type != MessageType.TEXT:
-            if collected:
-                break
-            continue
-        if message.is_ai or message.is_self:
-            if collected:
-                break
-            continue
-        if normalized_current_user_id and str(message.sender_id or "").strip() == normalized_current_user_id:
-            if collected:
-                break
-            continue
-        if str(getattr(message.status, "value", message.status)) in {"failed", "recalled"}:
-            if collected:
-                break
-            continue
-        if not str(message.content or "").strip():
-            if collected:
-                break
-            continue
-        collected.append(message)
-    return tuple(reversed(collected))
+    """Backward-compatible alias for reply-suggestion anchor group lookup."""
+    return latest_peer_reply_anchor_group(
+        messages,
+        current_user_id=current_user_id,
+        max_group_messages=max_group_messages,
+    )
 
 
 def _normalize_text(value: str, *, max_chars: int) -> str:

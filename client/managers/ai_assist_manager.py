@@ -15,8 +15,9 @@ from client.managers.ai_prompt_builder import (
     ReplySuggestionParseDiagnostics,
     ReplySummaryContext,
     coerce_assist_action,
-    latest_peer_text_message,
-    latest_peer_text_message_group,
+    latest_peer_reply_anchor_group,
+    latest_peer_reply_anchor_message,
+    reply_anchor_text,
 )
 from client.managers.ai_task_manager import AITaskManager, AITaskSnapshot, AITaskState, get_ai_task_manager
 from client.managers.conversation_memory_manager import ConversationMemoryManager
@@ -361,25 +362,24 @@ class AIAssistManager:
         if session.session_type not in {"direct", "private"}:
             return False, "unsupported_session_type", None
         normalized_current_user_id = str(current_user_id or "").strip()
-        latest_visible_text = next(
+        latest_visible_anchor = next(
             (
                 message
                 for message in reversed(list(messages or []))
-                if message.message_type == MessageType.TEXT
-                and not message.is_ai
+                if not message.is_ai
                 and str(getattr(message.status, "value", message.status)) not in {"failed", "recalled"}
-                and str(message.content or "").strip()
+                and reply_anchor_text(message)
             ),
             None,
         )
-        if latest_visible_text is not None:
-            latest_is_self = bool(latest_visible_text.is_self)
-            if normalized_current_user_id and str(latest_visible_text.sender_id or "").strip() == normalized_current_user_id:
+        if latest_visible_anchor is not None:
+            latest_is_self = bool(latest_visible_anchor.is_self)
+            if normalized_current_user_id and str(latest_visible_anchor.sender_id or "").strip() == normalized_current_user_id:
                 latest_is_self = True
             if latest_is_self:
                 return False, "latest_text_from_self", None
 
-        anchor = latest_peer_text_message(messages, current_user_id=current_user_id)
+        anchor = latest_peer_reply_anchor_message(messages, current_user_id=current_user_id)
         if anchor is None:
             return False, "no_peer_text_message", None
 
@@ -460,7 +460,7 @@ class AIAssistManager:
         current_user_id: str,
         summary_context: ReplySummaryContext,
     ) -> AIReplySuggestionState:
-        anchor_message = latest_peer_text_message(messages, current_user_id=current_user_id)
+        anchor_message = latest_peer_reply_anchor_message(messages, current_user_id=current_user_id)
         if anchor_message is None:
             return AIReplySuggestionState(
                 session_id=session.session_id,
@@ -679,7 +679,7 @@ class AIAssistManager:
         if not direct_context_messages:
             return []
 
-        anchor_group = latest_peer_text_message_group(messages, current_user_id=current_user_id)
+        anchor_group = latest_peer_reply_anchor_group(messages, current_user_id=current_user_id)
         if not anchor_group:
             return []
 
@@ -725,9 +725,9 @@ class AIAssistManager:
             role = "我" if bool(message.is_self) else "对方"
             lines.append(f"{role}: {str(message.content or '').strip()}")
         anchor_text = " ".join(
-            str(message.content or "").strip()
+            reply_anchor_text(message)
             for message in list(anchor_group or [])
-            if str(message.content or "").strip()
+            if reply_anchor_text(message)
         ).strip()
         if anchor_text:
             lines.append(f"当前待回复: {anchor_text}")
