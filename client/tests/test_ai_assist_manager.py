@@ -43,6 +43,7 @@ from client.managers.ai_assist_manager import AIAssistManager, AIReplySuggestion
 from client.managers.ai_prompt_builder import AIAssistAction
 from client.managers.ai_task_manager import AITaskSnapshot, AITaskState
 from client.managers.conversation_memory_manager import ConversationMemoryContext
+from client.core.file_text_extraction import FILE_TEXT_EXTRACT_EXTRA_KEY
 from client.core.voice_transcription import VOICE_TRANSCRIPT_EXTRA_KEY
 from client.core.secure_storage import SecureStorage
 from client.models.message import ChatMessage, MessageStatus, MessageType, Session
@@ -194,6 +195,29 @@ def _peer_voice_message(
                 "status": transcript_status,
                 "text": transcript_text,
             }
+        },
+    )
+
+
+def _peer_file_message(
+    message_id: str = "file-1",
+    *,
+    extract_text: str = "合同金额为 100 元，付款期限为周五。",
+    extract_status: str = "ready",
+) -> ChatMessage:
+    return ChatMessage(
+        message_id=message_id,
+        session_id="s1",
+        sender_id="peer",
+        content="/uploads/report.pdf",
+        message_type=MessageType.FILE,
+        status=MessageStatus.RECEIVED,
+        extra={
+            "name": "report.pdf",
+            FILE_TEXT_EXTRACT_EXTRA_KEY: {
+                "status": extract_status,
+                "text": extract_text,
+            },
         },
     )
 
@@ -606,6 +630,33 @@ def test_suggest_replies_skips_voice_without_ready_transcript() -> None:
     manager = AIAssistManager(task_manager=FakeTaskManager())
 
     assert manager.can_suggest_replies(_session(), [_peer_voice_message(transcript_status="pending")]) == (
+        False,
+        "no_peer_text_message",
+    )
+
+
+def test_suggest_replies_uses_ready_file_extract_as_anchor() -> None:
+    async def scenario() -> None:
+        fake = FakeTaskManager(
+            content="我看到了，合同金额和付款时间都清楚。\n可以，我按文件内容继续确认。\n我现在不方便确认文件细节。\n我晚点看完再回复你。"
+        )
+        manager = AIAssistManager(task_manager=fake)
+
+        state = await manager.suggest_replies(_session(), [_peer_file_message()], current_user_id="me")
+
+        assert state.status == AIReplySuggestionStatus.READY
+        assert state.anchor_message_id == "file-1"
+        prompt = fake.requests[0].messages[0]["content"]
+        assert "[文件内容: report.pdf: 合同金额为 100 元，付款期限为周五。]" in prompt
+        assert fake.requests[0].metadata["anchor_message_id"] == "file-1"
+
+    asyncio.run(scenario())
+
+
+def test_suggest_replies_skips_file_without_ready_extract() -> None:
+    manager = AIAssistManager(task_manager=FakeTaskManager())
+
+    assert manager.can_suggest_replies(_session(), [_peer_file_message(extract_status="pending")]) == (
         False,
         "no_peer_text_message",
     )

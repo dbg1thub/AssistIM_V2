@@ -857,6 +857,12 @@ def reply_anchor_text(message: ChatMessage) -> str:
         return ""
     if message.message_type == MessageType.TEXT:
         return _normalize_text(message.content, max_chars=AIPromptBuilder.MAX_MESSAGE_CHARS)
+    if message.message_type == MessageType.FILE:
+        file_text = extracted_file_context_text(message.extra, max_chars=AIPromptBuilder.MAX_MESSAGE_CHARS)
+        if not file_text:
+            return ""
+        name = AIPromptBuilder._attachment_name(message)
+        return f"[文件内容: {name}: {file_text}]" if name else f"[文件内容: {file_text}]"
     if message.message_type == MessageType.VOICE:
         transcript = dict((message.extra or {}).get(VOICE_TRANSCRIPT_EXTRA_KEY) or {})
         if str(transcript.get("status") or "").strip() != "ready":
