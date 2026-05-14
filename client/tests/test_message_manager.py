@@ -296,6 +296,7 @@ from client.events.moment_events import MomentEvent
 from client.core.message_translation import AI_TRANSLATION_EXTRA_KEY
 from client.core.voice_transcription import VOICE_TRANSCRIPT_EXTRA_KEY
 from client.core.file_text_extraction import FILE_SUMMARY_EXTRA_KEY, FILE_TEXT_EXTRACT_EXTRA_KEY
+from client.core.image_summary import IMAGE_SUMMARY_EXTRA_KEY
 from client.managers import message_manager as message_manager_module
 from client.managers import session_manager as session_manager_module
 from client.ui.controllers import chat_controller as chat_controller_module
@@ -957,6 +958,22 @@ def test_file_analysis_extra_is_stripped_from_outbound_payload() -> None:
     assert outbound['media'] == {'url': '/uploads/report.pdf'}
 
 
+def test_image_summary_extra_is_stripped_from_outbound_payload() -> None:
+    outbound = sanitize_outbound_message_extra(
+        {
+            'name': 'whiteboard.png',
+            IMAGE_SUMMARY_EXTRA_KEY: {'status': 'ready', 'text': '不要发给服务端'},
+            'local_path': 'D:/local/whiteboard.png',
+            'media': {'url': '/uploads/whiteboard.png'},
+        }
+    )
+
+    assert IMAGE_SUMMARY_EXTRA_KEY not in outbound
+    assert 'local_path' not in outbound
+    assert outbound['name'] == 'whiteboard.png'
+    assert outbound['media'] == {'url': '/uploads/whiteboard.png'}
+
+
 def test_message_manager_preserves_local_voice_transcript_during_remote_refresh() -> None:
     manager = message_manager_module.MessageManager()
     existing = ChatMessage(
@@ -1015,6 +1032,35 @@ def test_message_manager_preserves_local_file_analysis_during_remote_refresh() -
 
     assert merged.extra[FILE_TEXT_EXTRACT_EXTRA_KEY] == {'status': 'ready', 'text': '合同金额为 100 元'}
     assert merged.extra[FILE_SUMMARY_EXTRA_KEY] == {'status': 'ready', 'text': '文件确认了合同金额。'}
+
+
+def test_message_manager_preserves_local_image_summary_during_remote_refresh() -> None:
+    manager = message_manager_module.MessageManager()
+    existing = ChatMessage(
+        message_id='m-image',
+        session_id='session-1',
+        sender_id='alice',
+        content='/uploads/whiteboard.png',
+        message_type=MessageType.IMAGE,
+        status=MessageStatus.RECEIVED,
+        extra={
+            'name': 'whiteboard.png',
+            IMAGE_SUMMARY_EXTRA_KEY: {'status': 'ready', 'text': '图片里是一张会议白板。'},
+        },
+    )
+    incoming = ChatMessage(
+        message_id='m-image',
+        session_id='session-1',
+        sender_id='alice',
+        content='/uploads/whiteboard.png',
+        message_type=MessageType.IMAGE,
+        status=MessageStatus.RECEIVED,
+        extra={'name': 'whiteboard.png'},
+    )
+
+    merged = manager._merge_local_encryption_cache(existing, incoming)
+
+    assert merged.extra[IMAGE_SUMMARY_EXTRA_KEY] == {'status': 'ready', 'text': '图片里是一张会议白板。'}
 
 
 def test_message_manager_retries_on_ack_timeout_and_merges_canonical_ack(monkeypatch) -> None:

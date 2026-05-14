@@ -44,6 +44,7 @@ from client.managers.ai_prompt_builder import AIAssistAction
 from client.managers.ai_task_manager import AITaskSnapshot, AITaskState
 from client.managers.conversation_memory_manager import ConversationMemoryContext
 from client.core.file_text_extraction import FILE_TEXT_EXTRACT_EXTRA_KEY
+from client.core.image_summary import IMAGE_SUMMARY_EXTRA_KEY
 from client.core.voice_transcription import VOICE_TRANSCRIPT_EXTRA_KEY
 from client.core.secure_storage import SecureStorage
 from client.models.message import ChatMessage, MessageStatus, MessageType, Session
@@ -217,6 +218,28 @@ def _peer_file_message(
             FILE_TEXT_EXTRACT_EXTRA_KEY: {
                 "status": extract_status,
                 "text": extract_text,
+            },
+        },
+    )
+
+
+def _peer_image_message(
+    message_id: str = "image-1",
+    *,
+    summary_text: str = "图片里是一张会议白板，写着周五前确认预算。",
+    summary_status: str = "ready",
+) -> ChatMessage:
+    return ChatMessage(
+        message_id=message_id,
+        session_id="s1",
+        sender_id="peer",
+        content="/uploads/whiteboard.png",
+        message_type=MessageType.IMAGE,
+        status=MessageStatus.RECEIVED,
+        extra={
+            IMAGE_SUMMARY_EXTRA_KEY: {
+                "status": summary_status,
+                "text": summary_text,
             },
         },
     )
@@ -657,6 +680,33 @@ def test_suggest_replies_skips_file_without_ready_extract() -> None:
     manager = AIAssistManager(task_manager=FakeTaskManager())
 
     assert manager.can_suggest_replies(_session(), [_peer_file_message(extract_status="pending")]) == (
+        False,
+        "no_peer_text_message",
+    )
+
+
+def test_suggest_replies_uses_ready_image_summary_as_anchor() -> None:
+    async def scenario() -> None:
+        fake = FakeTaskManager(
+            content="我看到了，周五前确认预算。\n可以，我按白板内容继续推进。\n这块我暂时还不能确认。\n我晚点看清楚后再回复你。"
+        )
+        manager = AIAssistManager(task_manager=fake)
+
+        state = await manager.suggest_replies(_session(), [_peer_image_message()], current_user_id="me")
+
+        assert state.status == AIReplySuggestionStatus.READY
+        assert state.anchor_message_id == "image-1"
+        prompt = fake.requests[0].messages[0]["content"]
+        assert "[图片摘要: 图片里是一张会议白板，写着周五前确认预算。]" in prompt
+        assert fake.requests[0].metadata["anchor_message_id"] == "image-1"
+
+    asyncio.run(scenario())
+
+
+def test_suggest_replies_skips_image_without_ready_summary() -> None:
+    manager = AIAssistManager(task_manager=FakeTaskManager())
+
+    assert manager.can_suggest_replies(_session(), [_peer_image_message(summary_status="pending")]) == (
         False,
         "no_peer_text_message",
     )

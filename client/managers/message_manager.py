@@ -18,6 +18,7 @@ from typing import Any, Awaitable, Callable, Optional
 from client.core import logging
 from client.core.exceptions import AppError
 from client.core.file_text_extraction import FILE_SUMMARY_EXTRA_KEY, FILE_TEXT_EXTRACT_EXTRA_KEY
+from client.core.image_summary import IMAGE_SUMMARY_EXTRA_KEY
 from client.core.i18n import tr
 from client.core.logging import setup_logging
 from client.core.voice_transcription import VOICE_TRANSCRIPT_EXTRA_KEY
@@ -1623,6 +1624,9 @@ class MessageManager:
         local_file_summary = dict((existing_message.extra or {}).get(FILE_SUMMARY_EXTRA_KEY) or {})
         if local_file_summary and FILE_SUMMARY_EXTRA_KEY not in incoming_message.extra:
             incoming_message.extra[FILE_SUMMARY_EXTRA_KEY] = local_file_summary
+        local_image_summary = dict((existing_message.extra or {}).get(IMAGE_SUMMARY_EXTRA_KEY) or {})
+        if local_image_summary and IMAGE_SUMMARY_EXTRA_KEY not in incoming_message.extra:
+            incoming_message.extra[IMAGE_SUMMARY_EXTRA_KEY] = local_image_summary
         return incoming_message
 
     async def _hydrate_cached_attachment_metadata_for_display(self, message: ChatMessage) -> bool:
