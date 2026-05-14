@@ -941,6 +941,7 @@ def test_e2ee_service_history_recovery_restores_group_sender_keys(monkeypatch) -
         remote_extra = sanitize_outbound_message_extra({"encryption": encryption})
 
         monkeypatch.setattr(e2ee_service_module, "get_database", lambda: alice_old_db)
+        await alice_old_service.apply_group_session_fanout(remote_extra["encryption"]["fanout"][0])
         initial_plaintext = await alice_old_service.decrypt_text_content(
             ciphertext,
             {
@@ -1528,6 +1529,7 @@ def test_e2ee_service_encrypts_group_text_with_sender_key_fanout(monkeypatch) ->
         remote_extra = sanitize_outbound_message_extra({"encryption": encryption})
 
         monkeypatch.setattr(e2ee_service_module, "get_database", lambda: bob_db)
+        await bob_service.apply_group_session_fanout(remote_extra["encryption"]["fanout"][0])
         plaintext = await bob_service.decrypt_text_content(
             ciphertext,
             {
@@ -1552,6 +1554,56 @@ def test_e2ee_service_encrypts_group_text_with_sender_key_fanout(monkeypatch) ->
         assert installed_key is not None
         assert installed_key["key_id"] == remote_extra["encryption"]["sender_key_id"]
         assert installed_key["member_version"] == 7
+
+    asyncio.run(scenario())
+
+
+def test_e2ee_service_group_text_decryption_does_not_install_fanout(monkeypatch) -> None:
+    alice_db = FakeDatabase()
+    bob_db = FakeDatabase()
+
+    monkeypatch.setattr(e2ee_service_module, "get_http_client", lambda: FakeHttpClient())
+
+    async def scenario() -> None:
+        monkeypatch.setattr(e2ee_service_module, "get_database", lambda: alice_db)
+        alice_service = e2ee_service_module.E2EEService()
+        alice_bundle = await alice_service.get_or_create_local_bundle()
+
+        monkeypatch.setattr(e2ee_service_module, "get_database", lambda: bob_db)
+        bob_service = e2ee_service_module.E2EEService()
+        bob_bundle = await bob_service.get_or_create_local_bundle()
+        bob_remote_bundle = build_remote_bundle(bob_bundle, user_id="bob")
+
+        monkeypatch.setattr(e2ee_service_module, "get_database", lambda: alice_db)
+        ciphertext, encryption = await alice_service.encrypt_text_for_group_session(
+            "session-group-text-readonly",
+            "hello encrypted group",
+            [bob_remote_bundle],
+            member_version=7,
+            owner_user_id="alice",
+        )
+        remote_extra = sanitize_outbound_message_extra({"encryption": encryption})
+
+        monkeypatch.setattr(e2ee_service_module, "get_database", lambda: bob_db)
+        plaintext = await bob_service.decrypt_text_content(
+            ciphertext,
+            {
+                "session_id": "session-group-text-readonly",
+                "encryption": remote_extra["encryption"],
+            },
+        )
+        installed_key = await bob_service.get_group_sender_key_record(
+            "session-group-text-readonly",
+            owner_device_id=alice_bundle["device_id"],
+            sender_key_id=remote_extra["encryption"]["sender_key_id"],
+        )
+        summary = await bob_service.get_group_session_summary("session-group-text-readonly")
+
+        assert plaintext is None
+        assert installed_key is None
+        assert summary["inbound_sender_devices"] == []
+        assert summary["total_sender_keys"] == 0
+        assert remote_extra["encryption"]["fanout"][0]["recipient_device_id"] == bob_bundle["device_id"]
 
     asyncio.run(scenario())
 
@@ -1674,6 +1726,7 @@ def test_e2ee_service_encrypts_group_attachment_with_sender_key_fanout(monkeypat
         ciphertext_bytes = Path(encrypted.upload_file_path).read_bytes()
 
         monkeypatch.setattr(e2ee_service_module, "get_database", lambda: bob_db)
+        await bob_service.apply_group_session_fanout(remote_metadata["fanout"][0])
         metadata = await bob_service.decrypt_attachment_metadata(remote_metadata)
         decrypted_bytes, decrypted_metadata = await bob_service.decrypt_attachment_bytes(ciphertext_bytes, remote_metadata)
         summary = await bob_service.get_group_session_summary("session-group-attachment-1")
@@ -1697,6 +1750,63 @@ def test_e2ee_service_encrypts_group_attachment_with_sender_key_fanout(monkeypat
         assert installed_key is not None
         assert installed_key["key_id"] == remote_metadata["sender_key_id"]
         assert installed_key["member_version"] == 11
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        shutil.rmtree(workspace_tmp, ignore_errors=True)
+
+
+def test_e2ee_service_group_attachment_metadata_decryption_does_not_install_fanout(monkeypatch) -> None:
+    alice_db = FakeDatabase()
+    bob_db = FakeDatabase()
+
+    monkeypatch.setattr(e2ee_service_module, "get_http_client", lambda: FakeHttpClient())
+    workspace_tmp = (Path.cwd() / "client/tests/.pytest_tmp/e2ee-service-group-attachment-readonly").resolve()
+    workspace_tmp.mkdir(parents=True, exist_ok=True)
+
+    async def scenario() -> None:
+        monkeypatch.setattr(e2ee_service_module, "get_database", lambda: alice_db)
+        alice_service = e2ee_service_module.E2EEService()
+        alice_bundle = await alice_service.get_or_create_local_bundle()
+
+        monkeypatch.setattr(e2ee_service_module, "get_database", lambda: bob_db)
+        bob_service = e2ee_service_module.E2EEService()
+        bob_bundle = await bob_service.get_or_create_local_bundle()
+        bob_remote_bundle = build_remote_bundle(bob_bundle, user_id="bob")
+
+        source_path = workspace_tmp / "group-secret.png"
+        source_path.write_bytes(b"group-image-payload")
+
+        monkeypatch.setattr(e2ee_service_module, "get_database", lambda: alice_db)
+        encrypted = await alice_service.encrypt_attachment_for_group_session(
+            "session-group-attachment-readonly",
+            str(source_path),
+            [bob_remote_bundle],
+            fallback_name="group-secret.png",
+            size_bytes=19,
+            mime_type="image/png",
+            member_version=11,
+            owner_user_id="alice",
+        )
+        remote_metadata = sanitize_outbound_message_extra(
+            {"attachment_encryption": dict(encrypted.attachment_encryption)}
+        )["attachment_encryption"]
+
+        monkeypatch.setattr(e2ee_service_module, "get_database", lambda: bob_db)
+        metadata = await bob_service.decrypt_attachment_metadata(remote_metadata)
+        installed_key = await bob_service.get_group_sender_key_record(
+            "session-group-attachment-readonly",
+            owner_device_id=alice_bundle["device_id"],
+            sender_key_id=remote_metadata["sender_key_id"],
+        )
+        summary = await bob_service.get_group_session_summary("session-group-attachment-readonly")
+
+        assert metadata is None
+        assert installed_key is None
+        assert summary["inbound_sender_devices"] == []
+        assert summary["total_sender_keys"] == 0
+        assert remote_metadata["fanout"][0]["recipient_device_id"] == bob_bundle["device_id"]
 
     try:
         asyncio.run(scenario())

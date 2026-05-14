@@ -1378,19 +1378,6 @@ class E2EEService:
             sender_key_id=sender_key_id,
         )
         if sender_key_record is None:
-            matching_fanout = self._select_group_fanout_envelope(
-                encryption.get("fanout"),
-                local_device_id=str(local_bundle.get("device_id") or "").strip(),
-                session_id=session_id,
-            )
-            if matching_fanout is not None:
-                await self.apply_group_session_fanout(matching_fanout)
-                sender_key_record = await self.get_group_sender_key_record(
-                    session_id,
-                    owner_device_id=sender_device_id,
-                    sender_key_id=sender_key_id,
-                )
-        if sender_key_record is None:
             return None
 
         sender_key_b64 = str(sender_key_record.get("sender_key") or "").strip()
@@ -1689,19 +1676,6 @@ class E2EEService:
             owner_device_id=sender_device_id,
             sender_key_id=sender_key_id,
         )
-        if sender_key_record is None:
-            matching_fanout = self._select_group_fanout_envelope(
-                normalized.get("fanout"),
-                local_device_id=local_device_id,
-                session_id=session_id,
-            )
-            if matching_fanout is not None:
-                await self.apply_group_session_fanout(matching_fanout)
-                sender_key_record = await self.get_group_sender_key_record(
-                    session_id,
-                    owner_device_id=sender_device_id,
-                    sender_key_id=sender_key_id,
-                )
         if sender_key_record is None:
             return None
 
