@@ -1837,8 +1837,8 @@ class E2EEService:
                     "target_device_id": str(matching_fanout.get("recipient_device_id") or local_device_id),
                 }
             return {
-                "state": self.DECRYPTION_STATE_READY,
-                "can_decrypt": True,
+                "state": self.DECRYPTION_STATE_MISSING_GROUP_SENDER_KEY,
+                "can_decrypt": False,
                 "reprovision_required": False,
                 "local_device_id": local_device_id,
                 "target_device_id": sender_device_id,

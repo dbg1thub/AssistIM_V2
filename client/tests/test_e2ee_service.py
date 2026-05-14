@@ -1644,3 +1644,60 @@ def test_e2ee_service_encrypts_group_attachment_with_sender_key_fanout(monkeypat
         asyncio.run(scenario())
     finally:
         shutil.rmtree(workspace_tmp, ignore_errors=True)
+
+
+def test_e2ee_service_group_attachment_diagnostics_requires_installed_sender_key(monkeypatch) -> None:
+    alice_db = FakeDatabase()
+    bob_db = FakeDatabase()
+
+    monkeypatch.setattr(e2ee_service_module, "get_http_client", lambda: FakeHttpClient())
+    workspace_tmp = (Path.cwd() / "client/tests/.pytest_tmp/e2ee-service-group-attachment-diagnostics").resolve()
+    workspace_tmp.mkdir(parents=True, exist_ok=True)
+
+    async def scenario() -> None:
+        monkeypatch.setattr(e2ee_service_module, "get_database", lambda: alice_db)
+        alice_service = e2ee_service_module.E2EEService()
+        alice_bundle = await alice_service.get_or_create_local_bundle()
+
+        monkeypatch.setattr(e2ee_service_module, "get_database", lambda: bob_db)
+        bob_service = e2ee_service_module.E2EEService()
+        bob_bundle = await bob_service.get_or_create_local_bundle()
+        bob_remote_bundle = build_remote_bundle(bob_bundle, user_id="bob")
+
+        source_path = workspace_tmp / "group-secret.png"
+        source_path.write_bytes(b"group-image-payload")
+
+        monkeypatch.setattr(e2ee_service_module, "get_database", lambda: alice_db)
+        encrypted = await alice_service.encrypt_attachment_for_group_session(
+            "session-group-attachment-diagnostics-1",
+            str(source_path),
+            [bob_remote_bundle],
+            fallback_name="group-secret.png",
+            size_bytes=19,
+            mime_type="image/png",
+            member_version=11,
+            owner_user_id="alice",
+        )
+        remote_metadata = sanitize_outbound_message_extra(
+            {"attachment_encryption": dict(encrypted.attachment_encryption)}
+        )["attachment_encryption"]
+
+        monkeypatch.setattr(e2ee_service_module, "get_database", lambda: bob_db)
+        diagnostics = await bob_service.describe_attachment_decryption_state(remote_metadata)
+        installed_key = await bob_service.get_group_sender_key_record(
+            "session-group-attachment-diagnostics-1",
+            owner_device_id=alice_bundle["device_id"],
+            sender_key_id=remote_metadata["sender_key_id"],
+        )
+
+        assert installed_key is None
+        assert diagnostics["state"] == bob_service.DECRYPTION_STATE_MISSING_GROUP_SENDER_KEY
+        assert diagnostics["can_decrypt"] is False
+        assert diagnostics["reprovision_required"] is False
+        assert diagnostics["local_device_id"] == bob_bundle["device_id"]
+        assert diagnostics["target_device_id"] == alice_bundle["device_id"]
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        shutil.rmtree(workspace_tmp, ignore_errors=True)
