@@ -701,6 +701,7 @@ class GalleryContactDetailPanel(QWidget):
     call_requested = Signal(object, str)
     remark_edit_requested = Signal(object)
     friend_moments_requested = Signal(object)
+    detail_more_requested = Signal(object, QPoint)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -790,6 +791,7 @@ class GalleryContactDetailPanel(QWidget):
         self.message_button.clicked.connect(self._emit_message_request)
         self.voice_button.clicked.connect(lambda _checked=False: self._emit_call_request("voice"))
         self.video_button.clicked.connect(lambda _checked=False: self._emit_call_request("video"))
+        self.more_button.clicked.connect(self._emit_more_menu_request)
         self.remark_row.clicked.connect(self._emit_remark_edit_request)
         self.moments_row.clicked.connect(self._emit_friend_moments_request)
         self.moment_strip.clicked.connect(self._emit_friend_moments_request)
@@ -960,6 +962,11 @@ class GalleryContactDetailPanel(QWidget):
     def _emit_friend_moments_request(self) -> None:
         if self._entity and self._entity.get("type") == "friend":
             self.friend_moments_requested.emit(self._entity)
+
+    def _emit_more_menu_request(self) -> None:
+        if self._entity and self._entity.get("type") == "friend":
+            pos = self.more_button.mapToGlobal(self.more_button.rect().bottomRight())
+            self.detail_more_requested.emit(self._entity, pos)
 
     def _set_call_buttons_available(self, available: bool) -> None:
         for button in (self.voice_button, self.video_button):
@@ -1557,6 +1564,7 @@ class ContactInterface(QWidget):
         self.detail_panel.call_requested.connect(self.call_requested.emit)
         self.detail_panel.remark_edit_requested.connect(self._on_friend_remark_edit_requested)
         self.detail_panel.friend_moments_requested.connect(self._on_friend_moments_requested)
+        self.detail_panel.detail_more_requested.connect(self._show_friend_detail_more_menu)
         self._event_bus.subscribe_sync(ContactEvent.SYNC_REQUIRED, self._on_contact_sync_required)
         self._connection_manager.add_state_listener(self._on_connection_state_changed)
 
@@ -2634,6 +2642,51 @@ class ContactInterface(QWidget):
             tr("contact.detail.moments_coming_soon", "Friend timeline view will open here later."),
             parent=self.window(),
             duration=1600,
+        )
+
+    def _show_friend_detail_more_menu(self, payload: object, global_pos: QPoint) -> None:
+        """Show the detail-card friend management menu."""
+        if not isinstance(payload, dict):
+            return
+        contact = payload.get("data")
+        if not isinstance(contact, ContactRecord):
+            return
+
+        menu = RoundMenu(parent=self)
+        menu.setMinimumWidth(172)
+        remark_action = Action(tr("contact.detail.action.set_remark", "Set Remark"), self)
+        permission_action = Action(tr("contact.detail.action.friend_permissions", "Friend Permissions"), self)
+        block_action = Action(tr("contact.detail.action.add_to_blacklist", "Add to Blacklist"), self)
+        remove_action = Action(tr("contact.detail.action.remove_friend", "Remove Friend"), self)
+
+        menu.addAction(remark_action)
+        menu.addAction(permission_action)
+        menu.addSeparator()
+        menu.addAction(block_action)
+        menu.addAction(remove_action)
+
+        for action in (block_action, remove_action):
+            action_item = action.property("item")
+            if action_item is not None:
+                action_item.setForeground(QColor("#d13438"))
+
+        remark_action.triggered.connect(
+            lambda _checked=False, item=contact: self._on_friend_remark_edit_requested({"type": "friend", "data": item})
+        )
+        permission_action.triggered.connect(lambda _checked=False: self._show_friend_permission_placeholder())
+        block_action.triggered.connect(lambda _checked=False, cid=contact.id: self._on_block_friend_requested(cid))
+        remove_action.triggered.connect(
+            lambda _checked=False, item=contact: self._on_remove_friend_requested({"type": "friend", "data": item})
+        )
+
+        menu.exec(global_pos)
+
+    def _show_friend_permission_placeholder(self) -> None:
+        InfoBar.info(
+            tr("contact.detail.action.friend_permissions", "Friend Permissions"),
+            tr("contact.detail.permissions.placeholder", "Friend permissions will be available later."),
+            parent=self.window(),
+            duration=1800,
         )
 
     def _show_friend_context_menu(self, contact_id: str, global_pos: QPoint) -> None:

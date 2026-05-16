@@ -1374,6 +1374,21 @@ def test_contact_interface_handles_user_profile_update_incrementally() -> None:
     assert 'self._controller.apply_group_self_profile_update(self._groups, payload)' in contact_interface
 
 
+def test_contact_detail_more_menu_exposes_friend_management_actions() -> None:
+    contact_interface = Path('client/ui/windows/contact_interface.py').read_text(encoding='utf-8')
+
+    assert 'detail_more_requested = Signal(object, QPoint)' in contact_interface
+    assert 'self.more_button.clicked.connect(self._emit_more_menu_request)' in contact_interface
+    assert 'self.detail_panel.detail_more_requested.connect(self._show_friend_detail_more_menu)' in contact_interface
+    assert 'def _show_friend_detail_more_menu(self, payload: object, global_pos: QPoint) -> None:' in contact_interface
+    assert 'remark_action = Action(tr("contact.detail.action.set_remark", "Set Remark"), self)' in contact_interface
+    assert 'permission_action = Action(tr("contact.detail.action.friend_permissions", "Friend Permissions"), self)' in contact_interface
+    assert 'block_action = Action(tr("contact.detail.action.add_to_blacklist", "Add to Blacklist"), self)' in contact_interface
+    assert 'remove_action = Action(tr("contact.detail.action.remove_friend", "Remove Friend"), self)' in contact_interface
+    assert 'permission_action.triggered.connect(lambda _checked=False: self._show_friend_permission_placeholder())' in contact_interface
+    assert 'def _show_friend_permission_placeholder(self) -> None:' in contact_interface
+
+
 def test_contact_interface_profile_update_refreshes_group_member_projection_and_request_fields() -> None:
     contact_interface = Path('client/ui/windows/contact_interface.py').read_text(encoding='utf-8')
     apply_block = contact_interface.split('def _apply_profile_update_payload', 1)[1].split('async def _reload_data_async', 1)[0]
