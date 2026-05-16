@@ -477,6 +477,13 @@ async def _drain_summary_tasks(manager: ConversationSummaryManager) -> None:
         await asyncio.sleep(0)
 
 
+async def _drain_idle_refresh_request_tasks(manager: ConversationSummaryManager) -> None:
+    while manager._idle_refresh_request_tasks:
+        tasks = list(manager._idle_refresh_request_tasks)
+        await asyncio.gather(*tasks, return_exceptions=True)
+        await asyncio.sleep(0)
+
+
 def test_conversation_summary_manager_creates_ready_open_bucket(monkeypatch) -> None:
     monkeypatch.setattr(SecureStorage, "encrypt_text", classmethod(lambda cls, value: f"enc:{value}"))
     session = Session(session_id="session-1", name="Bob", session_type="direct")
@@ -1204,6 +1211,49 @@ def test_conversation_summary_manager_idle_refresh_updates_ready_bucket_when_mes
         assert bucket["message_count"] == 2
         memory_key = ("session-1", "summary", f"summary:{first_ts}")
         assert memory_key in fake_db.memory_items
+
+    asyncio.run(scenario())
+
+
+def test_conversation_summary_manager_request_idle_refresh_runs_as_background_request(monkeypatch) -> None:
+    monkeypatch.setattr(SecureStorage, "encrypt_text", classmethod(lambda cls, value: f"enc:{value}"))
+    session = Session(session_id="session-1", name="Bob", session_type="direct")
+    fake_db = _FakeDatabase(session)
+    fake_task_manager = _FakeTaskManager()
+    event_bus = EventBus()
+
+    async def scenario() -> None:
+        manager = _make_manager(fake_db, event_bus, fake_task_manager)
+        first = _message("m-1", datetime(2026, 4, 19, 10, 0, 0), content="先确认地点。")
+        second = _message("m-2", datetime(2026, 4, 19, 10, 1, 0), content="再确认时间。")
+        first_ts = int(first.timestamp.timestamp())
+        fake_db.messages_by_session["session-1"].extend([first, second])
+        fake_db.buckets[("session-1", first_ts)] = {
+            "session_id": "session-1",
+            "bucket_start_ts": first_ts,
+            "bucket_end_ts": first_ts,
+            "bucket_rule_version": 1,
+            "is_open": True,
+            "last_message_id": "m-1",
+            "last_message_ts": first_ts,
+            "message_count": 1,
+            "summary_status": "ready",
+            "display_summary_ciphertext": "enc:旧摘要",
+            "retrieval_summary_ciphertext": "enc:旧检索摘要",
+            "summary_structured_json_ciphertext": 'enc:{"display_summary":"旧摘要"}',
+            "summary_schema_version": ConversationSummaryManager.SUMMARY_SCHEMA_VERSION,
+            "summary_version": 1,
+        }
+
+        requested = manager.request_idle_refresh("session-1", reason="test", delay_seconds=0.0)
+
+        assert requested is True
+        assert len(manager._idle_refresh_request_tasks) == 1
+        await _drain_idle_refresh_request_tasks(manager)
+        await _drain_summary_tasks(manager)
+
+        assert manager._idle_refresh_request_tasks == set()
+        assert len(fake_task_manager.requests) == 1
 
     asyncio.run(scenario())
 

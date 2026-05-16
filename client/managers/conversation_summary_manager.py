@@ -82,6 +82,7 @@ class ConversationSummaryManager:
         self._file_text_extract_semaphore = asyncio.Semaphore(1)
         self._event_subscriptions: list[tuple[str, Any]] = []
         self._scheduled_refresh_tasks: dict[tuple[str, int], asyncio.Task] = {}
+        self._idle_refresh_request_tasks: set[asyncio.Task] = set()
         self._refresh_task_running_keys: set[tuple[str, int]] = set()
         self._pending_refresh_delays: dict[tuple[str, int], float] = {}
         self._last_idle_refresh_requested_at: dict[tuple[str, int], float] = {}
@@ -118,6 +119,10 @@ class ConversationSummaryManager:
                 continue
             if key not in self._refresh_task_running_keys:
                 task.cancel()
+        for task in list(self._idle_refresh_request_tasks):
+            if not task.done():
+                task.cancel()
+        self._idle_refresh_request_tasks.clear()
         self._pending_refresh_delays.clear()
         self._refresh_task_running_keys.clear()
         self._scheduled_refresh_tasks.clear()
@@ -728,6 +733,41 @@ class ConversationSummaryManager:
         for key in keys_to_clear:
             self._pending_refresh_delays.pop(key, None)
             self._last_idle_refresh_requested_at.pop(key, None)
+
+    def request_idle_refresh(
+        self,
+        session_id: str,
+        *,
+        reason: str = "",
+        delay_seconds: float | None = None,
+    ) -> bool:
+        """Request an idle summary refresh without scheduling work as a UI task."""
+        normalized_session_id = str(session_id or "").strip()
+        if not normalized_session_id or self._closing or self._is_task_manager_closed():
+            return False
+
+        async def runner() -> None:
+            await asyncio.sleep(0)
+            await self.schedule_idle_refresh(
+                normalized_session_id,
+                reason=reason,
+                delay_seconds=delay_seconds,
+            )
+
+        task = asyncio.create_task(runner())
+        self._idle_refresh_request_tasks.add(task)
+        task.add_done_callback(self._finalize_idle_refresh_request_task)
+        return True
+
+    def _finalize_idle_refresh_request_task(self, task: asyncio.Task) -> None:
+        """Drop completed idle-refresh request tasks and log unexpected failures."""
+        self._idle_refresh_request_tasks.discard(task)
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            logger.exception("Failed to request idle conversation summary refresh")
 
     async def schedule_idle_refresh(
         self,

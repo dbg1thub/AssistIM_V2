@@ -298,6 +298,12 @@ def test_conversation_summary_idle_refresh_only_runs_when_chat_hidden() -> None:
 
     assert 'reason="session_switch"' not in chat_interface
     assert 'reason="chat_hidden"' in chat_interface
+    assert "manager.request_idle_refresh(" in chat_interface
+    idle_refresh_block = chat_interface.split("def _schedule_idle_summary_refresh_for_session", 1)[1].split(
+        "def _ephemeral_direct_session_id",
+        1,
+    )[0]
+    assert "_schedule_ui_task(" not in idle_refresh_block
     assert "delay_seconds=manager.IDLE_REFRESH_DELAY_SECONDS" in chat_interface
 
 

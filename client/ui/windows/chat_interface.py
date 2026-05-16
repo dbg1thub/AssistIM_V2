@@ -5654,13 +5654,10 @@ class ChatInterface(QWidget):
         if not normalized_session_id or self._teardown_started or self._is_ephemeral_direct_session_id(normalized_session_id):
             return
         manager = get_conversation_summary_manager()
-        self._schedule_ui_task(
-            manager.schedule_idle_refresh(
-                normalized_session_id,
-                reason=reason,
-                delay_seconds=manager.IDLE_REFRESH_DELAY_SECONDS,
-            ),
-            f"idle summary refresh {normalized_session_id} {reason}",
+        manager.request_idle_refresh(
+            normalized_session_id,
+            reason=reason,
+            delay_seconds=manager.IDLE_REFRESH_DELAY_SECONDS,
         )
 
     @staticmethod
