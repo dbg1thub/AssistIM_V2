@@ -43,6 +43,7 @@ from client.services.local_model_resource_probe import (
     LocalModelResourceReport,
     probe_local_model_resources,
 )
+from client.ui.widgets.fluent_scrollbar import FluentOverlayScrollBarDisplayMode, attach_fluent_scrollbar
 from client.services.local_model_resource_importer import (
     LocalModelImportError,
     LocalModelImportResult,
@@ -580,6 +581,20 @@ class SettingsInterface(ScrollArea):
         self.setViewportMargins(0, 24, 0, 24)
         self.setWidget(self.scroll_widget)
         self.setWidgetResizable(True)
+
+        # Suppress the built-in fluent SmoothScrollDelegate bars and replace
+        # with our lightweight overlay scrollbar.
+        if hasattr(self, "scrollDelagate") and self.scrollDelagate is not None:
+            self.scrollDelagate.vScrollBar.setForceHidden(True)
+            self.scrollDelagate.hScrollBar.setForceHidden(True)
+            # Remove the delegate's viewport event filter so it stops
+            # intercepting wheel events with its SmoothScroll interpolation.
+            if self.viewport() is not None:
+                self.viewport().removeEventFilter(self.scrollDelagate)
+        self._settings_scrollbar = attach_fluent_scrollbar(
+            self,
+            mode=FluentOverlayScrollBarDisplayMode.ON_HOVER,
+        )
 
         self._init_layout()
         self._connect_signals()
