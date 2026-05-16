@@ -73,6 +73,8 @@ from client.ui.controllers.session_controller import get_session_controller
 from client.ui.styles import StyleSheet
 from client.ui.windows.chat_group_flow import ChatGroupFlowCoordinator
 from client.ui.windows.call_window import CallWindow
+from client.ui.windows.contact_interface import AddFriendDialog
+from client.ui.windows.group_creation_dialogs import StartGroupChatDialog
 from client.ui.widgets.chat_panel import ChatPanel
 from client.ui.widgets.fluent_dialog import FluentDialog
 from client.ui.widgets.global_search_panel import GlobalSearchResultsPanel
@@ -719,6 +721,8 @@ class ChatInterface(QWidget):
         """Connect panel-level signals."""
         self.session_panel.session_selected.connect(self._on_session_selected)
         self.session_panel.search_result_requested.connect(self._on_sidebar_search_result_requested)
+        self.session_panel.create_group_requested.connect(self._on_create_group_requested)
+        self.session_panel.add_friend_requested.connect(self._on_add_friend_requested)
         self.chat_panel.composer_draft_changed.connect(self._on_composer_draft_changed)
         self.chat_panel.file_upload_requested.connect(self._on_file_upload_requested)
         self.chat_panel.screenshot_requested.connect(self._on_screenshot_requested)
@@ -4546,6 +4550,58 @@ class ChatInterface(QWidget):
             self._group_flow.show_start_group_dialog(session),
             f"start group chat selector {session.session_id}",
         )
+
+    def _on_create_group_requested(self) -> None:
+        """Open the group creation dialog from the session panel add menu."""
+        self._schedule_ui_task(
+            self._open_start_group_dialog_no_session(),
+            "start group chat from add menu",
+        )
+
+    async def _open_start_group_dialog_no_session(self) -> None:
+        """Open StartGroupChatDialog without a pre-selected counterpart."""
+        try:
+            contacts = await self._contact_controller.load_contacts()
+        except Exception:
+            InfoBar.error(
+                tr("chat.group_picker.title", "Start Group Chat"),
+                tr("chat.group_picker.load_failed", "Unable to load contacts right now."),
+                parent=self.window(),
+                duration=2200,
+            )
+            return
+
+        if not contacts:
+            InfoBar.info(
+                tr("chat.group_picker.title", "Start Group Chat"),
+                tr("contact.sidebar.no_contacts_for_group", "There are no friends available to add."),
+                parent=self.window(),
+                duration=2000,
+            )
+            return
+
+        dialog = StartGroupChatDialog(
+            self._contact_controller,
+            contacts,
+            fixed_contact=None,
+            parent=self.window(),
+        )
+        dialog.group_created.connect(self._group_flow.handle_group_created)
+        self._show_dialog(dialog)
+
+    def _on_add_friend_requested(self) -> None:
+        """Open the add friend dialog from the session panel add menu."""
+        auth_controller = self._auth_controller
+        current_user = auth_controller.current_user if auth_controller is not None else None
+        current_user_id = str((current_user or {}).get("id", "") or "")
+
+        dialog = AddFriendDialog(
+            self._contact_controller,
+            set(),
+            current_user_id,
+            self.window(),
+        )
+        self._show_dialog(dialog)
 
     def _on_chat_info_search_requested(self) -> None:
         """Open the current-conversation local history search dialog from chat info."""

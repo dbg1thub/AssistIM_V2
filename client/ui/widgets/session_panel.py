@@ -13,7 +13,7 @@ from PySide6.QtWidgets import QAbstractItemView, QDialog, QFrame, QHBoxLayout, Q
 
 from qfluentwidgets import Action, BodyLabel, InfoBar, MessageBoxBase, RoundMenu, SearchLineEdit, SubtitleLabel, ToolButton
 
-from client.core.app_icons import AppIcon
+from client.core.app_icons import AppIcon, CollectionIcon
 from client.core.i18n import tr
 from client.delegates.session_delegate import SessionDelegate
 from client.events.event_bus import get_event_bus
@@ -87,6 +87,8 @@ class SessionPanel(QWidget):
 
     session_selected = Signal(str)
     add_requested = Signal()
+    create_group_requested = Signal()
+    add_friend_requested = Signal()
     search_result_requested = Signal(object)
 
     def __init__(self, parent=None):
@@ -144,7 +146,7 @@ class SessionPanel(QWidget):
         self.add_button.setObjectName("sessionAddButton")
         self.add_button.setToolTip(tr("session.add.tooltip", "New Conversation"))
         self.add_button.setFixedSize(36, 36)
-        self.add_button.clicked.connect(self.add_requested.emit)
+        self.add_button.clicked.connect(self._show_add_menu)
 
         self.search_bar_layout.addWidget(self.search_box, 1, Qt.AlignmentFlag.AlignVCenter)
         self.search_bar_layout.addWidget(self.add_button, 0, Qt.AlignmentFlag.AlignVCenter)
@@ -169,6 +171,25 @@ class SessionPanel(QWidget):
         self.main_layout.addWidget(self.search_bar)
         self.main_layout.addWidget(self.session_list, 1)
         StyleSheet.SESSION_PANEL.apply(self)
+
+    def _show_add_menu(self) -> None:
+        """Show a popup menu with group chat and add friend options."""
+        menu = RoundMenu(parent=self)
+        create_group_action = Action(
+            CollectionIcon("people_add"),
+            tr("session.add_menu.create_group", "Start Group Chat"),
+            parent=menu,
+        )
+        add_friend_action = Action(
+            CollectionIcon("person_add"),
+            tr("session.add_menu.add_friend", "Add Friend"),
+            parent=menu,
+        )
+        create_group_action.triggered.connect(self.create_group_requested.emit)
+        add_friend_action.triggered.connect(self.add_friend_requested.emit)
+        menu.addAction(create_group_action)
+        menu.addAction(add_friend_action)
+        menu.exec(self.add_button.mapToGlobal(self.add_button.rect().bottomLeft()))
 
     def _setup_session_model(self) -> None:
         """Initialize session model, proxy, and delegate."""

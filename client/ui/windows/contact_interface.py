@@ -38,7 +38,7 @@ from qfluentwidgets import (
 from qframelesswindow.titlebar import CloseButton
 from shiboken6 import isValid as is_valid_qt_object
 
-from client.core.app_icons import AppIcon
+from client.core.app_icons import AppIcon, CollectionIcon
 from client.core import logging
 from client.core.avatar_utils import profile_avatar_seed
 from client.core.config_backend import get_config
@@ -1558,7 +1558,7 @@ class ContactInterface(QWidget):
         self._switch_page("friends")
 
     def _connect_signals(self) -> None:
-        self.add_button.clicked.connect(self._show_add_placeholder)
+        self.add_button.clicked.connect(self._show_add_menu)
         self.search_box.textChanged.connect(self._on_search_text_changed)
         self.detail_panel.message_requested.connect(self.message_requested.emit)
         self.detail_panel.call_requested.connect(self.call_requested.emit)
@@ -3202,6 +3202,32 @@ class ContactInterface(QWidget):
             parent=self.window(),
             duration=1800,
         )
+
+    def _show_add_menu(self) -> None:
+        """Show a popup menu with group chat and add friend options."""
+        menu = RoundMenu(parent=self)
+        create_group_action = Action(
+            CollectionIcon("people_add"),
+            tr("session.add_menu.create_group", "Start Group Chat"),
+            parent=menu,
+        )
+        add_friend_action = Action(
+            CollectionIcon("person_add"),
+            tr("session.add_menu.add_friend", "Add Friend"),
+            parent=menu,
+        )
+        create_group_action.triggered.connect(lambda: self._show_add_placeholder_for("groups"))
+        add_friend_action.triggered.connect(lambda: self._show_add_placeholder_for("friends"))
+        menu.addAction(create_group_action)
+        menu.addAction(add_friend_action)
+        menu.exec(self.add_button.mapToGlobal(self.add_button.rect().bottomLeft()))
+
+    def _show_add_placeholder_for(self, page: str) -> None:
+        """Open the add dialog for a specific page regardless of current tab."""
+        saved_page = self._current_page
+        self._current_page = page
+        self._show_add_placeholder()
+        self._current_page = saved_page
 
     def _show_add_placeholder(self) -> None:
         if self._current_page == "friends":
