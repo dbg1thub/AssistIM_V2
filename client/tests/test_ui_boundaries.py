@@ -922,7 +922,7 @@ def test_voice_message_bubble_and_recording_overlay_are_custom_drawn() -> None:
 
     assert 'width_range' not in voice_size_block
     assert 'duration = self._voice_duration_seconds(message)' not in voice_size_block
-    assert 'VOICE_FIXED_WIDTH = 73' in message_delegate
+    assert 'VOICE_FIXED_WIDTH =' in message_delegate
     assert 'VOICE_MIN_WIDTH' not in message_delegate
     assert 'VOICE_MAX_WIDTH' not in message_delegate
     assert 'voice_width = min(self.VOICE_FIXED_WIDTH, max_bubble_width)' in voice_size_block
@@ -1394,11 +1394,46 @@ def test_user_profile_flyout_wires_history_recovery_import_export() -> None:
 
 def test_message_delegate_uses_live_auth_profile_for_self_avatar_rendering() -> None:
     message_delegate = Path('client/delegates/message_delegate.py').read_text(encoding='utf-8')
+    draw_avatar_block = message_delegate.split('def _draw_avatar', 1)[1].split(
+        '\n    def _avatar_pixmap',
+        1,
+    )[0]
 
     assert 'if message.is_self:' in message_delegate
     assert 'sender_avatar = str(current_user.get("avatar", "") or "")' in message_delegate
     assert 'sender_gender = str(current_user.get("gender", "") or "")' in message_delegate
     assert 'sender_username = str(current_user.get("username", "") or "")' in message_delegate
+    assert 'pixmap = self._avatar_pixmap(' in draw_avatar_block
+    assert 'QPixmap(avatar_path)' not in draw_avatar_block
+
+
+def test_message_delegate_paint_hot_path_caches_avatar_and_media_sources() -> None:
+    message_delegate = Path('client/delegates/message_delegate.py').read_text(encoding='utf-8')
+    avatar_ready_block = message_delegate.split('def _on_avatar_ready', 1)[1].split(
+        '\n    def _schedule_refresh_message_view',
+        1,
+    )[0]
+    resolve_image_block = message_delegate.split('def _resolve_image_source(self, message: ChatMessage) -> str:', 1)[1].split(
+        '\n    def _resolve_image_source_uncached',
+        1,
+    )[0]
+    resolve_video_block = message_delegate.split('def _resolve_video_source(self, message: ChatMessage) -> str:', 1)[1].split(
+        '\n    def _resolve_video_source_uncached',
+        1,
+    )[0]
+
+    assert 'AVATAR_PIXMAP_CACHE_LIMIT = 256' in message_delegate
+    assert 'MEDIA_SOURCE_CACHE_LIMIT = 512' in message_delegate
+    assert 'self._avatar_pixmap_cache: OrderedDict[tuple, QPixmap] = OrderedDict()' in message_delegate
+    assert 'self._media_source_cache: OrderedDict[tuple, str] = OrderedDict()' in message_delegate
+    assert 'def _avatar_pixmap(' in message_delegate
+    assert 'cached = self._cache_get(self._avatar_pixmap_cache, cache_key)' in message_delegate
+    assert 'self._cache_put(self._avatar_pixmap_cache, cache_key, pixmap, self.AVATAR_PIXMAP_CACHE_LIMIT)' in message_delegate
+    assert 'self._avatar_pixmap_cache.clear()' in avatar_ready_block
+    assert 'cached_source = self._cache_get(self._media_source_cache, cache_key)' in resolve_image_block
+    assert 'cached_source = self._cache_get(self._media_source_cache, cache_key)' in resolve_video_block
+    assert 'self._resolve_image_source_uncached(' in resolve_image_block
+    assert 'self._resolve_video_source_uncached(' in resolve_video_block
 
 
 def test_contact_interface_handles_user_profile_update_incrementally() -> None:

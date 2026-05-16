@@ -131,6 +131,8 @@ class MessageDelegate(QStyledItemDelegate):
     TEXT_LAYOUT_CACHE_LIMIT = 256
     MEDIA_SIZE_CACHE_LIMIT = 512
     IMAGE_RECT_CACHE_LIMIT = 512
+    AVATAR_PIXMAP_CACHE_LIMIT = 256
+    MEDIA_SOURCE_CACHE_LIMIT = 512
     EMOJI_TEXT_GAP = MIXED_EMOJI_TEXT_GAP
     GROUP_SENDER_LABEL_FONT_PIXEL_SIZE = 11
     GROUP_SENDER_LABEL_GAP = 2
@@ -166,6 +168,8 @@ class MessageDelegate(QStyledItemDelegate):
         self._text_layout_cache: OrderedDict[tuple[int, str], _RunTextLayout] = OrderedDict()
         self._media_size_cache: OrderedDict[tuple, QSize] = OrderedDict()
         self._image_rect_cache: OrderedDict[tuple, QRect] = OrderedDict()
+        self._avatar_pixmap_cache: OrderedDict[tuple, QPixmap] = OrderedDict()
+        self._media_source_cache: OrderedDict[tuple, str] = OrderedDict()
         self._active_session_id = ""
         self._active_session_type = ""
         self._show_group_member_nickname = True
@@ -866,10 +870,15 @@ class MessageDelegate(QStyledItemDelegate):
             seed=avatar_seed_value,
         )
 
-        if avatar_path:
+        pixmap = self._avatar_pixmap(
+            sender_avatar=sender_avatar,
+            sender_gender=sender_gender,
+            avatar_seed_value=avatar_seed_value,
+            avatar_path=avatar_path,
+        )
+        if not pixmap.isNull():
             painter.save()
             painter.setClipPath(path)
-            pixmap = QPixmap(avatar_path)
             if draw_avatar_pixmap(painter, rect, pixmap):
                 painter.restore()
                 return
@@ -894,6 +903,32 @@ class MessageDelegate(QStyledItemDelegate):
         painter.setFont(font)
         painter.setPen(QColor("#DDE7F1") if dark else QColor("#425466"))
         painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, label)
+
+    def _avatar_pixmap(
+        self,
+        *,
+        sender_avatar: str,
+        sender_gender: str,
+        avatar_seed_value: str,
+        avatar_path: str,
+    ) -> QPixmap:
+        """Return one cached avatar pixmap for paint-time rendering."""
+        if not avatar_path:
+            return QPixmap()
+        cache_key = (
+            sender_avatar,
+            sender_gender,
+            avatar_seed_value,
+            avatar_path,
+            self.AVATAR_SIZE,
+        )
+        cached = self._cache_get(self._avatar_pixmap_cache, cache_key)
+        if cached is not None:
+            return cached
+        pixmap = QPixmap(avatar_path)
+        if not pixmap.isNull():
+            self._cache_put(self._avatar_pixmap_cache, cache_key, pixmap, self.AVATAR_PIXMAP_CACHE_LIMIT)
+        return pixmap
 
     def _draw_translation_content(self, painter: QPainter, rect: QRect, message: ChatMessage) -> None:
         """Draw the local AI translation below the original text, when available."""
@@ -1582,15 +1617,40 @@ class MessageDelegate(QStyledItemDelegate):
 
     def _resolve_video_source(self, message: ChatMessage) -> str:
         """Resolve the best local path or URL for a video message."""
-        local_path = message.extra.get("local_path") if message.extra else None
+        extra = message.extra or {}
+        attachment_encryption = dict(extra.get("attachment_encryption") or {})
+        cache_key = (
+            "video",
+            message.message_id,
+            message.content or "",
+            extra.get("local_path", ""),
+            extra.get("url", ""),
+            bool(attachment_encryption.get("enabled")),
+        )
+        cached_source = self._cache_get(self._media_source_cache, cache_key)
+        if cached_source is not None:
+            return cached_source
+
+        source = self._resolve_video_source_uncached(message, extra=extra, attachment_encryption=attachment_encryption)
+        self._cache_put(self._media_source_cache, cache_key, source, self.MEDIA_SOURCE_CACHE_LIMIT)
+        return source
+
+    def _resolve_video_source_uncached(
+        self,
+        message: ChatMessage,
+        *,
+        extra: dict,
+        attachment_encryption: dict,
+    ) -> str:
+        """Resolve the best local path or URL for a video message without touching caches."""
+        local_path = extra.get("local_path") if extra else None
         if local_path and os.path.exists(local_path):
             return local_path
 
-        attachment_encryption = dict((message.extra or {}).get("attachment_encryption") or {})
         if attachment_encryption.get("enabled"):
             return ""
 
-        content = ((message.extra.get("url") if message.extra else None) or (message.content or "").strip())
+        content = ((extra.get("url") if extra else None) or (message.content or "").strip())
         if not content:
             return ""
 
@@ -2335,11 +2395,35 @@ class MessageDelegate(QStyledItemDelegate):
 
     def _resolve_image_source(self, message: ChatMessage) -> str:
         """Resolve the best image source for a message."""
-        local_path = message.extra.get("local_path") if message.extra else None
+        extra = message.extra or {}
+        attachment_encryption = dict(extra.get("attachment_encryption") or {})
+        cache_key = (
+            "image",
+            message.message_id,
+            message.content or "",
+            extra.get("local_path", ""),
+            bool(attachment_encryption.get("enabled")),
+        )
+        cached_source = self._cache_get(self._media_source_cache, cache_key)
+        if cached_source is not None:
+            return cached_source
+
+        source = self._resolve_image_source_uncached(message, extra=extra, attachment_encryption=attachment_encryption)
+        self._cache_put(self._media_source_cache, cache_key, source, self.MEDIA_SOURCE_CACHE_LIMIT)
+        return source
+
+    def _resolve_image_source_uncached(
+        self,
+        message: ChatMessage,
+        *,
+        extra: dict,
+        attachment_encryption: dict,
+    ) -> str:
+        """Resolve the best image source for a message without touching caches."""
+        local_path = extra.get("local_path") if extra else None
         if local_path and os.path.exists(local_path):
             return local_path
 
-        attachment_encryption = dict((message.extra or {}).get("attachment_encryption") or {})
         if attachment_encryption.get("enabled"):
             return ""
 
@@ -2412,6 +2496,7 @@ class MessageDelegate(QStyledItemDelegate):
 
     def _on_avatar_ready(self, _source: str) -> None:
         """Refresh the view after a remote avatar finishes downloading."""
+        self._avatar_pixmap_cache.clear()
         self._schedule_refresh_message_view()
 
     def _schedule_refresh_message_view(self) -> None:
