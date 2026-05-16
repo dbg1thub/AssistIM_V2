@@ -10,8 +10,7 @@ from PySide6.QtGui import QDesktopServices, QGuiApplication, QKeySequence
 from PySide6.QtWidgets import QAbstractItemView, QFrame, QHBoxLayout, QListView, QStackedWidget, QVBoxLayout, QWidget
 from shiboken6 import isValid as is_valid_qt_object
 
-from qfluentwidgets import BodyLabel, CaptionLabel, IconWidget, PushButton, ScrollBarHandleDisplayMode
-from qfluentwidgets.components.widgets.scroll_bar import SmoothScrollDelegate
+from qfluentwidgets import BodyLabel, CaptionLabel, IconWidget, PushButton
 try:
     from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 except Exception:  # pragma: no cover - optional Qt Multimedia runtime
@@ -267,7 +266,6 @@ class ChatPanel(QWidget):
 
         self._message_model: Optional[MessageModel] = None
         self._message_delegate: Optional[MessageDelegate] = None
-        self._scroll_delegate: Optional[SmoothScrollDelegate] = None
         self._send_segments_callback: Optional[Callable] = None
         self._send_typing_callback: Optional[Callable] = None
         self._attachment_open_callback: Optional[Callable[[ChatMessage], None]] = None
@@ -333,6 +331,7 @@ class ChatPanel(QWidget):
         self.message_list.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         self.message_list.setLayoutMode(QListView.LayoutMode.SinglePass)
         self.message_list.setResizeMode(QListView.ResizeMode.Adjust)
+        self.message_list.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.message_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.message_list.setSpacing(0)
         self.message_list.setViewportMargins(0, 0, 0, self.MESSAGE_LIST_BOTTOM_MARGIN)
@@ -494,13 +493,8 @@ class ChatPanel(QWidget):
         """Set up the model/delegate pair used by the message list."""
         self._message_model = MessageModel(self)
         self._message_delegate = MessageDelegate(self)
-        self._scroll_delegate = SmoothScrollDelegate(self.message_list)
-        self._scroll_delegate.vScrollBar.setHandleDisplayMode(ScrollBarHandleDisplayMode.ALWAYS)
-        self._scroll_delegate.hScrollBar.setForceHidden(True)
-        self._scroll_delegate.vScrollBar.setForceHidden(True)
         self.message_list.setModel(self._message_model)
         self.message_list.setItemDelegate(self._message_delegate)
-        self._scroll_delegate.vScrollBar.installEventFilter(self)
         self.message_list.verticalScrollBar().valueChanged.connect(self._remember_message_scroll_gap)
         self.message_list.verticalScrollBar().valueChanged.connect(self._on_message_scroll_value_changed)
         self.message_list.verticalScrollBar().rangeChanged.connect(self._on_message_range_changed)
@@ -940,16 +934,6 @@ class ChatPanel(QWidget):
         if watched is composer_resize_handle and self._handle_composer_resize_handle_event(event):
             return True
 
-        if self._scroll_delegate and watched in {
-            self.message_list,
-            self.message_list.viewport(),
-            self._scroll_delegate.vScrollBar,
-        }:
-            if event.type() == QEvent.Type.Enter:
-                self._scroll_delegate.vScrollBar.setForceHidden(False)
-            elif event.type() == QEvent.Type.Leave:
-                QTimer.singleShot(0, self._sync_message_scrollbar_visibility)
-
         if watched is self.message_list.viewport():
             if event.type() == QEvent.Type.Resize:
                 self._relayout_message_list()
@@ -1138,7 +1122,6 @@ class ChatPanel(QWidget):
         if self.composer_resize_handle is not None:
             handle_height = self.COMPOSER_RESIZE_HANDLE_HEIGHT
             self.composer_resize_handle.setGeometry(x, y - handle_height // 2, width, handle_height)
-        self._layout_message_scrollbar(input_top_y=y)
         self._sync_message_bottom_reserved_height(height)
         self.message_input.setGeometry(x, y, width, height)
         self.message_input.raise_()
@@ -1156,28 +1139,6 @@ class ChatPanel(QWidget):
         last_index = self._message_model.index(row, 0)
         self._message_delegate.sizeHintChanged.emit(last_index)
         self.message_list.updateGeometries()
-
-    def _layout_message_scrollbar(self, *, input_top_y: int) -> None:
-        """Keep the Fluent scrollbar above the floating composer without changing the viewport."""
-        if self._scroll_delegate is None or not self._is_message_layout_alive():
-            return
-        bar = self._scroll_delegate.vScrollBar
-        input_top_in_list = self.message_list.mapFrom(self.chat_page, QPoint(0, input_top_y)).y()
-        bar_height = max(0, input_top_in_list - 2)
-        bar_x = max(0, self.message_list.width() - 13)
-        bar.setGeometry(bar_x, 1, 12, bar_height)
-        bar._adjustHandleSize()
-        bar._adjustHandlePos()
-
-    def _sync_message_scrollbar_visibility(self) -> None:
-        if not self._scroll_delegate or not self._is_message_layout_alive():
-            return
-        hovered = (
-            self.message_list.underMouse()
-            or self.message_list.viewport().underMouse()
-            or self._scroll_delegate.vScrollBar.underMouse()
-        )
-        self._scroll_delegate.vScrollBar.setForceHidden(not hovered)
 
     def _relayout_message_list(self) -> None:
         """Force message rows to recompute widths after viewport changes."""

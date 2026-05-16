@@ -113,7 +113,7 @@ class MessageDelegate(QStyledItemDelegate):
     FILE_WIDTH, FILE_HEIGHT = attachment_card_size()
     VIDEO_WIDTH = 240
     VIDEO_HEIGHT = 136
-    VOICE_FIXED_WIDTH = 70
+    VOICE_FIXED_WIDTH = 90
     VOICE_HEIGHT = 42
     LEFT_MARGIN = 18
     RIGHT_MARGIN = 18

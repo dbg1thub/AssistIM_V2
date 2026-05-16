@@ -1001,7 +1001,7 @@ def test_chat_message_input_uses_floating_card_style_without_overlay_or_cursor_o
     assert 'content_rect = self.chat_content_area.geometry()' in chat_panel
     assert 'height = max(self.COMPOSER_MIN_HEIGHT, min(self.COMPOSER_MAX_HEIGHT, self._composer_height))' in chat_panel
     assert 'y = content_rect.bottom() - height + 1' in chat_panel
-    assert 'self._layout_message_scrollbar(input_top_y=y)' in chat_panel
+    assert 'self._layout_message_scrollbar(input_top_y=y)' not in chat_panel
     assert 'self._sync_message_bottom_reserved_height(height)' in chat_panel
     assert 'from shiboken6 import isValid as is_valid_qt_object' in chat_panel
     assert 'def _is_message_layout_alive(self) -> bool:' in chat_panel
@@ -1013,11 +1013,13 @@ def test_chat_message_input_uses_floating_card_style_without_overlay_or_cursor_o
     assert 'def _sync_message_bottom_reserved_height(self, height: int) -> None:' in chat_panel
     assert 'self._message_delegate.set_bottom_reserved_height(height)' in chat_panel
     assert 'self._message_delegate.sizeHintChanged.emit(last_index)' in chat_panel
-    assert 'def _layout_message_scrollbar(self, *, input_top_y: int) -> None:' in chat_panel
-    assert 'self.message_list.mapFrom(self.chat_page, QPoint(0, input_top_y)).y()' in chat_panel
-    assert 'bar.setGeometry(bar_x, 1, 12, bar_height)' in chat_panel
-    assert 'bar._adjustHandleSize()' in chat_panel
-    assert 'bar._adjustHandlePos()' in chat_panel
+    assert 'SmoothScrollDelegate' not in chat_panel
+    assert 'ScrollBarHandleDisplayMode' not in chat_panel
+    assert 'self._scroll_delegate' not in chat_panel
+    assert 'def _layout_message_scrollbar(self, *, input_top_y: int) -> None:' not in chat_panel
+    assert 'def _sync_message_scrollbar_visibility(self) -> None:' not in chat_panel
+    assert 'self.message_list.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)' in chat_panel
+    assert 'self.message_list.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)' in chat_panel
     assert 'self.composer_resize_handle.setGeometry(x, y - handle_height // 2, width, handle_height)' in chat_panel
     assert 'self.message_input.raise_()' in chat_panel
     assert 'self.composer_resize_handle.raise_()' in chat_panel
