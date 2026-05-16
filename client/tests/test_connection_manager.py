@@ -7,6 +7,8 @@ import sys
 import types
 from enum import Enum
 
+import pytest
+
 
 if 'PySide6.QtCore' not in sys.modules:
     qtcore = types.ModuleType('PySide6.QtCore')
@@ -643,6 +645,35 @@ def test_connection_manager_connect_waits_for_websocket_authentication(monkeypat
             assert manager.state == connection_manager_module.ConnectionState.CONNECTED
             assert manager.is_connected is True
             assert fake_ws_client.sent_nowait[-1]['type'] == 'sync_messages'
+        finally:
+            await manager.close()
+
+    asyncio.run(scenario())
+
+
+def test_connection_manager_connect_reports_expected_startup_disconnect(monkeypatch) -> None:
+    fake_ws_client = FakeWebSocketClient()
+
+    monkeypatch.setattr(connection_manager_module, 'get_auth_service', lambda: FakeAuthService(access_token='ws-token'))
+
+    async def scenario() -> None:
+        manager = connection_manager_module.ConnectionManager()
+        manager._ws_client = fake_ws_client
+        manager._loop = asyncio.get_running_loop()
+        fake_ws_client.is_connected = False
+        try:
+            connect_task = asyncio.create_task(manager.connect())
+            await asyncio.sleep(0)
+
+            manager._on_connect()
+            await asyncio.sleep(0.05)
+            manager._on_disconnect()
+
+            with pytest.raises(
+                connection_manager_module.RealtimeConnectionUnavailable,
+                match='WebSocket disconnected before authentication completed',
+            ):
+                await connect_task
         finally:
             await manager.close()
 

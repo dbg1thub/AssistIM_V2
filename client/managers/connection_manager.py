@@ -24,6 +24,10 @@ setup_logging()
 logger = logging.get_logger(__name__)
 
 
+class RealtimeConnectionUnavailable(RuntimeError):
+    """Expected startup failure when the realtime websocket is not usable yet."""
+
+
 class ConnectionManager:
     """
     Manager for WebSocket connection lifecycle.
@@ -187,6 +191,15 @@ class ConnectionManager:
     def _fail_waiters(waiters: list[asyncio.Future[None]], reason: str) -> None:
         """Fail and clear a waiter list."""
         error = RuntimeError(reason)
+        for waiter in waiters:
+            if not waiter.done():
+                waiter.set_exception(error)
+        waiters.clear()
+
+    @staticmethod
+    def _fail_realtime_waiters(waiters: list[asyncio.Future[None]], reason: str) -> None:
+        """Fail connection-stage waiters for expected realtime availability failures."""
+        error = RealtimeConnectionUnavailable(reason)
         for waiter in waiters:
             if not waiter.done():
                 waiter.set_exception(error)
@@ -516,7 +529,7 @@ class ConnectionManager:
         if not access_token:
             logger.info("Skipping websocket auth: no access token present")
             self._ws_auth_in_flight = False
-            self._fail_waiters(self._auth_waiters, "WebSocket authentication requires an access token")
+            self._fail_realtime_waiters(self._auth_waiters, "WebSocket authentication requires an access token")
             return False
 
         auth_message = {
@@ -536,7 +549,7 @@ class ConnectionManager:
         else:
             self._ws_auth_in_flight = False
             self._ws_auth_attempt_id += 1
-            self._fail_waiters(self._auth_waiters, "Failed to send websocket auth message")
+            self._fail_realtime_waiters(self._auth_waiters, "Failed to send websocket auth message")
             logger.warning("Failed to send websocket auth message")
         return success
 
@@ -547,7 +560,7 @@ class ConnectionManager:
         if not access_token:
             logger.info("Skipping websocket auth: no access token present")
             self._ws_auth_in_flight = False
-            self._fail_waiters(self._auth_waiters, "WebSocket authentication requires an access token")
+            self._fail_realtime_waiters(self._auth_waiters, "WebSocket authentication requires an access token")
             return False
 
         auth_message = {
@@ -567,7 +580,7 @@ class ConnectionManager:
         else:
             self._ws_auth_in_flight = False
             self._ws_auth_attempt_id += 1
-            self._fail_waiters(self._auth_waiters, "Failed to send websocket auth message")
+            self._fail_realtime_waiters(self._auth_waiters, "Failed to send websocket auth message")
             logger.warning("Failed to send websocket auth message")
         return success
 
@@ -592,7 +605,7 @@ class ConnectionManager:
         self._sync_in_flight = False
         self._ws_auth_attempt_id += 1
         logger.warning("WebSocket auth timed out after %.1fs", self.WS_AUTH_TIMEOUT_SECONDS)
-        self._fail_waiters(self._auth_waiters, "WebSocket authentication timed out")
+        self._fail_realtime_waiters(self._auth_waiters, "WebSocket authentication timed out")
         self._fail_waiters(self._sync_waiters, "Initial websocket sync was cancelled because authentication timed out")
         await self._notify_message(
             {
@@ -663,7 +676,7 @@ class ConnectionManager:
         self._ws_auth_refresh_attempted = False
         self._sync_in_flight = False
         self._ws_auth_attempt_id += 1
-        self._fail_waiters(self._auth_waiters, "WebSocket disconnected before authentication completed")
+        self._fail_realtime_waiters(self._auth_waiters, "WebSocket disconnected before authentication completed")
         self._fail_waiters(self._sync_waiters, "WebSocket disconnected before initial sync completed")
         old_state = self._state
 
@@ -715,7 +728,7 @@ class ConnectionManager:
                     self._sync_in_flight = False
                     self._fail_waiters(self._auth_waiters, "Failed to dispatch initial websocket sync request")
             else:
-                self._fail_waiters(self._auth_waiters, "WebSocket authentication rejected")
+                self._fail_realtime_waiters(self._auth_waiters, "WebSocket authentication rejected")
                 self._fail_waiters(self._sync_waiters, "Initial websocket sync was cancelled because authentication was rejected")
         elif msg_type == "history_messages":
             data = message.get("data", {})
@@ -750,7 +763,7 @@ class ConnectionManager:
                 self._ws_auth_refresh_attempted = True
                 self._schedule_message_coroutine(self._refresh_and_reauthenticate_websocket(message))
                 return
-            self._fail_waiters(self._auth_waiters, "WebSocket authentication failed")
+            self._fail_realtime_waiters(self._auth_waiters, "WebSocket authentication failed")
             self._fail_waiters(self._sync_waiters, "Initial websocket sync was cancelled because authentication failed")
         elif msg_type in {"message_edit", "message_recall", "message_delete", "read", "group_profile_update", "group_self_profile_update"}:
             sync_state_changed = self._advance_event_cursor_from_event_payload(message.get("data", {}))
@@ -827,7 +840,7 @@ class ConnectionManager:
             if not self._authenticate_websocket_nowait():
                 if auth_waiter in self._auth_waiters:
                     self._auth_waiters.remove(auth_waiter)
-                raise RuntimeError("Failed to send websocket auth message")
+                raise RealtimeConnectionUnavailable("Failed to send websocket auth message")
 
         await auth_waiter
         return True

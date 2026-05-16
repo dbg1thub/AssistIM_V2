@@ -19,6 +19,12 @@ _MAIN_RUNTIME_STUB_MODULES = (
     "client.managers.message_manager",
     "client.managers.session_manager",
     "client.managers.sound_manager",
+    "client.managers.search_manager",
+    "client.managers.call_manager",
+    "client.managers.ai_task_manager",
+    "client.services.ai_bootstrap",
+    "client.services.ai_memory_indexing_service",
+    "client.services.ai_service",
     "client.ui.controllers.auth_controller",
     "client.ui.controllers.chat_controller",
     "client.ui.controllers.message_controller",
@@ -256,6 +262,8 @@ def _load_main_module():
         sys.modules["PySide6.QtCore"] = qtcore
     if not hasattr(qtcore, "QLockFile"):
         qtcore.QLockFile = type("QLockFile", (), {})
+    if not hasattr(qtcore, "Qt"):
+        qtcore.Qt = type("Qt", (), {})
     if not hasattr(qtcore, "QTimer"):
         qtcore.QTimer = type("QTimer", (), {"singleShot": staticmethod(lambda *args, **kwargs: None)})
     if not hasattr(qtcore, "QDate"):
@@ -324,6 +332,8 @@ def _load_main_module():
                 "warning": staticmethod(lambda *args, **kwargs: None),
             },
         )
+    if not hasattr(qfluentwidgets, "FluentTranslator"):
+        qfluentwidgets.FluentTranslator = type("FluentTranslator", (), {})
     if not hasattr(qfluentwidgets, "setTheme"):
         qfluentwidgets.setTheme = lambda *args, **kwargs: None
     if not hasattr(qfluentwidgets, "setThemeColor"):
@@ -334,6 +344,7 @@ def _load_main_module():
     sys.modules["client.core.config"] = config_module
 
     i18n_module = types.ModuleType("client.core.i18n")
+    i18n_module.current_locale = lambda: "zh_CN"
     i18n_module.initialize_i18n = lambda *args, **kwargs: None
     i18n_module.tr = lambda _key, default="", *args, **kwargs: default
     sys.modules["client.core.i18n"] = i18n_module
@@ -369,6 +380,7 @@ def _load_main_module():
     )
     _install_stub(
         "client.managers.connection_manager",
+        RealtimeConnectionUnavailable=RuntimeError,
         get_connection_manager=lambda: None,
         peek_connection_manager=lambda: None,
     )
@@ -386,6 +398,30 @@ def _load_main_module():
         "client.managers.sound_manager",
         get_sound_manager=lambda: None,
         peek_sound_manager=lambda: None,
+    )
+    _install_stub(
+        "client.managers.search_manager",
+        peek_search_manager=lambda: None,
+    )
+    _install_stub(
+        "client.managers.call_manager",
+        peek_call_manager=lambda: None,
+    )
+    _install_stub(
+        "client.managers.ai_task_manager",
+        peek_ai_task_manager=lambda: None,
+    )
+    _install_stub(
+        "client.services.ai_bootstrap",
+        configure_default_ai_provider=lambda *args, **kwargs: None,
+    )
+    _install_stub(
+        "client.services.ai_memory_indexing_service",
+        get_ai_memory_indexing_service=lambda: None,
+    )
+    _install_stub(
+        "client.services.ai_service",
+        peek_ai_service=lambda: None,
     )
     _install_stub(
         "client.ui.controllers.auth_controller",
@@ -592,6 +628,44 @@ def test_application_start_background_services_waits_for_initial_sync(monkeypatc
         await task
 
     asyncio.run(scenario())
+
+
+def test_application_start_background_services_logs_expected_realtime_failure_without_traceback(
+    monkeypatch,
+) -> None:
+    main_module = _load_main_module()
+    fake_connection_manager = _FakeConnectionManager()
+    startup_error = main_module.RealtimeConnectionUnavailable("server closed websocket")
+
+    async def fail_connect() -> bool:
+        fake_connection_manager.connect_calls += 1
+        raise startup_error
+
+    warning_calls: list[tuple[str, tuple[object, ...]]] = []
+    exception_calls: list[tuple[str, tuple[object, ...]]] = []
+    fake_connection_manager.connect = fail_connect
+    monkeypatch.setattr(main_module, "get_connection_manager", lambda: fake_connection_manager)
+    monkeypatch.setattr(
+        main_module.logger,
+        "warning",
+        lambda message, *args, **kwargs: warning_calls.append((message, args)),
+    )
+    monkeypatch.setattr(
+        main_module.logger,
+        "exception",
+        lambda message, *args, **kwargs: exception_calls.append((message, args)),
+    )
+
+    async def scenario() -> None:
+        app = main_module.Application(_FakeQtApp())
+        await app.start_background_services(generation=app._start_new_runtime_generation())
+
+    asyncio.run(scenario())
+
+    assert fake_connection_manager.connect_calls == 1
+    assert fake_connection_manager.wait_for_initial_sync_calls == 0
+    assert warning_calls == [("Initial websocket connect unavailable: %s", (startup_error,))]
+    assert exception_calls == []
 
 
 def test_application_authenticate_updates_startup_security_status_from_auth_context(monkeypatch) -> None:

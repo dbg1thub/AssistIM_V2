@@ -32,7 +32,11 @@ from client.storage.database import get_database, peek_database
 from client.network.http_client import get_http_client, peek_http_client
 from client.network.websocket_client import get_websocket_client, peek_websocket_client
 
-from client.managers.connection_manager import get_connection_manager, peek_connection_manager
+from client.managers.connection_manager import (
+    RealtimeConnectionUnavailable,
+    get_connection_manager,
+    peek_connection_manager,
+)
 from client.managers.message_manager import get_message_manager, peek_message_manager
 from client.managers.session_manager import get_session_manager, peek_session_manager
 from client.managers.sound_manager import get_sound_manager, peek_sound_manager
@@ -1074,6 +1078,9 @@ class Application:
                 logger.info("Background services stopped before initial sync for stale runtime generation %s", generation)
                 return
             await conn_manager.wait_for_initial_sync()
+        except RealtimeConnectionUnavailable as exc:
+            logger.warning("Initial websocket connect unavailable: %s", exc)
+            return
         except Exception:
             logger.exception("Initial websocket connect failed")
             return
