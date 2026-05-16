@@ -1000,7 +1000,7 @@ class E2EEService:
                     "recipient_device_id": recipient_device_id,
                     "recipient_prekey_type": str(key_payload.get("prekey_type") or ""),
                     "recipient_prekey_id": int(key_payload.get("key_id") or 0),
-                    "payload_ciphertext": ciphertext_b64,
+                    "ciphertext": ciphertext_b64,
                     "nonce": nonce_b64,
                 }
             )
@@ -1101,7 +1101,7 @@ class E2EEService:
             raise RuntimeError("local device does not have the required private prekey for group fanout")
 
         plaintext = self._decrypt_payload(
-            ciphertext_b64=str(normalized.get("payload_ciphertext") or "").strip(),
+            ciphertext_b64=str(normalized.get("ciphertext") or "").strip(),
             nonce_b64=str(normalized.get("nonce") or "").strip(),
             sender_identity_public_b64=str(normalized.get("sender_identity_key_public") or "").strip(),
             recipient_private_key_b64=str(key_payload.get("private_key") or ""),

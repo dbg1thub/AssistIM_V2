@@ -785,6 +785,8 @@ def test_e2ee_service_prepares_group_session_fanout_and_reuses_sender_key(monkey
         assert len(first["fanout"]) == 1
         assert first["fanout"][0]["scheme"] == alice_service.GROUP_FANOUT_SCHEME
         assert first["fanout"][0]["recipient_device_id"] == bob_bundle["device_id"]
+        assert first["fanout"][0]["ciphertext"]
+        assert "payload_ciphertext" not in first["fanout"][0]
         assert summary == {
             "session_id": "session-group-1",
             "local_device_id": alice_bundle["device_id"],
@@ -1740,6 +1742,8 @@ def test_e2ee_service_encrypts_group_attachment_with_sender_key_fanout(monkeypat
         assert remote_metadata["sender_key_id"]
         assert len(remote_metadata["fanout"]) == 1
         assert remote_metadata["fanout"][0]["recipient_device_id"] == bob_bundle["device_id"]
+        assert remote_metadata["fanout"][0]["ciphertext"]
+        assert "payload_ciphertext" not in remote_metadata["fanout"][0]
         assert "local_metadata" not in remote_metadata
         assert metadata is not None
         assert metadata["original_name"] == "group-secret.png"

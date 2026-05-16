@@ -620,7 +620,12 @@ class FakeE2EEService:
                         'enabled': True,
                         'scheme': self.GROUP_FANOUT_SCHEME,
                         'session_id': session_id,
+                        'recipient_user_id': str(dict(bundle).get('user_id') or ''),
                         'recipient_device_id': str(dict(bundle).get('device_id') or ''),
+                        'sender_device_id': 'device-alice',
+                        'sender_key_id': 'group-key-1',
+                        'ciphertext': 'fanout-cipher',
+                        'nonce': 'fanout-nonce',
                     }
                     for bundle in recipient_bundles
                 ],
@@ -2630,6 +2635,8 @@ def test_message_manager_prepare_attachment_upload_encrypts_group_image_messages
             assert extra['attachment_encryption']['scheme'] == 'aesgcm-file+group-sender-key-v1'
             assert extra['attachment_encryption']['sender_key_id'] == 'group-key-1'
             assert len(extra['attachment_encryption']['fanout']) == 2
+            assert extra['attachment_encryption']['fanout'][0]['ciphertext'] == 'fanout-cipher'
+            assert 'payload_ciphertext' not in extra['attachment_encryption']['fanout'][0]
         finally:
             if cleanup_path:
                 Path(cleanup_path).unlink(missing_ok=True)
@@ -2694,6 +2701,8 @@ def test_message_manager_prepare_attachment_upload_encrypts_group_voice_messages
             assert extra['attachment_encryption']['enabled'] is True
             assert extra['attachment_encryption']['scheme'] == 'aesgcm-file+group-sender-key-v1'
             assert len(extra['attachment_encryption']['fanout']) == 2
+            assert extra['attachment_encryption']['fanout'][0]['ciphertext'] == 'fanout-cipher'
+            assert 'payload_ciphertext' not in extra['attachment_encryption']['fanout'][0]
         finally:
             if cleanup_path:
                 Path(cleanup_path).unlink(missing_ok=True)
