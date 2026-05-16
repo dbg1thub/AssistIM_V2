@@ -140,6 +140,8 @@ class UserService:
             "avatar": self.avatars.resolve_user_avatar_url(user),
             "avatar_kind": str(getattr(user, "avatar_kind", "default") or "default"),
             "gender": str(user.gender or ""),
+            "region": getattr(user, "region", None),
+            "signature": getattr(user, "signature", None),
         }
 
     def serialize_user(self, user: User) -> dict:

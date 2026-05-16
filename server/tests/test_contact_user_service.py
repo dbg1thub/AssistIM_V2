@@ -9,7 +9,10 @@ from app.services.user_service import UserService
 
 class _FakeFriendRepo:
     def __init__(self) -> None:
-        self.friendships = [SimpleNamespace(friend_id="user-2"), SimpleNamespace(friend_id="user-3")]
+        self.friendships = [
+            SimpleNamespace(friend_id="user-2", remark=""),
+            SimpleNamespace(friend_id="user-3", remark=""),
+        ]
         self.requests = [
             SimpleNamespace(
                 id="req-1",
@@ -34,8 +37,26 @@ class _FakeUserRepo:
     def __init__(self) -> None:
         self.list_users_by_ids_calls: list[list[str]] = []
         self.users = {
-            "user-2": SimpleNamespace(id="user-2", username="bob", nickname="Bob", avatar="/avatars/bob.png", avatar_kind="custom", gender="male"),
-            "user-3": SimpleNamespace(id="user-3", username="charlie", nickname="Charlie", avatar="/avatars/charlie.png", avatar_kind="custom", gender="male"),
+            "user-2": SimpleNamespace(
+                id="user-2",
+                username="bob",
+                nickname="Bob",
+                avatar="/avatars/bob.png",
+                avatar_kind="custom",
+                gender="male",
+                region="Busan",
+                signature="Ready to test.",
+            ),
+            "user-3": SimpleNamespace(
+                id="user-3",
+                username="charlie",
+                nickname="Charlie",
+                avatar="/avatars/charlie.png",
+                avatar_kind="custom",
+                gender="male",
+                region="Seoul",
+                signature="Available for chat.",
+            ),
         }
 
     def list_users_by_ids(self, user_ids: list[str]):
@@ -104,8 +125,12 @@ def test_friend_service_uses_bulk_user_loaders_for_friend_and_request_lists() ->
     friends_payload = service.list_friends(SimpleNamespace(id="user-1"))
     requests_payload = service.list_requests(SimpleNamespace(id="user-1"))
 
-    assert [item["id"] for item in friends_payload] == ["user-2", "user-3"]
+    assert [item["user"]["id"] for item in friends_payload] == ["user-2", "user-3"]
+    assert friends_payload[0]["user"]["region"] == "Busan"
+    assert friends_payload[0]["user"]["signature"] == "Ready to test."
     assert requests_payload[0]["sender"]["id"] == "user-2"
+    assert requests_payload[0]["sender"]["region"] == "Busan"
+    assert requests_payload[0]["sender"]["signature"] == "Ready to test."
     assert requests_payload[0]["receiver"] == {}
     assert fake_users.list_users_by_ids_calls == [["user-2", "user-3"], ["user-2", "user-1"]]
 
@@ -129,8 +154,8 @@ def test_user_service_record_profile_update_events_uses_bulk_member_lookup_and_n
         email=None,
         phone=None,
         birthday=None,
-        region=None,
-        signature=None,
+        region="Seoul",
+        signature="Testing realtime profile updates.",
         status="online",
         created_at=None,
         updated_at=None,
@@ -145,4 +170,8 @@ def test_user_service_record_profile_update_events_uses_bulk_member_lookup_and_n
     assert fake_db.commit_calls == 1
     assert service.sessions.list_members_for_sessions_calls == [["session-1", "session-2"]]
     assert [item[0] for item in service.messages.append_calls] == ["session-1", "session-2"]
+    assert event_result["payload"]["profile"]["region"] == "Seoul"
+    assert event_result["payload"]["profile"]["signature"] == "Testing realtime profile updates."
+    assert service.messages.append_calls[0][2]["profile"]["region"] == "Seoul"
+    assert service.messages.append_calls[0][2]["profile"]["signature"] == "Testing realtime profile updates."
     assert event_result["participant_ids"] == ["user-1", "user-2", "user-3"]

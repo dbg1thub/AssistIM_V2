@@ -117,8 +117,8 @@ def test_friend_request_private_session_and_message_flow(
     assert "email" not in friend_payload[0]["user"]
     assert "phone" not in friend_payload[0]["user"]
     assert "birthday" not in friend_payload[0]["user"]
-    assert "region" not in friend_payload[0]["user"]
-    assert "signature" not in friend_payload[0]["user"]
+    assert friend_payload[0]["user"]["region"] == "Busan"
+    assert friend_payload[0]["user"]["signature"] == "Backend and integration tests."
     assert "status" not in friend_payload[0]["user"]
 
     create_session_response = client.post(

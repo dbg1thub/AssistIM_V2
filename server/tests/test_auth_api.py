@@ -894,8 +894,8 @@ def test_user_routes_use_collection_and_public_detail_contracts(client: TestClie
     assert "email" not in list_payload["items"][0]
     assert "created_at" not in list_payload["items"][0]
     assert "display_name" in list_payload["items"][0]
-    assert "region" not in list_payload["items"][0]
-    assert "signature" not in list_payload["items"][0]
+    assert "region" in list_payload["items"][0]
+    assert "signature" in list_payload["items"][0]
     assert "status" not in list_payload["items"][0]
 
     detail_response = client.get(
@@ -909,8 +909,8 @@ def test_user_routes_use_collection_and_public_detail_contracts(client: TestClie
     assert "email" not in public_detail
     assert "phone" not in public_detail
     assert "created_at" not in public_detail
-    assert "region" not in public_detail
-    assert "signature" not in public_detail
+    assert public_detail["region"] is None
+    assert public_detail["signature"] is None
     assert "status" not in public_detail
 
     me_response = client.get("/api/v1/auth/me", headers=headers)
@@ -964,4 +964,5 @@ def test_user_search_requires_non_blank_keyword_and_matches_public_fields_only(c
     assert [item["id"] for item in payload] == [bob["user"]["id"]]
     assert "email" not in payload[0]
     assert "phone" not in payload[0]
-    assert "region" not in payload[0]
+    assert payload[0]["region"] == "Busan"
+    assert payload[0]["signature"] == "Profile details should stay private"
