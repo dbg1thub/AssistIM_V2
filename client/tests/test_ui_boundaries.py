@@ -2238,8 +2238,8 @@ def test_group_announcement_flow_uses_formal_banner_dialog_and_version_state() -
 
     assert 'group_announcement_requested = Signal()' in chat_panel
     assert 'from client.ui.widgets.group_announcement_banner import GroupAnnouncementBanner' in chat_header
-    assert 'self.group_announcement_banner = GroupAnnouncementBanner(self.detail_row)' in chat_header
-    assert 'self.detail_row_layout.addWidget(self.group_announcement_banner, 0, Qt.AlignmentFlag.AlignVCenter)' in chat_header
+    assert 'self.group_announcement_banner = GroupAnnouncementBanner(self.header_row)' in chat_header
+    assert 'self.header_row_layout.addWidget(self.group_announcement_banner, 0)' in chat_header
     assert 'self.chat_header.group_announcement_widget().clicked.connect(self.group_announcement_requested.emit)' in chat_panel
     assert 'self.chat_header.set_group_announcement_session(session if show_group_announcement else None)' in chat_panel
     assert 'from client.ui.windows.group_announcement_dialog import GroupAnnouncementDialog' in chat_interface
@@ -2264,18 +2264,14 @@ def test_chat_header_security_badges_are_driven_from_session_summary() -> None:
     assert 'ROW_HEIGHT = 23' in chat_header
     assert 'ICON_BUTTON_SIZE = 23' in chat_header
     assert 'self.setFixedHeight(self.HEADER_HEIGHT)' not in chat_header
-    assert 'self.main_layout.setContentsMargins(self.HEADER_MARGIN, self.HEADER_MARGIN, self.HEADER_MARGIN, self.HEADER_MARGIN)' in chat_header
-    assert 'self.main_layout.setSpacing(self.HEADER_SPACING)' in chat_header
-    assert 'self.title_row.setObjectName("chatHeaderTopRow")' in chat_header
-    assert 'self.detail_row.setObjectName("chatHeaderBottomRow")' in chat_header
-    assert 'self.title_row.setFixedHeight(self.ROW_HEIGHT)' in chat_header
-    assert 'self.detail_row.setFixedHeight(self.ROW_HEIGHT)' in chat_header
-    assert 'self.title_row_layout.setSpacing(self.HEADER_SPACING)' in chat_header
+    assert 'self.header_row.setObjectName("chatHeaderRow")' in chat_header
+    assert 'self.header_row_layout.setSpacing(self.HEADER_SPACING)' in chat_header
     assert 'self.badge_layout.setSpacing(self.HEADER_SPACING)' in chat_header
-    assert 'self.detail_row_layout.setSpacing(self.HEADER_SPACING)' in chat_header
     assert 'self.history_button.setFixedSize(self.ICON_BUTTON_SIZE, self.ICON_BUTTON_SIZE)' in chat_header
     assert 'self.info_button.setFixedSize(self.ICON_BUTTON_SIZE, self.ICON_BUTTON_SIZE)' in chat_header
-    assert 'self.detail_row_layout.addWidget(self.status_label, 0, Qt.AlignmentFlag.AlignVCenter)' in chat_header
+    assert 'self.header_row_layout.addWidget(self.status_label, 0)' in chat_header
+    assert 'from client.ui.widgets.fluent_divider import FluentDivider' in chat_header
+    assert 'self.divider = FluentDivider(self, variant=FluentDivider.FULL)' in chat_header
     assert 'def set_security_badges(self, badges: list[dict[str, str]]) -> None:' in chat_header
     assert 'widget = InfoBadge(self.badge_container' in chat_header
     assert 'def _session_security_badges(session: Session | None) -> list[dict[str, str]]:' in chat_panel

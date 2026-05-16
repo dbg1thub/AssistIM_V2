@@ -11,6 +11,7 @@ from qfluentwidgets import BodyLabel, CaptionLabel, InfoBadge, InfoLevel, Transp
 from client.core.app_icons import AppIcon, CollectionIcon
 from client.core.i18n import tr
 from client.ui.styles import StyleSheet
+from client.ui.widgets.fluent_divider import FluentDivider
 from client.ui.widgets.group_announcement_banner import GroupAnnouncementBanner
 
 
@@ -36,39 +37,39 @@ class ChatHeader(QWidget):
         self.setMinimumWidth(0)
 
         self.main_layout = QVBoxLayout(self)
-        self.main_layout.setContentsMargins(self.HEADER_MARGIN, self.HEADER_MARGIN, self.HEADER_MARGIN, self.HEADER_MARGIN)
-        self.main_layout.setSpacing(self.HEADER_SPACING)
+        self.main_layout.setContentsMargins(0, 0, 0, 0)
+        self.main_layout.setSpacing(0)
 
-        self.title_row = QWidget(self)
-        self.title_row.setObjectName("chatHeaderTopRow")
-        self.title_row.setMinimumWidth(0)
-        self.title_row.setFixedHeight(self.ROW_HEIGHT)
-        self.title_row_layout = QHBoxLayout(self.title_row)
-        self.title_row_layout.setContentsMargins(0, 0, 0, 0)
-        self.title_row_layout.setSpacing(self.HEADER_SPACING)
-
-        self.detail_row = QWidget(self)
-        self.detail_row.setObjectName("chatHeaderBottomRow")
-        self.detail_row.setMinimumWidth(0)
-        self.detail_row.setFixedHeight(self.ROW_HEIGHT)
-        self.detail_row_layout = QHBoxLayout(self.detail_row)
-        self.detail_row_layout.setContentsMargins(0, 0, 0, 0)
-        self.detail_row_layout.setSpacing(self.HEADER_SPACING)
-
-        self.title_label = BodyLabel(tr("chat_header.placeholder_title", "Select a Conversation"), self.title_row)
-        self.status_label = CaptionLabel(
-            tr("chat_header.placeholder_status", "Choose a chat from the left to get started"),
-            self.detail_row,
+        # Single horizontal row containing all header elements.
+        self.header_row = QWidget(self)
+        self.header_row.setObjectName("chatHeaderRow")
+        self.header_row.setMinimumWidth(0)
+        self.header_row_layout = QHBoxLayout(self.header_row)
+        self.header_row_layout.setContentsMargins(
+            self.HEADER_MARGIN, self.HEADER_MARGIN, self.HEADER_MARGIN, self.HEADER_MARGIN
         )
-        self.title_label.setMinimumWidth(0)
-        self.status_label.setMinimumWidth(0)
-        self.title_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-        self.status_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.header_row_layout.setSpacing(self.HEADER_SPACING)
 
+        self.title_label = BodyLabel(tr("chat_header.placeholder_title", "Select a Conversation"), self.header_row)
+        self.title_label.setMinimumWidth(40)
+        self.title_label.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Preferred)
         self.title_label.setObjectName("chatHeaderTitle")
+
+        self.status_label = CaptionLabel("", self.header_row)
+        self.status_label.setMinimumWidth(0)
+        self.status_label.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Preferred)
         self.status_label.setObjectName("chatHeaderStatus")
-        self.group_announcement_banner = GroupAnnouncementBanner(self.detail_row)
+
+        self.group_announcement_banner = GroupAnnouncementBanner(self.header_row)
         self.group_announcement_banner.hide()
+
+        self.badge_container = QWidget(self.header_row)
+        self.badge_container.setObjectName("chatHeaderBadgeContainer")
+        self.badge_layout = QHBoxLayout(self.badge_container)
+        self.badge_layout.setContentsMargins(0, 0, 0, 0)
+        self.badge_layout.setSpacing(self.HEADER_SPACING)
+        self.badge_container.hide()
+        self._badge_widgets: list[InfoBadge] = []
 
         self.history_button = TransparentToolButton(CollectionIcon("history"), self)
         self.history_button.setFixedSize(self.ICON_BUTTON_SIZE, self.ICON_BUTTON_SIZE)
@@ -79,25 +80,20 @@ class ChatHeader(QWidget):
         self.info_button.setToolTip(tr("chat_header.info_tooltip", "Chat Info"))
         self._apply_safe_button_font(self.history_button, self.info_button)
 
-        self.badge_container = QWidget(self.title_row)
-        self.badge_container.setObjectName("chatHeaderBadgeContainer")
-        self.badge_layout = QHBoxLayout(self.badge_container)
-        self.badge_layout.setContentsMargins(0, 0, 0, 0)
-        self.badge_layout.setSpacing(self.HEADER_SPACING)
-        self.badge_container.hide()
-        self._badge_widgets: list[InfoBadge] = []
+        # Layout: title | status_label | announcement | stretch | badges | buttons
+        self.header_row_layout.addWidget(self.title_label, 0)
+        self.header_row_layout.addWidget(self.status_label, 0)
+        self.header_row_layout.addWidget(self.group_announcement_banner, 0)
+        self.header_row_layout.addStretch(1)
+        self.header_row_layout.addWidget(self.badge_container, 0)
+        self.header_row_layout.addWidget(self.history_button, 0)
+        self.header_row_layout.addWidget(self.info_button, 0)
 
-        self.title_row_layout.addWidget(self.title_label, 1)
-        self.title_row_layout.addWidget(self.badge_container, 0)
-        self.title_row_layout.addWidget(self.history_button, 0)
-        self.title_row_layout.addWidget(self.info_button, 0)
+        # Bottom divider matching the splitter hairline style.
+        self.divider = FluentDivider(self, variant=FluentDivider.FULL)
 
-        self.detail_row_layout.addWidget(self.status_label, 0, Qt.AlignmentFlag.AlignVCenter)
-        self.detail_row_layout.addWidget(self.group_announcement_banner, 0, Qt.AlignmentFlag.AlignVCenter)
-        self.detail_row_layout.addStretch(1)
-
-        self.main_layout.addWidget(self.title_row, 0)
-        self.main_layout.addWidget(self.detail_row, 0)
+        self.main_layout.addWidget(self.header_row, 0)
+        self.main_layout.addWidget(self.divider, 0)
 
         self.history_button.clicked.connect(self.history_clicked.emit)
         self.info_button.clicked.connect(self.info_clicked.emit)
@@ -128,6 +124,7 @@ class ChatHeader(QWidget):
         """Set header content for the current session."""
         self.title_label.setText(title or tr("session.unnamed", "Untitled Session"))
         self.status_label.setText(status)
+        self.status_label.setVisible(bool(status))
         self.set_actions_enabled(True)
 
     def set_group_announcement_session(self, session) -> None:
@@ -149,6 +146,7 @@ class ChatHeader(QWidget):
     def set_status(self, status: str) -> None:
         """Set status label."""
         self.status_label.setText(status)
+        self.status_label.setVisible(bool(status))
 
     def set_actions_enabled(self, enabled: bool) -> None:
         """Enable or disable the header action buttons together."""
