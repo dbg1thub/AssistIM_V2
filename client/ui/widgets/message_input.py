@@ -2463,7 +2463,7 @@ class VoiceRecordingOverlay(QFrame):
         self.setObjectName("voiceRecordingOverlay")
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, False)
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
-        self.setFixedSize(286, self._CAPSULE_HEIGHT)
+        self.setFixedSize(220, self._CAPSULE_HEIGHT)
         self._progress_ratio = 0.0
         self._canceling = False
         self._warning = False
@@ -2555,8 +2555,7 @@ class VoiceRecordingOverlay(QFrame):
             else:
                 fill_color.setAlpha(205)
             painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(fill_color)
-            painter.drawRoundedRect(fill_rect, radius, radius)
+            painter.fillRect(fill_rect, fill_color)
             painter.restore()
 
         super().paintEvent(event)

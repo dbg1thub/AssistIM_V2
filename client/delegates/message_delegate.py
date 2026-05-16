@@ -555,10 +555,7 @@ class MessageDelegate(QStyledItemDelegate):
             return size
 
         if message.message_type == MessageType.VOICE:
-            duration = self._voice_duration_seconds(message)
-            width_range = self.VOICE_MAX_WIDTH - self.VOICE_MIN_WIDTH
-            width = self.VOICE_MIN_WIDTH + round(width_range * min(30, max(1, duration)) / 30)
-            voice_width = max(72, min(width, max_bubble_width))
+            voice_width = max(72, min(self.VOICE_MAX_WIDTH, max_bubble_width))
             transcript = self._voice_transcript_display_text(message)
             if not transcript:
                 return QSize(voice_width, self.VOICE_HEIGHT)

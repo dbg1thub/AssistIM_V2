@@ -903,8 +903,16 @@ def test_voice_message_bubble_and_recording_overlay_are_custom_drawn() -> None:
         '\n    def _draw_voice_transcript_content',
         1,
     )[0]
+    voice_size_block = message_delegate.split('if message.message_type == MessageType.VOICE:', 1)[1].split(
+        '\n\n        text_content_width = max(',
+        1,
+    )[0]
     recording_overlay_block = message_input.split('class VoiceRecordingOverlay(QFrame):', 1)[1].split(
         '\n\nclass MessageInputVoiceLimits:',
+        1,
+    )[0]
+    position_overlay_block = message_input.split('def _position_voice_recording_overlay(self) -> None:', 1)[1].split(
+        '\n    def _refresh_voice_recording_overlay',
         1,
     )[0]
     refresh_overlay_block = message_input.split('def _refresh_voice_recording_overlay(self) -> None:', 1)[1].split(
@@ -912,6 +920,9 @@ def test_voice_message_bubble_and_recording_overlay_are_custom_drawn() -> None:
         1,
     )[0]
 
+    assert 'width_range' not in voice_size_block
+    assert 'duration = self._voice_duration_seconds(message)' not in voice_size_block
+    assert 'voice_width = max(72, min(self.VOICE_MAX_WIDTH, max_bubble_width))' in voice_size_block
     assert 'voice_played' not in voice_content_block
     assert 'drawEllipse(QRect(voice_rect.right() - dot_size' not in voice_content_block
     assert 'if message.is_self:' not in voice_content_block.split('else:\n            path = QPainterPath()', 1)[1].split(
@@ -922,7 +933,10 @@ def test_voice_message_bubble_and_recording_overlay_are_custom_drawn() -> None:
     assert 'self.progress' not in recording_overlay_block
     assert 'def paintEvent(self, event) -> None:' in recording_overlay_block
     assert 'QColor(themeColor())' in recording_overlay_block
-    assert 'drawRoundedRect(fill_rect' in recording_overlay_block
+    assert 'self.setFixedSize(220, self._CAPSULE_HEIGHT)' in recording_overlay_block
+    assert 'painter.fillRect(fill_rect, fill_color)' in recording_overlay_block
+    assert 'drawRoundedRect(fill_rect' not in recording_overlay_block
+    assert 'button_center.x() - overlay.width() // 2' in position_overlay_block
     assert 'elapsed_ms = min(MessageInputVoiceLimits.MAX_SECONDS * 1000' in refresh_overlay_block
     assert 'overlay.update_state(elapsed_ms, canceling=self._voice_recording_cancel_requested)' in refresh_overlay_block
 
