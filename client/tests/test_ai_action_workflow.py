@@ -495,6 +495,17 @@ class _InvalidAtomicSendPlanner:
         )
 
 
+class _UnsafeUnsupportedActionPlanner:
+    def __init__(self, plan: AIActionPlan) -> None:
+        self.plan = plan
+        self.calls = 0
+
+    async def plan(self, *args, **kwargs):
+        del args, kwargs
+        self.calls += 1
+        return self.plan
+
+
 class _AtomicReadPlanner:
     async def plan(self, *args, **kwargs):
         user_text = str(args[0] if args else "").strip()
@@ -4858,6 +4869,141 @@ def test_ai_action_workflow_does_not_repair_unknown_write_action(tmp_path, monke
             assert "超出当前支持" in result.response_text
             assert planner.plan_calls == 1
             assert planner.repair_calls == []
+            assert message_sender.calls == []
+            assert await store.latest_pending_plan("thread-1") is None
+        finally:
+            await db.close()
+
+    asyncio.run(scenario())
+
+
+def test_ai_action_workflow_rejects_unsupported_recall_before_planning(tmp_path, monkeypatch) -> None:
+    async def scenario() -> None:
+        db = Database(str(tmp_path / "actions.db"))
+        monkeypatch.setattr(action_store_module, "get_database", lambda: db)
+        store = AIActionStore()
+        planner = _UnsafeUnsupportedActionPlanner(
+            AIActionPlan(
+                is_action=True,
+                goal="误规划为聊天记录查询",
+                risk="low",
+                steps=(
+                    AIActionStep(
+                        id="list_messages",
+                        action="message.list",
+                        args={"session_id": "session-1", "limit": 20},
+                    ),
+                ),
+                final={"type": "answer", "source": "$list_messages"},
+            )
+        )
+        server_reader = _FakeServerReadClient()
+        workflow = AIActionWorkflow(
+            action_store=store,
+            planner=planner,
+            contact_alias_resolver=ContactAliasResolver(db=_FakeContactDatabase([])),
+            server_reader=server_reader,
+        )
+        try:
+            result = await workflow.handle_user_turn(thread_id="thread-1", text="帮我撤回刚才那条消息")
+
+            assert result.handled is True
+            assert "当前不支持" in result.response_text
+            assert result.message_extra["ai_action"]["state"] == "failed"
+            assert result.message_extra["ai_action"]["error_code"] == "UNSUPPORTED_ACTION"
+            assert planner.calls == 0
+            assert server_reader.calls == []
+            assert await store.latest_pending_plan("thread-1") is None
+        finally:
+            await db.close()
+
+    asyncio.run(scenario())
+
+
+def test_ai_action_workflow_rejects_unsupported_friend_delete_before_planning(tmp_path, monkeypatch) -> None:
+    async def scenario() -> None:
+        db = Database(str(tmp_path / "actions.db"))
+        monkeypatch.setattr(action_store_module, "get_database", lambda: db)
+        store = AIActionStore()
+        planner = _UnsafeUnsupportedActionPlanner(
+            AIActionPlan(
+                is_action=True,
+                goal="误规划为好友关系查询",
+                risk="low",
+                steps=(
+                    AIActionStep(
+                        id="check_friend",
+                        action="friend.check",
+                        args={"user_id": "user-1"},
+                    ),
+                ),
+                final={"type": "answer", "source": "$check_friend"},
+            )
+        )
+        server_reader = _FakeServerReadClient()
+        workflow = AIActionWorkflow(
+            action_store=store,
+            planner=planner,
+            contact_alias_resolver=ContactAliasResolver(db=_FakeContactDatabase([])),
+            server_reader=server_reader,
+        )
+        try:
+            result = await workflow.handle_user_turn(thread_id="thread-1", text="帮我删除yuetong的好友")
+
+            assert result.handled is True
+            assert "当前不支持" in result.response_text
+            assert result.message_extra["ai_action"]["state"] == "failed"
+            assert result.message_extra["ai_action"]["error_code"] == "UNSUPPORTED_ACTION"
+            assert planner.calls == 0
+            assert server_reader.calls == []
+            assert await store.latest_pending_plan("thread-1") is None
+        finally:
+            await db.close()
+
+    asyncio.run(scenario())
+
+
+def test_ai_action_workflow_rejects_unsupported_moment_publish_before_planning(tmp_path, monkeypatch) -> None:
+    async def scenario() -> None:
+        db = Database(str(tmp_path / "actions.db"))
+        monkeypatch.setattr(action_store_module, "get_database", lambda: db)
+        store = AIActionStore()
+        planner = _UnsafeUnsupportedActionPlanner(
+            AIActionPlan(
+                is_action=True,
+                goal="误规划为发消息",
+                risk="high",
+                steps=(
+                    AIActionStep(
+                        id="resolve_target",
+                        action="contact.resolve",
+                        args={"queries": ["朋友圈"], "allow_multiple": False},
+                    ),
+                    AIActionStep(
+                        id="draft_message",
+                        action="message.draft",
+                        depends_on=("resolve_target",),
+                        args={"target": "$resolve_target.contacts[0]", "content": "测试"},
+                    ),
+                ),
+                final={"type": "answer", "source": "$draft_message"},
+            )
+        )
+        message_sender = _FakeActionMessageSender()
+        workflow = AIActionWorkflow(
+            action_store=store,
+            planner=planner,
+            contact_alias_resolver=ContactAliasResolver(db=_FakeContactDatabase([])),
+            message_sender=message_sender,
+        )
+        try:
+            result = await workflow.handle_user_turn(thread_id="thread-1", text="帮我发一条朋友圈")
+
+            assert result.handled is True
+            assert "当前不支持" in result.response_text
+            assert result.message_extra["ai_action"]["state"] == "failed"
+            assert result.message_extra["ai_action"]["error_code"] == "UNSUPPORTED_ACTION"
+            assert planner.calls == 0
             assert message_sender.calls == []
             assert await store.latest_pending_plan("thread-1") is None
         finally:

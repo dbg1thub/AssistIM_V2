@@ -860,6 +860,7 @@ class AIActionWorkflow:
         optimizer_ms = 0
         resource_check_ms = 0
         executor_ms = 0
+        pending: AIActionPlanRecord | None = None
 
         def log_perf(result_state: str, *, handled: bool, plan: AIActionPlan | None = None) -> None:
             logger.info(
@@ -897,6 +898,16 @@ class AIActionWorkflow:
                 len(normalized_text),
             )
             return AIActionTurnResult(handled=False)
+        unsupported = _unsupported_action_boundary(normalized_text)
+        if unsupported:
+            logger.info(
+                "[ai-diag] ai_action_workflow_rejected thread_id=%s reason=unsupported_action boundary=%s text_chars=%s",
+                thread_id,
+                unsupported,
+                len(normalized_text),
+            )
+            log_perf("unsupported_action", handled=True)
+            return _unsupported_action_turn_result(unsupported)
 
         pending = await self._store.latest_pending_plan(thread_id)
         pending = await self._expire_pending_confirmation_if_needed(pending)
@@ -1787,6 +1798,39 @@ def _clean_list(value: object) -> list[str]:
 
 def _normalize_text(value: str) -> str:
     return " ".join(str(value or "").split())
+
+
+def _unsupported_action_boundary(text: str) -> str:
+    normalized = _alias_key(text)
+    compact = re.sub(r"\s+", "", normalized)
+    if not compact:
+        return ""
+    if ("撤回" in compact or "召回" in compact) and "消息" in compact:
+        return "message.recall"
+    if "好友" in compact and any(token in compact for token in ("删除", "删掉", "移除", "解除")):
+        return "friend.delete"
+    if "朋友圈" in compact and any(token in compact for token in ("发", "发布", "发表", "上传", "创建", "新建")):
+        return "moment.create"
+    return ""
+
+
+def _unsupported_action_turn_result(boundary: str) -> AIActionTurnResult:
+    operation = {
+        "message.recall": "撤回消息",
+        "friend.delete": "删除好友",
+        "moment.create": "发布朋友圈",
+    }.get(str(boundary or "").strip(), "这个操作")
+    return AIActionTurnResult(
+        handled=True,
+        response_text=f"当前不支持由 AI 助手代你执行{operation}。",
+        message_extra={
+            "ai_action": {
+                "state": "failed",
+                "error_code": "UNSUPPORTED_ACTION",
+                "unsupported_action": boundary,
+            }
+        },
+    )
 
 
 def _alias_key(value: object) -> str:
