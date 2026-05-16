@@ -922,7 +922,10 @@ def test_voice_message_bubble_and_recording_overlay_are_custom_drawn() -> None:
 
     assert 'width_range' not in voice_size_block
     assert 'duration = self._voice_duration_seconds(message)' not in voice_size_block
-    assert 'voice_width = max(72, min(self.VOICE_MAX_WIDTH, max_bubble_width))' in voice_size_block
+    assert 'VOICE_FIXED_WIDTH = 73' in message_delegate
+    assert 'VOICE_MIN_WIDTH' not in message_delegate
+    assert 'VOICE_MAX_WIDTH' not in message_delegate
+    assert 'voice_width = min(self.VOICE_FIXED_WIDTH, max_bubble_width)' in voice_size_block
     assert 'voice_played' not in voice_content_block
     assert 'drawEllipse(QRect(voice_rect.right() - dot_size' not in voice_content_block
     assert 'if message.is_self:' not in voice_content_block.split('else:\n            path = QPainterPath()', 1)[1].split(

@@ -113,8 +113,7 @@ class MessageDelegate(QStyledItemDelegate):
     FILE_WIDTH, FILE_HEIGHT = attachment_card_size()
     VIDEO_WIDTH = 240
     VIDEO_HEIGHT = 136
-    VOICE_MIN_WIDTH = 96
-    VOICE_MAX_WIDTH = 220
+    VOICE_FIXED_WIDTH = 70
     VOICE_HEIGHT = 42
     LEFT_MARGIN = 18
     RIGHT_MARGIN = 18
@@ -555,7 +554,7 @@ class MessageDelegate(QStyledItemDelegate):
             return size
 
         if message.message_type == MessageType.VOICE:
-            voice_width = max(72, min(self.VOICE_MAX_WIDTH, max_bubble_width))
+            voice_width = min(self.VOICE_FIXED_WIDTH, max_bubble_width)
             transcript = self._voice_transcript_display_text(message)
             if not transcript:
                 return QSize(voice_width, self.VOICE_HEIGHT)
