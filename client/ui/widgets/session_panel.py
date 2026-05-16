@@ -11,8 +11,7 @@ from PySide6.QtCore import QEvent, QItemSelectionModel, QSortFilterProxyModel, Q
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import QAbstractItemView, QDialog, QFrame, QHBoxLayout, QListView, QSizePolicy, QVBoxLayout, QWidget
 
-from qfluentwidgets import Action, BodyLabel, InfoBar, MessageBoxBase, RoundMenu, ScrollBarHandleDisplayMode, SearchLineEdit, SubtitleLabel, ToolButton
-from qfluentwidgets.components.widgets.scroll_bar import SmoothScrollDelegate
+from qfluentwidgets import Action, BodyLabel, InfoBar, MessageBoxBase, RoundMenu, SearchLineEdit, SubtitleLabel, ToolButton
 
 from client.core.app_icons import AppIcon
 from client.core.i18n import tr
@@ -24,6 +23,7 @@ from client.models.message import Session, format_message_preview
 from client.models.session_model import SessionModel
 from client.ui.controllers.session_controller import get_session_controller
 from client.ui.styles import StyleSheet
+from client.ui.widgets.fluent_scrollbar import FluentOverlayScrollBar, FluentOverlayScrollBarDisplayMode, attach_fluent_scrollbar
 from client.ui.widgets.global_search_panel import GlobalSearchPopupOverlay
 
 
@@ -97,7 +97,7 @@ class SessionPanel(QWidget):
         self._session_model: Optional[SessionModel] = None
         self._proxy_model: Optional[SessionFilterProxyModel] = None
         self._session_delegate: Optional[SessionDelegate] = None
-        self._scroll_delegate: Optional[SmoothScrollDelegate] = None
+        self._session_scrollbar: Optional[FluentOverlayScrollBar] = None
         self._session_controller = get_session_controller()
         self._event_bus = get_event_bus()
         self._sessions_snapshot: tuple | None = None
@@ -158,7 +158,6 @@ class SessionPanel(QWidget):
         self.session_list.setLayoutMode(QListView.LayoutMode.Batched)
         self.session_list.setBatchSize(24)
         self.session_list.setResizeMode(QListView.ResizeMode.Adjust)
-        self.session_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.session_list.setContentsMargins(0, 0, 0, 0)
         self.session_list.setSpacing(0)
         self.session_list.setMouseTracking(True)
@@ -177,29 +176,20 @@ class SessionPanel(QWidget):
         self._proxy_model = SessionFilterProxyModel(self)
         self._proxy_model.setSourceModel(self._session_model)
         self._session_delegate = SessionDelegate(self)
-        self._scroll_delegate = SmoothScrollDelegate(self.session_list)
-        self._scroll_delegate.vScrollBar.setHandleDisplayMode(ScrollBarHandleDisplayMode.ALWAYS)
-        self._scroll_delegate.hScrollBar.setForceHidden(True)
-        self._scroll_delegate.vScrollBar.setForceHidden(True)
+        self._session_scrollbar = attach_fluent_scrollbar(
+            self.session_list,
+            mode=FluentOverlayScrollBarDisplayMode.ON_HOVER,
+        )
 
         self.session_list.setModel(self._proxy_model)
         self.session_list.setItemDelegate(self._session_delegate)
         self.session_list.installEventFilter(self)
         self.session_list.viewport().installEventFilter(self)
-        self._scroll_delegate.vScrollBar.installEventFilter(self)
 
     def eventFilter(self, watched, event) -> bool:
-        """Show overlay scrollbar on list hover without changing viewport width."""
-        if self._scroll_delegate and watched in {
-            self.session_list,
-            self.session_list.viewport(),
-            self._scroll_delegate.vScrollBar,
-        }:
-            if event.type() == QEvent.Type.Enter:
-                self._scroll_delegate.vScrollBar.setForceHidden(False)
-            elif event.type() == QEvent.Type.Leave:
-                QTimer.singleShot(0, self._sync_scrollbar_visibility)
-            elif event.type() == QEvent.Type.Resize:
+        """Handle viewport resize and right-click context menu."""
+        if watched in {self.session_list, self.session_list.viewport()}:
+            if event.type() == QEvent.Type.Resize:
                 QTimer.singleShot(0, self._relayout_session_list)
             elif watched is self.session_list.viewport() and event.type() == QEvent.Type.MouseButtonPress:
                 if event.button() == Qt.MouseButton.RightButton:
@@ -207,16 +197,6 @@ class SessionPanel(QWidget):
                     return True
 
         return super().eventFilter(watched, event)
-
-    def _sync_scrollbar_visibility(self) -> None:
-        if not self._scroll_delegate:
-            return
-        hovered = (
-            self.session_list.underMouse()
-            or self.session_list.viewport().underMouse()
-            or self._scroll_delegate.vScrollBar.underMouse()
-        )
-        self._scroll_delegate.vScrollBar.setForceHidden(not hovered)
 
     def _relayout_session_list(self) -> None:
         """Force item geometry to follow the latest viewport width during splitter drags."""

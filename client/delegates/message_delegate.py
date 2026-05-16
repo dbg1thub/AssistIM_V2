@@ -48,6 +48,7 @@ from client.ui.common.emoji_utils import (
     iter_text_and_emoji_clusters,
     load_emoji_pixmap,
 )
+from qfluentwidgets.common.config import qconfig
 
 logger = logging.get_logger(__name__)
 
@@ -176,6 +177,55 @@ class MessageDelegate(QStyledItemDelegate):
         self._group_members_by_id: dict[str, dict[str, object]] = {}
         self._bottom_reserved_height = 0
 
+        # Pre-built QFont / QFontMetrics instances. Each paint of a chat row
+        # used to construct half a dozen fonts and twice as many metrics, all
+        # with identical attributes; for thousands of rows that ate measurable
+        # time off the scroll budget. Build them once here and refresh through
+        # ``_rebuild_font_cache`` when the application font changes.
+        self._cached_text_font = self._text_font()
+        self._cached_time_block_font = self._build_time_block_font()
+        self._cached_status_count_font = self._build_status_count_font()
+        self._cached_group_sender_label_font = self._build_group_sender_label_font()
+        self._cached_text_metrics = QFontMetrics(self._cached_text_font)
+        self._cached_time_block_metrics = QFontMetrics(self._cached_time_block_font)
+        self._cached_status_count_metrics = QFontMetrics(self._cached_status_count_font)
+        self._cached_group_sender_label_metrics = QFontMetrics(self._cached_group_sender_label_font)
+
+        # Secondary fonts that used to be rebuilt inside _draw_* helpers.
+        self._cached_recall_notice_font = QFont()
+        self._cached_recall_notice_font.setPixelSize(12)
+        self._cached_recall_notice_metrics = QFontMetrics(self._cached_recall_notice_font)
+        self._cached_recall_notice_action_font = QFont(self._cached_recall_notice_font)
+        self._cached_recall_notice_action_font.setBold(True)
+        self._cached_recall_notice_action_metrics = QFontMetrics(self._cached_recall_notice_action_font)
+
+        self._cached_voice_duration_font = QFont()
+        self._cached_voice_duration_metrics = QFontMetrics(self._cached_voice_duration_font)
+
+        self._cached_video_duration_font = QFont()
+        self._cached_video_duration_font.setPixelSize(11)
+        self._cached_video_duration_font.setBold(True)
+        self._cached_video_duration_metrics = QFontMetrics(self._cached_video_duration_font)
+
+        self._cached_media_state_font = QFont()
+        self._cached_media_state_font.setPixelSize(12)
+        self._cached_media_state_font.setBold(True)
+
+        self._cached_avatar_initial_font = QFont()
+        self._cached_avatar_initial_font.setPixelSize(12)
+        self._cached_avatar_initial_font.setBold(True)
+
+        # Cached theme state: ``isDarkTheme()`` was being polled 5-10 times
+        # per row paint. Refresh through ``themeChanged`` so individual paint
+        # paths can read a plain bool field.
+        self._is_dark = bool(isDarkTheme())
+        try:
+            qconfig.themeChanged.connect(self._on_theme_changed)
+        except Exception:
+            # Theme broadcast is unavailable in some test stubs; subsequent
+            # paint() calls will fall back to refreshing the flag manually.
+            pass
+
     def set_session(self, session) -> bool:
         """Update the active session context used for group sender-label rendering."""
         if session is None:
@@ -242,6 +292,11 @@ class MessageDelegate(QStyledItemDelegate):
         message: ChatMessage = index.data(Qt.ItemDataRole.UserRole)
         if not message:
             return super().paint(painter, option, index)
+
+        # Snapshot the theme once for the entire row paint. Sub-paths read
+        # ``self._is_dark`` instead of calling ``isDarkTheme()`` on every
+        # branch, which used to cost 5-10 redundant lookups per row.
+        self._is_dark = bool(isDarkTheme())
 
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -585,7 +640,12 @@ class MessageDelegate(QStyledItemDelegate):
         return QSize(bubble_width, bubble_height)
 
     def _time_block_font(self) -> QFont:
-        """Return the font used by standalone time separators."""
+        """Return the cached font used by standalone time separators."""
+        return self._cached_time_block_font
+
+    @staticmethod
+    def _build_time_block_font() -> QFont:
+        """Construct the time separator font (called once at init)."""
         font = QFont()
         font.setPixelSize(11)
         return font
@@ -593,7 +653,7 @@ class MessageDelegate(QStyledItemDelegate):
     def _time_block_pill_rect(self, rect: QRect, time_text: str) -> tuple[QRect, str]:
         """Return the clickable pill rect and the final elided text for a time separator."""
         font = self._time_block_font()
-        metrics = QFontMetrics(font)
+        metrics = self._cached_time_block_metrics
         available_width = max(44, rect.width() - 16)
         display_text = metrics.elidedText(time_text, Qt.TextElideMode.ElideRight, max(20, available_width - 18))
         text_width = metrics.horizontalAdvance(display_text)
@@ -619,18 +679,11 @@ class MessageDelegate(QStyledItemDelegate):
         font = self._time_block_font()
         pill_rect, display_text = self._time_block_pill_rect(rect, time_text)
         painter.setFont(font)
+        dark = self._is_dark
 
         if hovered:
-            background = (
-                QColor(255, 255, 255, 32)
-                if isDarkTheme()
-                else QColor(0, 0, 0, 12)
-            )
-            border = (
-                QColor(255, 255, 255, 18)
-                if isDarkTheme()
-                else QColor(0, 0, 0, 8)
-            )
+            background = QColor(255, 255, 255, 32) if dark else QColor(0, 0, 0, 12)
+            border = QColor(255, 255, 255, 18) if dark else QColor(0, 0, 0, 8)
             path = QPainterPath()
             path.addRoundedRect(QRectF(pill_rect), pill_rect.height() / 2, pill_rect.height() / 2)
             painter.fillPath(path, background)
@@ -638,8 +691,10 @@ class MessageDelegate(QStyledItemDelegate):
             painter.drawPath(path)
 
         text_color = (
-            QColor(224, 224, 224, 236) if hovered else QColor(210, 210, 210, 230)
-        ) if isDarkTheme() else (QColor("#5F5F5F") if hovered else QColor("#8A8A8A"))
+            (QColor(224, 224, 224, 236) if hovered else QColor(210, 210, 210, 230))
+            if dark
+            else (QColor("#5F5F5F") if hovered else QColor("#8A8A8A"))
+        )
         painter.setPen(text_color)
         painter.drawText(pill_rect, Qt.AlignmentFlag.AlignCenter, display_text)
 
@@ -776,18 +831,14 @@ class MessageDelegate(QStyledItemDelegate):
         if should_offer_recalled_direct_edit(message):
             action_text = tr("message.recalled.edit_direct", "Direct Edit")
 
-        notice_font = QFont()
-        notice_font.setPixelSize(12)
-        notice_metrics = QFontMetrics(notice_font)
+        notice_metrics = self._cached_recall_notice_metrics
         notice_width = notice_metrics.horizontalAdvance(notice_text)
 
         action_rect: QRect | None = None
         total_width = notice_width
         action_width = 0
         if action_text:
-            action_font = QFont(notice_font)
-            action_font.setBold(True)
-            action_width = QFontMetrics(action_font).horizontalAdvance(action_text)
+            action_width = self._cached_recall_notice_action_metrics.horizontalAdvance(action_text)
             total_width += self.RECALL_ACTION_GAP + action_width
 
         start_x = rect.x() + max(0, (rect.width() - total_width) // 2)
@@ -799,27 +850,26 @@ class MessageDelegate(QStyledItemDelegate):
     def _draw_recall_notice(self, painter: QPainter, rect: QRect, message: ChatMessage) -> None:
         """Draw a centered system-style recall notice."""
         notice_text, action_text, notice_rect, action_rect = self._recall_notice_layout(rect, message)
-        notice_font = QFont()
-        notice_font.setPixelSize(12)
-        painter.setFont(notice_font)
-        painter.setPen(QColor(196, 196, 196, 220) if isDarkTheme() else QColor("#8A8A8A"))
+        painter.setFont(self._cached_recall_notice_font)
+        painter.setPen(QColor(196, 196, 196, 220) if self._is_dark else QColor("#8A8A8A"))
         painter.drawText(notice_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, notice_text)
         if action_text and action_rect is not None:
-            action_font = QFont(notice_font)
-            painter.setFont(action_font)
+            painter.setFont(self._cached_recall_notice_action_font)
             hovered = self._hovered_recall_notice_action_id == str((message.extra or {}).get(MessageModel.SOURCE_MESSAGE_ID_KEY, "") or "")
             if hovered:
                 hover_rect = action_rect.adjusted(-6, 1, 6, -1)
-                background = QColor(255, 255, 255, 32) if isDarkTheme() else QColor(0, 0, 0, 12)
-                border = QColor(255, 255, 255, 18) if isDarkTheme() else QColor(0, 0, 0, 8)
+                dark = self._is_dark
+                background = QColor(255, 255, 255, 32) if dark else QColor(0, 0, 0, 12)
+                border = QColor(255, 255, 255, 18) if dark else QColor(0, 0, 0, 8)
                 path = QPainterPath()
                 path.addRoundedRect(QRectF(hover_rect), hover_rect.height() / 2, hover_rect.height() / 2)
                 painter.fillPath(path, background)
                 painter.setPen(border)
                 painter.drawPath(path)
+            dark = self._is_dark
             action_color = (
-                QColor("#AECBFA") if hovered and isDarkTheme() else
-                QColor("#8AB4F8") if isDarkTheme() else
+                QColor("#AECBFA") if hovered and dark else
+                QColor("#8AB4F8") if dark else
                 QColor("#B3261E") if hovered else QColor("#D93025")
             )
             painter.setPen(action_color)
@@ -852,11 +902,17 @@ class MessageDelegate(QStyledItemDelegate):
 
         if message.is_self:
             auth_controller = peek_auth_controller()
-            current_user = dict(auth_controller.current_user or {}) if auth_controller is not None else {}
-            sender_avatar = str(current_user.get("avatar", "") or "")
-            sender_gender = str(current_user.get("gender", "") or "")
-            sender_name = str(current_user.get("nickname", "") or "") or str(current_user.get("username", "") or "")
-            sender_username = str(current_user.get("username", "") or "")
+            current_user = auth_controller.current_user if auth_controller is not None else None
+            if current_user:
+                sender_avatar = str(current_user.get("avatar", "") or "")
+                sender_gender = str(current_user.get("gender", "") or "")
+                sender_name = str(current_user.get("nickname", "") or "") or str(current_user.get("username", "") or "")
+                sender_username = str(current_user.get("username", "") or "")
+            else:
+                sender_avatar = ""
+                sender_gender = ""
+                sender_name = ""
+                sender_username = ""
         else:
             sender_username = str(extra.get("sender_username", "") or "")
         avatar_seed_value = profile_avatar_seed(
@@ -886,7 +942,7 @@ class MessageDelegate(QStyledItemDelegate):
 
         painter.save()
         painter.setClipPath(path)
-        dark = isDarkTheme()
+        dark = self._is_dark
         if message.is_self:
             fill = QColor(themeColor())
             fill.setAlpha(42 if dark else 28)
@@ -897,10 +953,7 @@ class MessageDelegate(QStyledItemDelegate):
         painter.restore()
 
         label = "ME" if message.is_self else ((message.sender_id or "?")[:1].upper())
-        font = QFont()
-        font.setPixelSize(12)
-        font.setBold(True)
-        painter.setFont(font)
+        painter.setFont(self._cached_avatar_initial_font)
         painter.setPen(QColor("#DDE7F1") if dark else QColor("#425466"))
         painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, label)
 
@@ -947,13 +1000,14 @@ class MessageDelegate(QStyledItemDelegate):
         text_rect, layout = self._text_layout(translation_rect, translation_text)
         divider_y = primary_rect.bottom() + 1 + max(2, self.TRANSLATION_TOP_GAP // 2)
 
+        dark = self._is_dark
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.setFont(self._text_font())
-        painter.setPen(QColor(255, 255, 255, 42) if isDarkTheme() else QColor(0, 0, 0, 30))
+        painter.setFont(self._cached_text_font)
+        painter.setPen(QColor(255, 255, 255, 42) if dark else QColor(0, 0, 0, 30))
         painter.drawLine(rect.x(), divider_y, rect.right(), divider_y)
-        text_color = QColor(222, 226, 232, 178) if isDarkTheme() else QColor("#707070")
+        text_color = QColor(222, 226, 232, 178) if dark else QColor("#707070")
         self._draw_plain_text_layout(painter, text_rect, layout, text_color)
         painter.restore()
 
@@ -1029,12 +1083,12 @@ class MessageDelegate(QStyledItemDelegate):
             else None
         )
 
-        text_font = self._text_font()
-        text_metrics = QFontMetrics(text_font)
+        text_font = self._cached_text_font
+        dark = self._is_dark
         text_color = self._text_color(message)
-        mention_text_color = QColor("#0F6CBD") if not isDarkTheme() else QColor("#8AB4F8")
-        selected_text_color = QColor(255, 255, 255) if isDarkTheme() else QColor("#101010")
-        highlight_color = QColor(86, 157, 229, 120) if isDarkTheme() else QColor(140, 196, 255, 140)
+        mention_text_color = QColor("#0F6CBD") if not dark else QColor("#8AB4F8")
+        selected_text_color = QColor(255, 255, 255) if dark else QColor("#101010")
+        highlight_color = QColor(86, 157, 229, 120) if dark else QColor(140, 196, 255, 140)
         emoji_target = BUBBLE_EMOJI_PIXEL_SIZE
 
         painter.save()
@@ -1094,8 +1148,9 @@ class MessageDelegate(QStyledItemDelegate):
         clip_path.addRoundedRect(QRectF(draw_rect), 12, 12)
 
         if pixmap.isNull():
-            painter.fillPath(clip_path, QColor(52, 59, 66, 220) if isDarkTheme() else QColor("#EEF2F7"))
-            painter.setPen(QColor(216, 216, 216) if isDarkTheme() else QColor("#7A7A7A"))
+            dark = self._is_dark
+            painter.fillPath(clip_path, QColor(52, 59, 66, 220) if dark else QColor("#EEF2F7"))
+            painter.setPen(QColor(216, 216, 216) if dark else QColor("#7A7A7A"))
             painter.drawText(draw_rect, Qt.AlignmentFlag.AlignCenter, tr("common.image", "Image"))
             self._draw_media_state_overlay(painter, draw_rect, message)
             return
@@ -1119,7 +1174,7 @@ class MessageDelegate(QStyledItemDelegate):
             display_name=file_name,
             file_path=file_path,
             fallback_size=fallback_size,
-            dark=isDarkTheme(),
+            dark=self._is_dark,
             header_height=self.FILE_HEIGHT if summary_text else None,
         )
         if summary_text:
@@ -1131,13 +1186,14 @@ class MessageDelegate(QStyledItemDelegate):
         text_rect, layout = self._text_layout(summary_rect, summary_text)
         divider_y = rect.y() + self.FILE_HEIGHT + max(2, self.TRANSLATION_TOP_GAP // 2)
 
+        dark = self._is_dark
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.setFont(self._text_font())
-        painter.setPen(QColor(255, 255, 255, 42) if isDarkTheme() else QColor(0, 0, 0, 30))
+        painter.setFont(self._cached_text_font)
+        painter.setPen(QColor(255, 255, 255, 42) if dark else QColor(0, 0, 0, 30))
         painter.drawLine(rect.x() + 10, divider_y, rect.right() - 10, divider_y)
-        text_color = QColor(222, 226, 232, 178) if isDarkTheme() else QColor("#707070")
+        text_color = QColor(222, 226, 232, 178) if dark else QColor("#707070")
         self._draw_plain_text_layout(painter, text_rect, layout, text_color)
         painter.restore()
 
@@ -1149,8 +1205,9 @@ class MessageDelegate(QStyledItemDelegate):
 
         thumbnail = self._load_video_thumbnail(message)
         if thumbnail.isNull():
-            painter.fillPath(cover_path, QColor(58, 63, 70, 220) if isDarkTheme() else QColor("#EEF2F7"))
-            painter.setPen(QColor(216, 216, 216) if isDarkTheme() else QColor("#7A7A7A"))
+            dark = self._is_dark
+            painter.fillPath(cover_path, QColor(58, 63, 70, 220) if dark else QColor("#EEF2F7"))
+            painter.setPen(QColor(216, 216, 216) if dark else QColor("#7A7A7A"))
             painter.drawText(cover_rect, Qt.AlignmentFlag.AlignCenter, "Video")
         else:
             source_rect = self._video_cover_source_rect(thumbnail.size(), cover_rect.size())
@@ -1176,7 +1233,8 @@ class MessageDelegate(QStyledItemDelegate):
         if transcript_text:
             voice_rect = QRect(rect.x(), rect.y(), rect.width(), max(1, self.VOICE_HEIGHT - self.BUBBLE_PADDING_V * 2))
         text_color = self._text_color(message)
-        sub_color = QColor(255, 255, 255, 170) if isDarkTheme() else QColor(32, 32, 32, 150)
+        dark = self._is_dark
+        sub_color = QColor(255, 255, 255, 170) if dark else QColor(32, 32, 32, 150)
         playing = bool((message.extra or {}).get("voice_playing"))
 
         painter.save()
@@ -1186,9 +1244,9 @@ class MessageDelegate(QStyledItemDelegate):
         icon_size = 18
         icon_rect = QRect(voice_rect.x(), voice_rect.y() + max(0, (voice_rect.height() - icon_size) // 2), icon_size, icon_size)
         duration_text = f'{duration}"'
-        font = QFont()
+        font = self._cached_voice_duration_font
         painter.setFont(font)
-        metrics = QFontMetrics(font)
+        metrics = self._cached_voice_duration_metrics
         text_width = metrics.horizontalAdvance(duration_text)
         text_rect = QRect(voice_rect.right() - text_width + 1, voice_rect.y(), text_width, voice_rect.height())
 
@@ -1221,8 +1279,7 @@ class MessageDelegate(QStyledItemDelegate):
 
         state_text = self._media_state_text(message)
         if state_text:
-            state_font = QFont(font)
-            painter.setFont(state_font)
+            painter.setFont(font)
             painter.setPen(sub_color)
             painter.drawText(voice_rect, Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignHCenter, state_text)
 
@@ -1243,13 +1300,14 @@ class MessageDelegate(QStyledItemDelegate):
         text_rect, layout = self._text_layout(transcript_rect, transcript_text)
         divider_y = voice_rect.bottom() + 1 + max(2, self.TRANSLATION_TOP_GAP // 2)
 
+        dark = self._is_dark
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.setFont(self._text_font())
-        painter.setPen(QColor(255, 255, 255, 42) if isDarkTheme() else QColor(0, 0, 0, 30))
+        painter.setFont(self._cached_text_font)
+        painter.setPen(QColor(255, 255, 255, 42) if dark else QColor(0, 0, 0, 30))
         painter.drawLine(rect.x(), divider_y, rect.right(), divider_y)
-        text_color = QColor(222, 226, 232, 178) if isDarkTheme() else QColor("#707070")
+        text_color = QColor(222, 226, 232, 178) if dark else QColor("#707070")
         self._draw_plain_text_layout(painter, text_rect, layout, text_color)
         painter.restore()
 
@@ -1259,7 +1317,7 @@ class MessageDelegate(QStyledItemDelegate):
         width = size
         count_text = self._group_read_count_text(message)
         if count_text:
-            width = max(size, QFontMetrics(self._status_count_font()).horizontalAdvance(count_text) + 12)
+            width = max(size, self._cached_status_count_metrics.horizontalAdvance(count_text) + 12)
         x = max(row_rect.x() + self.LEFT_MARGIN, bubble_rect.x() - self.BUBBLE_GAP - width)
         y = bubble_rect.y() + max(0, bubble_rect.height() - size - 6)
         return QRect(x, y, width, size)
@@ -1313,7 +1371,12 @@ class MessageDelegate(QStyledItemDelegate):
             AppIcon.WARNING.render(painter, rect, fill="#ffffff")
 
     def _status_count_font(self) -> QFont:
-        """Return the compact font used for group read-count pills."""
+        """Return the cached compact font used for group read-count pills."""
+        return self._cached_status_count_font
+
+    @staticmethod
+    def _build_status_count_font() -> QFont:
+        """Construct the read-count pill font (called once at init)."""
         font = QFont()
         font.setPixelSize(10)
         font.setBold(False)
@@ -1348,7 +1411,7 @@ class MessageDelegate(QStyledItemDelegate):
 
     def _status_badge_style(self, message: ChatMessage) -> tuple[QColor, str] | None:
         """Return badge background and icon for message status."""
-        dark = isDarkTheme()
+        dark = self._is_dark
         info_color = QColor(157, 157, 157) if dark else QColor(138, 138, 138)
         success_color = QColor(108, 203, 95) if dark else QColor(15, 123, 15)
         error_color = QColor(255, 153, 164) if dark else QColor(196, 43, 28)
@@ -1378,10 +1441,7 @@ class MessageDelegate(QStyledItemDelegate):
         overlay_color = QColor(0, 0, 0, 88) if self._is_uploading(message) else QColor(166, 35, 35, 112)
         painter.fillPath(overlay_path, overlay_color)
 
-        font = QFont()
-        font.setPixelSize(12)
-        font.setBold(True)
-        painter.setFont(font)
+        painter.setFont(self._cached_media_state_font)
         painter.setPen(Qt.GlobalColor.white)
         painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, state_text)
 
@@ -1444,14 +1504,18 @@ class MessageDelegate(QStyledItemDelegate):
         return message.content or tr("message.recalled_notice", "A message was recalled")
 
     def _group_sender_label_font(self) -> QFont:
-        """Return the shared font used by group sender labels."""
+        """Return the cached font used by group sender labels."""
+        return self._cached_group_sender_label_font
+
+    def _build_group_sender_label_font(self) -> QFont:
+        """Construct the group sender label font (called once at init)."""
         font = QFont()
         font.setPixelSize(self.GROUP_SENDER_LABEL_FONT_PIXEL_SIZE)
         return font
 
     def _group_sender_label_height(self) -> int:
         """Return the painted height for one sender label row."""
-        return QFontMetrics(self._group_sender_label_font()).height()
+        return self._cached_group_sender_label_metrics.height()
 
     def _group_sender_label_block_height(self, message: ChatMessage) -> int:
         """Return the extra top spacing reserved for one group sender label."""
@@ -1467,10 +1531,10 @@ class MessageDelegate(QStyledItemDelegate):
             return
 
         text_rect = row_layout.sender_label_rect
-        font = self._group_sender_label_font()
-        metrics = QFontMetrics(font)
+        font = self._cached_group_sender_label_font
+        metrics = self._cached_group_sender_label_metrics
         painter.setFont(font)
-        painter.setPen(QColor(196, 196, 196, 220) if isDarkTheme() else QColor("#8A8A8A"))
+        painter.setPen(QColor(196, 196, 196, 220) if self._is_dark else QColor("#8A8A8A"))
         elided = metrics.elidedText(label, Qt.TextElideMode.ElideRight, text_rect.width())
         text_width = metrics.horizontalAdvance(elided)
         if bool(row_layout.sender_label_alignment & Qt.AlignmentFlag.AlignRight):
@@ -1695,11 +1759,9 @@ class MessageDelegate(QStyledItemDelegate):
         if not duration_text:
             return
 
-        font = QFont()
-        font.setPixelSize(11)
-        font.setBold(True)
+        font = self._cached_video_duration_font
         painter.setFont(font)
-        metrics = QFontMetrics(font)
+        metrics = self._cached_video_duration_metrics
         text_width = metrics.horizontalAdvance(duration_text)
         text_rect = QRect(rect.right() - text_width - 10, rect.bottom() - 24, text_width, 16)
 
@@ -1774,8 +1836,7 @@ class MessageDelegate(QStyledItemDelegate):
         if cached_size is not None:
             return cached_size
 
-        font = self._text_font()
-        fm = QFontMetrics(font)
+        fm = self._cached_text_metrics
         if not text:
             size = QSize(18, fm.height())
             self._cache_put(self._text_measure_cache, cache_key, size, self.TEXT_MEASURE_CACHE_LIMIT)
@@ -1896,8 +1957,13 @@ class MessageDelegate(QStyledItemDelegate):
         selected_text_color: QColor,
         highlight_color: QColor,
     ) -> None:
-        """Draw a text run, splitting around any active selection."""
-        painter.setFont(self._text_font())
+        """Draw a text run, splitting around any active selection.
+
+        ``_draw_text_content`` already configured ``painter`` with the cached
+        text font; we deliberately avoid re-setting the font here because the
+        method runs once per text run inside the bubble, and per-run setFont
+        calls were a noticeable share of the per-row paint cost.
+        """
 
         for segment_start, segment_end, is_selected, is_mentioned in self._text_run_segments(
             run,
@@ -1929,7 +1995,7 @@ class MessageDelegate(QStyledItemDelegate):
         text_color: QColor,
     ) -> None:
         """Draw a non-selectable run layout, preserving emoji rendering."""
-        text_font = self._text_font()
+        text_font = self._cached_text_font
         emoji_target = BUBBLE_EMOJI_PIXEL_SIZE
         painter.setFont(text_font)
         painter.setPen(text_color)
@@ -2033,8 +2099,8 @@ class MessageDelegate(QStyledItemDelegate):
         if cached_layout is not None:
             return cached_layout
 
-        text_font = self._text_font()
-        text_metrics = QFontMetrics(text_font)
+        text_font = self._cached_text_font
+        text_metrics = self._cached_text_metrics
         emoji_target = BUBBLE_EMOJI_PIXEL_SIZE
         max_width = max(1, width)
 
@@ -2256,10 +2322,9 @@ class MessageDelegate(QStyledItemDelegate):
             return 0
         return last_line.runs[-1].end
 
-    @staticmethod
-    def _text_color(message: ChatMessage) -> QColor:
+    def _text_color(self, message: ChatMessage) -> QColor:
         """Return the foreground text color for a message bubble."""
-        if isDarkTheme():
+        if self._is_dark:
             return QColor(246, 248, 250, 235) if message.is_self else QColor(236, 239, 243, 230)
         return QColor("#1A1A1A")
 
@@ -2268,10 +2333,9 @@ class MessageDelegate(QStyledItemDelegate):
         """Return whether the message is still in HTTP upload stage."""
         return bool(getattr(message, "extra", {}) and message.extra.get("uploading"))
 
-    @staticmethod
-    def _bubble_fill_color(message: ChatMessage, *, context_menu_active: bool = False) -> QColor:
+    def _bubble_fill_color(self, message: ChatMessage, *, context_menu_active: bool = False) -> QColor:
         """Return one stable bubble fill, including the right-click pressed state."""
-        dark = isDarkTheme()
+        dark = self._is_dark
         if message.is_self:
             bubble_color = QColor(themeColor())
             if context_menu_active:
@@ -2497,6 +2561,11 @@ class MessageDelegate(QStyledItemDelegate):
     def _on_avatar_ready(self, _source: str) -> None:
         """Refresh the view after a remote avatar finishes downloading."""
         self._avatar_pixmap_cache.clear()
+        self._schedule_refresh_message_view()
+
+    def _on_theme_changed(self, *_args) -> None:
+        """Sync the cached dark-theme flag and force a list redraw."""
+        self._is_dark = bool(isDarkTheme())
         self._schedule_refresh_message_view()
 
     def _schedule_refresh_message_view(self) -> None:

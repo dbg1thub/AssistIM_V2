@@ -9,6 +9,7 @@ from PySide6.QtCore import QModelIndex, QRect, QSize, Qt
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import QStyle, QStyledItemDelegate, QStyleOptionViewItem
 from qfluentwidgets import isDarkTheme
+from qfluentwidgets.common.config import qconfig
 
 from client.core.app_icons import CollectionIcon
 from client.core.avatar_rendering import draw_avatar_pixmap, get_avatar_image_store
@@ -55,6 +56,28 @@ class SessionDelegate(QStyledItemDelegate):
         self._avatar_store.avatar_ready.connect(self._on_avatar_ready)
         self._mute_icon = CollectionIcon("alert_off")
 
+        # Cached fonts and metrics — same pattern as MessageDelegate.
+        self._cached_name_font = self._ui_font(16)
+        self._cached_name_metrics = QFontMetrics(self._cached_name_font)
+        self._cached_preview_font = self._ui_font(13)
+        self._cached_preview_metrics = QFontMetrics(self._cached_preview_font)
+        self._cached_preview_emoji_only_font = self._ui_font(22)
+        self._cached_time_font = self._ui_font(10)
+        self._cached_time_metrics = QFontMetrics(self._cached_time_font)
+        self._cached_prefix_font = self._ui_font(13)
+        self._cached_prefix_metrics = QFontMetrics(self._cached_prefix_font)
+        self._cached_prefix_bold_font = self._ui_font(13, bold=True)
+        self._cached_prefix_bold_metrics = QFontMetrics(self._cached_prefix_bold_font)
+        self._cached_unread_badge_font = self._unread_badge_font()
+        self._cached_unread_badge_metrics = QFontMetrics(self._cached_unread_badge_font)
+        self._cached_preview_emoji_font = self._preview_emoji_font()
+
+        self._is_dark = bool(isDarkTheme())
+        try:
+            qconfig.themeChanged.connect(self._on_theme_changed)
+        except Exception:
+            pass
+
     def sizeHint(self, option: QStyleOptionViewItem, index: QModelIndex) -> QSize:
         """Return fixed session row height."""
         return QSize(option.rect.width(), self.ITEM_HEIGHT)
@@ -64,6 +87,8 @@ class SessionDelegate(QStyledItemDelegate):
         session = index.data(Qt.ItemDataRole.UserRole)
         if not session:
             return super().paint(painter, option, index)
+
+        self._is_dark = bool(isDarkTheme())
 
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -84,16 +109,16 @@ class SessionDelegate(QStyledItemDelegate):
         content_right = card_rect.x() + card_rect.width() - self.ITEM_PADDING
         content_width = max(0, content_right - content_left)
 
-        name_font = self._ui_font(16)
-        name_fm = QFontMetrics(name_font)
+        name_font = self._cached_name_font
+        name_fm = self._cached_name_metrics
 
         draft_preview = (getattr(session, "draft_preview", None) or "").strip()
         preview_text = self._format_preview_text(session)
-        preview_font = self._preview_font(draft_preview or preview_text)
-        preview_fm = QFontMetrics(preview_font)
+        preview_font = self._cached_preview_emoji_only_font if is_emoji_text(draft_preview or preview_text) else self._cached_preview_font
+        preview_fm = QFontMetrics(preview_font) if preview_font is self._cached_preview_emoji_only_font else self._cached_preview_metrics
 
-        time_font = self._ui_font(10)
-        time_fm = QFontMetrics(time_font)
+        time_font = self._cached_time_font
+        time_fm = self._cached_time_metrics
 
         time_text = self._format_time(session.last_message_time or session.created_at)
         time_width = max(0, min(max(0, content_width // 2), time_fm.horizontalAdvance(time_text) + 4))
@@ -103,8 +128,7 @@ class SessionDelegate(QStyledItemDelegate):
         mute_slot_width = mute_icon_size if muted else 0
 
         unread_text = self._format_unread(session.unread_count)
-        unread_badge_font = self._unread_badge_font()
-        unread_badge_fm = QFontMetrics(unread_badge_font)
+        unread_badge_fm = self._cached_unread_badge_metrics
         unread_width = max(20, unread_badge_fm.horizontalAdvance(unread_text) + 14) if unread_text else 0
 
         name_available = max(0, content_width - time_width)
@@ -122,10 +146,11 @@ class SessionDelegate(QStyledItemDelegate):
         preview_rect = QRect(content_left, preview_y, preview_available, self.TEXT_LINE_HEIGHT)
         time_rect = QRect(content_right - time_width, name_y, time_width, self.TEXT_LINE_HEIGHT)
 
-        secondary_text = QColor(216, 216, 216) if isDarkTheme() else QColor(95, 95, 95)
-        primary_text = QColor(255, 255, 255) if isDarkTheme() else QColor(0, 0, 0)
+        dark = self._is_dark
+        secondary_text = QColor(216, 216, 216) if dark else QColor(95, 95, 95)
+        primary_text = QColor(255, 255, 255) if dark else QColor(0, 0, 0)
         preview_color = primary_text if session.unread_count > 0 else secondary_text
-        time_color = QColor(196, 196, 196) if isDarkTheme() else QColor(122, 122, 122)
+        time_color = QColor(196, 196, 196) if dark else QColor(122, 122, 122)
 
         painter.setFont(name_font)
         painter.setPen(primary_text)
@@ -149,9 +174,9 @@ class SessionDelegate(QStyledItemDelegate):
         painter.setFont(preview_font)
         if draft_preview:
             prefix_text = tr("session.draft_prefix", "[Draft]")
-            prefix_color = QColor("#FF6B6B") if isDarkTheme() else QColor("#D93025")
-            prefix_font = self._ui_font(13)
-            prefix_fm = QFontMetrics(prefix_font)
+            prefix_color = QColor("#FF6B6B") if dark else QColor("#D93025")
+            prefix_font = self._cached_prefix_font
+            prefix_fm = self._cached_prefix_metrics
             prefix_width = prefix_fm.horizontalAdvance(prefix_text) + 6
             body_available = max(0, preview_available - prefix_width)
 
@@ -174,11 +199,11 @@ class SessionDelegate(QStyledItemDelegate):
         else:
             attention_prefix = self._attention_preview_prefix(session)
             if attention_prefix:
-                prefix_font = self._ui_font(13, bold=True)
-                prefix_fm = QFontMetrics(prefix_font)
+                prefix_font = self._cached_prefix_bold_font
+                prefix_fm = self._cached_prefix_bold_metrics
                 prefix_width = prefix_fm.horizontalAdvance(attention_prefix) + 6
                 body_available = max(0, preview_available - prefix_width)
-                attention_color = QColor("#FF6B6B") if isDarkTheme() else QColor("#D93025")
+                attention_color = QColor("#FF6B6B") if dark else QColor("#D93025")
                 painter.setFont(prefix_font)
                 painter.setPen(attention_color)
                 painter.drawText(
@@ -222,7 +247,7 @@ class SessionDelegate(QStyledItemDelegate):
 
     def _draw_background(self, painter: QPainter, rect: QRect, option: QStyleOptionViewItem) -> None:
         """Draw rounded background for hover/selected state."""
-        dark = isDarkTheme()
+        dark = self._is_dark
         if option.state & QStyle.StateFlag.State_Selected:
             color = QColor(255, 255, 255, 38) if dark else QColor(0, 0, 0, 18)
             border = QColor(255, 255, 255, 0)
@@ -267,9 +292,9 @@ class SessionDelegate(QStyledItemDelegate):
 
             pixmap = QPixmap(avatar_path)
             if not draw_avatar_pixmap(painter, rect, pixmap):
-                painter.fillPath(path, QColor("#626B76") if isDarkTheme() else QColor("#D7DEE8"))
+                painter.fillPath(path, QColor("#626B76") if self._is_dark else QColor("#D7DEE8"))
         else:
-            painter.fillPath(path, QColor("#626B76") if isDarkTheme() else QColor("#D7DEE8"))
+            painter.fillPath(path, QColor("#626B76") if self._is_dark else QColor("#D7DEE8"))
 
         painter.setClipping(False)
 
@@ -295,15 +320,26 @@ class SessionDelegate(QStyledItemDelegate):
         if hasattr(parent, "update"):
             parent.update()
 
+    def _on_theme_changed(self, *_args) -> None:
+        """Sync the cached dark-theme flag and force a list redraw."""
+        self._is_dark = bool(isDarkTheme())
+        parent = self.parent()
+        if parent is None:
+            return
+        if hasattr(parent, "viewport"):
+            parent.viewport().update()
+        elif hasattr(parent, "update"):
+            parent.update()
+
     def _draw_unread_badge(self, painter: QPainter, rect: QRect, text: str) -> None:
         """Draw unread badge using a Fluent InfoBadge-like pill."""
         path = QPainterPath()
         radius = rect.height() / 2
         path.addRoundedRect(rect, radius, radius)
-        accent = QColor("#FF5A5F") if isDarkTheme() else QColor("#E53935")
+        accent = QColor("#FF5A5F") if self._is_dark else QColor("#E53935")
         painter.fillPath(path, accent)
 
-        painter.setFont(self._unread_badge_font())
+        painter.setFont(self._cached_unread_badge_font)
         painter.setPen(Qt.GlobalColor.white)
         painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, text)
 

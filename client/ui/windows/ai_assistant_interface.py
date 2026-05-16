@@ -34,7 +34,6 @@ from qfluentwidgets import (
     PrimaryPushButton,
     PushButton,
     RoundMenu,
-    ScrollBarHandleDisplayMode,
     SubtitleLabel,
     TabBar,
     TabCloseButtonDisplayMode,
@@ -42,7 +41,6 @@ from qfluentwidgets import (
     isDarkTheme,
     themeColor,
 )
-from qfluentwidgets.components.widgets.scroll_bar import SmoothScrollDelegate
 
 from client.core import logging
 from client.core.app_icons import AppIcon, CollectionIcon
@@ -54,6 +52,7 @@ from client.managers.ai_action_workflow import AIActionWorkflow
 from client.managers.ai_prompt_builder import AIPromptBuilder
 from client.managers.ai_task_manager import AITaskEvent, AITaskSnapshot, AITaskState, get_ai_task_manager
 from client.managers.conversation_memory_manager import ConversationMemoryContext, ConversationMemoryManager
+from client.ui.widgets.fluent_scrollbar import FluentOverlayScrollBar, FluentOverlayScrollBarDisplayMode, attach_fluent_scrollbar
 from client.models.ai_assistant import AIMessage, AIMessageRole, AIMessageStatus, AIThread
 from client.models.ai_assistant_message_model import AIAssistantMessageModel
 from client.services.ai_service import AIErrorCode
@@ -220,7 +219,7 @@ class AIAssistantInterface(QWidget):
         self._active_action_task: asyncio.Task | None = None
         self._last_persist_at = 0.0
         self._applying_theme = False
-        self._scroll_delegate: SmoothScrollDelegate | None = None
+        self._message_scrollbar: FluentOverlayScrollBar | None = None
         self._is_generating = False
         self._pending_image_attachment: dict | None = None
         self._thinking_animation_frame = 0
@@ -295,14 +294,13 @@ class AIAssistantInterface(QWidget):
         self._message_delegate = AIAssistantMessageDelegate(self.message_list)
         self.message_list.setModel(self._message_model)
         self.message_list.setItemDelegate(self._message_delegate)
-        self._scroll_delegate = SmoothScrollDelegate(self.message_list)
-        self._scroll_delegate.vScrollBar.setHandleDisplayMode(ScrollBarHandleDisplayMode.ALWAYS)
-        self._scroll_delegate.hScrollBar.setForceHidden(True)
-        self._scroll_delegate.vScrollBar.setForceHidden(True)
+        self._message_scrollbar = attach_fluent_scrollbar(
+            self.message_list,
+            mode=FluentOverlayScrollBarDisplayMode.ON_HOVER,
+        )
         self.message_list.installEventFilter(self)
         self.message_list.viewport().installEventFilter(self)
         self.message_list.verticalScrollBar().installEventFilter(self)
-        self._scroll_delegate.vScrollBar.installEventFilter(self)
         self.message_list.verticalScrollBar().valueChanged.connect(self._sync_scroll_to_bottom_button)
         self.message_list.verticalScrollBar().rangeChanged.connect(self._sync_scroll_to_bottom_button)
         self.message_list.customContextMenuRequested.connect(self._on_message_context_menu)
@@ -1439,9 +1437,9 @@ class AIAssistantInterface(QWidget):
         QTimer.singleShot(delay, guarded_callback)
 
     def _set_message_scrollbar_visible(self, visible: bool) -> None:
-        if self._scroll_delegate is None:
+        if self._message_scrollbar is None:
             return
-        self._scroll_delegate.vScrollBar.setForceHidden(not visible)
+        self._message_scrollbar.set_force_hidden(not visible)
 
     def _message_track_width(self) -> int:
         if hasattr(self, "composer_shell") and self.composer_shell.width() > 0:
@@ -1459,16 +1457,8 @@ class AIAssistantInterface(QWidget):
         self.message_list.viewport().update()
 
     def _sync_message_scrollbar_hover(self) -> None:
-        if not self._is_input_overlay_alive():
-            return
-        delegate_bar = self._scroll_delegate.vScrollBar if self._scroll_delegate is not None else None
-        hovered = (
-            self.message_list.underMouse()
-            or self.message_list.viewport().underMouse()
-            or self.message_list.verticalScrollBar().underMouse()
-            or bool(delegate_bar is not None and delegate_bar.underMouse())
-        )
-        self._set_message_scrollbar_visible(hovered)
+        """No-op: the overlay scrollbar manages its own hover visibility."""
+        pass
 
     def _update_input_overlay_positions(self) -> None:
         if not self._is_input_overlay_alive():
@@ -1526,15 +1516,11 @@ class AIAssistantInterface(QWidget):
         self.message_list.updateGeometries()
 
     def _layout_message_scrollbar(self, *, input_top_y: int) -> None:
-        if self._scroll_delegate is None or not self.message_list.isVisible():
+        if self._message_scrollbar is None or not self.message_list.isVisible():
             return
-        bar = self._scroll_delegate.vScrollBar
         input_top_in_list = self.message_list.mapFrom(self.content_panel, self.composer_shell.pos()).y()
-        bar_height = max(0, min(input_top_in_list - 2, self.message_list.height() - 2))
-        bar_x = max(0, self.message_list.width() - 13)
-        bar.setGeometry(bar_x, 1, 12, bar_height)
-        bar._adjustHandleSize()
-        bar._adjustHandlePos()
+        bottom_inset = max(0, self.message_list.height() - input_top_in_list + 2)
+        self._message_scrollbar.set_bottom_inset(bottom_inset)
 
     def _apply_prompt_editor_theme(self) -> None:
         if not hasattr(self, "prompt_edit"):
@@ -1715,23 +1701,6 @@ class AIAssistantInterface(QWidget):
         return True
 
     def eventFilter(self, watched, event) -> bool:
-        watched_scrollbar = set()
-        if hasattr(self, "message_list"):
-            watched_scrollbar.update(
-                {
-                    self.message_list,
-                    self.message_list.viewport(),
-                    self.message_list.verticalScrollBar(),
-                }
-            )
-        if self._scroll_delegate is not None:
-            watched_scrollbar.add(self._scroll_delegate.vScrollBar)
-        if watched in watched_scrollbar:
-            if event.type() in {QEvent.Type.Enter, QEvent.Type.MouseMove}:
-                self._set_message_scrollbar_visible(True)
-            elif event.type() == QEvent.Type.Leave:
-                self._schedule_single_shot(self._sync_message_scrollbar_hover, delay=80)
-
         if hasattr(self, "message_list") and watched is self.message_list.viewport():
             if event.type() == QEvent.Type.Resize:
                 self.message_list.doItemsLayout()

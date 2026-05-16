@@ -20,6 +20,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import QStyledItemDelegate, QStyleOptionViewItem
 from qfluentwidgets import isDarkTheme, themeColor
+from qfluentwidgets.common.config import qconfig
 
 from client.core.i18n import tr
 from client.models.ai_assistant import AIMessage, AIMessageRole, AIMessageStatus
@@ -80,6 +81,22 @@ class AIAssistantMessageDelegate(QStyledItemDelegate):
         self._animation_frame = 0
         self._bottom_reserved_height = 0
 
+        # Cached fonts and metrics to avoid per-row QFont + setFamilies overhead.
+        self._cached_text_font = self._text_font()
+        self._cached_text_metrics = QFontMetrics(self._cached_text_font)
+        self._cached_caption_font = self._caption_font()
+        self._cached_caption_metrics = QFontMetrics(self._cached_caption_font)
+        self._cached_button_font = self._button_font()
+
+        # Image pixmap cache to avoid re-reading from disk on every paint.
+        self._image_cache: dict[str, QPixmap] = {}
+
+        self._is_dark = bool(isDarkTheme())
+        try:
+            qconfig.themeChanged.connect(self._on_theme_changed)
+        except Exception:
+            pass
+
     def set_bottom_reserved_height(self, height: int) -> bool:
         next_height = max(0, int(height or 0))
         if next_height == self._bottom_reserved_height:
@@ -100,6 +117,8 @@ class AIAssistantMessageDelegate(QStyledItemDelegate):
         message = self._message(index)
         if message is None:
             return super().paint(painter, option, index)
+
+        self._is_dark = bool(isDarkTheme())
 
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -182,6 +201,13 @@ class AIAssistantMessageDelegate(QStyledItemDelegate):
         self._animation_frame = next_frame
         if view is not None:
             view.viewport().update()
+
+    def _on_theme_changed(self, *_args) -> None:
+        """Sync the cached dark-theme flag."""
+        self._is_dark = bool(isDarkTheme())
+        parent = self.parent()
+        if parent is not None and hasattr(parent, "viewport"):
+            parent.viewport().update()
 
     def action_command_at(self, view, index: QModelIndex, position: QPoint) -> str | None:
         message = self._message(index)
@@ -326,10 +352,10 @@ class AIAssistantMessageDelegate(QStyledItemDelegate):
 
         if is_user:
             available_text_width = max(24, min(self.USER_MAX_TEXT_WIDTH, track_width - self.BUBBLE_PADDING_H * 2))
-            text_size = self._measure_text(text, available_text_width, self._text_font())
+            text_size = self._measure_text(text, available_text_width, self._cached_text_font)
             content_width = max(18, text_size.width())
             bubble_width = min(track_width, max(42, content_width + self.BUBBLE_PADDING_H * 2))
-            text_height = max(QFontMetrics(self._text_font()).height(), text_size.height()) if text else 0
+            text_height = max(self._cached_text_metrics.height(), text_size.height()) if text else 0
             bubble_height = max(40, text_height + self.BUBBLE_PADDING_V * 2)
             if image_rect is not None:
                 bubble_height += image_rect.height() + self.IMAGE_BOTTOM_GAP
@@ -354,7 +380,7 @@ class AIAssistantMessageDelegate(QStyledItemDelegate):
             )
 
         text_width = track_width
-        text_size = self._measure_text(text, text_width, self._text_font())
+        text_size = self._measure_text(text, text_width, self._cached_text_font)
         text_height = text_size.height() if text else 0
         text_rect = QRect(track_x, cursor_y, text_width, text_height)
         cursor_y = text_rect.bottom() + 1 if text_height > 0 else cursor_y
@@ -379,14 +405,14 @@ class AIAssistantMessageDelegate(QStyledItemDelegate):
         if footer_text:
             if cursor_y > top:
                 cursor_y += self.ASSISTANT_SECTION_GAP
-            footer_size = self._measure_text(footer_text, text_width, self._caption_font())
+            footer_size = self._measure_text(footer_text, text_width, self._cached_caption_font)
             footer_rect = QRect(track_x, cursor_y, text_width, footer_size.height())
             cursor_y = footer_rect.bottom() + 1
 
         if image_rect is not None and image_rect.bottom() + 1 > cursor_y:
             cursor_y = image_rect.bottom() + 1
         if cursor_y <= top:
-            cursor_y = top + QFontMetrics(self._text_font()).height()
+            cursor_y = top + self._cached_text_metrics.height()
         bubble_rect = QRect(track_x, top, track_width, max(1, cursor_y - top))
         return AIAssistantMessageLayout(
             track_rect=track_rect,
@@ -403,7 +429,7 @@ class AIAssistantMessageDelegate(QStyledItemDelegate):
 
     def _draw_user_bubble(self, painter: QPainter, rect: QRect, message: AIMessage) -> None:
         color = QColor(themeColor())
-        color.setAlpha(58 if isDarkTheme() else 22)
+        color.setAlpha(58 if self._is_dark else 22)
         if message.message_id == self._context_menu_message_id:
             color.setAlpha(min(255, color.alpha() + 34))
         path = QPainterPath()
@@ -411,7 +437,7 @@ class AIAssistantMessageDelegate(QStyledItemDelegate):
         painter.fillPath(path, color)
 
     def _draw_assistant_context_highlight(self, painter: QPainter, rect: QRect) -> None:
-        color = QColor(255, 255, 255, 24) if isDarkTheme() else QColor(0, 0, 0, 10)
+        color = QColor(255, 255, 255, 24) if self._is_dark else QColor(0, 0, 0, 10)
         path = QPainterPath()
         path.addRoundedRect(QRectF(rect.adjusted(-8, -6, 8, 6)), self.BUBBLE_RADIUS, self.BUBBLE_RADIUS)
         painter.fillPath(path, color)
@@ -420,12 +446,12 @@ class AIAssistantMessageDelegate(QStyledItemDelegate):
         text = self._message_display_text(message)
         if not text:
             return
-        color = QColor(246, 248, 250, 235) if isDarkTheme() else QColor(26, 26, 26)
+        color = QColor(246, 248, 250, 235) if self._is_dark else QColor(26, 26, 26)
         self._draw_text_layout(
             painter,
             rect,
             text,
-            self._text_font(),
+            self._cached_text_font,
             color,
             selection=self._selection_range_for(message),
         )
@@ -433,14 +459,14 @@ class AIAssistantMessageDelegate(QStyledItemDelegate):
     def _draw_auxiliary_text(self, painter: QPainter, rect: QRect, text: str) -> None:
         if not text:
             return
-        color = QColor(236, 239, 243, 166) if isDarkTheme() else QColor(26, 26, 26, 150)
-        self._draw_text_layout(painter, rect, text, self._caption_font(), color)
+        color = QColor(236, 239, 243, 166) if self._is_dark else QColor(26, 26, 26, 150)
+        self._draw_text_layout(painter, rect, text, self._cached_caption_font, color)
 
     def _draw_action_status_card(self, painter: QPainter, rect: QRect, message: AIMessage) -> None:
         lines = self._action_status_display_lines(message)
         if not lines:
             return
-        dark = isDarkTheme()
+        dark = self._is_dark
         hovered = self._hovered_status_message_id == message.message_id
         bg = QColor(255, 255, 255, 14 if hovered else 9) if dark else QColor(255, 255, 255, 180 if hovered else 150)
         border = QColor(255, 255, 255, 42) if dark else QColor(15, 23, 42, 28)
@@ -456,7 +482,7 @@ class AIAssistantMessageDelegate(QStyledItemDelegate):
         header_color = QColor(246, 248, 250, 235) if dark else QColor(26, 26, 26)
         detail_color = QColor(236, 239, 243, 166) if dark else QColor(26, 26, 26, 150)
         for index, text in enumerate(lines):
-            font = self._text_font() if index == 0 else self._caption_font()
+            font = self._cached_text_font if index == 0 else self._cached_caption_font
             color = header_color if index == 0 else detail_color
             size = self._measure_text(text, width, font)
             self._draw_text_layout(painter, QRect(x, y, width, size.height()), text, font, color)
@@ -469,7 +495,7 @@ class AIAssistantMessageDelegate(QStyledItemDelegate):
         preview = self._confirmation_preview(message.extra)
         if not preview:
             return
-        dark = isDarkTheme()
+        dark = self._is_dark
         bg = QColor(255, 255, 255, 10) if dark else QColor(255, 255, 255, 158)
         border = QColor(255, 255, 255, 36) if dark else QColor(15, 23, 42, 30)
         path = QPainterPath()
@@ -485,10 +511,10 @@ class AIAssistantMessageDelegate(QStyledItemDelegate):
         target = str(preview.get("target") or "目标联系人").strip() or "目标联系人"
         content = str(preview.get("content") or "").strip()
         lines = [
-            (title, self._text_font(), QColor(246, 248, 250, 235) if dark else QColor(26, 26, 26)),
-            (f"收件人：{target}", self._caption_font(), QColor(236, 239, 243, 166) if dark else QColor(26, 26, 26, 150)),
-            (f"内容：{content}" if content else "内容：", self._text_font(), QColor(246, 248, 250, 235) if dark else QColor(26, 26, 26)),
-            ("这是会产生外部影响的操作，确认后才会发送。", self._caption_font(), QColor(236, 239, 243, 166) if dark else QColor(26, 26, 26, 150)),
+            (title, self._cached_text_font, QColor(246, 248, 250, 235) if dark else QColor(26, 26, 26)),
+            (f"收件人：{target}", self._cached_caption_font, QColor(236, 239, 243, 166) if dark else QColor(26, 26, 26, 150)),
+            (f"内容：{content}" if content else "内容：", self._cached_text_font, QColor(246, 248, 250, 235) if dark else QColor(26, 26, 26)),
+            ("这是会产生外部影响的操作，确认后才会发送。", self._cached_caption_font, QColor(236, 239, 243, 166) if dark else QColor(26, 26, 26, 150)),
         ]
         for text, font, color in lines:
             size = self._measure_text(text, width, font)
@@ -512,7 +538,7 @@ class AIAssistantMessageDelegate(QStyledItemDelegate):
         message_id: str,
         command: str,
     ) -> None:
-        dark = isDarkTheme()
+        dark = self._is_dark
         hovered = self._hovered_action == (message_id, command)
         if primary:
             fill = QColor(themeColor())
@@ -530,20 +556,29 @@ class AIAssistantMessageDelegate(QStyledItemDelegate):
         painter.fillPath(path, fill)
         painter.setPen(pen)
         painter.drawPath(path)
-        painter.setFont(self._button_font())
+        painter.setFont(self._cached_button_font)
         painter.setPen(text_color)
         painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, text)
 
     def _draw_image(self, painter: QPainter, rect: QRect, attachment: dict | None) -> None:
         path = str((attachment or {}).get("local_path") or "").strip()
-        pixmap = QPixmap(path) if path and Path(path).is_file() else QPixmap()
+        pixmap = QPixmap()
+        if path and Path(path).is_file():
+            cached = self._image_cache.get(path)
+            if cached is not None:
+                pixmap = cached
+            else:
+                pixmap = QPixmap(path)
+                if not pixmap.isNull():
+                    self._image_cache[path] = pixmap
         clip = QPainterPath()
         clip.addRoundedRect(QRectF(rect), 8, 8)
         painter.save()
         painter.setClipPath(clip)
+        dark = self._is_dark
         if pixmap.isNull():
-            painter.fillRect(rect, QColor(255, 255, 255, 18) if isDarkTheme() else QColor(0, 0, 0, 10))
-            painter.setPen(QColor(236, 239, 243, 166) if isDarkTheme() else QColor(26, 26, 26, 150))
+            painter.fillRect(rect, QColor(255, 255, 255, 18) if dark else QColor(0, 0, 0, 10))
+            painter.setPen(QColor(236, 239, 243, 166) if dark else QColor(26, 26, 26, 150))
             painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, "Image")
         else:
             scaled = pixmap.scaled(rect.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
@@ -569,8 +604,8 @@ class AIAssistantMessageDelegate(QStyledItemDelegate):
         selections = []
         if selection is not None and selection[0] < selection[1]:
             text_format = QTextCharFormat()
-            text_format.setBackground(QColor(86, 157, 229, 120) if isDarkTheme() else QColor(140, 196, 255, 140))
-            text_format.setForeground(QColor(255, 255, 255) if isDarkTheme() else QColor("#101010"))
+            text_format.setBackground(QColor(86, 157, 229, 120) if self._is_dark else QColor(140, 196, 255, 140))
+            text_format.setForeground(QColor(255, 255, 255) if self._is_dark else QColor("#101010"))
             selection_range = QTextLayout.FormatRange()
             selection_range.start = selection[0]
             selection_range.length = selection[1] - selection[0]
@@ -589,7 +624,7 @@ class AIAssistantMessageDelegate(QStyledItemDelegate):
         if not clamp and not layout_rects.text_rect.contains(position):
             return -1
         text = str(message.content or "")
-        layout, _size = self._build_text_layout(text, max(1, layout_rects.text_rect.width()), self._text_font())
+        layout, _size = self._build_text_layout(text, max(1, layout_rects.text_rect.width()), self._cached_text_font)
         local_x = position.x() - layout_rects.text_rect.x()
         local_y = position.y() - layout_rects.text_rect.y()
         line_count = layout.lineCount()
@@ -628,7 +663,7 @@ class AIAssistantMessageDelegate(QStyledItemDelegate):
         content_width = width - self.ACTION_STATUS_PADDING * 2
         height = self.ACTION_STATUS_PADDING * 2
         for index, text in enumerate(lines):
-            font = self._text_font() if index == 0 else self._caption_font()
+            font = self._cached_text_font if index == 0 else self._cached_caption_font
             height += self._measure_text(text, content_width, font).height()
             if index < len(lines) - 1:
                 height += self.ACTION_STATUS_LINE_GAP
@@ -641,10 +676,10 @@ class AIAssistantMessageDelegate(QStyledItemDelegate):
         target = str(preview.get("target") or "目标联系人").strip() or "目标联系人"
         content = str(preview.get("content") or "").strip()
         line_specs = [
-            (operation, self._text_font()),
-            (f"收件人：{target}", self._caption_font()),
-            (f"内容：{content}" if content else "内容：", self._text_font()),
-            ("这是会产生外部影响的操作，确认后才会发送。", self._caption_font()),
+            (operation, self._cached_text_font),
+            (f"收件人：{target}", self._cached_caption_font),
+            (f"内容：{content}" if content else "内容：", self._cached_text_font),
+            ("这是会产生外部影响的操作，确认后才会发送。", self._cached_caption_font),
         ]
         text_height = sum(self._measure_text(text, content_width, font).height() for text, font in line_specs)
         text_height += 6 * (len(line_specs) - 1)
@@ -699,7 +734,12 @@ class AIAssistantMessageDelegate(QStyledItemDelegate):
             y += line.height()
             width = max(width, line.naturalTextWidth())
         layout.endLayout()
-        metrics = QFontMetrics(font)
+        if font is self._cached_text_font:
+            metrics = self._cached_text_metrics
+        elif font is self._cached_caption_font:
+            metrics = self._cached_caption_metrics
+        else:
+            metrics = QFontMetrics(font)
         return layout, QSize(max(1, math.ceil(width)), max(metrics.height(), math.ceil(y)))
 
     def _track_width(self, row_width: int) -> int:

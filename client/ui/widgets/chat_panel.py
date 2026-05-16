@@ -28,6 +28,11 @@ from client.models.message_model import MessageModel
 from client.ui.styles import StyleSheet
 from client.ui.widgets.chat_header import ChatHeader
 from client.ui.widgets.chat_info_drawer import ChatInfoDrawerOverlay
+from client.ui.widgets.fluent_scrollbar import (
+    FluentOverlayScrollBar,
+    FluentOverlayScrollBarDisplayMode,
+    attach_fluent_scrollbar,
+)
 from client.ui.widgets.message_input import MessageInput
 from client.ui.widgets.welcome_placeholder import WelcomePlaceholder
 from qfluentwidgets.multimedia import VideoWidget
@@ -283,6 +288,7 @@ class ChatPanel(QWidget):
         self.composer_resize_handle: Optional[QFrame] = None
         self._chat_info_overlay: Optional[ChatInfoDrawerOverlay] = None
         self._security_pending_banner: Optional[SecurityPendingBanner] = None
+        self._message_scrollbar: Optional[FluentOverlayScrollBar] = None
         self._composer_height = self.COMPOSER_MIN_HEIGHT
         self._composer_resize_dragging = False
         self._composer_resize_start_y = 0
@@ -331,8 +337,6 @@ class ChatPanel(QWidget):
         self.message_list.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         self.message_list.setLayoutMode(QListView.LayoutMode.SinglePass)
         self.message_list.setResizeMode(QListView.ResizeMode.Adjust)
-        self.message_list.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        self.message_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.message_list.setSpacing(0)
         self.message_list.setViewportMargins(0, 0, 0, self.MESSAGE_LIST_BOTTOM_MARGIN)
         self.message_list.setMouseTracking(True)
@@ -348,6 +352,13 @@ class ChatPanel(QWidget):
         self._history_indicator.hide()
 
         self._setup_message_model()
+
+        # Fluent-styled overlay scrollbar replaces both native bars; horizontal
+        # scrolling is never desired in the chat surface.
+        self._message_scrollbar = attach_fluent_scrollbar(
+            self.message_list,
+            mode=FluentOverlayScrollBarDisplayMode.ON_HOVER,
+        )
 
         self.message_input = MessageInput(self.chat_page)
         self.message_input.setMinimumWidth(0)
@@ -1127,6 +1138,23 @@ class ChatPanel(QWidget):
         self.message_input.raise_()
         if self.composer_resize_handle is not None:
             self.composer_resize_handle.raise_()
+        self._sync_message_scrollbar_inset(content_rect=content_rect, composer_top_y=y)
+
+    def _sync_message_scrollbar_inset(self, *, content_rect, composer_top_y: int) -> None:
+        """Stop the overlay scrollbar 2px above the floating composer overlay."""
+        if self._message_scrollbar is None:
+            return
+        if not self.message_list.isVisible() or not content_rect.isValid():
+            return
+        # ``message_list`` is a child of ``chat_content_area`` and it fills it
+        # completely (the layout uses 0 margins), so converting ``y`` from the
+        # chat page into list-local coordinates only requires removing the list's
+        # top offset inside the content area. ``content_rect`` already lives in
+        # the same coordinate space as ``y``, so subtracting its top is enough.
+        list_height = self.message_list.height()
+        composer_top_in_list = composer_top_y - content_rect.top()
+        bottom_inset = max(0, list_height - composer_top_in_list + 2)
+        self._message_scrollbar.set_bottom_inset(bottom_inset)
 
     def _sync_message_bottom_reserved_height(self, height: int) -> None:
         if not self._is_message_layout_alive() or self._message_delegate is None or self._message_model is None:

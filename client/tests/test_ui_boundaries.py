@@ -1019,7 +1019,13 @@ def test_chat_message_input_uses_floating_card_style_without_overlay_or_cursor_o
     assert 'def _layout_message_scrollbar(self, *, input_top_y: int) -> None:' not in chat_panel
     assert 'def _sync_message_scrollbar_visibility(self) -> None:' not in chat_panel
     assert 'self.message_list.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)' in chat_panel
-    assert 'self.message_list.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)' in chat_panel
+    assert 'self.message_list.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)' not in chat_panel
+    assert 'self.message_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)' not in chat_panel
+    assert 'from client.ui.widgets.fluent_scrollbar import (' in chat_panel
+    assert 'self._message_scrollbar = attach_fluent_scrollbar(' in chat_panel
+    assert 'mode=FluentOverlayScrollBarDisplayMode.ON_HOVER' in chat_panel
+    assert 'def _sync_message_scrollbar_inset(self, *, content_rect, composer_top_y: int) -> None:' in chat_panel
+    assert 'self._message_scrollbar.set_bottom_inset(bottom_inset)' in chat_panel
     assert 'self.composer_resize_handle.setGeometry(x, y - handle_height // 2, width, handle_height)' in chat_panel
     assert 'self.message_input.raise_()' in chat_panel
     assert 'self.composer_resize_handle.raise_()' in chat_panel
