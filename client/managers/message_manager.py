@@ -2694,10 +2694,17 @@ class MessageManager:
             except asyncio.CancelledError:
                 logger.debug("ACK check loop cancelled")
                 break
-            except RuntimeError as e:
-                logger.error(f"ACK check runtime error: {e}")
-                # Break on event loop errors to prevent infinite error loop
-                break
+            except RuntimeError as exc:
+                # qasync occasionally schedules our wake-up while another task
+                # is mid-execution (typical when Qt synchronously dispatches a
+                # signal that drives the asyncio loop). Log and back off rather
+                # than killing the loop, otherwise pending message retries stop
+                # working until the next session.
+                logger.warning("ACK check loop runtime error, retrying: %s", exc)
+                try:
+                    await asyncio.sleep(2)
+                except asyncio.CancelledError:
+                    break
             except Exception as e:
                 logger.error(f"ACK check error: {e}")
     

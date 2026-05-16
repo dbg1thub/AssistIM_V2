@@ -83,3 +83,5 @@ tools/ai_action_planner_replay*.jsonl
 
 # 文档
 /docs/
+
+/.kiro/

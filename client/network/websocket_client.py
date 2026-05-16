@@ -434,6 +434,9 @@ class WebSocketClient:
                 raise
             
             except asyncio.TimeoutError:
+                if self._intentional_disconnect:
+                    logger.info("Receive loop exiting on intentional disconnect")
+                    break
                 logger.warning("Receive timeout, no message received")
                 continue
             
@@ -513,17 +516,24 @@ class WebSocketClient:
             if task and task is not current_task and not task.done():
                 task.cancel()
                 try:
-                    await task
+                    # Bound the await so a cancel-resistant task cannot hang
+                    # the entire shutdown sequence (e.g. websocket recv blocked
+                    # on an already-broken connection).
+                    await asyncio.wait_for(task, timeout=2.0)
                 except (asyncio.CancelledError, ConcurrentCancelledError):
                     pass
-        
+                except asyncio.TimeoutError:
+                    logger.warning("Task %s did not cancel within 2s; abandoning", task)
+                except Exception:
+                    pass
+
         if self._ws:
             try:
-                await self._ws.close()
+                await asyncio.wait_for(self._ws.close(), timeout=2.0)
             except Exception:
                 pass
             self._ws = None
-        
+
         self._receive_task = None
         self._heartbeat_task = None
         if self._connect_task is not current_task:

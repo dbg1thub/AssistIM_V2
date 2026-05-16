@@ -53,6 +53,7 @@ from client.managers.ai_prompt_builder import AIPromptBuilder
 from client.managers.ai_task_manager import AITaskEvent, AITaskSnapshot, AITaskState, get_ai_task_manager
 from client.managers.conversation_memory_manager import ConversationMemoryContext, ConversationMemoryManager
 from client.ui.widgets.fluent_scrollbar import FluentOverlayScrollBar, FluentOverlayScrollBarDisplayMode, attach_fluent_scrollbar
+from client.ui.widgets.fluent_divider import FluentDivider
 from client.models.ai_assistant import AIMessage, AIMessageRole, AIMessageStatus, AIThread
 from client.models.ai_assistant_message_model import AIAssistantMessageModel
 from client.services.ai_service import AIErrorCode
@@ -421,7 +422,9 @@ class AIAssistantInterface(QWidget):
         self.composer_widget.installEventFilter(self)
         self.prompt_edit.installEventFilter(self)
 
+        self.header_divider = FluentDivider(self.content_panel, variant=FluentDivider.FULL)
         self.content_layout.addWidget(self.header)
+        self.content_layout.addWidget(self.header_divider)
         self.content_layout.addWidget(self.empty_widget, 1)
         self.content_layout.addWidget(self.message_list, 1)
         self.message_list.hide()
