@@ -1176,14 +1176,9 @@ class MessageDelegate(QStyledItemDelegate):
             painter.drawRoundedRect(QRect(left + 8, top, bar_width, bar_height), 2, 2)
         else:
             path = QPainterPath()
-            if message.is_self:
-                path.moveTo(icon_rect.right(), icon_rect.top() + 1)
-                path.lineTo(icon_rect.left() + 2, icon_rect.center().y())
-                path.lineTo(icon_rect.right(), icon_rect.bottom() - 1)
-            else:
-                path.moveTo(icon_rect.left(), icon_rect.top() + 1)
-                path.lineTo(icon_rect.right() - 2, icon_rect.center().y())
-                path.lineTo(icon_rect.left(), icon_rect.bottom() - 1)
+            path.moveTo(icon_rect.left(), icon_rect.top() + 1)
+            path.lineTo(icon_rect.right() - 2, icon_rect.center().y())
+            path.lineTo(icon_rect.left(), icon_rect.bottom() - 1)
             path.closeSubpath()
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(text_color)
@@ -1192,12 +1187,6 @@ class MessageDelegate(QStyledItemDelegate):
         painter.setPen(text_color)
         painter.setFont(font)
         painter.drawText(text_rect, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, duration_text)
-
-        if not message.is_self and not bool((message.extra or {}).get("voice_played")):
-            dot_size = 7
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(QColor("#E53935"))
-            painter.drawEllipse(QRect(voice_rect.right() - dot_size, voice_rect.y() + 3, dot_size, dot_size))
 
         state_text = self._media_state_text(message)
         if state_text:

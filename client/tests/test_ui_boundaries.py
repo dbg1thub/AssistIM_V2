@@ -895,6 +895,38 @@ def test_voice_messages_have_send_open_and_click_paths_without_alt_shortcut() ->
     assert 'MessageType.VOICE' in message_delegate
 
 
+def test_voice_message_bubble_and_recording_overlay_are_custom_drawn() -> None:
+    message_input = Path('client/ui/widgets/message_input.py').read_text(encoding='utf-8')
+    message_delegate = Path('client/delegates/message_delegate.py').read_text(encoding='utf-8')
+
+    voice_content_block = message_delegate.split('def _draw_voice_content', 1)[1].split(
+        '\n    def _draw_voice_transcript_content',
+        1,
+    )[0]
+    recording_overlay_block = message_input.split('class VoiceRecordingOverlay(QFrame):', 1)[1].split(
+        '\n\nclass MessageInputVoiceLimits:',
+        1,
+    )[0]
+    refresh_overlay_block = message_input.split('def _refresh_voice_recording_overlay(self) -> None:', 1)[1].split(
+        '\n    def _run_programmatic_edit',
+        1,
+    )[0]
+
+    assert 'voice_played' not in voice_content_block
+    assert 'drawEllipse(QRect(voice_rect.right() - dot_size' not in voice_content_block
+    assert 'if message.is_self:' not in voice_content_block.split('else:\n            path = QPainterPath()', 1)[1].split(
+        'path.closeSubpath()',
+        1,
+    )[0]
+    assert 'QProgressBar' not in recording_overlay_block
+    assert 'self.progress' not in recording_overlay_block
+    assert 'def paintEvent(self, event) -> None:' in recording_overlay_block
+    assert 'QColor(themeColor())' in recording_overlay_block
+    assert 'drawRoundedRect(fill_rect' in recording_overlay_block
+    assert 'elapsed_ms = min(MessageInputVoiceLimits.MAX_SECONDS * 1000' in refresh_overlay_block
+    assert 'overlay.update_state(elapsed_ms, canceling=self._voice_recording_cancel_requested)' in refresh_overlay_block
+
+
 def test_chat_message_input_uses_floating_card_style_without_overlay_or_cursor_override() -> None:
     chat_panel = Path('client/ui/widgets/chat_panel.py').read_text(encoding='utf-8')
     fluent_splitter = Path('client/ui/widgets/fluent_splitter.py').read_text(encoding='utf-8')

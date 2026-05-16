@@ -34,7 +34,6 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
     QLabel,
-    QProgressBar,
     QSizePolicy,
     QStackedWidget,
     QStyle,
@@ -59,6 +58,7 @@ from qfluentwidgets import (
     SegmentedWidget,
     TransparentToolButton,
     isDarkTheme,
+    themeColor,
     qconfig, ToolTipPosition,
 )
 from qfluentwidgets.components.material import AcrylicToolTipFilter, AcrylicFlyoutViewBase, AcrylicFlyout
@@ -2455,37 +2455,42 @@ class MarqueeSuggestionButton(PushButton):
 class VoiceRecordingOverlay(QFrame):
     """Floating recording affordance shown while the mic button is held."""
 
+    _CAPSULE_HEIGHT = 72
+    _CONTENT_MARGIN_X = 18
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("voiceRecordingOverlay")
-        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, False)
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
-        self.setFixedWidth(286)
+        self.setFixedSize(286, self._CAPSULE_HEIGHT)
+        self._progress_ratio = 0.0
+        self._canceling = False
+        self._warning = False
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(18, 14, 18, 14)
-        layout.setSpacing(8)
+        layout.setContentsMargins(self._CONTENT_MARGIN_X, 11, self._CONTENT_MARGIN_X, 11)
+        layout.setSpacing(4)
 
         self.status_label = BodyLabel(self)
         self.status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.hint_label = CaptionLabel(self)
         self.hint_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.progress = QProgressBar(self)
-        self.progress.setRange(0, MessageInputVoiceLimits.MAX_SECONDS)
-        self.progress.setTextVisible(False)
-        self.progress.setFixedHeight(4)
 
         layout.addWidget(self.status_label)
         layout.addWidget(self.hint_label)
-        layout.addWidget(self.progress)
         self._apply_style(canceling=False, warning=False)
 
-    def update_state(self, elapsed_seconds: int, *, canceling: bool) -> None:
+    def update_state(self, elapsed_ms: int, *, canceling: bool) -> None:
         """Refresh visible recording state."""
-        elapsed_seconds = max(0, min(MessageInputVoiceLimits.MAX_SECONDS, int(elapsed_seconds or 0)))
+        max_ms = MessageInputVoiceLimits.MAX_SECONDS * 1000
+        elapsed_ms = max(0, min(max_ms, int(elapsed_ms or 0)))
+        elapsed_seconds = min(MessageInputVoiceLimits.MAX_SECONDS, (elapsed_ms + 999) // 1000)
         remaining = max(0, MessageInputVoiceLimits.MAX_SECONDS - elapsed_seconds)
         warning = remaining <= MessageInputVoiceLimits.WARNING_SECONDS and not canceling
-        self.progress.setValue(elapsed_seconds)
+        self._progress_ratio = elapsed_ms / max_ms if max_ms > 0 else 0.0
+        self._canceling = bool(canceling)
+        self._warning = bool(warning)
         if canceling:
             self.status_label.setText(tr("composer.voice.cancel_status", "Release to cancel"))
             self.hint_label.setText(tr("composer.voice.cancel_hint", "Move down to keep recording"))
@@ -2501,7 +2506,9 @@ class VoiceRecordingOverlay(QFrame):
 
     def show_notice(self, text: str) -> None:
         """Show a short non-recording notice in the same overlay style."""
-        self.progress.setValue(0)
+        self._progress_ratio = 0.0
+        self._canceling = True
+        self._warning = False
         self.status_label.setText(text)
         self.hint_label.setText("")
         self._apply_style(canceling=True, warning=False)
@@ -2510,38 +2517,49 @@ class VoiceRecordingOverlay(QFrame):
 
     def _apply_style(self, *, canceling: bool, warning: bool) -> None:
         dark = isDarkTheme()
-        if canceling:
-            accent = "#E05252"
-        elif warning:
-            accent = "#D9822B"
-        else:
-            accent = "#2E7D32" if not dark else "#5CC06F"
-        background = "rgba(32, 32, 32, 232)" if dark else "rgba(255, 255, 255, 244)"
-        border = "rgba(255, 255, 255, 36)" if dark else "rgba(0, 0, 0, 24)"
         text = "#F7F7F7" if dark else "#202020"
         sub = "rgba(247, 247, 247, 166)" if dark else "rgba(32, 32, 32, 156)"
         self.setStyleSheet(
-            "QFrame#voiceRecordingOverlay {"
-            f" background: {background};"
-            f" border: 1px solid {border};"
-            " border-radius: 10px;"
-            "}"
             "QLabel {"
             f" color: {text};"
             "}"
             "QLabel#captionLabel {"
             f" color: {sub};"
             "}"
-            "QProgressBar {"
-            " border: none;"
-            " background: rgba(128, 128, 128, 48);"
-            " border-radius: 2px;"
-            "}"
-            "QProgressBar::chunk {"
-            f" background: {accent};"
-            " border-radius: 2px;"
-            "}"
         )
+        self.update()
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        dark = isDarkTheme()
+        capsule_rect = QRectF(0.5, 0.5, self.width() - 1, self.height() - 1)
+        radius = capsule_rect.height() / 2
+        background = QColor(32, 32, 32, 232) if dark else QColor(255, 255, 255, 244)
+        border = QColor(255, 255, 255, 36) if dark else QColor(0, 0, 0, 24)
+
+        painter.setPen(QPen(border, 1))
+        painter.setBrush(background)
+        painter.drawRoundedRect(capsule_rect, radius, radius)
+
+        fill_width = capsule_rect.width() * max(0.0, min(1.0, self._progress_ratio))
+        if fill_width > 0:
+            fill_rect = QRectF(capsule_rect.left(), capsule_rect.top(), fill_width, capsule_rect.height())
+            fill_path = QPainterPath()
+            fill_path.addRoundedRect(capsule_rect, radius, radius)
+            painter.save()
+            painter.setClipPath(fill_path)
+            fill_color = QColor("#E05252") if self._canceling else QColor(themeColor())
+            if self._warning and not self._canceling:
+                fill_color.setAlpha(220)
+            else:
+                fill_color.setAlpha(205)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(fill_color)
+            painter.drawRoundedRect(fill_rect, radius, radius)
+            painter.restore()
+
+        super().paintEvent(event)
 
 
 class MessageInputVoiceLimits:
@@ -2604,7 +2622,7 @@ class MessageInput(QWidget):
         self._voice_recorder = None
         self._voice_recording_overlay: VoiceRecordingOverlay | None = None
         self._voice_recording_timer = QTimer(self)
-        self._voice_recording_timer.setInterval(100)
+        self._voice_recording_timer.setInterval(33)
         self._voice_recording_timer.timeout.connect(self._on_voice_recording_tick)
         self._voice_press_global_y: float | None = None
         self._reply_suggestion_buttons: list[PushButton] = []
@@ -3237,17 +3255,19 @@ class MessageInput(QWidget):
         if overlay is None or host is None:
             return
         host_rect = host.rect()
-        button_center = self.voice_message_button.mapTo(host, self.voice_message_button.rect().center())
+        button_rect = self.voice_message_button.rect()
+        button_center = self.voice_message_button.mapTo(host, button_rect.center())
+        button_top = self.voice_message_button.mapTo(host, QPoint(button_rect.center().x(), button_rect.top()))
         x = max(12, min(button_center.x() - overlay.width() // 2, host_rect.width() - overlay.width() - 12))
-        y = max(12, button_center.y() - overlay.sizeHint().height() - 64)
+        y = max(12, button_top.y() - overlay.height() - 10)
         overlay.move(x, y)
 
     def _refresh_voice_recording_overlay(self) -> None:
         overlay = self._voice_recording_overlay
         if overlay is None or not overlay.isVisible():
             return
-        elapsed_seconds = min(MessageInputVoiceLimits.MAX_SECONDS, max(0, (self._voice_recording_duration_ms + 999) // 1000))
-        overlay.update_state(elapsed_seconds, canceling=self._voice_recording_cancel_requested)
+        elapsed_ms = min(MessageInputVoiceLimits.MAX_SECONDS * 1000, max(0, self._voice_recording_duration_ms))
+        overlay.update_state(elapsed_ms, canceling=self._voice_recording_cancel_requested)
         self._position_voice_recording_overlay()
 
     def _run_programmatic_edit(self, callback) -> None:
