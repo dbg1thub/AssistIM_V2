@@ -11,6 +11,7 @@ from concurrent.futures import Future
 from typing import Any, Callable, Optional
 
 from client.core import logging
+from client.core.async_utils import bounded_cancel_gather
 from client.core.logging import setup_logging
 from client.services.auth_service import get_auth_service
 from client.network.websocket_client import (
@@ -1100,7 +1101,7 @@ class ConnectionManager:
                 task.cancel()
 
         if self._tasks:
-            await asyncio.gather(*list(self._tasks), return_exceptions=True)
+            await bounded_cancel_gather(list(self._tasks), label="connection_manager.tasks")
             self._tasks.clear()
 
         for future in list(self._thread_futures):

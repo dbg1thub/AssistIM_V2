@@ -8,6 +8,7 @@ from datetime import datetime
 from typing import Any, Optional
 
 from client.core import logging
+from client.core.async_utils import bounded_cancel_gather
 from client.core.chat_time_buckets import is_chat_time_break
 from client.core.datetime_utils import to_epoch_seconds
 from client.core.file_text_extraction import FILE_TEXT_EXTRACT_EXTRA_KEY, FileTextExtractionError
@@ -114,15 +115,25 @@ class ConversationSummaryManager:
             event_type, handler = self._event_subscriptions.pop()
             await self._event_bus.unsubscribe(event_type, handler)
 
-        for key, task in list(self._scheduled_refresh_tasks.items()):
-            if task.done():
-                continue
-            if key not in self._refresh_task_running_keys:
-                task.cancel()
-        for task in list(self._idle_refresh_request_tasks):
-            if not task.done():
-                task.cancel()
+        cancellable_refresh_tasks = [
+            task
+            for key, task in list(self._scheduled_refresh_tasks.items())
+            if key not in self._refresh_task_running_keys and not task.done()
+        ]
+        if cancellable_refresh_tasks:
+            await bounded_cancel_gather(
+                cancellable_refresh_tasks,
+                label="conversation_summary_manager.scheduled_refresh",
+            )
+
+        idle_request_tasks = list(self._idle_refresh_request_tasks)
         self._idle_refresh_request_tasks.clear()
+        if idle_request_tasks:
+            await bounded_cancel_gather(
+                idle_request_tasks,
+                label="conversation_summary_manager.idle_refresh_request",
+            )
+
         self._pending_refresh_delays.clear()
         self._refresh_task_running_keys.clear()
         self._scheduled_refresh_tasks.clear()

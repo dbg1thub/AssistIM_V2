@@ -285,7 +285,7 @@ class AIAssistantInterface(QWidget):
         self.message_list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.message_list.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         self.message_list.setLayoutMode(QListView.LayoutMode.SinglePass)
-        self.message_list.setResizeMode(QListView.ResizeMode.Adjust)
+        self.message_list.setResizeMode(QListView.ResizeMode.Fixed)
         self.message_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.message_list.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.message_list.setViewportMargins(0, 0, 0, self.MESSAGE_LIST_BOTTOM_MARGIN)

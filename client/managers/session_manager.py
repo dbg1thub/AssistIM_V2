@@ -11,6 +11,7 @@ from datetime import datetime
 from typing import Any, Callable, Optional
 
 from client.core import logging
+from client.core.async_utils import bounded_cancel_gather
 from client.core.avatar_utils import profile_avatar_seed
 from client.core.ai_features import (
     SESSION_AI_AUTO_TRANSLATE_ENABLED_KEY,
@@ -3417,18 +3418,17 @@ class SessionManager:
 
         self._running = False
 
-        for task in self._session_fetch_tasks.values():
-            if not task.done():
-                task.cancel()
-
-        if self._session_fetch_tasks:
-            await asyncio.gather(*self._session_fetch_tasks.values(), return_exceptions=True)
-            self._session_fetch_tasks.clear()
+        fetch_tasks = list(self._session_fetch_tasks.values())
+        self._session_fetch_tasks.clear()
+        if fetch_tasks:
+            await bounded_cancel_gather(fetch_tasks, label="session_manager.fetch_tasks")
 
         if self._identity_refresh_task is not None and not self._identity_refresh_task.done():
-            self._identity_refresh_task.cancel()
-            await asyncio.gather(self._identity_refresh_task, return_exceptions=True)
-            self._identity_refresh_task = None
+            await bounded_cancel_gather(
+                [self._identity_refresh_task],
+                label="session_manager.identity_refresh",
+            )
+        self._identity_refresh_task = None
 
         await self._unsubscribe_all()
         self._sessions.clear()

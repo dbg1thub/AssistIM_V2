@@ -336,7 +336,7 @@ class ChatPanel(QWidget):
         self.message_list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.message_list.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         self.message_list.setLayoutMode(QListView.LayoutMode.SinglePass)
-        self.message_list.setResizeMode(QListView.ResizeMode.Adjust)
+        self.message_list.setResizeMode(QListView.ResizeMode.Fixed)
         self.message_list.setSpacing(0)
         self.message_list.setViewportMargins(0, 0, 0, self.MESSAGE_LIST_BOTTOM_MARGIN)
         self.message_list.setMouseTracking(True)
@@ -495,9 +495,8 @@ class ChatPanel(QWidget):
         self.chat_layout.activate()
         self._position_history_indicator()
         self._layout_chat_info_overlay()
-        self._relayout_message_list()
+        self._layout_message_input_overlay()
         self._restore_message_viewport()
-        self._schedule_restore_message_viewport()
         self._schedule_layout_single_shot(self._relayout_message_list)
 
     def _setup_message_model(self) -> None:
@@ -947,8 +946,9 @@ class ChatPanel(QWidget):
 
         if watched is self.message_list.viewport():
             if event.type() == QEvent.Type.Resize:
-                self._relayout_message_list()
+                self._layout_message_input_overlay()
                 self._position_history_indicator()
+                self._schedule_layout_single_shot(self._relayout_message_list)
                 self._schedule_restore_message_viewport()
             if event.type() == QEvent.Type.Leave:
                 if self._message_delegate:
@@ -1040,9 +1040,7 @@ class ChatPanel(QWidget):
             self._layout_message_input_overlay()
             self._remember_message_scroll_gap()
             self._layout_chat_info_overlay()
-            self._relayout_message_list()
             self._restore_message_viewport()
-            self._schedule_restore_message_viewport()
             self._schedule_layout_single_shot(self._relayout_message_list)
 
         if watched is self.message_list and event.type() == QEvent.Type.KeyPress:
