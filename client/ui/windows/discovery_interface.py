@@ -1178,7 +1178,8 @@ class CreateMomentDialog(FluentDialog):
         layout.setContentsMargins(24, 24, 24, 20)
         layout.setSpacing(14)
 
-        layout.addWidget(TitleLabel(tr("discovery.dialog.title", "Post a moment"), self))
+        self.title_label = TitleLabel(tr("discovery.dialog.title", "Post a moment"), self)
+        layout.addWidget(self.title_label)
         hint = CaptionLabel(
             tr(
                 "discovery.dialog.hint",
@@ -1417,12 +1418,54 @@ class CreateMomentDialog(FluentDialog):
         return str(path or "").lower().endswith((".mp4", ".mov", ".m4v", ".avi", ".mkv", ".webm"))
 
 
+class EditMomentDialog(CreateMomentDialog):
+    """Dialog for editing moment text and visibility while keeping media unchanged."""
+
+    def __init__(self, moment: MomentRecord, parent=None, *, contacts: list[ContactRecord] | None = None):
+        self._moment_has_media = bool(moment.media)
+        super().__init__(parent, contacts=contacts)
+        self.setWindowTitle(tr("discovery.edit.window_title", "Edit Moment"))
+        self.setObjectName("EditMomentDialog")
+        self.title_label.setText(tr("discovery.edit.dialog_title", "Edit moment"))
+        self.editor.setPlainText(moment.content)
+        self._visibility_scope = moment.visibility_scope
+        self._visibility_user_ids = list(moment.visibility_user_ids)
+        self._sync_visibility_summary()
+        self.add_images_button.setVisible(False)
+        self.add_video_button.setVisible(False)
+        self.clear_media_button.setVisible(False)
+        self.publish_button.setText(tr("common.save", "Save"))
+        if moment.media:
+            self.media_preview.set_media(list(moment.media))
+            self.media_preview.show()
+            self.media_hint.setText(
+                tr("discovery.edit.media_unchanged", "Existing media will be kept unchanged.")
+            )
+        else:
+            self.media_preview.hide()
+            self.media_hint.setVisible(False)
+
+    def _submit(self) -> None:
+        text = self.editor.toPlainText().strip()
+        if not text and not self._moment_has_media:
+            InfoBar.warning(
+                tr("discovery.edit.title", "Edit Moment"),
+                tr("discovery.dialog.empty_warning", "Please enter something to post."),
+                parent=self,
+                duration=1800,
+            )
+            return
+        self.submitted.emit(text, [], self._visibility_scope, list(self._visibility_user_ids))
+        self.accept()
+
+
 class MomentCard(CardWidget):
     """Single moment card in the timeline."""
 
     like_requested = Signal(str, bool, int)
     comment_requested = Signal(str, str, object)
     detail_requested = Signal(str)
+    edit_requested = Signal(str)
     delete_requested = Signal(str)
     comment_delete_requested = Signal(str, str)
 
@@ -1458,13 +1501,17 @@ class MomentCard(CardWidget):
         info_layout.addWidget(self.name_label)
         info_layout.addWidget(self.time_label)
 
+        self.edit_button = TransparentToolButton(AppIcon.EDIT, self)
+        self.edit_button.setToolTip(tr("discovery.card.edit_tooltip", "Edit moment"))
+        self.edit_button.clicked.connect(self._request_edit)
         self.more_button = TransparentToolButton(AppIcon.CANCEL_MEDIUM, self)
         self.more_button.setToolTip(tr("discovery.card.delete_tooltip", "Delete moment"))
         self.more_button.clicked.connect(self._request_delete)
-        _apply_safe_button_font(self.more_button)
+        _apply_safe_button_font(self.edit_button, self.more_button)
 
         header_row.addWidget(self.avatar, 0, Qt.AlignmentFlag.AlignTop)
         header_row.addLayout(info_layout, 1)
+        header_row.addWidget(self.edit_button, 0, Qt.AlignmentFlag.AlignTop)
         header_row.addWidget(self.more_button, 0, Qt.AlignmentFlag.AlignTop)
         layout.addLayout(header_row)
 
@@ -1565,6 +1612,7 @@ class MomentCard(CardWidget):
         self.comment_button.setText(
             f"{comment_prefix} {self.moment.comment_count}" if self.moment.comment_count else comment_prefix
         )
+        self.edit_button.setVisible(self.moment.is_self)
         self.more_button.setVisible(self.moment.is_self)
 
         if self.moment.like_count or self.moment.comment_count:
@@ -1605,6 +1653,12 @@ class MomentCard(CardWidget):
         self.comment_section.remove_comment(normalized_id)
         self._refresh_actions()
 
+    def apply_update(self, moment: MomentRecord) -> None:
+        """Refresh visible text, media, visibility, and interaction state after edit."""
+        self.moment = moment
+        self._content_expanded = False
+        self._apply_moment()
+
     def apply_detail(self, moment: MomentRecord) -> None:
         """Refresh the card with one full moment detail payload."""
         self.moment.comments = list(moment.comments)
@@ -1639,6 +1693,9 @@ class MomentCard(CardWidget):
 
     def _request_delete(self) -> None:
         self.delete_requested.emit(self.moment.id)
+
+    def _request_edit(self) -> None:
+        self.edit_requested.emit(self.moment.id)
 
     def _request_comment_delete(self, moment_id: str, comment_id: str) -> None:
         self.comment_delete_requested.emit(moment_id, comment_id)
@@ -1849,6 +1906,7 @@ class DiscoveryInterface(QWidget):
             card.like_requested.connect(self._request_like_toggle)
             card.comment_requested.connect(self._request_comment_create)
             card.detail_requested.connect(self._request_moment_detail)
+            card.edit_requested.connect(self._request_moment_edit)
             card.delete_requested.connect(self._request_moment_delete)
             card.comment_delete_requested.connect(self._request_comment_delete)
             self.feed_layout.addWidget(card)
@@ -2100,6 +2158,103 @@ class DiscoveryInterface(QWidget):
         moment.comments.append(comment)
         moment.comment_count = max(moment.comment_count + 1, len(moment.comments))
 
+    def _request_moment_edit(self, moment_id: str) -> None:
+        moment = next((item for item in self._moments if item.id == moment_id), None)
+        if moment is None or not moment.is_self:
+            return
+        self._create_ui_task(
+            self._request_moment_edit_async(moment_id),
+            f"open edit moment dialog {moment_id}",
+        )
+
+    async def _request_moment_edit_async(self, moment_id: str) -> None:
+        moment = next((item for item in self._moments if item.id == moment_id), None)
+        if moment is None or not moment.is_self:
+            return
+        try:
+            contacts = await self._contact_controller.load_contacts()
+        except Exception:
+            logger.exception("Failed to load contacts for moment edit visibility selector")
+            contacts = []
+        dialog = EditMomentDialog(moment, self.window(), contacts=contacts)
+        dialog.submitted.connect(
+            lambda content, _media_paths, visibility_scope, visibility_user_ids, mid=moment_id: self._update_moment(
+                mid,
+                content,
+                visibility_scope,
+                visibility_user_ids,
+            )
+        )
+        self._dialog_refs.add(dialog)
+        dialog.finished.connect(lambda _result=0, dlg=dialog: self._dialog_refs.discard(dlg))
+        dialog.finished.connect(dialog.deleteLater)
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def _update_moment(
+        self,
+        moment_id: str,
+        content: str,
+        visibility_scope: str = "public",
+        visibility_user_ids: list | None = None,
+    ) -> None:
+        if self._teardown_started:
+            return
+        self._schedule_keyed_ui_task(
+            ("moment_update", moment_id),
+            self._update_moment_async(
+                moment_id,
+                content,
+                visibility_scope,
+                [str(item) for item in (visibility_user_ids or [])],
+            ),
+            f"update moment {moment_id}",
+        )
+
+    async def _update_moment_async(
+        self,
+        moment_id: str,
+        content: str,
+        visibility_scope: str = "public",
+        visibility_user_ids: list[str] | None = None,
+    ) -> None:
+        try:
+            moment = await self._controller.update_moment(
+                moment_id,
+                content,
+                visibility_scope=visibility_scope,
+                visibility_user_ids=list(visibility_user_ids or []),
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            InfoBar.error(
+                tr("discovery.edit.title", "Edit Moment"),
+                tr("discovery.edit.failed", "Edit failed. Please try again later."),
+                parent=self.window(),
+                duration=2200,
+            )
+            raise
+        self._apply_local_moment_update(moment)
+        InfoBar.success(
+            tr("discovery.edit.title", "Edit Moment"),
+            tr("discovery.edit.success", "Moment updated."),
+            parent=self.window(),
+            duration=1600,
+        )
+
+    def _apply_local_moment_update(self, moment: MomentRecord) -> None:
+        """Replace one updated moment while keeping local-only media preview paths."""
+        existing_index = next((index for index, item in enumerate(self._moments) if item.id == moment.id), None)
+        if existing_index is None:
+            return
+        self._copy_local_media_previews(self._moments[existing_index], moment)
+        self._moments[existing_index] = moment
+        card = self._cards.get(moment.id)
+        if card is not None:
+            card.apply_update(moment)
+
     def _request_moment_delete(self, moment_id: str) -> None:
         moment = next((item for item in self._moments if item.id == moment_id), None)
         if moment is None or not moment.is_self:
@@ -2262,6 +2417,18 @@ class DiscoveryInterface(QWidget):
             if item.get("url") and item.get("local_path")
         }
         for item in moment.media:
+            normalized_url = _normalize_media_url_key(item.url)
+            if normalized_url in local_paths_by_url:
+                item.local_path = local_paths_by_url[normalized_url]
+
+    @staticmethod
+    def _copy_local_media_previews(previous: MomentRecord, updated: MomentRecord) -> None:
+        local_paths_by_url = {
+            _normalize_media_url_key(item.url): item.local_path
+            for item in previous.media
+            if item.local_path
+        }
+        for item in updated.media:
             normalized_url = _normalize_media_url_key(item.url)
             if normalized_url in local_paths_by_url:
                 item.local_path = local_paths_by_url[normalized_url]

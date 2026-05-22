@@ -155,6 +155,22 @@ class MomentRepository:
     def get_by_id(self, moment_id: str) -> Moment | None:
         return self.db.get(Moment, moment_id)
 
+    def update_moment(
+        self,
+        moment: Moment,
+        *,
+        content: str,
+        visibility_scope: str,
+        visibility_user_ids_json: str,
+    ) -> Moment:
+        moment.content = content
+        moment.visibility_scope = visibility_scope
+        moment.visibility_user_ids_json = visibility_user_ids_json
+        self.db.add(moment)
+        self.db.commit()
+        self.db.refresh(moment)
+        return moment
+
     def get_comment_by_id(self, comment_id: str) -> MomentComment | None:
         return self.db.get(MomentComment, comment_id)
 

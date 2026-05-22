@@ -80,6 +80,32 @@ class MomentCreate(BaseModel):
         return self
 
 
+class MomentUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    content: str = Field(default="", max_length=MAX_MOMENT_CONTENT_LENGTH)
+    visibility_scope: MomentVisibilityScope = "public"
+    visibility_user_ids: list[str] = Field(default_factory=list, max_length=MAX_MOMENT_VISIBILITY_USER_IDS)
+
+    @field_validator("content", mode="before")
+    @classmethod
+    def _normalize_content(cls, value: object) -> str:
+        if value is None:
+            return ""
+        if not isinstance(value, str):
+            raise ValueError("content must be a string")
+        return value.strip()
+
+    @model_validator(mode="after")
+    def _normalize_visibility(self) -> "MomentUpdate":
+        self.visibility_user_ids = _normalize_user_id_list(self.visibility_user_ids)
+        if self.visibility_scope in {"include", "exclude"} and not self.visibility_user_ids:
+            raise ValueError("visibility_user_ids is required for include or exclude visibility")
+        if self.visibility_scope in {"public", "private"} and self.visibility_user_ids:
+            raise ValueError("visibility_user_ids is only supported for include or exclude visibility")
+        return self
+
+
 class MomentPrivacySettingsUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

@@ -219,6 +219,26 @@ class DiscoveryController:
         self._ensure_runtime_user_id(owner_user_id)
         return self._normalize_moment(payload or {})
 
+    async def update_moment(
+        self,
+        moment_id: str,
+        content: str,
+        *,
+        visibility_scope: str = "public",
+        visibility_user_ids: list[str] | None = None,
+    ) -> MomentRecord:
+        """Update one owned moment's text and visibility."""
+        owner_user_id = self._capture_runtime_user_id()
+        self._sync_cache_scope(owner_user_id)
+        payload = await self._discovery_service.update_moment(
+            moment_id,
+            content,
+            visibility_scope=visibility_scope,
+            visibility_user_ids=self._normalize_user_id_list(visibility_user_ids),
+        )
+        self._ensure_runtime_user_id(owner_user_id)
+        return self._normalize_moment(payload or {})
+
     async def load_moment_privacy_settings(self) -> MomentPrivacySettings:
         """Load the current user's moments privacy settings."""
         owner_user_id = self._capture_runtime_user_id()

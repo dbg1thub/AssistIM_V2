@@ -537,6 +537,20 @@ def test_discovery_ui_wires_moment_delete_actions() -> None:
     assert 'self.detail_panel.moments_panel' not in contact_interface
 
 
+def test_discovery_ui_wires_moment_edit_actions() -> None:
+    discovery_interface = Path('client/ui/windows/discovery_interface.py').read_text(encoding='utf-8')
+
+    assert 'class EditMomentDialog(CreateMomentDialog):' in discovery_interface
+    assert 'edit_requested = Signal(str)' in discovery_interface
+    assert 'self.edit_requested.emit(self.moment.id)' in discovery_interface
+    assert 'card.edit_requested.connect(self._request_moment_edit)' in discovery_interface
+    assert 'await self._controller.update_moment(' in discovery_interface
+    assert 'self._apply_local_moment_update(moment)' in discovery_interface
+    assert 'self.add_images_button.setVisible(False)' in discovery_interface
+    assert 'self.add_video_button.setVisible(False)' in discovery_interface
+    assert 'self.media_preview.set_media(list(moment.media))' in discovery_interface
+
+
 def test_moment_realtime_refresh_is_wired_to_visible_pages() -> None:
     discovery_interface = Path('client/ui/windows/discovery_interface.py').read_text(encoding='utf-8')
     contact_interface = Path('client/ui/windows/contact_interface.py').read_text(encoding='utf-8')

@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 from app.core.database import get_db
 from app.dependencies.auth_dependency import get_current_user
 from app.models.user import User
-from app.schemas.moment import MomentCommentCreate, MomentCreate, MomentPrivacySettingsUpdate
+from app.schemas.moment import MomentCommentCreate, MomentCreate, MomentPrivacySettingsUpdate, MomentUpdate
 from app.services.moment_service import MomentService
 from app.utils.response import success_response
 from app.websocket.manager import connection_manager
@@ -152,6 +152,31 @@ async def create_moment(payload: MomentCreate, current_user: User = Depends(get_
     await _broadcast_moment_refresh(
         action="moment_created",
         moment_id=str(result.get("id", "") or ""),
+        actor_user_id=current_user.id,
+        owner_user_id=str(result.get("user_id", "") or current_user.id),
+        changed=True,
+    )
+    return success_response(result)
+
+
+@router.patch("/{moment_id}")
+async def update_moment(
+    moment_id: str,
+    payload: MomentUpdate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    service = MomentService(db)
+    result = service.update_moment(
+        current_user,
+        moment_id,
+        payload.content,
+        visibility_scope=payload.visibility_scope,
+        visibility_user_ids=payload.visibility_user_ids,
+    )
+    await _broadcast_moment_refresh(
+        action="moment_updated",
+        moment_id=moment_id,
         actor_user_id=current_user.id,
         owner_user_id=str(result.get("user_id", "") or current_user.id),
         changed=True,

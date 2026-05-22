@@ -60,6 +60,25 @@ class DiscoveryService:
         )
         return dict(payload or {})
 
+    async def update_moment(
+        self,
+        moment_id: str,
+        content: str,
+        *,
+        visibility_scope: str = "public",
+        visibility_user_ids: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Update one moment's text and visibility."""
+        payload = await self._http.patch(
+            f"/moments/{moment_id}",
+            json={
+                "content": content,
+                "visibility_scope": visibility_scope,
+                "visibility_user_ids": list(visibility_user_ids or []),
+            },
+        )
+        return dict(payload or {})
+
     async def fetch_moment_privacy_settings(self) -> dict[str, Any]:
         """Fetch the current user's moments privacy settings."""
         payload = await self._http.get("/moments/privacy")

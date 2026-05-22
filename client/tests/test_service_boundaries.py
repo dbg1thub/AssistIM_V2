@@ -1096,6 +1096,7 @@ class FakeDiscoveryService:
         self.fetch_moments_calls: list[str | None] = []
         self.get_moment_calls: list[str] = []
         self.create_moment_calls: list[tuple[str, list[dict], str, list[str]]] = []
+        self.update_moment_calls: list[tuple[str, str, str, list[str]]] = []
         self.fetch_privacy_settings_calls = 0
         self.update_privacy_settings_calls: list[dict] = []
         self.like_calls: list[str] = []
@@ -1138,6 +1139,31 @@ class FakeDiscoveryService:
             )
         )
         return dict(self.created_moment_payload or {'id': 'moment-created', 'content': content, 'media': media or []})
+
+    async def update_moment(
+        self,
+        moment_id: str,
+        content: str,
+        *,
+        visibility_scope: str = 'public',
+        visibility_user_ids: list[str] | None = None,
+    ) -> dict:
+        self.update_moment_calls.append(
+            (
+                moment_id,
+                content,
+                visibility_scope,
+                [str(item) for item in (visibility_user_ids or [])],
+            )
+        )
+        return {
+            'id': moment_id,
+            'user_id': 'user-1',
+            'content': content,
+            'visibility_scope': visibility_scope,
+            'visibility_user_ids': list(visibility_user_ids or []),
+            'created_at': '2026-03-23T11:02:00Z',
+        }
 
     async def fetch_moment_privacy_settings(self) -> dict:
         self.fetch_privacy_settings_calls += 1
@@ -3293,6 +3319,12 @@ def test_discovery_controller_mutations_use_discovery_service(monkeypatch) -> No
             visibility_scope='exclude',
             visibility_user_ids=['user-2'],
         )
+        edited = await controller.update_moment(
+            'moment-2',
+            'edited post',
+            visibility_scope='include',
+            visibility_user_ids=['user-3'],
+        )
         liked = await controller.set_liked('moment-2', True, like_count=3)
         unliked = await controller.set_liked('moment-2', False, like_count=2)
         comment = await controller.add_comment('moment-2', 'thanks', image={'type': 'image', 'url': '/uploads/comment-photo.png'})
@@ -3302,10 +3334,17 @@ def test_discovery_controller_mutations_use_discovery_service(monkeypatch) -> No
         assert fake_discovery_service.create_moment_calls == [
             ('new post', [{'type': 'image', 'url': '/uploads/new-photo.png'}], 'exclude', ['user-2'])
         ]
+        assert fake_discovery_service.update_moment_calls == [
+            ('moment-2', 'edited post', 'include', ['user-3'])
+        ]
         assert moment.id == 'moment-2'
         assert moment.is_self is True
         assert moment.visibility_scope == 'include'
         assert moment.visibility_user_ids == ['user-2']
+        assert edited.id == 'moment-2'
+        assert edited.content == 'edited post'
+        assert edited.visibility_scope == 'include'
+        assert edited.visibility_user_ids == ['user-3']
         assert moment.images == ['/uploads/new-photo.png']
         assert liked is True
         assert unliked is False

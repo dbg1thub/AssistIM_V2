@@ -157,6 +157,68 @@ def test_moment_mutations_broadcast_realtime_refresh_notifications(
     assert comment_payload["data"]["changed"] is True
 
 
+def test_moment_owner_can_update_text_visibility_and_broadcast_refresh(
+    client: TestClient,
+    user_factory,
+    auth_header,
+    monkeypatch,
+) -> None:
+    alice = user_factory("moment_update_alice", "Moment Update Alice")
+    bob = user_factory("moment_update_bob", "Moment Update Bob")
+    charlie = user_factory("moment_update_charlie", "Moment Update Charlie")
+    _make_friends(client, auth_header, alice, bob)
+    alice_headers = auth_header(alice["access_token"])
+    bob_headers = auth_header(bob["access_token"])
+    send_json_to_users = AsyncMock(return_value=set())
+    online_user_ids = [alice["user"]["id"], bob["user"]["id"]]
+    monkeypatch.setattr(moment_routes.connection_manager, "online_user_ids", lambda: list(online_user_ids))
+    monkeypatch.setattr(moment_routes.connection_manager, "send_json_to_users", send_json_to_users)
+
+    create_response = client.post(
+        "/api/v1/moments",
+        json={"content": "original"},
+        headers=alice_headers,
+    )
+    assert create_response.status_code == 200
+    moment_id = create_response.json()["data"]["id"]
+    send_json_to_users.reset_mock()
+
+    forbidden_update = client.patch(
+        f"/api/v1/moments/{moment_id}",
+        json={"content": "hijack", "visibility_scope": "public", "visibility_user_ids": []},
+        headers=bob_headers,
+    )
+    assert forbidden_update.status_code == 403
+    assert forbidden_update.json()["code"] == ErrorCode.FORBIDDEN
+
+    invalid_visibility = client.patch(
+        f"/api/v1/moments/{moment_id}",
+        json={"content": "updated", "visibility_scope": "include", "visibility_user_ids": [charlie["user"]["id"]]},
+        headers=alice_headers,
+    )
+    assert invalid_visibility.status_code == 400
+    assert invalid_visibility.json()["code"] == ErrorCode.INVALID_REQUEST
+
+    update_response = client.patch(
+        f"/api/v1/moments/{moment_id}",
+        json={"content": "updated", "visibility_scope": "include", "visibility_user_ids": [bob["user"]["id"]]},
+        headers=alice_headers,
+    )
+    assert update_response.status_code == 200, update_response.text
+    payload = update_response.json()["data"]
+    assert payload["id"] == moment_id
+    assert payload["content"] == "updated"
+    assert payload["visibility_scope"] == "include"
+    assert payload["visibility_user_ids"] == [bob["user"]["id"]]
+    assert send_json_to_users.await_count == 1
+    refresh_payload = send_json_to_users.await_args.args[1]
+    assert refresh_payload["type"] == "moment_refresh"
+    assert refresh_payload["data"]["action"] == "moment_updated"
+    assert refresh_payload["data"]["moment_id"] == moment_id
+    assert refresh_payload["data"]["actor_user_id"] == alice["user"]["id"]
+    assert refresh_payload["data"]["owner_user_id"] == alice["user"]["id"]
+
+
 def test_moment_owner_can_delete_moment_and_cascade_interactions(
     client: TestClient,
     user_factory,

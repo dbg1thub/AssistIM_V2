@@ -154,6 +154,61 @@ class MomentService:
             viewer_user_id=current_user.id,
         )
 
+    def update_moment(
+        self,
+        current_user: User,
+        moment_id: str,
+        content: str,
+        *,
+        visibility_scope: str = "public",
+        visibility_user_ids: list[str] | None = None,
+    ) -> dict:
+        moment = self.moments.get_by_id(moment_id)
+        if moment is None:
+            raise AppError(ErrorCode.RESOURCE_NOT_FOUND, "moment not found", 404)
+        owner_user_id = str(getattr(moment, "user_id", "") or "")
+        if owner_user_id != current_user.id:
+            raise AppError(ErrorCode.FORBIDDEN, "moment update forbidden", 403)
+
+        normalized_scope = self._normalize_visibility_scope(visibility_scope)
+        normalized_visibility_user_ids = self._normalize_user_id_list(visibility_user_ids or [])
+        self._ensure_valid_moment_visibility_targets(
+            current_user,
+            normalized_scope,
+            normalized_visibility_user_ids,
+        )
+        normalized_content = str(content or "").strip()
+        if not normalized_content and not self._load_media_items(getattr(moment, "media_json", "[]")):
+            raise AppError(ErrorCode.INVALID_REQUEST, "content or existing media is required", 400)
+
+        updated = self.moments.update_moment(
+            moment,
+            content=normalized_content,
+            visibility_scope=normalized_scope,
+            visibility_user_ids_json=self._dump_user_ids(normalized_visibility_user_ids),
+        )
+        comments_map = self.moments.get_comments_map([moment_id], limit_per_moment=MOMENT_COMMENT_PREVIEW_LIMIT)
+        comment_counts_map = self.moments.get_comment_counts_map([moment_id])
+        like_counts_map = self.moments.get_like_counts_map([moment_id])
+        liked_moment_ids = self.moments.get_liked_moment_ids([moment_id], current_user.id)
+        comments = comments_map.get(moment_id, [])
+        user_ids = {current_user.id}
+        for comment in comments:
+            user_ids.add(comment.user_id)
+        users_map = self.moments.get_users_map(list(user_ids))
+        users_map[current_user.id] = current_user
+        return self.serialize_moment(
+            updated,
+            author=current_user,
+            comments=comments,
+            comment_count=comment_counts_map.get(moment_id, 0),
+            like_count=like_counts_map.get(moment_id, 0),
+            is_liked=moment_id in liked_moment_ids,
+            users_map=users_map,
+            comments_truncated=comment_counts_map.get(moment_id, 0) > len(comments),
+            viewer_user_id=current_user.id,
+        )
+
     def get_privacy_settings(self, current_user: User) -> dict:
         return self.serialize_privacy_setting(self.moments.get_privacy_setting(current_user.id))
 

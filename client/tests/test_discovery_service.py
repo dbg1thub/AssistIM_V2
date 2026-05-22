@@ -136,6 +136,34 @@ def test_discovery_service_create_moment_posts_media_items(monkeypatch) -> None:
     asyncio.run(scenario())
 
 
+def test_discovery_service_updates_moment_text_and_visibility(monkeypatch) -> None:
+    fake_http = FakeHttpClient({"id": "moment-1", "content": "updated"})
+    monkeypatch.setattr(discovery_service_module, "get_http_client", lambda: fake_http)
+
+    async def scenario() -> None:
+        service = discovery_service_module.DiscoveryService()
+        payload = await service.update_moment(
+            "moment-1",
+            "updated",
+            visibility_scope="exclude",
+            visibility_user_ids=["user-2"],
+        )
+
+        assert fake_http.patch_calls == [
+            (
+                "/moments/moment-1",
+                {
+                    "content": "updated",
+                    "visibility_scope": "exclude",
+                    "visibility_user_ids": ["user-2"],
+                },
+            )
+        ]
+        assert payload == {"id": "moment-1", "content": "updated"}
+
+    asyncio.run(scenario())
+
+
 def test_discovery_service_fetches_and_updates_moment_privacy_settings(monkeypatch) -> None:
     fake_http = FakeHttpClient(
         {
