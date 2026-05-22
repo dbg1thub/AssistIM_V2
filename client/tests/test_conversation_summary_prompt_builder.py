@@ -208,6 +208,38 @@ def test_format_context_uses_ready_voice_transcript_for_voice_messages() -> None
     assert "pending" not in prompt
 
 
+def test_format_context_prefers_ready_voice_summary_over_long_transcript() -> None:
+    session = Session(session_id="session-1", name="Bob", session_type="direct")
+    builder = ConversationSummaryPromptBuilder()
+    long_transcript = " ".join([f"第{index}项继续确认预算和时间" for index in range(80)])
+    built = builder.build_bucket_summary_request(
+        session,
+        [
+            _message(
+                "m-voice-summary",
+                datetime(2026, 4, 19, 10, 0, 0),
+                content="voice-summary.m4a",
+                message_type=MessageType.VOICE,
+                extra={
+                    VOICE_TRANSCRIPT_EXTRA_KEY: {
+                        "status": "ready",
+                        "text": long_transcript,
+                        "summary_status": "ready",
+                        "summary_text": "对方在确认预算、时间和后续负责人。",
+                    }
+                },
+            ),
+        ],
+        is_open=True,
+    )
+
+    assert built is not None
+    prompt = built.request.messages[0]["content"]
+    assert "对方: [语音摘要: 对方在确认预算、时间和后续负责人。]" in prompt
+    assert "第79项继续确认预算和时间" not in prompt
+    assert "语音转文字" not in prompt
+
+
 def test_format_context_uses_ready_file_text_extract_for_file_messages() -> None:
     session = Session(session_id="session-1", name="Bob", session_type="direct")
     builder = ConversationSummaryPromptBuilder()

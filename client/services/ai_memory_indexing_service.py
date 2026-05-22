@@ -207,7 +207,10 @@ class AIMemoryIndexingService:
         source_id = self.voice_transcript_source_id(message)
         transcript = dict((message.extra or {}).get(VOICE_TRANSCRIPT_EXTRA_KEY) or {})
         transcript_text = _normalize_text(transcript.get("text"))
-        if str(transcript.get("status") or "").strip() != "ready" or not transcript_text:
+        summary_text = ""
+        if str(transcript.get("summary_status") or "").strip() == "ready":
+            summary_text = _normalize_text(transcript.get("summary_text"))
+        if str(transcript.get("status") or "").strip() != "ready" or not (summary_text or transcript_text):
             await self._ai_memory_store.delete_source(
                 owner_scope=owner_scope,
                 source_type=self.VOICE_TRANSCRIPT_SOURCE_TYPE,
@@ -216,7 +219,7 @@ class AIMemoryIndexingService:
             return
 
         title = "语音消息"
-        memory_text = f"语音转写：{transcript_text}"
+        memory_text = f"语音摘要：{summary_text}" if summary_text else f"语音转写：{transcript_text}"
         keywords = self._voice_keywords(message, transcript=transcript)
         participants = await self._message_participants(message)
         timestamp = int(message.timestamp.timestamp()) if message.timestamp else 0
@@ -243,6 +246,11 @@ class AIMemoryIndexingService:
                     "duration_seconds": self._voice_duration_seconds(message, transcript=transcript),
                     "language": self._voice_language(transcript),
                     "transcript_status": "ready",
+                    "summary_status": "ready" if summary_text else str(transcript.get("summary_status") or "").strip(),
+                    "summary_engine": str(transcript.get("summary_engine") or "").strip(),
+                    "summary_model": str(
+                        transcript.get("summary_model") or transcript.get("summary_model_name") or ""
+                    ).strip(),
                     "engine": str(transcript.get("engine") or "").strip(),
                     "model": str(transcript.get("model") or "").strip(),
                     "mime_type": str((message.extra or {}).get("mime_type") or "").strip(),

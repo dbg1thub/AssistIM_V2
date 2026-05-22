@@ -132,8 +132,22 @@ def _voice_message(
     is_self: bool = True,
     transcript_status: str = "ready",
     transcript_text: str = "今晚八点开会。",
+    summary_status: str = "",
+    summary_text: str = "",
 ) -> ChatMessage:
     now = datetime(2026, 4, 24, 10, 5, 0)
+    transcript = {
+        "status": transcript_status,
+        "text": transcript_text,
+        "language": "zh",
+        "engine": "faster-whisper",
+        "model": "small",
+    }
+    if summary_status:
+        transcript["summary_status"] = summary_status
+    if summary_text:
+        transcript["summary_text"] = summary_text
+        transcript["summary_engine"] = "local_llm"
     return ChatMessage(
         message_id="m-voice",
         session_id=session_id,
@@ -147,13 +161,7 @@ def _voice_message(
         extra={
             "duration": 8,
             "mime_type": "audio/mp4",
-            VOICE_TRANSCRIPT_EXTRA_KEY: {
-                "status": transcript_status,
-                "text": transcript_text,
-                "language": "zh",
-                "engine": "faster-whisper",
-                "model": "small",
-            },
+            VOICE_TRANSCRIPT_EXTRA_KEY: transcript,
         },
     )
 
@@ -336,6 +344,37 @@ def test_ai_memory_indexing_service_indexes_ready_voice_transcript() -> None:
         assert "faster-whisper" in vector_index.calls[0]["keywords"]
         assert "test1" in vector_index.calls[0]["participants"]
         assert "我" in vector_index.calls[0]["participants"]
+
+    asyncio.run(scenario())
+
+
+def test_ai_memory_indexing_service_prefers_ready_voice_summary_for_long_transcript() -> None:
+    async def scenario() -> None:
+        store = _FakeAIMemoryStore()
+        vector_index = _FakeVectorIndex()
+        service = AIMemoryIndexingService(
+            db=_FakeDatabase(),
+            vector_index=vector_index,
+            ai_memory_store=store,
+        )
+        long_transcript = " ".join([f"第{index}项继续确认预算和时间" for index in range(100)])
+
+        await service.sync_voice_transcript_message(
+            _voice_message(
+                transcript_text=long_transcript,
+                summary_status="ready",
+                summary_text="对方在确认预算、时间和后续负责人。",
+            )
+        )
+
+        assert len(store.upserted_items) == 1
+        item = store.upserted_items[0]
+        assert item.text == "语音摘要：对方在确认预算、时间和后续负责人。"
+        assert "第99项继续确认预算和时间" not in item.text
+        assert vector_index.calls[0]["text"] == item.text
+        assert item.metadata["transcript_status"] == "ready"
+        assert item.metadata["summary_status"] == "ready"
+        assert item.metadata["summary_engine"] == "local_llm"
 
     asyncio.run(scenario())
 

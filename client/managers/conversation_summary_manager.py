@@ -760,14 +760,22 @@ class ConversationSummaryManager:
             return replace(message, extra=extra)
         if message.message_type == MessageType.VOICE:
             existing = dict(extra.get(VOICE_TRANSCRIPT_EXTRA_KEY) or {})
-            if str(existing.get("status") or "").strip() == "ready":
+            if (
+                str(existing.get("status") or "").strip() == "ready"
+                and str(existing.get("summary_status") or "").strip() == "ready"
+            ):
                 return message
             detail = dict(item.get("detail") or {})
-            extra[VOICE_TRANSCRIPT_EXTRA_KEY] = {
-                **detail,
-                "status": "ready",
-                "text": summary_text,
-            }
+            payload = {**existing, **detail, "status": "ready"}
+            if str(item.get("summary_status") or "").strip() == "ready":
+                payload["summary_status"] = "ready"
+                payload["summary_text"] = summary_text
+            elif str(detail.get("summary_status") or "").strip() == "ready":
+                payload["summary_status"] = "ready"
+                payload["summary_text"] = str(detail.get("summary_text") or summary_text).strip()
+            if not str(payload.get("text") or "").strip() and str(detail.get("text") or "").strip():
+                payload["text"] = str(detail.get("text") or "").strip()
+            extra[VOICE_TRANSCRIPT_EXTRA_KEY] = payload
             return replace(message, extra=extra)
         return message
 

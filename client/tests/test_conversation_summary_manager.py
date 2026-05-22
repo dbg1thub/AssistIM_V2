@@ -932,6 +932,39 @@ def test_conversation_summary_manager_uses_ready_media_cache_in_bucket_prompt(mo
     asyncio.run(scenario())
 
 
+def test_conversation_summary_manager_rehydrates_voice_cache_as_summary_not_transcript() -> None:
+    message = _message(
+        "m-voice-cache",
+        datetime(2026, 4, 19, 10, 0, 0),
+        content="voice-cache.m4a",
+        message_type=MessageType.VOICE,
+    )
+
+    updated = ConversationSummaryManager._message_with_media_cache(
+        message,
+        {
+            "message_id": "m-voice-cache",
+            "media_kind": "audio",
+            "summary_status": "ready",
+            "summary_text": "对方在确认预算、时间和后续负责人。",
+            "detail": {
+                "status": "ready",
+                "text": "完整转写里包含很多预算、时间、负责人确认细节。",
+                "summary_status": "ready",
+                "summary_text": "对方在确认预算、时间和后续负责人。",
+                "summary_engine": "local_llm",
+            },
+        },
+    )
+
+    transcript = updated.extra[VOICE_TRANSCRIPT_EXTRA_KEY]
+    assert transcript["status"] == "ready"
+    assert transcript["text"] == "完整转写里包含很多预算、时间、负责人确认细节。"
+    assert transcript["summary_status"] == "ready"
+    assert transcript["summary_text"] == "对方在确认预算、时间和后续负责人。"
+    assert transcript["summary_engine"] == "local_llm"
+
+
 def test_conversation_summary_manager_marks_overlong_voice_without_asr(monkeypatch) -> None:
     monkeypatch.setattr(SecureStorage, "encrypt_text", classmethod(lambda cls, value: f"enc:{value}"))
     session = Session(session_id="session-1", name="Bob", session_type="direct")

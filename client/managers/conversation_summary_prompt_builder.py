@@ -266,6 +266,10 @@ class ConversationSummaryPromptBuilder:
         if message.message_type == MessageType.VOICE:
             transcript = dict((message.extra or {}).get(VOICE_TRANSCRIPT_EXTRA_KEY) or {})
             if str(transcript.get("status") or "").strip() == "ready":
+                if str(transcript.get("summary_status") or "").strip() == "ready":
+                    summary_text = cls._normalize_scalar(transcript.get("summary_text"), max_chars=max_chars)
+                    if summary_text:
+                        return f"[语音摘要: {summary_text}]"
                 text = cls._normalize_scalar(transcript.get("text"), max_chars=max_chars)
                 if text:
                     return f"[语音转文字: {text}]"
