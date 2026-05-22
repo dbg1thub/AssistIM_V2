@@ -12,6 +12,11 @@ from app.core.errors import AppError, ErrorCode
 from app.dependencies.admin_dependency import get_current_admin_user, normalize_user_role
 from app.dependencies.settings_dependency import get_request_settings
 from app.models.user import User
+from app.realtime.force_logout_reasons import (
+    FORCE_LOGOUT_REASON_ADMIN_DISABLE_USER,
+    FORCE_LOGOUT_REASON_ADMIN_FORCE_LOGOUT,
+    force_logout_payload,
+)
 from app.schemas.admin import AdminDatabaseBackupPruneRequest, AdminDisableUserRequest, AdminSetUserRoleRequest
 from app.services.admin_audit_service import AdminAuditService
 from app.services.admin_auth_inspection_service import AdminAuthInspectionService
@@ -30,7 +35,6 @@ from app.services.admin_realtime_call_inspection_service import AdminRealtimeCal
 from app.services.admin_user_service import AdminUserService
 from app.utils.response import success_response
 from app.websocket.manager import connection_manager
-from app.websocket.payloads import ws_message
 
 
 router = APIRouter()
@@ -1125,8 +1129,8 @@ async def disable_admin_user(
     await connection_manager.disconnect_user_connections(
         user_id,
         close_code=4001,
-        reason="admin_disable_user",
-        payload=ws_message("force_logout", {"reason": "admin_disable_user"}),
+        reason=FORCE_LOGOUT_REASON_ADMIN_DISABLE_USER,
+        payload=force_logout_payload(FORCE_LOGOUT_REASON_ADMIN_DISABLE_USER),
     )
     return success_response(result)
 
@@ -1167,8 +1171,8 @@ async def force_logout_admin_user(
     disconnected = await connection_manager.disconnect_user_connections(
         user_id,
         close_code=4001,
-        reason="admin_force_logout",
-        payload=ws_message("force_logout", {"reason": "admin_force_logout"}),
+        reason=FORCE_LOGOUT_REASON_ADMIN_FORCE_LOGOUT,
+        payload=force_logout_payload(FORCE_LOGOUT_REASON_ADMIN_FORCE_LOGOUT),
     )
     result["disconnected"] = bool(disconnected)
     return success_response(result)

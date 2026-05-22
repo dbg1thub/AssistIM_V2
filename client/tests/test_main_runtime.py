@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import re
 import sys
 import types
 from pathlib import Path
@@ -2337,6 +2338,19 @@ def test_application_force_logout_unknown_reason_does_not_trigger_auth_loss() ->
         assert app._forced_logout_in_progress is False
 
     asyncio.run(scenario())
+
+
+def test_application_force_logout_reasons_match_realtime_protocol() -> None:
+    main_module = _load_main_module()
+    protocol = Path("docs/protocols/realtime_protocol.md").read_text(encoding="utf-8")
+    section = protocol.split("`force_logout.data.reason` 当前枚举：", 1)[1].split("账号策略是单活跃客户端会话", 1)[0]
+    documented_reasons = {
+        match.group(1)
+        for match in re.finditer(r"^- `([^`]+)`", section, flags=re.MULTILINE)
+    }
+
+    assert documented_reasons
+    assert main_module.FORMAL_FORCE_LOGOUT_REASONS == documented_reasons
 
 
 def test_application_ws_business_forbidden_error_does_not_trigger_auth_loss() -> None:

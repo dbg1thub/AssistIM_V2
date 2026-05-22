@@ -14,6 +14,12 @@ from app.core.rate_limit import rate_limiter
 from app.dependencies.auth_dependency import get_current_user
 from app.dependencies.settings_dependency import get_request_settings
 from app.models.user import User
+from app.realtime.force_logout_reasons import (
+    FORCE_LOGOUT_REASON_LOGOUT,
+    FORCE_LOGOUT_REASON_PASSWORD_RESET,
+    FORCE_LOGOUT_REASON_SESSION_REPLACED,
+    force_logout_payload,
+)
 from app.schemas.auth import (
     EmailVerificationSendRequest,
     LoginRequest,
@@ -28,7 +34,6 @@ from app.services.email_verification_service import EmailVerificationService
 from app.services.user_service import UserService
 from app.utils.response import success_response
 from app.websocket.manager import connection_manager
-from app.websocket.payloads import ws_message
 
 
 router = APIRouter()
@@ -57,7 +62,7 @@ def _password_reset_limit(request: Request) -> int:
 
 async def _disconnect_auth_connections(user_id: str, *, reason: str, strict_disconnect: bool) -> None:
     """Disconnect existing realtime runtime for one committed or soon-to-be-committed auth change."""
-    payload = ws_message("force_logout", {"reason": reason})
+    payload = force_logout_payload(reason)
     try:
         await connection_manager.disconnect_user_connections(
             user_id,
@@ -115,7 +120,11 @@ async def confirm_password_reset(
     result = AuthService(db, settings).reset_password(payload.email, payload.email_code, payload.new_password)
     user_id = str(result.get("user_id") or "")
     if user_id:
-        await _disconnect_auth_connections(user_id, reason="password_reset", strict_disconnect=False)
+        await _disconnect_auth_connections(
+            user_id,
+            reason=FORCE_LOGOUT_REASON_PASSWORD_RESET,
+            strict_disconnect=False,
+        )
     return success_response({"reset": True})
 
 
@@ -164,7 +173,11 @@ async def login(
         raise AppError(ErrorCode.SESSION_CONFLICT, "account already online", 409)
 
     if user_id and has_existing_session:
-        await _disconnect_auth_connections(user_id, reason="session_replaced", strict_disconnect=True)
+        await _disconnect_auth_connections(
+            user_id,
+            reason=FORCE_LOGOUT_REASON_SESSION_REPLACED,
+            strict_disconnect=True,
+        )
 
     auth_payload = auth_service.login_user(user, rotate_session=True)
     return success_response(auth_payload)
@@ -185,7 +198,11 @@ async def logout(
     db: Session = Depends(get_db),
 ) -> Response:
     AuthService(db).logout(current_user)
-    await _disconnect_auth_connections(current_user.id, reason="logout", strict_disconnect=False)
+    await _disconnect_auth_connections(
+        current_user.id,
+        reason=FORCE_LOGOUT_REASON_LOGOUT,
+        strict_disconnect=False,
+    )
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
