@@ -5294,12 +5294,12 @@ class ChatInterface(QWidget):
         """Download one file attachment when needed, then open the local file."""
         try:
             local_path = await self._chat_controller.download_message_attachment(message.message_id)
-        except Exception:
+        except Exception as exc:
             if not self._is_current_message_context(message, generation):
                 raise
             InfoBar.warning(
                 tr("chat.message.title", "Message"),
-                tr("chat.attachment.file_open_failed", "Unable to open this attachment."),
+                self._attachment_open_failure_message(message, exc),
                 parent=self.window(),
                 duration=1800,
             )
@@ -5323,10 +5323,38 @@ class ChatInterface(QWidget):
         if not self.chat_panel.open_local_attachment(local_path, message.message_type):
             InfoBar.warning(
                 tr("chat.message.title", "Message"),
-                tr("chat.attachment.file_open_failed", "Unable to open this attachment."),
+                self._attachment_open_failure_message(message),
                 parent=self.window(),
                 duration=1800,
             )
+
+    def _attachment_open_failure_message(self, message, exc: Exception | None = None) -> str:
+        """Return an attachment-open failure message based on local preview state."""
+        preview_state = dict(getattr(exc, "preview_state", None) or {})
+        if not preview_state:
+            preview_state = dict((getattr(message, "extra", None) or {}).get("attachment_preview_state") or {})
+        status = str(preview_state.get("status") or "").strip()
+        if status == "download_failed":
+            return tr(
+                "chat.attachment.download_failed",
+                "Unable to download this attachment. Check the network and try again.",
+            )
+        if status == "key_missing":
+            return tr(
+                "chat.attachment.key_missing",
+                "This device cannot decrypt the attachment key. Re-provision E2EE on this device.",
+            )
+        if status == "wrong_device":
+            return tr(
+                "chat.attachment.wrong_device",
+                "This attachment was encrypted for another device. Switch to that device or recover keys first.",
+            )
+        if status == "decrypt_failed":
+            return tr(
+                "chat.attachment.decrypt_failed",
+                "Unable to decrypt this attachment.",
+            )
+        return tr("chat.attachment.file_open_failed", "Unable to open this attachment.")
 
     async def _retry_message(self, message_id: str, session_id: str, generation: int) -> None:
         """Retry a failed message."""

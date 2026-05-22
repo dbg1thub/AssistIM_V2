@@ -1943,6 +1943,18 @@ def test_chat_file_open_flow_routes_downloads_through_controller_boundary() -> N
     assert 'def _on_media_ready(self, data: dict) -> None:' in chat_interface
 
 
+def test_chat_attachment_open_failure_messages_use_preview_state() -> None:
+    chat_interface = Path('client/ui/windows/chat_interface.py').read_text(encoding='utf-8')
+
+    assert 'def _attachment_open_failure_message(self, message, exc: Exception | None = None) -> str:' in chat_interface
+    assert 'attachment_preview_state' in chat_interface
+    assert 'download_failed' in chat_interface
+    assert 'key_missing' in chat_interface
+    assert 'wrong_device' in chat_interface
+    assert 'decrypt_failed' in chat_interface
+    assert 'self._attachment_open_failure_message(message, exc)' in chat_interface
+
+
 def test_code_uses_half_width_parentheses_in_reviewed_paths() -> None:
     targets = [
         Path('client/models/message.py'),

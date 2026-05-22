@@ -166,6 +166,7 @@ def sanitize_outbound_message_extra(extra: dict[str, Any] | None) -> dict[str, A
     normalized.pop("file_text_extract", None)
     normalized.pop("file_summary", None)
     normalized.pop("image_summary", None)
+    normalized.pop("attachment_preview_state", None)
 
     mentions = normalize_message_mentions(normalized.get("mentions"), content=str(normalized.get("content", "") or ""))
     if mentions:

@@ -1075,6 +1075,32 @@ def test_image_summary_extra_is_stripped_from_outbound_payload() -> None:
     assert outbound['media'] == {'url': '/uploads/whiteboard.png'}
 
 
+def test_attachment_preview_state_extra_is_stripped_from_outbound_payload() -> None:
+    outbound = sanitize_outbound_message_extra(
+        {
+            'name': 'encrypted.png',
+            'attachment_preview_state': {
+                'status': 'key_missing',
+                'error_code': 'key_missing',
+                'updated_at': 1778910000,
+            },
+            'attachment_encryption': {
+                'enabled': True,
+                'scheme': 'aesgcm-file+x25519-v1',
+            },
+            'url': '/uploads/encrypted.bin',
+        }
+    )
+
+    assert 'attachment_preview_state' not in outbound
+    assert outbound == {
+        'attachment_encryption': {
+            'enabled': True,
+            'scheme': 'aesgcm-file+x25519-v1',
+        },
+    }
+
+
 def test_message_manager_preserves_local_voice_transcript_during_remote_refresh() -> None:
     manager = message_manager_module.MessageManager()
     existing = ChatMessage(
@@ -2279,9 +2305,182 @@ def test_message_manager_download_attachment_decrypts_and_caches_local_file(monk
             assert stored.extra['local_path'] == local_path
             assert stored.extra['name'] == 'secret.pdf'
             assert stored.extra['file_type'] == 'application/pdf'
+            assert stored.extra['attachment_preview_state']['status'] == 'ready'
+            assert stored.extra['attachment_preview_state']['error_code'] == ''
         finally:
             if local_path:
                 Path(local_path).unlink(missing_ok=True)
+
+    asyncio.run(scenario())
+
+
+def test_message_manager_download_attachment_marks_download_failed_preview_state(monkeypatch) -> None:
+    fake_event_bus = FakeEventBus()
+    fake_conn_manager = FakeConnectionManager([])
+    fake_db = FakeDatabase()
+    fake_e2ee_service = FakeE2EEService()
+
+    class FakeFileService:
+        async def download_chat_attachment(self, file_url: str) -> bytes:
+            raise RuntimeError('cdn unavailable')
+
+    fake_db.messages['m-file-download-failed'] = ChatMessage(
+        message_id='m-file-download-failed',
+        session_id='session-1',
+        sender_id='bob',
+        content='https://cdn.example/files/blob.bin',
+        message_type=MessageType.FILE,
+        status=MessageStatus.RECEIVED,
+        is_self=False,
+        extra={'url': 'https://cdn.example/files/blob.bin'},
+    )
+
+    monkeypatch.setattr(message_manager_module, 'get_event_bus', lambda: fake_event_bus)
+    monkeypatch.setattr(message_manager_module, 'get_connection_manager', lambda: fake_conn_manager)
+    monkeypatch.setattr(message_manager_module, 'get_database', lambda: fake_db)
+    monkeypatch.setattr(message_manager_module, 'get_file_service', lambda: FakeFileService())
+
+    async def scenario() -> None:
+        manager = message_manager_module.MessageManager()
+        manager.set_user_id('alice')
+        manager._e2ee_service = fake_e2ee_service
+
+        with pytest.raises(RuntimeError):
+            await manager.download_attachment('m-file-download-failed')
+
+        stored = await fake_db.get_message('m-file-download-failed')
+        assert stored is not None
+        assert stored.extra['attachment_preview_state']['status'] == 'download_failed'
+        assert stored.extra['attachment_preview_state']['error_code'] == 'download_failed'
+        assert 'local_path' not in stored.extra
+        assert fake_e2ee_service.decrypt_attachment_calls == []
+
+    asyncio.run(scenario())
+
+
+def test_message_manager_download_attachment_marks_key_missing_preview_state(monkeypatch) -> None:
+    fake_event_bus = FakeEventBus()
+    fake_conn_manager = FakeConnectionManager([])
+    fake_db = FakeDatabase()
+    fake_e2ee_service = FakeE2EEService()
+    fake_e2ee_service.attachment_decryption_state = {
+        'state': 'missing_private_key',
+        'can_decrypt': False,
+        'reprovision_required': True,
+        'local_device_id': 'device-laptop',
+        'target_device_id': 'device-laptop',
+    }
+
+    class FakeFileService:
+        async def download_chat_attachment(self, file_url: str) -> bytes:
+            return b'cipher-bytes'
+
+    async def decrypt_raises(ciphertext_bytes: bytes, attachment_encryption: dict | None) -> tuple[bytes, dict]:
+        raise RuntimeError('local device does not have the required private prekey for attachment metadata')
+
+    fake_e2ee_service.decrypt_attachment_bytes = decrypt_raises  # type: ignore[method-assign]
+    fake_db.messages['m-file-key-missing'] = ChatMessage(
+        message_id='m-file-key-missing',
+        session_id='session-1',
+        sender_id='bob',
+        content='https://cdn.example/files/blob.bin',
+        message_type=MessageType.FILE,
+        status=MessageStatus.RECEIVED,
+        is_self=False,
+        extra={
+            'url': 'https://cdn.example/files/blob.bin',
+            'attachment_encryption': {
+                'enabled': True,
+                'scheme': 'aesgcm-file+x25519-v1',
+            },
+        },
+    )
+
+    monkeypatch.setattr(message_manager_module, 'get_event_bus', lambda: fake_event_bus)
+    monkeypatch.setattr(message_manager_module, 'get_connection_manager', lambda: fake_conn_manager)
+    monkeypatch.setattr(message_manager_module, 'get_database', lambda: fake_db)
+    monkeypatch.setattr(message_manager_module, 'get_file_service', lambda: FakeFileService())
+
+    async def scenario() -> None:
+        manager = message_manager_module.MessageManager()
+        manager.set_user_id('alice')
+        manager._e2ee_service = fake_e2ee_service
+
+        with pytest.raises(RuntimeError):
+            await manager.download_attachment('m-file-key-missing')
+
+        stored = await fake_db.get_message('m-file-key-missing')
+        assert stored is not None
+        assert stored.extra['attachment_preview_state']['status'] == 'key_missing'
+        assert stored.extra['attachment_preview_state']['error_code'] == 'key_missing'
+        assert stored.extra['attachment_encryption']['decryption_state'] == 'missing_private_key'
+        assert stored.extra['attachment_encryption']['recovery_action'] == 'reprovision_device'
+        assert stored.extra['attachment_encryption']['can_decrypt'] is False
+        assert 'local_path' not in stored.extra
+        assert any(event == message_manager_module.MessageEvent.DECRYPTION_STATE_CHANGED for event, _ in fake_event_bus.events)
+
+    asyncio.run(scenario())
+
+
+def test_message_manager_download_attachment_marks_wrong_device_preview_state(monkeypatch) -> None:
+    fake_event_bus = FakeEventBus()
+    fake_conn_manager = FakeConnectionManager([])
+    fake_db = FakeDatabase()
+    fake_e2ee_service = FakeE2EEService()
+    fake_e2ee_service.attachment_decryption_state = {
+        'state': 'not_for_current_device',
+        'can_decrypt': False,
+        'reprovision_required': False,
+        'local_device_id': 'device-laptop',
+        'target_device_id': 'device-phone',
+    }
+
+    class FakeFileService:
+        async def download_chat_attachment(self, file_url: str) -> bytes:
+            return b'cipher-bytes'
+
+    async def decrypt_raises(ciphertext_bytes: bytes, attachment_encryption: dict | None) -> tuple[bytes, dict]:
+        raise RuntimeError('attachment metadata is not for the current device')
+
+    fake_e2ee_service.decrypt_attachment_bytes = decrypt_raises  # type: ignore[method-assign]
+    fake_db.messages['m-file-wrong-device'] = ChatMessage(
+        message_id='m-file-wrong-device',
+        session_id='session-1',
+        sender_id='bob',
+        content='https://cdn.example/files/blob.bin',
+        message_type=MessageType.FILE,
+        status=MessageStatus.RECEIVED,
+        is_self=False,
+        extra={
+            'url': 'https://cdn.example/files/blob.bin',
+            'attachment_encryption': {
+                'enabled': True,
+                'scheme': 'aesgcm-file+x25519-v1',
+            },
+        },
+    )
+
+    monkeypatch.setattr(message_manager_module, 'get_event_bus', lambda: fake_event_bus)
+    monkeypatch.setattr(message_manager_module, 'get_connection_manager', lambda: fake_conn_manager)
+    monkeypatch.setattr(message_manager_module, 'get_database', lambda: fake_db)
+    monkeypatch.setattr(message_manager_module, 'get_file_service', lambda: FakeFileService())
+
+    async def scenario() -> None:
+        manager = message_manager_module.MessageManager()
+        manager.set_user_id('alice')
+        manager._e2ee_service = fake_e2ee_service
+
+        with pytest.raises(RuntimeError):
+            await manager.download_attachment('m-file-wrong-device')
+
+        stored = await fake_db.get_message('m-file-wrong-device')
+        assert stored is not None
+        assert stored.extra['attachment_preview_state']['status'] == 'wrong_device'
+        assert stored.extra['attachment_preview_state']['error_code'] == 'wrong_device'
+        assert stored.extra['attachment_encryption']['decryption_state'] == 'not_for_current_device'
+        assert stored.extra['attachment_encryption']['recovery_action'] == 'switch_device'
+        assert stored.extra['attachment_encryption']['target_device_id'] == 'device-phone'
+        assert 'local_path' not in stored.extra
 
     asyncio.run(scenario())
 

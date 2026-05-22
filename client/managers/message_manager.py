@@ -80,6 +80,24 @@ class MessageFailureCode:
     ATTACHMENT_UPLOAD_FAILED = "attachment_upload_failed"
 
 
+class AttachmentPreviewStatus:
+    """Local-only attachment preview/download states."""
+
+    READY = "ready"
+    DOWNLOAD_FAILED = "download_failed"
+    DECRYPT_FAILED = "decrypt_failed"
+    KEY_MISSING = "key_missing"
+    WRONG_DEVICE = "wrong_device"
+
+
+class AttachmentPreviewError(RuntimeError):
+    """Attachment open failure with a structured local preview state."""
+
+    def __init__(self, message: str, preview_state: dict[str, Any]):
+        super().__init__(message)
+        self.preview_state = dict(preview_state or {})
+
+
 @dataclass
 class PendingMessage:
     """Pending outbound message tracked across transport attempts and ACKs."""
@@ -1433,7 +1451,11 @@ class MessageManager:
 
         remote_source = self._attachment_remote_source(message)
         if not remote_source:
-            raise RuntimeError("attachment download URL is unavailable")
+            preview_state = await self._set_attachment_preview_state(
+                message,
+                AttachmentPreviewStatus.DOWNLOAD_FAILED,
+            )
+            raise AttachmentPreviewError("attachment download URL is unavailable", preview_state)
 
         attachment_encryption = dict((message.extra or {}).get("attachment_encryption") or {})
         logger.info(
@@ -1445,14 +1467,32 @@ class MessageManager:
             remote_source,
             str(attachment_encryption.get("scheme") or ""),
         )
-        payload_bytes = await self._file_service.download_chat_attachment(remote_source)
+        try:
+            payload_bytes = await self._file_service.download_chat_attachment(remote_source)
+        except Exception as exc:
+            preview_state = await self._set_attachment_preview_state(
+                message,
+                AttachmentPreviewStatus.DOWNLOAD_FAILED,
+            )
+            logger.warning("Attachment download failed for %s: %s", message.message_id, exc)
+            raise AttachmentPreviewError("attachment download failed", preview_state) from exc
 
         file_name = self._attachment_file_name(message)
         if attachment_encryption.get("enabled"):
-            payload_bytes, metadata = await self._require_e2ee_service().decrypt_attachment_bytes(
-                payload_bytes,
-                attachment_encryption,
-            )
+            try:
+                payload_bytes, metadata = await self._require_e2ee_service().decrypt_attachment_bytes(
+                    payload_bytes,
+                    attachment_encryption,
+                )
+            except Exception as exc:
+                attachment_encryption["decryption_error"] = str(exc)
+                await self._apply_attachment_decryption_diagnostics(attachment_encryption)
+                message.extra["attachment_encryption"] = attachment_encryption
+                preview_status = self._attachment_preview_status_from_decryption(attachment_encryption)
+                preview_state = await self._set_attachment_preview_state(message, preview_status)
+                await self._emit_decryption_state_changed(message, attachment_encryption, attachment=True)
+                logger.warning("Attachment decryption failed for %s: %s", message.message_id, exc)
+                raise AttachmentPreviewError("attachment decryption failed", preview_state) from exc
             metadata_name = str(metadata.get("original_name") or "").strip()
             metadata_mime_type = str(metadata.get("mime_type") or "").strip()
             if metadata_name:
@@ -1466,6 +1506,7 @@ class MessageManager:
             file_handle.write(payload_bytes)
 
         message.extra["local_path"] = target_path
+        message.extra["attachment_preview_state"] = self._build_attachment_preview_state(AttachmentPreviewStatus.READY)
         await self._db.save_message(message)
         logger.info(
             "[media-diag] attachment_download_saved message_id=%s session_id=%s local_path=%s bytes=%s encrypted=%s file_name=%s",
@@ -1477,6 +1518,46 @@ class MessageManager:
             file_name,
         )
         return target_path
+
+    @staticmethod
+    def _build_attachment_preview_state(status: str, error_code: str | None = None) -> dict[str, Any]:
+        """Build one local-only attachment preview state payload."""
+        normalized_status = str(status or "").strip() or AttachmentPreviewStatus.DECRYPT_FAILED
+        normalized_error = "" if normalized_status == AttachmentPreviewStatus.READY else str(error_code or normalized_status).strip()
+        return {
+            "status": normalized_status,
+            "error_code": normalized_error,
+            "updated_at": int(time.time()),
+        }
+
+    async def _set_attachment_preview_state(
+        self,
+        message: ChatMessage,
+        status: str,
+        *,
+        error_code: str | None = None,
+    ) -> dict[str, Any]:
+        """Persist one local-only preview state on a message."""
+        message.extra = dict(message.extra or {})
+        preview_state = self._build_attachment_preview_state(status, error_code)
+        message.extra["attachment_preview_state"] = preview_state
+        await self._db.save_message(message)
+        return preview_state
+
+    @staticmethod
+    def _attachment_preview_status_from_decryption(attachment_encryption: dict[str, Any]) -> str:
+        """Map structured E2EE diagnostics to attachment preview states."""
+        decryption_state = str(attachment_encryption.get("decryption_state") or "").strip()
+        recovery_action = str(attachment_encryption.get("recovery_action") or "").strip()
+        if recovery_action == "switch_device" or decryption_state == "not_for_current_device":
+            return AttachmentPreviewStatus.WRONG_DEVICE
+        if recovery_action == "reprovision_device" or decryption_state in {
+            "missing_local_bundle",
+            "missing_private_key",
+            "missing_group_sender_key",
+        }:
+            return AttachmentPreviewStatus.KEY_MISSING
+        return AttachmentPreviewStatus.DECRYPT_FAILED
 
     @staticmethod
     def _should_prefetch_encrypted_media(message: ChatMessage) -> bool:
@@ -1615,6 +1696,9 @@ class MessageManager:
             for field_name in ("name", "file_type", "size", "url", "media", "local_path", "duration"):
                 if field_name in existing_message.extra and field_name not in incoming_message.extra:
                     incoming_message.extra[field_name] = existing_message.extra[field_name]
+        local_attachment_preview_state = dict((existing_message.extra or {}).get("attachment_preview_state") or {})
+        if local_attachment_preview_state and "attachment_preview_state" not in incoming_message.extra:
+            incoming_message.extra["attachment_preview_state"] = local_attachment_preview_state
 
         local_voice_transcript = dict((existing_message.extra or {}).get(VOICE_TRANSCRIPT_EXTRA_KEY) or {})
         if local_voice_transcript and VOICE_TRANSCRIPT_EXTRA_KEY not in incoming_message.extra:
